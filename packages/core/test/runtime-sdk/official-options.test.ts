@@ -10,13 +10,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installMockModuleTripwire } from "../mock-module-tripwire";
 import * as winterAgentSdk from "@yanlinglabs/winter-agent-sdk";
+import type { CanUseTool } from "@yanlinglabs/winter-agent-sdk";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { PermissionGate } from "../../src/agent/gate";
 import { QuestionBroker } from "../../src/agent/questions";
 import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { assistantMemoryDirFor, memoryDirFor } from "../../src/agent/memory-dir";
-import { controlPlaneDenyRules, disallowedToolsFor, sandboxConfigFor } from "../../src/runtime-sdk/mode-options";
+import { buildWinterOptions, controlPlaneDenyRules, disallowedToolsFor, sandboxConfigFor, type WinterOptionsInput } from "../../src/runtime-sdk/mode-options";
 import { Settings } from "../../src/settings";
 import {
   ANTHROPIC_PROFILE_NAME,
@@ -854,35 +855,66 @@ describe("officialInputFor — item 3: configured MCP servers (HTTP/SSE/stdio) r
   });
 });
 
-// Daemon settings surface (2026-09-17 plan, item 3) — SDK-SURFACE WALL, pinned. `agent-definitions.ts`'s
-// parsed `<home>/agents/*.md` map has no field to ride on this leg's `OptionsTemplatePolicy` at the
-// currently pinned router version (`REQUIRED_WINTER_RUNTIME_SDK`, versions.ts) — see this block's
-// own construction site in official-options.ts for the measured reason (`buildOfficialOptions`
-// builds its result field-by-field off only the fields the type declares; it does not forward
-// arbitrary extra `policy` keys).
-//
-// HONEST LIMIT OF THIS TEST: `buildOfficialOptions` itself is NOT part of
-// `@yanlinglabs/winter-runtime-sdk`'s public `exports` map (only `.` and `./testing` are —
-// checked directly against the installed package.json), so this file cannot call it to prove the
-// field is dropped even if someone added it to `OptionsTemplatePolicy` without wiring it here — a
-// router bump that adds `agents` support would NOT make the assertion below fail on its own; it
-// only fails if OFFICIAL-OPTIONS.TS itself regresses (starts building `options.agents` for a policy
-// object the router still ignores). The version-pin assertion is the actual "someone has to look"
-// tripwire, the same shape `CONSOLE_AUTH_ROUTER_MIN`'s own gate test uses elsewhere in this file: a
-// router bump changes `REQUIRED_WINTER_RUNTIME_SDK`, which fails THIS assertion, which is the cue
-// to re-check `OptionsTemplatePolicy`'s dist `.d.ts` for an `agents` field by hand and wire it if
-// one now exists.
-describe("officialInputFor — the agents wall (item 3; no Options.agents route on the official leg)", () => {
-  test("the router version this wall was measured against — bump this ONLY after re-checking OptionsTemplatePolicy for an agents field", () => {
-    expect(REQUIRED_WINTER_RUNTIME_SDK).toBe("0.0.8");
+// Daemon settings surface batch 3 (router 0.0.9): the SDK-surface wall this block used to pin is
+// CLOSED — `OptionsTemplatePolicy` gained `agents?: Readonly<Record<string, unknown>>`
+// (`dist/official/options-template.d.ts`), and `official-options.ts`'s construction site forwards
+// `OfficialInputDeps.agents` onto it verbatim. This replaces the old version-pin tripwire with a
+// REAL assertion: the identical merged definition map, fed to BOTH legs' builders
+// (`buildWinterOptions` for Winter, `officialInputFor` for official), produces the identical
+// `options.agents` value on both — proving one owner/one merge actually reaches both legs, not just
+// that the router version moved.
+describe("officialInputFor — agents (router 0.0.9) reach both legs identically", () => {
+  const AGENTS = {
+    "code-reviewer": { description: "Reviews code for bugs", prompt: "You are a careful reviewer." },
+    "project-planner": { description: "Plans project work", prompt: "You plan work carefully." },
+  };
+
+  function winterOptionsInput(agents?: Record<string, unknown>): WinterOptionsInput {
+    return {
+      mode: "code",
+      policy: "ask",
+      sessionId: "11111111-2222-3333-4444-555555555555",
+      home: "/tmp/winter-home",
+      cwd: "/repo",
+      credentials: { byProvider: {} },
+      spawn: { pathToClaudeCodeExecutable: "/opt/winter" },
+      canUseTool: (async () => ({ behavior: "allow" as const })) as CanUseTool,
+      abort: new AbortController(),
+      baseEnv: { PATH: "/usr/bin", HOME: "/Users/x", TMPDIR: "/tmp", LANG: "en_US.UTF-8" },
+      ...(agents === undefined ? {} : { agents: agents as WinterOptionsInput["agents"] }),
+    };
+  }
+
+  test("the router version agents support was measured against", () => {
+    expect(REQUIRED_WINTER_RUNTIME_SDK).toBe("0.0.9");
   });
 
-  test("officialInputFor's own output carries no agents key anywhere reachable (today's construction, not a router-level guarantee — see this block's own header)", () => {
+  test("a non-empty agents map reaches this leg's options.agents, byte-identical to what the Winter leg's buildWinterOptions carries for the SAME map", () => {
+    const winterAgents = buildWinterOptions(winterOptionsInput(AGENTS)).agents;
+    expect(winterAgents).toEqual(AGENTS);
+
     const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
-    const result = officialInputFor(input, minimalDeps());
+    const result = officialInputFor(input, minimalDeps({ officialPeer: {} as never, capabilities: {}, agents: AGENTS }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
-    expect((result.input.options as Record<string, unknown> | undefined)?.["agents"]).toBeUndefined();
-    expect(Object.keys(result.input.options ?? {})).not.toContain("agents");
+    const officialAgents = (result.input.options as { agents?: Record<string, unknown> }).agents;
+    expect(officialAgents).toEqual(AGENTS);
+    // Both legs carry the SAME map for the SAME input — the actual "one owner, one merge, both
+    // legs" property, not just "each leg independently has SOME agents key".
+    expect(officialAgents).toEqual(winterAgents);
+  });
+
+  test("an empty/absent agents map omits options.agents entirely on THIS leg too — matching the Winter leg's own 'empty is absent' rule", () => {
+    expect(buildWinterOptions(winterOptionsInput({})).agents).toBeUndefined();
+    expect(buildWinterOptions(winterOptionsInput()).agents).toBeUndefined();
+
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+    const emptyResult = officialInputFor(input, minimalDeps({ officialPeer: {} as never, capabilities: {}, agents: {} }));
+    if (!("input" in emptyResult)) throw new Error(`officialInputFor unexpectedly refused`);
+    expect((emptyResult.input.options as { agents?: unknown }).agents).toBeUndefined();
+
+    const absentResult = officialInputFor(input, minimalDeps({ officialPeer: {} as never, capabilities: {} }));
+    if (!("input" in absentResult)) throw new Error(`officialInputFor unexpectedly refused`);
+    expect((absentResult.input.options as { agents?: unknown }).agents).toBeUndefined();
   });
 });
 

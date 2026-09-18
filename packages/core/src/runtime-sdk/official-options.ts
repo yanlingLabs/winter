@@ -383,6 +383,12 @@ export interface OfficialInputDeps {
    *  merge ORDER (capability servers win, same precedence the Winter leg's own `{ ...extra,
    *  ...capabilities }` establishes). `undefined`/empty ⇒ byte-identical to before item 3. */
   configuredMcpServers?: Readonly<Record<string, McpServerConfig>>;
+  /** Router 0.0.9: the daemon's merged (project-over-user) subagent definition map
+   *  (`agent-definitions.ts`'s `mergeAgentDefinitionTiers`), the SAME map the Winter leg carries via
+   *  `mode-options.ts`'s `buildWinterOptions` — one owner, one merge, both legs. Absent/empty means
+   *  no `options.agents` key at all (see the construction site's own "empty is treated the same as
+   *  absent" note), byte-identical to a session before this field existed. */
+  agents?: Readonly<Record<string, unknown>>;
   /** Everything `officialBrokerFor`/`canUseToolFor` needs, MINUS the three fields this function
    *  fills from `OfficialSessionInput` itself (never let a caller's stale `sessionId`/`mode`/`cwd`
    *  silently win over the session actually being opened). */
@@ -589,27 +595,17 @@ export function officialInputFor(
       remoteConfig: "deny",
       advertisesHandoff: true,
       ...(input.displayName === undefined ? {} : { displayName: input.displayName }),
-      // Daemon settings surface (2026-09-17 plan, item 3) — SDK-SURFACE WALL, measured and reported
-      // rather than routed around (the standing "do not invent a new SDK surface" rule):
-      // `agent-definitions.ts`'s parsed `<home>/agents/*.md` map has NO PLACE TO GO on this leg.
-      // `OptionsTemplatePolicy` (`@yanlinglabs/winter-runtime-sdk`, pinned at `versions.ts`'s
-      // `REQUIRED_WINTER_RUNTIME_SDK` — "0.0.8" as of this writing — `dist/official/
-      // options-template.d.ts`) declares no `agents` field, and its implementation
-      // (`buildOfficialOptions`, `dist/index.js`) builds the final `OfficialOptions` literal
-      // field-by-field off ONLY the fields the type declares — it does not spread arbitrary extra
-      // `policy` keys through, so adding one here would be silently dropped, not silently wrong (the
-      // ONE mercy of measuring it first). `assertOptionsInvariants` additionally REFUSES a stray key
-      // on `extraArgs`, confirming this router version is deliberately closed here, not merely
-      // incomplete. `policy.settings` is not an escape hatch either: it becomes the vendor's own
-      // flag-layer settings.json equivalent, whose real schema has no top-level `agents` key (agents
-      // are always file-based for Claude Code too — this would be dropped/rejected the same way).
-      // `official-options.test.ts`'s "the agents wall" block pins BOTH today's absence AND the
-      // router version measured above — the version assertion is the actual tripwire (a bump
-      // changes `REQUIRED_WINTER_RUNTIME_SDK`, which fails that test and is the cue to re-check
-      // `OptionsTemplatePolicy`'s `.d.ts` by hand); `buildOfficialOptions` itself is not on this
-      // package's public `exports` map, so nothing here can call it to prove the drop mechanically.
-      // The Winter leg carries `agents` today (`mode-options.ts`'s
-      // `buildWinterOptions`); this leg cannot, until the router grows the field.
+      // Daemon settings surface batch 3 (router 0.0.9): the SDK-surface wall this comment used to
+      // describe is CLOSED. `OptionsTemplatePolicy` (`@yanlinglabs/winter-runtime-sdk`, pinned at
+      // `versions.ts`'s `REQUIRED_WINTER_RUNTIME_SDK`, now "0.0.9") gained `agents?: Readonly<
+      // Record<string, unknown>>` — "the daemon's subagent definitions, handed to BOTH runtime legs
+      // from one owner" (the field's own doc, `dist/official/options-template.d.ts`) — and
+      // `buildOfficialOptions` forwards it verbatim into the official runtime's own pinned
+      // `Options.agents?: Record<string, AgentDefinition>`. `deps.agents` below is the SAME merged
+      // map (`agent-definitions.ts`'s `mergeAgentDefinitionTiers`, project-over-user) the Winter leg
+      // carries via `mode-options.ts`'s `buildWinterOptions` — one owner, one merge, both legs.
+      // `official-options.test.ts`'s "agents reach both legs" block proves this with a real
+      // assertion on the built `options.agents`, not a version-pin tripwire.
       options: {
         // Structural assignment onto `OptionsTemplatePolicy` — the router 0.0.3 exports the type by
         // name now, but `RouterOfficialInput["options"]` is already the precise shape this object
@@ -656,6 +652,12 @@ export function officialInputFor(
         settings: { permissions: { deny: permissionDenyRulesFor(deps.home, deps.settings) }, sandbox: sandboxConfigFor(deps.home) },
         additionalDisallowedTools: disallowedToolsFor(input.mode),
         ...(deps.hooks === undefined ? {} : { hooks: deps.hooks }),
+        // Router 0.0.9: `deps.agents` is the SAME merged (project-over-user) definition map the
+        // Winter leg carries — see this construction site's own header comment. Omitted entirely
+        // when empty, mirroring `mode-options.ts`'s own "empty is treated the same as absent" rule
+        // for `Options.agents` (an explicit `{}` would tell the runtime "zero subagents are
+        // defined" rather than "the host declared none").
+        ...(deps.agents !== undefined && Object.keys(deps.agents).length > 0 ? { agents: deps.agents } : {}),
       } as RouterOfficialInput["options"],
     },
   };
