@@ -8,7 +8,7 @@ import WinterKit
 /// `modelMenuContent`, beside the existing ⋯ policy picker). Same PURE-HELPER idiom as
 /// `PolicyMenuTests` — nothing here drives the live popover/Button UI (not independently unit
 /// testable, see that file's own note); this covers the pure decisions behind it
-/// (`modelDisplayLabel`/`sessionModelOptions`/`modelMenuIsVisible`), the adapter's in-flight
+/// (`modelDisplayLabel`/`sessionModelOptions`), the adapter's in-flight
 /// discipline (a STUBBED `onSetModel`, mirroring `PolicyMenuTests.testSessionPolicyUpdatesOnlyOnSuccess`),
 /// `AppModel.setSessionModel`'s real wire shape (mirrors `testAppModelSetSessionPolicyWireShape`),
 /// and the T1-deferred `listSessions()` → `SessionSummary.model` threading this task closes.
@@ -120,14 +120,6 @@ final class ModelPickerTests: XCTestCase {
         XCTAssertEqual(modelPickerOptions(SyncConfigSnapshot(provider: "codex-oauth", defaultModel: "gpt-5.6-sol", models: [],
                                                             defaultEffort: "high", clientEfforts: ["ultra"])), [],
                        "a defaultModel is NOT a catalogue — synthesizing siblings from it is the original bug")
-    }
-
-    /// THE ASYMMETRY: unlike the policy picker (hidden for chat — plan-immunity), the model menu
-    /// must show for EVERY mode, chat included. A test that would fail immediately if someone
-    /// "fixed" `modelMenuIsVisible` by copying the policy button's `!isChatSession` predicate.
-    func testModelMenuIsVisibleRegardlessOfChatSession() {
-        XCTAssertTrue(modelMenuIsVisible(isChatSession: true), "the model menu must show for chat — the deliberate asymmetry vs the policy picker")
-        XCTAssertTrue(modelMenuIsVisible(isChatSession: false))
     }
 
     // MARK: - Adapter in-flight discipline (stubbed onSetModel, mirrors PolicyMenuTests)
@@ -463,7 +455,6 @@ final class ModelPickerTests: XCTestCase {
         XCTAssertEqual(effortDisplayLabel(nil), "Default")
         XCTAssertEqual(effortDisplayLabel("none"), "none",
                        #"unset omits the reasoning block entirely; "none" is a real level"#)
-        XCTAssertTrue(effortMenuIsVisible(isChatSession: true))
     }
 
     // MARK: - Optimistic apply + revert
@@ -872,63 +863,6 @@ final class ModelPickerTests: XCTestCase {
 
     // MARK: - mac-chat-parity Task 7 (spec §5): the same menus, now reachable from the composer
 
-    /// The composer needs the header's two menus, and a per-mode composer chrome is not a
-    /// `WindowContentView` — so their CONTENT moved to file scope as `ModelMenuContent`/
-    /// `EffortMenuContent`, the same move `PolicyPickerRow` made at Task 6. **A move, not a rewrite:**
-    /// the bodies are the extension's own with the `adapter.` reads turned into parameters, and the
-    /// header's own vars are now forwarders that hand them exactly what those reads used to be.
-    ///
-    /// This is the "the header still renders identically" claim in the only form it can take at value
-    /// level: the inputs are the same inputs. Pixels remain the live gate.
-    @MainActor
-    func testTheHeadersModelMenuStillReadsTheAdaptersOwnValues() async {
-        let adapter = FieldStateAdapter(session: SessionModel())
-        adapter.modelCatalogue = SyncConfigSnapshot(
-            provider: "codex-oauth", defaultModel: "srv-a",
-            models: [srv("srv-a", efforts: ["low", "high"]),
-                     srv("srv-b", efforts: ["high", "max"])],
-            defaultEffort: "high", clientEfforts: ["ultra"])
-        adapter.modelChangeInFlight = true
-        let view = await headerView(adapter, rows: [
-            SessionSummary(sessionId: "s_1", title: nil, createdAt: 1, scope: "global",
-                           mode: "code", model: "srv-b", effort: "high"),
-        ])
-
-        let menu = view.modelMenuContent
-        // WS-20 review fix (Nit 2): the menu is sectioned by provider now — this pins the SOURCE
-        // catalogue it reads (`modelPickerSections` is the pure grouping function, already covered
-        // by its own tests) rather than a flat `.options` list that no longer exists.
-        XCTAssertEqual(modelPickerSections(menu.catalogue).flatMap { $0.entries.map(\.tag) }, ["srv-a", "srv-b"],
-                       "the catalogue's slugs, in daemon order")
-        XCTAssertEqual(menu.current, "srv-b", "…and the session ROW's model, exactly as before the move")
-        XCTAssertTrue(menu.isDisabled, "rows disable while a change is in flight — unchanged")
-    }
-
-    @MainActor
-    func testTheHeadersEffortMenuStillReadsTheAdaptersOwnValues() async {
-        let adapter = FieldStateAdapter(session: SessionModel())
-        adapter.modelCatalogue = SyncConfigSnapshot(
-            provider: "codex-oauth", defaultModel: "srv-a",
-            models: [srv("srv-a", efforts: ["low", "high"]),
-                     srv("srv-b", efforts: ["high", "max"])],
-            defaultEffort: "high", clientEfforts: ["ultra"])
-        let code = await headerView(adapter, rows: [
-            SessionSummary(sessionId: "s_1", title: nil, createdAt: 1, scope: "global",
-                           mode: "code", model: "srv-b", effort: "high"),
-        ])
-        XCTAssertEqual(code.effortMenuContent.wire, ["high", "max"], "the ROW's model's own levels")
-        XCTAssertEqual(code.effortMenuContent.tiers, ["ultra"], "a code session still reaches the tier section")
-        XCTAssertEqual(code.effortMenuContent.current, "high")
-
-        let chat = await headerView(adapter, rows: [
-            SessionSummary(sessionId: "s_1", title: nil, createdAt: 1, scope: "global",
-                           mode: "chat", model: "srv-b"),
-        ])
-        XCTAssertEqual(chat.effortMenuContent.wire, ["high", "max"],
-                       "chat still picks its wire effort — setEffort is mode-agnostic")
-        XCTAssertEqual(chat.effortMenuContent.tiers, [], "…and still never a tier")
-    }
-
     /// The composer asks the tier question as a BOOLEAN (its mode's own chrome answers it); the
     /// header asks it as a mode string.
     ///
@@ -977,19 +911,6 @@ final class ModelPickerTests: XCTestCase {
         XCTAssertEqual(adapter.pendingEffort, .clear)
         XCTAssertEqual(efforts, ["ultra", nil])
     }
-
-    /// A header view over a real directory — the menus read the session's row through
-    /// `currentSidebarSessionSummary`, so a wiring is the only way to drive them honestly.
-    @MainActor
-    private func headerView(_ adapter: FieldStateAdapter,
-                            rows: [SessionSummary]) async -> WindowContentView<EmptyView> {
-        let directory = SessionDirectory(lister: { rows })
-        await directory.refresh()
-        let wiring = SidebarWiring(directory: directory, currentSessionId: { rows.first?.sessionId },
-                                   onSelect: { _ in }, onOpenDetached: { _ in }, onNewSession: {})
-        return WindowContentView(adapter: adapter, tint: .blue, topInset: 8, sidebars: wiring) { EmptyView() }
-    }
-
 
     /// WS-20 (cross-lane fix): the direct settings.json WRITE this suite used to pin is RETIRED —
     /// `AppModel.writeAdvisorModelToSettings` is gone; the write now goes through the daemon's

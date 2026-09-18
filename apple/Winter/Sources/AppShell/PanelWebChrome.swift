@@ -90,6 +90,13 @@ final class PanelWebTabModel: ObservableObject {
     @Published private(set) var canGoBack = false
     @Published private(set) var canGoForward = false
 
+    /// **The page's own icon, for the tab pill** — live presentation only: never persisted, never
+    /// sent to the daemon, and dropped the moment the tab leaves the site it belongs to
+    /// (`panelFaviconKey`). `nil` means the pill shows the kind's glyph.
+    @Published private(set) var favicon: NSImage?
+    /// Which site `favicon` belongs to — `panelFaviconKey` of the page it was downloaded for.
+    private(set) var faviconKey: String?
+
     /// The container CEF's view is parented into — the handle every verb needs. Weak: the strong
     /// owner is `BrowserRuntime.containers` now, not SwiftUI, and a tab switched away from is
     /// DELIBERATELY kept alive by that registry — this reference must not become a second, competing
@@ -138,11 +145,24 @@ final class PanelWebTabModel: ObservableObject {
     /// has already produced seven times. (`CEFRuntimeTests` reaches CEF's C surface through
     /// `WinterCEFRuntime` for the same class of reason.)
     func apply(url: String, title: String, isLoading: Bool, canGoBack: Bool, canGoForward: Bool) {
+        if favicon != nil, panelFaviconKey(url) != faviconKey {
+            favicon = nil
+            faviconKey = nil
+        }
         self.url = url
         self.title = title
         self.isLoading = isLoading
         self.canGoBack = canGoBack
         self.canGoForward = canGoForward
+    }
+
+    /// An icon CEF downloaded for `pageURL` (`WinterCEFSetFaviconObserver`). Accepted only while the
+    /// tab is still on that page's site — a download that lands after a navigation elsewhere would
+    /// otherwise put one site's icon on another's tab. A `nil` icon changes nothing.
+    func receiveFavicon(_ icon: NSImage?, forPageURL pageURL: String) {
+        guard let icon, panelFaviconAccepts(pageURL: pageURL, currentURL: url) else { return }
+        favicon = icon
+        faviconKey = panelFaviconKey(pageURL)
     }
 
     /// **The producer `panel.reportNavigation` never had.** CEF has just committed a top-level
@@ -275,6 +295,7 @@ struct PanelWebChrome: View {
     /// it is why this is local `@State` rather than another `@Published` on the model.
     @State private var text: String = ""
     @FocusState private var fieldFocused: Bool
+    @State private var fieldHovered = false
     /// Set when the field refuses what was typed (a `javascript:` URL, an empty box, an over-long
     /// address). It changes the field's own look rather than raising an alert — a URL bar that
     /// throws a modal at a typo would be worse than one that simply does not go anywhere.
@@ -311,11 +332,12 @@ struct PanelWebChrome: View {
 
     private var leadingCluster: some View {
         HStack(spacing: panelChromeButtonSpacing) {
-            ShellTitlebarButton(systemImage: "chevron.left", label: "Back",
+            // The app header's own arrows, not chevrons (2026-09-17).
+            ShellTitlebarButton(systemImage: "arrow.left", label: "Back",
                                 size: panelChromeButtonSize) { model.goBack() }
                 .disabled(!model.canGoBack)
 
-            ShellTitlebarButton(systemImage: "chevron.right", label: "Forward",
+            ShellTitlebarButton(systemImage: "arrow.right", label: "Forward",
                                 size: panelChromeButtonSize) { model.goForward() }
                 .disabled(!model.canGoForward)
 
@@ -333,56 +355,173 @@ struct PanelWebChrome: View {
         // doc — which search engine a user's typing goes to, and what it learns about them, is a
         // product decision this task deliberately declined to make on their behalf). A placeholder
         // advertising a feature that was not built is worse than a narrower true one.
-        TextField("Enter a web address", text: $text)
+        let state = panelAddressFieldState(focused: fieldFocused, hovered: fieldHovered, text: text)
+        let host = state == .editing ? nil : panelAddressDisplayHost(text)
+        return TextField("Enter a web address", text: $text,
+                         prompt: Text("Enter a web address").foregroundStyle(Theme.textMuted))
             .textFieldStyle(.plain)
-            .font(Typography.label())
-            .multilineTextAlignment(.center)   // the spec's measured "centre-aligned, not leading"
-            .foregroundStyle(refused ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
+            .font(Typography.control())
+            // ChatGPT's field (2026-09-17), three states: at REST just the site, centred, on no
+            // fill; on HOVER the filled field with its page-menu and ↗ icons; while EDITING the
+            // full address, leading-aligned, with a hairline rim. The resting/hovered host is an
+            // overlay that lets clicks through to the field underneath, which keeps its text but
+            // draws it clear so the two never overlap.
+            .foregroundStyle(refused ? AnyShapeStyle(.red) : AnyShapeStyle(Theme.textPrimary))
+            // Faded rather than recoloured so the swap can animate; never fully 0, which would
+            // stop the field underneath taking the click.
+            .opacity(host != nil ? 0.001 : 1)
+            .overlay {
+                if let host {
+                    Text(host)
+                        .font(Typography.control())
+                        .foregroundStyle(Theme.textPrimary)
+                        .lineLimit(1)
+                        .allowsHitTesting(false)
+                        .transition(.blurReplace)
+                }
+            }
             .focused($fieldFocused)
             .onSubmit {
                 refused = !model.navigate(typed: text)
                 if !refused { fieldFocused = false }
             }
             .onChange(of: text) { _, _ in refused = false }
-            .padding(.horizontal, panelTabPillInset)
+            .padding(.leading, state == .hovered ? panelChromeButtonSize + 4 : panelTabPillInset)
+            .padding(.trailing, panelChromeButtonSize + 4)
             .frame(height: panelChromeFieldHeight)
             .background(
                 RoundedRectangle(cornerRadius: shellSidebarRowCornerRadius, style: .continuous)
-                    .fill(Theme.rowHover)
+                    .fill(state == .rest ? Color.clear : Theme.chromeHover)
             )
+            .overlay(
+                RoundedRectangle(cornerRadius: shellSidebarRowCornerRadius, style: .continuous)
+                    .strokeBorder(state == .editing ? Theme.hairlineElevated : Color.clear, lineWidth: 1)
+            )
+            // Hover only: the page menu at the leading edge (ChatGPT's sliders glyph).
+            .overlay(alignment: .leading) {
+                if state == .hovered {
+                    Menu {
+                        pageMenuItems
+                    } label: {
+                        Image(systemName: "slider.horizontal.3")
+                            .font(Typography.label())
+                            .foregroundStyle(Theme.textMuted)
+                            .frame(width: panelChromeButtonSize, height: panelChromeButtonSize)
+                            .contentShape(Rectangle())
+                    }
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .menuIndicator(.hidden)
+                    .padding(.leading, 4)
+                    .transition(.opacity.combined(with: .scale(scale: 0.85)))
+                    .help("Page")
+                    .accessibilityLabel("Page")
+                }
+            }
+            // Hover and editing: the ↗ at the trailing edge — open this page in the default browser.
+            .overlay(alignment: .trailing) {
+                if state != .rest {
+                    Button(action: openInDefaultBrowser) {
+                        Image(systemName: "arrow.up.right")
+                            .font(Typography.label())
+                            .foregroundStyle(Theme.textMuted)
+                            .frame(width: panelChromeButtonSize, height: panelChromeButtonSize)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!PanelURLPolicy.isAllowed(model.url))
+                    .padding(.trailing, 4)
+                    .transition(.opacity.combined(with: .scale(scale: 0.85)))
+                    .help("Open in Default Browser")
+                    .accessibilityLabel("Open in Default Browser")
+                }
+            }
+            .onHover { fieldHovered = $0 }
+            // The three looks cross-fade instead of snapping (2026-09-17).
+            .animation(.smooth(duration: 0.22), value: state)
             .accessibilityLabel("Address")
+    }
+
+    /// The page actions both menus offer (the field's sliders menu and the trailing ⋮).
+    @ViewBuilder
+    private var pageMenuItems: some View {
+        Button("Copy Link") {
+            guard PanelURLPolicy.isAllowed(model.url) else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(model.url, forType: .string)
+        }
+        .disabled(!PanelURLPolicy.isAllowed(model.url))
+        Button("Open in Default Browser", action: openInDefaultBrowser)
+            .disabled(!PanelURLPolicy.isAllowed(model.url))
+    }
+
+    private func openInDefaultBrowser() {
+        guard PanelURLPolicy.isAllowed(model.url), let url = URL(string: model.url) else { return }
+        NSWorkspace.shared.open(url)
     }
 
     private var trailingCluster: some View {
         Menu {
-            Button("Copy Link") {
-                guard PanelURLPolicy.isAllowed(model.url) else { return }
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(model.url, forType: .string)
-            }
-            .disabled(!PanelURLPolicy.isAllowed(model.url))
-
-            Button("Open in Default Browser") {
-                // Same allowlist as everything else that touches this string. Handing an arbitrary
-                // stored scheme to `NSWorkspace.open` would be the one door in this file that
-                // escapes the panel entirely — `open` will happily launch a registered handler for
-                // any scheme at all.
-                guard PanelURLPolicy.isAllowed(model.url), let url = URL(string: model.url) else { return }
-                NSWorkspace.shared.open(url)
-            }
-            .disabled(!PanelURLPolicy.isAllowed(model.url))
+            pageMenuItems
         } label: {
+            // ChatGPT's vertical ⋮ (SF Symbols has no vertical ellipsis — the horizontal one, turned).
             Image(systemName: "ellipsis")
+                .rotationEffect(.degrees(90))
                 .font(Typography.control(.medium))
                 .foregroundStyle(Theme.textMuted)
                 .frame(width: panelChromeButtonSize, height: panelChromeButtonSize)
                 .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
+        // `.button` + a SwiftUI button style renders the label as a SwiftUI view — the borderless
+        // menu style draws its own NSButton image and ignored the rotation.
+        .menuStyle(.button)
+        .buttonStyle(ShellChromeButtonStyle())
         .menuIndicator(.hidden)
         .frame(width: panelChromeButtonSize, height: panelChromeButtonSize)
         .help("More")
         .accessibilityLabel("More")
         .padding(.trailing, panelExpandButtonInset)
     }
+}
+
+/// PURE: the site a page icon belongs to — the displayed host (`panelAddressDisplayHost`, so
+/// `www.` and the bare domain are one site), for `http`/`https` pages only. `nil` for everything
+/// else, the built-in `data:` start page included, which is how that page never wears an icon.
+func panelFaviconKey(_ url: String) -> String? {
+    guard let scheme = URL(string: url.trimmingCharacters(in: .whitespaces))?.scheme?.lowercased(),
+          scheme == "http" || scheme == "https" else { return nil }
+    return panelAddressDisplayHost(url)?.lowercased()
+}
+
+/// PURE: may an icon downloaded for `pageURL` be shown on a tab now at `currentURL`? Only when both
+/// are the same (web) site.
+func panelFaviconAccepts(pageURL: String, currentURL: String) -> Bool {
+    guard let key = panelFaviconKey(pageURL) else { return false }
+    return key == panelFaviconKey(currentURL)
+}
+
+/// PURE: what the address field shows at rest — the page's host without a leading `www.`, or `nil`
+/// (no host: an empty field, a refused scheme, free text) so the field shows its own text instead.
+func panelAddressDisplayHost(_ address: String) -> String? {
+    guard let host = URL(string: address.trimmingCharacters(in: .whitespaces))?.host(),
+          !host.isEmpty else { return nil }
+    return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+}
+
+/// The address field's three looks (ChatGPT, 2026-09-17).
+enum PanelAddressFieldState: Equatable {
+    /// Just the site, centred, no fill.
+    case rest
+    /// The filled field with its page-menu and ↗ icons.
+    case hovered
+    /// The full address, leading-aligned, filled and rimmed.
+    case editing
+}
+
+/// PURE: which look the field wears — the pointer and focus decide, never the contents: an empty
+/// field at rest is bare too, showing only its placeholder (ChatGPT's fresh tab).
+func panelAddressFieldState(focused: Bool, hovered: Bool, text _: String) -> PanelAddressFieldState {
+    if focused { return .editing }
+    if hovered { return .hovered }
+    return .rest
 }

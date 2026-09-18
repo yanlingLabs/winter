@@ -900,8 +900,8 @@ struct ResolvedQuestionBody: View {
 /// It used to be `ElevatedSurface` at r=12 with no rim and no shadow, and that was the single
 /// loudest difference from iOS — because of the FILL, not the geometry. `ElevatedSurface`'s light
 /// value is `#F2F2F7`, which `brand.md` § 1 names for what it is: *"a retained cool system grey"*.
-/// Every other Mac surface is warm (`Canvas #F5F4F0`, `CardSurface #F9F9F7`, `ControlSurface
-/// #F0EFEC`); that one is not, and a cool grey block on a warm cream canvas reads **lavender**.
+/// (The palette has since gone neutral, and `ElevatedSurface` with it; back then every other Mac
+/// surface was warm, and a cool grey block on a warm cream canvas read **lavender**.)
 /// It was never chosen — "retained" is the palette's own word for inherited.
 ///
 /// Why the rim and the shadow are not decoration: `CardSurface` on the transcript's own ground is

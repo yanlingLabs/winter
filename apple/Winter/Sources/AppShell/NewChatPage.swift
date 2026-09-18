@@ -97,9 +97,11 @@ func newChatAnnouncement(_ announcement: String?, fallback: String) -> String {
     return trimmed.isEmpty ? fallback : trimmed
 }
 
-/// The composer card's metrics — reference-measured (~670 pt wide), tune-at-gate like the rest.
-let newChatCardWidth: CGFloat = 670
-let newChatCardCornerRadius: CGFloat = 18
+/// The composer card's metrics — ChatGPT-measured (2026-09-17): its composer and its transcript
+/// column share one ~736 pt centred width. The transcript caps at this same constant
+/// (`TranscriptView`), so the column and the composer can never drift apart.
+let newChatCardWidth: CGFloat = 736
+let newChatCardCornerRadius: CGFloat = 30
 
 /// The composer box's FIXED height — field + control row. Fixed by ruling: a mode's strip adds a
 /// band beyond this rather than resizing it, so the field and its controls never move under you.
@@ -321,6 +323,7 @@ struct NewChatControlChip: View {
     let title: String
     let label: String
     var titleStyle: AnyShapeStyle = AnyShapeStyle(.primary)
+    var showsChevron: Bool = true
     var action: (() -> Void)? = nil
 
     var body: some View {
@@ -335,9 +338,11 @@ struct NewChatControlChip: View {
                 Text(title)
                     .font(Typography.body())
                     .foregroundStyle(titleStyle)
-                Image(systemName: "chevron.down")
-                    .font(Typography.badge(.semibold))
-                    .foregroundStyle(Theme.textMuted)
+                if showsChevron {
+                    Image(systemName: "chevron.down")
+                        .font(Typography.badge(.semibold))
+                        .foregroundStyle(Theme.textMuted)
+                }
             }
             .padding(.horizontal, 8)
             .frame(height: 26)
@@ -522,7 +527,14 @@ struct NewChatPage: View {
                 NewChatIdeaRow(idea: idea) { host.newChatDraft = idea.prefill }
             }
         }
-        .frame(width: newChatCardWidth, alignment: .leading)
+        // `maxWidth`, NOT `width` (2026-09-17): a HARD 736 pt here is a demand, not a preference,
+        // and the page has nowhere to put it when the window is narrow — switching Chat → Cowork
+        // with the sidebar open widened this column past the space available, which widened the
+        // composer above it (it tracks the column at `maxWidth: newChatCardWidth`) and shoved the
+        // sidebar aside to pay for it. Chat's starter chips never did that because they are
+        // content-sized. As a ceiling the list is identical whenever the room exists and simply
+        // narrows when it does not.
+        .frame(maxWidth: newChatCardWidth, alignment: .leading)
     }
 
     /// The composer — now the SHARED `WinterComposerCard`, the same component the live chat page

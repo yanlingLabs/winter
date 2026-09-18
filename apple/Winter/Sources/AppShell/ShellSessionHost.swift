@@ -3988,32 +3988,9 @@ struct ShellSessionView: View {
                             sessionId: host.attachedSessionId, rows: directory.rows
                         ) == .present
                     ) {
-                        // cli-handoff T3's open-session "Move to CLI", RE-HOSTED (custom-sidebar
-                        // rework): the window toolbar it rode died with the native chrome
-                        // (`AppWindowController` — ChatGPT has none), so the SAME gated verb now
-                        // renders as a custom pill in the header's shell-owned accessory slot —
-                        // the exact slot the morph window injects its traffic lights through,
-                        // still never inside the shared `WindowContentView` itself. Same ONE
-                        // eligibility gate as the landing rows and the Recents context menu
-                        // (`moveToCliOffered`, on the ATTACHED session's live wire row — which is
-                        // also what keeps it absent on `DispatchSurface`'s hosting of this view),
-                        // same host verb, same help/accessibility labels as the toolbar item had.
-                        if let sessionId = host.attachedSessionId,
-                           moveToCliOffered(row: directory.rows.first(where: { $0.sessionId == sessionId })) {
-                            Button {
-                                host.moveToCli(sessionId: sessionId)
-                            } label: {
-                                Label("Move to CLI", systemImage: "terminal")
-                                    .font(Typography.caption(.medium))
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(Capsule().fill(.quaternary))
-                                    .contentShape(Capsule())
-                            }
-                            .buttonStyle(.plain)
-                            .help("Open Terminal in this session's folder, attached to this session")
-                            .accessibilityLabel("Move to CLI")
-                        }
+                        // The header row is gone from the shell (2026-09-17, ChatGPT has none);
+                        // Move to CLI stays on the landing rows and the Recents context menu.
+                        EmptyView()
                     }
                     // The outputs box — COLLAPSED/ABSENT when empty (the pinned "never a hollow
                     // box" rule). `host.outputFiles` is already mode-gated at the source
@@ -4123,8 +4100,8 @@ struct HopAwayBackgroundBar: View {
         // 1 pt quaternary stroke vocabulary (the search field / new-chat composer card); radius
         // and shadow unchanged — a minimal deglass, not a restyle. Both appearances follow the
         // system colors by construction.
-        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.quaternary, lineWidth: 1))
+        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(.quaternary, lineWidth: 1))
         .shadow(radius: 8)
         .padding(.horizontal, 24)
     }

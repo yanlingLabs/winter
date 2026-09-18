@@ -161,12 +161,19 @@ func panelShownTab(tabs: [PanelTab], activeTabId: String?) -> PanelTab? {
 /// URL-scheme policy governs what may be written back to the daemon and restored, which is a
 /// different question from what a fresh empty tab paints.
 let panelWebTabStartPageURL: String = {
+    // ChatGPT's empty browser page (2026-09-17): a globe, "Start browsing", one quiet line — on
+    // the panel's own `CardSurface` (#FFFFFF / #181818) with its text inks.
     let html = """
         <!doctype html><meta charset="utf-8"><title>New Tab</title>
-        <style>html,body{height:100%;margin:0}body{display:flex;align-items:center;\
-        justify-content:center;font:13px -apple-system,system-ui,sans-serif;color:#8a8a8e;\
-        background:#fff}@media(prefers-color-scheme:dark){body{background:#1c1c1e;color:#8a8a8e}}\
-        </style><body>New Tab
+        <style>html,body{height:100%;margin:0}body{display:flex;flex-direction:column;\
+        align-items:center;justify-content:center;font:13px -apple-system,system-ui,sans-serif;\
+        background:#fff;color:#1a1c1f}p{margin:0;color:#6a6b6d}h1{margin:12px 0 6px;\
+        font-size:16px;font-weight:600}svg{width:30px;height:30px}\
+        @media(prefers-color-scheme:dark){body{background:#181818;color:#fff}p{color:#aeaeae}}\
+        </style><body><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" \
+        stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 \
+        5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9s1.3-6.4 3.8-9z"/></svg>\
+        <h1>Start browsing</h1><p>Enter a URL to open a page</p>
         """
     let encoded = html.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
     return "data:text/html;charset=utf-8,\(encoded)"

@@ -706,3 +706,28 @@ final class ComposerChromeTests: XCTestCase {
                        "a per-mode chrome owns a submit path — submit belongs to the shared shell")
     }
 }
+
+/// 2026-09-17: the permissions row carries the live session's folder chip.
+final class ComposerFolderChipTests: XCTestCase {
+    func testTheFolderChipTitleIsTheLeafName() {
+        XCTAssertEqual(composerFolderChipTitle("/Users/me/Projects/winter"), "winter")
+        XCTAssertEqual(composerFolderChipTitle("/Users/me/Projects/winter/"), "winter")
+        XCTAssertEqual(composerFolderChipTitle(NSHomeDirectory()), "~")
+        XCTAssertEqual(composerFolderChipTitle("/"), "/")
+    }
+
+    func testTheWorkingDirectoryReachesTheCodeAndDispatchStripsOnly() {
+        for mode in [SessionMode.code, .dispatch, .chat] {
+            let context = ComposerContext(mode: .constant(mode), modeIsSelectable: false,
+                                          policy: ComposerPolicyControl(policy: "auto", changeInFlight: false,
+                                                                        onSet: { _ in }),
+                                          announcement: "", workingDirectory: "/tmp/project")
+            let strip = composerChrome(context).makeStrip()
+            if mode == .chat {
+                XCTAssertNil(strip, "chat has no row above its composer")
+            } else {
+                XCTAssertNotNil(strip, "\(mode) keeps its approval + folder row")
+            }
+        }
+    }
+}

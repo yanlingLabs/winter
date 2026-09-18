@@ -567,3 +567,25 @@ final class PanelWebChromeTests: XCTestCase {
                        "past the cap the daemon would refuse the report anyway, silently")
     }
 }
+
+/// 2026-09-17: the ChatGPT-style resting address — just the host, centred.
+final class PanelAddressDisplayHostTests: XCTestCase {
+    func testTheRestingAddressIsTheHostWithoutWww() {
+        XCTAssertEqual(panelAddressDisplayHost("https://www.youtube.com/"), "youtube.com")
+        XCTAssertEqual(panelAddressDisplayHost("https://docs.example.org/a/b?c=1"), "docs.example.org")
+        XCTAssertNil(panelAddressDisplayHost(""))
+        XCTAssertNil(panelAddressDisplayHost("not a url"))
+    }
+}
+
+final class PanelAddressFieldStateTests: XCTestCase {
+    func testTheFieldsThreeLooks() {
+        let site = "https://www.youtube.com/"
+        XCTAssertEqual(panelAddressFieldState(focused: false, hovered: false, text: site), .rest)
+        XCTAssertEqual(panelAddressFieldState(focused: false, hovered: true, text: site), .hovered)
+        XCTAssertEqual(panelAddressFieldState(focused: true, hovered: true, text: site), .editing)
+        XCTAssertEqual(panelAddressFieldState(focused: true, hovered: false, text: ""), .editing)
+        XCTAssertEqual(panelAddressFieldState(focused: false, hovered: false, text: ""), .rest,
+                       "a fresh tab's empty field is bare at rest, like every other state")
+    }
+}

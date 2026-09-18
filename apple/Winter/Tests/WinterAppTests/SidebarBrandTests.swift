@@ -31,26 +31,33 @@ final class SidebarBrandTests: XCTestCase {
         // the row washes (`DiffAddedWash`/`DiffRemovedWash`, Task 10) = 19. + diff-tabs' five
         // panel-kind tints (Task 12, Mac-only — `panelKindTint`'s switch) = 24. + editor-product
         // Task 2's sixth panel-kind tint (`PanelKindFilesTint`) = 25. All FINAL and measured —
-        // `docs/brand.md` § 3.6 / § 3.7.
-        XCTAssertEqual(Theme.assetColorNames.count, 25)
-        XCTAssertEqual(Set(Theme.assetColorNames).count, 25, "no duplicates")
+        // `docs/brand.md` § 3.6 / § 3.7. + the ChatGPT text inks (`TextPrimary`/`TextSecondary`/
+        // `TextPlaceholder`, 2026-09-17) = 28. + the chrome pair (`ChromeHover`/`ChromeSelected`) = 30.
+        // − the six retired panel-kind tints (2026-09-17) = 24.
+        XCTAssertEqual(Theme.assetColorNames.count, 26)
+        XCTAssertEqual(Set(Theme.assetColorNames).count, 26, "no duplicates")
     }
 
-    /// The plane mapping (`docs/brand.md`): the content card must be BRIGHTER than the sidebar
-    /// base in BOTH appearances — that difference IS the sidebar/content separation. A future
-    /// palette tune that inverted it would make the whole shell read inside-out, and nothing else
-    /// in the suite would notice.
-    func testCardSurfaceIsBrighterThanCanvasInBothAppearances() {
-        for appearance in [NSAppearance(named: .aqua)!, NSAppearance(named: .darkAqua)!] {
+    /// The plane mapping (`docs/brand.md`): the content card and the sidebar base must differ in
+    /// BOTH appearances — that difference IS the sidebar/content separation. Light keeps the
+    /// content brighter (pure white over a near-white sidebar); dark puts the content on pitch
+    /// black, so there the card is the DARKER plane.
+    func testCardSurfaceSeparatesFromCanvasInBothAppearances() {
+        for (appearance, cardIsBrighter) in [(NSAppearance(named: .aqua)!, true),
+                                             (NSAppearance(named: .darkAqua)!, false)] {
             var canvasBrightness: CGFloat = 0
             var cardBrightness: CGFloat = 0
             appearance.performAsCurrentDrawingAppearance {
                 canvasBrightness = Self.brightness(of: NSColor(named: "Canvas")!)
                 cardBrightness = Self.brightness(of: NSColor(named: "CardSurface")!)
             }
-            XCTAssertGreaterThan(
-                cardBrightness, canvasBrightness,
-                "CardSurface must be brighter than Canvas in \(appearance.name.rawValue)")
+            if cardIsBrighter {
+                XCTAssertGreaterThan(cardBrightness, canvasBrightness,
+                                     "CardSurface must be brighter than Canvas in \(appearance.name.rawValue)")
+            } else {
+                XCTAssertLessThan(cardBrightness, canvasBrightness,
+                                  "CardSurface must be darker than Canvas in \(appearance.name.rawValue)")
+            }
         }
     }
 
@@ -189,8 +196,10 @@ final class SidebarBrandTests: XCTestCase {
     func testSidebarToggleClearsTheTrafficLights() {
         XCTAssertGreaterThan(shellSidebarToggleLeadingInset, 80,
                              "the toggle must start beyond the three window buttons")
-        XCTAssertGreaterThan(shellTrafficLightInset.x, 0, "inset moves the lights inward, not out")
-        XCTAssertGreaterThan(shellTrafficLightInset.y, 0, "…and downward")
+        // With the empty unified toolbar (2026-09-17) AppKit itself insets the lights by (10, 9),
+        // so our own offset is only a 1 pt nudge — it must stay small either way.
+        XCTAssertLessThanOrEqual(abs(shellTrafficLightInset.x), 2)
+        XCTAssertLessThanOrEqual(abs(shellTrafficLightInset.y), 2)
     }
 
     /// The showing state is ChatGPT's own glyph (user call: "use the same drawer icon ChatGPT is

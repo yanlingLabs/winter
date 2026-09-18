@@ -60,6 +60,11 @@ struct TranscriptView: View {
                     }
                 }
                 .padding(.vertical, 4)
+                // ChatGPT's reading column (2026-09-17): the messages sit in a centred column the
+                // composer's width, while the scroll view itself stays full width (scrolling and
+                // the scroller work anywhere in the pane).
+                .frame(maxWidth: newChatCardWidth)
+                .frame(maxWidth: .infinity)
             }
             .onScrollGeometryChange(for: Bool.self) { geo in
                 geo.contentOffset.y + geo.containerSize.height >= geo.contentSize.height - 40

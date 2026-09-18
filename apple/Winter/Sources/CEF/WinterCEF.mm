@@ -22,6 +22,9 @@
 // a dependency anybody can see. `cef_menu_model.h` comes with the context-menu header.
 #include "include/cef_context_menu_handler.h"
 #include "include/cef_request_handler.h"
+// The page icon: `CefDisplayHandler::OnFaviconURLChange` → `CefBrowserHost::DownloadImage`.
+#include "include/cef_image.h"
+#include "include/cef_values.h"
 // B2 Task 3 — the CDP door. The observer is IMPLEMENTED here; the other two are what
 // `AddDevToolsMessageObserver` returns and what turns a Swift-built params string into the
 // `CefDictionaryValue` `ExecuteDevToolsMethod` takes.
@@ -470,6 +473,14 @@ static NSMutableArray<WinterCEFPendingBrowser *> *g_pending = nil;
 /// its captured session id. `nil` for a container nobody wired one to, and that
 /// case cancels the popup exactly as this file did before the route existed.
 @property(nonatomic, copy) void (^popupObserver)(NSString *);
+/// Where a downloaded page icon goes (`WinterCEFSetFaviconObserver`). Fire-on-arrival ONLY — the
+/// image is deliberately NOT cached on the bridge or carried in `WinterCEFBrowserState`: that
+/// snapshot is re-pushed on every loading flip, so a cached icon would re-install itself after
+/// Swift had cleared it for a navigation to another site. When to show or drop it is Swift's call.
+@property(nonatomic, copy) void (^faviconObserver)(NSImage *, NSString *);
+/// Bumped by every `OnFaviconURLChange`, so a download that lands after a NEWER candidate list
+/// arrived (a page swapping its icon for a badge, a navigation) is dropped rather than shown.
+@property(nonatomic) NSUInteger faviconGeneration;
 @property(nonatomic, copy) NSString *url;
 @property(nonatomic, copy) NSString *title;
 /// **Which document `title` actually describes.** A title is not a property of a browser, it is a
@@ -1274,6 +1285,119 @@ constexpr int kMenuIdOpenLinkInNewTab = MENU_ID_USER_FIRST + 0;
 constexpr int kMenuIdCopyLinkAddress = MENU_ID_USER_FIRST + 1;
 constexpr int kMenuIdCopyImageAddress = MENU_ID_USER_FIRST + 2;
 
+/// The icon size asked of `DownloadImage`, in DIP. Chromium drops representations larger than this
+/// and, when NONE is small enough, resizes the smallest down to it — so a site that only ships a
+/// 512px icon still yields one. 32 DIP covers the tab pill's 16pt glyph at 2x.
+constexpr uint32_t kFaviconMaxImageSize = 32;
+/// The scale the PNG is taken at: `GetAsPNG` returns the representation CLOSEST to it, which on a
+/// Retina panel is the 2x one when the site shipped it.
+constexpr float kFaviconScaleFactor = 2.0f;
+
+/// **One page-icon download, and the fallback through the page's other candidates.**
+///
+/// `OnDownloadImageFinished` runs on the browser-process UI thread (`cef_browser.h`), which IS the
+/// main thread under the external pump — so the observer is called synchronously, exactly as
+/// `NotifyState` calls its own.
+///
+/// **It touches no view and no window handle** — only the bridge it was built with (strong, the same
+/// ownership `WinterClient::bridge_` has; the bridge outlives every browser of its tab) and, to try
+/// the next candidate, the `CefBrowser` itself, and only while `g_open_browsers` still lists it.
+/// That is the zombie rule on `WinterCEFOpenBrowser`.
+///
+/// Stale results are dropped twice over: here by `faviconGeneration` (a newer candidate list has
+/// arrived since), and in Swift by the page URL it carries (the user navigated to another site).
+class WinterFaviconDownload : public CefDownloadImageCallback {
+ public:
+  WinterFaviconDownload(CefRefPtr<CefBrowser> browser,
+                        WinterCEFTabBridge *bridge,
+                        NSUInteger generation,
+                        NSString *pageURL,
+                        std::vector<CefString> candidates,
+                        size_t index)
+      : browser_(browser),
+        bridge_(bridge),
+        generation_(generation),
+        page_url_([pageURL copy]),
+        candidates_(std::move(candidates)),
+        index_(index) {}
+
+  /// Start at `index`; a no-op past the end of the list.
+  static void Start(CefRefPtr<CefBrowser> browser,
+                    WinterCEFTabBridge *bridge,
+                    NSUInteger generation,
+                    NSString *pageURL,
+                    std::vector<CefString> candidates,
+                    size_t index) {
+    if (!browser || index >= candidates.size()) {
+      return;
+    }
+    CefRefPtr<CefBrowserHost> host = browser->GetHost();
+    if (!host) {
+      return;
+    }
+    CefString url = candidates[index];
+    // `is_favicon = true`: Chromium's own favicon fetch — no cookies sent or accepted, the same
+    // thing Chrome does, so an icon on a third-party host never receives the user's session.
+    // `bypass_cache = false`: the browser cache answers a repeat visit.
+    host->DownloadImage(url, true, kFaviconMaxImageSize, false,
+                        new WinterFaviconDownload(browser, bridge, generation, pageURL,
+                                                  std::move(candidates), index));
+  }
+
+  void OnDownloadImageFinished(const CefString &image_url,
+                               int http_status_code,
+                               CefRefPtr<CefImage> image) override {
+    CEF_REQUIRE_UI_THREAD();
+    CefRefPtr<CefBrowser> browser = browser_;
+    browser_ = nullptr;
+    WinterCEFTabBridge *bridge = bridge_;
+    if (bridge == nil || bridge.faviconObserver == nil ||
+        bridge.faviconGeneration != generation_) {
+      return;
+    }
+    NSImage *icon = DecodeIcon(image);
+    if (icon == nil) {
+      // This candidate failed (404, undecodable). Try the next, if the browser is still open.
+      if (OpenBrowserRecordFor(browser) != nil) {
+        Start(browser, bridge, generation_, page_url_, std::move(candidates_), index_ + 1);
+      }
+      return;
+    }
+    bridge.faviconObserver(icon, page_url_ ?: @"");
+  }
+
+ private:
+  static NSImage *DecodeIcon(CefRefPtr<CefImage> image) {
+    if (!image || image->IsEmpty()) {
+      return nil;
+    }
+    int pixelWidth = 0;
+    int pixelHeight = 0;
+    CefRefPtr<CefBinaryValue> png =
+        image->GetAsPNG(kFaviconScaleFactor, true, pixelWidth, pixelHeight);
+    if (!png || png->GetSize() == 0) {
+      return nil;
+    }
+    NSData *data = [NSData dataWithBytes:png->GetRawData() length:png->GetSize()];
+    NSImage *icon = [[NSImage alloc] initWithData:data];
+    if (icon == nil || pixelWidth <= 0 || pixelHeight <= 0) {
+      return nil;
+    }
+    // Points, not pixels: a 32px representation taken at 2x is a 16pt icon.
+    icon.size = NSMakeSize(pixelWidth / kFaviconScaleFactor, pixelHeight / kFaviconScaleFactor);
+    return icon;
+  }
+
+  CefRefPtr<CefBrowser> browser_;
+  WinterCEFTabBridge *bridge_ = nil;
+  NSUInteger generation_ = 0;
+  NSString *page_url_ = nil;
+  std::vector<CefString> candidates_;
+  size_t index_ = 0;
+
+  IMPLEMENT_REFCOUNTING(WinterFaviconDownload);
+};
+
 /// Minimal client. `CefLifeSpanHandler` keeps `g_browsers` honest; `CefLoadHandler` exists because
 /// Task 1 explicitly asked for it: "Do not trust the first navigation blindly" — it saw one
 /// un-root-caused first-load failure in 23 runs, with every structural cause excluded by control,
@@ -1902,6 +2026,29 @@ class WinterClient : public CefClient,
     bridge.titleURL = main ? ([NSString stringWithUTF8String:main->GetURL().ToString().c_str()] ?: @"")
                            : @"";
     NotifyState(bridge);
+  }
+
+  /// **The page's icon.** Chromium reports the document's icon candidates (`<link rel=icon>`, in
+  /// document order, plus its default `/favicon.ico`) after the page loads and again whenever
+  /// script changes them. Each report supersedes the last (`faviconGeneration`), and the page URL
+  /// is captured NOW — the `titleURL` pattern — so Swift can refuse an icon that arrives after the
+  /// user has moved on to another site. An empty list downloads nothing; Swift's own
+  /// different-site rule is what clears a stale icon, in one place.
+  void OnFaviconURLChange(CefRefPtr<CefBrowser> browser,
+                          const std::vector<CefString> &icon_urls) override {
+    CEF_REQUIRE_UI_THREAD();
+    WinterCEFTabBridge *bridge = Tab();
+    if (bridge == nil) {
+      return;
+    }
+    bridge.faviconGeneration += 1;
+    if (bridge.faviconObserver == nil || icon_urls.empty()) {
+      return;
+    }
+    CefRefPtr<CefFrame> main = browser->GetMainFrame();
+    NSString *pageURL =
+        main ? ([NSString stringWithUTF8String:main->GetURL().ToString().c_str()] ?: @"") : @"";
+    WinterFaviconDownload::Start(browser, bridge, bridge.faviconGeneration, pageURL, icon_urls, 0);
   }
 
   // MARK: CefContextMenuHandler — the two-finger click
@@ -2825,6 +2972,10 @@ void WinterCEFSetNavigationObserver(NSView *parent, void (^observer)(NSString *u
 
 void WinterCEFSetPopupObserver(NSView *parent, void (^observer)(NSString *url)) {
   BridgeFor(parent).popupObserver = observer;
+}
+
+void WinterCEFSetFaviconObserver(NSView *parent, void (^observer)(NSImage *icon, NSString *pageURL)) {
+  BridgeFor(parent).faviconObserver = observer;
 }
 
 void WinterCEFSeedTabState(NSView *parent, const char *url, const char *title) {

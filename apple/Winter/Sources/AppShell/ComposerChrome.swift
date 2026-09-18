@@ -91,6 +91,9 @@ struct ComposerContext {
     let policy: ComposerPolicyControl?
     /// The cowork strip's trailing line. Only `CoworkComposerChrome` reads it.
     let announcement: String
+    /// The live session's working folder, shown as a chip beside the approval mode in the
+    /// permissions row (2026-09-17). `nil` → no chip.
+    var workingDirectory: String? = nil
 }
 
 // MARK: - The permissions row (mac-chat-parity Task 6, spec §4)
@@ -282,7 +285,8 @@ struct CodeComposerChrome: ComposerChrome {
     func makeControlRowAccessory() -> AnyView? { nil }
 
     func makeStrip() -> ComposerStrip? {
-        permissionsStrip(offering: sessionPolicyModes, context.policy)
+        permissionsStrip(offering: sessionPolicyModes, context.policy,
+                         workingDirectory: context.workingDirectory)
     }
 }
 
@@ -314,7 +318,8 @@ struct DispatchComposerChrome: ComposerChrome {
     func makeControlRowAccessory() -> AnyView? { nil }
 
     func makeStrip() -> ComposerStrip? {
-        permissionsStrip(offering: dispatchSettablePolicyModes, context.policy)
+        permissionsStrip(offering: dispatchSettablePolicyModes, context.policy,
+                         workingDirectory: context.workingDirectory)
     }
 }
 
@@ -326,14 +331,16 @@ struct DispatchComposerChrome: ComposerChrome {
 /// no session to set a policy on) gets **no band**, not a chip that cannot do anything. Chat's
 /// absent-rather-than-disabled rule, applied to the other absence.
 private func permissionsStrip(offering offers: [String],
-                              _ control: ComposerPolicyControl?) -> ComposerStrip? {
+                              _ control: ComposerPolicyControl?,
+                              workingDirectory: String?) -> ComposerStrip? {
     guard let control else { return nil }
     let row = ComposerPermissionsRow(offers: offers,
                                      showing: control.policy,
                                      changeInFlight: control.changeInFlight)
     return ComposerStrip(kind: .permissions(row),
                          height: newChatComposerStripHeight,
-                         content: AnyView(ComposerPermissionsStrip(row: row, onSelect: control.onSet)))
+                         content: AnyView(ComposerPermissionsStrip(row: row, onSelect: control.onSet,
+                                                                   workingDirectory: workingDirectory)))
 }
 
 /// The permissions band's content: one chip on the composer's own leading column, and space.
@@ -344,9 +351,14 @@ private func permissionsStrip(offering offers: [String],
 struct ComposerPermissionsStrip: View {
     let row: ComposerPermissionsRow
     let onSelect: (String) -> Void
+    var workingDirectory: String? = nil
 
     var body: some View {
         HStack(spacing: 10) {
+            // The session's folder first, then its approval mode — the new-chat page's order.
+            if let workingDirectory, !workingDirectory.isEmpty {
+                ComposerFolderChip(path: workingDirectory)
+            }
             ComposerPolicyChip(row: row, onSelect: onSelect)
             Spacer(minLength: 12)
         }
@@ -365,6 +377,30 @@ struct ComposerPermissionsStrip: View {
 /// Selecting a row does **not** dismiss the popover, matching the ⋯ menu it shares its rows with:
 /// the open menu is where a change in flight is most visible (every row disables, and the checkmark
 /// moves only once the daemon has confirmed), and closing it would hide exactly that.
+/// The live session's working folder: its leaf name, full path on hover, and a click reveals it in
+/// Finder. Display-only otherwise — changing a session's folders mid-session has no Mac door now.
+struct ComposerFolderChip: View {
+    let path: String
+
+    var body: some View {
+        NewChatControlChip(systemImage: "folder",
+                           title: composerFolderChipTitle(path),
+                           label: path,
+                           showsChevron: false,
+                           action: {
+                               NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
+                           })
+    }
+}
+
+/// PURE: the folder chip's title — the path's last component (`~` for the home folder itself).
+func composerFolderChipTitle(_ path: String) -> String {
+    let trimmed = path.hasSuffix("/") && path.count > 1 ? String(path.dropLast()) : path
+    if trimmed == NSHomeDirectory() { return "~" }
+    let leaf = (trimmed as NSString).lastPathComponent
+    return leaf.isEmpty ? trimmed : leaf
+}
+
 struct ComposerPolicyChip: View {
     let row: ComposerPermissionsRow
     let onSelect: (String) -> Void

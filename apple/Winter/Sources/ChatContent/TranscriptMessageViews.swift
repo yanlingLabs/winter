@@ -222,7 +222,7 @@ private struct TranscriptMarkdownBlockView: View {
                 .textSelection(.enabled)
                 .padding(.vertical, 3)
                 .padding(.horizontal, 8)
-                .background(RoundedRectangle(cornerRadius: 6).fill(Theme.elevatedSurface))
+                .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Theme.elevatedSurface))
         }
     }
 
