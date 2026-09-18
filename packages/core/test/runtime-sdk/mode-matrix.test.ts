@@ -356,7 +356,12 @@ test("the Bash sandbox names real DIRECTORIES, because its consumer renders seat
   // becomes a literal path that never exists and denies nothing.
   const sb = buildWinterOptions(optionsInput({ home: "/h" })).sandbox!;
   expect(sb.enabled).toBe(true);
-  expect(sb.filesystem!.denyWrite).toEqual(["/h/run"]);
+  // `runtimes` is on BOTH lists (2026-09-18). It was read-denied and write-allowed, which the
+  // official leg makes reachable: that leg has no out-of-cwd Bash fence (see the "8d MEASURED" test
+  // in official-leg.e2e.test.ts), and a per-tool `Write(path)` deny rule does not constrain a Bash
+  // redirect — so `<home>/runtimes/bin/winter`, rung 4 of `resolveWinterExecutable`'s ladder, was
+  // writable there. If either list loses it, that is the regression this line exists to catch.
+  expect(sb.filesystem!.denyWrite).toEqual(["/h/run", "/h/runtimes"]);
   // CLAUDE.md: "the sole read denial is ~/.winter/run" — reads are otherwise unrestricted.
   expect(sb.filesystem!.denyRead).toEqual(["/h/run", "/h/runtimes"]);   // Task 17: runtimes/ is model-denied (8a)
   for (const p of [...sb.filesystem!.denyWrite!, ...sb.filesystem!.denyRead!]) {
