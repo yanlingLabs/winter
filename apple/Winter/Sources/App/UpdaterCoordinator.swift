@@ -67,6 +67,13 @@ final class UpdaterCoordinator: NSObject {
     /// Menu-bar hooks (installed by AppDelegate).
     var onStagedChange: ((_ staged: Bool, _ version: String?) -> Void)?
     var onBadgeChange: ((_ badged: Bool) -> Void)?
+    /// 2026-09-18, the Updates panel: fired on every poll tick that DECLINES to install — i.e. the
+    /// idle gate held because a turn is running or a buffer is dirty. Purely informational; it
+    /// changes no policy and has no menu-bar consumer. It exists because the panel is the first
+    /// surface that can say WHY a staged update is sitting there, and "waiting for the current turn"
+    /// is a very different message from "click Restart Now". `AppDelegate` wires it to
+    /// `UpdatePresenter.installHeld()`; nil everywhere else, including every existing test.
+    var onInstallHeld: (() -> Void)?
     /// Whole-branch review (Critical): fired exactly once, immediately before the install handler
     /// runs. Sparkle terminates the host via a CANCELLABLE Apple quit event (no forceTerminate,
     /// no kAEQuitReason), which routes through `applicationShouldTerminate` — without arming,
@@ -109,6 +116,10 @@ final class UpdaterCoordinator: NSObject {
                     self.installNow()
                     return
                 }
+                // 2026-09-18: the hold is now VISIBLE (Updates panel). No policy change — this
+                // fires on exactly the tick that already declined, immediately before the badge
+                // refresh that was always here.
+                self.onInstallHeld?()
                 self.refreshBadge()
                 try? await Task.sleep(for: .seconds(self.deps.pollIntervalSeconds))
             }
