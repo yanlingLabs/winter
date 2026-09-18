@@ -110,6 +110,10 @@ final class ShellOverlayPresentation: ObservableObject {
     /// the chosen tab simply IS the tab you left. Every open door clears it first, so it can only
     /// ever be set while the library itself is the surface showing.
     @Published private(set) var libraryTabRequest: LibraryTab?
+    /// The composer's full-size model card ("Other models"), or nil. The composer's SMALL panel is
+    /// not in here — it belongs to its button and stays open underneath this card, so that the
+    /// commit returns you to it (`ComposerModelPanel.swift`).
+    @Published private(set) var sessionModelPicker: SessionModelPickerRequest?
 
     /// The search palette's own flag. OWNED here (rather than beside this object) so that opening
     /// a panel can close the palette without a back-reference somebody has to remember to wire;
@@ -129,6 +133,7 @@ final class ShellOverlayPresentation: ObservableObject {
 
     func open(_ overlay: ShellOverlay) {
         closePicker()
+        sessionModelPicker = nil
         search.close()
         libraryTabRequest = nil
         self.overlay = overlay
@@ -161,6 +166,7 @@ final class ShellOverlayPresentation: ObservableObject {
 
     func openSearch() {
         overlay = nil
+        sessionModelPicker = nil
         libraryTabRequest = nil
         closePicker()
         search.open()
@@ -178,6 +184,7 @@ final class ShellOverlayPresentation: ObservableObject {
         libraryTabRequest = nil
         search.close()
         closePicker()
+        sessionModelPicker = nil
         picker = request
         request.roles.pickerDidOpen(request.role)
     }
@@ -198,6 +205,20 @@ final class ShellOverlayPresentation: ObservableObject {
     func closeRolePicker(ifShowing request: SettingsRolePickerRequest) {
         guard picker == request else { return }
         closePicker()
+    }
+
+    // MARK: The composer's full-size model card
+
+    func openSessionModelPicker(_ request: SessionModelPickerRequest) {
+        overlay = nil
+        libraryTabRequest = nil
+        search.close()
+        closePicker()
+        sessionModelPicker = request
+    }
+
+    func closeSessionModelPicker() {
+        sessionModelPicker = nil
     }
 
     private func closePicker() {
@@ -677,10 +698,19 @@ extension View {
     /// - The rim: over a translucent material the edge is only as defined as whatever is behind it,
     ///   so a dark transcript under a dark surface would leave the boundary to the shadow alone.
     func shellFloatingSurface() -> some View {
-        background(.ultraThinMaterial, in: shellOverlayShape)
-            .background(shellOverlayShape.fill(Theme.paletteSurface.opacity(shellOverlayTintOpacity)))
-            .overlay(shellOverlayShape.strokeBorder(Theme.hairlineElevated,
-                                                    lineWidth: shellSidebarHairlineWidth))
+        shellFloatingSurface(in: shellOverlayShape)
+    }
+
+    /// The same glass in another continuous rounded rect — the composer's smaller model panel.
+    func shellFloatingSurface(cornerRadius: CGFloat) -> some View {
+        shellFloatingSurface(in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+    }
+
+    private func shellFloatingSurface<S: InsettableShape>(in shape: S) -> some View {
+        background(.ultraThinMaterial, in: shape)
+            .background(shape.fill(Theme.paletteSurface.opacity(shellOverlayTintOpacity)))
+            .overlay(shape.strokeBorder(Theme.hairlineElevated,
+                                        lineWidth: shellSidebarHairlineWidth))
             .shadow(color: .black.opacity(0.18), radius: 24, y: 8)
     }
 }

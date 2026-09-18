@@ -581,6 +581,21 @@ struct ShellRootView: View {
         // one effect — and it is a consequence of this ordering, so do not reorder these two
         // without meaning to. (The traffic lights are unaffected: they are `NSWindow` buttons
         // living above the content view, not SwiftUI siblings, so they stay clickable throughout.)
+        // The composer's small model panel (2026-09-18), drawn HERE rather than inside the composer
+        // so nothing clips or covers it: the model button publishes its bounds and live row, and
+        // this layer floats the panel centred above it. Beneath every other floating surface, so
+        // the full-size card its "Other models" row opens lands on top of it.
+        .overlayPreferenceValue(ComposerModelPanelKey.self) { entry in
+            if let entry {
+                ComposerModelPanelLayer(entry: entry) { row, commit in
+                    overlays.openSessionModelPicker(
+                        SessionModelPickerRequest(catalogue: row.catalogue,
+                                                  current: row.effectiveModel,
+                                                  onCommit: commit))
+                }
+                .transition(.opacity)
+            }
+        }
         .overlay {
             if let overlay = overlays.overlay {
                 ShellFloatingPanel(overlay: overlay, onClose: { overlays.close() }) {
@@ -621,11 +636,22 @@ struct ShellRootView: View {
             }
         }
         .animation(.easeOut(duration: 0.16), value: overlays.picker)
+        .overlay {
+            if let request = overlays.sessionModelPicker {
+                SessionModelPickerHost(request: request,
+                                       onClose: { overlays.closeSessionModelPicker() })
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.16), value: overlays.sessionModelPicker)
         // The picker belongs to Settings → Roles in a way the three panels do not belong to any
         // destination: navigating anywhere else (a menu-bar summon, another settings section) must
         // not leave a Roles card hanging over a page that has no roles on it. A write in flight
         // survives this exactly as it survives Esc — the close is the same one.
-        .onChange(of: nav.destination) { _, _ in overlays.closeRolePicker() }
+        .onChange(of: nav.destination) { _, _ in
+            overlays.closeRolePicker()
+            overlays.closeSessionModelPicker()
+        }
         .overlay {
             if searchPalette.isPresented {
                 SidebarSearchPalette(nav: nav, directory: directory, presentation: searchPalette)
