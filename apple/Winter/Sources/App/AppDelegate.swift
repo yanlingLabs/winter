@@ -32,13 +32,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `boot()` (production deps `.live` unless `daemonSupervisorDeps` below overrides them) and
     /// stopped in `applicationWillTerminate`.
     private(set) var daemonSupervisor: DaemonSupervisor?
-    /// Sparkle T3: owns the silent `SPUStandardUpdaterController` — constructed in `boot()`,
-    /// gated `!isRunningUnitTests` (same posture as `daemonSupervisor`'s real spawn path), so no
-    /// updater ever starts from the xctest host.
-    private(set) var updaterController: SPUStandardUpdaterController?
-    /// Sparkle T3: the `SPUUpdaterDelegate` this controller drives — Winter-specific gating (idle
-    /// gate in T4, channels in T5) lives on this seam, not in the controller itself.
+    /// Sparkle T3, rebuilt 2026-09-18: owns the silent updater — constructed in `boot()`, gated
+    /// `!isRunningUnitTests` (same posture as `daemonSupervisor`'s real spawn path), so no updater
+    /// ever starts from the xctest host.
+    ///
+    /// An `SPUUpdater` built by hand rather than the `SPUStandardUpdaterController` it used to be.
+    /// The controller is a two-line convenience that pairs an `SPUUpdater` with Sparkle's OWN
+    /// window-drawing `SPUStandardUserDriver`; Winter now draws its own update UI (`UpdatesPanel`),
+    /// so it constructs the same updater with `WinterUserDriver` in that slot instead. Sparkle's
+    /// engine — appcast, channels, EdDSA, staging, install, relaunch — is byte-for-byte the same
+    /// code path; only the presentation object differs. See `WinterUserDriver`'s own header.
+    private(set) var updater: SPUUpdater?
+    /// Sparkle T3: the `SPUUpdaterDelegate` the updater drives — Winter-specific gating (idle
+    /// gate in T4, channels in T5) lives on this seam, not in the updater itself.
     private(set) var updaterCoordinator: UpdaterCoordinator?
+    /// 2026-09-18: Sparkle's UI half. `SPUUpdater` retains it for its own lifetime; it is held here
+    /// too so the ownership is explicit rather than a property of Sparkle's internals.
+    private var updaterUserDriver: WinterUserDriver?
+    /// 2026-09-18: the observable the Updates panel reads. Constructed UNCONDITIONALLY (including
+    /// in Debug and under unit tests, where no `SPUUpdater` exists) so the panel has exactly one
+    /// code path: no updater attached = `UpdateStatus.unavailable`, rendered honestly. See
+    /// `UpdatePresenter`'s header.
+    private(set) var updatePresenter = UpdatePresenter()
     /// Sparkle T3 test seam: overrides the `UpdaterCoordinatorDeps` `boot()` constructs the
     /// coordinator with — set BEFORE calling `boot()`. `nil` (production) resolves to `.live`
     /// (mirrors `daemonSupervisorDeps` above).
@@ -721,12 +736,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             openDevCli: { [weak self] in self?.cliLauncher.openCli() },
             appVersion: { (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "—" },
             updateChannel: { UpdaterCoordinator.readChannelFromSettings() },
-            checkForUpdates: { [weak self] in self?.updaterController?.checkForUpdates(nil) },
+            // 2026-09-18: routed through the presenter rather than straight at Sparkle. Same check,
+            // one guard richer — the presenter refuses to start one while a background session is
+            // already running (which `SPUUpdater.checkForUpdates` would silently drop on the floor)
+            // and records the outcome, so opening the Updates panel afterwards shows what happened.
+            checkForUpdates: { [weak self] in self?.updatePresenter.check() },
             loginItemEnabled: { [weak self] in self?.loginItemController?.isEnabled ?? false },
             setLoginItemEnabled: { [weak self] enabled in self?.loginItemController?.setEnabled(enabled) },
             pairedDevicesList: { [weak self] in await self?.remoteAccessCoordinator?.pairedDevices() ?? [] },
             pairedDevicesRevoke: { [weak self] peer in try await self?.remoteAccessCoordinator?.revoke(phoneEndpointID: peer) },
-            presentPairingSheet: { [weak self] in self?.openPairDevice() }
+            presentPairingSheet: { [weak self] in self?.openPairDevice() },
+            // 2026-09-17: the library panel's MCP tab. No cwd — see the field's own doc: a cwd
+            // makes `mcp.list` spawn that project's servers, and a tab must not do that merely by
+            // being opened.
+            mcpList: { try await client.mcpList() },
+            // 2026-09-18: the Updates panel reads this presenter directly. Handed over even in
+            // Debug (where it will report `.unavailable`) so the panel never has a nil case to
+            // invent copy for.
+            updates: updatePresenter,
+            // 2026-09-18 — the four settings-surface reads. EVERY ONE OF THEM IS NEWER THAN THE
+            // DAEMON MOST USERS ARE RUNNING: the methods exist in this app before they exist in
+            // the `winter-core` on disk, so each call can come back `-32601`. That is wired as an
+            // expected state end to end, not caught here: each surface's own model branches on
+            // `RpcError.isMethodNotFound` and renders the "waiting on the daemon" copy it already
+            // had. Swallowing the error here instead would have flattened "the daemon is older"
+            // into the same nil as a dead socket.
+            sdkVersions: { try await sdkInstalledComponents(client.versionsGet()) },
+            capabilitiesList: { try await client.capabilitiesList() },
+            modelRoles: { try await client.settingsModelRoles() },
+            // Carried, not yet called — Settings → Roles is read-only for now. See the field's doc.
+            setModelRole: { role, model in try await client.setModelRole(role: role, model: model) }
         )
     }
 
@@ -939,12 +978,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 deps.dirtyEditors = { [weak self] in self?.liveDirtyEditorsOrOfficeDocuments() ?? false }
             }
             let coordinator = UpdaterCoordinator(deps: deps)
-            let controller = SPUStandardUpdaterController(
-                startingUpdater: true, updaterDelegate: coordinator, userDriverDelegate: nil)
-            controller.updater.automaticallyChecksForUpdates = true
-            controller.updater.automaticallyDownloadsUpdates = true
-            updaterCoordinator = coordinator
-            updaterController = controller
+            // 2026-09-18 — the ONE Sparkle change this feature makes. `SPUStandardUpdaterController`
+            // did exactly three things: build an `SPUUpdater` over the main bundle, pair it with
+            // Sparkle's own `SPUStandardUserDriver`, and call `startUpdater:`. We do the same three,
+            // substituting `WinterUserDriver` for the user driver so update progress renders in
+            // Winter's own panel instead of Sparkle's windows. Everything the UPDATER does is
+            // untouched: same host bundle, same delegate (`coordinator` — feed URL, channels, the
+            // idle gate, willInstallUpdateOnQuit), same two automatic flags, same start.
+            //
+            // Two deliberate orderings:
+            // 1. the flags are set BEFORE `startUpdater()`, not after as the controller forced.
+            //    `startUpdateCycle` reads them at start; setting them first is strictly closer to
+            //    the declared Info.plist configuration than the old set-then-reset-cycle dance.
+            // 2. `startUpdater:` (Swift: `start()`) throws where the controller swallowed the
+            //    error into an alert of its own. Winter has no alert to show at boot, so it logs
+            //    and leaves `updater` nil — a failed start degrades to "no updates in this run"
+            //    rather than taking the app down or, worse, leaving a half-started updater wired
+            //    to the menu bar.
+            let driver = WinterUserDriver(presenter: updatePresenter)
+            let spuUpdater = SPUUpdater(hostBundle: .main, applicationBundle: .main,
+                                        userDriver: driver, delegate: coordinator)
+            spuUpdater.automaticallyChecksForUpdates = true
+            spuUpdater.automaticallyDownloadsUpdates = true
+            do {
+                try spuUpdater.start()
+                updaterCoordinator = coordinator
+                updaterUserDriver = driver
+                updater = spuUpdater
+                updatePresenter.attach(updater: spuUpdater, coordinator: coordinator)
+            } catch {
+                OrbDebug.log("boot: Sparkle startUpdater failed — \(error.localizedDescription)")
+            }
             #endif
         }
 
@@ -1364,9 +1428,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onReallyQuit: { [weak self] in self?.reallyQuitting = true },
             // Lifecycle T6: the `.failed`-state "engine stopped — Restart" item's action.
             onRestartDaemon: { [weak self] in self?.daemonSupervisor?.restart() },
-            // Sparkle T3: the "Check for Updates…" item's action — fires Sparkle's own UI-driven
-            // check (progress/"you're up to date"/error alerts are Sparkle's standard user driver).
-            onCheckForUpdates: { [weak self] in self?.updaterController?.checkForUpdates(nil) },
+            // Sparkle T3, rewired 2026-09-18: the "Check for Updates…" item fires the same check,
+            // now rendered by Winter's own Updates panel rather than Sparkle's windows — and it
+            // SUMMONS the app window first, because a check with no surface would be invisible.
+            //
+            // Summon, SHOW the panel, then check — in that order, so the check's first state
+            // change lands on a surface that is already up. (The gap this closes: the panel used to
+            // be openable only from the account row, so the menu item ran a check the user could
+            // not see the result of — strictly worse than the stock Sparkle window it replaced.)
+            onCheckForUpdates: { [weak self] in
+                guard let self else { return }
+                self.summonAppWindow()
+                self.appWindow?.shellOverlays.open(ShellOverlay.updates)
+                self.updatePresenter.check()
+            },
             // Sparkle T4: the staged-update "Restart Now" line's action — same override path as
             // the idle gate's own poll-triggered install, routed through `installNow()`'s
             // idempotent guard.
@@ -1404,8 +1479,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // this method — order is safe either way since staging can only happen after an update
         // check, long past boot; `updaterCoordinator` is nil under unit tests, so these are no-ops
         // there.
+        // 2026-09-18: `onStagedChange` now FANS OUT. The menu bar's "Restart Now" line is
+        // unchanged; the second consumer is the Updates panel, and it is not optional — the silent
+        // background download never calls the user driver at all (`SPUAutomaticUpdateDriver` holds
+        // it "only for a termination callback"), so this hook is the panel's ONLY way to learn that
+        // an update is staged. Without it the menu bar would say "Update ready" while the panel
+        // still said "up to date".
         updaterCoordinator?.onStagedChange = { [weak self] staged, version in
             self?.menuBar?.setUpdateStaged(staged, version: version)
+            self?.updatePresenter.staged(staged, version: version)
+        }
+        // The idle gate declined a poll tick. Informational only (see `onInstallHeld`'s doc): it
+        // lets the panel say "waiting for the current turn to finish" instead of implying the user
+        // has simply not clicked yet.
+        updaterCoordinator?.onInstallHeld = { [weak self] in
+            self?.updatePresenter.installHeld()
         }
         updaterCoordinator?.onBadgeChange = { [weak self] badged in
             self?.menuBar?.setUpdateBadge(badged)

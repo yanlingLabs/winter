@@ -28,7 +28,11 @@ struct UpdaterPane: View {
                 row("Channel", updateChannelDisplay(updateChannel()))
             }
             Button("Check for Updates…") { checkForUpdates() }
-            Text("Updates install automatically in the background. A ready update offers Restart Now from the menu bar.")
+            // 2026-09-18: the Updates panel (the account row's arrow glyph) is now where the check
+            // itself renders — progress, release notes, and the installed-versions table. This pane
+            // stays the Dashboard's read-only summary + the same manual check; duplicating the
+            // panel's live state here would be two surfaces telling the same story.
+            Text("Updates install automatically in the background. Progress and release notes show in the Updates panel; a ready update also offers Restart Now from the menu bar.")
                 .font(Typography.caption())
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
