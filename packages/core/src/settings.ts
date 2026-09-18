@@ -1127,6 +1127,29 @@ function backupPreWs20Once(path: string, raw: unknown): void {
  * happens to read a v2 home first can no longer race the daemon to a migration written WITHOUT
  * presence in hand.
  */
+/**
+ * Fix wave (pre-merge review, advisor round 2 on finding 6): the ONE renderer for a `Settings`
+ * parse failure's issue list — `loadSettings`'s two throw sites AND `readableSettingsParseError`
+ * (the `saveSettings` door) all call this rather than each hand-joining `issues.map((i) =>
+ * i.path.join("."))` its own way, which is what made the item 6 ruling's own refusal message
+ * (`refuseCredentialShapedHeaders`'s `ctx.addIssue({code: "custom", ...})`) invisible at the two
+ * doors a user actually hits: a path-only join names the FIELD (`mcpServers.x.headers.Authorization`)
+ * but drops the WHY, so a hand-edited settings.json with a credential-shaped header produced a
+ * refusal that named neither the rule nor the alternative — exactly what the ruling's own text
+ * requires ("naming the rule and pointing at the alternative"). A `"custom"` issue's own `.message`
+ * (the only zod issue kind whose message is caller-authored prose, never a generic type/shape
+ * complaint) is now appended after its path; every other issue kind's rendering is BYTE-IDENTICAL to
+ * before this fix, since only the custom branch adds anything.
+ */
+function renderSettingsIssues(issues: readonly { path: PropertyKey[]; code?: string; message: string }[]): string {
+  return issues
+    .map((i) => {
+      const field = i.path.join(".") || "(root)";
+      return i.code === "custom" ? `${field}: ${i.message}` : field;
+    })
+    .join(", ");
+}
+
 export function loadSettings(path: string, opts?: { presentProviders?: ReadonlySet<string>; persistMigration?: boolean }): Settings {
   let raw: any;
   try {
@@ -1140,7 +1163,7 @@ export function loadSettings(path: string, opts?: { presentProviders?: ReadonlyS
   if (raw.schemaVersion === 3) {
     const parsed = Settings.safeParse(raw);
     if (!parsed.success) {
-      throw new Error(`settings.json is invalid: ${parsed.error.issues.map((i) => i.path.join(".")).join(", ")} — fix or delete ${path}`);
+      throw new Error(`settings.json is invalid: ${renderSettingsIssues(parsed.error.issues)} — fix or delete ${path}`);
     }
     return parsed.data;
   }
@@ -1150,7 +1173,7 @@ export function loadSettings(path: string, opts?: { presentProviders?: ReadonlyS
     const migrated = migrateSettingsV2ToV3(raw, home, opts?.presentProviders);
     const parsed = Settings.safeParse(migrated);
     if (!parsed.success) {
-      throw new Error(`settings.json is invalid: ${parsed.error.issues.map((i) => i.path.join(".")).join(", ")} — fix or delete ${path}`);
+      throw new Error(`settings.json is invalid: ${renderSettingsIssues(parsed.error.issues)} — fix or delete ${path}`);
     }
     // WS-20 (review round 2, self-fix): VALIDATE BEFORE WRITING — `saveSettings`'s own discipline
     // ("never persist an invalid settings file"). The old write-then-validate order could leave an
@@ -1310,7 +1333,7 @@ function mergeUnknownKeys(schema: unknown, raw: unknown, owned: unknown): unknow
  *  every `ipc/server.ts` handler (`settings.setModelRole`, `settings.setSkillDenied`, `mcp.enable`,
  *  `mcp.disable`, and any future one) — gets this for free rather than needing its own try/catch. */
 function readableSettingsParseError(path: string, error: z.ZodError, context: string): Error {
-  return new Error(`settings.json ${context}: ${error.issues.map((i) => i.path.join(".") || "(root)").join(", ")} — fix or delete ${path}`);
+  return new Error(`settings.json ${context}: ${renderSettingsIssues(error.issues)} — fix or delete ${path}`);
 }
 
 export function saveSettings(path: string, s: Settings): void {
