@@ -125,8 +125,9 @@ struct SettingsRoleValue: Equatable, Sendable {
     /// Defaulted, so every construction site that only cares about the value (previews, the older
     /// tests) keeps compiling and simply yields an unpickable row.
     let permittedProviders: [ModelRolePermittedProvider]
-    /// The reasoning effort STORED for this role, or nil (the model's own default). Carried, and
-    /// rendered NOWHERE while `settingsRoleEffortControlEnabled` is false — see that constant.
+    /// The reasoning effort STORED for this role, or nil (the model's own default). Rendered as the
+    /// row's second value and edited in its own card (`SettingsRoleEffortPicker.swift`); nowhere
+    /// while `settingsRoleEffortControlEnabled` is false.
     let effort: String?
     let effortExplicit: Bool
     /// The CURRENT model's effort vocabulary, in the wire's order. `nil` = no reasoning block, `[]`
@@ -299,12 +300,10 @@ final class SettingsRolesModel: ObservableObject {
     typealias Writer = (_ role: String, _ model: String?) async throws -> [String: ModelRoleValue]
     /// The same door with its third, effort, state (`ModelRoleEffortWrite`: leave / clear / set).
     ///
-    /// SEPARATE from `writer` rather than replacing it because the live wiring
-    /// (`DashboardWiring.setModelRole`, outside Settings) is still the two-argument closure. Until
-    /// it grows the third argument this is nil in the running app — which means (a) the effort
-    /// control cannot render even with its flag on (`canWriteEffort`), and (b) a model change
-    /// falls back to `writer`, so the `effort: null` rule 5 asks for is NOT sent live yet. That is
-    /// the pre-existing wire, not a new lie: nothing spends a stored effort today.
+    /// SEPARATE from `writer` rather than replacing it, so a host with only the two-argument closure
+    /// still works. The live app passes THIS one (`SettingsSurface.swift`, `wiring?.setModelRole`).
+    /// Where it is nil, (a) no effort door renders (`canWriteEffort`), and (b) a model change falls
+    /// back to `writer`, so the `effort: null` rule 5 asks for cannot be sent.
     typealias RoleWriter = (_ role: String, _ model: String?, _ effort: ModelRoleEffortWrite)
         async throws -> [String: ModelRoleValue]
 
@@ -585,7 +584,51 @@ struct SettingsRolesSection: View {
                     valueText(value)
                         .textSelection(.enabled)
                 }
+                // The role's REASONING EFFORT — its own value and its own card (2026-09-18), never
+                // folded into the model picker. Shown only where `settingsRoleEffortIsPickable`
+                // says so: a real vocabulary on an EXPLICIT model (an effort-only write re-sends
+                // the tag, which would pin a derived one), or a stale leftover that must stay
+                // visible and clearable. The advisor's `efforts` is always null, so it never shows.
+                if let value,
+                   settingsRoleEffortIsPickable(value, canWriteEffort: model.canWriteEffort,
+                                                canPresent: picker != nil) {
+                    Button {
+                        picker?.openRolePicker(
+                            SettingsRolePickerRequest(role: role,
+                                                      roles: model,
+                                                      catalog: catalog,
+                                                      injectedFacts: injectedFacts,
+                                                      fallbackValues: injected,
+                                                      kind: .effort))
+                    } label: {
+                        HStack(spacing: 6) {
+                            effortText(value)
+                            Image(systemName: "chevron.down")
+                                .font(Typography.caption())
+                                .foregroundStyle(Theme.textMuted)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Choose the reasoning effort for \(settingsModelRoleTitle(role))")
+                }
             }
+        }
+    }
+
+    /// The effort value. A stale effort reads "Mismatch" with a warning glyph — never as a choice.
+    @ViewBuilder
+    private func effortText(_ value: SettingsRoleValue) -> some View {
+        let selection = roleEffortSelection(effort: value.effort, efforts: value.efforts)
+        HStack(spacing: 4) {
+            if case .stale = selection {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(Typography.caption())
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            Text(roleEffortValueLabel(selection))
+                .font(Typography.controlMono())
+                .foregroundStyle(selection == .modelDefault ? Theme.textMuted : Theme.textPrimary)
         }
     }
 

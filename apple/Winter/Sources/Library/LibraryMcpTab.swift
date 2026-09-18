@@ -320,6 +320,16 @@ final class WinterCapabilitiesModel: ObservableObject {
 
 // MARK: - The tab
 
+/// The group header's status word when a refresh FAILED but the rows from the last good read are
+/// still on screen. This is STATE, not commentary: the red error line says the read failed, and only
+/// this says the rows beneath it are old. Empty (no detail) otherwise.
+let libraryStaleListText = "Last good read"
+
+/// PURE: the header detail for a list that may be showing stale rows.
+func libraryStaleListDetail(failed: Bool, hasRows: Bool) -> String {
+    failed && hasRows ? libraryStaleListText : ""
+}
+
 struct LibraryMcpTab: View {
     @StateObject private var model: McpToolsModel
     @StateObject private var capabilities: WinterCapabilitiesModel
@@ -370,7 +380,10 @@ struct LibraryMcpTab: View {
     @ViewBuilder
     private var externalSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            LibraryGroupHeader(title: "External servers")
+            LibraryGroupHeader(title: "External servers",
+                               detail: libraryStaleListDetail(
+                                   failed: model.errorText != nil && !model.isUnwired,
+                                   hasRows: !model.servers.isEmpty))
             if model.isUnwired {
                 LibraryPendingNote(
                     subject: "MCP servers you or a project or a plugin configured, and the tools "
@@ -383,11 +396,8 @@ struct LibraryMcpTab: View {
                     .font(Typography.label())
                     .foregroundStyle(.red)
             }
-            if model.errorText != nil, !model.isUnwired, !model.servers.isEmpty {
-                // Stale-list disclosure: the rows below are from the last GOOD read, not from the
-                // refresh that just failed above (whose message is already shown, once, in red).
-                LibraryFootnote(text: "Showing the last successful read.")
-            }
+            // Stale-list disclosure lives in the group header's detail (`libraryStaleListDetail`):
+            // the rows below are from the last GOOD read, not the refresh that just failed above.
             if !model.isUnwired {
                 if model.servers.isEmpty {
                     Text(model.hasLoaded
@@ -406,9 +416,6 @@ struct LibraryMcpTab: View {
                     }
                 }
             }
-            LibraryFootnote(text: "This list never starts a server, so it shows your own servers "
-                            + "and any a plugin contributes. A project's servers are not "
-                            + "included — listing them would mean starting them.")
         }
     }
 
@@ -439,7 +446,11 @@ struct LibraryMcpTab: View {
     @ViewBuilder
     private var winterSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            LibraryGroupHeader(title: "Winter's own tools")
+            LibraryGroupHeader(title: "Winter's own tools",
+                               detail: libraryStaleListDetail(
+                                   failed: !capabilities.showsShapeOnly
+                                       && capabilities.errorText != nil,
+                                   hasRows: !capabilities.capabilities.isEmpty))
             if capabilities.showsShapeOnly {
                 shapeOnlyCapabilities
             } else {
@@ -474,8 +485,6 @@ struct LibraryMcpTab: View {
                 subtitleIsMono: true
             )
         }
-        LibraryFootnote(text: "Known keys, not a live inventory — the tools inside each one "
-                        + "are not listed until the daemon can report them.")
     }
 
     @ViewBuilder
@@ -484,9 +493,6 @@ struct LibraryMcpTab: View {
             Text(errorText)
                 .font(Typography.label())
                 .foregroundStyle(.red)
-            if !capabilities.capabilities.isEmpty {
-                LibraryFootnote(text: "Showing the last successful read.")
-            }
         }
         if capabilities.capabilities.isEmpty {
             Text(capabilities.hasLoaded
@@ -498,9 +504,6 @@ struct LibraryMcpTab: View {
             ForEach(capabilities.capabilities, id: \.key) { capability in
                 capabilityRows(capability)
             }
-            LibraryFootnote(text: "Every mode gets a different slice of these. A tool says where "
-                            + "it is withheld and where the model has to go looking for it; "
-                            + "\"off\" means the daemon cannot serve that capability right now.")
         }
     }
 

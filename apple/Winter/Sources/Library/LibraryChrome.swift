@@ -89,20 +89,6 @@ struct LibraryPendingNote: View {
     }
 }
 
-/// A quiet one-line annotation under a list — the place a tab explains a rule the rows themselves
-/// cannot ("the only toggle here is the plugin's own"). Distinct from `LibraryPendingNote`: this
-/// describes SHIPPED behaviour, so it wears no clock and no fill.
-struct LibraryFootnote: View {
-    let text: String
-
-    var body: some View {
-        Text(text)
-            .font(Typography.caption())
-            .foregroundStyle(Theme.textMuted)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-}
-
 /// A group heading inside a detail list (a plugin's name over its hooks, a source over its
 /// servers). The same uppercase-caption treatment `DashboardSurface`'s own group headers wear, so
 /// the two surfaces read as one app.

@@ -236,9 +236,6 @@ struct LibraryHooksTab: View {
                 )
             }
             list
-            LibraryFootnote(text: "A hook has no switch of its own: it runs whenever the plugin "
-                            + "that declares it is enabled and consented. Turn the plugin off to "
-                            + "turn its hooks off.")
         }
         .padding(libraryDetailPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

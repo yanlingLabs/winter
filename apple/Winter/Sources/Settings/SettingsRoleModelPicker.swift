@@ -860,11 +860,9 @@ func settingsRolePickerTitle(_ role: SettingsModelRole) -> String {
     "Model for \(settingsModelRoleTitle(role).lowercased())"
 }
 
-/// The one sentence that keeps the whole list honest. `permitted` is catalog eligibility: a
-/// provider appears here whether or not it is set up, so the card says so once; step two's rows
-/// then state each provider's readiness where the daemon told us.
-let roleModelPickerEligibilityNote =
-    "Everything this daemon's catalog allows for this job — a provider listed here may still need setting up."
+// The card's old footer sentence ("Everything this daemon's catalog allows…") is GONE (user call,
+// 2026-09-18: no explanatory footer rows). Step two's rows still state each provider's readiness
+// where the daemon told us, which is where that fact is actually useful.
 
 /// The row that clears a role. Worded as the outcome, not the mechanism.
 let roleModelPickerClearTitle = "Use the default"
@@ -934,7 +932,8 @@ func roleEffortSelection(effort: String?, efforts: [String]?) -> RoleEffortSelec
     return roleEffortOptions(efforts).contains(effort) ? .valid(effort) : .stale(effort)
 }
 
-/// What the picker draws for effort.
+/// What the effort surface draws. Since 2026-09-18 that surface is NOT the model picker: it is the
+/// Roles row's own effort value and the separate effort card (`SettingsRoleEffortPicker.swift`).
 enum RoleEffortControl: Equatable, Sendable {
     /// Nothing at all. The ONLY state while `settingsRoleEffortControlEnabled` is false.
     case hidden
@@ -1021,10 +1020,8 @@ struct SettingsRoleModelPicker: View {
     /// `nil` clears the role. Only ever called with `nil` when `settingsRoleAllowsClearing` is true.
     let onCommit: (String?) -> Void
     let onClose: () -> Void
-    /// Whether an effort write can reach the daemon (`SettingsRolesModel.canWriteEffort`).
-    var canWriteEffort: Bool = false
-    /// An effort-only write for the role's CURRENT model. Only reachable from the gated control.
-    var onCommitEffort: (ModelRoleEffortWrite) -> Void = { _ in }
+    // No effort control here (2026-09-18): effort has its own card, `SettingsRoleEffortPicker`.
+    // A MODEL commit still carries `effort: null` — that is the host's rule, not a UI element.
 
     @State private var step: RoleModelPickerStep = .models
     @State private var familyId: String?
@@ -1042,12 +1039,6 @@ struct SettingsRoleModelPicker: View {
 
     private var selection: RoleModelPickerSelection { settingsRolePickerSelection(value) }
 
-    private var effortControl: RoleEffortControl {
-        roleEffortControl(enabled: settingsRoleEffortControlEnabled,
-                          canWriteEffort: canWriteEffort,
-                          value: value)
-    }
-
     var body: some View {
         ShellPanelCard(accessibilityName: settingsRolePickerTitle(role), onClose: onClose) {
             VStack(alignment: .leading, spacing: 0) {
@@ -1055,7 +1046,6 @@ struct SettingsRoleModelPicker: View {
                 Divider()
                 switch step {
                 case .models:
-                    effortBar
                     modelsStep
                 case let .providers(modelKey):
                     providersStep(modelKey)
@@ -1132,96 +1122,6 @@ struct SettingsRoleModelPicker: View {
 
     private func modelLabel(_ modelKey: String) -> String {
         groups.flatMap(\.models).first { $0.id == modelKey }?.label ?? modelKey
-    }
-
-    // MARK: Effort (gated — see `settingsRoleEffortControlEnabled`)
-
-    /// Renders NOTHING for `.hidden`, which is the only state while the flag is false.
-    @ViewBuilder
-    private var effortBar: some View {
-        switch effortControl {
-        case .hidden:
-            EmptyView()
-        case let .noSetting(stale):
-            VStack(alignment: .leading, spacing: 4) {
-                Text(roleEffortNoSettingText)
-                    .font(Typography.caption())
-                    .foregroundStyle(Theme.textMuted)
-                if let stale { staleNote(stale) }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            Divider()
-        case let .menu(options, selection):
-            HStack(spacing: 10) {
-                Text(roleEffortTitle)
-                    .font(Typography.control())
-                    .foregroundStyle(Theme.textSecondary)
-                Spacer(minLength: 8)
-                Menu {
-                    effortMenuItem(roleEffortModelDefaultTitle, choice: nil,
-                                   isSelected: selection == .modelDefault)
-                    Divider()
-                    ForEach(options, id: \.self) { option in
-                        effortMenuItem(option, choice: option, isSelected: selection == .valid(option))
-                    }
-                } label: {
-                    Text(effortMenuLabel(selection))
-                        .font(Typography.controlMono())
-                        .foregroundStyle(Theme.textPrimary)
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .disabled(isWriting)
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            if case let .stale(stale) = selection {
-                staleNote(stale)
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, 8)
-            }
-            Divider()
-        }
-    }
-
-    /// A stale value is NEVER a ticked option: the menu ticks nothing and the label says so.
-    private func effortMenuLabel(_ selection: RoleEffortSelection) -> String {
-        switch selection {
-        case .modelDefault: return roleEffortModelDefaultTitle
-        case let .valid(effort): return effort
-        case .stale: return "Mismatch"
-        }
-    }
-
-    @ViewBuilder
-    private func effortMenuItem(_ title: String, choice: String?, isSelected: Bool) -> some View {
-        Button {
-            onCommitEffort(roleEffortWriteForChoice(choice))
-        } label: {
-            if isSelected { Label(title, systemImage: "checkmark") } else { Text(title) }
-        }
-    }
-
-    /// The mismatch line, with the one fix it can offer: clear back to the model's default.
-    @ViewBuilder
-    private func staleNote(_ stale: String) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(Typography.caption())
-                .foregroundStyle(Theme.textSecondary)
-            Text(roleEffortStaleText(stale))
-                .font(Typography.caption())
-                .foregroundStyle(Theme.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 6)
-            Button(roleEffortModelDefaultTitle) { onCommitEffort(.clear) }
-                .buttonStyle(.plain)
-                .font(Typography.caption(.semibold))
-                .foregroundStyle(Theme.textPrimary)
-                .disabled(isWriting)
-        }
     }
 
     // MARK: Step one
@@ -1463,24 +1363,30 @@ struct SettingsRoleModelPicker: View {
         .disabled(isWriting)
     }
 
+    /// STATE only — a failed write's sentence, or "Saving…" while one is in flight. Renders nothing
+    /// otherwise: the explanatory sentence that used to sit here is gone (user call, 2026-09-18).
+    @ViewBuilder
     private var footer: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Divider()
-            if let errorText {
-                Text(errorText)
-                    .font(Typography.caption())
-                    .foregroundStyle(Color.red)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 14)
-                    .padding(.top, 8)
+        if errorText != nil || isWriting {
+            VStack(alignment: .leading, spacing: 4) {
+                Divider()
+                if let errorText {
+                    Text(errorText)
+                        .font(Typography.caption())
+                        .foregroundStyle(Color.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 14)
+                        .padding(.top, 8)
+                }
+                if isWriting {
+                    Text("Saving…")
+                        .font(Typography.caption())
+                        .foregroundStyle(Theme.textMuted)
+                        .padding(.horizontal, 14)
+                        .padding(.top, errorText == nil ? 8 : 0)
+                }
             }
-            Text(isWriting ? "Saving…" : roleModelPickerEligibilityNote)
-                .font(Typography.caption())
-                .foregroundStyle(Theme.textMuted)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 14)
-                .padding(.top, errorText == nil ? 8 : 0)
-                .padding(.bottom, 10)
+            .padding(.bottom, 10)
         }
     }
 }
@@ -1502,6 +1408,10 @@ struct SettingsRoleModelPicker: View {
 /// `SettingsRolePickerHost` is what observes them.
 struct SettingsRolePickerRequest {
     let role: SettingsModelRole
+    /// Which card: the model picker or the effort picker. Both ride this ONE request type into the
+    /// ONE slot on the shell's modal layer, so they exclude each other (and every other floating
+    /// surface) by construction.
+    let kind: SettingsRolePickerKind
     /// The pane's live model: the values, the in-flight flag, the write error, and the write door.
     let roles: SettingsRolesModel
     /// The families/pricing/credential store, observed so facts arriving a beat after the click
@@ -1517,8 +1427,10 @@ struct SettingsRolePickerRequest {
          roles: SettingsRolesModel,
          catalog: ModelCatalogFactsModel,
          injectedFacts: ModelCatalogFacts? = nil,
-         fallbackValues: [SettingsModelRole: SettingsRoleValue] = [:]) {
+         fallbackValues: [SettingsModelRole: SettingsRoleValue] = [:],
+         kind: SettingsRolePickerKind = .model) {
         self.role = role
+        self.kind = kind
         self.roles = roles
         self.catalog = catalog
         self.injectedFacts = injectedFacts
@@ -1533,6 +1445,7 @@ struct SettingsRolePickerRequest {
 extension SettingsRolePickerRequest: Equatable {
     static func == (lhs: SettingsRolePickerRequest, rhs: SettingsRolePickerRequest) -> Bool {
         lhs.role == rhs.role
+            && lhs.kind == rhs.kind
             && lhs.roles === rhs.roles
             && lhs.catalog === rhs.catalog
             && lhs.injectedFacts == rhs.injectedFacts
@@ -1579,25 +1492,34 @@ struct SettingsRolePickerHost: View {
 
     var body: some View {
         Group {
-            if let value {
+            if let value, request.kind == .model {
                 SettingsRoleModelPicker(role: request.role,
                                         value: value,
                                         facts: facts,
                                         isWriting: roles.writing,
                                         errorText: roles.writeErrorText,
                                         onCommit: commit,
-                                        onClose: onClose,
-                                        canWriteEffort: roles.canWriteEffort,
-                                        onCommitEffort: commitEffort)
+                                        onClose: onClose)
+            } else if let value, request.kind == .effort,
+                      settingsRoleEffortIsPickable(value, canWriteEffort: roles.canWriteEffort,
+                                                   canPresent: true) {
+                SettingsRoleEffortPicker(role: request.role,
+                                         value: value,
+                                         isWriting: roles.writing,
+                                         errorText: roles.writeErrorText,
+                                         onCommitEffort: commitEffort,
+                                         onClose: onClose)
             } else {
-                // The role vanished from under an open card (a reply that no longer reports it).
-                // Rendering nothing would leave the shell believing a picker is up with no way to
-                // dismiss it, so the card closes itself instead.
+                // The role vanished from under an open card (a reply that no longer reports it), or
+                // — for the effort card — a reply left it with no effort door (its model became
+                // derived, or lost its vocabulary). Rendering nothing would leave the shell
+                // believing a picker is up with no way to dismiss it, so the card closes itself.
                 Color.clear.onAppear(perform: onClose)
             }
         }
         .background {
-            Button("Close the model picker", action: onClose)
+            Button(request.kind == .effort ? "Close the effort picker" : "Close the model picker",
+                   action: onClose)
                 .keyboardShortcut(.cancelAction)
                 .opacity(0)
                 .frame(width: 0, height: 0)
@@ -1623,10 +1545,15 @@ struct SettingsRolePickerHost: View {
         }
     }
 
-    /// An effort-only write: re-sends the role's CURRENT tag (the wire's `model` is required-
-    /// nullable) and keeps the card open, since the model list is still the thing on screen.
+    /// An effort-only write from the effort card: re-sends the role's CURRENT tag (the wire's
+    /// `model` is required-nullable). Only reachable on an EXPLICIT role — the card exists only
+    /// when `settingsRoleEffortIsPickable` holds, which goes through `roleEffortControl`'s
+    /// explicit-model guard — so the re-send can never pin a model that was merely derived.
+    /// Closes on success, like a model commit.
     private func commitEffort(_ effort: ModelRoleEffortWrite) {
-        guard let model = value?.model else { return }
-        Task { _ = await roles.commit(request.role, model: model, effort: effort) }
+        guard let value, value.isExplicit, let model = value.model else { return }
+        Task {
+            if await roles.commit(request.role, model: model, effort: effort) { onClose() }
+        }
     }
 }

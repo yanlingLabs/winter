@@ -161,9 +161,6 @@ struct LibraryAgentsTab: View {
                     .padding(.vertical, 2)
                 }
             }
-            LibraryFootnote(text: "A definition file without a name: or description: line is "
-                            + "skipped by the runtime. When that happens it is listed here as a "
-                            + "skipped file, never left out.")
         }
         .padding(libraryDetailPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
