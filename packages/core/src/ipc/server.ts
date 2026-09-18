@@ -32,6 +32,7 @@ import {
   PanelListParams, PanelOpenTabParams, PanelCloseTabParams, PanelActivateTabParams, PanelReportNavigationParams,
   PanelCommandResultParams, PanelReadDiffParams,
   CapabilitiesListParams, VersionsGetParams, SettingsModelRolesParams, SettingsSetModelRoleParams,
+  AgentsListParams,
   SYSTEM_SESSION_ID,
   SessionEvent, ConnWriter, type WritableSocket,
 } from "@yanlinglabs/winter-protocol";
@@ -108,6 +109,8 @@ import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSe
 import { disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
 import { diagnoseRuntimes } from "../runtime-sdk/runtimes-doctor";
+import { loadUserAgentDefinitions } from "../agent/agent-definitions";
+import type { SupportedAgentsCache } from "../agent/supported-agents-cache";
 import {
   REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK, REQUIRED_CLAUDE_AGENT_SDK,
   installedClaudeAgentSdkVersion, installedWinterRuntimeSdkVersion,
@@ -389,6 +392,12 @@ export interface IpcServerOptions {
   // answered.
   panelCommands?: PanelCommandRegistry;
   quota?: QuotaManager;      // token/rate-limit snapshot; quota.state (dashboard read)
+  // Daemon settings surface (2026-09-17 plan, item 3): the daemon-wide "last observed
+  // Query.supportedAgents() answer" cache (`agent/supported-agents-cache.ts`) — `agents.list`'s
+  // `builtins` field. Optional, same "typed absence, never a crash" precedent as `quota` above: a
+  // server built without one (every pre-item-3 test) answers `builtins: null`, which is the
+  // truthful "never observed" answer, not a fabricated empty list.
+  supportedAgents?: SupportedAgentsCache;
   // Phase 5 routines T3 (design doc §3): the daemon-owned RoutineStore backing routines.*
   // (create/list/update/delete). Optional — same "typed no-op, never a crash" precedent as
   // `bg`/`skills`/`mcp` above: a server built without one (most existing tests) degrades
@@ -2082,6 +2091,30 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             ...(report.claude.resolved === undefined ? {} : { claudeExecutable: report.claude.resolved }),
           },
           official: report.bundle?.versions ?? null,
+        };
+      }
+      // -----------------------------------------------------------------------------------------
+      // Daemon settings surface (2026-09-17 plan, item 3). LOCAL-ROLE ONLY, same posture as
+      // capabilities.list/versions.get above — read-only, no settings write. A missing
+      // `opts.winterHome` (a test/harness without one) degrades to `definitions: []`/`rejected: []`
+      // rather than throwing — same "typed absence, never a crash" precedent every RPC in this
+      // block follows for an optional daemon-wide dep.
+      // -----------------------------------------------------------------------------------------
+      case METHODS.agentsList: {
+        parseParams(AgentsListParams, params);
+        const { sources, rejected } = opts.winterHome ? loadUserAgentDefinitions(opts.winterHome) : { sources: [], rejected: [] };
+        const definitionRows = sources.map(({ name, definition, path }) => ({
+          name,
+          description: definition.description,
+          ...(definition.model === undefined ? {} : { model: definition.model }),
+          path,
+        }));
+        const snapshot = opts.supportedAgents?.get() ?? null;
+        return {
+          ok: true,
+          definitions: definitionRows,
+          rejected,
+          builtins: snapshot === null ? null : { agents: snapshot.agents, sessionId: snapshot.sessionId, observedAt: snapshot.observedAt },
         };
       }
       // -----------------------------------------------------------------------------------------

@@ -56,6 +56,8 @@ import { SessionDirectories } from "./agent/dirs";
 import { TrustStore } from "./agent/trust";
 import { ContextAssembler } from "./agent/context";
 import { SkillStore } from "./agent/skills";
+import { loadUserAgentDefinitions } from "./agent/agent-definitions";
+import { SupportedAgentsCache } from "./agent/supported-agents-cache";
 import { BackgroundTaskRegistry } from "./agent/bg-registry";
 import { sessionTmpDir } from "./agent/session-tmp";
 import { PluginStore, pluginMcpEligible, pluginSpawnEligible, hookRegistryPlugins } from "./agent/plugins";
@@ -1461,6 +1463,11 @@ export async function startDaemon(opts: {
       sinks.onToolResult({ ...event, generation: runtime?.records.get(event.sessionId)?.generation });
     }
   });
+  // Daemon settings surface (2026-09-17 plan, item 3): hoisted alongside `winterDrivers` below (the
+  // ONE producer) for the identical reason — the RPC that reads it must work on a daemon with or
+  // without `agentProvider`, since `Query.supportedAgents()` is entirely a Winter-runtime-SDK fact,
+  // unrelated to the daemon's own internal Provider.
+  const supportedAgentsCache = new SupportedAgentsCache();
   const winterDrivers: WinterSessionDrivers = createWinterSessionDrivers({
     home: winterHome,
     profile: process.env.WINTER_PROFILE,
@@ -1486,6 +1493,7 @@ export async function startDaemon(opts: {
     // Task 17 (P8b-15): Winter children land in the persisted roster (absent when the spine is offline).
     ...(bgAgents === undefined ? {} : { children: bgAgents }),
     onTurnSettled: (sid) => { signals.onTurnSettled?.(sid); },
+    onSupportedAgents: (sid, agents) => supportedAgentsCache.observe(sid, agents),
     ...(titler === undefined ? {} : { titler }),
     // Fix wave (review row 7): the user's `settings.mcpServers` and a TRUSTED project's `.mcp.json`
     // reach the child as stdio configs under the registry's own keys (`mcp__<key>__<tool>`). Read
@@ -2273,6 +2281,12 @@ export async function startDaemon(opts: {
     // map, or every command would time out against an empty one.
     panelCommands,
     quota,
+    // Daemon settings surface (2026-09-17 plan, item 3): `agents.list`'s `builtins` field — the
+    // SAME instance `winterDrivers`'s `onSupportedAgents` callback (above) writes into, hoisted
+    // above the `if (agentProvider)` gate for the identical reason `winterDrivers` itself is: a
+    // Winter-leg session (and therefore this cache) exists independently of the daemon's own
+    // internal Provider.
+    supportedAgents: supportedAgentsCache,
     providerInfo,
     startedAt,
     // Phase 5 routines T3: same RoutineStore instance the `schedule` tool (inside the

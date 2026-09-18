@@ -1,7 +1,7 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
-  CanUseTool, EffortLevel, McpServerConfig, Options, PermissionMode, ProviderConnectionConfig, SandboxSettingsConfig, SpawnClaudeCodeProcess,
+  AgentDefinition, CanUseTool, EffortLevel, McpServerConfig, Options, PermissionMode, ProviderConnectionConfig, SandboxSettingsConfig, SpawnClaudeCodeProcess,
 } from "@yanlinglabs/winter-agent-sdk";
 import { RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import type { SessionApprovalPolicy } from "../agent/gate";
@@ -223,6 +223,16 @@ export interface WinterOptionsInput {
    *  `credentialRefFor` used to make. Kept on the interface because other callers may still pass
    *  it for unrelated reasons; nothing here reads it. */
   settings?: Settings | null;
+  /**
+   * Daemon settings surface (2026-09-17 plan, item 3): `<home>/agents/*.md`, ALREADY PARSED by the
+   * caller (`session-driver.ts`'s `optionsFor`, `loadUserAgentDefinitions(home).definitions`) —
+   * this builder stays pure/no-I/O (the doc comment on `buildWinterOptions` below, and the 3×6
+   * matrix test that relies on it), so it never reads the directory itself. Absent or empty ⇒ no
+   * `agents` key at all, byte-identical to a pre-item-3 session. Read fresh at EVERY incarnation by
+   * the caller (never cached here or there), so a new/edited/removed file reaches the session's
+   * next incarnation with no daemon restart.
+   */
+  agents?: Readonly<Record<string, AgentDefinition>>;
 }
 
 /**
@@ -529,5 +539,9 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
   // `toolAliases` is deliberately absent (the R4 measurement: none needed in 8b — the capability
   // tools carry their own `mcp__winter__*` names under R-1, and Winter's four default tools are
   // already bound under their built-in names by the router).
+  // Item 3: empty is treated the same as absent — an EMPTY `agents: {}` is not "no agents"
+  // byte-identically to a session before this field existed the way `undefined` is, so both are
+  // normalized to "no key at all" here rather than leaving that distinction to every caller.
+  if (input.agents !== undefined && Object.keys(input.agents).length > 0) options.agents = { ...input.agents };
   return options;
 }

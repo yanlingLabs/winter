@@ -65,6 +65,7 @@ import { winterSessions } from "./sessions";
 import { WINTER_PEER_VERSIONS } from "./versions";
 import { winterSystemPromptFor } from "./system-prompt";
 import { DISPATCH_EFFORT } from "../agent/dispatch-config";
+import { loadUserAgentDefinitions } from "../agent/agent-definitions";
 import type { AgentRegistry } from "../agent/bg-agent-registry";
 import type { ContextAssembler } from "../agent/context";
 import { startWinterSession, unconsumedUserMessages, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
@@ -197,6 +198,18 @@ export interface WinterLegDeps {
   children?: AgentRegistry;
   /** The activity enforcement's post-turn re-check (`enforcement.onTurnSettled(sessionId)`). */
   onTurnSettled?: (sessionId: string) => void;
+  /**
+   * Daemon settings surface (2026-09-17 plan, item 3): fired best-effort, fire-and-forget, once per
+   * incarnation, with whatever `Query.supportedAgents()` answers for THIS session's live child
+   * (`winter-session.ts`'s `open()`, right after the query is created). This is the ONLY place a
+   * built-in-agent-type list can come from — `Query.supportedAgents()` is Winter-leg-only (the
+   * official leg's own router seam exposes no equivalent), and it must NOT be read off
+   * `system/init.agents` in the projector, which serves a different purpose (the projector's job is
+   * turning wire frames into `SessionEvent`s, not caching a daemon-wide fact). Absent from a test
+   * double that doesn't care; never awaited or retried by this file — a rejection (a torn/aborted
+   * child before the call resolves) is swallowed at the call site, never surfaced here.
+   */
+  onSupportedAgents?: (sessionId: string, agents: import("@yanlinglabs/winter-agent-sdk").AgentInfo[]) => void;
   /**
    * Fix wave (review row 4): Winter's `SessionTitler` — P8b-10 keeps it on Winter's OWN provider
    * layer (never `sdk.query()`). Fired fire-and-forget after every MAIN-thread `turn_completed`
@@ -542,6 +555,13 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // ONCE (review Minor fix) — the prior form called both `winterOptionsFromSettings` and
         // `d30DefaultModel` twice for the identical value.
         ...(advisorModel === undefined ? {} : { advisorModel }),
+        // Daemon settings surface (2026-09-17 plan, item 3): a FRESH scan of `<home>/agents/*.md`
+        // at every incarnation (never cached here or in `loadUserAgentDefinitions` itself) — a
+        // new/edited/removed file reaches THIS session's very next incarnation, no daemon restart.
+        // `buildWinterOptions` itself stays pure/no-I/O (its own doc comment); this is the ONE
+        // caller that does the read, exactly where every other per-incarnation live read (advisor
+        // model, system prompt, connection override) already happens.
+        agents: loadUserAgentDefinitions(home).definitions,
       });
     };
 
@@ -619,6 +639,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       hasTranscript,
       ...(deps.children === undefined ? {} : { children: childrenSinkFor(deps.children, sessionId, log) }),
       ...(deps.onTurnSettled === undefined ? {} : { onTurnSettled: () => deps.onTurnSettled!(sessionId) }),
+      ...(deps.onSupportedAgents === undefined ? {} : { onSupportedAgents: (agents) => deps.onSupportedAgents!(sessionId, agents) }),
       // P8b-39: the session log is the durable queue — what `open()` re-pushes is read from it.
       unconsumed: () => unconsumedUserMessages(deps.store.read(sessionId)),
       idleTimeoutMs: deps.idleTimeoutMs ?? (() => winterOptionsFromSettings(deps.settings()).idleTimeoutSec * 1000),

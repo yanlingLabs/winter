@@ -573,6 +573,59 @@ export const VersionsGetResult = z.object({
   }).nullable(),
 });
 
+/**
+ * Daemon settings surface (2026-09-17 plan, item 3): `agents.list` — read-only, LOCAL role only
+ * (never added to `REMOTE_ALLOWED_METHODS` or its parity test). Reports three independent facts, so
+ * the Mac panel can render "what's configured", "what went wrong", and "what the runtime itself
+ * offers" without conflating them:
+ *
+ *  - `definitions`: the daemon's OWN parse of `<home>/agents/*.md` (`agent-definitions.ts`), the
+ *    SAME map passed as `Options.agents` on the Winter leg today (`mode-options.ts`'s
+ *    `buildWinterOptions`) — the official leg has no route for it yet (a measured router-package
+ *    gap, `official-options.ts`'s own comment on the construction site).
+ *  - `rejected`: every `.md` file this daemon could read but whose frontmatter failed validation
+ *    (missing/invalid `name`, missing `description`), each with ITS OWN reason — never silently
+ *    dropped.
+ *  - `builtins`: the built-in agent TYPES (`Explore`, `Plan`, …) as reported by the last LIVE Winter
+ *    session that answered `Query.supportedAgents()` (`session-driver.ts`'s
+ *    `WinterLegDeps.onSupportedAgents`, cached daemon-wide in `agent/supported-agents-cache.ts`) —
+ *    `null` when no session has EVER answered it (a fresh boot with no Winter-leg session opened
+ *    yet), never an invented list.
+ */
+export const AgentsListParams = z.object({});
+
+export const AgentDefinitionInfoSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  /** Verbatim from frontmatter — never split at a tag boundary (the runtime's own model-selection
+   *  vocabulary, not Winter's provider-qualified session tags). */
+  model: z.string().optional(),
+  /** Absolute path to the `.md` file this definition came from — diagnostic only. */
+  path: z.string(),
+});
+
+export const AgentDefinitionRejectionSchema = z.object({
+  path: z.string(),
+  reason: z.string(),
+});
+
+export const AgentInfoSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  model: z.string().optional(),
+});
+
+export const AgentsListResult = z.object({
+  ok: z.literal(true),
+  definitions: z.array(AgentDefinitionInfoSchema),
+  rejected: z.array(AgentDefinitionRejectionSchema),
+  builtins: z.object({
+    agents: z.array(AgentInfoSchema),
+    sessionId: z.string(),
+    observedAt: z.number(),
+  }).nullable(),
+});
+
 /** The `SupervisorStatus` union (core/plugins/supervisor.ts) plus `"na"` for Tier-1/legacy plugins
  *  that never run a process — shared by `PluginInfoSchema.status` (below) and, from Phase 4d-ii
  *  Task 2, `plugin.enable`'s result, which reports the SAME status right after its hot-apply
@@ -2200,4 +2253,7 @@ export const METHODS = {
   versionsGet: "versions.get",
   settingsModelRoles: "settings.modelRoles",
   settingsSetModelRole: "settings.setModelRole",
+  // Daemon settings surface (2026-09-17 plan, item 3) — read-only, LOCAL role only, same posture as
+  // the four just above: never added to `REMOTE_ALLOWED_METHODS` or its parity test.
+  agentsList: "agents.list",
 } as const;
