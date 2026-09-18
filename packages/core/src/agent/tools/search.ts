@@ -2,21 +2,25 @@ import { z } from "zod";
 import type { ToolDefinition, ToolRegistry } from "./registry";
 import { checkDangerousDomain } from "./page-core";
 
-const REQUEST_TIMEOUT_MS = 15_000;
-const DEFAULT_RESULTS = 5;
-const MAX_RESULTS = 10;
-const EXCERPT_CHARS = 1200; // per result — also what we ask Exa to cap `text` to server-side
+/** `/answer` SYNTHESIZES — it runs a search and then writes a grounded answer over the results, so
+ *  it is materially slower than the old `/search` round trip (which only returned rows). 15 s was
+ *  tuned for that older, cheaper call and would time out answers that were going to arrive. */
+const REQUEST_TIMEOUT_MS = 45_000;
+const ANSWER_CHARS = 24_000; // the synthesized answer itself
+const MAX_CITATIONS = 20; // rendered as a sources list; the provider decides how many it used
 const TOTAL_OUTPUT_CHARS = 30_000; // whole-response cap; see run()'s doc comment for why
-const EXA_SEARCH_URL = "https://api.exa.ai/search";
+const EXA_ANSWER_URL = "https://api.exa.ai/answer";
 
 /** Keychain secret name for the Exa API key — ONE exported const shared by the daemon wiring
- *  (daemon.ts) and `winter login --exa-key` (cli/src/main.ts), so the two can never drift on the
- *  literal. Same precedent as WEB_SEARCH_API_KEY_SECRET (web.ts:18). */
+ *  (daemon.ts), `winter login --exa-key` (cli/src/main.ts), the `exa` credential row
+ *  (`runtime-sdk/credentials.ts`) and the `Options.web.search.authRef` locator the Winter child
+ *  resolves for its own `WebSearch` (`runtime-sdk/mode-options.ts`), so none of them can ever drift
+ *  on the literal. */
 export const EXA_API_KEY_SECRET = "exa-api-key";
 
 export interface SearchToolDeps {
-  /** Emits one line per call, every outcome — same shape/precedent as web.ts's WebToolDeps.audit.
-   *  NEVER includes the API key: only `{kind, tool, query, outcome}`. */
+  /** Emits one line per call, every outcome — same shape/precedent as the audit lines the other
+   *  network-class tools emit. NEVER includes the API key: only `{kind, tool, query, outcome}`. */
   audit?: (line: Record<string, unknown>) => void;
   /** Test-only injection point (defaults to global fetch) — no live network in the test suite. */
   fetchFn?: typeof fetch;
@@ -25,70 +29,83 @@ export interface SearchToolDeps {
    *  default) is treated identically to "no key stored". */
   secret?: (name: string) => Promise<string | null>;
   /** Critical 1 fold-in (whole-branch review, USER-REVISED design 2026-07-28): "dangerous URLs
-   *  never even get SHOWN to the model" — blocking the read (ReadPage/FetchPage) while still
-   *  advertising the link in a Search result would be a half-measure: the model would just try the
-   *  link, fail, and possibly retry. SAME shape/getter as ReadPage's/the research runner's own
-   *  `dangerousDomainsAdded` (and daemon.ts wires all three to the literal SAME function). Absent →
-   *  no user additions; the SHIPPED list alone still applies. */
+   *  never even get SHOWN to the model" — citing a floor-listed page while blocking every read of
+   *  it would be a half-measure: the model would just try the link, fail, and possibly retry. SAME
+   *  shape/getter as the browser tool's own `dangerousDomainsAdded` (and daemon.ts wires them to
+   *  the literal SAME function). Absent → no user additions; the SHIPPED list alone still applies. */
   dangerousDomainsAdded?: (cwd?: string) => string[] | undefined;
 }
 
-interface ExaSearchResponse {
-  results?: Array<{ title?: string; url?: string; text?: string }>;
+/** What `/answer` returns (2026-09-18, verified against Exa's own reference for the endpoint):
+ *  `answer` is the synthesized text — a string unless the request asked for structured output,
+ *  which this tool never does — and `citations` are the pages it was grounded in, each carrying at
+ *  least `title` and `url`. `requestId`/`costDollars` also ride along and are deliberately ignored:
+ *  neither is anything the model should be shown, and `costDollars` is not this tool's ledger. */
+interface ExaAnswerResponse {
+  answer?: unknown;
+  citations?: Array<{ title?: string; url?: string }>;
 }
 
-/** Shape-checks a parsed Exa response body just enough to safely index into it — NOT full schema
- *  validation, just a guarantee that `results` is either absent or an array of non-null objects,
- *  so the `.slice`/`.map`/`x.title` chain below can never throw a raw TypeError that (a) leaks
- *  internal detail (e.g. "results.map is not a function") into the model-visible tool_result, and
- *  (b) gets mislabeled outcome="ok" in the audit line, since that exception fires AFTER `outcome`
- *  is set to "ok" (branch review FIX 5: `results:"str"` -> ok, `results:{}` -> network_error,
- *  `results:[null]` -> ok — all three should be `parse_error`, the outcome that already exists for
- *  exactly this). */
-function isValidExaResults(value: unknown): value is Array<{ title?: string; url?: string; text?: string }> | undefined {
+/** Shape-checks a parsed `/answer` body just enough to safely index into it — NOT full schema
+ *  validation, just a guarantee that `citations` is either absent or an array of non-null objects,
+ *  so the `.slice`/`.filter`/`x.title` chain below can never throw a raw TypeError that (a) leaks
+ *  internal detail ("citations.filter is not a function") into the model-visible tool_result, and
+ *  (b) gets mislabeled `outcome:"ok"`, since such an exception would fire AFTER `outcome` is set.
+ *  Carried over verbatim in spirit from the `/search` era's `isValidExaResults` (branch review
+ *  FIX 5), which existed for exactly these three cases: `citations:"str"`, `citations:{}`,
+ *  `citations:[null]` — all three are `parse_error`, the outcome that already exists for them. */
+function isValidExaCitations(value: unknown): value is Array<{ title?: string; url?: string }> | undefined {
   if (value === undefined) return true;
   if (!Array.isArray(value)) return false;
   return value.every((item) => item !== null && typeof item === "object");
 }
 
 /**
- * Chat's Exa-backed web search (B1-T5). Verified live against Exa's docs before writing this file
- * (task-5-report.md carries the full transcript): `POST https://api.exa.ai/search`, auth via the
- * `x-api-key` header, and a `contents: { text: { maxCharacters } }` field on the SAME request body
- * that returns each result's `text` inline in the SAME response — no second round-trip. That
- * single-call property is the entire reason chat uses Exa instead of code mode's two-step
- * web_search + web_fetch (Brave has no equivalent single-call contents option).
+ * Chat's and dispatch's web search — **Exa's ANSWER mode** (user ruling, 2026-09-18).
+ *
+ * `POST https://api.exa.ai/answer`, auth via the `x-api-key` header (never a query parameter), and
+ * the response is a ready SYNTHESIZED answer plus the citations it was grounded in. That is the
+ * whole reason this tool still exists beside the runtime's own `WebSearch`: one call gives a small
+ * conversational model a written answer with sources, where `WebSearch` gives it links to chase and
+ * chat has no page-reading tool to chase them with.
+ *
+ * `/answer` REQUIRES a key. So this tool's presence is itself gated on one being stored, at two
+ * places that must agree: `capabilities/research.ts` (the server advertises no `Search` without a
+ * key) and `runtime-sdk/mode-options.ts`'s `disallowedToolsFor` (which names it in
+ * `disallowedTools` in that same case, and withholds the runtime's `WebSearch` in the complement).
+ * The `no_key` branch below is therefore unreachable through a real session and is kept anyway: a
+ * typed, actionable failure is the right answer for a direct caller and for the window between a
+ * key being removed and a live child's next incarnation.
  */
 export function registerSearchTool(r: ToolRegistry, deps: SearchToolDeps = {}): void {
   for (const def of searchToolDefs(deps)) r.register(def);
 }
 
-/** P8b Task 7 — THE definition(s), extracted verbatim from `registerSearchTool`'s body so the daemon's shared
+/** P8b Task 7 — THE definition(s), extracted from `registerSearchTool`'s body so the daemon's shared
  *  `ToolRegistry` and the capability server drive the SAME `ToolDefinition` object rather than two
- *  copies of one. Nothing about the registration changed. */
+ *  copies of one. */
 export function searchToolDefs(deps: SearchToolDeps = {}): ToolDefinition[] {
   return [{
     name: "Search",
     description:
-      "Search the web and get back results WITH an excerpt of each page, in a single fast call. Use it freely whenever a fact might be newer than you are, or when the user asks about something current. Cite the URL when you use what it returns. Requires a stored Exa API key (winter login --exa-key).",
-    // Deliberately NOT `deferred: true` (unlike code's web_search): chat's derived toolset
-    // (registry.namesForMode("chat")) has no ToolSearch member unless something chat-eligible is
-    // itself deferred (nothing is), so a deferred Search here could never have its schema loaded —
-    // it would appear in chat's instructions and be permanently uncallable. That mirrors bug #7,
-    // the pre-existing dispatch-allowlist bug fixed by R-T2's `namesForMode` auto-ToolSearch
-    // addition (registry.ts): dispatch used to advertise web_fetch/web_search (both `deferred:
-    // true`) with no ToolSearch entry point of its own, making them permanently unloadable — this
-    // file does not repeat that, and a named test pins the fix.
-    // R-T3 (Task 3) went further and removed web_fetch/web_search from dispatch's `modes` entirely
-    // (web.ts) — dispatch now routes web lookups through THIS tool instead, not deferred, so it
-    // needs no ToolSearch round-trip and returns page excerpts in one call. dispatch-prompt.ts's
-    // DISPATCH_SYSTEM_PROMPT routing doctrine names "Search" explicitly, not web_search/web_fetch.
+      "Search the web and get back a written answer with its sources, in a single call. Ask a real question, not keywords — a search engine answers it and the answer comes back already synthesized, followed by the pages it came from. Use it freely whenever a fact might be newer than you are, or when the user asks about something current, and cite the URLs you used.",
+    // Deliberately NOT `deferred: true`: chat's derived toolset has no ToolSearch member unless
+    // something chat-eligible is itself deferred (nothing is), so a deferred Search here could
+    // never have its schema loaded — it would appear in chat's instructions and be permanently
+    // uncallable. That mirrors bug #7, the pre-existing dispatch-allowlist bug fixed by R-T2's
+    // `namesForMode` auto-ToolSearch addition (registry.ts).
     modes: ["chat", "dispatch"],
+    // ONE field, and that is the schema (claude-simple). The `/search` era's `max_results` is gone
+    // with the endpoint: `/answer` returns an answer, not a page of rows, and how many sources it
+    // consulted is the provider's judgement, not a caller's dial. Exa's other request fields
+    // (`model`, `systemPrompt`, `userLocation`, `outputSchema`, `stream`, `text`) are deliberately
+    // not exposed either — each is a knob whose wrong setting the model could not diagnose, and
+    // `text: true` in particular would return every cited page's FULL body, which this tool does
+    // not render and would only pay for.
     args: z.object({
       query: z.string().min(1),
-      max_results: z.number().int().positive().optional(),
     }),
-    async run({ query, max_results }, ctx) {
+    async run({ query }, ctx) {
       let outcome = "network_error";
       try {
         const key = (await deps.secret?.(EXA_API_KEY_SECRET)) ?? null;
@@ -99,30 +116,20 @@ export function searchToolDefs(deps: SearchToolDeps = {}): ToolDefinition[] {
           // otherwise would walk a user into pasting their key into shell history for nothing.
           throw new Error("Search needs an API key — store one with: winter login --exa-key (from exa.ai)");
         }
-        const count = Math.min(Math.max(max_results ?? DEFAULT_RESULTS, 1), MAX_RESULTS);
         const fetchFn = deps.fetchFn ?? fetch;
         const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
         const signal = AbortSignal.any([ctx.signal, timeoutSignal].filter((s): s is AbortSignal => Boolean(s)));
 
         let res: Response;
         try {
-          res = await fetchFn(EXA_SEARCH_URL, {
+          res = await fetchFn(EXA_ANSWER_URL, {
             method: "POST",
             headers: { "x-api-key": key, "content-type": "application/json" },
-            // The single-call property, verified live: `contents` rides the SAME request body as
-            // `query`, so the response's `results[].text` is populated with no second call. THIS
-            // is why chat uses Exa and not code's Brave two-step.
-            body: JSON.stringify({
-              query,
-              numResults: count,
-              contents: { text: { maxCharacters: EXCERPT_CHARS } },
-            }),
-            // FIX 4: Exa's search endpoint should never redirect. Without this, fetch's default
-            // `follow` behavior would carry the `x-api-key` header to whatever a 3xx response's
-            // `Location` points at from hop 2 onward — a destination no longer under Exa's
-            // control. `manual` turns any 3xx into a plain non-200 response, handled by the
-            // `res.status !== 200` branch below as `http_error` (web_fetch's followRedirects
-            // already uses this same pattern with its own per-hop SSRF guard).
+            body: JSON.stringify({ query }),
+            // FIX 4: Exa's endpoints should never redirect. Without this, fetch's default `follow`
+            // behavior would carry the `x-api-key` header to whatever a 3xx response's `Location`
+            // points at from hop 2 onward — a destination no longer under Exa's control. `manual`
+            // turns any 3xx into a plain non-200 response, handled by the status branch below.
             redirect: "manual",
             signal,
           });
@@ -145,14 +152,6 @@ export function searchToolDefs(deps: SearchToolDeps = {}): ToolDefinition[] {
           // (daemon.ts denies only `dirs.runDir` to the read/grep tools) — so the raw key would
           // still land somewhere Winter's own tools can open it, just one hop removed. Redact the
           // literal key substring out of the message before it ever reaches this log line.
-          //
-          // `replaceAll` is sufficient: verified live (bun 1.3.14) that Bun's fetch embeds the
-          // rejected header value in `e.message` byte-for-byte, with no escaping/normalization —
-          // plain ASCII, U+200B, CR, LF, CRLF, NUL and BOM all round-tripped as an EXACT substring
-          // in testing, at both short and realistic key lengths (no truncation observed either).
-          // No transformation that would defeat a literal match was found for the cases that
-          // actually reach this catch block (a couple of other control chars, e.g. tab/DEL, don't
-          // trigger Bun's header-value rejection at all, so they never reach this code path).
           const rawMessage = e instanceof Error ? e.message : String(e);
           const safeMessage = rawMessage.replaceAll(key, "<redacted>");
           console.error(`Search: network error (${name || "Error"}) — ${safeMessage}`);
@@ -160,53 +159,73 @@ export function searchToolDefs(deps: SearchToolDeps = {}): ToolDefinition[] {
         }
 
         if (res.status !== 200) {
-          outcome = "http_error";
-          throw new Error(`search failed: HTTP ${res.status}`);
+          // ACTIONABLE, and never the provider's own body: an error body can echo request headers
+          // (and therefore the key) and is attacker-influenced text besides. Only the status code
+          // crosses into the tool_result, mapped to the one sentence that says what to DO.
+          outcome = statusOutcome(res.status);
+          throw new Error(statusMessage(res.status));
         }
 
-        let data: ExaSearchResponse;
+        let data: ExaAnswerResponse;
         try {
-          data = (await res.json()) as ExaSearchResponse;
+          data = (await res.json()) as ExaAnswerResponse;
         } catch (e) {
           outcome = "parse_error";
           throw new Error(`search failed: could not parse response (${e instanceof Error ? e.message : String(e)})`);
         }
 
-        if (!isValidExaResults(data.results)) {
+        if (!isValidExaCitations(data.citations)) {
           outcome = "parse_error";
           throw new Error("search failed: malformed response from search service");
         }
+        // `answer` is a string unless `outputSchema` was sent, which this tool never sends. Anything
+        // else is a shape this renderer cannot speak for, so it is a parse error rather than a
+        // `String(object)` that would hand the model `[object Object]` labelled as an answer.
+        if (data.answer !== undefined && typeof data.answer !== "string") {
+          outcome = "parse_error";
+          throw new Error("search failed: malformed response from search service");
+        }
+        const fullAnswer = (data.answer ?? "").trim();
+        // NEVER a silent slice: an answer cut mid-sentence reads as a complete one, and a model that
+        // cannot tell the difference will present half a conclusion as the whole of it.
+        const answer = fullAnswer.length > ANSWER_CHARS
+          ? fullAnswer.slice(0, ANSWER_CHARS) + "\n\n[answer truncated]"
+          : fullAnswer;
 
-        const rawResults = (data.results ?? []).slice(0, count);
-        // Critical 1 fold-in (whole-branch review): strip any result whose url matches the
-        // effective dangerous-domain list BEFORE it ever reaches the model — advertising the link
-        // while blocking the read (ReadPage/FetchPage) would just have the model try it, fail, and
-        // possibly retry. Never a SILENT drop: the withheld count is always stated, so the model
-        // (and anyone reading the transcript) knows the result set was intentionally filtered, not
-        // just shorter than requested.
+        // The dangerous-domain floor, applied to the CITED urls — the same act the `/search` era
+        // applied to result rows, for the same reason (a link the model is shown is a link the model
+        // will try). Never a SILENT drop: the withheld count is always stated, so the model (and
+        // anyone reading the transcript) knows the source list was filtered, not merely short.
         const added = deps.dangerousDomainsAdded?.(ctx.cwd) ?? [];
+        const rawCitations = (data.citations ?? []).slice(0, MAX_CITATIONS);
         let withheld = 0;
-        const results = rawResults.filter((x) => {
-          if (!x.url || !checkDangerousDomain(x.url, added)) return true;
+        const citations = rawCitations.filter((c) => {
+          if (!c.url || !checkDangerousDomain(c.url, added)) return true;
           withheld++;
           return false;
         });
         const withheldNote = withheld > 0
-          ? `\n\n[${withheld} result${withheld === 1 ? "" : "s"} withheld — matched the dangerous-domain list]`
+          ? `\n\n[${withheld} source${withheld === 1 ? "" : "s"} withheld — matched the dangerous-domain list]`
           : "";
+
         outcome = "ok";
-        if (results.length === 0) return `no results for ${query}${withheldNote}`;
-        const rendered = results
-          .map((x, i) => {
-            const excerpt = (x.text ?? "").slice(0, EXCERPT_CHARS).trim();
-            return `${i + 1}. ${x.title ?? "-"}\n   ${x.url ?? "-"}\n   ${excerpt || "(no excerpt)"}`;
-          })
-          .join("\n\n");
-        // Chat has no `read` tool — unlike code's web_fetch there is no save-to-file escape
-        // hatch, so this string is ALL the model gets. Cap it hard: a correctness constraint, not
-        // just a safety one.
+        if (answer === "") return `no answer for ${query}${withheldNote}`;
+        // An answer with NOTHING left to attribute is still the answer — the user asked a question
+        // and a refusal here would be a worse outcome than an honest label. It is MARKED, because an
+        // unsourced answer is exactly the one a model must not present as cited fact.
+        const sources = citations.length === 0
+          ? `\n\n[unsourced — ${withheld > 0
+            ? "every source was withheld by the dangerous-domain list"
+            : "the search service returned no sources"}; say so if you repeat this]`
+          : "\n\nSources:\n" + citations
+            .map((c, i) => `${i + 1}. ${c.title?.trim() || "-"}\n   ${c.url ?? "-"}`)
+            .join("\n");
+        const rendered = answer + sources;
+        // Chat has no page-reading tool — unlike code's `WebFetch` there is no follow-the-link
+        // escape hatch here, so this string is ALL the model gets. Cap it hard: a correctness
+        // constraint, not just a safety one.
         const capped = rendered.length > TOTAL_OUTPUT_CHARS
-          ? rendered.slice(0, TOTAL_OUTPUT_CHARS) + "\n\n[results truncated]"
+          ? rendered.slice(0, TOTAL_OUTPUT_CHARS) + "\n\n[truncated]"
           : rendered;
         return capped + withheldNote;
       } finally {
@@ -215,4 +234,32 @@ export function searchToolDefs(deps: SearchToolDeps = {}): ToolDefinition[] {
       }
     },
   }];
+}
+
+/** The audit line's own vocabulary for a non-200 — finer than one `http_error` bucket precisely so
+ *  an operator reading `audit.jsonl` can tell "the key is wrong" from "the account is out of
+ *  credits" from "too fast", which are three different things for the user to fix. */
+function statusOutcome(status: number): string {
+  if (status === 401 || status === 403) return "unauthorized";
+  if (status === 402) return "out_of_credits";
+  if (status === 429) return "rate_limited";
+  return "http_error";
+}
+
+/** One sentence per documented failure, each naming the action that clears it. Deliberately the
+ *  ONLY thing derived from a failed response — never its body (see the call site). */
+function statusMessage(status: number): string {
+  switch (status) {
+    case 401:
+    case 403:
+      return "search failed: the stored Exa API key was rejected — replace it with `winter credentials set exa` (or `winter login --exa-key`)";
+    case 402:
+      return "search failed: this Exa account is out of credits or over its budget — top it up at exa.ai, or answer from what you already know and say the search was unavailable";
+    case 429:
+      return "search failed: the search service is rate-limiting this key — wait a little before searching again, and do not retry in a loop";
+    case 400:
+      return "search failed: the search service rejected the request as malformed — try a plainer question";
+    default:
+      return `search failed: the search service is unavailable (HTTP ${status})`;
+  }
 }
