@@ -244,7 +244,9 @@ winter login --exa-key           # Exa — powers Search in Chat and Dispatch
 > Brave is gone: the Winter-built `web_search` it backed was retired in favour of the runtime's own
 > claude-shaped `WebSearch`, so nothing needs a Brave key any more (`winter credentials remove
 > web-search` clears one you stored earlier). Exa is optional too — with no Exa key, Chat and Dispatch
-> get `WebSearch` instead of `Search`.
+> get `WebSearch` instead of `Search`. **On the Mac and the CLI**: the iPhone app runs its own chat
+> engine (`apple/WinterChatKit`), which still needs an Exa key for search and still has its own page
+> reader — it follows the daemon in a later kit tag.
 
 **A note in plain language: Winter is an independent project and is not affiliated with, endorsed by,
 or sponsored by OpenAI.** Signing in with a ChatGPT account uses that account under OpenAI's own
@@ -285,7 +287,9 @@ examples/       reference plugins (battery-limiter is a real, complete one)
 
 Tools declare which modes they belong to at registration; a tool with no declaration is code-only,
 so widening one is always a deliberate edit. `mode-toolset-census.test.ts` boots the real daemon and
-reads its registry, so these three sets can't drift from what ships:
+reads its registry, so these three sets can't drift from what ships. They are the DAEMON's sets — what
+a session gets on the Mac and from the CLI, and on the iPhone for a session the Mac is driving; chat
+started on the phone itself runs the phone's own engine and its own smaller set.
 
 **Chat** — `Search` (or `WebSearch` with no Exa key) · `WebFetch` · `browser` (read verbs only) ·
 `AskQuestion`

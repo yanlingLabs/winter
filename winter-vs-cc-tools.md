@@ -21,6 +21,11 @@ meaning for a child's built-ins (they are advertised up front), hence `No` on al
 below. The one daemon-owned web tool left is `Search`, and chat/dispatch get exactly one search
 tool: `Search` with an Exa key, `WebSearch` without.
 
+Everything in this file describes the DAEMON's tool surface — what a session gets on the Mac, from
+the CLI, and on the iPhone for a session the Mac is driving. Chat started on the phone itself runs
+`apple/WinterChatKit`'s own engine, which is not this surface: it still has its own Exa `/search`
+path and its own page reader, and it needs the Exa key either way. It follows in a later kit tag.
+
 | Tool | Deferred | What it does |
 |------|:--------:|--------------|
 | **Filesystem — read** | | |
