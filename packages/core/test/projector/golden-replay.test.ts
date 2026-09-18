@@ -374,15 +374,20 @@ describe("projector: golden-stream replay, every variant (P8b-14)", () => {
     expect(second.warnings.join(" ")).toContain("did not bump");
   });
 
-  test("task_updated parses against the protocol schema too — the one produced variant no golden covers (n6)", () => {
+  test("a background child's thread_completed parses against the protocol schema too — no golden covers it (n6)", () => {
+    // Background-task frames no longer produce `task_updated` (the to-do list is TaskCreate/
+    // TaskUpdate's alone); their one persisted effect is closing a background child's thread.
     const { projector } = makeProjector();
     const frames = [
-      { type: "system", subtype: "task_started", task_id: "t1", description: "write the report", uuid: "u", session_id: "be-1" },
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "call_bg", name: "Agent", input: { description: "d", prompt: "p", run_in_background: true } }] } },
+      { type: "system", subtype: "task_started", task_id: "t1", tool_use_id: "call_bg", description: "write the report", task_type: "agent", uuid: "u", session_id: "be-1" },
+      { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "call_bg", content: JSON.stringify({ status: "async_launched", agentId: "a", taskId: "t1" }) }] } },
       { type: "system", subtype: "task_updated", task_id: "t1", patch: { status: "failed", error: "the tool exited 1" }, uuid: "u", session_id: "be-1" },
-      { type: "system", subtype: "task_notification", task_id: "t1", status: "stopped", summary: "cancelled", output_file: "/tmp/x", uuid: "u", session_id: "be-1" },
+      { type: "system", subtype: "task_notification", task_id: "t1", tool_use_id: "call_bg", status: "failed", summary: "failed", output_file: "/tmp/x", uuid: "u", session_id: "be-1" },
     ];
     const produced = frames.flatMap((f) => accept(projector, f as never));
-    expect(produced.map((e) => e.type)).toEqual(["task_updated", "task_updated"]);
+    expect(produced.map((e) => e.type)).toEqual(["tool_call", "thread_started", "tool_result", "thread_completed"]);
+    expect(produced[3]).toMatchObject({ threadId: "call_bg", stopReason: "error" });
     for (const e of produced) {
       const parsed = SessionEvent.safeParse(e);
       expect({ type: e.type, ok: parsed.success, issues: parsed.success ? [] : parsed.error.issues.map((i) => i.path.join(".")) })

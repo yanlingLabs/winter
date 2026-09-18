@@ -121,6 +121,13 @@ export interface ProjectorDeps {
   /** Called for every refusal, in addition to `Projector.refusals` and a warn log. A throw from
    *  this handler is swallowed — a driver's own bookkeeping must never break the fold. */
   onRefusal?: (refusal: ProjectorRefusal) => void;
+  /**
+   * The session's to-do rows as already persisted (its folded `task_updated` history), read ONCE,
+   * lazily, the first time a `TaskCreate`/`TaskUpdate` result resolves. A projector lives for one
+   * child incarnation, so without this a `TaskUpdate` after a respawn (idle eviction, credential
+   * swap, resume) would find no tracked row and be dropped. Absent → start empty.
+   */
+  priorTodos?: () => readonly { id: string; subject: string; status: string; activeForm?: string }[];
 }
 
 /**

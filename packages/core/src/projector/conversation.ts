@@ -193,9 +193,25 @@ export function toolResultOutput(block: ContentBlock): string {
 }
 
 /**
+ * Whether a `tool_result` block is a failure, reading EVERY spelling the two runtimes use:
+ * `is_error` (the declared field, and the official leg's), `denied` (a permission refusal),
+ * `interrupted` (an in-flight call an interrupt cancelled) and `error` — the Winter engine's OWN
+ * marker for a thrown tool, a structured-output failure and a not-executed call
+ * (`winter-agent-sdk/packages/runtime/src/engine.ts` 5558/5569/6020/6033), which this predicate
+ * used to miss, recording every thrown tool as a success.
+ *
+ * NOT covered, because it is not on the wire at all: a tool that RETURNS `{isError: true}` — the
+ * engine's success path (`engine.ts:5965`) pushes `{content: raced.value.output}` and drops the
+ * flag. `index.ts` compensates for spawn tools only (their failures carry a pinned `Error:` prefix).
+ */
+export function isErrorResult(block: ContentBlock): boolean {
+  return block.is_error === true || block.denied === true || block.interrupted === true || block.error === true;
+}
+
+/**
  * One `tool_result` event per `tool_result` block on a `user` frame.
  *
- * `isError` reads BOTH spellings the runtime uses: `is_error` (the declared field) and `denied`
+ * `isError` reads every spelling the runtimes use (`isErrorResult`): `is_error` (the declared field), `error`, and `denied`
  * (what a permission refusal actually sets — measured). A denial that arrived as `denied: true`
  * with no `is_error` would otherwise be recorded as a SUCCESSFUL tool result, which is the one
  * mis-fold in this file that would be invisible in every unit test that only feeds declared shapes.
@@ -215,7 +231,7 @@ export function toolResults(frame: UserFrame, sessionId: string, threadId: strin
     if (b.type !== "tool_result") continue;
     const callId = str(b.tool_use_id);
     if (callId === undefined || callId.length === 0) continue;
-    const isError = b.is_error === true || b.denied === true || b.interrupted === true;
+    const isError = isErrorResult(b);
     const fileDiff = takeFileDiff(sessionId, callId);
     out.push({ type: "tool_result", sessionId, threadId, callId, output: toolResultOutput(b), isError, ...(fileDiff === undefined ? {} : { fileDiff }) });
   }
