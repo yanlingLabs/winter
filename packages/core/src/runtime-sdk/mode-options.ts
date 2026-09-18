@@ -519,12 +519,24 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     // `run_in_background` STAYS advertised (unlike `WINTER_DISABLE_BACKGROUND_TASKS`, which would
     // withhold it), so nothing the model can ask for is taken away.
     backgroundByDefault: false,
-    // The official leg already passes `settingSources: []` (`official-options.ts`); the Winter leg
-    // passed nothing, and in the agent SDK an ABSENT `settingSources` means all three sources — so
-    // the Winter child read `<home>/settings.json` through its OWN cascade and honoured SDK-format
-    // blocks the daemon never sent it, while the claude child saw none of them. The daemon's own
-    // `Options` are the single source of a session's settings on BOTH legs; this is what makes that
-    // true rather than aspirational.
+    // The official leg is already pinned to `settingSources: []` by the ROUTER, which also refuses a
+    // non-empty value outright (`winter-runtime-sdk/src/official/options-template.ts`); the Winter leg
+    // passed nothing, and in the agent SDK an ABSENT `settingSources` means all three sources
+    // (`user`/`project`/`local`). MEASURED at 0.0.16, what that actually gated is FILE DISCOVERY, not
+    // the settings document: `context/winter-md.ts` (WINTER.md), `context/output-styles.ts`,
+    // `commands/resolver.ts` and the skills/agent-definition loaders each default to all three tiers
+    // and walk `<home>` + `<cwd>/.winter/**` themselves. The SDK's settings-document cascade
+    // (`packages/sdk/src/settings/resolve.ts`) exists, is tested and is pinned against claude's schema,
+    // but has NO production call site at 0.0.16 — so the child was never parsing `<home>/settings.json`
+    // as a settings file, and this line must not be described as stopping that.
+    //
+    // What it stops is a SECOND discovery pass that duplicates — and is weaker than — the daemon's own:
+    // `ContextAssembler` already composes the instructions and the skill listing, `SkillStore` already
+    // scans `<cwd>/.winter/skills` TRUST-GATED where the SDK's own loader is not, the agent definitions
+    // arrive as `Options.agents` (trust-gated the same way), and `outputStyle` arrives resolved by name.
+    // Winter ships no slash-command surface at all, so `.winter/commands` has no daemon counterpart to
+    // lose. The daemon's `Options` are the single source of a session's configuration on BOTH legs; this
+    // is what makes that true rather than aspirational, and it keeps holding when that cascade is wired.
     settingSources: [],
   };
   if (input.spawn.spawnClaudeCodeProcess) options.spawnClaudeCodeProcess = input.spawn.spawnClaudeCodeProcess;
