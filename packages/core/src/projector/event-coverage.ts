@@ -181,7 +181,10 @@ export const PROJECTED_EVENT_COVERAGE = {
   // completing `tool_result` — so both ends come off the wire with no registry lookup (children.ts).
   thread_started: true,
   thread_completed: true,
-  // `system/task_updated` and `system/task_notification` fold into Winter's task graph mirror.
+  // A `run_in_background` child's thread closes on its background-task terminal frame
+  // (`system/task_notification`, or a terminal `system/task_updated`), not on its spawn's result.
+  // PRODUCER: `applyTodoResult` — the model's `TaskCreate`/`TaskUpdate` to-do list ONLY. Background-
+  // task frames (`system/task_*`) never produce it (they are a different SDK registry; children.ts).
   task_updated: true,
   // ---- produced: the turn boundary the HOST opens ----
   //

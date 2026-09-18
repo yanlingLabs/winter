@@ -3,7 +3,10 @@ import {
   MAIN_THREAD, asApiRetryFrame, asAssistantFrame, asInitFrame, asMirrorErrorFrame, asResultFrame, asStreamEventFrame,
   asUserFrame, assistantText, deltaText, hasToolResults, threadIdOf, toolCalls, toolResults, userText,
 } from "./conversation";
-import { applyTaskPatch, childFromSpawn, isSpawnTool, seedTask, threadCompletedFrom, threadStarted, type ChildRecord, type TaskRow } from "./children";
+import {
+  applyTodoResult, backgroundStopReason, childFromSpawn, isSpawnTool, pendingTodoFrom, spawnOutcome, threadCompleted,
+  threadStarted, type ChildRecord, type PendingTodoCall, type TaskRow,
+} from "./children";
 import { createEchoWindow, type EchoWindow } from "./dedupe";
 import { classifyThrown, sanitizeDetail } from "./errors";
 import { isKnownUnpersistedKind, kindOf, summarize } from "./hooks";
@@ -21,8 +24,9 @@ export {
   type AgentErrorCode, type ClassifiedError,
 } from "./errors";
 export {
-  TASK_STATUS_MAP, applyTaskPatch, childFromSpawn, isSpawnTool, seedTask, threadCompletedFrom,
-  threadStarted, type ChildRecord, type HostTaskStatus, type TaskRow, type WinterTaskStatus,
+  applyTodoResult, backgroundStopReason, childFromSpawn, isSpawnTool, isTodoTool, pendingTodoFrom, spawnOutcome,
+  threadCompleted, threadStarted, type ChildRecord, type HostTaskStatus, type PendingTodoCall, type SpawnOutcome,
+  type TaskRow, type ThreadStopReason,
 } from "./children";
 export { UNPERSISTED_KINDS, isKnownUnpersistedKind, kindOf, summarize } from "./hooks";
 export { QUESTION_TOOLS, isQuestionTool } from "./questions";
@@ -99,6 +103,8 @@ export const PROJECTOR_PASSTHROUGH_CLIENT = "winter";
 /** `totalsOf`'s parameter, narrowed to what it actually reads. */
 type ResultFrameLike = Parameters<typeof totalsOf>[0];
 
+const HOST_TODO_STATUSES: ReadonlySet<string> = new Set(["pending", "in_progress", "completed", "deleted"]);
+
 class ProjectorImpl implements Projector {
   private readonly checkpoint: CheckpointStore;
   private readonly winterSessionId: string;
@@ -134,13 +140,46 @@ class ProjectorImpl implements Projector {
   private loggedUnpricedUsage = false;
   /** Child threads opened by a spawning `tool_use`, keyed by that block's id (= the threadId). */
   private readonly children = new Map<string, ChildRecord>();
-  /** Winter's task graph, mirrored so a `task_updated` patch has a subject to carry. */
-  private readonly tasks = new Map<string, TaskRow>();
+  /** Child threads whose spawn LAUNCHED them in the background (`run_in_background`): kept open past
+   *  the spawn's `tool_result`, keyed by threadId (= the spawning tool_use id), until a background-
+   *  task terminal frame names them (`acceptTaskFrame`). */
+  private readonly backgroundChildren = new Set<string>();
+  /** Background-task id → child threadId, learned from `system/task_started.tool_use_id` and from a
+   *  Winter async result's `taskId` — the only correlator a `task_updated` patch carries. */
+  private readonly taskToThread = new Map<string, string>();
+  /** `TaskCreate`/`TaskUpdate` calls awaiting their `tool_result`, keyed by the call's `tool_use.id`
+   *  — cleared as soon as the result resolves (see `applyTodoResult`). */
+  private readonly pendingTodos = new Map<string, PendingTodoCall>();
+  /** The session's to-do rows, mirrored from resolved `TaskCreate`/`TaskUpdate` results. A SEPARATE
+   *  map from `tasks` (above): the to-do list and the background-task registry are two distinct
+   *  SDK-side stores with no shared ids, and conflating them would let one's rows silently patch
+   *  the other's. */
+  private readonly todos = new Map<string, TaskRow>();
+  /** Whether `todos` has been seeded from `deps.priorTodos` yet (lazily, on first need). */
+  private todosSeeded = false;
   /** Every refusal this projector made, in order — surfaced rather than dropped. */
   private readonly refused: ProjectorRefusal[] = [];
   /** True once this turn's terminal has been emitted, so an "error-result-then-throw" ResultError
    *  is recognised as the pair of a result already projected rather than projected twice. */
   private terminalEmitted = false;
+
+  /** Seed the to-do map from the session's persisted rows, once — see `ProjectorDeps.priorTodos`.
+   *  Never throws: a failed read leaves the map empty, which is today's behaviour. */
+  private seedTodosOnce(): void {
+    if (this.todosSeeded) return;
+    this.todosSeeded = true;
+    try {
+      for (const t of this.deps.priorTodos?.() ?? []) {
+        if (this.todos.has(t.id) || !HOST_TODO_STATUSES.has(t.status)) continue;
+        this.todos.set(t.id, {
+          id: t.id, subject: t.subject, status: t.status as TaskRow["status"],
+          ...(t.activeForm === undefined ? {} : { activeForm: t.activeForm }),
+        });
+      }
+    } catch (err) {
+      this.deps.log.warn?.("[projector] could not seed prior to-do rows", { sessionId: this.deps.sessionId, error: String(err) });
+    }
+  }
 
   constructor(private readonly deps: ProjectorDeps) {
     this.checkpoint = deps.checkpoint;
@@ -254,8 +293,8 @@ class ProjectorImpl implements Projector {
         out.push(...toolCalls(assistant, this.deps.sessionId, threadId, (n) => this.renameTool(n)));
         // A spawning call opens a child thread. `thread_started` follows its own `tool_call` so the
         // transcript reads parent-call-then-child, and the child's threadId IS the tool_use id —
-        // the same identifier its completing `tool_result` carries, which is what lets
-        // `thread_completed` be derived with no registry lookup (see children.ts).
+        // the same identifier its spawn's `tool_result` and its background-task frames carry
+        // (`tool_use_id`), which is what closes the thread (see children.ts's `spawnOutcome`).
         for (const b of assistant.message.content) {
           if (b.type !== "tool_use" || typeof b.name !== "string") continue;
           if (isQuestionTool(b.name) && !this.loggedToolNames.has(`?${b.name}`)) {
@@ -264,6 +303,11 @@ class ProjectorImpl implements Projector {
               sessionId: this.deps.sessionId, tool: b.name,
             });
           }
+          // `TaskCreate`/`TaskUpdate` never appear on the wire again after this — their store emits
+          // no frame of its own (`children.ts`'s module doc) — so the call's own input is stashed
+          // here, keyed by this block's id, for its `tool_result` to resolve below.
+          const pendingTodo = pendingTodoFrom(b);
+          if (pendingTodo !== undefined && typeof b.id === "string" && b.id.length > 0) this.pendingTodos.set(b.id, pendingTodo);
           if (!isSpawnTool(b.name)) continue;
           const child = childFromSpawn(b, threadId);
           if (child === undefined || this.children.has(child.threadId)) continue;
@@ -285,13 +329,43 @@ class ProjectorImpl implements Projector {
         const sourceId = `tr:${(firstResult?.tool_use_id as string | undefined) ?? `${this.turnIndex}:${this.roundIndex}`}`;
         return claim(sourceId, () => {
           const out = toolResults(userFrame, this.deps.sessionId, threadId);
+          const resultBlocks = userFrame.message.content.filter((b) => b.type === "tool_result");
+          // `tool_use_result` is FRAME-level (the official leg's structured result); it can only be
+          // attributed to a block when the frame carries exactly one.
+          const frameToolUseResult = resultBlocks.length === 1 ? (userFrame as unknown as Record<string, unknown>).tool_use_result : undefined;
           for (const b of userFrame.message.content) {
             if (b.type !== "tool_result") continue;
-            const childId = typeof b.tool_use_id === "string" ? b.tool_use_id : undefined;
-            if (childId === undefined || !this.children.has(childId)) continue;
-            this.children.delete(childId);
-            const completed = threadCompletedFrom(b, this.deps.sessionId);
-            if (completed !== undefined) out.push(completed);
+            const callId = typeof b.tool_use_id === "string" ? b.tool_use_id : undefined;
+            if (callId === undefined) continue;
+            const pendingTodo = this.pendingTodos.get(callId);
+            if (pendingTodo !== undefined) {
+              this.pendingTodos.delete(callId);
+              this.seedTodosOnce();
+              const todoEvent = applyTodoResult(this.todos, pendingTodo, b, this.deps.sessionId);
+              if (todoEvent !== undefined) out.push(todoEvent);
+              else {
+                this.deps.log.debug?.("[projector] a TaskCreate/TaskUpdate result produced no task_updated — a failed call, an untracked row, or an unparseable result", {
+                  sessionId: this.deps.sessionId, callId,
+                });
+              }
+            }
+            if (!this.children.has(callId)) continue;
+            const outcome = spawnOutcome(b, frameToolUseResult);
+            if (outcome.kind === "background") {
+              // The spawn only LAUNCHED the child: it is running now. Keep the thread open; the
+              // background-task terminal frame closes it (`acceptTaskFrame`).
+              this.backgroundChildren.add(callId);
+              if (outcome.taskId !== undefined) this.taskToThread.set(outcome.taskId, callId);
+              continue;
+            }
+            this.children.delete(callId);
+            for (const [t, th] of this.taskToThread) if (th === callId) this.taskToThread.delete(t);
+            if (outcome.failed) {
+              // The wire may carry no error flag for a failed spawn (the engine drops a returned
+              // `isError`), so the row that says so is corrected here too.
+              for (const e of out) if (e.type === "tool_result" && e.callId === callId) e.isError = true;
+            }
+            out.push(threadCompleted(callId, outcome.stopReason, this.deps.sessionId));
           }
           return out;
         });
@@ -387,55 +461,49 @@ class ProjectorImpl implements Projector {
   }
 
   /**
-   * Winter's task graph (§4.4). `task_started` seeds a row (so a later patch has a subject to
-   * carry); `task_updated` and `task_notification` patch it. `task_progress` and
-   * `background_tasks_changed` carry nothing the host's `task_updated` can express beyond what the
-   * patches already say, and `local_command_output` is not a task at all — all three fall through
-   * to the debug log.
+   * The background-task frames (`system/task_*`) — see `children.ts`'s "background tasks vs the
+   * to-do list" doc. They NEVER produce `task_updated` (the to-do list is `applyTodoResult`'s alone).
+   * Their one persisted effect is closing an open BACKGROUND child thread:
+   *
+   *   task_started       → learn `task_id → threadId` when its `tool_use_id` is a child we opened
+   *   task_notification  → terminal: close the thread it names (`tool_use_id`, else `task_id`)
+   *   task_updated       → a terminal `patch.status` closes the thread its `task_id` maps to
+   *   task_progress      → observed only
+   *
+   * No `task_type` filter: Winter says `agent` and Claude Code says `local_agent`, and matching on
+   * the projector's own child maps already excludes bash/workflow/monitor frames (and a foreground
+   * agent's late notification — Claude Code emits one for sync agents too — whose thread closed at
+   * its tool_result). The claim key `tc:<threadId>` is stable across a replay, so a second terminal
+   * for the same thread is a no-op both in memory and in the checkpoint store.
    *
    * Returns `undefined` (not `[]`) when the message is not a task frame, so `accept` can tell "not
    * mine" from "mine, and it projected nothing".
    */
   private acceptTaskFrame(msg: ProtocolSdkMessage): ProjectedBatch | undefined {
     const kind = kindOf(msg);
+    if (kind !== "system/task_started" && kind !== "system/task_updated" && kind !== "system/task_notification" && kind !== "system/task_progress") return undefined;
     const m = msg as Record<string, unknown>;
     const taskId = typeof m.task_id === "string" && m.task_id.length > 0 ? m.task_id : undefined;
     if (taskId === undefined) return undefined;
+    const toolUseId = typeof m.tool_use_id === "string" && m.tool_use_id.length > 0 ? m.tool_use_id : undefined;
 
     if (kind === "system/task_started") {
-      seedTask(this.tasks, taskId, m.description);
-      this.logSkipped(msg);   // the row is now tracked; the FRAME still persists nothing
-      return EMPTY_BATCH();
-    }
-    if (kind === "system/task_updated") {
-      const patch = typeof m.patch === "object" && m.patch !== null ? (m.patch as Record<string, unknown>) : {};
-      return this.claimed(`tk:${taskId}:${this.messageIndex}`, () => {
-        const ev = applyTaskPatch(this.tasks, taskId, patch, this.deps.sessionId);
-        // A patch of only run-bookkeeping (`total_paused_ms`, `end_time`) says nothing the host's
-        // `task_updated` can express. Logged rather than dropped in silence (n8, review r2).
-        if (ev === undefined) this.logSkipped(msg);
-        return ev === undefined ? [] : [ev];
-      });
-    }
-    if (kind === "system/task_progress") {
-      // A deliberate skip, not an unknown: progress carries usage and a description the patches
-      // already say. Logged through the same allowlisted door as every other observed family.
+      if (toolUseId !== undefined && this.children.has(toolUseId)) this.taskToThread.set(taskId, toolUseId);
       this.logSkipped(msg);
       return EMPTY_BATCH();
     }
-    if (kind === "system/task_notification") {
-      // A background task's own terminal. Its three statuses are a SUBSET of the patch vocabulary
-      // (`completed | failed | stopped`), and `stopped` is the patch's `killed` under another name
-      // — mapped here rather than widening children.ts's table with a value `patch.status` can
-      // never hold.
-      const status = m.status === "stopped" ? "killed" : typeof m.status === "string" ? m.status : undefined;
-      if (status === undefined) { this.logSkipped(msg); return EMPTY_BATCH(); }
-      return this.claimed(`tk:${taskId}:${this.messageIndex}`, () => {
-        const ev = applyTaskPatch(this.tasks, taskId, { status, ...(typeof m.summary === "string" ? { description: m.summary } : {}) }, this.deps.sessionId);
-        return ev === undefined ? [] : [ev];
-      });
+    const stopReason = kind === "system/task_notification" ? backgroundStopReason(m.status)
+      : kind === "system/task_updated" && typeof m.patch === "object" && m.patch !== null ? backgroundStopReason((m.patch as Record<string, unknown>).status)
+        : undefined;
+    const threadId = toolUseId !== undefined && this.backgroundChildren.has(toolUseId) ? toolUseId : this.taskToThread.get(taskId);
+    if (stopReason === undefined || threadId === undefined || !this.backgroundChildren.has(threadId)) {
+      this.logSkipped(msg);
+      return EMPTY_BATCH();
     }
-    return undefined;
+    this.backgroundChildren.delete(threadId);
+    this.children.delete(threadId);
+    this.taskToThread.delete(taskId);
+    return this.claimed(`tc:${threadId}`, () => [threadCompleted(threadId, stopReason, this.deps.sessionId)]);
   }
 
   flush(): void { this.commitPending(); }

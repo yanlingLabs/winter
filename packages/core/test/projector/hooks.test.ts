@@ -81,7 +81,7 @@ describe("projector/hooks: observed, never persisted", () => {
   });
 
   test("the TASK frames the projector handles on purpose are known kinds, not `unrecognised` (n8)", () => {
-    // `task_started` is CONSUMED (it seeds the row a later patch takes its subject from) and
+    // `task_started` is CONSUMED (it maps a task id onto a background child thread) and
     // `task_progress` is a deliberate skip. Missing from the allowlist, their once-per-kind line
     // read "unrecognised wire message" — the daemon log claiming the projector had never heard of
     // frames it handles deliberately, which is the one signal that line exists to give.

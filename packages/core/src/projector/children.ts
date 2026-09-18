@@ -1,4 +1,4 @@
-import { MAIN_THREAD, type ContentBlock } from "./conversation";
+import { MAIN_THREAD, isErrorResult, toolResultOutput, type ContentBlock } from "./conversation";
 import type { ProjectedEvent } from "./types";
 
 /**
@@ -26,7 +26,11 @@ import type { ProjectedEvent } from "./types";
  *   forwardSubagentText OFF (the default, and what a Winter session gets today):
  *       thread_started  ← the spawning `tool_use` block
  *       …the child's own tool_call/tool_result events, on the child's threadId…
- *       thread_completed ← the spawning call's `tool_result` block
+ *       thread_completed ← the spawning call's `tool_result` block — for a FOREGROUND spawn, or one
+ *                          that failed; a `run_in_background` spawn's result only says it LAUNCHED,
+ *                          so its thread stays open until the background-task terminal frame
+ *                          (`system/task_notification`, or a terminal `task_updated`) names it
+ *                          (`spawnOutcome`, `backgroundStopReason`, `ProjectorImpl.acceptTaskFrame`)
  *
  *   forwardSubagentText ON:
  *       the same, PLUS the child's `assistant_message` (and `assistant_delta`) on its threadId,
@@ -99,108 +103,232 @@ export function threadStarted(child: ChildRecord, sessionId: string): ProjectedE
   };
 }
 
-/**
- * A child's terminal, read off the spawning call's own `tool_result` block.
- *
- * `stalled` exists in the enum for one specific path — a subagent killed by the progress-stall
- * watchdog, which renders differently from a genuine failure because a stall is resumable and keeps
- * partial output. On the Winter leg the watchdog is the host's (P8b-15 keeps it), so the driver
- * tells the projector; the wire itself can only distinguish `aborted` (an interrupted in-flight
- * call) from `error` and `end_turn`.
- */
-export function threadCompletedFrom(block: ContentBlock, sessionId: string): ProjectedEvent | undefined {
-  const threadId = typeof block.tool_use_id === "string" ? block.tool_use_id : undefined;
-  if (threadId === undefined || threadId.length === 0) return undefined;
-  const stopReason: "end_turn" | "aborted" | "error" =
-    block.interrupted === true ? "aborted"
-      : block.is_error === true || block.denied === true ? "error"
-        : "end_turn";
+/** `thread_completed.stopReason` — the protocol's own enum (`ThreadCompletedEvent`). */
+export type ThreadStopReason = "end_turn" | "aborted" | "error" | "stalled";
+
+export function threadCompleted(threadId: string, stopReason: ThreadStopReason, sessionId: string): ProjectedEvent {
   return { type: "thread_completed", sessionId, threadId, stopReason };
 }
 
-// ── the task graph (§4.4) ──────────────────────────────────────────────────────────────────────
+/**
+ * What a spawning call's own `tool_result` says about its child:
+ *
+ *  - `{kind:"done"}` — the child is finished (a foreground spawn, or a spawn that failed before a
+ *    child ever ran). `stopReason` is `aborted` for an interrupted call, `error` for any error
+ *    spelling (`isErrorResult`) OR an output beginning `Error:` — the Winter engine drops a tool's
+ *    returned `isError` on the wire (`winter-agent-sdk` `engine.ts:5965`), and EVERY failure branch
+ *    of its Agent executor (`tools/impl/agent.ts`: unknown subagent_type, spawn failed,
+ *    isolation:"remote", background setup failed, a non-completed foreground child) returns an
+ *    `Error:`-prefixed output, so that prefix is the only failure signal that reaches the daemon.
+ *    The prefix test is applied to SPAWN results only (a Grep hit may well start with "Error:").
+ *    `stalled` is not derivable here: the stall watchdog is the host's, never a wire fact.
+ *  - `{kind:"background"}` — the spawn LAUNCHED a child that is still running
+ *    (`run_in_background`). The thread stays open until a background-task terminal frame names it
+ *    (`acceptTaskFrame`). Recognised on both legs:
+ *      Winter:   the output is JSON `{"status":"async_launched","agentId","taskId",…}` (agent.ts);
+ *      official: the user frame's `tool_use_result` is `{status:"async_launched",…}` — trusted only
+ *                when the frame carries exactly one tool_result, since the field is frame-level —
+ *                or, failing that, Claude Code's rendered text "Async agent launched successfully."
+ *                (`AgentTool.tsx`'s `mapToolResultToToolResultBlockParam`).
+ *    `taskId` is Winter's background-task id when the result names one — the fallback correlator
+ *    for a `task_updated` patch, which carries no `tool_use_id`.
+ */
+export type SpawnOutcome = { kind: "done"; stopReason: ThreadStopReason; failed: boolean } | { kind: "background"; taskId?: string };
+
+const ASYNC_LAUNCHED = "async_launched";
+const OFFICIAL_ASYNC_TEXT = "Async agent launched successfully.";
+
+export function spawnOutcome(block: ContentBlock, frameToolUseResult: unknown): SpawnOutcome {
+  if (block.interrupted === true) return { kind: "done", stopReason: "aborted", failed: true };
+  const text = toolResultOutput(block);
+  if (isErrorResult(block) || text.trimStart().startsWith("Error:")) return { kind: "done", stopReason: "error", failed: true };
+  const parsed = parseJsonObject(text);
+  if (parsed?.status === ASYNC_LAUNCHED) {
+    const taskId = typeof parsed.taskId === "string" && parsed.taskId.length > 0 ? parsed.taskId : undefined;
+    return { kind: "background", ...(taskId === undefined ? {} : { taskId }) };
+  }
+  if (isPlainObject(frameToolUseResult) && frameToolUseResult.status === ASYNC_LAUNCHED) return { kind: "background" };
+  if (text.trimStart().startsWith(OFFICIAL_ASYNC_TEXT)) return { kind: "background" };
+  return { kind: "done", stopReason: "end_turn", failed: false };
+}
 
 /**
- * ── `system/task_updated` → the host's `task_updated`, AND THE ONE PLACE THE ENUMS DO NOT MEET ─────
- *
- * Winter's task graph is ONE registry holding both the model's to-do rows (`TaskCreate`: subject,
- * description, activeForm, blocks/blockedBy — the same shape as the host's own `task_create` tool) and
- * its background agent runs (`startTracking({kind:"agent"})`). Its status vocabulary has six values;
- * the host's `TaskSchema.status` has four (`pending | in_progress | completed | deleted`), and
- * P8b-21 forbids widening the enum this phase.
- *
- * Four map cleanly. Two do not, and both losses are recorded rather than hidden:
- *
- *   pending   → pending
- *   running   → in_progress
- *   paused    → pending        (not running, not finished; `pending` is the only non-terminal value)
- *   completed → completed
- *   failed    → completed  + `metadata.winterStatus: "failed"`   ← LOSSY
- *   killed    → deleted    + `metadata.winterStatus: "killed"`
- *
- * `failed → completed` is the uncomfortable one: a failed task renders with a tick. The
- * alternatives are worse — `deleted` makes the row vanish (the user loses the fact it ever ran) and
- * projecting nothing strands it at `in_progress` forever. `metadata` is a free-form shallow bag on
- * the existing schema, so the true status rides along additively for the day a renderer reads it.
- * **The clean fix is a `failed` member on `TaskSchema.status`, which is a protocol change and
- * therefore a later phase's** — flagged in the task report, not smuggled in here.
+ * A background-task TERMINAL status → the child thread's stopReason, or `undefined` for a
+ * non-terminal one. Both vocabularies are read: `task_notification.status`
+ * (`completed | failed | stopped`) and `task_updated.patch.status`
+ * (`pending | running | completed | failed | killed | paused`). A failure is `error` and a stop/kill
+ * is `aborted` — never a clean `end_turn`.
  */
-export type WinterTaskStatus = "pending" | "running" | "completed" | "failed" | "killed" | "paused";
+export function backgroundStopReason(status: unknown): ThreadStopReason | undefined {
+  switch (status) {
+    case "completed": return "end_turn";
+    case "failed": return "error";
+    case "stopped":
+    case "killed": return "aborted";
+    default: return undefined;
+  }
+}
+
+function parseJsonObject(text: string): Record<string, unknown> | undefined {
+  const t = text.trim();
+  if (!t.startsWith("{")) return undefined;
+  try {
+    const v: unknown = JSON.parse(t);
+    return isPlainObject(v) ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// ── background tasks vs the to-do list ────────────────────────────────────────────────────────
+
+/**
+ * **The SDK's BACKGROUND-task registry is NOT the model's to-do list.** The runtime keeps two
+ * *completely separate* registries that happen to share a display name: `startTracking({kind:
+ * "agent"|"bash"|"workflow"})`'s background-task registry, which DOES put frames on the wire
+ * (`system/task_started`/`task_updated`/`task_progress`/`task_notification`), and the
+ * `TaskCreate`/`TaskUpdate`/`TaskList`/`TaskGet` to-do store (`tools/task-graph-store.ts`), which
+ * emits **nothing** onto the wire.
+ *
+ * Until this fix the projector folded the background frames into `task_updated` — so every
+ * background agent/bash/workflow run appeared as a phantom row in the user's to-do list, and a
+ * background AGENT's real finish was spent there instead of closing its thread. Now:
+ *
+ *  - the to-do list (`task_updated`, and so `task.list`) is fed SOLELY by `applyTodoResult` below;
+ *  - a background frame that names an open background CHILD thread (by `tool_use_id`, or by a task
+ *    id learned from `task_started`/the async result) closes that thread with `thread_completed`
+ *    on its terminal status (`backgroundStopReason`) — see `ProjectorImpl.acceptTaskFrame`;
+ *  - every other background frame (bash, workflow, an agent this projector never saw spawn) is
+ *    observed and logged once per kind, never persisted. There is no existing SessionEvent that
+ *    states "a background shell finished" for a list the user reads, and the model itself learns of
+ *    it through the runtime's own notification; inventing one is a protocol change (P8b-21).
+ */
 export type HostTaskStatus = "pending" | "in_progress" | "completed" | "deleted";
-
-export const TASK_STATUS_MAP: Readonly<Record<WinterTaskStatus, HostTaskStatus>> = {
-  pending: "pending",
-  running: "in_progress",
-  paused: "pending",
-  completed: "completed",
-  failed: "completed",
-  killed: "deleted",
-};
-
-/** The two Winter statuses the host's enum cannot express; their real value rides in `metadata`. */
-const LOSSY_STATUSES = new Set<WinterTaskStatus>(["failed", "killed"]);
 
 export interface TaskRow { id: string; subject: string; status: HostTaskStatus; activeForm?: string; metadata?: Record<string, unknown> }
 
-/**
- * Fold one `system/task_updated` patch into the tracked row and return the event, or undefined when
- * the patch says nothing this projector can express (an unknown status and no description change).
- *
- * A row this projector has never seen gets its `subject` from the patch's `description`, and failing
- * that from the task id — `TaskSchema.subject` is `z.string().min(1)` and an event that fails the
- * schema is worse than a row labelled by its id.
- */
-export function applyTaskPatch(
-  rows: Map<string, TaskRow>,
-  taskId: string,
-  patch: Record<string, unknown>,
-  sessionId: string,
-): ProjectedEvent | undefined {
-  const rawStatus = typeof patch.status === "string" ? (patch.status as WinterTaskStatus) : undefined;
-  const mapped = rawStatus !== undefined ? TASK_STATUS_MAP[rawStatus] : undefined;
-  const description = typeof patch.description === "string" && patch.description.length > 0 ? patch.description : undefined;
-  if (mapped === undefined && description === undefined) return undefined;
+// ── the model's to-do list (`TaskCreate`/`TaskUpdate`) → `task_updated` ────────────────────────────
+//
+// See this section's module doc above for why this is a wholly separate mechanism from
+// `acceptTaskFrame`'s frame-fed background-task registry: `TaskCreate`/`TaskUpdate` put NOTHING on
+// the wire, so the only signal a to-do mutation happened is the tool call itself — its `tool_use`
+// block (the input) paired with its `tool_result` (success/failure, and for `TaskCreate` the minted
+// id). `HostTaskStatus` already matches `TaskUpdate`'s own input `status` enum exactly
+// (`pending|in_progress|completed|deleted` on both sides — no `TASK_STATUS_MAP`-style lossy fold is
+// needed here), so `status: "deleted"` passes straight through unchanged, as `TaskSchema`'s own
+// doc comment on `task_updated` requires (a live task view removes the row rather than upserting a
+// phantom that outlives the delete).
 
-  const existing = rows.get(taskId);
-  const row: TaskRow = {
-    id: taskId,
-    subject: description ?? existing?.subject ?? taskId,
-    status: mapped ?? existing?.status ?? "pending",
-    ...(existing?.activeForm === undefined ? {} : { activeForm: existing.activeForm }),
-  };
-  const metadata: Record<string, unknown> = { ...(existing?.metadata ?? {}) };
-  if (rawStatus !== undefined && LOSSY_STATUSES.has(rawStatus)) metadata.winterStatus = rawStatus;
-  const error = typeof patch.error === "string" ? patch.error : undefined;
-  if (error !== undefined) metadata.winterError = error;
-  if (Object.keys(metadata).length > 0) row.metadata = metadata;
+/** Winter's `TaskCreate`/`TaskUpdate` tool names, matched on the RAW runtime name — the SAME
+ *  convention `isSpawnTool` uses, and for the same reason: the projector's assistant-frame loop
+ *  reads the wire block before `renameTool` runs. Matched identically on the official leg: Claude
+ *  Code's own "current task system" is the SAME four tools under the SAME names
+ *  (`winter-vs-cc-tools.md`'s tool-parity table), so a `claude` child's `TaskCreate`/`TaskUpdate`
+ *  calls are indistinguishable from a Winter child's at this layer. */
+const TODO_TOOLS = new Set(["TaskCreate", "TaskUpdate"]);
+export const isTodoTool = (winterName: string): boolean => TODO_TOOLS.has(winterName);
 
-  rows.set(taskId, row);
-  return { type: "task_updated", sessionId, threadId: MAIN_THREAD, task: row };
+/** A `TaskCreate`/`TaskUpdate` call's own input, tracked from its `tool_use` block until its
+ *  `tool_result` resolves it — needed because NEITHER result shape echoes the new field values
+ *  back: `TaskCreate`'s result is `{task:{id,subject}}` (subject only, no activeForm), and
+ *  `TaskUpdate`'s is `{success,taskId,updatedFields,statusChange?}` — the NAMES of what changed,
+ *  never the new values themselves (`tools/impl/task-graph.ts`'s T8 note 6). */
+export interface PendingTodoCall { kind: "create" | "update"; input: Record<string, unknown> }
+
+/** Read a `TaskCreate`/`TaskUpdate` `tool_use` block into a `PendingTodoCall`, or `undefined` for
+ *  any other tool. */
+export function pendingTodoFrom(block: ContentBlock): PendingTodoCall | undefined {
+  const name = typeof block.name === "string" ? block.name : undefined;
+  if (name !== "TaskCreate" && name !== "TaskUpdate") return undefined;
+  const input = typeof block.input === "object" && block.input !== null && !Array.isArray(block.input)
+    ? (block.input as Record<string, unknown>) : {};
+  return { kind: name === "TaskCreate" ? "create" : "update", input };
 }
 
-/** Seed a row from a `system/task_started` frame so a later patch has a subject to carry. */
-export function seedTask(rows: Map<string, TaskRow>, taskId: string, description: unknown): void {
-  if (rows.has(taskId)) return;
-  const subject = typeof description === "string" && description.length > 0 ? description : taskId;
-  rows.set(taskId, { id: taskId, subject, status: "pending" });
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+const HOST_TASK_STATUSES: ReadonlySet<HostTaskStatus> = new Set(["pending", "in_progress", "completed", "deleted"]);
+
+/**
+ * Parse a `TaskCreate`/`TaskUpdate` `tool_result` block's payload. The SDK's own executor always
+ * JSON-stringifies its result (`tools/impl/task-graph.ts`: every branch returns `output:
+ * JSON.stringify(...)`), and `toolResultOutput` already flattens both wire shapes of `content` (a
+ * bare string, or an array of text blocks) down to that one string — covering the official leg
+ * too, since nothing in `@anthropic-ai/claude-agent-sdk`'s own types names a distinct
+ * `tool_use_result` carrier for this. A `content` that is already a plain object (never observed,
+ * tolerated defensively) is read directly. Never throws: anything that fails to parse, or parses to
+ * something other than a plain object, is `undefined` — "nothing to project", not a crash.
+ */
+function parseTodoResultJson(block: ContentBlock): Record<string, unknown> | undefined {
+  const raw = (block as Record<string, unknown>).content;
+  if (isPlainObject(raw)) return raw;
+  const text = toolResultOutput(block);
+  if (text.length === 0) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return isPlainObject(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Fold a resolved `TaskCreate`/`TaskUpdate` call into the tracked to-do rows and return the
+ * `task_updated` event to emit, or `undefined` when there is nothing to project:
+ *
+ *  - the call errored (`isErrorResult`: `is_error`/`error`/`denied`/`interrupted`) — never a task update;
+ *  - `TaskUpdate`'s own domain failures report `success:false` INSIDE a non-error result
+ *    (`tools/impl/task-graph.ts`'s T8 note 1: not-found/self-reference/unknown-reference never set
+ *    `isError` — the input shape was fine, the graph operation was not) — also nothing to project;
+ *  - the result did not parse as the pinned shape at all (a foreign or malformed payload);
+ *  - an UNTRACKED `TaskUpdate` — no row for that id in `rows`, even after the projector seeded
+ *    them from the session's persisted history (`ProjectorDeps.priorTodos`). `TaskSchema.subject`
+ *    is `z.string().min(1)` and there is no wire fact to label an unseen row with, so this is a
+ *    **deliberate skip, not a fabricated row**, logged by the caller.
+ *
+ * `TaskCreate`'s new row takes its `subject` from the RESULT (the store's own echo, per the
+ * documented `{task:{id,subject}}` shape) and its `activeForm` from the CALL's input (the result
+ * never carries it) — `status` is always `"pending"`, matching the store's own `createTask`.
+ * `TaskUpdate` merges the call's `subject`/`activeForm`/`status` onto the tracked row, falling back
+ * to the row's previous value for any field the call did not touch.
+ */
+export function applyTodoResult(
+  rows: Map<string, TaskRow>,
+  call: PendingTodoCall,
+  block: ContentBlock,
+  sessionId: string,
+): ProjectedEvent | undefined {
+  if (isErrorResult(block)) return undefined;
+  const result = parseTodoResultJson(block);
+  if (result === undefined) return undefined;
+
+  if (call.kind === "create") {
+    const task = isPlainObject(result.task) ? result.task : undefined;
+    const id = typeof task?.id === "string" && task.id.length > 0 ? task.id : undefined;
+    const subject = typeof task?.subject === "string" && task.subject.length > 0 ? task.subject : undefined;
+    if (id === undefined || subject === undefined) return undefined;
+    const activeForm = typeof call.input.activeForm === "string" && call.input.activeForm.length > 0 ? call.input.activeForm : undefined;
+    const row: TaskRow = { id, subject, status: "pending", ...(activeForm === undefined ? {} : { activeForm }) };
+    rows.set(id, row);
+    return { type: "task_updated", sessionId, threadId: MAIN_THREAD, task: row };
+  }
+
+  // TaskUpdate
+  if (result.success !== true) return undefined;
+  const taskId = typeof result.taskId === "string" && result.taskId.length > 0 ? result.taskId : undefined;
+  if (taskId === undefined) return undefined;
+  const existing = rows.get(taskId);
+  const inputStatus = typeof call.input.status === "string" ? call.input.status : undefined;
+  const status = inputStatus !== undefined && HOST_TASK_STATUSES.has(inputStatus as HostTaskStatus) ? (inputStatus as HostTaskStatus) : undefined;
+  const subject = typeof call.input.subject === "string" && call.input.subject.length > 0 ? call.input.subject : existing?.subject;
+  if (subject === undefined) return undefined;   // untracked row, no subject anywhere — skip (see doc above)
+  const activeForm = typeof call.input.activeForm === "string" && call.input.activeForm.length > 0 ? call.input.activeForm : existing?.activeForm;
+  const row: TaskRow = {
+    id: taskId, subject, status: status ?? existing?.status ?? "pending",
+    ...(activeForm === undefined ? {} : { activeForm }),
+  };
+  rows.set(taskId, row);
+  return { type: "task_updated", sessionId, threadId: MAIN_THREAD, task: row };
 }

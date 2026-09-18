@@ -16,14 +16,21 @@ import type { SessionEvent, Task } from "@yanlinglabs/winter-protocol";
  * carries, which is the task-graph family, not `TodoWrite`.) So there is no file shape to confirm,
  * and a reader built around one would always return `[]`.
  *
- * What the daemon actually has is the WIRE record of that graph: every `TaskCreate`/`TaskUpdate`
- * call surfaces as a `system/task_started` / `system/task_updated` message, which the projector
- * (already, since 8b Task 11 — see `projector/index.ts`'s `acceptTaskFrame`) turns into a
- * `task_updated` `SessionEvent` carrying the full `Task` row. That event is PERSISTED
- * (`event-coverage.ts`: `task_updated: true` in both maps) — so the session's own store already
- * holds a durable, replayable history of every task mutation, with no dependency on the child
- * process still being alive (P8c-11: "the child's own effects are not relied upon — a child dies
- * at idle"). Folding that history to its latest state per task id is `task.list`'s answer.
+ * **Corrected from the original brief's premise a second time.** `TaskCreate`/`TaskUpdate` do NOT
+ * surface as `system/task_started`/`system/task_updated` messages — those frames belong to a wholly
+ * different SDK-side registry, the background-task tracker behind `startTracking({kind:"agent"|
+ * "bash"|"workflow"})`, which `acceptTaskFrame` (`projector/index.ts`) reads. The to-do store this
+ * file's header describes (`task-graph-store.ts`) is explicit that it "emits nothing onto the wire
+ * at all" — there is no frame for a to-do mutation, full stop. What the daemon actually has is the
+ * ORDINARY tool call: the projector tracks each `TaskCreate`/`TaskUpdate` `tool_use` block's input
+ * against its `tool_use.id`, and on that call's `tool_result` synthesizes the `task_updated`
+ * `SessionEvent` itself (`projector/children.ts`'s `applyTodoResult`) — no wire frame is read or
+ * needed. That event is PERSISTED (`event-coverage.ts`: `task_updated: true` in both maps) — so the
+ * session's own store already holds a durable, replayable history of every task mutation, with no
+ * dependency on the child process still being alive (P8c-11: "the child's own effects are not
+ * relied upon — a child dies at idle"). Folding that history to its latest state per task id is
+ * `task.list`'s answer, exactly as before this correction — only the PRODUCER of `task_updated`
+ * was misdescribed, not this module's own fold.
  *
  * `status: "deleted"` is TERMINAL (`TaskSchema`'s own doc comment: "no event ever transitions a
  * task OUT of deleted") and is filtered out of the returned list — mirroring the retired engine's

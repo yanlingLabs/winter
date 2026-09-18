@@ -89,6 +89,7 @@ import { startWinterSession, unconsumedUserMessages, type WinterChildrenSink, ty
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import { startOfficialSession, type OfficialSession } from "./official-session";
 import { officialAuthArmFor, OfficialConsoleProfileMissing, OfficialConsoleRouterUnsupported, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
+import { readWinterTasks } from "./tasks-reader";
 
 export type WinterLegRefusalCode =
   | "winter_executable_unavailable"   // P8b-2: no `winter` binary resolves (setting → env → bundle → home)
@@ -645,6 +646,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         winterSessionId: sessionId,
         runtimeKind: "winter-agent",
         nextSeq: () => deps.store.lastSeq(sessionId) + (++claimedInBatch),
+        priorTodos: () => readWinterTasks(deps.store, sessionId),
         checkpoint: checkpoints,
         now: () => new Date().toISOString(),
         log: {
@@ -934,6 +936,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         winterSessionId: sessionId,
         runtimeKind: "claude-agent",
         nextSeq: () => deps.store.lastSeq(sessionId) + (++claimedInBatch),
+        priorTodos: () => readWinterTasks(deps.store, sessionId),
         checkpoint: deps.checkpoints!,
         now: () => new Date().toISOString(),
         log: {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { MAIN_THREAD, TASK_STATUS_MAP, isSpawnTool } from "../../src/projector";
+import { MAIN_THREAD, isSpawnTool } from "../../src/projector";
 import {
   accept, assistantText, assistantToolUse, init, makeProjector, result, run, textDelta, toolResult,
 } from "./harness";
@@ -121,58 +121,15 @@ describe("projector/children: a spawned subagent's thread", () => {
   });
 });
 
-describe("projector/children: Winter's task graph → task_updated", () => {
-  test("THE STATUS MAP, pinned — six Winter values onto Winter's four", () => {
-    expect(TASK_STATUS_MAP).toEqual({
-      pending: "pending",
-      running: "in_progress",
-      paused: "pending",
-      completed: "completed",
-      failed: "completed",
-      killed: "deleted",
-    });
-  });
-
-  test("a task_started seeds the row, persists nothing itself, and a later patch carries its subject", () => {
+describe("projector/children: background-task frames are NOT the to-do list", () => {
+  // They used to fold into `task_updated` (a phantom to-do row per background agent/bash run).
+  // The thread-closing half lives in `background-children.test.ts`.
+  test("task_started / task_updated / task_notification for an unknown task persist nothing", () => {
     const { projector } = makeProjector();
     expect(accept(projector, taskFrame("task_started", { task_id: "t1", description: "write the report" }))).toEqual([]);
-    const out = accept(projector, taskFrame("task_updated", { task_id: "t1", patch: { status: "running" } })) as unknown as Any[];
-    expect(out.map((e) => e.type)).toEqual(["task_updated"]);
-    expect(out[0]!.task).toMatchObject({ id: "t1", subject: "write the report", status: "in_progress" });
-  });
-
-  test("a patch for a row nobody seeded still produces a schema-valid event, labelled by its id", () => {
-    // `TaskSchema.subject` is z.string().min(1); an event that fails the schema is worse than a row
-    // labelled by its task id.
-    const { projector } = makeProjector();
-    const out = accept(projector, taskFrame("task_updated", { task_id: "t9", patch: { status: "pending" } })) as unknown as Any[];
-    expect(out[0]!.task).toMatchObject({ id: "t9", subject: "t9", status: "pending" });
-  });
-
-  test("`failed` is LOSSY: it renders completed, with the true status preserved in metadata", () => {
-    // Winter's status enum has no failure state and P8b-21 forbids widening it this phase. The
-    // alternatives are worse: `deleted` makes the row vanish, and projecting nothing strands it at
-    // in_progress forever. Flagged in the task report as a protocol change for a later phase.
-    const { projector } = makeProjector();
-    const out = accept(projector, taskFrame("task_updated", { task_id: "t1", patch: { status: "failed", error: "the tool exited 1" } })) as unknown as Any[];
-    expect(out[0]!.task).toMatchObject({ status: "completed", metadata: { winterStatus: "failed", winterError: "the tool exited 1" } });
-  });
-
-  test("`killed` removes the row (status deleted), with the true status in metadata", () => {
-    const { projector } = makeProjector();
-    const out = accept(projector, taskFrame("task_updated", { task_id: "t1", patch: { status: "killed" } })) as unknown as Any[];
-    expect(out[0]!.task).toMatchObject({ status: "deleted", metadata: { winterStatus: "killed" } });
-  });
-
-  test("a task_notification's `stopped` is the patch vocabulary's `killed` under another name", () => {
-    const { projector } = makeProjector();
-    const out = accept(projector, taskFrame("task_notification", { task_id: "t1", status: "stopped", summary: "cancelled", output_file: "/tmp/x" })) as unknown as Any[];
-    expect(out[0]!.task).toMatchObject({ status: "deleted", subject: "cancelled" });
-  });
-
-  test("a patch that says nothing projectable produces nothing", () => {
-    const { projector } = makeProjector();
-    expect(accept(projector, taskFrame("task_updated", { task_id: "t1", patch: { total_paused_ms: 5 } }))).toEqual([]);
+    expect(accept(projector, taskFrame("task_updated", { task_id: "t1", patch: { status: "running" } }))).toEqual([]);
+    expect(accept(projector, taskFrame("task_updated", { task_id: "t1", patch: { status: "failed", error: "the tool exited 1" } }))).toEqual([]);
+    expect(accept(projector, taskFrame("task_notification", { task_id: "t1", status: "stopped", summary: "cancelled", output_file: "/tmp/x" }))).toEqual([]);
   });
 
   test("task_progress, background_tasks_changed and local_command_output persist nothing", () => {
@@ -180,11 +137,5 @@ describe("projector/children: Winter's task graph → task_updated", () => {
     expect(accept(projector, taskFrame("task_progress", { task_id: "t1", description: "d", usage: {} }))).toEqual([]);
     expect(accept(projector, taskFrame("background_tasks_changed", { tasks: [] }))).toEqual([]);
     expect(accept(projector, taskFrame("local_command_output", { content: "x" }))).toEqual([]);
-  });
-
-  test("every task event is MAIN-thread scoped — the task graph is the session's, not a thread's", () => {
-    const { projector } = makeProjector();
-    const out = accept(projector, taskFrame("task_updated", { task_id: "t1", patch: { status: "running" } })) as unknown as Any[];
-    expect(out[0]).toMatchObject({ threadId: MAIN_THREAD });
   });
 });
