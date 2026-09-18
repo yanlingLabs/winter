@@ -32,7 +32,7 @@ import {
   PanelListParams, PanelOpenTabParams, PanelCloseTabParams, PanelActivateTabParams, PanelReportNavigationParams,
   PanelCommandResultParams, PanelReadDiffParams,
   CapabilitiesListParams, VersionsGetParams, SettingsModelRolesParams, SettingsSetModelRoleParams,
-  AgentsListParams, SettingsSetSkillDeniedParams,
+  AgentsListParams, SettingsSetSkillDeniedParams, ModelsCatalogParams,
   SYSTEM_SESSION_ID,
   SessionEvent, ConnWriter, type WritableSocket,
 } from "@yanlinglabs/winter-protocol";
@@ -105,6 +105,7 @@ import type { ProviderLink } from "../peripheral/provider-link";
 import type { HardwareBroker } from "../peripheral/hardware";
 import { verbClass } from "../peripheral/hardware";
 import type { QuotaManager } from "../providers/quota";
+import { modelCatalogWire } from "../providers/model-catalog-wire";
 import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, readRawSettings } from "../settings";
 import { disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
@@ -2311,6 +2312,17 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         saveSettings(settingsPath, next);
         const roles = modelRolesFor(next, opts.boundProviderId?.());
         return { ok: true, model: roles[p.role].model, roles };
+      }
+      // -----------------------------------------------------------------------------------------
+      // Roles pane model picker: catalog family/pricing facts, LOCAL-ROLE ONLY, same posture as
+      // `settings.modelRoles` just above — read-only, no settings write, and settings-independent
+      // (`modelCatalogWire` calls the SAME unfiltered `permittedProviders()` those roles' "any"/
+      // "same-as-session" `permitted` sets use, so there is nothing here for a `winterHome`-less
+      // test server to degrade on).
+      // -----------------------------------------------------------------------------------------
+      case METHODS.modelsCatalog: {
+        parseParams(ModelsCatalogParams, params);
+        return modelCatalogWire();
       }
       // -----------------------------------------------------------------------------------------
       // Daemon settings surface batch 3 (item 2) — the ONE write door for a skill's `Skill(<name>)`

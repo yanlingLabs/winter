@@ -1621,8 +1621,13 @@ export function modelRoleConstraint(role: ModelRole): ModelRoleConstraint {
  *  `scope === "llm"` (stt/tts/embedding/image/video/search rows are never model-role candidates).
  *  `filterProviderIds` narrows to a single provider (the `"internal-provider"` constraint); omitted
  *  returns every eligible provider (the `"any"`/`"same-as-session"` constraints). A provider with
- *  zero servable rows after this filter is dropped entirely — never an empty-but-present entry. */
-function permittedProviders(filterProviderIds?: ReadonlySet<string>): Array<{ providerId: string; displayName: string; models: ModelTag[] }> {
+ *  zero servable rows after this filter is dropped entirely — never an empty-but-present entry.
+ *
+ *  EXPORTED for `providers/model-catalog-wire.ts`'s `models.catalog` reader, called there
+ *  unfiltered (the exact same call `modelRoleInfo` makes for its "any"/"same-as-session" roles) so
+ *  that surface's eligible provider/model set is PROVABLY the same one `permitted` can ever name —
+ *  reused, never a second hand-copy of this predicate that could drift from it. */
+export function permittedProviders(filterProviderIds?: ReadonlySet<string>): Array<{ providerId: string; displayName: string; models: ModelTag[] }> {
   const catalog = loadCatalog();
   const out: Array<{ providerId: string; displayName: string; models: ModelTag[] }> = [];
   for (const p of catalog.providers) {
