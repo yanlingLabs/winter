@@ -274,12 +274,19 @@ struct LibraryDetailPage<Trailing: View, Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: libraryDetailSpacing) {
+                    // The subject's caption opens the page now that the title line carries only
+                    // the title, the library's way.
+                    if !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(Typography.caption())
+                            .foregroundStyle(Theme.textMuted)
+                    }
                     content()
                 }
-                .padding(libraryDetailPadding)
+                .padding(.horizontal, libraryDetailPadding)
+                .padding(.bottom, libraryDetailPadding)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
@@ -287,7 +294,7 @@ struct LibraryDetailPage<Trailing: View, Content: View>: View {
     }
 
     private var header: some View {
-        ShellPanelHeader(title: title, subtitle: subtitle, backLabel: backLabel, onBack: onBack,
+        ShellPanelHeader(title: title, backLabel: backLabel, onBack: onBack,
                          trailing: trailing)
     }
 }

@@ -92,7 +92,12 @@ struct PairedDevicesView: View {
 
     private var header: some View {
         HStack {
-            Text("Paired Devices").font(Typography.paneTitle)
+            // In a floating panel, the library's title register; in the Dashboard, the pane title.
+            if closeGutter > 0 {
+                ShellPanelTitle("Paired Devices")
+            } else {
+                Text("Paired Devices").font(Typography.paneTitle)
+            }
             Spacer()
             // PLAIN, not filled (user call, 2026-09-18): two filled capsules in the corner of a
             // translucent panel read as the loudest thing on it, louder than the devices the pane

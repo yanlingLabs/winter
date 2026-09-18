@@ -377,11 +377,12 @@ struct ShellPanelBackButton: View {
     }
 }
 
-/// A panel page's header row: optional back chevron, title (and a muted caption), trailing
-/// actions, and the close glyph's gutter — all inside `shellPanelHeaderHeight`, 18 pt from the edge.
+/// A panel page's title line: optional back chevron, the title in the LIBRARY's own register
+/// (body, muted — the "Library" heading at the top of its tab column), trailing actions, and the
+/// close glyph's gutter — inside `shellPanelHeaderHeight`, 18 pt from the edge. No band, no rule
+/// under it (user call, 2026-09-18): the content starts right below, as it does in the library.
 struct ShellPanelHeader<Trailing: View>: View {
     let title: String
-    var subtitle: String = ""
     var backLabel: String = "Back"
     var onBack: (() -> Void)? = nil
     @ViewBuilder var trailing: () -> Trailing
@@ -391,19 +392,7 @@ struct ShellPanelHeader<Trailing: View>: View {
             if let onBack {
                 ShellPanelBackButton(label: backLabel, action: onBack)
             }
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title)
-                    .font(Typography.control(.semibold))
-                    .foregroundStyle(Theme.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                if !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(Typography.caption())
-                        .foregroundStyle(Theme.textMuted)
-                        .lineLimit(1)
-                }
-            }
+            ShellPanelTitle(title)
             Spacer(minLength: 8)
             trailing()
         }
@@ -414,9 +403,59 @@ struct ShellPanelHeader<Trailing: View>: View {
 }
 
 extension ShellPanelHeader where Trailing == EmptyView {
-    init(title: String, subtitle: String = "", backLabel: String = "Back", onBack: (() -> Void)? = nil) {
-        self.init(title: title, subtitle: subtitle, backLabel: backLabel, onBack: onBack,
-                  trailing: { EmptyView() })
+    init(title: String, backLabel: String = "Back", onBack: (() -> Void)? = nil) {
+        self.init(title: title, backLabel: backLabel, onBack: onBack, trailing: { EmptyView() })
+    }
+}
+
+/// A panel's title text — the library's "Library" heading, the one style every panel names itself in.
+struct ShellPanelTitle: View {
+    let text: String
+
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text)
+            .font(Typography.body())
+            .foregroundStyle(Theme.textMuted)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// The title at the top of a panel's LEFT COLUMN (the library's tab column, a picker's family
+/// column). The column's own 8 pt padding plus this row put the text on the shared title line,
+/// 18 pt in — level with the close glyph across the card.
+struct ShellPanelColumnTitle: View {
+    let text: String
+
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        ShellPanelTitle(text)
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: shellPanelHeaderHeight - 16)
+    }
+}
+
+/// The heading at the top of a panel's RIGHT side, on the same title line: what the left column has
+/// selected ("Skills", a family's name), in the library's `LibraryTabHeader` register.
+struct ShellPanelPaneHeading: View {
+    let text: String
+
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text)
+            .font(Typography.paneTitle)
+            .foregroundStyle(Theme.textPrimary)
+            .lineLimit(1)
+            .padding(.leading, shellPanelEdgeInset)
+            .padding(.trailing, shellPanelEdgeInset + shellOverlayCloseGutter)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: shellPanelHeaderHeight)
     }
 }
 
@@ -661,13 +700,7 @@ struct LibraryPanel: View {
     /// that was a band of nothing around one close button.
     private var tabColumn: some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(shellOverlayAccessibilityName(.library))
-                .font(Typography.body())
-                .foregroundStyle(Theme.textMuted)
-                .padding(.horizontal, 10)
-                // On the shared header line (the column's own 8 pt padding + this = 50 pt).
-                .frame(height: shellPanelHeaderHeight - 8)
-                .accessibilityAddTraits(.isHeader)
+            ShellPanelColumnTitle(shellOverlayAccessibilityName(.library))
             ForEach(LibraryTab.allCases, id: \.self) { candidate in
                 Button {
                     apply(libraryNavigationSelectingTab(navigation, candidate))
