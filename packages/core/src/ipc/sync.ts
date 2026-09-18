@@ -626,7 +626,7 @@ export interface SyncConfigContext {
    *  or a resolved `null`, both mean "no key stored". */
   secret?(name: string): Promise<string | null>;
   /** The user-ADDED half of the dangerous-domains list — daemon.ts's own shared
-   *  `dangerousDomainsAdded` const (the SAME one Search/ReadPage/the research runner already
+   *  `dangerousDomainsAdded` const (the SAME one `Search`, the `browser` tool and the child's own web floor already
    *  consult for the identical live list). Called with NO cwd: `sync.config` carries no
    *  session/project context, so this resolves against the daemon's base (non-project) settings —
    *  the same "no cwd" behavior every other cwd-less caller in this codebase already gets. */

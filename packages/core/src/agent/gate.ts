@@ -198,19 +198,27 @@ const READ_ONLY = new Set(["read", "glob", "grep", "ls", "bash_output", "Skill",
 // `docs info`/`docs read` ask under ask/dont-ask and deny under plan even though neither mutates,
 // because this gate is keyed by TOOL NAME and `docs` also carries `replace`/`insert`/`append`.
 const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule", "Workflow", "session_spawn", "sheets", "slides", "docs"]);
-// web_fetch (4g Task 5, T6 adds web_search here) is Winter's ONLY network-capable tool — it does NOT
-// belong in READ_ONLY (it makes a live outbound request; the response bytes are DATA that could
-// carry adversarial "instructions", so an unattended session shouldn't get an implicit pass) and it
-// is NOT quite MUTATING either (unlike write/edit/bash it never touches an arbitrary fs/process
-// path on its own — it only ever saves into the session's own sandboxed tmp scratch dir). It gets
-// its own class so its answer can diverge from both READ_ONLY and MUTATING independently.
+// `web_fetch`/`web_search` name the NETWORK class's original members. **Neither is a live daemon tool
+// any more** (2026-09-18, the web-tools ruling) — but the two strings are still exactly what this gate
+// is asked about, because `runtime-sdk/tool-names.ts`'s pair table maps the runtime's own
+// `WebFetch`→`web_fetch` and `WebSearch`→`web_search` before `gateClassFor` sees them. So these are
+// CLASSIFICATION DATA for the tools the child actually calls, not vestigial rows: deleting either
+// would drop its tool to the unclassified fail-closed `"ask"` branch — a card in `auto` where there is
+// silence today, and a typed deny in chat/dispatch.
+//
+// The class exists because a web call belongs in neither neighbour: it makes a live outbound request
+// whose response bytes are DATA that could carry adversarial "instructions" (so an unattended session
+// should not get READ_ONLY's implicit pass), and it touches no arbitrary fs/process path of its own
+// (so it is not MUTATING). Its answer can therefore diverge from both independently.
 //
 // SP-approvals T10 (user addition 2026-07-21, spec §7 "Web tools"): "web tools become free by
-// default" — web_search never prompts under ANY policy, and web_fetch never prompts under ANY
-// policy EITHER at this gate (its one remaining floor — a dangerous-domain check — is a pre-exec
-// check with path/domain awareness this gate deliberately never grows; it lives entirely in
-// engine.ts, run BEFORE executeCall for every policy including plan and auto, see dangerous-
-// domains.ts + engine.ts's webFetchGate). PRE-T10 this class rode the SAME branch as MUTATING/bash
+// default" — neither web tool prompts under ANY policy AT THIS GATE. Its one remaining floor is a
+// dangerous-domain check, a pre-exec check with path/domain awareness this gate deliberately never
+// grows. THAT FLOOR NO LONGER LIVES WHERE THIS COMMENT USED TO SAY IT DID: the retired engine's
+// `webFetchGate` is gone with the engine, and the floor is now supplied to the child as
+// `Options.web.blockedDomains` (`runtime-sdk/mode-options.ts`'s `webOptionsFor`, from the same
+// `agent/dangerous-domains.ts` list) and re-checked on the call by the PreToolUse hooks in
+// `runtime-sdk/hooks.ts`. PRE-T10 this class rode the SAME branch as MUTATING/bash
 // outside plan mode (ask under `ask`, allow under `auto`); that changed because re-prompting for
 // every fetch/search trained users to click through without reading, while the one case that
 // actually matters — a fetch that could exfiltrate data to a paste/tunnel/collector endpoint —
@@ -225,12 +233,14 @@ const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_workt
 // injected instructions), whereas read/glob/grep only ever touch the local filesystem the user
 // already controls. That's a meaningfully different risk shape worth its own labeled class in this
 // file's taxonomy, independent of whatever concrete allow/ask/deny verdict the two classes happen
-// to share today. It is NOT because engine.ts consults this class or its membership at runtime —
-// engine.ts's dangerous-domain floor (webFetchGate) is keyed on a plain `call.name === "web_fetch"`
-// string check, entirely decoupled from how this file organizes its sets; nothing about THIS class
-// boundary is what "lets" that check exist or run.
+// to share today. It is NOT because anything consults this class or its membership to build the
+// dangerous-domain floor — that floor is keyed on the tool being a web tool, wherever it is enforced
+// (once the retired engine's `webFetchGate`; today `Options.web.blockedDomains` inside the child
+// plus the PreToolUse hooks in `runtime-sdk/hooks.ts`), entirely decoupled from how this file organizes
+// its sets. Nothing about THIS class boundary is what "lets" that check exist or run.
 //
-// B1-T5: `Search` (chat's Exa-backed web search) joins this class too, deliberately — NOT
+// B1-T5: `Search` (chat's Exa-backed search — ANSWER mode since 2026-09-18) joins this class too,
+// deliberately — NOT
 // READ_ONLY, unlike its sibling task-3 tool AskQuestion. AskQuestion is READ_ONLY because it only
 // blocks on the QuestionBroker (a human answering is not a thing that needs gating); Search
 // performs real network egress to a third-party endpoint and returns attacker-reachable page text
@@ -274,23 +284,18 @@ const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_workt
 // verdict is even relevant). This file's answer is per-TOOL-NAME by construction, so folding a
 // verb-shaped distinction into it would be a second, weaker copy of a boundary that already holds.
 //
-// Its floor is one layer below, in the same two-place shape web_fetch's has: the DANGEROUS-DOMAIN
+// Its floor is one layer below, in the same two-place shape the web class's has: the DANGEROUS-DOMAIN
 // adjudication for `navigate`/`open` — a hard block inside the tool (tools/browser.ts's
-// `refuseDangerous`, unconditional and mode-blind), lifted for exactly one call by the engine's
-// `browserGate` when a human answered fetch's own approval card. Same list, same card, same
-// `WebFetch(domain:...)` rule, no new category (spec §4, the user's decision).
+// `refuseDangerous`, unconditional and mode-blind), lifted for exactly one call when a human answered
+// the web class's own approval card. Same list, same card, same `WebFetch(domain:...)` rule, no new
+// category (spec §4, the user's decision).
 //
-// Whole-branch review Critical 1 fix (2026-07-28, USER-REVISED design): `ReadPage` DOES now carry a
-// floor of its own — same family as web_fetch's, just NOT engine.ts-level and NOT a card. Chat/
-// dispatch structurally have no approval flow to card through at all (USER DECISION: "chat mode...
-// would never ask permissions"), so a dangerous-domain url is HARD-BLOCKED entirely inside the tool
-// (read-page.ts's `renderPage`/`runResearch`, both call page-core.ts's `checkDangerousDomain` before
-// ever reaching a fetch) — an isError refusal, never a card, and with NO `WebFetch(domain:...)`
-// standing-rule override (that rule is earned by approving a card, a consent flow this tool doesn't
-// have). The research sub-agent's `FetchPage` gets the identical hard-block (research.ts) for the
-// same reason: it "cannot card" (task-3-brief.md, "not interactive"). None of this changes what THIS
-// gate returns — `ReadPage`'s verdict here is still, and remains, unconditionally "allow"; the floor
-// lives entirely inside the tool, one layer below where this file's classification has any say.
+// `Search` carries a floor of its own in the same never-a-card shape, and for the structural reason
+// chat and dispatch have: they have no approval flow to card through at all (USER DECISION: "chat
+// mode... would never ask permissions"), so a floor-listed CITATION is withheld inside the tool
+// (search.ts calls page-core.ts's `checkDangerousDomain` on every cited url) rather than prompted for.
+// None of that changes what THIS gate returns — `Search`'s verdict here is unconditionally "allow";
+// the floor lives one layer below, where this file's classification has no say.
 // B2-T7 (whole-branch carry, from T6's review Minor-5): `list_mcp_resources` / `read_mcp_resource`
 // join NETWORK — they were UNCLASSIFIED, the same silent-in-both-directions omission the `browser`
 // entry above records, at a smaller blast radius (they are code-only, so nothing was dead in chat;
@@ -298,8 +303,8 @@ const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_workt
 // too — a read-only LISTING refused to a planning session — plus an approval card under `ask`/`auto`).
 //
 // THE ONE-LINE REASON: they make a live request to an external MCP server process and hand its
-// response back as untrusted model input — web_fetch/ReadPage's exact risk shape — while touching no
-// arbitrary fs/process path of their own; and unlike web_fetch the destination is not caller-chosen
+// response back as untrusted model input — the web class's exact risk shape — while touching no
+// arbitrary fs/process path of their own; and unlike a URL fetch the destination is not caller-chosen
 // (it is a server the USER configured in settings, addressed by name), so the class's unconditional
 // "allow" is owed with no floor beside it.
 //
@@ -308,6 +313,10 @@ const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_workt
 // already controls. NOT the `mcp__`/`plugin__` external branch either — these are FIXED built-ins
 // (mcp-resources.ts's own header says so: they never ride `isExternalToolName`), and CC's own
 // ListMcpResources/ReadMcpResource prompt no approval.
+// `ReadPage` stays in the set although its tool retired with the 2026-09-18 ruling: membership for a
+// name nothing calls is inert, while REMOVING it is the direction that fails silently (an unclassified
+// name lands on the fail-closed `"ask"` branch), and a replayed or relabelled call must not become a
+// card. Same argument as `web_fetch`/`web_search` above, which are additionally load-bearing.
 const NETWORK = new Set(["web_fetch", "web_search", "Search", "ReadPage", "browser", "list_mcp_resources", "read_mcp_resource"]);
 // skill_write (phase 5c Task 2) gets a NEW class, strictly stricter than MUTATING: "ask" under
 // BOTH `ask` AND `auto` (a card on EVERY call — no policy setting silences it), "deny" under

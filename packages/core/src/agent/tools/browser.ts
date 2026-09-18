@@ -440,8 +440,9 @@ export interface BrowserToolDeps {
    *  only input; see `panelReach`. */
   harnesses(sessionId: string): ReadonlyArray<{ clientName: string; role?: string | null }>;
   /** The user-added half of the dangerous-domain list, resolved per project and hot — the SAME
-   *  getter ReadPage, Search and the research runner already share (daemon.ts wires one function
-   *  reference to all of them). Absent → the shipped list alone still applies. */
+   *  getter `Search` shares, and the same list the daemon hands the child's own `WebFetch` as
+   *  `Options.web.blockedDomains` (daemon.ts wires one function reference to all of them).
+   *  Absent → the shipped list alone still applies. */
   dangerousDomainsAdded?(cwd?: string): string[] | undefined;
 }
 
@@ -529,10 +530,10 @@ function panelReach(deps: BrowserToolDeps, sessionId: string): PanelReach {
  *
  * Spec §4 splits into two halves that read alike and behave differently. The first is the per-domain
  * approval mechanism the browser shares with `fetch` — a card, a remembered rule, a user decision —
- * which is adjudicated in the ENGINE (`browserGate`, engine.ts) because that is where a human can be
- * asked. The second is this HARD-BLOCK, over the SAME list ReadPage and the research runner use
- * (`checkDangerousDomain` in page-core.ts, whose own doc carries the full rationale, and spec §7's
- * "the dangerous-domains list is shared").
+ * which is adjudicated where a human can be asked (historically the engine's `browserGate`; on the
+ * Winter leg the approval bridge). The second is this HARD-BLOCK, over the SAME list `Search` and the
+ * child's own `WebFetch` floor use (`checkDangerousDomain` in page-core.ts, whose own doc carries the
+ * full rationale, and spec §7's "the dangerous-domains list is shared").
  *
  * They meet in exactly one place: `approved`. The block is unconditional — every mode, every policy,
  * every caller including a direct `registry.execute` — EXCEPT for a single call the daemon stamped
@@ -547,12 +548,13 @@ function panelReach(deps: BrowserToolDeps, sessionId: string): PanelReach {
  * `commandArgs` enforces: a "a human approved this" signal must be daemon-written. `ctx` is built by
  * `executeCall`; `args` are written by the model.
  *
- * **The LIST is shared with ReadPage; the ENFORCEMENT DEPTH is not, and the difference is
- * structural — do not read "same as ReadPage" as "same coverage".**
+ * **The LIST is shared with every other web door; the ENFORCEMENT DEPTH is not, and the difference is
+ * structural — do not read "same list" as "same coverage".**
  *
- * ReadPage checks TWICE: once on the caller-supplied url, and again on the RESOLVED, post-redirect
- * host inside `fetchCleanPage` (page-core.ts's `dangerousAdded` option, added for exactly this — "a
- * url that merely redirects INTO a dangerous host"). It can, because it owns the fetch.
+ * A door that OWNS its fetch can check twice: once on the caller-supplied url, and again on the
+ * RESOLVED, post-redirect host (`page-core.ts`'s `fetchCleanPage` takes a `dangerousAdded` option for
+ * exactly that — "a url that merely redirects INTO a dangerous host" — and the child's own `WebFetch`
+ * re-checks a cross-host redirect because the redirect is returned to the model for a second call).
  *
  * This tool checks ONCE, on the FIRST HOP — the model-supplied string, before anything is sent. After
  * that the daemon is blind by construction:
@@ -712,8 +714,8 @@ export function browserToolDefs(deps: BrowserToolDeps): ToolDefinition[] {
       + "• navigate — point a tab you already have at a new url: it REUSES that tab instead of adding "
       + "one. This is the DEFAULT way to move through pages — open once, then navigate.\n"
       + "• back — go back in a tab's history.\n"
-      + "• read — the page's rendered text, as a reader sees it. Prefer this over ReadPage when the "
-      + "page needs JavaScript or the user's login; ReadPage is still better for plain articles.\n"
+      + "• read — the page's rendered text, as a reader sees it. Prefer this over WebFetch when the "
+      + "page needs JavaScript or the user's login; WebFetch is still better for plain articles.\n"
       + "• screenshot — a PNG of the tab, returned to you as an image.\n"
       // The description is MODE-INVARIANT — `ToolDefinition.description` has no per-mode seam, only
       // `argsByMode` does — so everything below is written to be true in every mode. In chat these
@@ -756,7 +758,7 @@ export function browserToolDefs(deps: BrowserToolDeps): ToolDefinition[] {
     // "default tool in chat where it is the primary web surface". The asymmetry is also forced:
     // chat's derived toolset has no ToolSearch member unless something chat-eligible is itself
     // deferred, so a chat-deferred `browser` would be permanently uncallable there (the same trap
-    // `AskQuestion` and `ReadPage` both record).
+    // `AskQuestion` and `Search` both record).
     deferred: ["code", "dispatch"],
     // The per-mode schema (registry.ts's `argsByMode`). `args` is the READ set: it is what chat sees
     // AND the fail-closed answer for any caller whose mode is unknown. Spec §1's "the per-mode

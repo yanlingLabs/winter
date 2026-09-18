@@ -16,7 +16,6 @@ import { WINTER_CAPABILITY_TOOLS, buildCapabilitiesFor, capabilityServerName, ty
 import { CAPABILITY_TOOL_MODES, disallowedToolsFor } from "../../src/runtime-sdk/mode-options";
 import { gateClassFor, hostToolNameFor } from "../../src/runtime-sdk/tool-names";
 import { PermissionGate } from "../../src/agent/gate";
-import { PageCache } from "../../src/agent/tools/page-core";
 
 const FIXTURE = join(import.meta.dir, "../agent/lsp/fake-server.ts");
 const FAKE = { command: "bun", args: ["run", FIXTURE] };
@@ -90,8 +89,7 @@ describe("lspCapability: the server shape", () => {
       computer: { computerUse: () => undefined }, computerUseEnabled: () => false,
       browser: { browser: { tabs: () => ({ tabs: [], activeTabId: undefined }) as never, openTab: () => "t", ...panel } },
       office: { office: { ...panel, dirsOf: () => [] as never } },
-      research: { search: {}, readPage: { cache: new PageCache() } },
-      web: { web: {} },
+      research: { search: {} },
       lsp: { lsp: () => undefined },
     };
     const base: CapabilitySession = { sessionId: "s", mode: "code", cwd: "/tmp", roots: ["/tmp"] };

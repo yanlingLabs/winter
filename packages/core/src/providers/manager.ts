@@ -119,7 +119,7 @@ function buildLiveModelResolver(
  * ONE of `INTERNAL_PROVIDER_IDS` (codex-oauth/openai) — a single process-wide instance, built here.
  * A `providerId` outside that set answers `null` rather than mis-building an OpenAI-compatible
  * client pointed at a provider it was never meant to speak to; the caller (daemon.ts) treats that
- * as "no internal Provider" — titles/reviewer/dreamer/cleaner/research/compaction go inert, logged
+ * as "no internal Provider" — titles/reviewer/dreamer/cleaner/compaction go inert, logged
  * ONCE, never a boot refusal. A per-provider internal Provider (one instance per provider, built on
  * the SDK) is the real follow-up that would let this set grow; not attempted here.
  */
@@ -179,7 +179,7 @@ export async function createProvider(
  * whichever backend was live at boot.
  *
  * Several existing callers capture `.provider` directly rather than through a level of
- * indirection (`agent/research.ts`'s runner takes `active.provider` itself, not a wrapper around
+ * indirection (the retired research runner took `active.provider` itself, not a wrapper around
  * it) — so the fix cannot be "reassign the wrapper's `.provider` field", it has to be "the object
  * every caller is already holding to never changes identity, only what it forwards to". Every
  * consumer that captured a `SwappableProvider` reference — directly, or one level removed through
@@ -221,14 +221,14 @@ export class SwappableProvider implements Provider {
  * SAME shape `createProvider`'s `ActiveProvider` already had (`provider`/`model`/`quota`/`live`,
  * renamed from `liveModel` only because every existing consumer's own field is already called
  * `live`, e.g. `SessionTitler`'s `deps.provider.live`) — every pre-existing consumer
- * (`SessionTitler`, `BashReviewer`, `Dreamer`, `SessionCleaner`, the research runner, `daemon.ts`'s
+ * (`SessionTitler`, `BashReviewer`, `Dreamer`, `SessionCleaner`, `daemon.ts`'s
  * own `knownModels`/`liveSelection` closures) keeps working unmodified, because they were never
  * typed against `ActiveProvider` directly, only against the narrower shape this also satisfies.
  *
  * `model`/`live` are MUTATED in place by `refresh` (never reassigned to a new object — this exact
  * object is what every consumer captured), so the ONE remaining piece — `provider` — being a
  * `SwappableProvider` is what makes the mutation visible even to a caller that unwrapped `.provider`
- * at construction time and threw the wrapper away (research.ts).
+ * at construction time and threw the wrapper away (the retired research runner).
  */
 export interface RebindableProvider {
   readonly provider: SwappableProvider;
@@ -293,7 +293,7 @@ export async function createRebindableProvider(settings: Settings, secrets: Secr
         // the last provider that actually worked". Logged on every attempt while stuck here (this
         // function's own doc comment) — the OLD backend is left in place, always.
         console.error(
-          `provider: settings.provider.model now names "${nextProviderId}" — the daemon's internal provider only rebuilds for ${INTERNAL_PROVIDER_IDS.join("/")}, so titles, the bash reviewer, the dreamer, the session cleaner, research, and turn compaction stay on "${boundProviderId}" until it's set back to one of those`,
+          `provider: settings.provider.model now names "${nextProviderId}" — the daemon's internal provider only rebuilds for ${INTERNAL_PROVIDER_IDS.join("/")}, so titles, the bash reviewer, the dreamer, the session cleaner, and turn compaction stay on "${boundProviderId}" until it's set back to one of those`,
         );
         return false;
       }
@@ -328,7 +328,7 @@ export async function createRebindableProvider(settings: Settings, secrets: Secr
 /**
  * WS-20 (review round 1, GUARD): the daemon has exactly ONE internal-calls `Provider` instance
  * (`ActiveProvider`, above) — the dispatch pin, the dreamer, the session cleaner and the ephemeral
- * research sub-agent all wire THEIR turns through it, never a second one. Each of those callers
+ * session cleaner all wire THEIR turns through it, never a second one. Each of those callers
  * resolves its OWN model as a tag (`pinsFor(settings).<slot>`) and then splits it once at the
  * internal-Provider spawn boundary (`splitTag(pin).modelId`) to get the bare id that instance's
  * `streamTurn()` expects.
@@ -366,7 +366,7 @@ export function internalModelFor(pin: ModelTag, provider: { providerId: string }
  * 2026-09-18: the reasoning effort for the two internal-Provider roles whose model is OPTIONAL —
  * `titles.model` and `reviewer.model` (`settings.roleEfforts`, resolved by `effortToSpendForRole`).
  *
- * The pin consumers (dreamer/cleaner/research) need no helper: they skip their run on an
+ * The pin consumers (dreamer/cleaner) need no helper: they skip their run on an
  * `internalModelFor` mismatch, so the model they spend is always their pin and they can hand its tag
  * straight to the resolver. These two roles FALL BACK instead — an unset pin, or one naming a provider
  * the internal `Provider` is not bound to, runs on the bound provider's live model — and the effort has

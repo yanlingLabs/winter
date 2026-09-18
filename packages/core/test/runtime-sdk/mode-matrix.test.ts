@@ -15,8 +15,9 @@ import { canUseToolFor, neverPromptsMessage, type BridgeLogger } from "../../src
 import {
   buildWinterOptions, permissionModeFor, disallowedToolsFor,
   CAPABILITY_TOOL_MODES, CHAT_DISALLOWED_BUILTINS, CHAT_ALLOWED_WINTER_TOOLS, GLOBAL_READ_ALLOW_RULES,
-  WEB_BUILTIN_ALLOW_RULES, type ToolExposure, type WinterOptionsInput,
+  WEB_BUILTIN_ALLOW_RULES, EXA_GATED_SEARCH_TOOL, type ToolExposure, type WinterOptionsInput,
 } from "../../src/runtime-sdk/mode-options";
+import { capabilityToolName } from "../../src/capabilities/names";
 import {
   gateClassFor, hostToolNameFor, winterToolNameFor,
   WINTER_ADVERTISED_TOOLS_0_0_4, WINTER_ADVERTISED_TOOLS_0_0_4_BASE, WINTER_ADVERTISED_MCP_TOOLS_0_0_4,
@@ -430,9 +431,10 @@ test("every capability tool is either exposed to a mode or in that mode's disall
 test("the per-mode capability exposure table is pinned (Winter leg, an Exa key stored)", () => {
   // 0.0.17 / the 2026-09-18 ruling: `WebFetch` is gone from all three lists and `WebSearch` survives
   // only in chat and dispatch, and only because an Exa key makes the daemon's `Search` the search
-  // surface there. Code mode gets both tools.
+  // surface there. Code mode gets both tools. The `mcp__winter__web__*` pair and
+  // `mcp__winter__research__ReadPage` are absent from every list because the tools themselves retired —
+  // a name that is no longer in `CAPABILITY_TOOL_MODES` cannot appear here at all.
   expect(disallowedToolsFor("code", WINTER_LEG_WITH_EXA)).toEqual([
-    "mcp__winter__research__ReadPage",
     "mcp__winter__research__Search",
     "mcp__winter__sessions__list_sessions",
     "mcp__winter__sessions__manage_session",
@@ -442,8 +444,6 @@ test("the per-mode capability exposure table is pinned (Winter leg, an Exa key s
     "WebSearch",
     // fix wave (review F7): `lsp` is code-only, as the registry door was
     "mcp__winter__lsp__lsp",
-    "mcp__winter__web__web_fetch",
-    "mcp__winter__web__web_search",
   ]);
   expect(disallowedToolsFor("chat", WINTER_LEG_WITH_EXA)).toEqual([...new Set([
     ...CHAT_DISALLOWED_BUILTINS,
@@ -456,26 +456,48 @@ test("the per-mode capability exposure table is pinned (Winter leg, an Exa key s
     "mcp__winter__sessions__list_sessions",
     "mcp__winter__sessions__manage_session",
     "mcp__winter__sessions__session_spawn",
-    "mcp__winter__web__web_fetch",
-    "mcp__winter__web__web_search",
   ])].sort());
+  // The retired names must not resurface in ANY mode's list under either answer (a stale entry would
+  // be inert rather than loud, which is exactly why it is asserted).
+  for (const mode of MODES) {
+    for (const exposure of [WINTER_LEG_WITH_EXA, WINTER_LEG_NO_EXA]) {
+      for (const gone of ["mcp__winter__web__web_fetch", "mcp__winter__web__web_search", "mcp__winter__research__ReadPage"]) {
+        expect(disallowedToolsFor(mode, exposure)).not.toContain(gone);
+      }
+    }
+  }
 });
 
-test("with NO Exa key, chat and dispatch get WebSearch INSTEAD of Search — never neither", () => {
+test("with NO Exa key, chat and dispatch get WebSearch INSTEAD of Search — exactly one of the two, never neither", () => {
   // `Search` reaches Exa's answer endpoint, which needs a key; `WebSearch`'s backend has an anonymous
-  // tier. So the absence of a key moves the search surface rather than removing it.
+  // tier. So the absence of a key SWAPS the search surface rather than removing it, and the two rules
+  // are exact complements — the property this test exists for, since the failure of either half is a
+  // mode with no search tool at all (or two) and nothing else would say so.
   for (const mode of ["chat", "dispatch"] as const) {
-    expect(disallowedToolsFor(mode, WINTER_LEG_NO_EXA)).not.toContain("WebSearch");
-    expect(disallowedToolsFor(mode, WINTER_LEG_WITH_EXA)).toContain("WebSearch");
-    // the two lists differ in EXACTLY that one name
-    expect(disallowedToolsFor(mode, WINTER_LEG_WITH_EXA).filter((t) => t !== "WebSearch"))
-      .toEqual(disallowedToolsFor(mode, WINTER_LEG_NO_EXA));
+    const withKey = disallowedToolsFor(mode, WINTER_LEG_WITH_EXA);
+    const noKey = disallowedToolsFor(mode, WINTER_LEG_NO_EXA);
+    expect(withKey).toContain("WebSearch");
+    expect(withKey).not.toContain(EXA_GATED_SEARCH_TOOL);
+    expect(noKey).not.toContain("WebSearch");
+    expect(noKey).toContain(EXA_GATED_SEARCH_TOOL);
+    // the two lists differ in EXACTLY those two names, in opposite directions
+    expect(withKey.filter((t) => t !== "WebSearch"))
+      .toEqual(noKey.filter((t) => t !== EXA_GATED_SEARCH_TOOL));
   }
-  // Code mode is unaffected either way: it has both tools whatever is stored.
+  // Code mode is unaffected either way: it has both SDK tools whatever is stored, and `Search` was
+  // never a code tool at all (it is disallowed there under both answers, by mode alone).
   for (const exposure of [WINTER_LEG_WITH_EXA, WINTER_LEG_NO_EXA]) {
     expect(disallowedToolsFor("code", exposure)).not.toContain("WebSearch");
     expect(disallowedToolsFor("code", exposure)).not.toContain("WebFetch");
+    expect(disallowedToolsFor("code", exposure)).toContain(EXA_GATED_SEARCH_TOOL);
   }
+});
+
+test("EXA_GATED_SEARCH_TOOL is the real wire name of the `research` server's Search", () => {
+  // The one literal `disallowedToolsFor` names outside `CAPABILITY_TOOL_MODES`, diffed against the
+  // minter rather than trusted: a string that is one segment off denies nothing, silently.
+  expect(EXA_GATED_SEARCH_TOOL).toBe(capabilityToolName("research", "Search"));
+  expect(Object.keys(CAPABILITY_TOOL_MODES)).toContain(EXA_GATED_SEARCH_TOOL);
 });
 
 test("ABSENT exaKeyPresent reads as PRESENT — a caller that cannot answer must not widen the surface", () => {
@@ -494,13 +516,14 @@ test("the OFFICIAL leg withholds neither web built-in, in any mode (the 2026-09-
     .toEqual(disallowedToolsFor("chat", { leg: "official", exaKeyPresent: false }));
 });
 
-test("WebFetch is never withheld, on either leg, in any mode — and code keeps the daemon's own pair for now", () => {
+test("WebFetch is never withheld, on either leg, in any mode", () => {
   for (const mode of MODES) {
     for (const exposure of [WINTER_LEG_WITH_EXA, WINTER_LEG_NO_EXA, { leg: "official" as const }]) {
       expect(disallowedToolsFor(mode, exposure)).not.toContain("WebFetch");
     }
   }
   // Lane B2 retires them; until then code's daemon-owned pair is exposed exactly as before.
+  // …and the daemon's own retired pair is not in code's list either, because it no longer exists.
   expect(disallowedToolsFor("code", WINTER_LEG_WITH_EXA)).not.toContain("mcp__winter__web__web_fetch");
   expect(disallowedToolsFor("code", WINTER_LEG_WITH_EXA)).not.toContain("mcp__winter__web__web_search");
 });

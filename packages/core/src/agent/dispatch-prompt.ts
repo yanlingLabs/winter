@@ -1,11 +1,28 @@
 /** Dispatch mode (Phase 7). The coordinator's identity + doctrine — its OWN base prompt (spec §7:
  *  "its own prompt, not code-prompt-plus-patches"): ContextAssembler swaps this in for the code
  *  SYSTEM_PROMPT; the assembler's other sections (date, user instructions, memory) still apply. */
-export const DISPATCH_SYSTEM_PROMPT = [
-  "You are Winter in Dispatch mode: the user's ambient coordinator on this Mac. You plan, delegate, monitor, and report — you are NOT a coding session.",
+/**
+ * Dispatch's base prompt for ONE session.
+ *
+ * A function, not a constant, for the same reason chat's is (`chat-prompt.ts`): its ROUTING DOCTRINE
+ * names the search tool by name, and which search tool a dispatch session actually has depends on
+ * whether an Exa key is stored — the daemon's `Search` (Exa ANSWER mode) with one, the runtime's own
+ * `WebSearch` without (the 2026-09-18 ruling; `/answer` cannot be called anonymously). Naming the one
+ * the session was not given is how a model ends up reporting a tool as broken when it was never there.
+ *
+ * `exaKeyPresent` ABSENT reads as PRESENT — the convention `ToolExposure`, `CapabilitySession` and
+ * `disallowedToolsFor` all keep, so every door agrees by default rather than by coincidence.
+ */
+export function dispatchSystemPrompt(opts: { exaKeyPresent?: boolean } = {}): string {
+  const search = opts.exaKeyPresent !== false ? "Search" : "WebSearch";
+  return [
+    "You are Winter in Dispatch mode: the user's ambient coordinator on this Mac. You plan, delegate, monitor, and report — you are NOT a coding session.",
   "",
   "# Routing doctrine",
-  "Always use the narrowest capable tool, in this order: answer directly < Search < read/glob/grep/ls < bash < computer < session_spawn.",
+  `Always use the narrowest capable tool, in this order: answer directly < ${search} < read/glob/grep/ls < bash < computer < session_spawn.`,
+  opts.exaKeyPresent !== false
+    ? "Search takes a real question and comes back with a written answer and its sources; WebFetch takes a URL and a question about that page. Prefer either over spawning a session to look something up."
+    : "WebSearch finds pages; WebFetch takes a URL and a question about that page. Prefer either over spawning a session to look something up. (Winter's own Search tool — one call, a written answer with sources — needs an Exa key: `winter login --exa-key`.)",
   "Anything that CHANGES FILES routes to session_spawn — no exceptions. You have no write or edit tools; do not try to write files via bash either.",
   "bash is for inspection and glue: git status, running a script or build the user asked about — never file mutation.",
   "",
@@ -21,7 +38,8 @@ export const DISPATCH_SYSTEM_PROMPT = [
   "",
   "# Relayed prompts",
   "When a child needs a permission or has a question, the card appears HERE in this conversation — the user answers it here; never re-ask on the child's behalf. Unanswered permission requests auto-deny after 10 minutes and the child continues without them.",
-].join("\n");
+  ].join("\n");
+}
 
 // R-T2 (per-mode tool registry, Task 2 — "the flip"): DISPATCH_ALLOW_TOOLS used to live here as
 // the hand-maintained source of truth for dispatch's toolset (spec §7's 11 tools; `web` registers
@@ -42,10 +60,9 @@ export const DISPATCH_SYSTEM_PROMPT = [
 // the catch-22 end to end (ToolSearch itself refused as unavailable, then push_notification
 // refused as "deferred — load its schema via ToolSearch first"). push_notification staying
 // dispatch-eligible+deferred is what makes ToolSearch appear for dispatch at all (it is loadable
-// now); web_fetch/web_search are simply gone from dispatch's `modes` (web.ts, R-T3) — dispatch
-// routes web lookups through `Search` (search.ts) instead, which was already `modes: ["chat",
-// "dispatch"]` and NOT deferred, so it needs no ToolSearch round-trip and returns page excerpts in
-// one call (no fetch-the-result-url second step, unlike the old web_search+web_fetch pair).
+// now); web_fetch/web_search left dispatch's `modes` in R-T3 and RETIRED ALTOGETHER on 2026-09-18 —
+// dispatch's web surface is `Search` (search.ts, `modes: ["chat","dispatch"]`, never deferred, so it
+// needs no ToolSearch round-trip) plus the runtime child's own `WebFetch`/`WebSearch`.
 //
 // D1-T2 (per-mode `deferred`): dispatch's simplified question tool is now `AskQuestion`
 // (ask-question.ts, `modes: ["chat", "dispatch"]`), not `ask_user` — `ask-user.ts` dropped

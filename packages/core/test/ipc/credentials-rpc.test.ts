@@ -103,7 +103,10 @@ describe("credential.list / credential.set / credential.remove (WS-19)", () => {
     expect(rowFor(rows, "deepseek")).toMatchObject({ manageable: true, present: false, kind: "api-key", risk: "review-required", group: "provider" });
     expect(rowFor(rows, "openai")).toMatchObject({ manageable: true, present: false, kind: "api-key", risk: "approved" });
     expect(rowFor(rows, "exa")).toMatchObject({ group: "tool", manageable: true, kind: "api-key", risk: "approved", displayName: "Exa" });
-    expect(rowFor(rows, "web-search")).toMatchObject({ group: "tool", displayName: "Web search" });
+    // The RETIRED Brave row (2026-09-18): absent entirely when nothing is stored, so a fresh install is
+    // never offered a slot for a tool that no longer exists. Its present-and-remove-only shape is
+    // asserted in its own test below.
+    expect(rowFor(rows, "web-search")).toBeUndefined();
     c.close();
   });
 
@@ -173,16 +176,46 @@ describe("credential.list / credential.set / credential.remove (WS-19)", () => {
     await c.hello(harnessToken, "test");
 
     await c.request(METHODS.credentialSet, { providerId: "exa", apiKey: SENTINEL });
-    await c.request(METHODS.credentialSet, { providerId: "web-search", apiKey: `${SENTINEL}-ws` });
-    // Raw, verbatim — `sync.config.exaKey` and the tools themselves read these unchanged.
+    // Raw, verbatim — `sync.config.exaKey` and the child's own `Options.web.search.authRef` read this
+    // name unchanged.
     expect(await secrets.get(EXA_API_KEY_SECRET)).toBe(SENTINEL);
-    expect(await secrets.get(WEB_SEARCH_API_KEY_SECRET)).toBe(`${SENTINEL}-ws`);
     expect(await secrets.get("exa:default")).toBeNull();
 
     const rows: any[] = (await c.request(METHODS.credentialList, {})).result.providers;
     expect(rowFor(rows, "exa").present).toBe(true);
     expect((await c.request(METHODS.credentialRemove, { providerId: "exa" })).result).toEqual({ ok: true, removed: true });
     expect(await secrets.get(EXA_API_KEY_SECRET)).toBeNull();
+    c.close();
+  });
+
+  test("the RETIRED `web-search` row: cannot be SET, is listed only when stored, and can still be REMOVED", async () => {
+    // 2026-09-18 (the web-tools ruling): the Brave-backed `web_search` is gone, so nothing reads this
+    // key — but a user who stored one before the retirement must still have a door OUT. Shape chosen to
+    // need no protocol change: `manageable: false` (which the CredentialRow contract defines as
+    // governing SET only), the same `door`, and the row omitted entirely when nothing is stored.
+    const { socketPath, harnessToken, secrets } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "test");
+
+    const refused = await c.request(METHODS.credentialSet, { providerId: "web-search", apiKey: SENTINEL });
+    expect(refused.error?.data?.code).toBe("credential_kind_unsupported");
+    expect(String(refused.error?.message)).toContain("winter credentials remove web-search");
+    // The refusal is not a half-write: nothing landed in the Keychain.
+    expect(await secrets.get(WEB_SEARCH_API_KEY_SECRET)).toBeNull();
+
+    // A key stored the old way (directly, as the retired `winter login --web-search-key` did) is
+    // listed, remove-only, and removable.
+    await secrets.set(WEB_SEARCH_API_KEY_SECRET, `${SENTINEL}-ws`);
+    const rows: any[] = (await c.request(METHODS.credentialList, {})).result.providers;
+    expect(rowFor(rows, "web-search")).toMatchObject({ group: "tool", present: true, manageable: false, kind: "api-key" });
+    // The protocol's own Remove-availability rule (`present && door !== "provider.login"`) holds for it.
+    expect(rowFor(rows, "web-search").door).not.toBe("provider.login");
+
+    expect((await c.request(METHODS.credentialRemove, { providerId: "web-search" })).result).toEqual({ ok: true, removed: true });
+    expect(await secrets.get(WEB_SEARCH_API_KEY_SECRET)).toBeNull();
+    // …and once it is gone the row goes with it.
+    const after: any[] = (await c.request(METHODS.credentialList, {})).result.providers;
+    expect(rowFor(after, "web-search")).toBeUndefined();
     c.close();
   });
 

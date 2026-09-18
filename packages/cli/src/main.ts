@@ -1171,9 +1171,10 @@ export async function runBgKillRoute(c: WinterClient, sessionId: string, taskId:
  * one frame over the local Unix socket (0600, same machine, same user). It is never logged on either
  * path, and it is never a flag, a pipe or an env var.
  *
- * THE TOOL ROWS: `web-search` (the legacy Brave key) is still read per call by the daemon's own tool
- * and is baked into no spawn, so the daemon has no live child to replace for it. **`exa` is no longer
- * like that** (2026-09-18, agent SDK 0.0.17): a Winter child's `Options.web.search.authRef` names it,
+ * THE TOOL ROWS: `web-search` (the legacy Brave key) is read by NOTHING since the 2026-09-18 web-tools
+ * ruling retired `web_search` — the row survives only so a stored key can be REMOVED, and
+ * `credential.set` refuses it typed. **`exa` is the live one** and it is no longer read per call either
+ * (2026-09-18, agent SDK 0.0.17): a Winter child's `Options.web.search.authRef` names it,
  * and whether it exists decides chat's and dispatch's tool surface — so it goes through the daemon
  * exactly like a provider key, and `evictSessionsForCredential` replaces every Winter-leg child for
  * it. Both still fall back to an in-process write with no daemon, so `winter login --exa-key` keeps
@@ -2087,7 +2088,7 @@ if (import.meta.main) {
     break;
   }
   case "login": {
-    const { KeychainSecretStore, CodexAuthStore, runLoginFlow, CODEX, writeOpenAiApiKey, WEB_SEARCH_API_KEY_SECRET, EXA_API_KEY_SECRET, OPENAI_API_KEY_SECRET: OPENAI_API_KEY_SECRET_LOGIN, profileDisplayName } = await import("@yanlinglabs/winter-core");
+    const { KeychainSecretStore, CodexAuthStore, runLoginFlow, CODEX, writeOpenAiApiKey, EXA_API_KEY_SECRET, OPENAI_API_KEY_SECRET: OPENAI_API_KEY_SECRET_LOGIN, profileDisplayName } = await import("@yanlinglabs/winter-core");
     console.log(`${AQUA}${profileDisplayName()} login${RESET}`);
     const secrets = new KeychainSecretStore();
     // Winter Phase 10a (O7, P10a-6): the Anthropic Console login door. Per the design amendment
@@ -2199,23 +2200,24 @@ if (import.meta.main) {
       console.log(`${AQUA}API key stored in Keychain${RESET} — set provider type in ~/.winter/settings.json (openai-compatible); ${credentialEffectNote(wroteOpenAi.via)}`);
       break;
     }
-    // 4g Task 6: web_search's Brave Search API key. Mirrors the --api-key branch above exactly
-    // (readSecret → validate → secrets.set → confirm → break) — the only difference is the
-    // validation, since Brave keys carry no known "sk-"-style prefix to sniff, so this just
-    // rejects an empty paste instead of a format check.
+    // DEPRECATED (2026-09-18, the web-tools ruling): the Brave-backed `web_search` retired, so there is
+    // nothing left to store a Brave key FOR. The flag stays and says so rather than being removed —
+    // an unknown flag would fall through to this command's usage text, which tells a user nothing about
+    // why the thing they did last month stopped working. It never prompts (a masked prompt for a value
+    // that would be dead on arrival is worse than a refusal), never writes, and never exits non-zero:
+    // one line, and it names the door out for a key already stored.
     if (process.argv.includes("--web-search-key")) {
-      const key = (await readSecret("Paste your Brave Search API key: ")).trim();
-      if (!key) { console.error("that does not look like an API key"); process.exit(1); }
-      // Branch review FIX 1 (defense in depth): reject before it ever reaches a fetch header.
-      const invisibleWarning = invisibleKeyCharWarning(key);
-      if (invisibleWarning) { console.error(invisibleWarning); process.exit(1); }
-      await secrets.set(WEB_SEARCH_API_KEY_SECRET, key);
-      console.log(`${AQUA}Brave Search API key stored in Keychain${RESET} — web_search is ready to use`);
+      console.log(
+        `${AQUA}--web-search-key is retired${RESET} — Winter's Brave-backed web_search is gone; the ` +
+        `runtime's own WebSearch and the Exa-backed Search have replaced it. Nothing needs a Brave key ` +
+        `any more.\n  A key you stored earlier can be removed with: winter credentials remove web-search\n` +
+        `  Search's own key (Exa) is set with: winter login --exa-key`,
+      );
       break;
     }
-    // B1-T5: Search's Exa API key. Same shape as the --web-search-key branch above — chat's
-    // Search tool and code's web_search each keep their own keychain secret so the two can never
-    // be confused for one another.
+    // B1-T5: Search's Exa API key — the one web-tool key Winter still uses (`Search`, Exa ANSWER mode),
+    // and the same item a Winter child resolves for its own `WebSearch` through
+    // `Options.web.search.authRef`.
     if (process.argv.includes("--exa-key")) {
       const key = (await readSecret("Paste your Exa API key: ")).trim();
       if (!key) { console.error("that does not look like an API key"); process.exit(1); }
@@ -2745,7 +2747,7 @@ if (import.meta.main) {
   routines [list] | routines create "<spec>" [--policy auto|plan] -- <prompt>
     | routines delete <id> | routines enable <id> | routines disable <id>       manage scheduled routines
   memory [list] [--project] | show <name> [--project] | rm <name> [--project]  manage saved memory facts
-  login [--api-key] [--anthropic-key] [--anthropic-console] [--web-search-key] [--exa-key]
+  login [--api-key] [--anthropic-key] [--anthropic-console] [--exa-key]
   logout [--anthropic] [--anthropic-console] [--openai]           (bare: signs out of ChatGPT/Codex)
   credentials [list] | credentials set <providerId> | credentials remove <providerId>   every provider's API key (masked prompt)
   provider | provider-smoke [--prompt <text>]

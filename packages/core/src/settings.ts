@@ -699,10 +699,18 @@ export const Settings = z.object({
    */
   providers: z.record(z.string(), z.object({ baseUrl: z.string().url().optional() })).optional(),
   legacy: z.object({ readLegacyProjectFiles: z.boolean().default(true) }).optional(),
-  /** WS-20: user-overridable per-slot model pins for the daemon's own INTERNAL callers (dispatch,
-   *  dreaming, the session cleaner, the ephemeral research sub-agent) — every key is optional; an
-   *  absent key (or an absent block) falls back to `pinsFor`'s own default, the ONE reader every
-   *  consumer goes through (never this raw block). See `pinsFor` below for the exact default rule. */
+  /** WS-20: user-overridable per-slot model pins for the daemon's own callers (dispatch, dreaming, the
+   *  session cleaner, and `research` — `WebFetch`'s page digest inside the runtime child since
+   *  2026-09-18) — every key is optional; an absent key (or an absent block) falls back to `pinsFor`'s
+   *  own default, the ONE reader every consumer goes through (never this raw block). See `pinsFor`
+   *  below for the exact default rule.
+   *
+   *  `researchFallback` IS RETIRED AND STILL PARSED. Its only consumer was the multi-page research
+   *  sub-agent, retired with `ReadPage` in the 2026-09-18 web-tools ruling. The key stays in this schema
+   *  because a settings.json that stores one must still LOAD — dropping the key would make zod strip it
+   *  on the next `saveSettings` and silently rewrite the user's file. `modelRoleInfo` marks the role
+   *  retired instead, and `setModelRole` refuses to set a new value while still allowing a stored one to
+   *  be cleared. Same rule for its `roleEfforts` key below. */
   pins: z.object({
     dispatch: ModelTagSchemaCore,
     dream: ModelTagSchemaCore,
@@ -736,6 +744,12 @@ export const Settings = z.object({
    * for the same reason: a stored role effort is always something the wire will honour. Winter-level
    * tiers (`CLIENT_EFFORTS`) are excluded by construction and refused at the write door as well (see
    * `roleAcceptsClientEffort`), so no role can ever store a value the endpoint would 400 on.
+   *
+   * TWO KEYS ARE PARSED BUT UNSPENDABLE (2026-09-18): `pins.research` (the SDK's `WebFetchConfig` has no
+   * effort field) and `pins.researchFallback` (its consumer retired). `roleCarriesEffort` answers `false`
+   * for both, so the write door refuses one and `modelRoleInfo` reports `efforts: null`; the KEYS stay
+   * here so a settings.json written while the door accepted one still loads and `effort: null` still
+   * clears it — the same rule `runtimes.advisorModel`'s own key already follows.
    */
   roleEfforts: z.object({
     "pins.dispatch": z.enum(REASONING_EFFORTS),
@@ -1658,9 +1672,11 @@ export function modelRoleConstraint(role: ModelRole): ModelRoleConstraint {
     // as a session model, on any catalog provider this daemon has a credential for. Nothing about it
     // touches `providers/manager.ts`'s single internal `Provider` any more, so narrowing `permitted`
     // to the currently bound backend would refuse models the child can genuinely run.
-    // `pins.researchFallback` stays `internal-provider` because its only consumer is still the
-    // daemon's own multi-page research runner (`agent/research.ts`), which lane B2 retires — see the
-    // note on `roleCarriesEffort` for the effort half of the same handover.
+    // `pins.researchFallback` keeps its `internal-provider` answer, but the constraint is moot: the role
+    // is RETIRED (its consumer, the multi-page research runner, went with `ReadPage`) and
+    // `modelRoleInfo` reports `permitted: []` for it regardless of what this says. Kept rather than
+    // re-answered because `constraint` is a wire field a client may render, and "internal-provider" is
+    // what it has always reported.
     case "pins.research":
       return "any";
     case "provider.model": case "pins.dispatch":
@@ -1729,10 +1745,11 @@ export function roleEffortFor(settings: Settings | null | undefined, role: Model
  *
  *  - `pins.dispatch` / `provider.model` — a runtime child's `Options.effort` (`session-driver.ts`'s
  *    `optionsFor`).
- *  - the five `"internal-provider"` roles — `TurnRequest.reasoningEffort` on the daemon's internal
- *    `Provider` (`providers/runtime-provider.ts`'s `mapTurnRequest` forwards it verbatim).
- *  - `pins.research` — the daemon's own research runner, for now, and NOWHERE ELSE once lane B2
- *    retires it: `WebFetch`'s digest has no effort field on the wire. See `roleCarriesEffort`.
+ *  - the four LIVE `"internal-provider"` roles (`pins.dream`/`pins.cleaner`/`titles.model`/
+ *    `reviewer.model`) — `TurnRequest.reasoningEffort` on the daemon's internal `Provider`
+ *    (`providers/runtime-provider.ts`'s `mapTurnRequest` forwards it verbatim).
+ *  - `pins.research` — NO longer: `WebFetch`'s digest has no effort field on the wire.
+ *  - `pins.researchFallback` — NO: its one consumer retired. See `roleCarriesEffort` for both.
  *  - `runtimes.advisorModel` — NO. The Winter agent SDK's `AdvisorConfig` is `{ model, authRef? }` and
  *    nothing else, and the pinned Claude Agent SDK's `Options` has no advisor effort either (its only
  *    `effort` is the SESSION's own). Agent-SDK parity comes first in this project, so the daemon does
@@ -1742,24 +1759,31 @@ export function roleEffortFor(settings: Settings | null | undefined, role: Model
  *    door briefly accepted one must still load, and `effort: null` still clears it.
  */
 /**
- * 2026-09-18 (agent SDK 0.0.17) — `pins.research`'s effort is on NOTICE, not yet gone.
+ * 2026-09-18 (the web-tools ruling) — TWO roles answer `false` now, and for the same reason: there is
+ * nowhere left for their stored effort to go.
  *
- * Its model moved into the runtime child (`Options.web.fetch.digestModel`, `WebFetch`'s page digest),
- * and the SDK's `WebFetchConfig` has NO effort field: `{digestModel, authRef, privateAddressPolicy}`
- * is the whole shape. So nothing in a child can spend a stored effort for this role. It stays `true`
- * here ONLY because the daemon's own multi-page research runner (`agent/research.ts`, whose
- * `RESEARCH_EFFORT` this resolver still defaults) is a live consumer until lane B2 retires it. When
- * that lands, this arm must become `false` — `modelRoleInfo` then reports `efforts: null` and the
- * Roles pane stops offering a control that stores a value nothing can spend, which is this function's
- * own stated rule — unless the SDK grows a `web.fetch.effort` (a 0.0.18 ask).
+ *  - `pins.research` — its model moved INTO the runtime child (`Options.web.fetch.digestModel`,
+ *    `WebFetch`'s page digest), and the SDK's `WebFetchConfig` has NO effort field:
+ *    `{digestModel, authRef, privateAddressPolicy}` is the whole shape. The note the spine left here
+ *    said "when the research runner retires, this arm must become `false`" — it has, so it is. If the
+ *    SDK ever grows a `web.fetch.effort` this flips back with it and nothing else changes.
+ *  - `pins.researchFallback` — the ONLY consumer it ever had was that multi-page research runner, which
+ *    retired with `ReadPage`. The SETTINGS KEY is kept (an old settings.json must still load, and
+ *    `pinsFor` still resolves it) but nothing reads the value, so an effort for it is unspendable by
+ *    construction. `modelRoleInfo` marks the role retired; see its own note there.
+ *
+ * `modelRoleInfo` therefore reports `efforts: null` for both, and the write door refuses an effort for
+ * either — which is this function's whole point: never put a control in the Roles pane that stores a
+ * value nothing will ever spend.
  */
 export function roleCarriesEffort(role: ModelRole): boolean {
   switch (role) {
     case "pins.dispatch": case "provider.model":
       return true;
-    case "pins.dream": case "pins.cleaner": case "pins.research": case "pins.researchFallback":
+    case "pins.dream": case "pins.cleaner":
     case "titles.model": case "reviewer.model":
       return true;
+    case "pins.research": case "pins.researchFallback":
     case "runtimes.advisorModel":
       return false;
   }
@@ -1960,8 +1984,16 @@ function modelRoleModel(settings: Settings | null | undefined, role: ModelRole, 
       return { model: pinsFor(settings).cleaner, explicit: settings?.pins?.cleaner !== undefined, constraint, permitted };
     case "pins.research":
       return { model: pinsFor(settings).research, explicit: settings?.pins?.research !== undefined, constraint, permitted };
+    // RETIRED (2026-09-18, the web-tools ruling): its ONE consumer was the multi-page research runner,
+    // which went with `ReadPage`. The role stays on the wire because the protocol's `ModelRole` enum is
+    // a hand-mirrored literal with a parity test and a Swift picker behind it — narrowing it is an
+    // RPC-schema change, not this lane's -- so it is marked retired with the fields the wire already
+    // has: `permitted: []` (a picker with nothing to pick, the same shape an unbound internal provider
+    // already produces) and, via `roleCarriesEffort`, `efforts: null`. `model` still reports its
+    // resolved value so a client that stored one can SEE it and clear it; `setModelRole` refuses to set
+    // a new one and says why.
     case "pins.researchFallback":
-      return { model: pinsFor(settings).researchFallback, explicit: settings?.pins?.researchFallback !== undefined, constraint, permitted };
+      return { model: pinsFor(settings).researchFallback, explicit: settings?.pins?.researchFallback !== undefined, constraint, permitted: [] };
     case "provider.model":
       // Always "explicit": `ProviderSettings.model` is a REQUIRED field, so every loaded `Settings`
       // always carries a real, currently-effective value — there is no "unset" state to distinguish.
@@ -2065,6 +2097,16 @@ function assertCatalogBackedTag(tag: string, role: ModelRole): void {
 export function setModelRole(settings: Settings, role: ModelRole, model?: string | null, effort?: string | null): Settings {
   if (model === undefined && effort === undefined) {
     throw new TypeError(`${role}: neither model nor effort was given — there is nothing to change (pass model to change the pin, effort to change the reasoning level, or both)`);
+  }
+  // RETIRED ROLE (2026-09-18): setting a model for it would store a value nothing reads. CLEARING it
+  // (`null`) is deliberately still allowed — a user with a stored pin from before the retirement must
+  // be able to get rid of it, exactly as `modelRoleInfo` still reports it so they can see it.
+  if (role === "pins.researchFallback" && typeof model === "string" && model.trim() !== "") {
+    throw new TypeError(
+      `${role}: this role is retired — the multi-page research runner it fed was replaced by the ` +
+        `runtime's own WebFetch (whose digest model is \`pins.research\`), so a model stored here would ` +
+        `never be used. Pass model: null to clear a value stored before the retirement.`,
+    );
   }
   const withModel = model === undefined ? settings : setModelRoleModel(settings, role, model);
   if (effort === undefined) return withModel;

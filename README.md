@@ -235,14 +235,16 @@ winter login --anthropic-key    # paste an Anthropic API key
 Signing in with a claude.ai subscription instead of a key isn't supported yet — that door stays
 shut by default until it's had more scrutiny.
 
-Optional search keys:
+An optional search key:
 
 ```sh
 winter login --exa-key           # Exa — powers Search in Chat and Dispatch
-winter login --web-search-key    # Brave — powers web_search in Code
 ```
 
-> Exa's key requirement is going away, and Brave is being retired in favour of Exa everywhere.
+> Brave is gone: the Winter-built `web_search` it backed was retired in favour of the runtime's own
+> claude-shaped `WebSearch`, so nothing needs a Brave key any more (`winter credentials remove
+> web-search` clears one you stored earlier). Exa is optional too — with no Exa key, Chat and Dispatch
+> get `WebSearch` instead of `Search`.
 
 **A note in plain language: Winter is an independent project and is not affiliated with, endorsed by,
 or sponsored by OpenAI.** Signing in with a ChatGPT account uses that account under OpenAI's own
@@ -285,14 +287,16 @@ Tools declare which modes they belong to at registration; a tool with no declara
 so widening one is always a deliberate edit. `mode-toolset-census.test.ts` boots the real daemon and
 reads its registry, so these three sets can't drift from what ships:
 
-**Chat (4)** — `Search` · `ReadPage` · `browser` (read verbs only) · `AskQuestion`
+**Chat** — `Search` (or `WebSearch` with no Exa key) · `WebFetch` · `browser` (read verbs only) ·
+`AskQuestion`
 
-**Dispatch (17)** — `session_spawn` · `list_sessions` · `manage_session` · `send_message` ·
-`task_stop` · `bash` · `computer` · `browser` · `read` · `ls` · `glob` · `grep` · `Search` ·
-`ReadPage` · `AskQuestion` · `push_notification` · `ToolSearch`
+**Dispatch** — `session_spawn` · `list_sessions` · `manage_session` · `send_message` ·
+`task_stop` · `bash` · `computer` · `browser` · `read` · `ls` · `glob` · `grep` ·
+`Search` (or `WebSearch` with no Exa key) · `WebFetch` · `AskQuestion` · `push_notification` ·
+`ToolSearch`
 
-**Code (36)** — `read` · `ls` · `glob` · `grep` · `write` · `edit` · `notebook_edit` · `bash` ·
-`bash_output` · `lsp` · `computer` · `browser` · `web_fetch` · `web_search` · `spawn_agent` ·
+**Code** — `read` · `ls` · `glob` · `grep` · `write` · `edit` · `notebook_edit` · `bash` ·
+`bash_output` · `lsp` · `computer` · `browser` · `WebFetch` · `WebSearch` · `spawn_agent` ·
 `send_message` · `agent_list` · `agent_output` · `task_stop` · `enter_worktree` · `exit_worktree` ·
 `Workflow` · `Skill` · `skill_write` · `schedule` · `ask_user` · `enter_plan_mode` ·
 `exit_plan_mode` · `task_create` · `task_update` · `task_list` · `task_get` · `push_notification` ·
