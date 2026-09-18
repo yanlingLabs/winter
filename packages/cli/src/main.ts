@@ -1171,10 +1171,13 @@ export async function runBgKillRoute(c: WinterClient, sessionId: string, taskId:
  * one frame over the local Unix socket (0600, same machine, same user). It is never logged on either
  * path, and it is never a flag, a pipe or an env var.
  *
- * THE TWO TOOL ROWS (`exa`, `web-search`) DELIBERATELY STAY IN-PROCESS: their keys are read per call
- * by the tools themselves, never baked into a spawn, so there is no live child for the daemon to
- * replace — `evictSessionsForCredential` is a no-op for them by construction. Routing them through
- * the socket would buy nothing and would make `winter login --exa-key` fail when the daemon is down.
+ * THE TOOL ROWS: `web-search` (the legacy Brave key) is still read per call by the daemon's own tool
+ * and is baked into no spawn, so the daemon has no live child to replace for it. **`exa` is no longer
+ * like that** (2026-09-18, agent SDK 0.0.17): a Winter child's `Options.web.search.authRef` names it,
+ * and whether it exists decides chat's and dispatch's tool surface — so it goes through the daemon
+ * exactly like a provider key, and `evictSessionsForCredential` replaces every Winter-leg child for
+ * it. Both still fall back to an in-process write with no daemon, so `winter login --exa-key` keeps
+ * working on a machine whose daemon is down; the printed note says which happened.
  */
 export interface CredentialRpcDoor {
   request(method: string, params?: unknown): Promise<any>;
@@ -2219,8 +2222,16 @@ if (import.meta.main) {
       // Branch review FIX 1 (defense in depth): reject before it ever reaches a fetch header.
       const invisibleWarning = invisibleKeyCharWarning(key);
       if (invisibleWarning) { console.error(invisibleWarning); process.exit(1); }
-      await secrets.set(EXA_API_KEY_SECRET, key);
-      console.log(`${AQUA}Exa API key stored in Keychain${RESET} — Search is ready to use in Chat`);
+      // 2026-09-18 (agent SDK 0.0.17): THIS KEY IS NOW BAKED INTO A SPAWN, so it takes the same door
+      // the provider keys take — through the daemon when one is listening. It used to be written
+      // in-process on purpose, because the daemon's own Search/ReadPage read it per call and no live
+      // child's `Options` mentioned it. Both halves of that changed: the child's
+      // `Options.web.search.authRef` NAMES it, and whether it exists decides chat's and dispatch's
+      // tool surface (`Search` when a key can work, `WebSearch` when it cannot). An in-process write
+      // would leave every live session on the old answer until the idle reap.
+      const wroteExa = await writeCredentialThroughDaemonOrLocally({ kind: "set", providerId: "exa", apiKey: key }, secrets, openCredentialDaemonDoor);
+      if (!wroteExa.ok) { console.error(wroteExa.message); process.exit(1); }
+      console.log(`${AQUA}Exa API key stored in Keychain${RESET} — Search is ready to use in Chat; ${credentialEffectNote(wroteExa.via)}`);
       break;
     }
     const tokens = await runLoginFlow({

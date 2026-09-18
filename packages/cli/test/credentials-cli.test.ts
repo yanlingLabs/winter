@@ -252,13 +252,23 @@ describe("the daemon door (fix round 4)", () => {
     expect(await secrets.get(OPENAI_API_KEY_SECRET)).toBeNull();
   });
 
-  test("the two TOOL rows stay in-process by design — there is no live child for a daemon to replace", async () => {
-    // `evictSessionsForCredential` is a no-op for `exa`/`web-search` by construction (their keys are
-    // read per call, never baked into a spawn), so routing them over the socket would buy nothing
-    // and would make `winter login --exa-key` fail when the daemon is down. Asserted as a DECISION:
-    // the tool keys are written by their own `login` flags, which never build a door.
+  test("a TOOL row still falls back in-process with no daemon — `winter login --exa-key` must work when it is down", async () => {
     const r = await runCredentialsRoute(secrets, home, "set", "exa", async () => SENTINEL, async () => undefined);
     expect(r).toMatchObject({ ok: true, via: "in-process" });
     expect(await secrets.get("exa-api-key")).toBe(SENTINEL);
+  });
+
+  test("with a daemon listening, the `exa` row goes THROUGH it (0.0.17: the key is baked into a spawn)", async () => {
+    // It used to be written in-process by design — the daemon's own Search/ReadPage read it per call
+    // and no child's `Options` named it. At agent SDK 0.0.17 a Winter child's
+    // `Options.web.search.authRef` NAMES it, and whether it exists decides chat's and dispatch's tool
+    // surface, both fixed at spawn. So the daemon has to hear about it: its `credential.set` evicts
+    // every Winter-leg child resumably, which is what makes "no restart" true for this key too.
+    const { door, calls } = scriptedDaemon({ [METHODS.credentialSet]: { ok: true } });
+    const r = await runCredentialsRoute(secrets, home, "set", "exa", async () => SENTINEL, async () => door);
+    expect(r).toMatchObject({ ok: true, via: "daemon" });
+    expect(calls[0]!.params).toEqual({ providerId: "exa", apiKey: SENTINEL });
+    // The value never touched this process's own store on that path — the daemon wrote it.
+    expect(await secrets.get("exa-api-key")).toBeNull();
   });
 });

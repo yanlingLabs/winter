@@ -518,6 +518,80 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
     } finally { t.close(); }
   });
 
+  // 2026-09-18 (agent SDK 0.0.17): the three `Options.web` inputs are read LIVE at every incarnation
+  // — the Exa key's presence, the project's dangerous-domain floor, and `pins.research` as the digest
+  // model. This is the wiring test; `mode-matrix.test.ts` pins what the builder does with them.
+  test("optionsFor reads the Exa key, the domain floor and pins.research LIVE, per incarnation", async () => {
+    const settings = {
+      provider: { model: "openai/gpt-5.6-sol" },
+      pins: { research: "codex-oauth/gpt-5.6-luna" },
+      runtimes: { winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 },
+    } as unknown as Settings;
+    const t = table({ settings: () => settings, dangerousDomainsAdded: () => ["corp.example"] });
+    try {
+      // No Exa key yet: no `search` block at all (the SDK's anonymous-only state).
+      const first = await t.drivers.create(t.store.createSession("t", { mode: "chat" }));
+      expect(t.q().options.web?.search).toBeUndefined();
+      // The floor is the shipped list PLUS the project's own addition, in that order.
+      const floor = t.q().options.web?.blockedDomains ?? [];
+      expect(floor).toContain("pastebin.com");
+      expect(floor[floor.length - 1]).toBe("corp.example");
+      // `pins.research` names a provider with no stored credential, so it is DROPPED rather than
+      // stated — a stated-but-unresolvable digest model would refuse every WebFetch call — and the
+      // drop is logged once, naming the setting.
+      expect(t.q().options.web?.fetch).not.toHaveProperty("digestModel");
+      expect(t.logs.some((l) => l.includes("pins.research"))).toBe(true);
+      await first.end();
+
+      // Store the key, and the NEXT incarnation names it.
+      await new FileSecretStore(join(t.home, "secrets.json")).set("exa-api-key", "x");
+      const second = await t.drivers.create(t.store.createSession("t2", { mode: "chat" }));
+      expect(t.q().options.web?.search?.authRef).toMatchObject({ kind: "keychain", account: "exa-api-key" });
+      // …and the value never appears anywhere in the child's Options.
+      expect(JSON.stringify(t.q().options)).not.toContain("\"x\"");
+      await second.end();
+    } finally { t.close(); }
+  });
+
+  // 2026-09-18 (agent SDK 0.0.17): the `exa` TOOL row is keyed by LEG, not by the record's provider.
+  // It used to evict nothing, correctly — the daemon's own Search/ReadPage read that key per call. Now
+  // `Options.web.search.authRef` names it AND its presence decides the tool surface itself, both fixed
+  // at spawn, so a live child has to be replaced or a key added mid-session does nothing until the
+  // idle reap.
+  test("an `exa` key change evicts every WINTER-leg session, whatever provider its record names", async () => {
+    const settings = { provider: { model: "openai/gpt-5.6-sol" }, runtimes: { winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } } as unknown as Settings;
+    const t = table({ settings: () => settings });
+    try {
+      const sid = t.store.createSession("t", { mode: "chat" });
+      const session = await t.drivers.create(sid);
+      const deps = {
+        list: () => t.drivers.list(),
+        providerOf: (sessionId: string) => t.records.get(sessionId)?.providerId,
+        legOf: (sessionId: string) => t.drivers.legOf(sessionId),
+        evict: (sessionId: string) => t.drivers.evict(sessionId),
+      };
+      // `exa` matches no record's provider at all, and evicts this session anyway.
+      expect(deps.providerOf(sid)).toBe("openai");
+      expect(await evictSessionsForCredential(deps, "exa")).toEqual([sid]);
+      // …and the legacy Brave row still evicts nothing: no child's `Options` names it.
+      expect(await evictSessionsForCredential(deps, "web-search")).toEqual([]);
+      await session.end();
+    } finally { t.close(); }
+  });
+
+  test("an `exa` change leaves an OFFICIAL-leg session alone — that leg is sent no `web` block at all", async () => {
+    const t = table({});
+    try {
+      const acted = await evictSessionsForCredential({
+        list: () => [{ sessionId: "s_official", turnRunning: false, idle: async () => {} }],
+        providerOf: () => "anthropic",
+        legOf: () => "official",
+        evict: async () => { throw new Error("must not evict an official-leg child for an Exa key"); },
+      }, "exa");
+      expect(acted).toEqual([]);
+    } finally { t.close(); }
+  });
+
   // WS-20 (review round 2, M6): `pinsFor` dropped its old cross-provider "openai" fallback rung —
   // a provider that serves no gpt-family row of its own (an `anthropic/*` primary, here) now yields
   // UNSTATED_TAG for `pins.dispatch`, and dispatch must refuse typed rather than mint a record

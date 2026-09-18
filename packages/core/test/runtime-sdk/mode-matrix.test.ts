@@ -6,6 +6,7 @@ import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { RESUME_STAGING_PREFIX, isResumeStagingRoot, resumeStagingRoot } from "@yanlinglabs/winter-runtime-sdk";
 import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import { Settings } from "../../src/settings";
+import { keychainService } from "../../src/profile";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { QuestionBroker } from "../../src/agent/questions";
 import { PermissionGate, type SessionApprovalPolicy } from "../../src/agent/gate";
@@ -13,8 +14,8 @@ import { classifyPermissionMode } from "@yanlinglabs/winter-agent-sdk/messaging"
 import { canUseToolFor, neverPromptsMessage, type BridgeLogger } from "../../src/runtime-sdk/approval-bridge";
 import {
   buildWinterOptions, permissionModeFor, disallowedToolsFor,
-  CAPABILITY_TOOL_MODES, CHAT_DISALLOWED_BUILTINS, CHAT_ALLOWED_WINTER_TOOLS,
-  type WinterOptionsInput,
+  CAPABILITY_TOOL_MODES, CHAT_DISALLOWED_BUILTINS, CHAT_ALLOWED_WINTER_TOOLS, GLOBAL_READ_ALLOW_RULES,
+  WEB_BUILTIN_ALLOW_RULES, type ToolExposure, type WinterOptionsInput,
 } from "../../src/runtime-sdk/mode-options";
 import {
   gateClassFor, hostToolNameFor, winterToolNameFor,
@@ -27,6 +28,10 @@ const MODES: Mode[] = ["code", "dispatch", "chat"];
 const POLICIES: SessionApprovalPolicy[] = ["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"];
 const silent: BridgeLogger = { info: () => {}, error: () => {} };
 const NO_CREDS: CredentialPresence = { byProvider: {} };
+// 0.0.17: the two Winter-leg tool-exposure inputs, spelled once. `exaKeyPresent` is explicit on both
+// (the absent default is `true`, which one test below pins on purpose).
+const WINTER_LEG_WITH_EXA: ToolExposure = { leg: "winter", exaKeyPresent: true };
+const WINTER_LEG_NO_EXA: ToolExposure = { leg: "winter", exaKeyPresent: false };
 
 // -------------------------------------------------------------------------------------------
 // permissionModeFor — the P8b-7 1:1 table
@@ -143,9 +148,15 @@ test("every cell discovers no settings tier of its own and keeps the foreground 
 // USER RULING 2026-09-18: reads are globally allowed, stated as an allow rule rather than left to a
 // `canUseTool` round trip. Only where the tools EXIST: chat's and dispatch's toolsets exclude
 // Read/Glob/Grep through `disallowedToolsFor`, and a rule for an absent tool is noise.
-test("code cells carry the global read-allow list; chat and dispatch carry none", () => {
+test("code cells carry the global read-allow list AND the two web built-ins; chat and dispatch carry none", () => {
+  // 0.0.17: `WebFetch`/`WebSearch` join the code-mode allow list — see `WEB_BUILTIN_ALLOW_RULES`'
+  // own doc. Without them a `dont-ask` session loses both tools, because the runtime denies an
+  // unresolved call under that mode without ever calling `canUseTool` (where Winter's gate has always
+  // answered `allow` for the web class). Spelled as the two constants, not a fourth literal copy.
   for (const policy of POLICIES) {
-    expect(buildWinterOptions(optionsInput({ mode: "code", policy })).permissions?.allow).toEqual(["Read", "Glob", "Grep"]);
+    expect(buildWinterOptions(optionsInput({ mode: "code", policy })).permissions?.allow)
+      .toEqual([...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES]);
+    expect(WEB_BUILTIN_ALLOW_RULES).toEqual(["WebFetch", "WebSearch"]);
     for (const mode of ["chat", "dispatch"] as const) {
       expect(buildWinterOptions(optionsInput({ mode, policy })).permissions?.allow).toBeUndefined();
     }
@@ -403,7 +414,7 @@ test("the Bash sandbox names real DIRECTORIES, because its consumer renders seat
 
 test("every capability tool is either exposed to a mode or in that mode's disallowedTools", () => {
   for (const mode of MODES) {
-    const disallowed = new Set(disallowedToolsFor(mode));
+    const disallowed = new Set(disallowedToolsFor(mode, WINTER_LEG_WITH_EXA));
     for (const [name, { modes }] of Object.entries(CAPABILITY_TOOL_MODES)) {
       const exposed = modes.includes(mode);
       expect({ mode, name, exposed, disallowed: disallowed.has(name) })
@@ -412,28 +423,27 @@ test("every capability tool is either exposed to a mode or in that mode's disall
   }
 });
 
-test("the per-mode capability exposure table is pinned", () => {
-  expect(disallowedToolsFor("code")).toEqual([
-    "WebFetch", "WebSearch",
+test("the per-mode capability exposure table is pinned (Winter leg, an Exa key stored)", () => {
+  // 0.0.17 / the 2026-09-18 ruling: `WebFetch` is gone from all three lists and `WebSearch` survives
+  // only in chat and dispatch, and only because an Exa key makes the daemon's `Search` the search
+  // surface there. Code mode gets both tools.
+  expect(disallowedToolsFor("code", WINTER_LEG_WITH_EXA)).toEqual([
     "mcp__winter__research__ReadPage",
     "mcp__winter__research__Search",
     "mcp__winter__sessions__list_sessions",
     "mcp__winter__sessions__manage_session",
     "mcp__winter__sessions__session_spawn",
   ]);
-  // P8b-33 / review F6: dispatch is no longer empty. Winter's own `web_fetch`/`web_search` are
-  // `modes: ["code"]`, so dispatch's web surface today is `Search`/`ReadPage` only — leaving the
-  // list empty GAVE dispatch the SDK's floorless web built-ins, which classify as NETWORK and
-  // therefore allow under every policy.
-  expect(disallowedToolsFor("dispatch")).toEqual([
-    "WebFetch", "WebSearch",
+  expect(disallowedToolsFor("dispatch", WINTER_LEG_WITH_EXA)).toEqual([
+    "WebSearch",
     // fix wave (review F7): `lsp` is code-only, as the registry door was
     "mcp__winter__lsp__lsp",
     "mcp__winter__web__web_fetch",
     "mcp__winter__web__web_search",
   ]);
-  expect(disallowedToolsFor("chat")).toEqual([...new Set([
+  expect(disallowedToolsFor("chat", WINTER_LEG_WITH_EXA)).toEqual([...new Set([
     ...CHAT_DISALLOWED_BUILTINS,
+    "WebSearch",
     "mcp__winter__computer__computer",
     "mcp__winter__lsp__lsp",
     "mcp__winter__office__docs",
@@ -447,32 +457,64 @@ test("the per-mode capability exposure table is pinned", () => {
   ])].sort());
 });
 
-test("P8b-33: EVERY mode disallows the SDK's own web built-ins", () => {
-  for (const mode of MODES) {
-    expect(disallowedToolsFor(mode)).toContain("WebFetch");
-    expect(disallowedToolsFor(mode)).toContain("WebSearch");
+test("with NO Exa key, chat and dispatch get WebSearch INSTEAD of Search — never neither", () => {
+  // `Search` reaches Exa's answer endpoint, which needs a key; `WebSearch`'s backend has an anonymous
+  // tier. So the absence of a key moves the search surface rather than removing it.
+  for (const mode of ["chat", "dispatch"] as const) {
+    expect(disallowedToolsFor(mode, WINTER_LEG_NO_EXA)).not.toContain("WebSearch");
+    expect(disallowedToolsFor(mode, WINTER_LEG_WITH_EXA)).toContain("WebSearch");
+    // the two lists differ in EXACTLY that one name
+    expect(disallowedToolsFor(mode, WINTER_LEG_WITH_EXA).filter((t) => t !== "WebSearch"))
+      .toEqual(disallowedToolsFor(mode, WINTER_LEG_NO_EXA));
   }
-  // …and code keeps today's daemon-owned pair through the new `web` capability server.
-  expect(disallowedToolsFor("code")).not.toContain("mcp__winter__web__web_fetch");
-  expect(disallowedToolsFor("code")).not.toContain("mcp__winter__web__web_search");
+  // Code mode is unaffected either way: it has both tools whatever is stored.
+  for (const exposure of [WINTER_LEG_WITH_EXA, WINTER_LEG_NO_EXA]) {
+    expect(disallowedToolsFor("code", exposure)).not.toContain("WebSearch");
+    expect(disallowedToolsFor("code", exposure)).not.toContain("WebFetch");
+  }
 });
 
-test("chat excludes the SDK's own web built-ins and every code-only built-in", () => {
-  const chat = disallowedToolsFor("chat");
-  // The floor: chat's research runs through the daemon-owned `research` capability, which carries
-  // the Exa key and the dangerous-domain floor. The SDK's own web tools carry neither.
+test("ABSENT exaKeyPresent reads as PRESENT — a caller that cannot answer must not widen the surface", () => {
+  for (const mode of ["chat", "dispatch"] as const) {
+    expect(disallowedToolsFor(mode, { leg: "winter" })).toEqual(disallowedToolsFor(mode, WINTER_LEG_WITH_EXA));
+  }
+});
+
+test("the OFFICIAL leg withholds neither web built-in, in any mode (the 2026-09-18 ruling)", () => {
+  for (const mode of MODES) {
+    expect(disallowedToolsFor(mode, { leg: "official" })).not.toContain("WebFetch");
+    expect(disallowedToolsFor(mode, { leg: "official" })).not.toContain("WebSearch");
+  }
+  // …and the Exa key is irrelevant there: it only ever decides a Winter-leg chat/dispatch question.
+  expect(disallowedToolsFor("chat", { leg: "official", exaKeyPresent: true }))
+    .toEqual(disallowedToolsFor("chat", { leg: "official", exaKeyPresent: false }));
+});
+
+test("WebFetch is never withheld, on either leg, in any mode — and code keeps the daemon's own pair for now", () => {
+  for (const mode of MODES) {
+    for (const exposure of [WINTER_LEG_WITH_EXA, WINTER_LEG_NO_EXA, { leg: "official" as const }]) {
+      expect(disallowedToolsFor(mode, exposure)).not.toContain("WebFetch");
+    }
+  }
+  // Lane B2 retires them; until then code's daemon-owned pair is exposed exactly as before.
+  expect(disallowedToolsFor("code", WINTER_LEG_WITH_EXA)).not.toContain("mcp__winter__web__web_fetch");
+  expect(disallowedToolsFor("code", WINTER_LEG_WITH_EXA)).not.toContain("mcp__winter__web__web_search");
+});
+
+test("chat excludes every code-only built-in (and WebFetch is NOT one of them any more)", () => {
+  const chat = disallowedToolsFor("chat", WINTER_LEG_WITH_EXA);
   expect(chat).toContain("WebSearch");
-  expect(chat).toContain("WebFetch");
+  expect(chat).not.toContain("WebFetch");
   for (const t of ["Bash", "Write", "Edit", "Read", "Glob", "Grep", "NotebookEdit", "Workflow", "Agent"]) {
     expect(chat).toContain(t);
   }
   // …and code does NOT exclude Bash.
-  expect(disallowedToolsFor("code")).not.toContain("Bash");
+  expect(disallowedToolsFor("code", WINTER_LEG_WITH_EXA)).not.toContain("Bash");
 });
 
-test("chat's allowed set is exactly AskUserQuestion plus Winter's own four", () => {
-  expect(CHAT_ALLOWED_WINTER_TOOLS).toEqual(["AskUserQuestion", "ListAgents", "ReadNotifications", "SendMessage", "advisor"]);
-  for (const t of CHAT_ALLOWED_WINTER_TOOLS) expect(disallowedToolsFor("chat")).not.toContain(t);
+test("chat's allowed set is exactly AskUserQuestion, WebFetch and Winter's own four", () => {
+  expect(CHAT_ALLOWED_WINTER_TOOLS).toEqual(["AskUserQuestion", "WebFetch", "ListAgents", "ReadNotifications", "SendMessage", "advisor"]);
+  for (const t of CHAT_ALLOWED_WINTER_TOOLS) expect(disallowedToolsFor("chat", WINTER_LEG_WITH_EXA)).not.toContain(t);
 });
 
 test("CHAT_DISALLOWED_BUILTINS is pinned, and covers every tool the CHILD actually advertises", () => {
@@ -485,8 +527,13 @@ test("CHAT_DISALLOWED_BUILTINS is pinned, and covers every tool the CHILD actual
     "NotebookEdit", "PushNotification", "Read", "ReadMcpResourceDirTool", "ReadMcpResourceTool",
     "RefreshMcpTools", "ReportFindings", "ScheduleWakeup", "Skill", "TaskCreate", "TaskGet",
     "TaskList", "TaskOutput", "TaskStop", "TaskUpdate", "ToolSearch", "WaitForMcpServers",
-    "WebFetch", "WebSearch", "Workflow", "Write",
+    "Workflow", "Write",
   ]);
+  // 0.0.17: NEITHER web built-in is in this constant any more, in either direction — `WebFetch` is
+  // chat-allowed and `WebSearch`'s exposure depends on whether an Exa key is stored, so both are
+  // decided in `disallowedToolsFor` instead of half here and half there.
+  expect(CHAT_DISALLOWED_BUILTINS).not.toContain("WebFetch");
+  expect(CHAT_DISALLOWED_BUILTINS).not.toContain("WebSearch");
   // THE invariant, stated as a set relation rather than a literal: every advertised name is either
   // chat-allowed or chat-disallowed. An SDK bump that advertises a new tool fails here.
   for (const t of WINTER_ADVERTISED_TOOLS_0_0_4) {
@@ -501,9 +548,11 @@ test("the advertised BASE set is pinned to what the BUILT BINARY reported at 0.0
   // home and CORE_BRAND's names; `system/init.tools`, verbatim — with NO MCP servers declared.
   expect(WINTER_ADVERTISED_TOOLS_0_0_4_BASE).toHaveLength(31);
   expect([...WINTER_ADVERTISED_TOOLS_0_0_4_BASE].sort()).toEqual([...WINTER_ADVERTISED_TOOLS_0_0_4_BASE]);
-  // Two measured facts the exclusion logic leans on.
-  expect(WINTER_ADVERTISED_TOOLS_0_0_4_BASE).not.toContain("WebFetch");   // not advertised at 0.0.3…
-  expect(WINTER_ADVERTISED_TOOLS_0_0_4_BASE).not.toContain("WebSearch");  // …but disallowed anyway (P8b-33)
+  // The 0.0.3 measurement, kept verbatim: neither web built-in existed in this runtime then. At
+  // 0.0.17 both ARE advertised in every session, which is why nothing derives chat's web exposure
+  // from this constant any more (see `tool-names.ts`'s own note and `disallowedToolsFor`).
+  expect(WINTER_ADVERTISED_TOOLS_0_0_4_BASE).not.toContain("WebFetch");
+  expect(WINTER_ADVERTISED_TOOLS_0_0_4_BASE).not.toContain("WebSearch");
   expect(WINTER_ADVERTISED_TOOLS_0_0_4_BASE).toContain("Monitor");
   // The measurement could not see the `winter.mcp` family, because it declared no MCP servers.
   for (const t of WINTER_ADVERTISED_MCP_TOOLS_0_0_4) expect(WINTER_ADVERTISED_TOOLS_0_0_4_BASE).not.toContain(t);
@@ -989,4 +1038,60 @@ test("WS-20: a tag names its provider outright regardless of which OTHER provide
   const codex = buildWinterOptions(optionsInput({ model: "codex-oauth/gpt-5.6-terra", credentials }));
   expect(codex.provider?.providerId).toBe("codex-oauth");
   expect(codex.provider?.authRef).toMatchObject({ kind: "keychain", account: "codex-oauth:default" });
+});
+
+// -------------------------------------------------------------------------------------------
+// `Options.web` — the WINTER leg's web-tool configuration (agent SDK 0.0.17, ruling 2026-09-18)
+// -------------------------------------------------------------------------------------------
+
+test("every Winter-leg cell carries a `web` block, and its private-address policy is per MODE", () => {
+  // `ask` in code (a card the user can answer), `deny` in chat and dispatch (they never prompt, and a
+  // prompt they cannot answer is a hang or an invisible refusal). WebFetch is the only door a Winter
+  // child has to a local service — its Bash sandbox has no network — so silent reach would ADD power.
+  for (const policy of POLICIES) {
+    expect(buildWinterOptions(optionsInput({ mode: "code", policy })).web?.fetch?.privateAddressPolicy).toBe("ask");
+    for (const mode of ["chat", "dispatch"] as const) {
+      expect(buildWinterOptions(optionsInput({ mode, policy })).web?.fetch?.privateAddressPolicy).toBe("deny");
+    }
+  }
+  // A dispatch CHILD is a code-mode session that can never answer a card either (P8b-26).
+  expect(buildWinterOptions(optionsInput({ mode: "code", origin: "dispatch-child" })).web?.fetch?.privateAddressPolicy).toBe("deny");
+});
+
+test("the Exa key travels as a keychain LOCATOR, and only when one is stored", () => {
+  const withKey = buildWinterOptions(optionsInput({ exaKeyPresent: true }));
+  expect(withKey.web?.search?.authRef).toEqual({ kind: "keychain", account: "exa-api-key", service: keychainService(undefined, "/tmp/winter-home") });
+  // never the value, and never `enabled` — the backend's anonymous tier works without a key, so there
+  // is no session in which the daemon wants the tool advertised-but-dead.
+  expect(withKey.web?.search).not.toHaveProperty("enabled");
+  expect(JSON.stringify(withKey.web)).not.toContain("exa-secret");
+  // With no key: no `search` block at all, which is the SDK's anonymous-only state.
+  expect(buildWinterOptions(optionsInput({ exaKeyPresent: false })).web?.search).toBeUndefined();
+});
+
+test("blockedDomains is the floor, verbatim — the shipped list plus whatever the caller resolved", () => {
+  const o = buildWinterOptions(optionsInput({ dangerousDomains: ["pastebin.com", "corp.example"] }));
+  expect(o.web?.blockedDomains).toEqual(["pastebin.com", "corp.example"]);
+  // Absent (a test double that does not care) is an EMPTY list, never undefined: the field is always
+  // stated, so a floor that is genuinely empty and a floor nobody passed read the same to the child.
+  expect(buildWinterOptions(optionsInput()).web?.blockedDomains).toEqual([]);
+});
+
+test("the digest model is stated with its OWN authRef — and dropped rather than guessed at", () => {
+  const home = "/tmp/winter-home";
+  // Cross-provider: the qualified tag, plus that provider's own Keychain locator. The session's key is
+  // never sent to another provider, and an explicit ref keeps the child off the BRAND's keychain
+  // service (the dist one, even for a dev-profile daemon) — the `Options.advisor.authRef` precedent.
+  const cross = buildWinterOptions(optionsInput({ model: "codex-oauth/gpt-5.6-sol", digestModel: "openai/gpt-5.6-luna" }));
+  expect(cross.web?.fetch?.digestModel).toBe("openai/gpt-5.6-luna");
+  expect(cross.web?.fetch?.authRef).toEqual({ kind: "keychain", account: "openai:default", service: keychainService(undefined, home) });
+  // The session's OWN tag is not stated: that IS the SDK's default, and stating it would be a second
+  // way to say the same thing (and a second thing to keep in step with a mid-session model switch).
+  const same = buildWinterOptions(optionsInput({ model: "openai/gpt-5.6-luna", digestModel: "openai/gpt-5.6-luna" }));
+  expect(same.web?.fetch).not.toHaveProperty("digestModel");
+  // No digest model at all: the same shape, so the digest runs on the session's model.
+  expect(buildWinterOptions(optionsInput({ model: "openai/gpt-5.6-sol" })).web?.fetch).not.toHaveProperty("digestModel");
+  // A `winter-test/*` double is never stated (the child's own selection refuses the reserved namespace).
+  const double = buildWinterOptions(optionsInput({ model: "winter-test/echo", digestModel: "winter-test/echo2" as never }));
+  expect(double.web?.fetch).not.toHaveProperty("digestModel");
 });

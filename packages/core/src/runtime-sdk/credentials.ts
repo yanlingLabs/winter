@@ -62,6 +62,26 @@ const TOOL_ROWS: ReadonlyArray<{ providerId: string; displayName: string; secret
 const CODEX_SECRET_MATERIAL_NAME = "codex-oauth:default";
 
 /**
+ * Is an Exa API key stored? (2026-09-18, agent SDK 0.0.17.)
+ *
+ * Two consumers ask it and pull in opposite directions: the Winter leg's tool exposure withholds
+ * `WebSearch` from chat/dispatch when a key exists (the daemon's `Search` covers it) and NAMES that
+ * key on `Options.web.search.authRef` when it does, and `capabilities.list` reports the same answer so
+ * a client's exposure view agrees with what a real session would get. ONE owner, so the two can never
+ * disagree about which item they mean.
+ *
+ * A BOOLEAN, never the value — the same rule the whole file keeps. A store that throws reads as
+ * ABSENT, deliberately: `rawPresent`'s own "failed" state exists for `credential.list`, which must not
+ * render an unreadable Keychain as "you have no credentials", while THIS question's honest failure
+ * answer is the WIDER tool surface (a `WebSearch` whose backend has an anonymous tier) rather than a
+ * `Search` that cannot work and a `WebSearch` that was withheld for it.
+ */
+export async function exaKeyPresent(store: SecretStore | undefined): Promise<boolean> {
+  if (store === undefined) return false;
+  return (await rawPresent(store, EXA_API_KEY_SECRET)) === "present";
+}
+
+/**
  * A slot's fixed presentation — the three fields a client keys a row by (`providerId|door|kind`,
  * A-1) must be STABLE, so `kind` is the kind this SLOT holds, never the kind of whatever happens
  * to be stored in it right now (an empty slot keeps its kind).
@@ -329,6 +349,16 @@ export interface CredentialEvictionDeps {
   list(): ReadonlyArray<{ sessionId: string; turnRunning: boolean; idle(): Promise<void> }>;
   /** The durable record's provider for one session, or `undefined` when there is no record. */
   providerOf(sessionId: string): string | undefined;
+  /**
+   * Which LEG one session's live child runs on (`WinterSessionDrivers.legOf`), or `undefined` when
+   * there is no live driver.
+   *
+   * Needed for a TOOL key rather than a provider credential: the Exa key is not in any session's
+   * durable record, so `providerOf` cannot answer "is this session affected". The leg can — the key
+   * reaches a child only through the WINTER leg's `Options.web.search.authRef` (the official leg is
+   * sent no `web` block at all, because claude owns its own web tools).
+   */
+  legOf?(sessionId: string): "engine" | "winter" | "official" | undefined;
   /** End the child resumably and forget the driver — `WinterSessionDrivers.evict`, which never throws. */
   evict(sessionId: string): Promise<void>;
   log?: (line: string) => void;
@@ -354,17 +384,35 @@ export interface CredentialEvictionDeps {
  * boundary, fire-and-forget, so `credential.set` never delays its reply. The turn in flight
  * legitimately finishes on the credential it was issued with.
  *
- * WHICH SESSIONS: exactly those whose durable record names this provider. A tool row (`exa`,
- * `web-search`) matches no record and evicts nothing — those keys are read per call by the tools
- * themselves, never baked into a spawn.
+ * WHICH SESSIONS: exactly those whose durable record names this provider — EXCEPT for the `exa` tool
+ * row, which is every WINTER-leg session (see below).
+ *
+ * **THE `exa` ROW IS NOT LIKE THE OTHERS** (2026-09-18, agent SDK 0.0.17). It used to evict nothing,
+ * correctly: the daemon's own `Search`/`ReadPage` read that key per call, so a live child's `Options`
+ * never mentioned it. Since 0.0.17 they do — `Options.web.search.authRef` NAMES it, and, worse for a
+ * stale child, whether an Exa key exists decides the TOOL SURFACE itself (`disallowedToolsFor`
+ * withholds `WebSearch` from chat/dispatch when the daemon's `Search` can work). Both are fixed at
+ * spawn, so adding or removing the key changed nothing for a live session: chat would keep a `Search`
+ * that 401s and no `WebSearch` to fall back on. Every Winter-leg child is therefore replaced,
+ * resumably, exactly as a provider credential's are. The official leg is untouched: it is sent no
+ * `web` block at all.
+ *
+ * `web-search` (the legacy Brave key) still evicts nothing — no child's `Options` names it.
  *
  * Returns the session ids it acted on (evicted now or scheduled), for the log and the tests.
  */
 export async function evictSessionsForCredential(deps: CredentialEvictionDeps, providerId: string): Promise<string[]> {
-  if (TOOL_ROWS.some((r) => r.providerId === providerId)) return [];
+  const toolRow = TOOL_ROWS.find((r) => r.providerId === providerId);
+  if (toolRow !== undefined && providerId !== "exa") return [];
+  // For `exa` the test is the LEG, not the record's provider — and it is re-applied at the idle
+  // boundary below for the same reason the provider test is: anything can happen inside a long turn,
+  // including a cross-leg handoff whose own eviction already replaced this child.
+  const affected = providerId === "exa"
+    ? (sessionId: string) => deps.legOf?.(sessionId) === "winter"
+    : (sessionId: string) => deps.providerOf(sessionId) === providerId;
   const acted: string[] = [];
   for (const session of deps.list()) {
-    if (deps.providerOf(session.sessionId) !== providerId) continue;
+    if (!affected(session.sessionId)) continue;
     acted.push(session.sessionId);
     if (session.turnRunning) {
       deps.log?.(`credentials: ${session.sessionId} is mid-turn on ${providerId} — its child will be replaced at the next idle boundary`);
@@ -376,7 +424,7 @@ export async function evictSessionsForCredential(deps: CredentialEvictionDeps, p
           // this one would throw away a fresh, correct incarnation for a credential it no longer
           // uses — one needless cold start and a resume, for nothing. The record is the same source
           // of truth the match above used, so re-reading it is the whole check.
-          if (deps.providerOf(session.sessionId) !== providerId) {
+          if (!affected(session.sessionId)) {
             deps.log?.(`credentials: ${session.sessionId} moved off ${providerId} while its turn ran — leaving its child alone`);
             return;
           }

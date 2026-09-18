@@ -98,7 +98,9 @@ function officialLegReason(mode: CapabilityMode): string {
 }
 
 const CHAT_MODE_TOOL_NOTE = (() => {
-  const excluded = disallowedToolsFor("chat");
+  // The WINTER leg's chat answer, with an Exa key assumed present (the narrower surface) —
+  // this matrix describes the daemon's own capability tools, which only a Winter child is handed.
+  const excluded = disallowedToolsFor("chat", { leg: "winter" });
   return `chat's own tool registry excludes ${excluded.length} Winter built-in(s) by design (runtime-sdk/mode-options.ts's disallowedToolsFor) — narrower by mode policy, not a runtime/surface gate`;
 })();
 

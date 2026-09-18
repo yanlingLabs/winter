@@ -53,7 +53,8 @@ import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
 import type { WinterRuntimeSdk, SessionMode } from "./create";
 import { clearSession } from "./diff-attach";
 import { credentialPresenceFrom, credentialRefFor } from "./keychain";
-import { apiKeyProviderIsUnauthenticated, missingCredentialDetail } from "./credentials";
+import { SHIPPED_DANGEROUS_DOMAINS } from "../agent/dangerous-domains";
+import { apiKeyProviderIsUnauthenticated, exaKeyPresent, missingCredentialDetail } from "./credentials";
 import { renderNoCredentialHint } from "./handoff";
 import { neutralSelectionRefusal, refusalDetailCategoryFor } from "./refusal-copy";
 import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
@@ -277,6 +278,17 @@ export interface WinterLegDeps {
    * consulted — byte-identical to a pre-item-1 session.
    */
   projectAgentDefinitions?: (cwd: string) => LoadedAgentDefinitions;
+  /**
+   * 2026-09-18 (agent SDK 0.0.17): the USER-ADDED half of the dangerous-domain floor for a project,
+   * `settings.permissions.dangerousDomains.added` through the PROJECT-settings overlay — the same
+   * `dangerousDomainsAdded` closure `daemon.ts` already hands the `Search`/`ReadPage`/`web_fetch`
+   * tools and the research runner, wired here verbatim so the floor a Winter CHILD honours through
+   * `Options.web.blockedDomains` is the identical list the daemon's own tools honour.
+   *
+   * Absent (every test double that does not care) ⇒ the shipped list alone, which is the same
+   * degradation the tools' own absent getter already has.
+   */
+  dangerousDomainsAdded?: (cwd?: string) => string[] | undefined;
   log?: (line: string) => void;
   /**
    * P8c-14 (integration round 2): lane 2's `planBridgeFor(...)` module — this file never imports
@@ -476,7 +488,15 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       const settings = deps.settings();
       const hook = runtime.spawnHookFor(mode);
       if (hook instanceof Error) throw new WinterLegRefusal("winter_executable_unavailable", hook.message);
-      const credentials = await credentialPresenceFrom(deps.secrets);
+      // Both credential probes, together: the provider inventory (`CredentialPresence`) and the ONE
+      // tool key whose presence changes the tool SURFACE (0.0.17 — see `WinterOptionsInput`'s
+      // `exaKeyPresent`). Independent Keychain reads, so they are issued in parallel, and re-issued at
+      // EVERY incarnation: adding or removing the Exa key must reach a session's next turn with no
+      // daemon restart, which is what `credentials.ts`'s eviction closes for the live child.
+      const [credentials, exaPresent] = await Promise.all([
+        credentialPresenceFrom(deps.secrets),
+        exaKeyPresent(deps.secrets),
+      ]);
       // `resolveSel`, the retired engine's resolution, carried here: dispatch runs its PIN — the live
       // `pinsFor(settings).dispatch` at `dispatchEffortFor` (the `pins.dispatch` role's stored effort,
       // else `DISPATCH_EFFORT`); `session.setModel`/`setEffort` refuse a dispatch target, so a stored
@@ -592,6 +612,34 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // already gets, rather than handing a malformed string to the spawn boundary.
       const rawAdvisorModel = winterOptionsFromSettings(settings).advisorModel;
       const advisorModel = rawAdvisorModel !== undefined && isModelTag(rawAdvisorModel) ? rawAdvisorModel : d30DefaultModel(model);
+      // 2026-09-18 (user ruling): `pins.research` is `WebFetch`'s PAGE-DIGEST model. Read LIVE here
+      // like every other per-incarnation value, and DROPPED — rather than stated — in the three cases
+      // where stating it would make every `WebFetch` call in the session a typed refusal (the SDK
+      // never silently falls back to the session's model for a STATED digest model, deliberately):
+      //
+      //   the `unstated` sentinel   `pinsFor` answers it when the daemon's own provider serves no
+      //                             `luna` slot and the user pinned nothing.
+      //   no stored credential      the pin names a provider this machine has no key for. The
+      //                             session's own model always has one (`beforeTurn` refuses first),
+      //                             so the digest runs there instead — a little more expensive, and
+      //                             the tool works.
+      //   the session's own tag     nothing to state: that IS the SDK's default (`buildWinterOptions`
+      //                             drops this one itself, since it holds both tags).
+      //
+      // Logged once per incarnation when it is dropped for a reason the user could act on, naming the
+      // setting — a pin that silently does nothing is exactly what `runtimes.advisorModel`'s own
+      // dropped-advisor log line exists to prevent.
+      const researchPin = pinsFor(settings).research;
+      const digestProviderId = researchPin === UNSTATED_TAG ? undefined : (() => {
+        try { return splitTag(researchPin).providerId; } catch { return undefined; }
+      })();
+      const digestModel = researchPin !== UNSTATED_TAG && researchPin !== model
+        && digestProviderId !== undefined && credentials.byProvider[digestProviderId] !== undefined
+        ? researchPin
+        : undefined;
+      if (digestModel === undefined && researchPin !== model) {
+        log(`pins.research: ${researchPin === UNSTATED_TAG ? "resolves to no known slot for this daemon's own provider" : `names ${digestProviderId ?? "a provider this daemon cannot name"}, which has no stored credential`} — WebFetch will digest pages on this session's own model instead`);
+      }
       return buildWinterOptions({
         mode,
         policy: live.approvalPolicy,
@@ -622,6 +670,13 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // ONCE (review Minor fix) — the prior form called both `winterOptionsFromSettings` and
         // `d30DefaultModel` twice for the identical value.
         ...(advisorModel === undefined ? {} : { advisorModel }),
+        // 0.0.17's `Options.web`, assembled in `buildWinterOptions` from these three pure inputs —
+        // see `webOptionsFor` there for what each one decides. `dangerousDomainsAdded` is the project
+        // overlay-aware getter the daemon's own web tools already read, so the child's floor and the
+        // daemon's are provably the same list.
+        exaKeyPresent: exaPresent,
+        dangerousDomains: [...SHIPPED_DANGEROUS_DOMAINS, ...(deps.dangerousDomainsAdded?.(cwd) ?? [])],
+        ...(digestModel === undefined ? {} : { digestModel }),
         // Daemon settings surface (2026-09-17 plan, item 3): a FRESH scan of `<home>/agents/*.md`
         // at every incarnation (never cached here or in `loadUserAgentDefinitions` itself) — a
         // new/edited/removed file reaches THIS session's very next incarnation, no daemon restart.

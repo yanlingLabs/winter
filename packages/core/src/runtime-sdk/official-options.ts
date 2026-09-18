@@ -736,7 +736,15 @@ export function officialInputFor(
           },
           sandbox: sandboxConfigFor(deps.home),
         },
-        additionalDisallowedTools: disallowedToolsFor(input.mode),
+        // 0.0.17 / the 2026-09-18 ruling: `leg: "official"` is what keeps claude's OWN `WebFetch` and
+        // `WebSearch` on this leg. The daemon used to disallow both in every mode (P8b-33) because
+        // they carried neither the Exa key nor the dangerous-domain floor — on THIS leg neither was
+        // ever ours to supply, and the user's ruling is that claude's native pair stays, with
+        // claude's own per-domain approval behaviour. No `Options.web` is sent here either (see
+        // `mode-options.ts`'s `webOptionsFor`): this leg's web tools are claude's to configure.
+        // `exaKeyPresent` is deliberately absent — it only ever decides a Winter-leg chat/dispatch
+        // question, and this leg runs neither mode.
+        additionalDisallowedTools: disallowedToolsFor(input.mode, { leg: "official" }),
         ...(deps.hooks === undefined ? {} : { hooks: deps.hooks }),
         // Router 0.0.9: `deps.agents` is the SAME merged (project-over-user) definition map the
         // Winter leg carries — see this construction site's own header comment. Omitted entirely

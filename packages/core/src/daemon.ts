@@ -1580,6 +1580,11 @@ export async function startDaemon(opts: {
     // `agents.list`'s own handler (ipc/server.ts) both use — an untrusted `cwd` gets the empty scan
     // shape outright, never even reaching the filesystem read `loadProjectAgentDefinitions` would do.
     projectAgentDefinitions: (cwd) => (trustStore.isTrusted(cwd) ? loadProjectAgentDefinitions(cwd) : { definitions: {}, sources: [], rejected: [] }),
+    // 2026-09-18 (agent SDK 0.0.17): the SAME `dangerousDomainsAdded` getter the daemon's own
+    // Search / ReadPage / web_fetch tools and the research runner are wired to, a few hundred lines
+    // below — so the floor a Winter CHILD honours through `Options.web.blockedDomains` is provably the
+    // identical list, project overlay included, rather than a second derivation of it.
+    dangerousDomainsAdded,
     log: (line) => console.error(`winter-leg: ${line}`),
     ...(opts.officialConnectionOverride === undefined ? {} : { officialConnectionOverride: opts.officialConnectionOverride }),
     // P8c integration Wirings 1 & 3 (P8c-14): lane 2's plan bridge and lane 3's hooks facade,

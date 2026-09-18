@@ -1,9 +1,12 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
-  AgentDefinition, CanUseTool, EffortLevel, McpServerConfig, Options, PermissionMode, ProviderConnectionConfig, SandboxSettingsConfig, SpawnClaudeCodeProcess,
+  AgentDefinition, CanUseTool, CredentialRef, EffortLevel, McpServerConfig, Options, PermissionMode, ProviderConnectionConfig,
+  SandboxSettingsConfig, SpawnClaudeCodeProcess, WebFetchConfig, WebToolsConfig,
 } from "@yanlinglabs/winter-agent-sdk";
 import { RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
+import { EXA_API_KEY_SECRET } from "../agent/tools/search";
+import { keychainService } from "../profile";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import type { Settings } from "../settings";
 import type { Mode as SessionMode } from "../agent/tools/registry";
@@ -72,21 +75,81 @@ export const CAPABILITY_TOOL_MODES: Readonly<Record<string, { modes: readonly Se
   "mcp__winter__office__slides": { modes: ["code", "dispatch"] },
   "mcp__winter__research__Search": { modes: ["chat", "dispatch"] },
   "mcp__winter__research__ReadPage": { modes: ["chat", "dispatch"] },
-  // P8b-33 (ruling): the SDK's own `WebSearch`/`WebFetch` are disallowed in EVERY mode — they carry
-  // neither the Exa key nor the dangerous-domain floor — and code keeps today's daemon-owned
-  // `web_fetch`/`web_search` through a new `web` capability server instead. Modes mirror today's
-  // registration: `agent/tools/web.ts:1011,1090` declare `modes: ["code"]` for both.
+  // The daemon's OWN web pair, code-only (`agent/tools/web.ts:1011,1090` declare `modes: ["code"]`).
+  // P8b-33's reason for ALSO disallowing the SDK's built-ins in every mode ("they carry neither the
+  // Exa key nor the dangerous-domain floor") expired at agent SDK 0.0.17, which gives both of them a
+  // host-supplied `Options.web` — the Exa key as an `authRef` the child resolves itself, and the
+  // floor as `blockedDomains`. See `SDK_WEB_BUILTINS` and `disallowedToolsFor` for the per-LEG rule
+  // that replaces it. These two rows stay exactly as they are until lane B2 retires them.
   "mcp__winter__web__web_fetch": { modes: ["code"] },
   "mcp__winter__web__web_search": { modes: ["code"] },
   // Fix wave (review F7): the `lsp` capability server — code-only, as the registry door was.
   "mcp__winter__lsp__lsp": { modes: ["code"] },
 };
 
-/** The SDK's own web built-ins. Disallowed in EVERY mode in 8b (P8b-33): they have no Exa key and
- *  no dangerous-domain floor, and Winter's own floors are daemon state a built-in cannot reach.
- *  Measured NOT to be advertised at 0.0.3 (`WINTER_ADVERTISED_TOOLS_0_0_4`) — listed anyway, so an
- *  SDK bump that starts advertising them cannot silently widen any mode's web surface. */
+/**
+ * **The two web built-ins BOTH runtimes ship**, under the same two names.
+ *
+ * Agent SDK 0.0.17 gives the Winter runtime its own `WebFetch`/`WebSearch` — a copy of claude's, on
+ * by default in every session's `init.tools` — and the official leg has always had claude's native
+ * pair. So the blanket per-mode disallow P8b-33 imposed (they had no Exa key and no dangerous-domain
+ * floor, both of which were daemon state a built-in could not reach) is retired: `Options.web` now
+ * carries the key as an `authRef` the child resolves itself and the floor as `blockedDomains`.
+ *
+ * **The rule is now per LEG and per MODE** (user ruling, 2026-09-18) — see `disallowedToolsFor`:
+ *
+ *   official leg   both tools stay, claude's own, with claude's own per-domain approval behaviour.
+ *   Winter, code   both tools.
+ *   Winter, chat   `WebFetch`, plus `WebSearch` ONLY when no Exa key is stored — with a key, the
+ *   Winter, disp.  daemon's `Search` (Exa answer mode) is the search surface instead, and exposing
+ *                  two searches to one model is a choice nobody asked it to make.
+ */
 export const SDK_WEB_BUILTINS: readonly string[] = ["WebFetch", "WebSearch"];
+
+/**
+ * Which runtime leg a tool list is being built for. The two legs' web surfaces are decided by
+ * DIFFERENT owners — Winter's by this daemon's `Options.web`, claude's by claude — so the leg is a
+ * REQUIRED argument rather than a defaulted one: a call site that forgets it would silently hand one
+ * leg the other's answer, and that is the exact failure the ruling is about.
+ */
+export type ToolExposureLeg = "winter" | "official";
+
+export interface ToolExposure {
+  leg: ToolExposureLeg;
+  /**
+   * Is an Exa API key stored? Decides chat/dispatch's search surface (see `SDK_WEB_BUILTINS`).
+   *
+   * ABSENT READS AS `true` — the NARROWER surface (no `WebSearch` in chat/dispatch). A caller that
+   * cannot answer the question must not thereby widen a mode's tool set; `session-driver.ts` probes
+   * it live at every incarnation, so the real sessions always answer it.
+   */
+  exaKeyPresent?: boolean;
+}
+
+/**
+ * The bare allow rules the two web built-ins need on the WINTER leg in code mode, and nowhere else.
+ *
+ * WHY THEY ARE NEEDED (measured in the pinned SDK's `permissions/evaluator.ts`): neither tool is in
+ * `isBuiltInReadOnly` or `TASK_MODE_CLASS_SILENT_ALLOW`, so the mode stage answers `unresolved` for
+ * them — and under `dontAsk` the post-allow-stage fallback DENIES an unresolved call outright and
+ * `canUseTool` is never called (§6.3, "every would-prompt outcome becomes a denial"). Winter's
+ * `dont-ask` policy maps to that mode, and Winter's own gate has always answered `allow` for the web
+ * class under EVERY policy (`agent/gate.ts`'s `NETWORK`, "web tools free at this gate"). Without
+ * these rules a `dont-ask` code session would silently lose both tools — a behaviour change the
+ * ruling did not ask for, invisible except as a refusal in the transcript.
+ *
+ * THEY CANNOT WIDEN ANYTHING. Both runtimes evaluate deny rules (stage 2) and ask rules (stage 3)
+ * BEFORE allow rules (stage 5), so a PreToolUse hook's deny (lane B3's floor) and every deny rule
+ * still win. The private-address ask is deliberately ahead of stage 5 too — the SDK's own evaluator
+ * says so in as many words ("neither a permissive mode nor a broad allow (`WebFetch`, …)") — so a
+ * loopback or private target still prompts in code mode under this rule. And a BARE name is not an
+ * exact-host `WebFetch(domain:<host>)` rule, so it grants none of the standing DNS-rebinding consent
+ * that naming a host does.
+ *
+ * NOT on the official leg, deliberately: claude asks per domain there and the user asked for claude's
+ * native behaviour to be kept exactly.
+ */
+export const WEB_BUILTIN_ALLOW_RULES: readonly string[] = [...SDK_WEB_BUILTINS];
 
 /**
  * Anchor a rule specifier to the FILESYSTEM ROOT — see `controlPlaneDenyRules`.
@@ -115,16 +178,29 @@ export function fsRootAnchored(pathOrPattern: string): string {
  * (P8b-28, allowed silently in every mode).
  *
  * Everything else a Winter child advertises is in chat's `disallowedTools`.
+ *
+ * 2026-09-18 (user ruling): `WebFetch` joins it. Chat reads pages today through the `research`
+ * capability's `ReadPage`; the SDK's own `WebFetch` is the same act done the way claude does it, with
+ * the daemon's domain floor and a `privateAddressPolicy` of `deny` (chat never asks, so a private
+ * target is refused rather than prompted). `WebSearch` is NOT in this literal: whether chat sees it
+ * depends on whether an Exa key is stored, which is runtime state and therefore `disallowedToolsFor`'s
+ * decision, not a module constant's.
  */
 export const CHAT_ALLOWED_WINTER_TOOLS: readonly string[] = [
   "AskUserQuestion",
+  "WebFetch",
   ...[...WINTER_OWN_TOOL_NAMES].sort(),
 ];
 
 /**
  * The Winter built-ins CHAT excludes — **derived from what the CHILD ACTUALLY ADVERTISES**
  * (`WINTER_ADVERTISED_TOOLS_0_0_4`, measured from the built binary) minus chat's allowed set, plus
- * the SDK's web built-ins and Winter's own pair-table names for completeness.
+ * Winter's own pair-table names for completeness.
+ *
+ * **NEITHER web built-in is here, in either direction** (0.0.17): `WebFetch` is in chat's allowed set
+ * and `WebSearch`'s exposure depends on whether an Exa key is stored — a runtime fact. Both are
+ * therefore decided in ONE place, `disallowedToolsFor`, rather than half here and half there, which
+ * is why the pair table's own two rows are filtered out below.
  *
  * Review F4: deriving this from Winter's pair table left `Monitor`, `ReportFindings` and
  * `ScheduleWakeup` — all three genuinely advertised — visible to a chat model that is supposed to
@@ -138,8 +214,7 @@ export const CHAT_ALLOWED_WINTER_TOOLS: readonly string[] = [
 export const CHAT_DISALLOWED_BUILTINS: readonly string[] = [...new Set([
   ...WINTER_ADVERTISED_TOOLS_0_0_4,
   ...RUNTIME_HOST_TOOL_PAIRS.map(([winter]) => winter),
-  ...SDK_WEB_BUILTINS,
-])].filter((w) => !CHAT_ALLOWED_WINTER_TOOLS.includes(w)).sort();
+])].filter((w) => !CHAT_ALLOWED_WINTER_TOOLS.includes(w) && !SDK_WEB_BUILTINS.includes(w)).sort();
 
 export interface WinterOptionsInput {
   mode: SessionMode;
@@ -235,6 +310,50 @@ export interface WinterOptionsInput {
    * next incarnation with no daemon restart.
    */
   agents?: Readonly<Record<string, AgentDefinition>>;
+  /**
+   * 2026-09-18 (agent SDK 0.0.17): is an Exa API key stored?
+   *
+   * TWO consumers, and they pull in opposite directions, which is why it is one input and not two:
+   * `disallowedToolsFor` withholds `WebSearch` from chat/dispatch when a key exists (the daemon's
+   * `Search` covers it), and `Options.web.search.authRef` NAMES that key for the child when it does.
+   *
+   * A PURE boolean, probed by the caller (`session-driver.ts`'s `optionsFor`, live at every
+   * incarnation beside the provider credential probe) — this builder never reads a secret store, and
+   * the VALUE never reaches it: the daemon names the credential and the child resolves it.
+   *
+   * Absent reads as "a key is stored" — the narrower tool surface; see `ToolExposure`.
+   */
+  exaKeyPresent?: boolean;
+  /**
+   * The dangerous-domain FLOOR, as hostnames, for `Options.web.blockedDomains` (0.0.17).
+   *
+   * `SHIPPED_DANGEROUS_DOMAINS ∪ settings.permissions.dangerousDomains.added` for THIS session's
+   * project, already resolved by the caller (the daemon's own `dangerousDomainsAdded(cwd)` getter,
+   * which is project-settings aware) — this builder stays pure and reads no settings tree itself.
+   *
+   * The two match rules agree: Winter's own `dangerousDomainMatch` is "equal, or a `.`-anchored
+   * suffix", and the SDK documents `blockedDomains` as suffix matching on a label boundary with a
+   * leading `*.`/`.` ignored. So the list travels verbatim, with no translation.
+   */
+  dangerousDomains?: readonly string[];
+  /**
+   * `pins.research` — `WebFetch`'s PAGE-DIGEST model (user ruling 2026-09-18), already resolved by
+   * the caller through `pinsFor(settings)`.
+   *
+   * Passed as the QUALIFIED tag (not the bare id the session's own `Options.model` carries): the SDK
+   * resolves it through the same selection path as a session model, and a qualified key is the one
+   * form that names its provider unambiguously. `Options.web.fetch.authRef` is set alongside it from
+   * that provider's own Keychain locator — always, even for the session's own provider, for the same
+   * reason `Options.advisor.authRef` is set explicitly: the child's own fallback would resolve
+   * `<providerId>:default` under the BRAND's Keychain service, which is the DIST service even for a
+   * dev-profile daemon.
+   *
+   * ABSENT means "the session's own model", the SDK's documented default — which is also what the
+   * caller passes when the pin resolves to the session's own tag, or to a provider with no stored
+   * credential (a stated-but-unresolvable digest model is a typed refusal on every `WebFetch` call,
+   * and a tool that cannot work is worse than one that costs a little more).
+   */
+  digestModel?: ModelTag;
 }
 
 /**
@@ -472,22 +591,38 @@ export function sandboxConfigFor(home: string): SandboxSettingsConfig {
   };
 }
 
-/** Every capability tool NOT exposed to this mode, plus — for chat — the Winter built-ins chat
- *  excludes. The literal is pinned by the matrix test; the parity tripwire (added at integration)
- *  diffs `CAPABILITY_TOOL_MODES` against Task 7's `WINTER_CAPABILITY_TOOLS`. */
+/**
+ * Every capability tool NOT exposed to this mode, plus — for chat — the Winter built-ins chat
+ * excludes, plus the per-leg web-built-in rule. The literal is pinned by the matrix test; the parity
+ * tripwire diffs `CAPABILITY_TOOL_MODES` against Task 7's `WINTER_CAPABILITY_TOOLS`.
+ *
+ * **`exposure` is required, and comes SECOND** — ahead of the defaulted `capabilityTools`, because a
+ * required parameter cannot follow an optional one and this one may not be defaulted (see
+ * `ToolExposure`). The web rule it decides (0.0.17, user ruling 2026-09-18):
+ *
+ *   official        nothing is added. claude's native `WebFetch`/`WebSearch` stay, with claude's own
+ *                   per-domain approval behaviour, which the ruling keeps verbatim.
+ *   winter + code   nothing is added either: both tools are the code-mode web surface now.
+ *   winter + chat   `WebSearch` is disallowed WHEN AN EXA KEY IS STORED, because the daemon's
+ *   winter + disp.  `Search` (Exa answer mode) is then the search surface. With NO key `Search`
+ *                   cannot work at all, so `WebSearch` — whose backend has an anonymous tier —
+ *                   takes its place rather than leaving those two modes with no search.
+ *
+ * `WebFetch` is never disallowed on either leg in any mode any more.
+ */
 export function disallowedToolsFor(
   mode: SessionMode,
+  exposure: ToolExposure,
   capabilityTools: Readonly<Record<string, { modes: readonly SessionMode[] }>> = CAPABILITY_TOOL_MODES,
 ): string[] {
   const out = Object.entries(capabilityTools)
     .filter(([, v]) => !v.modes.includes(mode))
     .map(([name]) => name);
-  // P8b-33: EVERY mode disallows the SDK's own web built-ins, not just chat. Dispatch's web surface
-  // today is `Search`/`ReadPage` only (`web_fetch`/`web_search` are `modes: ["code"]`,
-  // `agent/tools/web.ts:1011,1090`), so leaving dispatch's list empty would have GIVEN dispatch the
-  // SDK's floorless web tools — which classify as `NETWORK` and therefore allow under every policy.
-  out.push(...SDK_WEB_BUILTINS);
   if (mode === "chat") out.push(...CHAT_DISALLOWED_BUILTINS);
+  // The one place either web built-in is withheld — see this function's own doc comment, and
+  // `SDK_WEB_BUILTINS` for the ruling. A string in `disallowedTools` that the child does not
+  // advertise is inert, so this is safe to state for a leg whose tool happens to be named otherwise.
+  if (exposure.leg === "winter" && mode !== "code" && (exposure.exaKeyPresent ?? true)) out.push("WebSearch");
   return [...new Set(out)].sort();
 }
 
@@ -528,7 +663,11 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     // measurement) — child transcripts would be thinner on the Winter leg than on the engine. The
     // cost is more frames per child turn, which the projector folds onto the child's threadId.
     forwardSubagentText: true,
-    disallowedTools: disallowedToolsFor(input.mode, input.capabilityTools),
+    disallowedTools: disallowedToolsFor(
+      input.mode,
+      { leg: "winter", ...(input.exaKeyPresent === undefined ? {} : { exaKeyPresent: input.exaKeyPresent }) },
+      input.capabilityTools,
+    ),
     // Batch 3 (item 2): the fixed control-plane fence PLUS `settings.permissions.deny` (today just
     // `Skill(<name>)` toggles) — see `permissionDenyRulesFor`'s own doc for why this reads
     // `input.settings` rather than the vestigial "no longer consumed" note this field used to carry.
@@ -547,8 +686,11 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     // legitimate, daemon-decided top-level mode (set two lines below), and disabling the runtime's
     // ability to enter it would break that mode for the session itself, not just for a definition.
     permissions: {
-      // Code mode only — see `GLOBAL_READ_ALLOW_RULES`' own doc (the tools do not exist elsewhere).
-      ...(input.mode === "code" ? { allow: [...GLOBAL_READ_ALLOW_RULES] } : {}),
+      // Code mode only — see `GLOBAL_READ_ALLOW_RULES`' own doc (the tools do not exist elsewhere),
+      // and `WEB_BUILTIN_ALLOW_RULES`' own doc for why the two web built-ins need a bare allow rule
+      // on THIS leg (under `dontAsk` the runtime denies an unresolved call without ever calling
+      // `canUseTool`, and Winter's gate has always answered `allow` for the web class).
+      ...(input.mode === "code" ? { allow: [...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES] } : {}),
       deny: permissionDenyRulesFor(input.home, input.settings),
       disableBypassPermissionsMode: input.policy !== "bypass",
     },
@@ -646,5 +788,71 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
   // byte-identically to a session before this field existed the way `undefined` is, so both are
   // normalized to "no key at all" here rather than leaving that distinction to every caller.
   if (input.agents !== undefined && Object.keys(input.agents).length > 0) options.agents = { ...input.agents };
+  options.web = webOptionsFor(input);
   return options;
+}
+
+/**
+ * **`Options.web` — the WINTER leg's web-tool configuration** (agent SDK 0.0.17, user ruling
+ * 2026-09-18). ALWAYS set on this leg, because every field of it is a decision this daemon has an
+ * opinion about and the SDK's absent-means-default is a different opinion:
+ *
+ *  - `search.authRef` — the Exa key's Keychain LOCATOR, never the key. Omitted when none is stored,
+ *    which is exactly the SDK's "anonymous-only" state: an exhausted free quota then comes back as a
+ *    result saying so, never an error that ends the turn. `search.enabled` is deliberately NOT set —
+ *    the backend's anonymous tier works without a key, so there is no session in which the daemon
+ *    wants the tool advertised-but-dead. (The two per-call BOUNDS are left at the SDK's defaults:
+ *    they are the backend's own economics, not a Winter policy.)
+ *  - `fetch.digestModel` / `fetch.authRef` — `pins.research` (see `WinterOptionsInput.digestModel`).
+ *  - `fetch.privateAddressPolicy` — `"ask"` in CODE, `"deny"` in chat and dispatch, and `"deny"` for
+ *    a dispatch CHILD (P8b-26: a code-mode child spawned by dispatch can never answer a card, so an
+ *    `ask` there is a hang or a fail-closed refusal with a card nobody sees). `WebFetch` is the only
+ *    door a Winter child has to a local service — its Bash sandbox has no network at all — so silent
+ *    reach would ADD power claude's own design does not grant.
+ *  - `blockedDomains` — the dangerous-domain floor, verbatim (see `dangerousDomains`). This is an
+ *    EXECUTOR-level refusal in the child, not an approval: a floor domain is refused even in code
+ *    mode, where the retired daemon tool used to raise a card that could be approved once. That is
+ *    the ruling ("dangerous domains are hard-blocked"), and it is the same answer chat and dispatch
+ *    have always had.
+ *
+ * NOTHING HERE IS SET ON THE OFFICIAL LEG: `official-options.ts` sends no `web` at all, because
+ * claude owns its own web tools' behaviour and the ruling keeps it.
+ */
+function webOptionsFor(input: WinterOptionsInput): WebToolsConfig {
+  const privateAddressPolicy = input.mode === "code" && input.origin !== "dispatch-child" ? "ask" : "deny";
+  const digest = digestOptionsFor(input);
+  return {
+    ...(input.exaKeyPresent === false ? {} : { search: { authRef: exaAuthRefFor(input.home) } }),
+    fetch: { ...digest, privateAddressPolicy },
+    blockedDomains: [...(input.dangerousDomains ?? [])],
+  };
+}
+
+/** `fetch.digestModel` + its own `authRef`, or nothing at all — see `WinterOptionsInput.digestModel`. */
+function digestOptionsFor(input: WinterOptionsInput): Pick<WebFetchConfig, "digestModel" | "authRef"> {
+  const digest = input.digestModel;
+  if (digest === undefined || digest === input.model) return {};
+  // A `winter-test/*` digest model would be a reserved-namespace tag the child's own selection
+  // refuses — and every winter-test session's pins default to the primary double anyway, which the
+  // `=== input.model` check above has already dropped. Never stated.
+  if (digest.startsWith(WINTER_TEST_PREFIX)) return {};
+  const digestProvider = providerFor(digest, input.home);
+  // No provider, or no Keychain locator for it (`console/*`, whose credential lives in an `ant`
+  // profile a digest route never sees): the model is NOT stated, so the digest runs on the session's
+  // own model — the SDK's documented default — rather than becoming a typed refusal on every call.
+  // `session-driver.ts` logs the setting once when it drops a pin for this reason.
+  if (digestProvider?.authRef === undefined) return {};
+  return { digestModel: digest, authRef: digestProvider.authRef };
+}
+
+/**
+ * The Exa key as a `CredentialRef` — a LOCATOR, and the daemon never reads the value (the same rule
+ * `Options.provider.authRef` follows). `service` is spelled explicitly, as it is for every provider
+ * ref: the child would otherwise resolve the BRAND's Keychain service, which is the dist service even
+ * for a dev-profile daemon. The SDK's tool-secret resolver accepts either a bare key string or
+ * `{"kind":"api-key",…}` in that item, which is what lets this daemon keep storing Exa's key raw (as
+ * `winter credentials set exa` and `winter login --exa-key` always have).
+ */
+function exaAuthRefFor(home: string): CredentialRef {
+  return { kind: "keychain", account: EXA_API_KEY_SECRET, service: keychainService(undefined, home) };
 }

@@ -72,9 +72,9 @@ describe("lspCapability: the server shape", () => {
   test("the tables agree: code-only, deferred on the registry door, classified READ_ONLY under the bare name `lsp`", () => {
     expect(WINTER_CAPABILITY_TOOLS["mcp__winter__lsp__lsp"]).toEqual({ modes: ["code"], deferred: true });
     expect(CAPABILITY_TOOL_MODES["mcp__winter__lsp__lsp"]).toEqual({ modes: ["code"] });
-    expect(disallowedToolsFor("chat")).toContain("mcp__winter__lsp__lsp");
-    expect(disallowedToolsFor("dispatch")).toContain("mcp__winter__lsp__lsp");
-    expect(disallowedToolsFor("code")).not.toContain("mcp__winter__lsp__lsp");
+    expect(disallowedToolsFor("chat", { leg: "winter" })).toContain("mcp__winter__lsp__lsp");
+    expect(disallowedToolsFor("dispatch", { leg: "winter" })).toContain("mcp__winter__lsp__lsp");
+    expect(disallowedToolsFor("code", { leg: "winter" })).not.toContain("mcp__winter__lsp__lsp");
     // the bridge's names: the wire name strips to `lsp` (the seventh capability key), which the
     // gate allows under every policy including `plan` — a read-only tool, exactly as before
     expect(hostToolNameFor("mcp__winter__lsp__lsp")).toBe("lsp");

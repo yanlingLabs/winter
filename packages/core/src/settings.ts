@@ -1631,14 +1631,15 @@ export type ModelRole = (typeof MODEL_ROLES)[number];
  *  - `"internal-provider"`: routed through the daemon's SINGLE internal `Provider` instance
  *    (`providers/manager.ts`'s `createProvider`, built for `ownProviderFor(settings)` only when
  *    that provider is one of `INTERNAL_PROVIDER_IDS`, else not built at all) — `pins.dream`/
- *    `pins.cleaner`/`pins.research`/`pins.researchFallback` (gated by `internalModelFor`,
- *    providers/manager.ts) and `titles.model`/`reviewer.model` (same gate, daemon.ts) all run on
- *    it. A tag naming any OTHER provider is refused at read time (`internalModelFor` logs and
- *    skips), never guessed at.
+ *    `pins.cleaner`/`pins.researchFallback` (gated by `internalModelFor`, providers/manager.ts) and
+ *    `titles.model`/`reviewer.model` (same gate, daemon.ts) all run on it. A tag naming any OTHER
+ *    provider is refused at read time (`internalModelFor` logs and skips), never guessed at.
  *  - `"any"`: routed per-session through the runtime SDK exactly like an ordinary session model —
- *    `provider.model` (the daemon's own default chat model, `ownProviderFor`) and `pins.dispatch`
- *    (dispatch's fixed model, `session-driver.ts`) — any catalog provider the daemon has (or could
- *    have) credentials for, unconstrained by `INTERNAL_PROVIDER_IDS`.
+ *    `provider.model` (the daemon's own default chat model, `ownProviderFor`), `pins.dispatch`
+ *    (dispatch's fixed model, `session-driver.ts`) and, since 2026-09-18, `pins.research`
+ *    (`WebFetch`'s page digest, `Options.web.fetch.digestModel` inside the child) — any catalog
+ *    provider the daemon has (or could have) credentials for, unconstrained by
+ *    `INTERNAL_PROVIDER_IDS`.
  *  - `"same-as-session"`: `runtimes.advisorModel` — `mode-options.ts`'s `buildWinterOptions` drops
  *    an advisor whose provider disagrees with the SESSION's own model's provider (never guesses a
  *    credential). There is no single daemon-wide default to report: whether the advisor actually
@@ -1648,9 +1649,20 @@ export type ModelRoleConstraint = "internal-provider" | "any" | "same-as-session
 
 export function modelRoleConstraint(role: ModelRole): ModelRoleConstraint {
   switch (role) {
-    case "pins.dream": case "pins.cleaner": case "pins.research": case "pins.researchFallback":
+    case "pins.dream": case "pins.cleaner": case "pins.researchFallback":
     case "titles.model": case "reviewer.model":
       return "internal-provider";
+    // 2026-09-18 (user ruling, agent SDK 0.0.17): `pins.research` STOPS being an internal-Provider
+    // role. It is `WebFetch`'s page-digest model now, and that call runs INSIDE the runtime child —
+    // `Options.web.fetch.digestModel` + its own `authRef`, resolved through the same selection path
+    // as a session model, on any catalog provider this daemon has a credential for. Nothing about it
+    // touches `providers/manager.ts`'s single internal `Provider` any more, so narrowing `permitted`
+    // to the currently bound backend would refuse models the child can genuinely run.
+    // `pins.researchFallback` stays `internal-provider` because its only consumer is still the
+    // daemon's own multi-page research runner (`agent/research.ts`), which lane B2 retires — see the
+    // note on `roleCarriesEffort` for the effort half of the same handover.
+    case "pins.research":
+      return "any";
     case "provider.model": case "pins.dispatch":
       return "any";
     case "runtimes.advisorModel":
@@ -1717,8 +1729,10 @@ export function roleEffortFor(settings: Settings | null | undefined, role: Model
  *
  *  - `pins.dispatch` / `provider.model` — a runtime child's `Options.effort` (`session-driver.ts`'s
  *    `optionsFor`).
- *  - the six `"internal-provider"` roles — `TurnRequest.reasoningEffort` on the daemon's internal
+ *  - the five `"internal-provider"` roles — `TurnRequest.reasoningEffort` on the daemon's internal
  *    `Provider` (`providers/runtime-provider.ts`'s `mapTurnRequest` forwards it verbatim).
+ *  - `pins.research` — the daemon's own research runner, for now, and NOWHERE ELSE once lane B2
+ *    retires it: `WebFetch`'s digest has no effort field on the wire. See `roleCarriesEffort`.
  *  - `runtimes.advisorModel` — NO. The Winter agent SDK's `AdvisorConfig` is `{ model, authRef? }` and
  *    nothing else, and the pinned Claude Agent SDK's `Options` has no advisor effort either (its only
  *    `effort` is the SESSION's own). Agent-SDK parity comes first in this project, so the daemon does
@@ -1726,6 +1740,18 @@ export function roleEffortFor(settings: Settings | null | undefined, role: Model
  *    reports `efforts: null` for this role whatever its model, and the write door refuses an effort
  *    for it and says why. The `roleEfforts` schema KEEPS the key: a settings.json written while the
  *    door briefly accepted one must still load, and `effort: null` still clears it.
+ */
+/**
+ * 2026-09-18 (agent SDK 0.0.17) — `pins.research`'s effort is on NOTICE, not yet gone.
+ *
+ * Its model moved into the runtime child (`Options.web.fetch.digestModel`, `WebFetch`'s page digest),
+ * and the SDK's `WebFetchConfig` has NO effort field: `{digestModel, authRef, privateAddressPolicy}`
+ * is the whole shape. So nothing in a child can spend a stored effort for this role. It stays `true`
+ * here ONLY because the daemon's own multi-page research runner (`agent/research.ts`, whose
+ * `RESEARCH_EFFORT` this resolver still defaults) is a live consumer until lane B2 retires it. When
+ * that lands, this arm must become `false` — `modelRoleInfo` then reports `efforts: null` and the
+ * Roles pane stops offering a control that stores a value nothing can spend, which is this function's
+ * own stated rule — unless the SDK grows a `web.fetch.effort` (a 0.0.18 ask).
  */
 export function roleCarriesEffort(role: ModelRole): boolean {
   switch (role) {
@@ -1822,7 +1848,7 @@ export function effortToSpendForRole(
  *    `provider.reasoningEffort`, whose schema is `z.enum(REASONING_EFFORTS)` — a tier cannot be
  *    persisted there at all. A session that wants one selects it per-session (`session.setEffort`,
  *    where `clientEffortEligible` governs), which is where a prompt-rewriting choice belongs anyway.
- *  - the six `"internal-provider"` roles (`pins.dream`/`cleaner`/`research`/`researchFallback`,
+ *  - the five `"internal-provider"` roles and `pins.research` (`pins.dream`/`cleaner`/`researchFallback`,
  *    `titles.model`, `reviewer.model`) — these are not sessions in any sense: they are the daemon's
  *    own internal `Provider` calls (providers/manager.ts). There is no agent prompt for a tier to
  *    rewrite and no `spawn_agent` for a delegation posture to name, and those calls do not run through

@@ -260,14 +260,18 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     const t0 = Date.now();
     while (driver.init === undefined && Date.now() - t0 < 10_000) await Bun.sleep(20);
     const chatCaps = Object.entries(WINTER_CAPABILITY_TOOLS).filter(([, f]) => (f.modes as readonly string[]).includes("chat")).map(([n]) => n);
-    const disallowed = new Set(disallowedToolsFor("chat"));
+    // Agent SDK 0.0.17 adds `WebFetch`/`WebSearch` to EVERY default `init.tools` (the 0.0.3
+    // measurement `WINTER_ADVERTISED_TOOLS_0_0_4_BASE` records predates them), and the 2026-09-18
+    // ruling gives chat `WebFetch` plus — only with no Exa key stored — `WebSearch`. This daemon's
+    // throwaway Keychain service holds no Exa key, so both are expected here.
+    const disallowed = new Set(disallowedToolsFor("chat", { leg: "winter", exaKeyPresent: false }));
     const expected = [...new Set([
-      ...WINTER_ADVERTISED_TOOLS_0_0_4_BASE, ...WINTER_ADVERTISED_MCP_TOOLS_0_0_4, ...chatCaps,
+      ...WINTER_ADVERTISED_TOOLS_0_0_4_BASE, ...WINTER_ADVERTISED_MCP_TOOLS_0_0_4, "WebFetch", "WebSearch", ...chatCaps,
     ])].filter((t) => !disallowed.has(t)).sort();
     expect([...driver.init!.tools].sort()).toEqual(expected);
     // and, stated plainly: the four Winter defaults the child advertises (`advisor` is not
     // advertised at 0.0.4), AskUserQuestion, and the three chat capability tools
-    expect(expected).toEqual([...CHAT_ALLOWED_WINTER_TOOLS.filter((t) => t !== "advisor"), ...chatCaps].sort());
+    expect(expected).toEqual([...CHAT_ALLOWED_WINTER_TOOLS.filter((t) => t !== "advisor"), "WebSearch", ...chatCaps].sort());
   }, 30_000);
 
   test("(b) tooluse → tool_call + tool_result + terminal, WINTER-shaped, and the child's fallback text on the unregistered tool", async () => {

@@ -20,7 +20,7 @@ import { SkillStore } from "../../src/agent/skills";
 import { TrustStore } from "../../src/agent/trust";
 import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { assistantMemoryDirFor, memoryDirFor } from "../../src/agent/memory-dir";
-import { buildWinterOptions, controlPlaneDenyRules, disallowedToolsFor, GLOBAL_READ_ALLOW_RULES, sandboxConfigFor, type WinterOptionsInput } from "../../src/runtime-sdk/mode-options";
+import { buildWinterOptions, controlPlaneDenyRules, disallowedToolsFor, GLOBAL_READ_ALLOW_RULES, sandboxConfigFor, WEB_BUILTIN_ALLOW_RULES, type WinterOptionsInput } from "../../src/runtime-sdk/mode-options";
 import { winterSystemPromptFor } from "../../src/runtime-sdk/system-prompt";
 import { Settings } from "../../src/settings";
 import {
@@ -413,7 +413,7 @@ describe("officialInputFor — the control-plane fence (C1)", () => {
     expect(settings?.permissions?.deny).toEqual(controlPlaneDenyRules(home));
   });
 
-  test("both legs send the IDENTICAL read-allow list — one constant, never two copies", () => {
+  test("both legs send the IDENTICAL read-allow list — one constant, never two copies (the WEB pair is Winter-only)", () => {
     const home = "/Users/x/.winter-test-home";
     const official = (optionsFor("code", home).settings as { permissions?: { allow?: string[] } } | undefined)?.permissions?.allow;
     const winter = buildWinterOptions({
@@ -422,8 +422,16 @@ describe("officialInputFor — the control-plane fence (C1)", () => {
       canUseTool: (async () => ({ behavior: "allow" as const })) as CanUseTool, abort: new AbortController(),
       baseEnv: { PATH: "/usr/bin", HOME: "/Users/x", TMPDIR: "/tmp", LANG: "en_US.UTF-8" },
     }).permissions?.allow;
-    expect(official).toEqual(winter);
-    expect(winter).toEqual([...GLOBAL_READ_ALLOW_RULES]);
+    // The READ rules are one constant on both legs, as they always were.
+    expect(official).toEqual([...GLOBAL_READ_ALLOW_RULES]);
+    expect(winter?.slice(0, GLOBAL_READ_ALLOW_RULES.length)).toEqual([...GLOBAL_READ_ALLOW_RULES]);
+    // 0.0.17: the Winter leg additionally carries a bare allow for its two web built-ins, and this
+    // leg deliberately does NOT — `WEB_BUILTIN_ALLOW_RULES`' own doc has the reason on both sides: the
+    // Winter runtime denies an unresolved call under `dontAsk` without ever consulting `canUseTool`,
+    // while claude asks per DOMAIN and the 2026-09-18 ruling keeps that behaviour verbatim.
+    expect(winter).toEqual([...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES]);
+    expect(official).not.toContain("WebFetch");
+    expect(official).not.toContain("WebSearch");
   });
 
   test("settings.sandbox is EXACTLY sandboxConfigFor(home) — same real directory paths, no globs", () => {
@@ -433,12 +441,19 @@ describe("officialInputFor — the control-plane fence (C1)", () => {
     expect(settings?.sandbox).toEqual(sandboxConfigFor(home));
   });
 
-  test("additionalDisallowedTools is EXACTLY disallowedToolsFor(mode) — varies per mode like the Winter leg", () => {
+  test("additionalDisallowedTools is EXACTLY disallowedToolsFor(mode, {leg:\"official\"}) — claude's own web pair stays", () => {
     const codeOptions = optionsFor("code");
     const chatOptions = optionsFor("chat");
-    expect(codeOptions.additionalDisallowedTools).toEqual(disallowedToolsFor("code"));
-    expect(chatOptions.additionalDisallowedTools).toEqual(disallowedToolsFor("chat"));
-    // Chat's list is a strict superset (chat additionally excludes the SDK's own web/fs/shell
+    expect(codeOptions.additionalDisallowedTools).toEqual(disallowedToolsFor("code", { leg: "official" }));
+    expect(chatOptions.additionalDisallowedTools).toEqual(disallowedToolsFor("chat", { leg: "official" }));
+    // 0.0.17 / the 2026-09-18 ruling: NEITHER `WebFetch` nor `WebSearch` is withheld on this leg, in
+    // any mode — claude's native pair, with claude's own per-domain approval behaviour, is what the
+    // user asked to keep. The daemon used to disallow both here in every mode (P8b-33).
+    for (const options of [codeOptions, chatOptions]) {
+      expect(options.additionalDisallowedTools as string[]).not.toContain("WebFetch");
+      expect(options.additionalDisallowedTools as string[]).not.toContain("WebSearch");
+    }
+    // Chat's list is still a strict superset (chat additionally excludes the SDK's own fs/shell
     // built-ins) — a real, mode-sensitive difference, not two copies of the same literal.
     expect((chatOptions.additionalDisallowedTools as string[]).length).toBeGreaterThan((codeOptions.additionalDisallowedTools as string[]).length);
   });
