@@ -489,11 +489,15 @@ export const SettingsSetSkillDeniedResult = z.object({ ok: z.literal(true), name
  * Swift side stores this field as a plain `String`, never an exhaustive `switch`, so widening it
  * here cannot break `apple/WinterKit`'s build. `source`'s own enum is untouched (still
  * `"user"|"project"|"plugin"` — no "the daemon itself" slot, per this schema's neighboring RPCs'
- * own precedent). `transport` is new and optional — set ONLY on a row this daemon SYNTHESIZES for a
- * configured HTTP/SSE entry the manager never itself attempted (`status: "unmanaged"`/`"disabled"`,
- * ipc/server.ts's `mcp.list` handler); omitted on every row the manager itself tracked (started at
- * boot or via `ensureProject`), because that manager only ever runs stdio servers — the field would
- * say nothing new there.
+ * own precedent). `transport` is new and optional — set ONLY on a row this daemon SYNTHESIZES rather
+ * than tracks live: a configured HTTP/SSE entry the manager never itself attempted
+ * (`status: "unmanaged"`/`"disabled"`, ipc/server.ts's `mcp.list` handler), OR (fix wave, pre-merge
+ * review, finding 3) a DISABLED stdio entry the manager actually stopped and dropped tracking for
+ * (`McpManager.stopServer`, called from `mcp.disable`'s handler) — without this synthesis a disabled
+ * stdio server would vanish from the report entirely the moment it is actually stopped, rather than
+ * reading `"disabled"`. Omitted on every row the manager itself STILL tracks (started at boot or via
+ * `ensureProject`, never yet disabled) — a live stdio row never needed the field before this fix and
+ * still doesn't.
  */
 export const McpServerStatusSchema = z.object({
   name: z.string(),

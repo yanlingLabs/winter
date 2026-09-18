@@ -25,7 +25,21 @@ export class McpManager {
   private inFlight = new Map<string, Promise<void>>();
   private pluginState: Array<{ display: string; status: McpServerStatus["status"]; toolNames: string[]; client?: McpStdioClient }> = [];
   private pluginToolNames: string[] = []; // full `mcp__<plugin>_<server>__<tool>` names, for stopAll teardown
-  constructor(private readonly deps: { registry: ToolRegistry; trust: TrustStore; log?: (m: string) => void }) {}
+  constructor(private readonly deps: {
+    registry: ToolRegistry;
+    trust: TrustStore;
+    log?: (m: string) => void;
+    /**
+     * MEDIUM (fix wave, pre-merge review, finding 3): `settings.mcp.disabled`, read LIVE (never a
+     * boot snapshot — same posture every other hot setting in this codebase has). `startAll`'s own
+     * caller (`daemon.ts`) already pre-filters via `stdioMcpServersFor`, so this dep exists for
+     * `doEnsureProject` — the manager's OWN `.mcp.json` reader, which had no such filter at all, so
+     * merely RENDERING the UI (`mcp.list {cwd}`, which calls `ensureProject`) spawned a server the
+     * toggle says is disabled. Absent (every existing test/caller that predates this fix) means
+     * "nothing disabled" — the pre-existing behavior, unchanged.
+     */
+    disabled?: () => ReadonlySet<string>;
+  }) {}
 
   /**
    * Shared per-server bring-up used by startAll/doEnsureProject/startPlugins: spawn the client,
@@ -103,6 +117,25 @@ export class McpManager {
   }
 
   /**
+   * MEDIUM (fix wave, pre-merge review, finding 3, symmetry): the single-entry mirror of `startAll`
+   * — `mcp.enable`'s handler (`ipc/server.ts`) uses this to bring a just-re-enabled USER-tier server
+   * back up immediately. `stopServer` (below) now actually stops a disabled server's process rather
+   * than leaving it running under a cosmetic label, so re-enabling must actually restart it, or a
+   * user toggling a server off and back on would need a full daemon restart to get it working again
+   * — the exact no-restart-for-settings rule this whole surface exists to honour. Stops+clears any
+   * client ALREADY tracked under this name first, defensively (never expected in production, since
+   * only a name `stopServer` itself just removed reaches here) so a double-spawn can never leak a
+   * process this map no longer has a handle to.
+   */
+  async startOneUserServer(name: string, cfg: McpServerConfig): Promise<void> {
+    const existing = this.clients.get(name);
+    if (existing) { existing.stop(); this.clients.delete(name); }
+    const { status, toolNames, client } = await this.startOne(name, cfg, { onCollision: "throw" });
+    if (client) this.clients.set(name, client);
+    this.statuses.set(name, { name, status, toolNames, source: "user" });
+  }
+
+  /**
    * Trust-gated project `.mcp.json` bring-up. Idempotent per canonicalized cwd (a "none" or
    * "started" record short-circuits future calls). SECURITY: an untrusted dir returns WITHOUT
    * recording anything — nothing is read/spawned/registered, and a later `trust.trust(dir)` +
@@ -143,8 +176,20 @@ export class McpManager {
       return;
     }
 
+    // MEDIUM (fix wave, pre-merge review, finding 3): a name in `settings.mcp.disabled` is never
+    // started here — the same withholding `stdioMcpServersFor` already applies to `startAll`'s user
+    // servers, now applied to the manager's OWN `.mcp.json` reader too, so `ensureProject` (called
+    // merely to RENDER `mcp.list {cwd}`, `ipc/server.ts`) can no longer spawn a server the toggle
+    // says is disabled. Still RECORDED (never started, `toolNames: []`) rather than omitted
+    // entirely, so `mcp.list`'s own settings overlay has a row to rewrite to `status: "disabled"`
+    // — the same "reported, not silently absent" posture disabling gets everywhere else.
+    const disabled = this.deps.disabled?.() ?? new Set<string>();
     const state: ProjectState = { kind: "started", servers: [], clients: [], toolNames: [] };
     await Promise.all(Object.entries(servers).map(async ([name, sc]) => {
+      if (disabled.has(name)) {
+        state.servers.push({ name, status: "failed", toolNames: [], source: "project" });
+        return;
+      }
       const { status, toolNames, client } = await this.startOne(name, sc, {
         scope: dir,
         onCollision: "skip",
@@ -263,6 +308,48 @@ export class McpManager {
    */
   findServer(cwd: string | undefined, name: string): McpStdioClient | undefined {
     return this.visibleClients(cwd).find((e) => e.name === name && !e.client.dead)?.client;
+  }
+
+  /**
+   * MEDIUM (fix wave, pre-merge review, finding 3): the other half of the disabled-server fix — a
+   * RUNTIME `mcp.disable` (`settings.setMcpServerDisabled`, `ipc/server.ts`'s `mcp.disable` handler)
+   * used to leave an already-running server up, its process alive and its tools still callable
+   * through `tool.list`, even though `mcp.list` cosmetically reported it `status: "disabled"` (the
+   * settings overlay there rewrites the reported status regardless of what actually happened to the
+   * process). Stops the tracked client — user-tier (`this.clients`/`this.statuses`) AND, for every
+   * trusted project this manager has already started, that project's own client under the same
+   * name — and unregisters every tool it had registered, so a disabled server is actually gone, not
+   * merely relabeled. A name with no running client anywhere (already stopped, or never started —
+   * e.g. a project-tier server the filter above already withheld) is a no-op.
+   *
+   * Deliberately does NOT restart anything on RE-enable: `mcp.enable`'s own handler calls nothing
+   * here — a re-enabled user server needs a fresh boot-time `startAll` today (unchanged, pre-existing
+   * behavior for a NEWLY enabled name too), and a re-enabled project server picks it up on the NEXT
+   * as-yet-unensured project's `ensureProject` call, which is this fix's own scope, not a new gap.
+   */
+  stopServer(name: string): void {
+    const client = this.clients.get(name);
+    if (client) {
+      client.stop();
+      this.clients.delete(name);
+      const status = this.statuses.get(name);
+      if (status) for (const t of status.toolNames) this.deps.registry.unregister(`mcp__${name}__${t}`);
+      this.statuses.delete(name);
+    }
+    for (const state of this.projects.values()) {
+      if (state.kind !== "started") continue;
+      const idx = state.clients.findIndex((c) => c.name === name);
+      if (idx === -1) continue;
+      state.clients[idx]!.client.stop();
+      state.clients.splice(idx, 1);
+      const prefix = `mcp__${name}__`;
+      state.toolNames = state.toolNames.filter((t) => {
+        if (!t.startsWith(prefix)) return true;
+        this.deps.registry.unregister(t);
+        return false;
+      });
+      state.servers = state.servers.filter((s) => s.name !== name);
+    }
   }
 
   stopAll(): void {

@@ -105,7 +105,7 @@ import type { ProviderLink } from "../peripheral/provider-link";
 import type { HardwareBroker } from "../peripheral/hardware";
 import { verbClass } from "../peripheral/hardware";
 import type { QuotaManager } from "../providers/quota";
-import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled } from "../settings";
+import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor } from "../settings";
 import { disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
 import { diagnoseRuntimes } from "../runtime-sdk/runtimes-doctor";
@@ -2037,8 +2037,15 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const disabled = new Set(settings?.mcp?.disabled ?? []);
         const overlaid = tracked.map((row) => (disabled.has(row.name) ? { ...row, status: "disabled" as const } : row));
         const trackedNames = new Set(overlaid.map((r) => r.name));
+        // MEDIUM (fix wave, pre-merge review, finding 3): a stdio entry is normally excluded here
+        // (the "started at boot" gap this item doesn't touch — see this block's own header) UNLESS
+        // it is ALSO disabled: `mcp.disable`'s handler now actually STOPS a running server and drops
+        // its tracked status (`McpManager.stopServer`), so a disabled stdio server is no longer in
+        // `tracked` at all and would otherwise vanish from this report entirely rather than reading
+        // "disabled" — the same "reported, not silently absent" posture every other disabled entry
+        // in this list already has.
         const unmanaged = Object.entries(settings?.mcpServers ?? {})
-          .filter(([name, entry]) => entry.type !== "stdio" && !trackedNames.has(name))
+          .filter(([name, entry]) => (entry.type !== "stdio" || disabled.has(name)) && !trackedNames.has(name))
           .map(([name, entry]) => ({
             name,
             status: (disabled.has(name) ? "disabled" : "unmanaged") as "disabled" | "unmanaged",
@@ -2058,13 +2065,27 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "mcp.disable is not available on this server (no winterHome configured)");
         const settingsPath = join(opts.winterHome, "settings.json");
         saveSettings(settingsPath, setMcpServerDisabled(loadSettings(settingsPath), p.name, true));
+        // MEDIUM (fix wave, pre-merge review, finding 3): the settings write alone does not touch
+        // an already-running server — stop it and drop its status/tools now, so a disable takes
+        // effect immediately rather than merely relabeling `mcp.list`'s report.
+        opts.mcp?.stopServer(p.name);
         return { ok: true, name: p.name, enabled: false };
       }
       case METHODS.mcpEnable: {
         const p = parseParams(McpEnableParams, params);
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "mcp.enable is not available on this server (no winterHome configured)");
         const settingsPath = join(opts.winterHome, "settings.json");
-        saveSettings(settingsPath, setMcpServerDisabled(loadSettings(settingsPath), p.name, false));
+        const next = setMcpServerDisabled(loadSettings(settingsPath), p.name, false);
+        saveSettings(settingsPath, next);
+        // MEDIUM (fix wave, pre-merge review, finding 3, symmetry): `mcp.disable` now actually stops
+        // a running server rather than leaving it up under a cosmetic label — so re-enabling must
+        // actually restart it, or a disable/enable round trip would need a daemon restart to bring a
+        // USER-tier stdio server back, violating the no-restart-for-settings rule. Only the
+        // CONFIGURED stdio user-tier shape is restartable this way (`stdioMcpServersFor`'s own
+        // narrowing — the one shape `McpManager` can run at all); an HTTP/SSE or project `.mcp.json`
+        // name is a no-op here, same as it always was for `mcp.enable`.
+        const cfg = stdioMcpServersFor(next)[p.name];
+        if (cfg) await opts.mcp?.startOneUserServer(p.name, cfg);
         return { ok: true, name: p.name, enabled: true };
       }
       // -----------------------------------------------------------------------------------------
