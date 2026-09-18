@@ -431,9 +431,10 @@ test("every capability tool is either exposed to a mode or in that mode's disall
 test("the per-mode capability exposure table is pinned (Winter leg, an Exa key stored)", () => {
   // 0.0.17 / the 2026-09-18 ruling: `WebFetch` is gone from all three lists and `WebSearch` survives
   // only in chat and dispatch, and only because an Exa key makes the daemon's `Search` the search
-  // surface there. Code mode gets both tools.
+  // surface there. Code mode gets both tools. The `mcp__winter__web__*` pair and
+  // `mcp__winter__research__ReadPage` are absent from every list because the tools themselves retired —
+  // a name that is no longer in `CAPABILITY_TOOL_MODES` cannot appear here at all.
   expect(disallowedToolsFor("code", WINTER_LEG_WITH_EXA)).toEqual([
-    "mcp__winter__research__ReadPage",
     "mcp__winter__research__Search",
     "mcp__winter__sessions__list_sessions",
     "mcp__winter__sessions__manage_session",
@@ -443,8 +444,6 @@ test("the per-mode capability exposure table is pinned (Winter leg, an Exa key s
     "WebSearch",
     // fix wave (review F7): `lsp` is code-only, as the registry door was
     "mcp__winter__lsp__lsp",
-    "mcp__winter__web__web_fetch",
-    "mcp__winter__web__web_search",
   ]);
   expect(disallowedToolsFor("chat", WINTER_LEG_WITH_EXA)).toEqual([...new Set([
     ...CHAT_DISALLOWED_BUILTINS,
@@ -457,9 +456,16 @@ test("the per-mode capability exposure table is pinned (Winter leg, an Exa key s
     "mcp__winter__sessions__list_sessions",
     "mcp__winter__sessions__manage_session",
     "mcp__winter__sessions__session_spawn",
-    "mcp__winter__web__web_fetch",
-    "mcp__winter__web__web_search",
   ])].sort());
+  // The retired names must not resurface in ANY mode's list under either answer (a stale entry would
+  // be inert rather than loud, which is exactly why it is asserted).
+  for (const mode of MODES) {
+    for (const exposure of [WINTER_LEG_WITH_EXA, WINTER_LEG_NO_EXA]) {
+      for (const gone of ["mcp__winter__web__web_fetch", "mcp__winter__web__web_search", "mcp__winter__research__ReadPage"]) {
+        expect(disallowedToolsFor(mode, exposure)).not.toContain(gone);
+      }
+    }
+  }
 });
 
 test("with NO Exa key, chat and dispatch get WebSearch INSTEAD of Search — exactly one of the two, never neither", () => {
@@ -510,13 +516,14 @@ test("the OFFICIAL leg withholds neither web built-in, in any mode (the 2026-09-
     .toEqual(disallowedToolsFor("chat", { leg: "official", exaKeyPresent: false }));
 });
 
-test("WebFetch is never withheld, on either leg, in any mode — and code keeps the daemon's own pair for now", () => {
+test("WebFetch is never withheld, on either leg, in any mode", () => {
   for (const mode of MODES) {
     for (const exposure of [WINTER_LEG_WITH_EXA, WINTER_LEG_NO_EXA, { leg: "official" as const }]) {
       expect(disallowedToolsFor(mode, exposure)).not.toContain("WebFetch");
     }
   }
   // Lane B2 retires them; until then code's daemon-owned pair is exposed exactly as before.
+  // …and the daemon's own retired pair is not in code's list either, because it no longer exists.
   expect(disallowedToolsFor("code", WINTER_LEG_WITH_EXA)).not.toContain("mcp__winter__web__web_fetch");
   expect(disallowedToolsFor("code", WINTER_LEG_WITH_EXA)).not.toContain("mcp__winter__web__web_search");
 });

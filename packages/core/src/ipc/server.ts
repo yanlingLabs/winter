@@ -322,8 +322,8 @@ export interface IpcServerOptions {
   // above: a server built without one (most existing tests) makes the four RPCs typed failures.
   consoleBroker?: ConsoleProfileBroker;
   // Chat Slice D task 3 (`sync.config`): the user-ADDED half of the dangerous-domains list —
-  // daemon.ts's own shared `dangerousDomainsAdded` const, the SAME live getter Search/ReadPage/the
-  // research runner already consult (see those callers' own doc comments). `sync.config` calls
+  // daemon.ts's own shared `dangerousDomainsAdded` const, the SAME live getter `Search`, the `browser`
+  // tool and the child's own web floor already consult (see those callers' own doc comments). `sync.config` calls
   // this with NO cwd (it carries no session/project context), which resolves against the daemon's
   // base settings — same "no cwd" behavior every other cwd-less caller in this codebase already
   // gets. Optional — same "typed no-op, never a crash" precedent as the rest of this options

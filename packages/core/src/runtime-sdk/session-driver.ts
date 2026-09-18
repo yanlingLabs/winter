@@ -281,8 +281,8 @@ export interface WinterLegDeps {
   /**
    * 2026-09-18 (agent SDK 0.0.17): the USER-ADDED half of the dangerous-domain floor for a project,
    * `settings.permissions.dangerousDomains.added` through the PROJECT-settings overlay — the same
-   * `dangerousDomainsAdded` closure `daemon.ts` already hands the `Search`/`ReadPage`/`web_fetch`
-   * tools and the research runner, wired here verbatim so the floor a Winter CHILD honours through
+   * `dangerousDomainsAdded` closure `daemon.ts` already hands the `Search` and `browser`
+   * tools, wired here verbatim so the floor a Winter CHILD honours through
    * `Options.web.blockedDomains` is the identical list the daemon's own tools honour.
    *
    * Absent (every test double that does not care) ⇒ the shipped list alone, which is the same

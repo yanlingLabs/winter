@@ -111,9 +111,12 @@ export {
 } from "./runtime-state/doctor";
 export { FakeProvider } from "./agent/fake-provider";
 export { ToolRegistry, type ToolDefinition, type ToolContext, type ToolOutcome } from "./agent/tools/registry";
-export { registerWebTools, WEB_SEARCH_API_KEY_SECRET, type WebToolDeps } from "./agent/tools/web";
+// `registerWebTools`/`registerReadPageTool` and the research-runner types are GONE (2026-09-18, the
+// web-tools ruling) — the runtime child's own `WebFetch`/`WebSearch` are the web surface on both legs.
+// `WEB_SEARCH_API_KEY_SECRET` survives its tool because the CLI still needs the literal to tell a user
+// how to REMOVE a Brave key they stored before the retirement (see its own doc in `agent/tools/web.ts`).
+export { WEB_SEARCH_API_KEY_SECRET } from "./agent/tools/web";
 export { registerSearchTool, EXA_API_KEY_SECRET, type SearchToolDeps } from "./agent/tools/search";
-export { registerReadPageTool, type ReadPageDeps, type ResearchRunner, type ResearchQuery } from "./agent/tools/read-page";
 export { notifyHeadless, type OsascriptSpawnFn } from "./agent/notify-fallback";
 export { TaskStore } from "./agent/task-store";
 export { buildSeatbeltProfile, sandboxAvailable } from "./agent/sandbox";

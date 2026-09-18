@@ -1,15 +1,20 @@
 /**
- * SP-approvals Task 10 (user addition 2026-07-21, spec §7 "Web tools"): web_fetch is free by
+ * SP-approvals Task 10 (user addition 2026-07-21, spec §7 "Web tools"): a web fetch is free by
  * default like every other tool now, but keeps ONE safety floor no policy can silence — a fetch
  * whose target host is a known/likely exfiltration or tunnel-provider endpoint still needs a
- * human's yes. This is the SHIPPED half of the "effective dangerous set" the engine's pre-exec
- * check consults (`effective = SHIPPED_DANGEROUS_DOMAINS ∪ settings.permissions.dangerousDomains.
- * added` — see engine.ts's webFetchGate); the shipped list is an in-code constant, immutable by
- * construction ("the user can remove only the ones he added" — deleting an entry from
- * settings.json can only ever shrink the USER half, never this one).
+ * human's yes. This is the SHIPPED half of the "effective dangerous set" every web door consults
+ * (`effective = SHIPPED_DANGEROUS_DOMAINS ∪ settings.permissions.dangerousDomains.added`); the
+ * shipped list is an in-code constant, immutable by construction ("the user can remove only the ones
+ * he added" — deleting an entry from settings.json can only ever shrink the USER half, never this one).
+ *
+ * WHERE IT IS ENFORCED, since the engine's `webFetchGate` retired with the engine (2026-09-18): the
+ * union is handed to the runtime child as `Options.web.fetch.blockedDomains`
+ * (`runtime-sdk/mode-options.ts`'s `webOptionsFor`) and re-checked on the call by the PreToolUse hooks
+ * in `runtime-sdk/hooks.ts`; the daemon's own `Search` applies it to cited urls and the `browser` tool
+ * to `navigate`/`open` (both through `page-core.ts`'s `checkDangerousDomain`, over the same union).
  *
  * Curated for the REAL threat this floor exists for: a page the model was asked to summarize (or
- * a prompt-injected instruction hidden in one) telling it to `web_fetch` a secret/credential/file
+ * a prompt-injected instruction hidden in one) telling it to fetch a secret/credential/file
  * preview OUT to somewhere the human never sees — so every entry below is a domain whose entire
  * business model is "accept arbitrary bytes from anyone, no auth, and make them reachable again"
  * (a paste host), "accept an arbitrary file upload, no auth" (a one-shot file host), "log every
@@ -18,7 +23,7 @@
  * explicitly. Plain content hosts (docs sites, GitHub, npm, etc.) are deliberately NOT here even
  * though a determined exfiltrator could technically encode data into e.g. a GitHub Gist filename —
  * v1's list targets the LOW-effort, zero-auth, purpose-built dead-drops, not "anything writable on
- * the internet" (that would just make web_fetch ask on every domain, defeating "free by default").
+ * the internet" (that would just make every fetch ask on every domain, defeating "free by default").
  *
  * One rationale comment per entry, reviewed (task-10-brief.md's own instruction: "implementer
  * curates ~15-25 with rationale, reviewer audits"). KNOWN LIMIT (documented, accepted v1, spec §7):

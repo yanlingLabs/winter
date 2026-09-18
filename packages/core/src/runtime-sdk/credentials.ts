@@ -388,7 +388,7 @@ export interface CredentialEvictionDeps {
  * row, which is every WINTER-leg session (see below).
  *
  * **THE `exa` ROW IS NOT LIKE THE OTHERS** (2026-09-18, agent SDK 0.0.17). It used to evict nothing,
- * correctly: the daemon's own `Search`/`ReadPage` read that key per call, so a live child's `Options`
+ * correctly: the daemon's own `Search` reads that key per call, so a live child's `Options`
  * never mentioned it. Since 0.0.17 they do — `Options.web.search.authRef` NAMES it, and, worse for a
  * stale child, whether an Exa key exists decides the TOOL SURFACE itself (`disallowedToolsFor`
  * withholds `WebSearch` from chat/dispatch when the daemon's `Search` can work). Both are fixed at

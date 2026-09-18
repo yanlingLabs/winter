@@ -5,13 +5,10 @@ import { browserToolDefs } from "../../src/agent/tools/browser";
 import { computerToolDefs } from "../../src/agent/tools/computer";
 import { docsToolDefs } from "../../src/agent/tools/docs";
 import { listSessionsToolDefs } from "../../src/agent/tools/list-sessions";
-import { PageCache } from "../../src/agent/tools/page-core";
-import { readPageToolDefs } from "../../src/agent/tools/read-page";
 import { searchToolDefs } from "../../src/agent/tools/search";
 import { sessionSpawnToolDefs } from "../../src/agent/tools/session-spawn";
 import { sheetsToolDefs } from "../../src/agent/tools/sheets";
 import { slidesToolDefs } from "../../src/agent/tools/slides";
-import { webToolDefs } from "../../src/agent/tools/web";
 import { lspToolDefs } from "../../src/agent/tools/lsp";
 import {
   CAPABILITY_SERVER_KEYS,
@@ -31,8 +28,10 @@ import {
  * silently produce `mcp__winter__list_sessions` instead.
  */
 
-/** WS-06 §5's names for the five P8b-12 servers, plus the C-6 amendment (`Search`/`ReadPage` under
- *  `research`) and ruling P8b-33's sixth server (`web`). Spelled out, never derived. */
+/** WS-06 §5's names for the five P8b-12 servers, plus the C-6 amendment (`Search` under `research`).
+ *  Spelled out, never derived. `ReadPage` and the `web` server's `web_fetch`/`web_search` were here
+ *  until the 2026-09-18 web-tools ruling retired all three in favour of the runtime child's own
+ *  `WebFetch`/`WebSearch`. */
 const CANONICAL_NAMES = [
   // WS-06 §5 `mcp__winter__sessions` → R-1 re-brands the namespace, C-6 splits the three verbs out.
   "mcp__winter__sessions__session_spawn",
@@ -46,13 +45,9 @@ const CANONICAL_NAMES = [
   "mcp__winter__office__docs",
   "mcp__winter__office__sheets",
   "mcp__winter__office__slides",
-  // C-6 AMENDMENT to WS-06 §5: Search/ReadPage are daemon-owned capability tools (they carry the
-  // Exa key and the dangerous-domain floor), NOT the SDK's WebSearch/WebFetch.
+  // C-6 AMENDMENT to WS-06 §5, surviving the 2026-09-18 ruling: `Search` is Exa's ANSWER mode, which
+  // returns a written answer with its sources rather than links a chat session has no tool to chase.
   "mcp__winter__research__Search",
-  "mcp__winter__research__ReadPage",
-  // P8b-33: every mode disallows the SDK's built-in web tools, so code keeps its own pair.
-  "mcp__winter__web__web_fetch",
-  "mcp__winter__web__web_search",
   // Fix wave (review F7): the single multi-purpose `lsp` tool, reinstated as a capability — the
   // 0.0.4 child advertises no `LSP` of its own.
   "mcp__winter__lsp__lsp",
@@ -62,7 +57,7 @@ describe("capabilityToolName (P8b-12)", () => {
   test("builds the literal mcp__winter__<key>__<tool> form", () => {
     expect(capabilityToolName("sessions", "session_spawn")).toBe("mcp__winter__sessions__session_spawn");
     expect(capabilityToolName("computer", "computer")).toBe("mcp__winter__computer__computer");
-    expect(capabilityToolName("research", "ReadPage")).toBe("mcp__winter__research__ReadPage");
+    expect(capabilityToolName("research", "Search")).toBe("mcp__winter__research__Search");
   });
 
   // Since P9b-7 the daemon's own MCP namespace IS `winter` (`CORE_BRAND.mcpServerName`) — the SDK's
@@ -129,8 +124,7 @@ describe("WINTER_CAPABILITY_TOOLS", () => {
         ...sheetsToolDefs({ ...panel, dirsOf: () => [] as never }),
         ...slidesToolDefs({ ...panel, dirsOf: () => [] as never }),
       ],
-      research: [...searchToolDefs(), ...readPageToolDefs({ cache: new PageCache() })],
-      web: webToolDefs(),
+      research: searchToolDefs(),
       lsp: lspToolDefs({ lsp: () => undefined, cwdOf: () => undefined, rootsOf: () => [] }),
     };
 
@@ -180,12 +174,13 @@ describe("WINTER_CAPABILITY_TOOLS", () => {
     for (const tool of ["docs", "sheets", "slides"]) {
       expect(t[`mcp__winter__office__${tool}`]).toEqual({ modes: ["code", "dispatch"] });
     }
-    // search.ts / read-page.ts: `modes: ["chat","dispatch"]`, deliberately NOT deferred.
+    // search.ts: `modes: ["chat","dispatch"]`, deliberately NOT deferred.
     expect(t["mcp__winter__research__Search"]).toEqual({ modes: ["chat", "dispatch"] });
-    expect(t["mcp__winter__research__ReadPage"]).toEqual({ modes: ["chat", "dispatch"] });
-    // web.ts: `modes: ["code"]`, `deferred: true` on both.
-    expect(t["mcp__winter__web__web_fetch"]).toEqual({ modes: ["code"], deferred: true });
-    expect(t["mcp__winter__web__web_search"]).toEqual({ modes: ["code"], deferred: true });
+    // …and the three retired rows are GONE, which is the half a positive assertion cannot state
+    // (2026-09-18: `ReadPage` and the `web` server's pair left with the web-tools ruling).
+    for (const gone of ["mcp__winter__research__ReadPage", "mcp__winter__web__web_fetch", "mcp__winter__web__web_search"]) {
+      expect(t[gone], `${gone} is retired and must not be in the table`).toBeUndefined();
+    }
   });
 
   test("is a plain data table Task 9 can diff (no functions, no getters)", () => {

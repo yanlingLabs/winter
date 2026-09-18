@@ -29,9 +29,6 @@ import { ToolRegistry } from "./agent/tools/registry";
 import { WorkflowRuntime } from "./workflows/runtime";
 import { WorkflowStore } from "./workflows/store";
 import { MemoryStore } from "./agent/memory";
-import type { ResearchRunner } from "./agent/tools/read-page";
-import { PageCache } from "./agent/tools/page-core";
-import { createResearchRunner } from "./agent/research";
 import { registerComputerTool } from "./agent/tools/computer";
 import { ComputerUseService } from "./agent/computer-use";
 import { SessionTitler } from "./agent/titles";
@@ -556,8 +553,9 @@ export async function startDaemon(opts: {
   const projectRootOf = (cwd?: string | null): string | null => (cwd ? repoRootFor(cwd) : null);
   // Critical 1 fix, whole-branch review (2026-07-28): the user-added half of the effective
   // dangerous-domain list, SAME live-settings shape engine.ts's own EngineConfig.dangerousDomainsAdded
-  // getter (below) already used for web_fetch's approval-card floor — hoisted into ONE shared const
-  // here so ReadPage's/the research runner's/Search's NEW hard-block/withhold logic (this task) reads
+  // getter (below) already used for the code-mode fetch approval-card floor — hoisted into ONE shared
+  // const here so `Search`'s withhold logic, the `browser` tool's hard block and the floor the daemon
+  // hands the child's own `WebFetch` (`Options.web.fetch.blockedDomains`) all read
   // the IDENTICAL effective list that floor does, never a second independently-maintained getter.
   const dangerousDomainsAdded = (cwd?: string): string[] | undefined =>
     projectSettings.effective(projectRootOf(cwd))?.permissions?.dangerousDomains?.added;
@@ -850,7 +848,7 @@ export async function startDaemon(opts: {
           // ... }` literal copy) — item 2's whole point is that `.model`/`.live`/`.provider` on
           // THIS EXACT object get mutated in place by `active.refresh(...)`, so every consumer that
           // captured `agentProvider` (SessionTitler, BashReviewer, Dreamer, SessionCleaner) or
-          // `agentProvider.provider` alone (the research runner) sees a rebind with no code of its
+          // `agentProvider.provider` alone sees a rebind with no code of its
           // own changing.
           agentProvider = active;
           quota = active.quota;
@@ -924,15 +922,6 @@ export async function startDaemon(opts: {
   // reassigns the same binding on a hot `computerUse.enabled` toggle.
   let computerUse: ComputerUseService | undefined;
 
-  // P8b Task 7: HOISTED for the same reason `computerUse` is — the `research` capability server is
-  // built above the `if (agentProvider)` gate and must hand `ReadPage` the SAME `PageCache` the
-  // registry door and the ephemeral research runner share (a second cache would make a report's own
-  // citations miss on the follow-up read). `PageCache` has no dependencies, so the construction
-  // itself moves; the runner still needs `agentProvider.provider` and so stays a holder assigned
-  // inside the gate, read through a closure at tool-call time.
-  const pageCache = new PageCache();
-  let researchRunner: ResearchRunner | undefined;
-
   // Phase 4d-cleanup Task 2: PluginSupervisor construction + the boot-time orphan-PID sweep are
   // hoisted OUT of `if (agentProvider)` below — the ctor's own deps (runDir/socketPath/mintToken/
   // settings/logger) don't need a provider, and a daemon booted with the agent disabled (no
@@ -969,7 +958,8 @@ export async function startDaemon(opts: {
   // Runs regardless of agentProvider (see this block's own doc comment above).
   pluginSupervisor.sweepOrphans(spawnablePlugins.map((p) => p.id));
 
-  // Hoisted above the `if (agentProvider)` gate (4g Task 5) — registerWebTools below needs it, and
+  // Hoisted above the `if (agentProvider)` gate (4g Task 5) — the web tools that used to be registered
+  // below needed it, and
   // tool registration happens inside that gate. Built unconditionally regardless (same precedent as
   // `peripheral`/`hardware` further down, which share this SAME instance): winterHome is ready at
   // line 135, and AuditLog's own constructor is cheap (mkdir is lazy, on first write — see audit.ts).
@@ -1045,9 +1035,10 @@ export async function startDaemon(opts: {
   // builds this session's servers and puts them on that session's own `Options` —
   // `RuntimeSdkOptions.capabilities` stays `[]` and is reserved for the official leg.
   //
-  // `computerUse`/`researchRunner` are LETs assigned inside the gate below; these are closures,
-  // invoked at tool-call time long after boot (the `engine?.turnStartedAt` precedent this file
-  // already relies on).
+  // `computerUse` is a LET assigned inside the gate below; these are closures, invoked at tool-call
+  // time long after boot (the `engine?.turnStartedAt` precedent this file already relies on). The
+  // `research` server's own hoisted holders (a shared `PageCache` and the ephemeral research runner)
+  // went with `ReadPage` in the 2026-09-18 web-tools retirement — `Search` needs neither.
   //
   // WS-20: boot-time credential presence for the spawn tool's STATIC model enum (`spawnModelIds`
   // below) — a snapshot, like the enum itself; `sync.config`'s OWN `models` field re-probes hot,
@@ -1110,24 +1101,16 @@ export async function startDaemon(opts: {
         dirsOf: (sid) => store.dirs(sid),
       },
     },
-    // C-6: Winter's OWN web surface for chat/dispatch. `secret` is a CLOSURE — the Exa key is
-    // read inside `run`, never here and never into `listTools()`. `dangerousDomainsAdded` is
+    // Winter's OWN search tool for chat/dispatch (Exa answer mode). `secret` is a CLOSURE — the Exa
+    // key is read inside `run`, never here and never into `listTools()`. `dangerousDomainsAdded` is
     // the same shared getter every other consumer takes, so the floor is one list.
+    //
+    // `readPage` and the whole `web` server (`web_fetch`/`web_search`) left with the 2026-09-18 ruling:
+    // the child's own `WebFetch`/`WebSearch` are the web surface on both legs now, carrying this same
+    // floor and this same key through `Options.web` (`runtime-sdk/mode-options.ts`'s `webOptionsFor`).
     research: {
-      search: { audit: (line) => audit.append(line), secret: (name) => secrets.get(name), dangerousDomainsAdded },
-      readPage: {
-        cache: pageCache,
-        audit: (line) => audit.append(line),
-        // The runner is assigned inside the agent gate; read LIVE at call time, exactly as
-        // `ReadPage`'s own "research is not available in this session yet" fallback expects.
-        get research() { return researchRunner; },
-        dangerousDomainsAdded,
-      },
+      search: { audit: (line: Record<string, unknown>) => audit.append(line), secret: (name: string) => secrets.get(name), dangerousDomainsAdded },
     },
-    // P8b-33: code's web surface, for the same reason `research` exists for chat — the SDK's
-    // built-in WebSearch/WebFetch are disallowed in every mode in 8b. Same `audit`/`secrets`
-    // instances the registry door takes; the Brave key is read inside `run`.
-    web: { web: { audit: (line) => audit.append(line), secret: (name) => secrets.get(name) } },
     // Fix wave (review F7): the `lsp` tool over the SAME `let lspManager` holder the registry
     // door and `settings-apply.ts`'s hot `lsp.enabled` flip reassign — read per call.
     lsp: { lsp: () => lspManager ?? undefined },
@@ -1581,7 +1564,7 @@ export async function startDaemon(opts: {
     // shape outright, never even reaching the filesystem read `loadProjectAgentDefinitions` would do.
     projectAgentDefinitions: (cwd) => (trustStore.isTrusted(cwd) ? loadProjectAgentDefinitions(cwd) : { definitions: {}, sources: [], rejected: [] }),
     // 2026-09-18 (agent SDK 0.0.17): the SAME `dangerousDomainsAdded` getter the daemon's own
-    // Search / ReadPage / web_fetch tools and the research runner are wired to, a few hundred lines
+    // `Search` and the `browser` tool are wired to, a few hundred lines
     // below — so the floor a Winter CHILD honours through `Options.web.blockedDomains` is provably the
     // identical list, project overlay included, rather than a second derivation of it.
     dangerousDomainsAdded,
@@ -1673,50 +1656,22 @@ export async function startDaemon(opts: {
     // hot-settings T2: getter over the live `settings` holder (was a boot-captured value) — a
     // later task's watcher reassigns `settings` in place; this closure re-reads it on the NEXT
     // enter_worktree/spawn isolation call, no WorktreeManager reconstruction needed.
-    // 4g Task 5: web_fetch — Winter's ONLY sanctioned network egress (bash's sandbox denies network
-    // by design). Shares the SAME `audit` appender instance as peripheral/hardware below (hoisted
-    // above this gate for exactly this reason) — every call (success, ssrf-refusal, http error,
-    // timeout) gets one `{kind:"network", tool:"web_fetch", url, outcome}` line on audit.jsonl.
-    // 4g Task 6: web_search's Brave API key rides the SAME `secrets` store (KeychainSecretStore,
-    // built at the top of startDaemon) `winter login --web-search-key` writes into — one
-    // SecretStore instance, one Keychain, no separate store to keep in sync.
-    // B1-T5: Search — chat's Exa-backed one-call web search (results + page excerpts in a single
-    // request). Same `audit`/`secrets` instances as registerWebTools just above; its own keychain
-    // secret (EXA_API_KEY_SECRET) is `winter login --exa-key`'s write target, never web_search's.
-    // Critical 1 fix (whole-branch review): `dangerousDomainsAdded` — the same shared getter every
-    // other consumer of the effective dangerous-domain list uses below — so a Search result whose
-    // url matches it is withheld before the model ever sees it (never a silent drop; see search.ts).
-    // B2-T2: ReadPage — chat's (and, per user decision, dispatch's) batched page-reading tool.
-    // ONE PageCache instance per daemon, constructed here and shared: Task 3's ephemeral research
-    // runner hands the SAME instance to its FetchPage-only sub-agent, so a report's own citations
-    // resolve from the identical cache a follow-up ReadPage(lineStart/lineEnd) call would hit.
-    // (`pageCache` itself is HOISTED above the Winter runtime block — P8b Task 7 — so the `research`
-    // capability server shares this exact instance; nothing else about this wiring changed.)
-    // B2-T3: the ephemeral research sub-agent — FetchPage-only, cited reports. Reuses the SAME
-    // Provider instance (`agentProvider.provider`) the main engine turns use — this whole `if` is
-    // already gated on agentProvider being present, so `research` is constructed unconditionally
-    // HERE and stays undefined only when this gate never opens at all (no agentProvider), matching
-    // ReadPage's own "research is not available in this session yet" fallback for that case.
-    // `research.ts` never touches this (or any) ToolRegistry itself — FetchPage is a hand-built
-    // spec + direct dispatch entirely inside that module, never registered here or anywhere else
-    // (mode-toolset-census.test.ts's forward guard pins that FetchPage never joins this registry).
-    // Critical 1 fix (whole-branch review, USER-REVISED design): both ReadPage and its research
-    // runner get the SAME `dangerousDomainsAdded` getter — chat/dispatch have no approval flow at
-    // all, so a dangerous-domain url is HARD-BLOCKED (isError, no card) rather than carded like
-    // web_fetch (code mode, unchanged). See page-core.ts's `checkDangerousDomain` for the full
-    // rationale and read-page.ts/research.ts for where the check actually fires.
-    // Item 2: `providerId` closes over the SAME `agentProvider` reference this whole gate is
-    // already narrowed on (non-null here) — `.live?.()` reads the CURRENTLY BOUND backend's own
-    // identity, so research's own `internalModelFor` gate agrees with whichever backend
-    // `agentProvider.provider` (passed above) actually dispatches to, even after a hot rebind.
-    const research = createResearchRunner({ provider: agentProvider.provider, cache: pageCache, audit: (line) => audit.append(line), dangerousDomainsAdded, settings: () => settings, providerId: () => agentProvider!.live?.().providerId ?? ownProviderFor(settings), roleHealth, quota: agentProvider.quota });
-    researchRunner = research; // the holder the `research` capability server reads (P8b Task 7)
+    // THE WEB TOOLS THIS GATE USED TO BUILD ARE GONE (2026-09-18, the web-tools ruling): `web_fetch`,
+    // `web_search`, `ReadPage` and the ephemeral FetchPage-only research sub-agent, together with the
+    // shared `PageCache` that existed to make a report's citations resolve from the same cache a
+    // follow-up read would hit. The runtime child brings claude-shaped `WebFetch`/`WebSearch` of its
+    // own, and the daemon hands them the two things a built-in could not previously reach — the Exa
+    // key as a keychain LOCATOR and the dangerous-domain floor as `blockedDomains` — through
+    // `Options.web` (`runtime-sdk/mode-options.ts`'s `webOptionsFor`). Chat's and dispatch's `Search`
+    // is the one daemon-owned web tool left, and it is wired above with the rest of the capability
+    // servers (its Exa key read inside `run`, never here) rather than in this gate, because it needs
+    // nothing from the agent provider.
     // B2 Task 4: the agent's browser. Four narrow deps, each the SAME thing the equivalent RPC uses —
     // `tabs` is the fold `panel.list` serves, `openTab` is the function `panel.openTab`'s handler
     // runs, `dispatch` is the one pending-command registry `panel.commandResult` resolves against,
     // and `harnesses` is the hub's own attachment record. Nothing here is a second, parallel path to
     // the panel; that is what keeps an agent-driven tab indistinguishable from a user-driven one.
-    // `dangerousDomainsAdded` is the SAME shared getter ReadPage/Search/research already take (spec
+    // `dangerousDomainsAdded` is the SAME shared getter `Search` and the child's own `WebFetch` floor take (spec
     // §7: the dangerous-domains list is shared).
     // office-agent-tools T3: sheets — the same `panelCommands`/`hub` doors as `browser` above, plus
     // ONE more: `dirsOf`. `store.dirs(sid)` — never `writableRoots`/`ctx.roots` — is deliberate: it
@@ -2348,7 +2303,7 @@ export async function startDaemon(opts: {
     // Winter Phase 10a (O6, P10a-6): the ONE console-profile broker built above (boot-time
     // refreshBearer + startRefresher already fired) — drives provider.login/loginCode/logout/status.
     consoleBroker,
-    // Chat Slice D task 3 (`sync.config`): the SAME shared getter Search/ReadPage/the research
+    // Chat Slice D task 3 (`sync.config`): the SAME shared getter `Search`/the `browser` tool/the child's
     // runner already consult (constructed above, before the `if (agentProvider)` gate).
     dangerousDomainsAdded,
     // Chat Slice D task 3 (`sync.config`): the hot live-model closure built just above.
