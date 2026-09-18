@@ -24,9 +24,14 @@ import SwiftUI
 // "declares none" from "this daemon cannot tell you". The whole list can —
 // `pluginHooksAreReported(rows:)` is true the moment ANY row carries the key — so:
 //
-//   - reported ⇒ a hookless plugin says "Declares no hooks", which is a fact;
-//   - not reported ⇒ the tab keeps its original pending note and per-row "not reported" line,
-//     rather than an empty list that would read as "no plugin declares a hook".
+//   - reported ⇒ the list is the plugins that declare hooks, and an empty one honestly says "No
+//     installed plugin declares a hook";
+//   - not reported ⇒ the list shows the pending note and NO empty-state sentence, rather than an
+//     empty list that would read as "no plugin declares a hook".
+//
+// DRILL-IN (2026-09-18): the LIST is the plugins that declare hooks; a row opens that plugin's
+// hooks (event, command, timeout) as a full-width DETAIL page, whose one action is a door to the
+// plugin's own detail on the Plugins tab (a hook has no toggle of its own).
 //
 // Getting that backwards is the whole failure mode here: an app that shipped ahead of the daemon
 // (a cask update, a daemon from before the field) would quietly tell the user their plugins run no
@@ -174,60 +179,66 @@ func hooksGroupedByPlugin(
     return groups
 }
 
-// MARK: - The tab
+// MARK: - Drill-in helpers (2026-09-18)
 
-struct LibraryHooksTab: View {
+/// PURE: the Hooks LIST — the plugins that DECLARE hooks, in `plugins.list` order.
+///
+/// A plugin reported as declaring none is not a row: the tab is about hooks, and a list of plugins
+/// each saying "declares no hooks" is noise around the ones that matter. A plugin whose hooks were
+/// NOT reported (an older daemon) is not a row either — there is nothing to drill into, and the
+/// tab's pending note already says the daemon cannot tell us.
+func libraryHookListGroups(_ groups: [LibraryHookGroup]) -> [LibraryHookGroup] {
+    groups.filter { !$0.hooks.isEmpty }
+}
+
+/// PURE: a hook group row's one-line summary — how many hooks, and whether they run at all.
+func libraryHookGroupSubtitle(_ group: LibraryHookGroup) -> String {
+    let count = "\(group.hooks.count) hook\(group.hooks.count == 1 ? "" : "s")"
+    if group.statusText.isEmpty { return "\(count) · plugin not installed" }
+    return group.isEnabled ? count : "\(count) · plugin off, none run"
+}
+
+/// PURE: the LIST page's empty-state sentence, or nil when there are rows to show. Three different
+/// facts, three different sentences — and the one that must never appear is "no plugin declares a
+/// hook" on a daemon that simply did not say.
+func libraryHookListEmptyText(rows: [PluginRowDisplay], reported: Bool,
+                              listGroups: [LibraryHookGroup]) -> String? {
+    guard listGroups.isEmpty else { return nil }
+    if rows.isEmpty { return "No plugins are installed, so nothing can declare a hook." }
+    if reported { return "No installed plugin declares a hook." }
+    // Not reported: the pending note above the list is the whole answer.
+    return nil
+}
+
+// MARK: - The list
+
+struct LibraryHooksList: View {
     /// The live plugin list — the same instance the Plugins tab and the Dashboard's Plugins pane
-    /// observe. This tab only READS it (`rows`) and calls `refresh()`; every mutation stays on the
-    /// Plugins tab, which is what `onOpenPlugins` sends the user to.
+    /// observe. This tab only READS it and calls `refresh()`; every mutation is the Plugins tab's.
     @ObservedObject var model: PluginManagerModel
-    /// Flips the panel to the Plugins tab. A hook has no toggle of its own — enabling or disabling
-    /// the declaring plugin is the only control — so the honest affordance is a door to where that
-    /// control actually lives, not a disabled switch here.
-    let onOpenPlugins: () -> Void
-
-    /// Read straight off the live plugin rows — `plugins.list`'s own `manifestHooks`, decoded by
-    /// `WinterClient.pluginsList()`. Empty on a daemon that does not report the field, which
-    /// `hooksAreReported` is what distinguishes from "every plugin declares none".
-    private var hooksByPlugin: [String: [PluginHookDeclaration]] {
-        pluginHooksByPlugin(rows: model.rows)
-    }
+    let selected: LibraryItemRef?
+    let onOpen: (LibraryItemRef) -> Void
 
     /// The one cross-row question (see the file header): can this daemon tell us about hooks at
     /// all? Everything the tab says about an EMPTY hook list hangs off it.
-    private var hooksAreReported: Bool {
-        pluginHooksAreReported(rows: model.rows)
-    }
+    private var hooksAreReported: Bool { pluginHooksAreReported(rows: model.rows) }
 
     private var groups: [LibraryHookGroup] {
-        hooksGroupedByPlugin(rows: model.rows, hooks: hooksByPlugin)
+        libraryHookListGroups(hooksGroupedByPlugin(rows: model.rows,
+                                                   hooks: pluginHooksByPlugin(rows: model.rows)))
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: libraryDetailSpacing) {
-            LibraryTabHeader(title: "Hooks") {
-                Button("Refresh") { Task { await model.refresh() } }
-            }
+        LibraryListPage(title: "Hooks") {
+            Button("Refresh") { Task { await model.refresh() } }
+        } content: {
             if let errorText = model.errorText {
-                Text(errorText)
-                    .font(Typography.label())
-                    .foregroundStyle(.red)
+                LibraryErrorLine(text: errorText)
             }
-            if hooksAreReported {
-                Text("Commands an installed plugin runs at session start, around every tool call, "
-                     + "and at the end of a turn.")
-                    .font(Typography.label())
-                    .foregroundStyle(Theme.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if !model.rows.isEmpty {
-                // UNCHANGED from the pre-field build, and reached for exactly one reason now: a
-                // daemon older than `manifestHooks`. Never an error — an app ahead of its daemon is
-                // an ordinary state, and the honest thing to say is that we were not told.
-                //
-                // Suppressed when there are NO plugins at all: with nothing installed there is no
-                // evidence either way, and the list's own "nothing can declare a hook" line is the
-                // complete and correct answer. Printing a "waiting on the daemon" note beside it
-                // would invent a second, unfounded reason for an empty tab.
+            if !hooksAreReported && !model.rows.isEmpty {
+                // Reached for exactly one reason: a daemon older than `manifestHooks`. Never an
+                // error — an app ahead of its daemon is an ordinary state. Suppressed with NO
+                // plugins at all, where the empty line below is the complete answer.
                 LibraryPendingNote(
                     subject: "Commands an installed plugin runs at session start, around every tool "
                         + "call, and at the end of a turn.",
@@ -235,76 +246,84 @@ struct LibraryHooksTab: View {
                         + "plugins.list does not report manifestHooks yet."
                 )
             }
-            list
+            if let empty = libraryHookListEmptyText(rows: model.rows, reported: hooksAreReported,
+                                                    listGroups: groups) {
+                LibraryStateLine(text: empty)
+            } else if !groups.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 1) {
+                        ForEach(groups) { group in
+                            let ref = LibraryItemRef.hooks(pluginName: group.pluginName)
+                            LibraryLinkRow(
+                                systemImage: "point.3.connected.trianglepath.dotted",
+                                title: group.pluginName,
+                                subtitle: libraryHookGroupSubtitle(group),
+                                isSelected: selected == ref,
+                                action: { onOpen(ref) }
+                            )
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
         }
-        .padding(libraryDetailPadding)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task { await model.refresh() }
     }
+}
 
-    @ViewBuilder
-    private var list: some View {
-        if groups.isEmpty {
-            Text("No plugins are installed, so nothing can declare a hook.")
+// MARK: - The detail
+
+/// One plugin's hooks: event, command, timeout — in the order they fire.
+struct LibraryHooksDetail: View {
+    @ObservedObject var model: PluginManagerModel
+    let pluginName: String
+    let onBack: () -> Void
+    /// A hook has no toggle of its own — the declaring plugin's enable/disable is the only control —
+    /// so the page's one action is a door to that plugin's own detail.
+    let onOpenPlugin: () -> Void
+    let onVanished: () -> Void
+
+    private var group: LibraryHookGroup? {
+        hooksGroupedByPlugin(rows: model.rows, hooks: pluginHooksByPlugin(rows: model.rows))
+            .first { $0.pluginName == pluginName }
+    }
+
+    var body: some View {
+        LibraryDetailPage(
+            title: pluginName,
+            subtitle: group.map(libraryHookGroupSubtitle) ?? "Hooks",
+            backLabel: "Back to Hooks",
+            onBack: onBack
+        ) {
+            Button("Open plugin", action: onOpenPlugin)
                 .font(Typography.label())
-                .foregroundStyle(Theme.textSecondary)
-        } else {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(groups) { group in
-                        VStack(alignment: .leading, spacing: 2) {
-                            LibraryGroupHeader(
-                                title: group.pluginName,
-                                detail: group.statusText.isEmpty ? "not installed" : group.statusText
-                            )
-                            if group.hooks.isEmpty {
-                                if hooksAreReported {
-                                    // A FACT now, not a gap: the daemon reported this plugin's
-                                    // hooks and there are none.
-                                    LibraryRow(
-                                        systemImage: "minus.circle",
-                                        title: "Declares no hooks",
-                                        subtitle: "This plugin runs nothing at session start, "
-                                            + "around a tool call, or at the end of a turn."
-                                    )
-                                } else {
-                                    LibraryRow(
-                                        systemImage: "questionmark.circle",
-                                        title: "Hooks not reported",
-                                        subtitle: group.isEnabled
-                                            ? "This plugin's hooks, if any, run today — the app just "
-                                                + "cannot list them yet."
-                                            : "This plugin is off, so none of its hooks run."
-                                    )
-                                }
-                            } else {
-                                ForEach(group.hooks) { hook in
-                                    hookRow(hook, isEnabled: group.isEnabled)
-                                }
-                            }
+        } content: {
+            if let errorText = model.errorText {
+                LibraryErrorLine(text: errorText)
+            }
+            if let group {
+                if !group.isEnabled {
+                    LibraryStateLine(text: "This plugin is off, so none of these hooks run.")
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    ForEach(group.hooks) { hook in
+                        LibraryRow(
+                            systemImage: hookEventSystemImage(hook.event),
+                            title: hookEventTitle(hook.event),
+                            subtitle: hook.command,
+                            subtitleIsMono: true
+                        ) {
+                            LibraryRowBadge(text: hookTimeoutText(hook.timeoutMs))
                         }
                     }
                 }
-                .padding(.vertical, 2)
-            }
-            HStack {
-                Spacer(minLength: 0)
-                Button("Manage in Plugins", action: onOpenPlugins)
+            } else {
+                LibraryStateLine(text: "Loading…")
             }
         }
-    }
-
-    private func hookRow(_ hook: PluginHookDeclaration, isEnabled: Bool) -> some View {
-        LibraryRow(
-            systemImage: hookEventSystemImage(hook.event),
-            title: hookEventTitle(hook.event),
-            subtitle: hook.command,
-            subtitleIsMono: true
-        ) {
-            HStack(spacing: 6) {
-                LibraryRowBadge(text: hookTimeoutText(hook.timeoutMs))
-                if !isEnabled { LibraryRowBadge(text: "off") }
-            }
+        // The plugin was removed, or a refresh reports it declares none now.
+        .onChange(of: group?.hooks.isEmpty ?? true) { _, gone in
+            if gone { onVanished() }
         }
     }
 }

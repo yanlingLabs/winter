@@ -6,14 +6,13 @@ import WinterKit
 // different RPCs, and each one degrades on its own.
 //
 // **External servers** (`mcp.list`) — servers the user or a project or a plugin configured, each
-// with `{name, status, toolNames, source}`. The RPC exists and `WinterClient.mcpList(cwd:)` wraps
-// it; what does NOT exist is a door from the Library panel to a `WinterClient`. `LibraryPanel`
-// receives a `DashboardWiring`, whose whole contract is "DATA or a CLOSURE, never a WinterClient",
-// and no existing field can serve this call (every pane model holds its client `private`). Adding
-// the closure is a two-line edit to `DashboardSurface.swift` + `AppDelegate.swift` — both owned by
-// another session this cycle — so `McpToolsModel` takes the lister as an injected optional and is
-// constructed with `nil` here. `nil` renders an honest "no door yet" state; the future edit is
-// `McpToolsModel(lister: wiring.mcpList)`.
+// with `{name, status, toolNames, source}`, reached through `DashboardWiring.mcpList` (a closure,
+// never a `WinterClient`). `McpToolsModel` takes that lister as an injected optional; `nil` renders
+// an honest "no door yet" state.
+//
+// DRILL-IN (2026-09-18): the LIST shows both halves (external servers grouped by source, then
+// Winter's own); a row opens that server's tools as a full-width DETAIL page. Both models are owned
+// by `LibraryPanel`, not by the list, because the detail page replaces the list and reads them.
 //
 // **Winter's own capability servers** (`winter__<key>`: sessions, computer, browser, office,
 // research, web, lsp, external) — these are in-process MCP servers the DAEMON hands the runtime
@@ -330,36 +329,37 @@ func libraryStaleListDetail(failed: Bool, hasRows: Bool) -> String {
     failed && hasRows ? libraryStaleListText : ""
 }
 
-struct LibraryMcpTab: View {
-    @StateObject private var model: McpToolsModel
-    @StateObject private var capabilities: WinterCapabilitiesModel
+/// PURE: an external server row's one-line summary.
+func libraryMcpServerSubtitle(_ server: McpServerRow) -> String {
+    "\(server.toolNames.count) tool\(server.toolNames.count == 1 ? "" : "s") · \(mcpSourceBadge(server.source))"
+}
 
-    /// `@StateObject` with an injected instance: the panel is torn down on close, so the model's
-    /// life is the tab's, and `.task` re-seeds it on every open — the same re-seed-on-appear
-    /// posture every Dashboard pane already has.
-    ///
-    /// `capabilities:` is DEFAULTED so the existing construction site
-    /// (`ShellOverlays.swift`'s `LibraryMcpTab(lister: wiring.mcpList)`, a file this change does
-    /// not own) keeps compiling and keeps rendering the pre-RPC section. Passing
-    /// `wiring.capabilitiesList` there is the one edit that lights the Winter half up.
-    init(lister: McpToolsModel.Lister? = nil,
-         capabilities: WinterCapabilitiesModel.Lister? = nil) {
-        _model = StateObject(wrappedValue: McpToolsModel(lister: lister))
-        _capabilities = StateObject(wrappedValue: WinterCapabilitiesModel(lister: capabilities))
-    }
+// MARK: - The list
+
+/// Two sections, kept visibly apart — **External servers** (`server.rack`, grouped by source) and
+/// **Winter's own tools** (`sparkles`) — because the two are different namespaces that fail
+/// independently. Each row is a door to that server's tools.
+///
+/// The models are OWNED BY THE PANEL (`LibraryPanel`), not by this view: the detail page replaces
+/// this list entirely and reads the same models, so a tab-owned `@StateObject` would die on every
+/// drill-in and reload from scratch on every back.
+struct LibraryMcpList: View {
+    @ObservedObject var model: McpToolsModel
+    @ObservedObject var capabilities: WinterCapabilitiesModel
+    let selected: LibraryItemRef?
+    let onOpen: (LibraryItemRef) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: libraryDetailSpacing) {
-            LibraryTabHeader(title: "MCP tools") {
-                Button("Refresh") {
-                    Task { await model.refresh() }
-                    Task { await capabilities.refresh() }
-                }
-                // Enabled while EITHER half can still be asked — the two sections fail
-                // independently and one dead half must not lock the other's refresh.
-                .disabled((model.isUnwired || model.loading)
-                          && (capabilities.showsShapeOnly || capabilities.loading))
+        LibraryListPage(title: "MCP tools") {
+            Button("Refresh") {
+                Task { await model.refresh() }
+                Task { await capabilities.refresh() }
             }
+            // Enabled while EITHER half can still be asked — the two sections fail
+            // independently and one dead half must not lock the other's refresh.
+            .disabled((model.isUnwired || model.loading)
+                      && (capabilities.showsShapeOnly || capabilities.loading))
+        } content: {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     externalSection
@@ -369,13 +369,13 @@ struct LibraryMcpTab: View {
                 .padding(.vertical, 2)
             }
         }
-        .padding(libraryDetailPadding)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        // Both reads are safe on appear: the MCP read passes NO cwd (caveat 1 — a cwd spawns), and
+        // `capabilities.list` takes no params and starts nothing.
         .task { await model.refresh() }
         .task { await capabilities.refresh() }
     }
 
-    // MARK: External servers — live the moment a lister is injected
+    // MARK: External servers
 
     @ViewBuilder
     private var externalSection: some View {
@@ -391,26 +391,29 @@ struct LibraryMcpTab: View {
                     waitingOn: "The daemon serves these over mcp.list today — waiting on a door "
                         + "from this panel to that call (DashboardWiring carries none yet)."
                 )
-            } else if let errorText = model.errorText {
-                Text(errorText)
-                    .font(Typography.label())
-                    .foregroundStyle(.red)
-            }
-            // Stale-list disclosure lives in the group header's detail (`libraryStaleListDetail`):
-            // the rows below are from the last GOOD read, not the refresh that just failed above.
-            if !model.isUnwired {
+            } else {
+                if let errorText = model.errorText {
+                    LibraryErrorLine(text: errorText)
+                }
                 if model.servers.isEmpty {
-                    Text(model.hasLoaded
-                         ? "No external MCP servers are configured."
-                         : "Loading…")
-                        .font(Typography.label())
-                        .foregroundStyle(Theme.textSecondary)
+                    LibraryStateLine(text: model.hasLoaded
+                                     ? "No external MCP servers are configured."
+                                     : "Loading…")
                 } else {
                     ForEach(mcpServersGroupedBySource(model.servers), id: \.source) { group in
-                        VStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading, spacing: 1) {
                             LibraryGroupHeader(title: mcpSourceBadge(group.source))
                             ForEach(group.servers) { server in
-                                serverRows(server)
+                                let ref = LibraryItemRef.mcpServer(name: server.name)
+                                LibraryLinkRow(
+                                    systemImage: "server.rack",
+                                    title: server.name,
+                                    subtitle: libraryMcpServerSubtitle(server),
+                                    isSelected: selected == ref,
+                                    action: { onOpen(ref) }
+                                ) {
+                                    LibraryRowBadge(text: server.status)
+                                }
                             }
                         }
                     }
@@ -419,29 +422,7 @@ struct LibraryMcpTab: View {
         }
     }
 
-    @ViewBuilder
-    private func serverRows(_ server: McpServerRow) -> some View {
-        LibraryRow(
-            systemImage: "server.rack",
-            title: server.name,
-            subtitle: "\(server.toolNames.count) tool\(server.toolNames.count == 1 ? "" : "s")"
-        ) {
-            LibraryRowBadge(text: server.status)
-        }
-        ForEach(server.toolNames, id: \.self) { tool in
-            LibraryRow(
-                systemImage: "wrench",
-                title: tool,
-                // The BARE name is what the server calls it; the qualified name is what the model
-                // actually invokes and what a transcript shows. Both, always — see caveat 2.
-                subtitle: mcpWireToolName(server: server.name, tool: tool),
-                subtitleIsMono: true
-            )
-            .padding(.leading, 18)
-        }
-    }
-
-    // MARK: Winter's own capability servers — capabilities.list
+    // MARK: Winter's own capability servers
 
     @ViewBuilder
     private var winterSection: some View {
@@ -459,9 +440,9 @@ struct LibraryMcpTab: View {
         }
     }
 
-    /// The pre-RPC rendering, reached on a daemon that predates `capabilities.list` (or a tab built
-    /// with no closure). Identical to what this section always showed — the point is that an app
-    /// ahead of its daemon looks exactly as it did before, never like a Winter with no tools.
+    /// The pre-RPC rendering, for a daemon that predates `capabilities.list` (or no door). Rows are
+    /// NOT doors here — there is no data behind them to drill into — and they stay quiet and
+    /// unbadged so they cannot be mistaken for a live inventory.
     @ViewBuilder
     private var shapeOnlyCapabilities: some View {
         LibraryPendingNote(
@@ -473,10 +454,6 @@ struct LibraryMcpTab: View {
                 : "These are not in mcp.list at all, and this daemon does not answer "
                     + "capabilities.list yet."
         )
-        // Shape only. These keys are what the daemon registers today per CLAUDE.md's tool
-        // surface; `external` is per-plugin and dynamic, so no hand-kept list here can be
-        // right — which is the whole argument for the RPC. Rendered quiet and unbadged so it
-        // cannot be mistaken for a live inventory.
         ForEach(winterCapabilityKeysKnownToday, id: \.self) { key in
             LibraryRow(
                 systemImage: "sparkles",
@@ -490,44 +467,134 @@ struct LibraryMcpTab: View {
     @ViewBuilder
     private var liveCapabilities: some View {
         if let errorText = capabilities.errorText {
-            Text(errorText)
-                .font(Typography.label())
-                .foregroundStyle(.red)
+            LibraryErrorLine(text: errorText)
         }
         if capabilities.capabilities.isEmpty {
-            Text(capabilities.hasLoaded
-                 ? "The daemon reports no capability servers."
-                 : "Loading…")
-                .font(Typography.label())
-                .foregroundStyle(Theme.textSecondary)
+            LibraryStateLine(text: capabilities.hasLoaded
+                             ? "The daemon reports no capability servers."
+                             : "Loading…")
         } else {
-            ForEach(capabilities.capabilities, id: \.key) { capability in
-                capabilityRows(capability)
+            VStack(alignment: .leading, spacing: 1) {
+                ForEach(capabilities.capabilities, id: \.key) { capability in
+                    let ref = LibraryItemRef.winterCapability(key: capability.key)
+                    LibraryLinkRow(
+                        systemImage: "sparkles",
+                        title: capability.key,
+                        subtitle: winterCapabilitySubtitle(capability),
+                        isSelected: selected == ref,
+                        action: { onOpen(ref) }
+                    ) {
+                        if let badge = winterCapabilityBadge(capability) {
+                            LibraryRowBadge(text: badge)
+                        }
+                    }
+                }
             }
         }
     }
+}
 
-    @ViewBuilder
-    private func capabilityRows(_ capability: WinterCapability) -> some View {
-        LibraryRow(
-            systemImage: "sparkles",
-            title: capability.key,
-            subtitle: winterCapabilitySubtitle(capability)
+// MARK: - The details
+
+/// One external server's tools: the BARE name (what the server calls it) as the title, the
+/// qualified `mcp__<server>__<tool>` (what the model calls and a transcript shows) under it.
+struct LibraryMcpServerDetail: View {
+    @ObservedObject var model: McpToolsModel
+    let name: String
+    let onBack: () -> Void
+    let onVanished: () -> Void
+
+    private var server: McpServerRow? { model.servers.first { $0.name == name } }
+
+    var body: some View {
+        LibraryDetailPage(
+            title: name,
+            subtitle: server.map { "External server · \(mcpSourceBadge($0.source))" } ?? "External server",
+            backLabel: "Back to MCP tools",
+            onBack: onBack
         ) {
-            if let badge = winterCapabilityBadge(capability) {
-                LibraryRowBadge(text: badge)
+            if let server { LibraryRowBadge(text: server.status) }
+        } content: {
+            if let errorText = model.errorText {
+                LibraryErrorLine(text: errorText)
+            }
+            if let server {
+                if server.toolNames.isEmpty {
+                    LibraryStateLine(text: "This server reports no tools.")
+                } else {
+                    LibraryGroupHeader(title: "Tools", detail: "\(server.toolNames.count)")
+                    VStack(alignment: .leading, spacing: 1) {
+                        ForEach(server.toolNames, id: \.self) { tool in
+                            LibraryRow(
+                                systemImage: "wrench",
+                                title: tool,
+                                subtitle: mcpWireToolName(server: server.name, tool: tool),
+                                subtitleIsMono: true
+                            )
+                        }
+                    }
+                }
+            } else {
+                LibraryStateLine(text: "Loading…")
             }
         }
-        ForEach(capability.tools, id: \.name) { tool in
-            LibraryRow(
-                systemImage: "wrench",
-                // The wire already qualifies these (`mcp__winter__<key>__<tool>`) — unlike an
-                // external server's bare `toolNames`, which this file has to reassemble. Nothing
-                // is reconstructed here; this is the exact string a transcript shows.
-                title: tool.name,
-                subtitle: winterCapabilityToolSubtitle(tool)
-            )
-            .padding(.leading, 18)
+        .onChange(of: model.servers.map(\.name)) { _, names in
+            if !names.contains(name) { onVanished() }
+        }
+    }
+}
+
+/// One of Winter's own capability servers: its tools, each with what it is withheld from or
+/// deferred in. The wire already qualifies these names (`mcp__winter__<key>__<tool>`) — nothing is
+/// reassembled here.
+struct LibraryWinterCapabilityDetail: View {
+    @ObservedObject var capabilities: WinterCapabilitiesModel
+    let key: String
+    let onBack: () -> Void
+    let onVanished: () -> Void
+
+    private var capability: WinterCapability? {
+        capabilities.capabilities.first { $0.key == key }
+    }
+
+    var body: some View {
+        LibraryDetailPage(
+            title: key,
+            subtitle: "Winter's own tools · \(winterCapabilityWireName(key: key))",
+            backLabel: "Back to MCP tools",
+            onBack: onBack
+        ) {
+            if let capability, let badge = winterCapabilityBadge(capability) {
+                LibraryRowBadge(text: badge)
+            }
+        } content: {
+            if let errorText = capabilities.errorText {
+                LibraryErrorLine(text: errorText)
+            }
+            if let capability {
+                if !capability.enabled {
+                    LibraryStateLine(text: "The daemon cannot serve this capability right now.")
+                }
+                if capability.tools.isEmpty {
+                    LibraryStateLine(text: winterCapabilitySubtitle(capability))
+                } else {
+                    LibraryGroupHeader(title: "Tools", detail: "\(capability.tools.count)")
+                    VStack(alignment: .leading, spacing: 1) {
+                        ForEach(capability.tools, id: \.name) { tool in
+                            LibraryRow(
+                                systemImage: "wrench",
+                                title: tool.name,
+                                subtitle: winterCapabilityToolSubtitle(tool)
+                            )
+                        }
+                    }
+                }
+            } else {
+                LibraryStateLine(text: "Loading…")
+            }
+        }
+        .onChange(of: capabilities.capabilities.map(\.key)) { _, keys in
+            if !keys.contains(key) { onVanished() }
         }
     }
 }

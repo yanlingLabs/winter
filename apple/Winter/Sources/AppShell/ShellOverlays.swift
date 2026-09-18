@@ -53,10 +53,11 @@ func libraryTabSystemImage(_ tab: LibraryTab) -> String {
     }
 }
 
-/// PURE: the panel's name. NOT rendered as a title any more (user call, 2026-09-17: the library
-/// "shouldnt have a name") — the tab column already says what you are looking at, and a heading
-/// above it was the panel naming itself twice. Kept as the accessibility label, which still needs
-/// words, and as the window-level name for anything that lists these surfaces.
+/// PURE: the panel's name — its accessibility label, and (for the library, since 2026-09-18) the
+/// heading at the top of its tab column. The library went nameless for a day (2026-09-17) by
+/// dropping a whole header band; the name came back (user call: "add back the title") as a
+/// sidebar-style heading above the tabs instead, so it is named where the eye starts without the
+/// band.
 func shellOverlayAccessibilityName(_ overlay: ShellOverlay) -> String {
     switch overlay {
     case .library: return "Library"
@@ -354,25 +355,26 @@ struct ShellFloatingPanel<Content: View>: View {
 
 // MARK: - The library panel
 
-/// The library: one tab column, one detail side.
+/// The library: TWO STATES, the model picker's own pattern (2026-09-18, user call — "we shouldn't
+/// keep the 3 columns").
 ///
-/// Each tab's body lives in `Sources/Library/`, one file per tab, with the reasoning for its own
-/// half of the world. Where each stands (the daemon work is owned by other sessions):
-/// - **Skills** — BUILT. `skills.list`/`read`/`write`/`delete` all exist; `LibrarySkillsTab`
-///   re-houses the Dashboard's own `SkillsPane` over `DashboardWiring.skillsModel`. No per-skill
-///   on/off switch: that is arriving as a `Skill(<name>)` permission deny rule, not as a field.
-/// - **Plugins** — BUILT. `LibraryPluginsTab` re-houses `PluginManagerView` and the whole
-///   lifecycle it already drives (install/enable/disable/remove/restart/consent).
-/// - **Hooks** — SHAPE BUILT, data pending. Grouped by the plugin that declares them, with the
-///   live plugin list underneath; the declarations themselves need `manifestHooks` on
-///   `PluginInfoSchema` (the daemon parses and runs them already, the wire schema drops the field).
-/// - **MCP tools** — SHAPE BUILT, both halves pending for DIFFERENT reasons. External servers are
-///   served by `mcp.list` but this panel has no door to a client (`DashboardWiring` carries no
-///   `mcpList` closure); Winter's own `winter__<key>` capability servers are not in that response
-///   at all and need the new `capabilities.list`.
-/// - **Agents** — SHAPE BUILT, nothing daemon-side. Needs the agent-definition store and
-///   `agents.list`. A file missing `name:`/`description:` frontmatter is skipped by the runtime, so
-///   `AgentDefinitionEntry` models a rejected file as a first-class row, never an omission.
+/// - **LIST** — the tab column (headed "Library") + ONE list of the tab's items filling the rest.
+/// - **DETAIL** — one item as the whole card's subject: the tab column is gone, a header carries a
+///   back chevron and the item's name, and its contents run full width and scroll
+///   (`LibraryDetailPage`, drawn like `SettingsRoleModelPicker`'s step two).
+///
+/// Every transition is a pure function in `Sources/Library/LibraryNavigation.swift`
+/// (`LibraryNavigationTests`): a tab click always lands on that tab's list, back returns to the
+/// same tab's list, Esc steps back from a detail (and is left alone on a list, as before), and a
+/// detail whose subject vanishes (a deleted skill, a removed plugin) returns to the list.
+///
+/// **The list stays MOUNTED under a detail**, hidden, disabled and out of the accessibility tree —
+/// so back returns to exactly the scroll position you left, with the item you opened marked, and
+/// no list re-reads the daemon just because you came back to it.
+///
+/// **The models live here, not in the tabs.** The detail page replaces the tab's list and must read
+/// the same data, so the MCP tab's two models are `@StateObject`s of the PANEL (alive as long as
+/// the panel is up); every other tab's model is a process-lifetime one on `DashboardWiring`.
 ///
 /// `wiring == nil` (an app running without daemon wiring — `AppDelegate.makeDashboardWiring`
 /// degrades to `nil` when the peripheral provider or the helper client is missing) still renders
@@ -382,55 +384,141 @@ struct LibraryPanel: View {
     @Binding var tab: LibraryTab
     let wiring: DashboardWiring?
 
+    /// Which item's DETAIL is showing, or nil for the tab's LIST. The panel's own state, so it dies
+    /// with the panel: reopening the library always lands on a list (of the tab you left — that
+    /// half is `ShellSidebar`'s).
+    @State private var detail: LibraryItemRef?
+    /// The item last opened, kept after back so its row stays marked in the list.
+    @State private var lastOpened: LibraryItemRef?
+
+    /// Hoisted from the MCP tab (see the type's doc). Both built from the wiring's own doors; a
+    /// `nil` door is each model's own first-class "no door" state. Neither is ever given a cwd.
+    @StateObject private var mcpModel: McpToolsModel
+    @StateObject private var capabilitiesModel: WinterCapabilitiesModel
+
+    /// There is no `agents.list` yet, so the Agents tab is fed an empty list — the seam that changes
+    /// when the daemon lands its half.
+    private let agentEntries: [AgentDefinitionEntry] = []
+
+    init(tab: Binding<LibraryTab>, wiring: DashboardWiring?) {
+        _tab = tab
+        self.wiring = wiring
+        _mcpModel = StateObject(wrappedValue: McpToolsModel(lister: wiring?.mcpList))
+        _capabilitiesModel = StateObject(wrappedValue: WinterCapabilitiesModel(lister: wiring?.capabilitiesList))
+    }
+
+    private var navigation: LibraryNavigationState {
+        LibraryNavigationState(tab: tab, detail: detail)
+    }
+
+    private func apply(_ next: LibraryNavigationState) {
+        if next.tab != tab { tab = next.tab }
+        detail = next.detail
+    }
+
+    private func open(_ item: LibraryItemRef) {
+        lastOpened = item
+        apply(libraryNavigationOpening(navigation, item))
+    }
+
+    private func back() {
+        apply(libraryNavigationBack(navigation))
+    }
+
+    private func vanished(_ item: LibraryItemRef) {
+        apply(libraryNavigationSubjectVanished(navigation, item))
+    }
+
     var body: some View {
+        ZStack(alignment: .topLeading) {
+            listLayer
+                .opacity(navigation.isDetail ? 0 : 1)
+                .allowsHitTesting(!navigation.isDetail)
+                .disabled(navigation.isDetail)
+                .accessibilityHidden(navigation.isDetail)
+            if let detail {
+                detailPage(detail)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+        }
+        .background {
+            if let wiring {
+                // At the ROOT, outside the list layer: that layer is disabled while a detail shows,
+                // and a sheet inheriting that would open with dead buttons.
+                LibraryPluginConsentSheetHost(model: wiring.pluginManager)
+            }
+        }
+        .background {
+            // Esc steps back from a detail page — the picker host's device (a zero-size hidden
+            // `.cancelAction` button, plus `.onExitCommand` for when something inside holds focus).
+            // Rendered ONLY on a detail, so on a list Esc is exactly as unclaimed as it was.
+            if libraryEscapeOutcome(navigation) == .back {
+                Button("Back", action: back)
+                    .keyboardShortcut(.cancelAction)
+                    .opacity(0)
+                    .frame(width: 0, height: 0)
+                    .accessibilityHidden(true)
+            }
+        }
+        .onExitCommand {
+            if libraryEscapeOutcome(navigation) == .back { back() }
+        }
+        // The tab binding is `ShellSidebar`'s; if anything else moves it, a detail from another tab
+        // must not survive under it.
+        .onChange(of: tab) { _, _ in
+            apply(libraryNavigationReconciled(navigation))
+        }
+    }
+
+    // MARK: LIST
+
+    private var listLayer: some View {
         HStack(spacing: 0) {
             tabColumn
             Divider()
-            detail
+            list
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
 
     @ViewBuilder
-    private var detail: some View {
+    private var list: some View {
         if let wiring {
             switch tab {
             case .skills:
-                LibrarySkillsTab(model: wiring.skillsModel)
+                LibrarySkillsList(model: wiring.skillsModel, selected: lastOpened, onOpen: open)
             case .plugins:
-                LibraryPluginsTab(
-                    model: wiring.pluginManager,
-                    tilesModel: wiring.tilesModel,
-                    shortcutsModel: wiring.shortcutsModel,
-                    helperClient: wiring.helperClient
-                )
+                LibraryPluginsList(model: wiring.pluginManager,
+                                   shortcutsModel: wiring.shortcutsModel,
+                                   selected: lastOpened, onOpen: open)
             case .hooks:
-                // The Hooks tab has no toggle of its own — the declaring plugin's enable/disable is
-                // the only control — so its one action is a door to the Plugins tab. It is the
-                // panel that owns which tab is showing, so the door is handed down as a closure
-                // rather than the binding.
-                LibraryHooksTab(model: wiring.pluginManager, onOpenPlugins: { tab = .plugins })
+                LibraryHooksList(model: wiring.pluginManager, selected: lastOpened, onOpen: open)
             case .mcp:
-                // `lister: nil` is the honest state, not an oversight: `DashboardWiring` carries no
-                // `mcp.list` door yet (see `LibraryMcpTab`'s header). Wiring it is
-                // Two halves, two doors: `mcp.list` for external servers, `capabilities.list`
-                // for Winter's own `winter__<key>` servers. Either being absent renders that
-                // half's own pending state rather than failing the tab.
-                LibraryMcpTab(lister: wiring.mcpList, capabilities: wiring.capabilitiesList)
+                LibraryMcpList(model: mcpModel, capabilities: capabilitiesModel,
+                               selected: lastOpened, onOpen: open)
             case .agents:
-                // Empty because there is no `agents.list` to fill it — the tab says so itself.
-                LibraryAgentsTab()
+                LibraryAgentsList(entries: agentEntries, selected: lastOpened, onOpen: open)
             }
         } else {
             LibraryTabPlaceholder(tab: tab, hasWiring: false)
         }
     }
 
+    /// The panel names itself where the eye starts — at the top of this column, in the register of
+    /// a sidebar heading (Settings' own group headings), rather than in a full-width header band
+    /// that was a band of nothing around one close button.
     private var tabColumn: some View {
         VStack(alignment: .leading, spacing: 1) {
+            Text(shellOverlayAccessibilityName(.library))
+                .font(Typography.body())
+                .foregroundStyle(Theme.textMuted)
+                .padding(.horizontal, 10)
+                .padding(.top, 6)
+                .padding(.bottom, 6)
+                .accessibilityAddTraits(.isHeader)
             ForEach(LibraryTab.allCases, id: \.self) { candidate in
                 Button {
-                    tab = candidate
+                    apply(libraryNavigationSelectingTab(navigation, candidate))
                 } label: {
                     HStack(spacing: 10) {
                         Image(systemName: libraryTabSystemImage(candidate))
@@ -450,6 +538,44 @@ struct LibraryPanel: View {
         }
         .padding(8)
         .frame(width: libraryTabColumnWidth, alignment: .leading)
+    }
+
+    // MARK: DETAIL
+
+    @ViewBuilder
+    private func detailPage(_ item: LibraryItemRef) -> some View {
+        if let wiring {
+            switch item {
+            case let .skill(name):
+                LibrarySkillDetail(model: wiring.skillsModel, name: name,
+                                   onBack: back, onVanished: { vanished(item) })
+            case let .plugin(name):
+                LibraryPluginDetail(model: wiring.pluginManager,
+                                    tilesModel: wiring.tilesModel,
+                                    shortcutsModel: wiring.shortcutsModel,
+                                    name: name,
+                                    onBack: back, onVanished: { vanished(item) })
+            case let .hooks(pluginName):
+                LibraryHooksDetail(model: wiring.pluginManager, pluginName: pluginName,
+                                   onBack: back,
+                                   onOpenPlugin: { open(.plugin(name: pluginName)) },
+                                   onVanished: { vanished(item) })
+            case let .mcpServer(name):
+                LibraryMcpServerDetail(model: mcpModel, name: name,
+                                       onBack: back, onVanished: { vanished(item) })
+            case let .winterCapability(key):
+                LibraryWinterCapabilityDetail(capabilities: capabilitiesModel, key: key,
+                                              onBack: back, onVanished: { vanished(item) })
+            case let .agent(path):
+                LibraryAgentDetail(entries: agentEntries, path: path, onBack: back)
+            }
+        } else {
+            // Unreachable — with no wiring there is no list to open anything from — but a detail
+            // must still have a way back.
+            LibraryDetailPage(title: libraryTabTitle(item.tab), backLabel: "Back", onBack: back) {
+                LibraryStateLine(text: "This app is running without daemon wiring.")
+            }
+        }
     }
 }
 

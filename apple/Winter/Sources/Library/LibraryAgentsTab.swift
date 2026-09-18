@@ -126,19 +126,32 @@ func agentDefinitionsSorted(_ entries: [AgentDefinitionEntry]) -> [AgentDefiniti
     }
 }
 
-// MARK: - The tab
+/// PURE: an entry's detail-page ref. Keyed by path in both cases (a rejected file may have no
+/// name).
+func libraryAgentRef(_ entry: AgentDefinitionEntry) -> LibraryItemRef {
+    .agent(path: entry.id)
+}
 
-struct LibraryAgentsTab: View {
+/// PURE: the sentence a rejected file's row and detail say — the daemon's own words when it sent
+/// some, otherwise the fix for the reason we modelled.
+func agentRejectionExplanation(_ reason: AgentDefinitionRejection, detail: String) -> String {
+    detail.isEmpty ? agentRejectionText(reason) : detail
+}
+
+// MARK: - The list
+
+struct LibraryAgentsList: View {
     /// TODAY: always empty — there is no `agents.list` to fill it. The one seam that changes when
     /// the daemon lands its half; every view below already renders a populated value, including
     /// the `.rejected` rows.
-    var entries: [AgentDefinitionEntry] = []
+    let entries: [AgentDefinitionEntry]
+    let selected: LibraryItemRef?
+    let onOpen: (LibraryItemRef) -> Void
 
     private var rows: [AgentDefinitionEntry] { agentDefinitionsSorted(entries) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: libraryDetailSpacing) {
-            LibraryTabHeader(title: "Agents")
+        LibraryListPage(title: "Agents") {
             LibraryPendingNote(
                 subject: "The subagent definitions you have written — each one's name, what it is "
                     + "for, and where its file lives.",
@@ -147,13 +160,11 @@ struct LibraryAgentsTab: View {
                     + "thing and not shown here.)"
             )
             if rows.isEmpty {
-                Text("Nothing to list yet.")
-                    .font(Typography.label())
-                    .foregroundStyle(Theme.textSecondary)
+                LibraryStateLine(text: "Nothing to list yet.")
             } else {
                 LibraryGroupHeader(title: "Definitions", detail: agentDefinitionSummary(entries))
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: 1) {
                         ForEach(rows) { entry in
                             row(entry)
                         }
@@ -162,32 +173,85 @@ struct LibraryAgentsTab: View {
                 }
             }
         }
-        .padding(libraryDetailPadding)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     @ViewBuilder
     private func row(_ entry: AgentDefinitionEntry) -> some View {
+        let ref = libraryAgentRef(entry)
         switch entry {
         case let .definition(name, description, path, source):
-            LibraryRow(
+            LibraryLinkRow(
                 systemImage: "person.2",
                 title: name,
-                subtitle: description.isEmpty ? path : description
+                subtitle: description.isEmpty ? path : description,
+                isSelected: selected == ref,
+                action: { onOpen(ref) }
             ) {
                 LibraryRowBadge(text: source)
             }
         case let .rejected(path, reason, detail):
-            // The explicit error row. `.red` ink (the same semantic style `SkillsPane` and
-            // `PluginManagerView` use for their error lines) and the file's own path as the title,
-            // because a skipped file may have no name to show.
-            LibraryRow(
+            // A skipped file is a NORMAL row, never hidden behind a disclosure: red ink and its
+            // path as the title (it may have no name), the reason right under it.
+            LibraryLinkRow(
                 systemImage: "exclamationmark.triangle",
                 title: path,
-                subtitle: detail.isEmpty ? agentRejectionText(reason) : detail,
-                tint: .red
+                subtitle: agentRejectionExplanation(reason, detail: detail),
+                tint: .red,
+                isSelected: selected == ref,
+                action: { onOpen(ref) }
             ) {
                 LibraryRowBadge(text: agentRejectionBadge(reason))
+            }
+        }
+    }
+}
+
+// MARK: - The detail
+
+/// One definition's fields — or, for a skipped file, why it was skipped and what to add.
+///
+/// READ-ONLY, and it must stay that way for `permissionMode` in particular (see the security note
+/// at the top of this file): showing a definition is fine, setting its approval mode from here is
+/// not.
+struct LibraryAgentDetail: View {
+    let entries: [AgentDefinitionEntry]
+    let path: String
+    let onBack: () -> Void
+
+    private var entry: AgentDefinitionEntry? { entries.first { $0.id == path } }
+
+    var body: some View {
+        switch entry {
+        case let .definition(name, description, path, source):
+            LibraryDetailPage(title: name, subtitle: "Agent · \(source)",
+                              backLabel: "Back to Agents", onBack: onBack) {
+                LibraryDetailField(label: "Description",
+                                   value: description.isEmpty ? "No description" : description)
+                LibraryDetailField(label: "Source", value: source)
+                LibraryDetailField(label: "File", value: path, isMono: true)
+            }
+        case let .rejected(path, reason, detail):
+            LibraryDetailPage(title: (path as NSString).lastPathComponent,
+                              subtitle: "Skipped by the runtime · \(agentRejectionBadge(reason))",
+                              backLabel: "Back to Agents", onBack: onBack) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(Typography.label())
+                        .foregroundStyle(.red)
+                    Text(agentRejectionExplanation(reason, detail: detail))
+                        .font(Typography.label())
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                LibraryStateLine(text: "The runtime skips a definition file without a name: and a "
+                                 + "description: line in its frontmatter, so this agent is not "
+                                 + "available to any session until the file is fixed.")
+                LibraryDetailField(label: "File", value: path, isMono: true)
+            }
+        case nil:
+            LibraryDetailPage(title: (path as NSString).lastPathComponent,
+                              backLabel: "Back to Agents", onBack: onBack) {
+                LibraryStateLine(text: "This definition is no longer listed.")
             }
         }
     }

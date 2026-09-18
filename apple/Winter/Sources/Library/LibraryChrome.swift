@@ -26,15 +26,19 @@ let libraryDetailPadding: CGFloat = 18
 /// The gap between a detail tab's header and its body.
 let libraryDetailSpacing: CGFloat = 12
 
-/// A tab's own header: the tab name, plus whatever trailing control the tab owns (a Refresh
-/// button, usually).
+/// A tab's own header on its LIST page: the tab name, plus whatever trailing control the tab owns
+/// (a Refresh button, usually).
 ///
-/// The floating panel's chrome already says "Library" — this says which of the five you are
-/// looking at. Repeating the tab name from the column is deliberate: the column is a 176 pt strip
-/// of five words and the eye does not reliably carry which one is lit across the divider.
+/// The tab column's own heading says "Library" — this says which of the five you are looking at.
+/// Repeating the tab name from the column is deliberate: the column is a 176 pt strip of five words
+/// and the eye does not reliably carry which one is lit across the divider.
+///
+/// Reads `shellPanelCloseGutter` so a trailing Refresh never lands under the card's close button.
 struct LibraryTabHeader<Trailing: View>: View {
     let title: String
     @ViewBuilder var trailing: () -> Trailing
+
+    @Environment(\.shellPanelCloseGutter) private var closeGutter
 
     var body: some View {
         HStack(spacing: 8) {
@@ -43,6 +47,7 @@ struct LibraryTabHeader<Trailing: View>: View {
             Spacer(minLength: 8)
             trailing()
         }
+        .padding(.trailing, closeGutter)
     }
 }
 
@@ -179,5 +184,213 @@ struct LibraryRowBadge: View {
             .background(
                 Capsule().fill(Theme.selectionPill)
             )
+    }
+}
+
+// MARK: - Drill-in (2026-09-18)
+
+/// A LIST row that opens a DETAIL page — the model picker's `pickerRow` shape (title, one muted
+/// line, a trailing `chevron.forward`), with the Library's glyph in front and an optional status
+/// badge before the chevron.
+///
+/// `isSelected` marks the item you last opened, so stepping back from a detail page shows where you
+/// were in the list. No `.textSelection` on either line: this is a button, and selectable text
+/// inside one fights the click.
+struct LibraryLinkRow<Trailing: View>: View {
+    let systemImage: String
+    let title: String
+    var subtitle: String = ""
+    var subtitleIsMono: Bool = false
+    /// An error row's ink (`.red`, the house semantic style for error lines); `nil` = primary.
+    var tint: Color?
+    var isSelected: Bool = false
+    let action: () -> Void
+    @ViewBuilder var trailing: () -> Trailing
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: systemImage)
+                    .font(Typography.label())
+                    .foregroundStyle(tint ?? Theme.textMuted)
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(Typography.body())
+                        .foregroundStyle(tint ?? Theme.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(subtitleIsMono ? Typography.captionMono() : Typography.caption())
+                            .foregroundStyle(Theme.textMuted)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
+                Spacer(minLength: 8)
+                trailing()
+                Image(systemName: "chevron.forward")
+                    .font(Typography.caption())
+                    .foregroundStyle(Theme.textMuted)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(ShellSidebarRowStyle(isSelected: isSelected))
+    }
+}
+
+extension LibraryLinkRow where Trailing == EmptyView {
+    init(systemImage: String, title: String, subtitle: String = "", subtitleIsMono: Bool = false,
+         tint: Color? = nil, isSelected: Bool = false, action: @escaping () -> Void) {
+        self.init(systemImage: systemImage, title: title, subtitle: subtitle,
+                  subtitleIsMono: subtitleIsMono, tint: tint, isSelected: isSelected,
+                  action: action, trailing: { EmptyView() })
+    }
+}
+
+/// A DETAIL page: the item as the whole card's subject.
+///
+/// The header is the model picker's step-two header, drawn the same way on purpose
+/// (`SettingsRoleModelPicker.header`) — `chevron.backward`, the subject's name in
+/// `control(.semibold)`, one muted caption under it, 14/12 insets, the close button's gutter on the
+/// trailing side — so drilling into a skill and drilling into a model read as one pattern. Then a
+/// hairline, then the content, full width and scrolling.
+///
+/// `trailing` is for the page's own actions (a skill's Save/Delete). It sits BEFORE the close
+/// gutter, never under the close button.
+struct LibraryDetailPage<Trailing: View, Content: View>: View {
+    let title: String
+    var subtitle: String = ""
+    /// What the chevron says to VoiceOver — "Back to Skills", naming where it goes.
+    let backLabel: String
+    let onBack: () -> Void
+    @ViewBuilder var trailing: () -> Trailing
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: libraryDetailSpacing) {
+                    content()
+                }
+                .padding(libraryDetailPadding)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Button(action: onBack) {
+                Image(systemName: "chevron.backward")
+                    .font(Typography.control())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.textSecondary)
+            .accessibilityLabel(backLabel)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(Typography.control(.semibold))
+                    .foregroundStyle(Theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(Typography.caption())
+                        .foregroundStyle(Theme.textMuted)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 8)
+            trailing()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        // The card's close button lives in this corner; every hosted page owes it this much room.
+        .padding(.trailing, shellOverlayCloseGutter)
+    }
+}
+
+extension LibraryDetailPage where Trailing == EmptyView {
+    init(title: String, subtitle: String = "", backLabel: String, onBack: @escaping () -> Void,
+         @ViewBuilder content: @escaping () -> Content) {
+        self.init(title: title, subtitle: subtitle, backLabel: backLabel, onBack: onBack,
+                  trailing: { EmptyView() }, content: content)
+    }
+}
+
+/// A labelled fact on a detail page — a caption heading over its value. For the few fields a
+/// detail shows that are not a list (an agent's path, a plugin's consent line).
+struct LibraryDetailField: View {
+    let label: String
+    let value: String
+    var isMono: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label)
+                .font(Typography.caption(.semibold))
+                .foregroundStyle(Theme.textMuted)
+            Text(value)
+                .font(isMono ? Typography.labelMono() : Typography.label())
+                .foregroundStyle(Theme.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A LIST page's frame: the tab header, then the tab's own body filling the rest. One component so
+/// the five lists share their insets exactly (see `libraryDetailPadding`).
+struct LibraryListPage<Trailing: View, Content: View>: View {
+    let title: String
+    @ViewBuilder var trailing: () -> Trailing
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: libraryDetailSpacing) {
+            LibraryTabHeader(title: title, trailing: trailing)
+            content()
+        }
+        .padding(libraryDetailPadding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+extension LibraryListPage where Trailing == EmptyView {
+    init(title: String, @ViewBuilder content: @escaping () -> Content) {
+        self.init(title: title, trailing: { EmptyView() }, content: content)
+    }
+}
+
+/// A red state line (a failed read or write). The house semantic style for error lines.
+struct LibraryErrorLine: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(Typography.label())
+            .foregroundStyle(.red)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// A quiet state line ("Loading…", "No skills").
+struct LibraryStateLine: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(Typography.label())
+            .foregroundStyle(Theme.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
