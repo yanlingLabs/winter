@@ -45,9 +45,19 @@ const PRIVATE_REFUSAL = `refusing to fetch a private address`;
 /** First-two-octets private/loopback/link-local IPv4 table — shared by literal IPv4 hosts
  *  (`10.0.0.1`) AND IPv4-mapped IPv6 addresses (`::ffff:10.0.0.1` / its canonical hex form
  *  `::ffff:a00:1`), which resolve to the exact same 32-bit address and must not evade the guard
- *  just because they're spelled as IPv6. */
+ *  just because they're spelled as IPv6.
+ *
+ *  `100.64.0.0/10` (CGNAT, RFC 6598) JOINED THE TABLE 2026-09-18, with the whole-branch review's
+ *  private-address ruling: it is carrier-NAT space — a host there is a peer inside the carrier's
+ *  network, never the public internet — and it was the one range in the ruling's set this table did
+ *  not already hold. Strictly TIGHTER, like every other change this table has ever taken (see
+ *  `ssrfGuard`'s own "this only ever tightens" note): nothing it refused before is allowed now, and
+ *  the one new refusal is an address no legitimate fetch target is reachable at from here. It lands
+ *  in the SHARED table on purpose — `approval-bridge.ts`'s floor reads the same judgement through
+ *  `privateAddressRefusal`, and a second range table for it would drift silently and unsafely. */
 function ipv4Refusal(a: number, b: number): string | null {
-  if (a === 127 || a === 10 || a === 0 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)) {
+  if (a === 127 || a === 10 || a === 0 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)
+    || (a === 100 && b >= 64 && b <= 127)) {
     return PRIVATE_REFUSAL;
   }
   return null;
@@ -376,20 +386,48 @@ function rawAuthorityHost(raw: string): string | null {
  *  a resolver handed the same string targets into private space. No legitimate host is spelled that
  *  way, and `test/agent/tools/ssrf-resolver-sweep.test.ts` is the generator-independent gate that
  *  proves nothing the guard allows resolves — or dials — into private space. */
-export function ssrfGuard(raw: string): string | null {
-  let u: URL; try { u = new URL(raw); } catch { return `invalid url: ${raw}`; }
-  if (u.protocol !== "http:" && u.protocol !== "https:") return `only http(s) urls are allowed`;
-
+/**
+ * **The LEXICAL half of `ssrfGuard`, as its own answer** — "does this url TARGET a private,
+ * loopback, link-local, CGNAT, unspecified or `.local`/`localhost` address, as written?" — with the
+ * host it judged and the reason, or `undefined` for anything else.
+ *
+ * WHY IT IS SEPARATE (2026-09-18, whole-branch review B1/M2): `runtime-sdk/approval-bridge.ts` has to
+ * ask exactly this question and act on it — the agent SDK's own mandatory private-address ask arrives
+ * at `canUseTool` with no machine-readable signal (no `matchedAskRule`, only a free-form
+ * `decisionReason`), and Winter's gate classifies `web_fetch` as `NETWORK` and answers `allow`, so
+ * without a host-side judgement of its own the bridge silently consents to a fetch of
+ * `192.168.x.x`/`127.0.0.1`/`*.local` on BOTH legs. It must be the SAME judgement this file already
+ * makes — a second range table would drift, and the drift would be silent and in the unsafe
+ * direction — so this IS `ssrfGuard`'s middle, and the guard below is now its one other caller.
+ *
+ * `ssrfGuard`'s other two verdicts are deliberately NOT here: an unparseable url and a non-http(s)
+ * scheme are not private-address facts, and both tools' executors refuse them on their own (the
+ * pinned runtime answers `Invalid URL` without touching the network). A caller asking "is this
+ * private" must get `undefined` for those, not a refusal it would turn into an approval card.
+ *
+ * PURELY LEXICAL, and that is the whole contract: no DNS, no sockets, no clock — a name that RESOLVES
+ * into private space is not caught here (the Winter runtime's own executor re-checks after resolution;
+ * claude's does not — its design, and stated where the bridge acts on this).
+ */
+export function privateAddressRefusal(raw: string): { host: string; reason: string } | undefined {
+  let u: URL; try { u = new URL(raw); } catch { return undefined; }
   const canonical = u.hostname.toLowerCase();
   const canonicalRefusal = hostRefusal(canonical);
-  if (canonicalRefusal) return canonicalRefusal;
-
+  if (canonicalRefusal) return { host: canonical, reason: canonicalRefusal };
   const written = rawAuthorityHost(raw);
   if (written !== null && written !== canonical) {
     const writtenRefusal = hostRefusal(written);
-    if (writtenRefusal) return writtenRefusal;
+    if (writtenRefusal) return { host: written, reason: writtenRefusal };
   }
-  return null;
+  return undefined;
+}
+
+export function ssrfGuard(raw: string): string | null {
+  let u: URL; try { u = new URL(raw); } catch { return `invalid url: ${raw}`; }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return `only http(s) urls are allowed`;
+  // The canonical-then-as-written order, the two readings and every message are `privateAddressRefusal`'s
+  // now — this function's verdicts are unchanged, and both callers provably ask the same question.
+  return privateAddressRefusal(raw)?.reason ?? null;
 }
 
 // Whole-branch review, Critical 2 follow-up (fix round 2): the five regexes below used to be the

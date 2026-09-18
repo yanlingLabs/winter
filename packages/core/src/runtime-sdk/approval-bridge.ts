@@ -6,6 +6,7 @@ import type { QuestionBroker } from "../agent/questions";
 import type { PermissionGate, SessionApprovalPolicy } from "../agent/gate";
 import { parseRule } from "../agent/permission-rules";
 import type { Mode as SessionMode } from "../agent/tools/registry";
+import { privateAddressRefusal } from "../agent/tools/web";
 import { gateClassFor, gateToolNameFor, WINTER_OWN_TOOL_NAMES } from "./tool-names";
 import { controlPlaneTargetForCall, controlPlaneDenialMessage } from "./control-plane";
 import { outdirPath } from "../sessions/outdir";
@@ -130,6 +131,50 @@ function deniedByPolicyMessage(policy: SessionApprovalPolicy): string {
  */
 export function neverPromptsMessage(toolName: string, mode: string, policy: SessionApprovalPolicy): string {
   return `${toolName} requires approval and this ${mode} session never prompts (policy ${policy})`;
+}
+
+/**
+ * **A `WebFetch` whose target is a private/loopback/link-local address, AS WRITTEN** — the host and
+ * the reason, or `undefined`.
+ *
+ * WHY THE BRIDGE JUDGES THIS AT ALL (whole-branch review B1/M2, 2026-09-18). The agent SDK raises a
+ * MANDATORY ask for such a target — ahead of the permission mode, ahead of allow rules, and even
+ * under `bypassPermissions` — and states that only an allow rule naming that exact host, or
+ * `privateAddressPolicy: "allow"`, is consent. But it arrives at `canUseTool` with NOTHING a host can
+ * branch on: no `matchedAskRule` (no rule matched) and no `blockedPath`, only a free-form
+ * `decisionReason` this bridge deliberately logs and does not act on. Winter's gate, meanwhile,
+ * classifies `web_fetch` as `NETWORK` and answers `allow` under every policy — the user's standing
+ * "public web reads never nag" posture. Together those two correct behaviours ANSWERED THE SDK'S
+ * MANDATORY ASK WITH A SILENT YES: the child reached `192.168.x.x`, `127.0.0.1` and `*.local` with no
+ * card, no event and no record, on the Winter leg AND on the official leg, where claude's own
+ * per-domain cards land on this same bridge.
+ *
+ * So the bridge asks the question itself, off the ONE classifier the daemon already owns
+ * (`agent/tools/web.ts`'s `privateAddressRefusal` — `ssrfGuard`'s own lexical middle, so the verdict
+ * is provably the same one the retired `web_fetch` tool enforced, including the IPv4 odd-radix,
+ * IPv4-mapped-IPv6, bracketed-IPv6, trailing-dot, userinfo and uppercase spellings its corpus
+ * covers). LEG-AGNOSTIC by construction: both runtimes call the tool `WebFetch`, and the test is on
+ * the normalized `web_fetch` name, so a future third spelling that maps to the same host tool is
+ * covered too.
+ *
+ * **THE LIMIT, STATED:** this is LEXICAL. A public NAME that RESOLVES into private space
+ * (DNS rebinding) is not caught here. The Winter runtime's own executor re-checks after resolution,
+ * so that leg is covered one layer down; **on the official leg nothing checks it** — claude's design,
+ * and not something this daemon can reach.
+ */
+export function privateWebFetchTarget(toolName: string, input: unknown): { host: string; reason: string } | undefined {
+  if (gateToolNameFor(toolName) !== "web_fetch") return undefined;
+  if (typeof input !== "object" || input === null) return undefined;
+  const url = (input as Record<string, unknown>).url;
+  if (typeof url !== "string" || url === "") return undefined;
+  return privateAddressRefusal(url);
+}
+
+/** The typed refusal a never-prompting context gives a private-address `WebFetch` — one fixed shape,
+ *  so chat, dispatch, a dispatch child and `dont-ask` all read the same and none of them can be
+ *  mistaken for the tool's own `Invalid URL`. Names the host (never a credential, never a path). */
+export function privateAddressDeniedMessage(toolName: string, target: { host: string; reason: string }, reason: string): string {
+  return `${toolName} was not run — ${target.host} is a private or loopback address (${target.reason}), which needs a human's approval, and ${reason}.`;
 }
 
 /**
@@ -452,6 +497,39 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
       decision = "ask";
     }
 
+    // (5d) THE PRIVATE-ADDRESS FLOOR (whole-branch review B1/M2). See `privateWebFetchTarget` for
+    // what went wrong without it and why the judgement is the daemon's own.
+    //
+    // Under EVERY policy, `bypass` included — unlike (5b)'s sandbox-escape floor, which excludes
+    // bypass to reproduce the engine's own condition exactly. The condition being reproduced here is
+    // the SDK's, and the SDK's is "ask even in `bypassPermissions`, even under a broad allow rule,
+    // even after a hook pre-approved it": only an allow rule naming that exact host, or
+    // `privateAddressPolicy: "allow"`, is consent, and neither of those is a session policy. A
+    // session that wants no card for local targets says so with the policy, not with `bypass`.
+    //
+    // An escalation may only NARROW: a gate `deny` (plan mode) stays a deny, and this never widens
+    // one. And the escalation is exactly what makes `privateAddressPolicy: "ask"` honest for code —
+    // an approved card stamps `explicitApproval: "prompt"`, which is the consent the child's executor
+    // is waiting for.
+    const privateTarget = privateWebFetchTarget(toolName, input);
+    if (decision === "allow" && privateTarget !== undefined) {
+      log.info(`canUseTool: escalate session=${deps.sessionId} tool=${toolName} reason=private-address host=${privateTarget.host}`);
+      decision = "ask";
+    }
+    // Every never-prompting context answers it with ONE fixed refusal rather than the generic
+    // never-prompts line: chat, dispatch and a dispatch child (which the SDK's own
+    // `privateAddressPolicy: "deny"` already refuses one layer down on the Winter leg — this is the
+    // only floor on the OFFICIAL leg, where no `Options.web` is sent at all), and `dont-ask`, whose
+    // conversion at (5) above only ever saw a verdict that was already `"ask"`.
+    if (decision === "ask" && privateTarget !== undefined) {
+      const never = neverPromptsAs(deps);
+      if (never !== undefined || policy === "dont-ask") {
+        const why = never !== undefined ? `this ${never} session never prompts` : `policy ${policy} declines every approval`;
+        log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} policy=${policy} reason=private-address-never-prompts host=${privateTarget.host}`);
+        return { behavior: "deny", message: privateAddressDeniedMessage(toolName, privateTarget, why) };
+      }
+    }
+
     // A POLICY deny is not a user rejection — today it is a plain `isError` tool result and the
     // turn continues (only `deniedByHuman` ends it, engine.ts:5876-5882). `decisionClassification`
     // is deliberately omitted on both policy paths: claiming `user_reject` for "plan mode forbids
@@ -474,7 +552,7 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
       return { behavior: "deny", message: neverPromptsMessage(toolName, never, policy) };
     }
 
-    return await raiseCard(deps, { log, now, threadId, policy, state }, toolName, gateToolName, input, ctx);
+    return await raiseCard(deps, { log, now, threadId, policy, state, privateTarget }, toolName, gateToolName, input, ctx);
   };
 }
 
@@ -509,7 +587,11 @@ export function neverPromptsAs(deps: { mode: SessionMode; origin?: string }): st
 
 async function raiseCard(
   deps: CanUseToolDeps,
-  env: { log: BridgeLogger; now: () => number; threadId: string; policy: SessionApprovalPolicy; state: BridgeState },
+  env: {
+    log: BridgeLogger; now: () => number; threadId: string; policy: SessionApprovalPolicy; state: BridgeState;
+    /** Set when this card is (5d)'s private-address escalation — see the `options` line below. */
+    privateTarget?: { host: string; reason: string };
+  },
   toolName: string,
   gateToolName: string,
   input: Record<string, unknown>,
@@ -561,8 +643,20 @@ async function raiseCard(
   //
   // Revisit only when a per-call semantic is observed on a live child, never on the field name.
   const summary = approvalCardSummary({ name: gateToolName, argsJson });
-  const options = approvalOptionsFromSuggestions(ctx.suggestions)
-    ?? approvalOptionsFor({ name: gateToolName, argsJson });
+  // **A PRIVATE-ADDRESS CARD OFFERS ALLOW-ONCE AND NOTHING ELSE** (whole-branch review B1, and the
+  // NIT beside it). Every rule-bearing option is dropped — which for `web_fetch` means exactly the
+  // SDK's own suggestion, `WebFetch(domain:<host>)`, since `approvalOptionsFor` offers rules for
+  // `bash` alone. Per the 0.0.17 changelog that rule is not "don't ask me again": an allow rule
+  // naming an EXACT host is standing consent for that host WHEREVER IT RESOLVES, and it turns the
+  // private-address/DNS-rebinding check off for it permanently. No card wording asks for that, and
+  // choosing it here would also APPEND it to `.winter/permissions.local.json` (`approval.respond`'s
+  // `PermissionRules.append`, the one rules-store writer). Dropping it at card-construction time is
+  // the single place that closes both halves: the respond handler resolves an `optionId` against the
+  // options THIS record stored (an unknown id persists nothing), and `updatedPermissionsFor` reads
+  // the same list. `undefined` is the plain approve/deny card every non-`bash` tool already gets.
+  const options = env.privateTarget !== undefined
+    ? undefined
+    : approvalOptionsFromSuggestions(ctx.suggestions) ?? approvalOptionsFor({ name: gateToolName, argsJson });
 
   const issuedAt = env.now();
   const expiresAt = issuedAt + NO_PARK_TIMEOUT_MS;
