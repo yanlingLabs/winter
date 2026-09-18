@@ -106,7 +106,11 @@ struct PairedDevicesView: View {
                 .foregroundStyle(loading ? Theme.textMuted : Theme.accent)
                 .disabled(loading)
         }
-        .padding()
+        // In a floating panel: the shared header line (`shellPanelHeaderHeight`, 18 pt in), level
+        // with the close glyph. In the Dashboard (no gutter): the pane's own padding, unchanged.
+        .padding(.horizontal, closeGutter > 0 ? shellPanelEdgeInset : 16)
+        .padding(.vertical, closeGutter > 0 ? 0 : 16)
+        .frame(height: closeGutter > 0 ? shellPanelHeaderHeight : nil)
         .padding(.trailing, closeGutter)
     }
 

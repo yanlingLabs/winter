@@ -109,9 +109,13 @@ struct ComposerModelPanelKey: PreferenceKey {
 /// The small panel's footprint and placement.
 let composerModelPanelWidth: CGFloat = 264
 let composerModelPanelListMaxHeight: CGFloat = 260
-/// Gap between the button's top edge and the panel's bottom edge.
-let composerModelPanelGap: CGFloat = 10
+/// How far the panel's bottom edge sits BELOW the button's bottom edge: the panel covers the button
+/// it came from (user call, 2026-09-18), the way a macOS pop-up menu covers its own control.
+let composerModelPanelOverhang: CGFloat = 8
 let composerModelPanelCornerRadius: CGFloat = 14
+/// The panel's own header line and edge inset — the shared header geometry, scaled to a small card.
+let composerModelPanelHeaderHeight: CGFloat = 40
+let composerModelPanelEdgeInset: CGFloat = 14
 
 /// PURE: the panel's leading x — centred on the button, clamped inside the window.
 func composerModelPanelX(buttonMidX: CGFloat, containerWidth: CGFloat,
@@ -139,10 +143,11 @@ struct ComposerModelPanelLayer: View {
                     ComposerModelPanel(row: entry.row,
                                        onSetModel: entry.onSetModel,
                                        onSetEffort: entry.onSetEffort,
-                                       onOther: { onOther(entry.row, { entry.onSetModel($0) }) })
+                                       onOther: { onOther(entry.row, { entry.onSetModel($0) }) },
+                                       onClose: entry.onClose)
                 }
                 .frame(width: composerModelPanelWidth,
-                       height: max(0, button.minY - composerModelPanelGap),
+                       height: max(0, button.maxY + composerModelPanelOverhang),
                        alignment: .bottom)
                 .offset(x: composerModelPanelX(buttonMidX: button.midX, containerWidth: proxy.size.width))
             }
@@ -170,6 +175,7 @@ struct ComposerModelPanel: View {
     let onSetModel: (String?) -> Void
     let onSetEffort: (String?) -> Void
     let onOther: () -> Void
+    let onClose: () -> Void
 
     @ObservedObject private var catalog = ModelCatalogFactsModel.shared
     @State private var step: ComposerModelPanelStep = .models
@@ -186,22 +192,21 @@ struct ComposerModelPanel: View {
         VStack(alignment: .leading, spacing: 0) {
             switch step {
             case .models:
+                header(title: "Model", back: nil)
                 list { modelRows }
                 separator
                 panelRow("Other models", trailing: nil, showsChevron: true, isEnabled: true, action: onOther)
                 effortDoor
             case let .providers(modelKey):
                 header(title: modelTitle(modelKey)) { step = .models }
-                separator
                 list { providerRows(modelKey) }
                 effortDoor
             case .effort:
                 header(title: "Effort") { step = .models }
-                separator
                 list { effortRows }
             }
         }
-        .padding(6)
+        .padding([.horizontal, .bottom], 6)
         .frame(width: composerModelPanelWidth)
         .clipShape(RoundedRectangle(cornerRadius: composerModelPanelCornerRadius, style: .continuous))
         .shellFloatingSurface(cornerRadius: composerModelPanelCornerRadius)
@@ -324,24 +329,24 @@ struct ComposerModelPanel: View {
             .foregroundStyle(Theme.textSecondary)
     }
 
-    private func header(title: String, back: @escaping () -> Void) -> some View {
-        Button(action: back) {
-            HStack(spacing: 8) {
-                Image(systemName: "chevron.backward")
-                    .font(Typography.control(.medium))
-                    .foregroundStyle(Theme.textSecondary)
-                Text(title)
-                    .font(Typography.body(.medium))
-                    .foregroundStyle(Theme.textPrimary)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
+    /// The panel's header line: back chevron (sub-steps only), title, and the xmark — the shared
+    /// header controls, at the same distance from both edges so the two glyphs mirror each other.
+    /// The row sits inside the panel's 6 pt list padding, so its insets are reduced by that much.
+    private func header(title: String, back: (() -> Void)?) -> some View {
+        HStack(spacing: 8) {
+            if let back {
+                ShellPanelBackButton(label: "Back", action: back, height: composerModelPanelHeaderHeight)
             }
-            .padding(.horizontal, 10)
-            .frame(height: shellSidebarRowHeight)
-            .contentShape(Rectangle())
+            Text(title)
+                .font(Typography.control(.semibold))
+                .foregroundStyle(Theme.textPrimary)
+                .lineLimit(1)
+            Spacer(minLength: 6)
+            ShellPanelCloseButton(label: "Close model picker", action: onClose,
+                                  height: composerModelPanelHeaderHeight)
         }
-        .buttonStyle(ShellSidebarRowStyle(isSelected: false))
-        .accessibilityLabel("Back")
+        .padding(.horizontal, composerModelPanelEdgeInset - 6)
+        .frame(height: composerModelPanelHeaderHeight)
     }
 
     private func panelRow(_ title: String,

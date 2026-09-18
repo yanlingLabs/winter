@@ -287,34 +287,8 @@ struct LibraryDetailPage<Trailing: View, Content: View>: View {
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
-            Button(action: onBack) {
-                Image(systemName: "chevron.backward")
-                    .font(Typography.control())
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(Theme.textSecondary)
-            .accessibilityLabel(backLabel)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(Typography.control(.semibold))
-                    .foregroundStyle(Theme.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                if !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(Typography.caption())
-                        .foregroundStyle(Theme.textMuted)
-                        .lineLimit(1)
-                }
-            }
-            Spacer(minLength: 8)
-            trailing()
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        // The card's close button lives in this corner; every hosted page owes it this much room.
-        .padding(.trailing, shellOverlayCloseGutter)
+        ShellPanelHeader(title: title, subtitle: subtitle, backLabel: backLabel, onBack: onBack,
+                         trailing: trailing)
     }
 }
 
@@ -356,11 +330,14 @@ struct LibraryListPage<Trailing: View, Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: libraryDetailSpacing) {
+        VStack(alignment: .leading, spacing: 0) {
+            // On the shared header line, level with the close glyph and the tab column's title.
             LibraryTabHeader(title: title, trailing: trailing)
+                .frame(height: shellPanelHeaderHeight)
             content()
         }
-        .padding(libraryDetailPadding)
+        .padding(.horizontal, libraryDetailPadding)
+        .padding(.bottom, libraryDetailPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }

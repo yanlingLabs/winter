@@ -1177,34 +1177,18 @@ struct ModelFamilyPickerCard: View {
     // MARK: Header
 
     private var header: some View {
-        HStack(spacing: 10) {
-            if case .providers = step {
-                Button {
-                    step = .models
-                    expandedProvenanceTag = nil
-                } label: {
-                    Image(systemName: "chevron.backward")
-                        .font(Typography.control())
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(Theme.textSecondary)
-                .accessibilityLabel("Back to models")
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(headerTitle)
-                    .font(Typography.control(.semibold))
-                    .foregroundStyle(Theme.textPrimary)
-                Text(headerSubtitle)
-                    .font(Typography.caption())
-                    .foregroundStyle(Theme.textMuted)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 0)
+        ShellPanelHeader(title: headerTitle,
+                         subtitle: headerSubtitle,
+                         backLabel: "Back to models",
+                         onBack: backAction)
+    }
+
+    private var backAction: (() -> Void)? {
+        guard case .providers = step else { return nil }
+        return {
+            step = .models
+            expandedProvenanceTag = nil
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        // The card's close button lives in this corner; every hosted pane owes it this much room.
-        .padding(.trailing, shellOverlayCloseGutter)
     }
 
     private var headerTitle: String {
