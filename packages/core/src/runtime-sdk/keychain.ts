@@ -435,6 +435,30 @@ export async function credentialPresenceFrom(
  * disagree about whether a provider is ready. A `home` of `""` (a server with none wired) simply
  * never finds a profile — the same degradation `sync.config` already documents for it.
  */
+/**
+ * 2026-09-18 (agent SDK 0.0.17): does the item THIS REF NAMES hold usable material right now?
+ *
+ * `CredentialPresence.byProvider` cannot answer it: that map is keyed by PROVIDER, and for
+ * `anthropic` one key covers two slots (`anthropic:default`'s api key and `anthropic:console`'s
+ * broker bearer — see `credentialPresentProbe`'s own note). A console-only home therefore reads as
+ * "anthropic present" while `credentialRefFor("anthropic")` names the EMPTY api-key slot. That is
+ * fine for a session (its provider is decided by the tag's own prefix, and `beforeTurn` refuses on
+ * the real material), and NOT fine for an auxiliary route whose whole point is "state this model only
+ * if the credential this daemon can NAME for it is really there" — `Options.web.fetch.authRef`, whose
+ * absence is a typed refusal on every call rather than a fallback.
+ *
+ * ONE probe of ONE named item, and only the caller's `undefined`/boolean ever leaves it — the value is
+ * never read into anything logged or returned, and a store failure reads as absent.
+ */
+export async function refMaterialPresent(store: SecretStore | undefined, ref: CredentialRef | undefined): Promise<boolean> {
+  if (store === undefined || ref === undefined || ref.kind !== "keychain") return false;
+  try {
+    return (await readCredentialMaterial(store, ref.account)) !== null;
+  } catch {
+    return false;
+  }
+}
+
 export function credentialPresentProbe(deps: { credentials: CredentialPresence; home: string }): (providerId: string) => boolean {
   const consolePresent = existsSync(consoleProfileCredentialFile(deps.home));
   return (providerId: string): boolean =>
