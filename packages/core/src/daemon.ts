@@ -21,7 +21,7 @@ import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, 
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
-import { createProvider, internalModelFor } from "./providers/manager";
+import { createRebindableProvider, internalModelFor } from "./providers/manager";
 import type { Provider } from "./providers/types";
 import { QuotaManager } from "./providers/quota";
 import { ToolRegistry } from "./agent/tools/registry";
@@ -296,7 +296,14 @@ export async function startDaemon(opts: {
   // in providers/manager.ts) so `liveModel` below can recompose a REAL tag — kept optional here
   // (rather than importing `LiveModelSelection` verbatim) so a test that injects a provider
   // directly and doesn't care about live resolution can still omit it entirely.
-  agentProvider?: { provider: Provider; model: string; live?: () => { model: string; reasoningEffort?: string; providerId?: string } } | null;
+  // Daemon settings surface (2026-09-17 plan, item 2): `refresh`, when present, is
+  // `RebindableProvider.refresh` (providers/manager.ts) — the door that rebuilds+rebinds
+  // `provider` (a `SwappableProvider`, so `provider` itself never changes identity) on a hot
+  // `settings.provider.model` write that actually crosses catalog providers. Optional: a test
+  // that injects a plain `FakeProvider` double never has one, and `settings-apply.ts`'s
+  // `applyAgentProviderDiff` is itself a no-op with no `refreshAgentProvider` dep wired for it —
+  // same "typed no-op, never a crash" shape every other optional hook on this options object has.
+  agentProvider?: { provider: Provider; model: string; live?: () => { model: string; reasoningEffort?: string; providerId?: string }; refresh?: (next: Settings, secrets: SecretStore, settingsPath?: string) => Promise<boolean> } | null;
   /** TEST ONLY (fix round 1, M2) — threaded straight into `WinterLegDeps.officialConnectionOverride`;
    *  a production caller never sets this. See that field's own doc for why it exists at all. */
   officialConnectionOverride?: WinterLegDeps["officialConnectionOverride"];
@@ -794,7 +801,15 @@ export async function startDaemon(opts: {
   if (agentProvider === undefined) {
     if (settings) {
       try {
-        const active = await createProvider(settings, secrets, dirs.settingsPath);
+        // Daemon settings surface (2026-09-17 plan, item 2): `createRebindableProvider` instead of
+        // `createProvider` directly — the returned `.provider` is a `SwappableProvider` (stable
+        // identity, swappable backend) and `.refresh` is what `settings-apply.ts`'s
+        // `applyAgentProviderDiff` calls on a hot `provider.model` write that crosses catalog
+        // providers, so titles/the bash reviewer/the dreamer/the session cleaner/research all end
+        // up on the NEW provider with no daemon restart — see `providers/manager.ts`'s own doc
+        // comment on `RebindableProvider` for why a stable identity (not a reassigned variable) is
+        // what makes this reach every existing consumer unmodified.
+        const active = await createRebindableProvider(settings, secrets, dirs.settingsPath);
         if (active === null) {
           // WS-20 (review round 4): `settings.provider.model` names a provider OUTSIDE
           // `INTERNAL_PROVIDER_IDS` (codex-oauth/openai) — a real, unconstrained choice for a
@@ -815,7 +830,14 @@ export async function startDaemon(opts: {
           // resolve once here via the SAME deprecation-fallback path `live` uses on every turn.
           // `live` itself is still wired separately below (EngineConfig.provider.live) so turns
           // keep re-resolving on every call, not just at this boot snapshot.
-          agentProvider = { provider: active.provider, model: active.liveModel().model, live: active.liveModel };
+          //
+          // `agentProvider` is now the SAME object `active` itself is (no `{ provider: ..., model:
+          // ... }` literal copy) — item 2's whole point is that `.model`/`.live`/`.provider` on
+          // THIS EXACT object get mutated in place by `active.refresh(...)`, so every consumer that
+          // captured `agentProvider` (SessionTitler, BashReviewer, Dreamer, SessionCleaner) or
+          // `agentProvider.provider` alone (the research runner) sees a rebind with no code of its
+          // own changing.
+          agentProvider = active;
           quota = active.quota;
         }
       } catch (err) {
@@ -1321,16 +1343,19 @@ export async function startDaemon(opts: {
   // `SessionTitler`'s own `deps.model ?? deps.provider.model` default (the provider's own model) —
   // identical behavior to having no override configured at all.
   //
-  // A SEPARATE, pre-existing gap this does NOT fix (recorded in the item 4 report, not fixed here):
-  // `agentProvider` itself — the internal Provider instance `internalModelFor` compares THIS live
-  // tag's provider against — is built ONCE at boot from whatever `settings.provider.model` named
-  // THEN (just above) and is never rebuilt on a hot `provider.model` write. So a live
-  // `provider.model` change updates what `ownProviderFor(settings)` answers here before the
-  // daemon's actual internal Provider instance has caught up — the same caveat `settings.ts`'s
-  // `modelRoleInfo` documents on its own read side.
+  // Daemon settings surface (2026-09-17 plan, item 2): the gap the comment above USED TO record is
+  // now closed — `internalModelFor` compares the pin's provider against `agentProvider.live()`'s
+  // OWN `providerId`, which `RebindableProvider.refresh` (providers/manager.ts) mutates in place on
+  // a hot `provider.model` write, rather than `ownProviderFor(settings)` (a pure settings read that
+  // updates the INSTANT settings.json changes, before the actual bound backend has caught up, or —
+  // on a rebind that FAILED, e.g. no credential yet for the new provider — forever, since the old
+  // backend then never matches `ownProviderFor(settings)` again). `agentProvider?.live?.()` reads
+  // the CURRENTLY BOUND backend's own identity; the `ownProviderFor(settings)` fallback is for a
+  // test double that omits `live` (this closure's own pre-existing contract), never a production
+  // gap. See `RebindableProvider`'s own doc comment in providers/manager.ts.
   const titlesModel = (): string | undefined => {
     const m = settings?.titles?.model;
-    return m === undefined ? undefined : internalModelFor(m, { providerId: ownProviderFor(settings) }, "titles.model");
+    return m === undefined ? undefined : internalModelFor(m, { providerId: agentProvider?.live?.().providerId ?? ownProviderFor(settings) }, "titles.model");
   };
   const sessionTitler = agentProvider === null ? undefined : new SessionTitler({ provider: agentProvider, store, hub, model: titlesModel });
   const titler = sessionTitler === undefined ? undefined : {
@@ -1384,11 +1409,11 @@ export async function startDaemon(opts: {
   // through to `BashReviewer`'s own provider-model fallback rather than reaching `streamTurn` raw.
   // Daemon settings surface (2026-09-17 plan, item 4a): same live-getter fix as `titlesModel` above
   // — `reviewer.model` no longer freezes at whatever it was when THIS line ran; `BashReviewer` now
-  // re-reads it on every `review()` call. Same pre-existing `agentProvider` boot-binding caveat
-  // applies (see `titlesModel`'s own comment) — not fixed here, out of this item's scope.
+  // re-reads it on every `review()` call. Item 2's bound-providerId fix (see `titlesModel`'s own
+  // comment) applies here too — the same `agentProvider?.live?.()` reasoning, not repeated verbatim.
   const reviewerModel = (): string | undefined => {
     const m = settings?.reviewer?.model;
-    return m === undefined ? undefined : internalModelFor(m, { providerId: ownProviderFor(settings) }, "reviewer.model");
+    return m === undefined ? undefined : internalModelFor(m, { providerId: agentProvider?.live?.().providerId ?? ownProviderFor(settings) }, "reviewer.model");
   };
   const bashReviewer = agentProvider === null || agentProvider === undefined
     ? undefined
@@ -1586,7 +1611,11 @@ export async function startDaemon(opts: {
     // all, so a dangerous-domain url is HARD-BLOCKED (isError, no card) rather than carded like
     // web_fetch (code mode, unchanged). See page-core.ts's `checkDangerousDomain` for the full
     // rationale and read-page.ts/research.ts for where the check actually fires.
-    const research = createResearchRunner({ provider: agentProvider.provider, cache: pageCache, audit: (line) => audit.append(line), dangerousDomainsAdded, settings: () => settings });
+    // Item 2: `providerId` closes over the SAME `agentProvider` reference this whole gate is
+    // already narrowed on (non-null here) — `.live?.()` reads the CURRENTLY BOUND backend's own
+    // identity, so research's own `internalModelFor` gate agrees with whichever backend
+    // `agentProvider.provider` (passed above) actually dispatches to, even after a hot rebind.
+    const research = createResearchRunner({ provider: agentProvider.provider, cache: pageCache, audit: (line) => audit.append(line), dangerousDomainsAdded, settings: () => settings, providerId: () => agentProvider!.live?.().providerId ?? ownProviderFor(settings) });
     researchRunner = research; // the holder the `research` capability server reads (P8b Task 7)
     // B2 Task 4: the agent's browser. Four narrow deps, each the SAME thing the equivalent RPC uses —
     // `tabs` is the fold `panel.list` serves, `openTab` is the function `panel.openTab`'s handler
@@ -2047,6 +2076,13 @@ export async function startDaemon(opts: {
       // and is undefined until then, so the call is a typed no-op today — but a retention widening
       // on a running daemon reaches it the moment that task fills it in.
       runtimeSdk,
+      // Daemon settings surface (2026-09-17 plan, item 2): `agentProvider.refresh` is only present
+      // on the REAL boot path (`createRebindableProvider`, just above) — a test that injected
+      // `opts.agentProvider` directly (a `FakeProvider` double) never has one, and this whole
+      // `if (agentProvider)` gate has already established `agentProvider` is non-null here, so the
+      // sole remaining question `settings-apply.ts`'s `applyAgentProviderDiff` needs answered is
+      // "does THIS instance know how to rebind at all" — the optional-chained call answers it.
+      refreshAgentProvider: agentProvider.refresh ? (next) => agentProvider!.refresh!(next, secrets, dirs.settingsPath) : undefined,
       log: (msg) => console.error(`settings-apply: ${msg}`),
     });
     settingsWatcher = new SettingsWatcher({

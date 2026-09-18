@@ -3,9 +3,10 @@ import { mkdtempSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
-import { createProvider, internalModelFor, OPENAI_API_KEY_SECRET } from "../../src/providers/manager";
+import { createProvider, createRebindableProvider, internalModelFor, OPENAI_API_KEY_SECRET, SwappableProvider } from "../../src/providers/manager";
 import type { Settings } from "../../src/settings";
 import type { ModelTag } from "../../src/runtime-sdk/model-tag";
+import type { ModelInfo, Provider, ProviderEvent, TurnRequest } from "../../src/providers/types";
 
 function tmpSettingsFile(settings: Settings): string {
   const p = join(mkdtempSync(join(tmpdir(), "winter-manager-")), "settings.json");
@@ -198,5 +199,199 @@ describe("internalModelFor (WS-20 review round 1, GUARD)", () => {
     expect(lines[0]).toContain("pins.dream");
     expect(lines[0]).toContain("openai");
     expect(lines[0]).toContain("codex-oauth");
+  });
+});
+
+// Daemon settings surface (2026-09-17 plan, item 2): a fake `Provider` whose `streamTurn` can be
+// paused mid-generator and resumed on demand — the direct way to prove a rebind never tears an
+// in-flight call, without needing a real network backend to hang.
+class ControllableProvider implements Provider {
+  readonly id: string;
+  private release?: () => void;
+  private readonly firstDelta: string;
+  private readonly secondDelta: string;
+  constructor(id: string, firstDelta: string, secondDelta: string) {
+    this.id = id;
+    this.firstDelta = firstDelta;
+    this.secondDelta = secondDelta;
+  }
+  models(): ModelInfo[] { return []; }
+  async *streamTurn(_req: TurnRequest): AsyncIterable<ProviderEvent> {
+    yield { type: "text_delta", delta: this.firstDelta };
+    await new Promise<void>((resolve) => { this.release = resolve; });
+    yield { type: "text_delta", delta: this.secondDelta };
+  }
+  /** Lets a paused `streamTurn` call proceed past its first yield — the "still running" half of
+   *  an in-flight call the test holds open across a `rebind()`. */
+  unblock(): void {
+    this.release?.();
+  }
+}
+
+const noopReq: TurnRequest = { model: "x", input: [] };
+
+describe("SwappableProvider (item 2 — a hot provider.model write must not tear an in-flight call)", () => {
+  test("id/models delegate to whichever backend is current", () => {
+    const a = new ControllableProvider("provider-a", "a1", "a2");
+    const swappable = new SwappableProvider(a);
+    expect(swappable.id).toBe("provider-a");
+    const b = new ControllableProvider("provider-b", "b1", "b2");
+    swappable.rebind(b);
+    expect(swappable.id).toBe("provider-b");
+  });
+
+  test("an in-flight streamTurn call keeps running against the backend it started on, even after a rebind", async () => {
+    const a = new ControllableProvider("provider-a", "a1", "a2");
+    const b = new ControllableProvider("provider-b", "b1", "b2");
+    const swappable = new SwappableProvider(a);
+
+    const iter = swappable.streamTurn(noopReq)[Symbol.asyncIterator]();
+    const first = await iter.next();
+    expect(first.value).toEqual({ type: "text_delta", delta: "a1" }); // in flight, paused mid-generator
+
+    swappable.rebind(b); // the swap happens WHILE the call above is still suspended
+    // `iter.next()` resumes A synchronously up to its next await point (where `release` is
+    // captured) before this call's own promise settles — so `unblock()` must fire AFTER starting
+    // the resumption, not before (calling it first would release a promise nothing awaits yet).
+    const secondPromise = iter.next();
+    a.unblock(); // let A's generator proceed past its await point
+
+    const second = await secondPromise;
+    expect(second.value).toEqual({ type: "text_delta", delta: "a2" }); // still A — never torn
+    const third = await iter.next();
+    expect(third.done).toBe(true);
+  });
+
+  test("a call started AFTER a rebind dispatches to the new backend", async () => {
+    const a = new ControllableProvider("provider-a", "a1", "a2");
+    const b = new ControllableProvider("provider-b", "b1", "b2");
+    const swappable = new SwappableProvider(a);
+    swappable.rebind(b);
+
+    const events: ProviderEvent[] = [];
+    const iter = swappable.streamTurn(noopReq)[Symbol.asyncIterator]();
+    events.push((await iter.next()).value as ProviderEvent);
+    const secondPromise = iter.next();
+    b.unblock();
+    events.push((await secondPromise).value as ProviderEvent);
+    expect(events).toEqual([{ type: "text_delta", delta: "b1" }, { type: "text_delta", delta: "b2" }]);
+  });
+});
+
+describe("createRebindableProvider / refresh (item 2 — the internal Provider follows provider.model with no restart)", () => {
+  test("a provider.model write that crosses catalog providers rebinds .provider in place", async () => {
+    const store = new FileSecretStore(mkdtempSync(join(tmpdir(), "s-")));
+    await store.set(OPENAI_API_KEY_SECRET, "sk-test");
+    const settingsPath = tmpSettingsFile({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings);
+    const active = await createRebindableProvider(
+      { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings,
+      store,
+      settingsPath,
+    );
+    if (active === null) throw new Error("expected a real RebindableProvider (codex-oauth)");
+    expect(active.provider.id).toBe("codex-oauth");
+    const providerRefBefore = active.provider; // same object identity must survive the rebind
+
+    const next = { schemaVersion: 3, provider: { model: "openai/gpt-5.2" }, providers: { openai: { baseUrl: "https://x" } } } as unknown as Settings;
+    // Production calls `refresh` only AFTER the settings-watcher has already loaded `next` FROM
+    // `settingsPath` (settings-apply.ts's `apply(prev, next)` always agrees with the file it was
+    // just re-read from) — write it here too, or `liveModel()`'s own live re-read (which prefers
+    // disk over the boot-time argument from its very first call, by design — see
+    // `buildLiveModelResolver`'s existing "picked up on the NEXT call" test) would report the
+    // stale on-disk model under the NEW providerId.
+    writeFileSync(settingsPath, JSON.stringify(next));
+    bumpMtime(settingsPath, 5_000);
+    const rebound = await active.refresh(next, store, settingsPath);
+    expect(rebound).toBe(true);
+    expect(active.provider).toBe(providerRefBefore); // IDENTITY unchanged — every existing holder still valid
+    expect(active.provider.id).toBe("openai-compatible"); // but the BACKEND it dispatches to has changed
+    expect(active.model).toBe("gpt-5.2");
+  });
+
+  test("a same-provider write (a different model, same provider) is a no-op — no rebuild attempted", async () => {
+    const store = new FileSecretStore(mkdtempSync(join(tmpdir(), "s-")));
+    const settingsPath = tmpSettingsFile({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings);
+    const active = await createRebindableProvider(
+      { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings,
+      store,
+      settingsPath,
+    );
+    if (active === null) throw new Error("expected a real RebindableProvider (codex-oauth)");
+    const rebound = await active.refresh({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-luna" } } as Settings, store, settingsPath);
+    expect(rebound).toBe(false); // same provider — refresh must not even attempt a rebuild
+    expect(active.provider.id).toBe("codex-oauth");
+  });
+
+  test("moving OUTSIDE INTERNAL_PROVIDER_IDS leaves the old backend bound, logged once, never torn down", async () => {
+    const store = new FileSecretStore(mkdtempSync(join(tmpdir(), "s-")));
+    const settingsPath = tmpSettingsFile({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings);
+    const active = await createRebindableProvider(
+      { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings,
+      store,
+      settingsPath,
+    );
+    if (active === null) throw new Error("expected a real RebindableProvider (codex-oauth)");
+    const providerRefBefore = active.provider;
+
+    const lines: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+    let rebound: boolean;
+    try {
+      rebound = await active.refresh({ schemaVersion: 3, provider: { model: "anthropic/claude-sonnet-5" } } as Settings, store, settingsPath);
+    } finally {
+      console.error = realError;
+    }
+    expect(rebound).toBe(false);
+    expect(active.provider).toBe(providerRefBefore);
+    expect(active.provider.id).toBe("codex-oauth"); // the old backend keeps serving every caller
+    expect(lines).toHaveLength(1);
+  });
+
+  test("a failed rebuild (no stored credential for the new provider) leaves the old backend bound", async () => {
+    const store = new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))); // no OPENAI_API_KEY_SECRET set
+    const settingsPath = tmpSettingsFile({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings);
+    const active = await createRebindableProvider(
+      { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings,
+      store,
+      settingsPath,
+    );
+    if (active === null) throw new Error("expected a real RebindableProvider (codex-oauth)");
+    const providerRefBefore = active.provider;
+
+    const realError = console.error;
+    console.error = () => {};
+    let rebound: boolean;
+    try {
+      rebound = await active.refresh(
+        { schemaVersion: 3, provider: { model: "openai/gpt-5.2" }, providers: { openai: { baseUrl: "https://x" } } } as unknown as Settings,
+        store,
+        settingsPath,
+      );
+    } finally {
+      console.error = realError;
+    }
+    expect(rebound).toBe(false);
+    expect(active.provider).toBe(providerRefBefore);
+    expect(active.provider.id).toBe("codex-oauth");
+  });
+
+  test("quota is the SAME instance across a rebind (per-daemon, not per-provider-instance)", async () => {
+    const store = new FileSecretStore(mkdtempSync(join(tmpdir(), "s-")));
+    await store.set(OPENAI_API_KEY_SECRET, "sk-test");
+    const settingsPath = tmpSettingsFile({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings);
+    const active = await createRebindableProvider(
+      { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings,
+      store,
+      settingsPath,
+    );
+    if (active === null) throw new Error("expected a real RebindableProvider (codex-oauth)");
+    const quotaBefore = active.quota;
+    await active.refresh(
+      { schemaVersion: 3, provider: { model: "openai/gpt-5.2" }, providers: { openai: { baseUrl: "https://x" } } } as unknown as Settings,
+      store,
+      settingsPath,
+    );
+    expect(active.quota).toBe(quotaBefore);
   });
 });
