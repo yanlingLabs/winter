@@ -263,6 +263,65 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     c.close();
   });
 
+  // MEDIUM (fix wave, pre-merge review, finding 4): before this fix, `permitted` for an
+  // "internal-provider" role was computed from `ownProviderFor(settings)` alone — a pure settings
+  // read that can disagree with the daemon's ACTUAL bound backend after a rebind that failed (no
+  // stored credential yet for the new provider — `RebindableProvider.refresh` never tears down the
+  // old backend on failure, so every real call still dispatches to it, but this reader advertised
+  // the new, unreachable provider's rows as `permitted` anyway). `boundProviderId` simulates exactly
+  // that stuck state: settings.provider.model already names `openai`, but the daemon is still
+  // (only) bound to `codex-oauth`.
+  test("settings.modelRoles: permitted for an internal-provider role reflects the BOUND backend, not settings alone (a stuck rebind)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-model-roles-stuck-"));
+    const settingsPath = join(home, "settings.json");
+    saveSettings(settingsPath, Settings.parse({ schemaVersion: 3, provider: { model: "openai/gpt-5.6-sol" } }));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const secrets = new FileSecretStore(join(home, "secrets"));
+    const authority = new TokenAuthority(secrets);
+    const tokens = await authority.ensureTokens();
+    const server = startIpcServer({
+      socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets,
+      boundProviderId: () => "codex-oauth", // the daemon's ACTUAL bound backend — the stuck rebind
+    });
+    stop = () => { server.stop(); store.close(); };
+
+    const c = await TestClient.connect(socketPath);
+    await c.hello(tokens.harness, "cli");
+    const result = await c.request(METHODS.settingsModelRoles, {});
+    expect(result.error).toBeUndefined();
+    for (const role of ["titles.model", "reviewer.model", "pins.dream", "pins.cleaner", "pins.research", "pins.researchFallback"] as const) {
+      const providerIds = result.result.roles[role].permitted.map((p: any) => p.providerId);
+      expect(providerIds).toEqual(["codex-oauth"]); // the BOUND backend — never settings' "openai"
+    }
+    // "any"-constraint roles are unaffected — they never narrow to a single provider.
+    expect(result.result.roles["provider.model"].permitted.length).toBeGreaterThan(1);
+    c.close();
+  });
+
+  test("settings.setModelRole echoes the same bound-provider permitted set on its post-write cascade", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-model-roles-stuck-write-"));
+    const settingsPath = join(home, "settings.json");
+    saveSettings(settingsPath, Settings.parse({ schemaVersion: 3, provider: { model: "openai/gpt-5.6-sol" } }));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const secrets = new FileSecretStore(join(home, "secrets"));
+    const authority = new TokenAuthority(secrets);
+    const tokens = await authority.ensureTokens();
+    const server = startIpcServer({
+      socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets,
+      boundProviderId: () => "codex-oauth",
+    });
+    stop = () => { server.stop(); store.close(); };
+
+    const c = await TestClient.connect(socketPath);
+    await c.hello(tokens.harness, "cli");
+    const set = await c.request(METHODS.settingsSetModelRole, { role: "pins.dream", model: "codex-oauth/gpt-5.6-luna" });
+    expect(set.error).toBeUndefined();
+    expect(set.result.roles["titles.model"].permitted.map((p: any) => p.providerId)).toEqual(["codex-oauth"]);
+    c.close();
+  });
+
   test("not remote-allowed — local role only, for both methods", () => {
     expect(REMOTE_ALLOWED_METHODS.has(METHODS.settingsModelRoles)).toBe(false);
     expect(REMOTE_ALLOWED_METHODS.has(METHODS.settingsSetModelRole)).toBe(false);

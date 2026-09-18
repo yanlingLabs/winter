@@ -1477,32 +1477,34 @@ function permittedProviders(filterProviderIds?: ReadonlySet<string>): Array<{ pr
  * which is `settings.modelRoles`'s whole reason to exist (the "per-provider internal Provider"
  * follow-up widens `INTERNAL_PROVIDER_IDS` later and this reader picks it up automatically).
  *
- * CAVEAT (recorded, not fixed — out of this item's scope): `titles.model`/`reviewer.model`'s
- * "effective model when unset" reads back `settings.provider.model` itself, which is an
- * APPROXIMATION of what `SessionTitler`/`BashReviewer` actually run on
- * (`deps.model ?? deps.provider.model`, daemon.ts) — the real fallback is the daemon's internal
- * `Provider` instance's OWN resolved model (`active.liveModel().model`, which can rewrite a
- * deprecated slug), a value only a LIVE provider instance produces, not a pure settings read. Exact
- * whenever `settings.provider.model` needs no such rewrite (the common case). A SEPARATE,
- * pre-existing gap this read does not paper over: `agentProvider` itself (the internal Provider
- * instance backing BOTH fields) is built ONCE at daemon boot from whatever `settings.provider.model`
- * named then (`daemon.ts`), and is never rebuilt on a hot `provider.model` write — so a live change
- * to `provider.model` updates what THIS function reports (and what `internalModelFor` compares
- * against) before the daemon's actual internal Provider instance has caught up.
+ * `boundProviderId` (fix wave, pre-merge review, finding 4): the CURRENTLY BOUND internal-Provider
+ * backend's own catalog providerId — `agentProvider?.live?.().providerId`, live over
+ * `RebindableProvider.refresh` (`providers/manager.ts`) — the SAME value `internalModelFor`
+ * (`providers/manager.ts`) and `daemon.ts`'s `titles.model`/`reviewer.model` gates now compare a pin
+ * against. Every OTHER caller of the internal Provider was moved onto this comparison already; this
+ * function was the one straggler still computing its `"internal-provider"` `permitted` set from
+ * `ownProviderFor(settings)` alone — a PURE settings read that can disagree with the actual bound
+ * backend for as long as a rebind has not caught up, or forever, on a rebind that failed (no stored
+ * credential for the new provider yet — `RebindableProvider.refresh` never tears down the old
+ * backend on failure, so the daemon keeps running on it, but this reader used to advertise the NEW,
+ * unreachable one as `permitted` anyway). Absent (every caller/test that predates this fix, or a
+ * daemon with no internal Provider at all) falls back to `ownProviderFor(settings)`, unchanged.
  *
  * `runtimes.advisorModel`'s "unset" case has no single default to report at all (see
  * `modelRoleConstraint`'s own doc) — it reads back `null`, never a guess.
  */
-export function modelRoleInfo(settings: Settings | null | undefined, role: ModelRole): {
+export function modelRoleInfo(settings: Settings | null | undefined, role: ModelRole, boundProviderId?: string): {
   model: ModelTag | null;
   explicit: boolean;
   constraint: ModelRoleConstraint;
   permitted: Array<{ providerId: string; displayName: string; models: ModelTag[] }>;
 } {
   const constraint = modelRoleConstraint(role);
-  const ownProvider = ownProviderFor(settings);
+  // Fix wave (finding 4): the BOUND backend when known, never a pure settings re-derivation — see
+  // this function's own doc comment for why the two can disagree.
+  const effectiveProvider = boundProviderId ?? ownProviderFor(settings);
   const permitted = constraint === "internal-provider"
-    ? ((INTERNAL_PROVIDER_IDS as readonly string[]).includes(ownProvider) ? permittedProviders(new Set([ownProvider])) : [])
+    ? ((INTERNAL_PROVIDER_IDS as readonly string[]).includes(effectiveProvider) ? permittedProviders(new Set([effectiveProvider])) : [])
     : permittedProviders();
   const primaryModel = (settings?.provider?.model ?? DEFAULT_PROVIDER.model) as ModelTag;
 
@@ -1534,10 +1536,12 @@ export function modelRoleInfo(settings: Settings | null | undefined, role: Model
 
 /** Every role at once — `settings.modelRoles`'s whole result, and what `settings.setModelRole`
  *  echoes back post-write so the app sees the FULL cascade (a `provider.model` write moves every
- *  `"internal-provider"`/`"any"` role's default) without a second round trip. */
-export function modelRolesFor(settings: Settings | null | undefined): Record<ModelRole, ReturnType<typeof modelRoleInfo>> {
+ *  `"internal-provider"`/`"any"` role's default) without a second round trip. `boundProviderId`
+ *  (fix wave, finding 4): forwarded verbatim to every `modelRoleInfo` call — see that function's
+ *  own doc comment. */
+export function modelRolesFor(settings: Settings | null | undefined, boundProviderId?: string): Record<ModelRole, ReturnType<typeof modelRoleInfo>> {
   const out = {} as Record<ModelRole, ReturnType<typeof modelRoleInfo>>;
-  for (const role of MODEL_ROLES) out[role] = modelRoleInfo(settings, role);
+  for (const role of MODEL_ROLES) out[role] = modelRoleInfo(settings, role, boundProviderId);
   return out;
 }
 

@@ -855,6 +855,17 @@ export async function startDaemon(opts: {
   // fall back to an inert manager that just reports the zero/ok defaults.
   quota ??= new QuotaManager();
 
+  // Fix wave (pre-merge review, finding 4b): the ONE `RebindableProvider.refresh` retry lever,
+  // hoisted here (rather than re-derived at each call site) so `settings-apply.ts`'s hot-reload
+  // path AND `ipc/server.ts`'s `credential.set` handler share the exact same closure, never two
+  // independently-drifting copies of "does this instance know how to rebind at all". `refresh`
+  // itself self-gates on its own internal `boundProviderId` compare (a cheap no-op when nothing
+  // changed) — see `RebindableProvider.refresh`'s own doc comment — so calling it unconditionally
+  // from BOTH triggers is correct, not merely convenient.
+  const refreshAgentProviderHot = agentProvider?.refresh
+    ? (next: Settings) => agentProvider!.refresh!(next, secrets, dirs.settingsPath)
+    : undefined;
+
   // SP-approvals Task 5: hoisted alongside `engine` — same "declared null/undefined above, assigned
   // inside the gate" shape as `dreamer`/`mcp`/etc below. PermissionRules itself needs no provider
   // (only settings + winterHome), but has always been constructed inside the `if (agentProvider)`
@@ -2097,13 +2108,11 @@ export async function startDaemon(opts: {
       // and is undefined until then, so the call is a typed no-op today — but a retention widening
       // on a running daemon reaches it the moment that task fills it in.
       runtimeSdk,
-      // Daemon settings surface (2026-09-17 plan, item 2): `agentProvider.refresh` is only present
-      // on the REAL boot path (`createRebindableProvider`, just above) — a test that injected
-      // `opts.agentProvider` directly (a `FakeProvider` double) never has one, and this whole
-      // `if (agentProvider)` gate has already established `agentProvider` is non-null here, so the
-      // sole remaining question `settings-apply.ts`'s `applyAgentProviderDiff` needs answered is
-      // "does THIS instance know how to rebind at all" — the optional-chained call answers it.
-      refreshAgentProvider: agentProvider.refresh ? (next) => agentProvider!.refresh!(next, secrets, dirs.settingsPath) : undefined,
+      // Daemon settings surface (2026-09-17 plan, item 2); fix wave (finding 4b): the shared
+      // closure hoisted right after `agentProvider` itself is finalized, above — see its own doc
+      // comment. Reused verbatim here AND by `startIpcServer`'s own `refreshAgentProvider` option
+      // (`credential.set`'s retry), never two independently-drifting copies.
+      refreshAgentProvider: refreshAgentProviderHot,
       log: (msg) => console.error(`settings-apply: ${msg}`),
     });
     settingsWatcher = new SettingsWatcher({
@@ -2201,6 +2210,13 @@ export async function startDaemon(opts: {
   // on a no-provider daemon (or an unset `settings.provider.model`) — ipc/sync.ts degrades that to
   // `"none"`, never to `""`.
   const liveProvider = agentProvider ? () => providerIdFromSettingsTag(settings) ?? "none" : undefined;
+  // Fix wave (pre-merge review, finding 4): DELIBERATELY different from `liveProvider` just above —
+  // that field is a pure settings read, boot-bound to the CATALOGUE `sync.config` shows on purpose;
+  // this one is the actually-BOUND backend, the same `agentProvider?.live?.().providerId ??
+  // ownProviderFor(settings)` comparison `internalModelFor` and the `titles.model`/`reviewer.model`
+  // gates below already use. `settings.modelRoles`/`settings.setModelRole` (ipc/server.ts) are the
+  // only consumers.
+  const boundProviderId = () => agentProvider?.live?.().providerId ?? ownProviderFor(settings);
   // WS-20: `liveModel()` is a TAG — composed from the hot `liveSelection().providerId` (the CATALOG
   // providerId, boot-bound like everything else about provider identity, but read off
   // `LiveModelSelection` itself rather than `Provider.id` above, which is NOT always a real catalog
@@ -2264,6 +2280,14 @@ export async function startDaemon(opts: {
     liveEffort,
     // Whole-branch review C1: the provider identity that makes the two above interpretable.
     liveProvider,
+    // Fix wave (finding 4): the actually-bound internal-Provider backend, for settings.modelRoles/
+    // settings.setModelRole's `permitted` computation — see this const's own doc comment above.
+    boundProviderId,
+    // Fix wave (finding 4b): the SAME retry lever `settings-apply.ts`'s hot-reload path calls on
+    // every settled apply, now also reachable from `credential.set`'s handler — see that handler's
+    // own doc comment for why a credential add needs this rather than waiting for an unrelated
+    // settings write to trigger the next `refresh()`.
+    refreshAgentProvider: refreshAgentProviderHot,
     mcp: mcp ?? undefined,
     // Phase 4b Task 4: the plugin tool bridge. `registry` is undefined whenever agentProvider is
     // null (see `sharedRegistry`'s doc comment above). `supervisor`, unlike `registry`, is now

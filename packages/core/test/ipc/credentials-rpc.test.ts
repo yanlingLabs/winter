@@ -301,6 +301,58 @@ describe("credential.list / credential.set / credential.remove (WS-19)", () => {
     expect(configure.error.code).toBe(ERR.UNAUTHORIZED);
     c.close();
   });
+
+  // MEDIUM (fix wave, pre-merge review, finding 4b): `credential.set` used to touch only LIVE
+  // SESSION children (`evictSessionsForCredentialChange`, above) — the daemon's own INTERNAL
+  // Provider (a separate `RebindableProvider`, providers/manager.ts) never got a retry, so a
+  // rebind that failed for lack of a stored credential stayed stuck until some UNRELATED
+  // settings.json write reached `settings-apply.ts`'s own retry. `refreshAgentProvider` is injected
+  // here as a spy standing in for that closure — this file has no real `agentProvider` wired at
+  // all, so a real rebind cannot be exercised end to end; the obligation this test carries is
+  // narrower and load-bearing on its own: `credential.set` calls the retry hook, with the CURRENT
+  // on-disk settings, exactly once per successful set.
+  test("finding 4b: credential.set retries a stuck internal-Provider rebind immediately (no unrelated write needed)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ws19-cred-rpc-rebind-"));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "openai/gpt-5.6-sol" } }));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "auth-secrets")));
+    const tokens = await authority.ensureTokens();
+    const secrets = new FileSecretStore(join(home, "secrets"));
+    const refreshCalls: string[] = [];
+    const refreshAgentProvider = (next: { provider: { model: string } }) => { refreshCalls.push(next.provider.model); return true; };
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, secrets, winterHome: home, refreshAgentProvider });
+    cleanup = () => { server.stop(); store.close(); rmSync(home, { recursive: true, force: true }); };
+
+    const c = await TestClient.connect(socketPath);
+    await c.hello(tokens.harness, "test");
+    const set = await c.request(METHODS.credentialSet, { providerId: "openai", apiKey: SENTINEL });
+    expect(set.error).toBeUndefined();
+    expect(refreshCalls).toEqual(["openai/gpt-5.6-sol"]); // called with the CURRENT on-disk settings
+    c.close();
+  });
+
+  test("finding 4b: a successful credential.set never fails even when the retry hook itself throws", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ws19-cred-rpc-rebind-throws-"));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "openai/gpt-5.6-sol" } }));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "auth-secrets")));
+    const tokens = await authority.ensureTokens();
+    const secrets = new FileSecretStore(join(home, "secrets"));
+    const server = startIpcServer({
+      socketPath, serverVersion: "test", tokens: authority, store, secrets, winterHome: home,
+      refreshAgentProvider: () => { throw new Error("rebuild failed"); },
+    });
+    cleanup = () => { server.stop(); store.close(); rmSync(home, { recursive: true, force: true }); };
+
+    const c = await TestClient.connect(socketPath);
+    await c.hello(tokens.harness, "test");
+    const set = await c.request(METHODS.credentialSet, { providerId: "openai", apiKey: SENTINEL });
+    expect(set.error).toBeUndefined();
+    expect(set.result).toEqual({ ok: true }); // the credential IS saved regardless — best-effort retry only
+    c.close();
+  });
 });
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
