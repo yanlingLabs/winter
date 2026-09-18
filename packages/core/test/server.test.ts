@@ -816,12 +816,19 @@ describe("daemon IPC", () => {
 
     const disableRes = await c.request(METHODS.mcpDisable, { name: "fake" });
     expect(disableRes.result).toEqual({ ok: true, name: "fake", enabled: false });
-    // The manager's own boot-time cache still says "connected" internally, but mcp.list overlays
-    // the LIVE settings — the panel must never show a server the user just disabled as running.
-    expect((await c.request(METHODS.mcpList, {})).result.servers).toEqual([{ name: "fake", status: "disabled", toolNames: ["echo"], source: "user" }]);
+    // MEDIUM (fix wave, pre-merge review, finding 3): `mcp.disable` now ACTUALLY stops the tracked
+    // client (`McpManager.stopServer`) and unregisters its tools, rather than leaving the real
+    // process running under a cosmetic "disabled" label — a disabled server's tools must not still
+    // be callable through `tool.list`. The row is synthesized (never tracked any more), so
+    // `toolNames` is empty and `transport` is now set (same shape an HTTP/SSE "unmanaged" row gets).
+    // The registry-level proof that the tools are truly gone (not just absent from THIS report) is
+    // `manager.test.ts`'s "McpManager.stopServer" block, which has a direct `ToolRegistry` handle.
+    expect((await c.request(METHODS.mcpList, {})).result.servers).toEqual([{ name: "fake", status: "disabled", toolNames: [], source: "user", transport: "stdio" }]);
 
     const enableRes = await c.request(METHODS.mcpEnable, { name: "fake" });
     expect(enableRes.result).toEqual({ ok: true, name: "fake", enabled: true });
+    // Symmetry: re-enabling actually RESTARTS it (`McpManager.startOneUserServer`) — a disable/enable
+    // round trip must never need a daemon restart to bring a stdio server back.
     expect((await c.request(METHODS.mcpList, {})).result.servers).toEqual([{ name: "fake", status: "connected", toolNames: ["echo"], source: "user" }]);
     c.close();
   });

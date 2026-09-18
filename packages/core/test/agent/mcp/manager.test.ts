@@ -110,6 +110,66 @@ describe.if(isMac)("McpManager.ensureProject", () => {
     expect(mgr.list(dir).filter((s) => s.name === "proj").length).toBe(1); // exactly one project server, not duplicated
     mgr.stopAll();
   });
+
+  // MEDIUM (fix wave, pre-merge review, finding 3): `ensureProject` is called merely to RENDER
+  // `mcp.list {cwd}` (`ipc/server.ts`'s `mcpList` handler) — before this fix that unconditionally
+  // spawned every configured project server, disabled or not.
+  test("a name in settings.mcp.disabled is NEVER spawned by ensureProject, even in a trusted project", async () => {
+    const dir = projDir();
+    const registry = new ToolRegistry();
+    const trust = new TrustStore(join(realDir(), "trust.json")); trust.trust(dir);
+    const mgr = new McpManager({ registry, trust, disabled: () => new Set(["proj"]) });
+    await mgr.ensureProject(dir);
+    expect(registry.has("mcp__proj__echo")).toBe(false); // never spawned/registered
+    // Still reported, so mcp.list's own settings overlay has a row to rewrite to "disabled" —
+    // never started, so never "connected".
+    const row = mgr.list(dir).find((s) => s.name === "proj");
+    expect(row?.status).not.toBe("connected");
+    mgr.stopAll();
+  });
+
+  test("a name NOT in settings.mcp.disabled still starts normally (the filter is name-specific)", async () => {
+    const dir = projDir();
+    const registry = new ToolRegistry();
+    const trust = new TrustStore(join(realDir(), "trust.json")); trust.trust(dir);
+    const mgr = new McpManager({ registry, trust, disabled: () => new Set(["some-other-server"]) });
+    await mgr.ensureProject(dir);
+    expect(registry.has("mcp__proj__echo")).toBe(true);
+    expect(mgr.list(dir).find((s) => s.name === "proj")?.status).toBe("connected");
+    mgr.stopAll();
+  });
+});
+
+describe.if(isMac)("McpManager.stopServer (finding 3)", () => {
+  test("stops a running USER-tier server and removes its tools from the registry", async () => {
+    const registry = new ToolRegistry();
+    const mgr = new McpManager({ registry, trust: new TrustStore(join(realDir(), "trust.json")) });
+    await mgr.startAll({ fake: { command: "bun", args: ["run", FIXTURE] } });
+    expect(registry.has("mcp__fake__echo")).toBe(true);
+    mgr.stopServer("fake");
+    expect(registry.has("mcp__fake__echo")).toBe(false);
+    expect(mgr.list().find((s) => s.name === "fake")).toBeUndefined(); // status dropped too, not just tools
+    mgr.stopAll();
+  });
+
+  test("stops a running PROJECT-tier server and removes its tools from the registry", async () => {
+    const dir = projDir();
+    const registry = new ToolRegistry();
+    const trust = new TrustStore(join(realDir(), "trust.json")); trust.trust(dir);
+    const mgr = new McpManager({ registry, trust });
+    await mgr.ensureProject(dir);
+    expect(registry.has("mcp__proj__echo")).toBe(true);
+    mgr.stopServer("proj");
+    expect(registry.has("mcp__proj__echo")).toBe(false);
+    expect(mgr.list(dir).find((s) => s.name === "proj")).toBeUndefined();
+    mgr.stopAll();
+  });
+
+  test("a name with no running client anywhere is a no-op — never throws", () => {
+    const registry = new ToolRegistry();
+    const mgr = new McpManager({ registry, trust: new TrustStore(join(realDir(), "trust.json")) });
+    expect(() => mgr.stopServer("never-existed")).not.toThrow();
+  });
 });
 
 describe.if(isMac)("McpManager.list(cwd) + stopAll", () => {

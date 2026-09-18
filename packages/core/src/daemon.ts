@@ -1846,7 +1846,11 @@ export async function startDaemon(opts: {
     if (lspCfg?.enabled !== false) {
       lspManager = new LspManager({ idleShutdownMs: lspCfg?.idleShutdownMs });
     }
-    mcp = new McpManager({ registry, trust: trustStore, log: (m) => console.error(m) });
+    // MEDIUM (fix wave, pre-merge review, finding 3): the same live `() => settings` closure this
+    // file uses everywhere else — `doEnsureProject` reads it on every `ensureProject` call, never a
+    // boot snapshot, so a `mcp.disable`/`mcp.enable` write is honoured on the very next `mcp.list
+    // {cwd}` with no daemon restart.
+    mcp = new McpManager({ registry, trust: trustStore, log: (m) => console.error(m), disabled: () => new Set(settings?.mcp?.disabled ?? []) });
     // MCP resources (CC parity: ListMcpResourcesTool/ReadMcpResourceTool) — registered
     // unconditionally here (not per-server-connect: see mcp-resources.ts's own doc comment for why
     // a live conditional-registration mirror of CC isn't cheap with this registry's shape) so it
