@@ -509,6 +509,14 @@ export const SettingsSetSkillDeniedResult = z.object({ ok: z.literal(true), name
  * reading `"disabled"`. Omitted on every row the manager itself STILL tracks (started at boot or via
  * `ensureProject`, never yet disabled) — a live stdio row never needed the field before this fix and
  * still doesn't.
+ *
+ * `strippedHeaders` (read-door correction, item 6 follow-up): the NAMES ONLY (never a value) of any
+ * credential-shaped headers `loadSettings` silently dropped from THIS server's `headers` at read
+ * time (`settings.ts`'s `stripCredentialShapedMcpHeaders` — see that function's own doc for why the
+ * read door strips instead of refusing). Additive and optional, same posture as `transport`: omitted
+ * entirely on a row with nothing stripped, so every pre-existing exact-match test/fixture is
+ * untouched. The Swift side stores this field as a plain array of strings, never an exhaustive
+ * switch, so widening it here cannot break `apple/WinterKit`'s build either.
  */
 export const McpServerStatusSchema = z.object({
   name: z.string(),
@@ -516,6 +524,7 @@ export const McpServerStatusSchema = z.object({
   toolNames: z.array(z.string()),
   source: z.enum(["user", "project", "plugin"]),
   transport: z.enum(["stdio", "http", "sse"]).optional(),
+  strippedHeaders: z.array(z.string()).optional(),
 });
 export const McpListParams = z.object({ cwd: z.string().optional() });
 export const McpListResult = z.object({ ok: z.literal(true), servers: z.array(McpServerStatusSchema) });

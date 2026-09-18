@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { configuredMcpServersFor } from "../../src/runtime-sdk/external-mcp";
-import { Settings } from "../../src/settings";
+import { Settings, loadSettings } from "../../src/settings";
 
 // Daemon settings surface batch 3 (item 3b): a real `Settings.parse` always normalizes a `type`-less
 // entry to `{ type: "stdio", ... }` (settings.ts's own preprocess step), so this helper stamps the
@@ -76,6 +76,33 @@ test("an HTTP server and an SSE server pass through with their own shape (url, h
     httpOne: { type: "http", url: "https://example.com/mcp", headers: { "X-Request-Id": "abc123" } },
     sseOne: { type: "sse", url: "https://example.com/sse" },
   });
+});
+
+// Read-door follow-up (the ruling correction): a hand-edited settings.json carrying a
+// credential-shaped header must still boot the daemon (`loadSettings` strips rather than refuses —
+// see settings.test.ts's own dedicated describe block), and the stripped header must never reach
+// EITHER leg's `Options` — `configuredMcpServersFor` is the one function both `mode-options.ts`'s
+// `buildWinterOptions` and `official-options.ts`'s `officialInputFor` consume verbatim, so proving
+// it is absent from THIS function's output proves it is absent from both legs.
+test("a credential-shaped header a user hand-edited into settings.json is stripped by loadSettings and never reaches configuredMcpServersFor's output", () => {
+  const dir = mkdtempSync(join(tmpdir(), "winter-ext-mcp-cred-header-"));
+  const path = join(dir, "settings.json");
+  writeFileSync(path, JSON.stringify({
+    schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
+    mcpServers: {
+      httpOne: {
+        type: "http", url: "https://example.com/mcp",
+        headers: { Authorization: "Bearer sk-SENTINEL-should-never-reach-options", "X-Request-Id": "abc123" },
+      },
+    },
+  }));
+  // Load through the real daemon-facing door (not Settings.parse, which would itself refuse this
+  // shape) — this IS the read door under test.
+  const settings = loadSettings(path);
+  const out = configuredMcpServersFor({ settings, cwd: undefined, trusted: () => false });
+  expect(out).toEqual({ httpOne: { type: "http", url: "https://example.com/mcp", headers: { "X-Request-Id": "abc123" } } });
+  expect(JSON.stringify(out)).not.toContain("sk-SENTINEL");
+  expect(JSON.stringify(out)).not.toContain("Authorization");
 });
 
 // Daemon settings surface batch 3 (item 3a): a server named in settings.mcp.disabled is withheld
