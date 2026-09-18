@@ -509,6 +509,21 @@ final class ComposerChromeTests: XCTestCase {
         XCTAssertEqual(unknown.chipTitle, newChatModelPlaceholder, "only when the daemon named no model")
     }
 
+    /// Dispatch's composer offers neither the model button nor the folder chip — the daemon pins its
+    /// model, and it has no one folder — but keeps its approval-mode row.
+    func testDispatchComposerHasNoModelButtonOrFolderChip() {
+        let card = WinterComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.dispatch),
+                                      policy: ComposerPolicyControl(policy: "ask", changeInFlight: false, onSet: { _ in }),
+                                      model: wiredModel(), workingDirectory: "/repo", stop: nil)
+        XCTAssertFalse(card.chrome.showsModelControl)
+        XCTAssertNotNil(card.chrome.makeStrip(), "the approval-mode row stays")
+        for mode: SessionMode in [.code, .chat] {
+            let other = WinterComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(mode),
+                                           policy: nil, model: wiredModel(), stop: nil)
+            XCTAssertTrue(other.chrome.showsModelControl, "\(mode) keeps its model button")
+        }
+    }
+
     /// The short-name rule: vendor word, provider note and dashes stripped.
     func testComposerModelShortNames() {
         XCTAssertEqual(composerModelShortName(displayName: "GPT-5.6 Sol"), "5.6 Sol")

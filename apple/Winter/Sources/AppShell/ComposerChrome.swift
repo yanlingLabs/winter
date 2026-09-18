@@ -220,6 +220,14 @@ protocol ComposerChrome {
 
     /// The band behind the composer. `nil` = absent.
     func makeStrip() -> ComposerStrip?
+
+    /// Whether the composer offers the model/effort button. Every mode but Dispatch, whose model and
+    /// effort the daemon pins (Settings → Roles → Dispatch) — a picker there could only be refused.
+    var showsModelControl: Bool { get }
+}
+
+extension ComposerChrome {
+    var showsModelControl: Bool { true }
 }
 
 /// **The one mode → composer mapping in the app.**
@@ -315,11 +323,17 @@ struct DispatchComposerChrome: ComposerChrome {
     /// shown-but-refused posture rather than regressing it to absent (spec §3's table).
     var offersClientEffortTiers: Bool { effortTiersAreOffered(mode: mode.rawValue) }
 
+    /// No model button (user call, 2026-09-19): the daemon pins Dispatch's model and effort; they
+    /// are chosen in Settings → Roles.
+    var showsModelControl: Bool { false }
+
     func makeControlRowAccessory() -> AnyView? { nil }
 
+    /// The approval mode only — no folder chip (user call, 2026-09-19): Dispatch is not a
+    /// session in one folder, it coordinates sessions that each have their own.
     func makeStrip() -> ComposerStrip? {
         permissionsStrip(offering: dispatchSettablePolicyModes, context.policy,
-                         workingDirectory: context.workingDirectory)
+                         workingDirectory: nil)
     }
 }
 
