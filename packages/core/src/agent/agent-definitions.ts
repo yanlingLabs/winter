@@ -23,7 +23,9 @@
 // and under batch 2 it silently lost instead. `loadProjectAgentDefinitions` below adds the project
 // tier (TRUST-GATED, never looser than `ProjectSettingsResolver`'s own gate — see its own doc for
 // why the extra lstat symlink guards exist here and not in `SkillStore`: an agent definition's
-// `permissionMode`/`tools`/`disallowedTools` fields are themselves a permission grant, unlike a
+// `tools`/`disallowedTools` fields are themselves a permission grant (`permissionMode` WAS too,
+// until the fix wave's finding 2b stripped it at parse time — see `parseAgentDefinitionFile`'s own
+// doc comment; the lstat rigor here stands on `tools`/`disallowedTools` alone now), unlike a
 // skill's plain prompt text, so this tier gets the CONTROL-PLANE-adjacent rigor
 // `ProjectSettingsResolver`/`PermissionRules` use, not the looser bar `SkillStore.discover` accepts
 // for inert prompt content) and `mergeAgentDefinitionTiers` restores the SDK's own order: project

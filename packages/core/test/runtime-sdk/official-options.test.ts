@@ -860,6 +860,11 @@ describe("officialInputFor — item 2: settings.permissions.deny reaches this le
 // refused, typed, by `session-driver.ts`'s `inputDeps()` BEFORE this deps object is ever built).
 describe("officialInputFor — item 3: configured MCP servers (HTTP/SSE/stdio) reach this leg too", () => {
   test("an HTTP server and an SSE server configured in settings.mcpServers land in this leg's mcpServers, unchanged", () => {
+    // `configuredMcpServers` is handed straight to `officialInputFor` as a pre-built dep here —
+    // it deliberately never goes through `Settings.parse`, so the ruling (fix wave item 6, refuses
+    // a credential-shaped header at the SETTINGS door) does not apply to this fixture; in
+    // production this value is always `configuredMcpServersFor`'s OUTPUT, which can only ever have
+    // come from an already-validated `Settings`. This test is about passthrough, not validation.
     const configuredMcpServers = {
       httpOne: { type: "http" as const, url: "https://example.com/mcp", headers: { Authorization: "Bearer t" } },
       sseOne: { type: "sse" as const, url: "https://example.com/sse" },
