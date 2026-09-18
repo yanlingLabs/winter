@@ -579,20 +579,32 @@ export const VersionsGetResult = z.object({
  * the Mac panel can render "what's configured", "what went wrong", and "what the runtime itself
  * offers" without conflating them:
  *
- *  - `definitions`: the daemon's OWN parse of `<home>/agents/*.md` (`agent-definitions.ts`), the
- *    SAME map passed as `Options.agents` on the Winter leg today (`mode-options.ts`'s
+ *  - `definitions`: the daemon's OWN parse of `<home>/agents/*.md` MERGED with a trusted project's
+ *    `<cwd>/.winter/agents/*.md` (`agent-definitions.ts`'s `mergeAgentDefinitionTiers`), the SAME
+ *    merged map passed as `Options.agents` on the Winter leg today (`mode-options.ts`'s
  *    `buildWinterOptions`) — the official leg has no route for it yet (a measured router-package
- *    gap, `official-options.ts`'s own comment on the construction site).
+ *    gap, `official-options.ts`'s own comment on the construction site). Batch 3 (item 1): EVERY
+ *    definition from BOTH tiers is reported, tagged `tier`, with a losing USER-tier row (same name
+ *    as a project row) flagged `shadowed` rather than silently dropped — the project tier always
+ *    wins the actual `Options.agents` slot (the SDK's own precedence), but the panel can still show
+ *    what lost and why. `cwd` absent, or an untrusted `cwd`, reports the user tier alone (no project
+ *    row can ever appear — never a looser trust gate than `optionsFor`'s own).
  *  - `rejected`: every `.md` file this daemon could read but whose frontmatter failed validation
- *    (missing/invalid `name`, missing `description`), each with ITS OWN reason — never silently
- *    dropped.
+ *    (missing/invalid `name`, missing `description`), each with ITS OWN reason and ITS OWN `tier` —
+ *    never silently dropped.
  *  - `builtins`: the built-in agent TYPES (`Explore`, `Plan`, …) as reported by the last LIVE Winter
  *    session that answered `Query.supportedAgents()` (`session-driver.ts`'s
  *    `WinterLegDeps.onSupportedAgents`, cached daemon-wide in `agent/supported-agents-cache.ts`) —
  *    `null` when no session has EVER answered it (a fresh boot with no Winter-leg session opened
  *    yet), never an invented list.
  */
-export const AgentsListParams = z.object({});
+export const AgentsListParams = z.object({
+  /** Batch 3 (item 1): which project's `.winter/agents` to consult, trust-gated exactly like
+   *  `skills.list`'s own `cwd`. Absent — same as an untrusted cwd — reports the user tier alone. */
+  cwd: z.string().optional(),
+});
+
+export const AgentDefinitionTierSchema = z.enum(["user", "project"]);
 
 export const AgentDefinitionInfoSchema = z.object({
   name: z.string(),
@@ -602,11 +614,21 @@ export const AgentDefinitionInfoSchema = z.object({
   model: z.string().optional(),
   /** Absolute path to the `.md` file this definition came from — diagnostic only. */
   path: z.string(),
+  /** Batch 3 (item 1): which tier this row came from. Additive/optional — an older client that
+   *  never sends/expects it is unaffected. */
+  tier: AgentDefinitionTierSchema.optional(),
+  /** Set only on a USER-tier row whose name is ALSO defined by the project tier — it lost the
+   *  `Options.agents` slot to that project row but is still reported here, never dropped silently.
+   *  Never set on a project-tier row (a project definition never loses to anything). */
+  shadowed: z.boolean().optional(),
 });
 
 export const AgentDefinitionRejectionSchema = z.object({
   path: z.string(),
   reason: z.string(),
+  /** Batch 3 (item 1): which tier's scan produced this rejection. Additive/optional, same posture
+   *  as `AgentDefinitionInfoSchema.tier`. */
+  tier: AgentDefinitionTierSchema.optional(),
 });
 
 export const AgentInfoSchema = z.object({

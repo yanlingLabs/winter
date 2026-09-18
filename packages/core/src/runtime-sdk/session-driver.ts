@@ -65,7 +65,7 @@ import { winterSessions } from "./sessions";
 import { WINTER_PEER_VERSIONS } from "./versions";
 import { winterSystemPromptFor } from "./system-prompt";
 import { DISPATCH_EFFORT } from "../agent/dispatch-config";
-import { loadUserAgentDefinitions } from "../agent/agent-definitions";
+import { loadUserAgentDefinitions, loadProjectAgentDefinitions, mergeAgentDefinitionTiers, type LoadedAgentDefinitions } from "../agent/agent-definitions";
 import type { AgentRegistry } from "../agent/bg-agent-registry";
 import type { ContextAssembler } from "../agent/context";
 import { startWinterSession, unconsumedUserMessages, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
@@ -226,6 +226,15 @@ export interface WinterLegDeps {
    *  configs, and stay the `winter__external` capability carry. A key colliding with a daemon-owned
    *  `winter__<key>` server refuses the session typed (`assertNoCapabilityCollision`). */
   extraMcpServers?: (session: CapabilitySession) => Record<string, McpServerConfig>;
+  /**
+   * Daemon settings surface batch 3 (item 1): a TRUSTED project's `<cwd>/.winter/agents/*.md`
+   * (`agent/agent-definitions.ts`'s `loadProjectAgentDefinitions`) — trust-gated by the CALLER
+   * (daemon.ts wires this exactly like `extraMcpServers` above: a closure over the daemon's own
+   * `TrustStore`, returning the empty scan shape outright for an untrusted `cwd`). Absent from a
+   * test double that doesn't care, in which case only the user tier (`<home>/agents`) is ever
+   * consulted — byte-identical to a pre-item-1 session.
+   */
+  projectAgentDefinitions?: (cwd: string) => LoadedAgentDefinitions;
   log?: (line: string) => void;
   /**
    * P8c-14 (integration round 2): lane 2's `planBridgeFor(...)` module — this file never imports
@@ -561,7 +570,12 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // `buildWinterOptions` itself stays pure/no-I/O (its own doc comment); this is the ONE
         // caller that does the read, exactly where every other per-incarnation live read (advisor
         // model, system prompt, connection override) already happens.
-        agents: loadUserAgentDefinitions(home).definitions,
+        //
+        // Batch 3 (item 1): merged with the TRUSTED project tier (`deps.projectAgentDefinitions`,
+        // trust-gated by the daemon's own wiring — absent/untrusted degrades to the empty scan
+        // shape) via `mergeAgentDefinitionTiers`, restoring the SDK's own precedence (project wins
+        // over user, by name) instead of the user tier alone winning outright.
+        agents: mergeAgentDefinitionTiers(loadUserAgentDefinitions(home), deps.projectAgentDefinitions?.(cwd) ?? { definitions: {}, sources: [], rejected: [] }).optionsMap,
       });
     };
 
