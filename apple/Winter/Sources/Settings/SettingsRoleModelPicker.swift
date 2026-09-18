@@ -997,15 +997,17 @@ func roleEffortWriteForModelChange(currentModel: String?, newModel: String?,
 }
 
 /// Whether the daemon's `settings.setModelRole` accepts an ABSENT `model` (= leave the model
-/// untouched). **FALSE today**: `model` is required-nullable.
+/// untouched). **TRUE since 2026-09-18** (origin/main 81930854): absent = leave, `null` = clear the
+/// pin, a tag = set; both `model` and `effort` absent is refused; `provider.model` still refuses
+/// `null` but accepts an effort-only write with `model` absent.
 ///
-/// FLIP CONDITION: the daemon session lands `model` as OPTIONAL on `setModelRole` (absent = leave,
-/// `null` = clear, a tag = set; a call with neither field refused). Flipping this to `true` is the
-/// ONE-LINE change that turns every effort-only write into `.leave`, which also closes the race
-/// today's rule has (another client pins a defaulted role between our read and our write, and our
-/// `model: null` silently unpins it). An app running against an older daemon after the flip would
-/// get its effort-only writes refused, so flip it only with the daemon change in the field.
-let setModelRoleModelIsOptional = false
+/// With it true, every effort-only write sends `.leave` for EVERY role — which closes the race the
+/// old rule had: another client pinning a defaulted role between our read and our write, and our
+/// `model: null` silently unpinning it. The daemon pins the case that matters most: an effort-only
+/// write with `model` absent on an explicitly PINNED role leaves the pin intact.
+///
+/// Requires a daemon at or after that commit. Against an older one, effort-only writes are refused.
+let setModelRoleModelIsOptional = true
 
 /// PURE: the `model` an EFFORT-ONLY write sends.
 ///
