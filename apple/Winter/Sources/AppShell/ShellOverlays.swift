@@ -12,6 +12,10 @@ enum ShellOverlay: Hashable, Sendable {
     /// Which TAB is showing is the shell's own state, not part of the case: the panel is one
     /// surface that remembers where you were, and putting the tab in the identity would make
     /// "already open" depend on which tab you asked for.
+    ///
+    /// A caller that needs a SPECIFIC tab (Settings → Plugins' rows) says so through
+    /// `ShellOverlayPresentation.openLibrary(at:)`, which carries the tab as a one-shot REQUEST
+    /// beside this case rather than in it; the root applies it to its remembered tab and clears it.
     case library
     /// Paired phones: what is connected, and the door to pair or revoke.
     case devices
@@ -98,6 +102,14 @@ final class ShellOverlayPresentation: ObservableObject {
     /// catalog store, none of which can live in a `Hashable` enum — and stuffing closures into one
     /// would put the picker's behaviour in the enum's callers instead of in the picker.
     @Published private(set) var picker: SettingsRolePickerRequest?
+    /// A one-shot "show the library at THIS tab" (2026-09-18, Settings → Plugins), or nil.
+    ///
+    /// Which tab the library shows is the root's own remembered state (`ShellRootView.libraryTab`),
+    /// so that a plain reopen returns to the tab you left. A request does not replace that memory —
+    /// the root copies it INTO the memory and clears it (`clearLibraryTabRequest()`), after which
+    /// the chosen tab simply IS the tab you left. Every open door clears it first, so it can only
+    /// ever be set while the library itself is the surface showing.
+    @Published private(set) var libraryTabRequest: LibraryTab?
 
     /// The search palette's own flag. OWNED here (rather than beside this object) so that opening
     /// a panel can close the palette without a back-reference somebody has to remember to wire;
@@ -118,10 +130,27 @@ final class ShellOverlayPresentation: ObservableObject {
     func open(_ overlay: ShellOverlay) {
         closePicker()
         search.close()
+        libraryTabRequest = nil
         self.overlay = overlay
     }
 
-    func close() { overlay = nil }
+    /// Open the library AT `tab`. Goes through `open(.library)`, so the one-surface rule holds by
+    /// the same construction as every other door; the tab rides along as `libraryTabRequest`.
+    /// Already open on another tab: stays open, and moves to `tab`.
+    func openLibrary(at tab: LibraryTab) {
+        open(.library)
+        libraryTabRequest = tab
+    }
+
+    /// The root has applied the request to its remembered tab.
+    func clearLibraryTabRequest() {
+        libraryTabRequest = nil
+    }
+
+    func close() {
+        overlay = nil
+        libraryTabRequest = nil
+    }
 
     /// Same door, twice = closed. Matches ⌘K's behaviour on the search palette.
     func toggle(_ overlay: ShellOverlay) {
@@ -132,6 +161,7 @@ final class ShellOverlayPresentation: ObservableObject {
 
     func openSearch() {
         overlay = nil
+        libraryTabRequest = nil
         closePicker()
         search.open()
     }
@@ -145,6 +175,7 @@ final class ShellOverlayPresentation: ObservableObject {
 
     func openRolePicker(_ request: SettingsRolePickerRequest) {
         overlay = nil
+        libraryTabRequest = nil
         search.close()
         closePicker()
         picker = request
@@ -180,6 +211,16 @@ final class ShellOverlayPresentation: ObservableObject {
 /// (`SettingsRoleModelPicker.swift`) and conformed to here, so Settings depends on the capability
 /// rather than on the shell's whole modal layer — and a test can stand in for it.
 extension ShellOverlayPresentation: SettingsRolePickerPresenting {}
+
+/// The Plugins page's door: "show the library at this tab" (`SettingsPluginsSection.swift`).
+extension ShellOverlayPresentation: SettingsLibraryPresenting {}
+
+/// PURE: the tab the library shows — a pending request wins over the remembered tab. The root's
+/// binding reads through this so the panel's FIRST frame is already on the requested tab, instead
+/// of flashing the remembered one until the request is applied.
+func libraryTabShowing(remembered: LibraryTab, requested: LibraryTab?) -> LibraryTab {
+    requested ?? remembered
+}
 
 // MARK: - Metrics
 

@@ -53,6 +53,17 @@ struct ShellRootView: View {
     /// Which library tab is showing. Shell state rather than part of `ShellOverlay.library`, so
     /// reopening the panel returns you to where you were.
     @State private var libraryTab: LibraryTab = defaultLibraryTab
+    /// What the library panel is handed: the remembered tab, unless a request is pending
+    /// (`libraryTabShowing`) — so a panel opened at a tab renders that tab on its first frame. A
+    /// tab click writes the memory and drops any request, so the click always wins.
+    private var libraryTabBinding: Binding<LibraryTab> {
+        Binding(
+            get: { libraryTabShowing(remembered: libraryTab, requested: overlays.libraryTabRequest) },
+            set: { newTab in
+                libraryTab = newTab
+                overlays.clearLibraryTabRequest()
+            })
+    }
     /// Where Settings' Back row returns to. Captured when Settings opens rather than hard-coded:
     /// sending someone to the new-chat page when they came from a live session loses their place.
     @State private var destinationBeforeSettings: ShellDestination = defaultShellDestination
@@ -575,7 +586,7 @@ struct ShellRootView: View {
                 ShellFloatingPanel(overlay: overlay, onClose: { overlays.close() }) {
                     switch overlay {
                     case .library:
-                        LibraryPanel(tab: $libraryTab, wiring: dashboardWiring)
+                        LibraryPanel(tab: libraryTabBinding, wiring: dashboardWiring)
                     case .devices:
                         DevicesPanel(wiring: dashboardWiring, onPair: { overlays.close() })
                     case .updates:
@@ -586,6 +597,14 @@ struct ShellRootView: View {
             }
         }
         .animation(.easeOut(duration: 0.16), value: overlays.overlay)
+        // Settings → Plugins opens the library AT a tab (`openLibrary(at:)`). The request is copied
+        // into the remembered tab and cleared, so from here on it is simply the tab you left — the
+        // next plain reopen returns to it, which is the rule the remembered tab exists for.
+        .onChange(of: overlays.libraryTabRequest) { _, requested in
+            guard let requested else { return }
+            libraryTab = requested
+            overlays.clearLibraryTabRequest()
+        }
         // Settings → Roles' model picker (2026-09-18). A FOURTH surface in the same layer, wearing
         // the same `ShellPanelCard` as the three above — which is the whole point of it being here:
         // hung on the settings pane it wore the same card at a different place, with a scrim that
@@ -697,7 +716,8 @@ struct ShellRootView: View {
             // publish its model picker into it rather than hanging one on its own detail pane.
             SettingsSectionView(section: section ?? defaultSettingsSection,
                                 wiring: dashboardWiring,
-                                picker: overlays)
+                                picker: overlays,
+                                library: overlays)
         }
     }
 

@@ -297,56 +297,244 @@ final class AppShellTests: XCTestCase {
                        "order follows the section order, never the query")
     }
 
+    // MARK: - The settings structure (2026-09-18 restructure)
+
+    /// THE STRUCTURE, pinned exactly: six groups in the user's order, each section in its group in
+    /// order. Personal first (ChatGPT's own settings shape), Archived Chats last in it (the user's
+    /// "the last one"), Winter's four links last of all.
+    func testSettingsGroupsAndSectionsAreInTheUsersOrder() {
+        XCTAssertEqual(settingsSectionGroups.map(\.id),
+                       ["personal", "models", "assistant", "integrations", "mac", "winter"])
+        XCTAssertEqual(settingsSectionGroups.map(\.title),
+                       ["Personal", "Models", "Assistant", "Integrations", "This Mac", "Winter"])
+        let sections = Dictionary(uniqueKeysWithValues: settingsSectionGroups.map { ($0.id, $0.sections) })
+        XCTAssertEqual(sections["personal"], [.profile, .personalization, .notifications, .voice,
+                                              .appearance, .shortcuts, .importChats, .archivedChats])
+        XCTAssertEqual(sections["models"], [.roles, .providers, .runtimes, .quota])
+        XCTAssertEqual(sections["assistant"], [.memory, .workflows, .sessions, .permissions],
+                       "Hooks moved onto the Plugins page; Approvals is Permissions")
+        XCTAssertEqual(sections["integrations"], [.plugins, .computerUse, .browser, .appshots],
+                       "MCP servers live under Plugins now — no standalone section")
+        XCTAssertEqual(sections["mac"], [.trust, .peripheral, .commandLine, .launchAtLogin, .daemonStatus])
+        XCTAssertEqual(sections["winter"], [.support, .feedback, .discord, .donate])
+
+        let all = settingsSectionOrder
+        XCTAssertEqual(Set(all), Set(SettingsSection.allCases), "every section is in a group")
+        XCTAssertEqual(all.count, SettingsSection.allCases.count, "…exactly once")
+        XCTAssertEqual(settingsSectionTitle(.permissions), "Permissions")
+        XCTAssertEqual(settingsSectionTitle(.importChats), "Import")
+        XCTAssertEqual(settingsSectionTitle(.archivedChats), "Archived Chats")
+    }
+
+    /// Every section — the new ones included — has a title, a glyph, a subtitle, and is found by
+    /// the sidebar's (title-only) filter under its own title.
+    func testEverySectionIsLabelledAndFoundBySearchUnderItsOwnTitle() {
+        let all = settingsSectionOrder
+        for section in SettingsSection.allCases {
+            XCTAssertFalse(settingsSectionTitle(section).isEmpty)
+            XCTAssertFalse(settingsSectionSystemImage(section).isEmpty)
+            XCTAssertTrue(settingsSectionSubtitle(section).hasSuffix("."), "\(section) subtitle is a sentence")
+            XCTAssertTrue(settingsSectionsMatching(settingsSectionTitle(section), in: all).contains(section),
+                          "the filter finds \(section) by its own title")
+        }
+        XCTAssertEqual(Set(SettingsSection.allCases.map(settingsSectionTitle)).count,
+                       SettingsSection.allCases.count, "no two rows share a title")
+        XCTAssertEqual(settingsSectionsMatching("archived", in: all), [.archivedChats])
+        XCTAssertEqual(settingsSectionsMatching("discord", in: all), [.discord])
+        XCTAssertEqual(settingsSectionsMatching("permiss", in: all), [.permissions])
+        XCTAssertTrue(settingsSectionsMatching("approvals", in: all).isEmpty, "renamed, not duplicated")
+        XCTAssertTrue(settingsSectionsMatching("mcp", in: all).isEmpty, "MCP servers is a row on Plugins")
+        XCTAssertTrue(settingsSectionsMatching("hooks", in: all).isEmpty, "Hooks is a row on Plugins")
+    }
+
     // MARK: - The coming settings sections (2026-09-18)
 
-    /// The seven sections that are placeholders: every one is in the sidebar, reachable by the same
-    /// title filter as any other section, and has a page that says what belongs there AND where it
-    /// lives today — never a blank panel.
-    func testComingSectionsAreListedFilterableAndSayWhereTheThingLivesToday() {
-        let coming: [SettingsSection] = [.runtimes, .sessions, .approvals, .hooks, .mcpServers,
-                                         .appearance, .shortcuts]
+    /// The placeholder sections: every one is in the sidebar, reachable by the same title filter
+    /// as any other section, and has a page that says something — never a blank panel.
+    func testComingSectionsAreListedFilterableAndSaySomething() {
+        let coming: [SettingsSection] = [.profile, .personalization, .notifications, .voice,
+                                         .appearance, .shortcuts, .importChats, .archivedChats,
+                                         .runtimes, .sessions, .permissions,
+                                         .computerUse, .browser, .appshots]
         let all = settingsSectionOrder
-        XCTAssertEqual(Set(all), Set(SettingsSection.allCases), "every section is in exactly one group")
-        XCTAssertEqual(all.count, SettingsSection.allCases.count)
         for section in coming {
             XCTAssertTrue(all.contains(section), "\(section) is in the sidebar")
-            XCTAssertEqual(settingsSectionsMatching(settingsSectionTitle(section), in: all).first, section,
-                           "the filter finds \(section) by its own title")
+            XCTAssertTrue(settingsSectionIsComing(section))
             let copy = settingsSectionComingCopy(section) ?? ""
             XCTAssertFalse(copy.isEmpty, "\(section) says something")
             XCTAssertFalse(copy.contains("`"), "a variable reaches Text un-parsed — a backtick would render")
             XCTAssertFalse(settingsSectionBodyDrawsItsOwnHeader(section),
                            "a coming page draws no title, so the section header must")
+            XCTAssertTrue(settingsSectionRendersWithoutWiring(section),
+                          "a coming page never claims 'no daemon wiring'")
         }
-        XCTAssertEqual(settingsSectionsMatching("Hooks", in: all), [.hooks])
-        XCTAssertEqual(settingsSectionsMatching("mcp", in: all), [.mcpServers])
         XCTAssertEqual(settingsSectionsMatching("shortcut", in: all), [.shortcuts])
+        XCTAssertEqual(SettingsSection.allCases.filter(settingsSectionIsComing), coming.sorted {
+            SettingsSection.allCases.firstIndex(of: $0)! < SettingsSection.allCases.firstIndex(of: $1)!
+        }, "the pinned list and the copy table agree")
 
-        // The built sections have no coming copy — the two kinds of page never mix.
-        for section in all where !coming.contains(section) {
-            XCTAssertNil(settingsSectionComingCopy(section), "\(section) is built")
+        // THE INVARIANT, for any future copy too: whatever has coming copy renders the coming page,
+        // which draws no title — so the header must, wired or not.
+        for section in SettingsSection.allCases where settingsSectionIsComing(section) {
+            XCTAssertFalse(settingsSectionBodyDrawsItsOwnHeader(section), "\(section) would be unnamed")
+            XCTAssertTrue(settingsSectionRendersWithoutWiring(section))
         }
 
-        // The new group sits after Assistant.
-        let groupIds = settingsSectionGroups.map(\.id)
-        XCTAssertEqual(groupIds, ["models", "assistant", "integrations", "mac"])
+        // The built sections, the Plugins door and the links have no coming copy.
+        for section in all where !coming.contains(section) {
+            XCTAssertNil(settingsSectionComingCopy(section), "\(section) is not a placeholder")
+        }
+        // The door and the links draw their own `SettingsPage` title, with or without wiring.
+        for section: SettingsSection in [.plugins, .support, .feedback, .discord, .donate] {
+            XCTAssertTrue(settingsSectionBodyDrawsItsOwnHeader(section))
+            XCTAssertTrue(settingsSectionRendersWithoutWiring(section))
+        }
     }
 
-    /// Two things the brief for these pages assumed turned out not to exist; the copy must not
-    /// name them. `runtimes.official.auth` was removed in WS-20 (the arm is the tag prefix), and
-    /// there is no default-approval-policy key. And MCP headers get no promise of a field.
+    /// Things the briefs for these pages assumed turned out not to exist; the copy must not name
+    /// them. `runtimes.official.auth` was removed in WS-20 (the arm is the tag prefix), there is no
+    /// default-approval-policy key, there is no browser on/off key, and computer use is OPT-IN.
     func testComingCopyNamesOnlyWhatExists() {
         let runtimes = settingsSectionComingCopy(.runtimes) ?? ""
         XCTAssertFalse(runtimes.contains("runtimes.official.auth"))
         XCTAssertTrue(runtimes.contains("runtimes.handoff.crossRuntime"))
-        let approvals = settingsSectionComingCopy(.approvals) ?? ""
-        XCTAssertTrue(approvals.contains("reviewer.enabled"))
-        XCTAssertTrue(approvals.contains("composer"), "the policy is per session, in the composer")
-        let mcp = settingsSectionComingCopy(.mcpServers) ?? ""
-        XCTAssertTrue(mcp.contains("no field for auth headers"))
+        let permissions = settingsSectionComingCopy(.permissions) ?? ""
+        XCTAssertTrue(permissions.contains("reviewer.enabled"))
+        XCTAssertTrue(permissions.contains("composer"), "the policy is per session, in the composer")
         let shortcuts = settingsSectionComingCopy(.shortcuts) ?? ""
         XCTAssertTrue(shortcuts.contains("fixed"), "the summon hotkey has no control today")
         XCTAssertTrue(shortcuts.contains("Plugins tab"))
+        let computer = settingsSectionComingCopy(.computerUse) ?? ""
+        XCTAssertTrue(computer.contains("computerUse.enabled"))
+        XCTAssertTrue(computer.contains("off unless"), "computer use is opt-in (=== true)")
+        XCTAssertTrue(computer.contains("Chat never"), "the computer tool is code + dispatch only")
+        let browser = settingsSectionComingCopy(.browser) ?? ""
+        XCTAssertFalse(browser.contains("browser.enabled"), "there is no browser switch")
+        XCTAssertTrue(browser.contains("permissions.dangerousDomains.added"))
+        let archived = settingsSectionComingCopy(.archivedChats) ?? ""
+        XCTAssertTrue(archived.contains("Archived tab"), "names where archived sessions are today")
+        let appshots = settingsSectionComingCopy(.appshots) ?? ""
+        XCTAssertTrue(appshots.contains("coming"), "says it is coming, describes nothing")
+        // The not-yet-real pages are one short sentence (Voice two: its mic is not wired).
+        for section: SettingsSection in [.profile, .personalization, .notifications, .importChats, .appshots] {
+            let copy = settingsSectionComingCopy(section) ?? ""
+            XCTAssertLessThanOrEqual(copy.count, 100, "\(section) stays short")
+            XCTAssertFalse(copy.contains("settings.json"), "\(section) claims nothing is configured today")
+        }
+    }
+
+    // MARK: - Settings → Plugins: doors into the library (2026-09-18)
+
+    /// The five rows, in the user's order, each opening the library at ITS tab — and between them
+    /// every library tab has exactly one door.
+    func testPluginsPageRowsOpenTheLibraryAtTheirOwnTabs() {
+        XCTAssertEqual(settingsLibraryDoors.map(\.title),
+                       ["Plugins", "Skills", "Hooks", "MCP servers", "Agents"])
+        XCTAssertEqual(settingsLibraryDoors.map(\.tab), [.plugins, .skills, .hooks, .mcp, .agents])
+        XCTAssertEqual(Set(settingsLibraryDoors.map(\.tab)), Set(LibraryTab.allCases),
+                       "every library tab has exactly one door")
+        XCTAssertTrue(settingsHooksSwitchNote.contains("plugin hooks"),
+                      "hooks.enabled gates the plugin hook registry, not the daemon's own hooks")
+        XCTAssertTrue(settingsHooksSwitchNote.contains("hooks.enabled"),
+                      "the global hooks switch moved here from the old Hooks section")
+        XCTAssertFalse(settingsHooksSwitchNote.contains("`"))
+        XCTAssertTrue(settingsLibraryDoorIsOpenable(hasPresenter: true))
+        XCTAssertFalse(settingsLibraryDoorIsOpenable(hasPresenter: false),
+                       "no shell, no door — the row is inert, not dead")
+    }
+
+    /// A stand-in presenter records the tab each row asks for — the page reaches the shell through
+    /// the narrow protocol, never the whole layer.
+    func testALibraryDoorAsksThePresenterForItsTab() {
+        final class Recorder: SettingsLibraryPresenting {
+            var opened: [LibraryTab] = []
+            func openLibrary(at tab: LibraryTab) { opened.append(tab) }
+        }
+        let recorder = Recorder()
+        for door in settingsLibraryDoors { recorder.openLibrary(at: door.tab) }
+        XCTAssertEqual(recorder.opened, [.plugins, .skills, .hooks, .mcp, .agents])
+        XCTAssertTrue((ShellOverlayPresentation() as AnyObject) is SettingsLibraryPresenting,
+                      "the shell's modal layer is the real presenter")
+    }
+
+    /// **Opening the library at a tab.** The request rides beside `.library`, wins over the
+    /// remembered tab on the first frame, and is cleared once applied — after which a plain reopen
+    /// returns to the tab you left, exactly as before.
+    func testOpeningTheLibraryAtARequestedTab() {
+        let p = ShellOverlayPresentation()
+        p.openLibrary(at: .mcp)
+        XCTAssertEqual(p.overlay, .library)
+        XCTAssertEqual(p.libraryTabRequest, .mcp)
+        XCTAssertEqual(libraryTabShowing(remembered: .skills, requested: p.libraryTabRequest), .mcp,
+                       "the request wins before it is applied")
+
+        // The root applies it to its memory and clears it.
+        var remembered = libraryTabShowing(remembered: .skills, requested: p.libraryTabRequest)
+        p.clearLibraryTabRequest()
+        XCTAssertNil(p.libraryTabRequest)
+        XCTAssertEqual(libraryTabShowing(remembered: remembered, requested: p.libraryTabRequest), .mcp)
+
+        // Close and reopen PLAINLY: no request, so the remembered tab — the one you left — shows.
+        p.close()
+        p.open(.library)
+        XCTAssertNil(p.libraryTabRequest, "a plain open never carries a tab")
+        XCTAssertEqual(libraryTabShowing(remembered: remembered, requested: p.libraryTabRequest), .mcp)
+
+        // Moving to another tab by hand is remembered the same way.
+        remembered = .agents
+        p.toggle(.library)
+        p.toggle(.library)
+        XCTAssertEqual(libraryTabShowing(remembered: remembered, requested: p.libraryTabRequest), .agents)
+
+        // Already open on one tab: a request moves it, and the library stays the one surface up.
+        p.openLibrary(at: .hooks)
+        XCTAssertEqual(p.overlay, .library)
+        XCTAssertEqual(p.libraryTabRequest, .hooks)
+    }
+
+    /// A pending request never outlives the library: every other door, and closing, drops it — so
+    /// a stale request can never re-steer a later plain open.
+    func testALibraryTabRequestDiesWithTheLibrary() {
+        let doors: [(String, (ShellOverlayPresentation) -> Void)] = [
+            ("close", { $0.close() }),
+            ("search", { $0.openSearch() }),
+            ("devices", { $0.open(.devices) }),
+            ("updates", { $0.toggle(.updates) }),
+            ("plain library", { $0.open(.library) }),
+            ("picker", { [self] in $0.openRolePicker(pickerRequest(.titles)) }),
+        ]
+        for (name, door) in doors {
+            let p = ShellOverlayPresentation()
+            p.openLibrary(at: .agents)
+            door(p)
+            XCTAssertNil(p.libraryTabRequest, "\(name) drops the pending tab")
+        }
+    }
+
+    // MARK: - Settings → the Winter links (2026-09-18)
+
+    /// All four URLs are waiting on the user: every row is "Coming soon" and not clickable.
+    func testWinterLinksAreAllComingSoonUntilTheUserSuppliesURLs() {
+        XCTAssertEqual(WinterLink.allCases, [.support, .feedback, .discord, .donate])
+        for link in WinterLink.allCases {
+            XCTAssertNil(winterLinks.url(for: link), "\(link) has no URL yet — none may be invented")
+            XCTAssertEqual(winterLinkRowState(link), .comingSoon)
+        }
+        XCTAssertEqual(winterLinkComingSoonLabel, "Coming soon")
+        XCTAssertEqual([SettingsSection.support, .feedback, .discord, .donate].map(winterLink(for:)),
+                       [.support, .feedback, .discord, .donate])
+        XCTAssertNil(winterLink(for: .plugins), "only the four are links")
+    }
+
+    /// A row with a URL opens exactly that URL; filling one in touches no other row.
+    func testAWinterLinkWithAURLOpensIt() {
+        let url = URL(string: "https://example.invalid/discord")!
+        var table = winterLinks
+        table.discord = url
+        XCTAssertEqual(winterLinkRowState(.discord, in: table), .opens(url))
+        XCTAssertEqual(winterLinkRowState(.support, in: table), .comingSoon)
+        XCTAssertEqual(winterLinkRowState(.feedback, in: table), .comingSoon)
+        XCTAssertEqual(winterLinkRowState(.donate, in: table), .comingSoon)
     }
 
     // MARK: - The shell's modal layer: exactly one floating surface (2026-09-18)
@@ -367,11 +555,12 @@ final class AppShellTests: XCTestCase {
         var overlay: ShellOverlay?
         var picker: SettingsModelRole?
         var pickerKind: SettingsRolePickerKind?
+        var libraryTabRequest: LibraryTab?
     }
 
     private func layer(_ p: ShellOverlayPresentation) -> Layer {
         Layer(search: p.search.isPresented, overlay: p.overlay, picker: p.picker?.role,
-              pickerKind: p.picker?.kind)
+              pickerKind: p.picker?.kind, libraryTabRequest: p.libraryTabRequest)
     }
 
     /// **THE TABLE.** From every starting surface, every door: whatever opens, everything else is
@@ -382,6 +571,7 @@ final class AppShellTests: XCTestCase {
             ("search", { $0.openSearch() }, Layer(search: true)),
             ("⌘K", { $0.toggleSearch() }, Layer(search: true)),
             ("library", { $0.open(.library) }, Layer(overlay: .library)),
+            ("library at", { $0.openLibrary(at: .mcp) }, Layer(overlay: .library, libraryTabRequest: .mcp)),
             ("devices", { $0.toggle(.devices) }, Layer(overlay: .devices)),
             ("updates", { $0.open(.updates) }, Layer(overlay: .updates)),
         ]
@@ -389,6 +579,7 @@ final class AppShellTests: XCTestCase {
             ("nothing", { _ in }),
             ("search", { $0.openSearch() }),
             ("library", { $0.open(.library) }),
+            ("library at", { $0.openLibrary(at: .hooks) }),
             ("updates", { $0.open(.updates) }),
             ("picker", { [self] in $0.openRolePicker(pickerRequest(.titles)) }),
             ("effort", { [self] in $0.openRolePicker(pickerRequest(.titles, kind: .effort)) }),
