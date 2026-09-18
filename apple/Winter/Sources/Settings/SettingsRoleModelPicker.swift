@@ -49,8 +49,14 @@ import WinterKit
 //      is which, per provider, and `roleProviderCredentialState` derives everything from
 //      `credentialDoor` — never from a hardcoded provider id:
 //
-//        - `keychain` (~96)          join `credential.list` on `credentialSlotId`; that IS the
-//                                    readiness test. Stored / not stored.
+//        - `keychain` (~96)          join `credential.list` on the slot the daemon NAMED
+//                                    (`credentialSlotId`); that IS the readiness test. Stored /
+//                                    not stored — and, when no row named that slot, nothing at
+//                                    all. A `<providerId>:default` guess is never made: two
+//                                    secrets live under the id `anthropic` alone, so a
+//                                    providerId-keyed answer is wrong for a real user. See
+//                                    `credentialSlotPresence`, and the `credentialPresent`
+//                                    boolean that retires this join entirely.
 //        - `console-profile` (1)     `credentialSlotId` is null and that is CORRECT. The Console
 //                                    arm's readiness is an on-disk `ant` profile the daemon
 //                                    re-checks live at every spawn, so this read deliberately
@@ -285,31 +291,33 @@ func modelCatalogFacts(_ catalog: ModelsCatalog,
 
 /// PURE: `credential.list`'s rows → slot id → stored?, or nil when there was no list to read.
 ///
-/// **SLOT-KEYED, and that is the entire point.** `credential.list` emits one row per inventory
-/// SLOT, which is why `anthropic` appears twice — the api-key slot and the Console broker's bearer
-/// — and a providerId-keyed index would let one answer for the other.
+/// **SLOT-KEYED, AND ONLY ON A SLOT THE DAEMON ITSELF NAMED** (corrected 2026-09-18). A row with no
+/// `slotId` is not indexed at all, so it contributes no readiness claim anywhere.
 ///
-/// Two ways a row gets its key, in strict order:
+/// **A PROVIDER ID IS NOT A CREDENTIAL IDENTITY.** The earlier version of this function derived
+/// `"<providerId>:default"` for a manageable provider row, on the reading that today's daemon emits
+/// one row per slot but does not name it. That derivation was not merely incomplete, it was WRONG,
+/// and `anthropic` is the case that proves it: TWO secrets are filed under that single provider id
+/// — the api-key slot and the Console bearer — so a providerId-keyed guess cannot tell a
+/// console-only install from an api-key one. It would show "No key stored" on `anthropic/*` to a
+/// user who is signed in through the Console, and the opposite to an api-key user. Either way it
+/// asserts something this read cannot know. The mapping is many-to-one in at least one real case,
+/// and one of those arms is not even a Keychain fact — the Console arm's readiness is a file on
+/// disk the daemon re-checks at every spawn.
 ///
-/// 1. `row.slotId`, when the daemon sends it. Authoritative; nothing is derived.
-/// 2. **THE BRIDGE**, for today's daemon, which emits the rows per slot but never names the slot:
-///    `"<providerId>:default"`, and ONLY for a manageable provider row (the api-key door). The
-///    OAuth/console rows are never indexed, so `anthropic:console` can never satisfy a lookup for
-///    `anthropic:default`, which is the failure the slot-keyed rule exists to prevent.
+/// **WHAT REPLACES IT.** `models.catalog`'s per-provider rows are gaining
+/// **`credentialPresent: boolean`**, computed daemon-side by the rule that already backs the
+/// composer's model list — an on-disk profile check for the console arm, presence otherwise. When
+/// it lands, readiness is read straight off that boolean and there is no join left to get wrong.
 ///
-/// The derivation is safe because of where it is USED: the caller looks up the CATALOG'S OWN
-/// `credentialSlotId` string in this map. If a slot is ever named anything other than
-/// `<providerId>:default`, the lookup MISSES and the row renders nothing — never "no key stored".
-/// A wrong guess degrades to silence, which is the only direction it may degrade in.
+/// Until then a keychain-door provider whose slot nobody named is `.unknown`, which renders
+/// NOTHING: no "key stored", no "no key stored". Silence is the only direction this may fail in.
 func credentialSlotPresence(_ rows: [CredentialRow]?) -> [String: Bool]? {
     guard let rows else { return nil }
     var out: [String: Bool] = [:]
     for row in rows {
-        if let slot = row.slotId {
-            out[slot] = row.present
-        } else if row.group == "provider" && row.manageable {
-            out["\(row.providerId):default"] = row.present
-        }
+        guard let slot = row.slotId else { continue }
+        out[slot] = row.present
     }
     return out
 }
@@ -555,7 +563,8 @@ func roleProviderCredentialState(providerId: String,
     case "keychain":
         // Three ways to know nothing, all of which must render as nothing rather than "no key":
         // a keychain door with no slot named, a credential list we never read, and a slot that
-        // list did not mention.
+        // list did not mention (which, since the `<providerId>:default` derivation was deleted, is
+        // every row on today's daemon — deliberately: see `credentialSlotPresence`).
         guard let slot = fact.credentialSlotId,
               let presence = facts.credentialSlotPresence,
               let present = presence[slot] else { return .unknown }
@@ -851,8 +860,10 @@ enum RoleModelPickerSelection: Equatable, Sendable {
 ///
 /// A role that is not `explicit` reports a model all the same — the DERIVED one, which moves on its
 /// own when the default session model changes. Ticking that model's row would say "someone chose
-/// this", which is the precise confusion the pane's Pinned/Default badge exists to prevent, and it
-/// would leave "Use the default" unticked on the very rows that are using the default.
+/// this", and it would leave "Use the default" unticked on the very rows that are using the
+/// default. The pane's Pinned/Default badge used to make the same distinction visible in the row;
+/// the badge is gone (user call, 2026-09-18) and THIS is now the only place it is drawn, which
+/// makes the rule more load-bearing than it was, not less.
 ///
 /// So: not explicit (or cleared) → the default row. Explicit → its tag.
 func settingsRolePickerSelection(_ value: SettingsRoleValue) -> RoleModelPickerSelection {
@@ -869,13 +880,36 @@ func settingsRoleAllowsClearing(_ role: SettingsModelRole) -> Bool {
     role != .sessionDefault
 }
 
-/// PURE: whether the value on a row is a door at all. Three reasons it is not, and each is a state
+/// PURE: whether the value on a row is a door at all. FOUR reasons it is not, and each is a state
 /// the pane already renders honestly: the daemon told us nothing about this role, it named no
 /// permitted providers (which means "not told", never "none allowed" — see `SettingsRoleValue`),
-/// or this app has no write door.
-func settingsRoleIsPickable(_ value: SettingsRoleValue?, canWrite: Bool) -> Bool {
-    guard canWrite, let value else { return false }
+/// this app has no write door, or there is nowhere to PRESENT the card.
+///
+/// `canPresent` is required rather than defaulted on purpose. Since 2026-09-18 the picker is
+/// rendered by the shell (`SettingsRolePickerPresenting`), so a pane built without that door — a
+/// preview, a test, any future host that forgets to pass it — can genuinely not open one. A
+/// defaulted `true` would hide exactly that, leaving a chevron that does nothing when clicked.
+func settingsRoleIsPickable(_ value: SettingsRoleValue?, canWrite: Bool, canPresent: Bool) -> Bool {
+    guard canWrite, canPresent, let value else { return false }
     return !value.permittedProviders.isEmpty
+}
+
+/// Where a failed write's sentence goes.
+enum SettingsRoleWriteErrorSink: Equatable, Sendable {
+    /// Into the card, under its own rows — where the click that caused it was made.
+    case picker
+    /// Onto the pane, because the card that made the write is gone. The write outlived it (closing
+    /// the card cancels nothing), and a failure nobody is told about is the one outcome that is
+    /// never acceptable.
+    case pane
+}
+
+/// PURE: the sink. Into the card only when the card on screen is the one for the role that was
+/// WRITTEN — a card for a different role is somebody else's conversation, and "Couldn't set
+/// dispatch" under the titles picker reads as the titles write having failed.
+func settingsRoleWriteErrorSink(openRole: SettingsModelRole?,
+                                writtenRole: SettingsModelRole) -> SettingsRoleWriteErrorSink {
+    openRole == writtenRole ? .picker : .pane
 }
 
 /// The picker's own title, per role — the job it is choosing a model for.
@@ -1281,6 +1315,137 @@ struct SettingsRoleModelPicker: View {
                 .padding(.horizontal, 14)
                 .padding(.top, errorText == nil ? 8 : 0)
                 .padding(.bottom, 10)
+        }
+    }
+}
+
+// MARK: - Presenting the picker at SHELL level (2026-09-18)
+
+/// **Everything the shell needs in order to show this card, and nothing more.**
+///
+/// The picker used to be an `.overlay` on the settings detail pane, which had two visible costs the
+/// user named: the scrim dimmed only the detail area (the settings sidebar stayed lit), and the
+/// card's top inset was measured from the pane, so it sat lower than the library/devices/updates
+/// panels and ⌘K. It is the same `ShellPanelCard` as those three — it should therefore land in the
+/// same rectangle, and the only way to guarantee that is to render it where they render.
+///
+/// So the pane publishes a REQUEST and the shell renders it (`ShellRootView`). The request carries
+/// object references rather than a snapshot, deliberately: the card shows live state — which write
+/// is in flight, which sentence a failed write produced, and the repainted `values` a successful
+/// one returned — and a struct of copied values would freeze all three at the moment of the click.
+/// `SettingsRolePickerHost` is what observes them.
+struct SettingsRolePickerRequest {
+    let role: SettingsModelRole
+    /// The pane's live model: the values, the in-flight flag, the write error, and the write door.
+    let roles: SettingsRolesModel
+    /// The families/pricing/credential store, observed so facts arriving a beat after the click
+    /// reach the open card (`SettingsRoleModelPicker`'s own `onChange(of: facts)` depends on it).
+    let catalog: ModelCatalogFactsModel
+    /// A directly-injected override for the facts (previews and tests). Nil means "use the store".
+    let injectedFacts: ModelCatalogFacts?
+    /// The pane's injected values, used only while the model has loaded none — the same fallback
+    /// the pane itself applies, carried so the card cannot disagree with the row behind it.
+    let fallbackValues: [SettingsModelRole: SettingsRoleValue]
+
+    init(role: SettingsModelRole,
+         roles: SettingsRolesModel,
+         catalog: ModelCatalogFactsModel,
+         injectedFacts: ModelCatalogFacts? = nil,
+         fallbackValues: [SettingsModelRole: SettingsRoleValue] = [:]) {
+        self.role = role
+        self.roles = roles
+        self.catalog = catalog
+        self.injectedFacts = injectedFacts
+        self.fallbackValues = fallbackValues
+    }
+}
+
+/// Identity, so the shell can animate on it and so a stale close can be refused
+/// (`ShellOverlayPresentation.closeRolePicker(ifShowing:)`). The two models compare by IDENTITY —
+/// they are the live objects, and "the same pane's model" is the question being asked, not "two
+/// models holding equal values".
+extension SettingsRolePickerRequest: Equatable {
+    static func == (lhs: SettingsRolePickerRequest, rhs: SettingsRolePickerRequest) -> Bool {
+        lhs.role == rhs.role
+            && lhs.roles === rhs.roles
+            && lhs.catalog === rhs.catalog
+            && lhs.injectedFacts == rhs.injectedFacts
+            && lhs.fallbackValues == rhs.fallbackValues
+    }
+}
+
+/// The one thing Settings asks of the shell. A protocol rather than the concrete
+/// `ShellOverlayPresentation` so this pane depends on the CAPABILITY — and so a pane built without
+/// one (previews, tests) is honestly unpickable rather than offering a click that cannot land.
+@MainActor
+protocol SettingsRolePickerPresenting: AnyObject {
+    func openRolePicker(_ request: SettingsRolePickerRequest)
+}
+
+/// The shell-level wrapper: it observes what the card renders, so that in-flight and error states
+/// still appear INSIDE the card even though the card no longer lives inside the pane.
+///
+/// Esc lives here rather than on `ShellPanelCard`: adding it to the shared card would change the
+/// three existing panels' behaviour, and this change is not about them. A zero-size hidden button
+/// with `.cancelAction` is how a SwiftUI view registers Esc with no menu item behind it — the same
+/// device `ShellRootView` uses for ⌘K — and because it is rendered only while the card is up, it
+/// can never swallow an Esc meant for the composer. `.onExitCommand` is kept as a second path for
+/// the case where something in the card holds focus.
+struct SettingsRolePickerHost: View {
+    let request: SettingsRolePickerRequest
+    let onClose: () -> Void
+
+    @ObservedObject private var roles: SettingsRolesModel
+    @ObservedObject private var catalog: ModelCatalogFactsModel
+
+    init(request: SettingsRolePickerRequest, onClose: @escaping () -> Void) {
+        self.request = request
+        self.onClose = onClose
+        _roles = ObservedObject(initialValue: request.roles)
+        _catalog = ObservedObject(initialValue: request.catalog)
+    }
+
+    private var facts: ModelCatalogFacts { request.injectedFacts ?? catalog.facts }
+
+    private var value: SettingsRoleValue? {
+        (roles.values.isEmpty ? request.fallbackValues : roles.values)[request.role]
+    }
+
+    var body: some View {
+        Group {
+            if let value {
+                SettingsRoleModelPicker(role: request.role,
+                                        value: value,
+                                        facts: facts,
+                                        isWriting: roles.writing,
+                                        errorText: roles.writeErrorText,
+                                        onCommit: commit,
+                                        onClose: onClose)
+            } else {
+                // The role vanished from under an open card (a reply that no longer reports it).
+                // Rendering nothing would leave the shell believing a picker is up with no way to
+                // dismiss it, so the card closes itself instead.
+                Color.clear.onAppear(perform: onClose)
+            }
+        }
+        .background {
+            Button("Close the model picker", action: onClose)
+                .keyboardShortcut(.cancelAction)
+                .opacity(0)
+                .frame(width: 0, height: 0)
+                .accessibilityHidden(true)
+        }
+        .onExitCommand(perform: onClose)
+    }
+
+    /// The write is a plain `Task`, NOT `.task`: it must outlive this view. Closing the card mid-
+    /// write cancels nothing — the write lands, the pane repaints from its reply, and a failure
+    /// that arrives after the close is reported on the pane (`SettingsRolesModel.commit`), never
+    /// dropped. `onClose` is the shell's identity-checked close, so a reply arriving after another
+    /// picker has been opened cannot take that one down.
+    private func commit(_ tag: String?) {
+        Task {
+            if await roles.commit(request.role, model: tag) { onClose() }
         }
     }
 }

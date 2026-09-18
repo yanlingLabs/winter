@@ -296,17 +296,85 @@ final class SettingsRolePickerTests: XCTestCase {
         XCTAssertEqual(settingsRolePickerSelection(cleared), .useDefault)
     }
 
-    /// Three reasons a value is not a door, each a state the pane already renders honestly: the
+    /// Four reasons a value is not a door, each a state the pane already renders honestly: the
     /// daemon said nothing about the role, it named no providers (which means "not told", never
-    /// "none allowed"), or this app has no write door.
-    func testARowIsOnlyADoorWhenThereIsSomethingToPickAndSomewhereToWrite() {
-        XCTAssertTrue(settingsRoleIsPickable(value("openai/gpt-5.6-terra", permitted: permitted),
-                                             canWrite: true))
-        XCTAssertFalse(settingsRoleIsPickable(nil, canWrite: true))
+    /// "none allowed"), this app has no write door, or there is no shell to present the card in.
+    func testARowIsOnlyADoorWhenThereIsSomethingToPickSomewhereToWriteAndSomewhereToShowIt() {
+        let pickable = value("openai/gpt-5.6-terra", permitted: permitted)
+        XCTAssertTrue(settingsRoleIsPickable(pickable, canWrite: true, canPresent: true))
+        XCTAssertFalse(settingsRoleIsPickable(nil, canWrite: true, canPresent: true))
         XCTAssertFalse(settingsRoleIsPickable(value("openai/gpt-5.6-terra", permitted: []),
-                                              canWrite: true))
-        XCTAssertFalse(settingsRoleIsPickable(value("openai/gpt-5.6-terra", permitted: permitted),
-                                              canWrite: false))
+                                              canWrite: true, canPresent: true))
+        XCTAssertFalse(settingsRoleIsPickable(pickable, canWrite: false, canPresent: true))
+        // The card is rendered by the SHELL now. A pane with no presenter must not offer a
+        // chevron that opens nothing.
+        XCTAssertFalse(settingsRoleIsPickable(pickable, canWrite: true, canPresent: false))
+    }
+
+    /// **A write outlives its card, and its failure is never dropped.** The card is where the news
+    /// belongs while it is up; once it is gone (close, scrim, Esc, or another floating surface
+    /// taking its place mid-write) the pane is the only surface left that can carry it.
+    func testAFailedWriteReportsToItsOwnCardWhileItIsUpAndToThePaneOtherwise() {
+        XCTAssertEqual(settingsRoleWriteErrorSink(openRole: .dispatch, writtenRole: .dispatch), .picker)
+        XCTAssertEqual(settingsRoleWriteErrorSink(openRole: nil, writtenRole: .dispatch), .pane)
+        // Closed mid-write, then another role's card opened: that card is not where this news goes.
+        XCTAssertEqual(settingsRoleWriteErrorSink(openRole: .titles, writtenRole: .dispatch), .pane)
+    }
+
+    /// The same rule, end to end through the model: close the card while the write is in flight,
+    /// let the write fail, and the sentence lands on the PANE — the card's slot stays empty, because
+    /// nobody is looking at it.
+    @MainActor
+    func testClosingTheCardMidWriteMovesTheFailureToThePane() async {
+        let gate = WriteGate()
+        let model = SettingsRolesModel(loader: { [:] }, writer: { _, _ in
+            await gate.wait()
+            throw RpcError(code: -32603, message: "refused")
+        })
+        model.pickerDidOpen(.dispatch)
+        let write = Task { await model.commit(.dispatch, model: "openai/gpt-5.6-terra") }
+        for _ in 0..<1000 where !model.writing { await Task.yield() }
+        XCTAssertTrue(model.writing, "the write is in flight")
+
+        model.pickerDidClose()
+        await gate.open()
+        let landed = await write.value
+
+        XCTAssertFalse(landed)
+        XCTAssertFalse(model.writing, "the in-flight flag is released, not orphaned")
+        XCTAssertNil(model.writeErrorText, "the card is gone — nothing may be written into it")
+        XCTAssertNotNil(model.errorText, "…so the failure is on the pane instead")
+    }
+
+    /// And while the card is up, the failure is the card's — the pane is not where the click was.
+    @MainActor
+    func testAFailedWriteWithTheCardUpStaysInTheCard() async {
+        let model = SettingsRolesModel(loader: { [:] }, writer: { _, _ in
+            throw RpcError(code: -32603, message: "refused")
+        })
+        model.pickerDidOpen(.dispatch)
+        let landed = await model.commit(.dispatch, model: "openai/gpt-5.6-terra")
+        XCTAssertFalse(landed)
+        XCTAssertNotNil(model.writeErrorText)
+        XCTAssertNil(model.errorText)
+
+        model.pickerDidClose()
+        XCTAssertNil(model.writeErrorText, "a closed card carries no stale sentence into its next opening")
+    }
+
+    /// A one-shot latch a test can hold a write open on.
+    private actor WriteGate {
+        private var isOpen = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        func wait() async {
+            if isOpen { return }
+            await withCheckedContinuation { waiters.append($0) }
+        }
+        func open() {
+            isOpen = true
+            waiters.forEach { $0.resume() }
+            waiters.removeAll()
+        }
     }
 
     // MARK: - models.catalog → the seam
@@ -408,7 +476,9 @@ final class SettingsRolePickerTests: XCTestCase {
             catalogProvider("ollama-local", "Ollama", basis: "free", slot: nil, door: "none"),
             catalogProvider("futurehost", "Future", slot: "futurehost:default", door: "smartcard"),
         ])
-        let facts = modelCatalogFacts(catalog, credentials: [credentialRow("openai", present: true)])
+        let facts = modelCatalogFacts(catalog, credentials: [
+            credentialRow("openai", present: true, slotId: "openai:default"),
+        ])
 
         XCTAssertEqual(roleProviderCredentialState(providerId: "openai", facts: facts), .stored)
         XCTAssertEqual(roleCredentialNote(.stored), roleCredentialStoredText)
@@ -434,27 +504,37 @@ final class SettingsRolePickerTests: XCTestCase {
         XCTAssertEqual(roleProviderCredentialState(providerId: "nobody", facts: facts), .unknown)
     }
 
-    /// **THE JOIN IS ON THE SLOT.** `anthropic` has two credential rows — the api-key slot and the
-    /// Console broker's bearer — and only the first one answers for `anthropic:default`. A
-    /// providerId-keyed join would read the console row's `present: true` as "the API key is
-    /// stored" and hide a missing key behind a login the api-key arm cannot use.
-    func testTheConsoleRowNeverAnswersForTheApiKeySlot() {
+    /// **A PROVIDER ID IS NOT A CREDENTIAL IDENTITY.** `anthropic` files TWO secrets under one
+    /// provider id — the api-key slot and the Console bearer — so rows that do not name their slot
+    /// cannot say which one they are. The retired `<providerId>:default` derivation read them
+    /// anyway, and told a Console-only user "No key stored" on every `anthropic/*` row. With no
+    /// slot named, the only honest answer is none at all.
+    func testUnnamedAnthropicRowsMakeNoClaimEitherWay() {
         let catalog = ModelsCatalog(providers: [
             catalogProvider("anthropic", "Anthropic", slot: "anthropic:default"),
         ])
-        let rows = [
+        // A Console-only install: the api-key slot empty, the Console bearer present.
+        let consoleOnly = modelCatalogFacts(catalog, credentials: [
             credentialRow("anthropic", present: false),
             credentialRow("anthropic", present: true, door: "provider.login", manageable: false),
-        ]
-        let facts = modelCatalogFacts(catalog, credentials: rows)
-        XCTAssertEqual(roleProviderCredentialState(providerId: "anthropic", facts: facts), .missing,
-                       "the console bearer being present says nothing about the api-key slot")
-        XCTAssertEqual(facts.credentialSlotPresence?["anthropic:default"], false)
+        ])
+        XCTAssertEqual(roleProviderCredentialState(providerId: "anthropic", facts: consoleOnly), .unknown,
+                       "never 'No key stored' to someone who is signed in")
+        XCTAssertNil(roleCredentialNote(roleProviderCredentialState(providerId: "anthropic",
+                                                                    facts: consoleOnly)))
+        XCTAssertNil(consoleOnly.credentialSlotPresence?["anthropic:default"])
+
+        // An api-key install: the opposite shape, and the same silence.
+        let apiKey = modelCatalogFacts(catalog, credentials: [
+            credentialRow("anthropic", present: true),
+            credentialRow("anthropic", present: false, door: "provider.login", manageable: false),
+        ])
+        XCTAssertEqual(roleProviderCredentialState(providerId: "anthropic", facts: apiKey), .unknown)
     }
 
-    /// A slot id the daemon SENDS wins outright — no derivation runs, and a row whose provider id
-    /// does not match its slot still lands on the right slot.
-    func testADaemonSuppliedSlotIdWinsOverTheDerivation() {
+    /// A slot id the daemon SENDS is the only key a row is indexed under — and a row whose provider
+    /// id does not match its slot still lands on the right slot.
+    func testARowIsIndexedOnlyUnderTheSlotTheDaemonNamed() {
         let catalog = ModelsCatalog(providers: [
             catalogProvider("openai", "OpenAI", slot: "openai:work"),
         ])
@@ -466,17 +546,16 @@ final class SettingsRolePickerTests: XCTestCase {
                      "a row that named its slot is indexed THERE and nowhere else")
     }
 
-    /// **A MISS DEGRADES TO SILENCE, NEVER TO "NO KEY".** The bridge derives `<providerId>:default`
-    /// for today's daemon; if a slot is ever named anything else, the catalog's own slot string
-    /// simply is not in the map and the row says nothing — which is the only direction a guess may
-    /// fail in. Same for a credential list that was never read.
+    /// **A MISS DEGRADES TO SILENCE, NEVER TO "NO KEY".** A row that named no slot is not indexed,
+    /// so the catalog's own slot string is simply not in the map and the row says nothing. Same for
+    /// a credential list that was never read.
     func testAnUnmatchedOrUnreadSlotIsUnknownRatherThanMissing() {
         let catalog = ModelsCatalog(providers: [
             catalogProvider("openai", "OpenAI", slot: "openai:work"),
         ])
         let derived = modelCatalogFacts(catalog, credentials: [credentialRow("openai", present: true)])
         XCTAssertEqual(roleProviderCredentialState(providerId: "openai", facts: derived), .unknown,
-                       "`openai:default` was indexed; the catalog asked about `openai:work`")
+                       "the row named no slot, so it answers for none")
 
         let unread = modelCatalogFacts(catalog, credentials: nil)
         XCTAssertNil(unread.credentialSlotPresence,
@@ -490,18 +569,21 @@ final class SettingsRolePickerTests: XCTestCase {
         XCTAssertEqual(roleProviderCredentialState(providerId: "openai", facts: slotless), .unknown)
     }
 
-    /// The two OAuth/tool shapes are never indexed by the bridge: an unmanageable row is not the
-    /// api-key slot, and a tool key (Exa, web search) is not a model provider at all.
-    func testTheBridgeIndexesOnlyManageableProviderRows() {
+    /// **NO SLOT NAMED, NO CLAIM.** The conventional `<providerId>:default` is never derived — not
+    /// for a manageable provider row, not for anything. What replaces the join is the catalog's own
+    /// `credentialPresent` boolean; until it lands, an unnamed row contributes nothing.
+    func testAnUnnamedSlotIsNeverIndexed() {
         let rows = [
             credentialRow("openai", present: true),
             credentialRow("codex-oauth", present: true, door: "cli-oauth", manageable: false),
             credentialRow("exa", present: true, group: "tool"),
+            credentialRow("deepseek", present: false, slotId: "deepseek:default"),
         ]
         let presence = credentialSlotPresence(rows)
-        XCTAssertEqual(presence?["openai:default"], true)
-        XCTAssertNil(presence?["codex-oauth:default"], "an OAuth door is not the api-key slot")
-        XCTAssertNil(presence?["exa:default"], "a tool key is not a model provider's credential")
+        XCTAssertNil(presence?["openai:default"], "no derivation, even for a manageable provider row")
+        XCTAssertNil(presence?["codex-oauth:default"])
+        XCTAssertNil(presence?["exa:default"])
+        XCTAssertEqual(presence, ["deepseek:default": false], "only the NAMED slot is in the map")
         XCTAssertNil(credentialSlotPresence(nil), "no list ⇒ no map, not an empty one")
     }
 
@@ -511,7 +593,9 @@ final class SettingsRolePickerTests: XCTestCase {
             catalogProvider("openai", "OpenAI", slot: "openai:default"),
             catalogProvider("codex-oauth", "Codex", basis: "subscription", slot: nil, door: "none"),
         ])
-        let facts = modelCatalogFacts(catalog, credentials: [credentialRow("openai", present: false)])
+        let facts = modelCatalogFacts(catalog, credentials: [
+            credentialRow("openai", present: false, slotId: "openai:default"),
+        ])
         let options = roleProviderOptions(modelKey: "gpt-5.6-terra", permitted: permitted, facts: facts)
         XCTAssertEqual(options.first { $0.providerId == "openai" }?.credential, .missing)
         XCTAssertEqual(options.first { $0.providerId == "codex-oauth" }?.credential, .notApplicable)

@@ -33,11 +33,17 @@ struct ShellRootView: View {
     /// Task 7 (spec §1 windows disposition): the pairing sheet's presentation state, attached below
     /// as a SwiftUI `.sheet` — replaces `PairingSheetWindowController` (deleted this task).
     @ObservedObject var pairingPresentation: PairingSheetPresentationModel
-    /// sidebar-brand T4: the search palette's presentation state, owned HERE rather than in the
-    /// sidebar — the palette is an overlay on this ROOT (so it centres over the whole window and
-    /// survives whatever destination is showing), while the ⌕ that opens it lives in the pane.
-    /// The two are siblings, so the state has to live at their common parent.
-    @StateObject private var searchPalette = SearchPalettePresentation()
+    /// sidebar-brand T4: the search palette's presentation state. The palette is an overlay on this
+    /// ROOT (so it centres over the whole window and survives whatever destination is showing),
+    /// while the ⌕ that opens it lives in the pane — two siblings, so the state has to live at
+    /// their common parent, at least.
+    ///
+    /// 2026-09-18: it lives HIGHER than that now, on `ShellOverlayPresentation` (which
+    /// `AppWindowController` owns and hands both of these to). The palette is one of five mutually
+    /// exclusive floating surfaces, and a flag the modal layer cannot reach is a flag it cannot
+    /// close — which is exactly how the palette and a panel used to end up on screen together. This
+    /// is an `@ObservedObject` on the same instance `overlays.search` is.
+    @ObservedObject var searchPalette: SearchPalettePresentation
     /// 2026-09-17: the three floating panels the account row opens (library / devices / updates).
     /// The buttons are in the pane and the panels are overlays on this root, so the state has to
     /// live at least this high — and since 2026-09-18 it lives one level higher still, on
@@ -266,7 +272,7 @@ struct ShellRootView: View {
             // ruling: the pane now collapses, driven by the titlebar toggle below.
             if sidebarVisible {
                 ShellSidebar(nav: nav, directory: directory, host: host, newChat: newChat,
-                             presentation: searchPalette, overlays: overlays,
+                             overlays: overlays,
                              libraryTab: $libraryTab,
                              onOpenSettings: openSettings,
                              onLeaveSettings: leaveSettings)
@@ -580,6 +586,27 @@ struct ShellRootView: View {
             }
         }
         .animation(.easeOut(duration: 0.16), value: overlays.overlay)
+        // Settings → Roles' model picker (2026-09-18). A FOURTH surface in the same layer, wearing
+        // the same `ShellPanelCard` as the three above — which is the whole point of it being here:
+        // hung on the settings pane it wore the same card at a different place, with a scrim that
+        // dimmed only the detail area. The card's live state (which write is in flight, which
+        // sentence a failure produced) is observed by `SettingsRolePickerHost`, so it still appears
+        // INSIDE the card rather than being frozen at the moment of the click.
+        .overlay {
+            if let request = overlays.picker {
+                SettingsRolePickerHost(request: request,
+                                       // Identity-checked: a commit that lands after this card was
+                                       // dismissed must not close whatever replaced it.
+                                       onClose: { overlays.closeRolePicker(ifShowing: request) })
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.16), value: overlays.picker)
+        // The picker belongs to Settings → Roles in a way the three panels do not belong to any
+        // destination: navigating anywhere else (a menu-bar summon, another settings section) must
+        // not leave a Roles card hanging over a page that has no roles on it. A write in flight
+        // survives this exactly as it survives Esc — the close is the same one.
+        .onChange(of: nav.destination) { _, _ in overlays.closeRolePicker() }
         .overlay {
             if searchPalette.isPresented {
                 SidebarSearchPalette(nav: nav, directory: directory, presentation: searchPalette)
@@ -597,7 +624,9 @@ struct ShellRootView: View {
         // button is how a SwiftUI view registers a chord with no menu-bar item behind it; it
         // TOGGLES so the same chord closes what it opened.
         .background {
-            Button("Search sessions") { searchPalette.toggle() }
+            // Through the modal layer, not straight at the flag: opening the palette has to close
+            // whatever panel or picker is up.
+            Button("Search sessions") { overlays.toggleSearch() }
                 .keyboardShortcut("k", modifiers: .command)
                 .opacity(0)
                 .frame(width: 0, height: 0)
@@ -664,7 +693,11 @@ struct ShellRootView: View {
             // content on this destination), so the card shows ONLY the section — no nested pane
             // list, which is the whole point of making Settings a destination instead of reusing
             // the Dashboard's two-column surface.
-            SettingsSectionView(section: section ?? defaultSettingsSection, wiring: dashboardWiring)
+            // `picker:` is the shell's floating-panel layer, handed down so Settings → Roles can
+            // publish its model picker into it rather than hanging one on its own detail pane.
+            SettingsSectionView(section: section ?? defaultSettingsSection,
+                                wiring: dashboardWiring,
+                                picker: overlays)
         }
     }
 
@@ -1258,13 +1291,13 @@ struct ShellSidebar: View {
     /// page's first send — B4's one-door rule, retargeted). `nil` renders no row (the
     /// `chatLandingShowsNewChatButton` posture: an unwired door never renders a dead affordance).
     var newChat: (() -> Void)? = nil
-    /// sidebar-brand T4: the search palette's presentation flag, OWNED by `ShellRootView` (the
-    /// palette is an overlay on the ROOT — a sibling of this pane, not a child of it) and shared
-    /// here so the wordmark row's ⌕ can open it. The old inline `searchQuery` state moved into
-    /// `SidebarSearchPalette` with the field itself.
-    @ObservedObject var presentation: SearchPalettePresentation
-    /// 2026-09-17: the three floating panels, owned by `ShellRootView` for the same sibling reason
-    /// the palette is — the account row's icons open them, the panels render over the root.
+    // 2026-09-18: NO `presentation: SearchPalettePresentation` any more. The wordmark row's ⌕ used
+    // to open the palette through its own flag, which is exactly the second handle that let the
+    // palette and a panel be on screen together. It opens through `overlays.openSearch()` now, and
+    // a parameter nothing reads would only be an invitation to bypass that again.
+    /// The shell's modal layer (`ShellOverlayPresentation`): the account row's icons open the three
+    /// panels through it, and the ⌕ opens the search palette through it — every open goes through
+    /// the one object that keeps exactly one of them on screen.
     @ObservedObject var overlays: ShellOverlayPresentation
     /// Which library tab the panel returns to, held by the root so it survives a close.
     @Binding var libraryTab: LibraryTab
@@ -1485,7 +1518,9 @@ struct ShellSidebar: View {
                 .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 8)
             Button {
-                presentation.open()
+                // The modal layer's door, not the palette's own: opening ⌕ closes any panel or
+                // picker that is up (`ShellOverlayPresentation`).
+                overlays.openSearch()
             } label: {
                 Image(systemName: "magnifyingglass")
                     .font(Typography.control(.medium))
