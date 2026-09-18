@@ -903,7 +903,7 @@ final class SettingsRolePickerTests: XCTestCase {
                 XCTAssertEqual(write(role, value, optional: true), .leave, "\(role)")
             }
         }
-        XCTAssertFalse(setModelRoleModelIsOptional, "not landed daemon-side yet — flip with the daemon change")
+        XCTAssertTrue(setModelRoleModelIsOptional, "landed daemon-side at 81930854 — effort-only writes leave the model")
     }
 
     /// "Use the default" on a role that is ALREADY defaulted moves nothing, so the effort it now
