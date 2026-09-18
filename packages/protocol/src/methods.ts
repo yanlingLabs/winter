@@ -476,7 +476,18 @@ export const SkillsDeleteResult = z.object({});
  * validation the way a model role needs), so this door has no failure mode of its own beyond a
  * missing `winterHome`.
  */
-export const SettingsSetSkillDeniedParams = z.object({ name: z.string().min(1), denied: z.boolean() });
+// Minor 5d (fix wave, pre-merge review): `name` used to be a bare `z.string().min(1)` — a value
+// containing `)` or whitespace reaches `settings.ts`'s `skillDenyRule` (`Skill(${skillName})`)
+// unvalidated (unlike `skills.write`/`skills.delete`'s own names, which `SkillStore` itself checks
+// against its slug jail before any fs op — `setSkillDenied` has no such downstream gate at all: its
+// own doc states it "never throws on its own input"). The pinned rule-grammar parser is TOTAL (never
+// throws on a malformed rule), so this is hardening against a confusing/injected rule string, not a
+// hole being closed. Hand-mirrors `agent/skills.ts`'s own `skillNameError` slug pattern (protocol
+// never depends on core — same cross-package literal-mirroring precedent as `settings.ts`'s
+// `MODEL_ROLES`) rather than inventing a second shape: a not-yet-written skill can be pre-emptively
+// denied (`setSkillDenied`'s own doc), but it must still be a name a skill COULD ever have.
+const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+export const SettingsSetSkillDeniedParams = z.object({ name: z.string().min(1).regex(SKILL_NAME_PATTERN, "must be a valid skill name (lowercase alnum + dash, 1-64 chars)"), denied: z.boolean() });
 export const SettingsSetSkillDeniedResult = z.object({ ok: z.literal(true), name: z.string(), denied: z.boolean(), rule: z.string() });
 
 /**
