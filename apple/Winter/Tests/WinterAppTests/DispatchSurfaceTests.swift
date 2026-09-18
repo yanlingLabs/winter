@@ -41,6 +41,17 @@ final class DispatchSurfaceTests: XCTestCase {
         XCTAssertEqual(absent.dx, 0)
     }
 
+    /// The working pulse lifts only the dots near its ring, and fades out as it travels.
+    func testPulseTouchesOnlyTheRingAndFadesAsItTravels() {
+        let origin = CGPoint(x: 0, y: 0)
+        let onRing = dispatchPulseInfluence(point: CGPoint(x: 200, y: 0), origin: origin, ringRadius: 200, travelled: 0)
+        XCTAssertEqual(onRing, 1, accuracy: 0.0001)
+        XCTAssertEqual(dispatchPulseInfluence(point: CGPoint(x: 200 + dispatchPulseBand + 1, y: 0), origin: origin,
+                                              ringRadius: 200, travelled: 0), 0)
+        let late = dispatchPulseInfluence(point: CGPoint(x: 200, y: 0), origin: origin, ringRadius: 200, travelled: 0.75)
+        XCTAssertEqual(late, 0.25, accuracy: 0.0001)
+    }
+
     // MARK: - Harness (dispatch resolution, through the real host)
 
     private func makeHost(rows: [SessionSummary] = [], managementClient: WinterClient? = nil) -> (host: ShellSessionHost, factory: ShellTransportFactory) {

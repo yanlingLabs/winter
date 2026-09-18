@@ -85,6 +85,11 @@ struct WindowContentView<Accessory: View>: View {
     /// `directory.rows`, the same "read fresh from the directory" convention `composerCardMode`
     /// itself already follows.
     var sessionHasWorkingDirectory: Bool = false
+    /// How far this view runs UP under a titlebar band it has been laid out beneath (2026-09-19,
+    /// the shell only; zero everywhere else). The transcript then scrolls up under the band and
+    /// fades out there instead of being cut at a hard line — the empty strip at the top of the page
+    /// the user named. Everything else keeps its old position: it is offset by exactly this much.
+    var topBleed: CGFloat = 0
     @ViewBuilder let headerAccessory: () -> Accessory
 
 
@@ -222,6 +227,7 @@ struct WindowContentView<Accessory: View>: View {
             ), onOpenDiff: onOpenDiff, onOpenFile: onOpenFile,
             sessionHasWorkingDirectory: sessionHasWorkingDirectory)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .modifier(TranscriptTopBleed(bleed: topBleed, inset: topInset))
             // The composer FLOATS over the transcript (user call, 2026-08-12: "the composer should
             // float over the transcript and not have that hard background"). It used to be the next
             // sibling in this `VStack`, which reserved it a strip the transcript stopped above —
@@ -301,7 +307,10 @@ struct WindowContentView<Accessory: View>: View {
             }
         }
         .padding(.horizontal, 16)
-        .padding(.top, topInset)
+        // With a bleed, the TRANSCRIPT carries the top offset as a scroll margin (see
+        // `TranscriptTopBleed`) so its content can scroll up under the band; nothing else in this
+        // column sits at the top.
+        .padding(.top, topBleed > 0 ? 0 : topInset)
         .padding(.bottom, 16)
     }
 
@@ -315,7 +324,7 @@ struct WindowContentView<Accessory: View>: View {
             if showsWorkPanel {
                 floatingCard { workPanelBlock }
                     .frame(width: floatingSubagentBlockWidth)
-                    .padding(.top, topInset + 8)
+                    .padding(.top, topBleed + topInset + 8)
                     .padding(.trailing, 16)
                     .transition(.move(edge: .trailing))
             }
@@ -1200,3 +1209,40 @@ struct DispatchManagedSessionsBlock: View {
         }
     }
 }
+
+// MARK: - The transcript under the titlebar band (2026-09-19)
+
+/// Lets the transcript scroll up under the titlebar band and fade out there, instead of stopping at
+/// a hard line below an empty strip. No-op at `bleed == 0` (every surface but the shell).
+///
+/// The content keeps its old resting place — a scroll MARGIN of `bleed + inset` — so nothing moves
+/// until you scroll; the fade is a mask over the band plus a short ramp below it, eased so the
+/// text dissolves rather than being wiped (the same idea as the sidebar's top fade).
+struct TranscriptTopBleed: ViewModifier {
+    let bleed: CGFloat
+    let inset: CGFloat
+
+    func body(content: Content) -> some View {
+        if bleed > 0 {
+            content
+                .contentMargins(.top, bleed + inset, for: .scrollContent)
+                .mask {
+                    VStack(spacing: 0) {
+                        LinearGradient(stops: [
+                            .init(color: .clear, location: 0),
+                            .init(color: .black.opacity(0.08), location: 0.45),
+                            .init(color: .black.opacity(0.55), location: 0.8),
+                            .init(color: .black, location: 1),
+                        ], startPoint: .top, endPoint: .bottom)
+                        .frame(height: bleed + transcriptTopFadeRamp)
+                        Color.black
+                    }
+                }
+        } else {
+            content
+        }
+    }
+}
+
+/// How far below the band the fade finishes.
+let transcriptTopFadeRamp: CGFloat = 18

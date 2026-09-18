@@ -3923,6 +3923,9 @@ struct ShellSessionView: View {
             // (`host.openOutputFile`).
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
+                    // 2026-09-19: runs up under the titlebar band (`topBleed`), so the transcript
+                    // scrolls beneath it and fades instead of stopping at a hard line.
+                    ShellTopBleedReader { topBleed in
                     WindowContentView(
                         adapter: attachment.adapter,
                         tint: Color(red: 0.45, green: 0.75, blue: 1.0),
@@ -3982,11 +3985,13 @@ struct ShellSessionView: View {
                         // reader (T5's own review note, honored here as it asked).
                         sessionHasWorkingDirectory: editorTabSessionRoots(
                             sessionId: host.attachedSessionId, rows: directory.rows
-                        ) == .present
+                        ) == .present,
+                        topBleed: topBleed
                     ) {
                         // The header row is gone from the shell (2026-09-17, ChatGPT has none);
                         // Move to CLI stays on the landing rows and the Recents context menu.
                         EmptyView()
+                    }
                     }
                     // The outputs box — COLLAPSED/ABSENT when empty (the pinned "never a hollow
                     // box" rule). `host.outputFiles` is already mode-gated at the source
@@ -4100,5 +4105,20 @@ struct HopAwayBackgroundBar: View {
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(.quaternary, lineWidth: 1))
         .shadow(radius: 8)
         .padding(.horizontal, 24)
+    }
+}
+
+/// Hands its content the height of the titlebar band above it and lets the content run up under
+/// it (`WindowContentView.topBleed`). The band is read from the safe area, so it is whatever the
+/// window's titlebar actually is, never a guessed constant.
+struct ShellTopBleedReader<Content: View>: View {
+    @ViewBuilder let content: (CGFloat) -> Content
+
+    var body: some View {
+        GeometryReader { geo in
+            content(geo.safeAreaInsets.top)
+                .frame(width: geo.size.width, height: geo.size.height + geo.safeAreaInsets.top)
+                .offset(y: -geo.safeAreaInsets.top)
+        }
     }
 }
