@@ -541,6 +541,16 @@ function webSearchFloorHook(deps: SessionHooksDeps): HookCallback {
     const floor = effectiveDangerousDomains(deps);
     if (floor.length === 0) return allow();
     const record = plainRecord(pre.tool_input);
+    // A WRONG-TYPED domain list is the TOOL'S refusal to give, not this hook's to overwrite
+    // (whole-branch review N6). `blocked_domains: "pastebin.com"` or `allowed_domains: [1,2]` used to
+    // be read as "absent" here, and the `blocked_domains` branch below then wrote the floor OVER the
+    // malformed value — so the executor's own wrong-type refusal (agent SDK 0.0.17: such a call used to
+    // search UNFILTERED and is refused now) could never fire, and a wrong-typed `allowed_domains` got
+    // an injected `blocked_domains` beside it and came back as "cannot specify both" instead. Passing
+    // the call through untransformed gives the model the error that names what it actually got wrong.
+    // Nothing is lost by standing down: the call cannot search at all, and FETCHING anything it could
+    // have surfaced still goes through `webFetchFloorHook` on both legs.
+    if (wrongTypedDomainList(record["allowed_domains"]) || wrongTypedDomainList(record["blocked_domains"])) return allow();
     const allowed = domainList(record["allowed_domains"]);
 
     if (allowed !== undefined) {
@@ -581,13 +591,25 @@ function plainRecord(value: unknown): Record<string, unknown> {
 /** A `WebSearch` domain list as the tools themselves read it: an array of non-blank strings, or
  *  `undefined` for absent, empty, all-blank, or the wrong type entirely. Mirrors the agent SDK's own
  *  `stringArray` collapse of an explicitly-empty list to "absent" — a list that filters nothing is
- *  indistinguishable in effect from not having named the field. A wrong TYPE is also `undefined`
- *  here, which is the safe direction for this hook: the `blocked_domains` branch then injects the
- *  floor, and the tool's own validation still refuses the malformed field afterwards. */
+ *  indistinguishable in effect from not having named the field.
+ *
+ *  A wrong TYPE also reads as `undefined` here, and that is no longer load-bearing: `webSearchFloorHook`
+ *  stands down on a wrong-typed list BEFORE it asks this function anything (see `wrongTypedDomainList`),
+ *  so this collapse is only ever reached for a list that is genuinely absent or genuinely empty. */
 function domainList(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const strings = value.filter((v): v is string => typeof v === "string" && v.trim().length > 0);
   return strings.length > 0 ? strings : undefined;
+}
+
+/** Is this domain-list field present and of a shape the TOOL will refuse — anything but an array, or
+ *  an array carrying a non-string element? An ABSENT field is not wrong-typed, and neither is an
+ *  explicitly EMPTY array or one of only blank strings: the runtimes' own `stringArray` collapses
+ *  those to "absent", so the floor may treat them the same way and inject into them. */
+function wrongTypedDomainList(value: unknown): boolean {
+  if (value === undefined) return false;
+  if (!Array.isArray(value)) return true;
+  return value.some((v) => typeof v !== "string");
 }
 
 /** Case-insensitive dedupe that keeps the FIRST spelling of each domain (so the floor's own entries

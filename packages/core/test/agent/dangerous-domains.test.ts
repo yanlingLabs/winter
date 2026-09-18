@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { SHIPPED_DANGEROUS_DOMAINS, dangerousDomainMatch } from "../../src/agent/dangerous-domains";
+import {
+  SHIPPED_DANGEROUS_DOMAINS, dangerousDomainMatch, dangerousHostMatch, dangerousUrlMatch, normalizeDangerousDomain,
+} from "../../src/agent/dangerous-domains";
 
 // SP-approvals Task 10 (user addition 2026-07-21, spec §7): web tools become free by default, but
 // web_fetch keeps ONE floor no policy can silence — a fetch to a known/likely exfiltration or
@@ -113,5 +115,63 @@ describe("dangerousDomainMatch", () => {
   test("a trailing-dot FQDN still matches — the exact host, and a subdomain, both with a literal trailing dot", () => {
     expect(dangerousDomainMatch("pastebin.com.", list)).toBe("pastebin.com");
     expect(dangerousDomainMatch("sub.pastebin.com.", list)).toBe("pastebin.com");
+  });
+});
+
+// Whole-branch review N1 (2026-09-18): the floor's two matchers disagreed on URL-SHAPED user entries,
+// in the unsafe direction. `settings.permissions.dangerousDomains.added` is a bare `z.array(z.string())`
+// and the runtime child's own `blockedDomains` matcher URL-PARSES every entry, so `https://evil.example`
+// and `evil.example:8080` were honoured INSIDE a Winter child and by nothing host-side — not the
+// PreToolUse floor hook (the only enforcer on the official leg), not `Search`'s citation filter, not
+// `browser`. Both sides now reduce a url-shaped entry to its hostname.
+describe("normalizeDangerousDomain — url-shaped user entries (N1)", () => {
+  const CASES: Array<[string, string]> = [
+    ["evil.example", "evil.example"],                       // the common case, untouched
+    ["*.evil.example", "evil.example"],                     // the SDK's own wildcard spelling
+    [".evil.example", "evil.example"],
+    ["evil.example.", "evil.example"],                      // trailing root label
+    ["  EVIL.example  ", "evil.example"],                   // trim + case
+    ["https://evil.example", "evil.example"],
+    ["http://evil.example/admin", "evil.example"],
+    ["https://evil.example:8443/x?y=1#z", "evil.example"],
+    ["evil.example:8080", "evil.example"],                  // a port with no scheme — `new URL` alone reads this as a SCHEME
+    ["evil.example/x", "evil.example"],
+    ["user:pw@evil.example", "evil.example"],               // userinfo
+    ["https://user@EVIL.example./x", "evil.example"],        // every trick at once
+    ["//evil.example/x", "evil.example"],                   // scheme-relative
+    ["ftp://evil.example", "evil.example"],                 // any scheme, not just http(s)
+    ["*.evil.example:8080", "evil.example"],                // wildcard + port
+  ];
+
+  for (const [entry, want] of CASES) {
+    test(`${JSON.stringify(entry)} -> ${want}`, () => {
+      expect(normalizeDangerousDomain(entry)).toBe(want);
+    });
+  }
+
+  test("never throws, and falls back to the bare normalization for anything unparseable", () => {
+    for (const junk of ["", "   ", ":", "://", "http://", "///", "not a domain", "[", "]", "a b:c"]) {
+      expect(() => normalizeDangerousDomain(junk)).not.toThrow();
+    }
+    // A bracketed IPv6 authority keeps its brackets — that is what `URL.hostname` answers, and what a
+    // url's own host comparison uses.
+    expect(normalizeDangerousDomain("[::1]")).toBe("[::1]");
+    expect(normalizeDangerousDomain("http://[fe80::1]:8080/x")).toBe("[fe80::1]");
+  });
+
+  test("a url-shaped ENTRY now actually blocks the url it names, host-side", () => {
+    // The whole point: these are the spellings that were honoured by the child and by nothing else.
+    for (const entry of ["https://evil.example", "evil.example:8080", "evil.example/admin", "*.evil.example"]) {
+      expect(dangerousUrlMatch("https://evil.example/x", [entry])).toMatchObject({ host: "evil.example", matchedEntry: entry });
+      // …and a subdomain of it, through the shared suffix grammar.
+      expect(dangerousUrlMatch("https://sub.evil.example/x", [entry])).toMatchObject({ matchedEntry: entry });
+      // …while a neighbour that merely ends in the same letters still does not match.
+      expect(dangerousUrlMatch("https://notevil.example/x", [entry])).toBeNull();
+    }
+  });
+
+  test("a url-shaped entry reaches the HOST-string door too (WebSearch's own domain lists)", () => {
+    expect(dangerousHostMatch("sub.evil.example", ["https://evil.example/x"])).toBe("https://evil.example/x");
+    expect(dangerousHostMatch("notevil.example", ["https://evil.example/x"])).toBeNull();
   });
 });
