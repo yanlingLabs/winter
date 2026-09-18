@@ -860,4 +860,74 @@ final class SettingsRolePickerTests: XCTestCase {
     func testTheEffortControlIsLive() {
         XCTAssertTrue(settingsRoleEffortControlEnabled)
     }
+
+    // MARK: - The effort's OWN picker (2026-09-18)
+
+    /// The comment table is Winter's own copy: every known name has ONE line, and a name the table
+    /// does not know — including `ultra` and a provider word we have never seen — gets NOTHING.
+    func testTheCommentTableKnowsItsNamesAndInventsNothingForOthers() {
+        for name in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
+            let comment = roleEffortComment(name)
+            XCTAssertNotNil(comment, name)
+            XCTAssertFalse(comment?.contains("\n") ?? true, "\(name): one line")
+            XCTAssertFalse(comment?.isEmpty ?? true, name)
+        }
+        for unknown in ["ultra", "turbo", "", "High", "extra-high", "default"] {
+            XCTAssertNil(roleEffortComment(unknown), "\(unknown) must get no comment")
+        }
+        // The model-default row has its own line, and it is NOT in the vocabulary table.
+        XCTAssertEqual(roleEffortDetailComment(nil), roleEffortModelDefaultComment)
+        XCTAssertNil(roleEffortComments[roleEffortModelDefaultTitle])
+        XCTAssertEqual(roleEffortDetailComment("low"), roleEffortComment("low"))
+        XCTAssertNil(roleEffortDetailComment("turbo"))
+        // Generic by rule: no token budgets, no provider names.
+        for comment in roleEffortComments.values {
+            XCTAssertFalse(comment.lowercased().contains("token"), comment)
+            XCTAssertNil(comment.rangeOfCharacter(from: .decimalDigits), comment)
+        }
+    }
+
+    /// The row's effort door: only on an EXPLICIT model with a real vocabulary (a derived role
+    /// would be silently PINNED by the effort-only write's re-sent tag), or with a stale leftover
+    /// that must stay visible and clearable. Never for the advisor's `efforts: null`, never
+    /// without a writer or a place to present, never with the flag off.
+    func testTheRowShowsAnEffortDoorOnlyWhereOneCanLand() {
+        func pickable(_ v: SettingsRoleValue?, canWrite: Bool = true, canPresent: Bool = true,
+                      enabled: Bool = true) -> Bool {
+            settingsRoleEffortIsPickable(v, canWriteEffort: canWrite, canPresent: canPresent,
+                                         enabled: enabled)
+        }
+        XCTAssertTrue(pickable(effortValue(efforts: ["low", "high"])))
+        XCTAssertTrue(pickable(effortValue(effort: "xhigh", efforts: ["low", "high"])), "stale on a vocabulary")
+        XCTAssertTrue(pickable(effortValue(effort: "high", efforts: nil)), "stale leftover stays clearable")
+        XCTAssertTrue(pickable(effortValue(effort: "low", efforts: [])))
+        XCTAssertFalse(pickable(effortValue(efforts: nil)), "the advisor's shape: nothing")
+        XCTAssertFalse(pickable(effortValue(efforts: [])))
+        XCTAssertFalse(pickable(effortValue(efforts: ["ultra"])), "nothing offerable")
+        XCTAssertFalse(pickable(effortValue(explicit: false, efforts: ["low"])),
+                       "derived: the re-sent tag would pin it")
+        XCTAssertFalse(pickable(effortValue(explicit: false, effort: "x", efforts: nil)))
+        XCTAssertFalse(pickable(effortValue(model: nil, efforts: ["low"])))
+        XCTAssertFalse(pickable(effortValue(efforts: ["low"]), canWrite: false))
+        XCTAssertFalse(pickable(effortValue(efforts: ["low"]), canPresent: false))
+        XCTAssertFalse(pickable(effortValue(efforts: ["low"]), enabled: false))
+        XCTAssertFalse(pickable(nil))
+    }
+
+    /// A stale value never reads as a choice — not on the row, not as the card's opening highlight.
+    func testAStaleEffortNeverReadsOrOpensAsAChoice() {
+        XCTAssertEqual(roleEffortValueLabel(.modelDefault), roleEffortModelDefaultTitle)
+        XCTAssertEqual(roleEffortValueLabel(.valid("low")), "low")
+        XCTAssertEqual(roleEffortValueLabel(.stale("xhigh")), roleEffortMismatchLabel)
+        XCTAssertNotEqual(roleEffortValueLabel(.stale("xhigh")), "xhigh")
+        XCTAssertNil(roleEffortInitialHighlight(.modelDefault))
+        XCTAssertEqual(roleEffortInitialHighlight(.valid("high")), "high")
+        XCTAssertNil(roleEffortInitialHighlight(.stale("high")))
+    }
+
+    /// The card's left column is `roleEffortOptions` verbatim — the row's order, `none` once.
+    func testTheCardOffersTheRowsOwnOrder() {
+        XCTAssertEqual(roleEffortOptions(["none", "low", "high", "max"]), ["none", "low", "high", "max"])
+        XCTAssertEqual(roleEffortOptions(["high", "low"]), ["high", "low", "none"])
+    }
 }

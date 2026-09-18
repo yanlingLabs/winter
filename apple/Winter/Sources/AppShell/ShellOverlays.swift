@@ -91,7 +91,8 @@ func shellOverlayAccessibilityName(_ overlay: ShellOverlay) -> String {
 @MainActor
 final class ShellOverlayPresentation: ObservableObject {
     @Published private(set) var overlay: ShellOverlay?
-    /// The Roles model picker's live request, or nil. A REQUEST rather than a case on
+    /// The Roles picker's live request, or nil — the MODEL card or the EFFORT card
+    /// (`SettingsRolePickerRequest.kind`). One slot for both, so they exclude each other too. A REQUEST rather than a case on
     /// `ShellOverlay`: the card needs the role, the pane's live `SettingsRolesModel` and the
     /// catalog store, none of which can live in a `Hashable` enum — and stuffing closures into one
     /// would put the picker's behaviour in the enum's callers instead of in the picker.

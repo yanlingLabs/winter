@@ -352,10 +352,12 @@ final class AppShellTests: XCTestCase {
     // MARK: - The shell's modal layer: exactly one floating surface (2026-09-18)
 
     private func pickerRequest(_ role: SettingsModelRole = .dispatch,
-                               roles: SettingsRolesModel? = nil) -> SettingsRolePickerRequest {
+                               roles: SettingsRolesModel? = nil,
+                               kind: SettingsRolePickerKind = .model) -> SettingsRolePickerRequest {
         SettingsRolePickerRequest(role: role,
                                   roles: roles ?? SettingsRolesModel(),
-                                  catalog: ModelCatalogFactsModel())
+                                  catalog: ModelCatalogFactsModel(),
+                                  kind: kind)
     }
 
     /// What is showing, as one comparable value — so each row of the table below is a single
@@ -364,10 +366,12 @@ final class AppShellTests: XCTestCase {
         var search = false
         var overlay: ShellOverlay?
         var picker: SettingsModelRole?
+        var pickerKind: SettingsRolePickerKind?
     }
 
     private func layer(_ p: ShellOverlayPresentation) -> Layer {
-        Layer(search: p.search.isPresented, overlay: p.overlay, picker: p.picker?.role)
+        Layer(search: p.search.isPresented, overlay: p.overlay, picker: p.picker?.role,
+              pickerKind: p.picker?.kind)
     }
 
     /// **THE TABLE.** From every starting surface, every door: whatever opens, everything else is
@@ -387,6 +391,7 @@ final class AppShellTests: XCTestCase {
             ("library", { $0.open(.library) }),
             ("updates", { $0.open(.updates) }),
             ("picker", { [self] in $0.openRolePicker(pickerRequest(.titles)) }),
+            ("effort", { [self] in $0.openRolePicker(pickerRequest(.titles, kind: .effort)) }),
         ]
         for (startName, start) in starts {
             // A door is skipped only from ITS OWN surface: ⌘K pressed with the palette already up
@@ -402,7 +407,14 @@ final class AppShellTests: XCTestCase {
             let p = ShellOverlayPresentation()
             start(p)
             p.openRolePicker(pickerRequest(.research))
-            XCTAssertEqual(layer(p), Layer(picker: .research), "from \(startName), opening the picker")
+            XCTAssertEqual(layer(p), Layer(picker: .research, pickerKind: .model),
+                           "from \(startName), opening the picker")
+            // …and the effort picker: the same slot, so it replaces the model picker too.
+            let q = ShellOverlayPresentation()
+            start(q)
+            q.openRolePicker(pickerRequest(.research, kind: .effort))
+            XCTAssertEqual(layer(q), Layer(picker: .research, pickerKind: .effort),
+                           "from \(startName), opening the effort picker")
         }
     }
 
@@ -473,6 +485,24 @@ final class AppShellTests: XCTestCase {
         p.openRolePicker(other)
         p.closeRolePicker(ifShowing: b)
         XCTAssertEqual(p.picker, other)
+
+        // Same role, same model, the OTHER kind: a late model-card close cannot take down the
+        // effort card that replaced it.
+        let model = pickerRequest(.titles, roles: roles)
+        let effort = pickerRequest(.titles, roles: roles, kind: .effort)
+        p.openRolePicker(model)
+        p.openRolePicker(effort)
+        p.closeRolePicker(ifShowing: model)
+        XCTAssertEqual(p.picker, effort)
+        XCTAssertTrue(roles.pickerIsOpen)
+    }
+
+    /// A refresh that failed over rows from a good read says so in the header, and only then.
+    func testTheStaleListDetailIsStateNotCommentary() {
+        XCTAssertEqual(libraryStaleListDetail(failed: true, hasRows: true), libraryStaleListText)
+        XCTAssertEqual(libraryStaleListDetail(failed: true, hasRows: false), "")
+        XCTAssertEqual(libraryStaleListDetail(failed: false, hasRows: true), "")
+        XCTAssertEqual(libraryStaleListDetail(failed: false, hasRows: false), "")
     }
 
     /// Trust rows lead with the folder's own name and keep the full path beside it. The root and a

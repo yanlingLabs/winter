@@ -12,7 +12,7 @@ import SwiftUI
 //
 // Why a wrapper view at all, rather than `SkillsPane(model:)` straight in `LibraryPanel`'s switch:
 // the tab owns one fact the pane does not, and that fact needs somewhere to live — see the
-// footnote below on per-skill enable/disable. A wrapper also keeps the "every tab is a
+// comment below on per-skill enable/disable. A wrapper also keeps the "every tab is a
 // `Library*Tab`" symmetry, so the switch in `ShellOverlays.swift` reads as five peers rather than
 // two mounted panes and three bespoke bodies.
 //
@@ -32,7 +32,6 @@ struct LibrarySkillsTab: View {
         VStack(alignment: .leading, spacing: 0) {
             SkillsPane(model: model)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            Divider()
             // NO per-skill enable/disable toggle here, and this is a decision rather than an
             // omission: the daemon has no per-skill on/off switch today. The mechanism being built
             // for it (another session) is a permission DENY RULE spelled `Skill(<name>)` — i.e.
@@ -41,12 +40,9 @@ struct LibrarySkillsTab: View {
             // a toggle here now would mean inventing a second, unbacked source of truth for
             // "is this skill on", which is exactly the split-brain the rule design avoids.
             //
-            // When `Skill(<name>)` lands, this footnote is replaced by a per-row toggle bound to
-            // the rule's presence — the list above needs no change.
-            LibraryFootnote(text: "Skills are all on. Turning one off is coming as a "
-                            + "Skill(<name>) permission rule, not a switch on the skill itself.")
-                .padding(.horizontal, libraryDetailPadding)
-                .padding(.vertical, 10)
+            // When `Skill(<name>)` lands, it arrives as a per-row toggle bound to the rule's
+            // presence — the list above needs no change. (The footnote that used to explain this
+            // under the list is gone: user call, 2026-09-18, no explanatory footer rows.)
         }
     }
 }
