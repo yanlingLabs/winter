@@ -349,25 +349,25 @@ console.log(`Releasing version ${version}${BETA ? " (beta)" : ""}`);
 //     so the notes are written and committed first and the release runs `--no-bump`, which is the
 //     documented flow for every release this repo has cut.
 // ---------------------------------------------------------------------------
-const notesPath = join(ROOT, "releases", "notes", `${version}.md`);
-if (!existsSync(notesPath)) {
+const releaseNotesPath = join(ROOT, "releases", "notes", `${version}.md`);
+if (!existsSync(releaseNotesPath)) {
   fail(
-    `release notes missing: ${relative(ROOT, notesPath)}\n` +
-      `  Every release's user-facing notes go in that file (the Sparkle feed's <description> is built\n` +
-      `  from it, so an installed copy shows it before updating). Write and commit it, then re-run\n` +
-      `  with --no-bump to release this same version.`,
+    `release notes missing: ${relative(ROOT, releaseNotesPath)}\n` +
+      `  Every release's user-facing notes go in that file (the Sparkle feed's <description> and the\n` +
+      `  GitHub release body are both built from it, so an installed copy shows it before updating).\n` +
+      `  Write and commit it, then re-run with --no-bump to release this same version.`,
   );
 }
-const notesMarkdown = readFileSync(notesPath, "utf8");
+const notesMarkdown = readFileSync(releaseNotesPath, "utf8");
 // Rendered HERE only to prove it renders. Section 10 composes the real `<description>` with
 // `appcastDescription`, which re-runs this same pure conversion — the whole element is assembled in
 // ONE place, and the embedded-runtime line it puts first comes from the staged VERSIONS.json that
 // only exists after the build.
 try {
   const notesHtml = releaseNotesHtml({ notesMarkdown, version });
-  console.log(`Release notes: ${relative(ROOT, notesPath)} -> ${notesHtml.length} bytes of HTML for the appcast.`);
+  console.log(`Release notes: ${relative(ROOT, releaseNotesPath)} -> ${notesHtml.length} bytes of HTML for the appcast.`);
 } catch (e) {
-  fail(`${relative(ROOT, notesPath)}: ${(e as Error).message}`);
+  fail(`${relative(ROOT, releaseNotesPath)}: ${(e as Error).message}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1402,17 +1402,13 @@ sh(`git push origin v${version}`);
 
 if (guard.action === "publish") {
   console.log(`Publishing v${version}...`);
-  // P9c-2: a hand-authored body at releases/notes/<version>.md wins when present (the first
-  // Winter release ships one — "Norma is now Winter" + the migration paragraph + the API-key-only
-  // note for Claude models + the #.###.# scheme, see releases/notes/0.111.0.md); every other
-  // release falls back to the same terse default this pipeline has always generated. Neither path
-  // is new plumbing — --notes-file already took a path; only WHICH file it names changed.
-  const handAuthoredNotesPath = join(ROOT, "releases", "notes", `${version}.md`);
-  const notes = existsSync(handAuthoredNotesPath)
-    ? readFileSync(handAuthoredNotesPath, "utf8")
-    : `Winter ${version}${BETA ? " (beta)" : ""}\n\nSigned Sparkle appcast entry: ${appcastRel}.`;
+  // P9c-2: the body is the hand-authored `releases/notes/<version>.md`, the same file section 10's
+  // appcast `<description>` is rendered from — one text, two surfaces (GitHub as markdown, Sparkle
+  // as HTML), never two hand-kept copies. Read in section 2a, which also REQUIRES it, so the terse
+  // generated fallback this line used to carry is gone: it was only reachable when a release shipped
+  // without notes, which now fails before the build instead.
   const notesPath = join(OUT, "release-notes.md");
-  writeFileSync(notesPath, notes);
+  writeFileSync(notesPath, notesMarkdown);
   sh(`gh release create v${version} --title "Winter ${version}" --notes-file "${notesPath}" "${zipPath}" "${dmgPath}"`);
 } else {
   // guard.action === "resume": upload only whatever assets aren't already on the release.
