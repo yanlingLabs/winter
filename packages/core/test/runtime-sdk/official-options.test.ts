@@ -5,7 +5,7 @@
 // that test's own comment), and the auto-memory-directory equality with the Winter leg's own MEMDIR
 // helper (WS-14 §2: "identical for both branches").
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installMockModuleTripwire } from "../mock-module-tripwire";
@@ -13,11 +13,15 @@ import * as winterAgentSdk from "@yanlinglabs/winter-agent-sdk";
 import type { CanUseTool } from "@yanlinglabs/winter-agent-sdk";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import { ApprovalBroker } from "../../src/agent/approvals";
+import { ContextAssembler } from "../../src/agent/context";
 import { PermissionGate } from "../../src/agent/gate";
 import { QuestionBroker } from "../../src/agent/questions";
+import { SkillStore } from "../../src/agent/skills";
+import { TrustStore } from "../../src/agent/trust";
 import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { assistantMemoryDirFor, memoryDirFor } from "../../src/agent/memory-dir";
-import { buildWinterOptions, controlPlaneDenyRules, disallowedToolsFor, sandboxConfigFor, type WinterOptionsInput } from "../../src/runtime-sdk/mode-options";
+import { buildWinterOptions, controlPlaneDenyRules, disallowedToolsFor, GLOBAL_READ_ALLOW_RULES, sandboxConfigFor, type WinterOptionsInput } from "../../src/runtime-sdk/mode-options";
+import { winterSystemPromptFor } from "../../src/runtime-sdk/system-prompt";
 import { Settings } from "../../src/settings";
 import {
   ANTHROPIC_PROFILE_NAME,
@@ -116,23 +120,175 @@ describe("minimalOsEnvironment", () => {
 });
 
 // ── autoMemoryDirectoryFor ───────────────────────────────────────────────────────────────────────
+//
+// autoMemoryDirectoryFor used to re-derive this path BY HAND (`assistantMemoryDirFor`/`memoryDirFor`
+// called fresh, with only `{winterHome: home}`) instead of asking `ContextAssembler.memoryDirFor` —
+// the SAME method `winterSystemPromptFor`'s own `assemble()` call now uses to build the system
+// prompt's own MEMDIR section. Re-deriving by hand silently dropped three things: the user's
+// `settings.memory.directory` override, the WS-16 §17 memory-key relocation, and `workdirLess` — so
+// the official leg's child could be told, via `autoMemoryDirectory`, to write memory to a directory
+// OTHER than the one its own system prompt had just named it. These tests exercise a REAL
+// `ContextAssembler`, wired the same shape `daemon.ts` wires it in production, so they fail before
+// the fix (proving the drift) and pin the fix (both routes now share one authority).
+
+// realpathSync'd (macOS's own /tmp -> /private/tmp, /var -> /private/var symlinks would otherwise
+// make a RAW mkdtempSync path compare unequal to the SAME directory once `memory-dir.ts`'s own
+// `canon()` has resolved it — every path built from this helper needs to agree with what the code
+// under test itself canonicalizes to).
+function realDir(): string {
+  return realpathSync(mkdtempSync(join(tmpdir(), "winter-official-mem-")));
+}
+
+/** A real `ContextAssembler`, wired the SAME shape `daemon.ts` wires it in production:
+ *  `dirFor` (the project bucket) honours `directory`/`relocatedKey`; `assistantDir` deliberately
+ *  does NOT (see `assistantMemoryDirFor`'s own doc — honouring the override there would leak dream
+ *  memories into code sessions). Exercises the real `memoryDirFor`/`assistantMemoryDirFor` free
+ *  functions, not a hand-rolled stand-in for them. */
+function realAssembler(
+  home: string,
+  memoryOpts: { directory?: string; relocatedKey?: (todaysKey: string) => string | undefined; enabled?: boolean } = {},
+): ContextAssembler {
+  const trust = new TrustStore(join(home, "trust.json"));
+  const skills = new SkillStore({ winterHome: home, trust });
+  return new ContextAssembler({
+    winterHome: home, trust, skills,
+    memory: {
+      enabled: () => memoryOpts.enabled ?? true,
+      dirFor: (cwd) => memoryDirFor(cwd, { winterHome: home, directory: memoryOpts.directory, relocatedKey: memoryOpts.relocatedKey }),
+      assistantDir: () => assistantMemoryDirFor({ winterHome: home }),
+    },
+  });
+}
 
 describe("autoMemoryDirectoryFor", () => {
-  const HOME = "/Users/x/.winter-test-home";
-  const base = (mode: OfficialSessionInput["mode"]): OfficialSessionInput => ({ sessionId: "s_1", mode, cwd: "/Users/x/repo" });
+  const base = (mode: OfficialSessionInput["mode"], cwd: string): OfficialSessionInput => ({ sessionId: "s_1", mode, cwd, primary: cwd });
 
   test("code -> the SAME per-project MEMDIR the Winter leg's memoryDirFor resolves to", () => {
-    const input = base("code");
-    expect(autoMemoryDirectoryFor(input, HOME)).toBe(memoryDirFor(input.cwd, { winterHome: HOME }));
+    const home = realDir();
+    const cwd = realDir();
+    const assembler = realAssembler(home);
+    const input = base("code", cwd);
+    expect(autoMemoryDirectoryFor(input, assembler, home)).toBe(memoryDirFor(cwd, { winterHome: home }));
   });
 
   test("dispatch and chat -> the SAME shared _assistant bucket assistantMemoryDirFor resolves to", () => {
-    expect(autoMemoryDirectoryFor(base("dispatch"), HOME)).toBe(assistantMemoryDirFor({ winterHome: HOME }));
-    expect(autoMemoryDirectoryFor(base("chat"), HOME)).toBe(assistantMemoryDirFor({ winterHome: HOME }));
+    const home = realDir();
+    const cwd = realDir();
+    const assembler = realAssembler(home);
+    expect(autoMemoryDirectoryFor(base("dispatch", cwd), assembler, home)).toBe(assistantMemoryDirFor({ winterHome: home }));
+    expect(autoMemoryDirectoryFor(base("chat", cwd), assembler, home)).toBe(assistantMemoryDirFor({ winterHome: home }));
   });
 
   test("dispatch/chat and code resolve to DIFFERENT directories (the split is real, not accidental equality)", () => {
-    expect(autoMemoryDirectoryFor(base("code"), HOME)).not.toBe(autoMemoryDirectoryFor(base("dispatch"), HOME));
+    const home = realDir();
+    const cwd = realDir();
+    const assembler = realAssembler(home);
+    expect(autoMemoryDirectoryFor(base("code", cwd), assembler, home)).not.toBe(autoMemoryDirectoryFor(base("dispatch", cwd), assembler, home));
+  });
+
+  test("a settings.memory.directory override reaches autoMemoryDirectory (previously silently dropped)", () => {
+    const home = realDir();
+    const cwd = realDir();
+    const override = realDir(); // stands in for the user's `settings.memory.directory` pin
+    const assembler = realAssembler(home, { directory: override });
+    const input = base("code", cwd);
+    expect(autoMemoryDirectoryFor(input, assembler, home)).toBe(override);
+    // and it actually MOVED the answer — not a coincidental match with the un-overridden default.
+    expect(autoMemoryDirectoryFor(input, assembler, home)).not.toBe(memoryDirFor(cwd, { winterHome: home }));
+  });
+
+  test("the directory override STILL reaches autoMemoryDirectory even while settings.memory.enabled is OFF (the router forces its own auto-memory on regardless, with no daemon-side way to turn it off — see autoMemoryDirectoryFor's own doc)", () => {
+    const home = realDir();
+    const cwd = realDir();
+    const override = realDir();
+    // `enabled: false` here mirrors a user who both pinned a custom MEMDIR AND turned Winter's own
+    // memory feature off — a naive "fall back to the plain free functions whenever memory is
+    // disabled" implementation would silently drop the override right back, which is the bug this
+    // test pins shut.
+    const assembler = realAssembler(home, { directory: override, enabled: false });
+    const input = base("code", cwd);
+    expect(autoMemoryDirectoryFor(input, assembler, home)).toBe(override);
+  });
+
+  test("a recorded WS-16 §17 memory-key relocation reaches autoMemoryDirectory (previously silently dropped)", () => {
+    const home = realDir();
+    const cwd = realDir();
+    const relocatedTo = "some-relocated-key";
+    const assembler = realAssembler(home, { relocatedKey: () => relocatedTo });
+    const input = base("code", cwd);
+    const expected = join(home, "projects", relocatedTo, "memory");
+    expect(autoMemoryDirectoryFor(input, assembler, home)).toBe(expected);
+    // and it actually MOVED the answer off the pre-relocation (OLD key) directory — the exact
+    // failure mode P8b-17's own doc warns about: "the agent reads an empty directory at the old
+    // key and starts a fresh MEMORY.md beside the user's own".
+    expect(autoMemoryDirectoryFor(input, assembler, home)).not.toBe(memoryDirFor(cwd, { winterHome: home }));
+  });
+
+  test("a workdir-less code session gets the assistant bucket in BOTH routes (autoMemoryDirectory and the system prompt agree)", () => {
+    const home = realDir();
+    const cwd = realDir(); // session-driver.ts still defaults `cwd` to a session tmp dir even when workdir-less
+    const assembler = realAssembler(home);
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd, primary: undefined }; // `primary: undefined` STATED: workdir-less
+    const expected = assistantMemoryDirFor({ winterHome: home });
+    expect(autoMemoryDirectoryFor(input, assembler, home)).toBe(expected);
+    // the system prompt names the SAME directory (the protocol block always discloses its path,
+    // workdir-less or not — see context.ts's memoryProtocol()).
+    const prompt = winterSystemPromptFor(assembler, { mode: "code", primary: undefined, cwd });
+    expect(prompt).toContain(`lives at the absolute path \`${expected}\``);
+  });
+
+  test("chat/dispatch's assistant bucket still IGNORES the directory override — the deliberate asymmetry assistantMemoryDirFor's own doc states", () => {
+    const home = realDir();
+    const cwd = realDir();
+    const override = realDir();
+    const assembler = realAssembler(home, { directory: override });
+    expect(autoMemoryDirectoryFor(base("dispatch", cwd), assembler, home)).toBe(assistantMemoryDirFor({ winterHome: home }));
+    expect(autoMemoryDirectoryFor(base("chat", cwd), assembler, home)).toBe(assistantMemoryDirFor({ winterHome: home }));
+    expect(autoMemoryDirectoryFor(base("dispatch", cwd), assembler, home)).not.toBe(override);
+    expect(autoMemoryDirectoryFor(base("chat", cwd), assembler, home)).not.toBe(override);
+  });
+
+  // ── the strongest test: pin agreement with the REAL system prompt text, not a second hand-written
+  // expectation — a matrix over every (mode × workdirLess × override) combination this leg can spawn
+  // into. `memDirNamedByPrompt` parses the directory straight out of `winterSystemPromptFor`'s own
+  // output (the protocol block's disclosed path for the project bucket; the assistant index's
+  // "auto-loaded from" path for the assistant bucket, which requires a MEMORY.md to exist — so the
+  // assistant-bucket rows pre-create one at the ONE formula that bucket can ever resolve to,
+  // `assistantMemoryDirFor`, regardless of override).
+  function memDirNamedByPrompt(prompt: string): string {
+    const project = prompt.match(/lives at the absolute path `([^`]+)`/);
+    if (project) return project[1]!;
+    const assistant = prompt.match(/Assistant memory index \(auto-loaded from (.+?); capped/);
+    if (assistant) return assistant[1]!.replace(/\/MEMORY\.md$/, "");
+    throw new Error(`no memory directory disclosed in prompt:\n${prompt}`);
+  }
+
+  test("matrix: autoMemoryDirectory EQUALS the directory winterSystemPromptFor's own assemble() call discloses, for every (mode × workdirLess × override) combination", () => {
+    for (const mode of ["code", "dispatch", "chat"] as const) {
+      for (const workdirLess of [false, true]) {
+        for (const overridePresent of [false, true]) {
+          const home = realDir();
+          const cwd = realDir();
+          const override = overridePresent ? realDir() : undefined;
+          const assembler = realAssembler(home, { directory: override });
+          const isAssistantBucket = mode === "dispatch" || mode === "chat";
+          if (isAssistantBucket) {
+            // the assistant bucket only discloses its path in the prompt when MEMORY.md exists —
+            // pre-create it at the one directory that bucket can ever resolve to.
+            const dir = assistantMemoryDirFor({ winterHome: home });
+            mkdirSync(dir, { recursive: true });
+            writeFileSync(join(dir, "MEMORY.md"), "- [marker](marker.md) — matrix fixture\n");
+          }
+          const primary = workdirLess ? undefined : cwd;
+          const input: OfficialSessionInput = { sessionId: "s_1", mode, cwd, primary };
+
+          const prompt = winterSystemPromptFor(assembler, { mode, primary, cwd });
+          const expected = memDirNamedByPrompt(prompt);
+
+          expect(autoMemoryDirectoryFor(input, assembler, home)).toBe(expected);
+        }
+      }
+    }
   });
 });
 
@@ -152,7 +308,12 @@ function minimalDeps(overrides: Partial<OfficialInputDeps> = {}): OfficialInputD
     explicitConnectionEnv: {},
     officialPeer: undefined,
     claudeExecutableFor: () => ({ path: "/usr/bin/true" }),
-    assembler: { assemble: () => "" },
+    // Every test in THIS describe block's minimalDeps() is about something other than the memory
+    // directory (the control-plane fence, credential plans, auth arms, …) — a trivial stub that
+    // reports "no memory config wired" is honest (the SAME answer a real assembler with no `memory`
+    // dep gives) and keeps those tests undisturbed. `autoMemoryDirectoryFor`'s own describe block
+    // above uses a REAL `ContextAssembler` instead, because that IS what it is testing.
+    assembler: { assemble: () => "", memoryDirFor: () => undefined },
     capabilities: {},
     canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
     policy: "auto",
@@ -184,7 +345,7 @@ describe("officialInputFor — official_project_key_too_deep", () => {
     // it runs).
     await mock.module("@yanlinglabs/winter-agent-sdk", () => ({ ...winterAgentSdk, transcriptProjectKey: () => "x".repeat(65) }));
     try {
-      const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+      const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
       const result = officialInputFor(input, minimalDeps());
       expect(result).toBeInstanceOf(OfficialProjectKeyTooDeep);
       if (result instanceof OfficialProjectKeyTooDeep) {
@@ -198,7 +359,7 @@ describe("officialInputFor — official_project_key_too_deep", () => {
   });
 
   test("a real, ordinary cwd never refuses (the guard is not reachable on the real, self-truncating key)", () => {
-    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
     const result = officialInputFor(input, minimalDeps());
     expect(result).not.toBeInstanceOf(OfficialProjectKeyTooDeep);
   });
@@ -224,7 +385,7 @@ describe("officialInputFor — official_project_key_too_deep", () => {
 // rules UNCHANGED, no second anchoring scheme needed (measured, not assumed).
 describe("officialInputFor — the control-plane fence (C1)", () => {
   function optionsFor(mode: OfficialSessionInput["mode"], home = "/Users/x/.winter-test-home"): Record<string, unknown> {
-    const input: OfficialSessionInput = { sessionId: "s_1", mode, cwd: "/Users/x/repo" };
+    const input: OfficialSessionInput = { sessionId: "s_1", mode, cwd: "/Users/x/repo", primary: "/Users/x/repo" };
     const result = officialInputFor(input, minimalDeps({ home }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
     return result.input.options as unknown as Record<string, unknown>;
@@ -237,6 +398,32 @@ describe("officialInputFor — the control-plane fence (C1)", () => {
     expect(settings?.permissions?.deny).toEqual(controlPlaneDenyRules(home));
     // Non-vacuous: this is a real list of rules, not an accidentally-empty array satisfying `toEqual`.
     expect(settings?.permissions?.deny?.length).toBeGreaterThan(0);
+  });
+
+  // USER RULING 2026-09-18: reads are globally allowed on BOTH legs, stated the same way on both.
+  // Before this neither leg carried an allow rule — an out-of-cwd read was asked, bridged to
+  // `canUseTool`, and allowed by the gate as read-only: correct, but a host round trip per call and
+  // pinned by nothing on this leg. The DENY list must survive alongside it, because deny-before-allow
+  // is the only reason a bare `Read` allow cannot reach `<home>/run` or `<home>/runtimes`.
+  test("settings.permissions.allow is the shared global-read list, and the deny fence rides beside it", () => {
+    const home = "/Users/x/.winter-test-home";
+    const settings = optionsFor("code", home).settings as { permissions?: { allow?: string[]; deny?: string[] } } | undefined;
+    expect(settings?.permissions?.allow).toEqual([...GLOBAL_READ_ALLOW_RULES]);
+    expect(settings?.permissions?.allow).toEqual(["Read", "Glob", "Grep"]);
+    expect(settings?.permissions?.deny).toEqual(controlPlaneDenyRules(home));
+  });
+
+  test("both legs send the IDENTICAL read-allow list — one constant, never two copies", () => {
+    const home = "/Users/x/.winter-test-home";
+    const official = (optionsFor("code", home).settings as { permissions?: { allow?: string[] } } | undefined)?.permissions?.allow;
+    const winter = buildWinterOptions({
+      mode: "code", policy: "ask", sessionId: "11111111-2222-3333-4444-555555555555", home, cwd: "/repo",
+      credentials: { byProvider: {} }, spawn: { pathToClaudeCodeExecutable: "/opt/winter" },
+      canUseTool: (async () => ({ behavior: "allow" as const })) as CanUseTool, abort: new AbortController(),
+      baseEnv: { PATH: "/usr/bin", HOME: "/Users/x", TMPDIR: "/tmp", LANG: "en_US.UTF-8" },
+    }).permissions?.allow;
+    expect(official).toEqual(winter);
+    expect(winter).toEqual([...GLOBAL_READ_ALLOW_RULES]);
   });
 
   test("settings.sandbox is EXACTLY sandboxConfigFor(home) — same real directory paths, no globs", () => {
@@ -274,7 +461,7 @@ describe("officialInputFor — the control-plane fence (C1)", () => {
 // bypassPermissions` is a separate lever this clamp closes regardless of that downgrade.
 describe("officialInputFor — disableBypassPermissionsMode (finding 2a)", () => {
   function settingsPermissionsFor(policy: SessionApprovalPolicy): { deny?: string[]; disableBypassPermissionsMode?: string } | undefined {
-    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
     const result = officialInputFor(input, minimalDeps({ home: "/Users/x/.winter-test-home", policy }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
     const options = result.input.options as unknown as Record<string, unknown>;
@@ -304,7 +491,7 @@ describe("officialInputFor — the env shape + spool (P9c-1)", () => {
     family: "claude", authFamily: "api-key", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
   };
   const HOME = "/Users/x/.winter-test-home";
-  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
   const settingsWith = (subscriptionAuth: boolean): Settings => ({ runtimes: { official: { subscriptionAuth } } }) as unknown as Settings;
 
   function build(overrides: Partial<OfficialInputDeps> = {}): { input: import("@yanlinglabs/winter-runtime-sdk").RouterOfficialInput } {
@@ -387,7 +574,7 @@ describe("officialInputFor — the env shape + spool, console-oauth family (P9c-
     family: "claude", authFamily: "console-oauth", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
   };
   const HOME = "/Users/x/.winter-test-home";
-  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
   const settingsWith = (subscriptionAuth: boolean): Settings => ({ runtimes: { official: { subscriptionAuth } } }) as unknown as Settings;
 
   function build(overrides: Partial<OfficialInputDeps> = {}): { input: import("@yanlinglabs/winter-runtime-sdk").RouterOfficialInput } {
@@ -448,7 +635,7 @@ describe("officialInputFor — the console arm's real env (fix round 2, P10a-2; 
   // directly, exactly the shape that widening produces.
   const consoleSelection: RuntimeSelection = { ...apiKeySelection, authFamily: "console-profile" };
   const HOME = "/Users/x/.winter-test-home";
-  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
   // A REAL anthropic authRef present on the provider — the strongest proof that the console arm's
   // ANTHROPIC_API_KEY omission is structural (the credential plan is never even asked), not an
   // accident of no credential existing to inject in the first place.
@@ -532,7 +719,7 @@ describe("officialInputFor — the console arm refuses until the router pin supp
   // widens `authFamily` to `"console-profile"` — this suite builds the widened selection directly.
   const consoleSelection: RuntimeSelection = { ...apiKeySelection, authFamily: "console-profile" };
   const HOME = "/Users/x/.winter-test-home";
-  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
   const provider = { providerId: "anthropic", authRef: { kind: "keychain" as const, account: "anthropic:default" } };
 
   test("a stubbed pin below the floor (0.0.3) refuses the console arm typed", () => {
@@ -631,7 +818,7 @@ describe("officialInputFor — the console arm's own subscription guard: console
   };
   const consoleSelection: RuntimeSelection = { ...apiKeySelection, authFamily: "console-profile" };
   const HOME = "/Users/x/.winter-test-home";
-  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
   const provider = { providerId: "anthropic", authRef: { kind: "keychain" as const, account: "anthropic:default" } };
 
   test("an explicit console pin with no profile yet refuses typed console_profile_missing", () => {
@@ -836,7 +1023,7 @@ describe("officialInputFor — item 2: settings.permissions.deny reaches this le
       schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
       permissions: { deny: ["Skill(writing-skills)", "Agent(fork)"] },
     });
-    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
     const result = officialInputFor(input, minimalDeps({ home, settings }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
     const deny = (result.input.options as { settings?: { permissions?: { deny?: string[] } } }).settings?.permissions?.deny ?? [];
@@ -845,7 +1032,7 @@ describe("officialInputFor — item 2: settings.permissions.deny reaches this le
 
   test("an absent settings block changes nothing — just the fixed control-plane fence", () => {
     const home = "/Users/x/.winter-test-home";
-    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
     const result = officialInputFor(input, minimalDeps({ home, settings: undefined }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
     const deny = (result.input.options as { settings?: { permissions?: { deny?: string[] } } }).settings?.permissions?.deny ?? [];
@@ -869,7 +1056,7 @@ describe("officialInputFor — item 3: configured MCP servers (HTTP/SSE/stdio) r
       httpOne: { type: "http" as const, url: "https://example.com/mcp", headers: { Authorization: "Bearer t" } },
       sseOne: { type: "sse" as const, url: "https://example.com/sse" },
     };
-    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
     // `officialPeer` must be non-undefined for `mcpServers` to be assembled at all (see this
     // function's own `deps.officialPeer === undefined ? {} : …` branch) — an EMPTY `capabilities`
     // record means `officialCapabilityServersFor` never actually touches the peer object, so a bare
@@ -880,7 +1067,7 @@ describe("officialInputFor — item 3: configured MCP servers (HTTP/SSE/stdio) r
   });
 
   test("absent configuredMcpServers is byte-identical to before item 3 (empty mcpServers when there are no capability servers either)", () => {
-    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
     const result = officialInputFor(input, minimalDeps({ officialPeer: {} as never, capabilities: {} }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
     expect(result.input.mcpServers).toEqual({});
@@ -925,7 +1112,7 @@ describe("officialInputFor — agents (router 0.0.9) reach both legs identically
     const winterAgents = buildWinterOptions(winterOptionsInput(AGENTS)).agents;
     expect(winterAgents).toEqual(AGENTS);
 
-    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
     const result = officialInputFor(input, minimalDeps({ officialPeer: {} as never, capabilities: {}, agents: AGENTS }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
     const officialAgents = (result.input.options as { agents?: Record<string, unknown> }).agents;
@@ -939,7 +1126,7 @@ describe("officialInputFor — agents (router 0.0.9) reach both legs identically
     expect(buildWinterOptions(winterOptionsInput({})).agents).toBeUndefined();
     expect(buildWinterOptions(winterOptionsInput()).agents).toBeUndefined();
 
-    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
     const emptyResult = officialInputFor(input, minimalDeps({ officialPeer: {} as never, capabilities: {}, agents: {} }));
     if (!("input" in emptyResult)) throw new Error(`officialInputFor unexpectedly refused`);
     expect((emptyResult.input.options as { agents?: unknown }).agents).toBeUndefined();

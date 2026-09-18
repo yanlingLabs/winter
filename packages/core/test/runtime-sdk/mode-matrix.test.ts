@@ -140,6 +140,30 @@ test("every cell discovers no settings tier of its own and keeps the foreground 
   }
 });
 
+// USER RULING 2026-09-18: reads are globally allowed, stated as an allow rule rather than left to a
+// `canUseTool` round trip. Only where the tools EXIST: chat's and dispatch's toolsets exclude
+// Read/Glob/Grep through `disallowedToolsFor`, and a rule for an absent tool is noise.
+test("code cells carry the global read-allow list; chat and dispatch carry none", () => {
+  for (const policy of POLICIES) {
+    expect(buildWinterOptions(optionsInput({ mode: "code", policy })).permissions?.allow).toEqual(["Read", "Glob", "Grep"]);
+    for (const mode of ["chat", "dispatch"] as const) {
+      expect(buildWinterOptions(optionsInput({ mode, policy })).permissions?.allow).toBeUndefined();
+    }
+  }
+});
+
+// The allow list must never be able to out-vote the fence. Both runtimes evaluate deny BEFORE allow
+// (the Winter SDK's evaluator header spells the stage order; claude's is the same), so what this
+// pins is that the deny list is still THERE, in the same block, in every cell that has an allow.
+test("every cell with a read-allow list still carries the control-plane deny rules beside it", () => {
+  for (const policy of POLICIES) {
+    const perms = buildWinterOptions(optionsInput({ mode: "code", policy, home: "/h" })).permissions!;
+    expect(perms.allow).toBeDefined();
+    expect(perms.deny!.some((r) => r.includes("/h/run"))).toBe(true);
+    expect(perms.deny!.some((r) => r.startsWith("Read("))).toBe(true);
+  }
+});
+
 test("the child's env is BUILT, never inherited", () => {
   const o = buildWinterOptions(optionsInput({ home: "/tmp/temp-home", profile: "dev" }));
   expect(o.env).toEqual({

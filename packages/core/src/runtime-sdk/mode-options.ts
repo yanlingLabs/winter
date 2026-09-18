@@ -402,6 +402,30 @@ export function permissionDenyRulesFor(home: string, settings: Settings | null |
  * Recorded as a Code-mode carry; Task 17's code e2e includes a self-grant attempt that must be
  * denied.
  */
+/**
+ * USER RULING 2026-09-18: reads are GLOBALLY allowed, on BOTH legs, stated the same way on both.
+ *
+ * Winter's position has always been that `Read`/`Glob`/`Grep` are unfenced apart from the daemon's
+ * own state (CLAUDE.md: "Reads are deliberately unfenced"). Until this constant that was true only
+ * INDIRECTLY: neither leg carried an allow rule, so a read outside the working directory made the
+ * runtime ask, the ask reached `canUseTool`, the approval bridge normalised the tool name and
+ * `PermissionGate.evaluate` allowed it as read-only. Correct, but a host round trip per call, invisible
+ * in the `Options` either leg is handed, and pinned by no test on the official leg (the measured
+ * "8d" e2e covers a Bash read outside cwd, never the Read TOOL).
+ *
+ * Stating it as an allow rule makes it native and makes the two legs literally identical. It cannot
+ * widen the fence: both runtimes evaluate DENY before ALLOW — claude's own order, and the Winter
+ * SDK's `permissions/evaluator.ts` header ("1 PreToolUse hooks -> 2 deny rules -> 3 ask rules -> 4
+ * permission mode -> 5 allow rules -> 6 canUseTool") — so `controlPlaneDenyRules`'s `<home>/run`,
+ * `<home>/runtimes` and the resume-staging denials still win, exactly as before.
+ *
+ * Bare tool names, deliberately: `Read` means every use of the tool. A path-scoped form
+ * (`Read(//**)`) would say the same thing less clearly and tie this to one runtime's glob dialect.
+ * Only ever attached where these tools EXIST — chat's and dispatch's toolsets exclude them through
+ * `disallowedToolsFor`, and a rule for an absent tool is noise, so the callers gate on code mode.
+ */
+export const GLOBAL_READ_ALLOW_RULES: readonly string[] = ["Read", "Glob", "Grep"];
+
 export function sandboxConfigFor(home: string): SandboxSettingsConfig {
   return {
     enabled: true,
@@ -522,7 +546,12 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     // `allowDangerouslySkipPermissions`/`permissionMode: "bypassPermissions"` is this session's own,
     // legitimate, daemon-decided top-level mode (set two lines below), and disabling the runtime's
     // ability to enter it would break that mode for the session itself, not just for a definition.
-    permissions: { deny: permissionDenyRulesFor(input.home, input.settings), disableBypassPermissionsMode: input.policy !== "bypass" },
+    permissions: {
+      // Code mode only — see `GLOBAL_READ_ALLOW_RULES`' own doc (the tools do not exist elsewhere).
+      ...(input.mode === "code" ? { allow: [...GLOBAL_READ_ALLOW_RULES] } : {}),
+      deny: permissionDenyRulesFor(input.home, input.settings),
+      disableBypassPermissionsMode: input.policy !== "bypass",
+    },
     sandbox: sandboxConfigFor(input.home),
     // Agent SDK 0.0.16 defaults a spawn to BACKGROUND (claude's own default), which means a finished
     // child re-enters the model on a turn NOBODY PUSHED — a second `system/init`, an assistant

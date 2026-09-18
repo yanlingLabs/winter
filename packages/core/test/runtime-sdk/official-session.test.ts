@@ -213,13 +213,13 @@ function harness(overrides: Partial<OfficialSessionDeps> = {}): Harness {
     explicitConnectionEnv: {},
     officialPeer: undefined,
     claudeExecutableFor: () => ({ path: "/usr/bin/true" }),
-    assembler: { assemble: () => "" },
+    assembler: { assemble: () => "", memoryDirFor: () => undefined },
     capabilities: {},
     canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
     policy: "auto",
   };
 
-  const sessionInput: OfficialSessionInput = { sessionId: SESSION_ID, mode: "code", cwd: "/repo" };
+  const sessionInput: OfficialSessionInput = { sessionId: SESSION_ID, mode: "code", cwd: "/repo", primary: "/repo" };
 
   const records: OfficialSessionRecords = {
     setTranscriptHealth: (winterSessionId, health) => { healthCalls.push({ sessionId: winterSessionId, health }); },
@@ -544,7 +544,7 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
       explicitConnectionEnv: {},
       officialPeer: undefined,
       claudeExecutableFor: () => ({ path: "/usr/bin/true" }),
-      assembler: { assemble: () => "" },
+      assembler: { assemble: () => "", memoryDirFor: () => undefined },
       capabilities: {},
       canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
       policy: "auto",
@@ -577,7 +577,7 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
       explicitConnectionEnv: {},
       officialPeer: undefined,
       claudeExecutableFor: () => ({ path: "/usr/bin/true" }),
-      assembler: { assemble: () => "" },
+      assembler: { assemble: () => "", memoryDirFor: () => undefined },
       capabilities: {},
       canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
       policy: "auto",
@@ -632,7 +632,7 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
       explicitConnectionEnv: {},
       officialPeer: undefined,
       claudeExecutableFor: () => ({ path: "/usr/bin/true" }),
-      assembler: { assemble: () => "" },
+      assembler: { assemble: () => "", memoryDirFor: () => undefined },
       capabilities: {},
       canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
       policy: "auto",
@@ -658,7 +658,7 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
       explicitConnectionEnv: {},
       officialPeer: undefined,
       claudeExecutableFor: () => ({ path: "/usr/bin/true" }),
-      assembler: { assemble: () => "" },
+      assembler: { assemble: () => "", memoryDirFor: () => undefined },
       capabilities: {},
       canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
       policy: "auto",
@@ -1082,7 +1082,7 @@ describe("D1-8 — the P9c-1/P10a assertions on a RESUMED official init", () => 
       inputDeps: () => ({
         home: testHome(), selection: consoleSelection, explicitCredentials: [], explicitConnectionEnv: {},
         officialPeer: undefined, claudeExecutableFor: () => ({ path: "/usr/bin/true" }),
-        assembler: { assemble: () => "" }, capabilities: {},
+        assembler: { assemble: () => "", memoryDirFor: () => undefined }, capabilities: {},
         canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
         policy: "auto", consoleProfileExists: () => true,
       }),
@@ -1114,7 +1114,7 @@ describe("D1-8 — the P9c-1/P10a assertions on a RESUMED official init", () => 
       inputDeps: () => ({
         home: testHome(), selection: consoleSelection, explicitCredentials: [], explicitConnectionEnv: {},
         officialPeer: undefined, claudeExecutableFor: () => ({ path: "/usr/bin/true" }),
-        assembler: { assemble: () => "" }, capabilities: {},
+        assembler: { assemble: () => "", memoryDirFor: () => undefined }, capabilities: {},
         canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
         policy: "auto", consoleProfileExists: () => profilePresent,
       }),

@@ -242,7 +242,7 @@ async function buildWorld(
     ...(hooks === undefined ? {} : { hooks }),
   };
 
-  const sessionInput: OfficialSessionInput = { sessionId, mode, cwd };
+  const sessionInput: OfficialSessionInput = { sessionId, mode, cwd, primary: cwd };
 
   const session = startOfficialSession({
     sessionId,
@@ -558,6 +558,37 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       const result = w.events.find((e) => e.type === "tool_result") as (SessionEvent & { output?: string; isError?: boolean }) | undefined;
       expect(result?.isError).toBe(false);
       expect(result?.output).toContain(CONTENT);
+    });
+  }, 60_000);
+
+  // USER RULING 2026-09-18: reads are globally allowed on this leg too, as a NATIVE allow rule
+  // (`GLOBAL_READ_ALLOW_RULES`, the same constant the Winter leg sends). Before it, an out-of-cwd
+  // Read was asked, bridged to `canUseTool`, and allowed there by the gate as read-only — so the
+  // outcome looked the same and only this test, on the real binary, distinguishes "allowed by a
+  // rule" from "allowed by a round trip". The Bash counterpart is the "8d MEASURED" test below; this
+  // is the Read TOOL, which that test never exercised. `dont-ask` is the honest policy to measure
+  // under: it never raises a card, so a read that needed one would surface here as a denial.
+  //
+  // The C1 `<home>/run/probe.txt` denial above now ALSO carries weight it did not before: with a bare
+  // `Read` allow rule in the same block, that test passing is the proof that deny still beats allow
+  // on the real CLI.
+  test("a Read tool call OUTSIDE cwd is ALLOWED on this leg, under a policy that can never raise a card", async () => {
+    const outsideDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-read-outside-"));
+    const SENTINEL = "WINTER_GLOBAL_READ_SENTINEL_4e91";
+    const target = join(outsideDir, "elsewhere.txt");
+    writeFileSync(target, SENTINEL);
+    const turns: AnthropicTurnScript[] = [PLACEHOLDER_TURN("Read", [JSON.stringify({ file_path: "/placeholder" })]), DONE_TURN];
+    await withAnthropicLoopback(turns, async (fake) => {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "dont-ask");
+      // Non-vacuous: the target must genuinely be outside this session's working directory.
+      expect(target.startsWith(w.cwd)).toBe(false);
+      turns[0] = PLACEHOLDER_TURN("Read", [JSON.stringify({ file_path: target })]);
+      await w.session.send("read that file for me and tell me what it says");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      const result = w.events.find((e) => e.type === "tool_result") as (SessionEvent & { output?: string; isError?: boolean }) | undefined;
+      expect(result?.isError).toBe(false);
+      expect(result?.output).toContain(SENTINEL);
     });
   }, 60_000);
 
@@ -1039,7 +1070,7 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       const events: SessionEvent[] = [];
       eventsFor.set(sessionId, events);
       const checkpoints = new MemCheckpoints();
-      const sessionInput: OfficialSessionInput = { sessionId, mode: "code", cwd };
+      const sessionInput: OfficialSessionInput = { sessionId, mode: "code", cwd, primary: cwd };
       const inputDeps: OfficialInputDeps = {
         home,
         selection: selectionFor(),
@@ -1408,7 +1439,7 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       const events: SessionEvent[] = [];
       eventsFor.set(sessionId, events);
       const checkpoints = new MemCheckpoints();
-      const sessionInput: OfficialSessionInput = { sessionId, mode: "code", cwd };
+      const sessionInput: OfficialSessionInput = { sessionId, mode: "code", cwd, primary: cwd };
       const inputDeps: OfficialInputDeps = {
         home,
         selection: selectionFor(),

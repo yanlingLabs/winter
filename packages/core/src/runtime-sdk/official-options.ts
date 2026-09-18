@@ -25,7 +25,7 @@ import type { CapabilityServerRecord } from "../capabilities";
 import { officialSubscriptionAuthEnabled, type Settings } from "../settings";
 import { canUseToolFor, type CanUseToolDeps } from "./approval-bridge";
 import { CORE_BRAND } from "./brand";
-import { permissionDenyRulesFor, disallowedToolsFor, sandboxConfigFor } from "./mode-options";
+import { GLOBAL_READ_ALLOW_RULES, permissionDenyRulesFor, disallowedToolsFor, sandboxConfigFor } from "./mode-options";
 import { officialCapabilityServersFor, type OfficialMcpModule } from "./official-capabilities";
 import { winterSystemPromptFor } from "./system-prompt";
 import { ClaudeExecutableUnavailable } from "./official-executable";
@@ -344,6 +344,20 @@ export interface OfficialSessionInput {
   /** `SessionMeta.origin` — `"dispatch-child"` skips the output style, same as the Winter leg. */
   origin?: string;
   displayName?: string;
+  /** `WinterSystemPromptInput.primary`/`engine.ts`'s `primaryDir(sessionId)`, verbatim: the live
+   *  `cwd` column, else the first `dirs` row — `undefined` for a genuinely workdir-less session.
+   *  Distinct from `cwd` above (which the caller (`session-driver.ts`'s `sessionInput()`) already
+   *  defaults to a session tmp dir when this is absent, exactly like the Winter leg's own `cwd`):
+   *  collapsing the two before they reach this file would make a workdir-less session
+   *  indistinguishable from a real single-directory one, which is what fed `autoMemoryDirectoryFor`
+   *  the wrong bucket for that case before this field existed.
+   *
+   *  REQUIRED-but-possibly-undefined, deliberately not `primary?:` — the same shape
+   *  `WinterSystemPromptInput.primary` uses. An OPTIONAL field would let a construction site simply
+   *  forget it, and "forgot" would read as "workdir-less": a silent default deciding which memory
+   *  bucket a session writes to, which is the exact class of bug this field was added to end. Every
+   *  site must now SAY which it is, and the compiler checks that it did. */
+  primary: string | undefined;
 }
 
 export interface OfficialInputDeps {
@@ -370,7 +384,11 @@ export interface OfficialInputDeps {
    *  `Options` value wins over" the constructor-time default), so a `runtimes.claudeExecutable`
    *  edit takes effect for the very next turn with no daemon restart. */
   claudeExecutableFor: () => { path: string } | ClaudeExecutableUnavailable;
-  assembler: Pick<ContextAssembler, "assemble">;
+  /** `"memoryDirFor"` is what `autoMemoryDirectoryFor` (below) calls to compute `autoMemoryDirectory`
+   *  — the SAME method `winterSystemPromptFor`'s own `assemble()` call uses to build the system
+   *  prompt's MEMDIR section, so this leg's child can no longer be told to write memory somewhere
+   *  other than what its own prompt just named (see `ContextAssembler.memoryDirFor`'s own doc). */
+  assembler: Pick<ContextAssembler, "assemble" | "memoryDirFor">;
   /** This session's already-built per-session Winter capability servers (`buildCapabilitiesFor`'s
    *  own output) — mirrored onto the official leg by `officialCapabilityServersFor` (P8c-4). */
   capabilities: CapabilityServerRecord;
@@ -429,12 +447,53 @@ export interface OfficialInputDeps {
   consoleProfileExists?: () => boolean;
 }
 
-/** `winterSystemPromptFor`'s memory-bucket choice, verbatim (chat/dispatch share `_assistant`; code
- *  is per-project) — so the official leg's `autoMemoryDirectory` is the SAME directory the Winter
- *  leg's MEMDIR resolves to for this session (WS-14 §2: "identical for both branches"). */
-export function autoMemoryDirectoryFor(input: OfficialSessionInput, home: string): string {
+/** The official leg's `autoMemoryDirectory` — this function USED TO re-derive the path by hand
+ *  (`assistantMemoryDirFor`/`memoryDirFor` called fresh, with only `{winterHome: home}`), which
+ *  silently dropped three things `assembler.memoryDirFor` (the SAME decision `winterSystemPromptFor`
+ *  makes for this session's system prompt, `agent/context.ts`) actually accounts for:
+ *  `settings.memory.directory` (the user's relocation override), the WS-16 §17 memory-key
+ *  relocation (`relocatedKey`), and `workdirLess` (a workdir-less CODE session's prompt names the
+ *  shared `_assistant` bucket, not a per-cwd one). That drift meant this leg's child could be told,
+ *  via `autoMemoryDirectory`, to write memory somewhere OTHER than the directory its own system
+ *  prompt had just disclosed. Routing through the assembler is what makes the two agree by
+ *  construction rather than by two independent authors staying in sync by hand.
+ *
+ *  `input.primary === undefined` is the SAME "workdir-less" test `winterSystemPromptFor` runs
+ *  (`WinterSystemPromptInput.primary`) — see `OfficialSessionInput.primary`'s own doc for why it is
+ *  a separate field from `cwd`.
+ *
+ *  The router's `RouterOfficialInput.autoMemoryDirectory` is a required field with no "no MEMDIR"
+ *  representation — and the router currently hardcodes `autoMemoryEnabled: true` for this leg with
+ *  no daemon-side setting able to turn it off (a separate, router-side gap; not this function's to
+ *  fix) — so a value must always be sent, EVEN WHEN Winter's own `memory.enabled` setting is off for
+ *  this incarnation. `{evenIfDisabled: true}` is what asks the assembler for that value: "what
+ *  directory WOULD this be" rather than "what directory IS this, or nothing" — still honouring
+ *  `settings.memory.directory`/`relocatedKey` (see `ContextAssembler.memoryDirFor`'s own doc for why
+ *  skipping `enabled()` alone, without also skipping the override, is the point: the on/off switch
+ *  and the relocation are orthogonal settings, and a naive "just use the plain free functions
+ *  whenever memory is disabled" fallback would silently drop the override again for exactly the
+ *  users who both pinned a custom MEMDIR AND turned Winter's own memory feature off — the same class
+ *  of bug this function exists to fix). The free-function fallback below fires ONLY when
+ *  `assembler.memoryDirFor` still answers `undefined` even with that flag — which, per its own doc,
+ *  means there is no `memory` dep wired AT ALL (a harness/test double that never supplied one; every
+ *  production caller does), not "disabled". */
+export function autoMemoryDirectoryFor(
+  input: OfficialSessionInput,
+  assembler: Pick<ContextAssembler, "memoryDirFor">,
+  home: string,
+): string {
+  const isAssistantBucket = input.mode === "dispatch" || input.mode === "chat";
+  const resolved = assembler.memoryDirFor(
+    {
+      cwd: input.cwd,
+      memoryBucket: isAssistantBucket ? "assistant" : "project",
+      workdirLess: input.primary === undefined,
+    },
+    { evenIfDisabled: true },
+  );
+  if (resolved !== undefined) return resolved;
   const opts: MemoryDirOptions = { winterHome: home };
-  return input.mode === "dispatch" || input.mode === "chat" ? assistantMemoryDirFor(opts) : memoryDirFor(input.cwd, opts);
+  return isAssistantBucket ? assistantMemoryDirFor(opts) : memoryDirFor(input.cwd, opts);
 }
 
 /** `officialInputFor`'s success shape: the `RouterOfficialInput` AND, separately, the executable
@@ -511,7 +570,7 @@ export function officialInputFor(
   const systemPromptAppend = winterSystemPromptFor(deps.assembler, {
     mode: input.mode,
     ...(input.origin === undefined ? {} : { origin: input.origin }),
-    primary: input.cwd,
+    primary: input.primary,
     cwd: input.cwd,
     ...(input.outDir === undefined ? {} : { outDir: input.outDir }),
     ...(input.extraDirs === undefined ? {} : { extraDirs: input.extraDirs }),
@@ -585,7 +644,7 @@ export function officialInputFor(
       sessionId: input.sessionId,
       ...(input.parentSessionId === undefined ? {} : { parentSessionId: input.parentSessionId }),
       base,
-      autoMemoryDirectory: autoMemoryDirectoryFor(input, deps.home),
+      autoMemoryDirectory: autoMemoryDirectoryFor(input, deps.assembler, deps.home),
       projectKey,
       sharedTempRoot,
       ...(spool === undefined ? {} : { spool }),
@@ -659,6 +718,11 @@ export function officialInputFor(
         // separate lever this clamp closes regardless of that downgrade.
         settings: {
           permissions: {
+            // The SAME constant the Winter leg sends (`mode-options.ts`'s `GLOBAL_READ_ALLOW_RULES`,
+            // whose doc carries the ruling and the deny-before-allow argument) — one list, two legs,
+            // never a second copy that could drift. This leg only ever runs code-mode sessions, but
+            // the guard is kept so the two call sites read identically.
+            ...(input.mode === "code" ? { allow: [...GLOBAL_READ_ALLOW_RULES] } : {}),
             deny: permissionDenyRulesFor(deps.home, deps.settings),
             ...(deps.policy === "bypass" ? {} : { disableBypassPermissionsMode: "disable" as const }),
           },
