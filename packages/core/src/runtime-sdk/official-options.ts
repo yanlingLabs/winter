@@ -576,6 +576,24 @@ export function officialInputFor(
       remoteConfig: "deny",
       advertisesHandoff: true,
       ...(input.displayName === undefined ? {} : { displayName: input.displayName }),
+      // Daemon settings surface (2026-09-17 plan, item 3) — SDK-SURFACE WALL, measured and reported
+      // rather than routed around (the standing "do not invent a new SDK surface" rule):
+      // `agent-definitions.ts`'s parsed `<home>/agents/*.md` map has NO PLACE TO GO on this leg.
+      // `OptionsTemplatePolicy` (`@yanlinglabs/winter-runtime-sdk`, pinned at `versions.ts`'s
+      // `REQUIRED_WINTER_RUNTIME_SDK` — "0.0.8" as of this writing — `dist/official/
+      // options-template.d.ts`) declares no `agents` field, and its implementation
+      // (`buildOfficialOptions`, `dist/index.js`) builds the final `OfficialOptions` literal
+      // field-by-field off ONLY the fields the type declares — it does not spread arbitrary extra
+      // `policy` keys through, so adding one here would be silently dropped, not silently wrong (the
+      // ONE mercy of measuring it first). `assertOptionsInvariants` additionally REFUSES a stray key
+      // on `extraArgs`, confirming this router version is deliberately closed here, not merely
+      // incomplete. `policy.settings` is not an escape hatch either: it becomes the vendor's own
+      // flag-layer settings.json equivalent, whose real schema has no top-level `agents` key (agents
+      // are always file-based for Claude Code too — this would be dropped/rejected the same way).
+      // `official-options-agents-wall.test.ts` pins this exact absence, named to the router version
+      // above, so a future bump that adds the field is a positive test failure, not a silent gap
+      // nobody notices. The Winter leg carries `agents` today (`mode-options.ts`'s
+      // `buildWinterOptions`); this leg cannot, until the router grows the field.
       options: {
         // Structural assignment onto `OptionsTemplatePolicy` — the router 0.0.3 exports the type by
         // name now, but `RouterOfficialInput["options"]` is already the precise shape this object

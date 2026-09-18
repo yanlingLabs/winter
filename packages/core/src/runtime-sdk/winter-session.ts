@@ -81,7 +81,7 @@
 // second wait is already aborted and its iteration will close its own books, but the session is
 // `resumable` from the moment `end()` returns — the next `open()` awaits that iteration before it
 // spawns (finding 3), and no push can reach the closed queue in between.
-import type { Options, Query } from "@yanlinglabs/winter-agent-sdk";
+import type { AgentInfo, Options, Query } from "@yanlinglabs/winter-agent-sdk";
 import type { NewSessionEvent, SessionEvent } from "@yanlinglabs/winter-protocol";
 import { MAIN_THREAD, ProjectorRefusedError, classifyThrown, type ProjectedBatch, type Projector, type ProtocolSdkMessage } from "../projector";
 import { PROJECTOR_PASSTHROUGH_CLIENT } from "../projector/index";
@@ -197,6 +197,10 @@ export interface WinterSessionDeps {
   children?: WinterChildrenSink;
   /** Fired when the incarnation goes idle after a turn (the activity enforcement's re-check hook). */
   onTurnSettled?: () => void;
+  /** Daemon settings surface (2026-09-17 plan, item 3): see `WinterLegDeps.onSupportedAgents`
+   *  (session-driver.ts) for the full contract — this is the per-session slice of it (already
+   *  bound to `sessionId` by `session-driver.ts`'s own `startWinterSession` call). */
+  onSupportedAgents?: (agents: AgentInfo[]) => void;
   log?: (line: string) => void;
 }
 
@@ -547,6 +551,23 @@ class WinterSessionImpl implements WinterSession {
       const queue = (this.deps.queue ?? createHostPromptQueue)();
       const projector = this.deps.projector(shape);
       const query = this.deps.runtime.sdk.query({ prompt: queue, options });
+      // Daemon settings surface (2026-09-17 plan, item 3): best-effort, fire-and-forget — a
+      // rejection (a torn/aborted child before this resolves) must never affect `open()` itself,
+      // which is why this is neither awaited nor placed before `this.inc = inc` below. See
+      // `WinterSessionDeps.onSupportedAgents`'s own doc comment for why this is the ONE place a
+      // built-in-agent-type list can come from.
+      if (this.deps.onSupportedAgents) {
+        try {
+          // The extra try/catch (beside the promise's own `.catch`) guards a SYNCHRONOUS throw —
+          // a test double or a mismatched peer missing this method entirely throws the instant
+          // it's called, before `.then`/`.catch` ever attach, which a promise-only guard would miss.
+          query.supportedAgents()
+            .then((agents) => this.deps.onSupportedAgents?.(agents))
+            .catch(() => { /* best-effort only */ });
+        } catch {
+          /* best-effort only */
+        }
+      }
       const inc: Incarnation = { ...shape, queue, projector, query, attachment: undefined, sawInit: false, done: Promise.resolve() };
       this.inc = inc;
       this.gen = generation;

@@ -38,7 +38,7 @@ import {
   type OfficialPermissionMode,
   type OfficialSessionInput,
 } from "../../src/runtime-sdk/official-options";
-import { CONSOLE_AUTH_ROUTER_MIN } from "../../src/runtime-sdk/versions";
+import { CONSOLE_AUTH_ROUTER_MIN, REQUIRED_WINTER_RUNTIME_SDK } from "../../src/runtime-sdk/versions";
 
 // ⚠️ Bun's `mock.module` overwrites properties on the ALREADY-LOADED module's own namespace object
 // IN PLACE (its own doc comment: "exports are overwritten") — so `winterAgentSdk.transcriptProjectKey`
@@ -794,6 +794,27 @@ describe("effectiveOfficialAuthFor (O6, provider.status; WS-20: presence alone)"
   });
   test("neither present -> \"none\"", () => {
     expect(effectiveOfficialAuthFor(false, false)).toBe("none");
+  });
+});
+
+// Daemon settings surface (2026-09-17 plan, item 3) — SDK-SURFACE WALL, pinned. `agent-definitions.ts`'s
+// parsed `<home>/agents/*.md` map has no field to ride on this leg's `OptionsTemplatePolicy` at the
+// currently pinned router version (`REQUIRED_WINTER_RUNTIME_SDK`, versions.ts) — see this block's
+// own construction site in official-options.ts for the measured reason (`buildOfficialOptions`
+// builds its result field-by-field off only the fields the type declares; it does not forward
+// arbitrary extra `policy` keys). This test pins the CURRENT absence, named to the router version,
+// so a future bump that adds the field turns this into a FAILING test someone has to notice and
+// act on, rather than a silent gap nobody revisits.
+describe(`officialInputFor — the agents wall (item 3; router ${REQUIRED_WINTER_RUNTIME_SDK} has no Options.agents route)`, () => {
+  test("officialInputFor's own output carries no agents key anywhere reachable", () => {
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+    const result = officialInputFor(input, minimalDeps());
+    if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
+    expect((result.input.options as Record<string, unknown> | undefined)?.["agents"]).toBeUndefined();
+    // Belt: `OptionsTemplatePolicy` itself has no `agents` member at all — this repeats the
+    // assertion structurally (Object.keys never contains it), so a future field ADDED to the type
+    // but never wired here still fails loudly rather than passing on an absent-by-coincidence value.
+    expect(Object.keys(result.input.options ?? {})).not.toContain("agents");
   });
 });
 

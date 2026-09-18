@@ -873,6 +873,24 @@ test("M7: no advisorModel at all -> no Options.advisor key, unchanged from befor
   expect(o.advisor).toBeUndefined();
 });
 
+// Daemon settings surface (2026-09-17 plan, item 3): `<home>/agents/*.md`, ALREADY PARSED by the
+// caller, reaches `Options.agents` verbatim — this builder never reads the directory itself
+// (its own "pure, no I/O" doc comment), so these tests only exercise the passthrough, not the parser
+// (agent-definitions.test.ts owns that).
+test("item 3: a populated `agents` input reaches Options.agents verbatim", () => {
+  const agents = { reviewer: { description: "Reviews code", prompt: "You review code." } };
+  const o = buildWinterOptions(optionsInput({ agents }));
+  expect(o.agents).toEqual(agents);
+  expect(o.agents).not.toBe(agents); // defensively copied, never the caller's own object reference
+});
+
+test("item 3: an empty `agents: {}` produces NO Options.agents key at all — same shape as absent", () => {
+  const withEmpty = buildWinterOptions(optionsInput({ agents: {} }));
+  const withAbsent = buildWinterOptions(optionsInput());
+  expect(withEmpty.agents).toBeUndefined();
+  expect(withAbsent.agents).toBeUndefined();
+});
+
 test("Task 16 / P8b-24: `resume` names the transcript through Options.resume and OMITS sessionId; a fresh start is the reverse", () => {
   const resumed = buildWinterOptions(optionsInput({ resume: true }));
   expect(resumed.resume).toBe("11111111-2222-3333-4444-555555555555");

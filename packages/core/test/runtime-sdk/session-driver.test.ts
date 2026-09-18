@@ -8,7 +8,7 @@
 //       and `ensure` undefined, never a throw (the IPC layer then refuses typed, fix wave F2);
 //   R1  the store's own log is what a resume re-pushes (`unconsumed` over `store.read`).
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Options, Query } from "@yanlinglabs/winter-agent-sdk";
@@ -73,6 +73,9 @@ class FakeQuery {
   [Symbol.asyncIterator](): this { return this; }
   async interrupt(): Promise<void> { this.emit({ type: "result", subtype: "success", is_error: false, permission_denials: [], result: "", interrupted: true }); }
   async setModel(): Promise<void> {}
+  // Daemon settings surface (2026-09-17 plan, item 3): a canned answer — real enough to prove
+  // `onSupportedAgents` actually reaches this exact value, never a shape check on a mock call.
+  async supportedAgents() { return [{ name: "Explore", description: "read-only search" }]; }
 }
 
 const result = (): Frame => ({ type: "result", subtype: "success", is_error: false, permission_denials: [], result: "" });
@@ -132,6 +135,50 @@ describe("createWinterSessionDrivers — the table", () => {
       expect(t.queries).toHaveLength(1);
       expect(t.q().options.sessionId).toBe(session.backendSessionId);
       expect(t.tracked).toEqual([sid]);
+      await session.end();
+    } finally { t.close(); }
+  });
+
+  // Daemon settings surface (2026-09-17 plan, item 3): end-to-end through the REAL `optionsFor`
+  // path (not just `buildWinterOptions` in isolation, mode-matrix.test.ts's job) — a real
+  // `<home>/agents/*.md` file, written to the driver table's own `home` BEFORE the session is
+  // created, reaches the child's `Options.agents` verbatim.
+  test("item 3: a real <home>/agents/*.md file reaches the child's Options.agents", async () => {
+    const t = table();
+    try {
+      mkdirSync(join(t.home, "agents"), { recursive: true });
+      writeFileSync(
+        join(t.home, "agents", "reviewer.md"),
+        ["---", "name: code-reviewer", "description: Reviews code for bugs", "---", "", "You review code."].join("\n"),
+      );
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const session = await t.drivers.create(sid);
+      expect(t.q().options.agents).toEqual({ "code-reviewer": { description: "Reviews code for bugs", prompt: "You review code." } });
+      await session.end();
+    } finally { t.close(); }
+  });
+
+  test("item 3: no agents/ directory at all -> no Options.agents key, unchanged from before this fix", async () => {
+    const t = table();
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const session = await t.drivers.create(sid);
+      expect(t.q().options.agents).toBeUndefined();
+      await session.end();
+    } finally { t.close(); }
+  });
+
+  test("item 3: onSupportedAgents fires with the LIVE query's own answer, bound to this session's id", async () => {
+    const observed: Array<{ sessionId: string; agents: unknown }> = [];
+    const t = table({ onSupportedAgents: (sessionId, agents) => { observed.push({ sessionId, agents }); } });
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const session = await t.drivers.create(sid);
+      // Fire-and-forget (winter-session.ts's own doc comment) — poll rather than assume it landed
+      // synchronously with `create()`'s own return.
+      const deadline = Date.now() + 1000;
+      while (observed.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5));
+      expect(observed).toEqual([{ sessionId: sid, agents: [{ name: "Explore", description: "read-only search" }] }]);
       await session.end();
     } finally { t.close(); }
   });
