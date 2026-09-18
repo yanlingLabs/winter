@@ -67,28 +67,117 @@ func shellOverlayAccessibilityName(_ overlay: ShellOverlay) -> String {
 
 // MARK: - Presentation
 
-/// Which panel is open, if any.
+/// **THE SHELL'S MODAL LAYER — one object, one thing open.**
 ///
-/// One model for all three rather than a flag each: they are mutually exclusive by nature (each is
-/// a modal consultation), and a single optional makes that true by construction instead of by
-/// remembering to close the other two.
+/// It began (2026-09-17) as "which of the three panels is showing", one optional rather than three
+/// flags so that mutual exclusion was true by construction instead of by remembering to close the
+/// other two. 2026-09-18 extends exactly that reasoning to the two surfaces that were living
+/// alongside it: the ⌘K SEARCH PALETTE (whose own flag is still a `SearchPalettePresentation`,
+/// because `SidebarSearchPalette` owns that type) and Settings → Roles' MODEL PICKER.
+///
+/// All five — search, library, devices, updates, picker — are the same kind of thing: a floating
+/// consultation you make and dismiss. Two of them on screen at once has never been a state anybody
+/// wants, and before this they could be: the palette's flag and the panel's optional knew nothing
+/// about each other. Now every OPEN door on this object clears the other two kinds first, so
+/// "exactly one" is a property of this class rather than a rule five call sites remember.
+///
+/// **Every open must therefore go through this object.** The five doors are the ⌕ and ⌘K
+/// (`ShellRootView`/`ShellSidebar`), the account row's three icons, `AppDelegate`'s "Check for
+/// Updates…" (`open(.updates)`, unchanged), and the Roles pane's value rows
+/// (`openRolePicker(_:)`). Closing needs no coordination and stays plain.
 ///
 /// An `ObservableObject` for the same reason `SearchPalettePresentation` is one — the buttons that
 /// open these live in the sidebar's account row while the panels are overlays on the shell ROOT.
 @MainActor
 final class ShellOverlayPresentation: ObservableObject {
-    @Published var overlay: ShellOverlay?
+    @Published private(set) var overlay: ShellOverlay?
+    /// The Roles model picker's live request, or nil. A REQUEST rather than a case on
+    /// `ShellOverlay`: the card needs the role, the pane's live `SettingsRolesModel` and the
+    /// catalog store, none of which can live in a `Hashable` enum — and stuffing closures into one
+    /// would put the picker's behaviour in the enum's callers instead of in the picker.
+    @Published private(set) var picker: SettingsRolePickerRequest?
+
+    /// The search palette's own flag. OWNED here (rather than beside this object) so that opening
+    /// a panel can close the palette without a back-reference somebody has to remember to wire;
+    /// `ShellRootView` observes the same instance it is handed here.
+    let search: SearchPalettePresentation
+
+    /// `search` is an OPTIONAL rather than defaulting straight to a fresh instance: a default
+    /// ARGUMENT VALUE expression is checked as a nonisolated context regardless of the enclosing
+    /// initializer's own isolation, and `SearchPalettePresentation.init` is `@MainActor` — the same
+    /// trap `AppWindowController.init`'s `navigation:` parameter documents. The fallback is built
+    /// in this (`@MainActor`) body instead.
+    init(search: SearchPalettePresentation? = nil) {
+        self.search = search ?? SearchPalettePresentation()
+    }
 
     var isPresented: Bool { overlay != nil }
 
-    func open(_ overlay: ShellOverlay) { self.overlay = overlay }
+    func open(_ overlay: ShellOverlay) {
+        closePicker()
+        search.close()
+        self.overlay = overlay
+    }
+
     func close() { overlay = nil }
 
     /// Same door, twice = closed. Matches ⌘K's behaviour on the search palette.
     func toggle(_ overlay: ShellOverlay) {
-        self.overlay = self.overlay == overlay ? nil : overlay
+        if self.overlay == overlay { close() } else { open(overlay) }
+    }
+
+    // MARK: The search palette
+
+    func openSearch() {
+        overlay = nil
+        closePicker()
+        search.open()
+    }
+
+    /// ⌘K and the ⌕ both toggle, so the same door closes what it opened.
+    func toggleSearch() {
+        if search.isPresented { search.close() } else { openSearch() }
+    }
+
+    // MARK: The Roles model picker
+
+    func openRolePicker(_ request: SettingsRolePickerRequest) {
+        overlay = nil
+        search.close()
+        closePicker()
+        picker = request
+        request.roles.pickerDidOpen(request.role)
+    }
+
+    /// The ONE way the picker goes away — the close button, the scrim, Esc, and every exclusion
+    /// path above. It tells the pane's model, which is what lets a write still in flight report its
+    /// failure to the pane instead of into a card nobody can see (`SettingsRolesModel.commit`).
+    func closeRolePicker() {
+        closePicker()
+    }
+
+    /// **Close THIS picker, if it is still the one showing.**
+    ///
+    /// A commit outlives its card: close the picker for role A mid-write, open one for role B, and
+    /// A's reply then lands with a close in its hand. An unconditional close would take B down with
+    /// it. Identity is the role AND the model object, because two panes could in principle be
+    /// showing the same role.
+    func closeRolePicker(ifShowing request: SettingsRolePickerRequest) {
+        guard picker == request else { return }
+        closePicker()
+    }
+
+    private func closePicker() {
+        guard let open = picker else { return }
+        picker = nil
+        open.roles.pickerDidClose()
     }
 }
+
+/// The narrow door the Roles pane needs from the shell: "show this picker". Declared by the picker
+/// (`SettingsRoleModelPicker.swift`) and conformed to here, so Settings depends on the capability
+/// rather than on the shell's whole modal layer — and a test can stand in for it.
+extension ShellOverlayPresentation: SettingsRolePickerPresenting {}
 
 // MARK: - Metrics
 

@@ -47,8 +47,8 @@ import WinterKit
 // 3. **The default session model is not a peer of the others.** `provider.model` rebinds the
 //    daemon's own internal provider, and every pin's DEFAULT is derived from it — so changing it
 //    silently moves every role the user has not pinned explicitly. That is the entire reason the
-//    read carries "explicit or defaulted" and this pane shows it: a user who changes the top row
-//    can see which rows moved underneath them.
+//    read carries "explicit or defaulted". The row no longer draws it as a badge (user call,
+//    2026-09-18); the picker still honours it, never ticking a model a role merely inherited.
 //
 // The advisor keeps its live picker in the composer's model menu (`WinterComposerCard` →
 // `FieldStateAdapter.applyAdvisorModelSelection` → `settings.setAdvisorModel`); the row here is the
@@ -221,18 +221,14 @@ let settingsModelRoleUnwiredNote = "Not readable yet — Winter can't ask the da
 /// never true: every role always resolves to something daemon-side.
 let settingsModelRoleUnknownValue = "—"
 
-/// PURE: the badge beside a value. "Pinned" is a choice someone made; "Default" is a value that
-/// will move on its own when the default session model changes — which is the one thing a user
-/// reading this pane most needs to be able to tell apart.
-func settingsRoleValueBadge(_ value: SettingsRoleValue) -> String {
-    value.isExplicit ? "Pinned" : "Default"
-}
-
-/// PURE: whether changing the default session model would move this role. The top row itself is
-/// excluded — it is the cause, not one of the things carried along.
-func settingsRoleFollowsSessionDefault(_ role: SettingsModelRole, value: SettingsRoleValue) -> Bool {
-    role != .sessionDefault && !value.isExplicit
-}
+// 2026-09-18: the "Pinned"/"Default" BADGE is GONE from the rows (user call — they did not want
+// it). `settingsRoleValueBadge` and `settingsRoleFollowsSessionDefault` went with it rather than
+// being left as dead code with no caller.
+//
+// **The distinction itself is untouched.** `SettingsRoleValue.isExplicit` still arrives, is still
+// the thing `settingsRolePickerSelection` branches on, and still decides that a DERIVED value does
+// not tick its own model's row in the picker. What was removed is the chip in the row, not the fact
+// it was drawn from.
 
 /// PURE: what a cleared role shows in the value column. Distinct from
 /// `settingsModelRoleUnknownValue` ("—"), which means "the daemon said nothing": this one means the
@@ -300,6 +296,15 @@ final class SettingsRolesModel: ObservableObject {
     /// A failed write's sentence. Kept apart from `errorText` because it belongs INSIDE the picker
     /// — the card is where the action was taken, and a message behind it is a message unread.
     @Published private(set) var writeErrorText: String?
+    /// WHICH role's card is on screen, if any. Told by the shell's modal layer
+    /// (`ShellOverlayPresentation.openRolePicker`/`closeRolePicker`), which is the one place that
+    /// knows — the card is rendered at shell level now, not by this pane.
+    ///
+    /// A ROLE, not a flag: close the dispatch card mid-write and open the titles one, and a flag
+    /// would say "a card is up" when dispatch's failure lands — putting it in the wrong card.
+    @Published private(set) var openPickerRole: SettingsModelRole?
+
+    var pickerIsOpen: Bool { openPickerRole != nil }
 
     var isUnwired: Bool { loader == nil }
     /// Whether a value on this pane is a door. No writer = the rows stay exactly as read-only as
@@ -332,7 +337,19 @@ final class SettingsRolesModel: ObservableObject {
         }
     }
 
-    func clearWriteError() { writeErrorText = nil }
+    /// A card just opened for `role`. Yesterday's failed write is not news about this one.
+    func pickerDidOpen(_ role: SettingsModelRole) {
+        openPickerRole = role
+        writeErrorText = nil
+    }
+
+    /// The card just went away — by its close button, its scrim, Esc, or another floating surface
+    /// taking its place. A write it started may still be in flight; that is the whole reason this
+    /// exists, because from here on the failure has nowhere to land but the pane.
+    func pickerDidClose() {
+        openPickerRole = nil
+        writeErrorText = nil
+    }
 
     /// Write one role and REPAINT FROM THE REPLY.
     ///
@@ -359,8 +376,15 @@ final class SettingsRolesModel: ObservableObject {
             isUnsupported = false
             return true
         } catch {
-            writeErrorText = shellPanelErrorText("Couldn't set \(settingsModelRoleTitle(role).lowercased())",
-                                                 detail: "\(error)")
+            // WHERE the sentence goes is decided, not assumed: the card is the right place when it
+            // is still up, and the pane is the only place left when it is not. A write that was
+            // started and then dismissed must still say that it failed.
+            let sentence = shellPanelErrorText("Couldn't set \(settingsModelRoleTitle(role).lowercased())",
+                                               detail: "\(error)")
+            switch settingsRoleWriteErrorSink(openRole: openPickerRole, writtenRole: role) {
+            case .picker: writeErrorText = sentence
+            case .pane: errorText = sentence
+            }
             return false
         }
     }
@@ -368,17 +392,16 @@ final class SettingsRolesModel: ObservableObject {
 
 // -----------------------------------------------------------------------------------------------
 
-/// Settings → Roles. Read-only by construction: no bindings, no buttons — a value can reach this
-/// view (through `loader`, or injected directly as `values`) but none can leave it.
+/// Settings → Roles. One row per job, each row's value a door onto the two-step model picker.
 ///
-/// `loader:` is DEFAULTED to nil so the existing construction sites (`SettingsSurface.swift`'s two
-/// `SettingsRolesSection()` calls, a file this change does not own) keep compiling and keep
-/// rendering the unreadable state. Passing `wiring.modelRoles` there is the one edit that lights
-/// every row up.
+/// Every dependency is optional and every absent one degrades to the honest read-only pane this
+/// started as: no `loader` = nothing was ever asked, no `writer` = the values are text, no `picker`
+/// = there is nowhere to show the card. That is why `SettingsSurface.swift`'s bare
+/// `SettingsRolesSection()` still compiles and still renders something true.
 ///
-/// Adding a picker later means one control per row, populated from that row's `permitted` list and
-/// writing through `DashboardWiring.setModelRole` — never from an app-side allowlist, which would
-/// be stale the moment the agent SDK's catalog grows (an SDK bump ships with no app release).
+/// The picker's contents are the daemon's `permitted` list and nothing else — never an app-side
+/// allowlist, which would be stale the moment the agent SDK's catalog grows (an SDK bump ships with
+/// no app release).
 struct SettingsRolesSection: View {
     @StateObject private var model: SettingsRolesModel
     /// Directly-injected values, used when no loader has produced any. Kept for pure construction
@@ -393,24 +416,30 @@ struct SettingsRolesSection: View {
     /// did not own) constructs this section with `loader:`/`writer:` only; passing `catalog:` there
     /// is the one edit that turns this into an ordinary injected dependency.
     @ObservedObject private var catalog: ModelCatalogFactsModel
-
-    /// Which role's picker is open. Nil = none, which is every state before someone clicks a value.
-    @State private var pickerRole: SettingsModelRole?
+    /// Where the picker is SHOWN (2026-09-18). The pane publishes a request; the shell renders the
+    /// card in its own floating-panel layer, which is the only way it can wear the same position,
+    /// size, material, rim and scrim as the library/devices/updates panels — see
+    /// `SettingsRolePickerRequest`. Nil (a preview, a test, a host that passes none) makes the rows
+    /// honestly unpickable rather than clickable-but-inert; `settingsRoleIsPickable` says so.
+    private let picker: (any SettingsRolePickerPresenting)?
 
     init(values: [SettingsModelRole: SettingsRoleValue] = [:],
          loader: SettingsRolesModel.Loader? = nil,
          writer: SettingsRolesModel.Writer? = nil,
          facts: ModelCatalogFacts? = nil,
-         catalog: ModelCatalogFactsModel = .shared) {
+         catalog: ModelCatalogFactsModel = .shared,
+         picker: (any SettingsRolePickerPresenting)? = nil) {
         self.injected = values
         self.injectedFacts = facts
         self.catalog = catalog
+        self.picker = picker
         _model = StateObject(wrappedValue: SettingsRolesModel(loader: loader, writer: writer))
     }
 
-    /// The injected value wins when there is one; otherwise the store's, which is `.none` until a
-    /// picker has opened at least once.
-    private var facts: ModelCatalogFacts { injectedFacts ?? catalog.facts }
+    // The facts themselves are no longer read HERE: the card is rendered by the shell, and
+    // `SettingsRolePickerHost` resolves `injectedFacts ?? catalog.facts` where it can also OBSERVE
+    // the store. This pane still owns the store (it is what makes the read lazy on the first click)
+    // and hands it over in the request.
 
     /// The loaded map wins once there is one; `injected` is the fallback, so a pane constructed
     /// with literal values behaves exactly as it did before the loader existed.
@@ -446,35 +475,17 @@ struct SettingsRolesSection: View {
         // same re-seed-on-appear posture every other pane has. A daemon without the method answers
         // once and latches `isUnsupported`; it is not retried into a spin.
         .task { await model.refresh() }
-        // The picker rides the SETTINGS PANE, not the shell root — `ShellOverlay` is a closed enum
-        // whose cases the sidebar switches over exhaustively, and this surface does not own that
-        // file. Two visible consequences, both accepted rather than hidden: the scrim dims the
-        // settings detail area only (the settings sidebar stays lit), and the card's top inset is
-        // measured from this pane rather than the window, so it sits a little lower than ⌘K does.
-        // The CARD itself is the same one, from the same `ShellPanelCard`.
-        .overlay {
-            if let pickerRole, let value = values[pickerRole] {
-                SettingsRoleModelPicker(
-                    role: pickerRole,
-                    value: value,
-                    facts: facts,
-                    isWriting: model.writing,
-                    errorText: model.writeErrorText,
-                    onCommit: { tag in
-                        Task {
-                            if await model.commit(pickerRole, model: tag) { closePicker() }
-                        }
-                    },
-                    onClose: closePicker
-                )
-                .transition(.opacity)
-            }
-        }
-    }
-
-    private func closePicker() {
-        pickerRole = nil
-        model.clearWriteError()
+        // NO `.overlay` here any more (2026-09-18). The picker used to ride this pane, and it cost
+        // exactly what riding a pane costs: the scrim dimmed the detail area only — the settings
+        // sidebar stayed lit — and the card's top inset was measured from the pane, so it sat lower
+        // than the library/devices/updates panels and ⌘K, which are all measured from the window.
+        // The card was already the shared `ShellPanelCard`; what differed was WHERE it was hung.
+        //
+        // It is now hung where they are: the pane publishes a `SettingsRolePickerRequest` and the
+        // shell renders it (`ShellRootView`). Position, size, material, rim, scrim and the corner
+        // close button are therefore the same BY CONSTRUCTION rather than by two places agreeing —
+        // and, because all five surfaces now pass through one presentation object, opening any of
+        // them closes the rest.
     }
 
     @ViewBuilder
@@ -491,23 +502,26 @@ struct SettingsRolesSection: View {
             }
         } control: {
             HStack(spacing: 8) {
-                if let value, settingsRoleFollowsSessionDefault(role, value: value) {
-                    // Says WHY this value is what it is, and warns that it is not anchored: change
-                    // the top row and this one follows.
-                    SettingsBadge(settingsRoleValueBadge(value))
-                }
-                // A DOOR when the daemon named models for this role and this app can write; the
-                // same text, inert, otherwise — an unreadable or unwritable row must look exactly
-                // as it did before the picker existed rather than offering a click that cannot
-                // land.
-                if settingsRoleIsPickable(value, canWrite: model.canWrite) {
+                // NO "Pinned"/"Default" badge (user call, 2026-09-18). The `explicit` fact behind it
+                // is untouched and still decides the picker's checkmark — only the chip is gone.
+                //
+                // A DOOR when the daemon named models for this role, this app can write, and there
+                // is a shell to present the card in; the same text, inert, otherwise — an
+                // unreadable or unwritable row must look exactly as it did before the picker
+                // existed rather than offering a click that cannot land.
+                if settingsRoleIsPickable(value, canWrite: model.canWrite, canPresent: picker != nil) {
                     // The catalog read is LAZY and happens HERE, the first time a picker is
                     // opened — not on `.task`. Settings is visited far more often than a model is
                     // changed, and `models.catalog` is ~134 KB; paying for it on every visit to
                     // Settings buys a table nobody looked at. `loadIfNeeded` is idempotent and
                     // single-flight, so the click that opens the card can fire it unconditionally.
                     Button {
-                        pickerRole = role
+                        picker?.openRolePicker(
+                            SettingsRolePickerRequest(role: role,
+                                                      roles: model,
+                                                      catalog: catalog,
+                                                      injectedFacts: injectedFacts,
+                                                      fallbackValues: injected))
                         Task { await catalog.loadIfNeeded() }
                     } label: {
                         HStack(spacing: 6) {

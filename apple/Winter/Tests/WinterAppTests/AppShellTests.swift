@@ -297,6 +297,184 @@ final class AppShellTests: XCTestCase {
                        "order follows the section order, never the query")
     }
 
+    // MARK: - The coming settings sections (2026-09-18)
+
+    /// The seven sections that are placeholders: every one is in the sidebar, reachable by the same
+    /// title filter as any other section, and has a page that says what belongs there AND where it
+    /// lives today — never a blank panel.
+    func testComingSectionsAreListedFilterableAndSayWhereTheThingLivesToday() {
+        let coming: [SettingsSection] = [.runtimes, .sessions, .approvals, .hooks, .mcpServers,
+                                         .appearance, .shortcuts]
+        let all = settingsSectionOrder
+        XCTAssertEqual(Set(all), Set(SettingsSection.allCases), "every section is in exactly one group")
+        XCTAssertEqual(all.count, SettingsSection.allCases.count)
+        for section in coming {
+            XCTAssertTrue(all.contains(section), "\(section) is in the sidebar")
+            XCTAssertEqual(settingsSectionsMatching(settingsSectionTitle(section), in: all).first, section,
+                           "the filter finds \(section) by its own title")
+            let copy = settingsSectionComingCopy(section) ?? ""
+            XCTAssertFalse(copy.isEmpty, "\(section) says something")
+            XCTAssertFalse(copy.contains("`"), "a variable reaches Text un-parsed — a backtick would render")
+            XCTAssertFalse(settingsSectionBodyDrawsItsOwnHeader(section),
+                           "a coming page draws no title, so the section header must")
+        }
+        XCTAssertEqual(settingsSectionsMatching("Hooks", in: all), [.hooks])
+        XCTAssertEqual(settingsSectionsMatching("mcp", in: all), [.mcpServers])
+        XCTAssertEqual(settingsSectionsMatching("shortcut", in: all), [.shortcuts])
+
+        // The built sections have no coming copy — the two kinds of page never mix.
+        for section in all where !coming.contains(section) {
+            XCTAssertNil(settingsSectionComingCopy(section), "\(section) is built")
+        }
+
+        // The new group sits after Assistant.
+        let groupIds = settingsSectionGroups.map(\.id)
+        XCTAssertEqual(groupIds, ["models", "assistant", "integrations", "mac"])
+    }
+
+    /// Two things the brief for these pages assumed turned out not to exist; the copy must not
+    /// name them. `runtimes.official.auth` was removed in WS-20 (the arm is the tag prefix), and
+    /// there is no default-approval-policy key. And MCP headers get no promise of a field.
+    func testComingCopyNamesOnlyWhatExists() {
+        let runtimes = settingsSectionComingCopy(.runtimes) ?? ""
+        XCTAssertFalse(runtimes.contains("runtimes.official.auth"))
+        XCTAssertTrue(runtimes.contains("runtimes.handoff.crossRuntime"))
+        let approvals = settingsSectionComingCopy(.approvals) ?? ""
+        XCTAssertTrue(approvals.contains("reviewer.enabled"))
+        XCTAssertTrue(approvals.contains("composer"), "the policy is per session, in the composer")
+        let mcp = settingsSectionComingCopy(.mcpServers) ?? ""
+        XCTAssertTrue(mcp.contains("no field for auth headers"))
+        let shortcuts = settingsSectionComingCopy(.shortcuts) ?? ""
+        XCTAssertTrue(shortcuts.contains("fixed"), "the summon hotkey has no control today")
+        XCTAssertTrue(shortcuts.contains("Plugins tab"))
+    }
+
+    // MARK: - The shell's modal layer: exactly one floating surface (2026-09-18)
+
+    private func pickerRequest(_ role: SettingsModelRole = .dispatch,
+                               roles: SettingsRolesModel? = nil) -> SettingsRolePickerRequest {
+        SettingsRolePickerRequest(role: role,
+                                  roles: roles ?? SettingsRolesModel(),
+                                  catalog: ModelCatalogFactsModel())
+    }
+
+    /// What is showing, as one comparable value — so each row of the table below is a single
+    /// assertion about the WHOLE layer, not three separate ones that could each pass alone.
+    private struct Layer: Equatable {
+        var search = false
+        var overlay: ShellOverlay?
+        var picker: SettingsModelRole?
+    }
+
+    private func layer(_ p: ShellOverlayPresentation) -> Layer {
+        Layer(search: p.search.isPresented, overlay: p.overlay, picker: p.picker?.role)
+    }
+
+    /// **THE TABLE.** From every starting surface, every door: whatever opens, everything else is
+    /// closed. Five surfaces, one open at a time, by construction.
+    func testOpeningAnyFloatingSurfaceClosesEveryOther() {
+        typealias Door = (String, (ShellOverlayPresentation) -> Void, Layer)
+        let doors: [Door] = [
+            ("search", { $0.openSearch() }, Layer(search: true)),
+            ("⌘K", { $0.toggleSearch() }, Layer(search: true)),
+            ("library", { $0.open(.library) }, Layer(overlay: .library)),
+            ("devices", { $0.toggle(.devices) }, Layer(overlay: .devices)),
+            ("updates", { $0.open(.updates) }, Layer(overlay: .updates)),
+        ]
+        let starts: [(String, (ShellOverlayPresentation) -> Void)] = [
+            ("nothing", { _ in }),
+            ("search", { $0.openSearch() }),
+            ("library", { $0.open(.library) }),
+            ("updates", { $0.open(.updates) }),
+            ("picker", { [self] in $0.openRolePicker(pickerRequest(.titles)) }),
+        ]
+        for (startName, start) in starts {
+            // A door is skipped only from ITS OWN surface: ⌘K pressed with the palette already up
+            // is a CLOSE, which `testTheTogglingDoorsCloseWhatTheyOpened` pins separately.
+            for (doorName, door, expected) in doors
+            where startName != doorName && !(startName == "search" && doorName == "⌘K") {
+                let p = ShellOverlayPresentation()
+                start(p)
+                door(p)
+                XCTAssertEqual(layer(p), expected, "from \(startName), opening \(doorName)")
+            }
+            // …and the picker, from the same start.
+            let p = ShellOverlayPresentation()
+            start(p)
+            p.openRolePicker(pickerRequest(.research))
+            XCTAssertEqual(layer(p), Layer(picker: .research), "from \(startName), opening the picker")
+        }
+    }
+
+    /// Same door twice = closed, for the palette as for the panels — and closing one surface opens
+    /// nothing else.
+    func testTheTogglingDoorsCloseWhatTheyOpened() {
+        let p = ShellOverlayPresentation()
+        p.toggleSearch()
+        p.toggleSearch()
+        XCTAssertEqual(layer(p), Layer())
+        p.toggle(.library)
+        p.toggle(.library)
+        XCTAssertEqual(layer(p), Layer())
+    }
+
+    /// The palette's flag is the SAME object the view observes, and the layer can close it — which
+    /// is the whole reason the layer owns it rather than sitting beside it.
+    func testTheLayerOwnsThePaletteInstanceItCloses() {
+        let search = SearchPalettePresentation()
+        let p = ShellOverlayPresentation(search: search)
+        XCTAssertTrue(p.search === search)
+        search.open()
+        p.open(.devices)
+        XCTAssertFalse(search.isPresented)
+    }
+
+    /// The pane's model is TOLD when its card opens and closes — by the close button, by another
+    /// surface taking over, and by nothing else. That flag is what routes a late write failure to
+    /// the pane instead of into a card nobody can see.
+    func testThePickerTellsItsModelWhenItOpensAndWhenAnythingClosesIt() {
+        let roles = SettingsRolesModel()
+        let p = ShellOverlayPresentation()
+
+        p.openRolePicker(pickerRequest(roles: roles))
+        XCTAssertTrue(roles.pickerIsOpen)
+        p.closeRolePicker()
+        XCTAssertFalse(roles.pickerIsOpen)
+
+        p.openRolePicker(pickerRequest(roles: roles))
+        p.open(.library)
+        XCTAssertFalse(roles.pickerIsOpen, "exclusion goes through the same close")
+
+        p.openRolePicker(pickerRequest(roles: roles))
+        p.toggleSearch()
+        XCTAssertFalse(roles.pickerIsOpen)
+    }
+
+    /// **A LATE CLOSE CANNOT TAKE DOWN ITS REPLACEMENT.** Close picker A mid-write, open picker B,
+    /// then A's successful reply arrives carrying A's close: B must survive it.
+    func testAStaleCloseLeavesTheReplacementPickerStanding() {
+        let roles = SettingsRolesModel()
+        let p = ShellOverlayPresentation()
+        let a = pickerRequest(.dispatch, roles: roles)
+        let b = pickerRequest(.titles, roles: roles)
+
+        p.openRolePicker(a)
+        p.closeRolePicker()
+        p.openRolePicker(b)
+        p.closeRolePicker(ifShowing: a)
+        XCTAssertEqual(p.picker, b, "A's close is refused — B is not A")
+        XCTAssertTrue(roles.pickerIsOpen, "…and B's model still knows its card is up")
+
+        p.closeRolePicker(ifShowing: b)
+        XCTAssertNil(p.picker)
+
+        // Same role, a DIFFERENT pane's model: still not the same card.
+        let other = pickerRequest(.titles, roles: SettingsRolesModel())
+        p.openRolePicker(other)
+        p.closeRolePicker(ifShowing: b)
+        XCTAssertEqual(p.picker, other)
+    }
+
     /// Trust rows lead with the folder's own name and keep the full path beside it. The root and a
     /// trailing slash are the two cases where "last component" is not a name at all.
     func testTrustFolderDisplayNameFallsBackToThePathItself() {

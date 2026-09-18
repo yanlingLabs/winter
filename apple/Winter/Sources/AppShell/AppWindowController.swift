@@ -120,11 +120,16 @@ final class AppWindowController: NSObject, NSWindowDelegate {
     /// Unconditional for the same reason `dashboardSelection` is: no `AppModel` dependency, cheap to
     /// always have a real (idle) instance.
     let pairingPresentation = PairingSheetPresentationModel()
-    /// 2026-09-18: which floating panel (library / devices / updates) is showing. Owned HERE rather
-    /// than privately inside `ShellRootView` for one concrete reason: the menu bar's "Check for
-    /// Updates…" has to be able to OPEN the updates panel, and a `@StateObject` private to a view
-    /// is unreachable from `AppDelegate`. Same posture as `dashboardSelection` above, for the same
-    /// kind of reason — state a door outside the view has to reach cannot live inside it.
+    /// 2026-09-18: the shell's whole MODAL LAYER — which floating surface is showing, out of the
+    /// search palette, the three panels (library / devices / updates) and Settings → Roles' model
+    /// picker. Owned HERE rather than privately inside `ShellRootView` for one concrete reason: the
+    /// menu bar's "Check for Updates…" has to be able to OPEN the updates panel, and a
+    /// `@StateObject` private to a view is unreachable from `AppDelegate`. Same posture as
+    /// `dashboardSelection` above, for the same kind of reason — state a door outside the view has
+    /// to reach cannot live inside it.
+    ///
+    /// It owns the palette's flag too (`shellOverlays.search`), which is what makes "only one of
+    /// the five is ever open" a property of the object rather than a rule five call sites remember.
     let shellOverlays = ShellOverlayPresentation()
 
     /// Hidden-window hygiene: `false` whenever the window is ordered out OR fully occluded. Views
@@ -239,6 +244,9 @@ final class AppWindowController: NSObject, NSWindowDelegate {
             dashboardWiring: dashboardWiring, newChat: openNewChat,
             dashboardSelection: dashboardSelection,
             pairingPresentation: pairingPresentation,
+            // The palette's flag comes OUT of the modal layer that owns it — the view observes the
+            // very instance `shellOverlays` closes when something else opens.
+            searchPalette: shellOverlays.search,
             overlays: shellOverlays
         ))
         window.setFrame(frame, display: true)
