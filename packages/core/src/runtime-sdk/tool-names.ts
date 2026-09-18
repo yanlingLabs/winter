@@ -5,13 +5,12 @@ import { WINTER_DEFAULT_TOOL_DEFINITIONS } from "@yanlinglabs/winter-agent-sdk/t
  * from it so they can never drift.
  *
  * The gate's four class sets (`agent/gate.ts`) are keyed by the HOST's tool names — `bash`, `read`,
- * `write`, `web_fetch`, `Search`, `ReadPage`, `browser`, `docs`… — because every caller it has
- * today is the engine's dispatch loop, which hands it `call.name` straight off the host's own
- * `ToolRegistry`. A Winter child calls the SAME actions under DIFFERENT names, so feeding the raw
- * Winter name to the gate is wrong in both directions and SILENTLY:
+ * `write`, `web_fetch`, `Search`, `browser`, `docs`… — because every caller it has today hands it a
+ * name off the host's own `ToolRegistry`. A Winter child calls the SAME actions under DIFFERENT names,
+ * so feeding the raw Winter name to the gate is wrong in both directions and SILENTLY:
  *
  *  - `mcp__winter__research__Search` is not in `NETWORK`, so chat's gate branch ("allow READ_ONLY /
- *    NETWORK, deny everything else") would DENY chat's only research tool — chat's Search dies with
+ *    NETWORK, deny everything else") would DENY chat's only search tool — chat's Search dies with
  *    every unit test green.
  *  - `"Bash"` is not in `MUTATING`, so it falls to the unclassified fail-closed `"ask"` branch —
  *    which under `auto` is a card where today there is silence, and under dispatch/chat a typed
@@ -54,6 +53,12 @@ export const RUNTIME_HOST_TOOL_PAIRS: ReadonlyArray<readonly [runtime: string, h
   ["TaskGet", "task_get"],
   ["TaskStop", "task_stop"],
   ["LSP", "lsp"],
+  // ⚠️ THE TWO LOAD-BEARING ROWS (2026-09-18). The daemon no longer HAS a `web_fetch`/`web_search` tool —
+  // both retired with the web-tools ruling — but these mappings are how the runtime's own `WebFetch`/
+  // `WebSearch` reach `gate.ts`'s `NETWORK` class and `approvals.ts`'s card text. Delete either and its
+  // tool falls to the unclassified fail-closed `"ask"` branch: a card under `auto` where there is silence
+  // today, and a typed deny in chat and dispatch. The host NAMES they map onto are now classification
+  // data (and the name old session JSONLs carry), not tools.
   ["WebFetch", "web_fetch"],
   ["WebSearch", "web_search"],
   ["EnterPlanMode", "enter_plan_mode"],
@@ -109,8 +114,8 @@ export const WINTER_OWN_TOOL_NAMES: ReadonlySet<string> = new Set(
  * **This, not the host's pair table, is what `disallowedTools` must be derived from** (review F4). The
  * brief's instruction to build the list from `WINTER_DEFAULT_TOOL_DEFINITIONS` rests on a wrong
  * premise — that export is only Winter's own four — and the host's pair table is a different set
- * again: it has rows for tools the child does NOT advertise (`LSP`, `ToolSearch`, `WebFetch`,
- * `WebSearch`, the two MCP-resource tools) and, more importantly, MISSES three the child DOES
+ * again: it has rows for tools the child does NOT advertise (`LSP`, `ToolSearch`, the two
+ * MCP-resource tools) and, more importantly, MISSES three the child DOES
  * advertise (`Monitor`, `ReportFindings`, `ScheduleWakeup`). Deriving chat's exclusions from the
  * pair table therefore left three tools advertised to a chat model that is supposed to have no
  * fs/shell/repo surface at all.
@@ -256,12 +261,15 @@ export const WINTER_CAPABILITY_TOOL_PREFIX = "mcp__winter__";
  * land in another lane, and the integration parity test diffs them.
  */
 export const WINTER_CAPABILITY_SERVER_KEYS: ReadonlySet<string> = new Set([
-  // The SIXTH key, `web`, arrived with P8b-33's rows in `CAPABILITY_TOOL_MODES` and was missing here
-  // (review NEW-1). The cost was not cosmetic: `mcp__winter__web__web_fetch` did not strip, so
-  // `isExternalToolName` claimed it and it took the MUTATING/external branch — a CARD under
-  // `ask`/`accept-edits` and a DENY under `plan`/`dont-ask`, where `web_fetch`/`web_search` are
-  // `NETWORK` today and allowed under every policy including `plan`. The card would also have read
-  // `mcp__winter__web__web_fetch` and lost its URL summary and "always allow" options (P8b-25).
+  // ⚠️ `web` IS RETAINED ON PURPOSE (2026-09-18). Its capability SERVER is gone — `web_fetch`/
+  // `web_search` retired with the web-tools ruling and `CAPABILITY_SERVER_KEYS` no longer lists the key
+  // — but this set is what `hostToolNameFor` STRIPS through, and the Mac and the phone still render
+  // historical session JSONLs full of `mcp__winter__web__web_fetch` rows. Drop the key and every one of
+  // those names stops stripping: `isExternalToolName` claims it, the row loses its host name in the
+  // renderers, and (for anything that replayed through the gate) it would take the MUTATING/external
+  // branch — a CARD under `ask`/`accept-edits`, a DENY under `plan`/`dont-ask`, where the web class is
+  // `NETWORK` and allowed under every policy. That was the original review-NEW-1 bug when the key was
+  // MISSING; removing it now would recreate it for every past session.
   "sessions", "computer", "browser", "office", "research", "web",
   // The SEVENTH key, `lsp` (fix wave, review F7): `mcp__winter__lsp__lsp` strips to `lsp`, which
   // `gate.ts` classifies READ_ONLY — the class the registry-door tool always had.
@@ -281,7 +289,7 @@ const HOST_TO_RUNTIME = ((): ReadonlyMap<string, string> => {
  * Three cases, in order:
  *  1. a host capability tool — `mcp__winter__<key>__<tool>` whose `<key>` is one of the FIVE
  *     capability server keys — → the BARE `<tool>` name, which is exactly how `gate.ts` already
- *     classifies all five servers' tools (`Search`/`ReadPage` in `NETWORK`, `browser` in `NETWORK`,
+ *     classifies every server's tools (`Search` in `NETWORK`, `browser` in `NETWORK`,
  *     `computer`/`docs`/`sheets`/`slides`/`session_spawn` in `MUTATING`,
  *     `list_sessions`/`manage_session` in `READ_ONLY`);
  *  2. a mapped Winter built-in → its host name (the pair table);

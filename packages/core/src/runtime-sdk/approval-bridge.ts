@@ -271,7 +271,7 @@ export function approvalOptionsFromSuggestions(suggestions: readonly PermissionU
  * **What this bridge deliberately does NOT reproduce** — every one of these is engine-resident
  * policy that becomes per-mode `Options` in Task 9, and each is listed with its disposition in the
  * task report: the in-project write/edit silencing under `ask`; `controlPlaneFileTarget` and the
- * `~/.winter` grant denylist; the out-of-root `dirGrant` card; `web_fetch`'s and `browser`'s
+ * `~/.winter` grant denylist; the out-of-root `dirGrant` card; the web class's and `browser`'s
  * dangerous-domain floors (which move with the capability tools, P8b-12); bash's always-card
  * escalation args; and the safety reviewer. It also performs no rules-store READ, so a standing
  * rule that silences a card today does not silence it here — Winter's own rule stages do that.

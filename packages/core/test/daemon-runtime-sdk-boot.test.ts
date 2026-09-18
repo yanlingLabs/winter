@@ -182,11 +182,13 @@ describe("daemon boot — the capability servers (Tasks 6-7, P8b-36)", () => {
       const servers = d.buildSessionCapabilities(session());
       // KEYED BY NAME — the record IS `Options.mcpServers`' shape, and the child derives each tool's
       // wire name from the key, so the key set is the thing to assert. Computer use is off in this
-      // temp home, so six servers, not seven — plus `external` (Phase 8c Lane 3, Task 3.4), which is
+      // temp home, so it is absent too — plus `external` (Phase 8c Lane 3, Task 3.4), which is
       // ALWAYS present (kept, advertising zero tools, same "inert not absent" contract every other
       // capability server already follows) since this daemon boot wires no `CapabilityDeps.external`.
       expect(Object.keys(servers)).toEqual([
-        "winter__sessions", "winter__browser", "winter__office", "winter__research", "winter__web",
+        "winter__sessions", "winter__browser", "winter__office", "winter__research",
+        // `winter__web` was here until 2026-09-18: `web_fetch`/`web_search` retired in favour of the
+        // runtime child's own `WebFetch`/`WebSearch`, and the server went with them.
         "winter__lsp",   // fix wave F7: the `lsp` capability server
         "winter__external",   // Phase 8c Lane 3 Task 3.4: plugin-contributed tools (none wired here)
       ]);

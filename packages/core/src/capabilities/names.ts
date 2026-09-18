@@ -50,15 +50,23 @@ export type { SessionMode };
 
 /** The capability server keys, in the order `buildCapabilitiesFor` returns them.
  *
- *  P8b-33 added `web` to P8b-12's five: every mode disallows the SDK's built-in WebSearch/WebFetch
- *  in 8b (no keys, no dangerous-domain floor), so code keeps the daemon-owned pair. The fix wave
- *  added `lsp` (review F7): the `lsp` tool was retired on the premise that Winter's own LSP serves
- *  the child, and the measured 0.0.4 advertised set has none. Phase 8c Lane 3 (Task 3.4) added
- *  `external`: plugin-contributed tools, forwarded to the owning plugin over its existing RPC —
+ *  The fix wave added `lsp` (review F7): the `lsp` tool was retired on the premise that Winter's own
+ *  LSP serves the child, and the measured 0.0.4 advertised set has none. Phase 8c Lane 3 (Task 3.4)
+ *  added `external`: plugin-contributed tools, forwarded to the owning plugin over its existing RPC —
  *  its tool set is per-plugin and dynamic, so (unlike every other key) it has no corresponding
  *  `WINTER_CAPABILITY_TOOLS` rows; mode scoping for it lives on each `ExternalToolSource.modes`
- *  instead (default `["code"]`, `capabilities/server.ts`'s own documented fallback). */
-export const CAPABILITY_SERVER_KEYS = ["sessions", "computer", "browser", "office", "research", "web", "lsp", "external"] as const;
+ *  instead (default `["code"]`, `capabilities/server.ts`'s own documented fallback).
+ *
+ *  **`web` LEFT the list (2026-09-18, the web-tools ruling.)** P8b-33 had added it because every mode
+ *  disallowed the SDK's built-in `WebSearch`/`WebFetch` (no keys, no dangerous-domain floor), so code
+ *  needed a daemon-owned pair. At agent SDK 0.0.17 the child's own tools carry both through
+ *  `Options.web`, so `web_fetch`/`web_search` retired and the server went with them — on BOTH legs, the
+ *  official one included, which is what "claude's native web tools, kept exactly" required.
+ *
+ *  The protocol's `CapabilityServerInfoSchema.key` enum (`packages/protocol/src/methods.ts`) still
+ *  lists `"web"`. Deliberately not narrowed: it constrains what `capabilities.list` may EMIT, a wider
+ *  enum is valid for a result, and narrowing it is an RPC-schema change with a Swift mirror behind it. */
+export const CAPABILITY_SERVER_KEYS = ["sessions", "computer", "browser", "office", "research", "lsp", "external"] as const;
 export type CapabilityServerKey = (typeof CAPABILITY_SERVER_KEYS)[number];
 
 /**
@@ -136,17 +144,23 @@ export const WINTER_CAPABILITY_TOOLS = {
   "mcp__winter__office__docs": { modes: ["code", "dispatch"] },
   "mcp__winter__office__sheets": { modes: ["code", "dispatch"] },
   "mcp__winter__office__slides": { modes: ["code", "dispatch"] },
-  // `research` (C-6) — Winter's OWN web surface for chat and dispatch, not the SDK's
-  // WebSearch/WebFetch: these two carry the Exa key and the dangerous-domain floor (Winter map §5.1
-  // trap (ii)). Never deferred — `search.ts`'s own note explains why chat's small toolset should
-  // not pay a ToolSearch round trip for them.
+  // `research` — Winter's OWN search surface for chat and dispatch: Exa's ANSWER mode, which returns a
+  // written answer with its sources rather than links a chat session has no tool to chase (the
+  // 2026-09-18 ruling). Never deferred — `search.ts`'s own note explains why chat's small toolset must
+  // not pay a ToolSearch round trip for it.
+  //
+  // Its EXPOSURE additionally follows whether an Exa key is stored, which is runtime state and
+  // therefore not expressible here: `/answer` cannot be called anonymously, so with no key the
+  // capability server advertises no `Search` and `disallowedToolsFor` names it (and exposes the
+  // runtime's own `WebSearch` in its place). Same shape as `computer`'s live settings gate above — the
+  // `modes` row states today's REGISTRATION, and a live gate narrows it further.
   "mcp__winter__research__Search": { modes: ["chat", "dispatch"] },
-  "mcp__winter__research__ReadPage": { modes: ["chat", "dispatch"] },
-  // `web` (P8b-33) — CODE's web surface, for the same reason `research` exists for chat: the SDK's
-  // built-in WebSearch/WebFetch are disallowed in every mode in 8b, so without these two a code
-  // session would have no web access at all. `modes: ["code"]`, `deferred: true` (registry door).
-  "mcp__winter__web__web_fetch": { modes: ["code"], deferred: true },
-  "mcp__winter__web__web_search": { modes: ["code"], deferred: true },
+  // `ReadPage` (chat/dispatch) and the `web` server's `web_fetch`/`web_search` (code) were HERE until
+  // the 2026-09-18 ruling retired all three. The child's own `WebFetch`/`WebSearch` are the web surface
+  // now, on both legs, with the Exa key and the dangerous-domain floor supplied through `Options.web`.
+  // Their names survive as CLASSIFICATION DATA only — `runtime-sdk/tool-names.ts`'s pair table maps
+  // `WebFetch`→`web_fetch`/`WebSearch`→`web_search` for the gate and the Mac/phone tool rows, and old
+  // session JSONLs still replay rows named `web_fetch`/`web_search`/`ReadPage`.
   // `lsp` (fix wave, review F7) — the single multi-purpose language-server tool, reinstated as a
   // capability: the 0.0.4 child advertises no `LSP` of its own. Today's registration verbatim:
   // no `modes` on the def (⇒ `["code"]`), `deferred: true`.

@@ -1,24 +1,43 @@
-import { z } from "zod";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import type { ToolDefinition, ToolRegistry } from "./registry";
-
+// **The web PRIMITIVES.** Winter's URL guard, its HTML→text conversion and its SSRF-guarded redirect
+// loop — a library, not a tool surface.
+//
+// It USED to be the home of the `web_fetch`/`web_search` tool definitions as well. Both retired with
+// the 2026-09-18 web-tools ruling: the runtime child brings claude-shaped `WebFetch`/`WebSearch` of its
+// own now, with the dangerous-domain floor and the Exa key handed to it through `Options.web`, so a
+// daemon-side copy of either would be a second, diverging implementation of a tool the model already
+// has. What is left here is everything that was never about those two tools.
+//
+// WHO STILL READS IT, and the honest answer about what does not (recorded so nobody has to re-derive
+// it): `page-core.ts` imports `extractTitle`/`followRedirects`/`htmlToText`/`scanAnchorOpensForLinks`,
+// and `page-core.ts`'s own fetch/cache/render path has no in-daemon tool consumer left either. Both
+// files are KEPT deliberately rather than deleted with their last caller:
+//
+//   * they carry the adversarial corpus — the `ssrf-resolver-sweep`, `html-to-text-differential`,
+//     `regex-shapes` and `page-core` test files are a measured record of IPv4 spelling tricks,
+//     redirect-chain re-guarding and catastrophic-backtracking shapes that cost real review rounds,
+//     and deleting the code deletes the record;
+//   * the phone's own `PageFetcher`/`HtmlToText`/`PageCache` (`apple/WinterChatKit`) are ports of
+//     these functions, and the chat engine there still runs them.
+//
+// So: no new daemon tool should be built on this file without a ruling, and nothing here may be
+// treated as dead weight to trim without reading the two reasons above first.
 const MAX_FETCH_BYTES = 5 * 1024 * 1024; // hard cap on bytes READ off the wire (streamed — see readCapped)
-const PREVIEW_BYTES = 8192;
-const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_REDIRECT_HOPS = 3;
-const DEFAULT_SEARCH_RESULTS = 5;
-const MAX_SEARCH_RESULTS = 10;
 
-/** Keychain secret name for the Brave Search API key (4g Task 6) — shared between the daemon's
- *  `registerWebTools` wiring (packages/core/src/daemon.ts) and the CLI's `winter login
- *  --web-search-key` (packages/cli/src/main.ts), same precedent as providers/manager.ts's
- *  OPENAI_API_KEY_SECRET: ONE exported const so the two call sites can never drift apart on the
- *  literal string. */
+/**
+ * Keychain secret name for the Brave Search API key (4g Task 6).
+ *
+ * THE TOOL THAT READ IT IS GONE (2026-09-18) — `web_search` retired with the ruling above. The name
+ * stays because a USER'S STORED KEY DOES NOT RETIRE WITH IT: `runtime-sdk/credentials.ts`'s
+ * `web-search` row names this item so `credential.remove` / `winter credentials remove web-search`
+ * can clear it, `auth/legacy-secret-names.ts` carries it through Migration B, and the CLI's
+ * deprecated `--web-search-key` branch names it when it tells the user to remove rather than set.
+ * Deleting the literal would orphan whatever is in a user's Keychain today with no door to it.
+ *
+ * It stays HERE, not in `credentials.ts`, so the migration list and the CLI keep importing the
+ * single spelling they always imported — moving it would be churn in three files for no property.
+ */
 export const WEB_SEARCH_API_KEY_SECRET = "web-search-api-key";
-
-// module-level, per-process — names saved files webfetch-<n>-<host>.md (USER DESIGN, task-5-brief.md)
-let fetchCounter = 0;
 
 const LOCAL_REFUSAL = `refusing to fetch a local address`;
 const PRIVATE_REFUSAL = `refusing to fetch a private address`;
@@ -972,201 +991,4 @@ export async function followRedirects(startUrl: string, opts: FollowRedirectsOpt
     const { text, bytesRead } = await readCapped(res, MAX_FETCH_BYTES);
     return { ok: true, url: current, status: res.status, contentType, body: text, bytesRead };
   }
-}
-
-export interface WebToolDeps {
-  /** Emits one line per call, EVERY outcome (success, ssrf-refusal, http error, timeout, ...) —
-   *  matching how hardware.ts audits (peripheral/hardware.ts's `deps.audit.append(...)`), but
-   *  threaded as a plain callback (not the AuditLog class) so tests don't need a real file. */
-  audit?: (line: Record<string, unknown>) => void;
-  /** Test-only injection point (defaults to global fetch, same as followRedirects' own default) —
-   *  lets the file-write/result-shape test drive the FULL run() through registerWebTools without
-   *  live network, the same way followRedirects' own tests drive it directly. */
-  fetchFn?: typeof fetch;
-  /** web_search's ONLY route to its Brave API key — daemon.ts wires this as `(name) =>
-   *  secrets.get(name)` over the SAME KeychainSecretStore instance the daemon already builds
-   *  (auth/secret-store.ts). Plain function (not the SecretStore interface) so this file doesn't
-   *  need a cross-directory import into auth/ just for a type. Undefined (test default) is treated
-   *  identically to "no key stored" — web_search's no-key error path covers both. */
-  secret?: (name: string) => Promise<string | null>;
-}
-
-export function registerWebTools(r: ToolRegistry, deps: WebToolDeps = {}): void {
-  for (const def of webToolDefs(deps)) r.register(def);
-}
-
-/** P8b Task 7 (ruling P8b-33) — THE two definitions, extracted verbatim from `registerWebTools`'s
- *  body so the daemon's shared `ToolRegistry` and the `web` capability server drive the SAME
- *  `ToolDefinition` objects rather than two copies. Nothing about either registration changed.
- *
- *  WHY `web` IS A CAPABILITY SERVER AT ALL: every mode disallows the SDK's built-in
- *  `WebSearch`/`WebFetch` in 8b — they carry neither Winter's Brave/Exa keys nor its dangerous-domain
- *  floor — so code keeps these two, daemon-owned, over MCP. */
-export function webToolDefs(deps: WebToolDeps = {}): ToolDefinition[] {
-  return [{
-    name: "web_fetch",
-    description:
-      "Fetch a URL (http/https) and return a preview of its readable text content. Winter's only network-capable tool — bash has no network. The full converted page is saved to a file (its path is in the result) — use read/grep/spawn_agent on that file for anything beyond the preview. Fetch is read-only GET.",
-    // url only — no `prompt` (CC's web_fetch takes an optional page-digest prompt). Deliberate spec
-    // deviation: the save-to-tmp result shape below already gives the model read/grep/spawn_agent
-    // access to the FULL saved page, so a fetch-time digest prompt is redundant. Also no `max_bytes`:
-    // the 5MB read cap and 8192-byte preview are fixed constants (not caller-tunable), keeping the
-    // SSRF/DoS posture uniform regardless of what a caller asks for.
-    args: z.object({ url: z.string().min(1) }),
-    // R-T3: dispatch dropped (was ["code", "dispatch"], R-T2). `deferred: true` below meant this
-    // was advertised to dispatch but never callable — dispatch has no ToolSearch of its own to
-    // load it with (bug #7's other half; namesForMode only adds ToolSearch for a mode that has
-    // something ELSE eligible AND deferred — push_notification still qualifies, so ToolSearch
-    // still exists for dispatch, just never alongside a way to load this one). dispatch now uses
-    // Search (search.ts) instead — non-deferred, one-call excerpts, no catch-22.
-    modes: ["code"],
-    deferred: true, // T1 machinery, per-def flag — same pattern as task_get
-    async run({ url }, ctx) {
-      let outcome = "network_error";
-      // Last hop's resolved URL (from followRedirects — set on BOTH success and failure, since a
-      // failure can happen mid-redirect-chain too). Audited alongside the originally-requested
-      // `url` when it differs, so a redirect chain's actual source is never silently dropped.
-      let finalUrl: string | undefined;
-      try {
-        if (!ctx.tmpDir) {
-          outcome = "no_tmp_dir";
-          throw new Error("web_fetch requires a session tmp directory (ctx.tmpDir is unset)");
-        }
-        const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-        const signal = AbortSignal.any([ctx.signal, timeoutSignal].filter((s): s is AbortSignal => Boolean(s)));
-
-        const res = await followRedirects(url, { fetchFn: deps.fetchFn, signal });
-        finalUrl = res.url;
-        if (!res.ok) {
-          outcome = res.kind === "ssrf" ? "ssrf_refused"
-            : res.kind === "timeout" ? "timeout"
-            : res.kind === "redirects" ? "too_many_redirects"
-            : res.kind === "http" ? "http_error"
-            : "network_error";
-          throw new Error(res.error);
-        }
-        // Fetch succeeded — anything that throws past this point (e.g. the file write below) is a
-        // local/write failure, not a network one, so it must not be mislabeled "network_error".
-        outcome = "fetched";
-
-        const isHtml = res.contentType.toLowerCase().includes("text/html");
-        const finalText = isHtml ? htmlToText(res.body) : res.body;
-        const title = isHtml ? extractTitle(res.body) : "-";
-
-        const host = new URL(res.url).hostname.toLowerCase().replace(/[^a-z0-9.-]/g, "_");
-        const filename = `webfetch-${++fetchCounter}-${host}.md`;
-        let savedPath: string;
-        try {
-          mkdirSync(ctx.tmpDir, { recursive: true });
-          savedPath = join(ctx.tmpDir, filename);
-          writeFileSync(savedPath, finalText);
-        } catch (e) {
-          outcome = "write_error";
-          throw e;
-        }
-
-        const savedBytes = Buffer.byteLength(finalText, "utf8");
-        const preview = Buffer.from(finalText, "utf8").subarray(0, PREVIEW_BYTES).toString("utf8");
-
-        outcome = "ok";
-        return [
-          `Fetched ${res.url} (HTTP ${res.status}, ${res.contentType || "unknown content-type"}, ${res.bytesRead} bytes → ${savedBytes} bytes text)`,
-          `Title: ${title}`,
-          `Saved to: ${savedPath}`,
-          `--- preview (first 8192 bytes) ---`,
-          preview,
-          `--- end preview ---`,
-          `Full page saved. Use read with offset/limit to page through it, grep to search it, or spawn_agent to digest it.`,
-        ].join("\n");
-      } finally {
-        deps.audit?.({
-          kind: "network", tool: "web_fetch", url,
-          ...(finalUrl !== undefined && finalUrl !== url ? { finalUrl } : {}),
-          outcome,
-        });
-      }
-    },
-  }, {
-    name: "web_search",
-    description:
-      "Search the web (Brave Search) and return a numbered list of results (title, url, description). Winter's only search tool — pair with web_fetch to read a result's full page. Requires a stored Brave Search API key (winter login --web-search-key).",
-    args: z.object({
-      query: z.string().min(1),
-      // Default 5, hard-clamped to 10 below — caller-tunable but never unbounded (same DoS
-      // posture as web_fetch's fixed byte caps, just expressed as a result-count cap instead).
-      max_results: z.number().int().positive().optional(),
-    }),
-    modes: ["code"], // R-T3: dispatch dropped (was ["code", "dispatch"], R-T2) — see web_fetch's doc comment above
-    deferred: true, // same class as web_fetch — rides ToolSearch deferral, not visible/callable until loaded
-    async run({ query, max_results }, ctx) {
-      let outcome = "network_error";
-      try {
-        const key = (await deps.secret?.(WEB_SEARCH_API_KEY_SECRET)) ?? null;
-        if (!key) {
-          outcome = "no_key";
-          // No `<key>` placeholder (branch review FIX 6): the CLI's --web-search-key branch
-          // ignores a positional argv value and always PROMPTS via readSecret.
-          throw new Error(
-            "web_search needs an API key — store one with: winter login --web-search-key (Brave Search API)",
-          );
-        }
-
-        const count = Math.min(Math.max(max_results ?? DEFAULT_SEARCH_RESULTS, 1), MAX_SEARCH_RESULTS);
-        const fetchFn = deps.fetchFn ?? fetch;
-        const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-        const signal = AbortSignal.any([ctx.signal, timeoutSignal].filter((s): s is AbortSignal => Boolean(s)));
-        const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${count}`;
-
-        let res: Response;
-        try {
-          res = await fetchFn(url, { headers: { "X-Subscription-Token": key, Accept: "application/json" }, signal });
-        } catch (e) {
-          const name = e instanceof Error ? e.name : "";
-          if (name === "AbortError" || name === "TimeoutError") {
-            outcome = "timeout";
-            throw new Error(`request timed out searching for ${query}`);
-          }
-          outcome = "network_error";
-          // FIX 1's identical twin (branch review): Bun's real fetch embeds an invalid header's
-          // VALUE verbatim in its own error text (confirmed live against the Brave
-          // `X-Subscription-Token` header, same as Search's `x-api-key`) — and unlike chat's
-          // Search, this tool's output is remote-reachable (a code session is drivable from a
-          // phone), so the leak matters even more here.
-          //
-          // Whole-branch re-review FIX (search.ts's identical twin — see its comment for the full
-          // reasoning): stderr is NOT operator-only — launchd.ts redirects it to
-          // ~/.winter/logs/core.err.log, which the daemon's own read/grep tools can open (only
-          // dirs.runDir is denied). Redact the literal key substring before logging; `replaceAll`
-          // is sufficient — verified live that Bun embeds the rejected header value byte-for-byte,
-          // with no escaping, across every char class that reaches this catch.
-          const rawMessage = e instanceof Error ? e.message : String(e);
-          const safeMessage = rawMessage.replaceAll(key, "<redacted>");
-          console.error(`web_search: network error (${name || "Error"}) — ${safeMessage}`);
-          throw new Error("web_search failed: could not reach the search service");
-        }
-
-        if (res.status !== 200) {
-          outcome = "http_error";
-          throw new Error(`web_search failed: HTTP ${res.status}`);
-        }
-
-        let data: { web?: { results?: Array<{ title?: string; url?: string; description?: string }> } };
-        try {
-          data = (await res.json()) as typeof data;
-        } catch (e) {
-          outcome = "parse_error";
-          throw new Error(`web_search failed: could not parse response (${e instanceof Error ? e.message : String(e)})`);
-        }
-
-        const results = (data.web?.results ?? []).slice(0, count);
-        outcome = "ok";
-        if (results.length === 0) return `no results for ${query}`;
-        return results
-          .map((r, i) => `${i + 1}. ${r.title ?? "-"}\n   ${r.url ?? "-"}\n   ${r.description ?? "-"}`)
-          .join("\n");
-      } finally {
-        deps.audit?.({ kind: "network", tool: "web_search", query, outcome });
-      }
-    },
-  }];
 }

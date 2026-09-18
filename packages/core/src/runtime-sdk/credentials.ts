@@ -51,10 +51,27 @@ export interface CredentialRefusal {
 
 /** The two daemon-owned tool keys (A-2). NOT `<id>:default` credential material — raw values under
  *  the names the tools themselves already read, which is why they are a separate table rather than
- *  extra inventory slots. */
-const TOOL_ROWS: ReadonlyArray<{ providerId: string; displayName: string; secretName: string }> = [
+ *  extra inventory slots.
+ *
+ *  `retired` (2026-09-18, the web-tools ruling): the Brave-backed `web_search` is gone, so nothing
+ *  reads `web-search` any more. A USER'S STORED KEY DOES NOT RETIRE WITH THE TOOL, and the shape this
+ *  takes is the least disruptive one the wire already has:
+ *
+ *    * the row is EMITTED ONLY WHEN SOMETHING IS ACTUALLY STORED — an install that never had a Brave
+ *      key never sees it, so `credential.list` stops offering a slot for a tool that does not exist;
+ *    * when it is emitted it carries `manageable: false`, which the protocol's own `CredentialRow` doc
+ *      defines as governing SET ONLY ("a client offers Remove whenever `present && door !==
+ *      \"provider.login\"`"), so the Mac app renders exactly Remove and no Add — the `codex-oauth`
+ *      precedent, no schema change and no new enum member;
+ *    * `credential.set("web-search")` is a typed `credential_kind_unsupported` refusal naming the way
+ *      out, while `credential.remove("web-search")` keeps working unchanged (`removalNamesFor` reads
+ *      this same table and has never consulted `manageable` — see `removeCredential`'s own A-3 note).
+ *
+ *  `door` stays `credential.set`: the enum has no "retired" member, and the Remove-availability rule
+ *  above keys on `door !== "provider.login"`, which this satisfies. */
+const TOOL_ROWS: ReadonlyArray<{ providerId: string; displayName: string; secretName: string; retired?: true }> = [
   { providerId: "exa", displayName: "Exa", secretName: EXA_API_KEY_SECRET },
-  { providerId: "web-search", displayName: "Web search", secretName: WEB_SEARCH_API_KEY_SECRET },
+  { providerId: "web-search", displayName: "Web search (retired)", secretName: WEB_SEARCH_API_KEY_SECRET, retired: true },
 ];
 
 /** Spelled once — `credential-material.ts`'s `CREDENTIAL_MATERIAL_NAMES.codexOauth`, reached
@@ -203,13 +220,18 @@ export async function credentialRows(store: SecretStore, _home?: string, _settin
     });
   });
   TOOL_ROWS.forEach((row, i) => {
+    const present = toolPresence[i] === "present";
+    // A retired key with nothing stored is not a row at all — see `TOOL_ROWS`. `"failed"` counts as
+    // absent here, exactly as it does for a slot: an unreadable store must not conjure a row offering
+    // to remove something we could not read.
+    if (row.retired === true && !present) return;
     rows.push({
       providerId: row.providerId,
       displayName: row.displayName,
       group: "tool",
       authKinds: ["api-key"],
-      manageable: true,
-      present: toolPresence[i] === "present",
+      manageable: row.retired !== true,
+      present,
       kind: "api-key",
       risk: "approved",
       door: "credential.set",
@@ -227,6 +249,13 @@ type WriteTarget = { storage: "material" | "raw"; secretName: string };
  *  is not addressable through this door in either direction. */
 function setTargetFor(providerId: string): WriteTarget | CredentialRefusal {
   const tool = TOOL_ROWS.find((r) => r.providerId === providerId);
+  if (tool?.retired === true) {
+    return {
+      code: "credential_kind_unsupported",
+      message: `${tool.displayName.replace(" (retired)", "")} is no longer used by any Winter tool — its key cannot be set. An existing one can still be removed with \`winter credentials remove ${providerId}\`.`,
+      door: "credential.set",
+    };
+  }
   if (tool !== undefined) return { storage: "raw", secretName: tool.secretName };
   if (providerId === "anthropic") return { storage: "material", secretName: ANTHROPIC_CREDENTIAL_SECRET_NAME };
   if (providerId === "codex-oauth") {
@@ -388,7 +417,7 @@ export interface CredentialEvictionDeps {
  * row, which is every WINTER-leg session (see below).
  *
  * **THE `exa` ROW IS NOT LIKE THE OTHERS** (2026-09-18, agent SDK 0.0.17). It used to evict nothing,
- * correctly: the daemon's own `Search`/`ReadPage` read that key per call, so a live child's `Options`
+ * correctly: the daemon's own `Search` reads that key per call, so a live child's `Options`
  * never mentioned it. Since 0.0.17 they do — `Options.web.search.authRef` NAMES it, and, worse for a
  * stale child, whether an Exa key exists decides the TOOL SURFACE itself (`disallowedToolsFor`
  * withholds `WebSearch` from chat/dispatch when the daemon's `Search` can work). Both are fixed at

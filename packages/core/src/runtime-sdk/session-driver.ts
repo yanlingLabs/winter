@@ -281,8 +281,8 @@ export interface WinterLegDeps {
   /**
    * 2026-09-18 (agent SDK 0.0.17): the USER-ADDED half of the dangerous-domain floor for a project,
    * `settings.permissions.dangerousDomains.added` through the PROJECT-settings overlay — the same
-   * `dangerousDomainsAdded` closure `daemon.ts` already hands the `Search`/`ReadPage`/`web_fetch`
-   * tools and the research runner, wired here verbatim so the floor a Winter CHILD honours through
+   * `dangerousDomainsAdded` closure `daemon.ts` already hands the `Search` and `browser`
+   * tools, wired here verbatim so the floor a Winter CHILD honours through
    * `Options.web.blockedDomains` is the identical list the daemon's own tools honour.
    *
    * Absent (every test double that does not care) ⇒ the shipped list alone, which is the same
@@ -576,6 +576,11 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         tmpDir: deps.tmpDirOf(sessionId),
         outDir: deps.outDirOf(sessionId),
         signal: inc.abort.signal,
+        // The SAME probe `buildWinterOptions` gets below (one read, one incarnation): it decides
+        // whether this session's `research` server advertises `Search` at all, and `disallowedTools`
+        // decides the complementary `WebSearch`/`Search` withholding from the identical value. Two
+        // doors, one answer — see `capabilities/research.ts` for what disagreement would cost.
+        exaKeyPresent: exaPresent,
       };
       const capabilities = deps.buildSessionCapabilities(capSession);
       // Winter's own voice (Step 0(a)): the engine's `primaryDir`/`cwd`/`additionalWorkDirs` inputs,
@@ -590,6 +595,10 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       const systemPrompt = deps.assembler === undefined ? undefined : winterSystemPromptFor(deps.assembler, {
         mode, origin: live.origin, primary, cwd: primary ?? deps.tmpDirOf(sessionId),
         outDir: deps.outDirOf(sessionId), extraDirs, effort: live.effort,
+        // THE THIRD READER of this one probe, and the reason it is threaded rather than re-derived:
+        // chat's and dispatch's base prompts NAME their search tool, and the prompt must name the one
+        // `disallowedTools` and the capability server actually gave this incarnation.
+        exaKeyPresent: exaPresent,
       });
       // P8b-36 obligation: any other server merged into the same record must not shadow a
       // daemon-owned one. Since the fix wave the configured user/project MCP servers ARE merged
@@ -840,6 +849,10 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       return stamped;
     };
 
+    // `exaKeyPresent` is deliberately UNSET here (⇒ read as present, `CapabilitySession`'s own
+    // convention). It gates only `Search`, whose `modes` are chat and dispatch, and this leg ships
+    // Code-only (P8c-1/P8c-2) — so the mode filter withholds the tool on the official leg whatever the
+    // key says, and probing the Keychain for an answer that decides nothing would be noise.
     const capSessionFor = (): CapabilitySession => ({
       sessionId, mode, cwd,
       roots: deps.rootsOf(sessionId),

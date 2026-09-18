@@ -9,9 +9,9 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CHAT_SYSTEM_PROMPT } from "../../src/agent/chat-prompt";
+import { chatSystemPrompt } from "../../src/agent/chat-prompt";
 import { ContextAssembler } from "../../src/agent/context";
-import { DISPATCH_SYSTEM_PROMPT } from "../../src/agent/dispatch-prompt";
+import { dispatchSystemPrompt } from "../../src/agent/dispatch-prompt";
 import type { ResolvedStyle } from "../../src/agent/output-styles";
 import { sessionTmpDir } from "../../src/agent/session-tmp";
 import { SkillStore } from "../../src/agent/skills";
@@ -44,7 +44,7 @@ function world(style?: ResolvedStyle) {
 
 
 /** engine.ts `turn()` (at 4c8319ba) → `this.cfg.assembler.assemble({...})`, verbatim in meaning. */
-function engineAssemble(assembler: ContextAssembler, meta: { mode?: "code" | "dispatch" | "chat"; origin?: string; cwd?: string; effort?: string }, sessionId: string): string {
+function engineAssemble(assembler: ContextAssembler, meta: { mode?: "code" | "dispatch" | "chat"; origin?: string; cwd?: string; effort?: string; exaKeyPresent?: boolean }, sessionId: string): string {
   const isDispatch = meta.mode === "dispatch";
   const isChat = meta.mode === "chat";
   const primary = meta.cwd;                                  // `primaryDir`: the cwd column, else dirs[0] (none here)
@@ -54,7 +54,10 @@ function engineAssemble(assembler: ContextAssembler, meta: { mode?: "code" | "di
   return assembler.assemble({
     cwd,
     loadedSkills: [],
-    basePromptOverride: isDispatch ? DISPATCH_SYSTEM_PROMPT : isChat ? CHAT_SYSTEM_PROMPT : undefined,
+    // 2026-09-18: both base prompts are BUILDERS now — chat's and dispatch's web paragraph names the
+    // search tool the session actually has, which follows the Exa key. Absent reads as present.
+    basePromptOverride: isDispatch ? dispatchSystemPrompt({ exaKeyPresent: meta.exaKeyPresent !== false })
+      : isChat ? chatSystemPrompt({ exaKeyPresent: meta.exaKeyPresent !== false }) : undefined,
     memoryBucket: isDispatch || isChat ? "assistant" : "project",
     skipOutputStyle: meta.origin === "dispatch-child",
     ultraDelegation: ultra,
@@ -66,7 +69,7 @@ function engineAssemble(assembler: ContextAssembler, meta: { mode?: "code" | "di
 }
 
 /** The engine's composed instructions for a session shaped like `session`. */
-function engineInstructions(w: ReturnType<typeof world>, session: { mode?: "code" | "dispatch" | "chat"; origin?: string; cwd?: string; effort?: string }): string {
+function engineInstructions(w: ReturnType<typeof world>, session: { mode?: "code" | "dispatch" | "chat"; origin?: string; cwd?: string; effort?: string; exaKeyPresent?: boolean }): string {
   const sessionId = w.store.createSession("global", { approvalPolicy: "auto", ...session });
   return engineAssemble(w.assembler, session, sessionId);
 }
@@ -153,5 +156,58 @@ describe("winterSystemPromptFor — the engine's composed instructions, per mode
       expect(options.systemPrompt).toBe(x);
       expect(options.outputStyle).toBeUndefined();
     }
+  });
+});
+
+// ------------------------------------------------------------------------------------------------
+// 2026-09-18 (the web-tools ruling): the base prompts NAME the search tool the session HAS
+// ------------------------------------------------------------------------------------------------
+
+describe("chat/dispatch base prompts follow the Exa key", () => {
+  // The property: whichever search tool `disallowedToolsFor` withheld must not be NAMED in the prompt.
+  // A prompt that names a tool the session was not given is how a model ends up reporting a tool as
+  // broken, or apologising for a failure that never happened, with nothing failing anywhere in tests.
+  test("with a key: chat and dispatch are told about Search, never about WebSearch", () => {
+    for (const text of [chatSystemPrompt({ exaKeyPresent: true }), dispatchSystemPrompt({ exaKeyPresent: true })]) {
+      expect(text).toContain("Search");
+      expect(text).not.toContain("WebSearch");
+      expect(text).toContain("WebFetch"); // the page-reading half is there either way
+    }
+  });
+
+  test("with NO key: they are told about WebSearch, and Search is only ever named as unavailable", () => {
+    for (const text of [chatSystemPrompt({ exaKeyPresent: false }), dispatchSystemPrompt({ exaKeyPresent: false })]) {
+      expect(text).toContain("WebSearch");
+      expect(text).toContain("WebFetch");
+      // `Search` appears only inside the sentence that says it is NOT available and how to turn it on —
+      // never as an instruction to use it.
+      expect(text).toContain("winter login --exa-key");
+    }
+  });
+
+  test("ABSENT reads as PRESENT — the same convention every other Exa door keeps", () => {
+    expect(chatSystemPrompt()).toBe(chatSystemPrompt({ exaKeyPresent: true }));
+    expect(dispatchSystemPrompt()).toBe(dispatchSystemPrompt({ exaKeyPresent: true }));
+  });
+
+  test("neither prompt mentions a retired tool", () => {
+    for (const build of [chatSystemPrompt, dispatchSystemPrompt]) {
+      for (const key of [true, false]) {
+        const text = build({ exaKeyPresent: key });
+        for (const gone of ["ReadPage", "web_fetch", "web_search", "lineStart"]) expect(text).not.toContain(gone);
+      }
+    }
+  });
+
+  test("winterSystemPromptFor threads it through, and code mode is unaffected either way", () => {
+    const w = world();
+    const chatWith = winterSystemPromptFor(w.assembler, { mode: "chat", primary: w.cwd, cwd: w.cwd, exaKeyPresent: true });
+    const chatWithout = winterSystemPromptFor(w.assembler, { mode: "chat", primary: w.cwd, cwd: w.cwd, exaKeyPresent: false });
+    expect(chatWith).not.toBe(chatWithout);
+    expect(chatWithout).toContain("WebSearch");
+    expect(winterSystemPromptFor(w.assembler, { mode: "chat", primary: w.cwd, cwd: w.cwd })).toBe(chatWith);
+    // Code mode has no base-prompt override at all, so the key changes nothing there.
+    expect(winterSystemPromptFor(w.assembler, { mode: "code", primary: w.cwd, cwd: w.cwd, exaKeyPresent: false }))
+      .toBe(winterSystemPromptFor(w.assembler, { mode: "code", primary: w.cwd, cwd: w.cwd, exaKeyPresent: true }));
   });
 });

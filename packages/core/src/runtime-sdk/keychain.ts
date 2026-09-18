@@ -27,7 +27,7 @@ export interface CredentialSlot {
  * The known PROVIDER-routing secrets — never the full `SecretStore` namespace. `auth/tokens.ts`'s
  * `TOKEN_NAMES` (harness/admin/remote — pairing/remote auth, not a model provider) and
  * `agent/tools/{search,web}.ts`'s `EXA_API_KEY_SECRET`/`WEB_SEARCH_API_KEY_SECRET` (daemon-owned
- * Search/ReadPage capability-tool keys, P8b-12 — never routed through a `CredentialRef`) are
+ * the `Search` capability tool's Exa key — never routed through a `CredentialRef`) are
  * DELIBERATELY excluded, same as the Sparkle key. Only the two provider-credential families
  * `createProvider` (`providers/manager.ts:104-113`) reads from today are IN:
  *
@@ -219,7 +219,7 @@ function describeError(err: unknown): string {
  * already resolves its one Keychain service once at module load (`auth/secret-store.ts:16`,
  * profile-aware) and most refs this seam sees will not spell it. Within that, only a `ref.account`
  * present in `WINTER_CREDENTIAL_INVENTORY` is served: an unlisted secret name (e.g. the Sparkle key,
- * a pairing token, a Search/ReadPage capability key) is refused as `undefined`, identically to a
+ * a pairing token, the `Search` tool's Exa key) is refused as `undefined`, identically to a
  * genuine miss — there is no arbitrary secret-name read through this seam.
  *
  * HOTFIX (post-8b, 2026-09-11): the stored record is now JSON `CredentialMaterial`

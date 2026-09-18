@@ -4,7 +4,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
-import { PageCache } from "../../src/agent/tools/page-core";
 import { CORE_BRAND } from "../../src/runtime-sdk/brand";
 import { createWinterRuntimeSdk, type WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import {
@@ -64,8 +63,7 @@ function deps(): CapabilityDeps {
     computerUseEnabled: () => true, // every server, so every name is covered
     browser: { browser: { tabs: () => ({ tabs: [], activeTabId: undefined }) as never, openTab: () => "t", ...panel } },
     office: { office: { ...panel, dirsOf: () => [] as never } },
-    research: { search: {}, readPage: { cache: new PageCache() } },
-    web: { web: {} },
+    research: { search: {} },
     lsp: { lsp: () => undefined },
   };
 }

@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import type { WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
-import { PageCache } from "../../src/agent/tools/page-core";
 import {
   CAPABILITY_SERVER_KEYS, WINTER_CAPABILITY_TOOLS,
   buildCapabilitiesFor, capabilityServerName, capabilityToolName,
@@ -33,8 +32,7 @@ function deps(): CapabilityDeps {
     computerUseEnabled: () => true,
     browser: { browser: { tabs: () => ({ tabs: [], activeTabId: undefined }) as never, openTab: () => "t", ...panel } },
     office: { office: { ...panel, dirsOf: () => [] as never } },
-    research: { search: {}, readPage: { cache: new PageCache() } },
-    web: { web: {} },
+    research: { search: {} },
     lsp: { lsp: () => undefined },
   };
 }
@@ -66,12 +64,14 @@ describe("P8b-37: what each server ADVERTISES follows the session's mode", () =>
     expect(toolsOf(serversFor("dispatch"), "sessions")).toEqual(["list_sessions", "manage_session", "session_spawn"]);
   });
 
-  test("a chat session's `web` server lists nothing; `research` lists Search and ReadPage", () => {
-    expect(toolsOf(serversFor("chat"), "web")).toEqual([]);
-    expect(toolsOf(serversFor("chat"), "research")).toEqual(["ReadPage", "Search"]);
-    // And the mirror image: code gets the web pair and none of the chat research surface.
-    expect(toolsOf(serversFor("code"), "web")).toEqual(["web_fetch", "web_search"]);
+  test("a chat session's `research` server lists Search; a code session's lists nothing", () => {
+    expect(toolsOf(serversFor("chat"), "research")).toEqual(["Search"]);
+    expect(toolsOf(serversFor("dispatch"), "research")).toEqual(["Search"]);
+    // Code's web surface is the child's OWN WebFetch/WebSearch now (2026-09-18) — the `web` server and
+    // its `web_fetch`/`web_search` are retired, so there is no such key to list at all.
     expect(toolsOf(serversFor("code"), "research")).toEqual([]);
+    expect(CAPABILITY_SERVER_KEYS as readonly string[]).not.toContain("web");
+    expect(serversFor("code")[capabilityServerName("web")]).toBeUndefined();
   });
 
   test("`computer` and `office` are code+dispatch only; `browser` is in all three", () => {
@@ -110,10 +110,7 @@ describe("P8b-37: what each server EXECUTES follows the session's mode", () => {
     expect(res.content).toEqual([{ type: "text", text: "unknown tool: manage_session" }]);
   });
 
-  test("a chat session cannot EXECUTE web_fetch, and a code session cannot execute Search", async () => {
-    const fetched = await call("chat", "web", "web_fetch", { url: "https://example.com" });
-    expect(fetched.isError).toBe(true);
-    expect(fetched.content).toEqual([{ type: "text", text: "unknown tool: web_fetch" }]);
+  test("a code session cannot execute Search, even naming it directly", async () => {
     const searched = await call("code", "research", "Search", { query: "anything" });
     expect(searched.isError).toBe(true);
     expect(searched.content).toEqual([{ type: "text", text: "unknown tool: Search" }]);

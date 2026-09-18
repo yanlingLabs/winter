@@ -12,11 +12,11 @@
  * own executors, through `Options.web.blockedDomains` (`runtime-sdk/mode-options.ts`); the host-side
  * `PreToolUse` floor hook, which is what makes it policy on the OFFICIAL leg, where nothing else in
  * Winter can reach claude's native web tools (`runtime-sdk/hooks.ts`); and the daemon's own
- * `Search`. The pre-8c engine's `webFetchGate` — which earlier revisions of this comment named as
+ * `Search` (cited urls) and `browser` (`navigate`/`open`), through `page-core.ts`. The pre-8c engine's `webFetchGate` — which earlier revisions of this comment named as
  * the consumer — was retired with the engine and no longer exists in any form.
  *
  * Curated for the REAL threat this floor exists for: a page the model was asked to summarize (or
- * a prompt-injected instruction hidden in one) telling it to `web_fetch` a secret/credential/file
+ * a prompt-injected instruction hidden in one) telling it to fetch a secret/credential/file
  * preview OUT to somewhere the human never sees — so every entry below is a domain whose entire
  * business model is "accept arbitrary bytes from anyone, no auth, and make them reachable again"
  * (a paste host), "accept an arbitrary file upload, no auth" (a one-shot file host), "log every
@@ -25,7 +25,7 @@
  * explicitly. Plain content hosts (docs sites, GitHub, npm, etc.) are deliberately NOT here even
  * though a determined exfiltrator could technically encode data into e.g. a GitHub Gist filename —
  * v1's list targets the LOW-effort, zero-auth, purpose-built dead-drops, not "anything writable on
- * the internet" (that would just make web_fetch ask on every domain, defeating "free by default").
+ * the internet" (that would just make every fetch ask on every domain, defeating "free by default").
  *
  * One rationale comment per entry, reviewed (task-10-brief.md's own instruction: "implementer
  * curates ~15-25 with rationale, reviewer audits"). KNOWN LIMIT (documented, accepted v1, spec §7):

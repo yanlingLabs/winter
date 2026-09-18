@@ -2,11 +2,23 @@ import { extractTitle, followRedirects, htmlToText, scanAnchorOpensForLinks } fr
 import { SHIPPED_DANGEROUS_DOMAINS, dangerousDomainMatch } from "../dangerous-domains";
 
 /**
- * page-core: the shared building block behind chat mode's `ReadPage` tool (read a web page as
- * clean numbered markdown with its links preserved, load line ranges, batch pages) and its
- * research sub-agent — fetch -> clean -> extract links -> deterministic line numbering ->
- * in-memory TTL cache. Deliberately NOT registered as a tool: this file is a pure module with no
- * filesystem, no shell, nothing chat-mode-specific — a later task wraps it as `ReadPage`.
+ * page-core: the shared building block behind chat mode's page reading — fetch -> clean -> extract
+ * links -> deterministic line numbering -> in-memory TTL cache. Deliberately NOT registered as a
+ * tool: this file is a pure module with no filesystem, no shell, nothing chat-mode-specific.
+ *
+ * ⚠️ **WHAT STILL USES IT (2026-09-18, the web-tools ruling).** `checkDangerousDomain` /
+ * `dangerousDomainRefusal` are live — `Search` (cited urls) and the `browser` tool (`navigate`/`open`)
+ * both call them, and they are the daemon's single matcher for the effective dangerous-domain list.
+ * The FETCH path (`fetchCleanPage`, `PageCache`, `renderLines`, `extractLinks`) has no in-daemon tool
+ * consumer left: `ReadPage` and the multi-page research sub-agent it served both retired, and the
+ * runtime child's own `WebFetch` reads pages the way claude does, locally, with its own conversion.
+ *
+ * It is KEPT rather than deleted with its last caller, deliberately and for two reasons — the same two
+ * `web.ts`'s header records. It carries the adversarial corpus (`page-core.test.ts`'s redirect-into-a-
+ * dangerous-host case, the SSRF sweep, the HTML differential) which is a measured record of several
+ * review rounds; and `apple/WinterChatKit`'s `PageFetcher`/`PageCache`/`HtmlToText` are ports of these
+ * functions that the phone's own chat engine still runs. Do not build a NEW daemon tool on the fetch
+ * path without a ruling, and do not trim it as dead weight without reading those two reasons first.
  *
  * Reuses web.ts's `followRedirects` (SSRF-guards EVERY redirect hop, streams with a byte cap,
  * injectable `fetchFn`) and `htmlToText` (headings -> `#`, links -> `text (href)`, lists -> `- `)
@@ -23,22 +35,25 @@ import { SHIPPED_DANGEROUS_DOMAINS, dangerousDomainMatch } from "../dangerous-do
  */
 
 /** Critical 1, whole-branch review (2026-07-28, USER-REVISED design): the shared dangerous-domain
- *  hard-block floor for ReadPage (chat/dispatch, read-page.ts) and the research sub-agent's
- *  FetchPage (research.ts) — the ONE thing standing between a caller-directed url and a known
+ *  hard-block floor — the ONE thing standing between a caller-directed url and a known
  *  exfiltration/tunnel-provider host (dangerous-domains.ts's own doc comment names the threat this
  *  guards against). Reuses `dangerousDomainMatch`/`SHIPPED_DANGEROUS_DOMAINS` directly — this is a
  *  thin wrapper, never a second matcher.
  *
+ *  ITS CALLERS TODAY (2026-09-18): the daemon's `Search` (every CITED url, withheld before the model
+ *  sees it) and the `browser` tool (`navigate`/`open`). It was written for `ReadPage` and the research
+ *  sub-agent's `FetchPage`, both retired; the child's own `WebFetch` gets the same list through
+ *  `Options.web.blockedDomains` instead of calling this function.
+ *
  *  USER DECISION: "chat mode shouldn't have a plan mode, it simply wouldn't ever ask permissions.
  *  The dangerous urls... would just simply be blocked straight up before the fetch." So this is a
- *  HARD refusal, never a card — unlike `web_fetch` (code mode), whose existing engine.ts approval
- *  card (`webFetchGate`) is COMPLETELY UNCHANGED by this fix; that tool still has (and needs) a
+ *  HARD refusal, never a card — unlike a CODE-mode fetch, which still has (and needs) a
  *  human-in-the-loop path because code mode has one at all. Chat/dispatch structurally don't.
  *
  *  Deliberately does NOT consult a `WebFetch(domain:...)` standing-rule exception (permission-
- *  rules.ts): that rule is minted by a human APPROVING a `web_fetch` card, a consent flow ReadPage/
- *  FetchPage do not have — a rule earned through one tool's approval flow must never silently clear
- *  the OTHER's hard floor that has no such flow to earn it through. `added` is the caller-resolved
+ *  rules.ts): that rule is minted by a human APPROVING a code-mode fetch card, a consent flow the
+ *  never-ask doors do not have — a rule earned through one tool's approval flow must never silently
+ *  clear another's hard floor that has no such flow to earn it through. `added` is the caller-resolved
  *  "effective list" user-added half (`settings.permissions.dangerousDomains.added`, per project) —
  *  this function takes it as a plain array so it never has to know how to read settings itself; the
  *  one true escape hatch is editing that list, not an in-chat override.
@@ -628,11 +643,10 @@ export async function fetchCleanPage(url: string, cache: PageCache, deps: PageCo
     }
 
     // Minor 3 fix (whole-branch review, fix round 2): checkDangerousDomain only ever ran on the
-    // CALLER-SUPPLIED url, before this function was even invoked (read-page.ts's renderPage/
-    // runResearch, research.ts's runResearch/handleFetchPage) — a SAFE url that redirects INTO a
-    // dangerous host sailed through untouched (probed: ReadPage("https://safe.example/go") -> 302
+    // CALLER-SUPPLIED url, before this function was even invoked — a SAFE url that redirects INTO a
+    // dangerous host sailed through untouched (probed: a read of "https://safe.example/go" -> 302
     // -> https://transfer.sh/dropped fetched and rendered, isError:false). Can't undo the network
-    // egress that already happened (matches webFetchGate's own documented limit — the first hop
+    // egress that already happened (the same documented limit every first-hop check has — the first hop
     // already carried whatever the model put in the URL), but this stops the dangerous host's
     // CONTENT from ever reaching the model or the cache: re-check the RESOLVED (post-redirect) host
     // here, using the SAME already-resolved effective list the caller used for its own check.
