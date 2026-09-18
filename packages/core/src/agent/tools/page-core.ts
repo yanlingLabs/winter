@@ -1,5 +1,5 @@
 import { extractTitle, followRedirects, htmlToText, scanAnchorOpensForLinks } from "./web";
-import { SHIPPED_DANGEROUS_DOMAINS, dangerousDomainMatch } from "../dangerous-domains";
+import { SHIPPED_DANGEROUS_DOMAINS, dangerousUrlMatch } from "../dangerous-domains";
 
 /**
  * page-core: the shared building block behind chat mode's page reading — fetch -> clean -> extract
@@ -37,7 +37,7 @@ import { SHIPPED_DANGEROUS_DOMAINS, dangerousDomainMatch } from "../dangerous-do
 /** Critical 1, whole-branch review (2026-07-28, USER-REVISED design): the shared dangerous-domain
  *  hard-block floor — the ONE thing standing between a caller-directed url and a known
  *  exfiltration/tunnel-provider host (dangerous-domains.ts's own doc comment names the threat this
- *  guards against). Reuses `dangerousDomainMatch`/`SHIPPED_DANGEROUS_DOMAINS` directly — this is a
+ *  guards against). Reuses `dangerousUrlMatch`/`SHIPPED_DANGEROUS_DOMAINS` directly — this is a
  *  thin wrapper, never a second matcher.
  *
  *  ITS CALLERS TODAY (2026-09-18): the daemon's `Search` (every CITED url, withheld before the model
@@ -67,16 +67,10 @@ export interface DangerousDomainMatch {
 }
 
 export function checkDangerousDomain(rawUrl: string, added: readonly string[] = []): DangerousDomainMatch | null {
-  let url: URL;
-  try {
-    url = new URL(rawUrl);
-  } catch {
-    return null;
-  }
-  const host = url.hostname.toLowerCase();
-  if (!host) return null;
-  const matchedEntry = dangerousDomainMatch(host, [...SHIPPED_DANGEROUS_DOMAINS, ...added]);
-  return matchedEntry ? { host, matchedEntry } : null;
+  // One matcher for every host-side door: `dangerousUrlMatch` normalises BOTH sides (a user-added
+  // `*.evil.example`, a leading dot, a trailing root dot, a unicode entry), which is what the floor
+  // hook and a Winter child's own executor honour -- this door must not be the narrower one.
+  return dangerousUrlMatch(rawUrl, [...SHIPPED_DANGEROUS_DOMAINS, ...added]);
 }
 
 /** Shared refusal-text shape for every `checkDangerousDomain` hit, wherever it fires — ReadPage's
