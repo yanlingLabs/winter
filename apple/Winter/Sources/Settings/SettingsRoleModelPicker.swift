@@ -20,8 +20,8 @@ import WinterKit
 // (`permitted`, `facts`).
 //
 // WIRED 2026-09-18: `models.catalog` fills that seam (families, per-tag pricing evidence, and each
-// provider's CREDENTIAL DOOR), joined with `credential.list` for readiness. `modelCatalogFacts(_:_:)`
-// is the whole mapping and it is pure; `ModelCatalogFactsModel` is the one thing that reads a
+// provider's CREDENTIAL DOOR and READINESS — `credentialPresent`). `modelCatalogFacts(_:)` is the
+// whole mapping and it is pure; `ModelCatalogFactsModel` is the one thing that reads a
 // daemon. `.none` REMAINS a first-class state, not a degraded one — it is what a daemon that
 // predates `models.catalog` produces, and the picker is fully usable in it:
 //
@@ -43,30 +43,26 @@ import WinterKit
 //      that a value is a well-formed tag, not that a catalog row backs it, so a stitched-together
 //      pair would be accepted, stored, and then blow up at session start — a failure arriving hours
 //      and several screens away from the click that caused it. See `roleModelTag`.
-//   2. **CREDENTIAL STATE IS JOINED ON THE SLOT, NEVER ON `providerId`, AND IT BRANCHES ON THE
-//      DOOR.** `permitted` is CATALOG ELIGIBILITY — it applies the blocked floor and nothing else,
-//      so it names providers that have no credential slot at all. `models.catalog` now says which
-//      is which, per provider, and `roleProviderCredentialState` derives everything from
-//      `credentialDoor` — never from a hardcoded provider id:
+//   2. **READINESS IS THE DAEMON'S ANSWER, READ STRAIGHT OFF THE PROVIDER ROW.** `permitted` is
+//      CATALOG ELIGIBILITY — it applies the blocked floor and nothing else, so it names providers
+//      the user has no credential for. Since 2026-09-18 every `models.catalog` provider row carries
+//      `credentialPresent`, computed daemon-side by the rule that backs the composer's model list
+//      (the on-disk `ant` profile for the console arm, stored material otherwise). That boolean IS
+//      the readiness test. There is no `credential.list` join and no slot lookup any more — the
+//      join is gone, not bypassed, because a providerId- or slot-keyed guess was provably wrong
+//      for a real user (two secrets live under the id `anthropic` alone).
 //
-//        - `keychain` (~96)          join `credential.list` on the slot the daemon NAMED
-//                                    (`credentialSlotId`); that IS the readiness test. Stored /
-//                                    not stored — and, when no row named that slot, nothing at
-//                                    all. A `<providerId>:default` guess is never made: two
-//                                    secrets live under the id `anthropic` alone, so a
-//                                    providerId-keyed answer is wrong for a real user. See
-//                                    `credentialSlotPresence`, and the `credentialPresent`
-//                                    boolean that retires this join entirely.
-//        - `console-profile` (1)     `credentialSlotId` is null and that is CORRECT. The Console
-//                                    arm's readiness is an on-disk `ant` profile the daemon
-//                                    re-checks live at every spawn, so this read deliberately
-//                                    cannot answer it. Offerable, not promised — and the door is
-//                                    `winter login --anthropic-console`, never "add a key".
-//        - `none` (5)                this daemon stores no credential for them. NO credential state
-//                                    at all: these are exactly the rows a providerId join would
-//                                    mark "no credential" forever, with nothing the user could do.
+//      `credentialDoor` answers a SEPARATE question — which flow to offer when it is not ready —
+//      and is branched on, never a hardcoded provider id (`roleProviderCredentialState`):
 //
-//      An unrecognised door renders nothing either. Saying nothing beats saying something false.
+//        - `keychain` (~96)          not ready → "add one in Settings → Providers".
+//        - `console-profile` (1)     not ready → `winter login --anthropic-console`, never "add a
+//                                    key": there is no key to add.
+//        - `none` (5)                this daemon stores no credential for them, so NOTHING is said
+//                                    either way — whatever the boolean says.
+//
+//      An absent boolean (a daemon that predates it), and a door this build does not know, say
+//      nothing at all. Saying nothing beats saying something false.
 //
 // Offerable is not the same as promised.
 // -----------------------------------------------------------------------------------------------
@@ -124,16 +120,17 @@ struct ModelPricingFact: Equatable, Sendable {
 /// What the catalog says about ONE provider's credential — the two fields the readiness question
 /// turns on, and nothing else.
 ///
-/// Both are the daemon's raw strings. `credentialDoor` is the branch (`keychain` |
-/// `console-profile` | `none`, and whatever a later catalog adds); `credentialSlotId` is the join
-/// key, and **null is a statement, not an omission**, for the console door.
+/// `credentialPresent` is THE readiness answer, computed daemon-side; nil = not told (an older
+/// daemon), which renders as no claim at all. `credentialDoor` is the raw door (`keychain` |
+/// `console-profile` | `none`, and whatever a later catalog adds) and decides only which FLOW a
+/// not-ready row points at. No slot id is kept: nothing app-side joins on one any more.
 struct ProviderCredentialFact: Equatable, Sendable {
     var credentialDoor: String?
-    var credentialSlotId: String?
+    var credentialPresent: Bool?
 
-    init(credentialDoor: String? = nil, credentialSlotId: String? = nil) {
+    init(credentialDoor: String? = nil, credentialPresent: Bool? = nil) {
         self.credentialDoor = credentialDoor
-        self.credentialSlotId = credentialSlotId
+        self.credentialPresent = credentialPresent
     }
 }
 
@@ -193,31 +190,20 @@ struct ModelCatalogFacts: Equatable, Sendable {
     /// any per-token number, because the catalog says in as many words that a subscription row's
     /// published list prices do not describe what that credential is billed.
     var providerPricingBasis: [String: String]
-    /// Provider id → its credential door and slot (`models.catalog`'s `providers`). Absent for a
-    /// provider means "not told", which renders as no credential state at all.
+    /// Provider id → its credential door and the daemon's readiness boolean (`models.catalog`'s
+    /// `providers`). Absent for a provider means "not told", which renders as no credential state.
     var providerCredentials: [String: ProviderCredentialFact]
-    /// Slot id → whether material is stored, from `credential.list`.
-    ///
-    /// **THREE states, and they must not collapse into two.** `nil` (the whole map) = the
-    /// credential list was never read, or could not be; a slot ABSENT from a present map = the
-    /// daemon listed no such slot, which we cannot interpret; `false` = the daemon said this slot
-    /// is empty. Only the last one may render as "no key stored" — the other two render nothing,
-    /// because "you have no key" is a claim about the user's Keychain and must only be made when
-    /// the daemon actually made it.
-    var credentialSlotPresence: [String: Bool]?
 
     init(byTag: [String: ModelCatalogFact] = [:],
          familyOrder: [String] = [],
          familyNames: [String: String] = [:],
          providerPricingBasis: [String: String] = [:],
-         providerCredentials: [String: ProviderCredentialFact] = [:],
-         credentialSlotPresence: [String: Bool]? = nil) {
+         providerCredentials: [String: ProviderCredentialFact] = [:]) {
         self.byTag = byTag
         self.familyOrder = familyOrder
         self.familyNames = familyNames
         self.providerPricingBasis = providerPricingBasis
         self.providerCredentials = providerCredentials
-        self.credentialSlotPresence = credentialSlotPresence
     }
 
     /// Told nothing. Still a fully usable picker — and the exact state a daemon that predates
@@ -229,7 +215,8 @@ struct ModelCatalogFacts: Equatable, Sendable {
 
 // MARK: - The wire → the seam
 
-/// PURE: `models.catalog` (+ `credential.list`, when it answered) → the seam.
+/// PURE: `models.catalog` → the seam. Readiness comes off the catalog's own provider rows
+/// (`credentialPresent`); nothing else is read or joined.
 ///
 /// The ONE place the payload becomes app facts, so every rule below is testable without a socket.
 ///
@@ -240,8 +227,7 @@ struct ModelCatalogFacts: Equatable, Sendable {
 ///
 /// The whole catalog lands in `byTag` (~618 rows). That is a lookup table, not a list: nothing
 /// iterates it to build options — the offerable set is `permitted` and nothing else, forever.
-func modelCatalogFacts(_ catalog: ModelsCatalog,
-                       credentials: [CredentialRow]? = nil) -> ModelCatalogFacts {
+func modelCatalogFacts(_ catalog: ModelsCatalog) -> ModelCatalogFacts {
     var byTag: [String: ModelCatalogFact] = [:]
     byTag.reserveCapacity(catalog.models.count)
     for model in catalog.models {
@@ -278,48 +264,14 @@ func modelCatalogFacts(_ catalog: ModelsCatalog,
         if let pricingBasis = provider.pricingBasis { basis[provider.id] = pricingBasis }
         credentialsByProvider[provider.id] =
             ProviderCredentialFact(credentialDoor: provider.credentialDoor,
-                                   credentialSlotId: provider.credentialSlotId)
+                                   credentialPresent: provider.credentialPresent)
     }
 
     return ModelCatalogFacts(byTag: byTag,
                              familyOrder: [],
                              familyNames: familyNames,
                              providerPricingBasis: basis,
-                             providerCredentials: credentialsByProvider,
-                             credentialSlotPresence: credentialSlotPresence(credentials))
-}
-
-/// PURE: `credential.list`'s rows → slot id → stored?, or nil when there was no list to read.
-///
-/// **SLOT-KEYED, AND ONLY ON A SLOT THE DAEMON ITSELF NAMED** (corrected 2026-09-18). A row with no
-/// `slotId` is not indexed at all, so it contributes no readiness claim anywhere.
-///
-/// **A PROVIDER ID IS NOT A CREDENTIAL IDENTITY.** The earlier version of this function derived
-/// `"<providerId>:default"` for a manageable provider row, on the reading that today's daemon emits
-/// one row per slot but does not name it. That derivation was not merely incomplete, it was WRONG,
-/// and `anthropic` is the case that proves it: TWO secrets are filed under that single provider id
-/// — the api-key slot and the Console bearer — so a providerId-keyed guess cannot tell a
-/// console-only install from an api-key one. It would show "No key stored" on `anthropic/*` to a
-/// user who is signed in through the Console, and the opposite to an api-key user. Either way it
-/// asserts something this read cannot know. The mapping is many-to-one in at least one real case,
-/// and one of those arms is not even a Keychain fact — the Console arm's readiness is a file on
-/// disk the daemon re-checks at every spawn.
-///
-/// **WHAT REPLACES IT.** `models.catalog`'s per-provider rows are gaining
-/// **`credentialPresent: boolean`**, computed daemon-side by the rule that already backs the
-/// composer's model list — an on-disk profile check for the console arm, presence otherwise. When
-/// it lands, readiness is read straight off that boolean and there is no join left to get wrong.
-///
-/// Until then a keychain-door provider whose slot nobody named is `.unknown`, which renders
-/// NOTHING: no "key stored", no "no key stored". Silence is the only direction this may fail in.
-func credentialSlotPresence(_ rows: [CredentialRow]?) -> [String: Bool]? {
-    guard let rows else { return nil }
-    var out: [String: Bool] = [:]
-    for row in rows {
-        guard let slot = row.slotId else { continue }
-        out[slot] = row.present
-    }
-    return out
+                             providerCredentials: credentialsByProvider)
 }
 
 // MARK: - The one thing in this file that reads a daemon
@@ -335,13 +287,12 @@ func credentialSlotPresence(_ rows: [CredentialRow]?) -> [String: Bool]? {
 /// (`AppShell/SettingsSurface.swift`) already holds the whole `DashboardWiring` and constructs
 /// `SettingsRolesSection(loader:writer:)` — one more argument there would make this an ordinary
 /// injected dependency, and that file was not this change's to edit. Everything needed for the swap
-/// is already in place: the type is fully injectable (`init(catalog:credentials:)`), the section
+/// is already in place: the type is fully injectable (`init(catalog:)`), the section
 /// takes it as a parameter, and the shared instance is only its DEFAULT. One `catalog:` argument at
 /// that call site retires the singleton.
 @MainActor
 final class ModelCatalogFactsModel: ObservableObject {
     typealias CatalogLoader = () async throws -> ModelsCatalog
-    typealias CredentialsLoader = () async throws -> [CredentialRow]
 
     /// Configured once by `AppDelegate.makeDashboardWiring` from the same closures it puts on the
     /// wiring, so the two can never name different daemons.
@@ -350,7 +301,6 @@ final class ModelCatalogFactsModel: ObservableObject {
     @Published private(set) var facts: ModelCatalogFacts = .none
 
     private var catalog: CatalogLoader?
-    private var credentials: CredentialsLoader?
     /// True once the question is ANSWERED — including answered "this daemon has no such method".
     /// A real failure (a dead socket, a timeout) deliberately does NOT settle it, so the next time
     /// a picker opens it asks again.
@@ -361,16 +311,14 @@ final class ModelCatalogFactsModel: ObservableObject {
     /// exactly as it renders an old daemon: `.none`, honestly.
     var isWired: Bool { catalog != nil }
 
-    init(catalog: CatalogLoader? = nil, credentials: CredentialsLoader? = nil) {
+    init(catalog: CatalogLoader? = nil) {
         self.catalog = catalog
-        self.credentials = credentials
     }
 
     /// Point it at a daemon. Re-configuring drops whatever was cached: a new wiring is a new
     /// connection, and a catalog read from the previous one is not a fact about this one.
-    func configure(catalog: CatalogLoader?, credentials: CredentialsLoader?) {
+    func configure(catalog: CatalogLoader?) {
         self.catalog = catalog
-        self.credentials = credentials
         self.settled = false
         self.facts = .none
     }
@@ -384,7 +332,7 @@ final class ModelCatalogFactsModel: ObservableObject {
         defer { loading = false }
         do {
             let payload = try await catalog()
-            facts = modelCatalogFacts(payload, credentials: await storedCredentialRows())
+            facts = modelCatalogFacts(payload)
             settled = true
         } catch {
             // `-32601` is the EXPECTED answer from a daemon that predates the method, exactly as it
@@ -394,13 +342,6 @@ final class ModelCatalogFactsModel: ObservableObject {
         }
     }
 
-    /// Best effort, and nil on ANY failure. A credential list that would not answer must leave
-    /// `credentialSlotPresence` nil — the state where every keychain provider renders NO credential
-    /// line — rather than an empty map, which would render as "no key stored" on every row.
-    private func storedCredentialRows() async -> [CredentialRow]? {
-        guard let credentials else { return nil }
-        return try? await credentials()
-    }
 }
 
 // MARK: - Pricing, classified before it is formatted
@@ -528,71 +469,73 @@ func roleHasProvenance(_ pricing: ModelPricingFact?, classified: RolePricing) ->
     return pricing?.sourceRef?.isEmpty == false
 }
 
-// MARK: - Credential state, joined on the SLOT and branched on the DOOR
+// MARK: - Credential state: readiness from the daemon, the FLOW from the door
+
+/// Which fix a not-ready provider points at — derived from `credentialDoor`, never a provider id.
+enum RoleCredentialFlow: Equatable, Sendable {
+    /// `keychain`: a key in Settings → Providers.
+    case providersSettings
+    /// `console-profile`: `winter login --anthropic-console`. Never "add a key" — there is none.
+    case consoleLogin
+}
 
 /// PURE: what we may honestly say about whether a provider is ready to run.
 ///
-/// Five cases, and **two of them render nothing at all** — which is the point of having five.
+/// Four cases, and **two of them render nothing at all** — which is the point of having four.
 enum RoleProviderCredentialState: Equatable, Sendable {
-    /// `keychain` door, the catalog's slot, and the daemon says material is stored.
-    case stored
-    /// `keychain` door, the catalog's slot, and the daemon says the slot is empty. The ONLY state
-    /// that may say "no key".
-    case missing
-    /// `console-profile` door. Offerable, not promised: readiness is an on-disk `ant` profile the
-    /// daemon re-checks at every spawn, so this read cannot answer it and does not pretend to.
-    case consoleProfile
+    /// The daemon says `credentialPresent: true`.
+    case ready(RoleCredentialFlow)
+    /// The daemon says `credentialPresent: false`. The ONLY state that may say "not set up".
+    case missing(RoleCredentialFlow)
     /// `none` door. This daemon stores no credential for the provider — so there is no credential
-    /// state to show, and showing one would invent a problem with no fix.
+    /// state to show, whatever the boolean says, and showing one would invent a problem with no fix.
     case notApplicable
-    /// Not told: no catalog row, no door, no slot, no credential list, or a slot the list never
-    /// named. Renders nothing.
+    /// Not told: no catalog row, a daemon that predates `credentialPresent`, or a door this build
+    /// does not know. Renders nothing.
     case unknown
 }
 
-/// PURE: the state for one provider. **Branches on `credentialDoor` and never on a provider id.**
-func roleProviderCredentialState(providerId: String,
-                                 facts: ModelCatalogFacts) -> RoleProviderCredentialState {
-    guard let fact = facts.providerCredentials[providerId],
-          let door = fact.credentialDoor else { return .unknown }
+/// PURE: the fix a door points at — nil for `none` and for any door this build does not know.
+func roleCredentialFlow(door: String?) -> RoleCredentialFlow? {
     switch door {
-    case "console-profile":
-        return .consoleProfile
-    case "none":
-        return .notApplicable
-    case "keychain":
-        // Three ways to know nothing, all of which must render as nothing rather than "no key":
-        // a keychain door with no slot named, a credential list we never read, and a slot that
-        // list did not mention (which, since the `<providerId>:default` derivation was deleted, is
-        // every row on today's daemon — deliberately: see `credentialSlotPresence`).
-        guard let slot = fact.credentialSlotId,
-              let presence = facts.credentialSlotPresence,
-              let present = presence[slot] else { return .unknown }
-        return present ? .stored : .missing
-    default:
-        // A door a later catalog adds. Carried this far and then said nothing about, because a
-        // door we do not understand is a readiness rule we do not understand.
-        return .unknown
+    case "keychain": return .providersSettings
+    case "console-profile": return .consoleLogin
+    default: return nil
     }
 }
 
+/// PURE: the state for one provider. **Readiness is `credentialPresent` and nothing else** — no
+/// `credential.list`, no slot id. The door is consulted FIRST, because a door can void the
+/// boolean: `none` reports `false` on every daemon (it stores nothing to be present), and would
+/// otherwise render "not set up" on rows nobody can fix. A door this build does not know may be
+/// the same kind, so readiness is stated only for a door whose fix we can name.
+func roleProviderCredentialState(providerId: String,
+                                 facts: ModelCatalogFacts) -> RoleProviderCredentialState {
+    guard let fact = facts.providerCredentials[providerId] else { return .unknown }
+    if fact.credentialDoor == "none" { return .notApplicable }
+    guard let flow = roleCredentialFlow(door: fact.credentialDoor),
+          let present = fact.credentialPresent else { return .unknown }
+    return present ? .ready(flow) : .missing(flow)
+}
+
 let roleCredentialStoredText = "Key stored"
-let roleCredentialMissingText = "No key stored — add one in Providers"
-/// Never "add a key": there is no key to add. The door is the Console login, and the sentence says
-/// out loud that this screen cannot confirm it — the daemon does, live, when a session starts.
+let roleCredentialMissingText = "No key stored — add one in Settings → Providers"
+let roleCredentialConsoleReadyText = "Signed in to the Anthropic Console"
+/// Never "add a key": there is no key to add. The door is the Console login.
 ///
 /// Plain text, no backticks: this string reaches `Text` as a VARIABLE, and only a literal is parsed
 /// as Markdown — a backtick here would render as a backtick.
-let roleCredentialConsoleText =
-    "Uses the Anthropic Console login. Winter checks it when a session starts, not here — sign in with: winter login --anthropic-console"
+let roleCredentialConsoleMissingText =
+    "Not signed in to the Anthropic Console — sign in with: winter login --anthropic-console"
 
 /// PURE: the credential line under a provider's name, or nil for the two states that must stay
 /// silent (`notApplicable`, `unknown`).
 func roleCredentialNote(_ state: RoleProviderCredentialState) -> String? {
     switch state {
-    case .stored: return roleCredentialStoredText
-    case .missing: return roleCredentialMissingText
-    case .consoleProfile: return roleCredentialConsoleText
+    case .ready(.providersSettings): return roleCredentialStoredText
+    case .ready(.consoleLogin): return roleCredentialConsoleReadyText
+    case .missing(.providersSettings): return roleCredentialMissingText
+    case .missing(.consoleLogin): return roleCredentialConsoleMissingText
     case .notApplicable, .unknown: return nil
     }
 }
@@ -779,7 +722,7 @@ struct RoleProviderOption: Identifiable, Equatable, Sendable {
     let displayName: String
     let tag: String
     let pricing: RolePricing
-    /// What we may say about readiness — see `RoleProviderCredentialState`. Two of its five cases
+    /// What we may say about readiness — see `RoleProviderCredentialState`. Two of its four cases
     /// are "say nothing", which a plain `Bool` could not express.
     let credential: RoleProviderCredentialState
     /// The raw pricing evidence for THIS pair, carried so the row's disclosure can show the
@@ -918,14 +861,129 @@ func settingsRolePickerTitle(_ role: SettingsModelRole) -> String {
 }
 
 /// The one sentence that keeps the whole list honest. `permitted` is catalog eligibility: a
-/// provider appears here whether or not a key is stored for it, so the card says so once instead of
-/// implying per row that every option is ready to run.
+/// provider appears here whether or not it is set up, so the card says so once; step two's rows
+/// then state each provider's readiness where the daemon told us.
 let roleModelPickerEligibilityNote =
-    "Everything this daemon's catalog allows for this job — a provider listed here may still need a key in Providers."
+    "Everything this daemon's catalog allows for this job — a provider listed here may still need setting up."
 
 /// The row that clears a role. Worded as the outcome, not the mechanism.
 let roleModelPickerClearTitle = "Use the default"
 let roleModelPickerClearDetail = "Follows the default session model, and moves when it does."
+
+// MARK: - Reasoning effort — BUILT, and GATED OFF
+
+/// **THE ONE SWITCH for the per-role effort control. It is `false`, and with it false NOTHING about
+/// effort renders anywhere** — no menu, no "takes no effort setting" line, no mismatch note.
+///
+/// WHAT FLIPS IT: the daemon session confirming that a role's STORED effort actually reaches the
+/// model request. Today the daemon stores and validates `settings.setModelRole`'s `effort`, but
+/// nothing spends it — so a control would let the user choose something with no effect, and a
+/// control that lies is worse than an absent one (user's standing rule). Flip it here, and only
+/// here, once that is confirmed; every rule it needs is already in `roleEffortControl` and tested.
+///
+/// It also needs the three-argument write door (`SettingsRolesModel.RoleWriter`) wired, or the
+/// control stays hidden regardless (`canWriteEffort`).
+let settingsRoleEffortControlEnabled = false
+
+/// Winter-level tiers that are SESSION concepts, refused by `setModelRole` on every role. Never
+/// offered, even if a catalog row were to list one.
+let roleEffortNeverOffered: Set<String> = ["ultra"]
+
+/// The effort `setModelRole` accepts on any model WITH a vocabulary but that no vocabulary lists.
+let roleEffortNone = "none"
+
+/// PURE: the efforts a menu may offer for a vocabulary — **in the row's own order, never sorted**.
+///
+/// - `nil` (no reasoning block) and `[]` (an empty vocabulary) → nothing.
+/// - Otherwise the vocabulary minus `roleEffortNeverOffered`, then `"none"` appended — `"none"` is
+///   offered EXACTLY when there is a real vocabulary to offer it beside, and nowhere else. A row
+///   whose every entry is filtered away offers nothing (not a lone "none").
+func roleEffortOptions(_ efforts: [String]?) -> [String] {
+    guard let efforts else { return [] }
+    var out: [String] = []
+    for effort in efforts where !roleEffortNeverOffered.contains(effort) && !out.contains(effort) {
+        out.append(effort)
+    }
+    guard out.contains(where: { $0 != roleEffortNone }) else { return [] }
+    if !out.contains(roleEffortNone) { out.append(roleEffortNone) }
+    return out
+}
+
+/// What a role's stored effort IS, measured against its current model's vocabulary.
+enum RoleEffortSelection: Equatable, Sendable {
+    /// None stored: the model's own default applies.
+    case modelDefault
+    /// Stored, and one of `roleEffortOptions`.
+    case valid(String)
+    /// Stored, and NOT offerable for this model — a leftover from an earlier model, or a tier this
+    /// app never offers. Rendered as a MISMATCH, never as a ticked option.
+    case stale(String)
+}
+
+/// PURE: the classification. `"none"` counts as valid only where it is offered (a non-empty
+/// vocabulary); on a model with no vocabulary every stored value is stale.
+func roleEffortSelection(effort: String?, efforts: [String]?) -> RoleEffortSelection {
+    guard let effort else { return .modelDefault }
+    return roleEffortOptions(efforts).contains(effort) ? .valid(effort) : .stale(effort)
+}
+
+/// What the picker draws for effort.
+enum RoleEffortControl: Equatable, Sendable {
+    /// Nothing at all. The ONLY state while `settingsRoleEffortControlEnabled` is false.
+    case hidden
+    /// No menu — the model takes no effort setting. `stale` carries a leftover stored effort, which
+    /// must still be named as a mismatch (with a way to clear it) rather than vanish.
+    case noSetting(stale: String?)
+    /// A menu of `options` (row order), with `selection` possibly `.stale`.
+    case menu(options: [String], selection: RoleEffortSelection)
+}
+
+/// PURE: the whole control decision. Takes `enabled` as a parameter so the tests can drive the
+/// rules with the flag both ways; the view passes `settingsRoleEffortControlEnabled`.
+///
+/// Hidden unless enabled AND an effort can reach the wire AND the role has an EXPLICIT model: an
+/// effort-only write must re-send the role's current tag (`model` is required-nullable), and doing
+/// that on a DERIVED role would silently pin its model — a side effect nobody asked for.
+///
+/// Then: `nil` vocabulary → hidden (or a mismatch note if an effort is stored); `[]` (or nothing
+/// offerable) → a quiet "takes no effort setting", plus the mismatch if any; otherwise the menu.
+func roleEffortControl(enabled: Bool, canWriteEffort: Bool,
+                       value: SettingsRoleValue) -> RoleEffortControl {
+    guard enabled, canWriteEffort, value.isExplicit, value.model != nil else { return .hidden }
+    let options = roleEffortOptions(value.efforts)
+    guard !options.isEmpty else {
+        // `nil`: no reasoning block — no control at all, unless a leftover must be named.
+        guard value.efforts != nil else {
+            return value.effort.map { .noSetting(stale: $0) } ?? .hidden
+        }
+        // `[]` (or nothing offerable): the quiet line — never an empty menu.
+        return .noSetting(stale: value.effort)
+    }
+    return .menu(options: options,
+                 selection: roleEffortSelection(effort: value.effort, efforts: value.efforts))
+}
+
+/// PURE: the effort to send ALONGSIDE a model change. A different model → `.clear` (a stored
+/// effort the new model may not offer must not survive the switch), unless the user explicitly
+/// kept it. The same model → `.leave`.
+func roleEffortWriteForModelChange(currentModel: String?, newModel: String?,
+                                   keepEffort: Bool) -> ModelRoleEffortWrite {
+    guard currentModel != newModel, !keepEffort else { return .leave }
+    return .clear
+}
+
+/// PURE: the effort to send when the user picks one from the menu. `nil` = "Model default".
+func roleEffortWriteForChoice(_ choice: String?) -> ModelRoleEffortWrite {
+    choice.map { .set($0) } ?? .clear
+}
+
+let roleEffortTitle = "Reasoning effort"
+let roleEffortModelDefaultTitle = "Model default"
+let roleEffortNoSettingText = "This model takes no effort setting."
+/// PURE: the mismatch sentence. Names the stored value so the user can see what is wrong.
+func roleEffortStaleText(_ effort: String) -> String {
+    "Stored effort \u{201C}\(effort)\u{201D} isn't offered by this model"
+}
 
 // MARK: - The picker
 
@@ -956,6 +1014,10 @@ struct SettingsRoleModelPicker: View {
     /// `nil` clears the role. Only ever called with `nil` when `settingsRoleAllowsClearing` is true.
     let onCommit: (String?) -> Void
     let onClose: () -> Void
+    /// Whether an effort write can reach the daemon (`SettingsRolesModel.canWriteEffort`).
+    var canWriteEffort: Bool = false
+    /// An effort-only write for the role's CURRENT model. Only reachable from the gated control.
+    var onCommitEffort: (ModelRoleEffortWrite) -> Void = { _ in }
 
     @State private var step: RoleModelPickerStep = .models
     @State private var familyId: String?
@@ -973,6 +1035,12 @@ struct SettingsRoleModelPicker: View {
 
     private var selection: RoleModelPickerSelection { settingsRolePickerSelection(value) }
 
+    private var effortControl: RoleEffortControl {
+        roleEffortControl(enabled: settingsRoleEffortControlEnabled,
+                          canWriteEffort: canWriteEffort,
+                          value: value)
+    }
+
     var body: some View {
         ShellPanelCard(accessibilityName: settingsRolePickerTitle(role), onClose: onClose) {
             VStack(alignment: .leading, spacing: 0) {
@@ -980,6 +1048,7 @@ struct SettingsRoleModelPicker: View {
                 Divider()
                 switch step {
                 case .models:
+                    effortBar
                     modelsStep
                 case let .providers(modelKey):
                     providersStep(modelKey)
@@ -1056,6 +1125,96 @@ struct SettingsRoleModelPicker: View {
 
     private func modelLabel(_ modelKey: String) -> String {
         groups.flatMap(\.models).first { $0.id == modelKey }?.label ?? modelKey
+    }
+
+    // MARK: Effort (gated — see `settingsRoleEffortControlEnabled`)
+
+    /// Renders NOTHING for `.hidden`, which is the only state while the flag is false.
+    @ViewBuilder
+    private var effortBar: some View {
+        switch effortControl {
+        case .hidden:
+            EmptyView()
+        case let .noSetting(stale):
+            VStack(alignment: .leading, spacing: 4) {
+                Text(roleEffortNoSettingText)
+                    .font(Typography.caption())
+                    .foregroundStyle(Theme.textMuted)
+                if let stale { staleNote(stale) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            Divider()
+        case let .menu(options, selection):
+            HStack(spacing: 10) {
+                Text(roleEffortTitle)
+                    .font(Typography.control())
+                    .foregroundStyle(Theme.textSecondary)
+                Spacer(minLength: 8)
+                Menu {
+                    effortMenuItem(roleEffortModelDefaultTitle, choice: nil,
+                                   isSelected: selection == .modelDefault)
+                    Divider()
+                    ForEach(options, id: \.self) { option in
+                        effortMenuItem(option, choice: option, isSelected: selection == .valid(option))
+                    }
+                } label: {
+                    Text(effortMenuLabel(selection))
+                        .font(Typography.controlMono())
+                        .foregroundStyle(Theme.textPrimary)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .disabled(isWriting)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            if case let .stale(stale) = selection {
+                staleNote(stale)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 8)
+            }
+            Divider()
+        }
+    }
+
+    /// A stale value is NEVER a ticked option: the menu ticks nothing and the label says so.
+    private func effortMenuLabel(_ selection: RoleEffortSelection) -> String {
+        switch selection {
+        case .modelDefault: return roleEffortModelDefaultTitle
+        case let .valid(effort): return effort
+        case .stale: return "Mismatch"
+        }
+    }
+
+    @ViewBuilder
+    private func effortMenuItem(_ title: String, choice: String?, isSelected: Bool) -> some View {
+        Button {
+            onCommitEffort(roleEffortWriteForChoice(choice))
+        } label: {
+            if isSelected { Label(title, systemImage: "checkmark") } else { Text(title) }
+        }
+    }
+
+    /// The mismatch line, with the one fix it can offer: clear back to the model's default.
+    @ViewBuilder
+    private func staleNote(_ stale: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(Typography.caption())
+                .foregroundStyle(Theme.textSecondary)
+            Text(roleEffortStaleText(stale))
+                .font(Typography.caption())
+                .foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 6)
+            Button(roleEffortModelDefaultTitle) { onCommitEffort(.clear) }
+                .buttonStyle(.plain)
+                .font(Typography.caption(.semibold))
+                .foregroundStyle(Theme.textPrimary)
+                .disabled(isWriting)
+        }
     }
 
     // MARK: Step one
@@ -1420,7 +1579,9 @@ struct SettingsRolePickerHost: View {
                                         isWriting: roles.writing,
                                         errorText: roles.writeErrorText,
                                         onCommit: commit,
-                                        onClose: onClose)
+                                        onClose: onClose,
+                                        canWriteEffort: roles.canWriteEffort,
+                                        onCommitEffort: commitEffort)
             } else {
                 // The role vanished from under an open card (a reply that no longer reports it).
                 // Rendering nothing would leave the shell believing a picker is up with no way to
@@ -1443,9 +1604,22 @@ struct SettingsRolePickerHost: View {
     /// that arrives after the close is reported on the pane (`SettingsRolesModel.commit`), never
     /// dropped. `onClose` is the shell's identity-checked close, so a reply arriving after another
     /// picker has been opened cannot take that one down.
+    ///
+    /// A MODEL change carries `effort: null` (rule 5, `roleEffortWriteForModelChange`) so a stored
+    /// effort the new model may not offer does not survive the switch. Only reaches the wire when
+    /// the three-argument writer is wired — see `SettingsRolesModel.RoleWriter`.
     private func commit(_ tag: String?) {
+        let effort = roleEffortWriteForModelChange(currentModel: value?.model, newModel: tag,
+                                                   keepEffort: false)
         Task {
-            if await roles.commit(request.role, model: tag) { onClose() }
+            if await roles.commit(request.role, model: tag, effort: effort) { onClose() }
         }
+    }
+
+    /// An effort-only write: re-sends the role's CURRENT tag (the wire's `model` is required-
+    /// nullable) and keeps the card open, since the model list is still the thing on screen.
+    private func commitEffort(_ effort: ModelRoleEffortWrite) {
+        guard let model = value?.model else { return }
+        Task { _ = await roles.commit(request.role, model: model, effort: effort) }
     }
 }

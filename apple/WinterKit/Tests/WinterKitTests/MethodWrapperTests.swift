@@ -1805,6 +1805,70 @@ extension MethodWrapperTests {
                        "codex-oauth/gpt-5.6-terra", "always provider-qualified; a bare id is refused daemon-side")
     }
 
+    /// `models.catalog`'s effort vocabulary and readiness boolean (2026-09-18). The load-bearing
+    /// facts: `null` and `[]` are DIFFERENT (no reasoning block vs an empty vocabulary), the row's
+    /// order is kept verbatim (never sorted), `defaultEffort` may be null on a row WITH a
+    /// vocabulary, and `credentialPresent` is carried per provider with an absent key read as
+    /// "not told" (nil), never as false.
+    func testModelsCatalogCarriesEffortVocabulariesVerbatimAndCredentialPresent() async throws {
+        let (client, t) = try await connected()
+        let payload = #"{"ok":true,"providers":[ {"id":"openai","credentialDoor":"keychain","credentialSlotId":"openai:default","credentialPresent":true}, {"id":"console","credentialDoor":"console-profile","credentialSlotId":null,"credentialPresent":false}, {"id":"old","credentialDoor":"keychain"} ], "models":[ {"tag":"openai/o4-mini","efforts":["low","medium","high"],"defaultEffort":"medium"}, {"tag":"xai-oauth/grok-4.5","efforts":["high","medium","low"],"defaultEffort":null}, {"tag":"a/empty","efforts":[],"defaultEffort":null}, {"tag":"a/nullblock","efforts":null}, {"tag":"a/absent"} ]}"#
+        let (_, c) = try await roundTrip(t, sentIndex: 1, result: payload) { try await client.modelsCatalog() }
+
+        XCTAssertEqual(c.providers.map(\.credentialPresent), [true, false, nil],
+                       "an absent `credentialPresent` is NOT false — it is an older daemon saying nothing")
+        XCTAssertEqual(c.models[0].efforts, ["low", "medium", "high"])
+        XCTAssertEqual(c.models[0].defaultEffort, "medium")
+        XCTAssertEqual(c.models[1].efforts, ["high", "medium", "low"], "the wire's order, NEVER sorted")
+        XCTAssertNil(c.models[1].defaultEffort, "a vocabulary with no default is a real shape")
+        XCTAssertEqual(c.models[2].efforts, [], "`[]` survives as `[]` — an empty vocabulary, not no block")
+        XCTAssertNil(c.models[3].efforts, "`null` = no reasoning block at all")
+        XCTAssertNil(c.models[4].efforts, "absent reads the same as `null`")
+    }
+
+    /// `settings.modelRoles`' effort fields, and `setModelRole`'s THREE effort states on the wire:
+    /// `.leave` OMITS the key, `.clear` sends a literal `null`, `.set` sends the string. The first two
+    /// must be distinguishable, and the default must be `.leave` so older callers are byte-identical.
+    func testModelRoleEffortDecodesAndTheWriteKeepsAbsentAndNullApart() async throws {
+        let (client, t) = try await connected()
+        let map = #"{"ok":true,"roles":{ "pins.dream":{"model":"openai/o4-mini","explicit":true,"constraint":"any","effort":"high","effortExplicit":true,"efforts":["low","medium","high"]}, "pins.cleaner":{"model":"a/empty","explicit":true,"effort":null,"effortExplicit":false,"efforts":[]}, "titles.model":{"model":"a/none","explicit":false,"efforts":null}, "reviewer.model":{"model":"a/old","explicit":false} }}"#
+        let (_, roles) = try await roundTrip(t, sentIndex: 1, result: map) { try await client.settingsModelRoles() }
+        XCTAssertEqual(roles["pins.dream"]?.effort, "high")
+        XCTAssertEqual(roles["pins.dream"]?.effortExplicit, true)
+        XCTAssertEqual(roles["pins.dream"]?.efforts, ["low", "medium", "high"])
+        XCTAssertNil(roles["pins.cleaner"]?.effort)
+        XCTAssertEqual(roles["pins.cleaner"]?.efforts, [], "an empty vocabulary stays empty, not nil")
+        XCTAssertNil(roles["titles.model"]?.efforts, "no reasoning block")
+        XCTAssertNil(roles["reviewer.model"]?.efforts, "an older daemon's row: absent ⇒ nil")
+        XCTAssertEqual(roles["reviewer.model"]?.effortExplicit, false)
+
+        let (leaveReq, _) = try await roundTrip(t, sentIndex: 2, result: map) {
+            try await client.setModelRole(role: "pins.dream", model: "openai/o4-mini")
+        }
+        let leave = try XCTUnwrap(leaveReq["params"] as? [String: Any])
+        XCTAssertFalse(leave.keys.contains("effort"), "the default is `.leave`: the key is OMITTED")
+
+        let (clearReq, _) = try await roundTrip(t, sentIndex: 3, result: map) {
+            try await client.setModelRole(role: "pins.dream", model: "openai/o4-mini", effort: .clear)
+        }
+        let clear = try XCTUnwrap(clearReq["params"] as? [String: Any])
+        XCTAssertTrue(clear.keys.contains("effort"), "`.clear` must PRESENT the key…")
+        XCTAssertTrue(clear["effort"] is NSNull, "…as a literal JSON null")
+        XCTAssertEqual(clear["model"] as? String, "openai/o4-mini")
+
+        let (setReq, _) = try await roundTrip(t, sentIndex: 4, result: map) {
+            try await client.setModelRole(role: "pins.dream", model: "openai/o4-mini", effort: .set("low"))
+        }
+        XCTAssertEqual((setReq["params"] as? [String: Any])?["effort"] as? String, "low")
+
+        let (bothNullReq, _) = try await roundTrip(t, sentIndex: 5, result: map) {
+            try await client.setModelRole(role: "pins.dream", model: nil, effort: .clear)
+        }
+        let bothNull = try XCTUnwrap(bothNullReq["params"] as? [String: Any])
+        XCTAssertTrue(bothNull["model"] is NSNull)
+        XCTAssertTrue(bothNull["effort"] is NSNull)
+    }
+
     /// THE DEGRADATION CONTRACT. Today's shipped daemon implements none of these four, so each one
     /// comes back `-32601` — and every surface keys on `isMethodNotFound` to render its existing
     /// "waiting on the daemon" state instead of an error. A wrapper that swallowed this into an

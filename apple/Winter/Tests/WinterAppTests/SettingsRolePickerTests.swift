@@ -383,20 +383,11 @@ final class SettingsRolePickerTests: XCTestCase {
                                  _ name: String,
                                  basis: String? = "token",
                                  slot: String? = nil,
-                                 door: String? = "keychain") -> CatalogProvider {
+                                 door: String? = "keychain",
+                                 present: Bool? = nil) -> CatalogProvider {
         CatalogProvider(id: id, displayName: name, pricingBasis: basis,
-                        authKinds: ["api-key"], credentialSlotId: slot, credentialDoor: door)
-    }
-
-    private func credentialRow(_ providerId: String,
-                               present: Bool,
-                               door: String = "credential.set",
-                               manageable: Bool = true,
-                               group: String = "provider",
-                               slotId: String? = nil) -> CredentialRow {
-        CredentialRow(providerId: providerId, displayName: providerId, group: group,
-                      authKinds: ["api-key"], manageable: manageable, present: present,
-                      kind: "api-key", risk: "approved", door: door, slotId: slotId)
+                        authKinds: ["api-key"], credentialSlotId: slot, credentialDoor: door,
+                        credentialPresent: present)
     }
 
     /// The whole payload → the seam, in one pass: family NAMES (never ids), the provider's pricing
@@ -465,139 +456,88 @@ final class SettingsRolePickerTests: XCTestCase {
         for option in options { XCTAssertTrue(listed.contains(option.tag), option.tag) }
     }
 
-    // MARK: - Credential state: joined on the SLOT, branched on the DOOR
+    // MARK: - Credential state: readiness off the provider row, the fix from the door
 
-    /// THE THREE DOORS, each rendering something different — and two of the five states rendering
-    /// nothing at all, which is the reason the enum has five cases instead of a boolean.
-    func testEachCredentialDoorRendersItsOwnThing() {
-        let catalog = ModelsCatalog(providers: [
-            catalogProvider("openai", "OpenAI", slot: "openai:default", door: "keychain"),
-            catalogProvider("console", "Anthropic Console", slot: nil, door: "console-profile"),
-            catalogProvider("ollama-local", "Ollama", basis: "free", slot: nil, door: "none"),
-            catalogProvider("futurehost", "Future", slot: "futurehost:default", door: "smartcard"),
-        ])
-        let facts = modelCatalogFacts(catalog, credentials: [
-            credentialRow("openai", present: true, slotId: "openai:default"),
-        ])
-
-        XCTAssertEqual(roleProviderCredentialState(providerId: "openai", facts: facts), .stored)
-        XCTAssertEqual(roleCredentialNote(.stored), roleCredentialStoredText)
-
-        // The console arm has no Keychain slot AND that is correct — offerable, not promised, and
-        // the door it names is the Console login, never "add a key".
-        XCTAssertEqual(roleProviderCredentialState(providerId: "console", facts: facts), .consoleProfile)
-        let consoleNote = roleCredentialNote(.consoleProfile) ?? ""
-        XCTAssertTrue(consoleNote.contains("winter login --anthropic-console"))
-        XCTAssertFalse(consoleNote.lowercased().contains("add a key"))
-        XCTAssertFalse(consoleNote.lowercased().contains("no key"))
-
-        // `none`: this daemon stores no credential for it, so there is NOTHING to say. These are
-        // exactly the rows a providerId join would mark unconfigured forever, with no way to fix it.
-        XCTAssertEqual(roleProviderCredentialState(providerId: "ollama-local", facts: facts), .notApplicable)
-        XCTAssertNil(roleCredentialNote(.notApplicable))
-
-        // A door a later catalog adds: carried, then said nothing about.
-        XCTAssertEqual(roleProviderCredentialState(providerId: "futurehost", facts: facts), .unknown)
-        XCTAssertNil(roleCredentialNote(.unknown))
-
-        // A provider the catalog never mentioned.
-        XCTAssertEqual(roleProviderCredentialState(providerId: "nobody", facts: facts), .unknown)
-    }
-
-    /// **A PROVIDER ID IS NOT A CREDENTIAL IDENTITY.** `anthropic` files TWO secrets under one
-    /// provider id — the api-key slot and the Console bearer — so rows that do not name their slot
-    /// cannot say which one they are. The retired `<providerId>:default` derivation read them
-    /// anyway, and told a Console-only user "No key stored" on every `anthropic/*` row. With no
-    /// slot named, the only honest answer is none at all.
-    func testUnnamedAnthropicRowsMakeNoClaimEitherWay() {
-        let catalog = ModelsCatalog(providers: [
-            catalogProvider("anthropic", "Anthropic", slot: "anthropic:default"),
-        ])
-        // A Console-only install: the api-key slot empty, the Console bearer present.
-        let consoleOnly = modelCatalogFacts(catalog, credentials: [
-            credentialRow("anthropic", present: false),
-            credentialRow("anthropic", present: true, door: "provider.login", manageable: false),
-        ])
-        XCTAssertEqual(roleProviderCredentialState(providerId: "anthropic", facts: consoleOnly), .unknown,
-                       "never 'No key stored' to someone who is signed in")
-        XCTAssertNil(roleCredentialNote(roleProviderCredentialState(providerId: "anthropic",
-                                                                    facts: consoleOnly)))
-        XCTAssertNil(consoleOnly.credentialSlotPresence?["anthropic:default"])
-
-        // An api-key install: the opposite shape, and the same silence.
-        let apiKey = modelCatalogFacts(catalog, credentials: [
-            credentialRow("anthropic", present: true),
-            credentialRow("anthropic", present: false, door: "provider.login", manageable: false),
-        ])
-        XCTAssertEqual(roleProviderCredentialState(providerId: "anthropic", facts: apiKey), .unknown)
-    }
-
-    /// A slot id the daemon SENDS is the only key a row is indexed under — and a row whose provider
-    /// id does not match its slot still lands on the right slot.
-    func testARowIsIndexedOnlyUnderTheSlotTheDaemonNamed() {
-        let catalog = ModelsCatalog(providers: [
-            catalogProvider("openai", "OpenAI", slot: "openai:work"),
-        ])
-        let facts = modelCatalogFacts(catalog, credentials: [
-            credentialRow("openai", present: true, slotId: "openai:work"),
-        ])
-        XCTAssertEqual(roleProviderCredentialState(providerId: "openai", facts: facts), .stored)
-        XCTAssertNil(facts.credentialSlotPresence?["openai:default"],
-                     "a row that named its slot is indexed THERE and nowhere else")
-    }
-
-    /// **A MISS DEGRADES TO SILENCE, NEVER TO "NO KEY".** A row that named no slot is not indexed,
-    /// so the catalog's own slot string is simply not in the map and the row says nothing. Same for
-    /// a credential list that was never read.
-    func testAnUnmatchedOrUnreadSlotIsUnknownRatherThanMissing() {
-        let catalog = ModelsCatalog(providers: [
-            catalogProvider("openai", "OpenAI", slot: "openai:work"),
-        ])
-        let derived = modelCatalogFacts(catalog, credentials: [credentialRow("openai", present: true)])
-        XCTAssertEqual(roleProviderCredentialState(providerId: "openai", facts: derived), .unknown,
-                       "the row named no slot, so it answers for none")
-
-        let unread = modelCatalogFacts(catalog, credentials: nil)
-        XCTAssertNil(unread.credentialSlotPresence,
-                     "never read is a THIRD state — an empty map would read as `no key` on every row")
-        XCTAssertEqual(roleProviderCredentialState(providerId: "openai", facts: unread), .unknown)
-
-        // A keychain door with no slot named is equally unanswerable.
-        let slotless = modelCatalogFacts(
-            ModelsCatalog(providers: [catalogProvider("openai", "OpenAI", slot: nil)]),
-            credentials: [credentialRow("openai", present: true)])
-        XCTAssertEqual(roleProviderCredentialState(providerId: "openai", facts: slotless), .unknown)
-    }
-
-    /// **NO SLOT NAMED, NO CLAIM.** The conventional `<providerId>:default` is never derived — not
-    /// for a manageable provider row, not for anything. What replaces the join is the catalog's own
-    /// `credentialPresent` boolean; until it lands, an unnamed row contributes nothing.
-    func testAnUnnamedSlotIsNeverIndexed() {
-        let rows = [
-            credentialRow("openai", present: true),
-            credentialRow("codex-oauth", present: true, door: "cli-oauth", manageable: false),
-            credentialRow("exa", present: true, group: "tool"),
-            credentialRow("deepseek", present: false, slotId: "deepseek:default"),
+    /// THE TABLE: every door × `credentialPresent` ∈ {true, false, nil}. Readiness is the boolean
+    /// and nothing else; the door silences `none` (checked BEFORE the boolean, whose value is
+    /// `false` there on every daemon) and otherwise only names the fix.
+    func testReadinessIsTheProviderRowsBooleanAndTheDoorOnlyNamesTheFix() {
+        let doors: [String?] = ["keychain", "console-profile", "none", "smartcard", nil]
+        let presents: [Bool?] = [true, false, nil]
+        let expected: [String: RoleProviderCredentialState] = [
+            "keychain/true": .ready(.providersSettings),
+            "keychain/false": .missing(.providersSettings),
+            "keychain/nil": .unknown,
+            "console-profile/true": .ready(.consoleLogin),
+            "console-profile/false": .missing(.consoleLogin),
+            "console-profile/nil": .unknown,
+            "none/true": .notApplicable,
+            "none/false": .notApplicable,
+            "none/nil": .notApplicable,
+            // A door this build does not know may void the boolean the way `none` does, so it
+            // states nothing — readiness only where the fix can be named.
+            "smartcard/true": .unknown,
+            "smartcard/false": .unknown,
+            "smartcard/nil": .unknown,
+            "nil/true": .unknown,
+            "nil/false": .unknown,
+            "nil/nil": .unknown,
         ]
-        let presence = credentialSlotPresence(rows)
-        XCTAssertNil(presence?["openai:default"], "no derivation, even for a manageable provider row")
-        XCTAssertNil(presence?["codex-oauth:default"])
-        XCTAssertNil(presence?["exa:default"])
-        XCTAssertEqual(presence, ["deepseek:default": false], "only the NAMED slot is in the map")
-        XCTAssertNil(credentialSlotPresence(nil), "no list ⇒ no map, not an empty one")
+        for door in doors {
+            for present in presents {
+                let facts = modelCatalogFacts(ModelsCatalog(providers: [
+                    catalogProvider("p", "P", door: door, present: present),
+                ]))
+                let key = "\(door ?? "nil")/\(present.map { "\($0)" } ?? "nil")"
+                XCTAssertEqual(roleProviderCredentialState(providerId: "p", facts: facts), expected[key], key)
+            }
+        }
+        XCTAssertEqual(roleProviderCredentialState(providerId: "nobody", facts: .none), .unknown,
+                       "a provider the catalog never mentioned says nothing")
+    }
+
+    /// What each state SAYS. Keychain points at Settings → Providers; the Console arm names
+    /// `winter login --anthropic-console` and never "add a key"; `none` and `unknown` say nothing.
+    func testEachStateRendersItsOwnLineAndTwoRenderNothing() {
+        XCTAssertEqual(roleCredentialNote(.ready(.providersSettings)), roleCredentialStoredText)
+        let keyMissing = roleCredentialNote(.missing(.providersSettings)) ?? ""
+        XCTAssertTrue(keyMissing.contains("Providers"))
+
+        let consoleMissing = roleCredentialNote(.missing(.consoleLogin)) ?? ""
+        XCTAssertTrue(consoleMissing.contains("winter login --anthropic-console"))
+        XCTAssertFalse(consoleMissing.lowercased().contains("key"), "there is no key to add on the Console arm")
+        let consoleReady = roleCredentialNote(.ready(.consoleLogin)) ?? ""
+        XCTAssertFalse(consoleReady.lowercased().contains("key"))
+
+        XCTAssertNil(roleCredentialNote(.notApplicable))
+        XCTAssertNil(roleCredentialNote(.unknown))
+    }
+
+    /// **NO JOIN SURVIVES.** Readiness never depends on a slot id: the same boolean gives the same
+    /// answer whether the catalog names a slot, names none (the console arm), or names a slot that
+    /// is not `<providerId>:default`. The seam does not even carry a slot any more.
+    func testReadinessNeverDependsOnASlotId() {
+        for slot in ["anthropic:default", "anthropic:work", nil] as [String?] {
+            let facts = modelCatalogFacts(ModelsCatalog(providers: [
+                catalogProvider("anthropic", "Anthropic", slot: slot, present: true),
+            ]))
+            XCTAssertEqual(roleProviderCredentialState(providerId: "anthropic", facts: facts),
+                           .ready(.providersSettings), "slot \(slot ?? "nil")")
+            XCTAssertEqual(facts.providerCredentials["anthropic"],
+                           ProviderCredentialFact(credentialDoor: "keychain", credentialPresent: true))
+        }
     }
 
     /// The state reaches the row it belongs to, per PROVIDER, inside step two.
     func testStepTwoCarriesEachProvidersOwnCredentialState() throws {
         let catalog = ModelsCatalog(providers: [
-            catalogProvider("openai", "OpenAI", slot: "openai:default"),
-            catalogProvider("codex-oauth", "Codex", basis: "subscription", slot: nil, door: "none"),
+            catalogProvider("openai", "OpenAI", slot: "openai:default", present: false),
+            catalogProvider("codex-oauth", "Codex", basis: "subscription", slot: nil, door: "none",
+                            present: false),
         ])
-        let facts = modelCatalogFacts(catalog, credentials: [
-            credentialRow("openai", present: false, slotId: "openai:default"),
-        ])
+        let facts = modelCatalogFacts(catalog)
         let options = roleProviderOptions(modelKey: "gpt-5.6-terra", permitted: permitted, facts: facts)
-        XCTAssertEqual(options.first { $0.providerId == "openai" }?.credential, .missing)
+        XCTAssertEqual(options.first { $0.providerId == "openai" }?.credential, .missing(.providersSettings))
         XCTAssertEqual(options.first { $0.providerId == "codex-oauth" }?.credential, .notApplicable)
     }
 
@@ -618,7 +558,7 @@ final class SettingsRolePickerTests: XCTestCase {
         let store = ModelCatalogFactsModel(catalog: {
             calls.hit()
             throw RpcError(code: -32601, message: "method not found: models.catalog")
-        }, credentials: { [] })
+        })
 
         await store.loadIfNeeded()
         await store.loadIfNeeded()
@@ -635,7 +575,7 @@ final class SettingsRolePickerTests: XCTestCase {
             calls.hit()
             if calls.count == 1 { throw RpcError(code: -32603, message: "boom") }
             return ModelsCatalog(families: [CatalogFamily(id: "gpt", displayName: "GPT")])
-        }, credentials: { [] })
+        })
 
         await store.loadIfNeeded()
         XCTAssertEqual(store.facts, .none)
@@ -647,22 +587,19 @@ final class SettingsRolePickerTests: XCTestCase {
         XCTAssertEqual(calls.count, 2, "settled once it succeeded — the catalog is immutable for a daemon's life")
     }
 
-    /// The two reads fail APART. A `credential.list` that will not answer must leave the catalog's
-    /// families and prices standing and simply say nothing about readiness — never an empty
-    /// presence map, which would render as "no key stored" on every keychain provider.
+    /// The readiness boolean lands WITH the catalog, in the one read — there is no second read that
+    /// could fail apart from it.
     @MainActor
-    func testACredentialListThatFailsLeavesTheCatalogStandingAndSaysNothing() async {
+    func testTheStoreCarriesReadinessStraightOffTheCatalog() async {
         let store = ModelCatalogFactsModel(catalog: {
             ModelsCatalog(providers: [CatalogProvider(id: "openai", displayName: "OpenAI",
                                                       credentialSlotId: "openai:default",
-                                                      credentialDoor: "keychain")])
-        }, credentials: { throw RpcError(code: -32603, message: "keychain locked") })
-
+                                                      credentialDoor: "keychain",
+                                                      credentialPresent: true)])
+        })
         await store.loadIfNeeded()
-        XCTAssertNil(store.facts.credentialSlotPresence)
-        XCTAssertEqual(roleProviderCredentialState(providerId: "openai", facts: store.facts), .unknown)
-        XCTAssertEqual(store.facts.providerCredentials["openai"]?.credentialDoor, "keychain",
-                       "the catalog half landed regardless")
+        XCTAssertEqual(roleProviderCredentialState(providerId: "openai", facts: store.facts),
+                       .ready(.providersSettings))
     }
 
     /// With no wiring at all there is nothing to ask, and that is the same `.none` an old daemon
@@ -767,5 +704,148 @@ final class SettingsRolePickerTests: XCTestCase {
         XCTAssertEqual(decoded[.dispatch]?.permittedProviders.map(\.providerId),
                        ["codex-oauth", "openai", "anthropic"])
         XCTAssertEqual(decoded[.dispatch]?.permitted.count, 4, "the flat view is unchanged")
+    }
+
+    // MARK: - Reasoning effort: built, table-tested, and GATED OFF
+
+    private func effortValue(model: String? = "openai/o4-mini", explicit: Bool = true,
+                             effort: String? = nil, efforts: [String]?) -> SettingsRoleValue {
+        SettingsRoleValue(model: model, isExplicit: explicit, constraint: "any", permitted: [],
+                          effort: effort, effortExplicit: effort != nil, efforts: efforts)
+    }
+
+    /// THE FLAG. It ships false, and with it false NOTHING renders — for every shape, stale ones
+    /// included, and even with a write door wired.
+    func testTheFlagShipsOffAndOffRendersNothingForAnyShape() {
+        XCTAssertFalse(settingsRoleEffortControlEnabled,
+                       "flip ONLY when the daemon confirms a role's stored effort reaches the request")
+        let shapes: [SettingsRoleValue] = [
+            effortValue(efforts: nil), effortValue(efforts: []),
+            effortValue(efforts: ["low", "high"]), effortValue(effort: "high", efforts: ["low"]),
+            effortValue(effort: "high", efforts: nil), effortValue(effort: "ultra", efforts: ["low"]),
+        ]
+        for value in shapes {
+            XCTAssertEqual(roleEffortControl(enabled: settingsRoleEffortControlEnabled,
+                                             canWriteEffort: true, value: value), .hidden)
+            XCTAssertEqual(roleEffortControl(enabled: false, canWriteEffort: true, value: value), .hidden)
+        }
+    }
+
+    /// Rules 1–3: only what `efforts` lists, IN ITS ORDER (never sorted); `none` appended exactly
+    /// when the vocabulary is non-empty; `ultra` never.
+    func testOptionsFollowTheRowsOrderAddNoneOnlyBesideARealVocabularyAndNeverUltra() {
+        let table: [([String]?, [String])] = [
+            (nil, []),
+            ([], []),
+            (["low", "medium", "high"], ["low", "medium", "high", "none"]),
+            (["high", "medium", "low"], ["high", "medium", "low", "none"]),
+            (["low", "ultra", "high"], ["low", "high", "none"]),
+            (["ultra"], []),
+            (["none"], []),
+            (["low", "none", "high"], ["low", "none", "high"]),
+            (["low", "low"], ["low", "none"]),
+        ]
+        for (efforts, expected) in table {
+            XCTAssertEqual(roleEffortOptions(efforts), expected, "\(String(describing: efforts))")
+        }
+    }
+
+    /// Rule 4: a stored effort outside the current vocabulary is a MISMATCH, never a selection —
+    /// `ultra` and a `none` on a vocabulary-less model included.
+    func testAStaleEffortIsAMismatchNeverASelection() {
+        let table: [(String?, [String]?, RoleEffortSelection)] = [
+            (nil, ["low", "high"], .modelDefault),
+            ("low", ["low", "high"], .valid("low")),
+            ("none", ["low", "high"], .valid("none")),
+            ("medium", ["low", "high"], .stale("medium")),
+            ("ultra", ["low", "ultra"], .stale("ultra")),
+            ("none", [], .stale("none")),
+            ("none", nil, .stale("none")),
+            ("high", nil, .stale("high")),
+            (nil, nil, .modelDefault),
+        ]
+        for (effort, efforts, expected) in table {
+            XCTAssertEqual(roleEffortSelection(effort: effort, efforts: efforts), expected,
+                           "\(effort ?? "nil") on \(String(describing: efforts))")
+        }
+    }
+
+    /// The whole control, flag ON: `null` → nothing (unless a leftover must be named); `[]` → the
+    /// quiet line, never an empty menu; a vocabulary → the menu with its selection; and hidden for
+    /// a DERIVED role (an effort write would pin its model) or with no effort-capable writer.
+    func testTheControlWithTheFlagOn() {
+        func control(_ v: SettingsRoleValue, canWrite: Bool = true) -> RoleEffortControl {
+            roleEffortControl(enabled: true, canWriteEffort: canWrite, value: v)
+        }
+        XCTAssertEqual(control(effortValue(efforts: nil)), .hidden)
+        XCTAssertEqual(control(effortValue(effort: "high", efforts: nil)), .noSetting(stale: "high"))
+        XCTAssertEqual(control(effortValue(efforts: [])), .noSetting(stale: nil))
+        XCTAssertEqual(control(effortValue(effort: "low", efforts: [])), .noSetting(stale: "low"))
+        XCTAssertEqual(control(effortValue(efforts: ["ultra"])), .noSetting(stale: nil),
+                       "nothing offerable is the quiet line, not an empty menu")
+        XCTAssertEqual(control(effortValue(effort: "high", efforts: ["high", "medium", "low"])),
+                       .menu(options: ["high", "medium", "low", "none"], selection: .valid("high")))
+        XCTAssertEqual(control(effortValue(effort: "xhigh", efforts: ["low", "high"])),
+                       .menu(options: ["low", "high", "none"], selection: .stale("xhigh")))
+        XCTAssertEqual(control(effortValue(efforts: ["low"]), canWrite: false), .hidden)
+        XCTAssertEqual(control(effortValue(explicit: false, efforts: ["low"])), .hidden)
+        XCTAssertEqual(control(effortValue(model: nil, efforts: ["low"])), .hidden)
+    }
+
+    /// Rule 5: a MODEL change sends `effort: null` unless the user explicitly kept it; the same
+    /// model leaves it; a menu choice sets it and "Model default" clears it.
+    func testTheEffortThatRidesAlongWithEachWrite() {
+        XCTAssertEqual(roleEffortWriteForModelChange(currentModel: "a/x", newModel: "a/y", keepEffort: false), .clear)
+        XCTAssertEqual(roleEffortWriteForModelChange(currentModel: "a/x", newModel: "a/y", keepEffort: true), .leave)
+        XCTAssertEqual(roleEffortWriteForModelChange(currentModel: "a/x", newModel: "a/x", keepEffort: false), .leave)
+        XCTAssertEqual(roleEffortWriteForModelChange(currentModel: "a/x", newModel: nil, keepEffort: false), .clear,
+                       "clearing the role moves it to a derived model, so the effort goes too")
+        XCTAssertEqual(roleEffortWriteForModelChange(currentModel: nil, newModel: "a/y", keepEffort: false), .clear)
+        XCTAssertEqual(roleEffortWriteForChoice("low"), .set("low"))
+        XCTAssertEqual(roleEffortWriteForChoice(nil), .clear)
+    }
+
+    /// The model's two doors. With the three-argument writer the effort reaches it verbatim; with
+    /// only the legacy two-argument writer (today's live wiring) a `.set` is REFUSED rather than
+    /// silently dropped, while a model change still lands.
+    @MainActor
+    func testTheModelRoutesEffortOnlyThroughADoorThatCanCarryIt() async {
+        final class Box: @unchecked Sendable { var effort: ModelRoleEffortWrite?; var legacyCalls = 0 }
+        let box = Box()
+        let full = SettingsRolesModel(loader: { [:] }, roleWriter: { _, _, effort in
+            box.effort = effort
+            return [:]
+        })
+        XCTAssertTrue(full.canWriteEffort)
+        let cleared = await full.commit(.dispatch, model: "a/y", effort: .clear)
+        XCTAssertTrue(cleared)
+        XCTAssertEqual(box.effort, .clear)
+        let set = await full.commit(.dispatch, model: "a/y", effort: .set("low"))
+        XCTAssertTrue(set)
+        XCTAssertEqual(box.effort, .set("low"))
+
+        let legacy = SettingsRolesModel(loader: { [:] }, writer: { _, _ in
+            box.legacyCalls += 1
+            return [:]
+        })
+        XCTAssertFalse(legacy.canWriteEffort)
+        let refused = await legacy.commit(.dispatch, model: "a/y", effort: .set("low"))
+        XCTAssertFalse(refused, "a chosen effort that could never reach the daemon is refused, not dropped")
+        XCTAssertEqual(box.legacyCalls, 0)
+        let modelChange = await legacy.commit(.dispatch, model: "a/y", effort: .clear)
+        XCTAssertTrue(modelChange)
+        XCTAssertEqual(box.legacyCalls, 1)
+    }
+
+    /// The pane decode carries the three effort fields through untouched.
+    func testTheDecodeCarriesEffortFields() {
+        let decoded = settingsModelRoleValues([
+            SettingsModelRole.dream.rawValue: ModelRoleValue(
+                model: "xai-oauth/grok-4.5", explicit: true, constraint: "any", permitted: [],
+                effort: "high", effortExplicit: true, efforts: ["high", "medium", "low"]),
+        ])
+        XCTAssertEqual(decoded[.dream]?.effort, "high")
+        XCTAssertEqual(decoded[.dream]?.effortExplicit, true)
+        XCTAssertEqual(decoded[.dream]?.efforts, ["high", "medium", "low"])
     }
 }

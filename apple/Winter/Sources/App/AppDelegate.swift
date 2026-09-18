@@ -713,10 +713,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // could pass `catalog:` into `SettingsRolesSection` directly, at which point `configure`
         // here goes away. See `ModelCatalogFactsModel`'s own doc.
         let modelsCatalog: () async throws -> ModelsCatalog = { try await client.modelsCatalog() }
-        let credentialList: () async throws -> [CredentialRow] = {
-            try await LiveCredentialsClient(client: client).list()
-        }
-        ModelCatalogFactsModel.shared.configure(catalog: modelsCatalog, credentials: credentialList)
+        // Readiness comes off `models.catalog`'s own `credentialPresent` now (the daemon's rule,
+        // with Console checked by its on-disk profile), so there is no `credential.list` to join.
+        ModelCatalogFactsModel.shared.configure(catalog: modelsCatalog)
         return DashboardWiring(
             daemonStatus: { try await client.daemonStatus() },
             quotaState: { try await client.quotaState() },
@@ -777,13 +776,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             sdkVersions: { try await sdkInstalledComponents(client.versionsGet()) },
             capabilitiesList: { try await client.capabilitiesList() },
             modelRoles: { try await client.settingsModelRoles() },
-            setModelRole: { role, model in try await client.setModelRole(role: role, model: model) },
-            // 2026-09-18 — the picker's catalog + readiness reads, the same two closures the shared
+            setModelRole: { role, model, effort in
+                try await client.setModelRole(role: role, model: model, effort: effort)
+            },
+            // 2026-09-18 — the picker's catalog read, the same closure the shared
             // `ModelCatalogFactsModel` was configured with above. `models.catalog` is newer than
             // most daemons on disk and answers `-32601` there, which the store treats as an answer
-            // and not a fault; `credential.list` has shipped since WS-19.
-            modelsCatalog: modelsCatalog,
-            credentialList: credentialList
+            // and not a fault.
+            modelsCatalog: modelsCatalog
         )
     }
 
