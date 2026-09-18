@@ -649,7 +649,21 @@ export function officialInputFor(
         // leg's deny list ALSO carries `settings.permissions.deny` (today's `Skill(<name>)` toggles)
         // — the exact same combined list the Winter leg's `buildWinterOptions` now sends, never a
         // second copy that could drift.
-        settings: { permissions: { deny: permissionDenyRulesFor(deps.home, deps.settings) }, sandbox: sandboxConfigFor(deps.home) },
+        // HIGH (fix wave, pre-merge review, finding 2a): same rationale as `mode-options.ts`'s
+        // `buildWinterOptions` — the pinned SDK's own `Settings.permissions.disableBypassPermissionsMode`
+        // (a `'disable'` literal on THIS leg, not a boolean — `sdk.d.ts`'s `Settings.permissions`)
+        // rides the flag-settings layer alongside `deny`/`sandbox` above, unless the session's own
+        // policy IS `bypass` — a case the top of this function already downgrades to `acceptEdits`
+        // for the SESSION itself (`officialPermissionModeFor`, "never bypassPermissions on this leg",
+        // D14/P8c-2), but a subagent DEFINITION's own `permissionMode: bypassPermissions` is a
+        // separate lever this clamp closes regardless of that downgrade.
+        settings: {
+          permissions: {
+            deny: permissionDenyRulesFor(deps.home, deps.settings),
+            ...(deps.policy === "bypass" ? {} : { disableBypassPermissionsMode: "disable" as const }),
+          },
+          sandbox: sandboxConfigFor(deps.home),
+        },
         additionalDisallowedTools: disallowedToolsFor(input.mode),
         ...(deps.hooks === undefined ? {} : { hooks: deps.hooks }),
         // Router 0.0.9: `deps.agents` is the SAME merged (project-over-user) definition map the

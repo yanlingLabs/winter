@@ -108,6 +108,20 @@ test("bypass is the only cell that sets allowDangerouslySkipPermissions", () => 
   }
 });
 
+// HIGH (fix wave, pre-merge review, finding 2a): `disableBypassPermissionsMode` is the daemon's
+// clamp against an agent DEFINITION's own `permissionMode: bypassPermissions` overriding the
+// session's mode (the pinned runtime honours a definition's mode over the session's own whenever
+// the session's is `default`/`dontAsk`/`plan`) — set for every cell EXCEPT `bypass`, where the
+// session's own top-level mode legitimately IS `bypassPermissions` already.
+test("disableBypassPermissionsMode is set for every policy except bypass itself", () => {
+  for (const mode of MODES) {
+    for (const policy of POLICIES) {
+      const o = buildWinterOptions(optionsInput({ mode, policy }));
+      expect(o.permissions?.disableBypassPermissionsMode).toBe(policy !== "bypass");
+    }
+  }
+});
+
 // Agent SDK 0.0.16 adoption: two fields the daemon sets on EVERY Winter-leg cell, for reasons that
 // are invisible in the option's own name — a background-by-default spawn would produce a turn the
 // host never pushed, and an absent `settingSources` means "all three sources" (so the child would
@@ -206,6 +220,11 @@ test("the control-plane deny rules cover the four write tools × the control-pla
     expect(deny).toContain(`${tool}(//**/.winter/settings.local.json)`);
     expect(deny).toContain(`${tool}(//h/permissions.local.json)`);
     expect(deny).toContain(`${tool}(//h/run/**)`);
+    // HIGH (fix wave, pre-merge review, finding 2c): an agent definition file is a permission-
+    // bearing surface (`permissionMode`) — same "project-INDEPENDENT, any depth" fence as the three
+    // control-plane filenames above, just for a directory of them.
+    expect(deny).toContain(`${tool}(//h/agents/**)`);
+    expect(deny).toContain(`${tool}(//**/.winter/agents/**)`);
   }
   // Task 17: + the engine's read-tool denials, carried: Read/Glob/Grep × { run/**, runtimes/** }
   for (const tool of ["Read", "Glob", "Grep"]) {
@@ -222,7 +241,7 @@ test("the control-plane deny rules cover the four write tools × the control-pla
   for (const tool of ["Edit", "Write", "MultiEdit", "NotebookEdit", "Read", "Glob", "Grep"]) {
     expect(deny).toContain(`${tool}(${claudeResumeTarget})`);
   }
-  expect(deny).toHaveLength(4 * 8 + 3 * 3);
+  expect(deny).toHaveLength(4 * 10 + 3 * 3);
 });
 
 // Daemon settings surface batch 3 (item 2): `settings.permissions.deny` (Skill(<name>) toggles,
@@ -236,14 +255,14 @@ test("item 2: settings.permissions.deny is appended after the fixed control-plan
   const deny = buildWinterOptions(optionsInput({ home: "/h", settings })).permissions!.deny!;
   expect(deny.slice(-2)).toEqual(["Skill(writing-skills)", "Agent(fork)"]);
   // The fixed fence is untouched (same count this file's other test pins).
-  expect(deny).toHaveLength(4 * 8 + 3 * 3 + 2);
+  expect(deny).toHaveLength(4 * 10 + 3 * 3 + 2);
 });
 
 test("item 2: an absent settings.permissions.deny changes nothing — byte-identical to before item 2", () => {
   const withNull = buildWinterOptions(optionsInput({ home: "/h", settings: null })).permissions!.deny!;
   const withUndefined = buildWinterOptions(optionsInput({ home: "/h" })).permissions!.deny!;
-  expect(withNull).toHaveLength(4 * 8 + 3 * 3);
-  expect(withUndefined).toHaveLength(4 * 8 + 3 * 3);
+  expect(withNull).toHaveLength(4 * 10 + 3 * 3);
+  expect(withUndefined).toHaveLength(4 * 10 + 3 * 3);
 });
 
 // Winter Phase 10b (D1-3, W18-9): a read of a `claude-resume-*` staging root is denied — proved
@@ -307,7 +326,9 @@ test("every deny rule is //-anchored, and resolves to the fence target it names"
   expect(specs.has(`/${join(home, "run")}/**`)).toBe(true);        // the daemon control plane
   expect(specs.has(`/${join(home, "runtimes")}/**`)).toBe(true);   // the runtime store (reads; Task 17)
   expect(specs.has(`/${join(tmpdir(), "claude-resume-*", "**")}`)).toBe(true); // P8d-12's staging root
-  expect(specs.size).toBe(9);
+  expect(specs.has(`/${join(home, "agents")}/**`)).toBe(true);     // finding 2c: the user's own agent definitions
+  expect(specs.has(`//**/.winter/agents/**`)).toBe(true);          // finding 2c: any project's, any depth
+  expect(specs.size).toBe(11);
   // The two inert forms must never reappear.
   for (const s of specs) {
     expect({ s, singleSlashAbsolute: /^\/[^/]/.test(s) }).toEqual({ s, singleSlashAbsolute: false });

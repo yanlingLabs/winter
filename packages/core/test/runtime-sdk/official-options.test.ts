@@ -265,6 +265,33 @@ describe("officialInputFor — the control-plane fence (C1)", () => {
   });
 });
 
+// HIGH (fix wave, pre-merge review, finding 2a): the official leg's own `disableBypassPermissionsMode`
+// clamp — `Settings.permissions.disableBypassPermissionsMode` is a `'disable'` LITERAL on this leg
+// (`sdk.d.ts`'s `Settings` interface), not a boolean, so it must be OMITTED rather than set `false`
+// for the one policy where the daemon's own top-level mode legitimately reaches something other than
+// the clamp's target — `bypass`, which `officialPermissionModeFor` already downgrades to
+// `acceptEdits` for the SESSION itself, but a subagent DEFINITION's own `permissionMode:
+// bypassPermissions` is a separate lever this clamp closes regardless of that downgrade.
+describe("officialInputFor — disableBypassPermissionsMode (finding 2a)", () => {
+  function settingsPermissionsFor(policy: SessionApprovalPolicy): { deny?: string[]; disableBypassPermissionsMode?: string } | undefined {
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+    const result = officialInputFor(input, minimalDeps({ home: "/Users/x/.winter-test-home", policy }));
+    if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
+    const options = result.input.options as unknown as Record<string, unknown>;
+    return (options.settings as { permissions?: { deny?: string[]; disableBypassPermissionsMode?: string } } | undefined)?.permissions;
+  }
+
+  test("set to the 'disable' literal for every policy except bypass", () => {
+    for (const policy of ["plan", "dont-ask", "ask", "accept-edits", "auto", "chat"] as const) {
+      expect(settingsPermissionsFor(policy)?.disableBypassPermissionsMode).toBe("disable");
+    }
+  });
+
+  test("omitted (never 'disable') when the session's own policy is bypass", () => {
+    expect(settingsPermissionsFor("bypass")?.disableBypassPermissionsMode).toBeUndefined();
+  });
+});
+
 // ── Phase 9c (P9c-1): the env shape + CLAUDE_CONFIG_DIR pin ────────────────────────────────────
 //
 // `officialConfigDirFor(home)` = `<home>/runtimes/claude-config` is a real path this file's own

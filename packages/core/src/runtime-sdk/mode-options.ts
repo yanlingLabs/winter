@@ -345,6 +345,18 @@ export function controlPlaneDenyRules(home: string): string[] {
     // The daemon's control plane: sockets, pid files, the runtime state db.
     fsRootAnchored([join(home, "run"), "**"].join("/")),
     claudeResumeStaging,
+    // HIGH (fix wave, pre-merge review, finding 2c): an agent DEFINITION file is itself a
+    // permission-bearing surface (`agent-definitions.ts`'s own header: "an agent definition's
+    // `permissionMode`/`tools`/`disallowedTools` fields are themselves a permission grant") — same
+    // class of self-grant the three control-plane filenames above exist to fence, just a directory
+    // of them rather than three fixed names. Both tiers, same "project-INDEPENDENT, any depth"
+    // treatment as the control-plane filenames: the user's own `<home>/agents/**` and any project's
+    // `**/.winter/agents/**`, whichever project owns it. `permissionMode` is ALSO stripped at parse
+    // time (`parseAgentDefinitionFile`) — this write fence and that strip are independent layers over
+    // the same invariant, the same "two layers over one self-grant" posture `controlPlaneFileTarget`'s
+    // own doc states for the host-side fence vs. the deny-rule fence.
+    fsRootAnchored([join(home, "agents"), "**"].join("/")),
+    fsRootAnchored(["**", ".winter", "agents", "**"].join("/")),
   ];
   // Task 17: the engine's read tool denied `<home>/run` and `<home>/runtimes` (the runtime store,
   // 8a's model-denied directory); the Winter leg's read-class tools carry the same two denials.
@@ -481,7 +493,21 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     // Batch 3 (item 2): the fixed control-plane fence PLUS `settings.permissions.deny` (today just
     // `Skill(<name>)` toggles) — see `permissionDenyRulesFor`'s own doc for why this reads
     // `input.settings` rather than the vestigial "no longer consumed" note this field used to carry.
-    permissions: { deny: permissionDenyRulesFor(input.home, input.settings) },
+    //
+    // HIGH (fix wave, pre-merge review, finding 2a): `disableBypassPermissionsMode` (the pinned SDK's
+    // own `Options.permissions` field, `protocol/config.d.ts`) is the ONE lever this leg has against
+    // an agent DEFINITION's own `permissionMode: bypassPermissions` — the runtime honours a
+    // definition's mode over the session's own whenever the session's is `default`/`dontAsk`/`plan`,
+    // and self-sets `allowDangerouslySkipPermissions` for it, with nothing upstream of the spawn
+    // fencing that off. `<home>/agents/*.md` and a trusted project's `.winter/agents/*.md` are both
+    // plain files a session under `ask`/`auto`/`accept-edits` can write (see `controlPlaneDenyRules`
+    // below, extended in the same fix, for the write fence — this is the SEPARATE, belt-and-suspenders
+    // runtime-level clamp), so a self-authored definition could otherwise mint itself an uncarded
+    // child. Disabled unless the SESSION's own policy is `bypass` — that is the one case where
+    // `allowDangerouslySkipPermissions`/`permissionMode: "bypassPermissions"` is this session's own,
+    // legitimate, daemon-decided top-level mode (set two lines below), and disabling the runtime's
+    // ability to enter it would break that mode for the session itself, not just for a definition.
+    permissions: { deny: permissionDenyRulesFor(input.home, input.settings), disableBypassPermissionsMode: input.policy !== "bypass" },
     sandbox: sandboxConfigFor(input.home),
     // Agent SDK 0.0.16 defaults a spawn to BACKGROUND (claude's own default), which means a finished
     // child re-enters the model on a turn NOBODY PUSHED — a second `system/init`, an assistant
