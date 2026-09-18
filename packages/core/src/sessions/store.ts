@@ -198,7 +198,13 @@ export class SessionStore {
    *  hook has `secrets` in hand at construction time, so every other caller (tests, `winter doctor`,
    *  any direct `new SessionStore(home)`) omits it and gets the same fixed-preference tie-break as
    *  before this field existed. */
-  constructor(private readonly homeDir: string, private readonly storeOpts?: { presentProviders?: ReadonlySet<string> }) {
+  constructor(private readonly homeDir: string, private readonly storeOpts?: {
+    presentProviders?: ReadonlySet<string>;
+    /** Is a session's STORED effort stale for the model it is being moved to? Asked by `setModel`,
+     *  which clears the effort when the answer is yes. Injected (the daemon passes the one
+     *  selection rule, `effortRefusalFor`) because the store knows no catalog; absent = never stale. */
+    effortStaleFor?: (effort: string, model: string, mode: string | undefined) => boolean;
+  }) {
     mkdirSync(join(homeDir, "sessions"), { recursive: true });
     this.db = new Database(join(homeDir, "sessions", "index.db"));
     this.db.run(`CREATE TABLE IF NOT EXISTS sessions (
@@ -628,6 +634,19 @@ export class SessionStore {
   setModel(sessionId: string, model: string | null): void {
     const res = this.db.run("UPDATE sessions SET model = ? WHERE session_id = ?", [model, sessionId]);
     if (res.changes === 0) throw new Error(`unknown session: ${sessionId}`);
+    // A stored effort was chosen for the model the session is LEAVING. When the destination cannot
+    // take it, it goes with the old model — here, at the one write every door shares (the RPC, a
+    // deferred handoff landing at its quiescent boundary, a rollback), so no client has to remember
+    // to clear it first and none can display a level the next turn will not spend. `model: null`
+    // (back to the live default) is left alone: the store does not know the default, and the spend
+    // path drops a stale level on its own.
+    const stale = this.storeOpts?.effortStaleFor;
+    if (model === null || stale === undefined) return;
+    const row = this.db.query("SELECT effort, mode FROM sessions WHERE session_id = ?").get(sessionId) as { effort: string | null; mode: string | null } | null;
+    if (row?.effort == null) return;
+    let isStale = false;
+    try { isStale = stale(row.effort, model, row.mode ?? undefined); } catch { /* a throwing rule clears nothing */ }
+    if (isStale) this.db.run("UPDATE sessions SET effort = NULL WHERE session_id = ?", [sessionId]);
   }
 
   /** provider-correctness T4: per-session reasoning-effort override — `effort: null` CLEARS it

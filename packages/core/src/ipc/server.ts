@@ -64,7 +64,7 @@ import { foldPanelTabs } from "../panel/store";
 import { mintPanelTab } from "../panel/open-tab";
 import type { PanelCommandRegistry } from "../panel/commands";
 import { readStoredDiff } from "../diffs/store";
-import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory, effortsForModel } from "./sync";
+import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
 import type { ModelInfo } from "../providers/types";
 import type { ChildrenRpc } from "../runtime-sdk/children-rpc";
@@ -107,7 +107,7 @@ import { verbClass } from "../peripheral/hardware";
 import type { QuotaManager } from "../providers/quota";
 import { modelCatalogWire } from "../providers/model-catalog-wire";
 import { withProblemsForRoles, type RoleHealthRegistry } from "../providers/role-health";
-import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, readRawSettings } from "../settings";
+import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, readRawSettings } from "../settings";
 import { disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
 import { diagnoseRuntimes } from "../runtime-sdk/runtimes-doctor";
@@ -722,25 +722,10 @@ function assertRemoteMayUseSession(store: SessionStore, role: string | undefined
  *  cannot enumerate is not bricked. It means the daemon can accept what `sync.config` does not
  *  advertise, never the reverse. */
 function assertEffortSelectable(effort: string, model: string, mode: string | undefined): void {
-  if (isClientEffort(effort)) {
-    // `clientEffortEligible` is a fail-closed allowlist (settings.ts) — a mode nobody has written
-    // yet is refused, deliberately unlike `engine.ts`'s `resolveMode`, which defaults to "code".
-    if (!clientEffortEligible(mode)) {
-      throw new RpcFailure(ERR.INVALID_PARAMS, `effort '${effort}' is a Winter-level tier offered on code sessions only — this is a '${mode ?? "unknown"}' session (wire efforts: ${effortsForModel(model).join(", ")})`);
-    }
-    return;
-  }
-  const allowed = effortsForModel(model);
-  // 2026-09-17: a real catalog row with NO vocabulary takes no effort at all — refuse rather than
-  // let any tier through to a child that will refuse it typed (98 of 618 rows are shaped like this).
-  // Only a row the catalog does not know (a BYO endpoint) keeps the "unconstrained" passthrough.
-  if (allowed.length === 0 && model && rowForTag(model) !== undefined) {
-    throw new RpcFailure(ERR.INVALID_PARAMS, `model '${model}' declares no reasoning-effort vocabulary — an effort cannot be set for it (leave it on the provider's default)`);
-  }
-  if (allowed.length > 0 && !allowed.includes(effort)) {
-    const forModel = model ? `by model '${model}'` : "by the configured provider";
-    throw new RpcFailure(ERR.INVALID_PARAMS, `effort '${effort}' is not accepted ${forModel} — supported: ${allowed.join(", ")}`);
-  }
+  // The rule itself is `effortRefusalFor` (settings.ts) — shared with the session store and the spend
+  // path, so a level this door refuses is also one a model switch clears and a request never carries.
+  const refusal = effortRefusalFor(effort, model, mode);
+  if (refusal !== undefined) throw new RpcFailure(ERR.INVALID_PARAMS, refusal);
 }
 
 /**

@@ -47,7 +47,7 @@ import type { RuntimeSessionRecord, RuntimeSessionRecords } from "../runtime-sta
 import type { ProjectionCheckpoints } from "../runtime-state/checkpoints";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
-import { DEFAULT_PROVIDER, effortToSpendForRole, officialSubscriptionAuthEnabled, ownProviderFor, pinsFor, providerBaseUrlFor, winterOptionsFromSettings, type Settings } from "../settings";
+import { DEFAULT_PROVIDER, effortRefusalFor, effortToSpendForRole, officialSubscriptionAuthEnabled, ownProviderFor, pinsFor, providerBaseUrlFor, winterOptionsFromSettings, type Settings } from "../settings";
 import { d30DefaultModel } from "./advisor-reviewer";
 import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
 import type { WinterRuntimeSdk, SessionMode } from "./create";
@@ -201,7 +201,26 @@ const sdkEffortOf = (raw: string | undefined): EffortLevel | undefined => (raw !
  *    `EffortLevel`, and "no effort sent" is what both already mean on the Winter leg.
  */
 function spendEffortFor(settings: Settings | null | undefined, mode: SessionMode, model: string, liveEffort: string | undefined): EffortLevel | undefined {
-  return sdkEffortOf(liveEffort ?? (mode === "dispatch" ? dispatchEffortFor(settings, model) : effortToSpendForRole(settings, "provider.model", model, undefined)));
+  // A STALE session effort is not an explicit choice for THIS model: it was picked for the model the
+  // session was on before a switch (or arrived through a door that never checked — a phone-synced
+  // session, a row older than the store's own clearing). Sending it verbatim ended the next turn
+  // ("model … declares no effort vocabulary, so no effort level can be verified for it"), so a level
+  // the one selection rule refuses for this model is treated as unset and the implicit default takes
+  // over. `session.setEffort` still refuses the same level up front, so a fresh choice is never
+  // silently dropped — only one that a model change left behind.
+  const own = liveEffort !== undefined && effortRefusalFor(liveEffort, model, mode) === undefined ? liveEffort : undefined;
+  if (liveEffort !== undefined && own === undefined) noteStaleEffortOnce(model, liveEffort);
+  return sdkEffortOf(own ?? (mode === "dispatch" ? dispatchEffortFor(settings, model) : effortToSpendForRole(settings, "provider.model", model, undefined)));
+}
+
+const staleEffortNoted = new Set<string>();
+/** One line per (model, level) per process — a resumed session re-assembles its options every turn. */
+function noteStaleEffortOnce(model: string, effort: string): void {
+  const key = `${model}\u0000${effort}`;
+  if (staleEffortNoted.has(key)) return;
+  if (staleEffortNoted.size > 256) staleEffortNoted.clear();
+  staleEffortNoted.add(key);
+  console.error(`session effort '${effort}' is not selectable on '${model}' — spending the default effort instead`);
 }
 
 export interface WinterLegDeps {

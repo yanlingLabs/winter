@@ -103,6 +103,36 @@ export function clientEffortEligible(mode: string | undefined): boolean {
 }
 
 /**
+ * THE ONE effort-selection rule: why `effort` may NOT be selected for `model` on a `mode` session, or
+ * `undefined` when it may. `session.setEffort` / `session.create` throw this text; the session store
+ * clears a stored effort a model change made stale; the spend path drops one that is stale anyway
+ * (an old row, a phone-synced session) rather than send the child something it refuses typed —
+ * "model … declares no effort vocabulary, so no effort level can be verified for it" ended the turn.
+ * One function so those four can never disagree about what a model takes.
+ *
+ * The two branches are ALTERNATIVES, not layers: a Winter-level tier (`ultra`) never reaches the
+ * endpoint, so it is judged by the session's MODE only and never by the row's vocabulary. A wire
+ * level is judged by the row: a catalog row with no vocabulary takes none; a row with one takes only
+ * what it lists (plus `"none"`); a tag the catalog does not know (a BYO endpoint) is unconstrained.
+ */
+export function effortRefusalFor(effort: string, model: string, mode: string | undefined): string | undefined {
+  const vocabulary = effortVocabularyFor(model) ?? [];
+  const allowed = vocabulary.length > 0 ? ["none", ...vocabulary] : [];
+  if (isClientEffort(effort)) {
+    if (clientEffortEligible(mode)) return undefined;
+    return `effort '${effort}' is a Winter-level tier offered on code sessions only — this is a '${mode ?? "unknown"}' session (wire efforts: ${allowed.join(", ")})`;
+  }
+  if (allowed.length === 0 && model && rowForTag(model) !== undefined) {
+    return `model '${model}' declares no reasoning-effort vocabulary — an effort cannot be set for it (leave it on the provider's default)`;
+  }
+  if (allowed.length > 0 && !allowed.includes(effort)) {
+    const forModel = model ? `by model '${model}'` : "by the configured provider";
+    return `effort '${effort}' is not accepted ${forModel} — supported: ${allowed.join(", ")}`;
+  }
+  return undefined;
+}
+
+/**
  * WS-20 (review round 4): the ONLY two providers the daemon's own internal `Provider`
  * (`providers/manager.ts`, ONE instance per daemon process — titles/the bash reviewer/dreamer/the
  * session cleaner/research/turn compaction all call through it) can actually be BUILT for.
