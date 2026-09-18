@@ -56,7 +56,7 @@ import { SessionDirectories } from "./agent/dirs";
 import { TrustStore } from "./agent/trust";
 import { ContextAssembler } from "./agent/context";
 import { SkillStore } from "./agent/skills";
-import { loadUserAgentDefinitions } from "./agent/agent-definitions";
+import { loadUserAgentDefinitions, loadProjectAgentDefinitions } from "./agent/agent-definitions";
 import { SupportedAgentsCache } from "./agent/supported-agents-cache";
 import { BackgroundTaskRegistry } from "./agent/bg-registry";
 import { sessionTmpDir } from "./agent/session-tmp";
@@ -1499,6 +1499,10 @@ export async function startDaemon(opts: {
     // reach the child as stdio configs under the registry's own keys (`mcp__<key>__<tool>`). Read
     // LIVE per incarnation from the same holder and the same `TrustStore` the McpManager consults.
     extraMcpServers: (session) => configuredMcpServersFor({ settings, cwd: session.cwd, trusted: (dir) => trustStore.isTrusted(dir) }),
+    // Daemon settings surface batch 3 (item 1): the SAME trust gate `extraMcpServers` above and
+    // `agents.list`'s own handler (ipc/server.ts) both use — an untrusted `cwd` gets the empty scan
+    // shape outright, never even reaching the filesystem read `loadProjectAgentDefinitions` would do.
+    projectAgentDefinitions: (cwd) => (trustStore.isTrusted(cwd) ? loadProjectAgentDefinitions(cwd) : { definitions: {}, sources: [], rejected: [] }),
     log: (line) => console.error(`winter-leg: ${line}`),
     ...(opts.officialConnectionOverride === undefined ? {} : { officialConnectionOverride: opts.officialConnectionOverride }),
     // P8c integration Wirings 1 & 3 (P8c-14): lane 2's plan bridge and lane 3's hooks facade,

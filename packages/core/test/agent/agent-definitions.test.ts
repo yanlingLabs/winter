@@ -2,10 +2,12 @@
 // (agent-definitions.ts) — a reimplementation of the winter-agent-sdk runtime's internal
 // (unexported) frontmatter parser, since the official leg has no way to see the directory itself.
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadUserAgentDefinitions, parseAgentDefinitionFile } from "../../src/agent/agent-definitions";
+import {
+  loadUserAgentDefinitions, loadProjectAgentDefinitions, mergeAgentDefinitionTiers, parseAgentDefinitionFile,
+} from "../../src/agent/agent-definitions";
 
 function tmpHome(): string {
   return mkdtempSync(join(tmpdir(), "winter-agent-defs-"));
@@ -15,6 +17,16 @@ function writeAgentFile(home: string, filename: string, content: string): void {
   const dir = join(home, "agents");
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, filename), content);
+}
+
+function writeProjectAgentFile(cwd: string, filename: string, content: string): void {
+  const dir = join(cwd, ".winter", "agents");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, filename), content);
+}
+
+function agentMd(name: string, description = "d"): string {
+  return ["---", `name: ${name}`, `description: ${description}`, "---", "", "Body."].join("\n");
 }
 
 describe("parseAgentDefinitionFile", () => {
@@ -182,5 +194,106 @@ describe("loadUserAgentDefinitions", () => {
     expect(Object.keys(loadUserAgentDefinitions(home).definitions)).toEqual([]);
     writeAgentFile(home, "late.md", ["---", "name: late-arrival", "description: d", "---", "", "Body."].join("\n"));
     expect(Object.keys(loadUserAgentDefinitions(home).definitions)).toEqual(["late-arrival"]);
+  });
+});
+
+describe("loadProjectAgentDefinitions", () => {
+  test("a missing .winter/agents directory yields zero definitions, never an error", () => {
+    const cwd = tmpHome();
+    const { definitions, rejected } = loadProjectAgentDefinitions(cwd);
+    expect(definitions).toEqual({});
+    expect(rejected).toEqual([]);
+  });
+
+  test("valid project files are keyed by frontmatter name, same as the user tier", () => {
+    const cwd = tmpHome();
+    writeProjectAgentFile(cwd, "reviewer.md", agentMd("project-reviewer", "reviews from the project"));
+    const { definitions } = loadProjectAgentDefinitions(cwd);
+    expect(Object.keys(definitions)).toEqual(["project-reviewer"]);
+    expect(definitions["project-reviewer"]!.description).toBe("reviews from the project");
+  });
+
+  test("a symlinked .winter is refused — treated as no project agents at all", () => {
+    const real = tmpHome();
+    const decoy = mkdtempSync(join(tmpdir(), "winter-agent-defs-decoy-"));
+    writeProjectAgentFile(decoy, "sneaky.md", agentMd("sneaky"));
+    symlinkSync(join(decoy, ".winter"), join(real, ".winter"));
+    const { definitions, rejected } = loadProjectAgentDefinitions(real);
+    expect(definitions).toEqual({});
+    expect(rejected).toEqual([]);
+  });
+
+  test("a symlinked .winter/agents directory is refused the same way", () => {
+    const cwd = tmpHome();
+    const decoyAgents = mkdtempSync(join(tmpdir(), "winter-agent-defs-decoy-agents-"));
+    writeFileSync(join(decoyAgents, "sneaky.md"), agentMd("sneaky"));
+    mkdirSync(join(cwd, ".winter"), { recursive: true });
+    symlinkSync(decoyAgents, join(cwd, ".winter", "agents"));
+    const { definitions } = loadProjectAgentDefinitions(cwd);
+    expect(definitions).toEqual({});
+  });
+
+  test("a symlinked individual .md file inside a real agents/ dir is skipped, not followed", () => {
+    const cwd = tmpHome();
+    const outside = tmpHome();
+    writeFileSync(join(outside, "planted.md"), agentMd("planted"));
+    mkdirSync(join(cwd, ".winter", "agents"), { recursive: true });
+    symlinkSync(join(outside, "planted.md"), join(cwd, ".winter", "agents", "planted.md"));
+    const { definitions, rejected } = loadProjectAgentDefinitions(cwd);
+    expect(definitions).toEqual({});
+    expect(rejected).toEqual([]); // skipped silently, same as any other unreadable entry — never a rejection
+  });
+});
+
+describe("mergeAgentDefinitionTiers", () => {
+  test("a project definition wins over a same-named user one — the SDK's own precedence, restored", () => {
+    const home = tmpHome();
+    const cwd = tmpHome();
+    writeAgentFile(home, "shared.md", agentMd("shared", "from the USER tier"));
+    writeProjectAgentFile(cwd, "shared.md", agentMd("shared", "from the PROJECT tier"));
+    const user = loadUserAgentDefinitions(home);
+    const project = loadProjectAgentDefinitions(cwd);
+    const { optionsMap, sources } = mergeAgentDefinitionTiers(user, project);
+    expect(optionsMap["shared"]!.description).toBe("from the PROJECT tier");
+    const shared = sources.filter((s) => s.name === "shared");
+    expect(shared).toHaveLength(2);
+    const projectRow = shared.find((s) => s.tier === "project")!;
+    const userRow = shared.find((s) => s.tier === "user")!;
+    expect(projectRow.shadowed).toBeUndefined();
+    expect(userRow.shadowed).toBe(true);
+  });
+
+  test("a user-only and a project-only definition both survive the merge untouched", () => {
+    const home = tmpHome();
+    const cwd = tmpHome();
+    writeAgentFile(home, "u.md", agentMd("user-only"));
+    writeProjectAgentFile(cwd, "p.md", agentMd("project-only"));
+    const { optionsMap, sources } = mergeAgentDefinitionTiers(loadUserAgentDefinitions(home), loadProjectAgentDefinitions(cwd));
+    expect(Object.keys(optionsMap).sort()).toEqual(["project-only", "user-only"]);
+    expect(sources.every((s) => s.shadowed === undefined)).toBe(true);
+  });
+
+  test("an untrusted project (never scanned by the caller) contributes nothing — its agents are entirely absent from both optionsMap and sources", () => {
+    const home = tmpHome();
+    const cwd = tmpHome();
+    writeAgentFile(home, "u.md", agentMd("user-only"));
+    writeProjectAgentFile(cwd, "p.md", agentMd("would-be-project-agent"));
+    // The caller never calls loadProjectAgentDefinitions for an untrusted cwd — simulated here by
+    // just not calling it, passing the empty-scan shape a gate would produce.
+    const emptyProject = { definitions: {}, sources: [], rejected: [] };
+    const { optionsMap, sources } = mergeAgentDefinitionTiers(loadUserAgentDefinitions(home), emptyProject);
+    expect(Object.keys(optionsMap)).toEqual(["user-only"]);
+    expect(sources.map((s) => s.name)).toEqual(["user-only"]);
+  });
+
+  test("rejections from both tiers are surfaced, each tagged with its own tier", () => {
+    const home = tmpHome();
+    const cwd = tmpHome();
+    writeAgentFile(home, "bad-user.md", ["---", "description: no name here", "---", "", "Body."].join("\n"));
+    writeProjectAgentFile(cwd, "bad-project.md", ["---", "description: no name here either", "---", "", "Body."].join("\n"));
+    const { rejected } = mergeAgentDefinitionTiers(loadUserAgentDefinitions(home), loadProjectAgentDefinitions(cwd));
+    expect(rejected).toHaveLength(2);
+    expect(rejected.find((r) => r.path.endsWith("bad-user.md"))!.tier).toBe("user");
+    expect(rejected.find((r) => r.path.endsWith("bad-project.md"))!.tier).toBe("project");
   });
 });

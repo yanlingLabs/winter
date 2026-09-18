@@ -109,7 +109,7 @@ import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSe
 import { disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
 import { diagnoseRuntimes } from "../runtime-sdk/runtimes-doctor";
-import { loadUserAgentDefinitions } from "../agent/agent-definitions";
+import { loadUserAgentDefinitions, loadProjectAgentDefinitions, mergeAgentDefinitionTiers } from "../agent/agent-definitions";
 import type { SupportedAgentsCache } from "../agent/supported-agents-cache";
 import {
   REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK, REQUIRED_CLAUDE_AGENT_SDK,
@@ -2094,20 +2094,29 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         };
       }
       // -----------------------------------------------------------------------------------------
-      // Daemon settings surface (2026-09-17 plan, item 3). LOCAL-ROLE ONLY, same posture as
-      // capabilities.list/versions.get above — read-only, no settings write. A missing
-      // `opts.winterHome` (a test/harness without one) degrades to `definitions: []`/`rejected: []`
-      // rather than throwing — same "typed absence, never a crash" precedent every RPC in this
-      // block follows for an optional daemon-wide dep.
+      // Daemon settings surface (2026-09-17 plan, item 3; batch 3 item 1 adds the project tier).
+      // LOCAL-ROLE ONLY, same posture as capabilities.list/versions.get above — read-only, no
+      // settings write. A missing `opts.winterHome` (a test/harness without one) degrades to
+      // `definitions: []`/`rejected: []` rather than throwing — same "typed absence, never a crash"
+      // precedent every RPC in this block follows for an optional daemon-wide dep.
+      //
+      // The project tier is read ONLY for a `cwd` `opts.trust` reports trusted — the SAME gate
+      // `optionsFor`'s own `WinterLegDeps.projectAgentDefinitions` wiring uses (daemon.ts), never a
+      // looser one: an absent `cwd`, a missing `opts.trust`, or an untrusted `cwd` all report the
+      // user tier alone, with no project row able to appear.
       // -----------------------------------------------------------------------------------------
       case METHODS.agentsList: {
-        parseParams(AgentsListParams, params);
-        const { sources, rejected } = opts.winterHome ? loadUserAgentDefinitions(opts.winterHome) : { sources: [], rejected: [] };
-        const definitionRows = sources.map(({ name, definition, path }) => ({
+        const p = parseParams(AgentsListParams, params);
+        const user = opts.winterHome ? loadUserAgentDefinitions(opts.winterHome) : { definitions: {}, sources: [], rejected: [] };
+        const project = p.cwd && opts.trust?.isTrusted(p.cwd) ? loadProjectAgentDefinitions(p.cwd) : { definitions: {}, sources: [], rejected: [] };
+        const { sources, rejected } = mergeAgentDefinitionTiers(user, project);
+        const definitionRows = sources.map(({ name, definition, path, tier, shadowed }) => ({
           name,
           description: definition.description,
           ...(definition.model === undefined ? {} : { model: definition.model }),
           path,
+          tier,
+          ...(shadowed === undefined ? {} : { shadowed }),
         }));
         const snapshot = opts.supportedAgents?.get() ?? null;
         return {

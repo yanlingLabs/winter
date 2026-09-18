@@ -11,6 +11,7 @@ import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 import { SupportedAgentsCache } from "../../src/agent/supported-agents-cache";
+import { TrustStore } from "../../src/agent/trust";
 
 class TestClient {
   private decoder = new LineDecoder();
@@ -57,7 +58,7 @@ describe("agents.list", () => {
   let stop: (() => void) | undefined;
   afterEach(() => { stop?.(); stop = undefined; });
 
-  async function boot(opts: { withAgentsDir?: boolean; supportedAgents?: SupportedAgentsCache } = {}) {
+  async function boot(opts: { withAgentsDir?: boolean; supportedAgents?: SupportedAgentsCache; trust?: TrustStore } = {}) {
     const home = mkdtempSync(join(tmpdir(), "winter-agents-list-"));
     if (opts.withAgentsDir) mkdirSync(join(home, "agents"), { recursive: true });
     const store = new SessionStore(home);
@@ -68,6 +69,7 @@ describe("agents.list", () => {
     const server = startIpcServer({
       socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets,
       ...(opts.supportedAgents === undefined ? {} : { supportedAgents: opts.supportedAgents }),
+      ...(opts.trust === undefined ? {} : { trust: opts.trust }),
     });
     stop = () => { server.stop(); store.close(); };
     return { home, socketPath, harnessToken: tokens.harness };
@@ -91,11 +93,50 @@ describe("agents.list", () => {
     await c.hello(harnessToken, "cli");
     const result = await c.request(METHODS.agentsList, {});
     expect(result.result.definitions).toEqual([
-      { name: "code-reviewer", description: "Reviews code", model: "sonnet", path: join(home, "agents", "reviewer.md") },
+      { name: "code-reviewer", description: "Reviews code", model: "sonnet", path: join(home, "agents", "reviewer.md"), tier: "user" },
     ]);
     expect(result.result.rejected).toHaveLength(1);
     expect(result.result.rejected[0].path).toBe(join(home, "agents", "no-name.md"));
     expect(result.result.rejected[0].reason).toContain('"name"');
+    expect(result.result.rejected[0].tier).toBe("user");
+    c.close();
+  });
+
+  test("a trusted project's .winter/agents contributes a row tagged tier: project, and wins over a same-named user agent", async () => {
+    const trustPath = mkdtempSync(join(tmpdir(), "winter-agents-list-trust-"));
+    const trust = new TrustStore(join(trustPath, "trust.json"));
+    const cwd = mkdtempSync(join(tmpdir(), "winter-agents-list-project-"));
+    trust.trust(cwd);
+    const { home, socketPath, harnessToken } = await boot({ withAgentsDir: true, trust });
+    writeFileSync(join(home, "agents", "shared.md"), ["---", "name: shared", "description: from user", "---", "", "Body."].join("\n"));
+    mkdirSync(join(cwd, ".winter", "agents"), { recursive: true });
+    writeFileSync(join(cwd, ".winter", "agents", "shared.md"), ["---", "name: shared", "description: from project", "---", "", "Body."].join("\n"));
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.agentsList, { cwd });
+    const rows = result.result.definitions as Array<{ name: string; description: string; tier: string; shadowed?: boolean }>;
+    expect(rows).toHaveLength(2);
+    const projectRow = rows.find((r) => r.tier === "project")!;
+    const userRow = rows.find((r) => r.tier === "user")!;
+    expect(projectRow.description).toBe("from project");
+    expect(projectRow.shadowed).toBeUndefined();
+    expect(userRow.description).toBe("from user");
+    expect(userRow.shadowed).toBe(true);
+    c.close();
+  });
+
+  test("an UNTRUSTED project's .winter/agents is ignored entirely — no project row, no error", async () => {
+    const trustPath = mkdtempSync(join(tmpdir(), "winter-agents-list-trust-"));
+    const trust = new TrustStore(join(trustPath, "trust.json"));
+    const cwd = mkdtempSync(join(tmpdir(), "winter-agents-list-untrusted-"));
+    // deliberately never trusted
+    const { socketPath, harnessToken } = await boot({ trust });
+    mkdirSync(join(cwd, ".winter", "agents"), { recursive: true });
+    writeFileSync(join(cwd, ".winter", "agents", "sneaky.md"), ["---", "name: sneaky", "description: should not appear", "---", "", "Body."].join("\n"));
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.agentsList, { cwd });
+    expect(result.result.definitions).toEqual([]);
     c.close();
   });
 

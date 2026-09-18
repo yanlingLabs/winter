@@ -14,7 +14,22 @@
 // does not depend on. It follows `skills.ts`'s own in-repo precedent for a small, dependency-free
 // frontmatter parser (no YAML dependency anywhere in this workspace) rather than inventing a third
 // shape.
-import { readFileSync, readdirSync, statSync } from "node:fs";
+//
+// Daemon settings surface batch 3 (item 1, PRECEDENCE FIX): batch 2 shipped ONLY the user tier
+// (`<home>/agents/*.md`) wired straight onto `Options.agents` — the SDK's PROGRAMMATIC tier, the
+// HIGHEST precedence there is. That inverted the SDK's own ordering: a trusted project's own
+// `.winter/agents/*.md` (the project's filesystem tier) used to win over a same-named user agent,
+// and under batch 2 it silently lost instead. `loadProjectAgentDefinitions` below adds the project
+// tier (TRUST-GATED, never looser than `ProjectSettingsResolver`'s own gate — see its own doc for
+// why the extra lstat symlink guards exist here and not in `SkillStore`: an agent definition's
+// `permissionMode`/`tools`/`disallowedTools` fields are themselves a permission grant, unlike a
+// skill's plain prompt text, so this tier gets the CONTROL-PLANE-adjacent rigor
+// `ProjectSettingsResolver`/`PermissionRules` use, not the looser bar `SkillStore.discover` accepts
+// for inert prompt content) and `mergeAgentDefinitionTiers` restores the SDK's own order: project
+// wins over user, by name. Trust itself is still the CALLER's decision (mirrors
+// `configuredMcpServersFor`'s own `trusted: (dir) => boolean` shape) — this module never imports a
+// `TrustStore` itself, so it stays testable with a plain temp directory and no daemon wiring.
+import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentDefinition, PermissionMode } from "@yanlinglabs/winter-agent-sdk";
 
@@ -148,12 +163,33 @@ export function parseAgentDefinitionFile(raw: string, path: string): ParsedAgent
   return { ok: true, name, definition };
 }
 
+export interface LoadedAgentDefinitions {
+  definitions: Record<string, AgentDefinition>;
+  sources: Array<{ name: string; definition: AgentDefinition; path: string }>;
+  rejected: AgentDefinitionRejection[];
+}
+
+/** lstat-based (never follows a final symlink) directory check — see this module's own header for
+ *  why the project tier gets this rigor: an agent definition's `permissionMode`/`tools` fields are
+ *  themselves a permission grant, the same class of surface `ProjectSettingsResolver` guards this
+ *  way for `.winter/settings*.json`. */
+function isRealDir(path: string): boolean {
+  try { return lstatSync(path).isDirectory(); } catch { return false; }
+}
+
+/** lstat-based (never follows a symlinked entry) regular-file check, used for every `.md` this
+ *  module reads — a symlinked file inside an `agents/` directory is treated as absent, not followed. */
+function isRealFile(path: string): boolean {
+  try { return lstatSync(path).isFile(); } catch { return false; }
+}
+
 /**
- * Scans `<home>/agents/*.md`, returning every valid definition (keyed by its frontmatter `name`)
- * plus every rejected file with its reason. Defensive throughout: a missing directory yields zero
- * definitions and zero rejections (never an error); an unreadable individual file is skipped
+ * Scans one `agents/` directory (either `<home>/agents` or a project's `<cwd>/.winter/agents`),
+ * returning every valid definition (keyed by its frontmatter `name`) plus every rejected file with
+ * its reason. Defensive throughout: a missing directory yields zero definitions and zero rejections
+ * (never an error); an unreadable individual file, or one that is itself a symlink, is skipped
  * (also never a rejection entry — a rejection is specifically about a file this daemon COULD read
- * but whose content is invalid, not an I/O failure).
+ * but whose content is invalid, not an I/O failure or a refused symlink).
  *
  * Deliberately performs a FRESH scan on every call — no caching — so item 3's own requirement ("new
  * files reach the next session hot, no restart") is satisfied by construction: the daemon never has
@@ -166,26 +202,21 @@ export function parseAgentDefinitionFile(raw: string, path: string): ParsedAgent
  * but as an array carrying each definition's OWN file path too — `agents.list`'s consumer, which
  * reports "which file" as a diagnostic `definitions` don't have room for once collapsed to a map).
  */
-export function loadUserAgentDefinitions(home: string): {
-  definitions: Record<string, AgentDefinition>;
-  sources: Array<{ name: string; definition: AgentDefinition; path: string }>;
-  rejected: AgentDefinitionRejection[];
-} {
+function scanAgentDefinitionsDir(dir: string): LoadedAgentDefinitions {
   const definitions: Record<string, AgentDefinition> = {};
   const sources: Array<{ name: string; definition: AgentDefinition; path: string }> = [];
   const rejected: AgentDefinitionRejection[] = [];
-  const dir = join(home, "agents");
   let files: string[];
   try {
     files = readdirSync(dir);
   } catch {
-    return { definitions, sources, rejected }; // no agents/ directory at all — nothing, never an error
+    return { definitions, sources, rejected }; // directory absent entirely — nothing, never an error
   }
   for (const entry of files) {
     if (!entry.toLowerCase().endsWith(".md")) continue;
     const full = join(dir, entry);
     try {
-      if (!statSync(full).isFile()) continue;
+      if (!isRealFile(full)) continue; // missing, a directory, or a symlink — never followed
       const raw = readFileSync(full, "utf8");
       const parsed = parseAgentDefinitionFile(raw, full);
       if (parsed.ok) {
@@ -199,4 +230,81 @@ export function loadUserAgentDefinitions(home: string): {
     }
   }
   return { definitions, sources, rejected };
+}
+
+/** The USER tier: `<home>/agents/*.md`, always readable (home is fully trusted by construction —
+ *  no trust gate here, mirroring `SkillStore`'s own user-tier treatment). */
+export function loadUserAgentDefinitions(home: string): LoadedAgentDefinitions {
+  return scanAgentDefinitionsDir(join(home, "agents"));
+}
+
+/**
+ * The PROJECT tier: a TRUSTED project's `<cwd>/.winter/agents/*.md`. Trust is the CALLER's decision
+ * — this function takes no `TrustStore` and makes no I/O-independent judgment about it; callers
+ * gate the call itself (mirrors `configuredMcpServersFor`'s own `trusted: (dir) => boolean` shape,
+ * `runtime-sdk/external-mcp.ts`), so a caller that never calls this for an untrusted `cwd` gets the
+ * exact same "nothing from this project" result an explicit empty scan would.
+ *
+ * Symlink refusal mirrors `project-settings.ts`'s own precedent for `.winter`-rooted control-plane
+ * surfaces (see this module's header): `<cwd>/.winter` and `<cwd>/.winter/agents` must each be a
+ * REAL directory (lstat, never resolved through a symlink) or this project's agents are treated as
+ * absent — a symlinked `.winter` (or a symlinked `agents` subdirectory) pointing at agent-writable
+ * space elsewhere must never be able to plant a definition that grants itself
+ * `permissionMode: bypassPermissions` under a trusted project's name.
+ */
+export function loadProjectAgentDefinitions(cwd: string): LoadedAgentDefinitions {
+  const dotWinter = join(cwd, ".winter");
+  if (!isRealDir(dotWinter)) return { definitions: {}, sources: [], rejected: [] };
+  const agentsDir = join(dotWinter, "agents");
+  if (!isRealDir(agentsDir)) return { definitions: {}, sources: [], rejected: [] };
+  return scanAgentDefinitionsDir(agentsDir);
+}
+
+/** One `agents.list` row, tagged with which tier it came from. `shadowed: true` marks a USER-tier
+ *  definition whose name is ALSO defined by the project tier — it lost (per `mergeAgentDefinitionTiers`
+ *  below) but is still reported, never silently dropped from the listing (the plan's own "rejections
+ *  still surfaced" bar, extended to "losses still surfaced"). Never set on a project-tier row (a
+ *  project definition never loses to anything). */
+export interface AgentDefinitionTierSource {
+  name: string;
+  definition: AgentDefinition;
+  path: string;
+  tier: "user" | "project";
+  shadowed?: true;
+}
+
+export interface AgentDefinitionTierRejection extends AgentDefinitionRejection {
+  tier: "user" | "project";
+}
+
+/**
+ * Restores the SDK's OWN precedence — project wins over user, by name — over the two independently
+ * loaded tiers. `optionsMap` is exactly what `Options.agents` should receive on the Winter leg
+ * (`mode-options.ts`'s `buildWinterOptions`): project entries first, user entries added only for
+ * names the project tier did not already define. `sources`/`rejected` report EVERY entry from BOTH
+ * tiers (`agents.list`'s consumer) — project rows first, then every user row (flagged `shadowed`
+ * when a same-named project row won), so a losing user definition is visible, not silently merged
+ * away.
+ */
+export function mergeAgentDefinitionTiers(
+  user: LoadedAgentDefinitions,
+  project: LoadedAgentDefinitions,
+): { optionsMap: Record<string, AgentDefinition>; sources: AgentDefinitionTierSource[]; rejected: AgentDefinitionTierRejection[] } {
+  const optionsMap: Record<string, AgentDefinition> = { ...project.definitions };
+  for (const [name, def] of Object.entries(user.definitions)) {
+    if (!(name in optionsMap)) optionsMap[name] = def;
+  }
+  const sources: AgentDefinitionTierSource[] = [
+    ...project.sources.map((s): AgentDefinitionTierSource => ({ ...s, tier: "project" })),
+    ...user.sources.map((s): AgentDefinitionTierSource => ({
+      ...s,
+      tier: "user",
+      ...(project.definitions[s.name] !== undefined ? { shadowed: true as const } : {}),
+    })),
+  ];
+  const rejected: AgentDefinitionTierRejection[] = [
+    ...project.rejected.map((r): AgentDefinitionTierRejection => ({ ...r, tier: "project" })),
+    ...user.rejected.map((r): AgentDefinitionTierRejection => ({ ...r, tier: "user" })),
+  ];
+  return { optionsMap, sources, rejected };
 }
