@@ -363,8 +363,6 @@ final class AppShellTests: XCTestCase {
             let copy = settingsSectionComingCopy(section) ?? ""
             XCTAssertFalse(copy.isEmpty, "\(section) says something")
             XCTAssertFalse(copy.contains("`"), "a variable reaches Text un-parsed — a backtick would render")
-            XCTAssertFalse(settingsSectionBodyDrawsItsOwnHeader(section),
-                           "a coming page draws no title, so the section header must")
             XCTAssertTrue(settingsSectionRendersWithoutWiring(section),
                           "a coming page never claims 'no daemon wiring'")
         }
@@ -373,10 +371,9 @@ final class AppShellTests: XCTestCase {
             SettingsSection.allCases.firstIndex(of: $0)! < SettingsSection.allCases.firstIndex(of: $1)!
         }, "the pinned list and the copy table agree")
 
-        // THE INVARIANT, for any future copy too: whatever has coming copy renders the coming page,
-        // which draws no title — so the header must, wired or not.
+        // THE INVARIANT, for any future copy too: whatever has coming copy renders the coming page
+        // without wiring.
         for section in SettingsSection.allCases where settingsSectionIsComing(section) {
-            XCTAssertFalse(settingsSectionBodyDrawsItsOwnHeader(section), "\(section) would be unnamed")
             XCTAssertTrue(settingsSectionRendersWithoutWiring(section))
         }
 
@@ -384,9 +381,8 @@ final class AppShellTests: XCTestCase {
         for section in all where !coming.contains(section) {
             XCTAssertNil(settingsSectionComingCopy(section), "\(section) is not a placeholder")
         }
-        // The door and the links draw their own `SettingsPage` title, with or without wiring.
+        // The door and the links render with or without wiring.
         for section: SettingsSection in [.plugins, .support, .feedback, .discord, .donate] {
-            XCTAssertTrue(settingsSectionBodyDrawsItsOwnHeader(section))
             XCTAssertTrue(settingsSectionRendersWithoutWiring(section))
         }
     }

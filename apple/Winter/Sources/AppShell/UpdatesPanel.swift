@@ -58,7 +58,8 @@ private struct UpdatesPanelBody: View {
                 }
                 versionsSection
             }
-            .padding(updatesPanelPadding)
+            .padding(.horizontal, shellPanelEdgeInset)
+            .padding(.bottom, updatesPanelPadding)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         // Opening the panel IS the check (see the type doc). `checkOnOpen` refuses to stomp a flow
@@ -81,6 +82,8 @@ private struct UpdatesPanelBody: View {
                 Text(updateStatusHeadline(presenter.status))
                     .font(Typography.bodyLarge(.medium))
                     .foregroundStyle(Theme.textPrimary)
+                    // On the shared header line, level with the close glyph.
+                    .frame(height: shellPanelHeaderHeight)
                 if let detail = updateStatusDetail(presenter.status) {
                     Text(detail)
                         .font(Typography.caption())
@@ -89,7 +92,7 @@ private struct UpdatesPanelBody: View {
                 }
             }
             // Clears the close button, which rides the card's own top-trailing corner.
-            .padding(.trailing, updatesPanelCloseButtonClearance)
+            .padding(.trailing, shellOverlayCloseGutter)
 
             if updateShowsProgress(presenter.status) {
                 progressBar
@@ -324,9 +327,6 @@ let releaseNotesCodeCorner: CGFloat = 6
 /// start their content on the same line.
 let updatesPanelPadding: CGFloat = 24
 let updatesPanelSectionSpacing: CGFloat = 18
-/// Room for `ShellFloatingPanel`'s close button, which sits on the card's top-trailing corner
-/// rather than in a header band (there is no header — the panels are nameless).
-let updatesPanelCloseButtonClearance: CGFloat = 32
 
 /// PURE: the row glyph for an installed component. Unknown names fall back to the generic one, so a
 /// row the daemon adds later still renders.

@@ -110,6 +110,10 @@ final class ShellOverlayPresentation: ObservableObject {
     /// the chosen tab simply IS the tab you left. Every open door clears it first, so it can only
     /// ever be set while the library itself is the surface showing.
     @Published private(set) var libraryTabRequest: LibraryTab?
+    /// The composer's full-size model card ("Other models"), or nil. The composer's SMALL panel is
+    /// not in here — it belongs to its button and stays open underneath this card, so that the
+    /// commit returns you to it (`ComposerModelPanel.swift`).
+    @Published private(set) var sessionModelPicker: SessionModelPickerRequest?
 
     /// The search palette's own flag. OWNED here (rather than beside this object) so that opening
     /// a panel can close the palette without a back-reference somebody has to remember to wire;
@@ -129,6 +133,7 @@ final class ShellOverlayPresentation: ObservableObject {
 
     func open(_ overlay: ShellOverlay) {
         closePicker()
+        sessionModelPicker = nil
         search.close()
         libraryTabRequest = nil
         self.overlay = overlay
@@ -161,6 +166,7 @@ final class ShellOverlayPresentation: ObservableObject {
 
     func openSearch() {
         overlay = nil
+        sessionModelPicker = nil
         libraryTabRequest = nil
         closePicker()
         search.open()
@@ -178,6 +184,7 @@ final class ShellOverlayPresentation: ObservableObject {
         libraryTabRequest = nil
         search.close()
         closePicker()
+        sessionModelPicker = nil
         picker = request
         request.roles.pickerDidOpen(request.role)
     }
@@ -198,6 +205,20 @@ final class ShellOverlayPresentation: ObservableObject {
     func closeRolePicker(ifShowing request: SettingsRolePickerRequest) {
         guard picker == request else { return }
         closePicker()
+    }
+
+    // MARK: The composer's full-size model card
+
+    func openSessionModelPicker(_ request: SessionModelPickerRequest) {
+        overlay = nil
+        libraryTabRequest = nil
+        search.close()
+        closePicker()
+        sessionModelPicker = request
+    }
+
+    func closeSessionModelPicker() {
+        sessionModelPicker = nil
     }
 
     private func closePicker() {
@@ -303,8 +324,101 @@ extension EnvironmentValues {
     }
 }
 
-/// The button's own width plus a little air.
-let shellOverlayCloseGutter: CGFloat = shellTitlebarButtonSize + 8
+/// Room a hosted pane leaves, BEYOND its own `shellPanelEdgeInset`, for the close glyph: the glyph
+/// itself plus the same gap again.
+let shellOverlayCloseGutter: CGFloat = 24
+
+// MARK: - The header row every floating surface shares (2026-09-18)
+
+/// ONE header geometry for every floating surface, taken from the search palette (user call: "the
+/// search panel is perfect"): a 50 pt row, its controls 18 pt in from the card's edges, and the
+/// close/back glyphs at the palette's own size and ink. The xmark and a back chevron therefore sit
+/// on one centre line, mirror images of each other across the card.
+let shellPanelHeaderHeight: CGFloat = 50
+let shellPanelEdgeInset: CGFloat = 18
+
+/// The palette's xmark, as a shared control.
+struct ShellPanelCloseButton: View {
+    let label: String
+    let action: () -> Void
+    /// The row it is centred in — the shared header line unless a smaller surface says otherwise.
+    var height: CGFloat = shellPanelHeaderHeight
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .font(Typography.label(.medium))
+                .foregroundStyle(Theme.textMuted)
+                .frame(height: height)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+    }
+}
+
+/// Its mirror: the same glyph size and ink, pointing back.
+struct ShellPanelBackButton: View {
+    let label: String
+    let action: () -> Void
+    /// The row it is centred in — the shared header line unless a smaller surface says otherwise.
+    var height: CGFloat = shellPanelHeaderHeight
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "chevron.backward")
+                .font(Typography.label(.medium))
+                .foregroundStyle(Theme.textMuted)
+                .frame(height: height)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+    }
+}
+
+/// A panel page's header row: optional back chevron, title (and a muted caption), trailing
+/// actions, and the close glyph's gutter — all inside `shellPanelHeaderHeight`, 18 pt from the edge.
+struct ShellPanelHeader<Trailing: View>: View {
+    let title: String
+    var subtitle: String = ""
+    var backLabel: String = "Back"
+    var onBack: (() -> Void)? = nil
+    @ViewBuilder var trailing: () -> Trailing
+
+    var body: some View {
+        HStack(spacing: 10) {
+            if let onBack {
+                ShellPanelBackButton(label: backLabel, action: onBack)
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(Typography.control(.semibold))
+                    .foregroundStyle(Theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(Typography.caption())
+                        .foregroundStyle(Theme.textMuted)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 8)
+            trailing()
+        }
+        .padding(.leading, shellPanelEdgeInset)
+        .padding(.trailing, shellPanelEdgeInset + shellOverlayCloseGutter)
+        .frame(height: shellPanelHeaderHeight)
+    }
+}
+
+extension ShellPanelHeader where Trailing == EmptyView {
+    init(title: String, subtitle: String = "", backLabel: String = "Back", onBack: (() -> Void)? = nil) {
+        self.init(title: title, subtitle: subtitle, backLabel: backLabel, onBack: onBack,
+                  trailing: { EmptyView() })
+    }
+}
 
 // MARK: - The container
 
@@ -359,11 +473,8 @@ struct ShellPanelCard<Content: View>: View {
         // Back INSIDE the card, in its own corner (user call). What stops it landing on the panes'
         // own Refresh buttons is `shellPanelCloseGutter`, which those panes read and inset by.
         .overlay(alignment: .topTrailing) {
-            ShellTitlebarButton(systemImage: "xmark",
-                                label: "Close \(accessibilityName)",
-                                action: onClose)
-                .padding(.top, 10)
-                .padding(.trailing, 10)
+            ShellPanelCloseButton(label: "Close \(accessibilityName)", action: onClose)
+                .padding(.trailing, shellPanelEdgeInset)
         }
         .accessibilityLabel(accessibilityName)
         // The panel is its own OPAQUE surface, so rows inside it keep the opaque greys rather than
@@ -554,8 +665,8 @@ struct LibraryPanel: View {
                 .font(Typography.body())
                 .foregroundStyle(Theme.textMuted)
                 .padding(.horizontal, 10)
-                .padding(.top, 6)
-                .padding(.bottom, 6)
+                // On the shared header line (the column's own 8 pt padding + this = 50 pt).
+                .frame(height: shellPanelHeaderHeight - 8)
                 .accessibilityAddTraits(.isHeader)
             ForEach(LibraryTab.allCases, id: \.self) { candidate in
                 Button {
@@ -677,10 +788,25 @@ extension View {
     /// - The rim: over a translucent material the edge is only as defined as whatever is behind it,
     ///   so a dark transcript under a dark surface would leave the boundary to the shadow alone.
     func shellFloatingSurface() -> some View {
-        background(.ultraThinMaterial, in: shellOverlayShape)
-            .background(shellOverlayShape.fill(Theme.paletteSurface.opacity(shellOverlayTintOpacity)))
-            .overlay(shellOverlayShape.strokeBorder(Theme.hairlineElevated,
-                                                    lineWidth: shellSidebarHairlineWidth))
+        shellFloatingSurface(in: shellOverlayShape)
+    }
+
+    /// The same glass in another continuous rounded rect — the composer's smaller model panel.
+    func shellFloatingSurface(cornerRadius: CGFloat) -> some View {
+        shellFloatingSurface(in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+    }
+
+    /// The glass alone — material plus the panels' tint, no rim, no shadow — for a surface that
+    /// draws its own rim (the composer, 2026-09-18).
+    func shellGlass<S: InsettableShape>(in shape: S) -> some View {
+        background(.ultraThinMaterial, in: shape)
+            .background(shape.fill(Theme.paletteSurface.opacity(shellOverlayTintOpacity)))
+    }
+
+    private func shellFloatingSurface<S: InsettableShape>(in shape: S) -> some View {
+        shellGlass(in: shape)
+            .overlay(shape.strokeBorder(Theme.hairlineElevated,
+                                        lineWidth: shellSidebarHairlineWidth))
             .shadow(color: .black.opacity(0.18), radius: 24, y: 8)
     }
 }

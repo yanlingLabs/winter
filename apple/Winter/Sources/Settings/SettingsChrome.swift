@@ -43,23 +43,32 @@ import SwiftUI
 /// about what "generous" means. Pure numbers — no view here.
 enum SettingsChrome {
     /// Continuous corners, at the radius the reference's cards read at against a 720 pt column.
-    static let cardCornerRadius: CGFloat = 12
+    static let cardCornerRadius: CGFloat = 14
     /// A row's own inset. The reference's rows are noticeably roomier than an AppKit list row;
     /// these two numbers are the whole reason the surface reads as "settings" and not "a table".
-    static let rowHorizontalPadding: CGFloat = 16
+    static let rowHorizontalPadding: CGFloat = 18
     static let rowVerticalPadding: CGFloat = 14
     /// The minimum gap between a row's text block and its trailing control.
     static let rowControlGap: CGFloat = 16
-    /// Label → its card.
-    static let groupLabelGap: CGFloat = 8
-    /// Group → group, and title → first group.
-    static let groupGap: CGFloat = 26
+    /// Label → its card. The reference sets its group labels well clear of the card they name.
+    static let groupLabelGap: CGFloat = 14
+    /// Group → group, and title → first group — the reference's roomy vertical rhythm.
+    static let groupGap: CGFloat = 40
     /// The page's margins inside the detail card.
     static let pageMargin: CGFloat = 28
-    static let pageTopInset: CGFloat = 26
+    static let pageTopInset: CGFloat = 8
+    /// A trailing control's own corner and insets — the pill the reference draws its menus and
+    /// its soft buttons in.
+    static let controlCornerRadius: CGFloat = 8
+    static let controlHorizontalPadding: CGFloat = 12
+    /// Every trailing control's height — pills, soft buttons and fields line up row to row.
+    static let controlHeight: CGFloat = 30
+    /// The Roles page's two pills, fixed so the column never follows the value's length.
+    static let roleModelPillWidth: CGFloat = 230
+    static let roleEffortPillWidth: CGFloat = 120
     /// The content column never runs the full width of a wide window — long descriptions become
     /// unreadable and a trailing toggle ends up a foot away from the label it belongs to.
-    static let contentMaxWidth: CGFloat = 720
+    static let contentMaxWidth: CGFloat = 800
 }
 
 // MARK: - The page
@@ -67,9 +76,8 @@ enum SettingsChrome {
 /// A whole settings section: the large left-aligned title, an optional one-line subtitle, an
 /// optional trailing accessory (the Refresh buttons live there), and a scrolling column of groups.
 ///
-/// **A section that uses this draws its OWN heading**, which is why `SettingsSurface.swift`'s
-/// `settingsSectionBodyDrawsItsOwnHeader` answers `true` for it — the outer `SettingsSectionView`
-/// must not print the section's name a second time above it.
+/// **Every settings section is one of these** (2026-09-18) — the page draws the heading, so the
+/// outer `SettingsSectionView` never prints one.
 struct SettingsPage<Accessory: View, Content: View>: View {
     let title: String
     let subtitle: String?
@@ -105,19 +113,16 @@ struct SettingsPage<Accessory: View, Content: View>: View {
         }
     }
 
+    /// The title alone, large and regular-weight, as the reference draws it (user call,
+    /// 2026-09-18: "make the settings tabs look like ChatGPT's"). `subtitle` is kept on the API —
+    /// the sidebar search and callers still name one — but the page no longer prints it: the
+    /// reference has no line under its title, and every page having one made them all read as
+    /// forms with instructions rather than settings.
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(Typography.emptyStateTitle)
-                    .foregroundStyle(Theme.textPrimary)
-                if let subtitle {
-                    Text(subtitle)
-                        .font(Typography.label())
-                        .foregroundStyle(Theme.textMuted)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
+            Text(title)
+                .font(Typography.settingsPageTitle)
+                .foregroundStyle(Theme.textPrimary)
             Spacer(minLength: 12)
             accessory
         }
@@ -133,9 +138,10 @@ extension SettingsPage where Accessory == EmptyView {
 
 // MARK: - The group
 
-/// The small muted label that names a card. Sentence case, never uppercased: this shell rejected
-/// the `.uppercased()` treatment for its own section labels (`ShellSidebar`'s "Recents") and the
-/// settings surface follows it.
+/// The label that names a card: primary ink, a step above the rows, medium weight, flush with the
+/// card's edge — the reference's "Permissions" / "General" headings. Sentence case, never
+/// uppercased: this shell rejected the `.uppercased()` treatment for its own section labels
+/// (`ShellSidebar`'s "Recents") and the settings surface follows it.
 struct SettingsGroupLabel: View {
     let text: String
 
@@ -143,9 +149,8 @@ struct SettingsGroupLabel: View {
 
     var body: some View {
         Text(text)
-            .font(Typography.caption(.semibold))
-            .foregroundStyle(Theme.textMuted)
-            .padding(.horizontal, 4)
+            .font(Typography.bodyLarge(.medium))
+            .foregroundStyle(Theme.textPrimary)
     }
 }
 
@@ -190,10 +195,13 @@ struct SettingsCard<Content: View>: View {
             VStack(spacing: 0) {
                 ForEach(rows.indices, id: \.self) { index in
                     rows[index]
+                    // INSET by the row padding, as the reference draws them: a rule that ran into
+                    // the rim read as the card being cut into boxes rather than listing rows.
                     if index < rows.count - 1 {
                         Rectangle()
                             .fill(Theme.hairlineElevated)
                             .frame(height: 1)
+                            .padding(.horizontal, SettingsChrome.rowHorizontalPadding)
                     }
                 }
             }
@@ -237,13 +245,15 @@ struct SettingsRow<Detail: View, Control: View>: View {
     var body: some View {
         HStack(alignment: .center, spacing: SettingsChrome.rowControlGap) {
             VStack(alignment: .leading, spacing: 3) {
+                // Regular weight at body size, never semibold: the reference's row titles are
+                // plain text, and bold titles made every card read as a stack of headings.
                 Text(title)
-                    .font(Typography.control(.semibold))
+                    .font(Typography.body())
                     .foregroundStyle(Theme.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let description {
                     Text(description)
-                        .font(Typography.caption())
+                        .font(Typography.control())
                         .foregroundStyle(Theme.textMuted)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -275,14 +285,15 @@ struct SettingsRowNote: View {
 
     var body: some View {
         Text(text)
-            .font(Typography.caption())
+            .font(Typography.control())
             .foregroundStyle(Theme.textMuted)
             .fixedSize(horizontal: false, vertical: true)
     }
 }
 
-/// A read-only row: the value IS the control. Monospaced by default, because almost everything
-/// read-only on this surface is an identifier, a path or a count and wants a fixed advance.
+/// A read-only row: the value IS the control. Sans by default, like the reference's own values
+/// ("/Users/…/Codex" aside, which it still sets in sans); pass `monospaced: true` for a hash or a
+/// raw identifier that genuinely wants a fixed advance.
 ///
 /// `middleTruncated` exists for a socket path or a folder: a long value must shrink rather than
 /// push the row's title off the card, and the head and the tail are the informative halves.
@@ -290,7 +301,7 @@ struct SettingsValueRow: View {
     let title: String
     var description: String? = nil
     let value: String
-    var monospaced: Bool = true
+    var monospaced: Bool = false
     var middleTruncated: Bool = false
     /// True when the value is an absence ("—", "None") rather than a fact — rendered in the muted
     /// tone so a missing value never reads as a real one.
@@ -299,8 +310,8 @@ struct SettingsValueRow: View {
     var body: some View {
         SettingsRow(title, description: description) {
             Text(value)
-                .font(monospaced ? Typography.controlMono() : Typography.control())
-                .foregroundStyle(isMuted ? Theme.textMuted : Theme.textPrimary)
+                .font(monospaced ? Typography.controlMono() : Typography.body())
+                .foregroundStyle(isMuted ? Theme.textMuted : Theme.textSecondary)
                 .lineLimit(middleTruncated ? 1 : nil)
                 .truncationMode(.middle)
                 .textSelection(.enabled)
@@ -328,7 +339,7 @@ struct SettingsNoteRow: View {
         // there is no error token in `Theme` and inventing one here would be a twelfth palette
         // value nothing else uses.
         Text(text)
-            .font(Typography.label())
+            .font(Typography.control())
             .foregroundStyle(isError ? AnyShapeStyle(Color.red) : AnyShapeStyle(Theme.textMuted))
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -392,11 +403,117 @@ struct SettingsButton: View {
 
     var body: some View {
         Button(title, role: isDestructive ? .destructive : nil, action: action)
-            .buttonStyle(.bordered)
-            .controlSize(.regular)
-            .font(Typography.control())
+            .buttonStyle(SettingsSoftButtonStyle(isDestructive: isDestructive))
             .disabled(!isEnabled)
             .fixedSize()
+    }
+}
+
+/// The reference's soft button ("Change"): a filled rounded rect with no bezel and no rim, a touch
+/// lighter under the pointer and while pressed. Destructive buttons keep the same shape and take
+/// their danger from the red label alone.
+struct SettingsSoftButtonStyle: ButtonStyle {
+    var isDestructive: Bool = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        SoftButtonBody(configuration: configuration, isDestructive: isDestructive)
+    }
+
+    private struct SoftButtonBody: View {
+        let configuration: ButtonStyleConfiguration
+        let isDestructive: Bool
+        @Environment(\.isEnabled) private var isEnabled
+        @State private var isHovered = false
+
+        var body: some View {
+            configuration.label
+                .font(Typography.body())
+                .foregroundStyle(isDestructive ? AnyShapeStyle(Color.red) : AnyShapeStyle(Theme.textPrimary))
+                .padding(.horizontal, SettingsChrome.controlHorizontalPadding)
+                .frame(height: SettingsChrome.controlHeight)
+                .background(
+                    RoundedRectangle(cornerRadius: SettingsChrome.controlCornerRadius, style: .continuous)
+                        .fill(isHovered || configuration.isPressed ? Theme.chromeHover : Theme.controlSurface)
+                )
+                .opacity(isEnabled ? 1 : 0.45)
+                .contentShape(Rectangle())
+                .onHover { isHovered = $0 }
+        }
+    }
+}
+
+/// The reference's menu pill ("Finder ⌄", "Auto detect ⌄"): the current value in sans with a small
+/// chevron, inside a hairline-rimmed rounded rect. A LABEL, not a button — callers wrap it in their
+/// own `Button` or `Menu`, so the pill never decides what a click does.
+struct SettingsMenuPill<Leading: View>: View {
+    let text: String
+    var isMuted: Bool = false
+    /// A FIXED width, when given (user call, 2026-09-18): a column of pills whose widths follow
+    /// their values reads ragged and jumps when a value changes. The text truncates inside it.
+    var width: CGFloat? = nil
+    private let leading: Leading
+
+    init(_ text: String, isMuted: Bool = false, width: CGFloat? = nil,
+         @ViewBuilder leading: () -> Leading) {
+        self.text = text
+        self.isMuted = isMuted
+        self.width = width
+        self.leading = leading()
+    }
+
+    @State private var isHovered = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            leading
+            Text(text)
+                .font(Typography.body())
+                .foregroundStyle(isMuted ? Theme.textMuted : Theme.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if width != nil { Spacer(minLength: 4) }
+            Image(systemName: "chevron.down")
+                .font(Typography.caption(.medium))
+                .foregroundStyle(Theme.textSecondary)
+        }
+        .padding(.horizontal, SettingsChrome.controlHorizontalPadding)
+        .frame(width: width, height: SettingsChrome.controlHeight)
+        .background(
+            RoundedRectangle(cornerRadius: SettingsChrome.controlCornerRadius, style: .continuous)
+                .fill(isHovered ? Theme.chromeHover : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: SettingsChrome.controlCornerRadius, style: .continuous)
+                .strokeBorder(Theme.hairlineElevated, lineWidth: 1)
+        )
+        .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
+    }
+}
+
+extension SettingsMenuPill where Leading == EmptyView {
+    init(_ text: String, isMuted: Bool = false, width: CGFloat? = nil) {
+        self.init(text, isMuted: isMuted, width: width, leading: { EmptyView() })
+    }
+}
+
+/// A text field in the settings vocabulary: the pill's continuous corner and hairline rim instead
+/// of AppKit's square-ish `.roundedBorder` bezel, so fields and buttons share one corner.
+struct SettingsTextFieldStyle: TextFieldStyle {
+    func _body(configuration: TextField<Self._Label>) -> some View {
+        configuration
+            .textFieldStyle(.plain)
+            .font(Typography.control())
+            .padding(.horizontal, 10)
+            .frame(height: SettingsChrome.controlHeight)
+            .background(
+                RoundedRectangle(cornerRadius: SettingsChrome.controlCornerRadius, style: .continuous)
+                    .fill(Theme.controlSurface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: SettingsChrome.controlCornerRadius, style: .continuous)
+                    .strokeBorder(Theme.hairlineElevated, lineWidth: 1)
+            )
     }
 }
 
