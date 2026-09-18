@@ -168,8 +168,6 @@ struct SettingsRoleEffortPicker: View {
     var body: some View {
         ShellPanelCard(accessibilityName: settingsRoleEffortPickerTitle(role), onClose: onClose) {
             VStack(alignment: .leading, spacing: 0) {
-                header
-                Divider()
                 HStack(spacing: 0) {
                     effortColumn
                     Divider()
@@ -180,19 +178,12 @@ struct SettingsRoleEffortPicker: View {
         }
     }
 
-    // MARK: Header
-
-    private var header: some View {
-        // Whose vocabulary this is: efforts are per model, so the tag is the context.
-        ShellPanelHeader(title: settingsRoleEffortPickerTitle(role),
-                         subtitle: value.model ?? settingsModelRoleClearedValue)
-    }
-
     // MARK: Left column
 
     private var effortColumn: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 1) {
+                ShellPanelColumnTitle(settingsRoleEffortPickerTitle(role))
                 columnRow(roleEffortModelDefaultTitle, choice: nil)
                 ForEach(options, id: \.self) { option in
                     columnRow(option, choice: option)
@@ -230,6 +221,15 @@ struct SettingsRoleEffortPicker: View {
     // MARK: Right side
 
     private var detail: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // The title line: whose vocabulary this is — efforts are per model.
+            ShellPanelPaneHeading(value.model ?? settingsModelRoleClearedValue)
+            detailBody
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var detailBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 if case let .stale(stale) = selection { staleNote(stale) }
@@ -259,7 +259,8 @@ struct SettingsRoleEffortPicker: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .padding(14)
+            .padding(.horizontal, shellPanelEdgeInset)
+            .padding(.bottom, 14)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

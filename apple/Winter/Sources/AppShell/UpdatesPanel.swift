@@ -52,6 +52,10 @@ private struct UpdatesPanelBody: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: updatesPanelSectionSpacing) {
+                // The panel names itself on the shared title line, as the library does.
+                ShellPanelTitle("Updates")
+                    .frame(height: shellPanelHeaderHeight)
+                    .padding(.bottom, -updatesPanelSectionSpacing)
                 statusSection
                 if let notes = presenter.notes {
                     ReleaseNotesSection(notes: notes, link: presenter.notesURL)
@@ -82,8 +86,6 @@ private struct UpdatesPanelBody: View {
                 Text(updateStatusHeadline(presenter.status))
                     .font(Typography.bodyLarge(.medium))
                     .foregroundStyle(Theme.textPrimary)
-                    // On the shared header line, level with the close glyph.
-                    .frame(height: shellPanelHeaderHeight)
                 if let detail = updateStatusDetail(presenter.status) {
                     Text(detail)
                         .font(Typography.caption())

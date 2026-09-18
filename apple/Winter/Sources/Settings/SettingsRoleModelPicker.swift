@@ -1143,12 +1143,13 @@ struct ModelFamilyPickerCard: View {
     var body: some View {
         ShellPanelCard(accessibilityName: title, onClose: onClose) {
             VStack(alignment: .leading, spacing: 0) {
-                header
-                Divider()
                 switch step {
                 case .models:
+                    // No header line of its own: the title heads the family column, as "Library"
+                    // heads the library's tab column.
                     modelsStep
                 case let .providers(modelKey):
+                    header
                     providersStep(modelKey)
                 }
                 footer
@@ -1178,7 +1179,6 @@ struct ModelFamilyPickerCard: View {
 
     private var header: some View {
         ShellPanelHeader(title: headerTitle,
-                         subtitle: headerSubtitle,
                          backLabel: "Back to models",
                          onBack: backAction)
     }
@@ -1198,12 +1198,6 @@ struct ModelFamilyPickerCard: View {
         }
     }
 
-    private var headerSubtitle: String {
-        switch step {
-        case .models: return subtitle
-        case .providers: return "Who serves it"
-        }
-    }
 
     private func modelLabel(_ modelKey: String) -> String {
         groups.flatMap(\.models).first { $0.id == modelKey }?.label ?? modelKey
@@ -1223,6 +1217,7 @@ struct ModelFamilyPickerCard: View {
     private var familyColumn: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 1) {
+                ShellPanelColumnTitle(title)
                 ForEach(groups) { group in
                     Button {
                         familyId = group.id
@@ -1251,6 +1246,14 @@ struct ModelFamilyPickerCard: View {
 
     @ViewBuilder
     private var modelColumn: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ShellPanelPaneHeading(selectedGroup?.title ?? "")
+            modelList
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private var modelList: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 1) {
                 if offersClear {
