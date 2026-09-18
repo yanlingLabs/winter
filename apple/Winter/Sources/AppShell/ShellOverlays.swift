@@ -313,19 +313,7 @@ struct ShellPanelCard<Content: View>: View {
         // own background right to its own edges, so without this the card's bottom corners are
         // square wherever the content reaches them — visible on the devices panel.
         .clipShape(shellOverlayShape)
-        // `.ultraThinMaterial` (user call), not an `NSVisualEffectView`: a SwiftUI material already
-        // blends WITHIN the window, which is exactly what a panel floating over the transcript
-        // wants, and it is the thinnest of the set. The sidebar's behind-window vibrancy is a
-        // different job and keeps its own view (`ShellVibrancyBackground`).
-        .background(.ultraThinMaterial, in: shellOverlayShape)
-        .background(shellOverlayShape.fill(Theme.paletteSurface.opacity(shellOverlayTintOpacity)))
-        // The rim (user call, 2026-09-18). It earns its place more here than on an opaque card:
-        // over `.ultraThinMaterial` the edge is only as defined as whatever happens to be behind
-        // it, so a dark transcript under a dark panel leaves the boundary to the shadow alone.
-        // `hairlineElevated` is the brand's own line for a surface sitting ABOVE the plane.
-        .overlay(shellOverlayShape.strokeBorder(Theme.hairlineElevated,
-                                                lineWidth: shellSidebarHairlineWidth))
-        .shadow(color: .black.opacity(0.18), radius: 24, y: 8)
+        .shellFloatingSurface()
         // Back INSIDE the card, in its own corner (user call). What stops it landing on the panes'
         // own Refresh buttons is `shellPanelCloseGutter`, which those panes read and inset by.
         .overlay(alignment: .topTrailing) {
@@ -503,5 +491,29 @@ struct LibraryPanelPlaceholderBody: View {
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+// MARK: - The floating surface, shared
+
+extension View {
+    /// The material every floating surface wears — the three panels, the Roles pickers AND the ⌘K
+    /// search palette (2026-09-18, user call: the palette was the one still painting an opaque
+    /// fill). ONE modifier, so the four cannot drift into four slightly different glasses.
+    ///
+    /// - `.ultraThinMaterial`, not an `NSVisualEffectView`: a SwiftUI material already blends
+    ///   WITHIN the window, which is what a surface floating over the transcript wants, and it is
+    ///   the thinnest of the set. The sidebar's behind-window vibrancy is a different job and keeps
+    ///   its own view (`ShellVibrancyBackground`).
+    /// - A whisper of `paletteSurface` under it, so the glass sits in the app's colour family
+    ///   rather than reading as raw system chrome.
+    /// - The rim: over a translucent material the edge is only as defined as whatever is behind it,
+    ///   so a dark transcript under a dark surface would leave the boundary to the shadow alone.
+    func shellFloatingSurface() -> some View {
+        background(.ultraThinMaterial, in: shellOverlayShape)
+            .background(shellOverlayShape.fill(Theme.paletteSurface.opacity(shellOverlayTintOpacity)))
+            .overlay(shellOverlayShape.strokeBorder(Theme.hairlineElevated,
+                                                    lineWidth: shellSidebarHairlineWidth))
+            .shadow(color: .black.opacity(0.18), radius: 24, y: 8)
     }
 }

@@ -121,11 +121,11 @@ struct SidebarSearchPalette: View {
             }
         }
         .frame(width: searchPaletteWidth)
-        .background(
-            RoundedRectangle(cornerRadius: searchPaletteCornerRadius, style: .continuous)
-                .fill(Theme.paletteSurface)
-                .shadow(color: .black.opacity(0.18), radius: 24, y: 8)
-        )
+        // The SAME glass the panels wear (2026-09-18), through the one shared modifier — this was
+        // the last floating surface still painting an opaque `paletteSurface`. Clipped first so a
+        // highlighted row cannot square off the corner it sits in.
+        .clipShape(shellOverlayShape)
+        .shellFloatingSurface()
         // The query resets on every open (the reference does) — a palette that reopens holding
         // last time's search is a small annoyance repeated forever.
         .onAppear {

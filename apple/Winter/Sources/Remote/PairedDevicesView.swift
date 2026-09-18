@@ -55,9 +55,17 @@ struct PairedDevicesView: View {
                 List {
                     ForEach(sortedRecords, id: \.phoneEndpointID) { record in
                         row(for: record)
+                            // Row backgrounds off too, or each row repaints the plane the list no
+                            // longer does and the rows come back as opaque stripes.
+                            .listRowBackground(Color.clear)
                     }
                 }
                 .listStyle(.inset)
+                // A `List` paints its own OPAQUE background, which is why the devices panel was
+                // glass at the header and solid below it (user report, 2026-09-18). Hidden, the list
+                // sits on whatever the host gives it — the panel's material here, the card surface
+                // in the Dashboard — instead of on a plane of its own.
+                .scrollContentBackground(.hidden)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
