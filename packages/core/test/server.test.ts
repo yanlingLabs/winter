@@ -794,6 +794,38 @@ describe("daemon IPC", () => {
     c.close();
   });
 
+  test("daemon settings surface batch 3 (item 3a): mcp.disable flips a REAL boot-started server's mcp.list status to disabled, and mcp.enable flips it back", async () => {
+    if (process.platform !== "darwin") return; // spawns a child process
+    const { FakeProvider } = await import("../src/agent/fake-provider");
+    const fixture = join(import.meta.dir, "agent", "mcp", "fake-mcp-server.ts");
+    const home = mkdtempSync(join(tmpdir(), "winter-daemon-"));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({
+      schemaVersion: 3,
+      provider: { model: "codex-oauth/gpt-5.4" },
+      mcpServers: { fake: { command: "bun", args: ["run", fixture] } },
+    }, null, 2));
+    const secrets = new FileSecretStore(join(home, "test-secrets"));
+    const fake = new FakeProvider([[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]]);
+    daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
+    harnessToken = daemon.tokens.harness;
+
+    const c = await TestClient.connect(daemon.socketPath);
+    await c.hello(harnessToken, "mcp-disable-lister");
+    // Boot-time: the manager actually connected it.
+    expect((await c.request(METHODS.mcpList, {})).result.servers).toEqual([{ name: "fake", status: "connected", toolNames: ["echo"], source: "user" }]);
+
+    const disableRes = await c.request(METHODS.mcpDisable, { name: "fake" });
+    expect(disableRes.result).toEqual({ ok: true, name: "fake", enabled: false });
+    // The manager's own boot-time cache still says "connected" internally, but mcp.list overlays
+    // the LIVE settings — the panel must never show a server the user just disabled as running.
+    expect((await c.request(METHODS.mcpList, {})).result.servers).toEqual([{ name: "fake", status: "disabled", toolNames: ["echo"], source: "user" }]);
+
+    const enableRes = await c.request(METHODS.mcpEnable, { name: "fake" });
+    expect(enableRes.result).toEqual({ ok: true, name: "fake", enabled: true });
+    expect((await c.request(METHODS.mcpList, {})).result.servers).toEqual([{ name: "fake", status: "connected", toolNames: ["echo"], source: "user" }]);
+    c.close();
+  });
+
   test("plugins.list returns [] when no PluginStore is wired into the server", async () => {
     await boot(); // no `plugins` opt passed by the daemon in this test's boot() helper
     const c = await TestClient.connect(daemon.socketPath);

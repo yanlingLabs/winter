@@ -15,7 +15,7 @@
 import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { isVendorCompliantProjectKey, transcriptProjectKey, type CredentialRef, type PermissionResult, type ProviderSelection } from "@yanlinglabs/winter-agent-sdk";
+import { isVendorCompliantProjectKey, transcriptProjectKey, type CredentialRef, type McpServerConfig, type PermissionResult, type ProviderSelection } from "@yanlinglabs/winter-agent-sdk";
 import { createApprovalBridge, officialConnectionEnv, officialCredentialPlan, type ApprovalRequest, type OfficialPermissionMode as RouterOfficialPermissionMode, type RouterOfficialInput, type RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import type { ContextAssembler } from "../agent/context";
 import type { SessionApprovalPolicy } from "../agent/gate";
@@ -374,6 +374,15 @@ export interface OfficialInputDeps {
   /** This session's already-built per-session Winter capability servers (`buildCapabilitiesFor`'s
    *  own output) — mirrored onto the official leg by `officialCapabilityServersFor` (P8c-4). */
   capabilities: CapabilityServerRecord;
+  /** Daemon settings surface batch 3 (item 3): the SAME configured-server map the Winter leg's
+   *  `extraMcpServers` produces (`external-mcp.ts`'s `configuredMcpServersFor` — `settings.
+   *  mcpServers` + a trusted project's `.mcp.json`, minus anything in `settings.mcp.disabled`) —
+   *  closes a pre-existing gap where user/project-configured MCP servers reached the Winter leg
+   *  only. `session-driver.ts`'s `inputDeps()` already ran `assertNoCapabilityCollision` against it
+   *  before this deps object was built, so this function trusts it collision-free and only decides
+   *  merge ORDER (capability servers win, same precedence the Winter leg's own `{ ...extra,
+   *  ...capabilities }` establishes). `undefined`/empty ⇒ byte-identical to before item 3. */
+  configuredMcpServers?: Readonly<Record<string, McpServerConfig>>;
   /** Everything `officialBrokerFor`/`canUseToolFor` needs, MINUS the three fields this function
    *  fills from `OfficialSessionInput` itself (never let a caller's stale `sessionId`/`mode`/`cwd`
    *  silently win over the session actually being opened). */
@@ -503,9 +512,13 @@ export function officialInputFor(
     ...(input.effort === undefined ? {} : { effort: input.effort }),
   });
 
+  // Batch 3 (item 3): configured servers FIRST, Winter's own capability servers LAST — the same
+  // precedence order `session-driver.ts`'s Winter-leg builder uses (`{ ...extra, ...capabilities }`),
+  // so a configured server can never shadow a daemon-owned `winter__<key>` one on this leg either
+  // (the collision itself was already refused, typed, before this deps object was built).
   const mcpServers = deps.officialPeer === undefined
     ? {}
-    : officialCapabilityServersFor(deps.capabilities, deps.officialPeer as unknown as OfficialMcpModule);
+    : { ...(deps.configuredMcpServers ?? {}), ...officialCapabilityServersFor(deps.capabilities, deps.officialPeer as unknown as OfficialMcpModule) };
 
   const base: Record<string, string> = minimalOsEnvironment(env);
   // Phase 9c (P9c-1): defence in depth (see `FORBIDDEN_CHILD_ENV`'s own doc) — a no-op today given

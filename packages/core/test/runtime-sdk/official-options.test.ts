@@ -797,6 +797,63 @@ describe("effectiveOfficialAuthFor (O6, provider.status; WS-20: presence alone)"
   });
 });
 
+// Daemon settings surface batch 3 (item 2): `settings.permissions.deny` must reach this leg's
+// `options.settings.permissions.deny` too — `permissionDenyRulesFor` is the ONE function both
+// `buildWinterOptions` (mode-options.ts) and this leg's construction site call, so a divergence here
+// would mean the two legs enforce DIFFERENT deny lists for the identical settings.json.
+describe("officialInputFor — item 2: settings.permissions.deny reaches this leg too", () => {
+  test("a Skill(<name>) deny rule (or any hand-written rule) rides alongside the fixed control-plane fence", () => {
+    const home = "/Users/x/.winter-test-home";
+    const settings = Settings.parse({
+      schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
+      permissions: { deny: ["Skill(writing-skills)", "Agent(fork)"] },
+    });
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+    const result = officialInputFor(input, minimalDeps({ home, settings }));
+    if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
+    const deny = (result.input.options as { settings?: { permissions?: { deny?: string[] } } }).settings?.permissions?.deny ?? [];
+    expect(deny).toEqual([...controlPlaneDenyRules(home), "Skill(writing-skills)", "Agent(fork)"]);
+  });
+
+  test("an absent settings block changes nothing — just the fixed control-plane fence", () => {
+    const home = "/Users/x/.winter-test-home";
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+    const result = officialInputFor(input, minimalDeps({ home, settings: undefined }));
+    if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
+    const deny = (result.input.options as { settings?: { permissions?: { deny?: string[] } } }).settings?.permissions?.deny ?? [];
+    expect(deny).toEqual(controlPlaneDenyRules(home));
+  });
+});
+
+// Daemon settings surface batch 3 (item 3): closes the pre-existing gap where a
+// user/project-configured MCP server reached the Winter leg only (`extraMcpServers`,
+// `external-mcp.ts`) — `configuredMcpServers` on `OfficialInputDeps` is threaded onto this leg's own
+// `mcpServers`, capability servers LAST so they can never be shadowed (the collision itself is
+// refused, typed, by `session-driver.ts`'s `inputDeps()` BEFORE this deps object is ever built).
+describe("officialInputFor — item 3: configured MCP servers (HTTP/SSE/stdio) reach this leg too", () => {
+  test("an HTTP server and an SSE server configured in settings.mcpServers land in this leg's mcpServers, unchanged", () => {
+    const configuredMcpServers = {
+      httpOne: { type: "http" as const, url: "https://example.com/mcp", headers: { Authorization: "Bearer t" } },
+      sseOne: { type: "sse" as const, url: "https://example.com/sse" },
+    };
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+    // `officialPeer` must be non-undefined for `mcpServers` to be assembled at all (see this
+    // function's own `deps.officialPeer === undefined ? {} : …` branch) — an EMPTY `capabilities`
+    // record means `officialCapabilityServersFor` never actually touches the peer object, so a bare
+    // placeholder is enough here; this test is about the CONFIGURED side, not the capability side.
+    const result = officialInputFor(input, minimalDeps({ officialPeer: {} as never, capabilities: {}, configuredMcpServers }));
+    if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
+    expect(result.input.mcpServers).toEqual(configuredMcpServers);
+  });
+
+  test("absent configuredMcpServers is byte-identical to before item 3 (empty mcpServers when there are no capability servers either)", () => {
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+    const result = officialInputFor(input, minimalDeps({ officialPeer: {} as never, capabilities: {} }));
+    if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
+    expect(result.input.mcpServers).toEqual({});
+  });
+});
+
 // Daemon settings surface (2026-09-17 plan, item 3) — SDK-SURFACE WALL, pinned. `agent-definitions.ts`'s
 // parsed `<home>/agents/*.md` map has no field to ride on this leg's `OptionsTemplatePolicy` at the
 // currently pinned router version (`REQUIRED_WINTER_RUNTIME_SDK`, versions.ts) — see this block's

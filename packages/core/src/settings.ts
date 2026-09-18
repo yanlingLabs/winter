@@ -175,15 +175,59 @@ export const PermissionsSettings = z.object({
  *  answer cannot drift (the same pairing `retention.ts` keeps for its two windows). */
 export const DEFAULT_WINTER_IDLE_TIMEOUT_SEC = 900;
 
+/** Daemon settings surface batch 3 (item 3b): the three `settings.mcpServers` entry shapes,
+ *  mirroring the agent SDK's own `Options.mcpServers` process-transport union field-for-field
+ *  (`McpStdioServerConfig`/`McpHttpServerConfig`/`McpSSEServerConfig`, `@yanlinglabs/winter-agent-sdk`)
+ *  rather than inventing a fourth shape — an `McpSdkServerConfig` (in-process, carries a live JS
+ *  instance) has no settings-file representation and is deliberately NOT one of these three.
+ *  `enabled` is NOT one of the mirrored SDK fields — see `mcp.disabled` below for why Winter's own
+ *  "disable" spelling is a separate, name-keyed list instead of a per-entry flag here. */
+const McpStdioServerSettings = z.object({
+  type: z.literal("stdio"),
+  command: z.string().min(1),
+  args: z.array(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
+});
+const McpHttpServerSettings = z.object({
+  type: z.literal("http"),
+  url: z.string().url(),
+  headers: z.record(z.string(), z.string()).optional(),
+});
+const McpSSEServerSettings = z.object({
+  type: z.literal("sse"),
+  url: z.string().url(),
+  headers: z.record(z.string(), z.string()).optional(),
+});
+/** A pre-item-3b entry (no `type` field at all) is stdio — the shape every `settings.mcpServers`
+ *  entry has always had — normalized to the explicit-discriminant form BEFORE the discriminated
+ *  union runs, so an existing home's settings.json keeps parsing byte-for-byte with no migration.
+ *  A malformed entry (missing `command` on a stdio-shaped one, a non-URL `url`, an unrecognized
+ *  `type`, …) fails with the discriminated union's own per-branch message — a useful "which shape
+ *  did you mean" error rather than a plain-union's aggregated wall of text. */
+const McpServerSettingsEntry = z.preprocess(
+  (v) => (v && typeof v === "object" && !Array.isArray(v) && !("type" in v) ? { ...(v as object), type: "stdio" } : v),
+  z.discriminatedUnion("type", [McpStdioServerSettings, McpHttpServerSettings, McpSSEServerSettings]),
+);
+export type McpServerSettingsEntry = z.infer<typeof McpServerSettingsEntry>;
+
 export const Settings = z.object({
   schemaVersion: z.literal(3),
   provider: ProviderSettings,
   permissions: PermissionsSettings.optional(),
-  mcpServers: z.record(z.string(), z.object({
-    command: z.string().min(1),
-    args: z.array(z.string()).optional(),
-    env: z.record(z.string(), z.string()).optional(),
-  })).optional(),
+  mcpServers: z.record(z.string(), McpServerSettingsEntry).optional(),
+  /** Daemon settings surface batch 3 (item 3a): which CONFIGURED MCP servers are disabled, by
+   *  NAME. A name-keyed denylist — not a per-entry `enabled` flag on `mcpServers` above — because
+   *  it is the one shape that can name a server regardless of which tier configured it (today only
+   *  `settings.mcpServers`, but a trusted project's `.mcp.json` server shares the same tool-name
+   *  key space and could be named here too without needing its own settings-file entry to carry a
+   *  flag on). Mirrors claude's own `disabledMcpjsonServers` concept — same idea, Winter's own
+   *  settings shape (a flat name list, not nested under `mcpServers` itself, so disabling a server
+   *  never touches its config block). A disabled server is withheld from BOTH legs
+   *  (`external-mcp.ts`'s `configuredMcpServersFor`) and from the daemon's own boot-time
+   *  `McpManager.startAll` (`daemon.ts`), and `mcp.list` reports it as `status: "disabled"`. */
+  mcp: z.object({
+    disabled: z.array(z.string()).optional(),
+  }).optional(),
   reviewer: z.object({
     enabled: z.boolean().optional(),
     model: ModelTagSchemaCore.optional(),
@@ -635,6 +679,44 @@ export function legacyProjectFilesReadEnabled(settings: Settings | null | undefi
 export function providerBaseUrlFor(settings: Settings | null | undefined, providerId: string): string | undefined {
   const url = settings?.providers?.[providerId]?.baseUrl;
   return url === undefined || url.length === 0 ? undefined : url;
+}
+
+/**
+ * Daemon settings surface batch 3 (item 3): `settings.mcpServers` narrowed to the STDIO entries the
+ * daemon's own `McpManager` can actually run (`daemon.ts`'s boot-time `mcp.startAll` call) — an
+ * HTTP/SSE entry has no in-daemon client (`external-mcp.ts`'s own header explains why that is fine:
+ * only the spawned child ever connects to those), so it is silently excluded here rather than
+ * passed to a manager that would crash on a missing `command`. Also excludes anything named in
+ * `settings.mcp.disabled` (item 3a) — the daemon's own shared registry must not run a server the
+ * user disabled any more than a session's `Options.mcpServers` should. Shape matches
+ * `agent/mcp/manager.ts`'s own `McpServerConfig` (`{command, args?, env?}`) field-for-field.
+ */
+export function stdioMcpServersFor(settings: Settings | null | undefined): Record<string, { command: string; args?: string[]; env?: Record<string, string> }> {
+  const out: Record<string, { command: string; args?: string[]; env?: Record<string, string> }> = {};
+  const disabled = new Set(settings?.mcp?.disabled ?? []);
+  for (const [name, entry] of Object.entries(settings?.mcpServers ?? {})) {
+    if (entry.type !== "stdio" || disabled.has(name)) continue;
+    out[name] = { command: entry.command, ...(entry.args === undefined ? {} : { args: entry.args }), ...(entry.env === undefined ? {} : { env: entry.env }) };
+  }
+  return out;
+}
+
+/**
+ * Daemon settings surface batch 3 (item 3a): pure `Settings -> Settings` transform toggling ONE
+ * server's membership in `settings.mcp.disabled` — the same "load, transform, save" pattern
+ * `setSkillDenied`/`setModelRole` already use (`ipc/server.ts`'s `mcp.enable`/`mcp.disable`
+ * handlers). `disabled: true` adds the name (a no-op if already present); `disabled: false` removes
+ * it (a no-op if absent). Never validates `name` against the currently-configured server list —
+ * disabling a server before it exists in `settings.mcpServers` (or one only a trusted project's
+ * `.mcp.json` will ever configure) is a legitimate pre-emptive block, same posture `skillDenyRule`
+ * takes for a skill that hasn't been written yet.
+ */
+export function setMcpServerDisabled(settings: Settings, name: string, disabled: boolean): Settings {
+  const current = settings.mcp?.disabled ?? [];
+  const next = disabled
+    ? (current.includes(name) ? current : [...current, name])
+    : current.filter((n) => n !== name);
+  return { ...settings, mcp: { ...settings.mcp, disabled: next } };
 }
 
 /**

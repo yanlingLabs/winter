@@ -156,7 +156,13 @@ describe("loadSettings", () => {
   test("mcpServers parses; absent → undefined; legacy migration keeps working", () => {
     const s = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, mcpServers: { everything: { command: "npx", args: ["-y", "@modelcontextprotocol/server-everything"], env: { X: "1" } } } });
     if (!s.mcpServers) throw new Error("mcpServers must be defined");
-    expect(s.mcpServers["everything"]?.command).toBe("npx");
+    // Daemon settings surface batch 3 (item 3b): a `type`-less entry (the pre-item-3b shape every
+    // home's settings.json already has on disk) normalizes to stdio -- byte-identical acceptance,
+    // just now an explicit discriminant on the parsed object.
+    const everything = s.mcpServers["everything"]!;
+    expect(everything.type).toBe("stdio");
+    if (everything.type !== "stdio") throw new Error("unreachable");
+    expect(everything.command).toBe("npx");
     const none = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } });
     expect(none.mcpServers).toBeUndefined();
   });

@@ -17,7 +17,7 @@ import { ensureOutdir } from "./sessions/outdir";
 import { writeDiff, type DiffHeader } from "./diffs/store";
 import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
-import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, INTERNAL_PROVIDER_IDS, type Settings } from "./settings";
+import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, type Settings } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
@@ -1853,7 +1853,12 @@ export async function startDaemon(opts: {
     // exists across every later startAll/ensureProject/startPlugins call this `mcp` instance ever
     // makes. Deferred like schedule/notebook_edit/worktree above — specialized, not needed most
     // turns.
-    await mcp.startAll(settings?.mcpServers ?? {});
+    // Daemon settings surface batch 3 (item 3): the daemon's own shared registry can only ever run
+    // STDIO servers (no in-daemon HTTP/SSE client — `external-mcp.ts`'s header explains why that's
+    // fine, the spawned child connects to those itself) and must not start anything the user has
+    // disabled (`settings.mcp.disabled`) — `stdioMcpServersFor` is the one filter both facts go
+    // through (settings.ts).
+    await mcp.startAll(stdioMcpServersFor(settings));
     // Plugin MCP servers start only with explicit settings consent (mcpEnabled = enabled &&
     // !disabled); a plugin's skills are always live (SkillStore above), but its MCP/manifest
     // content is the seam that needs the user opting in via settings.plugins.enabled AND,

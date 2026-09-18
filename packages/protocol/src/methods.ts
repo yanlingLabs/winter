@@ -479,14 +479,44 @@ export const SkillsDeleteResult = z.object({});
 export const SettingsSetSkillDeniedParams = z.object({ name: z.string().min(1), denied: z.boolean() });
 export const SettingsSetSkillDeniedResult = z.object({ ok: z.literal(true), name: z.string(), denied: z.boolean(), rule: z.string() });
 
+/**
+ * Daemon settings surface batch 3 (item 3a): `status` gains two values — `"disabled"` (named in
+ * `settings.mcp.disabled`; withheld from both legs) and `"unmanaged"` (a configured HTTP/SSE server
+ * the DAEMON never itself connects to — no in-daemon client for those transports, see
+ * `external-mcp.ts`'s header — reported so the panel can distinguish "never even attempted" from
+ * "attempted and failed"). Both are ADDITIVE enum members on an existing RPC result field (not a
+ * `SessionEvent` variant), so this needs none of the protocol-change checklist's event steps; the
+ * Swift side stores this field as a plain `String`, never an exhaustive `switch`, so widening it
+ * here cannot break `apple/WinterKit`'s build. `source`'s own enum is untouched (still
+ * `"user"|"project"|"plugin"` — no "the daemon itself" slot, per this schema's neighboring RPCs'
+ * own precedent). `transport` is new and optional — set for every settings-configured (`"user"`)
+ * row, omitted for `"project"`/`"plugin"` rows (always stdio today, so it would say nothing new).
+ */
 export const McpServerStatusSchema = z.object({
   name: z.string(),
-  status: z.enum(["connected", "failed"]),
+  status: z.enum(["connected", "failed", "disabled", "unmanaged"]),
   toolNames: z.array(z.string()),
   source: z.enum(["user", "project", "plugin"]),
+  transport: z.enum(["stdio", "http", "sse"]).optional(),
 });
 export const McpListParams = z.object({ cwd: z.string().optional() });
 export const McpListResult = z.object({ ok: z.literal(true), servers: z.array(McpServerStatusSchema) });
+
+/**
+ * Daemon settings surface batch 3 (item 3a): the enable/disable door for a CONFIGURED MCP server,
+ * by name — LOCAL role only. Winter spelling: `settings.mcp.disabled` (a flat, name-keyed list),
+ * chosen over claude's own settings-level `disabledMcpjsonServers`/`deniedMcpServers` shape because
+ * Winter's `settings.mcpServers` is itself a name-keyed record (unlike claude's array-of-servers
+ * `.mcp.json`) — a name list is the one spelling that can name a server regardless of which tier
+ * configured it, without needing a per-entry `enabled` flag on every transport-shape variant of
+ * `mcpServers` (see that schema's own doc for why `enabled` was deliberately NOT mirrored from the
+ * SDK's config shapes). Two methods (`mcp.enable`/`mcp.disable`), matching `plugin.enable`/
+ * `plugin.disable`'s own two-method convention rather than one boolean-flag method.
+ */
+export const McpEnableParams = z.object({ name: z.string().min(1) });
+export const McpEnableResult = z.object({ ok: z.literal(true), name: z.string(), enabled: z.literal(true) });
+export const McpDisableParams = z.object({ name: z.string().min(1) });
+export const McpDisableResult = z.object({ ok: z.literal(true), name: z.string(), enabled: z.literal(false) });
 
 /**
  * Daemon settings surface (2026-09-17 plan, item 2): `capabilities.list` — the daemon's OWN
@@ -2216,6 +2246,8 @@ export const METHODS = {
   skillsDelete: "skills.delete",
   settingsSetSkillDenied: "settings.setSkillDenied",
   mcpList: "mcp.list",
+  mcpEnable: "mcp.enable",
+  mcpDisable: "mcp.disable",
   pluginsList: "plugins.list",
   askUserRespond: "ask_user.respond",
   taskList: "task.list",
