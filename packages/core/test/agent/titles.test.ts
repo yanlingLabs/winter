@@ -7,6 +7,8 @@ import { SessionHub } from "../../src/sessions/hub";
 import { SessionTitler } from "../../src/agent/titles";
 import { FakeProvider } from "../../src/agent/fake-provider";
 import type { ModelInfo, Provider, ProviderEvent, TurnRequest } from "../../src/providers/types";
+import { internalRoleEffortFor } from "../../src/providers/manager";
+import { Settings } from "../../src/settings";
 
 function setup(script: ProviderEvent[][]) {
   const home = mkdtempSync(join(tmpdir(), "winter-titles-home-"));
@@ -236,5 +238,75 @@ describe("SessionTitler", () => {
         else process.env.WINTER_TITLE_TIMEOUT_MS = original;
       }
     });
+  });
+});
+
+// 2026-09-18: `settings.roleEfforts["titles.model"]`. The titler only FORWARDS an effort its caller
+// already resolved, so these tests wire the `effort` getter EXACTLY as daemon.ts does —
+// `internalRoleEffortFor` over a live settings holder and the bound selection — and assert on the
+// OUTGOING `TurnRequest`, which is the only place a "stored but never spent" effort can be caught.
+describe("SessionTitler: the titles.model role effort", () => {
+  const settingsOf = (over: Record<string, unknown>): Settings =>
+    Settings.parse({ schemaVersion: 3, provider: { model: "openai/gpt-5.6-sol" }, ...over });
+  const BOUND = { providerId: "openai", model: "gpt-5.6-sol" };
+
+  /** One titler over a mutable settings holder; each `title()` is a fresh session (a session titles once). */
+  function liveTitler(initial: Settings) {
+    const home = mkdtempSync(join(tmpdir(), "winter-titles-effort-"));
+    const store = new SessionStore(home);
+    const provider = new FakeProvider(titleScript("A title"));
+    const holder = { settings: initial };
+    const titler = new SessionTitler({
+      provider: { provider, model: BOUND.model, live: () => BOUND }, store, hub: new SessionHub(store),
+      effort: () => internalRoleEffortFor(holder.settings, "titles.model", holder.settings.titles?.model, BOUND),
+    });
+    const title = async (): Promise<TurnRequest> => {
+      const sid = store.createSession("global", { cwd: "/tmp" });
+      seedTurn(store, sid);
+      await titler.maybeTitle(sid);
+      return provider.requests.at(-1)!;
+    };
+    return { holder, title, provider };
+  }
+
+  test("absent → the request carries NO reasoningEffort key at all, exactly as before", async () => {
+    const req = await liveTitler(settingsOf({})).title();
+    expect("reasoningEffort" in req).toBe(false);
+    // …and a titler built with no `effort` dep at all (every pre-existing construction) is unchanged too.
+    const { store, titler, sessionId, provider } = setup(titleScript("t"));
+    seedTurn(store, sessionId);
+    await titler.maybeTitle(sessionId);
+    expect("reasoningEffort" in provider.requests[0]!).toBe(false);
+  });
+
+  test("a stored effort the model offers reaches the request", async () => {
+    expect((await liveTitler(settingsOf({ roleEfforts: { "titles.model": "low" } })).title()).reasoningEffort).toBe("low");
+  });
+
+  test("a stored effort the model does NOT offer is mapped or omitted — the title is still written", async () => {
+    // Pinned to o4-mini (low/medium/high, default medium): `max` maps onto the row's default.
+    expect((await liveTitler(settingsOf({ titles: { model: "openai/o4-mini" }, roleEfforts: { "titles.model": "max" } })).title()).reasoningEffort).toBe("medium");
+    // Pinned to a row with no vocabulary: omitted.
+    const t = liveTitler(settingsOf({ titles: { model: "openai/gpt-5.4" }, roleEfforts: { "titles.model": "high" } }));
+    expect("reasoningEffort" in (await t.title())).toBe(false);
+    expect(t.provider.requests).toHaveLength(1);
+  });
+
+  test("a pin naming an UNBOUND provider falls back to the bound model — and the effort is mapped onto THAT row, not the refused pin's", async () => {
+    // The refused pin (anthropic/claude-opus-5) LISTS xhigh; the row the titler will actually run on
+    // (the bound openai/o4-mini) does not. Mapping against the pin would send o4-mini an effort it rejects.
+    const bound = { providerId: "openai", model: "o4-mini" };
+    const s = settingsOf({ titles: { model: "anthropic/claude-opus-5" }, roleEfforts: { "titles.model": "xhigh" } });
+    expect(internalRoleEffortFor(s, "titles.model", s.titles?.model, bound)).toBe("medium"); // o4-mini's default, not opus's xhigh
+    expect(internalRoleEffortFor(s, "titles.model", s.titles?.model, { providerId: "anthropic", model: "ignored" })).toBe("xhigh");
+  });
+
+  test("a settings change lands on the NEXT title from the SAME titler — no restart", async () => {
+    const t = liveTitler(settingsOf({}));
+    expect("reasoningEffort" in (await t.title())).toBe(false);
+    t.holder.settings = settingsOf({ roleEfforts: { "titles.model": "high" } });
+    expect((await t.title()).reasoningEffort).toBe("high");
+    t.holder.settings = settingsOf({});
+    expect("reasoningEffort" in (await t.title())).toBe(false);
   });
 });

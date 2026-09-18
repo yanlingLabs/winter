@@ -87,7 +87,8 @@ export interface SessionRow {
   /** provider-correctness T4: a per-session reasoning-effort override (`session.setEffort`/
    *  `store.setEffort`). Index-only metadata on exactly the same terms as `model` above — same
    *  additive column, same reset-to-undefined on a full index rebuild. Absent means "use the global
-   *  default" (`settings.provider.reasoningEffort`, AgentEngine.resolveSel's own rule); it does NOT
+   *  default" (`settings.provider.reasoningEffort` — the retired AgentEngine.resolveSel's rule, carried
+   *  by `session-driver.ts`'s `optionsFor` since 2026-09-18, mapped onto the session's model); it does NOT
    *  mean "no reasoning" — an unset effort omits the provider's `reasoning` block entirely, while
    *  `"none"` is a distinct level the endpoint honours (settings.ts's REASONING_EFFORTS). */
   effort?: string;

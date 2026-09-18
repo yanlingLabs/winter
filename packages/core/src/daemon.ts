@@ -21,7 +21,7 @@ import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, 
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
-import { createRebindableProvider, internalModelFor } from "./providers/manager";
+import { createRebindableProvider, internalModelFor, internalRoleEffortFor } from "./providers/manager";
 import type { Provider } from "./providers/types";
 import { QuotaManager } from "./providers/quota";
 import { ToolRegistry } from "./agent/tools/registry";
@@ -1373,7 +1373,17 @@ export async function startDaemon(opts: {
     const m = settings?.titles?.model;
     return m === undefined ? undefined : internalModelFor(m, { providerId: agentProvider?.live?.().providerId ?? ownProviderFor(settings) }, "titles.model");
   };
-  const sessionTitler = agentProvider === null ? undefined : new SessionTitler({ provider: agentProvider, store, hub, model: titlesModel });
+  // 2026-09-18: the role's stored effort (`settings.roleEfforts["titles.model"]`), a getter off the
+  // SAME live `settings` binding and the SAME bound selection `titlesModel` reads — so it is hot, and
+  // it is mapped onto whichever row `titlesModel`'s fall-through actually lands on (the pin, or the
+  // bound provider's live model). Shared with the reviewer below; `internalRoleEffortFor`'s own doc
+  // has the rule. `agentProvider.model` is the fallback only for a test double with no `live`.
+  const boundSelection = (): { providerId: string; model: string } => ({
+    providerId: agentProvider?.live?.().providerId ?? ownProviderFor(settings),
+    model: agentProvider?.live?.().model ?? agentProvider?.model ?? "",
+  });
+  const titlesEffort = (): string | undefined => internalRoleEffortFor(settings, "titles.model", settings?.titles?.model, boundSelection());
+  const sessionTitler = agentProvider === null ? undefined : new SessionTitler({ provider: agentProvider, store, hub, model: titlesModel, effort: titlesEffort });
   const titler = sessionTitler === undefined ? undefined : {
     maybeTitle: (sid: string): Promise<void> => (settings?.titles?.enabled === false ? Promise.resolve() : sessionTitler.maybeTitle(sid)),
   };
@@ -1431,9 +1441,11 @@ export async function startDaemon(opts: {
     const m = settings?.reviewer?.model;
     return m === undefined ? undefined : internalModelFor(m, { providerId: agentProvider?.live?.().providerId ?? ownProviderFor(settings) }, "reviewer.model");
   };
+  // The effort half, exactly as `titlesEffort` above (same getter shape, same fall-through rule).
+  const reviewerEffort = (): string | undefined => internalRoleEffortFor(settings, "reviewer.model", settings?.reviewer?.model, boundSelection());
   const bashReviewer = agentProvider === null || agentProvider === undefined
     ? undefined
-    : new BashReviewer({ provider: agentProvider, model: reviewerModel });
+    : new BashReviewer({ provider: agentProvider, model: reviewerModel, effort: reviewerEffort });
   const hooksFor = (session: CapabilitySession) =>
     sessionHooksFor({
       sessionId: session.sessionId,
@@ -1932,8 +1944,9 @@ export async function startDaemon(opts: {
     // reviewer.enabled hot in BOTH directions: were it left undefined at a disabled-boot, a later
     // false→true edit could never take effect (the getter gates whether review RUNS, but only if
     // there's a reviewer object to run) — a restart-required toggle, which the "no restart
-    // anywhere" rule forbids. `reviewer.model` stays a boot snapshot (out of T2's scope — it
-    // picks WHICH model the reviewer would use, not whether reviewing is on).
+    // anywhere" rule forbids. (`reviewer.model` WAS a boot snapshot when this was written; it has
+    // been a live getter since the 2026-09-17 settings surface, and its effort since 2026-09-18 —
+    // see `reviewerModel`/`reviewerEffort` above.)
     // Default ON: the titler is built unless settings.titles.enabled is explicitly false.
     // Plugin hooks runtime (Phase 4f Task 2): the engine-facing `cfg.hooks` facade. `hookRegistry`
     // is the SAME instance ipc/server.ts's plugin-lifecycle RPCs rebuild in place (passed through

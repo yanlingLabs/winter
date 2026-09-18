@@ -47,7 +47,7 @@ import type { RuntimeSessionRecord, RuntimeSessionRecords } from "../runtime-sta
 import type { ProjectionCheckpoints } from "../runtime-state/checkpoints";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
-import { DEFAULT_PROVIDER, officialSubscriptionAuthEnabled, ownProviderFor, pinsFor, providerBaseUrlFor, winterOptionsFromSettings, type Settings } from "../settings";
+import { DEFAULT_PROVIDER, effortToSpendForRole, officialSubscriptionAuthEnabled, ownProviderFor, pinsFor, providerBaseUrlFor, winterOptionsFromSettings, type Settings } from "../settings";
 import { d30DefaultModel } from "./advisor-reviewer";
 import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
 import type { WinterRuntimeSdk, SessionMode } from "./create";
@@ -59,12 +59,12 @@ import { neutralSelectionRefusal, refusalDetailCategoryFor } from "./refusal-cop
 import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
 import { attachOfficialSession, attachWinterSession } from "./messaging";
 import { buildWinterOptions, permissionModeFor } from "./mode-options";
-import { implicitEffortFor, providerFor, rowForTag, testProviderNameFor } from "./provider-selection";
+import { providerFor, rowForTag, testProviderNameFor } from "./provider-selection";
 import { splitTag, UNSTATED_TAG, isModelTag, type ModelTag } from "./model-tag";
 import { winterSessions } from "./sessions";
 import { WINTER_PEER_VERSIONS } from "./versions";
 import { winterSystemPromptFor } from "./system-prompt";
-import { DISPATCH_EFFORT } from "../agent/dispatch-config";
+import { dispatchEffortFor } from "../agent/dispatch-config";
 import { loadUserAgentDefinitions, loadProjectAgentDefinitions, mergeAgentDefinitionTiers, type LoadedAgentDefinitions } from "../agent/agent-definitions";
 
 /**
@@ -456,8 +456,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       const hook = runtime.spawnHookFor(mode);
       if (hook instanceof Error) throw new WinterLegRefusal("winter_executable_unavailable", hook.message);
       const credentials = await credentialPresenceFrom(deps.secrets);
-      // `resolveSel`, the engine's own resolution: dispatch runs its FIXED PIN (`DISPATCH_MODEL` at
-      // `DISPATCH_EFFORT`; `session.setModel`/`setEffort` refuse a dispatch target, so a stored
+      // `resolveSel`, the retired engine's resolution, carried here: dispatch runs its PIN — the live
+      // `pinsFor(settings).dispatch` at `dispatchEffortFor` (the `pins.dispatch` role's stored effort,
+      // else `DISPATCH_EFFORT`); `session.setModel`/`setEffort` refuse a dispatch target, so a stored
       // override can only come from a harness that wrote the store directly — a test's door to
       // the `winter-test/*` doubles); every other mode is the per-session override, else the
       // daemon's configured provider model, else (no settings loaded at all — no agent provider
@@ -477,7 +478,22 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       const model = mode === "dispatch" ? (live.model as ModelTag | undefined ?? pinsFor(settings).dispatch) : (live.model as ModelTag | undefined ?? settings?.provider?.model ?? DEFAULT_PROVIDER.model);
       // 2026-09-17: the dispatch pin's fixed tier is IMPLICIT — mapped onto the pin row's vocabulary
       // (`implicitEffortFor`), never sent to a row that does not declare it. A per-session effort stays explicit.
-      const effort = mode === "dispatch" ? sdkEffortOf(live.effort ?? implicitEffortFor(model, DISPATCH_EFFORT)) : sdkEffortOf(live.effort);
+      //
+      // 2026-09-18: both arms now honour the STORED role effort, through the one resolver
+      // (`effortToSpendForRole`, settings.ts) and off the `settings` this incarnation just read live:
+      //  - dispatch: `roleEfforts["pins.dispatch"]`, else `DISPATCH_EFFORT` as before (`dispatchEffortFor`).
+      //    `mode === "dispatch"` is the ONLY door to it — a dispatch CHILD is `mode: "code"` and takes the
+      //    other arm, so the coordinator's effort cannot leak onto the work it spawns.
+      //  - every other mode: the session's OWN effort first, always. Only a session that never chose one
+      //    falls back to the daemon's default effort, `provider.reasoningEffort` (the `provider.model`
+      //    role's effort) — the rule `SessionMeta.effort`'s doc has promised since the engine
+      //    ("absent means use the global default") and that nothing had implemented since the engine
+      //    was retired: the value was stored, reported by `sync.config`, and spent by no request. It
+      //    is IMPLICIT here, so it is mapped onto THIS session's model's row, never forced onto it.
+      // `live.effort` stays first on both arms and stays verbatim (explicit; the child refuses it typed
+      // when unsupported). `sdkEffortOf` then drops `"none"`/`ultra` on every path alike, so a role's
+      // stored `"none"` is spent exactly as a session's is: the request carries no effort.
+      const effort = sdkEffortOf(live.effort ?? (mode === "dispatch" ? dispatchEffortFor(settings, model) : effortToSpendForRole(settings, "provider.model", model, undefined)));
       // WS-20: `model` is ALWAYS a provider-qualified tag now (or the winter-test escape hatch) —
       // `providerFor` names exactly its provider, no inventory-order tie-break, no "router's decided
       // provider" hotfix needed (that hotfix existed only because a BARE id could be ambiguous).

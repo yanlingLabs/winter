@@ -2,7 +2,7 @@ import { statSync } from "node:fs";
 import type { SecretStore } from "../auth/secret-store";
 import { readOpenAiApiKey } from "../auth/credential-material";
 import { OPENAI_API_KEY_SECRET } from "../auth/legacy-secret-names";
-import { loadSettings, providerBaseUrlFor, INTERNAL_PROVIDER_IDS, type Settings } from "../settings";
+import { effortToSpendForRole, loadSettings, providerBaseUrlFor, INTERNAL_PROVIDER_IDS, type Settings } from "../settings";
 import type { ModelInfo, Provider, ProviderEvent, TurnRequest } from "./types";
 import { createCodexOauthRuntimeProvider, createOpenAiCompatibleRuntimeProvider } from "./runtime-provider";
 import { QuotaManager, withQuota } from "./quota";
@@ -360,4 +360,31 @@ export function internalModelFor(pin: ModelTag, provider: { providerId: string }
     return undefined;
   }
   return modelId;
+}
+
+/**
+ * 2026-09-18: the reasoning effort for the two internal-Provider roles whose model is OPTIONAL —
+ * `titles.model` and `reviewer.model` (`settings.roleEfforts`, resolved by `effortToSpendForRole`).
+ *
+ * The pin consumers (dreamer/cleaner/research) need no helper: they skip their run on an
+ * `internalModelFor` mismatch, so the model they spend is always their pin and they can hand its tag
+ * straight to the resolver. These two roles FALL BACK instead — an unset pin, or one naming a provider
+ * the internal `Provider` is not bound to, runs on the bound provider's live model — and the effort has
+ * to be mapped onto the row that is actually about to be called, never onto the pin's row when the pin
+ * was just refused. This function re-derives that same choice (the same provider comparison
+ * `internalModelFor` makes, deliberately WITHOUT its log line: the model getter beside it has already
+ * narrated the mismatch once for this call) and recomposes the fallback's TAG from the bound
+ * selection, because a catalog row is looked up by tag and `bound.model` is a bare id.
+ *
+ * No consumer default: neither role sent an effort before roles could store one, so nothing stored
+ * is `undefined` and the request carries no `reasoningEffort` — byte-identical to before.
+ */
+export function internalRoleEffortFor(
+  settings: Settings | null | undefined,
+  role: "titles.model" | "reviewer.model",
+  pin: ModelTag | undefined,
+  bound: { providerId: string; model: string },
+): string | undefined {
+  const spent = pin !== undefined && splitTag(pin).providerId === bound.providerId ? pin : `${bound.providerId}/${bound.model}`;
+  return effortToSpendForRole(settings, role, spent, undefined);
 }

@@ -542,3 +542,119 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
     } finally { t.close(); }
   });
 });
+
+// 2026-09-18: the two "any"-constraint roles' efforts, spent on a runtime child's `Options.effort`.
+// Every assertion is on the OPTIONS THE CHILD IS ACTUALLY SPAWNED WITH (`t.q().options`), through the
+// real `optionsFor` — the resolver's own rules are unit-tested in settings.test.ts.
+describe("role efforts on the runtime leg (pins.dispatch, and provider.model's default effort)", () => {
+  const legs = { runtimes: { winterLeg: { chat: true, dispatch: true, code: true }, winterIdleTimeoutSec: 10 } };
+  const settingsOf = (over: Record<string, unknown>): Settings =>
+    ({ provider: { model: "codex-oauth/gpt-5.6-sol" }, ...legs, ...over }) as unknown as Settings;
+
+  /** Spawns one session under `settings` and answers the effort its child was handed. */
+  async function spawnedEffort(settings: Settings, meta: Parameters<SessionStore["createSession"]>[1]): Promise<unknown> {
+    const t = table({ settings: () => settings });
+    try {
+      const sid = t.store.createSession("t", meta);
+      const session = await t.drivers.create(sid);
+      const effort = t.q().options.effort;
+      await session.end();
+      return effort;
+    } finally { t.close(); }
+  }
+
+  describe("pins.dispatch", () => {
+    test("absent → DISPATCH_EFFORT mapped onto the pin's row, exactly as before", async () => {
+      expect(await spawnedEffort(settingsOf({}), { mode: "dispatch" })).toBe("medium");
+      // The pre-existing mapping of the DEFAULT is untouched: a pin whose row has no `medium` and no default sends nothing.
+      expect(await spawnedEffort(settingsOf({ pins: { dispatch: "deepseek/deepseek-v4-flash" } }), { mode: "dispatch" })).toBeUndefined();
+    });
+
+    test("a stored effort the pin's model offers reaches Options.effort", async () => {
+      expect(await spawnedEffort(settingsOf({ roleEfforts: { "pins.dispatch": "high" } }), { mode: "dispatch" })).toBe("high");
+    });
+
+    test("a stored effort the pin's model does NOT offer is mapped or omitted — the coordinator still spawns", async () => {
+      // deepseek-v4-flash: none/low/high/max, no defaultEffort → a stored `xhigh` has nowhere to map.
+      expect(await spawnedEffort(settingsOf({ pins: { dispatch: "deepseek/deepseek-v4-flash" }, roleEfforts: { "pins.dispatch": "xhigh" } }), { mode: "dispatch" })).toBeUndefined();
+      // anthropic/claude-opus-5 is not this leg's to run; openai/o4-mini (low/medium/high, default medium) is.
+      expect(await spawnedEffort(settingsOf({ pins: { dispatch: "openai/o4-mini" }, roleEfforts: { "pins.dispatch": "max" } }), { mode: "dispatch" })).toBe("medium");
+    });
+
+    test("a stored \"none\" is spent exactly as a SESSION's stored \"none\" is: the child is handed no effort", async () => {
+      expect(await spawnedEffort(settingsOf({ roleEfforts: { "pins.dispatch": "none" } }), { mode: "dispatch" })).toBeUndefined();
+      // The reference behaviour it mirrors — a session's own "none" (`session.setEffort`'s door).
+      expect(await spawnedEffort(settingsOf({}), { mode: "chat", effort: "none" })).toBeUndefined();
+    });
+
+    test("it governs the dispatch COORDINATOR only — never a user's session, never a dispatch CHILD", async () => {
+      const s = settingsOf({ roleEfforts: { "pins.dispatch": "max" } });
+      expect(await spawnedEffort(s, { mode: "dispatch" })).toBe("max");
+      expect(await spawnedEffort(s, { mode: "code" })).toBeUndefined();
+      expect(await spawnedEffort(s, { mode: "chat" })).toBeUndefined();
+      expect(await spawnedEffort(s, { mode: "code", origin: "dispatch-child" })).toBeUndefined();
+    });
+
+    test("a settings change lands on the coordinator's NEXT incarnation — same driver table, no restart", async () => {
+      let live = settingsOf({});
+      const t = table({ settings: () => live });
+      try {
+        const sid = t.store.createSession("t", { mode: "dispatch" });
+        await t.drivers.create(sid);
+        expect(t.q().options.effort).toBe("medium");
+        // An idle reap (or any eviction): the driver leaves the table, so the next `ensure` re-opens
+        // from the record and `optionsFor` runs again — the daemon itself is never restarted.
+        await t.drivers.evict(sid);
+        live = settingsOf({ roleEfforts: { "pins.dispatch": "xhigh" } });
+        const second = await t.drivers.ensure(sid);
+        expect(t.queries).toHaveLength(2);
+        expect(t.q().options.effort).toBe("xhigh");
+        await second?.end();
+      } finally { t.close(); }
+    });
+  });
+
+  describe("provider.model — the daemon's default effort (provider.reasoningEffort)", () => {
+    const withDefault = (effort: string, over: Record<string, unknown> = {}): Settings =>
+      settingsOf({ provider: { model: "codex-oauth/gpt-5.6-sol", reasoningEffort: effort }, ...over });
+
+    test("absent → a session with no effort of its own sends none, exactly as before", async () => {
+      expect(await spawnedEffort(settingsOf({}), { mode: "code" })).toBeUndefined();
+      expect(await spawnedEffort(settingsOf({}), { mode: "chat" })).toBeUndefined();
+    });
+
+    test("a stored default reaches a session that never chose an effort", async () => {
+      expect(await spawnedEffort(withDefault("high"), { mode: "code" })).toBe("high");
+      expect(await spawnedEffort(withDefault("high"), { mode: "chat" })).toBe("high");
+    });
+
+    test("the session's OWN effort always wins, verbatim", async () => {
+      expect(await spawnedEffort(withDefault("high"), { mode: "code", effort: "low" })).toBe("low");
+    });
+
+    test("it is IMPLICIT: mapped onto the session's own model's row, or omitted — never forced, never a refusal", async () => {
+      expect(await spawnedEffort(withDefault("max"), { mode: "code", model: "openai/o4-mini" })).toBe("medium");
+      expect(await spawnedEffort(withDefault("medium"), { mode: "code", model: "deepseek/deepseek-v4-flash" })).toBeUndefined();
+      expect(await spawnedEffort(withDefault("high"), { mode: "code", model: "openai/gpt-5.4" })).toBeUndefined();
+    });
+
+    test("dispatch is not a consumer of it: the coordinator runs its own role's effort, else DISPATCH_EFFORT", async () => {
+      expect(await spawnedEffort(withDefault("max"), { mode: "dispatch" })).toBe("medium");
+    });
+
+    test("a settings change lands on the session's NEXT incarnation — no restart", async () => {
+      let live = settingsOf({});
+      const t = table({ settings: () => live });
+      try {
+        const sid = t.store.createSession("t", { mode: "code" });
+        await t.drivers.create(sid);
+        expect(t.q().options.effort).toBeUndefined();
+        await t.drivers.evict(sid); // the idle-reap shape — see the dispatch twin of this test above
+        live = withDefault("xhigh");
+        const second = await t.drivers.ensure(sid);
+        expect(t.q().options.effort).toBe("xhigh");
+        await second?.end();
+      } finally { t.close(); }
+    });
+  });
+});
