@@ -242,139 +242,14 @@ struct PolicyPickerRow: View {
     }
 }
 
-// MARK: - The right work sidebar (a function-family on WindowContentView, like `subagentSection`/
-// `pinnedTasksSection`, so it renders them directly — brief Step 2's "smallest diff" option).
+// MARK: - The current session's directory row
+
+// The right work sidebar (Options + Work blocks) was retired 2026-09-17: subagents float over the
+// content, tasks float above the composer, and the approval picker lives in the composer's strip.
 
 extension WindowContentView {
-    /// The right WorkSidebar: an "Options" block (approval-mode picker + current-session info) over
-    /// a `Divider` over a "Work" block (subagents ABOVE tasks — the relocated content). Width
-    /// `sidebarRightWidth`; scrollable so a long task/subagent list never clips. Rendered inline in
-    /// the HStack when the width fits, or in a `Theme.paletteSurface` overlay when it doesn't
-    /// (`WindowContentView.sidebarLayout` owns that surface, not this view).
-    @ViewBuilder
-    var workSidebar: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                sidebarOptionsBlock
-                Divider().opacity(0.5)
-                sidebarWorkBlock
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(12)
-        }
-        .frame(width: sidebarRightWidth)
-    }
-
-    /// This view's two policy surfaces — the ⋯ popover (`policyMenuContent`) and the WorkSidebar's
-    /// Options block below — rendered from the shared `PolicyPickerRow`, handed EXACTLY the three
-    /// `adapter` reads the row used to make itself (brief Step 2: "one implementation"). Internal
-    /// (not `private`) so `policyMenuContent` in WindowContentView.swift can call it across files.
-    ///
-    /// `onSelect` forwards rather than passing `adapter.onSetPolicy` itself, so the row calls
-    /// whatever the surface has wired at TAP time — the behaviour of the inline `Button` this
-    /// replaced, preserved on purpose.
-    ///
-    /// Returns the concrete type rather than `some View`: it makes "both surfaces render the shared
-    /// row, with the adapter's own values" a thing a test can read (`PolicyMenuTests`) instead of a
-    /// thing only the live app can show.
-    func policyPickerRow(_ policy: String) -> PolicyPickerRow {
-        PolicyPickerRow(policy: policy,
-                        current: adapter.sessionPolicy,
-                        isDisabled: adapter.policyChangeInFlight,
-                        onSelect: { adapter.onSetPolicy($0) })
-    }
-
-    @ViewBuilder
-    private var sidebarOptionsBlock: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Options")
-                .font(Typography.caption(.semibold))
-                .foregroundStyle(.secondary)
-            // Plan-immunity (2026-07-28 design): the SAME gate as WindowContentView's
-            // `policyMenuButton` (both of this view's surfaces render `PolicyPickerRow` through
-            // `policyPickerRow(_:)` above) — chat's policy is fixed, so the picker is hidden
-            // entirely rather than shown-but-broken. The composer's permissions row expresses the
-            // same gate a third way, structurally: chat's composer has no band to hide.
-            // `sidebarSessionInfo` below (title/scope/cwd) is still useful for chat and stays
-            // visible either way.
-            if !adapter.isChatSession {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(sessionPolicyModes, id: \.self) { policyPickerRow($0) }
-                }
-            }
-            sidebarSessionInfo
-        }
-    }
-
-    /// Current-session info rows: title / scope / cwd (cwd middle-truncated). Read fresh from the
-    /// directory each render via `sidebars.currentSessionId()`. Hidden when the current session
-    /// isn't (yet) in the directory list.
-    @ViewBuilder
-    private var sidebarSessionInfo: some View {
-        if let row = currentSidebarSessionSummary {
-            VStack(alignment: .leading, spacing: 3) {
-                sidebarInfoRow("title", displaySidebarTitle(row.title), truncation: .tail)
-                sidebarInfoRow("scope", row.scope, truncation: .tail)
-                if let cwd = row.cwd, !cwd.isEmpty {
-                    sidebarInfoRow("cwd", cwd, truncation: .middle)
-                }
-            }
-            .padding(.top, 2)
-        }
-    }
-
-    private func sidebarInfoRow(_ label: String, _ value: String, truncation: Text.TruncationMode) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(label)
-                .foregroundStyle(Theme.textMuted)
-            // `.primary` for the VALUE against the label's muted token — the pair was `.tertiary`
-            // over `.secondary`, which collapses to one grey once the faint level moves onto
-            // `Theme.textMuted` (mac-chat-parity Task 8).
-            Text(value)
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-                .truncationMode(truncation)
-        }
-        .font(Typography.caption())
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    @ViewBuilder
-    private var sidebarWorkBlock: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Work")
-                .font(Typography.caption(.semibold))
-                .foregroundStyle(.secondary)
-            // Subagents ABOVE tasks (brief Step 2). Each section already carries its own leading
-            // `Divider`; they hide when empty via these gates (mirrors the content column's gates).
-            if !adapter.liveSubagents.isEmpty {
-                subagentSection(adapter.liveSubagents)
-            }
-            if !adapter.pinnedTasks.isEmpty {
-                pinnedTasksSection(adapter.pinnedTasks)
-            }
-            if adapter.liveSubagents.isEmpty && adapter.pinnedTasks.isEmpty {
-                Text("No active work")
-                    .font(Typography.caption())
-                    .foregroundStyle(Theme.textMuted)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    /// The directory row for the currently focused/pinned session, or `nil` (no wiring / not listed
-    /// yet). `sidebars` is always non-nil where the WorkSidebar renders, but read optionally here.
-    /// Internal (not `private`) — Task 10 (Chat Slice D): `WindowContentView`'s model-menu content
-    /// (WindowContentView.swift) reads `.model` off this same row, same cross-file-access precedent
-    /// as `policyPickerRow`'s own doc comment above.
     var currentSidebarSessionSummary: SessionSummary? {
         guard let sidebars, let sid = sidebars.currentSessionId() else { return nil }
         return sidebars.directory.rows.first { $0.sessionId == sid }
-    }
-
-    /// Same fallback `SessionSidebarRow` uses — an untitled session reads "New session".
-    private func displaySidebarTitle(_ title: String?) -> String {
-        let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmed.isEmpty ? "New session" : trimmed
     }
 }

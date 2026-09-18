@@ -54,6 +54,9 @@ func shellRenderingActive(isWindowVisible: Bool, occlusionVisible: Bool) -> Bool
     isWindowVisible && occlusionVisible
 }
 
+/// The shell window's size floor (see `testWindowMinimumSizeCanAlwaysFitThePanelWithoutTheSidebar`).
+let shellWindowMinSize = NSSize(width: 820, height: 520)
+
 // MARK: - The singleton app window
 
 /// Spec §1, the singleton: ONE `AppWindowController` owns the app window for the process lifetime.
@@ -117,6 +120,12 @@ final class AppWindowController: NSObject, NSWindowDelegate {
     /// Unconditional for the same reason `dashboardSelection` is: no `AppModel` dependency, cheap to
     /// always have a real (idle) instance.
     let pairingPresentation = PairingSheetPresentationModel()
+    /// 2026-09-18: which floating panel (library / devices / updates) is showing. Owned HERE rather
+    /// than privately inside `ShellRootView` for one concrete reason: the menu bar's "Check for
+    /// Updates…" has to be able to OPEN the updates panel, and a `@StateObject` private to a view
+    /// is unreachable from `AppDelegate`. Same posture as `dashboardSelection` above, for the same
+    /// kind of reason — state a door outside the view has to reach cannot live inside it.
+    let shellOverlays = ShellOverlayPresentation()
 
     /// Hidden-window hygiene: `false` whenever the window is ordered out OR fully occluded. Views
     /// read `navigation.renderingActive` (the published mirror); non-view consumers (Task 2's
@@ -171,15 +180,28 @@ final class AppWindowController: NSObject, NSWindowDelegate {
         // action, which rode the toolbar, now rides `ShellSessionView`'s header pill.
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
-        // sidebar-brand T5: the window's own fill matches the CONTENT plane (`docs/brand.md`), so
-        // a live resize never flashes the system grey behind the SwiftUI hosting view — the
-        // sidebar's own `Theme.canvas` is painted by the pane itself. Named-asset lookup with the
-        // system fallback kept: this runs during window construction, and a window that fails to
-        // build because a colorset is missing would be a far worse failure than an unbranded one
-        // (the catalog itself is pinned by `SidebarBrandTests`, which is where that must fail).
-        window.backgroundColor = NSColor(named: "CardSurface") ?? .windowBackgroundColor
+        // sidebar-brand T5 SUPERSEDED: the window's own fill used to be the CONTENT plane
+        // (`CardSurface`), so a live resize never flashed system grey behind the hosting view.
+        // 2026-09-17 EXPERIMENT — the sidebar's behind-window vibrancy (`ShellVibrancyBackground`).
+        // An `NSVisualEffectView` in `.behindWindow` mode can only reach the desktop if the window
+        // itself stops covering it: an opaque window's backing store is composited first, so the
+        // blur would sample nothing. `.clear` + `isOpaque = false` hand that region through.
+        // Everything else in the shell paints its own opaque fill (the content card's
+        // `cardSurface`, the base plane's canvas), so only the sidebar column goes translucent.
+        window.backgroundColor = .clear
+        window.isOpaque = false
+        // 2026-09-17 (EXPERIMENT): an EMPTY unified toolbar — on macOS 26 a toolbar window gets the
+        // system's larger corner radius (Safari's). No items, no separator: it exists only for
+        // the window chrome it buys.
+        let toolbar = NSToolbar(identifier: "WinterShellToolbar")
+        window.toolbar = toolbar
+        window.toolbarStyle = .unified
+        // Attached but NOT drawn: the toolbar exists only for the window corner it buys, and its
+        // own band would otherwise paint grey over the panel's chrome (2026-09-17).
+        toolbar.isVisible = false
+        window.titlebarSeparatorStyle = .none
         window.isReleasedWhenClosed = false // this controller owns the window's lifetime, forever
-        window.minSize = NSSize(width: 820, height: 520)
+        window.minSize = shellWindowMinSize
         // Spec §1: opt OUT of native full-screen — a hidden full-screen window strands a Space.
         // `.fullScreenNone` also leaves the green button as a plain zoom, which is the right verb
         // for a window that hides rather than closes.
@@ -216,7 +238,8 @@ final class AppWindowController: NSObject, NSWindowDelegate {
             nav: navigationModel, directory: directory, host: host,
             dashboardWiring: dashboardWiring, newChat: openNewChat,
             dashboardSelection: dashboardSelection,
-            pairingPresentation: pairingPresentation
+            pairingPresentation: pairingPresentation,
+            overlays: shellOverlays
         ))
         window.setFrame(frame, display: true)
         positionTrafficLights()
@@ -288,6 +311,9 @@ final class AppWindowController: NSObject, NSWindowDelegate {
         }
         occlusionVisible = true
         window.makeKeyAndOrderFront(nil)
+        // With the (experimental) toolbar, ordering the window in resets its size floor to zero —
+        // measured 2026-09-17 — so the floor is re-asserted once it is on screen.
+        window.minSize = shellWindowMinSize
         NSApp.activate(ignoringOtherApps: true)
         // sidebar-brand: re-assert the inset here too. AppKit re-lays the standard window buttons
         // out on its own schedule — not only on resize — and a summon follows an order-out, which

@@ -13,11 +13,15 @@ let panelTabPillInset: CGFloat = 9
 
 /// panel-shell T13: SQUARED, not a capsule — matches the app's ONE hover/selection vocabulary
 /// (`shellSidebarRowCornerRadius`, `ShellSidebar.swift`), which already governs every sidebar row
-/// and every titlebar button (`ShellTitlebarButton` wears `ShellSidebarRowStyle` at that radius).
+/// and every titlebar button (`ShellTitlebarButton` wears `ShellChromeButtonStyle` at that radius).
 /// Derived rather than a second `6` literal, so the pill's highlight and the rest of the app's
 /// rounded-rects can never drift into two different radii for what reads as one visual language.
 /// Was `panelTabPillSize.height / 2` (a capsule, 14) until the user's live gate asked for square.
 let panelTabPillRadius: CGFloat = shellSidebarRowCornerRadius
+
+/// A web tab's real page icon, ChatGPT-style: 16pt square with a 3pt corner, in the glyph's slot.
+let panelTabFaviconSize: CGFloat = 16
+let panelTabFaviconRadius: CGFloat = 3
 
 /// The gap from the LAST pill to the "+" button — the only adjacency the reference has anything to
 /// measure, since it shows exactly one tab. `panelTabSpacing` below is the other, unmeasured, gap.
@@ -589,16 +593,17 @@ struct PanelTabStrip: View {
 
     private var newTabButton: some View {
         Button(action: onOpenTab) {
+            // ChatGPT's thin, larger "+" (2026-09-17) — 14 pt regular, not 12 pt semibold.
             Image(systemName: "plus")
-                .font(Typography.label(.semibold))
+                .font(Typography.body())
                 .foregroundStyle(Theme.textMuted)
                 .frame(width: panelTabPillSize.height, height: panelTabPillSize.height)
                 .contentShape(Rectangle())
         }
         // panel-shell T13 follow-up: the same hover treatment every tab and every titlebar button
-        // wears. `ShellSidebarRowStyle` renders a BACKGROUND behind the label, not padding around
+        // wears. `ShellChromeButtonStyle` renders a BACKGROUND behind the label, not padding around
         // it, so the 28pt footprint `panelTabPillWidth`'s overhead arithmetic assumes is unchanged.
-        .buttonStyle(ShellSidebarRowStyle(isSelected: false))
+        .buttonStyle(ShellChromeButtonStyle())
         .help("New tab")
         .accessibilityLabel("New tab")
     }
@@ -626,7 +631,7 @@ struct PanelTabStrip: View {
                 size: panelExpandButtonSize,
                 isOn: presentation.mode == .maximized
             ) {
-                withAnimation(.snappy) { presentation.toggleMaximized() }
+                withAnimation(shellPanelMotion) { presentation.toggleMaximized() }
             }
 
             ShellTitlebarButton(
@@ -644,7 +649,7 @@ struct PanelTabStrip: View {
                 label: "Hide panel",
                 size: panelExpandButtonSize
             ) {
-                withAnimation(.snappy) { presentation.toggleVisible() }
+                withAnimation(shellPanelMotion) { presentation.toggleVisible() }
             }
         }
         .padding(.trailing, panelExpandButtonInset)
@@ -653,7 +658,7 @@ struct PanelTabStrip: View {
 }
 
 /// One tab pill. The ACTIVE tab stays filled and, since panel-shell T13, an INACTIVE tab also
-/// fills on hover — both through `ShellSidebarRowStyle` (see the `.buttonStyle` below), both
+/// fills on hover — both through `ShellChromeButtonStyle` (see the `.buttonStyle` below), both
 /// landing on `Theme.rowHover` (the brief's "RowHover register"; that style's
 /// `selectedUsesHoverTone` is what makes selection use the same token as hover here instead of
 /// `SelectionPill`). "Filled" therefore always means the same fill regardless of which of the two
@@ -672,131 +677,77 @@ struct PanelTabStrip: View {
 /// **Fires two RPCs, applies neither locally.** Both closures only report the tap outward
 /// (`onActivate`/`onClose`); see `ShellSessionHost`'s panel-tab-strip section for why they end at
 /// the wire and never touch `PanelStore` themselves.
-/// The pill's kind-hued state ladder (live-gate ruling 2026-08-15; fill decision =
-/// `Theme.panelKindPillFill`, measured in brand.md § 3.7). Mirrors `ShellSidebarRowStyle.RowBody`'s
-/// structure — internal `@State` hover on a nested `View` (a `ButtonStyle` itself cannot hold
-/// `@State`), pressed folded into hover exactly like `shellSidebarRowFill`'s
-/// `isHovered || isPressed` — so the two row treatments differ ONLY in palette: neutral tokens
-/// there, the kind's own hue at three strengths here.
-private struct PanelTabPillStyle: ButtonStyle {
-    let kind: PanelTabKind
-    let isActive: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        PillBody(configuration: configuration, kind: kind, isActive: isActive)
-    }
-
-    private struct PillBody: View {
-        let configuration: Configuration
-        let kind: PanelTabKind
-        let isActive: Bool
-        @State private var isHovered = false
-
-        var body: some View {
-            configuration.label
-                .background(
-                    RoundedRectangle(cornerRadius: panelTabPillRadius, style: .continuous)
-                        .fill(Theme.panelKindPillFill(
-                            kind, isActive: isActive,
-                            isHovered: isHovered || configuration.isPressed))
-                )
-                .onHover { isHovered = $0 }
-        }
-    }
-}
-
+/// A panel tab, ChatGPT-style (2026-09-17): no kind tint — the active tab wears `chromeSelected`
+/// with primary ink, the rest are bare with muted ink and pick up `chromeHover` under the pointer.
+/// The close box shows on the active or hovered tab only, and a long title fades rather than "…".
 private struct PanelTabPill: View {
     let tab: PanelTab
-    /// live-gate fix E: **resolved by the caller**, never re-derived here. Both call sites pass
-    /// `panelTabStripTitle(tab)`, so the one rule for "what does this pill say" has one home; a
-    /// pill that computed its own title would be a second answer sitting beside it.
     let title: String
     let width: CGFloat
     let isActive: Bool
     let onActivate: () -> Void
     let onClose: () -> Void
+    /// The page's own icon (web tabs only, via `PanelTabPillLive`); `nil` shows the kind's glyph.
+    var favicon: NSImage? = nil
+
+    @State private var isHovered = false
 
     var body: some View {
         Button(action: onActivate) {
             ZStack(alignment: .leading) {
-                Image(systemName: panelTabFaviconSystemImage(tab.kind))
-                    .font(Typography.caption())
-                    .foregroundStyle(Theme.textMuted)
-                    .padding(.leading, 9.5)
-                Text(title)
-                    .font(Typography.label())
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    // **live-gate fix J: the title swap must not animate.** Fix E made a parked
-                    // tab's pill update the moment `OnTitleChange` lands, and the user's gate
-                    // reported a small shake as it does. Nothing about the pill's GEOMETRY moves:
-                    // the width is `panelTabPillWidth`'s, fixed on the frame below and independent
-                    // of the label, and this `Text` is leading-aligned at a constant inset. What
-                    // changes is this view's own glyph run and its intrinsic width inside that
-                    // fixed frame — and SwiftUI animates that like any other change if a
-                    // transaction with an animation happens to be in flight when it lands (the
-                    // strip's neighbours have several: `withAnimation(.snappy)` on the expand and
-                    // sidebar toggles, and the insert of the ⌘-clicked tab that is usually
-                    // moments away from this very update).
-                    //
-                    // SUPPRESSED: implicit animation of the update caused by `title` changing, for
-                    // this label only. PRESERVED: everything else the strip animates on purpose —
-                    // tab add/remove, activation, hover (`ShellSidebarRowStyle`), and the pill
-                    // width change when the tab count moves. `.animation(_:value:)` applies only
-                    // when the value it names changes, so no other update is touched.
+                Group {
+                    if let favicon {
+                        Image(nsImage: favicon)
+                            .resizable()
+                            .interpolation(.high)
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: panelTabFaviconSize, height: panelTabFaviconSize)
+                            .clipShape(RoundedRectangle(cornerRadius: panelTabFaviconRadius,
+                                                        style: .continuous))
+                    } else {
+                        Image(systemName: panelTabFaviconSystemImage(tab.kind))
+                            .font(Typography.caption())
+                            .foregroundStyle(Theme.textMuted)
+                    }
+                }
+                .padding(.leading, 9.5)
+                // ChatGPT's tab title: 13 pt regular (measured 2026-09-17).
+                FadingTitleText(text: title, font: Typography.control())
+                    .foregroundStyle(isActive ? Theme.textPrimary : Theme.textMuted)
                     .animation(nil, value: title)
                     .padding(.leading, 33)
-                    // DERIVED from the close button's own inset and box below, so tightening one
-                    // can never leave the label running under the other.
-                    .padding(.trailing, panelTabLabelTrailingInset)
+                    .padding(.trailing, panelTabShowsClose(isActive: isActive, isHovered: isHovered)
+                             ? panelTabLabelTrailingInset : panelTabPillInset)
             }
             .frame(width: width, height: panelTabPillSize.height, alignment: .leading)
             .contentShape(RoundedRectangle(cornerRadius: panelTabPillRadius, style: .continuous))
         }
-        // live-gate ruling 2026-08-15 ("the selected tab should still show in the same color the
-        // tabs of that type do, just a litle stronger"): the pill no longer wears
-        // `ShellSidebarRowStyle` — that shared style's hover/selected fill is OPAQUE neutral
-        // `RowHover`, which occluded the kind tint exactly on the states the user looks at, and
-        // its fixed luminance was the ceiling that had pushed `web`'s light alpha down to 4.7%
-        // ("browser tabs don't read blue"). `PanelTabPillStyle` below paints the ONE fill
-        // `Theme.panelKindPillFill` decides — the kind's own hue at rest/hover/selected strengths
-        // (§ 3.7's measured ladder) — mirroring the shared style's structure (internal `@State`
-        // hover + `.onHover`, pressed folds into hover, same `panelTabPillRadius` rounded rect)
-        // so it stays the same grammar with a kind-hued palette, not a second mechanism. The
-        // group CHIP keeps the shared style: it has no selected state, and the 2.0× base makes
-        // its neutral hover cue measure ≥ 1.043 (§ 3.7) — no occlusion problem to fix there.
-        .buttonStyle(PanelTabPillStyle(kind: tab.kind, isActive: isActive))
+        .buttonStyle(ShellChromeButtonStyle(isSelected: isActive, cornerRadius: panelTabPillRadius))
         .overlay(alignment: .trailing) {
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(Typography.badge(.semibold))
-                    .foregroundStyle(Theme.textMuted)
-                    .frame(width: panelTabCloseBoxSize, height: panelTabCloseBoxSize)
-                    .contentShape(Rectangle())
+            if panelTabShowsClose(isActive: isActive, isHovered: isHovered) {
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(Typography.label())
+                        .foregroundStyle(Theme.textMuted)
+                        .frame(width: panelTabCloseBoxSize, height: panelTabCloseBoxSize)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.trailing, panelTabCloseInset)
+                .accessibilityLabel("Close \(title)")
             }
-            .buttonStyle(.plain)
-            .padding(.trailing, panelTabCloseInset)
-            .accessibilityLabel("Close \(title)")
         }
+        .onHover { isHovered = $0 }
         .help(title)
         .accessibilityLabel(title)
     }
 }
 
-/// live-gate fix E: one pill, subscribed to its tab's live browser state.
-///
-/// **The `@ObservedObject` is an INVALIDATION channel and nothing else** — the value still comes
-/// from `panelTabStripTitle`, the same function the plain branch calls and the one the tests pin,
-/// so the two branches of the strip's conditional can never say different things. Without the
-/// subscription the pill would show whatever the title happened to be at the last `PanelStore`
-/// publication and never update: `OnTitleChange` reaches `PanelWebTabModel`, which is not something
-/// `PanelStore` publishes, so no fold would ever re-render the strip. That is precisely the
-/// symptom this fix is about — a ⌘-clicked background tab that has loaded, with the right title
-/// sitting in the model, and a pill still reading the commit-time one.
-///
-/// A separate type rather than an optional stored property because `@ObservedObject` cannot wrap an
-/// optional: SwiftUI subscribes at property-wrapper level, so "sometimes there is a publisher" has
-/// to be expressed as two views, not one view with a nil.
+/// PURE: the close box shows on the active tab and on whichever tab the pointer is over.
+func panelTabShowsClose(isActive: Bool, isHovered: Bool) -> Bool {
+    isActive || isHovered
+}
+
 private struct PanelTabPillLive: View {
     @ObservedObject var model: PanelWebTabModel
     let tab: PanelTab
@@ -807,7 +758,7 @@ private struct PanelTabPillLive: View {
 
     var body: some View {
         PanelTabPill(tab: tab, title: panelTabStripTitle(tab), width: width, isActive: isActive,
-                     onActivate: onActivate, onClose: onClose)
+                     onActivate: onActivate, onClose: onClose, favicon: model.favicon)
     }
 }
 
@@ -818,16 +769,10 @@ private struct PanelTabPillLive: View {
 /// EXPANDED (`onExpand`), never activates or closes any individual tab.
 ///
 /// **Smaller than a pill by shape, not by a second visual language.** Same height
-/// (`panelTabPillSize.height`) and the same `ShellSidebarRowStyle` neutral fill `newTabButton`
+/// (`panelTabPillSize.height`) and the same chrome style `newTabButton`
 /// already wears — a natural (unset) width instead of a fixed 156pt cap is what actually reads as
-/// smaller against a full pill. diff-tabs Task 12 wires the stronger per-kind tint the design spec
-/// describes (`Theme.panelKindChipTint`) as a background wash, same mechanism as the pill
-/// (`PanelTabPill`'s own doc comment) — NOT the favicon or the count text, both of which stay
-/// `Theme.textMuted`: the pill's own rule ("the tint is the surface, not the icon") reads as "the
-/// glyph is left exactly as it already is", and it extends here for a stronger, measured reason —
-/// this wash at 2× opacity composites to only ~1.1–1.2:1 against `CardSurface`, which as literal
-/// TEXT ink would be all but invisible (`docs/brand.md` § 3.7 records the numbers). "Stronger
-/// version" is the SURFACE being stronger, not the ink changing meaning.
+/// smaller against a full pill. Neutral like the pills since 2026-09-17 (ChatGPT has no per-kind
+/// tint): the shared chrome style, favicon and count in `Theme.textMuted`.
 private struct PanelTabKindChip: View {
     let kind: PanelTabKind
     let count: Int
@@ -849,24 +794,14 @@ private struct PanelTabKindChip: View {
             .frame(height: panelTabPillSize.height)
             .contentShape(RoundedRectangle(cornerRadius: panelTabPillRadius, style: .continuous))
         }
-        // diff-tabs Task 12: the SAME "layers under the style's own fill" mechanism as the pill
-        // (`PanelTabPill`'s own doc comment walks the SwiftUI mechanics in full) — `.background`
-        // attached BEFORE `.buttonStyle` sits behind the style's `.clear`-at-rest /
-        // opaque-on-hover fill. `panelKindChipTint` is the SAME switch as the pill's tint, scaled
-        // by the named multiplier (`Theme.panelKindChipTintOpacityMultiplier`), never a second
-        // exhaustive switch.
-        .background {
-            RoundedRectangle(cornerRadius: panelTabPillRadius, style: .continuous)
-                .fill(Theme.panelKindChipTint(kind))
-        }
-        .buttonStyle(ShellSidebarRowStyle(isSelected: false))
+        .buttonStyle(ShellChromeButtonStyle(cornerRadius: panelTabPillRadius))
         .help("\(count) \(kind.rawValue.capitalized) tab\(count == 1 ? "" : "s")")
         .accessibilityLabel("\(count) \(kind.rawValue.capitalized) tab\(count == 1 ? "" : "s"), collapsed")
     }
 }
 
-/// A placeholder favicon keyed off the tab's kind, not a fetched site icon — Plan A never loads
-/// real content (a page's own favicon is Plan B/CEF's), so the kind is the only signal there is.
+/// The favicon glyph keyed off the tab's kind — what every non-web pill shows, and what a web pill
+/// shows until (or unless) its page's own icon arrives (`PanelWebTabModel.favicon`).
 /// Exhaustive on purpose, no `default:` — `PanelTabKind`'s own doc comment (`PanelTab.swift`)
 /// explains why a future case must fail this to compile rather than fall back silently.
 func panelTabFaviconSystemImage(_ kind: PanelTabKind) -> String {
@@ -952,8 +887,10 @@ struct PanelDivider: View {
     @State private var dragStartWidth: CGFloat?
 
     var body: some View {
+        // Drawn in the panel's own face, not as a second rule: the chat card's hairline border
+        // already draws the one line between the two (two adjacent rules read as a double line).
         Rectangle()
-            .fill(Theme.hairline)
+            .fill(Theme.cardSurface)
             .frame(width: panelDividerWidth)
             .contentShape(Rectangle().inset(by: -4))   // a 1pt line is not a grabbable target
             .onHover { $0 ? NSCursor.resizeLeftRight.push() : NSCursor.pop() }

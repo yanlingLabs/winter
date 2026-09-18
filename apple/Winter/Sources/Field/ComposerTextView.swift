@@ -109,7 +109,7 @@ struct ComposerTextView: NSViewRepresentable {
         // inverse of the typical glass tone — so subtracting it from the background would produce
         // near-white in both modes (the washed-out 'full white' symptom)" — i.e. typed text renders
         // invisible. `.labelColor` here was the transplant regression; `.white` restores v1 parity.
-        textView.textColor = usesAdaptiveColors ? .labelColor : .white
+        textView.textColor = usesAdaptiveColors ? (NSColor(named: "TextPrimary") ?? .labelColor) : .white
         textView.isRichText = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.drawsBackground = false
@@ -122,7 +122,7 @@ struct ComposerTextView: NSViewRepresentable {
         textView.autoresizingMask = [.width]
         textView.typingAttributes = [
             .font: textView.font ?? Typography.sansNS(ofSize: fontSize),
-            .foregroundColor: usesAdaptiveColors ? NSColor.labelColor : NSColor.white
+            .foregroundColor: usesAdaptiveColors ? (NSColor(named: "TextPrimary") ?? .labelColor) : NSColor.white
         ]
         // The caret is WINTER'S accent (user call, 2026-08-07 — every cursor in the app one colour),
         // never `.controlAccentColor`: that is whatever the user picked in System Settings, so it

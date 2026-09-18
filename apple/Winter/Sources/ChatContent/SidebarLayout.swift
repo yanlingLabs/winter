@@ -9,6 +9,8 @@
 /// fit inline. See `resolveSidebars`.
 let sidebarLeftWidth: CGFloat = 220
 let sidebarRightWidth: CGFloat = 260
+/// The floating subagents block's width (2026-09-17 — the right sidebar's successor).
+let floatingSubagentBlockWidth: CGFloat = 240
 let sidebarContentMinWidth: CGFloat = 520
 
 /// gate-feedback-1 FIX C: the edge-chevron affordances (`WindowContentView.sidebarChevron`) used

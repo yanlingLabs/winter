@@ -38,10 +38,25 @@ struct ShellRootView: View {
     /// survives whatever destination is showing), while the ⌕ that opens it lives in the pane.
     /// The two are siblings, so the state has to live at their common parent.
     @StateObject private var searchPalette = SearchPalettePresentation()
+    /// 2026-09-17: the three floating panels the account row opens (library / devices / updates).
+    /// The buttons are in the pane and the panels are overlays on this root, so the state has to
+    /// live at least this high — and since 2026-09-18 it lives one level higher still, on
+    /// `AppWindowController`, because the menu bar's "Check for Updates…" opens the updates panel
+    /// from outside the view tree entirely.
+    @ObservedObject var overlays: ShellOverlayPresentation
+    /// Which library tab is showing. Shell state rather than part of `ShellOverlay.library`, so
+    /// reopening the panel returns you to where you were.
+    @State private var libraryTab: LibraryTab = defaultLibraryTab
+    /// Where Settings' Back row returns to. Captured when Settings opens rather than hard-coded:
+    /// sending someone to the new-chat page when they came from a live session loses their place.
+    @State private var destinationBeforeSettings: ShellDestination = defaultShellDestination
     /// sidebar-brand: whether the sidebar pane is showing. `@State` on the root suffices — the
     /// window outlives every hide/re-summon (`AppWindowController` owns it forever), so the user's
     /// choice survives exactly as long as the window itself does.
     @State private var sidebarVisible = true
+    /// The work panel's visibility (2026-09-17) — shared with `WindowContentView` through the same
+    /// `@AppStorage` key, so the titlebar toggle and the panel column read one value.
+    @AppStorage(workPanelVisibleKey) private var workPanelVisible = true
     /// panel-shell T10: mode and width together — replaces the two separate `@State` values Task 2
     /// added (`panelMode`/`panelWidth`, one comment below this one until this task). `.mode` is
     /// still the REQUESTED mode (`panelResolvedMode` may render `.hidden` on a narrow window while
@@ -80,6 +95,21 @@ struct ShellRootView: View {
     /// non-optional, so something must always be handed to it.
     @StateObject private var fallbackPanelStore = PanelStore()
     private var panelStore: PanelStore { host?.panelStore ?? fallbackPanelStore }
+
+    /// The work-panel toggle shows only where the panel can: an attached, non-chat session.
+    private var showsWorkPanelToggle: Bool {
+        guard case .session(let sessionId) = nav.destination else { return false }
+        guard let row = directory.rows.first(where: { $0.sessionId == sessionId }) else { return false }
+        return row.mode != "chat"
+    }
+
+    private var workPanelToggle: some View {
+        ShellTitlebarButton(systemImage: workPanelToggleGlyph,
+                            label: workPanelVisible ? "Hide work panel" : "Show work panel",
+                            isOn: workPanelVisible) {
+            withAnimation(shellPanelMotion) { workPanelVisible.toggle() }
+        }
+    }
 
     var body: some View {
         // panel-shell T2: the whole body moved inside a `GeometryReader` — `contentWidth` (the
@@ -122,7 +152,7 @@ struct ShellRootView: View {
                 .onAppear {
                     let presentationBinding = $presentation
                     host?.onRevealPanel = {
-                        withAnimation(.snappy) { presentationBinding.wrappedValue.revealIfHidden() }
+                        withAnimation(shellPanelMotion) { presentationBinding.wrappedValue.revealIfHidden() }
                     }
                 }
                 #if DEBUG
@@ -236,7 +266,10 @@ struct ShellRootView: View {
             // ruling: the pane now collapses, driven by the titlebar toggle below.
             if sidebarVisible {
                 ShellSidebar(nav: nav, directory: directory, host: host, newChat: newChat,
-                             presentation: searchPalette)
+                             presentation: searchPalette, overlays: overlays,
+                             libraryTab: $libraryTab,
+                             onOpenSettings: openSettings,
+                             onLeaveSettings: leaveSettings)
                     // Slides out to the leading edge rather than fading — the pane is a physical
                     // surface, and a fade reads as dissolving rather than closing.
                     .transition(.move(edge: .leading))
@@ -267,27 +300,6 @@ struct ShellRootView: View {
             if mode != .maximized {
                 detail
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    // sidebar-brand T5: the RAISED plane (`docs/brand.md` § the plane mapping).
-                    // REQUIRED, not cosmetic: the sidebar's cream only reads correctly against a
-                    // painted content plane — against the window's default system grey it looks
-                    // wrong rather than warm. Painted here, at the shell level, so every destination
-                    // inherits it and none has to remember.
-                    // The CARD — the phone's own treatment brought over (user call, 2026-08-07): iOS
-                    // masks its reveal card with a continuous rounded rect, traces that exact shape
-                    // with a hairline rim, and floats it on the warm base. Only the LEADING corners
-                    // round — the other two meet the window's own edge, which already has the
-                    // system's rounding, and doubling it would read as a card inside a card.
-                    //
-                    // Drawn as a BACKGROUND LAYER that ignores the safe area, not as a clip on the
-                    // content. `detail`'s content is inset by the titlebar's safe area (only the
-                    // sidebar opts out), so clipping the content produced a ~23 pt gap above the card
-                    // — invisible before only because the window's own `CardSurface` fill was quietly
-                    // covering that band, and revealed the moment `canvas` went behind it. A
-                    // background layer reaches the window's top edge without moving any content.
-                    //
-                    // This REPLACED the full-height boundary hairline between pane and detail: a
-                    // straight line cannot follow a rounded corner, so it would have run past the
-                    // card's edge. The rim is the separator now, which is also how the phone does it.
                     .background {
                         shellDetailCardShape
                             .fill(Theme.cardSurface)
@@ -301,22 +313,10 @@ struct ShellRootView: View {
                     }
             }
 
-            // panel-shell T2: the third column. The divider renders ONLY in `.side` — there is
-            // nothing to divide when the panel owns the whole content area (`.maximized`), and
-            // neither it nor the panel renders at all in `.hidden`.
-            //
-            // Every `panelClampWidth` call below is reachable ONLY when `mode == .side`, which
-            // `panelResolvedMode` guarantees means `panelFitsInContent(contentWidth)` already
-            // holds — that is what keeps the clamp's own bounds from inverting (Task 1's carried
-            // finding; the guarantee is pinned by
-            // `PanelModeTests.testClampBoundsAreNeverInvertedWhenThePanelFits`). Nothing here ever
-            // calls it below the threshold where it could — panel-shell T10: that includes
-            // `panelRenderedWidth` below, which only calls `panelClampWidth` for `.side` and is
-            // itself only ever called from inside this SAME `mode != .hidden` branch.
+            if mode == .side {
+                PanelDivider(width: $presentation.sideWidth, contentWidth: contentWidth)
+            }
             if mode != .hidden {
-                if mode == .side {
-                    PanelDivider(width: $presentation.sideWidth, contentWidth: contentWidth)
-                }
                 ShellPanel(store: panelStore, presentation: $presentation, host: host, nav: nav)
                     .frame(width: mode == .maximized
                            ? nil
@@ -324,8 +324,7 @@ struct ShellRootView: View {
                                                  contentWidth: contentWidth))
                     .frame(maxWidth: mode == .maximized ? .infinity : nil,
                            maxHeight: .infinity)
-                    // Mirrors the sidebar's own leading-edge slide (`sidebarVisible` above) —
-                    // a physical surface sliding in from its own edge, not fading.
+                    // A physical surface sliding in from its own edge.
                     .transition(.move(edge: .trailing))
             }
         }
@@ -337,7 +336,7 @@ struct ShellRootView: View {
         // **It does NOT cover `Color.accentColor`, and this comment used to claim it did** — named
         // the pending cards specifically, which was the one example that was false (mac-chat-parity
         // Task 8 fix round 1). Probed: with a system accent of #FFC726, `Color.accentColor` renders
-        // #FFC727 *inside* this modifier while `ShapeStyle.tint` renders #2E9484. `Color.accentColor`
+        // #FFC727 *inside* this modifier while `ShapeStyle.tint` renders #8CCBF0. `Color.accentColor`
         // reads the system preference directly and ignores ancestor tint entirely — which is why the
         // cards' selection chrome was drawing in the user's own accent until Task 8 named
         // `Theme.accent` at each site, and why this comment mattered: it is exactly the sentence
@@ -346,10 +345,18 @@ struct ShellRootView: View {
         // Deliberately NOT `ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME`: that would retint
         // every system control in the app process, including surfaces this pass does not own.
         .tint(Theme.accent)
-        // The base plane behind everything, so the card's rounded corners reveal warm canvas
-        // rather than the window's own fill. The sidebar paints its own `canvas` too; this is what
-        // covers the sliver the corners cut out of the detail side.
-        .background(Theme.canvas)
+        // ChatGPT's text ink (2026-09-17): every `.primary` in the shell resolves to this.
+        .foregroundStyle(Theme.textPrimary)
+        // The base plane behind everything, so the card's rounded corners reveal the sidebar's
+        // plane rather than the window's own fill.
+        //
+        // 2026-09-17: that plane is the VIBRANCY (`ShellVibrancyBackground`) — ONE view for the
+        // whole shell, not one per pane. The first cut put it on the sidebar pane alone, which
+        // left every pixel the pane does not cover — the gutter between pane and card, and the
+        // wedges the card's rounded corners cut out — on this opaque canvas: translucent column,
+        // solid corners. Whatever the card does not cover IS the plane, so the plane is what has
+        // to be translucent. `.ignoresSafeArea()` so it reaches under the titlebar band too.
+        .background { ShellVibrancyBackground().ignoresSafeArea() }
         // app-shell T4: the hop-away "keep working?" banner (spec §1, T3 review as-m9) — an
         // OVERLAY on the whole split view, not inside `detail`, so it survives the very
         // navigation that triggered it (the user has already moved on to a different surface by
@@ -375,6 +382,15 @@ struct ShellRootView: View {
         // the pane) is what makes that possible.
         .overlay(alignment: .topLeading) {
             HStack(spacing: shellTitlebarClusterSpacing) {
+                // SETTINGS (user call, 2026-09-17): the titlebar carries the traffic lights and ONE
+                // back arrow, nothing else. The sidebar toggle would collapse the very column the
+                // settings sections live in, and the placeholder nav arrows are noise beside a real
+                // one. This arrow IS the way out, which is why the sidebar no longer carries a Back
+                // row of its own.
+                if isSettings {
+                    ShellTitlebarButton(systemImage: "arrow.left", label: "Back",
+                                        action: leaveSettings)
+                } else {
                 ShellTitlebarButton(
                     systemImage: shellSidebarToggleSystemImage(isVisible: sidebarVisible),
                     label: shellSidebarToggleLabel(isVisible: sidebarVisible)
@@ -388,6 +404,7 @@ struct ShellRootView: View {
                     ShellTitlebarButton(systemImage: glyph,
                                         label: glyph == "arrow.left" ? "Back" : "Forward",
                                         isPlaceholder: true)
+                }
                 }
             }
             .padding(.leading, shellSidebarToggleLeadingInset)
@@ -419,9 +436,16 @@ struct ShellRootView: View {
         // is "outside the panel's leading edge" in any sense the spec line means. `.maximized`
         // simply shows nothing here; nothing in the spec asks for a `.maximized`-specific placement.
         .overlay(alignment: .topTrailing) {
-            if mode == .hidden {
+            // Hidden entirely in Settings (user call): every glyph up here drives the chat surface
+            // — the work panel, the browser panel — and none of them has anything to act on while
+            // a settings section is showing.
+            if mode == .hidden, !isSettings {
                 HStack(spacing: shellTitlebarClusterSpacing) {
                     ForEach(shellTitlebarTrailingGlyphs, id: \.self) { glyph in
+                        // The work-panel toggle sits just before the panel toggles, as ChatGPT's does.
+                        if glyph == "dock.rectangle", showsWorkPanelToggle {
+                            workPanelToggle
+                        }
                         if glyph == "sidebar.right" {
                             // panel-shell T2: the placeholder named in `shellTitlebarTrailingLabel`
                             // becomes the real toggle. `shellTitlebarTrailingGlyphs` still lists this
@@ -470,7 +494,7 @@ struct ShellRootView: View {
                                     : "Widen the window or hide the sidebar to use the panel."
                             ) {
                                 let wasHidden = presentation.mode == .hidden
-                                withAnimation(.snappy) { presentation.toggleVisible() }
+                                withAnimation(shellPanelMotion) { presentation.toggleVisible() }
                                 // 2026-08-09 live gate (user): "the sidebar should open with a tab
                                 // already" — an empty panel has nothing to show and no reason to be
                                 // open. Only on the HIDDEN -> visible transition, and only when the
@@ -512,9 +536,12 @@ struct ShellRootView: View {
                 .padding(.top, shellSidebarToggleTopInset)
                 .ignoresSafeArea(.container, edges: .top)
             } else if mode == .side {
-                ShellTitlebarButton(systemImage: "circle.dashed",
-                                    label: shellTitlebarTrailingLabel("circle.dashed"),
-                                    isPlaceholder: true)
+                HStack(spacing: shellTitlebarClusterSpacing) {
+                    ShellTitlebarButton(systemImage: "circle.dashed",
+                                        label: shellTitlebarTrailingLabel("circle.dashed"),
+                                        isPlaceholder: true)
+                    if showsWorkPanelToggle { workPanelToggle }
+                }
                     // Clears the panel itself (`panelRenderedWidth`, reachable here because this
                     // branch already IS `mode == .side`) plus the divider hairline between panel
                     // and chat, plus the same clearance the titlebar cluster already uses
@@ -538,6 +565,22 @@ struct ShellRootView: View {
         // one effect — and it is a consequence of this ordering, so do not reorder these two
         // without meaning to. (The traffic lights are unaffected: they are `NSWindow` buttons
         // living above the content view, not SwiftUI siblings, so they stay clickable throughout.)
+        .overlay {
+            if let overlay = overlays.overlay {
+                ShellFloatingPanel(overlay: overlay, onClose: { overlays.close() }) {
+                    switch overlay {
+                    case .library:
+                        LibraryPanel(tab: $libraryTab, wiring: dashboardWiring)
+                    case .devices:
+                        DevicesPanel(wiring: dashboardWiring, onPair: { overlays.close() })
+                    case .updates:
+                        UpdatesPanel(wiring: dashboardWiring)
+                    }
+                }
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.16), value: overlays.overlay)
         .overlay {
             if searchPalette.isPresented {
                 SidebarSearchPalette(nav: nav, directory: directory, presentation: searchPalette)
@@ -617,7 +660,29 @@ struct ShellRootView: View {
             } else {
                 ShellLandingView(destination: nav.destination)
             }
+        case .settings(let section):
+            // The sidebar is already showing the settings sections (`ShellSidebar` swaps its own
+            // content on this destination), so the card shows ONLY the section — no nested pane
+            // list, which is the whole point of making Settings a destination instead of reusing
+            // the Dashboard's two-column surface.
+            SettingsSectionView(section: section ?? defaultSettingsSection, wiring: dashboardWiring)
         }
+    }
+
+    /// Whether a settings section is showing. Drives the chrome that stands down while it is.
+    private var isSettings: Bool { shellDestinationIsSettings(nav.destination) }
+
+    /// Enter Settings, remembering where the user was so Back can return them there.
+    private func openSettings() {
+        if case .settings = nav.destination {} else {
+            destinationBeforeSettings = nav.destination
+        }
+        nav.navigate(to: .settings(section: defaultSettingsSection))
+    }
+
+    /// Leave Settings the way they came in.
+    private func leaveSettings() {
+        nav.navigate(to: destinationBeforeSettings)
     }
 }
 
@@ -706,6 +771,37 @@ let shellAccountRowTitle = "Winter"
 let shellAccountAvatarSize: CGFloat = 24
 let shellAccountRowHeight: CGFloat = 34
 
+/// One icon in the account row's expanded cluster (2026-09-17).
+struct ShellAccountAction: Equatable {
+    let systemImage: String
+    let label: String
+}
+
+/// What the account row reveals when it expands, in order. NOT WIRED YET (user call: "don't wire
+/// them yet, lets do this first") — every one renders as a placeholder, which in this app means it
+/// reads one step quieter and still hovers, rather than pretending to be disabled.
+///
+/// This REPLACED the popover menu that used to open here. The Dashboard's own doors (`Settings`,
+/// the rest of `shellAccountMenuGroups`) are where the gear will land when these are wired; until
+/// then the sidebar has no Dashboard door at all, which is the deliberate cost of doing the shape
+/// first.
+let shellAccountActions: [ShellAccountAction] = [
+    ShellAccountAction(systemImage: "gearshape", label: "Settings"),
+    // The SAME glyph the Skills pane has always used — the panel it opens is where skills
+    // live now, and two different books for one idea is two ideas (user call).
+    ShellAccountAction(systemImage: "book.closed", label: "Library"),
+    ShellAccountAction(systemImage: "iphone", label: "Phone"),
+    ShellAccountAction(systemImage: "arrow.triangle.2.circlepath", label: "Check for updates"),
+]
+
+/// The gap between those icons — tighter than the titlebar cluster's, because four of them plus the
+/// account pill have to share one 272 pt row.
+let shellAccountActionSpacing: CGFloat = 2
+
+/// The disclosure's curve. Quicker than the side panels' — this is a row opening, not a surface
+/// arriving — and with no bounce, like everything else in the shell.
+let shellAccountExpandMotion: Animation = .easeInOut(duration: 0.2)
+
 /// The account popover's width — wide enough for the longest pane title without wrapping.
 let shellAccountMenuWidth: CGFloat = 240
 
@@ -780,7 +876,9 @@ let shellSidebarHairlineWidth: CGFloat = 0.5
 /// Generous on purpose — the phone's card uses 54 to sit with the display's own corner, and a
 /// timid Mac radius (this shipped at 12 first) reads as a rendering artefact rather than as a
 /// deliberate card edge. Tune-at-gate.
-let shellDetailCardCornerRadius: CGFloat = 28
+/// DERIVED from the composer's radius (2026-09-17) — the sidebar/chat edge and the composer round
+/// the same way, with the same continuous curve.
+let shellDetailCardCornerRadius: CGFloat = newChatCardCornerRadius
 
 /// The detail card's shape — declared ONCE so the clip and the rim trace the same geometry. Two
 /// separate constructions is how a rim ends up a hair off its own clip edge.
@@ -831,11 +929,68 @@ let shellSidebarSectionGap: CGFloat = 32
 ///
 /// The fade is generous because it is the only thing separating the strip from the list — a short
 /// ramp reads as an edge, which is precisely what the removed divider was.
+/// The alpha a row still has at the KNEE — the moment it reaches the floating row's edge and
+/// starts passing behind it. Everything above this point is the gentle half of the ramp; below it
+/// the decay goes exponential.
+let shellFadeKneeAlpha: Double = 0.45
+
+/// How hard the curve bites once a row is behind the floating row. Higher = more of the drop
+/// happens in the first few points past the knee.
+let shellFadeBehindDecay: Double = 4.5
+
+/// One end of the mask's ramp — eased, and DELIBERATELY NOT one curve end to end (2026-09-17).
+///
+/// A plain two-stop gradient changes alpha at a constant rate, so it starts and stops abruptly and
+/// the eye reads those kinks as a soft line; a single smoothstep fixed that but spent the fade
+/// evenly over open pane and occupied row alike, which makes a row still clearly legible as it
+/// slides under "Winter".
+///
+/// So the ramp has a KNEE at the floating row's edge (`openHeight` is the pane before it,
+/// `behindHeight` the row itself):
+///
+/// - **before it** — a smoothstep from solid down to `shellFadeKneeAlpha`, flat where it meets the
+///   solid so there is nothing to catch on;
+/// - **behind it** — exponential decay to zero (`shellFadeBehindDecay`), so most of what is left
+///   disappears in the first few points past the edge and the tail reaches zero right at the
+///   pane's edge rather than stopping short of it.
+///
+/// `fadingIn` is the top end: the same curve read from the far side, since up there it is the
+/// wordmark's row that the content passes behind.
+func shellFadeRamp(fadingIn: Bool, openHeight: CGFloat, behindHeight: CGFloat) -> LinearGradient {
+    let total = max(openHeight + behindHeight, 1)
+    let knee = Double(openHeight / total)
+    // `t` runs 0 (fully solid) → 1 (fully clear), regardless of which end this ramp is.
+    let stops: [Gradient.Stop] = (0...18).map { step in
+        let t = Double(step) / 18
+        let alpha: Double
+        if t <= knee {
+            let u = knee > 0 ? t / knee : 1
+            alpha = 1 - (1 - shellFadeKneeAlpha) * (u * u * (3 - 2 * u)) // smoothstep 1 → knee
+        } else {
+            let u = (t - knee) / max(1 - knee, 0.0001)
+            let k = shellFadeBehindDecay
+            alpha = shellFadeKneeAlpha * (exp(-k * u) - exp(-k)) / (1 - exp(-k))
+        }
+        return Gradient.Stop(color: .black.opacity(alpha), location: fadingIn ? 1 - t : t)
+    }
+    return LinearGradient(stops: fadingIn ? stops.reversed() : stops,
+                          startPoint: .top, endPoint: .bottom)
+}
+
+/// The band the floating wordmark occupies at the top of the pane: its traffic-light clearance
+/// plus the row itself. Rows scroll UNDER it and are masked out across exactly this height.
+let shellSidebarWordmarkBandHeight: CGFloat = shellSidebarTopInset + shellSidebarWordmarkRowHeight
+
+/// The ramp a row dissolves over on its way under the wordmark. Shorter than the bottom's: the
+/// distance to travel is smaller, and this gap is also the resting air under "Winter" (it replaced
+/// that row's own 6 pt bottom padding).
+let shellSidebarTopFadeHeight: CGFloat = 26
+
 let shellAccountStripHeight: CGFloat = 46
-let shellAccountFadeHeight: CGFloat = 32
+let shellAccountFadeHeight: CGFloat = 56
 
 /// The rounded-rect hover/selection fill's corner radius — shared by every row, one vocabulary.
-let shellSidebarRowCornerRadius: CGFloat = 6
+let shellSidebarRowCornerRadius: CGFloat = 10
 
 /// Where the pane's CONTENT column starts, measured from the pane's own leading edge. Rows reach
 /// it as 8 pt of scroll-content padding plus 10 pt inside the row (the 10 is inside the row so the
@@ -854,7 +1009,10 @@ let shellSidebarContentInset: CGFloat = 18
 /// visibly shy in a side-by-side, and (10, 8) is the corrected measurement. Tune-at-gate, like
 /// every other constant in this block — and note it interacts with
 /// `shellSidebarToggleLeadingInset` below, which has to keep clearing the buttons as they move.
-let shellTrafficLightInset = CGPoint(x: 10, y: 8)
+/// 2026-09-17: with the (experimental) empty unified toolbar, AppKit itself now places the buttons
+/// 10 pt right and 9 pt lower than the toolbar-less baseline this was measured against — measured
+/// off a screenshot — so the extra offset shrinks to (0, −1) to land them where (10, 8) did.
+let shellTrafficLightInset = CGPoint(x: 0, y: -1)
 
 /// Where the titlebar control cluster sits: to the RIGHT of the traffic lights, in the titlebar
 /// band, at the same place whether the sidebar is showing or hidden (the reference keeps it fixed
@@ -889,6 +1047,14 @@ let shellTitlebarTrailingInset: CGFloat = 8
 /// `shellTitlebarTrailingPlaceholderGlyphs` below for that, now that `sidebar.right` is wired
 /// (panel-shell T2).
 let shellTitlebarTrailingGlyphs: [String] = ["circle.dashed", "dock.rectangle", "sidebar.right"]
+
+/// The work-panel toggle's glyph (2026-09-17) — ChatGPT's list-in-a-panel icon. Not part of
+/// `shellTitlebarTrailingGlyphs`: it renders only for an attached non-chat session.
+let workPanelToggleGlyph = "list.bullet.rectangle"
+
+/// The `@AppStorage` key the work panel's visibility lives under — read by the titlebar toggle
+/// (`ShellRootView`) and the panel column (`WindowContentView`).
+let workPanelVisibleKey = "winter.workPanelVisible"
 
 /// The subset of `shellTitlebarTrailingGlyphs` that is STILL a placeholder. Split out (review
 /// round 2, Important 3) because the two questions — "what's in the cluster" and "what's still
@@ -950,6 +1116,13 @@ func shellSidebarToggleLabel(isVisible: Bool) -> String {
 /// call, 2026-08-07: "a button like highlight when hovered — not icon color but background color
 /// just like the sidebar items"). One row vocabulary across the whole shell, now including the
 /// titlebar.
+/// PURE: a titlebar icon's ink — primary while on (ChatGPT's white/near-black selected icon),
+/// muted at rest, the system's faint level while dimmed.
+func shellTitlebarIconStyle(isOn: Bool, isDimmed: Bool) -> AnyShapeStyle {
+    if isDimmed { return AnyShapeStyle(.tertiary) }
+    return isOn ? AnyShapeStyle(Theme.textPrimary) : AnyShapeStyle(Theme.textMuted)
+}
+
 struct ShellTitlebarButton: View {
     let systemImage: String
     let label: String
@@ -984,12 +1157,13 @@ struct ShellTitlebarButton: View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(Typography.control(.medium))
-                .foregroundStyle((isPlaceholder || !isEnabled) ? AnyShapeStyle(.tertiary)
-                                                                : AnyShapeStyle(Theme.textMuted))
+                .foregroundStyle(shellTitlebarIconStyle(isOn: isOn,
+                                                        isDimmed: isPlaceholder || !isEnabled))
                 .frame(width: size, height: size)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(ShellSidebarRowStyle(isSelected: isOn))
+        // ChatGPT's chrome states (2026-09-17): hover `chromeHover`, on `chromeSelected`.
+        .buttonStyle(ShellChromeButtonStyle(isSelected: isOn))
         .help(label)
         .accessibilityLabel(label)
     }
@@ -1061,11 +1235,33 @@ struct ShellSidebar: View {
     /// here so the wordmark row's ⌕ can open it. The old inline `searchQuery` state moved into
     /// `SidebarSearchPalette` with the field itself.
     @ObservedObject var presentation: SearchPalettePresentation
+    /// 2026-09-17: the three floating panels, owned by `ShellRootView` for the same sibling reason
+    /// the palette is — the account row's icons open them, the panels render over the root.
+    @ObservedObject var overlays: ShellOverlayPresentation
+    /// Which library tab the panel returns to, held by the root so it survives a close.
+    @Binding var libraryTab: LibraryTab
+    /// The gear's door. The root owns it because entering Settings has to remember where the user
+    /// was first, which this pane has no business knowing.
+    var onOpenSettings: () -> Void = {}
+    /// The settings sidebar's Back row.
+    var onLeaveSettings: () -> Void = {}
 
     /// The account popover's presentation flag — local to this pane, since both the button that
     /// opens it and the popover itself live here (unlike the search palette, whose door and body
     /// are siblings and therefore need state at their common parent).
+    /// PARKED, not dead (2026-09-17): the popover this drove was replaced by the row's sideways
+    /// disclosure, but `accountMenuContent` is where the Dashboard's doors are already assembled
+    /// from the Dashboard's own tables — it is what the gear icon opens once the cluster is wired.
     @State private var accountMenuShown = false
+    /// Whether the account row is expanded into its icon cluster (2026-09-17). Local to the pane,
+    /// and deliberately NOT persisted: it is a disclosure, not a preference.
+    @State private var accountExpanded = false
+
+    /// While Settings is showing, this pane is the settings sidebar and NOTHING else (user call,
+    /// 2026-09-17): no wordmark, no search, no account row. Those three belong to the app's own
+    /// navigation, and leaving them up made Settings look like a page inside the sidebar rather
+    /// than the surface that replaced it. The way out is the titlebar's one back arrow.
+    private var isSettings: Bool { shellDestinationIsSettings(nav.destination) }
 
     // sidebar-chrome-2 DELETED `isDashboardDestination` (Task 7's "lit for ANY .dashboard
     // destination"). The account row is a MENU now, not a navigation row, so it has no selected
@@ -1073,11 +1269,26 @@ struct ShellSidebar: View {
     // claiming a selection it does not represent.
 
     var body: some View {
-        VStack(spacing: 0) {
-            // sidebar-brand T4: the wordmark is PINNED above the scroll area — it owns the
-            // traffic-light clearance now, and rows scroll BENEATH it rather than past it.
-            wordmarkRow
+        // 2026-09-17: the wordmark is an OVERLAY, not a sibling above the scroll. As a sibling it
+        // clipped the scroll at its own bottom edge, so a row scrolling up vanished at a hard
+        // line — the thing the bottom strip had already been fixed for. Now the scroll runs the
+        // FULL height of the pane, under both the wordmark and the account row, and
+        // `recentsFadeMask` dissolves the rows at each end. Both ends, one mechanism.
+        Group {
             ScrollView {
+                // 2026-09-17: in Settings this column IS the settings sidebar (user call: "the
+                // sidebar will be rewritten as settings sidebar in settings tab"). Swapping the
+                // content rather than nesting a second list is what keeps one sidebar on screen.
+                if case .settings(let section) = nav.destination {
+                    SettingsSidebarContent(nav: nav,
+                                           selected: section ?? defaultSettingsSection)
+                        .padding(.horizontal, 8)
+                        // Only the traffic-light band to clear now — there is no wordmark above and
+                        // no account row below, so the sections start higher and run lower.
+                        .padding(.top, shellSidebarTopInset + shellSidebarTopFadeHeight)
+                        .padding(.bottom, shellAccountFadeHeight)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
                 VStack(alignment: .leading, spacing: 1) {
                     ForEach(shellSidebarTopRows, id: \.self) { row in
                         topRow(row)
@@ -1087,7 +1298,7 @@ struct ShellSidebar: View {
                     // sidebar-brand: the warm brand grey at the reference's larger, quieter
                     // register (was 11 pt semibold `.secondary`), under a generous section gap.
                     Text("Recents")
-                        .font(Typography.control())
+                        .font(Typography.body())
                         .foregroundStyle(Theme.textMuted)
                         .padding(.horizontal, 10)
                         .padding(.top, shellSidebarSectionGap)
@@ -1110,7 +1321,7 @@ struct ShellSidebar: View {
                     let recents = recentsCandidates(directory.rows)
                     if recents.isEmpty {
                         Text("No sessions yet")
-                            .font(Typography.control())
+                            .font(Typography.body())
                             .foregroundStyle(Theme.textMuted)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 4)
@@ -1121,17 +1332,28 @@ struct ShellSidebar: View {
                     }
                 }
                 .padding(.horizontal, 8)
-                // Clearance for the FLOATING account strip below, so the last recents row can
-                // still be scrolled fully clear of it instead of resting permanently underneath.
+                // Clearance for the FLOATING wordmark above and account strip below, so the first
+                // and last rows can still be scrolled fully clear of them instead of resting
+                // permanently underneath. The fade bands are part of that clearance: without
+                // them the row at rest would sit half-dissolved inside the ramp.
+                .padding(.top, shellSidebarWordmarkBandHeight + shellSidebarTopFadeHeight)
                 .padding(.bottom, shellAccountStripHeight + shellAccountFadeHeight)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            // The rows carry their own disappearance at BOTH ends (2026-09-17) — see `accountStrip`.
+            .mask { recentsFadeMask }
+            .overlay(alignment: .top) {
+                if !isSettings { wordmarkRow }
             }
         }
         // The account strip FLOATS over the scroll rather than sitting below it (user call,
         // 2026-08-07), so recents pass UNDERNEATH it: a soft fade first, then the blurred strip.
         // That is what replaced the divider — the rows softening as they go under says "there is
         // more here" far better than a hard rule ever did.
-        .overlay(alignment: .bottom) { accountStrip }
+        .overlay(alignment: .bottom) {
+            if !isSettings { accountStrip }
+        }
         .frame(width: shellSidebarWidth)
         // Flat opaque fill, edge-to-edge and top-to-bottom — the pane's ONE background, reaching
         // the very top of the window (nothing native reserves the titlebar band any more: the
@@ -1140,7 +1362,17 @@ struct ShellSidebar: View {
         // mapping) — warm cream in light, warm charcoal in dark. The content side wears
         // `cardSurface`, one step brighter; that difference IS the separation, and the hairline
         // is only secondary.
-        .background(Theme.canvas)
+        //
+        // 2026-09-17 EXPERIMENT: the pane paints NO fill of its own any more — the shell's base
+        // plane behind it is the behind-window vibrancy (`ShellVibrancyBackground`, which says why
+        // a SwiftUI material cannot blur the desktop), and a fill here would just cover it. The
+        // content side stays opaque `cardSurface`, so it is everything AROUND the card — this
+        // column, the gutter, the corner wedges — that is translucent, as one continuous plane.
+        // ChatGPT's sidebar ink — the sidebar's `.primary` resolves one step softer.
+        .foregroundStyle(Theme.textSecondary)
+        // Every row INSIDE this pane is on the vibrant plane, so its hover/selected steps are the
+        // washes rather than the opaque greys (`ShellSidebarRowStyle.RowBody.fill`).
+        .environment(\.shellRowFillIsVibrant, true)
         .ignoresSafeArea(.container, edges: .top)
         // Same "the view's own appearance is the belt" posture as `SessionSidebar.task` — the
         // wirer-level `startInitialLoad()` kick can lose its race against this directory's harness
@@ -1188,10 +1420,10 @@ struct ShellSidebar: View {
     private func rowLabel(_ row: ShellSidebarRow) -> some View {
         HStack(spacing: 10) {
             Image(systemName: shellSidebarRowSystemImage(row))
-                .font(Typography.control())
+                .font(Typography.body())
                 .frame(width: 18)
             Text(shellSidebarRowTitle(row))
-                .font(Typography.control())
+                .font(Typography.body())
             Spacer(minLength: 4)
             if case .mode(let mode) = row, !mode.isAvailable {
                 // Deglassed (the capsule fill died with the reskin): a quiet tag, now in the
@@ -1244,7 +1476,6 @@ struct ShellSidebar: View {
         .padding(.horizontal, shellSidebarContentInset)
         .frame(height: shellSidebarWordmarkRowHeight)
         .padding(.top, shellSidebarTopInset)
-        .padding(.bottom, 6)
     }
 
     /// One compact Recents row: single-line middle-truncated title + the subtle activity dot
@@ -1264,21 +1495,10 @@ struct ShellSidebar: View {
                     .font(Typography.label())
                     .foregroundStyle(Theme.textMuted)
                     .frame(width: 16)
-                Text(sessionDisplayTitle(row.title))
-                    .font(Typography.control())
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                // Winter Phase 8d (Task 4.2, WS-14 §14): the runtime badge — a quiet trailing label
-                // beside the title, absent whenever `runtimeBadgeLabel` says so (an unrecorded leg,
-                // or a daemon that predates the field). Never a colored pill: this is provenance,
-                // not a state that needs to draw the eye the way the activity dot does.
-                if let badge = runtimeBadgeLabel(row.runtimeKind) {
-                    Text(badge)
-                        .font(Typography.tiny())
-                        .foregroundStyle(Theme.textMuted)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 4)
+                // A long title fades out at its end (ChatGPT), never "…"-cut in the middle.
+                // No Spacer after it: the title box itself takes the free width (a Spacer would
+                // split it and start the fade half a row early).
+                FadingTitleText(text: sessionDisplayTitle(row.title), font: Typography.body())
                 if let style = recentsActivityDotStyle(row.activity) {
                     Circle()
                         .fill(activityChipColor(style))
@@ -1319,33 +1539,64 @@ struct ShellSidebar: View {
     /// This REPLACES the plain navigate-to-Dashboard button. The Dashboard is still reachable —
     /// every menu entry lands in it — but by NAME rather than as one undifferentiated door, which
     /// is the user's "split into settings and other things".
-    /// The floating bottom strip: the account row over ONE continuous ramp into the pane's canvas.
+    /// The floating bottom strip: the account row, and nothing behind it.
     ///
-    /// The DIVIDER that used to sit here is gone (user call, 2026-08-07), and the first attempt at
-    /// replacing it put `.ultraThinMaterial` behind the row. That was wrong for a specific reason:
-    /// a material TINTS regardless of what is behind it, and this pane is opaque canvas — so
-    /// instead of blurring rows it painted a grey band with a hard top edge. That is the divider
-    /// again, just drawn as a tone change instead of a line.
+    /// The DIVIDER that used to sit here is gone (user call, 2026-08-07). Two attempts at replacing
+    /// it both failed the same way — `.ultraThinMaterial` first, then a gradient ramp into the
+    /// pane's canvas: each PAINTED something across the strip, and a painted strip with a top edge
+    /// is the divider again, drawn as a tone change instead of a line.
     ///
-    /// So: no material. One gradient spanning the WHOLE strip — transparent at the top, fully
-    /// canvas by just over halfway, canvas the rest of the way — so rows dissolve into the pane's
-    /// own colour as they pass under and there is no boundary anywhere to catch the eye. The ramp
-    /// has to cover the row's own height too; ending it above the row is what reintroduces an edge.
+    /// 2026-09-17 — THE RAMP IS GONE. Over the vibrant pane it had nowhere to hide: an opaque end
+    /// punched a flat rectangle through the blur, and a translucent one (tried at 0.9) was a grey
+    /// band with rows ghosting through it, which is the very thing the ramp existed to prevent.
+    ///
+    /// Nothing is painted behind the row now. The rows themselves fade instead — the scroll is
+    /// MASKED (`recentsBottomFadeMask`), so a title approaching the strip loses its own alpha and
+    /// is gone before it reaches the account row. The pane's plane is continuous top to bottom,
+    /// and the disappearance is carried by the thing that is actually disappearing.
     private var accountStrip: some View {
         accountRow
             .frame(height: shellAccountStripHeight)
-            .background(alignment: .bottom) {
-                LinearGradient(
-                    stops: [
-                        .init(color: Theme.canvas.opacity(0), location: 0),
-                        .init(color: Theme.canvas, location: 0.55),
-                        .init(color: Theme.canvas, location: 1),
-                    ],
-                    startPoint: .top, endPoint: .bottom
-                )
-                .frame(height: shellAccountStripHeight + shellAccountFadeHeight)
-                .allowsHitTesting(false)
+    }
+
+    /// The mask that does it, symmetric: fully clear across the wordmark's band, a ramp in, solid
+    /// for the middle, a ramp out, fully clear across the account row's band. Nothing renders
+    /// behind either floating row at all — rendering at 10% there is what reads as dirt.
+    private var recentsFadeMask: some View {
+        VStack(spacing: 0) {
+            if isSettings {
+                // Nothing floats over this column in Settings, so there is nothing to disappear
+                // BEHIND — just a soft top under the traffic lights and a soft bottom at the
+                // window's edge, with no clear bands at either end.
+                Color.clear
+                    .frame(height: shellSidebarTopInset)
+                shellFadeRamp(fadingIn: true,
+                              openHeight: shellSidebarTopFadeHeight, behindHeight: 0)
+                    .frame(height: shellSidebarTopFadeHeight)
+                Rectangle()
+                shellFadeRamp(fadingIn: false,
+                              openHeight: shellAccountFadeHeight, behindHeight: 0)
+                    .frame(height: shellAccountFadeHeight)
+            } else {
+            // Only the traffic-light band is fully clear. The ramp runs THROUGH the wordmark's
+            // own row and the account row rather than stopping at their edges (user call,
+            // 2026-09-17): ending it at the floating row's edge put the last step of the fade on
+            // a straight line exactly where that row begins, which is the edge again — read as a
+            // faint band under "Winter" instead of a rule. Running the ramp past the row means
+            // the only place alpha reaches zero is the pane's own edge, where nothing can show.
+            Color.clear
+                .frame(height: shellSidebarTopInset)
+            shellFadeRamp(fadingIn: true,
+                          openHeight: shellSidebarTopFadeHeight,
+                          behindHeight: shellSidebarWordmarkRowHeight)
+                .frame(height: shellSidebarWordmarkRowHeight + shellSidebarTopFadeHeight)
+            Rectangle()
+            shellFadeRamp(fadingIn: false,
+                          openHeight: shellAccountFadeHeight,
+                          behindHeight: shellAccountStripHeight)
+                .frame(height: shellAccountFadeHeight + shellAccountStripHeight)
             }
+        }
     }
 
     private var accountRow: some View {
@@ -1357,41 +1608,88 @@ struct ShellSidebar: View {
                 // label to a bare indicator and one letter. A popover is drawn by SwiftUI, so the
                 // row looks exactly like what is written here, and it keeps the pane fully
                 // custom-drawn ([[custom-chrome-not-native]]) instead of borrowing menu chrome.
+                // 2026-09-17: this opens the row SIDEWAYS instead of opening a popover menu (user
+                // call). The chevron points right because that is now the direction the disclosure
+                // travels, and it turns to point back the way it came while open.
                 Button {
-                    accountMenuShown.toggle()
+                    withAnimation(shellAccountExpandMotion) { accountExpanded.toggle() }
                 } label: {
                     HStack(spacing: 8) {
                         avatar
                         Text(shellAccountRowTitle)
-                            .font(Typography.control(.medium))
+                            .font(Typography.body())
                             .foregroundStyle(.primary)
-                        Image(systemName: "chevron.down")
+                        Image(systemName: "chevron.right")
                             .font(Typography.badge(.semibold))
                             .foregroundStyle(Theme.textMuted)
+                            .rotationEffect(.degrees(accountExpanded ? 180 : 0))
                     }
                     .padding(.horizontal, 8)
                     .frame(height: shellAccountRowHeight)
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(ShellSidebarRowStyle(isSelected: false))
+                .buttonStyle(ShellSidebarRowStyle(isSelected: accountExpanded))
                 .accessibilityLabel("Account and settings")
-                .popover(isPresented: $accountMenuShown, arrowEdge: .top) {
-                    accountMenuContent
-                }
 
                 Spacer(minLength: 0)
 
-                // PLACEHOLDER (user call: "the downloads icon on the corner we shall deal with it
-                // later"). Disabled for the same reason the navigation arrows are — an affordance
-                // that looks live and does nothing is worse than one that admits it isn't ready.
-                Image(systemName: "arrow.down.to.line.compact")
-                    .font(Typography.body())
-                    .foregroundStyle(.tertiary)
-                    .accessibilityHidden(true)
+                if accountExpanded {
+                    HStack(spacing: shellAccountActionSpacing) {
+                        ForEach(shellAccountActions, id: \.systemImage) { action in
+                            // NOT `isPlaceholder` (user call, 2026-09-17): these read at full
+                            // strength even while unwired. Each one is about to own a real
+                            // surface, and the quiet tone is for things that may never be wired.
+                            ShellTitlebarButton(systemImage: action.systemImage,
+                                                label: action.label,
+                                                isOn: accountActionIsOn(action),
+                                                action: { perform(action) })
+                        }
+                    }
+                    // They come out FROM BEHIND the account pill (user call) — the row opening
+                    // rightward pushes them into view, rather than them flying in from the window
+                    // edge to meet it.
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+                } else {
+                    // PLACEHOLDER (user call: "the downloads icon on the corner we shall deal with
+                    // it later"). Stands down while the cluster is out — the cluster carries an
+                    // update icon of its own, and two of them would be one too many.
+                    Image(systemName: "arrow.down.to.line.compact")
+                        .font(Typography.body())
+                        .foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
+                        .transition(.opacity)
+                }
             }
             .padding(.horizontal, shellSidebarContentInset - 8)
             .padding(.vertical, 8)
         }
+    }
+
+    /// What each revealed icon does. The gear is a DESTINATION (the root remembers where you were
+    /// and swaps this very column for the settings sections); the other three are floating panels,
+    /// because each is a thing you consult and dismiss rather than navigate to.
+    private func perform(_ action: ShellAccountAction) {
+        switch action.systemImage {
+        case "gearshape": onOpenSettings()
+        case "book.closed": openOverlay(.library)
+        case "iphone": openOverlay(.devices)
+        default: openOverlay(.updates)
+        }
+    }
+
+    /// A door stays LIT while what it opened is showing — the same "reflects a mode, not just an
+    /// action" treatment the panel's maximize button already wears.
+    private func accountActionIsOn(_ action: ShellAccountAction) -> Bool {
+        switch action.systemImage {
+        case "gearshape": if case .settings = nav.destination { return true } else { return false }
+        case "book.closed": return overlays.overlay == .library
+        case "iphone": return overlays.overlay == .devices
+        default: return overlays.overlay == .updates
+        }
+    }
+
+    private func openOverlay(_ overlay: ShellOverlay) {
+        withAnimation(shellAccountExpandMotion) { overlays.toggle(overlay) }
     }
 
     /// The circular avatar — a drawn monogram, exactly the reference's (a tinted circle with an
@@ -1467,6 +1765,24 @@ struct ShellSidebar: View {
     }
 }
 
+// MARK: - Which plane a row is drawn on (2026-09-17)
+
+/// True for rows sitting on the sidebar's TRANSLUCENT plane, false everywhere the same row style is
+/// worn over an opaque surface (the search palette, the account popover, the panel's Files tab, the
+/// New Chat page). Set ONCE on the pane rather than passed at every call site — the rows that need
+/// the vibrant washes are exactly the rows inside that pane, and a parameter would have to be
+/// remembered at each of the eight call sites instead.
+private struct ShellRowFillIsVibrantKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var shellRowFillIsVibrant: Bool {
+        get { self[ShellRowFillIsVibrantKey.self] }
+        set { self[ShellRowFillIsVibrantKey.self] = newValue }
+    }
+}
+
 // MARK: - The ONE row treatment (custom-sidebar)
 
 /// Every sidebar row's rendering: the label over a `shellSidebarRowCornerRadius` rounded-rect
@@ -1499,6 +1815,7 @@ struct ShellSidebarRowStyle: ButtonStyle {
         let isSelected: Bool
         let selectedUsesHoverTone: Bool
         @State private var isHovered = false
+        @Environment(\.shellRowFillIsVibrant) private var isVibrant
 
         var body: some View {
             configuration.label
@@ -1517,16 +1834,23 @@ struct ShellSidebarRowStyle: ButtonStyle {
         /// tints — and it is a real asset rather than an `.opacity()` hack precisely because a
         /// runtime alpha has no dark-mode variant to tune (the guide's anti-rule).
         ///
-        /// Note `selectionPill` is DARKER than the pane in dark mode: Claude's measured
-        /// semantics, deliberate, and differing from ChatGPT (whose selected row is lighter).
+        /// `selectionPill` is a neutral grey: darker than the pane in both appearances.
         /// Both follow the system appearance by construction. Tune-at-gate values.
+        ///
+        /// 2026-09-17: on the TRANSLUCENT pane those opaque greys read as chips stuck on the
+        /// window — they cover the blur exactly where the eye is. Inside the pane
+        /// (`shellRowFillIsVibrant`) the same two steps resolve to the luminance washes instead
+        /// (`Theme.rowHoverVibrant`/`selectionPillVibrant`), which brighten or darken the backdrop
+        /// without hiding it. Same ramp, same decision function — only the paint differs, and the
+        /// eight call sites on opaque surfaces are untouched by construction.
         private var fill: AnyShapeStyle {
+            let hover = isVibrant ? Theme.rowHoverVibrant : Theme.rowHover
+            let selected = isVibrant ? Theme.selectionPillVibrant : Theme.selectionPill
             switch shellSidebarRowFill(isSelected: isSelected,
                                        isHovered: isHovered || configuration.isPressed) {
             case .selected:
-                return selectedUsesHoverTone ? AnyShapeStyle(Theme.rowHover)
-                                              : AnyShapeStyle(Theme.selectionPill)
-            case .hover: return AnyShapeStyle(Theme.rowHover)
+                return selectedUsesHoverTone ? AnyShapeStyle(hover) : AnyShapeStyle(selected)
+            case .hover: return AnyShapeStyle(hover)
             case .none: return AnyShapeStyle(.clear)
             }
         }

@@ -87,34 +87,13 @@ struct WindowContentView<Accessory: View>: View {
     var sessionHasWorkingDirectory: Bool = false
     @ViewBuilder let headerAccessory: () -> Accessory
 
-    /// Task 4 (2d-iii): the ⋯ menu's popover presentation state — local to this view (not the
-    /// adapter), same convention as any other purely-presentational SwiftUI `@State` here; the
-    /// adapter only owns the DATA the menu reads/writes (`sessionPolicy`/`policyChangeInFlight`).
-    @State private var showingPolicyMenu = false
 
-    /// Task 10 (Chat Slice D): the model menu's own popover presentation state — same local,
-    /// presentational-only convention as `showingPolicyMenu` above (a separate flag: the two menus
-    /// are independent popovers, never shown together off one boolean).
-    @State private var showingModelMenu = false
 
-    /// provider-correctness T6: the effort menu's own popover state — a THIRD independent flag, same
-    /// reasoning as `showingModelMenu` being separate from `showingPolicyMenu`: model and effort are
-    /// independent affordances and must never open off one boolean.
-    @State private var showingEffortMenu = false
 
-    /// working-directories T8: the working-folders chip's own popover state — a FOURTH independent
-    /// flag, same reasoning again. Internal (not `private`) so `WorkingDirsMenu.swift`'s
-    /// cross-file `extension WindowContentView` can bind it, the same access widening
-    /// `currentSidebarSessionSummary`/`policyPickerRow` already carry for the WorkSidebar split.
-    @State var showingDirsMenu = false
 
-    /// app-shell T3: the `/background` affordance's own popover state — a FIFTH independent flag,
-    /// same reasoning as the four above. Internal (not `private`) for the same reason
-    /// `showingDirsMenu` is: `ActivityMenu.swift`'s cross-file `extension WindowContentView` binds it.
-    @State var showingActivityMenu = false
 
     /// Task 3 (2e-i): whether the "… +N completed" tail is expanded to the full completed list.
-    /// Local presentational state, same convention as `showingPolicyMenu` above — resets whenever
+    /// Local presentational state, same convention as the other local presentational flags — resets whenever
     /// this view is recreated (e.g. a new session), which is fine: there's nothing worth
     /// preserving about a stale expand/collapse choice across sessions.
     @State private var expandedCompleted = false
@@ -122,6 +101,10 @@ struct WindowContentView<Accessory: View>: View {
     /// Task 6 (2e-iii): the outer container's measured width, fed by `.onGeometryChange` (2c lesson:
     /// NEVER GeometryReader-in-ScrollView). `0` until the first layout pass — treated as "not yet
     /// measured" (no sidebars resolved) so a stale zero never briefly opens the right overlay.
+    @Environment(\.displayScale) private var displayScale
+    /// The work panel's visibility — the titlebar toggle writes the same key (`ShellRootView`).
+    @AppStorage(workPanelVisibleKey) private var workPanelVisible = true
+
     @State private var measuredWidth: CGFloat = 0
     /// Task 6 (2e-iii): the raw sidebar flags the width engine (`resolveSidebars`) resolves against
     /// `measuredWidth`. gate-feedback-1 FIX B: BOTH default to EXPANDED (the left session switcher
@@ -132,7 +115,7 @@ struct WindowContentView<Accessory: View>: View {
     /// `SidebarLayoutTests`' "default state" pins. Overlays are tap-only: `overlayOpen` is set
     /// solely by a chevron tap on a side that can't fit inline, and cleared on dismiss / once it
     /// fits inline.
-    @State private var sidebar = SidebarState(leftExpanded: true, rightExpanded: true,
+    @State private var sidebar = SidebarState(leftExpanded: true, rightExpanded: false,
                                               leftOverlayOpen: false, rightOverlayOpen: false)
 
     /// Asks the user has CLOSED out of the composer (2026-08-13). Closing hands the composer back
@@ -147,13 +130,11 @@ struct WindowContentView<Accessory: View>: View {
     @State private var closedAsks: Set<String> = []
 
     var body: some View {
-        // `sidebars == nil` → today's exact layout, byte-identical: `contentColumn(rightVisible:
-        // false)` re-adds `&& !false` (== `&& true`) to the two relocation gates, a no-op.
         Group {
             if let sidebars {
                 sidebarLayout(sidebars)
             } else {
-                contentColumn(rightVisible: false)
+                pageColumns
             }
         }
         // Winter Phase 8d (Task 4.2, WS-13 §8.2); Winter Phase 10b (D1-4, W18-23): the lossy-switch
@@ -196,58 +177,22 @@ struct WindowContentView<Accessory: View>: View {
         }
     }
 
-    /// The chat window's content column (header → transcript → pending cards → pinned tasks →
-    /// queued line → composer → subagents). `rightVisible` is the RELOCATION gate: when the right
-    /// WorkSidebar is showing, the pinned-tasks and subagent sections move THERE — this column drops
-    /// them (`&& !rightVisible`) so they're never duplicated.
+    /// The chat window's content column (header → transcript → floating task list → queued line →
+    /// composer), with the floating subagents block overlaid top-trailing.
     @ViewBuilder
-    private func contentColumn(rightVisible: Bool) -> some View {
+    private var contentColumn: some View {
         VStack(spacing: 10) {
-            HStack(spacing: 12) {
-                headerAccessory()
-                Text(adapter.statusText)
-                    .font(Typography.label(.medium))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                // working-directories T8: the working-folders chip. Its gate is the DAEMON's own
-                // participation answer (`dirs != nil` — see `dirsMenuIsVisible`), not a mode list
-                // mirrored on this side: a chat/dispatch window gets no chip because `session.list`
-                // populated no set for it, and a workdir-less code session (`[]`) DOES get one,
-                // since that is exactly the session that needs the adopt door.
-                if dirsMenuIsVisible(currentSidebarSessionSummary?.dirs) {
-                    dirsMenuButton
+            // The header row survives only where a caller injects an accessory — the orb's morph
+            // window draws its traffic lights here. Its status text and its folders / background /
+            // model / effort / policy buttons were removed 2026-09-17 (ChatGPT has no such row;
+            // model and effort live in the composer).
+            if Accessory.self != EmptyView.self {
+                HStack(spacing: 12) {
+                    headerAccessory()
+                    Spacer()
                 }
-                // app-shell T3: the `/background` affordance. Gated the same way the folders chip
-                // is — on the DAEMON's own answer for this row (its derived `activity`, absent for
-                // a session with no lifecycle) — plus the wiring gate: a surface that never wired
-                // `onSetActivity` renders nothing here at all (`backgroundVerbForCurrentSession`).
-                if let verb = backgroundVerbForCurrentSession {
-                    backgroundVerbButton(verb)
-                }
-                // Task 10 (Chat Slice D): the model menu — deliberately the OPPOSITE gate from the
-                // policy button just below (`modelMenuIsVisible`'s own doc comment explains the
-                // asymmetry: chat hides POLICY but shows MODEL). Placed beside the policy button,
-                // same header slot, same plain-icon-button idiom.
-                if modelMenuIsVisible(isChatSession: adapter.isChatSession) {
-                    modelMenuButton
-                }
-                // provider-correctness T6: the effort menu, beside the model menu — the OTHER axis
-                // ("effort and model are two different things, just like the CLI"), and the only
-                // surface on the Mac through which a Winter-level tier is reachable at all.
-                if effortMenuIsVisible(isChatSession: adapter.isChatSession) {
-                    effortMenuButton
-                }
-                // Plan-immunity (2026-07-28 design): chat's approval policy is fixed and can never
-                // be changed — the picker behind this button is meaningless (and every row's
-                // onSetPolicy call would now come back as an RPC error) for a chat-pinned window, so
-                // it's hidden entirely rather than shown-but-broken. Every OTHER mode is unaffected
-                // (`adapter.isChatSession` defaults `false` and only a `DetachedWindowController`
-                // pinned to a `mode:"chat"` session ever sets it true).
-                if !adapter.isChatSession {
-                    policyMenuButton
-                }
+                .frame(height: chatWindowHeaderHeight)
             }
-            .frame(height: chatWindowHeaderHeight)
 
             // mac-chat-parity Task 3: the approval/question/plan cards used to be a pinned band
             // MOUNTED HERE, between the transcript and the pinned-tasks section, and deleted the
@@ -293,8 +238,11 @@ struct WindowContentView<Accessory: View>: View {
             // flow would just move the hard edge up by their height.
             .safeAreaInset(edge: .bottom, spacing: 10) {
                 VStack(spacing: 10) {
-                    if !adapter.pinnedTasks.isEmpty && !rightVisible {
-                        pinnedTasksSection(adapter.pinnedTasks)
+                    // The task list FLOATS just above the composer (2026-09-17), as its own card at
+                    // the composer's width.
+                    if !adapter.pinnedTasks.isEmpty {
+                        floatingCard { pinnedTasksSection(adapter.pinnedTasks) }
+                            .frame(maxWidth: newChatCardWidth)
                     }
 
                     if let queued = adapter.queuedText {
@@ -343,9 +291,6 @@ struct WindowContentView<Accessory: View>: View {
                         .transition(.blurReplace)
                     }
 
-                    if !adapter.liveSubagents.isEmpty && !rightVisible {
-                        subagentSection(adapter.liveSubagents)
-                    }
                 }
                 // The driver. A `.transition` is inert without one — the branches above would swap
                 // instantly and the blur would never render. Keyed on the ASK'S IDENTITY rather than
@@ -358,6 +303,66 @@ struct WindowContentView<Accessory: View>: View {
         .padding(.horizontal, 16)
         .padding(.top, topInset)
         .padding(.bottom, 16)
+    }
+
+    /// The page: the chat column, and — for a non-chat session in the app shell, while the
+    /// titlebar toggle has it on — the work panel as a real column beside it (2026-09-17, ChatGPT's
+    /// layout). Being a column rather than an overlay, it takes its width out of the transcript's.
+    @ViewBuilder
+    private var pageColumns: some View {
+        HStack(alignment: .top, spacing: 0) {
+            contentColumn
+            if showsWorkPanel {
+                floatingCard { subagentBlock }
+                    .frame(width: floatingSubagentBlockWidth)
+                    .padding(.top, topInset + 8)
+                    .padding(.trailing, 16)
+                    .transition(.move(edge: .trailing))
+            }
+        }
+    }
+
+    /// The panel belongs to the app shell's session page (the one surface with the titlebar toggle,
+    /// `composerCardMode != nil`) and never to a chat session.
+    private var showsWorkPanel: Bool {
+        workPanelVisible && composerCardMode != nil && !adapter.isChatSession
+    }
+
+    /// The floating subagents block's body: a header, the live rows, or an empty line.
+    @ViewBuilder
+    private var subagentBlock: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Subagents")
+                .font(Typography.caption(.semibold))
+                .foregroundStyle(.secondary)
+            if adapter.liveSubagents.isEmpty {
+                Text("None running")
+                    .font(Typography.caption())
+                    .foregroundStyle(Theme.textMuted)
+            } else {
+                subagentSection(adapter.liveSubagents)
+            }
+        }
+    }
+
+    /// ChatGPT's floating-card radius (its Outputs card, measured 2026-09-17).
+    private let floatingCardCornerRadius: CGFloat = 20
+
+    /// A floating surface — `paletteSurface` (the "floats above content" token) with the elevated
+    /// hairline rim and a soft shadow. Shared by the subagents block and the task list.
+    private func floatingCard<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        content()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: floatingCardCornerRadius, style: .continuous)
+                    .fill(Theme.paletteSurface)
+                    .shadow(color: .black.opacity(0.08), radius: 12, y: 4)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: floatingCardCornerRadius, style: .continuous)
+                    .strokeBorder(Theme.hairlineElevated, lineWidth: 1 / displayScale)
+            )
     }
 
     /// The SHARED composer card (user call, 2026-08-07: the live page's composer "should be the same
@@ -389,6 +394,7 @@ struct WindowContentView<Accessory: View>: View {
             policy: adapter.composerPolicyControl,
             model: composerModelControl,
             stripEdge: .above,
+            workingDirectory: currentSidebarSessionSummary?.cwd,
             sendBlockedReason: adapter.composerDraft
                 .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : nil,
             stop: composerStopControl
@@ -424,8 +430,7 @@ struct WindowContentView<Accessory: View>: View {
     /// doors onto `session.setModel`/`session.setEffort` can never show different answers.
     ///
     /// The current selection is the session ROW's (`session.list`, via `currentSidebarSessionSummary`)
-    /// overlaid with any optimistic pick — `effectiveSelection`, exactly as `modelMenuContent`/
-    /// `effortMenuContent` above compute it. Unlike the policy, none of this is cached on the
+    /// overlaid with any optimistic pick — `effectiveSelection`, exactly as the composer's menus compute it. Unlike the policy, none of this is cached on the
     /// adapter: `session.list` already carries `model`/`effort` per row, and a second source of truth
     /// here is what `onSetModel`'s own doc rules out.
     ///
@@ -469,21 +474,20 @@ struct WindowContentView<Accessory: View>: View {
         // the two pre-existing surfaces feed `resolveSidebars` byte-identical inputs.
         let state = sidebarStateForConfiguration(sidebar, showsSessionSwitcher: sidebars.showsSessionSwitcher)
         let resolved = measuredWidth > 0
+            // The right work sidebar was retired 2026-09-17 (its subagents float over the content,
+            // its tasks float above the composer, its approval picker lives in the composer), so
+            // the engine only ever resolves the left side.
             ? resolveSidebars(width: measuredWidth,
-                              leftExpanded: state.leftExpanded, rightExpanded: state.rightExpanded,
-                              leftOverlayOpen: state.leftOverlayOpen, rightOverlayOpen: state.rightOverlayOpen)
+                              leftExpanded: state.leftExpanded, rightExpanded: false,
+                              leftOverlayOpen: state.leftOverlayOpen, rightOverlayOpen: false)
             : EffectiveSidebars(leftVisible: false, rightVisible: false, leftOverlay: false, rightOverlay: false)
         ZStack {
             HStack(spacing: 0) {
                 if resolved.leftVisible && !resolved.leftOverlay {
                     sessionSidebarColumn(sidebars)
-                    Divider()
+                    sidebarHairline
                 }
-                contentColumn(rightVisible: resolved.rightVisible)
-                if resolved.rightVisible && !resolved.rightOverlay {
-                    Divider()
-                    workSidebarColumn
-                }
+                pageColumns
             }
 
             // Edge chevron affordances for the sides that are NOT effectively visible. Tapping one
@@ -498,11 +502,6 @@ struct WindowContentView<Accessory: View>: View {
                     }
                 }
                 Spacer(minLength: 0)
-                if !resolved.rightVisible {
-                    sidebarChevron("chevron.left") {
-                        sidebar = openRightViaChevron(sidebar, width: measuredWidth)
-                    }
-                }
             }
 
             // Overlay panels + a tap-to-dismiss scrim BEHIND each (the scrim is added first so the
@@ -518,14 +517,6 @@ struct WindowContentView<Accessory: View>: View {
                 }
                 .transition(.move(edge: .leading))
             }
-            if resolved.rightOverlay {
-                sidebarScrim { sidebar = dismissRightOverlay(sidebar) }
-                HStack(spacing: 0) {
-                    Spacer(minLength: 0)
-                    workSidebarColumn.background(Theme.paletteSurface)
-                }
-                .transition(.move(edge: .trailing))
-            }
         }
         .onGeometryChange(for: CGFloat.self, of: { $0.size.width }, action: { newWidth in
             measuredWidth = newWidth
@@ -535,7 +526,6 @@ struct WindowContentView<Accessory: View>: View {
             // would silently re-open the overlay. Overlays are honored ONLY while the side does NOT
             // fit inline (see `resolveSidebars`), so clearing here is the simplest correct wiring.
             if newWidth >= sidebarContentMinWidth + sidebarLeftWidth { sidebar.leftOverlayOpen = false }
-            if newWidth >= sidebarContentMinWidth + sidebarRightWidth { sidebar.rightOverlayOpen = false }
         })
         .animation(.easeInOut(duration: 0.18), value: resolved)
     }
@@ -556,9 +546,6 @@ struct WindowContentView<Accessory: View>: View {
     }
 
     /// The right work column (`workSidebar` owns its own width). Top-inset-aligned like the left.
-    private var workSidebarColumn: some View {
-        workSidebar.padding(.top, topInset)
-    }
 
     /// A full-height 16pt-wide edge chevron (`.secondary`), the hit-target for opening a hidden
     /// side. gate-feedback-1 FIX C: the GLYPH is now top-anchored (`sidebarChevronTopOffset` below
@@ -566,6 +553,15 @@ struct WindowContentView<Accessory: View>: View {
     /// the FULL column height (`.frame(maxHeight: .infinity, alignment: .top)` + `.contentShape`
     /// covers the same full-height/16pt-wide rectangle as before; only where the icon renders
     /// within it moved).
+    /// The inline sidebars' divider — ONE device pixel of `hairlineElevated` (this surface's rule
+    /// token, `TranscriptBrandTests`). It was a system `Divider` — a full point of the system
+    /// separator — which read far heavier than every other rule in the window.
+    private var sidebarHairline: some View {
+        Rectangle()
+            .fill(Theme.hairlineElevated)
+            .frame(width: 1 / displayScale)
+    }
+
     private func sidebarChevron(_ systemName: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
@@ -587,162 +583,10 @@ struct WindowContentView<Accessory: View>: View {
             .onTapGesture(perform: dismiss)
     }
 
-    /// Task 4 (2d-iii): the header's trailing ⋯ button — opens `policyMenuContent`'s popover.
-    /// Plain-styled (no button chrome) to sit quietly in the header row next to the status text.
-    @ViewBuilder
-    private var policyMenuButton: some View {
-        Button {
-            showingPolicyMenu = true
-        } label: {
-            Image(systemName: "ellipsis.circle")
-                .font(Typography.body())
-                .foregroundStyle(.secondary)
-        }
-        .buttonStyle(.plain)
-        .popover(isPresented: $showingPolicyMenu, arrowEdge: .bottom) {
-            policyMenuContent
-        }
-    }
-
-    /// The ⋯ menu's first (and currently only) item: an inline six-mode picker (SP-policies Task
-    /// 14 — `sessionPolicyModes`: plan/dont-ask/ask/accept-edits/auto/bypass, restrictiveness
-    /// order) for `adapter.sessionPolicy` — a checkmark marks the current value, rows disable
-    /// while `adapter.policyChangeInFlight` (a change is already in flight; mirrors the
-    /// pending-card buttons' own in-flight disable). Selecting a row fires `adapter.onSetPolicy`
-    /// directly — the wirer (`GlassRootView`/`DetachedWindowController`) owns the
-    /// in-flight/success bookkeeping, same convention as the three respond callbacks' card
-    /// buttons.
-    @ViewBuilder
-    private var policyMenuContent: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Approval mode")
-                .font(Typography.caption(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.bottom, 4)
-            // Task 6 (2e-iii): the row body is shared with the WorkSidebar's Options block — and,
-            // since mac-chat-parity T6, with the composer's permissions row — via `PolicyPickerRow`
-            // (WorkSidebar.swift). One implementation for all three; `policyPickerRow(_:)` is this
-            // view's forwarder, handing it this adapter's own values.
-            ForEach(sessionPolicyModes, id: \.self) { policy in
-                policyPickerRow(policy)
-            }
-        }
-        .padding(12)
-        .frame(minWidth: 160)
-    }
-
-    // MARK: - Task 10 (Chat Slice D): the header's model menu — `session.setModel`, ALL modes
-
-    /// The header's model-menu button — opens `modelMenuContent`'s popover. Same plain-icon-button
-    /// idiom as `policyMenuButton` above (brief: "same control style/placement conventions as the
-    /// policy picker") — a different glyph ("cpu") so the two affordances are visually distinct.
-    @ViewBuilder
-    private var modelMenuButton: some View {
-        Button {
-            // T6: a snapshot, refreshed exactly when it is about to be read.
-            adapter.onRefreshModelCatalogue()
-            showingModelMenu = true
-        } label: {
-            Image(systemName: "cpu")
-                .font(Typography.body())
-                .foregroundStyle(.secondary)
-        }
-        .buttonStyle(.plain)
-        .popover(isPresented: $showingModelMenu, arrowEdge: .bottom) {
-            // The padding/width live HERE rather than inside the content, so the content stays a
-            // concrete value this view's tests can read (and so the composer's own popover, which
-            // stacks BOTH sections, can frame the pair once instead of twice). Same modifiers, same
-            // order, applied to the same rows: the menu renders exactly as it did.
-            modelMenuContent
-                .padding(12)
-                .frame(minWidth: 160)
-        }
-    }
-
-    /// The model menu's rows, handed the three values this view used to read inside them.
-    ///
-    /// mac-chat-parity T7: the ROWS moved to `ModelMenuContent` (file scope, below) because the
-    /// composer's chip needs the same menu and a per-mode composer chrome is not a
-    /// `WindowContentView` — the same move `PolicyPickerRow` made at Task 6, for the same reason,
-    /// and returning the concrete type for the same reason too: it makes "both doors render the same
-    /// rows, from this adapter's own values" a thing a test can read.
-    ///
-    /// Read once per popover render, same "read fresh at render" convention `sidebarSessionInfo`
-    /// uses for title/scope/cwd. The current selection is the optimistic overlay when one is pending
-    /// and the daemon's own row otherwise (`effectiveSelection`).
-    var modelMenuContent: ModelMenuContent {
-        ModelMenuContent(
-            current: effectiveSelection(row: currentSidebarSessionSummary?.model, optimistic: adapter.pendingModel),
-            isDisabled: adapter.modelChangeInFlight,
-            catalogue: adapter.modelCatalogue,
-            onSelect: { model in
-                adapter.applyModelSelection(model)
-                showingModelMenu = false
-            })
-    }
-
-    // MARK: - provider-correctness T6: the header's effort menu — `session.setEffort`
-
-    /// Same plain-icon-button idiom as the model/policy buttons, a different glyph ("gauge") so the
-    /// three affordances stay visually distinct.
-    @ViewBuilder
-    private var effortMenuButton: some View {
-        Button {
-            // T6: a snapshot, refreshed exactly when it is about to be read.
-            adapter.onRefreshModelCatalogue()
-            showingEffortMenu = true
-        } label: {
-            Image(systemName: "gauge.with.dots.needle.33percent")
-                .font(Typography.body())
-                .foregroundStyle(.secondary)
-        }
-        .buttonStyle(.plain)
-        .popover(isPresented: $showingEffortMenu, arrowEdge: .bottom) {
-            // See `modelMenuButton`'s own note: the frame lives at the popover, the rows are a value.
-            effortMenuContent
-                .padding(12)
-                .frame(minWidth: 180)
-        }
-    }
-
-    /// The effort menu: "Default", then the WIRE levels the session's model accepts, then — only for
-    /// a CODE session whose model the catalogue actually lists — the Winter-level tiers, under their
-    /// own heading. The two sections are never merged (see `effortPickerOptions`), and the tier
-    /// section is simply ABSENT rather than shown-and-refused in both cases it does not apply:
-    /// chat/dispatch, and a catalogue that reported no wire levels at all (a BYOK Mac, or nothing
-    /// fetched yet — whole-branch review I1). In that second case the menu is "Default" alone, which
-    /// is the honest rendering of "this daemon has told me nothing about efforts for this model".
-    /// A tier the user ALREADY pinned still gets its row via the `.unknown` branch below, so a
-    /// selection made before the catalogue emptied out stays visible and clearable.
-    /// mac-chat-parity T7: the rows moved to `EffortMenuContent` (file scope, below) — the same move
-    /// `modelMenuContent` just above made, and for the same one reason: the composer's chip renders
-    /// this menu too. This forwarder is what still decides, for the HEADER, which model's levels and
-    /// which mode's tier answer the rows are built from — unchanged, and now readable as a value.
-    var effortMenuContent: EffortMenuContent {
-        let row = currentSidebarSessionSummary
-        let opts = effortPickerOptions(catalogue: adapter.modelCatalogue,
-                                       model: effectiveSelection(row: row?.model, optimistic: adapter.pendingModel),
-                                       mode: row?.mode)
-        return EffortMenuContent(
-            wire: opts.wire,
-            tiers: opts.tiers,
-            current: effectiveSelection(row: row?.effort, optimistic: adapter.pendingEffort),
-            isDisabled: adapter.effortChangeInFlight,
-            onSelect: { effort in
-                adapter.applyEffortSelection(effort)
-                showingEffortMenu = false
-            })
-    }
-
-    /// LIVE-GATE G4, Task 3 (2e-i) redesign: the CC-tree-style pinned task list — blue bold `■`
-    /// in_progress row (with a live elapsed suffix), dim `☐` pending rows, and `✓` completed rows
-    /// pushed to the bottom and capped at 2 with a tappable "… +N completed" affordance. Hidden
-    /// entirely when `adapter.pinnedTasks` is empty (the caller in `body` already gates on that).
     @ViewBuilder
     func pinnedTasksSection(_ tasks: [TaskItem]) -> some View {
         let built = buildTaskSection(tasks)
         VStack(alignment: .leading, spacing: 4) {
-            Divider().opacity(0.5)
             // Expanded state rebuilds WITHOUT the 2-completed cap (brief: "rebuild without the
             // cap") rather than reusing `built.rows`, which is always capped.
             let displayedRows = expandedCompleted ? sortedTaskRows(tasks) : built.rows
@@ -826,7 +670,6 @@ struct WindowContentView<Accessory: View>: View {
     func subagentSection(_ items: [SubagentItem]) -> some View {
         let built = buildSubagentSection(items)
         VStack(alignment: .leading, spacing: 4) {
-            Divider().opacity(0.5)
             ForEach(built.rows, id: \.threadId) { row in
                 subagentRowView(row)
             }
@@ -1270,28 +1113,6 @@ func modelDisplayLabel(_ model: String?, catalogue: SyncConfigSnapshot) -> Strin
 /// wire list as its own row.
 func effortDisplayLabel(_ effort: String?) -> String {
     effort ?? "Default"
-}
-
-/// Visibility rule behind the effort-menu button — the same always-true asymmetry vs the policy
-/// picker that `modelMenuIsVisible` documents, kept as its own symbol for the same reason: a
-/// regression that copies `!isChatSession` here is then a one-line, obviously-wrong diff. Chat
-/// sessions DO choose their effort (`session.setEffort` is mode-agnostic); what they may not choose
-/// is a TIER, and that is `effortTiersAreOffered`'s job, not this one's.
-func effortMenuIsVisible(isChatSession _: Bool) -> Bool {
-    true
-}
-
-/// Visibility rule behind the model-menu button (`modelMenuButton`'s own `if` in `body` above) —
-/// deliberately the OPPOSITE of the policy button's `!adapter.isChatSession` chat-hiding predicate:
-/// chat hides POLICY (plan-immunity: the policy is fixed server-side, `engine.ts` resolves it to
-/// the internal "chat" policy every turn regardless of the stored row, and the picker behind it
-/// would be meaningless) but the MODEL stays user-choosable in chat — `session.setModel`'s own doc
-/// comment (`ipc/server.ts`) is explicit that there is no "fixed model" concept for ANY mode, chat
-/// included. Always `true` — kept as a named function (not an inlined literal in the view body) so
-/// a regression that copies the policy predicate here is a one-line, obviously-wrong diff, and so
-/// this asymmetry has a concrete symbol `ModelPickerTests` can assert against instead of nothing.
-func modelMenuIsVisible(isChatSession _: Bool) -> Bool {
-    true
 }
 
 /// Winter Phase 10b (D1-4, W18-23): the lossy-switch confirm dialog's body — `warnings` joined

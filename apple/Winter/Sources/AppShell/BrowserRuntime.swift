@@ -56,6 +56,10 @@ final class BrowserRuntime {
         var setStateObserver: (PanelCEFContainerView, ((WinterCEFBrowserState?) -> Void)?) -> Void
         var setNavigationObserver: (PanelCEFContainerView, ((String?, String?) -> Void)?) -> Void
         var setPopupObserver: (PanelCEFContainerView, ((String?) -> Void)?) -> Void
+        /// The page icon (`WinterCEFSetFaviconObserver`). **Defaulted to a no-op** so a recording
+        /// driver that has no interest in icons compiles, and logs, exactly as it did before the
+        /// channel existed. `production` passes the real one.
+        var setFaviconObserver: (PanelCEFContainerView, ((NSImage?, String?) -> Void)?) -> Void = { _, _ in }
         var seedTabState: (PanelCEFContainerView, String, String) -> Void
         var createBrowser: (PanelCEFContainerView, String) -> Void
         var closeBrowser: (PanelCEFContainerView) -> Void
@@ -95,6 +99,7 @@ final class BrowserRuntime {
             setStateObserver: { WinterCEFSetStateObserver($0, $1) },
             setNavigationObserver: { WinterCEFSetNavigationObserver($0, $1) },
             setPopupObserver: { WinterCEFSetPopupObserver($0, $1) },
+            setFaviconObserver: { WinterCEFSetFaviconObserver($0, $1) },
             seedTabState: { WinterCEFSeedTabState($0, $1, $2) },
             // editor-product Task 4: `0` is "no override" (CEF's own `background_color` contract —
             // fully transparent alpha) — an ordinary web tab has no brand to anticipate, so this
@@ -596,7 +601,7 @@ final class BrowserRuntime {
                                             host: host, sessionId: sessionId)
         model.container = container
 
-        // All three are registered BEFORE the browser exists — that is why the bridge keys them on
+        // All four are registered BEFORE the browser exists — that is why the bridge keys them on
         // the container view rather than on a browser id. Creation is asynchronous and can queue
         // behind `OnContextInitialized`, so there is no later moment that is guaranteed to come.
         driver.setStateObserver(container) { [weak model] state in
@@ -611,6 +616,11 @@ final class BrowserRuntime {
         // regardless; this is what turns the cancelled one into a real panel tab.
         driver.setPopupObserver(container) { [weak model] popupURL in
             model?.openPopupAsTab(url: popupURL ?? "")
+        }
+        // The page's icon, for the tab pill. Presentation only — the model decides whether it
+        // still describes the page on screen, and nothing about it is ever sent to the daemon.
+        driver.setFaviconObserver(container) { [weak model] icon, pageURL in
+            model?.receiveFavicon(icon, forPageURL: pageURL ?? "")
         }
     }
 
@@ -688,6 +698,7 @@ final class BrowserRuntime {
         driver.setStateObserver(container, nil)
         driver.setNavigationObserver(container, nil)
         driver.setPopupObserver(container, nil)
+        driver.setFaviconObserver(container, nil)
         driver.closeBrowser(container)
 
         // Only AFTER the close, and the ordering is the same one the shipped `dismantleNSView` had.

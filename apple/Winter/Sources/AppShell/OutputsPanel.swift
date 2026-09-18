@@ -323,8 +323,8 @@ struct OutputsPanelContentView: View {
         // flat `windowBackgroundColor` card with the shell's 1 pt quaternary stroke vocabulary;
         // radius and shadow unchanged — the full panel restyle is explicitly NOT this pass. Both
         // appearances follow the system colors by construction.
-        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.quaternary, lineWidth: 1))
+        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(.quaternary, lineWidth: 1))
         .shadow(radius: 10)
     }
 }

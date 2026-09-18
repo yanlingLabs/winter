@@ -450,6 +450,8 @@ struct WinterComposerCard: View {
     let model: ComposerModelControl
 
     var stripEdge: WinterComposerStripEdge = .below
+    /// The live session's working folder, for the permissions row's folder chip (2026-09-17).
+    var workingDirectory: String? = nil
     var placeholder: String = newChatComposerPlaceholder
     /// A trailing line for a mode whose chrome shows one — today only cowork's strip. Empty renders
     /// that strip's controls with nothing after them.
@@ -497,7 +499,8 @@ struct WinterComposerCard: View {
         composerChrome(ComposerContext(mode: $mode,
                                        modeIsSelectable: modeIsSelectable,
                                        policy: policy,
-                                       announcement: announcement))
+                                       announcement: announcement,
+                                       workingDirectory: workingDirectory))
     }
 
     /// What the model/effort chip shows, for THIS card's control and THIS mode's tier answer.
@@ -584,7 +587,7 @@ struct WinterComposerCard: View {
                         if text.isEmpty {
                             Text(placeholder)
                                 .font(Typography.composerField())
-                                .foregroundStyle(Theme.textMuted)
+                                .foregroundStyle(Theme.textPlaceholder)
                                 .padding(.horizontal, ComposerTextView.textContainerInset.width)
                                 .padding(.vertical, ComposerTextView.textContainerInset.height)
                                 .allowsHitTesting(false)
@@ -798,8 +801,8 @@ struct ComposerQuestionBox: View {
     let onClose: () -> Void
     @Binding var draft: PendingCardDraft
 
-    /// iOS's 28-on-a-22-composer, at this shell's 18.
-    static let cornerRadius: CGFloat = 24
+    /// iOS's 28-on-a-22-composer ratio, at this shell's 30 (ChatGPT-measured, 2026-09-17).
+    static let cornerRadius: CGFloat = 36
 
     var body: some View {
         PendingQuestionBody(

@@ -252,8 +252,8 @@ enum MessageTextFormatter {
             text,
             baseFont: baseFont,
             codeFont: codeFont,
-            foregroundColor: .labelColor,
-            codeForegroundColor: .labelColor,
+            foregroundColor: themeColor("TextPrimary", colorScheme: colorScheme),
+            codeForegroundColor: themeColor("TextPrimary", colorScheme: colorScheme),
             codeBackgroundColor: codeBackground,
             lineSpacing: lineSpacing
         )

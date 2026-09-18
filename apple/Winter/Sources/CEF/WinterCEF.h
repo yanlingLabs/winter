@@ -204,6 +204,19 @@ void WinterCEFSetNavigationObserver(NSView *parent, void (^observer)(NSString *u
 /// observer do the same.
 void WinterCEFSetPopupObserver(NSView *parent, void (^observer)(NSString *url));
 
+/// Observe the PAGE ICON of the browser hosted by `parent`. Pass `nil` to stop observing.
+///
+/// Fed by `CefDisplayHandler::OnFaviconURLChange` → `CefBrowserHost::DownloadImage` — the browser's
+/// own network stack and cache, as a favicon fetch (no cookies), trying the page's candidates in
+/// order until one decodes. `icon` is sized in points (a 2x representation when the site has one);
+/// `pageURL` is the main frame's URL when the candidates were reported, so the caller can refuse an
+/// icon that lands after a navigation to a different site. Fire-on-arrival only: nothing is cached
+/// here, and nothing here ever reaches the daemon.
+///
+/// Called on the MAIN thread, like the observers above. Registered against the container view for
+/// the same reason they are.
+void WinterCEFSetFaviconObserver(NSView *parent, void (^observer)(NSImage *icon, NSString *pageURL));
+
 /// Prime a tab with what the daemon ALREADY knows about it, before its browser is created. Two
 /// effects, both of which exist because **a tab's browser can be created more than once over that
 /// tab's life, each time with an empty dedupe memory**. Until browser-runtime T4 that happened on
