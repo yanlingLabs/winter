@@ -685,6 +685,13 @@ const REPRESENTATIVES = [
   { tool: "mcp__winter__computer__computer", input: {}, cls: "MUTATING (capability)" },
   { tool: "Workflow", input: { script: "x" }, cls: "Workflow carve-out" },
   { tool: "mcp__winter__research__Search", input: { query: "q" }, cls: "NETWORK (capability)" },
+  // 0.0.17: the SDK's own web pair reaches `canUseTool` under the modes that consult it. They are in
+  // no gate class of their own — `gateClassFor` falls through to the pair table's `web_fetch`/
+  // `web_search`, which is Winter's `NETWORK` class, so a public web read never nags and chat/dispatch
+  // never see a card. The floor is a layer below (`Options.web.blockedDomains` in the child, and lane
+  // B3's PreToolUse hooks on both legs), never this gate's answer.
+  { tool: "WebFetch", input: { url: "https://example.com", prompt: "what" }, cls: "NETWORK (SDK built-in)" },
+  { tool: "WebSearch", input: { query: "q" }, cls: "NETWORK (SDK built-in)" },
 ] as const;
 
 /** What the bridge must answer. `ask` means one `approval_requested`; allow/deny emit NOTHING. */
