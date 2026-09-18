@@ -192,6 +192,8 @@ describe("releaseNotesHtml (2026-09-17 settings-surface plan, item 9)", () => {
     expect(files.length).toBeGreaterThanOrEqual(10);
     const dir = mkdtempSync(join(tmpdir(), "winter-appcast-notes-"));
     tmpDirs.push(dir);
+    const tagsSeen = new Set<string>();
+    const entitiesSeen = new Set<string>();
     for (const file of files) {
       const version = file.replace(/\.md$/, "");
       const description = appcastDescription({
@@ -219,7 +221,22 @@ describe("releaseNotesHtml (2026-09-17 settings-surface plan, item 9)", () => {
       expect(lint.error?.message ?? "").toBe(""); // xmllint missing would silently pass below
       expect(`${file}: ${lint.stderr}`).toBe(`${file}: `);
       expect(lint.status).toBe(0);
+      for (const m of description.matchAll(/<\/?([a-z][a-z0-9]*)(\s[^>]*)?>/g)) {
+        tagsSeen.add(m[1]!);
+        // No attributes, ever — the Mac app's notes renderer parses these tags by name alone.
+        expect(`${file}: <${m[1]} ${m[2] ?? ""}>`).toBe(`${file}: <${m[1]} >`);
+      }
+      for (const m of description.matchAll(/&[#a-zA-Z0-9]+;/g)) entitiesSeen.add(m[0]);
     }
+    // THE CONTRACT TRIPWIRE. The Mac app renders this HTML with its own typography through a
+    // hand-written converter (apple/Winter/Sources/Updates — `ReleaseNotes`), deliberately not
+    // `NSAttributedString(html:)`, so it handles a CLOSED set of tags by name and degrades anything
+    // else to its text content. A table flattened to a run-on sentence is the failure mode. So if
+    // `releaseNotesHtml` ever learns a new construct AND a notes file uses it, this fails here —
+    // in the release pipeline's own suite — instead of in front of a user mid-update. Widening it is
+    // fine; widening it without teaching that converter the same tag is not.
+    expect([...tagsSeen].sort()).toEqual(["code", "h2", "li", "p", "pre", "strong", "ul"]);
+    expect([...entitiesSeen].sort()).toEqual(["&amp;", "&gt;", "&lt;"]);
   });
 });
 
