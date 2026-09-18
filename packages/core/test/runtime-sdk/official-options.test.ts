@@ -161,7 +161,7 @@ function realAssembler(
 }
 
 describe("autoMemoryDirectoryFor", () => {
-  const base = (mode: OfficialSessionInput["mode"], cwd: string): OfficialSessionInput => ({ sessionId: "s_1", mode, cwd, primary: cwd });
+  const base = (mode: OfficialSessionInput["mode"], cwd: string): OfficialSessionInput => ({ sessionId: "s_1", mode, cwd, primary: cwd, spendEffort: undefined });
 
   test("code -> the SAME per-project MEMDIR the Winter leg's memoryDirFor resolves to", () => {
     const home = realDir();
@@ -228,7 +228,7 @@ describe("autoMemoryDirectoryFor", () => {
     const home = realDir();
     const cwd = realDir(); // session-driver.ts still defaults `cwd` to a session tmp dir even when workdir-less
     const assembler = realAssembler(home);
-    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd, primary: undefined }; // `primary: undefined` STATED: workdir-less
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd, primary: undefined, spendEffort: undefined }; // `primary: undefined` STATED: workdir-less
     const expected = assistantMemoryDirFor({ winterHome: home });
     expect(autoMemoryDirectoryFor(input, assembler, home)).toBe(expected);
     // the system prompt names the SAME directory (the protocol block always discloses its path,
@@ -280,7 +280,7 @@ describe("autoMemoryDirectoryFor", () => {
             writeFileSync(join(dir, "MEMORY.md"), "- [marker](marker.md) — matrix fixture\n");
           }
           const primary = workdirLess ? undefined : cwd;
-          const input: OfficialSessionInput = { sessionId: "s_1", mode, cwd, primary };
+          const input: OfficialSessionInput = { sessionId: "s_1", mode, cwd, primary, spendEffort: undefined };
 
           const prompt = winterSystemPromptFor(assembler, { mode, primary, cwd });
           const expected = memDirNamedByPrompt(prompt);
@@ -345,7 +345,7 @@ describe("officialInputFor — official_project_key_too_deep", () => {
     // it runs).
     await mock.module("@yanlinglabs/winter-agent-sdk", () => ({ ...winterAgentSdk, transcriptProjectKey: () => "x".repeat(65) }));
     try {
-      const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
+      const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
       const result = officialInputFor(input, minimalDeps());
       expect(result).toBeInstanceOf(OfficialProjectKeyTooDeep);
       if (result instanceof OfficialProjectKeyTooDeep) {
@@ -359,7 +359,7 @@ describe("officialInputFor — official_project_key_too_deep", () => {
   });
 
   test("a real, ordinary cwd never refuses (the guard is not reachable on the real, self-truncating key)", () => {
-    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
     const result = officialInputFor(input, minimalDeps());
     expect(result).not.toBeInstanceOf(OfficialProjectKeyTooDeep);
   });
@@ -385,7 +385,7 @@ describe("officialInputFor — official_project_key_too_deep", () => {
 // rules UNCHANGED, no second anchoring scheme needed (measured, not assumed).
 describe("officialInputFor — the control-plane fence (C1)", () => {
   function optionsFor(mode: OfficialSessionInput["mode"], home = "/Users/x/.winter-test-home"): Record<string, unknown> {
-    const input: OfficialSessionInput = { sessionId: "s_1", mode, cwd: "/Users/x/repo", primary: "/Users/x/repo" };
+    const input: OfficialSessionInput = { sessionId: "s_1", mode, cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
     const result = officialInputFor(input, minimalDeps({ home }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
     return result.input.options as unknown as Record<string, unknown>;
@@ -461,7 +461,7 @@ describe("officialInputFor — the control-plane fence (C1)", () => {
 // bypassPermissions` is a separate lever this clamp closes regardless of that downgrade.
 describe("officialInputFor — disableBypassPermissionsMode (finding 2a)", () => {
   function settingsPermissionsFor(policy: SessionApprovalPolicy): { deny?: string[]; disableBypassPermissionsMode?: string } | undefined {
-    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
     const result = officialInputFor(input, minimalDeps({ home: "/Users/x/.winter-test-home", policy }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
     const options = result.input.options as unknown as Record<string, unknown>;
@@ -491,7 +491,7 @@ describe("officialInputFor — the env shape + spool (P9c-1)", () => {
     family: "claude", authFamily: "api-key", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
   };
   const HOME = "/Users/x/.winter-test-home";
-  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
+  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
   const settingsWith = (subscriptionAuth: boolean): Settings => ({ runtimes: { official: { subscriptionAuth } } }) as unknown as Settings;
 
   function build(overrides: Partial<OfficialInputDeps> = {}): { input: import("@yanlinglabs/winter-runtime-sdk").RouterOfficialInput } {
@@ -574,7 +574,7 @@ describe("officialInputFor — the env shape + spool, console-oauth family (P9c-
     family: "claude", authFamily: "console-oauth", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
   };
   const HOME = "/Users/x/.winter-test-home";
-  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
+  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
   const settingsWith = (subscriptionAuth: boolean): Settings => ({ runtimes: { official: { subscriptionAuth } } }) as unknown as Settings;
 
   function build(overrides: Partial<OfficialInputDeps> = {}): { input: import("@yanlinglabs/winter-runtime-sdk").RouterOfficialInput } {
@@ -635,7 +635,7 @@ describe("officialInputFor — the console arm's real env (fix round 2, P10a-2; 
   // directly, exactly the shape that widening produces.
   const consoleSelection: RuntimeSelection = { ...apiKeySelection, authFamily: "console-profile" };
   const HOME = "/Users/x/.winter-test-home";
-  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
+  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
   // A REAL anthropic authRef present on the provider — the strongest proof that the console arm's
   // ANTHROPIC_API_KEY omission is structural (the credential plan is never even asked), not an
   // accident of no credential existing to inject in the first place.
@@ -719,7 +719,7 @@ describe("officialInputFor — the console arm refuses until the router pin supp
   // widens `authFamily` to `"console-profile"` — this suite builds the widened selection directly.
   const consoleSelection: RuntimeSelection = { ...apiKeySelection, authFamily: "console-profile" };
   const HOME = "/Users/x/.winter-test-home";
-  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
+  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
   const provider = { providerId: "anthropic", authRef: { kind: "keychain" as const, account: "anthropic:default" } };
 
   test("a stubbed pin below the floor (0.0.3) refuses the console arm typed", () => {
@@ -818,7 +818,7 @@ describe("officialInputFor — the console arm's own subscription guard: console
   };
   const consoleSelection: RuntimeSelection = { ...apiKeySelection, authFamily: "console-profile" };
   const HOME = "/Users/x/.winter-test-home";
-  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
+  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
   const provider = { providerId: "anthropic", authRef: { kind: "keychain" as const, account: "anthropic:default" } };
 
   test("an explicit console pin with no profile yet refuses typed console_profile_missing", () => {
@@ -1023,7 +1023,7 @@ describe("officialInputFor — item 2: settings.permissions.deny reaches this le
       schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
       permissions: { deny: ["Skill(writing-skills)", "Agent(fork)"] },
     });
-    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
     const result = officialInputFor(input, minimalDeps({ home, settings }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
     const deny = (result.input.options as { settings?: { permissions?: { deny?: string[] } } }).settings?.permissions?.deny ?? [];
@@ -1032,7 +1032,7 @@ describe("officialInputFor — item 2: settings.permissions.deny reaches this le
 
   test("an absent settings block changes nothing — just the fixed control-plane fence", () => {
     const home = "/Users/x/.winter-test-home";
-    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
     const result = officialInputFor(input, minimalDeps({ home, settings: undefined }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
     const deny = (result.input.options as { settings?: { permissions?: { deny?: string[] } } }).settings?.permissions?.deny ?? [];
@@ -1056,7 +1056,7 @@ describe("officialInputFor — item 3: configured MCP servers (HTTP/SSE/stdio) r
       httpOne: { type: "http" as const, url: "https://example.com/mcp", headers: { Authorization: "Bearer t" } },
       sseOne: { type: "sse" as const, url: "https://example.com/sse" },
     };
-    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
     // `officialPeer` must be non-undefined for `mcpServers` to be assembled at all (see this
     // function's own `deps.officialPeer === undefined ? {} : …` branch) — an EMPTY `capabilities`
     // record means `officialCapabilityServersFor` never actually touches the peer object, so a bare
@@ -1067,7 +1067,7 @@ describe("officialInputFor — item 3: configured MCP servers (HTTP/SSE/stdio) r
   });
 
   test("absent configuredMcpServers is byte-identical to before item 3 (empty mcpServers when there are no capability servers either)", () => {
-    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
     const result = officialInputFor(input, minimalDeps({ officialPeer: {} as never, capabilities: {} }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
     expect(result.input.mcpServers).toEqual({});
@@ -1112,7 +1112,7 @@ describe("officialInputFor — agents (router 0.0.9) reach both legs identically
     const winterAgents = buildWinterOptions(winterOptionsInput(AGENTS)).agents;
     expect(winterAgents).toEqual(AGENTS);
 
-    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
     const result = officialInputFor(input, minimalDeps({ officialPeer: {} as never, capabilities: {}, agents: AGENTS }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
     const officialAgents = (result.input.options as { agents?: Record<string, unknown> }).agents;
@@ -1126,7 +1126,7 @@ describe("officialInputFor — agents (router 0.0.9) reach both legs identically
     expect(buildWinterOptions(winterOptionsInput({})).agents).toBeUndefined();
     expect(buildWinterOptions(winterOptionsInput()).agents).toBeUndefined();
 
-    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo" };
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
     const emptyResult = officialInputFor(input, minimalDeps({ officialPeer: {} as never, capabilities: {}, agents: {} }));
     if (!("input" in emptyResult)) throw new Error(`officialInputFor unexpectedly refused`);
     expect((emptyResult.input.options as { agents?: unknown }).agents).toBeUndefined();

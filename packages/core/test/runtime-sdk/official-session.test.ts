@@ -219,7 +219,7 @@ function harness(overrides: Partial<OfficialSessionDeps> = {}): Harness {
     policy: "auto",
   };
 
-  const sessionInput: OfficialSessionInput = { sessionId: SESSION_ID, mode: "code", cwd: "/repo", primary: "/repo" };
+  const sessionInput: OfficialSessionInput = { sessionId: SESSION_ID, mode: "code", cwd: "/repo", primary: "/repo", spendEffort: undefined };
 
   const records: OfficialSessionRecords = {
     setTranscriptHealth: (winterSessionId, health) => { healthCalls.push({ sessionId: winterSessionId, health }); },
@@ -261,6 +261,30 @@ function harness(overrides: Partial<OfficialSessionDeps> = {}): Harness {
 // ── M6a ──────────────────────────────────────────────────────────────────────────────────────────
 
 describe("M6a — mirror_error → transcript health", () => {
+  // 2026-09-18: until this, the official leg sent NO effort. `OfficialSessionInput.effort` reached only
+  // the system-prompt builder, so `session.setEffort` succeeded, every client displayed the choice,
+  // and the `claude` child never received it — the effort picker was a no-op on every Claude model
+  // while the identical picker worked on every other one. Asserted on the exact `options` object
+  // `runtime.sdk.query()` was handed, because that is the only place the official runtime reads an
+  // effort and the router forwards it untouched.
+  test("the session's spend effort reaches the query's top-level Options.effort", async () => {
+    const h = harness({ sessionInput: () => ({ sessionId: SESSION_ID, mode: "code", cwd: "/repo", primary: "/repo", spendEffort: "high" }) });
+    await h.session.send("hi");
+    await h.settled();
+    expect(h.capturedOptions).toHaveLength(1);
+    expect(h.capturedOptions[0]!["effort"]).toBe("high");
+  });
+
+  // Absent must stay ABSENT, not `undefined`-valued and not a default: no effort on the wire means
+  // the runtime's own default applies, which is what this leg did for every session before.
+  test("no spend effort means the key is absent from Options, so the runtime's own default applies", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    await h.settled();
+    expect(h.capturedOptions).toHaveLength(1);
+    expect("effort" in h.capturedOptions[0]!).toBe(false);
+  });
+
   test("a mirror_error frame sets transcript health exactly once and emits nothing else", async () => {
     const h = harness();
     await h.session.send("hi");
@@ -854,6 +878,41 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
       q: () => queries[queries.length - 1]!,
     };
   }
+
+  // The WHOLE path, through the real drivers: a session's STORED effort (`store.setEffort`, what
+  // `session.setEffort` writes) -> `session-driver.ts`'s `spendEffortFor` -> `OfficialSessionInput.
+  // spendEffort` -> the query's top-level `Options.effort`. The unit test above pins only the last
+  // hop; this pins that the driver actually computes and threads it, which is the part that was
+  // missing entirely before 2026-09-18.
+  test("a stored session effort reaches the official query's Options.effort through the real driver", async () => {
+    const w = driverWorld();
+    try {
+      await writeCredentialMaterial(w.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
+      const sid = w.store.createSession("t", { mode: "code", model: MODEL });
+      w.store.setEffort(sid, "high");
+      await w.drivers.create(sid);
+      expect(w.capturedOptions).toHaveLength(1);
+      expect((w.capturedOptions[0] as Record<string, unknown>)["effort"]).toBe("high");
+    } finally {
+      await w.close();
+    }
+  });
+
+  // `"none"` is Winter's "send no effort" and is not an SDK `EffortLevel`; `sdkEffortOf` drops it on
+  // the Winter leg, so it must drop it here too — same function, same meaning on both legs.
+  test("a stored effort of \"none\" sends NO effort on the official leg, exactly as on the Winter leg", async () => {
+    const w = driverWorld();
+    try {
+      await writeCredentialMaterial(w.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
+      const sid = w.store.createSession("t", { mode: "code", model: MODEL });
+      w.store.setEffort(sid, "none");
+      await w.drivers.create(sid);
+      expect(w.capturedOptions).toHaveLength(1);
+      expect("effort" in (w.capturedOptions[0] as Record<string, unknown>)).toBe(false);
+    } finally {
+      await w.close();
+    }
+  });
 
   test("a session assembled on the api-key arm, resumed after a Console sign-in, still injects the api-key material — never the Console bearer", async () => {
     const w = driverWorld();
