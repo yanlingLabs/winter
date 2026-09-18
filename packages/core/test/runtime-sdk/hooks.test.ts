@@ -468,6 +468,12 @@ describe("sessionHooksFor — the dangerous-domain floor on WebSearch", () => {
     expect(updatedInputOf(out)).toBeUndefined();
   });
 
+  test("the denied allow-list entry is named in its NORMALIZED form — a model-written value never reaches the refusal raw", async () => {
+    const out = await searchVerdict({ query: "q", allowed_domains: ["  *.RAW.PasteBin.COM.  "] });
+    expect(denialReason(out)).toContain("raw.pastebin.com matches the blocked entry pastebin.com");
+    expect(denialReason(out)).not.toContain("*.");
+  });
+
   test("an allow-list clear of the floor is untouched", async () => {
     expect(await searchVerdict({ query: "q", allowed_domains: ["docs.example", "example.org"] })).toEqual({});
   });
