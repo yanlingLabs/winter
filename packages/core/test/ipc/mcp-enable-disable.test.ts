@@ -5,8 +5,8 @@
 // `settings-set-skill-denied.test.ts`/`agents-list.test.ts` already use — no real MCP child process
 // needed here (that flip, against a REAL stdio server the manager started at boot, is covered in
 // server.test.ts's own mcp.list tests, which already spawn a fixture process).
-import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { afterEach, describe, expect, test, spyOn } from "bun:test";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@yanlinglabs/winter-protocol";
@@ -82,6 +82,24 @@ describe("mcp.enable / mcp.disable / mcp.list settings overlay", () => {
     return { home, socketPath, harnessToken: tokens.harness };
   }
 
+  // Read-door correction (item 6 follow-up): a HAND-EDITED settings.json — never `Settings.parse`,
+  // which would itself refuse a credential-shaped header (the write door, unchanged) — is the only
+  // way this shape reaches disk at all. Otherwise identical wiring to `boot()` above.
+  async function bootRaw(rawSettings: Record<string, unknown>) {
+    const home = mkdtempSync(join(tmpdir(), "winter-mcp-header-strip-"));
+    writeFileSync(join(home, "settings.json"), JSON.stringify(rawSettings, null, 2));
+    const trust = new TrustStore(join(home, "trust.json"));
+    const mcp = new McpManager({ registry: new ToolRegistry(), trust });
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const secrets = new FileSecretStore(join(home, "secrets"));
+    const authority = new TokenAuthority(secrets);
+    const tokens = await authority.ensureTokens();
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets, mcp });
+    stop = () => { server.stop(); store.close(); };
+    return { home, socketPath, harnessToken: tokens.harness };
+  }
+
   test("mcp.disable writes the name into settings.mcp.disabled; mcp.enable removes it", async () => {
     const { home, socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
@@ -146,6 +164,44 @@ describe("mcp.enable / mcp.disable / mcp.list settings overlay", () => {
     const { result } = await c.request(METHODS.mcpList, { cwd: "/some/project" });
     expect(result.servers).toEqual([{ name: "proj", status: "disabled", toolNames: ["echo"], source: "project" }]);
     c.close();
+  });
+
+  // Read-door correction (item 6 follow-up): "make it visible where the user will look" —
+  // `mcp.list` must report a stripped-header reason on the row, and the header VALUE must appear
+  // nowhere: not in the row, not anywhere else in the serialized RPC result, not in any captured
+  // stderr line.
+  test("mcp.list reports strippedHeaders for a server whose credential-shaped header loadSettings dropped — the header VALUE leaks nowhere", async () => {
+    const SENTINEL = "Bearer sk-SENTINEL-mcp-list-leak-check";
+    const { socketPath, harnessToken } = await bootRaw({
+      schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
+      mcpServers: {
+        remote: {
+          type: "http", url: "https://example.com/mcp",
+          headers: { Authorization: SENTINEL, "X-Request-Id": "abc123" },
+        },
+      },
+    });
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    let result: any;
+    let errLines: string[];
+    try {
+      const c = await TestClient.connect(socketPath);
+      await c.hello(harnessToken, "cli");
+      ({ result } = await c.request(METHODS.mcpList, {}));
+      c.close();
+      errLines = errSpy.mock.calls.map((call) => String(call[0])); // read BEFORE mockRestore() — mockRestore clears call history
+    } finally {
+      errSpy.mockRestore();
+    }
+    expect(result.servers).toEqual([
+      { name: "remote", status: "unmanaged", toolNames: [], source: "user", transport: "http", strippedHeaders: ["Authorization"] },
+    ]);
+    // `mcp.list`'s row shape never carries header VALUES at all (only `strippedHeaders`' names) —
+    // this assertion is the belt to that suspenders: the secret is absent from the serialized RPC
+    // result no matter which field it might have leaked through.
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain(SENTINEL);
+    expect(errLines.some((l) => l.includes(SENTINEL))).toBe(false);
   });
 
   test("not remote-allowed — local role only", () => {

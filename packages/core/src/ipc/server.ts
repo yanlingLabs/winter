@@ -105,7 +105,7 @@ import type { ProviderLink } from "../peripheral/provider-link";
 import type { HardwareBroker } from "../peripheral/hardware";
 import { verbClass } from "../peripheral/hardware";
 import type { QuotaManager } from "../providers/quota";
-import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom } from "../settings";
+import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, readRawSettings } from "../settings";
 import { disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
 import { diagnoseRuntimes } from "../runtime-sdk/runtimes-doctor";
@@ -2083,7 +2083,19 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const tracked = opts.mcp?.list(p.cwd) ?? [];
         const settings = liveSettingsFor(opts);
         const disabled = new Set(settings?.mcp?.disabled ?? []);
-        const overlaid = tracked.map((row) => (disabled.has(row.name) ? { ...row, status: "disabled" as const } : row));
+        // Read-door correction (item 6 follow-up): which credential-shaped headers `loadSettings`
+        // silently dropped, per server — read fresh off the RAW file (never off `settings` above,
+        // which by construction can no longer say what it removed) so a hand-edited header shows up
+        // HERE even though `configuredMcpServersFor` never forwards it to either leg. NEVER the
+        // header value, only its name — same posture as the boot-time log line this mirrors.
+        const strippedHeaders = opts.winterHome
+          ? stripCredentialShapedMcpHeaders(readRawSettings(join(opts.winterHome, "settings.json")) ?? {})
+          : {};
+        const withStripped = <T extends { name: string }>(row: T): T | (T & { strippedHeaders: string[] }) => {
+          const headers = strippedHeaders[row.name];
+          return headers && headers.length > 0 ? { ...row, strippedHeaders: headers } : row;
+        };
+        const overlaid = tracked.map((row) => withStripped(disabled.has(row.name) ? { ...row, status: "disabled" as const } : row));
         const trackedNames = new Set(overlaid.map((r) => r.name));
         // MEDIUM (fix wave, pre-merge review, finding 3): a stdio entry is normally excluded here
         // (the "started at boot" gap this item doesn't touch — see this block's own header) UNLESS
@@ -2094,7 +2106,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // in this list already has.
         const unmanaged = Object.entries(settings?.mcpServers ?? {})
           .filter(([name, entry]) => (entry.type !== "stdio" || disabled.has(name)) && !trackedNames.has(name))
-          .map(([name, entry]) => ({
+          .map(([name, entry]) => withStripped({
             name,
             status: (disabled.has(name) ? "disabled" : "unmanaged") as "disabled" | "unmanaged",
             toolNames: [] as string[],

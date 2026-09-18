@@ -227,6 +227,75 @@ function refuseCredentialShapedHeaders<T extends z.ZodObject<{ headers: z.ZodOpt
   });
 }
 
+/**
+ * READ-DOOR companion to `refuseCredentialShapedHeaders` above (the WRITE-door refusal, unchanged
+ * — `saveSettings` and every direct `Settings.parse`/`Settings.safeParse` caller still refuse a
+ * credential-shaped header, full stop). A `settings.json` a HUMAN hand-edited can carry one the
+ * moment they save the file outside Winter entirely, and refusing to *load* such a file is far
+ * worse than the leak the write door guards against: `loadSettings` throwing is exactly what
+ * `daemon.ts`'s boot catch turns into `"settings unavailable, agent disabled"` — disabling EVERY
+ * session on the machine over ONE header on ONE configured MCP server. So the read door does the
+ * opposite of the write door: it silently (to the schema) DROPS just the offending header key —
+ * never the whole `headers` object, never the whole server entry, never the rest of the file — and
+ * hands the caller back what it removed, per server, so `loadSettings` can log it and `mcp.list`
+ * can report it.
+ *
+ * Scoped to `http`/`sse` entries ONLY, matching exactly what `refuseCredentialShapedHeaders` is
+ * wired onto above — a stdio entry has no `headers` field in its schema at all, so a stray
+ * `headers` object on one is already dropped wholesale by zod's ordinary unknown-key stripping;
+ * walking it here would log a misleading "dropped from headers" line for a key that was never
+ * going anywhere near a wire request.
+ *
+ * Pure and non-throwing: operates on `raw` — the UNTYPED, pre-schema-validation JSON — so it runs
+ * identically across every `loadSettings` schemaVersion branch (the field's shape is unchanged by
+ * the v2→v3 migration). MUTATES `raw` in place (deleting the offending keys): every `loadSettings`
+ * call site passes a freshly-`JSON.parse`d object it owns exclusively, and `mcp.list`'s own
+ * read-only use (`ipc/server.ts`, against a throwaway `readRawSettings` result it discards right
+ * after reading the returned map) has no other observer to surprise.
+ *
+ * NOTE (read this before assuming the header survives on disk): stripping happens only in memory,
+ * at load time — the file itself is untouched by this function. But the header does NOT reliably
+ * survive on disk either: `saveSettings`'s own round-trip merge (`mergeUnknownKeys`) takes a
+ * `mcpServers` entry from the IN-MEMORY value wholesale (a `z.preprocess` value schema hits that
+ * function's leaf branch), so the very next UNRELATED settings write on that home (an `mcp.disable`,
+ * a `setSkillDenied`, a plugin toggle — anything at all that round-trips through `loadSettings` →
+ * `saveSettings`) persists the ALREADY-STRIPPED shape, permanently removing the hand-edited header
+ * from the file. This is accepted, not a bug to route around here: the alternative (restoring the
+ * header so it can round-trip) would make `saveSettings`'s post-merge `Settings.safeParse` refuse
+ * every subsequent unrelated write on that home — reintroducing a version of the exact outage this
+ * function exists to remove, just one write later instead of one load later.
+ */
+export function stripCredentialShapedMcpHeaders(raw: unknown): Record<string, string[]> {
+  const stripped: Record<string, string[]> = {};
+  const servers = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>).mcpServers : undefined;
+  if (!servers || typeof servers !== "object" || Array.isArray(servers)) return stripped;
+  for (const [name, entryUnknown] of Object.entries(servers as Record<string, unknown>)) {
+    if (!entryUnknown || typeof entryUnknown !== "object" || Array.isArray(entryUnknown)) continue;
+    const entry = entryUnknown as Record<string, unknown>;
+    if (entry.type !== "http" && entry.type !== "sse") continue; // stdio (or typeless-stdio) has no headers field at all
+    const headers = entry.headers;
+    if (!headers || typeof headers !== "object" || Array.isArray(headers)) continue;
+    const headersObj = headers as Record<string, unknown>;
+    const offending = Object.keys(headersObj).filter(isCredentialShapedHeaderName);
+    if (offending.length === 0) continue;
+    for (const headerName of offending) delete headersObj[headerName];
+    stripped[name] = offending;
+  }
+  return stripped;
+}
+
+/** Process-lifetime dedupe key set for the read-door strip's log line — `loadSettings` has ~30 call
+ *  sites across the daemon/CLI, several re-invoked on every RPC (`mcp.list`, `capabilities.list`,
+ *  every settings-writing handler re-reads before it writes) — without this, a single hand-edited
+ *  header would print a fresh stderr line on every one of those calls for as long as the daemon
+ *  runs, which is not what "log exactly one stderr line per offending entry" means. Keyed on the
+ *  file path too, so two different homes (or two different temp-dir test fixtures) with the SAME
+ *  server/header name each still get their own line. Never cleared — intentionally process-lifetime,
+ *  matching the "logged once" posture of this file's other boot-time "accepted, logged, ignored"
+ *  lines (`winterLegDisabledKeys`/`officialSubscriptionAuthFlagInert`), which log once per settings
+ *  CHANGE rather than once per read for the same reason. */
+const loggedCredentialHeaderStrips = new Set<string>();
+
 const McpHttpServerSettings = refuseCredentialShapedHeaders(z.object({
   type: z.literal("http"),
   url: z.string().url(),
@@ -1159,6 +1228,25 @@ export function loadSettings(path: string, opts?: { presentProviders?: ReadonlyS
       throw new Error(`settings file not found at ${path} — run \`winter daemon run\` once to initialize`);
     }
     throw err;
+  }
+  // Read door (ruling, item 6 follow-up — see `stripCredentialShapedMcpHeaders`'s own doc above):
+  // strip any credential-shaped MCP header from the RAW object BEFORE any schema validation runs,
+  // on EVERY branch below (v3 direct, v2/v1 migration alike — the field's shape is unaffected by
+  // migration) — a hand-edited file carrying one must still boot the daemon and keep the agent
+  // enabled, never widen into `daemon.ts`'s "settings unavailable, agent disabled". One stderr line
+  // per offending (server, header) pair, the FIRST time this path/server/header combination is
+  // ever seen by this process (`loggedCredentialHeaderStrips` — see its own doc for why: this
+  // function is called from many places, repeatedly, and "log once per read" would spam the log
+  // for as long as the file stays unedited).
+  for (const [serverName, headerNames] of Object.entries(stripCredentialShapedMcpHeaders(raw))) {
+    for (const headerName of headerNames) {
+      const key = `${path}\0${serverName}\0${headerName}`;
+      if (loggedCredentialHeaderStrips.has(key)) continue;
+      loggedCredentialHeaderStrips.add(key);
+      console.error(
+        `settings: mcp server "${serverName}" header "${headerName}" is credential-shaped — dropped from its headers at load; settings.json is model-readable, so a literal credential there is not safe — use \${env:VAR}-style indirection once it exists, never a literal secret here`,
+      );
+    }
   }
   if (raw.schemaVersion === 3) {
     const parsed = Settings.safeParse(raw);

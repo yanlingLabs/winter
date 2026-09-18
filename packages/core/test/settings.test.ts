@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, spyOn } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -254,24 +254,116 @@ describe("loadSettings", () => {
       expect(result.success).toBe(true);
     });
 
-    // Fix wave (advisor round 2): a raw `Settings.safeParse` proves the SCHEMA refuses the header,
-    // but the doors a user actually hits are `loadSettings` (boot, the settings watcher) and
-    // `saveSettings` — both of which used to render ONLY the issue's path
-    // (`renderSettingsIssues`'s predecessor: `issues.map((i) => i.path.join("."))`), dropping the
-    // custom issue's own `.message` entirely. A hand-edited settings.json with a credential-shaped
-    // header therefore threw "settings.json is invalid: mcpServers.x.headers.Authorization — fix or
-    // delete <path>" — naming the FIELD, but neither the rule nor the alternative the ruling's own
-    // text requires. This proves the thrown Error's MESSAGE (not just the raw zod issues) names both.
-    test("a hand-edited settings.json with a credential-shaped header is refused by loadSettings, naming the rule and the alternative", () => {
-      const p = tmpSettings({
-        schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
-        mcpServers: { bad: { type: "http", url: "https://example.com/mcp", headers: { Authorization: "Bearer sk-leaked" } } },
+    // CORRECTED RULING (read-door follow-up): `<home>/settings.json` can be hand-edited by a human
+    // OUTSIDE Winter entirely, and `loadSettings` refusing to LOAD such a file is far worse than the
+    // leak the WRITE door guards against — `daemon.ts`'s boot hook treats any `loadSettings` throw
+    // as "settings unavailable, agent disabled", so ONE hand-edited header on ONE configured MCP
+    // server used to disable EVERY session on the machine. The WRITE door (`saveSettings`, and any
+    // direct `Settings.parse`/`safeParse` — the four tests above) still refuses UNCONDITIONALLY;
+    // only the READ door (`loadSettings`) now strips the offending header and keeps loading.
+    const SENTINEL = "Bearer sk-SENTINEL-9f8e7d-DO-NOT-LEAK";
+
+    describe("loadSettings strips instead of refusing (the bug this ruling corrects)", () => {
+      test("RED FIRST (was refused before the fix): loadSettings SUCCEEDS on a hand-edited file with a credential-shaped header — the header is gone from the parsed value, the rest of the entry survives, exactly one line is logged", () => {
+        const p = tmpSettings({
+          schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
+          mcpServers: {
+            bad: { type: "http", url: "https://example.com/mcp", headers: { Authorization: SENTINEL, "X-Request-Id": "abc123" } },
+          },
+        });
+        const errSpy = spyOn(console, "error").mockImplementation(() => {});
+        let s: Settings;
+        let lines: string[];
+        try {
+          s = loadSettings(p); // used to throw here — see the deleted test this one replaces
+          lines = errSpy.mock.calls.map((c) => String(c[0])); // read BEFORE mockRestore() — mockRestore clears call history
+        } finally {
+          errSpy.mockRestore();
+        }
+        const entry = s.mcpServers?.bad;
+        if (entry?.type !== "http") throw new Error("unreachable");
+        expect(entry.headers).toEqual({ "X-Request-Id": "abc123" }); // offending key gone; benign header + url survive
+        expect(entry.url).toBe("https://example.com/mcp");
+        const offending = lines.filter((l) => l.includes('mcp server "bad"') && l.includes('header "Authorization"'));
+        expect(offending.length).toBe(1); // exactly one stderr line for this offending entry
+        expect(offending[0]).toContain("credential-shaped");
+        expect(lines.some((l) => l.includes(SENTINEL))).toBe(false); // the header VALUE never appears in any log line
       });
-      expect(() => loadSettings(p)).toThrow(/credential-shaped/);
-      expect(() => loadSettings(p)).toThrow(/\$\{env:VAR\}/);
-      // The value itself is never echoed into the error (no secret in an error message/log line).
-      try { loadSettings(p); throw new Error("unreachable"); } catch (err) {
-        expect((err as Error).message).not.toContain("sk-leaked");
+
+      test("multiple offending headers on one entry each get their own logged line; a benign header on the same entry survives untouched", () => {
+        const p = tmpSettings({
+          schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
+          mcpServers: {
+            bad: { type: "sse", url: "https://example.com/sse", headers: { "X-Auth-Token": SENTINEL, Cookie: "c", Accept: "application/json" } },
+          },
+        });
+        const errSpy = spyOn(console, "error").mockImplementation(() => {});
+        let s: Settings;
+        let lines: string[];
+        try {
+          s = loadSettings(p);
+          lines = errSpy.mock.calls.map((c) => String(c[0])); // read BEFORE mockRestore()
+        } finally {
+          errSpy.mockRestore();
+        }
+        const entry = s.mcpServers?.bad;
+        if (entry?.type !== "sse") throw new Error("unreachable");
+        expect(entry.headers).toEqual({ Accept: "application/json" });
+        expect(lines.filter((l) => l.includes('header "X-Auth-Token"')).length).toBe(1);
+        expect(lines.filter((l) => l.includes('header "Cookie"')).length).toBe(1);
+      });
+
+      test("a stdio entry's stray headers field is never treated as a credential drop (headers is not part of the stdio shape at all)", () => {
+        const p = tmpSettings({
+          schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
+          mcpServers: { bad: { type: "stdio", command: "true", headers: { Authorization: SENTINEL } } },
+        });
+        const errSpy = spyOn(console, "error").mockImplementation(() => {});
+        try {
+          loadSettings(p);
+          expect(errSpy.mock.calls.some((c) => String(c[0]).includes("credential-shaped"))).toBe(false);
+        } finally {
+          errSpy.mockRestore();
+        }
+      });
+
+      test("logs at most once per (file, server, header) across repeated loadSettings calls on the same path — no per-call log spam", () => {
+        const p = tmpSettings({
+          schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
+          mcpServers: { bad: { type: "http", url: "https://example.com/mcp", headers: { Authorization: SENTINEL } } },
+        });
+        const errSpy = spyOn(console, "error").mockImplementation(() => {});
+        try {
+          loadSettings(p);
+          loadSettings(p);
+          loadSettings(p);
+          const offending = errSpy.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('header "Authorization"'));
+          expect(offending.length).toBe(1);
+        } finally {
+          errSpy.mockRestore();
+        }
+      });
+    });
+
+    // The WRITE door: unchanged, still refuses unconditionally — pinned directly at `saveSettings`
+    // itself (not just the schema `Settings.safeParse` tests above), since that IS the door a real
+    // settings-writing RPC (`mcp.enable`/`disable`, `setModelRole`, `setSkillDenied`, plugin
+    // enable/disable, …) goes through.
+    test("saveSettings still refuses a credential-shaped header, naming the rule and the alternative, never echoing the value", () => {
+      const p = tmpSettings({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } });
+      // Built by hand (never through `Settings.parse`, which would itself throw here) — the same
+      // shape a caller who skipped validation, or round-tripped a hand-built object, could hand in.
+      const bad = {
+        schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
+        mcpServers: { bad: { type: "http", url: "https://example.com/mcp", headers: { Authorization: SENTINEL } } },
+      } as unknown as Settings;
+      expect(() => saveSettings(p, bad)).toThrow(/credential-shaped/);
+      expect(() => saveSettings(p, bad)).toThrow(/\$\{env:VAR\}/);
+      try {
+        saveSettings(p, bad);
+        throw new Error("unreachable");
+      } catch (err) {
+        expect((err as Error).message).not.toContain(SENTINEL);
       }
     });
   });
