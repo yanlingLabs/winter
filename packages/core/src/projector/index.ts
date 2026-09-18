@@ -11,14 +11,14 @@ import { createEchoWindow, type EchoWindow } from "./dedupe";
 import { classifyThrown, sanitizeDetail } from "./errors";
 import { isKnownUnpersistedKind, kindOf, summarize } from "./hooks";
 import { isQuestionTool } from "./questions";
-import { projectTerminal, totalsOf, type UsageTotals } from "./terminal";
+import { projectTerminal, sharesMainLedgerRow, totalsOf, type MainModelKey, type UsageTotals } from "./terminal";
 import { hostToolNameFor } from "../runtime-sdk/tool-names";
 import { ProjectorRefusedError } from "./types";
 import type { CheckpointStore, ProjectedBatch, ProjectedEvent, Projector, ProjectorDeps, ProjectorRefusal, ProtocolSdkMessage } from "./types";
 
 export { PROJECTED_EVENT_COVERAGE, SUBAGENT_TRANSCRIPT_INCLUDE } from "./event-coverage";
 export { createEchoWindow, ECHO_WINDOW, type EchoWindow } from "./dedupe";
-export { projectTerminal, totalsOf, type UsageTotals } from "./terminal";
+export { projectTerminal, sharesMainLedgerRow, totalsOf, type MainModelKey, type UsageTotals } from "./terminal";
 export {
   AGENT_ERROR_CODES, classifyResult, classifyThrown, codeForHttpStatus, sanitizeDetail,
   type AgentErrorCode, type ClassifiedError,
@@ -105,6 +105,27 @@ type ResultFrameLike = Parameters<typeof totalsOf>[0];
 
 const HOST_TODO_STATUSES: ReadonlySet<string> = new Set(["pending", "in_progress", "completed", "deleted"]);
 
+/**
+ * `system/init` → how to find this session's own `modelUsage` row (0.0.17, P-B1).
+ *
+ * `winter_provider` is the Winter runtime's own init EXTENSION (`engine.ts`'s `buildSdkInitMessage`),
+ * and its `modelKey` is documented to ALWAYS equal the ledger's row key. It is absent for a session
+ * with no resolved provider identity (a `winter-test/*` double) and on the official leg, where
+ * `init.model` and the `modelUsage` keys are the same vendor id — so `key` falls back to `init.model`
+ * and that leg's behaviour is unchanged. `modelId` stays `init.model` verbatim for the suffix rung.
+ */
+function mainModelKeyFrom(init: Record<string, unknown>): MainModelKey | undefined {
+  const model = typeof init.model === "string" && init.model.length > 0 ? init.model : undefined;
+  const provider = init.winter_provider;
+  const modelKey = typeof provider === "object" && provider !== null && typeof (provider as { modelKey?: unknown }).modelKey === "string"
+    && ((provider as { modelKey: string }).modelKey).length > 0
+    ? (provider as { modelKey: string }).modelKey
+    : undefined;
+  const key = modelKey ?? model;
+  if (key === undefined && model === undefined) return undefined;
+  return { ...(key === undefined ? {} : { key }), ...(model === undefined ? {} : { modelId: model }) };
+}
+
 class ProjectorImpl implements Projector {
   private readonly checkpoint: CheckpointStore;
   private readonly winterSessionId: string;
@@ -128,8 +149,25 @@ class ProjectorImpl implements Projector {
   private pending: PendingMark | undefined;
   private messageIndex = 0;
   private backendSessionId: string | undefined;
-  /** `system/init.model` — the session's canonical model row, which keys `contextTokens` (m6). */
-  private mainModel: string | undefined;
+  /**
+   * How to find the session's own `modelUsage` row, which keys `contextTokens` (m6).
+   *
+   * 0.0.17 (P-B1): `init.winter_provider.modelKey` is the ROW KEY verbatim (the qualified
+   * `provider/model` catalog key), while `init.model` is the BARE id the daemon passed at the spawn
+   * boundary — so both are kept, and `totalsOf` tries the key first and the `/${modelId}` suffix
+   * second. The official leg sends no `winter_provider`, so there `key === init.model` and the
+   * behaviour is byte-identical to before this release.
+   */
+  private mainModel: MainModelKey | undefined;
+  /**
+   * 0.0.17 (P-B1 item 3): has a subagent or a web tool's inner pass been able to spend on the MAIN
+   * ledger row since the previous terminal?
+   *
+   * DELIBERATELY NOT reset at `beginTurn`/`init` — only at a terminal. A background child finishes
+   * while the session is idle and its spend lands in the cumulative ledger BETWEEN turns, so a flag
+   * cleared at turn start would miss exactly the case that motivated this fix.
+   */
+  private sharedRowActivity = false;
   private running = false;
   private resultAt: string | undefined;
   /** One log line per unknown wire `type`, not one per message. */
@@ -249,13 +287,34 @@ class ProjectorImpl implements Projector {
     const init = asInitFrame(msg);
     if (init !== undefined) {
       this.backendSessionId = typeof init.session_id === "string" ? init.session_id : undefined;
-      this.mainModel = typeof init.model === "string" && init.model.length > 0 ? init.model : undefined;
+      this.mainModel = mainModelKeyFrom(init);
       this.deps.log.debug?.("[projector] session init", {
         sessionId: this.deps.sessionId, mode: this.deps.mode,
         model: typeof init.model === "string" ? init.model : undefined,
         tools: Array.isArray(init.tools) ? init.tools.length : 0,
       });
       return EMPTY_BATCH();
+    }
+
+    // 0.0.17 (P-B1): an in-runtime `session.setModel` RE-KEYS the ledger row and emits NO second
+    // `system/init` (only an unsolicited turn does), so a projector that learned the row key from
+    // `init` alone would keep matching the OLD row for the rest of the session — a zero delta and a
+    // silently absent `contextTokens`. `system/model_switch.to_model` is the new key (the engine
+    // announces both ids as catalog keys for a resolved switch; an unresolved one may still be bare,
+    // which is why the bare tail is derived rather than assumed). NOT consumed here — no `return`:
+    // the frame falls through to the same "known unpersisted kind" log line it has always taken.
+    if (kindOf(msg) === "system/model_switch") {
+      const to = (msg as Record<string, unknown>).to_model;
+      if (typeof to === "string" && to.length > 0) {
+        const slash = to.lastIndexOf("/");
+        this.mainModel = { key: to, modelId: slash >= 0 ? to.slice(slash + 1) : to };
+        // The DELTA is rebased too, and it must be: `previous.main` is the OLD row's cumulative
+        // input, and the new row starts at zero from here — subtracting one from the other would
+        // answer 0 for the first turn on the new model (an absent `contextTokens` at exactly the
+        // moment a client most wants one) and would under-report every turn after it. The two
+        // whole-ledger baselines are untouched: they sum every row, which a switch does not reset.
+        if (this.totals !== undefined) this.totals = { ...this.totals, main: 0, mainExact: true };
+      }
     }
 
     // ── the official leg's mirror error (P8c-11 / Task 2.2, provisional shape — see
@@ -286,6 +345,12 @@ class ProjectorImpl implements Projector {
       const threadId = threadIdOf(assistant);
       const firstToolUse = assistant.message.content.find((b) => b.type === "tool_use" && typeof b.id === "string");
       const sourceId = firstToolUse !== undefined ? `tu:${firstToolUse.id as string}` : `as:${this.turnIndex}:${this.roundIndex}`;
+      // 0.0.17 (P-B1 item 3): OUTSIDE the `claim`, deliberately — a replayed prefix produces no
+      // events but its calls DID spend, and this flag is about the ledger, not about the transcript.
+      for (const b of assistant.message.content) {
+        if (b.type !== "tool_use" || typeof b.name !== "string") continue;
+        if (isSpawnTool(b.name) || sharesMainLedgerRow(b.name)) this.sharedRowActivity = true;
+      }
       return claim(sourceId, () => {
         const out: ProjectedEvent[] = [];
         const text = assistantText(assistant);
@@ -418,10 +483,14 @@ class ProjectorImpl implements Projector {
           sessionId: this.deps.sessionId,
         });
       }
+      // 0.0.17 (P-B1 item 3): a BACKGROUND child still open at the terminal has been spending in
+      // this very window whether or not a frame said so — the same reading as a `task_*` frame.
+      const sawSharedRowActivity = this.sharedRowActivity || this.backgroundChildren.size > 0;
       const events = claim(sourceId, () => {
         const out = projectTerminal({
           result: resultFrame, sessionId: this.deps.sessionId, threadId: MAIN_THREAD,
           previous: this.totals, rounds, ...(this.mainModel === undefined ? {} : { mainModel: this.mainModel }),
+          ...(sawSharedRowActivity ? { sawSharedRowActivity } : {}),
         });
         this.totals = out.totals ?? this.totals;
         return out.events;
@@ -431,6 +500,9 @@ class ProjectorImpl implements Projector {
       this.turnIndex++;
       this.roundIndex = 0;
       this.roundsThisTurn = 0;
+      // 0.0.17 (P-B1 item 3): the window this flag covers is TERMINAL-to-terminal, not turn-start to
+      // terminal — see the field's own doc comment for the background child that spends between turns.
+      this.sharedRowActivity = false;
       this.running = false;
       this.sawFrame = false;
       if (this.openTurns > 0) this.openTurns--;
@@ -483,6 +555,10 @@ class ProjectorImpl implements Projector {
     const kind = kindOf(msg);
     if (kind !== "system/task_started" && kind !== "system/task_updated" && kind !== "system/task_notification" && kind !== "system/task_progress") return undefined;
     const m = msg as Record<string, unknown>;
+    // 0.0.17 (P-B1 item 3): a task frame of ANY kind is a child that ran — set before every early
+    // return below, because a frame this projector cannot attribute to a thread (no `task_id`, an
+    // unknown id, a non-terminal status) still names spend that landed in the cumulative ledger.
+    this.sharedRowActivity = true;
     const taskId = typeof m.task_id === "string" && m.task_id.length > 0 ? m.task_id : undefined;
     if (taskId === undefined) return undefined;
     const toolUseId = typeof m.tool_use_id === "string" && m.tool_use_id.length > 0 ? m.tool_use_id : undefined;
@@ -544,6 +620,7 @@ class ProjectorImpl implements Projector {
     this.turnIndex++;
     this.roundIndex = 0;
     this.roundsThisTurn = 0;
+    this.sharedRowActivity = false;   // same terminal-to-terminal window as the result path above
     // An abort is a TURN BOUNDARY, never an error (ruling P8b-24) — the same rule `terminal.ts`
     // applies to `result.interrupted`, applied here so a thrown AbortError cannot smuggle an
     // `agent_error` past it.

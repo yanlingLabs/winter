@@ -42,6 +42,33 @@ import { classifyResult } from "./errors";
  *    `context_used` field on `result`).**
  *  - No `modelUsage` at all (an unpriced row — the measured case for every `winter-test/*` double)
  *    → zeros and no `contextTokens`. Nothing is fabricated.
+ *
+ * ── AGENT SDK 0.0.17 (P-B1): THE LEDGER IS NO LONGER THE MAIN LOOP'S ────────────────────────────
+ *
+ * Two changes in that release break both halves of the old reading, and they arrive together:
+ *
+ *  1. **the main row's KEY is the qualified `provider/model` catalog key**, not the string the host
+ *     passed. The daemon passes the BARE modelId (`mode-options.ts`'s WS-20 spawn boundary) while
+ *     `system/init.model` echoes that same bare string, so the old `model === init.model` equality
+ *     MISSED ON EVERY WINTER-LEG SESSION — and the old fallback then SUMMED every row.
+ *     `init.winter_provider.modelKey` is the row key verbatim (the child emits it beside `model`),
+ *     which is why `MainModelKey` carries both and why the key is tried first.
+ *  2. **the ledger carries more rows than the main loop's**: subagent spend is priced and rolled up
+ *     at every depth, and the web tools' inner passes land there too (`WebSearch`'s pass runs on the
+ *     SESSION'S OWN model, so it lands on the MAIN row; `WebFetch`'s digest lands on its own row when
+ *     a `digestModel` is stated, and on the main row when it is not).
+ *
+ * So summing is not a degradation any more, it is a wrong answer that COMPACTS: the auto-compaction
+ * trigger scans back for the last `turn_completed` with `contextTokens > 0`, and an inflated figure
+ * compacts prematurely and repeatedly. Hence `mainExact` below — and hence `sawSharedRowActivity`,
+ * because a MATCH alone is not enough: a child on the inherited model and `WebSearch`'s inner pass
+ * both accrue into the very row this figure reads.
+ *
+ * `inputTokens`/`outputTokens` DELIBERATELY still sum every row (decision, P-B1 item 4): they are
+ * what the turn SPENT, and from 0.0.17 on a subagent's and an inner pass's generations are real
+ * spend the root is charged for. The root's `total_cost_usd`/`modelUsage` already cover the whole
+ * agent tree, so nothing may add a child's usage on top of them (nothing in this daemon does — no
+ * `task_notification` carries usage at all; its only field is `content`).
  */
 export interface UsageTotals {
   /** Every row's input (base + cache read + cache creation) — what the turn cost going in. */
@@ -56,34 +83,102 @@ export interface UsageTotals {
    * calls (compaction summariser, classifier, advisor, `countTokens`) emit no stream events — which
    * says nothing about whether they accrue into `modelUsage`. Summing every row would therefore let
    * an auxiliary call inflate a figure labelled EXACT. Keying to the session's own model row closes
-   * that without needing to prove what the ledger does. With no model known (no `system/init` seen)
-   * this equals `input`, and the honest degradation is stated rather than hidden.
+   * that without needing to prove what the ledger does.
+   *
+   * `0` when no row could be identified as the session's own (`mainExact: false`) — never the sum,
+   * which is the 0.0.17 failure this field's doc block above describes.
    */
   main: number;
+  /**
+   * Is `main` THE SESSION'S OWN ROW (or, with no model known at all, the whole ledger)?
+   *
+   * `false` means "rows exist and none of them is identifiably this session's" — the honest
+   * degradation, and the one state in which `contextTokens` is omitted rather than guessed. It also
+   * fences the DELTA: a `previous` that was inexact carries `main: 0`, so a delta taken against it
+   * would report this turn's whole cumulative row as one turn's context. `projectTerminal` therefore
+   * requires BOTH ends exact, which self-heals on the following turn.
+   */
+  mainExact: boolean;
 }
+
+/**
+ * How to find the session's own row, from `system/init` (and re-derived on `system/model_switch`).
+ *
+ * `key` is `init.winter_provider.modelKey ?? init.model`; `modelId` is `init.model` verbatim. With
+ * NEITHER (no `system/init` seen at all — every raw-stream replay harness) `main` falls back to the
+ * whole ledger and stays `mainExact: true`: there is no model to be wrong about, and this is the
+ * pre-0.0.17 behaviour for that case, kept deliberately.
+ */
+export interface MainModelKey {
+  key?: string;
+  modelId?: string;
+}
+
+/**
+ * Tool calls whose OWN model pass can land on the session's main ledger row (0.0.17, P-B1 item 3).
+ *
+ * `WebSearch` runs its inner pass on the SESSION'S OWN model, always — so its tokens are on the main
+ * row by construction. `WebFetch`'s digest runs on `Options.web.fetch.digestModel` when the host
+ * states one (its own row) and on the session's model when it does not, and the projector cannot see
+ * which — so it counts too. Both names are the same on both legs (the Winter runtime copied claude's
+ * own tool names); the host spellings ride along because `renameTool` has already mapped a Winter
+ * name by the time a transcript reads it and a future caller may hand either one over.
+ *
+ * Subagent spawns are NOT here: `isSpawnTool` (`children.ts`) is the one owner of that question.
+ */
+const MAIN_ROW_SHARING_TOOLS: ReadonlySet<string> = new Set(["WebSearch", "WebFetch", "web_search", "web_fetch"]);
+
+export const sharesMainLedgerRow = (toolName: string): boolean => MAIN_ROW_SHARING_TOOLS.has(toolName);
 
 interface LedgerRow { inputTokens?: unknown; outputTokens?: unknown; cacheReadInputTokens?: unknown; cacheCreationInputTokens?: unknown }
 
 const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0);
 
+const rowInputOf = (row: LedgerRow): number =>
+  num(row.inputTokens) + num(row.cacheReadInputTokens) + num(row.cacheCreationInputTokens);
+
+/**
+ * Which ledger key is the session's own row, or `undefined` when none can be named.
+ *
+ * Two rungs and no third:
+ *  1. the KEY, exactly (`init.winter_provider.modelKey`, which the child guarantees equals the row
+ *     key; or `init.model` on a leg that sends no `winter_provider` — the official leg, whose
+ *     `modelUsage` keys and `init.model` are the same vendor id, so its behaviour is unchanged);
+ *  2. the UNIQUE row whose key ends with `/${modelId}` — the qualified key for the bare id the
+ *     daemon passed. **Unique, not first:** two providers can serve the same model id, and picking
+ *     one of two candidates would be a guess presented as an exact reading.
+ */
+function mainRowKeyOf(keys: readonly string[], key: string | undefined, modelId: string | undefined): string | undefined {
+  if (key !== undefined && keys.includes(key)) return key;
+  if (modelId === undefined || modelId.length === 0) return undefined;
+  const suffix = `/${modelId}`;
+  const candidates = keys.filter((k) => k.endsWith(suffix));
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
 /** Sum the cumulative ledger across every model row. Input counts cache reads and cache writes:
  *  they are context the provider charged for on the way in, and leaving them out would under-report
  *  a cached conversation by most of its size. */
-export function totalsOf(result: ResultFrame, mainModel?: string): UsageTotals | undefined {
+export function totalsOf(result: ResultFrame, main?: MainModelKey): UsageTotals | undefined {
   const usage = (result as { modelUsage?: unknown }).modelUsage;
   if (typeof usage !== "object" || usage === null) return undefined;
+  const rows = Object.entries(usage as Record<string, LedgerRow>).filter(
+    (entry): entry is [string, LedgerRow] => typeof entry[1] === "object" && entry[1] !== null,
+  );
   let input = 0;
   let output = 0;
-  let main = 0;
-  let sawMain = false;
-  for (const [model, row] of Object.entries(usage as Record<string, LedgerRow>)) {
-    if (typeof row !== "object" || row === null) continue;
-    const rowInput = num(row.inputTokens) + num(row.cacheReadInputTokens) + num(row.cacheCreationInputTokens);
-    input += rowInput;
+  for (const [, row] of rows) {
+    input += rowInputOf(row);
     output += num(row.outputTokens);
-    if (mainModel !== undefined && model === mainModel) { main += rowInput; sawMain = true; }
   }
-  return { input, output, main: sawMain ? main : input };
+  const key = main?.key;
+  const modelId = main?.modelId;
+  // No model known at all → the whole ledger, as before this release (see `MainModelKey`).
+  if (key === undefined && (modelId === undefined || modelId.length === 0)) return { input, output, main: input, mainExact: true };
+  const mainKey = mainRowKeyOf(rows.map(([k]) => k), key, modelId);
+  if (mainKey === undefined) return { input, output, main: 0, mainExact: false };
+  const mainRow = rows.find(([k]) => k === mainKey)![1];
+  return { input, output, main: rowInputOf(mainRow), mainExact: true };
 }
 
 export interface TerminalInput {
@@ -94,8 +189,22 @@ export interface TerminalInput {
   previous: UsageTotals | undefined;
   /** How many `assistant` frames this turn produced — exactly 1 makes `contextTokens` exact. */
   rounds: number;
-  /** `system/init.model`, when one has been seen — keys the `contextTokens` row (m6). */
-  mainModel?: string;
+  /** How to find the session's own ledger row (`MainModelKey`), when a `system/init` has been seen. */
+  mainModel?: MainModelKey;
+  /**
+   * 0.0.17 (P-B1 item 3): did anything OTHER than the main loop accrue into the main row since the
+   * previous terminal — a subagent (at any depth, foreground or background), or a `WebSearch` /
+   * `WebFetch` call whose inner pass may run on the session's own model?
+   *
+   * A child on the INHERITED model shares the main row, and `WebSearch`'s inner pass always does, so
+   * a matched row is not by itself an exact context reading. This flag is the other half of that
+   * test, and it is deliberately coarse: the honest answer is "not exact", and `contextTokens` is
+   * omitted rather than reported with a child's spend folded in.
+   *
+   * Absent reads as `false` — the pre-0.0.17 shape for every existing caller and fixture, none of
+   * which spawns or searches.
+   */
+  sawSharedRowActivity?: boolean;
 }
 
 export interface TerminalOutput { events: ProjectedEvent[]; totals: UsageTotals | undefined; stopReason: "end_turn" | "aborted" | "error" }
@@ -115,7 +224,12 @@ export function projectTerminal(input: TerminalInput): TerminalOutput {
   // at all has zero observed rounds, and calling that "one round, therefore exact" states a
   // measurement nobody made. Exactly one round is the only shape where the delta IS the round.
   const mainDelta = totals === undefined ? 0 : Math.max(0, totals.main - (previous?.main ?? 0));
-  const contextTokens = totals !== undefined && rounds === 1 && mainDelta > 0 ? { contextTokens: mainDelta } : {};
+  // 0.0.17 (P-B1): BOTH ends of the delta must be the session's own row, and nothing else may have
+  // spent on it in this window — see `UsageTotals.mainExact` and `sawSharedRowActivity`.
+  const mainExact = totals !== undefined && totals.mainExact && (previous === undefined || previous.mainExact);
+  const contextTokens = mainExact && rounds === 1 && mainDelta > 0 && input.sawSharedRowActivity !== true
+    ? { contextTokens: mainDelta }
+    : {};
 
   const interrupted = (result as { interrupted?: unknown }).interrupted === true;
   const isError = !interrupted && (result.is_error === true || (typeof result.subtype === "string" && result.subtype.startsWith("error_")));
