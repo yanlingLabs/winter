@@ -73,6 +73,22 @@ describe("BashReviewer", () => {
     expect(p.requests[0]?.model).toBe("fake");
   });
 
+  // Minor 5c (fix wave, pre-merge review): same fix as SessionTitler's (titles.ts) — the fallback
+  // (no `reviewer.model` override) now consults `deps.provider.live` (RebindableProvider.live)
+  // FIRST, which moves on a SAME-provider model change too, unlike the static `deps.provider.model`
+  // snapshot that only ever moves on a rebind crossing catalog providers.
+  test("no override -> falls back to the LIVE bound model (deps.provider.live), not the static snapshot", async () => {
+    const p = new FakeProvider([...verdict("safe", "first"), ...verdict("safe", "second")]);
+    let bound = "codex-oauth/gpt-5.6-sol";
+    const reviewer = new BashReviewer({ provider: { provider: p, model: "fake", live: () => ({ model: bound }) } } as any);
+    await reviewer.review({ command: "ls" });
+    expect(p.requests[0]?.model).toBe("codex-oauth/gpt-5.6-sol"); // NOT "fake", the static snapshot
+
+    bound = "codex-oauth/gpt-5.6-luna";
+    await reviewer.review({ command: "pwd" });
+    expect(p.requests[1]?.model).toBe("codex-oauth/gpt-5.6-luna");
+  });
+
   test("tools:[] and the justification reaches the provider input", async () => {
     const p = new FakeProvider(verdict("safe", "ok"));
     await new BashReviewer({ provider: { provider: p, model: "fake" } } as any).review({

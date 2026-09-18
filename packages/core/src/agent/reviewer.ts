@@ -85,7 +85,11 @@ export type ReviewInput =
  *  (unparseable/empty output, invalid verdict value, timeout, or abort) it THROWS so the caller
  *  can escalate to a human rather than silently allowing the call. */
 export class BashReviewer {
-  private readonly provider: { provider: Provider; model: string };
+  // Minor 5c (fix wave, pre-merge review): same fix as `SessionTitler`'s (titles.ts) own `provider`
+  // field — see that class's doc comment for the full "same-provider rebind never moves the static
+  // snapshot" explanation. `live` is `RebindableProvider.live`, optional only for a structurally
+  // typed test double with no `.live` at all.
+  private readonly provider: { provider: Provider; model: string; live?: () => { model: string } };
   // Daemon settings surface (2026-09-17 plan, item 4a): same live-getter fix as `SessionTitler`'s
   // `model` (titles.ts) — `reviewer.model` used to be resolved ONCE at daemon.ts construction time
   // and handed here as a plain string, a boot snapshot CLAUDE.md's no-restart rule forbids. `model`
@@ -93,7 +97,7 @@ export class BashReviewer {
   private readonly model: (() => string | undefined) | undefined;
   private readonly timeoutMs: number;
 
-  constructor(deps: { provider: { provider: Provider; model: string }; model?: () => string | undefined; timeoutMs?: number }) {
+  constructor(deps: { provider: { provider: Provider; model: string; live?: () => { model: string } }; model?: () => string | undefined; timeoutMs?: number }) {
     this.provider = deps.provider;
     this.model = deps.model;
     this.timeoutMs = deps.timeoutMs ?? Number(process.env.WINTER_REVIEW_TIMEOUT_MS ?? 15000);
@@ -116,7 +120,8 @@ export class BashReviewer {
     const run = (async () => {
       let text = "";
       for await (const ev of this.provider.provider.streamTurn({
-        model: this.model?.() ?? this.provider.model,
+        // Minor 5c: the LIVE bound model first — see `SessionTitler.oneShot`'s identical fallback.
+        model: this.model?.() ?? this.provider.live?.().model ?? this.provider.model,
         instructions,
         input: turnInput,
         tools: [],

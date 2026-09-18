@@ -126,6 +126,34 @@ describe("SessionTitler", () => {
     expect(provider.requests[0]?.model).toBe("fake-1");
   });
 
+  // Minor 5c (fix wave, pre-merge review): the fallback (no `titles.model` override at all) used
+  // to read the STATIC `deps.provider.model` snapshot, which `RebindableProvider.refresh` only ever
+  // moves on a rebind that CROSSES catalog providers — a same-provider model change (the common
+  // case) left titles stuck on whatever was bound at daemon boot, forever, with no daemon restart
+  // in sight to fix it. `deps.provider.live` (when present — `RebindableProvider.live`) is now
+  // consulted FIRST, mirroring `agentProvider.live?.().model`'s hot re-read every real daemon uses.
+  test("no override -> falls back to the LIVE bound model (deps.provider.live), not the static snapshot", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-titles-home-"));
+    const store = new SessionStore(home);
+    const hub = new SessionHub(store);
+    const provider = new FakeProvider([...titleScript("first"), ...titleScript("second")]);
+    let bound = "codex-oauth/gpt-5.6-sol";
+    const titler = new SessionTitler({ provider: { provider, model: "fake-1", live: () => ({ model: bound }) }, store, hub });
+
+    const sessionA = store.createSession("global", { cwd: "/tmp" });
+    seedTurn(store, sessionA);
+    await titler.maybeTitle(sessionA);
+    expect(provider.requests[0]?.model).toBe("codex-oauth/gpt-5.6-sol"); // NOT "fake-1", the static snapshot
+
+    // A same-provider model change moves `live()` immediately, with no titler reconstruction —
+    // the exact case `RebindableProvider.refresh`'s own early return never touches `.model` for.
+    bound = "codex-oauth/gpt-5.6-luna";
+    const sessionB = store.createSession("global", { cwd: "/tmp" });
+    seedTurn(store, sessionB);
+    await titler.maybeTitle(sessionB);
+    expect(provider.requests[1]?.model).toBe("codex-oauth/gpt-5.6-luna");
+  });
+
   test("no user message → no event, no model call", async () => {
     const { store, titler, sessionId, provider } = setup(titleScript("Should never be used"));
     // No seedTurn: session has no main-thread user_message yet.
