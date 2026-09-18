@@ -827,6 +827,16 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
  *    `ask` there is a hang or a fail-closed refusal with a card nobody sees). `WebFetch` is the only
  *    door a Winter child has to a local service — its Bash sandbox has no network at all — so silent
  *    reach would ADD power claude's own design does not grant.
+ *
+ *    **`"ask"` MEANS A CARD BECAUSE THE BRIDGE MAKES IT ONE** (whole-branch review B1, 2026-09-18).
+ *    The runtime's private-address ask arrives at `canUseTool` with no machine-readable signal, and
+ *    Winter's gate answers the web class `allow` under every policy — so for one release this option
+ *    resolved to a SILENT YES and the child reached `192.168.x.x`/`127.0.0.1`/`*.local` with no card
+ *    at all. `approval-bridge.ts`'s `privateWebFetchTarget` is what makes the word true: it escalates
+ *    such a call to a real card in code mode (every policy, `bypass` and `plan` included) and to a
+ *    typed deny wherever nobody can answer one. Do not read this field as self-enforcing — it is one
+ *    half of a two-part arrangement, and the other half is leg-agnostic on purpose, because the
+ *    official leg is sent no `web` block and would otherwise have no private-address floor at all.
  *  - `blockedDomains` — the dangerous-domain floor, verbatim (see `dangerousDomains`). This is an
  *    EXECUTOR-level refusal in the child, not an approval: a floor domain is refused even in code
  *    mode, where the retired daemon tool used to raise a card that could be approved once. That is

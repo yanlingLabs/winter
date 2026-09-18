@@ -739,11 +739,28 @@ export function officialInputFor(
         // 0.0.17 / the 2026-09-18 ruling: `leg: "official"` is what keeps claude's OWN `WebFetch` and
         // `WebSearch` on this leg. The daemon used to disallow both in every mode (P8b-33) because
         // they carried neither the Exa key nor the dangerous-domain floor — on THIS leg neither was
-        // ever ours to supply, and the user's ruling is that claude's native pair stays, with
-        // claude's own per-domain approval behaviour. No `Options.web` is sent here either (see
-        // `mode-options.ts`'s `webOptionsFor`): this leg's web tools are claude's to configure.
-        // `exaKeyPresent` is deliberately absent — it only ever decides a Winter-leg chat/dispatch
-        // question, and this leg runs neither mode.
+        // ever ours to supply. No `Options.web` is sent here either (see `mode-options.ts`'s
+        // `webOptionsFor`): this leg's tools are claude's to configure. `exaKeyPresent` is deliberately
+        // absent — it only ever decides a Winter-leg chat/dispatch question, and this leg runs neither
+        // mode.
+        //
+        // **WHAT IS TRUE ABOUT THE APPROVALS, precisely** (whole-branch review M2 — an earlier version
+        // of this comment claimed claude's per-domain approval behaviour was "kept verbatim", and it is
+        // not). claude's NATIVE tools are kept; their permission requests are not answered by claude.
+        // Every `canUseTool` request on this leg lands on Winter's own bridge
+        // (`approval-bridge.ts`'s `canUseToolFor`), where:
+        //   - a PUBLIC web read is free and silent — Winter's gate classifies the web class as
+        //     `NETWORK` and allows it under every policy (the user's standing posture: web reads do
+        //     not nag), so claude's per-domain card is answered yes without being shown;
+        //   - a PRIVATE/loopback/link-local target raises a REAL card in code mode and is a typed deny
+        //     in every context that cannot prompt — the bridge's own floor, which is the ONLY such
+        //     floor on this leg (`privateWebFetchTarget`), because `privateAddressPolicy` is a field of
+        //     the `Options.web` this leg is never sent;
+        //   - the dangerous-domain FLOOR hard-blocks, through the PreToolUse hooks both legs share
+        //     (`hooks.ts`) — again the only enforcer here, since `blockedDomains` rides that same
+        //     absent option.
+        // A public NAME that RESOLVES private is caught by the Winter runtime's own executor on the
+        // other leg and by nothing here; that is claude's design and outside this daemon's reach.
         additionalDisallowedTools: disallowedToolsFor(input.mode, { leg: "official" }),
         ...(deps.hooks === undefined ? {} : { hooks: deps.hooks }),
         // Router 0.0.9: `deps.agents` is the SAME merged (project-over-user) definition map the
