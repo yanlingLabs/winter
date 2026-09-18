@@ -113,6 +113,8 @@ struct ComposerContext {
 struct ComposerPolicyControl {
     let policy: String?
     let changeInFlight: Bool
+    /// The last refused change's sentence (`FieldStateAdapter.policyRefusal`), or nil.
+    var refusal: String? = nil
     let onSet: (String) -> Void
 }
 
@@ -131,6 +133,8 @@ struct ComposerPermissionsRow: Equatable {
     let showing: String?
     /// True while a `session.setPolicy` is in flight.
     let changeInFlight: Bool
+    /// The last refused change's sentence, shown beside the chip, or nil.
+    var refusal: String? = nil
 
     /// What the chip reads.
     ///
@@ -350,7 +354,8 @@ private func permissionsStrip(offering offers: [String],
     guard let control else { return nil }
     let row = ComposerPermissionsRow(offers: offers,
                                      showing: control.policy,
-                                     changeInFlight: control.changeInFlight)
+                                     changeInFlight: control.changeInFlight,
+                                     refusal: control.refusal)
     return ComposerStrip(kind: .permissions(row),
                          height: newChatComposerStripHeight,
                          content: AnyView(ComposerPermissionsStrip(row: row, onSelect: control.onSet,
@@ -374,6 +379,15 @@ struct ComposerPermissionsStrip: View {
                 ComposerFolderChip(path: workingDirectory)
             }
             ComposerPolicyChip(row: row, onSelect: onSelect)
+            // A refused change says so beside the chip (2026-09-19) instead of the chip silently
+            // keeping its old value.
+            if let refusal = row.refusal {
+                Text(refusal)
+                    .font(Typography.control())
+                    .foregroundStyle(.red)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
             Spacer(minLength: 12)
         }
         // Matches the control row's inset, so the chip's glyph lands on the same column as the plus.

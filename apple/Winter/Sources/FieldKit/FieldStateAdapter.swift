@@ -729,6 +729,28 @@ final class FieldStateAdapter: ObservableObject {
     /// change can be in flight at a time. Set synchronously before the RPC, cleared once it
     /// settles — same insert/remove discipline as `interactionInFlight`.
     @Published var policyChangeInFlight: Bool = false
+    /// The last approval-mode change the daemon REFUSED, as one fixed sentence (never the daemon's
+    /// own text), or nil. Shown beside the picker; cleared by the next attempt and by a session
+    /// switch (`seedSessionPolicy`). Before 2026-09-19 a refusal was silent — the picker simply kept
+    /// the old mode.
+    @Published var policyRefusal: String?
+
+    /// The ONE shape every surface's `onSetPolicy` runs (the shell, a detached window, the orb):
+    /// in-flight on, refusal cleared, send, then adopt on success or say so on failure.
+    func runPolicyChange(_ policy: String, send: @escaping @MainActor () async -> Bool) {
+        policyChangeInFlight = true
+        policyRefusal = nil
+        Task { @MainActor [weak self] in
+            let ok = await send()
+            guard let self else { return }
+            self.policyChangeInFlight = false
+            if ok {
+                self.adoptSessionPolicy(policy)
+            } else {
+                self.policyRefusal = policyRefusalText(policy)
+            }
+        }
+    }
 
     /// mac-chat-parity T4: seed the policy readout for `sessionId` off the directory's rows. Called
     /// at ALL THREE session-SWITCH sites — `ShellSessionHost.attachFresh`/`hop`,
@@ -748,6 +770,7 @@ final class FieldStateAdapter: ObservableObject {
         let wire = wireApprovalPolicy(sessionId, in: rows)
         sessionPolicy = wire ?? Self.unknownSessionPolicyPlaceholder
         sessionPolicyKnown = wire != nil
+        policyRefusal = nil
     }
 
     /// mac-chat-parity T4: fill in a policy that was UNKNOWN at switch time, once the row arrives.
@@ -798,6 +821,7 @@ final class FieldStateAdapter: ObservableObject {
     var composerPolicyControl: ComposerPolicyControl {
         ComposerPolicyControl(policy: sessionPolicyKnown ? sessionPolicy : nil,
                               changeInFlight: policyChangeInFlight,
+                              refusal: policyRefusal,
                               onSet: { [weak self] policy in self?.onSetPolicy(policy) })
     }
 
@@ -1219,4 +1243,10 @@ func mentionsQuoted(_ value: String, in message: String) -> Bool {
     guard !value.isEmpty else { return false }
     let needle = value.lowercased()
     return ["'", "\"", "`"].contains { message.contains("\($0)\(needle)\($0)") }
+}
+
+/// PURE: the sentence a refused approval-mode change shows. Fixed text naming the mode the user
+/// asked for — never the daemon's error message (the house rule for anything a daemon refuses).
+func policyRefusalText(_ policy: String) -> String {
+    "Couldn't switch to \(policyDisplayLabel(policy)) — try again."
 }

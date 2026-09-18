@@ -3425,13 +3425,9 @@ final class ShellSessionHost: ObservableObject {
         }
 
         adapter.onSetPolicy = { [weak self, weak adapter] policy in
-            guard let adapter else { return }
-            adapter.policyChangeInFlight = true
-            Task { @MainActor [weak self, weak adapter] in
-                guard let sid = self?.attachedSessionId else { adapter?.policyChangeInFlight = false; return }
-                let ok = (try? await client.setPolicy(sessionId: sid, policy: policy)) != nil
-                adapter?.policyChangeInFlight = false
-                if ok { adapter?.adoptSessionPolicy(policy) }
+            adapter?.runPolicyChange(policy) { [weak self] in
+                guard let sid = self?.attachedSessionId else { return false }
+                return (try? await client.setPolicy(sessionId: sid, policy: policy)) != nil
             }
         }
         // Winter Phase 8d (Task 4.2): routes through `AppModel.applyModelChange` — THE ONE

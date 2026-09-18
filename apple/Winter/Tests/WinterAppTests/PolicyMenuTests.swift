@@ -527,4 +527,31 @@ final class PolicyMenuTests: XCTestCase {
         XCTAssertEqual(dispatchSettablePolicyModes, sessionPolicyModes.filter { $0 != "plan" },
                        "derived from the six, so a seventh policy reaches dispatch automatically")
     }
+
+    // MARK: - A refused change says so (2026-09-19)
+
+    @MainActor
+    func testARefusedPolicyChangeSaysSoAndASuccessClearsIt() async {
+        let adapter = FieldStateAdapter(session: SessionModel())
+        adapter.adoptSessionPolicy("ask")
+
+        adapter.runPolicyChange("bypass") { false }
+        XCTAssertTrue(adapter.policyChangeInFlight)
+        for _ in 0..<50 where adapter.policyChangeInFlight { await Task.yield() }
+        XCTAssertFalse(adapter.policyChangeInFlight)
+        XCTAssertEqual(adapter.sessionPolicy, "ask", "a refusal never adopts the new mode")
+        XCTAssertEqual(adapter.policyRefusal, policyRefusalText("bypass"))
+        XCTAssertEqual(adapter.composerPolicyControl.refusal, adapter.policyRefusal, "the composer sees it")
+
+        adapter.runPolicyChange("auto") { true }
+        XCTAssertNil(adapter.policyRefusal, "a new attempt clears the old refusal at once")
+        for _ in 0..<50 where adapter.policyChangeInFlight { await Task.yield() }
+        XCTAssertEqual(adapter.sessionPolicy, "auto")
+        XCTAssertNil(adapter.policyRefusal)
+
+        adapter.runPolicyChange("bypass") { false }
+        for _ in 0..<50 where adapter.policyChangeInFlight { await Task.yield() }
+        adapter.seedSessionPolicy(for: "another", in: [])
+        XCTAssertNil(adapter.policyRefusal, "a session switch clears it — it was about the other session")
+    }
 }

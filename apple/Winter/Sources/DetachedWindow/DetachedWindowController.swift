@@ -220,13 +220,9 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         // `[weak adapter]` throughout for the same leak reason (one adapter per detached window);
         // `[weak self]` for the same live-sessionId-read reason as those three callbacks.
         adapter.onSetPolicy = { [weak self, weak adapter] policy in
-            guard let adapter else { return }
-            adapter.policyChangeInFlight = true
-            Task { @MainActor [weak self, weak adapter] in
-                guard let self else { return }
-                let ok = (try? await client.setPolicy(sessionId: self.sessionId, policy: policy)) != nil
-                adapter?.policyChangeInFlight = false
-                if ok { adapter?.adoptSessionPolicy(policy) }
+            adapter?.runPolicyChange(policy) { [weak self] in
+                guard let self else { return false }
+                return (try? await client.setPolicy(sessionId: self.sessionId, policy: policy)) != nil
             }
         }
 
