@@ -172,11 +172,13 @@ describe("loadSettings", () => {
     const s = Settings.parse({
       schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
       mcpServers: {
-        remoteHttp: { type: "http", url: "https://example.com/mcp", headers: { Authorization: "Bearer t" } },
+        // Ruling (fix wave item 6): a credential-shaped header is now REFUSED at this door — see
+        // the dedicated describe block below — so this fixture uses a benign header instead.
+        remoteHttp: { type: "http", url: "https://example.com/mcp", headers: { "X-Request-Id": "abc123" } },
         remoteSse: { type: "sse", url: "https://example.com/sse" },
       },
     });
-    expect(s.mcpServers!["remoteHttp"]).toEqual({ type: "http", url: "https://example.com/mcp", headers: { Authorization: "Bearer t" } });
+    expect(s.mcpServers!["remoteHttp"]).toEqual({ type: "http", url: "https://example.com/mcp", headers: { "X-Request-Id": "abc123" } });
     expect(s.mcpServers!["remoteSse"]).toEqual({ type: "sse", url: "https://example.com/sse" });
   });
 
@@ -199,6 +201,58 @@ describe("loadSettings", () => {
     // An unrecognized `type` discriminant.
     const badType = Settings.safeParse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, mcpServers: { bad: { type: "grpc", url: "https://example.com" } } });
     expect(badType.success).toBe(false);
+  });
+
+  // RULING (fix wave, pre-merge review, item 6): `<home>/settings.json` is model-readable, so a
+  // bearer token or API key sitting in an HTTP/SSE MCP server's `headers` is agent-exfiltratable.
+  // Refused case-insensitively at the settings door until env-var indirection or a Keychain locator
+  // exists for this field — a deliberate, documented narrowing of what the pinned agent SDK's own
+  // McpHttpServerConfig/McpSSEServerConfig accept for `headers`.
+  describe("MCP headers must not carry credentials yet (ruling, item 6)", () => {
+    function withHeader(type: "http" | "sse", headers: Record<string, string>) {
+      return Settings.safeParse({
+        schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
+        mcpServers: { bad: { type, url: "https://example.com/mcp", headers } },
+      });
+    }
+
+    test("refuses the four well-known credential header names, case-insensitively, on both http and sse", () => {
+      for (const type of ["http", "sse"] as const) {
+        for (const name of ["Authorization", "authorization", "X-Api-Key", "x-api-key", "Cookie", "COOKIE", "Proxy-Authorization", "proxy-authorization"]) {
+          const result = withHeader(type, { [name]: "sk-should-be-refused" });
+          expect(result.success).toBe(false);
+          if (!result.success) {
+            expect(result.error.issues.some((i) => i.path.join(".") === `mcpServers.bad.headers.${name}`)).toBe(true);
+            // The error names the rule and points at the alternative (env-var indirection).
+            expect(result.error.issues[0]?.message).toContain("credential-shaped");
+            expect(result.error.issues[0]?.message).toContain("${env:VAR}");
+          }
+        }
+      }
+    });
+
+    test("refuses any header name containing \"token\" or \"secret\" anywhere, case-insensitively", () => {
+      for (const name of ["X-Auth-Token", "x-secret-key", "My-Token-Header", "SECRET"]) {
+        expect(withHeader("http", { [name]: "value" }).success).toBe(false);
+      }
+    });
+
+    test("a benign header still passes through unchanged, on both legs' server shapes", () => {
+      const result = withHeader("http", { "X-Request-Id": "abc123", Accept: "application/json" });
+      expect(result.success).toBe(true);
+      if (!result.success) throw new Error("unreachable");
+      const entry = result.data.mcpServers?.bad;
+      if (entry?.type !== "http") throw new Error("unreachable");
+      expect(entry.headers).toEqual({ "X-Request-Id": "abc123", Accept: "application/json" });
+    });
+
+    test("no headers at all still parses (absent stays absent)", () => {
+      const result = Settings.safeParse({
+        schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
+        mcpServers: { bad: { type: "http", url: "https://example.com/mcp" } },
+      });
+      expect(result.success).toBe(true);
+    });
   });
 
   test("reviewer config parses; absent → undefined", () => {
