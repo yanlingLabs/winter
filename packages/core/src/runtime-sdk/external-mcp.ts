@@ -3,17 +3,20 @@
 // Two sources, the same two `McpManager` starts for the daemon's shared registry (`agent/mcp/
 // manager.ts`): the user's `settings.mcpServers` (source "user") and a TRUSTED project's
 // `<cwd>/.mcp.json` (source "project", trust-gated exactly as `McpManager.ensureProject` gates it —
-// an untrusted directory contributes nothing, and nothing is read from it). Both are stdio servers
-// in Winter's settings grammar (`command`, `args`, `env`); they are forwarded as the SDK's
-// `McpStdioServerConfig` under the SAME KEY the manager registers them under, so the child names
-// their tools `mcp__<key>__<tool>` — the names `tool.list` and the Mac's tool rows already carry.
+// an untrusted directory contributes nothing, and nothing is read from it). The project's
+// `.mcp.json` stays stdio-only (Claude Code's own file format, unrelated to this widening); daemon
+// settings surface batch 3 (item 3b) widens the USER side (`settings.mcpServers`) to also accept the
+// HTTP/SSE shapes both SDKs' `Options.mcpServers` support — forwarded to both legs UNDER THE SAME
+// KEY the manager registers them under, so the child names their tools `mcp__<key>__<tool>` — the
+// names `tool.list` and the Mac's tool rows already carry.
 //
-// THE CHILD SPAWNS ITS OWN COPY. The daemon's `McpManager` still runs these servers for the shared
-// registry (`tool.list`, `mcp.*` RPCs); a Winter child cannot reach an in-daemon stdio client, so
-// each session's child starts the configured servers itself from these configs. One extra process
-// per configured server per live session — recorded in the fix-wave report as the cost of this
-// door; the alternative (a `winter__external` capability server proxying the daemon's clients) is
-// the plugin-contributed-tools carry and lands with it.
+// THE CHILD SPAWNS/CONNECTS ITS OWN COPY. The daemon's `McpManager` still runs stdio servers for the
+// shared registry (`tool.list`, `mcp.*` RPCs) — it has no HTTP/SSE client of its own (`daemon.ts`
+// filters those out before `McpManager.startAll`, see that call site's own comment); a Winter child
+// cannot reach an in-daemon stdio client either, so each session's child starts/connects the
+// configured servers itself from these configs. One extra process/connection per configured server
+// per live session — recorded in the fix-wave report as the cost of this door for stdio; unchanged
+// for HTTP/SSE, which were never proxied through the daemon to begin with.
 //
 // PRECEDENCE mirrors the registry: user servers were started first there and project tools with a
 // colliding name were skipped, so here a user server shadows a same-keyed project server. Neither
@@ -22,8 +25,8 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import type { McpStdioServerConfig } from "@yanlinglabs/winter-agent-sdk";
-import type { Settings } from "../settings";
+import type { McpServerConfig } from "@yanlinglabs/winter-agent-sdk";
+import type { McpServerSettingsEntry, Settings } from "../settings";
 
 const ProjectMcpConfig = z.object({
   mcpServers: z.record(z.string(), z.object({
@@ -45,7 +48,7 @@ export interface ConfiguredMcpInput {
   readFile?: (path: string) => string;
 }
 
-function stdio(cfg: { command: string; args?: string[]; env?: Record<string, string> }): McpStdioServerConfig {
+function stdio(cfg: { command: string; args?: string[]; env?: Record<string, string> }): McpServerConfig {
   return {
     type: "stdio",
     command: cfg.command,
@@ -54,11 +57,24 @@ function stdio(cfg: { command: string; args?: string[]; env?: Record<string, str
   };
 }
 
+/** `settings.mcpServers`' own entry shape (already `type`-discriminated by the schema, batch 3 item
+ *  3b) straight onto the matching SDK config — no translation beyond copying the fields the SDK
+ *  type actually has (`tools`/`timeout`/`alwaysLoad` are NOT in Winter's settings grammar today, so
+ *  they are never set here; the SDK treats an absent optional field the same as one explicitly
+ *  omitted). */
+function toMcpServerConfig(entry: McpServerSettingsEntry): McpServerConfig {
+  if (entry.type === "stdio") return stdio(entry);
+  return { type: entry.type, url: entry.url, ...(entry.headers === undefined ? {} : { headers: { ...entry.headers } }) };
+}
+
 /** The `Options.mcpServers` entries Winter's configuration contributes to ONE session, keyed as the
  *  daemon's registry keys them. Never throws: a malformed or missing `.mcp.json` contributes nothing
- *  (the manager's own "record none" posture). */
-export function configuredMcpServersFor(input: ConfiguredMcpInput): Record<string, McpStdioServerConfig> {
-  const out: Record<string, McpStdioServerConfig> = {};
+ *  (the manager's own "record none" posture). Batch 3 (item 3a): a server named in
+ *  `settings.mcp.disabled` is withheld entirely — neither leg ever sees it, the same "absent, not a
+ *  present-but-inert entry" posture every other disable switch in this codebase takes. */
+export function configuredMcpServersFor(input: ConfiguredMcpInput): Record<string, McpServerConfig> {
+  const out: Record<string, McpServerConfig> = {};
+  const disabled = new Set(input.settings?.mcp?.disabled ?? []);
   if (input.cwd !== undefined && input.cwd !== "") {
     let dir = input.cwd;
     try { dir = realpathSync(dir); } catch { /* the manager falls back to the given path too */ }
@@ -66,11 +82,16 @@ export function configuredMcpServersFor(input: ConfiguredMcpInput): Record<strin
       try {
         const raw = (input.readFile ?? ((p: string) => readFileSync(p, "utf8")))(join(dir, ".mcp.json"));
         const cfg = ProjectMcpConfig.parse(JSON.parse(raw));
-        for (const [name, sc] of Object.entries(cfg.mcpServers ?? {})) out[name] = stdio(sc);
+        for (const [name, sc] of Object.entries(cfg.mcpServers ?? {})) {
+          if (!disabled.has(name)) out[name] = stdio(sc);
+        }
       } catch { /* missing/malformed → nothing from the project */ }
     }
   }
   // User servers LAST so they shadow a same-keyed project server (the registry's precedence).
-  for (const [name, sc] of Object.entries(input.settings?.mcpServers ?? {})) out[name] = stdio(sc);
+  for (const [name, sc] of Object.entries(input.settings?.mcpServers ?? {})) {
+    if (disabled.has(name)) continue;
+    out[name] = toMcpServerConfig(sc);
+  }
   return out;
 }

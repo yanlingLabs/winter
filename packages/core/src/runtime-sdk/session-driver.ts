@@ -747,6 +747,16 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       const capSession = capSessionFor();
       const capabilities = deps.buildSessionCapabilities(capSession);
       const hooks = deps.hooksFor?.(capSession).official;
+      // Daemon settings surface batch 3 (item 3): the SAME configured-server read the Winter leg's
+      // `optionsFor` makes (`deps.extraMcpServers`), threaded onto the official leg too — closing
+      // the pre-existing gap where user/project-configured MCP servers reached the Winter leg only.
+      // The collision guard is identical to the Winter leg's own (`assertNoCapabilityCollision`,
+      // P8b-36 obligation): a configured server named exactly like a daemon-owned `winter__<key>`
+      // server refuses the SESSION typed, here just as much as there.
+      const configuredMcpServers = deps.extraMcpServers?.(capSession) ?? {};
+      try { assertNoCapabilityCollision(configuredMcpServers, capabilities); } catch (err) {
+        throw new WinterLegRefusal("winter_leg_unavailable", err instanceof Error ? err.message : String(err));
+      }
       // The SAME credential read `optionsFor` (the Winter incarnation builder, above) makes per
       // incarnation — `officialCredentialPlan`'s auto-derivation (`official-options.ts`) needs this
       // provider's `authRef` to inject `ANTHROPIC_API_KEY` at spawn.
@@ -806,6 +816,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         claudeExecutableFor: () => runtime.claudeExecutableFor(),
         assembler: deps.assembler ?? { assemble: () => "" },
         capabilities,
+        // Batch 3 (item 3): threaded onto `officialInputFor` regardless of whether it's empty —
+        // `{}` there is byte-identical to before item 3.
+        configuredMcpServers,
         // Phase 9c (P9c-1): the LIVE settings snapshot (`deps.settings()` — the same hot holder
         // `create()`/`legForNew` already read above; never a boot snapshot) — `official-options.ts`'s
         // `officialInputFor` reads it ONLY through `officialSubscriptionAuthEnabled`, and

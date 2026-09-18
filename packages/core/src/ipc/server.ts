@@ -9,7 +9,7 @@ import {
   ApprovalListParams,
   SessionAddDirParams, SessionSetCwdParams, TrustDirParams,
   BgListParams, BgPeekParams, BgKillParams, BgKillAllParams,
-  SessionSteerParams, SessionInterruptParams, SessionCompactParams, SkillsListParams, McpListParams,
+  SessionSteerParams, SessionInterruptParams, SessionCompactParams, SkillsListParams, McpListParams, McpEnableParams, McpDisableParams,
   SkillsReadParams, SkillsWriteParams, SkillsDeleteParams,
   PluginsListParams, AskUserRespondParams, TaskListParams, PlanRespondParams, SessionSetPolicyParams,
   SessionSetModelParams, SessionSetEffortParams, SessionSetActivityParams, SessionSetDirsParams,
@@ -105,7 +105,7 @@ import type { ProviderLink } from "../peripheral/provider-link";
 import type { HardwareBroker } from "../peripheral/hardware";
 import { verbClass } from "../peripheral/hardware";
 import type { QuotaManager } from "../providers/quota";
-import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule } from "../settings";
+import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled } from "../settings";
 import { disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
 import { diagnoseRuntimes } from "../runtime-sdk/runtimes-doctor";
@@ -2006,10 +2006,57 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (!res.ok) throw new RpcFailure(skillErrorCode(res), res.error);
         return {};
       }
+      // -----------------------------------------------------------------------------------------
+      // Daemon settings surface batch 3 (item 3a): `mcp.list` now overlays LIVE settings onto
+      // whatever the daemon's own `McpManager` tracked (which — for `"user"` servers — is a
+      // BOOT-TIME snapshot; `McpManager.startAll` never re-runs on a settings edit, a pre-existing
+      // limitation this item does not attempt to fix). Two things this overlay adds that the
+      // manager itself cannot know:
+      //  - a NOW-disabled server (`settings.mcp.disabled`) is reported `status: "disabled"`
+      //    regardless of whatever status the manager cached at boot;
+      //  - a configured HTTP/SSE server is UNION'D IN even though the manager never attempted it at
+      //    all (no in-daemon client for those transports) — `status: "unmanaged"` (or `"disabled"`
+      //    if also named in `settings.mcp.disabled`), `transport` set from its own `type`.
+      // A stdio server added to settings AFTER boot is NOT synthesized here — the manager's own
+      // "started at boot" gap is unrelated to this item and stays exactly as wide as it already was.
+      // -----------------------------------------------------------------------------------------
       case METHODS.mcpList: {
         const p = parseParams(McpListParams, params);
         if (p.cwd) await opts.mcp?.ensureProject(p.cwd);
-        return { ok: true, servers: opts.mcp?.list(p.cwd) ?? [] };
+        const tracked = opts.mcp?.list(p.cwd) ?? [];
+        const settings = liveSettingsFor(opts);
+        const disabled = new Set(settings?.mcp?.disabled ?? []);
+        const overlaid = tracked.map((row) => (row.source === "user" && disabled.has(row.name) ? { ...row, status: "disabled" as const } : row));
+        const trackedNames = new Set(overlaid.map((r) => r.name));
+        const unmanaged = Object.entries(settings?.mcpServers ?? {})
+          .filter(([name, entry]) => entry.type !== "stdio" && !trackedNames.has(name))
+          .map(([name, entry]) => ({
+            name,
+            status: (disabled.has(name) ? "disabled" : "unmanaged") as "disabled" | "unmanaged",
+            toolNames: [] as string[],
+            source: "user" as const,
+            transport: entry.type,
+          }));
+        return { ok: true, servers: [...overlaid, ...unmanaged] };
+      }
+      // -----------------------------------------------------------------------------------------
+      // Daemon settings surface batch 3 (item 3a) — the enable/disable door for a configured MCP
+      // server, by name. LOCAL-ROLE ONLY. `setMcpServerDisabled` never fails on its own input (no
+      // catalog/tag validation needed), so the only failure mode here is a missing `winterHome`.
+      // -----------------------------------------------------------------------------------------
+      case METHODS.mcpDisable: {
+        const p = parseParams(McpDisableParams, params);
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "mcp.disable is not available on this server (no winterHome configured)");
+        const settingsPath = join(opts.winterHome, "settings.json");
+        saveSettings(settingsPath, setMcpServerDisabled(loadSettings(settingsPath), p.name, true));
+        return { ok: true, name: p.name, enabled: false };
+      }
+      case METHODS.mcpEnable: {
+        const p = parseParams(McpEnableParams, params);
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "mcp.enable is not available on this server (no winterHome configured)");
+        const settingsPath = join(opts.winterHome, "settings.json");
+        saveSettings(settingsPath, setMcpServerDisabled(loadSettings(settingsPath), p.name, false));
+        return { ok: true, name: p.name, enabled: true };
       }
       // -----------------------------------------------------------------------------------------
       // Daemon settings surface (2026-09-17 plan, item 2). LOCAL-ROLE ONLY: never added to
