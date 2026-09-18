@@ -163,19 +163,10 @@ struct SidebarSearchPalette: View {
                 .font(Typography.bodyLarge())
                 .focused($fieldFocused)
                 .onSubmit(openSelection)
-            Button {
-                presentation.close()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(Typography.label(.medium))
-                    .foregroundStyle(Theme.textMuted)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Close search")
+            ShellPanelCloseButton(label: "Close search") { presentation.close() }
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 15)
+        .padding(.horizontal, shellPanelEdgeInset)
+        .frame(height: shellPanelHeaderHeight)
     }
 
     private var results: some View {

@@ -183,20 +183,9 @@ struct SettingsRoleEffortPicker: View {
     // MARK: Header
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(settingsRoleEffortPickerTitle(role))
-                .font(Typography.control(.semibold))
-                .foregroundStyle(Theme.textPrimary)
-            // Whose vocabulary this is: efforts are per model, so the tag is the context.
-            Text(value.model ?? settingsModelRoleClearedValue)
-                .font(Typography.caption())
-                .foregroundStyle(Theme.textMuted)
-                .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .padding(.trailing, shellOverlayCloseGutter)
+        // Whose vocabulary this is: efforts are per model, so the tag is the context.
+        ShellPanelHeader(title: settingsRoleEffortPickerTitle(role),
+                         subtitle: value.model ?? settingsModelRoleClearedValue)
     }
 
     // MARK: Left column

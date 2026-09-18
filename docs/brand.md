@@ -390,6 +390,7 @@ The scale (§ 4.5) plus its mono variants and the named one-offs:
 | `pairingCode` | — | 22 mono semibold | The six-digit confirm code. |
 | `pairingGlyphLarge` | — | 36 | |
 | `pairingGlyphMedium` | — | 30 | |
+| `settingsPageTitle` | — | 26 regular | A settings page's title. |
 | `morphTrafficGlyph` | — | 8.5 bold | The morph window's hand-drawn traffic lights — verbatim orb geometry, § 4.5. |
 | `paneTitle` | — | `.headline` | Dashboard pane titles. |
 | `emptyStateTitle` | — | `.title2` | |
