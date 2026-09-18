@@ -268,3 +268,83 @@ describe("Search: the audit line", () => {
     expect(JSON.stringify(h.audit)).not.toContain(KEY);
   });
 });
+
+// Whole-branch review N5: THE REAL-FETCH PROOF, restored.
+//
+// `search.ts`'s redaction is `rawMessage.replaceAll(key, "<redacted>")`, and the reason a plain
+// substring replace is SUFFICIENT is a measured fact about Bun, not a guess: Bun's own fetch embeds an
+// invalid header's VALUE verbatim in its error text (`Header 'x-api-key' has invalid value: '…'`), so
+// the literal key IS the substring. The retired Brave tool carried that proof through Bun's REAL fetch;
+// its Exa twin had only a SIMULATED throw, which proves the redaction runs but not that it matches what
+// Bun actually says. This drives the real thing.
+//
+// STILL HERMETIC, and provably so: header validation happens locally, when the Request is constructed,
+// so `fetch` throws before any DNS lookup or socket. The assertion that PROVES it took that path rather
+// than a network one is `stderr` containing Bun's own "invalid value" wording — a DNS failure would say
+// something else entirely, and the test would fail. No `fetchFn` override.
+describe("Search: the key never leaks, through Bun's REAL fetch (N5)", () => {
+  const ZWSP = "​";
+  const LEAKY_KEY = `exa_live_looking_key_never_print_me${ZWSP}`;   // trailing U+200B — `.trim()` keeps it
+
+  function realFetchHarness(key: string) {
+    const audit: Array<Record<string, unknown>> = [];
+    const registry = new ToolRegistry();
+    // No `fetchFn`: the tool calls the global `fetch`, at its own `EXA_ANSWER_URL`. That url is never
+    // REACHED — the illegal header is rejected while the Request is being built — which is what keeps
+    // this hermetic without an endpoint seam the tool does not have.
+    registerSearchTool(registry, { audit: (line) => audit.push(line), secret: async () => key });
+    return { registry, audit };
+  }
+
+  test("a stray U+200B in the key never reaches the tool_result or the audit line", async () => {
+    const h = realFetchHarness(LEAKY_KEY);
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const out = await h.registry.execute("Search", { query: "winter release notes" }, ctx());
+      expect(out.isError).toBe(true);
+      // The model sees the one static sentence, never the provider's or Bun's own text.
+      expect(out.output).toBe("search failed: could not reach the search service");
+      expect(out.output).not.toContain(LEAKY_KEY);
+      expect(out.output).not.toContain("exa_live_looking_key");
+      expect(JSON.stringify(h.audit)).not.toContain("exa_live_looking_key");
+      expect(h.audit[0]).toMatchObject({ kind: "network", tool: "Search", outcome: "network_error" });
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  test("the LOG line is redacted too — and stays diagnostic, which is why a blanket scrub is not the fix", async () => {
+    // `launchd.ts` sends the daemon's stderr to `<home>/logs/`, which is deliberately agent-READABLE
+    // (only `run/` and `runtimes/` are denied), so a key in a log line is a key the model can read.
+    const h = realFetchHarness(LEAKY_KEY);
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await h.registry.execute("Search", { query: "q" }, ctx());
+      const stderrText = errSpy.mock.calls.map((c) => c.map((x) => String(x)).join(" ")).join("\n");
+      expect(stderrText).not.toContain(LEAKY_KEY);
+      expect(stderrText).not.toContain("exa_live_looking_key");
+      // The proof that `replaceAll(key, …)` matched what Bun really said: Bun's own words survive
+      // around the hole where the key was.
+      expect(stderrText).toContain("invalid value");
+      expect(stderrText).toContain("<redacted>");
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  test("a clean key's genuine failure keeps its real diagnostic — the redaction is a no-op, not a scrub", async () => {
+    const h = harness({
+      key: "clean-ascii-key",
+      respond: () => { throw new Error("getaddrinfo ENOTFOUND api.exa.ai"); },
+    });
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await h.registry.execute("Search", { query: "q" }, ctx());
+      const stderrText = errSpy.mock.calls.map((c) => c.map((x) => String(x)).join(" ")).join("\n");
+      expect(stderrText).toContain("ENOTFOUND");
+      expect(stderrText).not.toContain("<redacted>");
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+});
