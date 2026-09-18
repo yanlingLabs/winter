@@ -833,6 +833,40 @@ describe("daemon IPC", () => {
     c.close();
   });
 
+  // MEDIUM (fix wave, pre-merge review, finding 3, symmetry — regression coverage caught by a
+  // second review pass): `mcp.enable` on a server that was NEVER disabled (an idempotent double
+  // toggle from the Mac pane, or an enable racing an unrelated write) used to kill the running
+  // process: `startOneUserServer` stopped the old client but left its tools registered, so
+  // `startOne`'s "throw" collision mode hit a duplicate-name `registry.register` on the very next
+  // line and turned it into a dead process with a "failed" status. Fixed by routing the stop
+  // through `stopServer` (which also unregisters), proven here at the full IPC layer against a real
+  // boot-started child.
+  test("mcp.enable on an ALREADY-RUNNING, never-disabled server does not kill it", async () => {
+    if (process.platform !== "darwin") return; // spawns a child process
+    const { FakeProvider } = await import("../src/agent/fake-provider");
+    const fixture = join(import.meta.dir, "agent", "mcp", "fake-mcp-server.ts");
+    const home = mkdtempSync(join(tmpdir(), "winter-daemon-"));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({
+      schemaVersion: 3,
+      provider: { model: "codex-oauth/gpt-5.4" },
+      mcpServers: { fake: { command: "bun", args: ["run", fixture] } },
+    }, null, 2));
+    const secrets = new FileSecretStore(join(home, "test-secrets"));
+    const fake = new FakeProvider([[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]]);
+    daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
+    harnessToken = daemon.tokens.harness;
+
+    const c = await TestClient.connect(daemon.socketPath);
+    await c.hello(harnessToken, "mcp-enable-already-running");
+    expect((await c.request(METHODS.mcpList, {})).result.servers).toEqual([{ name: "fake", status: "connected", toolNames: ["echo"], source: "user" }]);
+
+    // Enable a name that was NEVER disabled — the regression path.
+    const enableRes = await c.request(METHODS.mcpEnable, { name: "fake" });
+    expect(enableRes.result).toEqual({ ok: true, name: "fake", enabled: true });
+    expect((await c.request(METHODS.mcpList, {})).result.servers).toEqual([{ name: "fake", status: "connected", toolNames: ["echo"], source: "user" }]);
+    c.close();
+  });
+
   test("plugins.list returns [] when no PluginStore is wired into the server", async () => {
     await boot(); // no `plugins` opt passed by the daemon in this test's boot() helper
     const c = await TestClient.connect(daemon.socketPath);

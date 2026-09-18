@@ -122,14 +122,20 @@ export class McpManager {
    * back up immediately. `stopServer` (below) now actually stops a disabled server's process rather
    * than leaving it running under a cosmetic label, so re-enabling must actually restart it, or a
    * user toggling a server off and back on would need a full daemon restart to get it working again
-   * — the exact no-restart-for-settings rule this whole surface exists to honour. Stops+clears any
-   * client ALREADY tracked under this name first, defensively (never expected in production, since
-   * only a name `stopServer` itself just removed reaches here) so a double-spawn can never leak a
-   * process this map no longer has a handle to.
+   * — the exact no-restart-for-settings rule this whole surface exists to honour.
+   *
+   * Calls `this.stopServer(name)` FIRST, unconditionally — not a manual `client.stop() +
+   * this.clients.delete(name)`. A prior revision did the manual form, which stopped the OLD process
+   * but left its tools registered; `startOne`'s `"throw"` collision mode then hit a duplicate-name
+   * `registry.register` on the very next line, which THROWS (by design — a server whose own tool
+   * list collides is meant to fail whole-server, see `startOne`'s own doc), turning an ordinary
+   * `mcp.enable` on an ALREADY-running or never-disabled name into a dead process with stale, now
+   *-orphaned tool registrations and a "failed" status. `stopServer` unregisters the old tools too
+   * (a no-op when there is nothing tracked under `name` at all — the common case, a genuinely
+   * disabled server being re-enabled), so the fresh registration below never collides with itself.
    */
   async startOneUserServer(name: string, cfg: McpServerConfig): Promise<void> {
-    const existing = this.clients.get(name);
-    if (existing) { existing.stop(); this.clients.delete(name); }
+    this.stopServer(name);
     const { status, toolNames, client } = await this.startOne(name, cfg, { onCollision: "throw" });
     if (client) this.clients.set(name, client);
     this.statuses.set(name, { name, status, toolNames, source: "user" });
