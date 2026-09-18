@@ -432,8 +432,11 @@ struct SettingsSectionView: View {
             // would thrash the very cache the store exists to be. `AppDelegate` configures the one
             // instance when it builds the wiring, which is the same lifetime a threaded dependency
             // would have had, with fewer moving parts. The parameter stays for previews and tests.
+            // The THREE-argument door (`roleWriter:`), not the two-argument one: the picker sends
+            // an explicit effort clear with every model change, so a role cannot keep an effort its
+            // new model does not offer.
             SettingsRolesSection(loader: wiring?.modelRoles ?? nil,
-                                 writer: wiring?.setModelRole ?? nil,
+                                 roleWriter: wiring?.setModelRole ?? nil,
                                  picker: picker)
         case .runtimes, .sessions, .approvals, .hooks, .mcpServers, .appearance, .shortcuts:
             // Answered BEFORE the wiring unwrap too: a coming section's page reads nothing from

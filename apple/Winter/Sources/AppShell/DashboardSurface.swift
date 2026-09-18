@@ -260,7 +260,13 @@ struct DashboardWiring {
     ///
     /// The reply is the WHOLE effective map — one write refreshes every row, which matters because
     /// clearing one role moves every role that was following it.
-    var setModelRole: ((_ role: String, _ model: String?) async throws -> [String: ModelRoleValue])? = nil
+    ///
+    /// 2026-09-18: takes the effort too, as a THREE-state `ModelRoleEffortWrite` — leave / clear /
+    /// set. Carried even while the effort control is gated off, because the picker still sends a
+    /// CLEAR alongside every model change: without it a role would keep an effort the new model may
+    /// not offer, harmless only until the day something spends a role's effort.
+    var setModelRole: ((_ role: String, _ model: String?, _ effort: ModelRoleEffortWrite) async throws
+        -> [String: ModelRoleValue])? = nil
 
     /// 2026-09-18 — `models.catalog`: the pinned provider catalog as this daemon resolved it. What
     /// the Roles model picker needs and `settings.modelRoles` does not carry — the families in use,
@@ -274,15 +280,6 @@ struct DashboardWiring {
     /// `nil` and a daemon that answers `-32601` are the same thing to the picker: `.none` facts,
     /// which is a fully usable picker with no families and no prices.
     var modelsCatalog: (() async throws -> ModelsCatalog)? = nil
-
-    /// 2026-09-18 — `credential.list`, for the picker's readiness line. NOT a second credentials
-    /// UI: the rows are joined to the catalog on `credentialSlotId` and reduced to one boolean per
-    /// slot, and Settings → Providers remains the only place a key is entered.
-    ///
-    /// Carried beside `modelsCatalog` rather than folded into it because they fail apart: a
-    /// credential list that will not answer must leave the catalog's families and prices standing
-    /// and simply say nothing about readiness.
-    var credentialList: (() async throws -> [CredentialRow])? = nil
 }
 
 /// The Dashboard's root content inside the shell: a fixed-width, GROUPED left pane list + the

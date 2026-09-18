@@ -1708,14 +1708,48 @@ public struct ModelRoleValue: Equatable, Sendable {
     public let explicit: Bool
     public let constraint: String
     public let permitted: [ModelRolePermittedProvider]
+    /// The reasoning effort STORED for this role, or nil when none is (the model's own default
+    /// applies). Stored and validated daemon-side — see `setModelRole`'s doc for what spends it.
+    public let effort: String?
+    /// True when `effort` was set on purpose rather than falling out of a default.
+    public let effortExplicit: Bool
+    /// The effort vocabulary of this role's CURRENT model, in the catalog's own order (never
+    /// sorted — the order genuinely varies by provider). **Three states, not two:** `nil` = the
+    /// model has no reasoning block at all; `[]` = a reasoning block with an EMPTY vocabulary;
+    /// non-empty = the efforts the daemon will accept (plus `"none"`, which it accepts but never
+    /// lists). Same meaning as `CatalogModel.efforts`.
+    public let efforts: [String]?
 
     public init(model: String?, explicit: Bool, constraint: String,
-                permitted: [ModelRolePermittedProvider]) {
+                permitted: [ModelRolePermittedProvider],
+                effort: String? = nil, effortExplicit: Bool = false, efforts: [String]? = nil) {
         self.model = model
         self.explicit = explicit
         self.constraint = constraint
         self.permitted = permitted
+        self.effort = effort
+        self.effortExplicit = effortExplicit
+        self.efforts = efforts
     }
+}
+
+/// What `settings.setModelRole` is told about a role's effort. **Three cases, because the wire has
+/// three**, and a `String?` can only spell two of them:
+///
+/// - `.leave` — the key is OMITTED: the stored effort is left exactly as it is.
+/// - `.clear` — a literal `"effort": null`: clear it back to the model's default.
+/// - `.set(e)` — `"effort": "<e>"`. Refused (`INVALID_PARAMS`) when `e` is outside the model's
+///   vocabulary, and for ANY value on a model with no vocabulary.
+public enum ModelRoleEffortWrite: Equatable, Sendable {
+    case leave
+    case clear
+    case set(String)
+}
+
+/// PRIVATE decode of an effort vocabulary. `null`/absent → nil (no reasoning block), an array →
+/// its strings IN WIRE ORDER (never sorted), so `[]` survives as `[]`.
+fileprivate func effortVocabulary(_ v: JSONValue?) -> [String]? {
+    v?.arrayValue.map { $0.compactMap { $0.stringValue } }
 }
 
 extension WinterClient {
@@ -1806,7 +1840,12 @@ extension WinterClient {
                 // Absent constraint reads as the most permissive one the wire defines — a role
                 // whose constraint we were not told about must not look narrower than it is.
                 constraint: o["constraint"]?.stringValue ?? "any",
-                permitted: permitted
+                permitted: permitted,
+                effort: o["effort"]?.stringValue,
+                effortExplicit: o["effortExplicit"]?.boolValue ?? false,
+                // `null` and an absent key both decode to nil ("no reasoning block"), while `[]`
+                // stays `[]` — the distinction the whole effort control turns on.
+                efforts: effortVocabulary(o["efforts"])
             )
         }
         return out
@@ -1837,12 +1876,25 @@ extension WinterClient {
     /// Two refusals the caller must expect and must NOT retry blind: `provider.model` refuses
     /// `null` outright (there is always a default session model), and a BARE model id is refused
     /// everywhere — only provider-qualified tags (`openai/gpt-5.6-terra`) are ever sent.
+    ///
+    /// **`effort` is the THIRD state, and it is spelled out rather than optional-ed.** `.leave` omits
+    /// the key (leave the stored effort untouched), `.clear` sends a literal `"effort": null` (back to
+    /// the model's default), `.set` sends the string. The default is `.leave`, so every existing
+    /// caller sends exactly the bytes it always did. `model` stays required-nullable, so an
+    /// effort-only change must re-send the role's current tag.
     @discardableResult
-    public func setModelRole(role: String, model: String?) async throws -> [String: ModelRoleValue] {
-        let r = try await request("settings.setModelRole", params: .object([
+    public func setModelRole(role: String, model: String?,
+                             effort: ModelRoleEffortWrite = .leave) async throws -> [String: ModelRoleValue] {
+        var params: [String: JSONValue] = [
             "role": .string(role),
             "model": model.map { JSONValue.string($0) } ?? .null,
-        ]))
+        ]
+        switch effort {
+        case .leave: break
+        case .clear: params["effort"] = .null
+        case let .set(value): params["effort"] = .string(value)
+        }
+        let r = try await request("settings.setModelRole", params: .object(params))
         return decodeModelRoles(r)
     }
 }
@@ -1948,17 +2000,19 @@ public struct CatalogFamily: Equatable, Sendable {
 /// **`credentialDoor` is the field that decides what a UI may say about readiness**, and it has
 /// exactly three values today, each meaning something a `providerId` join cannot express:
 ///
-/// - `"keychain"` (~96 providers) — `credentialSlotId` names a Keychain slot; joining
-///   `credential.list` on THAT SLOT is the whole readiness test.
+/// - `"keychain"` (~96 providers) — `credentialSlotId` names a Keychain slot; the fix is a key in
+///   Settings → Providers.
 /// - `"console-profile"` (1, the `console` provider) — `credentialSlotId` is **null and that is
 ///   CORRECT**: the Anthropic Console arm has no Keychain slot at all. Its readiness is an on-disk
-///   `ant` profile the daemon re-checks live at every spawn, so this read deliberately cannot
-///   answer it. Offerable, not promised.
+///   `ant` profile (which `credentialPresent` reports); the fix is `winter login --anthropic-console`.
 /// - `"none"` (5: bedrock, ollama-local, uncloseai, vertex, xai-oauth) — this daemon stores no
 ///   credential for them. These are precisely the rows a naive join would mark "no credential"
 ///   forever, with nothing the user could do about it.
 ///
 /// Behaviour is derived from this field, NEVER from a hardcoded provider id.
+///
+/// **READINESS IS NOT THIS FIELD'S JOB ANY MORE** (2026-09-18): `credentialPresent` answers it,
+/// daemon-side. `credentialDoor` now answers only "which flow would I offer to fix it".
 public struct CatalogProvider: Equatable, Sendable {
     public let id: String
     public let displayName: String
@@ -1972,16 +2026,22 @@ public struct CatalogProvider: Equatable, Sendable {
     /// `keychain` | `console-profile` | `none`, raw. Nil means the daemon did not say, which is
     /// "not told" and must render as no credential state at all.
     public let credentialDoor: String?
+    /// **THE readiness answer**, computed daemon-side by the rule that backs the composer's model
+    /// list: the on-disk `ant` profile for the `console-profile` door, stored material otherwise. A
+    /// daemon with no secret store reports every provider `false`. Nil = not told (a daemon that
+    /// predates the field), which must render as no readiness claim at all — never as "missing".
+    public let credentialPresent: Bool?
 
     public init(id: String, displayName: String, pricingBasis: String? = nil,
                 authKinds: [String] = [], credentialSlotId: String? = nil,
-                credentialDoor: String? = nil) {
+                credentialDoor: String? = nil, credentialPresent: Bool? = nil) {
         self.id = id
         self.displayName = displayName
         self.pricingBasis = pricingBasis
         self.authKinds = authKinds
         self.credentialSlotId = credentialSlotId
         self.credentialDoor = credentialDoor
+        self.credentialPresent = credentialPresent
     }
 }
 
@@ -2002,10 +2062,18 @@ public struct CatalogModel: Equatable, Sendable {
     /// came from an official published document. Absent reads as `"unknown"`: not told is not
     /// quotable. All 18 priced rows report `"list"`.
     public let costBasis: String
+    /// The reasoning-effort vocabulary, IN THE CATALOG'S ORDER — never sort it (`openai/o4-mini` is
+    /// low/medium/high, `xai-oauth/grok-4.5` is high/medium/low). `nil` = no reasoning block at all
+    /// (most rows); `[]` = a reasoning block with an EMPTY vocabulary; only a few dozen rows carry a
+    /// real one.
+    public let efforts: [String]?
+    /// The effort the model runs at when none is stored. Can be nil even when `efforts` is not.
+    public let defaultEffort: String?
 
     public init(tag: String, canonicalModelId: String? = nil, providerId: String? = nil,
                 familyId: String? = nil, status: String? = nil,
-                pricing: CatalogPricing? = nil, costBasis: String = "unknown") {
+                pricing: CatalogPricing? = nil, costBasis: String = "unknown",
+                efforts: [String]? = nil, defaultEffort: String? = nil) {
         self.tag = tag
         self.canonicalModelId = canonicalModelId
         self.providerId = providerId
@@ -2013,6 +2081,8 @@ public struct CatalogModel: Equatable, Sendable {
         self.status = status
         self.pricing = pricing
         self.costBasis = costBasis
+        self.efforts = efforts
+        self.defaultEffort = defaultEffort
     }
 }
 
@@ -2089,7 +2159,8 @@ extension WinterClient {
                 // An explicit `null` and an absent key decode the same here, and for the console
                 // door they MEAN the same: there is no Keychain slot to name.
                 credentialSlotId: p["credentialSlotId"]?.stringValue,
-                credentialDoor: p["credentialDoor"]?.stringValue
+                credentialDoor: p["credentialDoor"]?.stringValue,
+                credentialPresent: p["credentialPresent"]?.boolValue
             )
         }
         let models: [CatalogModel] = (r["models"]?.arrayValue ?? []).compactMap { m in
@@ -2102,7 +2173,9 @@ extension WinterClient {
                 status: m["status"]?.stringValue,
                 pricing: pricing(m["pricing"]),
                 // Not told ⇒ not quotable. `"unknown"` is the catalog's own word for that.
-                costBasis: m["costBasis"]?.stringValue ?? "unknown"
+                costBasis: m["costBasis"]?.stringValue ?? "unknown",
+                efforts: effortVocabulary(m["efforts"]),
+                defaultEffort: m["defaultEffort"]?.stringValue
             )
         }
         return ModelsCatalog(schemaVersion: r["schemaVersion"]?.intValue,

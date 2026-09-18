@@ -113,11 +113,11 @@ struct SettingsRoleValue: Equatable, Sendable {
     /// Anthropic Console arm's readiness is a live `ant` profile check with no Keychain slot
     /// behind it.
     ///
-    /// **ANSWERED, same day: `models.catalog` carries `credentialSlotId` + `credentialDoor` per
-    /// provider**, and the picker now joins on the SLOT and branches on the DOOR
-    /// (`roleProviderCredentialState`). The three doors render three different things, and two of
-    /// them render no credential state at all — see `SettingsRoleModelPicker.swift`'s header rule 2.
-    /// On a daemon without `models.catalog` this is all `.unknown`, which is the old behaviour.
+    /// **ANSWERED: `models.catalog` carries `credentialPresent` + `credentialDoor` per provider.**
+    /// The boolean is the daemon's own readiness answer and the picker reads it straight off the
+    /// provider row — no join of any kind; the door only names the fix
+    /// (`roleProviderCredentialState`, and `SettingsRoleModelPicker.swift`'s header rule 2). On a
+    /// daemon without the field this is all `.unknown`, which renders nothing.
     let permitted: [String]
     /// The same set with the wire's PROVIDER GROUPING intact — what the picker is built on, since
     /// its second step is "who serves this model".
@@ -125,17 +125,30 @@ struct SettingsRoleValue: Equatable, Sendable {
     /// Defaulted, so every construction site that only cares about the value (previews, the older
     /// tests) keeps compiling and simply yields an unpickable row.
     let permittedProviders: [ModelRolePermittedProvider]
+    /// The reasoning effort STORED for this role, or nil (the model's own default). Carried, and
+    /// rendered NOWHERE while `settingsRoleEffortControlEnabled` is false — see that constant.
+    let effort: String?
+    let effortExplicit: Bool
+    /// The CURRENT model's effort vocabulary, in the wire's order. `nil` = no reasoning block, `[]`
+    /// = an empty vocabulary — two different facts (`roleEffortControl`).
+    let efforts: [String]?
 
     init(model: String?,
          isExplicit: Bool,
          constraint: String,
          permitted: [String],
-         permittedProviders: [ModelRolePermittedProvider] = []) {
+         permittedProviders: [ModelRolePermittedProvider] = [],
+         effort: String? = nil,
+         effortExplicit: Bool = false,
+         efforts: [String]? = nil) {
         self.model = model
         self.isExplicit = isExplicit
         self.constraint = constraint
         self.permitted = permitted
         self.permittedProviders = permittedProviders
+        self.effort = effort
+        self.effortExplicit = effortExplicit
+        self.efforts = efforts
     }
 }
 
@@ -266,7 +279,10 @@ func settingsModelRoleValues(_ roles: [String: ModelRoleValue]) -> [SettingsMode
             isExplicit: value.explicit,
             constraint: value.constraint,
             permitted: value.permitted.flatMap(\.models),
-            permittedProviders: value.permitted
+            permittedProviders: value.permitted,
+            effort: value.effort,
+            effortExplicit: value.effortExplicit,
+            efforts: value.efforts
         )
     }
     return out
@@ -281,9 +297,20 @@ final class SettingsRolesModel: ObservableObject {
     typealias Loader = () async throws -> [String: ModelRoleValue]
     /// `settings.setModelRole`, which answers with the WHOLE effective map — see `commit`.
     typealias Writer = (_ role: String, _ model: String?) async throws -> [String: ModelRoleValue]
+    /// The same door with its third, effort, state (`ModelRoleEffortWrite`: leave / clear / set).
+    ///
+    /// SEPARATE from `writer` rather than replacing it because the live wiring
+    /// (`DashboardWiring.setModelRole`, outside Settings) is still the two-argument closure. Until
+    /// it grows the third argument this is nil in the running app — which means (a) the effort
+    /// control cannot render even with its flag on (`canWriteEffort`), and (b) a model change
+    /// falls back to `writer`, so the `effort: null` rule 5 asks for is NOT sent live yet. That is
+    /// the pre-existing wire, not a new lie: nothing spends a stored effort today.
+    typealias RoleWriter = (_ role: String, _ model: String?, _ effort: ModelRoleEffortWrite)
+        async throws -> [String: ModelRoleValue]
 
     private let loader: Loader?
     private let writer: Writer?
+    private let roleWriter: RoleWriter?
 
     @Published private(set) var values: [SettingsModelRole: SettingsRoleValue] = [:]
     @Published private(set) var loading = false
@@ -309,11 +336,14 @@ final class SettingsRolesModel: ObservableObject {
     var isUnwired: Bool { loader == nil }
     /// Whether a value on this pane is a door. No writer = the rows stay exactly as read-only as
     /// they were before the picker existed.
-    var canWrite: Bool { writer != nil }
+    var canWrite: Bool { writer != nil || roleWriter != nil }
+    /// Whether an effort can reach the wire at all. False ⇒ no effort control, whatever the flag.
+    var canWriteEffort: Bool { roleWriter != nil }
 
-    init(loader: Loader? = nil, writer: Writer? = nil) {
+    init(loader: Loader? = nil, writer: Writer? = nil, roleWriter: RoleWriter? = nil) {
         self.loader = loader
         self.writer = writer
+        self.roleWriter = roleWriter
     }
 
     func refresh() async {
@@ -363,13 +393,28 @@ final class SettingsRolesModel: ObservableObject {
     /// good map is left exactly as it was — a refused write must not repaint anything — and the
     /// daemon's words go through `shellPanelErrorText`, because a settings write can fail with a
     /// raw schema dump that would otherwise be shown to a person as if it were a sentence.
+    ///
+    /// `effort` defaults to `.leave`. With only the two-argument `writer` wired, a `.leave`/`.clear`
+    /// goes through it with the effort key absent (see `RoleWriter` for why that is today's wire),
+    /// and a `.set` is REFUSED here rather than silently dropped — a chosen effort that never
+    /// reached the daemon would be the exact lie the gated control exists to avoid.
     @discardableResult
-    func commit(_ role: SettingsModelRole, model: String?) async -> Bool {
-        guard let writer, !writing else { return false }
+    func commit(_ role: SettingsModelRole, model: String?,
+                effort: ModelRoleEffortWrite = .leave) async -> Bool {
+        guard canWrite, !writing else { return false }
+        if roleWriter == nil, case .set = effort { return false }
         writing = true
         defer { writing = false }
         do {
-            values = settingsModelRoleValues(try await writer(role.rawValue, model))
+            let reply: [String: ModelRoleValue]
+            if let roleWriter {
+                reply = try await roleWriter(role.rawValue, model, effort)
+            } else if let writer {
+                reply = try await writer(role.rawValue, model)
+            } else {
+                return false
+            }
+            values = settingsModelRoleValues(reply)
             writeErrorText = nil
             // A successful write also proves the read method is there, whatever an earlier answer
             // latched.
@@ -411,7 +456,7 @@ struct SettingsRolesSection: View {
     /// means "use the store"; a non-nil value overrides it outright, which is what previews and
     /// tests pass. See `SettingsRoleModelPicker.swift`'s header for what `.none` renders.
     private let injectedFacts: ModelCatalogFacts?
-    /// Where the live facts come from — `models.catalog` joined with `credential.list`, read once
+    /// Where the live facts come from — `models.catalog` (readiness included), read once
     /// and kept. Defaulted to the shared instance because `SettingsSectionView` (a file this change
     /// did not own) constructs this section with `loader:`/`writer:` only; passing `catalog:` there
     /// is the one edit that turns this into an ordinary injected dependency.
@@ -426,6 +471,7 @@ struct SettingsRolesSection: View {
     init(values: [SettingsModelRole: SettingsRoleValue] = [:],
          loader: SettingsRolesModel.Loader? = nil,
          writer: SettingsRolesModel.Writer? = nil,
+         roleWriter: SettingsRolesModel.RoleWriter? = nil,
          facts: ModelCatalogFacts? = nil,
          catalog: ModelCatalogFactsModel = .shared,
          picker: (any SettingsRolePickerPresenting)? = nil) {
@@ -433,7 +479,8 @@ struct SettingsRolesSection: View {
         self.injectedFacts = facts
         self.catalog = catalog
         self.picker = picker
-        _model = StateObject(wrappedValue: SettingsRolesModel(loader: loader, writer: writer))
+        _model = StateObject(wrappedValue: SettingsRolesModel(loader: loader, writer: writer,
+                                                              roleWriter: roleWriter))
     }
 
     // The facts themselves are no longer read HERE: the card is rendered by the shell, and
