@@ -685,10 +685,12 @@ struct WinterComposerCard: View {
             NewChatControlButton(systemImage: "plus", label: "Attach (not wired yet)", font: Typography.composerPlusGlyph)
             accessory
             Spacer(minLength: 12)
-            ComposerModelChip(row: modelRow,
-                              onOpen: model.onOpen,
-                              onSetModel: model.onSetModel,
-                              onSetEffort: model.onSetEffort)
+            if chrome.showsModelControl {
+                ComposerModelChip(row: modelRow,
+                                  onOpen: model.onOpen,
+                                  onSetModel: model.onSetModel,
+                                  onSetEffort: model.onSetEffort)
+            }
             NewChatControlButton(systemImage: "mic", label: "Dictate (not wired yet)", font: Typography.bodyLarge(.medium))
             sendButton
         }
