@@ -188,8 +188,10 @@ struct DashboardWiring {
     /// and the absence of any pre-existing settings-WRITE surface on the Mac app make a live
     /// channel-picker out of scope this task; disclosed in the report as a v1 cut).
     let updateChannel: () -> String?
-    /// `updaterController?.checkForUpdates(nil)` — the same manual Sparkle check the menu bar's
-    /// "Check for Updates…" item fires.
+    /// `UpdatePresenter.check()` — the same manual Sparkle check the menu bar's "Check for
+    /// Updates…" item fires, and the same one the Updates panel runs when it opens. Routed through
+    /// the presenter (2026-09-18) rather than straight at `SPUUpdater` so the outcome is recorded
+    /// somewhere a surface can read it.
     let checkForUpdates: () -> Void
     let loginItemEnabled: () -> Bool
     let setLoginItemEnabled: (Bool) -> Void
@@ -202,6 +204,63 @@ struct DashboardWiring {
     /// the shell and drives `AppWindowController.pairingPresentation` instead of spawning
     /// `PairingSheetWindowController` (deleted this task).
     let presentPairingSheet: () -> Void
+
+    /// 2026-09-17 — the library panel's MCP tab. `var` with a `nil` default, unlike every `let`
+    /// above: `DashboardWiring` is constructed in several places (the app's one real wiring, plus
+    /// pure-construction tests) and a required field would break all of them for a tab that treats
+    /// "no lister" as a first-class state anyway.
+    ///
+    /// Deliberately CWD-LESS. Passing a cwd to `mcp.list` is not a read — it SPAWNS that project's
+    /// servers — and the tab must never do that as a side effect of being looked at. The cost,
+    /// stated in the tab itself: project-scoped servers cannot appear there.
+    var mcpList: (() async throws -> [(name: String, status: String, toolNames: [String], source: String)])? = nil
+
+    /// 2026-09-18 — the Updates panel's observable. `var` with a `nil` default for the same reason
+    /// `mcpList` above is one: this struct is also constructed by pure-construction tests, and a
+    /// required field would break every one of them for a panel that treats "no presenter" as a
+    /// first-class state anyway.
+    ///
+    /// Always non-nil in the real app, INCLUDING Debug builds — the presenter exists whether or not
+    /// Sparkle does, and reports `UpdateStatus.unavailable` when it does not. That is what lets the
+    /// panel degrade honestly instead of looking empty.
+    var updates: UpdatePresenter? = nil
+
+    /// 2026-09-18 — the three SDK versions (Winter agent SDK, Winter runtime SDK, Claude agent SDK).
+    ///
+    /// `nil` TODAY, deliberately: the daemon RPC that answers this is being built by another
+    /// session. The panel renders `pendingSdkComponents` in that case — three named rows that say
+    /// they are waiting — so the shape of the table is already final and wiring the RPC is a single
+    /// closure here, with no view change at all.
+    ///
+    /// Each row carries BOTH numbers (`InstalledComponent.pinned` = what this build was compiled
+    /// against, `.installed` = what actually resolved). A disagreement is a normal thing to look at,
+    /// not an error: the resolver has several rungs and which one answered is exactly the fact a
+    /// version panel exists to show.
+    var sdkVersions: (() async throws -> [InstalledComponent])? = nil
+
+    /// 2026-09-18 — the Library panel's MCP tab, Winter half: `capabilities.list`, the daemon's own
+    /// in-process capability servers (`winter__<key>`), which `mcp.list` does not carry at all.
+    ///
+    /// Params-less and side-effect-free, unlike `mcpList` with a cwd — a panel may call it on
+    /// appear. `nil` (and a daemon too old to answer it) both render the tab's pre-RPC section.
+    var capabilitiesList: (() async throws -> [WinterCapability])? = nil
+
+    /// 2026-09-18 — Settings → Roles: `settings.modelRoles`, the effective model for each of the
+    /// nine roles plus whether it was chosen or derived and what the daemon would accept instead.
+    ///
+    /// Keyed by the SETTINGS PATH (`pins.dispatch`, `provider.model`, …) — the raw wire keys, not
+    /// the app's enum, because a role a later daemon adds must survive the trip even though this
+    /// build has no case for it.
+    var modelRoles: (() async throws -> [String: ModelRoleValue])? = nil
+
+    /// 2026-09-18 — the write half, `settings.setModelRole`. **Carried but not yet called from any
+    /// surface**: the Roles pane is deliberately read-only for now (pickers are the next step).
+    /// It is here so the write is one construction away and so the read and the write are wired
+    /// from the same place, having the same lifetime.
+    ///
+    /// The reply is the WHOLE effective map — one write refreshes every row, which matters because
+    /// clearing one role moves every role that was following it.
+    var setModelRole: ((_ role: String, _ model: String?) async throws -> [String: ModelRoleValue])? = nil
 }
 
 /// The Dashboard's root content inside the shell: a fixed-width, GROUPED left pane list + the

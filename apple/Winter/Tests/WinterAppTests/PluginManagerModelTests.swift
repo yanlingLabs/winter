@@ -201,6 +201,47 @@ final class PluginManagerModelTests: XCTestCase {
             XCTAssertFalse(settleShouldContinue(status: status, elapsedSeconds: 10), "status \(status ?? "nil") must stay stopped")
         }
     }
+
+    // MARK: - manifestHooks (2026-09-18): the Hooks tab's data path
+
+    /// The row factory carries `plugins.list`'s `manifestHooks` through in MANIFEST ORDER, with
+    /// duplicates intact and each declaration's index folded into its `id` — a `ForEach` over
+    /// colliding ids silently drops rows, which would under-report hooks that really do run twice.
+    func testManifestHooksKeepManifestOrderAndDuplicatesStayDistinct() {
+        let display = pluginRowDisplay(
+            name: "demo", version: nil, tier: "capability", requiredConsents: [], consented: [],
+            legacy: false, status: "running", disabled: false,
+            manifestHooks: [
+                PluginManifestHook(event: "pre-tool", command: "./deny.sh", timeoutMs: 500),
+                PluginManifestHook(event: "post-tool", command: "./observe.sh", timeoutMs: nil),
+                PluginManifestHook(event: "pre-tool", command: "./deny.sh", timeoutMs: 500),
+            ])
+        let hooks = display.manifestHooks ?? []
+        XCTAssertEqual(hooks.map(\.event), ["pre-tool", "post-tool", "pre-tool"])
+        XCTAssertNil(hooks[1].timeoutMs, "an absent timeout is the daemon's default, never 0")
+        XCTAssertEqual(Set(hooks.map(\.id)).count, 3, "two identical declarations must stay two rows")
+    }
+
+    /// The one cross-row question the Hooks tab has to answer: an older daemon omits the field for
+    /// EVERY plugin, and a supporting daemon omits it for a hookless one. Only the whole list can
+    /// tell those apart — and getting it backwards tells a user their hooks do not run.
+    func testHooksAreReportedOnlyWhenSomeRowActuallyCarriesTheField() {
+        let unreported = pluginRowDisplay(name: "a", version: nil, tier: nil, requiredConsents: [],
+                                          consented: [], legacy: false, status: nil, disabled: false)
+        let declaresNone = pluginRowDisplay(name: "b", version: nil, tier: nil, requiredConsents: [],
+                                            consented: [], legacy: false, status: nil, disabled: false,
+                                            manifestHooks: [])
+        XCTAssertFalse(pluginHooksAreReported(rows: [unreported, unreported]))
+        XCTAssertFalse(pluginHooksAreReported(rows: []), "no plugins ⇒ nobody told us anything either way")
+        XCTAssertTrue(pluginHooksAreReported(rows: [unreported, declaresNone]),
+                      "an EMPTY array is the daemon saying 'none' — that counts as reporting")
+
+        // A row that reported nothing is omitted from the dictionary rather than mapped to [],
+        // so the group builder's own empty-state stays reachable only when it is true.
+        let map = pluginHooksByPlugin(rows: [unreported, declaresNone])
+        XCTAssertNil(map["a"])
+        XCTAssertEqual(map["b"], [])
+    }
 }
 
 // -----------------------------------------------------------------------------------------------

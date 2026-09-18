@@ -99,6 +99,11 @@ enum ShellDestination: Hashable, Sendable {
     /// and the target of all three New-chat doors (sidebar row, chat landing button, menu-bar item
     /// — all through the one injected `AppDelegate.newChat()` door).
     case newChat
+    /// 2026-09-17: Settings as a real destination, with the shell's own sidebar rewritten as the
+    /// settings sidebar while it is open (`SettingsSection`, `SettingsSidebarContent`). A `nil`
+    /// section means "wherever you were last, or the default" — the same convention
+    /// `.dashboard(pane:)` uses, for the same reason: a door that does not care which section.
+    case settings(section: SettingsSection?)
 }
 
 /// Where a freshly opened shell lands. chatgpt-ui T1 DECOUPLED this from `sidebarOrder.first`
@@ -118,6 +123,13 @@ func selectedSidebarMode(for destination: ShellDestination) -> SessionMode? {
     return nil
 }
 
+/// PURE: is this the Settings destination? One spelling of the `if case` for the several places
+/// that stand chrome down while Settings is up.
+func shellDestinationIsSettings(_ destination: ShellDestination) -> Bool {
+    if case .settings = destination { return true }
+    return false
+}
+
 /// PURE: the landing surface's title.
 func shellDestinationTitle(_ destination: ShellDestination) -> String {
     switch destination {
@@ -125,6 +137,7 @@ func shellDestinationTitle(_ destination: ShellDestination) -> String {
     case .session: return "Session"
     case .dashboard: return "Dashboard"
     case .newChat: return "New chat" // the sidebar row's own register (sentence case)
+    case .settings: return "Settings"
     }
 }
 
@@ -135,6 +148,7 @@ func shellDestinationSystemImage(_ destination: ShellDestination) -> String {
     case .session: return "message"
     case .dashboard: return "gearshape"
     case .newChat: return "square.and.pencil" // the sidebar row's pencil-square, shared
+    case .settings: return "gearshape"
     }
 }
 
@@ -213,6 +227,10 @@ func shellLandingPlaceholderText(_ destination: ShellDestination) -> String {
     // and says so, the same honest posture as the host-less `.mode`/`.session` cases.
     case .mode, .session, .newChat: return "This shell has no session host."
     case .dashboard: return "The Dashboard surface has no wiring."
+    // 2026-09-17: Settings reaches this for the same structural reason the Dashboard does — the
+    // re-housed panes read `DashboardWiring`'s injected closures, and a shell built without it
+    // has nothing for them to read.
+    case .settings: return "Settings has no wiring."
     }
 }
 

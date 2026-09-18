@@ -635,6 +635,11 @@ final class MethodWrapperTests: XCTestCase {
         XCTAssertEqual(plugins[1].consented, [])
         XCTAssertFalse(plugins[1].legacy)
         XCTAssertNil(plugins[1].status)
+
+        // 2026-09-18: this fixture is an OLDER daemon's shape — no `manifestHooks` anywhere — and
+        // it must decode as nil, not as []. See the wrapper's own doc for why the two differ.
+        XCTAssertNil(plugins[0].manifestHooks)
+        XCTAssertNil(plugins[1].manifestHooks)
     }
 
     /// Phase 4d-iii Task 2: `plugin.restart {pluginId}` — no typed outcome (the server throws a
@@ -1598,5 +1603,153 @@ extension MethodWrapperTests {
         XCTAssertEqual(result.tabs[1].kind, "web")
         XCTAssertNil(result.tabs[1].diffId, "a non-diff tab (and an older daemon's row) decodes diffId as nil, never a guessed value")
         XCTAssertEqual(result.activeTabId, "t1")
+    }
+
+    // MARK: - The settings-surface reads (2026-09-18): capabilities.list / versions.get / model roles
+    //
+    // All four are NEWER than this client, so every test below has a twin obligation: decode the
+    // real shape, AND prove the older-daemon reply (`-32601`) arrives as a flag a surface can
+    // branch on rather than as an indistinguishable failure.
+
+    /// Runs one wrapper call and answers with a JSON-RPC ERROR envelope rather than a result —
+    /// the shape a daemon that does not implement the method actually sends.
+    func roundTripError<T>(
+        _ t: ScriptedTransport, sentIndex: Int, code: Int, message: String,
+        _ call: @escaping () async throws -> T
+    ) async throws -> Error? {
+        async let v: T = call()
+        let sent = try await waitForSent(t, count: sentIndex + 1)
+        let req = decodeLine(sent[sentIndex])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"error":{"code":\#(code),"message":"\#(message)"}}"#)
+        do { _ = try await v; return nil } catch { return error }
+    }
+
+    /// `plugins.list`'s `manifestHooks`: manifest ORDER, duplicates intact, and the key OMITTED
+    /// (not empty) for a plugin that declares none — which is why the decode is an optional.
+    func testPluginsListDecodesManifestHooksInOrderAndKeepsAbsenceDistinctFromEmpty() async throws {
+        let (client, t) = try await connected()
+        let (_, plugins) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true,"plugins":[ {"name":"demo","skills":[],"hasMcp":false,"mcpEnabled":false,"disabled":false, "manifestHooks":[{"event":"pre-tool","command":"./deny.sh","timeoutMs":500}, {"event":"post-tool","command":"./observe.sh"}, {"event":"pre-tool","command":"./deny.sh","timeoutMs":500}]}, {"name":"quiet","skills":[],"hasMcp":false,"mcpEnabled":false,"disabled":false}, {"name":"declared-none","skills":[],"hasMcp":false,"mcpEnabled":false,"disabled":false, "manifestHooks":[]} ]}"#) { try await client.pluginsList() }
+
+        let hooks = try XCTUnwrap(plugins[0].manifestHooks)
+        XCTAssertEqual(hooks.map(\.event), ["pre-tool", "post-tool", "pre-tool"],
+                       "manifest order, NOT regrouped by event")
+        XCTAssertEqual(hooks[0].command, "./deny.sh")
+        XCTAssertEqual(hooks[0].timeoutMs, 500)
+        XCTAssertNil(hooks[1].timeoutMs, "an absent timeout is the daemon's default, never 0")
+        XCTAssertEqual(hooks[2], hooks[0], "a duplicate entry survives as its own entry")
+
+        XCTAssertNil(plugins[1].manifestHooks, "key absent ⇒ not told")
+        XCTAssertEqual(plugins[2].manifestHooks, [], "key present but empty ⇒ told: declares none")
+    }
+
+    /// `capabilities.list`: the exposure map, the deferred set, the always-true `enabled` for the
+    /// six ungated keys, and `external`'s empty tool list (normal, not an error).
+    func testCapabilitiesListDecodesExposureAndTreatsAnEmptyToolListAsNormal() async throws {
+        let (client, t) = try await connected()
+        let (req, caps) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true,"capabilities":[ {"key":"computer","enabled":false,"tools":[ {"name":"mcp__winter__computer__computer","modes":["code","dispatch"], "deferred":["dispatch"],"exposure":{"code":true,"dispatch":true,"chat":false}}]}, {"key":"external","enabled":true,"tools":[]}, {"key":"sessions","tools":[{"name":"mcp__winter__sessions__SendMessage"}]} ]}"#) { try await client.capabilitiesList() }
+
+        XCTAssertEqual(req["method"] as? String, "capabilities.list")
+        XCTAssertEqual(caps.count, 3)
+        XCTAssertEqual(caps[0].key, "computer")
+        XCTAssertFalse(caps[0].enabled, "computer is one of the two live-gated keys")
+        XCTAssertEqual(caps[0].tools[0].modes, ["code", "dispatch"])
+        XCTAssertEqual(caps[0].tools[0].deferred, ["dispatch"])
+        XCTAssertEqual(caps[0].tools[0].exposure["chat"], false)
+        XCTAssertEqual(caps[0].tools[0].exposure["code"], true)
+
+        XCTAssertTrue(caps[1].tools.isEmpty, "external with no plugin-contributed tools is normal")
+        XCTAssertTrue(caps[2].enabled, "an absent `enabled` reads as true — only computer/lsp gate")
+        XCTAssertTrue(caps[2].tools[0].exposure.isEmpty, "an absent exposure map is empty, not guessed")
+    }
+
+    /// `versions.get`: pins and installed are independent, the two executables carry path+source
+    /// and NO version (the `winter` binary has no version flag), and `official: null` is the
+    /// ordinary "nothing staged" answer.
+    func testVersionsGetSplitsPinsInstalledAndTheVersionlessExecutables() async throws {
+        let (client, t) = try await connected()
+        let (req, v) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true,"core":"0.114.4", "pins":{"winterAgentSdk":"0.0.16","winterRuntimeSdk":"0.0.8","claudeAgentSdk":"0.3.250"}, "installed":{"winterRuntimeSdk":"0.0.8","claudeAgentSdk":"0.3.249", "winterExecutable":{"path":"/tmp/dist/winter","source":"env"}, "claudeExecutable":{"source":"package"}}, "official":null}"#) { try await client.versionsGet() }
+
+        XCTAssertEqual(req["method"] as? String, "versions.get")
+        XCTAssertEqual(v.core, "0.114.4")
+        XCTAssertEqual(v.pins["winterAgentSdk"], "0.0.16")
+        XCTAssertNil(v.installed["winterAgentSdk"], "not reported ⇒ nil, never the pin echoed back")
+        XCTAssertEqual(v.installed["claudeAgentSdk"], "0.3.249", "a disagreement with the pin is a normal state")
+        XCTAssertNil(v.installed["winterExecutable"], "the executable objects are not version strings")
+        XCTAssertEqual(v.winterExecutable?.path, "/tmp/dist/winter")
+        XCTAssertEqual(v.winterExecutable?.source, "env")
+        XCTAssertNil(v.claudeExecutable?.path)
+        XCTAssertEqual(v.claudeExecutable?.source, "package")
+        XCTAssertNil(v.official, "null ⇒ no Release bundle staged, which is not an error")
+    }
+
+    /// `settings.modelRoles` read + `settings.setModelRole` write. The write's two load-bearing
+    /// facts: a cleared role sends a literal `null` (NOT an omitted key), and the reply is the
+    /// whole map, so one call refreshes the pane.
+    func testModelRolesReadAndWriteShareTheMapAndClearSendsALiteralNull() async throws {
+        let (client, t) = try await connected()
+        let map = #"{"ok":true,"roles":{ "provider.model":{"model":"openai/gpt-5.6-terra","explicit":true,"constraint":"any", "permitted":[{"providerId":"openai","displayName":"OpenAI","models":["openai/gpt-5.4"]}]}, "pins.dispatch":{"model":"openai/gpt-5.6-terra","explicit":false,"constraint":"same-as-session"}, "pins.dream":{"model":null,"explicit":false}, "unknown.future.role":{"model":"x/y","explicit":true,"constraint":"any"} }}"#
+
+        let (readReq, roles) = try await roundTrip(t, sentIndex: 1, result: map) {
+            try await client.settingsModelRoles()
+        }
+        XCTAssertEqual(readReq["method"] as? String, "settings.modelRoles")
+        XCTAssertEqual(roles["provider.model"]?.model, "openai/gpt-5.6-terra")
+        XCTAssertTrue(roles["provider.model"]?.explicit ?? false)
+        XCTAssertEqual(roles["provider.model"]?.permitted.first?.displayName, "OpenAI")
+        XCTAssertEqual(roles["provider.model"]?.permitted.first?.models, ["openai/gpt-5.4"])
+        XCTAssertEqual(roles["pins.dispatch"]?.constraint, "same-as-session")
+        XCTAssertFalse(roles["pins.dispatch"]?.explicit ?? true, "defaulted ⇒ it moves with provider.model")
+        XCTAssertTrue(roles["pins.dispatch"]?.permitted.isEmpty ?? false)
+        XCTAssertNil(roles["pins.dream"]?.model, "a cleared role's model is null, and that is a value")
+        XCTAssertEqual(roles["pins.dream"]?.constraint, "any", "an absent constraint reads as the widest one")
+        XCTAssertNotNil(roles["unknown.future.role"], "a role this build does not know is still carried")
+
+        let (clearReq, afterClear) = try await roundTrip(t, sentIndex: 2, result: map) {
+            try await client.setModelRole(role: "pins.dispatch", model: nil)
+        }
+        XCTAssertEqual(clearReq["method"] as? String, "settings.setModelRole")
+        let clearParams = clearReq["params"] as? [String: Any]
+        XCTAssertEqual(clearParams?["role"] as? String, "pins.dispatch")
+        XCTAssertTrue(clearParams?.keys.contains("model") ?? false,
+                      "clearing sends `model: null` — an OMITTED key is a different, refused request")
+        XCTAssertTrue(clearParams?["model"] is NSNull, "…and it must encode as a literal JSON null")
+        XCTAssertEqual(afterClear.count, 4, "the write answers with the whole map, so one call refreshes the pane")
+
+        let (setReq, _) = try await roundTrip(t, sentIndex: 3, result: map) {
+            try await client.setModelRole(role: "pins.dream", model: "codex-oauth/gpt-5.6-terra")
+        }
+        XCTAssertEqual((setReq["params"] as? [String: Any])?["model"] as? String,
+                       "codex-oauth/gpt-5.6-terra", "always provider-qualified; a bare id is refused daemon-side")
+    }
+
+    /// THE DEGRADATION CONTRACT. Today's shipped daemon implements none of these four, so each one
+    /// comes back `-32601` — and every surface keys on `isMethodNotFound` to render its existing
+    /// "waiting on the daemon" state instead of an error. A wrapper that swallowed this into an
+    /// empty value would make a missing method indistinguishable from a real empty inventory, and
+    /// one that reported it as a plain failure would put a red banner on a working app.
+    func testTheNewMethodsSurfaceAnOlderDaemonAsMethodNotFoundRatherThanAPlainFailure() async throws {
+        let (client, t) = try await connected()
+        var index = 1
+        let calls: [(String, () async throws -> Void)] = [
+            ("capabilities.list", { _ = try await client.capabilitiesList() }),
+            ("versions.get", { _ = try await client.versionsGet() }),
+            ("settings.modelRoles", { _ = try await client.settingsModelRoles() }),
+            ("settings.setModelRole", { _ = try await client.setModelRole(role: "pins.dream", model: nil) }),
+        ]
+        for (method, call) in calls {
+            let error = try await roundTripError(t, sentIndex: index, code: -32601,
+                                                 message: "method not found: \(method)") { try await call() }
+            let rpc = try XCTUnwrap(error as? RpcError, "\(method) must throw an RpcError")
+            XCTAssertTrue(rpc.isMethodNotFound, "\(method) on an older daemon is -32601, not a failure to report")
+            XCTAssertTrue(isMethodNotFoundError(rpc))
+            index += 1
+        }
+
+        // The flag is NOT a catch-all for "the call didn't work": a genuine failure must still read
+        // as one, or every surface would render "waiting on the daemon" for a broken daemon.
+        let real = try await roundTripError(t, sentIndex: index, code: -32603, message: "boom") {
+            _ = try await client.versionsGet()
+        }
+        XCTAssertFalse(try XCTUnwrap(real as? RpcError).isMethodNotFound)
     }
 }

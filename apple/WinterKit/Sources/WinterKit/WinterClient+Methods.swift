@@ -57,6 +57,28 @@ public struct PluginContribEntry: Equatable, Sendable {
     public let provider: [String: JSONValue]?
 }
 
+/// One entry of a plugin's `manifestHooks` (2026-09-18) — a manifest's `contributes.hooks` line,
+/// mirrored field-for-field: `{event, command, timeoutMs?}` (`agent/plugin-manifest.ts`).
+///
+/// `event` is the RAW wire string, never an enum. The daemon's own schema is a closed four-value
+/// zod enum today (`session-start` | `pre-tool` | `post-tool` | `turn-end`), but a client that
+/// hard-fails on a fifth value a newer daemon adds is worse than one that shows its raw name —
+/// the same permissive posture every other decode in this file takes.
+///
+/// `timeoutMs` absent means the daemon's own default applies, which is a DIFFERENT fact from
+/// `0`, so it decodes to `nil` rather than to a number.
+public struct PluginManifestHook: Equatable, Sendable {
+    public let event: String
+    public let command: String
+    public let timeoutMs: Int?
+
+    public init(event: String, command: String, timeoutMs: Int?) {
+        self.event = event
+        self.command = command
+        self.timeoutMs = timeoutMs
+    }
+}
+
 // MARK: - working-directories T8: a session's ordered working-directory set
 
 /// One entry of a session's working-directory set — mirrors the protocol's `SessionDirEntry`
@@ -763,10 +785,23 @@ extension WinterClient {
     /// existing label-based access (`.name`, `.tier`, etc.) is unaffected by a tuple's field
     /// POSITION, only unlabeled positional destructuring would break, and none exists in this repo
     /// (grepped before adding).
+    /// 2026-09-18: `manifestHooks` (the plugin's declared `contributes.hooks`, in MANIFEST ORDER)
+    /// added, appended at the END for the same additive reason `version` was.
+    ///
+    /// **`nil` and `[]` are different answers and must never be collapsed.** The wire OMITS the
+    /// key for a plugin that declares no hook, and an older daemon omits it for every plugin
+    /// because its schema has no such field — so `nil` means "not told" and `[]` would mean "told:
+    /// none". Only the caller, looking across ALL rows, can tell those apart (if any row carries
+    /// the key, the daemon has the field), which is exactly why this decodes to an OPTIONAL and
+    /// never defaults to empty the way `skills`/`requiredConsents` do.
+    ///
+    /// Order is the wire's order, unregrouped: two hooks on the same event are two entries, and a
+    /// duplicate `(event, command)` pair is a manifest the daemon itself accepts — deduping here
+    /// would hide a real, running second hook.
     public func pluginsList() async throws -> [(
         name: String, skills: [String], hasMcp: Bool, mcpEnabled: Bool, disabled: Bool,
         tier: String?, requiredConsents: [String], consented: [String], legacy: Bool, status: String?,
-        version: String?
+        version: String?, manifestHooks: [PluginManifestHook]?
     )] {
         let r = try await request("plugins.list", params: .object([:]))
         return (r["plugins"]?.arrayValue ?? []).compactMap { p in
@@ -782,7 +817,17 @@ extension WinterClient {
                 (p["consented"]?.arrayValue ?? []).compactMap { $0.stringValue },
                 p["legacy"]?.boolValue ?? false,
                 p["status"]?.stringValue,
-                p["version"]?.stringValue
+                p["version"]?.stringValue,
+                p["manifestHooks"]?.arrayValue.map { hooks in
+                    // A malformed ENTRY (no event/command) is dropped; the ARRAY's presence still
+                    // stands, so the caller keeps reading "this daemon reports hooks".
+                    hooks.compactMap { h -> PluginManifestHook? in
+                        guard let event = h["event"]?.stringValue,
+                              let command = h["command"]?.stringValue else { return nil }
+                        return PluginManifestHook(event: event, command: command,
+                                                  timeoutMs: h["timeoutMs"]?.intValue)
+                    }
+                }
             )
         }
     }
@@ -1515,5 +1560,284 @@ public struct PanelDiffPayload: Codable, Equatable, Sendable {
         self.removed = removed
         self.patch = patch
         self.truncated = truncated
+    }
+}
+
+// MARK: - Settings-surface reads (2026-09-18): capabilities.list / versions.get / settings.modelRoles
+//
+// THE ONE THING EVERY CALLER OF THESE FOUR MUST KNOW: they are NOT on every daemon. They landed
+// after the app learned to call them, so a daemon from before that answers `-32601` — and that is
+// an ordinary, expected reply, not a fault. Each wrapper therefore throws exactly what the daemon
+// sent (this file's universal posture; nothing is swallowed here), and every surface branches on
+// `RpcError.isMethodNotFound` to render its own "waiting on the daemon" state rather than an error.
+// Returning an optional instead would have hidden a REAL failure (a closed socket, a timeout) in
+// the same `nil` as a missing method.
+
+/// One tool inside a Winter capability server (`capabilities.list`).
+///
+/// `modes`/`deferred`/`exposure` say three different things and none implies another:
+/// - `modes` — the session modes the tool is REGISTERED for;
+/// - `deferred` — the modes where it exists but is not eagerly in the prompt (the model has to
+///   search for it), which is a real availability difference a user reading this needs;
+/// - `exposure` — the resolved per-mode answer AFTER the mode's `disallowedTools` filter, i.e.
+///   what the child actually sees.
+///
+/// `exposure` is decoded as a raw `[String: Bool]` rather than three named fields, deliberately:
+/// the mode set is the daemon's (`SessionMode`), it has grown before, and a struct with
+/// `code`/`dispatch`/`chat` properties would silently drop a fourth mode instead of showing it.
+public struct WinterCapabilityTool: Equatable, Sendable {
+    public let name: String
+    public let modes: [String]
+    public let deferred: [String]
+    public let exposure: [String: Bool]
+
+    public init(name: String, modes: [String], deferred: [String], exposure: [String: Bool]) {
+        self.name = name
+        self.modes = modes
+        self.deferred = deferred
+        self.exposure = exposure
+    }
+}
+
+/// One capability server the daemon runs in-process and hands the runtime child as
+/// `winter__<key>` (the child sees `mcp__winter__<key>__<tool>`).
+///
+/// `enabled` is a LIVE GATE on only two keys (`computer`, `lsp`); every other key always reports
+/// `true`, so a UI must not render "enabled" as if it were a per-key switch the user set.
+///
+/// An EMPTY `tools` array is normal — `external` is the plugin-contributed server and has no tools
+/// until a plugin contributes some. It is never an error and must not render as one.
+public struct WinterCapability: Equatable, Sendable {
+    public let key: String
+    public let enabled: Bool
+    public let tools: [WinterCapabilityTool]
+
+    public init(key: String, enabled: Bool, tools: [WinterCapabilityTool]) {
+        self.key = key
+        self.enabled = enabled
+        self.tools = tools
+    }
+}
+
+/// A resolved runtime binary (`versions.get`'s `installed.winterExecutable`/`.claudeExecutable`).
+///
+/// **There is no version here, by nature, not by omission**: the `winter` binary has no version
+/// flag, so the only true facts about it are WHERE it is and WHICH resolver rung answered
+/// (`settings` / env / bundle / home / package…). Both fields are independently optional.
+public struct VersionsExecutable: Equatable, Sendable {
+    public let path: String?
+    public let source: String?
+
+    public init(path: String?, source: String?) {
+        self.path = path
+        self.source = source
+    }
+}
+
+/// `versions.get`'s answer.
+///
+/// `pins` is what THIS BUILD of the daemon was compiled against; `installed` is what actually
+/// resolved. A disagreement is an ordinary consequence of the resolver's rungs (an explicit
+/// setting, a dev checkout, a home-local binary) and is a thing to SHOW, never an error to raise.
+///
+/// Every field is independently optional: `pins`/`installed` are decoded as plain string maps so a
+/// fourth pin a later daemon adds arrives intact instead of being dropped by a fixed struct, and
+/// `official` is `nil` when no Release bundle is staged — a normal state on every dev machine.
+public struct VersionsSnapshot: Equatable, Sendable {
+    /// The daemon's own version (`VERSION`).
+    public let core: String?
+    /// Compile-time pins, keyed as the wire keys them (`winterAgentSdk`, `winterRuntimeSdk`,
+    /// `claudeAgentSdk`).
+    public let pins: [String: String]
+    /// Actually-resolved SDK versions, same keys. Only the STRING-valued entries land here; the
+    /// two executable objects are split out below because they carry no version at all.
+    public let installed: [String: String]
+    public let winterExecutable: VersionsExecutable?
+    public let claudeExecutable: VersionsExecutable?
+    /// The staged Release bundle's own block, kept OPAQUE: its shape is the daemon's and no
+    /// surface reads it yet, so decoding it into named fields would be inventing a contract.
+    /// `nil` when nothing is staged.
+    public let official: [String: JSONValue]?
+
+    public init(core: String?, pins: [String: String], installed: [String: String],
+                winterExecutable: VersionsExecutable?, claudeExecutable: VersionsExecutable?,
+                official: [String: JSONValue]?) {
+        self.core = core
+        self.pins = pins
+        self.installed = installed
+        self.winterExecutable = winterExecutable
+        self.claudeExecutable = claudeExecutable
+        self.official = official
+    }
+}
+
+/// One provider a role may use, with the models it may use from it (`settings.modelRoles`'
+/// per-role `permitted`). Provider-grouped on the wire because that is how a picker must group it;
+/// `models` are already fully-qualified tags (`openai/gpt-5.4`), never bare ids.
+public struct ModelRolePermittedProvider: Equatable, Sendable {
+    public let providerId: String
+    public let displayName: String
+    public let models: [String]
+
+    public init(providerId: String, displayName: String, models: [String]) {
+        self.providerId = providerId
+        self.displayName = displayName
+        self.models = models
+    }
+}
+
+/// What the daemon reports for one model role.
+///
+/// `model` is OPTIONAL because eight of the nine roles accept `null` (cleared → the role falls
+/// back to its derived default); `provider.model` alone always carries one. A `nil` model is a
+/// real, renderable state and is not the same as "the daemon told us nothing about this role",
+/// which is the role's key being absent from the map entirely.
+///
+/// `explicit == false` means the value is DERIVED — it moves on its own when `provider.model`
+/// changes — which is the single most important thing this pane exists to show.
+///
+/// `constraint` is the raw wire string (`any` | `internal-provider` | `same-as-session`), not an
+/// enum: a constraint the daemon adds later must reach the screen, not be dropped by this decode.
+public struct ModelRoleValue: Equatable, Sendable {
+    public let model: String?
+    public let explicit: Bool
+    public let constraint: String
+    public let permitted: [ModelRolePermittedProvider]
+
+    public init(model: String?, explicit: Bool, constraint: String,
+                permitted: [ModelRolePermittedProvider]) {
+        self.model = model
+        self.explicit = explicit
+        self.constraint = constraint
+        self.permitted = permitted
+    }
+}
+
+extension WinterClient {
+    /// `capabilities.list` — READ-ONLY; the daemon's own in-process capability servers, which are
+    /// not in `mcp.list`'s answer at all (that RPC lists EXTERNAL servers).
+    ///
+    /// Takes no params and starts nothing — unlike `mcp.list`, where passing a `cwd` spawns that
+    /// project's servers as a side effect of "listing". A panel can safely call this on appear.
+    ///
+    /// Throws `-32601` on a daemon that predates the method; see this section's header.
+    public func capabilitiesList() async throws -> [WinterCapability] {
+        let r = try await request("capabilities.list", params: .object([:]))
+        return (r["capabilities"]?.arrayValue ?? []).compactMap { c in
+            guard let key = c["key"]?.stringValue else { return nil }
+            let tools: [WinterCapabilityTool] = (c["tools"]?.arrayValue ?? []).compactMap { t in
+                guard let name = t["name"]?.stringValue else { return nil }
+                var exposure: [String: Bool] = [:]
+                for (mode, value) in t["exposure"]?.objectValue ?? [:] {
+                    if let flag = value.boolValue { exposure[mode] = flag }
+                }
+                return WinterCapabilityTool(
+                    name: name,
+                    modes: (t["modes"]?.arrayValue ?? []).compactMap { $0.stringValue },
+                    deferred: (t["deferred"]?.arrayValue ?? []).compactMap { $0.stringValue },
+                    exposure: exposure
+                )
+            }
+            // `enabled` defaults to TRUE when absent: only `computer`/`lsp` carry a live gate and
+            // every other key reports true, so an older/partial shape reading as "off" would
+            // libel six working servers.
+            return WinterCapability(key: key, enabled: c["enabled"]?.boolValue ?? true, tools: tools)
+        }
+    }
+
+    /// `versions.get` — READ-ONLY; what this daemon was pinned to and what actually resolved.
+    ///
+    /// Throws `-32601` on a daemon that predates the method; see this section's header.
+    public func versionsGet() async throws -> VersionsSnapshot {
+        let r = try await request("versions.get", params: .object([:]))
+        func strings(_ v: JSONValue?) -> [String: String] {
+            (v?.objectValue ?? [:]).compactMapValues { $0.stringValue }
+        }
+        func executable(_ v: JSONValue?) -> VersionsExecutable? {
+            guard let o = v?.objectValue else { return nil }
+            return VersionsExecutable(path: o["path"]?.stringValue, source: o["source"]?.stringValue)
+        }
+        let installed = r["installed"]
+        return VersionsSnapshot(
+            core: r["core"]?.stringValue,
+            pins: strings(r["pins"]),
+            // `compactMapValues { $0.stringValue }` also does the splitting: the two executable
+            // entries are OBJECTS, so they simply don't land in the string map.
+            installed: strings(installed),
+            winterExecutable: executable(installed?["winterExecutable"]),
+            claudeExecutable: executable(installed?["claudeExecutable"]),
+            // An explicit `null` decodes to `.null`, whose `objectValue` is nil — the same answer
+            // as an absent key, which is what "no Release bundle staged" means either way.
+            official: r["official"]?.objectValue
+        )
+    }
+
+    /// PRIVATE: `settings.modelRoles` and `settings.setModelRole` return the SAME map, which is why
+    /// one write refreshes a whole pane. Decoded in one place so the two can never drift.
+    ///
+    /// The map is looked for under `roles` first and then read off the result object itself, minus
+    /// the envelope's own `ok` — permissive on purpose, since a key that is not a known role is
+    /// dropped rather than fought over.
+    private func decodeModelRoles(_ r: JSONValue) -> [String: ModelRoleValue] {
+        let raw = r["roles"]?.objectValue
+            ?? (r.objectValue ?? [:]).filter { $0.key != "ok" }
+        var out: [String: ModelRoleValue] = [:]
+        for (role, value) in raw {
+            guard let o = value.objectValue else { continue }
+            let permitted: [ModelRolePermittedProvider] = (o["permitted"]?.arrayValue ?? []).compactMap { p in
+                guard let id = p["providerId"]?.stringValue else { return nil }
+                return ModelRolePermittedProvider(
+                    providerId: id,
+                    // A provider with no facing name falls back to its id rather than rendering
+                    // blank — the id is always a true, if plainer, name for it.
+                    displayName: p["displayName"]?.stringValue ?? id,
+                    models: (p["models"]?.arrayValue ?? []).compactMap { $0.stringValue }
+                )
+            }
+            out[role] = ModelRoleValue(
+                // A wire `null` decodes to nil here, exactly as a cleared role should.
+                model: o["model"]?.stringValue,
+                explicit: o["explicit"]?.boolValue ?? false,
+                // Absent constraint reads as the most permissive one the wire defines — a role
+                // whose constraint we were not told about must not look narrower than it is.
+                constraint: o["constraint"]?.stringValue ?? "any",
+                permitted: permitted
+            )
+        }
+        return out
+    }
+
+    /// `settings.modelRoles` — READ-ONLY; the effective model for each of the nine roles, whether
+    /// it was chosen or derived, and which models the daemon would accept for it.
+    ///
+    /// Keyed by the SETTINGS PATH the role lives at (`pins.dispatch`, `provider.model`,
+    /// `titles.model`, `reviewer.model`, `runtimes.advisorModel`, …) — the same string
+    /// `setModelRole` sends back.
+    ///
+    /// Throws `-32601` on a daemon that predates the method; see this section's header.
+    public func settingsModelRoles() async throws -> [String: ModelRoleValue] {
+        decodeModelRoles(try await request("settings.modelRoles", params: .object([:])))
+    }
+
+    /// `settings.setModelRole {role, model|null}` — the write half, returning the WHOLE effective
+    /// map so one call refreshes every row (clearing one role moves every other role that was
+    /// following it).
+    ///
+    /// **`model: nil` sends a literal `null`, never an omitted key.** They are different requests:
+    /// `null` means "clear this role, fall back to the derived default", while an absent key is a
+    /// params shape the daemon's schema would refuse. This is why the params are built by hand
+    /// instead of through `obj(...)`, which compacts nils away (and which is correct for every
+    /// other wrapper, where absence is the "leave it alone" signal).
+    ///
+    /// Two refusals the caller must expect and must NOT retry blind: `provider.model` refuses
+    /// `null` outright (there is always a default session model), and a BARE model id is refused
+    /// everywhere — only provider-qualified tags (`openai/gpt-5.6-terra`) are ever sent.
+    @discardableResult
+    public func setModelRole(role: String, model: String?) async throws -> [String: ModelRoleValue] {
+        let r = try await request("settings.setModelRole", params: .object([
+            "role": .string(role),
+            "model": model.map { JSONValue.string($0) } ?? .null,
+        ]))
+        return decodeModelRoles(r)
     }
 }
