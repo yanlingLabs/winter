@@ -258,6 +258,35 @@ describe("the daemon door (fix round 4)", () => {
     expect(await secrets.get("exa-api-key")).toBe(SENTINEL);
   });
 
+  test("the RETIRED `web-search` row refuses a SET on both paths, and still removes on both", async () => {
+    // 2026-09-18 (the web-tools ruling): nothing reads the Brave key any more, so `credential.set`
+    // refuses it typed — and the refusal has to hold on the NO-DAEMON path too, which is the one that
+    // could quietly bypass it if the fallback wrote the raw secret itself instead of going through
+    // core's `setCredential`. It goes through core, and this pins that.
+    const noDaemon = await runCredentialsRoute(secrets, home, "set", "web-search", async () => SENTINEL, async () => undefined);
+    expect(noDaemon).toMatchObject({ ok: false });
+    expect(String((noDaemon as { message: string }).message)).toContain("winter credentials remove web-search");
+    expect(await secrets.get("web-search-api-key")).toBeNull();
+
+    // …and the DAEMON's own refusal for the same row stands and is never retried in-process (the rule
+    // this suite already pins for provider rows), so the store stays empty on that path too. The
+    // daemon-side refusal itself is pinned in core's `credentials-rpc` suite; this door only has to
+    // carry it.
+    const refusal = Object.assign(new Error("Web search is no longer used by any Winter tool (code -32602)"), {
+      rpc: { message: "Web search is no longer used by any Winter tool — its key cannot be set.", code: -32602, data: { code: "credential_kind_unsupported", door: "credential.set" } },
+    });
+    const { door } = scriptedDaemon({ [METHODS.credentialSet]: refusal });
+    const viaDaemon = await runCredentialsRoute(secrets, home, "set", "web-search", async () => SENTINEL, async () => door);
+    expect(viaDaemon).toMatchObject({ ok: false, code: "credential_kind_unsupported" });
+    expect(await secrets.get("web-search-api-key")).toBeNull();
+
+    // REMOVE is the door that must keep working: a key stored before the retirement is clearable.
+    await secrets.set("web-search-api-key", SENTINEL);
+    const removed = await runCredentialsRoute(secrets, home, "remove", "web-search", never, async () => undefined);
+    expect(removed).toMatchObject({ ok: true, removed: true });
+    expect(await secrets.get("web-search-api-key")).toBeNull();
+  });
+
   test("with a daemon listening, the `exa` row goes THROUGH it (0.0.17: the key is baked into a spawn)", async () => {
     // It used to be written in-process by design — the daemon's own Search/ReadPage read it per call
     // and no child's `Options` named it. At agent SDK 0.0.17 a Winter child's
