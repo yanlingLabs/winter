@@ -155,15 +155,34 @@ function normalizeDomainLabel(value: string): string {
  */
 export function dangerousHostMatch(host: unknown, entries: readonly string[]): string | null {
   if (typeof host !== "string") return null;
-  const h = normalizeDomainLabel(host);
+  const h = asciiDomain(normalizeDomainLabel(host));
   if (!h) return null;
   for (const entry of entries) {
     if (typeof entry !== "string") continue;
-    const e = normalizeDomainLabel(entry);
+    const e = asciiDomain(normalizeDomainLabel(entry));
     if (!e) continue;
     if (dangerousDomainMatch(h, [e]) !== null) return entry;
   }
   return null;
+}
+
+/**
+ * A domain in its ASCII (punycode) form, the form a URL's own `hostname` is always already in. The
+ * shipped list is entirely ASCII, so this matters for exactly one case: a user who writes an
+ * INTERNATIONALIZED domain into `settings.permissions.dangerousDomains.added` in its unicode
+ * spelling (`пример.рф`) while every url the floor is ever asked about names it as
+ * `xn--e1afmkfd.xn--p1ai`. Without this the two never compare equal and the entry silently does
+ * nothing. Computed only when the value actually carries a non-ASCII character, so the common path
+ * pays nothing; an unconvertible value is returned unchanged rather than dropped.
+ */
+function asciiDomain(domain: string): string {
+  if (!/[^\u0000-\u007f]/.test(domain)) return domain;
+  try {
+    const host = new URL(`https://${domain}`).hostname;
+    return host.length > 0 ? host : domain;
+  } catch {
+    return domain;
+  }
 }
 
 export interface DangerousUrlMatch {
