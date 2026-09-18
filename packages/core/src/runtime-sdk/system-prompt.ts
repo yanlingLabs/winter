@@ -17,8 +17,8 @@
 // unset style is byte-identical to today and a set one is applied ONCE, by Winter, never a second
 // time by Winter's own style loader.
 import type { ContextAssembler } from "../agent/context";
-import { CHAT_SYSTEM_PROMPT } from "../agent/chat-prompt";
-import { DISPATCH_SYSTEM_PROMPT } from "../agent/dispatch-prompt";
+import { chatSystemPrompt } from "../agent/chat-prompt";
+import { dispatchSystemPrompt } from "../agent/dispatch-prompt";
 import type { Mode as SessionMode } from "../agent/tools/registry";
 import { clientEffortEligible, isClientEffort } from "../settings";
 
@@ -37,17 +37,30 @@ export interface WinterSystemPromptInput {
   extraDirs?: string[];
   /** The session's stored effort; `ultra` on a code session adds the delegation paragraph. */
   effort?: string;
+  /**
+   * Is an Exa API key stored? (2026-09-18, the web-tools ruling.)
+   *
+   * Chat's and dispatch's base prompts NAME their search tool, and which one the session actually has
+   * depends on this: the daemon's `Search` with a key, the runtime's own `WebSearch` without. The same
+   * value drives `disallowedToolsFor` and the `research` capability build, so the prompt and the tool
+   * list can never disagree. ABSENT reads as PRESENT, as it does at every other door.
+   */
+  exaKeyPresent?: boolean;
 }
 
 export function winterSystemPromptFor(assembler: Pick<ContextAssembler, "assemble">, input: WinterSystemPromptInput): string {
   const isDispatch = input.mode === "dispatch";
   const isChat = input.mode === "chat";
+  // Spread rather than passed as `{ exaKeyPresent: input.exaKeyPresent }`: an EXPLICIT `undefined` and an
+  // absent key read the same in the builders (both mean "present"), but keeping the key off the object
+  // when the caller did not answer is the shape every other optional input in this file already takes.
+  const webOpts = input.exaKeyPresent === undefined ? {} : { exaKeyPresent: input.exaKeyPresent };
   return assembler.assemble({
     cwd: input.cwd,
     // The engine's per-session `loadedSkills` set is empty at a session's first turn; on the Winter
     // leg the `Skill` tool is Winter's own, so nothing ever fills it host-side.
     loadedSkills: [],
-    basePromptOverride: isDispatch ? DISPATCH_SYSTEM_PROMPT : isChat ? CHAT_SYSTEM_PROMPT : undefined,
+    basePromptOverride: isDispatch ? dispatchSystemPrompt(webOpts) : isChat ? chatSystemPrompt(webOpts) : undefined,
     // Dreaming (Phase 7b) + Chat Slice A: dispatch AND chat read the shared `_assistant` bucket.
     memoryBucket: isDispatch || isChat ? "assistant" : "project",
     skipOutputStyle: input.origin === "dispatch-child",
