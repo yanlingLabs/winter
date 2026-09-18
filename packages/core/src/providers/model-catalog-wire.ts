@@ -11,8 +11,10 @@
  */
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import type { CapabilityEvidence, ModelPricing } from "@yanlinglabs/winter-provider-catalog";
+import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { permittedProviders } from "../settings";
-import { credentialInventory } from "../runtime-sdk/keychain";
+import { credentialInventory, credentialPresentProbe } from "../runtime-sdk/keychain";
+import { effortVocabularyOf } from "../runtime-sdk/provider-selection";
 
 export interface ModelCatalogWirePricing {
   inputPerMTokUsd: number;
@@ -33,6 +35,10 @@ export interface ModelCatalogWireModel {
   status: string;
   pricing: ModelCatalogWirePricing | null;
   costBasis: "list" | "unknown";
+  /** The row's own reasoning-effort vocabulary — see the protocol schema's own doc for why `null`
+   *  and `[]` are different answers here and must not be collapsed. */
+  efforts: string[] | null;
+  defaultEffort: string | null;
 }
 
 export interface ModelCatalogWireProvider {
@@ -44,6 +50,9 @@ export interface ModelCatalogWireProvider {
   /** Which door credentials this provider — see the protocol schema's own doc; `null` slot alone is
    *  ambiguous between "another door" and "no door", and those must not look alike to a picker. */
   credentialDoor: "keychain" | "console-profile" | "none";
+  /** Whether that door is actually SATISFIED on this home right now — `credentialPresentProbe`
+   *  (runtime-sdk/keychain.ts), the same rule `sync.config`'s own model list filters on. */
+  credentialPresent: boolean;
 }
 
 export interface ModelCatalogWireFamily {
@@ -98,9 +107,20 @@ function wirePricing(pricing: CapabilityEvidence<ModelPricing> | undefined): Mod
 /**
  * The `models.catalog` result, built fresh on every call — `loadCatalog()` is itself memoised and
  * immutable for the process, so there is nothing to cache here beyond what it already does.
+ *
+ * `deps` is the credential-readiness input, and it is a PARAMETER rather than a probe this function
+ * runs itself: reading the Keychain is asynchronous and ~150 slots wide (`credentialPresenceFrom`),
+ * and the caller (`ipc/server.ts`'s `models.catalog` handler) already computes exactly this pair for
+ * `sync.config` on the very same `opts.secrets`/`opts.winterHome`. Taking the ALREADY-COMPUTED
+ * presence keeps this reader synchronous and keeps the two surfaces on one probe per call. A server
+ * with no secret store wired hands over an empty `{byProvider:{}}` (and `home: ""`), which reports
+ * every provider as not-ready — the same degradation `sync.config` documents for the same inputs.
  */
-export function modelCatalogWire(): ModelCatalogWireResult {
+export function modelCatalogWire(deps: { credentials: CredentialPresence; home: string }): ModelCatalogWireResult {
   const catalog = loadCatalog();
+  // ONE on-disk console probe for the whole listing (the closure's own contract) — never one per
+  // provider row.
+  const credentialPresent = credentialPresentProbe(deps);
 
   // The SAME set `settings.modelRoles`'s "any"/"same-as-session" roles permit — `permittedProviders()`
   // unfiltered, exactly the call `modelRoleInfo` makes for those roles. Flattening `.models` here
@@ -146,6 +166,14 @@ export function modelCatalogWire(): ModelCatalogWireResult {
         authKinds: [...p.authKinds],
         credentialSlotId: slotId,
         credentialDoor: door,
+        // The DOOR above says how this provider can be credentialed; this says whether it IS.
+        // Computed HERE, daemon-side, because the join a client would have to do instead is wrong
+        // for exactly the two providers a Claude user cares about: `credential.list` is keyed by
+        // secret NAME, and guessing `<providerId>:default` reports `console` as unusable (its one
+        // slot is filed under `anthropic`) while reporting `anthropic` as ready on a console-only
+        // home (that same `anthropic` key covers both accounts). `credentialPresentProbe` is the
+        // one rule that gets both right, and `sync.config`'s model list already filters on it.
+        credentialPresent: credentialPresent(p.id),
       };
     });
 
@@ -159,6 +187,21 @@ export function modelCatalogWire(): ModelCatalogWireResult {
       status: m.status,
       pricing: wirePricing(m.pricing),
       costBasis: costBasisFor(m.pricing),
+      // `effortVocabularyOf` (runtime-sdk/provider-selection.ts) — the ROW form, so this listing
+      // never re-looks-up by tag what it already holds, and the SAME rule
+      // `settings.modelRoles`' per-role `efforts` answers with. Catalog truth, in the row's own
+      // order: no `"none"` is prepended, unlike `sync.config`'s `models[].efforts`, where the
+      // prepend is that surface's PICKER convention (`effortsForModel`, ipc/sync.ts — the catalog
+      // excludes `"none"` because it is Winter's unset, not a catalog tier). A consumer building a
+      // selection control from this field adds `"none"` by that same rule; a consumer reporting what
+      // the catalog KNOWS must not see a value the catalog never declared.
+      efforts: effortVocabularyOf(m),
+      // `ReasoningCapabilities.defaultEffort` is optional even on a row that HAS a vocabulary (15 of
+      // the 48 rows with one declare it), so `null` here means "the catalog names no default", never
+      // "no default applies" — the provider still has one, unobserved. It is the fallback
+      // `implicitEffortFor` maps an unsupported implicit effort onto, which is why it rides beside
+      // the vocabulary rather than being left for a consumer to guess.
+      defaultEffort: m.reasoning?.defaultEffort ?? null,
     }));
 
   // Families with at least one offerable model, in the catalog's own id order — an empty family

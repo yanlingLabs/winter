@@ -115,3 +115,41 @@ export function implicitEffortFor(tag: string, wanted: string): string | undefin
   const fallback = row.reasoning?.defaultEffort;
   return typeof fallback === "string" && vocab.includes(fallback) ? fallback : undefined;
 }
+
+/**
+ * 2026-09-18: a row's DECLARED effort vocabulary, with the one distinction every consumer above this
+ * line has been collapsing — `null` and `[]` are DIFFERENT catalog states and must stay so on any
+ * wire that carries them:
+ *
+ *   - `null`  — the row declares no `reasoning` block at all (`ReasoningCapabilities` is optional on
+ *               `WinterModelDescriptor`): the catalog knows of no effort CONCEPT for this model. 472
+ *               of 618 rows.
+ *   - `[]`    — the row HAS a `reasoning` block whose `efforts` array is empty: reasoning is claimed,
+ *               but this model takes no effort SETTING (98 of 618 rows — the population
+ *               `implicitEffortFor` above exists for).
+ *
+ * A UI renders those two differently ("no such control" vs "this model's reasoning is not
+ * adjustable"), which is why `effortsForModel` (ipc/sync.ts, ipc/picker-models.ts) — whose `[]` means
+ * "nothing to offer" for BOTH — cannot serve a surface that needs the distinction.
+ *
+ * ONE rule, two entry points, so `models.catalog`'s rows and `settings.modelRoles`' per-role
+ * vocabulary can never report a different answer for the same model. The array is the row's OWN
+ * order, verbatim and freshly copied — no `"none"` is prepended here: that prepend is a PICKER
+ * convention (`effortsForModel`'s own doc: the catalog deliberately excludes `"none"` because it is
+ * Winter's unset, not a catalog tier), and this function carries catalog truth, not a menu.
+ */
+export function effortVocabularyOf(row: WinterModelDescriptor | undefined): string[] | null {
+  if (row === undefined) return null;
+  const efforts = row.reasoning?.efforts;
+  return efforts === undefined ? null : [...efforts];
+}
+
+/** `effortVocabularyOf` by TAG. A tag with no catalog row at all (`winter-test/*`, the `UNSTATED_TAG`
+ *  sentinel, a BYO endpoint's own id) reports `null` — "no vocabulary known", the same answer a row
+ *  with no `reasoning` block gives, because from a consumer's side those are the same fact: this
+ *  daemon has no catalog evidence of an effort concept here. Callers that must tell "unknown model"
+ *  from "known model, no reasoning" (the effort-selection gate does) ask `rowForTag` as well — the
+ *  same split `implicitEffortFor` above makes. */
+export function effortVocabularyFor(tag: string): string[] | null {
+  return effortVocabularyOf(rowForTag(tag));
+}

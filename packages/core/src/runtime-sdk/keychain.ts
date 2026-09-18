@@ -2,8 +2,10 @@ import type { CredentialRef } from "@yanlinglabs/winter-agent-sdk";
 import type { CredentialPresence, KeychainSeam } from "@yanlinglabs/winter-runtime-sdk";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import type { WinterProviderDescriptor } from "@yanlinglabs/winter-provider-catalog";
+import { existsSync } from "node:fs";
 import type { SecretStore } from "../auth/secret-store";
 import { keychainService } from "../profile";
+import { consoleProfileCredentialFile } from "./anthropic-paths";
 import { CREDENTIAL_MATERIAL_NAMES, readCredentialMaterial, writeCredentialMaterial } from "../auth/credential-material";
 
 /**
@@ -408,4 +410,33 @@ export async function credentialPresenceFrom(
     console.warn(`[keychain] ${failures.length} of ${probed.length} presence probe(s) failed (${[...new Set(failures)].join(", ")})`);
   }
   return { byProvider, ...(Object.keys(authByProvider).length === 0 ? {} : { authByProvider }) };
+}
+
+/**
+ * 2026-09-18: "does this CATALOG PROVIDER hold a credential right now" — the one rule every
+ * provider-facing listing answers it with, returned as a closure so the console door's on-disk probe
+ * runs ONCE per listing rather than once per provider (the catalog has ~100 eligible providers).
+ *
+ * `console` is checked ON DISK (`consoleProfileCredentialFile`), never through
+ * `CredentialPresence.byProvider` — that inventory's `"anthropic"` key conflates the api-key slot
+ * (`anthropic:default`) with the console broker's bearer slot (`anthropic:console`), both filed under
+ * provider id `"anthropic"` (see `credentialInventory`'s own head array). Reading `byProvider` for
+ * `console` would therefore report a console-only home's `anthropic/*` API-KEY rows as credentialed
+ * with no api-key material behind them, and an api-key-only home's `console/*` rows the same way.
+ * `console` is its own catalog provider id and is answered on its own terms.
+ *
+ * PRESENCE IS NOT VALIDITY — the file-wide rule (see this module's own header): a stored secret or an
+ * existing profile file may be expired or revoked, and only the child/provider layer decides that.
+ * For the console door specifically, the daemon re-checks the profile LIVE at every spawn
+ * (`console_profile_missing`), so a `true` here is "offerable", never "promised".
+ *
+ * ONE implementation, shared by `ipc/picker-models.ts` (`sync.config`'s `models`) and
+ * `providers/model-catalog-wire.ts` (`models.catalog`'s `providers`), so the two surfaces cannot
+ * disagree about whether a provider is ready. A `home` of `""` (a server with none wired) simply
+ * never finds a profile — the same degradation `sync.config` already documents for it.
+ */
+export function credentialPresentProbe(deps: { credentials: CredentialPresence; home: string }): (providerId: string) => boolean {
+  const consolePresent = existsSync(consoleProfileCredentialFile(deps.home));
+  return (providerId: string): boolean =>
+    providerId === "console" ? consolePresent : deps.credentials.byProvider[providerId] !== undefined;
 }
