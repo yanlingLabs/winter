@@ -206,8 +206,12 @@ export interface WinterLegDeps {
   memoryKeyOf: (cwd: string) => string;
   /** Task 17 Step 0(a): the daemon's ONE `ContextAssembler` — Winter's system prompt per mode,
    *  composed per incarnation (hot: WINTER.md, memory, the output style are re-read on resume).
-   *  Absent (a harness without one) ⇒ no `systemPrompt` and the child runs Winter's own. */
-  assembler?: Pick<ContextAssembler, "assemble">;
+   *  Absent (a harness without one) ⇒ no `systemPrompt` and the child runs Winter's own.
+   *  `"memoryDirFor"` is required alongside `"assemble"` because the official leg's own
+   *  `OfficialInputDeps.assembler` (`official-options.ts`) needs it too — this is the SAME instance
+   *  forwarded to that leg below, so the official leg's `autoMemoryDirectory` reads the identical
+   *  MEMDIR decision this assembler's `assemble()` just used to build the system prompt. */
+  assembler?: Pick<ContextAssembler, "assemble" | "memoryDirFor">;
   /** Task 17 (P8b-15): the persisted child roster (`createPersistedChildren` over 8a's
    *  `runtime_children`). A Winter child is registered under the spawning `tool_use.id` with NO
    *  local abort (its process is the session's), fed `progress()` on every frame of its thread, and
@@ -758,6 +762,12 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         extraDirs,
         ...(live.effort === undefined ? {} : { effort: live.effort }),
         ...(live.origin === undefined ? {} : { origin: live.origin }),
+        // `OfficialSessionInput.primary`'s own doc: kept DISTINCT from `cwd` above (which already
+        // defaulted to the session tmp dir) so `officialInputFor` can tell a genuinely workdir-less
+        // session apart from a real single-directory one — the SAME `primary` this closure just
+        // computed, undefaulted, mirroring the Winter leg's own `winterSystemPromptFor` call
+        // (`primary` above, not `primary ?? cwd`).
+        primary,
       };
     };
 
@@ -836,7 +846,11 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         ...testOverrides,
         officialPeer: runtime.officialPeerSync(),
         claudeExecutableFor: () => runtime.claudeExecutableFor(),
-        assembler: deps.assembler ?? { assemble: () => "" },
+        // A harness with no assembler at all (`deps.assembler` absent) has no memory config to have
+        // consulted either — `memoryDirFor: () => undefined` reports that honestly (the SAME answer
+        // a real assembler gives when its own `memory` dep is unwired), so `autoMemoryDirectoryFor`
+        // takes its own documented no-assembler-answer fallback rather than being handed a fake path.
+        assembler: deps.assembler ?? { assemble: () => "", memoryDirFor: () => undefined },
         capabilities,
         // Batch 3 (item 3): threaded onto `officialInputFor` regardless of whether it's empty —
         // `{}` there is byte-identical to before item 3.

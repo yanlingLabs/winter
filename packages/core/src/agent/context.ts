@@ -248,6 +248,45 @@ export class ContextAssembler {
     };
   }
 
+  /** The ONE memory-directory decision — `assemble()`'s own MEMDIR section (below) is the first
+   *  caller, but it is deliberately a PUBLIC method so a second producer can ask the identical
+   *  question and get the identical answer, rather than re-deriving it by hand and drifting. That
+   *  drift already happened once: the official (`claude`) leg's `autoMemoryDirectoryFor`
+   *  (`runtime-sdk/official-options.ts`) used to recompute this from scratch via the bare
+   *  `memoryDirFor`/`assistantMemoryDirFor` free functions in `memory-dir.ts`, which dropped
+   *  `settings.memory.directory` (the user's relocation override), the WS-16 §17 memory-key
+   *  relocation (`relocatedKey`), and `workdirLess` — so the official leg's child could be told to
+   *  write memory to a DIFFERENT directory than the one its own system prompt (built through THIS
+   *  class, `assemble()`) had just named. Restructuring both onto this one method is what makes that
+   *  class of bug structurally impossible going forward.
+   *
+   *  With no `opts` (every caller below, `assemble()` included), returns `undefined` under exactly
+   *  the conditions `assemble()`'s own MEMDIR section falls through to the legacy phase-5b branch:
+   *  no `memory` dep wired (a test that doesn't care about memory), memory disabled, or — for the
+   *  project bucket only — no `cwd` to key a project directory off. `undefined` is NOT itself a
+   *  directory: a caller whose contract requires SOME path regardless of memory being wired/enabled
+   *  (e.g. the official leg's `autoMemoryDirectoryFor`, whose router input has no "no MEMDIR"
+   *  representation — the router forces its OWN auto-memory on unconditionally) passes
+   *  `{evenIfDisabled: true}` to ask "what directory WOULD this be": `enabled()` saying no is never
+   *  by itself a reason to answer `undefined` any more — only "no `memory` dep at all" is (the
+   *  project bucket's null-`cwd` case is UNCHANGED by this flag, since that's "nothing to key a
+   *  directory off", not "memory turned off" — irrelevant to the official leg either way, since its
+   *  own `cwd` is a required string). Skipping `enabled()` while still consulting
+   *  `directory`/`relocatedKey` is what keeps a user's override live for that caller even while
+   *  Winter's OWN memory system is toggled off — the override and the on/off switch are orthogonal
+   *  settings, and collapsing them would silently drop the override again for that one caller, the
+   *  same class of bug this method exists to prevent. */
+  memoryDirFor(
+    input: { cwd: string | null; memoryBucket?: "project" | "assistant"; workdirLess?: boolean },
+    opts?: { evenIfDisabled?: boolean },
+  ): string | undefined {
+    if (!this.memory) return undefined;
+    if (!opts?.evenIfDisabled && !this.memory.enabled()) return undefined;
+    if (input.memoryBucket === "assistant") return this.memory.assistantDir();
+    if (!input.cwd) return undefined;
+    return input.workdirLess ? this.memory.assistantDir() : this.memory.dirFor(input.cwd);
+  }
+
   assemble(input: {
     cwd: string | null; loadedSkills?: string[]; basePromptOverride?: string; memoryBucket?: "project" | "assistant"; skipOutputStyle?: boolean;
     // CM branch review (Important 1 follow-on): whether the `Skill` tool is actually offered to
@@ -435,23 +474,31 @@ export class ContextAssembler {
     // special case — see MemoryContextConfig's own doc comment), disabled memory, or (for the
     // project bucket) a null cwd all fall through to the UNCHANGED legacy branch, so every
     // existing caller/test keeps its exact prior behavior.
-    if (this.memory && this.memory.enabled() && input.memoryBucket === "assistant") {
+    //
+    // The gate itself now lives in `memoryDirFor` (this class's own method, declared just above
+    // `assemble()`) — a second producer (the official leg's `autoMemoryDirectoryFor`) calls that
+    // SAME method for the SAME session, so it can no longer name a different MEMDIR than the one
+    // this section is about to disclose to the model. This block only decides which SECTION SHAPE
+    // to render once a directory is known; the directory computation itself lives in one place.
+    const resolvedMemDir = this.memoryDirFor({ cwd, memoryBucket: input.memoryBucket, workdirLess: input.workdirLess });
+    if (resolvedMemDir !== undefined && input.memoryBucket === "assistant") {
       // Dreaming (Phase 7b): assistant-mode sessions load the shared dream bucket INSTEAD of the
       // cwd MEMDIR, and get NO memory-protocol block — they have no write tools; memories come
       // from dream cycles, and their base prompt already says so.
-      const indexPath = join(this.memory.assistantDir(), "MEMORY.md");
+      const indexPath = join(resolvedMemDir, "MEMORY.md");
       const idx = readMemory(indexPath, MEMDIR_INDEX_MAX_LINES, MEMDIR_INDEX_MAX_BYTES);
       if (idx) {
         sections.push(`<system-reminder>\nAssistant memory index (auto-loaded from ${indexPath}; capped at the first ${MEMDIR_INDEX_MAX_LINES} lines / ${Math.round(MEMDIR_INDEX_MAX_BYTES / 1024)}KB):\n${neutralizeReminderTags(idx)}\n</system-reminder>`);
       }
-    } else if (this.memory && cwd && this.memory.enabled()) {
+    } else if (resolvedMemDir !== undefined) {
       // working-directories T6 (spec §2): a workdir-less CODE session has no project to key a
       // MEMDIR off, but — unlike dispatch/chat above — it DOES have write tools, so it gets the
       // full protocol block same as any project session, just pointed at the shared `_assistant`
-      // bucket via the SAME `assistantDir()` closure the branch above reads (one spelling, not a
-      // second path computation). A with-dirs session (`workdirLess` absent/false, every
-      // pre-existing caller) takes `dirFor(cwd)` exactly as before — byte-identical.
-      const memDir = input.workdirLess ? this.memory.assistantDir() : this.memory.dirFor(cwd);
+      // bucket (`memoryDirFor`'s own `workdirLess` branch, the SAME `assistantDir()` closure the
+      // branch above reads — one spelling, not a second path computation). A with-dirs session
+      // (`workdirLess` absent/false, every pre-existing caller) takes `dirFor(cwd)` exactly as
+      // before — byte-identical.
+      const memDir = resolvedMemDir;
       sections.push(memoryProtocol(memDir));
       const idx = readMemory(join(memDir, "MEMORY.md"), MEMDIR_INDEX_MAX_LINES, MEMDIR_INDEX_MAX_BYTES);
       // Absent MEMORY.md (a fresh project, or one with no saved facts yet) → skip this section
