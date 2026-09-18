@@ -388,8 +388,7 @@ struct ShellRootView: View {
                 // one. This arrow IS the way out, which is why the sidebar no longer carries a Back
                 // row of its own.
                 if isSettings {
-                    ShellTitlebarButton(systemImage: "arrow.left", label: "Back",
-                                        action: leaveSettings)
+                    ShellSettingsBackButton(action: leaveSettings)
                 } else {
                 ShellTitlebarButton(
                     systemImage: shellSidebarToggleSystemImage(isVisible: sidebarVisible),
@@ -1121,6 +1120,35 @@ func shellSidebarToggleLabel(isVisible: Bool) -> String {
 func shellTitlebarIconStyle(isOn: Bool, isDimmed: Bool) -> AnyShapeStyle {
     if isDimmed { return AnyShapeStyle(.tertiary) }
     return isOn ? AnyShapeStyle(Theme.textPrimary) : AnyShapeStyle(Theme.textMuted)
+}
+
+/// Settings' one way out: the arrow beside the traffic lights, now carrying its own words (user
+/// call, 2026-09-18).
+///
+/// Not a `ShellTitlebarButton`, which is a fixed-size icon box — this one is a label, so it sizes to
+/// its text. It reads in `textPrimary` rather than the titlebar's usual muted ink: every other glyph
+/// up there is a control you may or may not want, while this is the only exit from a surface that
+/// has replaced the whole sidebar, and it should not look optional.
+struct ShellSettingsBackButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.left")
+                    .font(Typography.control(.medium))
+                Text("Back to app")
+                    .font(Typography.body())
+            }
+            .foregroundStyle(Theme.textPrimary)
+            .padding(.horizontal, 8)
+            .frame(height: shellTitlebarButtonSize)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(ShellChromeButtonStyle())
+        .help("Back to app")
+        .accessibilityLabel("Back to app")
+    }
 }
 
 struct ShellTitlebarButton: View {

@@ -281,6 +281,32 @@ final class AppShellTests: XCTestCase {
                        "no glyph twice — the cluster is read left to right, not by label")
     }
 
+    /// The settings sidebar's filter (2026-09-18). Title-only by design — matching a section's
+    /// BODY would mean the list changed as panes gained words, which is not a searchable contract.
+    func testSettingsSearchFiltersByTitleAndTreatsBlankAsEverything() {
+        let all = settingsSectionOrder
+        XCTAssertEqual(settingsSectionsMatching("", in: all), all, "a blank query hides nothing")
+        XCTAssertEqual(settingsSectionsMatching("   ", in: all), all, "whitespace is still blank")
+        XCTAssertEqual(settingsSectionsMatching("roles", in: all), [.roles], "case-insensitive")
+        XCTAssertEqual(settingsSectionsMatching("QUOTA", in: all), [.quota])
+        XCTAssertEqual(settingsSectionsMatching("comm", in: all), [.commandLine], "substring")
+        XCTAssertTrue(settingsSectionsMatching("zzz", in: all).isEmpty,
+                      "no match is empty — the caller renders the no-results line")
+        XCTAssertEqual(settingsSectionsMatching("o", in: all),
+                       settingsSectionsMatching("o", in: all).filter(all.contains),
+                       "order follows the section order, never the query")
+    }
+
+    /// Trust rows lead with the folder's own name and keep the full path beside it. The root and a
+    /// trailing slash are the two cases where "last component" is not a name at all.
+    func testTrustFolderDisplayNameFallsBackToThePathItself() {
+        XCTAssertEqual(folderDisplayName("/Users/x/Projects/winter"), "winter")
+        XCTAssertEqual(folderDisplayName("/Users/x/Projects/winter/"), "winter",
+                       "a trailing slash is not a different folder")
+        XCTAssertEqual(folderDisplayName("/"), "/", "the root has no name but itself")
+        XCTAssertEqual(folderDisplayName(""), "", "nothing in, nothing invented")
+    }
+
     func testWindowChromeIsSeamlessTitlebarOverFullSizeContent() {
         let controller = makeController()
         defer { controller.hide() }

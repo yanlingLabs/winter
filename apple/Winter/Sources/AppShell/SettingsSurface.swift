@@ -102,59 +102,116 @@ func settingsSectionSubtitle(_ section: SettingsSection) -> String {
 
 // MARK: - The sidebar, while Settings is open
 
-/// The settings sidebar: just the grouped sections. It occupies the SAME column the recents list
-/// normally does (`ShellSidebar` swaps its content on the destination), so there is never a second
-/// sidebar on screen.
+/// PURE: the sections of `group` whose title matches `query`. An empty/blank query matches
+/// everything, so the unfiltered list is the same code path as the filtered one.
 ///
-/// NO Back row (user call, 2026-09-17): the way out is the one arrow in the titlebar, beside the
-/// traffic lights. A second door at the top of this list was the same verb twice.
+/// Matching is on the TITLE only, deliberately: the subtitles are sentences, and letting them match
+/// makes a search for "model" return five sections whose rows say nothing about models. The user
+/// types the name of the page they want.
+func settingsSectionsMatching(_ query: String, in sections: [SettingsSection]) -> [SettingsSection] {
+    let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return sections }
+    return sections.filter { settingsSectionTitle($0).localizedCaseInsensitiveContains(trimmed) }
+}
+
+/// The settings sidebar: a search field over the grouped sections. It occupies the SAME column the
+/// recents list normally does (`ShellSidebar` swaps its content on the destination), so there is
+/// never a second sidebar on screen.
+///
+/// NO Back row (user call, 2026-09-17), even though the reference window has one: the way out is
+/// the one arrow in the titlebar, beside the traffic lights. A second door at the top of this list
+/// was the same verb twice.
 struct SettingsSidebarContent: View {
     @ObservedObject var nav: ShellNavigationModel
     let selected: SettingsSection
 
+    /// Not persisted and not lifted into `ShellNavigationModel`: a filter is a gesture, not a
+    /// preference, and coming back to Settings with yesterday's query still narrowing the list
+    /// would look like sections had gone missing.
+    @State private var query = ""
+
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
+            // NO horizontal padding of its own (2026-09-18): the rows' pills span this column's
+            // full width, and the extra 10 a side made the field visibly narrower than everything
+            // under it. Its text inset matches a row's internally instead.
+            SettingsSearchField(query: $query)
+                .padding(.bottom, 4)
             ForEach(settingsSectionGroups) { group in
-                Text(group.title)
-                    .font(Typography.body())
-                    .foregroundStyle(Theme.textMuted)
-                    .padding(.horizontal, 10)
-                    .padding(.top, shellSidebarSectionGap)
-                    .padding(.bottom, 4)
-                ForEach(group.sections, id: \.self) { section in
-                    Button {
-                        nav.navigate(to: .settings(section: section))
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: settingsSectionSystemImage(section))
-                                .font(Typography.control())
-                                .frame(width: 22)
-                            Text(settingsSectionTitle(section))
-                                .font(Typography.body())
-                            Spacer(minLength: 0)
-                        }
+                let matches = settingsSectionsMatching(query, in: group.sections)
+                // A group with nothing left in it disappears entirely — a lone heading over empty
+                // space reads as a section that failed to load.
+                if !matches.isEmpty {
+                    Text(group.title)
+                        .font(Typography.body())
+                        .foregroundStyle(Theme.textMuted)
                         .padding(.horizontal, 10)
-                        .frame(height: shellSidebarRowHeight)
-                        .contentShape(Rectangle())
+                        .padding(.top, shellSidebarSectionGap)
+                        .padding(.bottom, 4)
+                    ForEach(matches, id: \.self) { section in
+                        row(section)
                     }
-                    .buttonStyle(ShellSidebarRowStyle(isSelected: section == selected))
                 }
+            }
+            if noSectionMatches {
+                Text("No settings match “\(query.trimmingCharacters(in: .whitespacesAndNewlines))”.")
+                    .font(Typography.label())
+                    .foregroundStyle(Theme.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 14)
             }
         }
     }
+
+    /// True only when the user has actually typed something AND nothing survived it — an empty
+    /// query can never reach this, because it matches every section.
+    private var noSectionMatches: Bool {
+        settingsSectionGroups.allSatisfy { settingsSectionsMatching(query, in: $0.sections).isEmpty }
+    }
+
+    private func row(_ section: SettingsSection) -> some View {
+        Button {
+            nav.navigate(to: .settings(section: section))
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: settingsSectionSystemImage(section))
+                    .font(Typography.control())
+                    .frame(width: 22)
+                Text(settingsSectionTitle(section))
+                    .font(Typography.body())
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: shellSidebarRowHeight)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(ShellSidebarRowStyle(isSelected: section == selected))
+    }
 }
 
-/// PURE: whether this section's body is a re-housed Dashboard pane, which already draws its own
-/// heading and padding. `.roles` and `.providers` are authored for this surface and rely on the
-/// section header above them; everything else is a pane move and must not get a second title.
+/// PURE: whether this section's body prints its own title, so `SettingsSectionView` must not print
+/// one above it.
 ///
-/// A placeholder is NOT a pane — with no wiring the body is `SettingsSectionPlaceholder`, which
-/// draws no title of its own and would leave you looking at an unnamed panel. So the caller ANDs
-/// this with "there is wiring"; this function answers only "is this arm a pane move".
-func settingsSectionPaneDrawsItsOwnHeader(_ section: SettingsSection) -> Bool {
+/// Two ways a body ends up owning its heading, and after the 2026-09-18 restyle they are both the
+/// common case:
+///
+/// - a **settings-native section** built on `SettingsPage` (`SettingsChrome.swift`), which draws
+///   the large left-aligned title, the subtitle, the scroll and the margins itself — `.roles`,
+///   `.quota`, `.trust`, `.peripheral`, `.commandLine`, `.launchAtLogin`, `.daemonStatus`;
+/// - a **re-housed Dashboard pane**, which draws its own `Typography.paneTitle` and padding inside
+///   its own `ScrollView` — `.memory` and `.workflows`, the two left as they are.
+///
+/// `.providers` is the only arm that still relies on the header above it.
+///
+/// A placeholder is NOT a body of either kind — with no wiring the body is
+/// `SettingsSectionPlaceholder`, which draws no title and would leave you looking at an unnamed
+/// panel. So the caller ANDs this with "there is wiring", except for `.roles`, which renders
+/// wiring or not.
+func settingsSectionBodyDrawsItsOwnHeader(_ section: SettingsSection) -> Bool {
     switch section {
-    case .roles, .providers: return false
-    case .quota, .memory, .workflows, .trust, .peripheral,
+    case .providers: return false
+    case .roles, .quota, .memory, .workflows, .trust, .peripheral,
          .commandLine, .launchAtLogin, .daemonStatus: return true
     }
 }
@@ -163,18 +220,19 @@ func settingsSectionPaneDrawsItsOwnHeader(_ section: SettingsSection) -> Bool {
 
 /// What the card shows for a section.
 ///
-/// Two kinds of arm, and the difference is the whole design:
+/// Three kinds of arm after the 2026-09-18 restyle, and the difference is the whole design:
 ///
-/// - **Re-housed** (`.quota` … `.daemonStatus`) — the SAME pane the Dashboard renders, constructed
-///   from the same `DashboardWiring` field. Not a rewrite and not a copy: one implementation, two
-///   homes, so a fix to a pane fixes both. The cost, accepted deliberately rather than papered
-///   over: each pane draws its own title and its own padding inside its own `ScrollView`, so the
-///   section header above it is followed by the pane's own heading. Removing that would mean
-///   editing pane files the Dashboard also renders.
-/// - **Authored here** (`.providers`, `.roles`) — the two sections that are NOT a pane move.
-///   `.providers` consolidates `ProviderPane`'s three peer blocks into one catalog-driven surface
-///   (`SettingsProvidersSection`); `.roles` is genuinely new and read-only until the daemon grows a
-///   pin door (`SettingsRolesSection`). Both live in `Sources/Settings/`.
+/// - **Settings-native** (`.roles`, `.quota`, `.trust`, `.peripheral`, `.commandLine`,
+///   `.launchAtLogin`, `.daemonStatus`) — written for THIS surface in the card/row vocabulary
+///   (`Sources/Settings/SettingsChrome.swift`), each drawing its own `SettingsPage` title, subtitle,
+///   scroll and margins. The seven that were pane moves kept every closure, every pure formatter
+///   and every failure string from the pane they replaced; only the presentation changed, and the
+///   Dashboard panes themselves are untouched and still rendered by the Dashboard.
+/// - **Left as the Dashboard pane** (`.memory`, `.workflows`) — list/editor-shaped surfaces that a
+///   card would make worse, not better. Each arm in `wired()` says why, in place.
+/// - **Authored here, uncarded** (`.providers`) — `SettingsProvidersSection` consolidates
+///   `ProviderPane`'s three peer blocks into one catalog-driven surface. It is a page of editors,
+///   not a page of rows, and it is the one arm that still takes the section header below.
 ///
 /// `.roles` is answered BEFORE the wiring check on purpose: it reads nothing from the daemon today,
 /// so it is the one section that still has something true to say in an app running without wiring.
@@ -202,10 +260,12 @@ struct SettingsSectionView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    /// A pane move only speaks for itself when it is actually rendering — with no wiring the body
-    /// is the placeholder, which needs our header to name it.
+    /// A body only speaks for itself when it is actually rendering — with no wiring the body is the
+    /// placeholder, which needs our header to name it. `.roles` is the exception: it renders
+    /// (through `SettingsPage`, with its own title) whether or not there is wiring at all.
     private var bodyDrawsItsOwnHeader: Bool {
-        settingsSectionPaneDrawsItsOwnHeader(section) && wiring != nil
+        if section == .roles { return true }
+        return settingsSectionBodyDrawsItsOwnHeader(section) && wiring != nil
     }
 
     private var header: some View {
@@ -228,7 +288,20 @@ struct SettingsSectionView: View {
             // passed when it exists. `wiring?.modelRoles ?? nil` flattens the double optional —
             // "no wiring" and "wiring without that method" are the same thing to this pane, and it
             // distinguishes never-asked from asked-and-not-told on its own.
-            SettingsRolesSection(loader: wiring?.modelRoles ?? nil)
+            //
+            // 2026-09-18: `writer:` joins it — `settings.setModelRole`, the door the row's model
+            // picker commits through. Same double-optional flattening and the same reason: a pane
+            // with no writer is simply read-only, which is exactly what it was yesterday.
+            // `catalog:` is deliberately NOT passed, though the parameter exists for it. The
+            // implementer left `ModelCatalogFactsModel.shared` as owed debt, assuming this call
+            // site would retire it; the judgement here is that it should stay. The catalog is one
+            // 134 KB read describing the whole process's world, not per-section state, and this
+            // section is an `@ObservedObject` consumer — handing it a fresh instance per render
+            // would thrash the very cache the store exists to be. `AppDelegate` configures the one
+            // instance when it builds the wiring, which is the same lifetime a threaded dependency
+            // would have had, with fewer moving parts. The parameter stays for previews and tests.
+            SettingsRolesSection(loader: wiring?.modelRoles ?? nil,
+                                 writer: wiring?.setModelRole ?? nil)
         default:
             if let wiring {
                 wired(section, wiring)
@@ -246,26 +319,44 @@ struct SettingsSectionView: View {
         case .providers:
             // ONE consolidated Providers surface (user's call), sharing the Dashboard pane's
             // view-models rather than minting new ones — see `SettingsProvidersSection`.
+            //
+            // LEFT UN-CARDED in the 2026-09-18 restyle, deliberately: this section is three
+            // EDITORS (an Anthropic auth block with its own sheet, a ~100-row catalog of live
+            // `SecureField`s, and a disclosure-group endpoint form), not a list of statements with
+            // one affordance each. A `SettingsCard` row has room for one control; a credential row
+            // is a text field, a state line and two buttons. Forcing it in would shrink the fields
+            // and hide the states. It keeps `SettingsSectionView`'s header — the only arm that
+            // still does.
             SettingsProvidersSection(model: wiring.providerModel)
         case .quota:
-            QuotaPane(fetch: wiring.quotaState)
+            SettingsQuotaSection(fetch: wiring.quotaState)
         case .memory:
+            // LEFT AS THE DASHBOARD PANE in the 2026-09-18 restyle, deliberately: Memory is a
+            // browser — a searchable list of memory documents with a selected-item detail view and
+            // its own editing affordances. That is a master/detail shape, not a column of rows with
+            // trailing controls, and a card would only add a rim around a list that already scrolls
+            // inside one. It draws its own `Typography.paneTitle` header, which is why
+            // `settingsSectionBodyDrawsItsOwnHeader` answers true for it.
             MemoryPane(model: wiring.memoryModel)
         case .workflows:
+            // LEFT AS THE DASHBOARD PANE, for the same reason as `.memory`: Workflows is a list of
+            // saved orchestrations plus the runs currently in flight, each with progress and its
+            // own per-run detail. A settings row cannot carry a running thing.
             WorkflowsPane(model: wiring.workflowsModel)
         case .trust:
-            TrustPane(list: wiring.trustList, remove: wiring.trustRemove)
+            SettingsTrustSection(list: wiring.trustList, remove: wiring.trustRemove)
         case .peripheral:
-            PeripheralPane(provider: wiring.peripheral, helperClient: wiring.helperClient)
+            SettingsPeripheralSection(provider: wiring.peripheral, helperClient: wiring.helperClient)
         case .commandLine:
-            CliInstallerPane(isDev: wiring.isDevProfile,
-                             cliInstallState: wiring.cliInstallState,
-                             installCli: wiring.installCli,
-                             openDevCli: wiring.openDevCli)
+            SettingsCommandLineSection(isDev: wiring.isDevProfile,
+                                       cliInstallState: wiring.cliInstallState,
+                                       installCli: wiring.installCli,
+                                       openDevCli: wiring.openDevCli)
         case .launchAtLogin:
-            LoginItemPane(isEnabled: wiring.loginItemEnabled, setEnabled: wiring.setLoginItemEnabled)
+            SettingsLaunchAtLoginSection(isEnabled: wiring.loginItemEnabled,
+                                         setEnabled: wiring.setLoginItemEnabled)
         case .daemonStatus:
-            DaemonStatusPane(fetch: wiring.daemonStatus)
+            SettingsDaemonStatusSection(fetch: wiring.daemonStatus)
         case .roles:
             // Unreachable: `body(for:)` answers `.roles` before it ever gets here. Spelled out
             // rather than left to a `default:` so that a NEW section added to the enum breaks this

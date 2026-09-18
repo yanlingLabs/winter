@@ -1682,6 +1682,89 @@ extension MethodWrapperTests {
         XCTAssertNil(v.official, "null ⇒ no Release bundle staged, which is not an error")
     }
 
+    /// `models.catalog`: the three arrays, the pricing evidence, and the credential DOORS.
+    ///
+    /// The doors are the load-bearing part. `credentialSlotId: null` on the console row is CORRECT
+    /// (there is no Keychain slot for it), and a `"none"` door means this daemon stores no
+    /// credential at all — so neither may be read as "no key stored". Decoding them raw is what
+    /// lets the app branch on the door rather than on a hardcoded provider id.
+    func testModelsCatalogDecodesFamiliesProvidersModelsAndTheThreeCredentialDoors() async throws {
+        let (client, t) = try await connected()
+        let payload = #"{"ok":true,"schemaVersion":2,"catalogVersion":"v3.8.50+winter.1", "families":[{"id":"gpt","displayName":"GPT","vendor":"openai","status":"stable"}, {"id":"other","displayName":"Other models","vendor":"various","status":"stable"}, {"displayName":"nameless"}], "providers":[{"id":"openai","displayName":"OpenAI","pricingBasis":"token","authKinds":["api-key"], "credentialSlotId":"openai:default","credentialDoor":"keychain"}, {"id":"console","displayName":"Anthropic Console","pricingBasis":"token","authKinds":["oauth"], "credentialSlotId":null,"credentialDoor":"console-profile"}, {"id":"ollama-local","displayName":"Ollama","pricingBasis":"free","authKinds":[], "credentialSlotId":null,"credentialDoor":"none"}, {"id":"futurehost","displayName":"Future","credentialDoor":"smartcard"}], "models":[{"tag":"openai/gpt-5.6-terra","canonicalModelId":"gpt-5.6-terra","providerId":"openai", "familyId":"gpt","status":"stable","costBasis":"list", "pricing":{"inputPerMTokUsd":1.25,"outputPerMTokUsd":10,"cacheReadPerMTokUsd":0.125, "source":"vendor-pricing-page","confidence":"high","observedAt":"2026-09-01T00:00:00Z", "sourceRef":"Published list prices. Cache WRITE rates are under-reported; batch and geographic modifiers are not folded in."}}, {"tag":"console/claude-opus-5","canonicalModelId":"claude-opus-5","providerId":"console", "familyId":"other","status":"stable","pricing":null,"costBasis":"unknown"}, {"tag":"openai/gpt-nameless","providerId":"openai", "pricing":{"inputPerMTokUsd":3,"outputPerMTokUsd":15,"source":"guess"}}, {"canonicalModelId":"no-tag-at-all","providerId":"openai"}]}"#
+
+        let (req, c) = try await roundTrip(t, sentIndex: 1, result: payload) {
+            try await client.modelsCatalog()
+        }
+        XCTAssertEqual(req["method"] as? String, "models.catalog")
+        XCTAssertEqual((req["params"] as? [String: Any])?.isEmpty, true, "params-less")
+        XCTAssertEqual(c.schemaVersion, 2)
+        XCTAssertEqual(c.catalogVersion, "v3.8.50+winter.1")
+
+        // `other` is a REAL family the catalog ships, not a client-side fallback.
+        XCTAssertEqual(c.families.map(\.id), ["gpt", "other"], "a family with no id has nothing to key it by")
+        XCTAssertEqual(c.families[1].displayName, "Other models")
+
+        XCTAssertEqual(c.providers.count, 4)
+        XCTAssertEqual(c.providers[0].credentialSlotId, "openai:default")
+        XCTAssertEqual(c.providers[0].credentialDoor, "keychain")
+        XCTAssertNil(c.providers[1].credentialSlotId, "the console arm has no Keychain slot — correct, not missing")
+        XCTAssertEqual(c.providers[1].credentialDoor, "console-profile")
+        XCTAssertEqual(c.providers[2].credentialDoor, "none", "this daemon stores no credential for it")
+        XCTAssertEqual(c.providers[3].credentialDoor, "smartcard",
+                       "an unknown door is carried raw — a closed enum would drop the provider")
+        XCTAssertEqual(c.providers[3].displayName, "Future")
+        XCTAssertNil(c.providers[3].pricingBasis, "not told ⇒ nil, never a guessed basis")
+
+        XCTAssertEqual(c.models.map(\.tag),
+                       ["openai/gpt-5.6-terra", "console/claude-opus-5", "openai/gpt-nameless"],
+                       "a row with no tag is dropped: there is no string it could ever commit")
+        let terra = try XCTUnwrap(c.models.first)
+        XCTAssertEqual(terra.costBasis, "list")
+        XCTAssertEqual(terra.pricing?.inputPerMTokUsd, 1.25, "a fractional price survives as a double")
+        XCTAssertEqual(terra.pricing?.cacheReadPerMTokUsd, 0.125)
+        XCTAssertNil(terra.pricing?.cacheWritePerMTokUsd, "an unpublished cache-write rate is nil, not 0")
+        XCTAssertEqual(terra.pricing?.confidence, "high")
+        XCTAssertEqual(terra.pricing?.observedAt, "2026-09-01T00:00:00Z")
+        XCTAssertTrue(terra.pricing?.sourceRef?.contains("under-reported") ?? false,
+                      "the prose provenance arrives whole — it is never truncated on the way in")
+
+        XCTAssertNil(c.models[1].pricing, "`pricing: null` is the ordinary case — 600 of 618 rows")
+        XCTAssertEqual(c.models[1].familyId, "other")
+    }
+
+    /// **A PRICE WITH NO ATTRIBUTION IS NOT A PRICE.** `source` and `confidence` are both required
+    /// on the wire and they are the only fields that say what the numbers are worth, so a pricing
+    /// object missing either decodes to nil — which lands every consumer on its "not published"
+    /// rendering rather than showing an unattributed figure as a list price.
+    func testAPricingObjectWithNoConfidenceDecodesToNoPriceAtAll() async throws {
+        let (client, t) = try await connected()
+        let payload = #"{"ok":true,"models":[ {"tag":"a/one","costBasis":"list","pricing":{"inputPerMTokUsd":3,"outputPerMTokUsd":15,"source":"vendor"}}, {"tag":"a/two","costBasis":"list","pricing":{"inputPerMTokUsd":3,"outputPerMTokUsd":15,"confidence":"high"}}, {"tag":"a/three","costBasis":"list","pricing":{"outputPerMTokUsd":15,"source":"vendor","confidence":"high"}}, {"tag":"a/four","costBasis":"list","pricing":{"inputPerMTokUsd":3,"outputPerMTokUsd":15,"source":"vendor","confidence":"low"}} ]}"#
+        let (_, c) = try await roundTrip(t, sentIndex: 1, result: payload) { try await client.modelsCatalog() }
+
+        XCTAssertNil(c.models[0].pricing, "no confidence ⇒ no price")
+        XCTAssertNil(c.models[1].pricing, "no source ⇒ no price")
+        XCTAssertNil(c.models[2].pricing, "half a pair of numbers is not a price")
+        XCTAssertEqual(c.models[3].pricing?.confidence, "low",
+                       "a LOW confidence is still an attribution — it decodes, and the basis decides the rest")
+        XCTAssertEqual(c.models[0].costBasis, "list",
+                       "the row's own basis is untouched by the pricing object being dropped")
+    }
+
+    /// An absent `costBasis` reads as `"unknown"` — not told is not quotable — and the three arrays
+    /// are independently optional, so a partial answer is a partial catalog and never a throw.
+    func testAnAbsentCostBasisIsUnknownAndMissingArraysAreEmpty() async throws {
+        let (client, t) = try await connected()
+        let (_, c) = try await roundTrip(t, sentIndex: 1,
+                                         result: #"{"ok":true,"models":[{"tag":"a/one"}]}"#) {
+            try await client.modelsCatalog()
+        }
+        XCTAssertEqual(c.models[0].costBasis, "unknown")
+        XCTAssertNil(c.models[0].familyId, "not told ⇒ nil, which is NOT the real `other` family")
+        XCTAssertTrue(c.families.isEmpty)
+        XCTAssertTrue(c.providers.isEmpty)
+        XCTAssertNil(c.schemaVersion)
+    }
+
     /// `settings.modelRoles` read + `settings.setModelRole` write. The write's two load-bearing
     /// facts: a cleared role sends a literal `null` (NOT an omitted key), and the reply is the
     /// whole map, so one call refreshes the pane.
@@ -1735,6 +1818,7 @@ extension MethodWrapperTests {
             ("versions.get", { _ = try await client.versionsGet() }),
             ("settings.modelRoles", { _ = try await client.settingsModelRoles() }),
             ("settings.setModelRole", { _ = try await client.setModelRole(role: "pins.dream", model: nil) }),
+            ("models.catalog", { _ = try await client.modelsCatalog() }),
         ]
         for (method, call) in calls {
             let error = try await roundTripError(t, sentIndex: index, code: -32601,

@@ -168,6 +168,11 @@ extension JSONValue {
     /// (`z.record(...)` on the wire) that need to come back as `[String: JSONValue]` rather than
     /// a further-decoded shape core doesn't validate either.
     var objectValue: [String: JSONValue]? { if case .object(let o) = self { return o }; return nil }
+
+    /// Also not in the core set, which stops at `intValue` (a number that rounds to itself). Prices
+    /// are the first wire numbers here that are genuinely fractional — `$0.075 per 1M tokens` reads
+    /// as `0` through `intValue` — so they need the undamaged double.
+    var doubleValue: Double? { if case .number(let n) = self { return n }; return nil }
 }
 
 extension WinterClient {
@@ -1839,5 +1844,271 @@ extension WinterClient {
             "model": model.map { JSONValue.string($0) } ?? .null,
         ]))
         return decodeModelRoles(r)
+    }
+}
+
+// MARK: - models.catalog (2026-09-18): the pinned provider catalog, as this daemon resolved it
+//
+// LOCAL-ONLY, params-less, read-only. Same degradation contract as the four above: a daemon that
+// predates it answers `-32601`, and that is an expected reply, not a fault.
+//
+// THE SCALE MATTERS TO EVERY CONSUMER, so it is stated once here: ~15 families, ~102 providers,
+// ~618 models, ~134 KB of JSON — and **18 of the 618 rows carry a price at all**. An unpriced row is
+// therefore the ORDINARY case and a priced one the exception; a UI built the other way round will
+// be a wall of "unknown" for everything a user actually looks at.
+//
+// THREE DECODE POSTURES, all deliberate:
+//
+//  1. **Identity is required, everything else is defaulted.** A family/provider row with no `id`,
+//     and a model row with no `tag`, is dropped — there is nothing to key it by. Every other field
+//     falls back (a display name to its id, a cost basis to `"unknown"`) or stays nil ("not told").
+//  2. **Vocabulary fields stay RAW STRINGS** — `status`, `pricingBasis`, `credentialDoor`,
+//     `costBasis`, a price's `source`/`confidence`. Same rule `CredentialRow` states at length: the
+//     catalog is the agent SDK's and grows on an SDK bump with NO app release, so a closed Swift
+//     enum would turn "a value I don't know" into "a row I drop".
+//  3. **A price with no `source`/`confidence` decodes to NIL, not to a price.** Both are REQUIRED on
+//     the wire, and they are the only things that say what the numbers are worth; a figure with
+//     neither is an unattributed number, and an unattributed number rendered as a price is exactly
+//     the failure the whole `costBasis` apparatus exists to prevent. `nil` lands every consumer on
+//     its "not published" rendering, which is the safe one.
+
+/// One provider+model pair's published prices, USD per million tokens (`models.catalog`'s
+/// `ModelDescriptor.pricing`). `nil` on the model when the catalog carries none — which is 600 of
+/// the 618 rows.
+///
+/// **This type is EVIDENCE, not a verdict.** Whether a number may be SHOWN is answered by the
+/// model's `costBasis` (computed daemon-side) and by the provider's `pricingBasis`, never by the
+/// presence of digits here: an INFERRED price carries real, plausible numbers under
+/// `costBasis: "unknown"`, and a subscription provider's rows carry its API twin's list prices,
+/// which describe a different credential entirely.
+public struct CatalogPricing: Equatable, Sendable {
+    public let inputPerMTokUsd: Double
+    public let outputPerMTokUsd: Double
+    /// Independently optional — a provider that publishes no cache rate is the common case, and a
+    /// missing rate is NOT zero.
+    public let cacheReadPerMTokUsd: Double?
+    public let cacheWritePerMTokUsd: Double?
+    /// Where the figure came from, in the catalog's own vocabulary. Required on the wire.
+    public let source: String
+    /// How much the catalog trusts it. **Required on the wire** and required here: see posture 3.
+    public let confidence: String
+    /// ISO instant the figure was observed, when the catalog states one.
+    public let observedAt: String?
+    /// PROSE PROVENANCE — up to ~1178 characters. The evidence behind the figure, including the
+    /// catalog's own disclosures (cache-WRITE rates are under-reported; batch, fast-lane and
+    /// geographic modifiers are not folded into these numbers).
+    ///
+    /// **It is not a tooltip string and must never be truncated into one.** It is a paragraph a
+    /// user asks for; a UI that inlines it will either clip the disclosure that makes the number
+    /// honest or push every other row off the screen.
+    public let sourceRef: String?
+
+    public init(inputPerMTokUsd: Double, outputPerMTokUsd: Double,
+                cacheReadPerMTokUsd: Double? = nil, cacheWritePerMTokUsd: Double? = nil,
+                source: String, confidence: String,
+                observedAt: String? = nil, sourceRef: String? = nil) {
+        self.inputPerMTokUsd = inputPerMTokUsd
+        self.outputPerMTokUsd = outputPerMTokUsd
+        self.cacheReadPerMTokUsd = cacheReadPerMTokUsd
+        self.cacheWritePerMTokUsd = cacheWritePerMTokUsd
+        self.source = source
+        self.confidence = confidence
+        self.observedAt = observedAt
+        self.sourceRef = sourceRef
+    }
+}
+
+/// One model family (`models.catalog`'s `families`).
+///
+/// The array is ALREADY FILTERED daemon-side to the families actually in use, and it includes a
+/// REAL `"other"` family that ~149 model rows resolve to. `other` is DATA — a curated bucket the
+/// catalog states — not a client-side fallback for "we were told nothing", and the two must not
+/// render as one thing.
+///
+/// **There is no canonical ORDER here.** The catalog sorts families by id, and an id is not a label
+/// ("gpt" sorts nowhere near "GPT-5"), so any order a UI shows is that UI's own policy.
+public struct CatalogFamily: Equatable, Sendable {
+    public let id: String
+    /// Falls back to `id` when the catalog names none — plainer, never wrong.
+    public let displayName: String
+    public let vendor: String?
+    /// Raw (`stable` | `preview` | … ) — the catalog's vocabulary, not a Swift enum.
+    public let status: String?
+
+    public init(id: String, displayName: String, vendor: String? = nil, status: String? = nil) {
+        self.id = id
+        self.displayName = displayName
+        self.vendor = vendor
+        self.status = status
+    }
+}
+
+/// One provider (`models.catalog`'s `providers`), ~102 of them.
+///
+/// **`credentialDoor` is the field that decides what a UI may say about readiness**, and it has
+/// exactly three values today, each meaning something a `providerId` join cannot express:
+///
+/// - `"keychain"` (~96 providers) — `credentialSlotId` names a Keychain slot; joining
+///   `credential.list` on THAT SLOT is the whole readiness test.
+/// - `"console-profile"` (1, the `console` provider) — `credentialSlotId` is **null and that is
+///   CORRECT**: the Anthropic Console arm has no Keychain slot at all. Its readiness is an on-disk
+///   `ant` profile the daemon re-checks live at every spawn, so this read deliberately cannot
+///   answer it. Offerable, not promised.
+/// - `"none"` (5: bedrock, ollama-local, uncloseai, vertex, xai-oauth) — this daemon stores no
+///   credential for them. These are precisely the rows a naive join would mark "no credential"
+///   forever, with nothing the user could do about it.
+///
+/// Behaviour is derived from this field, NEVER from a hardcoded provider id.
+public struct CatalogProvider: Equatable, Sendable {
+    public let id: String
+    public let displayName: String
+    /// `token` | `subscription` | `free`, raw. A statement about the CREDENTIAL, which is why it
+    /// overrides any per-token figure on that provider's model rows.
+    public let pricingBasis: String?
+    public let authKinds: [String]
+    /// The Keychain slot id (`openai:default`). **Null is meaningful, not missing** — see the
+    /// `console-profile` and `none` doors above.
+    public let credentialSlotId: String?
+    /// `keychain` | `console-profile` | `none`, raw. Nil means the daemon did not say, which is
+    /// "not told" and must render as no credential state at all.
+    public let credentialDoor: String?
+
+    public init(id: String, displayName: String, pricingBasis: String? = nil,
+                authKinds: [String] = [], credentialSlotId: String? = nil,
+                credentialDoor: String? = nil) {
+        self.id = id
+        self.displayName = displayName
+        self.pricingBasis = pricingBasis
+        self.authKinds = authKinds
+        self.credentialSlotId = credentialSlotId
+        self.credentialDoor = credentialDoor
+    }
+}
+
+/// One catalog row (`models.catalog`'s `models`), ~618 of them — **one per provider+model PAIR**,
+/// which is why `tag` is the key and `canonicalModelId` is the thing that makes
+/// `deepseek/deepseek-v4-pro` and `openrouter/deepseek-v4-pro` one model served twice.
+public struct CatalogModel: Equatable, Sendable {
+    /// The fully-qualified, provider-qualified tag (`codex-oauth/gpt-5.6-terra`). The ONLY string
+    /// any caller may put on the wire for this row; never recompose one from the parts below.
+    public let tag: String
+    public let canonicalModelId: String?
+    public let providerId: String?
+    /// The family id, resolving to the real `"other"` family for ~149 rows.
+    public let familyId: String?
+    public let status: String?
+    public let pricing: CatalogPricing?
+    /// `"list"` | `"unknown"`, **computed daemon-side** — `"list"` is asserted only when the figure
+    /// came from an official published document. Absent reads as `"unknown"`: not told is not
+    /// quotable. All 18 priced rows report `"list"`.
+    public let costBasis: String
+
+    public init(tag: String, canonicalModelId: String? = nil, providerId: String? = nil,
+                familyId: String? = nil, status: String? = nil,
+                pricing: CatalogPricing? = nil, costBasis: String = "unknown") {
+        self.tag = tag
+        self.canonicalModelId = canonicalModelId
+        self.providerId = providerId
+        self.familyId = familyId
+        self.status = status
+        self.pricing = pricing
+        self.costBasis = costBasis
+    }
+}
+
+/// `models.catalog`'s whole answer.
+///
+/// `schemaVersion`/`catalogVersion` are CARRIED, not gated on: a client that refused an unfamiliar
+/// schema version would go blind on the very bump it was meant to survive, and every field above
+/// already degrades on its own. They are here so a surface can show which catalog it is looking at.
+public struct ModelsCatalog: Equatable, Sendable {
+    public let schemaVersion: Int?
+    public let catalogVersion: String?
+    public let families: [CatalogFamily]
+    public let providers: [CatalogProvider]
+    public let models: [CatalogModel]
+
+    public init(schemaVersion: Int? = nil, catalogVersion: String? = nil,
+                families: [CatalogFamily] = [], providers: [CatalogProvider] = [],
+                models: [CatalogModel] = []) {
+        self.schemaVersion = schemaVersion
+        self.catalogVersion = catalogVersion
+        self.families = families
+        self.providers = providers
+        self.models = models
+    }
+}
+
+extension WinterClient {
+    /// `models.catalog` — READ-ONLY, params-less, LOCAL-only; the pinned provider catalog as this
+    /// daemon resolved it: the families in use, every provider with its credential door, and one
+    /// row per provider+model pair with whatever pricing evidence the catalog carries.
+    ///
+    /// ~134 KB of JSON and entirely static for a daemon's lifetime (it is compiled-in catalog data,
+    /// not state), so a caller should read it ONCE per session and cache — never per keystroke.
+    ///
+    /// Throws `-32601` on a daemon that predates the method; see the section header above.
+    public func modelsCatalog() async throws -> ModelsCatalog {
+        let r = try await request("models.catalog", params: .object([:]))
+
+        func pricing(_ v: JSONValue?) -> CatalogPricing? {
+            // Posture 3: the two numbers AND both attributions, or nothing. A figure with no
+            // source/confidence is an unattributed number, and this decode refuses to mint one.
+            guard let o = v?.objectValue,
+                  let input = o["inputPerMTokUsd"]?.doubleValue,
+                  let output = o["outputPerMTokUsd"]?.doubleValue,
+                  let source = o["source"]?.stringValue,
+                  let confidence = o["confidence"]?.stringValue
+            else { return nil }
+            return CatalogPricing(
+                inputPerMTokUsd: input,
+                outputPerMTokUsd: output,
+                cacheReadPerMTokUsd: o["cacheReadPerMTokUsd"]?.doubleValue,
+                cacheWritePerMTokUsd: o["cacheWritePerMTokUsd"]?.doubleValue,
+                source: source,
+                confidence: confidence,
+                observedAt: o["observedAt"]?.stringValue,
+                sourceRef: o["sourceRef"]?.stringValue
+            )
+        }
+
+        let families: [CatalogFamily] = (r["families"]?.arrayValue ?? []).compactMap { f in
+            guard let id = f["id"]?.stringValue else { return nil }
+            return CatalogFamily(id: id,
+                                 displayName: f["displayName"]?.stringValue ?? id,
+                                 vendor: f["vendor"]?.stringValue,
+                                 status: f["status"]?.stringValue)
+        }
+        let providers: [CatalogProvider] = (r["providers"]?.arrayValue ?? []).compactMap { p in
+            guard let id = p["id"]?.stringValue else { return nil }
+            return CatalogProvider(
+                id: id,
+                displayName: p["displayName"]?.stringValue ?? id,
+                pricingBasis: p["pricingBasis"]?.stringValue,
+                authKinds: (p["authKinds"]?.arrayValue ?? []).compactMap { $0.stringValue },
+                // An explicit `null` and an absent key decode the same here, and for the console
+                // door they MEAN the same: there is no Keychain slot to name.
+                credentialSlotId: p["credentialSlotId"]?.stringValue,
+                credentialDoor: p["credentialDoor"]?.stringValue
+            )
+        }
+        let models: [CatalogModel] = (r["models"]?.arrayValue ?? []).compactMap { m in
+            guard let tag = m["tag"]?.stringValue else { return nil }
+            return CatalogModel(
+                tag: tag,
+                canonicalModelId: m["canonicalModelId"]?.stringValue,
+                providerId: m["providerId"]?.stringValue,
+                familyId: m["familyId"]?.stringValue,
+                status: m["status"]?.stringValue,
+                pricing: pricing(m["pricing"]),
+                // Not told ⇒ not quotable. `"unknown"` is the catalog's own word for that.
+                costBasis: m["costBasis"]?.stringValue ?? "unknown"
+            )
+        }
+        return ModelsCatalog(schemaVersion: r["schemaVersion"]?.intValue,
+                             catalogVersion: r["catalogVersion"]?.stringValue,
+                             families: families,
+                             providers: providers,
+                             models: models)
     }
 }

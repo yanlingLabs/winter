@@ -146,16 +146,20 @@ final class UpdatesPanelTests: XCTestCase {
                        ReleaseNotes(isHTML: true, body: "<p>Fixed things</p>"))
     }
 
-    @MainActor
-    func testHtmlNotesAreFlattenedAndPlainTextPassesThrough() {
+    /// Plain-text notes bypass the parser entirely; HTML notes go through it and keep their
+    /// structure. (The pass this replaces FLATTENED the HTML to a single string — right while a
+    /// `<description>` was one line, wrong now that it carries headings, lists and fences.)
+    func testHtmlNotesKeepTheirStructureAndPlainTextPassesThrough() {
         let html = ReleaseNotes(isHTML: true, body: "<h2>0.115.0</h2><p>Faster <b>everything</b>.</p>")
-        let flattened = releaseNotesText(html)
-        XCTAssertTrue(flattened.contains("0.115.0"))
-        XCTAssertTrue(flattened.contains("Faster everything."))
-        XCTAssertFalse(flattened.contains("<"))
+        XCTAssertEqual(releaseNotesBlocks(html), [
+            .heading(level: 2, runs: [ReleaseNotesRun("0.115.0")]),
+            .paragraph([ReleaseNotesRun("Faster "),
+                        ReleaseNotesRun("everything", strong: true),
+                        ReleaseNotesRun(".")]),
+        ])
 
         let plain = ReleaseNotes(isHTML: false, body: "  just words\n")
-        XCTAssertEqual(releaseNotesText(plain), "just words")
+        XCTAssertEqual(releaseNotesBlocks(plain), [.paragraph([ReleaseNotesRun("just words")])])
     }
 
     // MARK: - The installed-versions table
@@ -412,4 +416,299 @@ final class UpdatesPanelTests: XCTestCase {
         XCTAssertEqual(installedComponentValue(rows[0]), "the daemon didn't report this one")
         XCTAssertFalse(rows.contains { $0.name.lowercased().contains("executable") })
     }
+
+    // MARK: - Release notes: HTML -> blocks (2026-09-18)
+    //
+    // `parseReleaseNotesHTML` is pure, so every case below is a table test: a string in, an array
+    // of blocks out. The fixtures at the bottom are the EXACT bytes `release.ts` puts in the feed
+    // (`scripts/release-lib.ts`'s `appcastDescription`), embedded rather than read from disk: the
+    // samples live in a git-ignored records directory that a committed file may not point at
+    // (CLAUDE.md). Regenerating them means re-running `appcastDescription` over the notes files.
+
+    /// The compatibility line, and the one that matters MOST today: every item live in the feed
+    /// (0.111.0 - 0.114.4) carries a single TAGLESS description, and Sparkle's default format is
+    /// HTML — so the tagless body reaches the parser flagged as HTML and must come out as one
+    /// ordinary paragraph. NOT the subtitle: a lone line is the notes, not metadata about them.
+    func testATaglessOneLinerIsOneOrdinaryParagraph() {
+        let line = "Winter agent SDK 0.0.16 \u{00B7} Claude Agent SDK 0.3.250"
+        XCTAssertEqual(releaseNotesBlocks(ReleaseNotes(isHTML: true, body: line)),
+                       [.paragraph([ReleaseNotesRun(line)])])
+    }
+
+    /// The subtitle promotion is conservative on both sides: it needs a REAL `<p>` (so the tagless
+    /// line above stays body copy) and it needs something to be a subtitle to (so a description
+    /// that is nothing but one paragraph reads as notes).
+    func testTheSubtitlePromotionNeedsARealParagraphAndSomethingAfterIt() {
+        XCTAssertEqual(parseReleaseNotesHTML("<p>Only this</p>"),
+                       [.paragraph([ReleaseNotesRun("Only this")])])
+        XCTAssertEqual(parseReleaseNotesHTML("<p>SDK line</p><p>Notes</p>"),
+                       [.subtitle([ReleaseNotesRun("SDK line")]),
+                        .paragraph([ReleaseNotesRun("Notes")])])
+    }
+
+    func testHeadingsCarryTheirLevel() {
+        XCTAssertEqual(parseReleaseNotesHTML("<h2>Two</h2><h3>Three</h3><h1>One</h1>"), [
+            .heading(level: 2, runs: [ReleaseNotesRun("Two")]),
+            .heading(level: 3, runs: [ReleaseNotesRun("Three")]),
+            .heading(level: 1, runs: [ReleaseNotesRun("One")]),
+        ])
+    }
+
+    /// Tight lists and LOOSE ones (`<li><p>…</p></li>`, what markdown emits for blank-line
+    /// separated items) must both come out as one bullet per item. Treating that inner `<p>` as a
+    /// paragraph boundary would shred every list into unbulleted prose.
+    func testTightAndLooseListItemsBothBecomeOneBulletEach() {
+        XCTAssertEqual(parseReleaseNotesHTML("<ul>\n  <li>first</li>\n  <li>second</li>\n</ul>"),
+                       [.bullet([ReleaseNotesRun("first")]), .bullet([ReleaseNotesRun("second")])])
+        XCTAssertEqual(parseReleaseNotesHTML("<ul><li><p>first</p></li><li><p>second</p></li></ul>"),
+                       [.bullet([ReleaseNotesRun("first")]), .bullet([ReleaseNotesRun("second")])])
+    }
+
+    /// A fence keeps its real newlines (never collapsed like prose whitespace), drops the `<code>`
+    /// the generator always nests inside it, and decodes its escaped text.
+    func testACodeFenceKeepsItsNewlinesAndDecodesItsText() {
+        XCTAssertEqual(
+            parseReleaseNotesHTML("<pre><code>a &amp;&amp; b\nc &lt;d&gt;</code></pre>"),
+            [.code("a && b\nc <d>")])
+    }
+
+    /// Inline runs: the marks compose, and the SPACES between runs survive. Trimming each run
+    /// instead of the block's outer edges would weld "Faster" onto "everything".
+    func testInlineCodeAndStrongBecomeRunsWithTheirSpacingIntact() {
+        XCTAssertEqual(
+            parseReleaseNotesHTML("<p>Run <code>winter doctor</code> when <strong>stuck</strong>.</p>"),
+            [.paragraph([ReleaseNotesRun("Run "),
+                         ReleaseNotesRun("winter doctor", code: true),
+                         ReleaseNotesRun(" when "),
+                         ReleaseNotesRun("stuck", strong: true),
+                         ReleaseNotesRun(".")])])
+        XCTAssertEqual(parseReleaseNotesHTML("<p><strong><code>x</code></strong></p>"),
+                       [.paragraph([ReleaseNotesRun("x", strong: true, code: true)])])
+    }
+
+    /// Adjacent runs with the same marks merge, so block equality tracks rendered MEANING rather
+    /// than tokenizer internals — an ignored `<a>` or a decoded entity must not split a phrase.
+    func testAdjacentRunsWithTheSameMarksMerge() {
+        XCTAssertEqual(parseReleaseNotesHTML("<p>one <a>two</a> three &amp; four</p>"),
+                       [.paragraph([ReleaseNotesRun("one two three & four")])])
+    }
+
+    /// Entities, decoded exactly ONCE. `&amp;lt;` is the TEXT `&lt;` — a second pass over the
+    /// output would turn an escaped example into live markup. An unrecognised entity stays
+    /// literal, and `&nbsp;` survives the whitespace collapse (U+00A0 is in
+    /// `CharacterSet.whitespaces`, which is why the collapse is ASCII-only).
+    func testEveryEntityDecodesExactlyOnce() {
+        XCTAssertEqual(decodeReleaseNotesEntities("&amp;"), "&")
+        XCTAssertEqual(decodeReleaseNotesEntities("&lt;p&gt;"), "<p>")
+        XCTAssertEqual(decodeReleaseNotesEntities("&quot;q&quot;"), "\"q\"")
+        XCTAssertEqual(decodeReleaseNotesEntities("&#39;a&apos;b"), "'a'b")
+        XCTAssertEqual(decodeReleaseNotesEntities("&#x2014;"), "\u{2014}")
+        XCTAssertEqual(decodeReleaseNotesEntities("a&nbsp;b"), "a\u{00A0}b")
+        XCTAssertEqual(decodeReleaseNotesEntities("&amp;lt;"), "&lt;")
+        XCTAssertEqual(decodeReleaseNotesEntities("&notareal;"), "&notareal;")
+        XCTAssertEqual(decodeReleaseNotesEntities("a & b"), "a & b")
+        // Through the whole parser, not just the decoder: no `&` may ever reach the screen raw.
+        XCTAssertEqual(parseReleaseNotesHTML("<p>Tom &amp; Jerry &lt;tag&gt; &quot;x&quot;</p>"),
+                       [.paragraph([ReleaseNotesRun("Tom & Jerry <tag> \"x\"")])])
+        XCTAssertEqual(parseReleaseNotesHTML("<p>a&nbsp;b</p>"),
+                       [.paragraph([ReleaseNotesRun("a\u{00A0}b")])])
+    }
+
+    /// Malformed input must lose neither the notes nor its own composure. Every case here is a
+    /// degradation to TEXT — raw markup reaching the screen is the one outcome that is a bug.
+    func testMalformedMarkupDegradesToTextAndNeverToMarkup() {
+        // Unclosed block tags: each new block boundary flushes the one before it.
+        XCTAssertEqual(parseReleaseNotesHTML("<p>one<p>two<h2>three"), [
+            .subtitle([ReleaseNotesRun("one")]),
+            .paragraph([ReleaseNotesRun("two")]),
+            .heading(level: 2, runs: [ReleaseNotesRun("three")]),
+        ])
+        // An unclosed inline mark dies at its block rather than bleeding into the next.
+        XCTAssertEqual(parseReleaseNotesHTML("<p><strong>bold</p><p>plain</p>"), [
+            .subtitle([ReleaseNotesRun("bold", strong: true)]),
+            .paragraph([ReleaseNotesRun("plain")]),
+        ])
+        // A `<` that begins no tag is prose, and must not eat the rest of the notes.
+        XCTAssertEqual(parseReleaseNotesHTML("<p>a < b and 3 <4</p>"),
+                       [.paragraph([ReleaseNotesRun("a < b and 3 <4")])])
+        // An unterminated tag at the end of the buffer.
+        XCTAssertEqual(parseReleaseNotesHTML("<p>text</p><p"),
+                       [.paragraph([ReleaseNotesRun("text")])])
+        // Close tags with nothing open, and an unknown element, are transparent.
+        XCTAssertEqual(parseReleaseNotesHTML("</p></ul></strong>loose <span>text</span>"),
+                       [.paragraph([ReleaseNotesRun("loose text")])])
+        // A comment is not content.
+        XCTAssertEqual(parseReleaseNotesHTML("<p>before<!-- hidden -->after</p>"),
+                       [.paragraph([ReleaseNotesRun("beforeafter")])])
+        // Empty and whitespace-only bodies make no blocks at all — never an empty box.
+        XCTAssertEqual(parseReleaseNotesHTML(""), [])
+        XCTAssertEqual(parseReleaseNotesHTML("<p></p><ul><li>  </li></ul>\n  \n"), [])
+    }
+
+    /// Attributes cannot occur in this feed (the generator emits none, not even a language class),
+    /// but the tokenizer skips them rather than printing them — the degradation a widened
+    /// generator would need.
+    func testAttributesAreSkippedRatherThanPrinted() {
+        XCTAssertEqual(
+            parseReleaseNotesHTML("<pre><code class=\"language-sh\">winter doctor</code></pre>"),
+            [.code("winter doctor")])
+        XCTAssertEqual(parseReleaseNotesHTML("<p>see <a href=\"https://x/a>b\">here</a></p>"),
+                       [.paragraph([ReleaseNotesRun("see here")])])
+    }
+
+    // MARK: - The real feed payloads
+
+    /// The primary fixture: 0.112.0 is the most structurally complete `<description>` the release
+    /// pipeline has ever produced — subtitle, three `h2` sections, a `<pre><code>` fence, six
+    /// bullets, `strong` and inline `code` in one payload. Exercised end to end.
+    func testTheRealPayloadParsesEndToEnd() {
+        let blocks = parseReleaseNotesHTML(Self.appcastDescription_0_112_0)
+
+        // 3 h2 + 6 li + 3 p (one of which is promoted to the subtitle) + 1 pre.
+        XCTAssertEqual(blocks.count, 13)
+        XCTAssertEqual(blocks.first,
+                       .subtitle([ReleaseNotesRun("Winter agent SDK 0.0.16 \u{00B7} Claude Agent SDK 0.3.250")]))
+
+        var headings: [String] = []
+        var bullets = 0
+        var fences: [String] = []
+        for block in blocks {
+            switch block {
+            case .heading(let level, let runs):
+                XCTAssertEqual(level, 2)
+                headings.append(releaseNotesPlainText(runs))
+            case .bullet: bullets += 1
+            case .code(let text): fences.append(text)
+            case .paragraph, .subtitle: break
+            }
+        }
+        XCTAssertEqual(headings, ["Sign in to the Anthropic Console",
+                                  "Claude subscriptions stay off",
+                                  "Fixes"])
+        XCTAssertEqual(bullets, 6)
+        XCTAssertEqual(fences, ["winter login --anthropic-console\nwinter logout --anthropic-console"])
+
+        // The lead paragraph's marks, in order — the shape the renderer draws.
+        guard case .paragraph(let lead)? = blocks.dropFirst(2).first else {
+            return XCTFail("the first section's paragraph is missing")
+        }
+        XCTAssertEqual(lead.filter(\.isStrong).map(\.text),
+                       ["API key", "Console login", "Claude subscription"])
+        XCTAssertEqual(lead.filter(\.isCode).map(\.text), ["ant"])
+        XCTAssertTrue(releaseNotesPlainText(lead).hasSuffix("From the terminal:"))
+
+        assertNoMarkupSurvives(blocks)
+    }
+
+    /// The longest payload shipped (3777 characters). Structure pinned by count, and the whole
+    /// thing swept for markup residue — 28 inline `code` spans and 7 `strong` runs is where a
+    /// tokenizer bug would show first.
+    func testTheLongestRealPayloadParses() {
+        let blocks = parseReleaseNotesHTML(Self.appcastDescription_0_114_0)
+
+        // 3 h2 + 10 li + 3 p (one promoted to the subtitle).
+        XCTAssertEqual(blocks.count, 16)
+        XCTAssertEqual(blocks.first,
+                       .subtitle([ReleaseNotesRun("Winter agent SDK 0.0.16 \u{00B7} Claude Agent SDK 0.3.250")]))
+        XCTAssertEqual(blocks.filter { if case .heading = $0 { return true } else { return false } }.count, 3)
+        XCTAssertEqual(blocks.filter { if case .bullet = $0 { return true } else { return false } }.count, 10)
+        XCTAssertEqual(blocks.filter { if case .code = $0 { return true } else { return false } }.count, 0)
+
+        let codeRuns = releaseNotesAllRuns(blocks).filter(\.isCode)
+        XCTAssertEqual(codeRuns.count, 28)
+        XCTAssertTrue(codeRuns.contains { $0.text == "codex-oauth/gpt-5.6-terra" })
+        XCTAssertEqual(releaseNotesAllRuns(blocks).filter(\.isStrong).count, 7)
+
+        assertNoMarkupSurvives(blocks)
+    }
+
+    // MARK: Helpers
+
+    /// Nothing the parser emits may contain a tag or an undecoded entity. Checked on every block of
+    /// both real payloads — the one failure mode that is unambiguously a bug on screen.
+    private func assertNoMarkupSurvives(_ blocks: [ReleaseNotesBlock],
+                                        file: StaticString = #filePath, line: UInt = #line) {
+        for block in blocks {
+            let text: String
+            switch block {
+            case .subtitle(let runs), .paragraph(let runs), .bullet(let runs):
+                text = releaseNotesPlainText(runs)
+            case .heading(_, let runs):
+                text = releaseNotesPlainText(runs)
+            case .code(let body):
+                text = body
+            }
+            XCTAssertFalse(text.isEmpty, "an empty block reached the renderer", file: file, line: line)
+            for tag in ["<p>", "</p>", "<li>", "<h2>", "<code>", "<strong>", "<pre>", "<ul>"] {
+                XCTAssertFalse(text.contains(tag), "raw markup on screen: \(tag) in \(text)",
+                               file: file, line: line)
+            }
+            for entity in ["&amp;", "&lt;", "&gt;", "&quot;", "&#39;", "&nbsp;"] {
+                XCTAssertFalse(text.contains(entity), "undecoded entity on screen: \(entity)",
+                               file: file, line: line)
+            }
+        }
+    }
+
+    private func releaseNotesPlainText(_ runs: [ReleaseNotesRun]) -> String {
+        runs.map(\.text).joined()
+    }
+
+    private func releaseNotesAllRuns(_ blocks: [ReleaseNotesBlock]) -> [ReleaseNotesRun] {
+        blocks.flatMap { block -> [ReleaseNotesRun] in
+            switch block {
+            case .subtitle(let runs), .paragraph(let runs), .bullet(let runs): return runs
+            case .heading(_, let runs): return runs
+            case .code: return []
+            }
+        }
+    }
+
+    // MARK: The fixtures - verbatim feed bytes
+
+    /// `<description>` for 0.112.0, exactly as `appcastDescription` renders it.
+    private static let appcastDescription_0_112_0 = """
+<p>Winter agent SDK 0.0.16 · Claude Agent SDK 0.3.250</p>
+<h2>Sign in to the Anthropic Console</h2>
+<p>Claude models no longer need an API key copied into Winter. The Anthropic section of the Providers pane now offers three ways in: <strong>API key</strong>, <strong>Console login</strong>, and <strong>Claude subscription</strong> (shown, but not available yet). Console login signs you in through Anthropic's own Platform CLI, <code>ant</code>, which ships inside Winter.app. Usage is billed to your Console organization at API rates, exactly like a key. From the terminal:</p>
+<pre><code>winter login --anthropic-console
+winter logout --anthropic-console</code></pre>
+<ul>
+  <li>Both of Winter's runtimes use it. Code sessions on Claude models run on the Console profile, and sessions that run on Winter's own runtime use the Console token.</li>
+  <li><code>runtimes.official.auth</code> picks the method: <code>auto</code> (the default: Console when you're signed in, otherwise your API key), <code>api-key</code>, or <code>console</code>. Changes apply without a restart.</li>
+  <li>Your API key and your Console login are stored separately in the Keychain. Signing in to or out of the Console never touches a stored API key.</li>
+  <li>A running Claude session keeps the credential it started with. A new choice applies to the next session, or the next time a session moves between runtimes.</li>
+  <li>Signing out checks that the profile is really gone, and says so if it isn't.</li>
+</ul>
+<h2>Claude subscriptions stay off</h2>
+<p>Signing in with a claude.ai subscription still isn't supported. The hidden <code>runtimes.official.subscriptionAuth</code> setting no longer loosens any check on its own; it stays inert until that door is approved.</p>
+<h2>Fixes</h2>
+<ul>
+  <li>Moving a session from the Claude runtime back to Winter's runtime no longer reports success when the destination fails to start. The move is refused and the session stays where it was.</li>
+</ul>
+"""
+
+    /// `<description>` for 0.114.0 - the longest one shipped.
+    private static let appcastDescription_0_114_0 = """
+<p>Winter agent SDK 0.0.16 · Claude Agent SDK 0.3.250</p>
+<h2>A model is now "provider/model", never just "model"</h2>
+<p>The same model reached through two providers was one name with a hidden coin-flip behind it. <code>gpt-5.6-terra</code> could mean your Codex subscription or your OpenAI API key, and Winter picked one for you. It is now two distinct models: <code>codex-oauth/gpt-5.6-terra</code> and <code>openai/gpt-5.6-terra</code>. The same holds everywhere: <code>anthropic/claude-sonnet-5</code> versus <code>console/claude-sonnet-5</code>, <code>deepseek/deepseek-reasoner</code> versus <code>openrouter/deepseek-reasoner</code>.</p>
+<ul>
+  <li><strong>The picker is grouped by provider.</strong> Under each provider you see that provider's models by their usual names (Terra, Sol, Fable…). Pick the provider you mean; Winter never chooses one.</li>
+  <li><strong>Badges and status lines show the model name.</strong> The provider is shown as a secondary label or tooltip, not glued into every title.</li>
+  <li><strong>Your existing settings and sessions migrate once, on first launch.</strong> A stored bare model becomes the tag for the provider you had configured (<code>codex-oauth</code> stays Codex, an <code>openai-compatible</code> endpoint becomes <code>openai/…</code> with its base URL kept under <code>providers.openai.baseUrl</code>). Claude models follow your Console login when one exists. A backup is written to <code>settings.json.bak-pre-ws20</code>.</li>
+  <li><strong>The assistant conversation and background jobs</strong> (dreaming, cleaning, research) run on provider-qualified pins that default to your configured provider. They can be changed under <code>pins</code> in settings; they are never hard-coded to a provider.</li>
+  <li><strong>Anthropic Console is its own provider.</strong> The <code>runtimes.official.auth</code> setting is gone: an <code>anthropic/…</code> model uses your API key, a <code>console/…</code> model uses the Console profile from <code>winter login --anthropic-console</code>.</li>
+  <li><strong>The CLI:</strong> <code>winter model</code> lists models grouped by provider and accepts the full tag; <code>winter model codex-oauth/gpt-5.6-terra</code>.</li>
+</ul>
+<h2>Reasoning effort on OpenAI models</h2>
+<p>The catalog now carries the measured effort vocabulary for <code>gpt-5.6</code>, <code>gpt-5.6-sol</code>, <code>gpt-5.6-terra</code> and <code>gpt-5.6-luna</code> on both the OpenAI API and Codex: low, medium, high, xhigh and max. The "declares no reasoning effort vocabulary" refusal that 0.113.1 worked around is gone.</p>
+<h2>Under the hood</h2>
+<ul>
+  <li>Agent SDK 0.0.13 (catalog: <code>console</code> provider, Console twins of every Claude row, the effort vocabularies) and router 0.0.8 (a request always names its provider; a bare model id and a provider that disagrees with the tag are both refused with a typed reason).</li>
+  <li>The Mac app writes the advisor model through the daemon (<code>settings.setAdvisorModel</code>) instead of editing <code>settings.json</code> directly.</li>
+  <li><strong>iPhone users: update the iOS app before relying on on-device chat.</strong> This release changes the protocol's model fields to tags. An iOS build on the previous kit stores the daemon's default model verbatim and sends it to the Codex API, which rejects it. The fix ships in the next iOS build (kit <code>v-tags-kit1</code>); Mac-mediated sessions are unaffected.</li>
+  <li>A default model outside Codex and OpenAI (for example <code>anthropic/claude-sonnet-5</code>) is accepted, but the daemon's own background features that run on its internal provider (titles, review, dreaming, cleaning, research) stay off until the default names Codex or OpenAI. One log line says so.</li>
+</ul>
+"""
 }
