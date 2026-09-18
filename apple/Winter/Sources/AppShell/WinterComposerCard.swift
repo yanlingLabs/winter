@@ -594,10 +594,9 @@ struct WinterComposerCard: View {
         // The composer keeps its OWN complete face and border — all four corners, always. That is
         // what makes the strip read as a second surface behind it rather than as this card growing
         // a section.
-        .background(
-            RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
-                .fill(Theme.composerSurface)
-        )
+        // The panels' GLASS (user call, 2026-09-18), not the opaque `composerSurface`: the
+        // transcript scrolling under the composer reads through it, as it does under ⌘K.
+        .shellGlass(in: RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous))
         // The rim strengthens on hover; only the RIM moves, never the fill — a card that changed
         // colour under the pointer would read as selected rather than as ready.
         //
@@ -635,8 +634,10 @@ struct WinterComposerCard: View {
     @ViewBuilder
     private func stripSurface(_ strip: ComposerStrip?) -> some View {
         if let strip {
-            RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
-                .fill(Theme.canvas)
+            // Glass too, now that the composer in front of it is: an opaque strip behind a
+            // translucent composer would show through it as a solid block.
+            Color.clear
+                .shellGlass(in: RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
                         .strokeBorder(Theme.hairline.opacity(0.5),
@@ -800,10 +801,8 @@ struct ComposerQuestionBox: View {
         // one thing that breaks the illusion of a single surface changing form. Same constant, so
         // the two cannot drift.
         .frame(maxWidth: newChatCardWidth)
-        .background(
-            RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
-                .fill(Theme.composerSurface)
-        )
+        // The composer's glass — the morph keeps one surface (see above).
+        .shellGlass(in: RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
                 .strokeBorder(isHovered ? AnyShapeStyle(Color.primary.opacity(0.30))
