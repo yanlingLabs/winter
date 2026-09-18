@@ -487,21 +487,63 @@ final class ComposerChromeTests: XCTestCase {
                        "no pick ⇒ the daemon's live default model decides the levels")
     }
 
-    /// What the chip SAYS. It names the model in force, keeps today's "Default model" text while
-    /// nothing is pinned (the string this slot has rendered since it was a placeholder), and names
-    /// the effort beside it once one is chosen — a control that shows neither would leave a picked
-    /// effort invisible everywhere on the page.
-    func testTheChipNamesTheModelInForceAndTheEffortBesideIt() {
+    /// What the chip SAYS (2026-09-18): the model in force by its short name — the daemon's live
+    /// default when nothing is pinned, never "Default model" — and nothing else: no effort, no
+    /// provider, no runtime. The help line still names both axes in full.
+    func testTheChipNamesOnlyTheModelInForce() {
         let unset = WinterComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.chat),
                                       policy: nil, model: wiredModel(), stop: nil).modelRow
-        XCTAssertEqual(unset.chipTitle, newChatModelPlaceholder)
-        XCTAssertEqual(unset.chipTitle, "Default model", "…which is the text this slot already rendered")
+        XCTAssertEqual(unset.chipTitle, "srv a", "the live default's short name, not a placeholder")
+        XCTAssertEqual(unset.effectiveModel, "srv-a")
 
         let picked = WinterComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.chat),
                                        policy: nil, model: wiredModel(model: "srv-b", effort: "high"), stop: nil).modelRow
-        XCTAssertEqual(picked.chipTitle, "srv-b · high")
+        XCTAssertEqual(picked.chipTitle, "srv b", "no effort beside it")
         XCTAssertTrue(picked.help.contains("srv-b"))
         XCTAssertTrue(picked.help.contains("high"))
+
+        let empty = SyncConfigSnapshot(provider: "none", defaultModel: "", models: [],
+                                       defaultEffort: "", clientEfforts: [])
+        let unknown = WinterComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.chat),
+                                        policy: nil, model: wiredModel(catalogue: empty), stop: nil).modelRow
+        XCTAssertEqual(unknown.chipTitle, newChatModelPlaceholder, "only when the daemon named no model")
+    }
+
+    /// The short-name rule: vendor word, provider note and dashes stripped.
+    func testComposerModelShortNames() {
+        XCTAssertEqual(composerModelShortName(displayName: "GPT-5.6 Sol"), "5.6 Sol")
+        XCTAssertEqual(composerModelShortName(displayName: "Claude Fable 5.1"), "Fable 5.1")
+        XCTAssertEqual(composerModelShortName(displayName: "Claude Opus 4.7 (Bedrock)"), "Opus 4.7")
+        XCTAssertEqual(composerModelShortName(displayName: "gpt-5.6-terra"), "5.6 terra")
+        XCTAssertEqual(composerModelShortName(displayName: "Gemini 3 Pro"), "Gemini 3 Pro")
+        XCTAssertEqual(composerModelShortName(displayName: "gptx-1"), "gptx 1", "a whole word only")
+        let catalogue = SyncConfigSnapshot(provider: "codex-oauth", defaultModel: "codex-oauth/gpt-5.6-sol",
+            models: [SyncConfigModelInfo(id: "codex-oauth/gpt-5.6-sol", providerId: "codex-oauth",
+                                         displayName: "GPT-5.6 Sol", facingName: "sol", efforts: [])],
+            defaultEffort: "", clientEfforts: [])
+        XCTAssertEqual(composerModelShortName("codex-oauth/gpt-5.6-sol", catalogue: catalogue), "5.6 Sol")
+        XCTAssertEqual(composerModelShortName("anthropic/claude-fable-5-1", catalogue: catalogue), "fable 5 1",
+                       "no catalogue row: the tag's model portion, never the provider")
+    }
+
+    /// The panel's offerable set is the session catalogue, grouped by provider in its own order,
+    /// and the panel centres over the button without leaving the window.
+    func testComposerPanelPermittedSetAndPlacement() {
+        let catalogue = SyncConfigSnapshot(provider: "a", defaultModel: "a/m1",
+            models: [SyncConfigModelInfo(id: "a/m1", providerId: "a", displayName: "M1", facingName: nil, efforts: []),
+                     SyncConfigModelInfo(id: "b/m1", providerId: "b", displayName: "M1", facingName: nil, efforts: []),
+                     SyncConfigModelInfo(id: "a/m2", providerId: "a", displayName: "M2", facingName: nil, efforts: [])],
+            defaultEffort: "", clientEfforts: [])
+        let permitted = sessionPermittedProviders(catalogue, facts: ModelCatalogFacts(providerNames: ["a": "Alpha"]))
+        XCTAssertEqual(permitted.map(\.providerId), ["a", "b"])
+        XCTAssertEqual(permitted.map(\.displayName), ["Alpha", "b"])
+        XCTAssertEqual(permitted[0].models, ["a/m1", "a/m2"])
+        let groups = roleModelFamilyGroups(permitted)
+        XCTAssertEqual(composerModelPanelGroup(groups, effective: "b/m1")?.models.first?.providerIds, ["a", "b"])
+
+        XCTAssertEqual(composerModelPanelX(buttonMidX: 500, containerWidth: 1000, width: 200), 400)
+        XCTAssertEqual(composerModelPanelX(buttonMidX: 20, containerWidth: 1000, width: 200), 8)
+        XCTAssertEqual(composerModelPanelX(buttonMidX: 990, containerWidth: 1000, width: 200), 792)
     }
 
     /// One change at a time, and VISIBLY — the same discipline the permissions row keeps, read off

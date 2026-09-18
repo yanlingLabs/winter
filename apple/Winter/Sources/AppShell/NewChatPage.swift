@@ -122,7 +122,7 @@ let newChatSendButtonSize: CGFloat = 30
 
 /// What the model/effort slot reads until it is wired. NOT a real model name: showing one would
 /// claim this page had picked it, and the page has no session to pick for yet.
-let newChatModelPlaceholder = "Default model"
+let newChatModelPlaceholder = "Model"
 
 /// The composer's own placeholder, inside the card. The greeting above already says what this
 /// page is for, so this asks rather than repeats — the reference's own split.

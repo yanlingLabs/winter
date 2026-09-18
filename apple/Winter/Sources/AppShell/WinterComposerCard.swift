@@ -188,16 +188,18 @@ struct ComposerModelRow: Equatable {
     /// "Advisor model" submenu's checkmark. `nil` = unset ("Automatic").
     var advisorModel: String? = nil
 
-    /// What the chip reads: the model in force, and the effort beside it once one is chosen.
-    ///
-    /// `newChatModelPlaceholder` while nothing is pinned — the exact text this slot has rendered
-    /// since it was a placeholder, so an unpicked composer looks unchanged. Naming the effort only
-    /// when it is set keeps the common case short while making a chosen effort visible somewhere on
-    /// the page (before this task it was visible nowhere on the new-chat page at all).
+    /// The model actually in force: the pinned one, else the daemon's live default. `nil` only when
+    /// the daemon has reported neither.
+    var effectiveModel: String? {
+        model ?? (catalogue.defaultModel.isEmpty ? nil : catalogue.defaultModel)
+    }
+
+    /// What the chip reads (2026-09-18): the model in force by its SHORT name — "5.6 Sol",
+    /// "Fable 5.1" (`composerModelShortName`) — and nothing else. Never "Default model", never the
+    /// provider, the runtime or the effort: the panel behind the button says all of those.
+    /// `newChatModelPlaceholder` only while the daemon has reported no model at all.
     var chipTitle: String {
-        let label = model.map { modelDisplayLabel($0, catalogue: catalogue) } ?? newChatModelPlaceholder
-        guard let effort else { return label }
-        return "\(label) · \(effort)"
+        effectiveModel.map { composerModelShortName($0, catalogue: catalogue) } ?? newChatModelPlaceholder
     }
 
     /// The runtime badge text (`runtimeBadgeLabel`, `ShellSidebar.swift`'s pure mapping) — `nil`
@@ -229,32 +231,25 @@ struct ComposerModelChip: View {
     let onOpen: () -> Void
     let onSetModel: (String?) -> Void
     let onSetEffort: (String?) -> Void
-    /// Winter Phase 8d (P8d-8, Task 4.2): the "Advisor model" submenu's write door. Defaulted so
-    /// the (currently sole) construction site's older callers, and every test double, keep
-    /// compiling unchanged.
-    var onSetAdvisorModel: (String?) -> Void = { _ in }
 
-    /// Local presentational state, the convention every other picker on this screen follows.
-    @State private var showingMenu = false
+    /// Whether this button's panel is open. The panel itself renders at shell level
+    /// (`ComposerModelPanelLayer`), fed through `ComposerModelPanelKey` while this is true.
+    @State private var showingPanel = false
 
     var body: some View {
         Button {
-            onOpen()
-            showingMenu = true
+            if !showingPanel {
+                onOpen()
+                // The families and provider names come from `models.catalog`, read once, lazily.
+                Task { await ModelCatalogFactsModel.shared.loadIfNeeded() }
+            }
+            showingPanel.toggle()
         } label: {
             HStack(spacing: 4) {
                 Text(row.chipTitle)
                     .font(Typography.body())
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                // Winter Phase 8d (Task 4.2, WS-14 §14): the runtime badge, absent whenever
-                // `ComposerModelRow.runtimeBadge` says so.
-                if let badge = row.runtimeBadge {
-                    Text(badge)
-                        .font(Typography.tiny())
-                        .foregroundStyle(Theme.textMuted)
-                        .lineLimit(1)
-                }
                 Image(systemName: "chevron.down")
                     .font(Typography.badge(.semibold))
                     .foregroundStyle(Theme.textMuted)
@@ -264,29 +259,14 @@ struct ComposerModelChip: View {
         .buttonStyle(.plain)
         .help(row.help)
         .accessibilityLabel(row.help)
-        .popover(isPresented: $showingMenu, arrowEdge: .top) {
-            VStack(alignment: .leading, spacing: 2) {
-                ModelMenuContent(current: row.model,
-                                 isDisabled: row.modelChangeInFlight,
-                                 catalogue: row.catalogue,
-                                 onSelect: { onSetModel($0); showingMenu = false })
-                Divider().opacity(0.5).padding(.vertical, 6)
-                EffortMenuContent(wire: row.wire, tiers: row.tiers, current: row.effort,
-                                  isDisabled: row.effortChangeInFlight,
-                                  onSelect: { onSetEffort($0); showingMenu = false })
-                // Winter Phase 8d (P8d-8, Task 4.2); WS-20 review fix (Nit 2): the D30 advisor
-                // picker — "Automatic" plus the SAME catalogue the model menu above just offered
-                // (`row.catalogue`, verbatim — P8d-8's own ruling), now sectioned by provider the
-                // same way. A menu, not a THIRD stacked section: this is a one-shot local-settings
-                // edit with no in-flight/optimistic state to show, unlike the two live-session
-                // controls above it.
-                Divider().opacity(0.5).padding(.vertical, 6)
-                AdvisorModelMenuContent(current: row.advisorModel,
-                                        catalogue: row.catalogue,
-                                        onSelect: { onSetAdvisorModel($0) })
-            }
-            .padding(12)
-            .frame(minWidth: 200)
+        .anchorPreference(key: ComposerModelPanelKey.self, value: .bounds) { anchor in
+            showingPanel
+                ? ComposerModelPanelEntry(anchor: anchor,
+                                          row: row,
+                                          onSetModel: onSetModel,
+                                          onSetEffort: onSetEffort,
+                                          onClose: { showingPanel = false })
+                : nil
         }
     }
 }
@@ -707,8 +687,7 @@ struct WinterComposerCard: View {
             ComposerModelChip(row: modelRow,
                               onOpen: model.onOpen,
                               onSetModel: model.onSetModel,
-                              onSetEffort: model.onSetEffort,
-                              onSetAdvisorModel: model.onSetAdvisorModel)
+                              onSetEffort: model.onSetEffort)
             NewChatControlButton(systemImage: "mic", label: "Dictate (not wired yet)", font: Typography.bodyLarge(.medium))
             sendButton
         }

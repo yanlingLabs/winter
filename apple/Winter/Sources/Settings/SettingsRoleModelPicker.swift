@@ -193,17 +193,23 @@ struct ModelCatalogFacts: Equatable, Sendable {
     /// Provider id → its credential door and the daemon's readiness boolean (`models.catalog`'s
     /// `providers`). Absent for a provider means "not told", which renders as no credential state.
     var providerCredentials: [String: ProviderCredentialFact]
+    /// Provider id → its facing name (`models.catalog`'s `providers[].displayName`). The session
+    /// catalogue (`sync.config`) names models but not providers, so the composer's picker reads
+    /// provider names from here; absent renders the id.
+    var providerNames: [String: String]
 
     init(byTag: [String: ModelCatalogFact] = [:],
          familyOrder: [String] = [],
          familyNames: [String: String] = [:],
          providerPricingBasis: [String: String] = [:],
-         providerCredentials: [String: ProviderCredentialFact] = [:]) {
+         providerCredentials: [String: ProviderCredentialFact] = [:],
+         providerNames: [String: String] = [:]) {
         self.byTag = byTag
         self.familyOrder = familyOrder
         self.familyNames = familyNames
         self.providerPricingBasis = providerPricingBasis
         self.providerCredentials = providerCredentials
+        self.providerNames = providerNames
     }
 
     /// Told nothing. Still a fully usable picker — and the exact state a daemon that predates
@@ -260,7 +266,9 @@ func modelCatalogFacts(_ catalog: ModelsCatalog) -> ModelCatalogFacts {
 
     var basis: [String: String] = [:]
     var credentialsByProvider: [String: ProviderCredentialFact] = [:]
+    var providerNames: [String: String] = [:]
     for provider in catalog.providers {
+        providerNames[provider.id] = provider.displayName
         if let pricingBasis = provider.pricingBasis { basis[provider.id] = pricingBasis }
         credentialsByProvider[provider.id] =
             ProviderCredentialFact(credentialDoor: provider.credentialDoor,
@@ -271,7 +279,8 @@ func modelCatalogFacts(_ catalog: ModelsCatalog) -> ModelCatalogFacts {
                              familyOrder: [],
                              familyNames: familyNames,
                              providerPricingBasis: basis,
-                             providerCredentials: credentialsByProvider)
+                             providerCredentials: credentialsByProvider,
+                             providerNames: providerNames)
 }
 
 // MARK: - The one thing in this file that reads a daemon
@@ -1067,6 +1076,38 @@ struct SettingsRoleModelPicker: View {
     let role: SettingsModelRole
     let value: SettingsRoleValue
     var facts: ModelCatalogFacts = .none
+    var isWriting: Bool = false
+    var errorText: String?
+    let onCommit: (String?) -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        ModelFamilyPickerCard(title: settingsRolePickerTitle(role),
+                              subtitle: settingsModelRoleExplanation(role),
+                              permitted: value.permittedProviders,
+                              selection: settingsRolePickerSelection(value),
+                              offersClear: settingsRoleAllowsClearing(role),
+                              facts: facts,
+                              isWriting: isWriting,
+                              errorText: errorText,
+                              onCommit: onCommit,
+                              onClose: onClose)
+    }
+}
+
+/// The two-step family → model → provider card itself, independent of what is being chosen FOR:
+/// Settings → Roles wraps it for one role (`SettingsRoleModelPicker`), and the composer's "Other"
+/// door wraps it for the session's own model (`SessionModelPickerHost`, 2026-09-18). Same card,
+/// same place, same pure functions — only the title, the offered set and the commit differ.
+struct ModelFamilyPickerCard: View {
+    let title: String
+    let subtitle: String
+    /// The offerable set — the ONLY tags this card can commit (`roleModelTag` never composes).
+    let permitted: [ModelRolePermittedProvider]
+    let selection: RoleModelPickerSelection
+    /// Whether the "Use the default" row leads the model column.
+    var offersClear: Bool = false
+    var facts: ModelCatalogFacts = .none
     /// True while a write is in flight — every row goes inert rather than queueing a second write.
     var isWriting: Bool = false
     /// A failed write's sentence, already through `shellPanelErrorText`. Shown INSIDE the card,
@@ -1085,17 +1126,22 @@ struct SettingsRoleModelPicker: View {
     @State private var expandedProvenanceTag: String?
 
     private var groups: [RoleModelFamilyGroup] {
-        roleModelFamilyGroups(value.permittedProviders, facts: facts)
+        roleModelFamilyGroups(permitted, facts: facts)
     }
 
+    /// The family showing: the one clicked, else the one holding the current selection (so the
+    /// card opens where you already are), else the first.
     private var selectedGroup: RoleModelFamilyGroup? {
-        groups.first { $0.id == familyId } ?? groups.first
+        if let familyId, let group = groups.first(where: { $0.id == familyId }) { return group }
+        if case let .tag(tag) = selection,
+           let group = groups.first(where: { $0.models.contains { $0.tags.contains(tag) } }) {
+            return group
+        }
+        return groups.first
     }
-
-    private var selection: RoleModelPickerSelection { settingsRolePickerSelection(value) }
 
     var body: some View {
-        ShellPanelCard(accessibilityName: settingsRolePickerTitle(role), onClose: onClose) {
+        ShellPanelCard(accessibilityName: title, onClose: onClose) {
             VStack(alignment: .leading, spacing: 0) {
                 header
                 Divider()
@@ -1120,7 +1166,7 @@ struct SettingsRoleModelPicker: View {
         .onChange(of: facts) { _, updated in
             guard case let .providers(modelKey) = step,
                   roleProviderOptions(modelKey: modelKey,
-                                      permitted: value.permittedProviders,
+                                      permitted: permitted,
                                       facts: updated).isEmpty
             else { return }
             step = .models
@@ -1163,14 +1209,14 @@ struct SettingsRoleModelPicker: View {
 
     private var headerTitle: String {
         switch step {
-        case .models: return settingsRolePickerTitle(role)
+        case .models: return title
         case let .providers(modelKey): return modelLabel(modelKey)
         }
     }
 
     private var headerSubtitle: String {
         switch step {
-        case .models: return settingsModelRoleExplanation(role)
+        case .models: return subtitle
         case .providers: return "Who serves it"
         }
     }
@@ -1223,7 +1269,7 @@ struct SettingsRoleModelPicker: View {
     private var modelColumn: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 1) {
-                if settingsRoleAllowsClearing(role) {
+                if offersClear {
                     pickerRow(title: roleModelPickerClearTitle,
                               detail: roleModelPickerClearDetail,
                               isSelected: selection == .useDefault,
@@ -1258,7 +1304,7 @@ struct SettingsRoleModelPicker: View {
     @ViewBuilder
     private func providersStep(_ modelKey: String) -> some View {
         let options = roleProviderOptions(modelKey: modelKey,
-                                          permitted: value.permittedProviders,
+                                          permitted: permitted,
                                           facts: facts)
         ScrollView {
             VStack(alignment: .leading, spacing: 1) {
