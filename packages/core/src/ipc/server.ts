@@ -105,7 +105,7 @@ import type { ProviderLink } from "../peripheral/provider-link";
 import type { HardwareBroker } from "../peripheral/hardware";
 import { verbClass } from "../peripheral/hardware";
 import type { QuotaManager } from "../providers/quota";
-import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor } from "../settings";
+import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom } from "../settings";
 import { disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
 import { diagnoseRuntimes } from "../runtime-sdk/runtimes-doctor";
@@ -2184,8 +2184,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           // doc + capabilities/lsp.ts's own doc on `settings.lsp.enabled`) — every other key has no
           // settings gate at all and is always live. `external`'s tool set is per-plugin/dynamic
           // (no static WINTER_CAPABILITY_TOOLS rows), so `tools` is `[]` for it, never fabricated.
-          const enabled = key === "computer" ? settings?.computerUse?.enabled === true
-            : key === "lsp" ? settings?.lsp?.enabled !== false
+          // Minor 5e: `computerUseEnabledFrom`/`lspEnabledFrom` (settings.ts) — the ONE reader for
+          // each gate, rather than a third hand-spelled copy of what daemon.ts's boot registration
+          // and `settings-apply.ts`'s hot-toggle closures already decide.
+          const enabled = key === "computer" ? (settings ? computerUseEnabledFrom(settings) : false)
+            : key === "lsp" ? (settings ? lspEnabledFrom(settings) : true)
             : true;
           return { key, enabled, tools };
         });

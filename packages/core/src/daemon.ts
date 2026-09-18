@@ -17,7 +17,7 @@ import { ensureOutdir } from "./sessions/outdir";
 import { writeDiff, type DiffHeader } from "./diffs/store";
 import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
-import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, type Settings } from "./settings";
+import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, type Settings } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
@@ -1070,7 +1070,10 @@ export async function startDaemon(opts: {
     },
     // LIVE, not a boot snapshot: the servers are built when a session starts, so toggling computer
     // use reaches the next session with no restart and no help from Task 9's `disallowedTools`.
-    computerUseEnabled: () => settings?.computerUse?.enabled === true,
+    // Minor 5e (fix wave): `computerUseEnabledFrom` (settings.ts) — the ONE reader this gate shares
+    // with the boot registration below, `settings-apply.ts`'s `cuEnabled`, and `ipc/server.ts`'s
+    // `capabilities.list` handler.
+    computerUseEnabled: () => (settings ? computerUseEnabledFrom(settings) : false),
     // THE SAME four closures `registerBrowserTool` gets below — `mintPanelTab` and
     // `panelCommands.dispatch` are what emit `panel_tab_opened`/`panel_tab_activated`/
     // `panel_command`, so a capability with its own would open tabs nobody can see and dispatch
@@ -1815,7 +1818,8 @@ export async function startDaemon(opts: {
     // P8b Task 6: the `let` itself is HOISTED above the Winter runtime block (it is the holder the
     // `computer` capability server's getter reads — one service, one lease set, two doors); only
     // the construction stays here, unchanged.
-    if (settings?.computerUse?.enabled) {
+    // Minor 5e (fix wave): `computerUseEnabledFrom` — the ONE reader, see this const's own doc.
+    if (settings && computerUseEnabledFrom(settings)) {
       computerUse = new ComputerUseService({ broker: peripheral, heartbeatMs: settings?.peripheral?.heartbeatMs });
       // D1-T2: `deferred: ["dispatch"]` — immediate in code (unchanged), deferred only for the
       // dispatch coordinator (matches the hot-toggle re-registration below, registerComputer).
@@ -1854,7 +1858,8 @@ export async function startDaemon(opts: {
     // outDirOf just above, action- rather than value-shaped (see persistDiff's own doc comment).
     const persistDiff = (sid: string, diffId: string, header: Omit<DiffHeader, "truncated">, patch: string) =>
       writeDiff(winterHome, sid, diffId, header, patch);
-    if (lspCfg?.enabled !== false) {
+    // Minor 5e (fix wave): `lspEnabledFrom` — the ONE reader, see this const's own doc comment.
+    if (settings ? lspEnabledFrom(settings) : true) {
       lspManager = new LspManager({ idleShutdownMs: lspCfg?.idleShutdownMs });
     }
     // MEDIUM (fix wave, pre-merge review, finding 3): the same live `() => settings` closure this

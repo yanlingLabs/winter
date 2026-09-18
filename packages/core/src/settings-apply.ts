@@ -1,5 +1,5 @@
 import type { Settings } from "./settings";
-import { memoryEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings } from "./settings";
+import { memoryEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, computerUseEnabledFrom, lspEnabledFrom } from "./settings";
 import { retentionFromSettings } from "./runtime-state/retention";
 import type { ToolRegistry } from "./agent/tools/registry";
 import type { ComputerUseService } from "./agent/computer-use";
@@ -91,15 +91,19 @@ export function makeApply(deps: SettingsApplyDeps): (prev: Settings | null, next
   const sleep = deps.sleep ?? ((ms: number) => Bun.sleep(ms));
   const log = deps.log ?? (() => {});
 
-  // Per-flag polarity — the two flags have OPPOSITE defaults, so a single `!!` form is wrong for
-  // one of them. These mirror the exact boot gates in daemon.ts so `prev` (boot settings) yields
-  // the true registered-at-boot state, INCLUDING the absent-block boundary:
-  //   - computerUse: opt-in / default-OFF  (daemon.ts `if (settings?.computerUse?.enabled)`) —
-  //     absent block ⇒ NOT registered. `cuEnabled(null)` ⇒ false.
-  //   - lsp: opt-out / default-ON (daemon.ts `if (lspCfg?.enabled !== false)`, same `!== false`
-  //     convention as hooks/reviewer) — absent block ⇒ registered. `lspEnabled(null)` ⇒ true.
-  const cuEnabled = (s: Settings | null) => !!s?.computerUse?.enabled;
-  const lspEnabled = (s: Settings | null) => s?.lsp?.enabled !== false;
+  // Per-flag polarity — the two flags have OPPOSITE defaults, so a single form is wrong for one of
+  // them. These mirror the exact boot gates in daemon.ts so `prev` (boot settings) yields the true
+  // registered-at-boot state, INCLUDING the absent-block boundary:
+  //   - computerUse: opt-in / default-OFF (`computerUseEnabledFrom`) — absent block ⇒ NOT
+  //     registered. `cuEnabled(null)` ⇒ false.
+  //   - lsp: opt-out / default-ON (`lspEnabledFrom`, same `!== false` convention as hooks/reviewer)
+  //     — absent block ⇒ registered. `lspEnabled(null)` ⇒ true.
+  // Minor 5e (fix wave, pre-merge review): `computerUseEnabledFrom`/`lspEnabledFrom` (settings.ts)
+  // are now the ONE reader for each gate — this file, daemon.ts's boot registration + its own
+  // `computerUseEnabled` live getter, and `ipc/server.ts`'s `capabilities.list` handler all shared
+  // FOUR independently hand-spelled copies of the identical boolean before this.
+  const cuEnabled = (s: Settings | null) => (s ? computerUseEnabledFrom(s) : false);
+  const lspEnabled = (s: Settings | null) => (s ? lspEnabledFrom(s) : true);
   // memory: default-ON / opt-out, same polarity as lsp — mirrors daemon.ts's own
   // `memoryEnabledHot` (`settings ? memoryEnabledFrom(settings) : true`) rather than re-deriving
   // the `!== false` shape locally, so the two can never drift apart.
