@@ -57,16 +57,35 @@ enum Theme {
     /// that, not tidy it.
     static let composerRim = Color("ComposerRim")
 
-    /// The muted warm meta grey — section labels, quiet meta rows, trailing glyphs. `.secondary`
-    /// renders cooler and lighter on the warm canvas, which is why this is an asset instead.
+    /// The muted meta grey — section labels, quiet meta rows, trailing glyphs. ChatGPT's measured
+    /// "Worked for" grey in light (#767778) and idle-icon grey in dark (#8B8B8B), 2026-09-17.
     static let textMuted = Color("TextMuted")
+
+    /// The primary text colour — ChatGPT's measured reply ink (#1A1C1F light, 2026-09-17). Set as
+    /// the shell's root foreground style, so every `.primary` beneath it resolves to this; the
+    /// transcript's AppKit pipeline names it directly (`MessageTextFormatter`).
+    static let textPrimary = Color("TextPrimary")
+
+    /// Sidebar text — ChatGPT's sidebar rows and title (#3B3D3F light), one step softer than
+    /// `textPrimary`. The sidebar's own foreground style, so its `.primary` resolves to this.
+    static let textSecondary = Color("TextSecondary")
+
+    /// Composer placeholder text — ChatGPT's measured placeholder (#C5C5C6 light).
+    static let textPlaceholder = Color("TextPlaceholder")
+
+    /// Window-chrome controls (titlebar icons, panel tabs, the address field) — ChatGPT's measured
+    /// hover fill (#2A2A2A dark; light is one step past `chromeSelected`, not captured).
+    static let chromeHover = Color("ChromeHover")
+
+    /// The same controls' selected/on fill — ChatGPT's measured #F3F3F4 light / #242424 dark.
+    static let chromeSelected = Color("ChromeSelected")
 
     /// The base plane of the OPPOSITE appearance — the primary-action trick (a pill that reads
     /// cream in dark and charcoal in light). Live on Mac in the new-chat page's send glyph
     /// (`NewChatPage`).
     static let inverseCanvas = Color("InverseCanvas")
 
-    /// Brand tint — a muted blue-green teal. It tints prominent controls and glyphs and stays out
+    /// Brand tint — an ice blue (#8CCBF0). It tints prominent controls and glyphs and stays out
     /// of navigation entirely (`docs/brand.md` § 3.2, which is why the sidebar carries no accent
     /// anywhere). On Mac that means the transcript's card selection chrome, its list markers and
     /// quote rules, and the in-progress task/subagent tint — all of them since mac-chat-parity
@@ -85,6 +104,19 @@ enum Theme {
     /// between `canvas` and `selectionPill` in both appearances, so hover → selected reads as
     /// ONE ramp rather than two unrelated tints.
     static let rowHover = Color("RowHover")
+
+    /// The same two row states, for rows drawn on the TRANSLUCENT sidebar plane (2026-09-17).
+    ///
+    /// `rowHover`/`selectionPill` are opaque greys measured against an opaque pane; painted over
+    /// the vibrancy they COVER the blur in the one place the eye is drawn to, so the pill reads as
+    /// a solid chip stuck on a window. These two are luminance washes instead — black in light,
+    /// white in dark, both at a few percent — so the pill brightens or darkens what is already
+    /// there and the desktop keeps showing through it. Alpha lives in the catalog, per appearance,
+    /// exactly as the diff washes do; a runtime `.opacity()` would have no dark-mode variant.
+    static let rowHoverVibrant = Color("RowHoverVibrant")
+
+    /// The selected step of the vibrant ramp — see `rowHoverVibrant`.
+    static let selectionPillVibrant = Color("SelectionPillVibrant")
 
     /// The **shell's** divider — sidebar against content, and rims drawn at the `canvas`/
     /// `cardSurface` plane. Mac-only: the phone has no window-internal divider. A warm value
@@ -158,90 +190,8 @@ enum Theme {
     /// `diffAddedWash`.
     static let diffRemovedWash = Color("DiffRemovedWash")
 
-    // MARK: - Color: the six panel-kind tints (diff-tabs Task 12; sixth added editor-product Task 2) — Mac-only
-
-    /// **Mac-only**, like `rowHover`/`hairline`/`hairlineElevated`/`paletteSurface` (§ 1): the
-    /// panel strip itself has no iOS surface, so there is nothing on the phone for these to
-    /// mirror. `docs/brand.md` § 3.7 publishes every measurement below.
-    ///
-    /// Six soft washes, one per `PanelTabKind`, on the SAME hue at two strengths: a faint pill
-    /// fill (`panelKindTint`, this token) and a stronger chip fill (`panelKindChipTint`, derived
-    /// below at `panelKindChipTintOpacityMultiplier`× this token's alpha) — never two colorsets
-    /// per kind, so `Theme.panelKindTint`'s switch stays the ONE place a kind maps to a hue.
-    ///
-    /// **Alphas are MEASURED under the pill's LADDER model (user live-gate ruling, 2026-08-15:
-    /// "the selected tab should still show in the same color the tabs of that type do, just a
-    /// litle stronger; the default accent should be a lil stronger").** The pill no longer wears
-    /// `ShellSidebarRowStyle`'s neutral `RowHover` on hover/selected — that opaque fill occluded
-    /// the kind's hue exactly when the user was looking at it, and its fixed luminance was the
-    /// ceiling that had forced `web` down to a 4.7% light alpha ("browser tabs don't read blue").
-    /// Instead the pill paints ONE hue per kind at three strengths — rest (this token's authored
-    /// alpha), hover (×`panelKindPillHoverOpacityMultiplier`) and selected
-    /// (×`panelKindPillSelectedOpacityMultiplier`) — so every state change stays IN the kind's
-    /// color and the old neutral-crossover trade-off no longer exists. Floors, re-measured per
-    /// kind in both schemes and published in brand.md § 3.7: rest visibility ≥ 1.05 on
-    /// `CardSurface`; rest→hover and hover→selected each ≥ 1.040; `labelColor` ≥ 4.5:1 on the
-    /// STRONGEST (selected) composite. Light rest is a flat 12%; dark rest is 19% except `note`
-    /// at 17% — the bright ambers lift the selected composite enough that, under the ORIGINAL
-    /// (stale-ink) measurement, the white label fell under 4.5:1 at 19%×2.4 (recorded 4.22:1);
-    /// 17% restored 4.73:1. Re-measured since (`docs/brand.md` § 3.7's stale-ink footnote): 19%
-    /// actually holds 4.65:1, a PASS, which makes that original reason for the exception obsolete
-    /// — the alpha stays at 17% regardless; a revert to 19% is a separate, unmade design call, not
-    /// a consequence of the correction. The group CHIP keeps the
-    /// shared row style and its 2.0× fill — the stronger base incidentally lifted its light-mode
-    /// hover delta from the old documented ~1.00–1.011 trade-off to a measured 1.043–1.212, so
-    /// what § 3.7 once recorded as an accepted weakness is now a pinned floor.
-    static func panelKindTint(_ kind: PanelTabKind) -> Color {
-        switch kind {
-        case .web: return Color("PanelKindWebTint")
-        case .document: return Color("PanelKindDocumentTint")
-        case .code: return Color("PanelKindCodeTint")
-        case .note: return Color("PanelKindNoteTint")
-        case .diff: return Color("PanelKindDiffTint")
-        // editor-product Task 2: the sixth kind, same ladder-model alphas as web/document/code/diff
-        // (flat 12% light / 19% dark — no label-legibility ceiling forced a note-style exception
-        // here; measured, `docs/brand.md` § 3.7).
-        case .files: return Color("PanelKindFilesTint")
-        }
-    }
-
-    /// The ONE named exception to "no raw literals" this task's global constraints carve out —
-    /// every hue and every alpha stays authored in the colorset (§ 3.1); this only SCALES an
-    /// already-authored, already-per-appearance-tuned value by a fixed, named factor. Measured
-    /// (not assumed) that `Color.opacity(_:)` MULTIPLIES an already-translucent color's stored
-    /// alpha rather than replacing or clamping it: a 0.08-alpha color at `.opacity(2.0)` resolved
-    /// to exactly 0.16. That is what makes "one colorset, times a constant" produce the SAME
-    /// result in both appearances as authoring a second colorset by hand would have — the brief's
-    /// other sanctioned shape — without the second exhaustive switch that shape would have cost.
-    static let panelKindChipTintOpacityMultiplier: Double = 2.0
-
-    /// The group chip's stronger tint (Task 11's slot: `PanelTabKindChip`, `ShellPanel.swift`) —
-    /// "the same hue at DOUBLE opacity." Derived from `panelKindTint`, never a second switch: one
-    /// switch stays the single place a kind names its hue, and this only scales what it returns.
-    static func panelKindChipTint(_ kind: PanelTabKind) -> Color {
-        panelKindTint(kind).opacity(panelKindChipTintOpacityMultiplier)
-    }
-
-    /// The pill's state ladder (live-gate ruling 2026-08-15, doc on `panelKindTint` above): hover
-    /// and selected are the SAME authored hue at fixed, named multiples of the rest alpha — the
-    /// same one-colorset-times-a-constant mechanism as the chip's 2.0×, for the same reason (the
-    /// alpha ladder resolves identically in both appearances because each rung SCALES the
-    /// per-appearance authored value). 1.6/2.4 are measured, not round numbers for their own
-    /// sake: § 3.7's tables show every adjacent-rung delta clearing the 1.040 floor and the
-    /// selected rung holding label legibility in both schemes.
-    static let panelKindPillHoverOpacityMultiplier: Double = 1.6
-    static let panelKindPillSelectedOpacityMultiplier: Double = 2.4
-
-    /// The ONE fill decision for a panel tab pill — pure on its inputs, exhaustively laddered:
-    /// selected beats hover beats rest, mirroring `shellSidebarRowFill`'s precedence so the two
-    /// row treatments stay one grammar even though the pill's PAINT is kind-hued rather than
-    /// neutral. A selected pill ignores hover (selection is a terminal state; the cursor and the
-    /// close box already answer "am I over it").
-    static func panelKindPillFill(_ kind: PanelTabKind, isActive: Bool, isHovered: Bool) -> Color {
-        if isActive { return panelKindTint(kind).opacity(panelKindPillSelectedOpacityMultiplier) }
-        if isHovered { return panelKindTint(kind).opacity(panelKindPillHoverOpacityMultiplier) }
-        return panelKindTint(kind)
-    }
+    // The six per-kind panel-tab tints (diff-tabs Task 12 → editor-product Task 2) were retired
+    // 2026-09-17: panel tabs are neutral chrome now, like ChatGPT's (`ShellChromeButtonStyle`).
 
     // MARK: - Type
 
@@ -268,29 +218,16 @@ enum Theme {
     /// larger size read as calm rather than loud.
     static let greeting: Font = .system(size: 38, weight: .regular, design: .serif)
 
-    /// Serif allowlist **binding #4** — assistant prose in the transcript, applied on Mac by
-    /// mac-chat-parity Task 8 (it was allowlisted and unapplied from the sidebar-brand pass until
-    /// then). The reading face for what Winter *says*: paragraphs, headings, lists and quotes inside
-    /// an assistant message. Nothing else — user messages, tool rows, cards and every piece of
-    /// chrome stay on the system sans, and inline code / code blocks / maths keep their own faces
-    /// inside serif prose.
+    /// Assistant prose in the transcript — what Winter *says*. Retired from the serif allowlist
+    /// (2026-09-17, user: "drop our weird assistant font"; ChatGPT's app sets replies in the system
+    /// sans): it is now the plain system font, the same face as every other role on this surface.
+    /// Kept as a named entry point so the prose pipeline (`transcriptProseFont`, the question card,
+    /// the orb field reply) still reaches the assistant voice through one place.
     ///
     /// An `NSFont`, not a SwiftUI `Font`, because the transcript renders prose through
-    /// `MessageTextFormatter`'s `NSAttributedString` pipeline (bold/italic/code runs are per-run
-    /// font substitutions), which never sees a `Font`.
-    ///
-    /// **`NSFontManager.convert(_:toHaveTrait:)` keeps the family**, so bold and italic runs inside
-    /// serif prose stay New York rather than silently falling back to SF: measured on this OS,
-    /// `.NewYork-Regular` converts to `.NewYork-Semibold` and `.NewYork-RegularItalic`. Pinned by
-    /// `TranscriptBrandTests.testSerifProseSurvivesBoldAndItalicConversion` so it stays true.
-    ///
-    /// Falls back to the sans of the same size and weight if the serif design is ever unavailable —
-    /// a `nil` here would otherwise mean unrendered prose, and unstyled prose is the better failure.
+    /// `MessageTextFormatter`'s `NSAttributedString` pipeline, which never sees a `Font`.
     static func assistantProse(size: CGFloat, weight: NSFont.Weight) -> NSFont {
-        let sans = NSFont.systemFont(ofSize: size, weight: weight)
-        guard let descriptor = sans.fontDescriptor.withDesign(.serif),
-              let serif = NSFont(descriptor: descriptor, size: size) else { return sans }
-        return serif
+        NSFont.systemFont(ofSize: size, weight: weight)
     }
 
     // Everything the serif allowlist does NOT cover — rows, labels, chrome, lists, tool output —
@@ -307,14 +244,12 @@ enum Theme {
     static let assetColorNames: [String] = [
         "Canvas", "CardSurface", "SelectionPill", "ElevatedSurface", "ControlSurface",
         "BubbleUser", "ComposerSurface", "ComposerRim", "TextMuted", "InverseCanvas",
+        "TextPrimary", "TextSecondary", "TextPlaceholder", "ChromeHover", "ChromeSelected",
         "AccentColor", "RowHover", "Hairline", "HairlineElevated", "PaletteSurface",
+        // The vibrant pane's own two row states (2026-09-17) — luminance washes, not greys.
+        "RowHoverVibrant", "SelectionPillVibrant",
         // diff-tabs — the diff pair: two foreground roles, two row washes. FINAL and measured
         // (Task 10); `docs/brand.md` § 3.6 publishes every ratio.
         "DiffRemoved", "DiffAdded", "DiffAddedWash", "DiffRemovedWash",
-        // diff-tabs Task 12 — the five panel-kind tints (Mac-only, `panelKindTint`'s switch).
-        // FINAL and measured; `docs/brand.md` § 3.7 publishes every ratio. Sixth added
-        // editor-product Task 2 (`PanelKindFilesTint`), same measured discipline.
-        "PanelKindWebTint", "PanelKindDocumentTint", "PanelKindCodeTint", "PanelKindNoteTint",
-        "PanelKindDiffTint", "PanelKindFilesTint",
     ]
 }

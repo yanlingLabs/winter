@@ -31,7 +31,7 @@ describe("theme.ts", () => {
   });
 
   test("accent is Winter's blue, not CC's burnt-orange brand color", () => {
-    expect(theme.accent).toBe("#73BFFF");
+    expect(theme.accent).toBe("#8CCBF0");
   });
 
   test("every value is a 6-digit uppercase hex string", () => {

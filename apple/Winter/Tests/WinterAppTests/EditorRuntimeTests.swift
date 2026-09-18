@@ -620,7 +620,7 @@ final class EditorRuntimeTests: XCTestCase {
                       "the INJECTED .dark scheme must reach the payload: \(expression)")
         // A double-`#` raw string: the value itself contains a `#` (the hex's own leading hash),
         // which would otherwise read as the single-`#` terminator right after the opening quote.
-        XCTAssertTrue(expression.contains(##""editor.background":"#20201F""##),
+        XCTAssertTrue(expression.contains(##""editor.background":"#181818""##),
                       "CardSurface's dark hex (docs/brand.md § 1): \(expression)")
     }
 

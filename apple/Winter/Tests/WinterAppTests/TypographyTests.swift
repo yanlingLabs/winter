@@ -468,7 +468,7 @@ final class TypographyTests: XCTestCase {
                 count += code.components(separatedBy: token).count - 1
             }
         }
-        XCTAssertEqual(count, 22,
+        XCTAssertEqual(count, 21,
             "the token files' font-construction count moved — if you added a role, § 4.7's "
             + "checklist first (doc row + mapping in TypographyTests), then update this pin")
     }
@@ -490,22 +490,22 @@ final class TypographyTests: XCTestCase {
                                                            weight: .regular))
         // The orb's message roles derive from the transcript roles — and the reply takes the
         // transcript's FACE as well as its size (final 2026-08-13 ruling: "font style and
-        // size"): Theme.assistantProse serif, same spelling as the token builds.
+        // size"): Theme.assistantProse, same spelling as the token builds.
         XCTAssertEqual(Typography.fieldUserMessage(.medium),
                        .system(size: transcriptProseMetrics(.sans).bodySize, weight: .medium))
         XCTAssertEqual(Typography.fieldAssistantMessage(),
                        Font(Theme.assistantProse(size: transcriptProseMetrics(.assistant).bodySize,
                                                  weight: .regular)))
-        // …and the face is REALLY the serif (the Font-equality above is a wiring pin; this is
-        // the behavioural half — the same NSFont the token wraps resolves to the serif family).
-        XCTAssertTrue(Theme.assistantProse(size: transcriptProseMetrics(.assistant).bodySize,
-                                           weight: .regular).fontName.contains("NewYork"),
-                      "the field reply's face must be the transcript's New York serif")
+        // …and the face is REALLY the system sans (the serif binding was retired 2026-09-17).
+        XCTAssertEqual(Theme.assistantProse(size: transcriptProseMetrics(.assistant).bodySize,
+                                            weight: .regular),
+                       NSFont.systemFont(ofSize: transcriptProseMetrics(.assistant).bodySize),
+                       "the field reply's face must be the transcript's system sans")
         // The inline-code re-coupling was a WIRING change with zero rendered delta — both
-        // halves stated: derived AND still the 13.5 this surface always drew.
+        // halves stated: derived AND the 12.5 the 14 pt ladder lands on.
         XCTAssertEqual(Typography.fieldInlineCodeNS.pointSize,
                        transcriptProseMetrics(.sans).codeSize(for: transcriptProseMetrics(.sans).bodySize))
-        XCTAssertEqual(Typography.fieldInlineCodeNS.pointSize, 13.5)
+        XCTAssertEqual(Typography.fieldInlineCodeNS.pointSize, 12.5)
 
         // The hold-at-14 this test briefly pinned is RETIRED (final 2026-08-13 ruling: the
         // orb types at the bound size too, +1 pt resting consequence accepted). The pin's

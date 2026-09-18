@@ -15,34 +15,43 @@ The palette originated on iOS, derived from the Claude iOS app and tuned by hand
 
 ## 1. The palette
 
-Every value below is authored in both catalogs with explicit Light and Dark appearances. Code never sees a number.
+Every value below is authored with explicit Light and Dark appearances. Code never sees a number.
 
-### The eleven shared tokens
+**The Mac and iOS palettes no longer mirror each other (2026-09-17).** The Mac follows the ChatGPT/Codex macOS app — the values in this section are the **Mac** catalog's, measured from its light and dark themes; the iOS catalog keeps its own values in `../norma-ios/Winter/Assets.xcassets`.
+
+### The fourteen core tokens (Mac values)
 
 | Token | Light | Dark | Role |
 | --- | --- | --- | --- |
-| `Canvas` | `#F5F4F0` | `#181816` | The base plane. Warm cream / warm charcoal. |
-| `CardSurface` | `#F9F9F7` | `#20201F` | The raised plane above `Canvas`. |
-| `SelectionPill` | `#E8E6E1` | `#0B0B0B` | The selected row's fill. |
-| `ElevatedSurface` | `#F2F2F7` | `#272726` | Tool output, approval cards — one step above the card. |
-| `ControlSurface` | `#F0EFEC` | `#32322F` | Small controls: composer circles, model pills. |
-| `BubbleUser` | `#F0EFEC` | `#32322F` | The user's own messages. |
-| `ComposerSurface` | `#F9F9F7` | `#272726` | The composer card's opaque face. |
-| `ComposerRim` | `#FFFFFF` @ 0.90 | `#FFFFFF` @ 0.08 | The composer's bright hairline. |
-| `TextMuted` | `#7A7974` | `#9E9D96` | Quiet meta: section labels, timestamps, trailing glyphs. |
-| `InverseCanvas` | `#2A2A27` | `#FAF9F5` | `Canvas` with its appearances swapped — the primary-action tint. |
-| `AccentColor` | `#2E9484` | `#2E9484` | Brand teal. Same value in both appearances. |
+| `Canvas` | `#FCFCFC` | `#262626` | The base plane. Near-white / neutral charcoal. |
+| `CardSurface` | `#FFFFFF` | `#181818` | The content plane — ChatGPT's white / near-black. |
+| `SelectionPill` | `#EFF0F0` | `#383838` | The selected row's fill — a soft neutral grey. |
+| `ElevatedSurface` | `#F7F7F7` | `#232323` | Tool output, approval cards — one step above the card. |
+| `ControlSurface` | `#F0F0F0` | `#323232` | Small controls: composer circles, model pills. |
+| `BubbleUser` | `#EAF3FD` | `#223D72` | The user's own messages — ChatGPT's blue bubble. |
+| `ComposerSurface` | `#FFFFFF` | `#353535` | The composer card's opaque face. |
+| `ComposerRim` | `#E5E5E5` | `#414141` | The composer's bright hairline. |
+| `TextMuted` | `#767778` | `#8B8B8B` | Quiet meta: section labels, timestamps, trailing glyphs — ChatGPT's measured "Worked for" grey (light) and idle-icon grey (dark). |
+| `TextPrimary` | `#1A1C1F` | `#FFFFFF` | Body text — ChatGPT's measured reply ink (light; dark not yet measured). The shell's root foreground style. |
+| `TextSecondary` | `#3B3D3F` | `#DEDEDE` | Sidebar text — ChatGPT's measured sidebar ink (light; dark not yet measured). |
+| `TextPlaceholder` | `#C7C7C8` | `#686868` | Composer placeholder — ChatGPT's measured placeholder (light; dark not yet measured). |
+| `InverseCanvas` | `#1A1C1F` | `#FFFFFF` | `Canvas` with its appearances swapped — the primary-action tint. |
+| `AccentColor` | `#8CCBF0` | `#8CCBF0` | Brand ice blue. Same value in both appearances. |
 
-### The four Mac-only tokens
+### The Mac-only tokens
 
 These exist only in the Mac catalog. They are **deliberate platform extensions, not drift** — the phone has no hover state, no window-internal divider, and no floating palette, so there is nothing on iOS for them to mirror.
 
 | Token | Light | Dark | Role |
 | --- | --- | --- | --- |
-| `RowHover` | `#EFEDE8` | `#101010` | Hover fill. Interpolated between `Canvas` and `SelectionPill` in both appearances, so hover → selected reads as one ramp rather than two unrelated tints. |
-| `Hairline` | `#E5E2DC` | `#2A2A28` | The **shell's** divider: sidebar against content, and rims at the `Canvas`/`CardSurface` plane. Warm, because the system `separatorColor` is cool and fights the cream. |
-| `HairlineElevated` | `#D8D5CF` | `#3A3A38` | The same rule **one plane up** — drawn *on* `ElevatedSurface` or `ControlSurface`. See below; it is not a nicety. |
-| `PaletteSurface` | `#FFFFFF` | `#272726` | The face of anything that **floats above** content — the search palette it is named for, and the chat window's slide-in sidebar overlays. Brighter than `CardSurface` in both appearances, because it floats. |
+| `RowHover` | `#F5F6F6` | `#2F2F2F` | Hover fill — between `Canvas` and `SelectionPill` in both appearances (ChatGPT's measured sidebar ramp). |
+| `RowHoverVibrant` | `#000000` @ 4% | `#FFFFFF` @ 6% | The same hover step for rows on the TRANSLUCENT sidebar plane (2026-09-17): a luminance wash, not a grey — it brightens or darkens the blur behind it instead of covering it. |
+| `SelectionPillVibrant` | `#000000` @ 7% | `#FFFFFF` @ 10% | The selected step of that vibrant ramp. Paired with `RowHoverVibrant` so hover → selected reads as one ramp there too. |
+| `Hairline` | `#EAEAEA` | `#373737` | The **shell's** divider: sidebar against content, and rims at the `Canvas`/`CardSurface` plane. A neutral grey, matched to the neutral planes. |
+| `HairlineElevated` | `#DADADB` | `#3C3C3C` | The same rule **one plane up** — drawn *on* `ElevatedSurface` or `ControlSurface`. See below; it is not a nicety. |
+| `PaletteSurface` | `#FFFFFF` | `#2D2D2D` | The face of anything that **floats above** content — the search palette it is named for, and the chat window's slide-in sidebar overlays. Brighter than `CardSurface` in both appearances, because it floats. |
+| `ChromeHover` | `#EDEDEE` | `#2A2A2A` | Window-chrome controls' hover fill — titlebar icons, panel tabs, the address field. Dark is ChatGPT's measured value; light was not captured and sits one step past `ChromeSelected`. |
+| `ChromeSelected` | `#F3F3F4` | `#242424` | The same controls' on/selected fill (the active panel tab, a toggled titlebar icon) — ChatGPT's measured values. |
 
 `ElevatedSurface` cannot serve as `PaletteSurface`: its light value (`#F2F2F7`) is a retained cool system grey that is *darker* than `CardSurface`. That is the wrong direction for something that floats above.
 
@@ -64,7 +73,7 @@ Not a mistake. Claude's user bubble measured byte-identical to their control-chi
 
 **On Mac** the same two tokens map onto the window: **the sidebar is `Canvas`, the content side is `CardSurface`.** One decision satisfying two goals at once — it reproduces the greyer-sidebar-against-brighter-content relationship of the ChatGPT and Claude desktop apps, *and* it preserves the phone's base/raised semantics exactly, rather than reinterpreting them for a second platform.
 
-**`CardSurface` must stay brighter than `Canvas` in both appearances.** That difference *is* the separation; the hairline is secondary. A palette tune that inverted it would make the shell read inside-out. Pinned by `SidebarBrandTests.testCardSurfaceIsBrighterThanCanvasInBothAppearances`.
+**`CardSurface` must stay distinct from `Canvas` in both appearances.** That difference *is* the separation; the hairline is secondary. Light keeps the content brighter (pure white over a near-white sidebar); dark puts the content on pitch black, so there it is the darker plane. Pinned by `SidebarBrandTests.testCardSurfaceSeparatesFromCanvasInBothAppearances`.
 
 ### Inside the Mac transcript
 
@@ -96,19 +105,17 @@ This extends to derived values. A hover tint is its own authored asset, not `.op
 
 ### 3.2 The accent stays out of the sidebar
 
-The brand teal drives prominent controls, links, and `.tint(_:)`. It does **not** tint navigation. Selection in a sidebar is carried by fill alone (`SelectionPill`), with row content staying `.primary`.
+The brand ice blue drives prominent controls, links, and `.tint(_:)`. It does **not** tint navigation. Selection in a sidebar is carried by fill alone (`SelectionPill`), with row content staying `.primary`.
 
 On Mac this has a specific mechanical consequence: **`ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME` is deliberately left unset.** A colorset named `AccentColor` becomes the app-wide control tint the moment that setting names it — retinting every system control as a silent side effect of adding the palette. Keep it unset.
 
-**Corollary, and it bit for real:** because that setting is unset, SwiftUI's `Color.accentColor` (and `.tint`'s default, and `.accentColor` in any form) resolves to **the user's own System Settings accent** — whatever they picked in General — not to Winter's teal. Code that wants the brand must name `Theme.accent`. Every accent-tinted piece of the Mac's approval and question cards was drawing in the Mac owner's personal accent until the 2026-08-12 transcript pass; `TranscriptBrandTests` now fails the suite on any `accentColor` in `ChatContent/`.
+**Corollary, and it bit for real:** because that setting is unset, SwiftUI's `Color.accentColor` (and `.tint`'s default, and `.accentColor` in any form) resolves to **the user's own System Settings accent** — whatever they picked in General — not to Winter's ice blue. Code that wants the brand must name `Theme.accent`. Every accent-tinted piece of the Mac's approval and question cards was drawing in the Mac owner's personal accent until the 2026-08-12 transcript pass; `TranscriptBrandTests` now fails the suite on any `accentColor` in `ChatContent/`.
 
-And an ancestor `.tint(_:)` does **not** rescue it — probed: with a system accent of `#FFC726`, `Color.accentColor` renders `#FFC727` even inside `.tint(Theme.accent)`, while `ShapeStyle.tint` renders `#2E9484`. `.tint` reaches `ShapeStyle.tint`, carets and selection; it does not reach `Color.accentColor`, which reads the system preference directly.
+And an ancestor `.tint(_:)` does **not** rescue it — probed: with a system accent of `#FFC726`, `Color.accentColor` renders `#FFC727` even inside `.tint(Theme.accent)`, while `ShapeStyle.tint` renders `#8CCBF0`. `.tint` reaches `ShapeStyle.tint`, carets and selection; it does not reach `Color.accentColor`, which reads the system preference directly.
 
-### 3.3 `SelectionPill` is darker than its pane in dark mode
+### 3.3 `SelectionPill` is a neutral grey
 
-`#0B0B0B` on a `#181816` base. This is intentional, measured from Claude, and adopted on purpose: a semantic system fill *cannot* express "darker than background", which is exactly why this is an authored asset rather than `.quaternary`.
-
-Note this **differs from ChatGPT**, whose selected row is lighter than its pane. Where the two references disagree, Winter follows Claude — that is where the palette came from.
+`#EFF0F0` on the `#FCFCFC` light sidebar, `#383838` on the `#262626` dark one — ChatGPT's measured selected row, lighter-looking in dark and a soft grey in light. `RowHover` sits between the pane and the pill in both appearances so hover → selected reads as one ramp.
 
 ### 3.4 Contrast — a known limitation
 
@@ -176,49 +183,9 @@ How visible the washes themselves are, against the plane they tint: added 1.085:
 
 **Two channels, always.** The `-N`/`+M` signs and the `±` markers are TEXT, not glyphs, precisely because colour is the one channel that does not survive greyscale, colour blindness or a screen reader.
 
-### 3.7 Panel kind tints
+### 3.7 Panel tabs are neutral chrome
 
-**Mac-only** — the panel strip (`apple/Winter/Sources/AppShell/ShellPanel.swift`) has no iOS surface, so there is nothing on the phone for these to mirror, the same declared-exception class as § 1's four Mac-only tokens.
-
-Six soft washes, one per `PanelTabKind` (`web`/`document`/`code`/`note`/`diff`/`files`) — a single colorset per kind (`Theme.panelKindTint(_:)`'s own exhaustive switch, no `default:`), never two. Every stronger use is *derived* by scaling the one authored alpha: the group chip at `panelKindChipTintOpacityMultiplier` (2.0×), and the pill's hover/selected rungs at `panelKindPillHoverOpacityMultiplier` (1.6×) / `panelKindPillSelectedOpacityMultiplier` (2.4×). `Color.opacity(_:)` was measured to MULTIPLY an already-translucent colour's stored alpha (0.08 → 0.16 exactly) rather than replace or clamp it, which is what lets a single authored value scale correctly in both appearances.
-
-**The ladder model (user live-gate ruling, 2026-08-15).** The first shipped version painted the kind tint only at REST: `ShellSidebarRowStyle`'s opaque neutral `RowHover` covered it on hover *and* selection, and that fixed neutral luminance imposed a telescoping-identity ceiling (`hoverΔ × visibility = 1.10988`, fixed) that had forced `web` down to a 4.7% light alpha. The user's gate verdict — *"the selected tab should still show in the same color the tabs of that type do, just a litle stronger; the default accent should be a lil stronger; the browser tabs should have blue accent"* — replaced that model: a pill now paints ONE hue at three strengths (rest → hover 1.6× → selected 2.4×, `Theme.panelKindPillFill`, its own `PanelTabPillStyle`), every state change stays in the kind's colour, and the old ceiling no longer exists for pills. Rest alphas rose accordingly:
-
-| Kind | Hue | Light α (rest) | Dark α (rest) |
-| --- | --- | --- | --- |
-| `PanelKindWebTint` | `#3B82F6` | 12% | 19% |
-| `PanelKindDocumentTint` | `#F59E0B` | 12% | 19% |
-| `PanelKindCodeTint` | `#8B5CF6` | 12% | 19% |
-| `PanelKindNoteTint` | `#EAB308` | 12% | **17%** |
-| `PanelKindDiffTint` | `#22C55E` | 12% | 19% |
-| `PanelKindFilesTint` | `#64748B` | 12% | 19% |
-
-**The ceiling that sets the dark alphas is label legibility at the SELECTED rung**, not any hover identity: white `labelColor` on the 2.4× composite must hold the 4.5:1 body floor, and the bright ambers lift the selected composite fastest — `note` keeps 17% (5.16:1); `document` at 19% is the tightest pass (4.97:1). `files` (editor-product Task 2, added under this same ladder model — it never saw the old RowHover-occlusion model at all) needed no such exception at a flat 19%. Ladder measurements, § 3.5's method, floors in **bold** where a value is the class minimum:
-
-**Stale-ink correction (wave-8 item 8):** every `labelColor @ selected` figure in this section — the table below, and the two numbers in the sentence just above — was originally measured against a stale composite (the ink composited once over `CardSurface`, then reused for every subsequent tint instead of compositing fresh per background) and has since been re-measured; the table's other three columns and every other section's figures are unaffected. One consequence worth stating on its own: `note`-dark AT 19% (not the 17% it actually keeps) now measures 4.65:1 under the corrected method — a PASS against the 4.5:1 floor, where the original stale measurement had recorded a 4.22 FAIL. That 4.22 fail was the entire reason this section gave for the 17% exception, so the reason is now obsolete — but the alpha itself still stays at 17%; reverting it to 19% is a real, separate design option this correction deliberately leaves OUT of scope.
-
-| Kind | scheme | rest visibility (≥1.05) | rest→hover (≥1.040) | hover→selected (≥1.040) | `labelColor` @ selected (≥4.5) |
-| --- | --- | --- | --- | --- | --- |
-| `web` | light | 1.143 | 1.086 | 1.120 | 11.04 |
-| `document` | light | 1.090 | 1.054 | 1.072 | 12.18 |
-| `code` | light | 1.156 | 1.094 | 1.132 | 10.78 |
-| `note` | light | 1.076 | **1.045** | 1.060 | 12.50 |
-| `diff` | light | 1.103 | 1.061 | 1.081 | 11.92 |
-| `files` | light | 1.155 | 1.094 | 1.133 | 10.77 |
-| `web` | dark | 1.273 | 1.187 | 1.274 | 6.62 |
-| `document` | dark | 1.444 | 1.292 | 1.411 | **4.97** |
-| `code` | dark | 1.236 | 1.163 | 1.241 | 7.09 |
-| `note` | dark | 1.425 | 1.278 | 1.391 | 5.16 |
-| `diff` | dark | 1.410 | 1.278 | 1.397 | 5.17 |
-| `files` | dark | 1.228 | **1.150** | 1.216 | 7.37 |
-
-(`PanelKindTintTests.testEveryAdjacentRungOfThePillLadderStaysDistinguishable` floors both rung deltas at 1.040 in both schemes; `testTheLadderIsMonotoneAgainstTheBareSurface` pins the ≥1.05 rest floor and strict rest < hover < selected ordering; `testTintedTextStaysLegibleAcrossTheLadder` pins the 4.5 label floor at the selected rung. A selected pill ignores hover — selection is terminal — pinned in `testPillFillResolvesTheLadderWithSelectedBeatingHover`. `files`'s dark rest→hover (1.150) is now the class minimum for that cell — bold moved off `code`'s 1.163, which stays the same measured value, just no longer the tightest.)
-
-**`TextMuted` (favicon/close-glyph ink), measured at REST** (its real home — unselected pills carry it too), against § 3.5's own quiet-meta register floors (3.5 light / 4.0 dark, baseline 4.14 / 5.99 on the plain surface): light 3.58–3.85 (worst `code`), dark 4.15–4.88 (worst `document`; `files` at 4.88 is the new, safer end of that range). All clear; the stronger washes cost more than the old rest alphas did, and the figures stay inside `TextMuted`'s established range.
-
-**The favicon glyph and, on the chip, the count digit are deliberately NOT tinted** — "the tint is the surface, not the icon" (the identical rule Task 9 wrote for the diff favicon). At chip opacity the wash composites to ~1.2–1.35:1 against `CardSurface`; as literal text ink that would be near-invisible.
-
-**The chip kept the old model on purpose** — it has no selected state, so there was no occlusion complaint to fix; it still wears `ShellSidebarRowStyle` (neutral `RowHover` on hover) over its 2.0× fill, which sits BETWEEN the pill's hover (1.6×) and selected (2.4×) rungs by design. The stronger rest base incidentally FIXED what this section previously recorded as an accepted ~1.00–1.011 light-mode trade-off: the chip's neutral hover delta now measures 1.043–1.212 light / 1.816–2.590 dark (`files` dark, 1.816, is the new lower end — editor-product Task 2, still well clear of the 1.30 floor), and what was a recorded weakness is a pinned floor (`testChipHoverFillStaysDistinguishableFromEveryChipAtRest`, 1.040 light / 1.30 dark). Chip visibility against `CardSurface`: 1.158–1.345 light, 1.556–2.219 dark (`files` dark, 1.556, is the new lower end); `labelColor` on every chip composite ≥ 5.40.
+The six per-kind panel-tab tints (diff-tabs Task 12, extended by editor-product Task 2, re-tuned by the 2026-08-15 ladder ruling) were **retired on 2026-09-17**: panel tabs, the collapsed group chip, the "+" button and the titlebar icons all wear one neutral chrome style (`ShellChromeButtonStyle`) — no fill at rest, `ChromeHover` under the pointer, `ChromeSelected` while on — matching ChatGPT's macOS app. A tab's kind is still told by its favicon.
 
 ### 3.8 The editor's Monaco theme (editor-product Task 4)
 
@@ -228,11 +195,11 @@ Six soft washes, one per `PanelTabKind` (`web`/`document`/`code`/`note`/`diff`/`
 
 | Monaco color | Token | Light | Dark | Why this token |
 | --- | --- | --- | --- | --- |
-| `editor.background` | `CardSurface` | `#F9F9F7` | `#20201F` | The plane every other panel content view sits on (§ 2's plane mapping) — the editor is one more tenant of it. |
+| `editor.background` | `CardSurface` | `#FFFFFF` | `#181818` | The plane every other panel content view sits on (§ 2's plane mapping) — the editor is one more tenant of it. |
 | `editor.foreground` | `labelColor`, composited over `CardSurface` | `#262626` | `#DDDDDD` | `labelColor` is measured NOT fully opaque (84.7% both appearances, `PanelKindTintTests`); composited to one opaque hex by § 3.5's own method rather than sent with its own alpha — the SAME value § 3.6's ink table already publishes as "`labelColor` (the body)" on plain `CardSurface` (14.35 / 11.99, below). |
-| `editor.selectionBackground` | `SelectionPill` | `#E8E6E1` | `#0B0B0B` | The one existing token named for exactly this job ("the selected row's fill"). Dark is darker than its pane by design — § 3.3's ruling carries over unchanged; this is the same asset, not a re-derivation. |
-| `editor.lineHighlightBackground` | `RowHover` | `#EFEDE8` | `#101010` | The closest existing token to "the row under the cursor, gently set apart from its neighbours" — exactly what a list row's hover state already means everywhere else in the app. |
-| `editorCursor.foreground` | `AccentColor` | `#2E9484` | `#2E9484` | Neither wash above reads as a CARET color — both are quiet fills, and a cursor wants to be found at a glance. `accent` is the one token reserved for exactly that job elsewhere (§ 3.2: "tints prominent controls and glyphs", the transcript's own selection chrome and in-progress markers). § 3.4's recorded ceiling ("fine for controls and glyphs, short of the body-text floor") is why this is sanctioned for a caret and would not be for a run of text. |
+| `editor.selectionBackground` | `SelectionPill` | `#EFF0F0` | `#383838` | The one existing token named for exactly this job ("the selected row's fill"). Dark is darker than its pane by design — § 3.3's ruling carries over unchanged; this is the same asset, not a re-derivation. |
+| `editor.lineHighlightBackground` | `RowHover` | `#F5F6F6` | `#2F2F2F` | The closest existing token to "the row under the cursor, gently set apart from its neighbours" — exactly what a list row's hover state already means everywhere else in the app. |
+| `editorCursor.foreground` | `AccentColor` | `#8CCBF0` | `#8CCBF0` | Neither wash above reads as a CARET color — both are quiet fills, and a cursor wants to be found at a glance. `accent` is the one token reserved for exactly that job elsewhere (§ 3.2: "tints prominent controls and glyphs", the transcript's own selection chrome and in-progress markers). § 3.4's recorded ceiling ("fine for controls and glyphs, short of the body-text floor") is why this is sanctioned for a caret and would not be for a run of text. |
 
 **Syntax — five Monaco token rules, the SAME `NSColor`s `SyntaxHighlighter` paints the transcript's code blocks with** (`ChatContent/MessageTextFormatting.swift`), so a code block reads identically in the transcript and in the editor:
 
@@ -265,19 +232,11 @@ Since the 2026-08-13 typography pass this section is the **type source of truth 
 
 ### 4.1 The parity law
 
-**Point-size parity is the design — iOS is the source of truth, ruled 2026-08-13** ("the iOS here is source of truth. the Mac should follow it"). iOS sets the user bubble and the serif assistant prose at the SAME nominal style (`.body`); the Mac mirrors that relationship at its own register: **one transcript ladder, shared by both prose roles**, with only the face and the leading differing.
-
-The x-height facts stay recorded — as **accepted properties**, no longer as the rule. Measured on macOS 26:
-
-- SF at 14 pt: x-height **7.3691** · NY at 14 pt: **6.713** (−9%)
-- NY at 15.5 pt: x-height **7.3337** — within **0.48%** of SF at 14 pt
-- SF at 15.5 pt: x-height **8.1587** — at a shared point size the serif reads **~10% optically lighter** (−10.11%)
-
-That last line is the accepted property: at the shared ladder, Winter's serif reply reads ~10% lighter than the sans bubble beside it. Known, chosen — it is iOS's own rendered relationship, and matching it is the point. (An earlier pass sized the Mac's sans ladder lower to equalise x-heights; the ruling retired that — § 4.6.)
+**The transcript follows ChatGPT's Mac app — measured 2026-09-17.** Both prose roles (the user bubble and the assistant reply) are the system sans at **14 pt on a ~23 pt line pitch**, matched against a 2× capture of ChatGPT by whole-line ink width (eight strings, all within ~0.5% of SF Pro 14 regular). ChatGPT bundles no text font of its own, so its face *is* SF Pro — Winter's sans. The earlier serif reply (New York) was retired the same day (§ 4.2).
 
 Consequences, stated as law:
 
-1. **The two transcript prose roles share ONE ladder.** Same body, quote, headings and inline-code drop; the serif carries a wider leading (5 vs 3 — iOS's own distinction: `lineSpacing(6)` on serif markdown, nothing on the bubble). `TranscriptBrandTests.testTheTwoProseRolesShareOneNominalSizeByRuling` pins both the shared sizes and the accepted optical property.
+1. **The two transcript prose roles share ONE ladder** — body, quote, headings, inline-code drop *and* leading, in the same face. `TranscriptBrandTests.testTheTwoProseRolesShareOneLadder` pins it.
 2. **Parity between the apps is parity of ROLES, not of numbers.** iOS expresses roles as Dynamic Type styles (they must keep scaling); the Mac expresses them as points (macOS has no user type ramp). The same role name in the table below is the parity contract — never copy a number across the column boundary.
 
 ### 4.2 The serif allowlist
@@ -287,14 +246,14 @@ Serif may be used **only** for:
 1. **The wordmark** — the iOS drawer title, the Mac sidebar header (`Theme.wordmark`, both platforms).
 2. **The pairing-gate title** — iOS only (`Theme.serifTitle`).
 3. **The pairing words display** — iOS only (`Theme.pairingWords`).
-4. **Assistant prose in the transcript** — the reading face for what the assistant says. *Live on both platforms* (iOS from SP-chat; Mac from the 2026-08-12 chat-parity pass). The question card's question text is this binding too, by derivation — Winter asking is Winter speaking. So is the **orb field's inline reply** (ruled 2026-08-13: "the assistant reply should also use the same font the mac app uses font style and size") — `Typography.fieldAssistantMessage` wraps this face at the assistant role's size; same voice, one more surface, not a new binding.
+4. ~~**Assistant prose in the transcript**~~ — **retired 2026-09-17** (user: "drop our weird assistant font"). The reply, the question card's question and the orb field's reply are the system sans on both platforms now; `Theme.assistantProse` survives on the Mac only as the named entry point for that voice.
 5. **The Mac new-chat greeting** (`Theme.greeting`) — added 2026-08-07. Not invented on a whim: the iOS gallery's typography file names "the home greeting" as a sanctioned serif moment alongside the wordmark; this entry *records* that shipped decision (its full defence lives on the token's own doc), which the list had failed to do until the 2026-08-13 typography pass.
 
 Everything else — user messages, tool output, lists, chrome, code — stays on the system sans by doing nothing.
 
-Binding #4 has one boundary worth stating outright, because the Mac's own renderer makes it easy to cross: it allowlists **the transcript reply**, not model-authored text wherever it appears. A plan card's body is written by the model and rendered by the very same view, and it stays **sans** — a card is chrome around a decision. On the Mac that is a required `role` parameter rather than a default, and `TranscriptBrandTests` scans both call sites in both directions.
+The Mac renderer still takes a required `role` parameter (assistant vs sans) so the two voices can diverge again without a new plumbing pass; today both resolve to the same font.
 
-**Do not add a sixth binding without amending this list.** Serif beyond these moments turns an accent into a costume.
+**Do not add a binding without amending this list.** Serif beyond these moments turns an accent into a costume.
 
 ### 4.3 The role table
 
@@ -304,29 +263,27 @@ The contract: **same role structure, same hierarchy order, same serif/sans assig
 
 | Role | iOS | Mac | Face / notes |
 | --- | --- | --- | --- |
-| `assistantProse` | `.body` serif, `lineSpacing(6)` | 15.5 serif, lineSpacing 5 | NY. Binding #4. The unified ladder below. |
-| `userBubble` | `.body` | 15.5 sans (the unified ladder's body) | SF. Same nominal size as the reply — § 4.1's law, iOS's own relationship. |
+| `assistantProse` | `.body`, `lineSpacing(6)` | 14 sans, lineSpacing 6 | SF. ChatGPT-measured; the unified ladder below. |
+| `userBubble` | `.body` | 14 sans (the unified ladder's body) | SF. Same size and rhythm as the reply — § 4.1's law. |
 | `codeBlock` | `.footnote` mono | 12.5 mono | SF Mono. Mac: `syntaxCodeNS`. |
 | `toolPhrase` | 14 (pinned) | 11 | Recorded divergence, § 4.6 — both sides measured, differently. |
 | `toolOutputMono` | `.footnote` mono | 11 mono | The expandable tool payload. |
 | `transcriptError` | `.footnote` | 11 | Mac: `caption`. |
 | `jumpPill` | `.caption` semibold | 11 medium | "Jump to latest". |
 
-The Mac's ONE transcript ladder (`transcriptProseMetrics`, both roles, pinned by `TranscriptBrandTests`; sans values were 14 / 13.5 / drop 0.5 / [20, 17, 15.5, 14.5] until the 2026-08-13 ruling):
+The Mac's ONE transcript ladder (`transcriptProseMetrics`, both roles, pinned by `TranscriptBrandTests`; 15.5 / 15 / drop 2 / [22, 19, 17, 16] with leading 3 · 5 until the 2026-09-17 ChatGPT pass):
 
-| | Both prose roles (sans user message & plan card · serif assistant reply) |
+| | Both prose roles (user message, plan card, assistant reply) |
 | --- | --- |
-| Body | 15.5 |
-| Headings H1–H4 | 22 / 19 / 17 / 16 |
-| Block quote | 15 |
-| Inline code | 13.5 (body − 2, one shared drop) |
-| `lineSpacing` | **sans 3 · serif 5** — the one metric the roles do NOT share |
+| Body | 14 |
+| Headings H1–H4 | 20 / 17 / 15.5 / 14.5 (not in the ChatGPT capture — the donor's 14-pt run) |
+| Block quote | 13.5 |
+| Inline code | 12.5 (body − 1.5 — the code-block face's size) |
+| `lineSpacing` | 6 (14 pt SF's 16.7 natural line + 6 ≈ ChatGPT's measured 23 pt pitch) |
 
-The serif rhythm is 5, not iOS's: iOS's 1.59 pitch/size ratio is tuned for a phone's line width, and this is a desktop window. The sans keeps its tighter 3 — leading is the roles' one distinction, exactly as on iOS.
+iOS's prose ladder is semantic: body prose `.body`; H1–H2 `.title3` semibold; H3+ `.headline`; no block-quote block in its renderer (recorded, § 4.6). Its inline code comes out of `AttributedString`'s markdown at the surrounding run's size — no separate role to name.
 
-iOS's serif ladder is semantic: body prose `.body` serif; H1–H2 `.title3` semibold serif; H3+ `.headline` serif; no block-quote block in its renderer (recorded, § 4.6). Its inline code comes out of `AttributedString`'s markdown at the surrounding run's size — no separate role to name.
-
-**Bold and italic runs inside serif prose stay New York.** `NSFontManager.convert(_:toHaveTrait:)` is free to fall back to another family when a trait is unavailable; measured, it does not here (`.NewYork-Regular` → `.NewYork-Semibold` / `.NewYork-RegularItalic`). Pinned by `TranscriptBrandTests.testSerifProseSurvivesBoldAndItalicConversion`, because the failure — every emphasis rendering in SF mid-sentence — is the kind nobody reports and everybody feels. The conversion itself lives in `Typography.converted(_:toHaveTrait:)` so the sweep can ban `NSFontManager` everywhere else.
+**Bold and italic runs** are built by `Typography.converted(_:toHaveTrait:)` (`NSFontManager`), kept there so the sweep can ban `NSFontManager` everywhere else.
 
 #### The question card (one ladder, two registers)
 
@@ -334,11 +291,11 @@ The question is Winter asking, so its text is **binding #4 by derivation** on bo
 
 | Role | iOS | Mac | Notes |
 | --- | --- | --- | --- |
-| `questionText` | `.body` serif, `lineSpacing(6)` | derived | ≡ `assistantProse` body, both platforms. |
-| `questionOption` | `.callout` | 14.5 | The composer box's option register — the one the Mac ported. |
+| `questionText` | `.body`, `lineSpacing(6)` | derived | ≡ `assistantProse` body, both platforms. |
+| `questionOption` | `.callout` | 13 | The composer box's option register — the one the Mac ported. |
 | `questionOptionInline` | `.subheadline` | — | iOS's frozen transcript card uses a step lower; recorded, § 4.6. |
-| `questionSecondary` | `.footnote` | 12 | Descriptions, notes, Other. |
-| `questionPill` | `.caption` medium | 11 | The composer's header pills. |
+| `questionSecondary` | `.footnote` | 10.5 | Descriptions, notes, Other. |
+| `questionPill` | `.caption` medium | 10 | The composer's header pills. |
 | `questionCardChip` | `.caption2` semibold | — | iOS's frozen-card category chip; recorded, § 4.6. |
 | `questionPillCheck` | 9 semibold | 9 semibold | The answered-pill checkmark — the one glyph both platforms pin at 9. |
 | `questionCheckmark` | `.body` medium | — | iOS's reserved-column option check. |
@@ -442,9 +399,9 @@ The scale (§ 4.5) plus its mono variants and the named one-offs:
 | `chipLabel` | — | `.caption2` | Activity chips, sidebar count chips. |
 | `fieldCodeLabelNS` | — | 11 medium | The orb field's code-block language label. |
 | `fieldCodeBlockNS` | — | 13 mono | The orb field's code-block body. |
-| `fieldInlineCodeNS` | — | derived | The orb field's inline-code run — re-bound through the shared transcript metrics by the orb ruling (lands on the same 13.5 the verbatim value carried: 15.5 − 2; a wiring change with zero rendered delta). |
-| `fieldUserMessage` | — | derived | The orb field's echo of what you asked — bound to the transcript's user-message size (both 15.5 today). Face stays the field's difference-blend sans. |
-| `fieldAssistantMessage` | — | derived | The orb field's reply — the transcript's assistant voice, FACE AND SIZE: `Theme.assistantProse` serif at the assistant role's size (final 2026-08-13 ruling; binding #4's surface, § 4.2). |
+| `fieldInlineCodeNS` | — | derived | The orb field's inline-code run — re-bound through the shared transcript metrics by the orb ruling (12.5 today: 14 − 1.5). |
+| `fieldUserMessage` | — | derived | The orb field's echo of what you asked — bound to the transcript's user-message size (both 14 today). Face stays the field's difference-blend sans. |
+| `fieldAssistantMessage` | — | derived | The orb field's reply — the transcript's assistant voice, FACE AND SIZE: `Theme.assistantProse` (the system sans since 2026-09-17) at the assistant role's size. |
 | `shortcutKeyNS` | — | 11 | Shortcut recorder key-caps. |
 | `panelTabLabelNS` | — | 12 | The web panel's native tab label. |
 
@@ -456,7 +413,7 @@ Block maths (`mathNS`) walks a real maths-face candidate list (STIX Two first) a
 | --- | --- | --- | --- |
 | `Theme.wordmark` | 25 semibold serif | 20 semibold serif | Binding #1 — § 4.4 records why the numbers differ. |
 | `Theme.greeting` | — | 38 serif | Binding #5, the new-chat page. |
-| `Theme.assistantProse` | (via `.fontDesign(.serif)`) | derived | Binding #4's face — an NSFont face *function*; every size it renders comes from the ladders above, and `TranscriptBrandTests` pins the face itself. |
+| `Theme.assistantProse` | (system sans) | derived | The assistant voice's face — an NSFont face *function*, the system sans since binding #4 was retired (§ 4.2); every size comes from the ladder above, and `TranscriptBrandTests` pins the face. |
 
 ### 4.4 The wordmark's two size registers
 
@@ -481,7 +438,7 @@ Tokenisation is a refactor: rendered output changes **only** where a row here re
 
 | Role | iOS | Mac | Status |
 | --- | --- | --- | --- |
-| Assistant serif prose vs sans beside it | both at `.body` → serif reads ~10% optically lighter | ONE shared ladder (15.5) → the same relationship | **RULED 2026-08-13: iOS is the source of truth; the Mac follows.** The earlier optical-parity correction (sans ladder sized lower to equalise x-heights) and the recorded `@ScaledMetric` recipe for lifting iOS's serif are both RETIRED — the point-size relationship, serif-reads-lighter and all, is the design. iOS unchanged; the Mac's sans ladder unified onto the assistant's sizes (leading stays distinct). |
+| Assistant prose vs the user bubble | both at `.body`, both sans | ONE shared ladder (14), both sans | **2026-09-17: serif retired, ladder re-measured against ChatGPT (14 pt).** History: **RULED 2026-08-13: iOS is the source of truth; the Mac follows.** The earlier optical-parity correction (sans ladder sized lower to equalise x-heights) and the recorded `@ScaledMetric` recipe for lifting iOS's serif are both RETIRED — the point-size relationship, serif-reads-lighter and all, is the design. iOS unchanged; the Mac's sans ladder unified onto the assistant's sizes (leading stays distinct). |
 | Composer field vs user bubble | both `.body` — the field and the bubble share one style | derived — one bound size | **RESOLVED 2026-08-13** ("make the composer field bound to the user message size aka 15.5"): `composerFieldSize` reads the live sans metrics, so the divergence is structurally closed — a ladder change moves typing and bubble together. The new-chat page's 16-pt register (a 2026-08-07 user call) is retired by the same ruling. |
 | Orb field + morph window message text | n/a | derived — bound to the transcript roles | **RULED 2026-08-13**, twice: sizes first ("follow the same message sizes … bound to the apps transcript sizes"), then the reply's FACE ("the same font the mac app uses font style and size") — the field reply is `Theme.assistantProse` serif at 15.5, binding #4's surface. The morph window's transcript is `WindowContentView` → `TranscriptView` → the metrics end to end (verified; it needed nothing). Rendered changes: reply 13 sans → 15.5 serif, echo 11 → 15.5; inline code lands on the same 13.5. **Visual gate:** New York at 15.5 under the field's difference-blend law has never been seen — glass legibility is eye-only. |
 | The orb field's OWN composer | n/a | derived — bound like every other home | **RESOLVED by the final 2026-08-13 ruling** ("the orb should type at 15.5 as well make it bound to the user message transcript"): the hold-at-14 is retired, the quantified consequence accepted (resting field 47 → 48 pt, line height 17 → 18, wider grow steps). The clear-button threshold is re-derived from the live face (`ComposerTextView.twoLineContentHeight` — two lines + insets), so the NEXT ladder change moves it with the text instead of silently retuning it. Panel clamps stay literal and type-independent, pinned. |
@@ -571,8 +528,8 @@ Some iOS `Theme.swift` doc comments quote hex values that **no longer match the 
 
 | Token | Comment says (light) | Asset actually is | |
 | --- | --- | --- | --- |
-| `InverseCanvas` | `#181816` | `#2A2A27` | drifted |
-| `SelectionPill` | `#EDEBE6` | `#E8E6E1` | drifted |
+| `InverseCanvas` | `#2A2A2A` | `#FAFAFA` | drifted |
+| `SelectionPill` | `#EFEFEF` | `#0B0B0B` | drifted |
 
 Everything else the comments assert is still accurate (`ElevatedSurface`, `BubbleUser`, `ControlSurface`, `TextMuted`, `AccentColor`, `ComposerRim`, and both dark values above all match).
 
