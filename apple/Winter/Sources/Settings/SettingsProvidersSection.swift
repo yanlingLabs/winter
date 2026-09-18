@@ -1,21 +1,21 @@
 import SwiftUI
+import WinterKit
 
 // -----------------------------------------------------------------------------------------------
-// LEFT AS IT WAS by the 2026-09-18 settings restyle, deliberately. Every other section moved into
-// the card/row vocabulary (`SettingsChrome.swift`): a statement with one trailing control. This one
-// is not that shape — it is three EDITORS stacked (the Anthropic auth block with its own sheet, a
-// catalog-sized list of live `SecureField` credential rows, and a disclosure-group endpoint form).
-// A card row has room for one control; a credential row is a field, a state line and two buttons.
-// Carding it would shrink the fields and hide the states, so it keeps the surrounding
-// `SettingsSectionView` header and its own layout until it is redesigned on its own terms.
-// -----------------------------------------------------------------------------------------------
-
-// -----------------------------------------------------------------------------------------------
-// Settings → Providers (2026-09-17). ONE consolidated section (user's call), where the Dashboard's
-// `ProviderPane` has three top-level blocks stacked as peers: an OpenAI BYO-key form, the Anthropic
-// block, and the catalog-driven credentials list.
+// Settings → Providers (2026-09-17; re-set in the card vocabulary 2026-09-18). ONE consolidated
+// section (user's call), where the Dashboard's `ProviderPane` has three top-level blocks stacked as
+// peers: an OpenAI BYO-key form, the Anthropic block, and the catalog-driven credentials list.
 //
-// WHAT CHANGED, AND WHY
+// 2026-09-18, the card restyle (user call: "make the settings tabs, all, look like ChatGPT's"):
+// this page was the one left un-carded, because a credential row was a field, a state line and two
+// buttons — more than a row's one trailing control. The answer is that the FIELD is not always
+// there: a key row is a sentence ("Stored" / "Not set") with one soft button, and the SecureField
+// only appears, under the row, for the one provider you chose to add or replace a key for. That
+// also retires the page's old cost — a live SecureField per catalog row (~100) on every redraw.
+// Every model, every read, every write and every failure string is still the shared Dashboard
+// view-models' — this file is markup only.
+//
+// WHAT CHANGED, AND WHY (2026-09-17)
 //
 // The credentials list is the SPINE here. Its rows are derived from the agent SDK's pinned catalog
 // (WS-19 W19-1) — the daemon's inventory grows with an SDK bump and no app release — so it is the
@@ -40,13 +40,11 @@ import SwiftUI
 // DROPPED from the pane, deliberately: the "Prefer to sign in with ChatGPT?" copy-the-command
 // block. The credentials list already carries the `codex-oauth` row, whose `cli-oauth` door text
 // ("Managed by the winter login command in a terminal") says the same thing where the user is
-// already looking for it. Nothing lost; one fewer top-level block.
+// already looking for it.
 //
 // NOT dropped: `ProviderPane` itself, which the Dashboard still renders. This section SHARES its
 // view-models (`wiring.providerModel` and the two it owns) rather than minting new ones — they hold
-// no socket, re-seed on `.task`, and the two destinations are never on screen at once, so
-// `CredentialsSection`'s `.onDisappear { clearTypedState() }` and `AnthropicAuthSection`'s
-// `.sheet(item:)` behave exactly as they do in the Dashboard.
+// no socket, re-seed on `.task`, and the two destinations are never on screen at once.
 // -----------------------------------------------------------------------------------------------
 
 /// A provider whose ENDPOINT this build can change, and the door it goes through.
@@ -81,75 +79,53 @@ let settingsEndpointOverrides: [SettingsEndpointOverride] = [
 
 // -----------------------------------------------------------------------------------------------
 
-/// Settings → Providers. Wraps its content in a `ScrollView` on purpose: `CredentialsSection` is a
-/// `LazyVStack` over a catalog-sized list (~100 rows, each with live controls) and a `LazyVStack`
-/// with no enclosing scroll viewport silently degrades to a plain `VStack` — building every
-/// `SecureField` in the catalog on each redraw. `SettingsSectionView` provides no scroll of its own.
+/// Settings → Providers.
 struct SettingsProvidersSection: View {
     @ObservedObject var model: ProviderPaneModel
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                currentStatus
-                Divider()
-                // ORDER IS LOAD-BEARING: the credentials rows whose door is `provider.login` say
-                // "the Anthropic (Claude) controls above" — that block has to actually be above.
-                AnthropicAuthSection(model: model.anthropicAuth)
-                Divider()
-                CredentialsSection(model: model.credentials)
-                Divider()
-                advanced
-                Divider()
-                disclosure
+        SettingsPage(title: settingsSectionTitle(.providers)) {
+            SettingsButton("Refresh", isEnabled: !model.statusLoading) {
+                Task {
+                    await model.refreshStatus()
+                    await model.anthropicAuth.refreshStatus()
+                    await model.credentials.refresh()
+                }
             }
-            .padding(.top, 18)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+        } content: {
+            SettingsGroup {
+                currentRow
+            }
+            // ORDER IS LOAD-BEARING: the credential rows whose door is `provider.login` say "the
+            // Anthropic (Claude) controls above" — that group has to actually be above.
+            SettingsProvidersAnthropicGroup(model: model.anthropicAuth)
+            SettingsProvidersKeyGroups(model: model.credentials)
+            SettingsGroup("Custom endpoint") {
+                ForEach(settingsEndpointOverrides) { override in
+                    endpointForm(override)
+                }
+            }
+            // The non-affiliation + account-risk disclosure, verbatim from the one constant both
+            // this page and the first-run sheet read — never a second paraphrase of the same risk.
+            Text(winterProviderDisclosureText)
+                .font(Typography.control())
+                .foregroundStyle(Theme.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .task { await model.refreshStatus() }
     }
 
     /// What the daemon says it is actually using right now. Same read and same formatter as the
-    /// Dashboard pane (`daemon.status` → `providerStatusText`), kept because it answers the first
-    /// question anyone opens this page with.
-    private var currentStatus: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("Current provider")
-                    .font(Typography.caption(.semibold))
-                    .foregroundStyle(Theme.textMuted)
-                Spacer()
-                Button("Refresh") { Task { await model.refreshStatus() } }
-                    .disabled(model.statusLoading)
-            }
-            if let statusErrorText = model.statusErrorText {
-                // `.red` for a failure line, as every sibling surface in this app spells it.
-                Text(statusErrorText).font(Typography.label()).foregroundStyle(.red)
-            } else {
-                Text(providerStatusText(providerId: model.providerId, providerModel: model.providerModel))
-                    .font(Typography.controlMono())
-                    .textSelection(.enabled)
-            }
-        }
-    }
-
-    /// Collapsed by default: an endpoint override is the rare case, and leaving a key field open on
-    /// a page whose main job is a list of key fields invites typing into the wrong one.
-    private var advanced: some View {
-        DisclosureGroup {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("Point a provider at your own endpoint — a proxy, a gateway, or a compatible service. Leave this alone unless you know you need it.")
-                    .font(Typography.caption())
-                    .foregroundStyle(Theme.textMuted)
-                    .fixedSize(horizontal: false, vertical: true)
-                ForEach(settingsEndpointOverrides) { override in
-                    endpointForm(override)
-                }
-            }
-            .padding(.top, 10)
-        } label: {
-            Text("Advanced — custom endpoints")
-                .font(Typography.control(.semibold))
+    /// Dashboard pane (`daemon.status` → `providerStatusText`).
+    @ViewBuilder
+    private var currentRow: some View {
+        if let statusErrorText = model.statusErrorText {
+            SettingsNoteRow(statusErrorText, isError: true)
+        } else {
+            SettingsValueRow(title: "Current provider",
+                             description: "What the daemon is using right now.",
+                             value: providerStatusText(providerId: model.providerId,
+                                                       providerModel: model.providerModel))
         }
     }
 
@@ -158,63 +134,215 @@ struct SettingsProvidersSection: View {
     /// never the logic, so there is still exactly one implementation of what Save does.
     @ViewBuilder
     private func endpointForm(_ override: SettingsEndpointOverride) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(override.displayName)
-                .font(Typography.label(.semibold))
-            Text("Saving re-sends your key and restarts the daemon, so the endpoint takes effect immediately.")
-                .font(Typography.caption())
-                .foregroundStyle(Theme.textMuted)
-                .fixedSize(horizontal: false, vertical: true)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Base URL").font(Typography.caption()).foregroundStyle(Theme.textMuted)
+        SettingsRow(override.displayName,
+                    description: "Point \(override.displayName) at your own endpoint — a proxy, a gateway, or a compatible service. Saving re-sends your key and restarts the daemon, so the endpoint takes effect immediately.") {
+            EmptyView()
+        }
+        VStack(alignment: .leading, spacing: 12) {
+            endpointField("Base URL") {
                 TextField(override.placeholderBaseUrl, text: $model.baseUrl)
-                    .textFieldStyle(.roundedBorder)
-                    .font(Typography.labelMono())
             }
-            VStack(alignment: .leading, spacing: 4) {
-                Text("API key").font(Typography.caption()).foregroundStyle(Theme.textMuted)
+            endpointField("API key") {
                 SecureField("sk-…", text: $model.apiKey)
-                    .textFieldStyle(.roundedBorder)
-                    .font(Typography.labelMono())
             }
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Model (optional)").font(Typography.caption()).foregroundStyle(Theme.textMuted)
-                // WS-20: a model is always a provider-qualified tag; the placeholder shows the shape.
+            // WS-20: a model is always a provider-qualified tag; the placeholder shows the shape.
+            endpointField("Model (optional)") {
                 TextField("openai/gpt-5.6-sol", text: $model.model)
-                    .textFieldStyle(.roundedBorder)
-                    .font(Typography.labelMono())
             }
-
-            if let saveErrorText = model.saveErrorText {
-                Text(saveErrorText).font(Typography.label()).foregroundStyle(.red)
-            } else if model.savedConfirmation {
-                Text("Saved — Winter is switching to your API key.")
-                    .font(Typography.label())
-                    .foregroundStyle(.green)
-            }
-
-            HStack {
+            HStack(spacing: 10) {
+                if let saveErrorText = model.saveErrorText {
+                    Text(saveErrorText).font(Typography.control()).foregroundStyle(.red)
+                } else if model.savedConfirmation {
+                    Text("Saved — Winter is switching to your API key.")
+                        .font(Typography.control())
+                        .foregroundStyle(Theme.textSecondary)
+                }
                 Spacer()
-                Button {
+                if model.saving { ProgressView().controlSize(.small) }
+                SettingsButton("Save & apply", isEnabled: model.canSave) {
                     Task { await model.save() }
-                } label: {
-                    HStack(spacing: 6) {
-                        if model.saving { ProgressView().controlSize(.small) }
-                        Text("Save & apply")
+                }
+            }
+        }
+        .padding(.horizontal, SettingsChrome.rowHorizontalPadding)
+        .padding(.vertical, SettingsChrome.rowVerticalPadding)
+    }
+
+    private func endpointField<Field: View>(_ label: String, @ViewBuilder field: () -> Field) -> some View {
+        HStack(spacing: 12) {
+            Text(label)
+                .font(Typography.control())
+                .foregroundStyle(Theme.textMuted)
+                .frame(width: 120, alignment: .leading)
+            field()
+                .textFieldStyle(.roundedBorder)
+                .font(Typography.control())
+        }
+    }
+}
+
+// MARK: - Anthropic (Claude)
+
+/// The Anthropic block as one card. Its own view so it can OBSERVE `AnthropicAuthSectionModel` —
+/// a nested `ObservableObject` does not republish through the `ProviderPaneModel` that owns it.
+private struct SettingsProvidersAnthropicGroup: View {
+    @ObservedObject var model: AnthropicAuthSectionModel
+
+    var body: some View {
+        SettingsGroup("Anthropic (Claude)") {
+            SettingsRow("Anthropic Console",
+                        description: "The arm is the model: anthropic/… uses the API key, console/… uses the Console profile.") {
+                if let statusErrorText = model.statusErrorText {
+                    Text(statusErrorText).font(Typography.control()).foregroundStyle(.red)
+                } else {
+                    SettingsRowNote(model.statusText)
+                }
+                if let selectErrorText = model.selectErrorText {
+                    Text(selectErrorText).font(Typography.control()).foregroundStyle(.red)
+                }
+            } control: {
+                if model.hasConsoleProfile {
+                    SettingsButton("Sign out", isEnabled: !model.selecting) {
+                        Task { await model.signOut() }
+                    }
+                } else {
+                    SettingsButton("Sign in", isEnabled: !model.selecting) { model.startLogin() }
+                }
+            }
+        }
+        .task { await model.refreshStatus() }
+        .sheet(item: $model.loginSheet) { sheet in
+            AnthropicLoginSheet(model: sheet, onDone: {
+                model.loginSheet = nil
+                Task { await model.refreshStatus() }
+            })
+        }
+    }
+}
+
+// MARK: - API keys
+
+/// The catalog-driven credential rows, split into what is connected and what is not — the list is
+/// ~100 providers long and the few you actually use should not be buried alphabetically among them.
+///
+/// Each row is a sentence with ONE soft button (Add key / Replace / Remove). The SecureField is
+/// shown only under the row being edited, so there is exactly one live secret field on the page.
+private struct SettingsProvidersKeyGroups: View {
+    @ObservedObject var model: CredentialsSectionModel
+    /// The one row whose key field is open, or nil. Local: which row you are typing into is a
+    /// gesture, not state the model needs to know about.
+    @State private var editing: String?
+
+    var body: some View {
+        let connected = model.rows.filter(\.present)
+        let available = model.rows.filter { !$0.present }
+        Group {
+            if let loadErrorText = model.loadErrorText {
+                SettingsGroup {
+                    SettingsNoteRow(loadErrorText, isError: true)
+                }
+            }
+            SettingsGroup("Connected") {
+                if connected.isEmpty {
+                    SettingsNoteRow(model.loading && model.rows.isEmpty ? "Loading…"
+                                                                        : "No keys or sign-ins stored yet.")
+                }
+                ForEach(connected) { row in
+                    credentialRow(row)
+                }
+            }
+            if !available.isEmpty {
+                SettingsGroup("Add a provider") {
+                    SettingsNoteRow("Keys live only in this Mac's Keychain. Adding or removing one takes effect immediately — no restart.")
+                    ForEach(available) { row in
+                        credentialRow(row)
                     }
                 }
-                .disabled(!model.canSave)
+            }
+        }
+        .task { await model.refresh() }
+        .onDisappear {
+            editing = nil
+            model.clearTypedState()
+        }
+        // ONE dialog for the whole list, driven by `pendingRemoval` — a presentation modifier per
+        // row (~100 of them) is not something to rely on.
+        .confirmationDialog(
+            model.pendingRemoval.map(credentialRemovalTitle) ?? "",
+            isPresented: Binding(
+                get: { model.pendingRemoval != nil },
+                set: { presented in if !presented { model.cancelRemoval() } }
+            ),
+            presenting: model.pendingRemoval
+        ) { _ in
+            Button("Remove", role: .destructive) { Task { await model.confirmRemoval() } }
+            Button("Cancel", role: .cancel) { model.cancelRemoval() }
+        } message: { row in
+            Text(credentialRemovalMessage(row))
+        }
+    }
+
+    @ViewBuilder
+    private func credentialRow(_ row: CredentialRow) -> some View {
+        let isEditing = editing == row.providerId
+        SettingsRow(row.displayName,
+                    // A bespoke-OAuth row (Anthropic Console, Codex) never gets a field —
+                    // `credential.set` would refuse it typed — so its door says where it is made.
+                    description: row.manageable ? (row.present ? "Stored" : nil)
+                                                : credentialDoorText(row.door)) {
+            if isEditing {
+                HStack(spacing: 8) {
+                    SecureField("API key", text: Binding(
+                        get: { model.draft(for: row.providerId) },
+                        set: { model.setDraft($0, for: row.providerId) }
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    .font(Typography.control())
+                    .onSubmit { save(row) }
+                    SettingsButton("Save", isEnabled: model.canSave(row.providerId)) { save(row) }
+                    SettingsButton("Cancel") {
+                        model.setDraft("", for: row.providerId)
+                        editing = nil
+                    }
+                }
+                .padding(.top, 6)
+            }
+            // Under the row it belongs to — on a catalog-sized list a refusal shown elsewhere is
+            // indistinguishable from a Save that did nothing.
+            if let rowErrorText = model.rowError(for: row.providerId) {
+                Text(rowErrorText)
+                    .font(Typography.control())
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } control: {
+            // SET and REMOVE are two independent gates (WS-19 §9 A-3): a `codex-oauth` row can't be
+            // typed into but CAN be removed.
+            HStack(spacing: 8) {
+                if row.manageable && !isEditing {
+                    SettingsButton(row.present ? "Replace" : "Add key",
+                                   isEnabled: model.busyProviderId == nil) {
+                        if let previous = editing { model.setDraft("", for: previous) }
+                        editing = row.providerId
+                    }
+                }
+                if credentialRowOffersRemove(row) {
+                    // Opens the confirmation only — the delete itself is `confirmRemoval()`.
+                    SettingsButton("Remove", isDestructive: true,
+                                   isEnabled: model.busyProviderId == nil) {
+                        model.requestRemoval(row)
+                    }
+                }
             }
         }
     }
 
-    /// The non-affiliation + account-risk disclosure, verbatim from the one constant both this
-    /// section and the first-run sheet read — never a second paraphrase of the same risk.
-    private var disclosure: some View {
-        Text(winterProviderDisclosureText)
-            .font(Typography.caption())
-            .foregroundStyle(Theme.textMuted)
-            .fixedSize(horizontal: false, vertical: true)
+    private func save(_ row: CredentialRow) {
+        guard model.canSave(row.providerId) else { return }
+        Task {
+            await model.save(providerId: row.providerId)
+            // Close the field only when the write landed — a refused key stays typed for fixing.
+            if model.rowError(for: row.providerId) == nil { editing = nil }
+        }
     }
 }

@@ -84,6 +84,9 @@ enum Typography {
     /// The composer's attach (+) glyph — 17 pt, one step past `heading`: glyph geometry, not a
     /// text step, and the SAME 17 the iOS composer draws its primary glyphs at.
     static let composerPlusGlyph: Font = sans(17, .medium)
+    /// A settings page's own title ("Roles", "Providers") — the ChatGPT settings window's large
+    /// regular-weight heading, well above anything in the sidebar beside it.
+    static let settingsPageTitle: Font = sans(26, .regular)
 
     // MARK: Semantic passthroughs
 
