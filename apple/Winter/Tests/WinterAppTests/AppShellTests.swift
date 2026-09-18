@@ -269,6 +269,18 @@ final class AppShellTests: XCTestCase {
     /// toolbar can never quietly grow back (native chrome needs an explicit user OK). The
     /// summon/visibility/geometry pins around this one are the guardrail — chrome flags must
     /// never change behavior.
+    /// The account row's sideways disclosure (2026-09-17, user call): the icons it reveals, in
+    /// order. A VOCABULARY pin, not coverage — it is what stops the set drifting while it is still
+    /// unwired, which is exactly the window where nothing else would notice.
+    func testAccountRowRevealsTheFourPlaceholderActions() {
+        XCTAssertEqual(shellAccountActions.map(\.systemImage),
+                       ["gearshape", "book.closed", "iphone", "arrow.triangle.2.circlepath"])
+        XCTAssertEqual(shellAccountActions.map(\.label),
+                       ["Settings", "Library", "Phone", "Check for updates"])
+        XCTAssertEqual(Set(shellAccountActions.map(\.systemImage)).count, shellAccountActions.count,
+                       "no glyph twice — the cluster is read left to right, not by label")
+    }
+
     func testWindowChromeIsSeamlessTitlebarOverFullSizeContent() {
         let controller = makeController()
         defer { controller.hide() }
@@ -281,8 +293,10 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(window.styleMask.contains(.fullSizeContentView), "content extends under the titlebar")
         XCTAssertEqual(window.titleVisibility, .hidden, "no title text over the seamless top")
         XCTAssertEqual(window.title, "Winter", "the window keeps its NAME — Mission Control/Window-menu identity")
-        XCTAssertNil(window.toolbar, "custom-sidebar: NO toolbar — ChatGPT has none; the traffic lights float over the custom pane")
-        XCTAssertTrue(window.isOpaque, "the shell is an opaque window — the detached windows' clear shell is NOT this recipe")
+        // 2026-09-17 experiment: an EMPTY unified toolbar, for macOS 26's larger window corner.
+        XCTAssertEqual(window.toolbar?.items.count, 0, "the toolbar carries no items — it is chrome only")
+        XCTAssertEqual(window.toolbarStyle, .unified)
+        XCTAssertFalse(window.isOpaque, "2026-09-17: the sidebar's behind-window vibrancy needs a non-opaque window — an opaque backing store covers the desktop before the blur can sample it")
     }
 
     /// panel-shell T2 review round 2: the panel toggle's disabled help text ("Widen the window or

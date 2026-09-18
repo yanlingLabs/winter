@@ -78,15 +78,28 @@ struct PairedDevicesView: View {
         }
     }
 
+    /// Room for the floating panel's close button when this pane is hosted in one; zero in the
+    /// Dashboard, where nothing sits in that corner.
+    @Environment(\.shellPanelCloseGutter) private var closeGutter
+
     private var header: some View {
         HStack {
             Text("Paired Devices").font(Typography.paneTitle)
             Spacer()
+            // PLAIN, not filled (user call, 2026-09-18): two filled capsules in the corner of a
+            // translucent panel read as the loudest thing on it, louder than the devices the pane
+            // is about. Text buttons in the accent, the register the rest of the app's inline
+            // actions already use.
             Button("Pair a Device…") { onPairDevice() }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.accent)
             Button("Refresh") { Task { await load() } }
+                .buttonStyle(.plain)
+                .foregroundStyle(loading ? Theme.textMuted : Theme.accent)
                 .disabled(loading)
         }
         .padding()
+        .padding(.trailing, closeGutter)
     }
 
     private var sortedRecords: [PairRecord] {
@@ -102,8 +115,22 @@ struct PairedDevicesView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button("Revoke") { confirmingRevoke = record }
-                .disabled(revokingPeer != nil)
+            // A trash glyph, not the word (user call). The confirm alert still spells out what
+            // revoking does, so the row does not have to carry the sentence — and a row of
+            // repeated "Revoke" buttons made the list read as a list of buttons.
+            Button {
+                confirmingRevoke = record
+            } label: {
+                Image(systemName: "trash")
+                    .font(Typography.control())
+                    .frame(width: shellTitlebarButtonSize, height: shellTitlebarButtonSize)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(ShellChromeButtonStyle())
+            .foregroundStyle(Theme.textMuted)
+            .help("Revoke \(record.label)")
+            .accessibilityLabel("Revoke \(record.label)")
+            .disabled(revokingPeer != nil)
         }
     }
 

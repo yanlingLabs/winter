@@ -22,6 +22,27 @@ public struct RpcError: Error, Equatable, Sendable {
         self.message = message
         self.data = data
     }
+
+    /// JSON-RPC's own `-32601` — the daemon's `default:` arm (`ipc/server.ts`'s
+    /// `RpcFailure(ERR.METHOD_NOT_FOUND, …)`), which is what an OLDER daemon answers for a method
+    /// this app already knows how to call.
+    ///
+    /// This is a FIRST-CLASS, EXPECTED state, not a failure to report: the Mac app ships ahead of
+    /// the daemon routinely (a cask update, a running `winter-core` from before the RPC landed),
+    /// and the honest rendering for a surface whose method is missing is the "waiting on the
+    /// daemon" copy it already has — never a red banner and never an empty list, which reads as
+    /// "the daemon says there are none". Every caller of a not-yet-universal method branches on
+    /// THIS, so the rule lives in one place instead of being spelled `code == -32601` at each
+    /// surface.
+    public var isMethodNotFound: Bool { code == -32601 }
+}
+
+/// `true` when `error` is a daemon that does not implement the method — see
+/// `RpcError.isMethodNotFound`. A free function because call sites catch an `Error`, not an
+/// `RpcError`, and `(error as? RpcError)?.isMethodNotFound == true` at every one of them is the
+/// same conditional cast written five times.
+public func isMethodNotFoundError(_ error: Error) -> Bool {
+    (error as? RpcError)?.isMethodNotFound ?? false
 }
 
 /// Winter Phase 8d (Task 4.2, Interfaces block): the handoff barrier's four typed refusal codes a

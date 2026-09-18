@@ -254,14 +254,22 @@ struct SkillsPane: View {
         }
     }
 
+    @Environment(\.shellPanelCloseGutter) private var closeGutter
+
     private var header: some View {
         HStack {
             Text("Skills").font(Typography.paneTitle)
             Spacer()
+            // Plain, in the accent — the filled capsule was the loudest thing on the panel (user
+            // call, 2026-09-18, same change as the devices pane's two buttons).
             Button("Refresh") { Task { await model.refresh() } }
+                .buttonStyle(.plain)
+                .foregroundStyle(model.loading ? Theme.textMuted : Theme.accent)
                 .disabled(model.loading)
         }
         .padding([.top, .horizontal])
+        // Room for the floating panel's close button; zero in the Dashboard.
+        .padding(.trailing, closeGutter)
         .padding(.bottom, 4)
     }
 

@@ -46,6 +46,14 @@ struct PluginRowDisplay: Equatable, Identifiable {
     let statusText: String
     let statusColorKind: PluginStatusColorKind
     let actions: [PluginAction]
+    /// 2026-09-18: the plugin's manifest-declared hooks (`plugins.list`'s `manifestHooks`), carried
+    /// for the Library panel's Hooks tab. The Plugins pane itself renders nothing from it.
+    ///
+    /// **OPTIONAL, and the nil is load-bearing.** The wire omits the key both for a plugin that
+    /// declares no hook AND for every plugin on a daemon that predates the field, so a single row
+    /// cannot distinguish "none" from "not told". Only the whole list can (`pluginHooksAreReported`),
+    /// which is why this is never defaulted to `[]` on the way in.
+    let manifestHooks: [PluginHookDeclaration]?
 }
 
 /// Task 2 (4d-iii): `plugins.list` entry → row display. PURE — no `WinterClient`, no SwiftUI —
@@ -78,7 +86,11 @@ func pluginRowDisplay(
     consented: [String],
     legacy: Bool,
     status: String?,
-    disabled: Bool
+    disabled: Bool,
+    /// 2026-09-18. Defaulted so every existing caller (and `PluginManagerModelTests`' table) is
+    /// unchanged — and defaulted to `nil`, never `[]`, because absence is a distinct answer here
+    /// (see `PluginRowDisplay.manifestHooks`).
+    manifestHooks: [PluginManifestHook]? = nil
 ) -> PluginRowDisplay {
     let tierBadge: String
     if legacy {
@@ -133,7 +145,16 @@ func pluginRowDisplay(
         consentText: consentText,
         statusText: statusText,
         statusColorKind: statusColorKind,
-        actions: actions
+        actions: actions,
+        // Manifest order is preserved verbatim — the daemon fires them in it, and regrouping by
+        // event here would misreport the order a user is trying to reason about. The index rides
+        // along so two identical declarations (a manifest the daemon accepts) stay two rows.
+        manifestHooks: manifestHooks.map { hooks in
+            hooks.enumerated().map { index, hook in
+                PluginHookDeclaration(event: hook.event, command: hook.command,
+                                      timeoutMs: hook.timeoutMs, manifestIndex: index)
+            }
+        }
     )
 }
 
@@ -307,7 +328,8 @@ final class PluginManagerModel: ObservableObject {
                 pluginRowDisplay(
                     name: p.name, version: p.version, tier: p.tier,
                     requiredConsents: p.requiredConsents, consented: p.consented,
-                    legacy: p.legacy, status: p.status, disabled: p.disabled
+                    legacy: p.legacy, status: p.status, disabled: p.disabled,
+                    manifestHooks: p.manifestHooks
                 )
             }
             statusByName = Dictionary(uniqueKeysWithValues: plugins.map { ($0.name, $0.status) })
