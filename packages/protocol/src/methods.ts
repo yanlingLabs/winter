@@ -623,6 +623,11 @@ export const VersionsGetResult = z.object({
    *  staged (a dev checkout, or a build that never embedded the official leg) — never an error
    *  either way. */
   official: z.object({
+    // Minor 5a (fix wave, pre-merge review): required at the source (`runtime-sdk/bundle-layout.ts`'s
+    // `VersionsJson.schema: 1`) but omitted here — a bare `z.object()` strips an unmodeled key by
+    // default rather than throwing, so `schema` silently vanished from any parse of this result, the
+    // exact silent-strip class this branch exists to fix. Declared verbatim.
+    schema: z.literal(1),
     winterAgentSdk: z.string(),
     winterRuntimeSdk: z.string(),
     officialSdk: z.string(),

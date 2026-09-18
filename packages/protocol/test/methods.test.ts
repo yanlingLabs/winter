@@ -151,6 +151,7 @@ import {
   ProviderLoginCodeResult,
   ProviderLogoutParams,
   ProviderStatusResult,
+  VersionsGetResult,
 } from "../src/methods";
 
 describe("SessionAttachParams", () => {
@@ -1478,5 +1479,41 @@ describe("provider.status (O5, P10a-3); WS-20: auth is gone, effective gains \"b
       expect(ProviderStatusResult.safeParse({ anthropic: { apiKey: false, consoleProfile: false, effective: v } }).success).toBe(true);
     }
     expect(ProviderStatusResult.safeParse({ anthropic: { apiKey: false, consoleProfile: false, effective: "bearer" } }).success).toBe(false);
+  });
+});
+
+// Minor 5a (fix wave, pre-merge review): `official.schema` (required at the source,
+// runtime-sdk/bundle-layout.ts's `VersionsJson.schema: 1`) used to be entirely absent from this
+// wire schema — a bare `z.object()` strips an unmodeled key rather than throwing, so any real
+// parse of a `versions.get` reply silently dropped it. Declared now; this pins that it survives.
+describe("versions.get official.schema (Minor 5a)", () => {
+  const fullOfficial = {
+    schema: 1 as const,
+    winterAgentSdk: "0.0.16",
+    winterRuntimeSdk: "0.0.9",
+    officialSdk: "0.3.250",
+    claudeCode: "0.3.250",
+    checksums: { winterPreSign: "abc", claude: "def" },
+    stagedAt: "2026-09-18T00:00:00.000Z",
+  };
+  const base = {
+    ok: true as const,
+    core: "0.114.4",
+    pins: { winterAgentSdk: "0.0.16", winterRuntimeSdk: "0.0.9", claudeAgentSdk: "0.3.250" },
+    installed: { winterAgentSdk: "0.0.16" },
+  };
+
+  test("official.schema survives a real parse — not silently stripped", () => {
+    const parsed = VersionsGetResult.parse({ ...base, official: fullOfficial });
+    expect(parsed.official).toEqual(fullOfficial);
+  });
+
+  test("official.schema is REQUIRED — omitting it now refuses rather than silently stripping", () => {
+    const { schema: _schema, ...officialWithoutSchema } = fullOfficial;
+    expect(VersionsGetResult.safeParse({ ...base, official: officialWithoutSchema }).success).toBe(false);
+  });
+
+  test("official: null still parses (no staged bundle)", () => {
+    expect(VersionsGetResult.parse({ ...base, official: null }).official).toBeNull();
   });
 });
