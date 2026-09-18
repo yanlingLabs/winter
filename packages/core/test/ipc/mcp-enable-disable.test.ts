@@ -64,14 +64,14 @@ describe("mcp.enable / mcp.disable / mcp.list settings overlay", () => {
   let stop: (() => void) | undefined;
   afterEach(() => { stop?.(); stop = undefined; });
 
-  async function boot(settingsOverride?: Record<string, unknown>) {
+  async function boot(settingsOverride?: Record<string, unknown>, mcpOverride?: McpManager) {
     const home = mkdtempSync(join(tmpdir(), "winter-mcp-enable-"));
     const base = { schemaVersion: 3 as const, provider: { model: "codex-oauth/gpt-5.6-sol" } };
     saveSettings(join(home, "settings.json"), Settings.parse({ ...base, ...settingsOverride }));
     const trust = new TrustStore(join(home, "trust.json"));
     // A bare McpManager with NOTHING started — this file never spawns a real child process (see
     // header); `mcp.list`'s stdio/"connected" path is exercised elsewhere.
-    const mcp = new McpManager({ registry: new ToolRegistry(), trust });
+    const mcp = mcpOverride ?? new McpManager({ registry: new ToolRegistry(), trust });
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const secrets = new FileSecretStore(join(home, "secrets"));
@@ -127,6 +127,24 @@ describe("mcp.enable / mcp.disable / mcp.list settings overlay", () => {
     await c.hello(harnessToken, "cli");
     const { result } = await c.request(METHODS.mcpList, {});
     expect(result.servers).toEqual([{ name: "remote", status: "disabled", toolNames: [], source: "user", transport: "sse" }]);
+    c.close();
+  });
+
+  test("a tracked PROJECT-source row (not just \"user\") is ALSO overlaid disabled — a disabled server is withheld from the child regardless of which tier configured it", async () => {
+    // A minimal fake standing in for a REAL McpManager whose ensureProject already started a
+    // project server — proves the overlay is not narrowed to source "user" (the bug this test
+    // guards against: configuredMcpServersFor withholds a disabled server from BOTH user and
+    // project sources, so mcp.list reporting only the user half "connected -> disabled" flip would
+    // have shown a withheld project server as still running).
+    const fakeMcp = {
+      list: () => [{ name: "proj", status: "connected" as const, toolNames: ["echo"], source: "project" as const }],
+      ensureProject: async () => {},
+    } as unknown as McpManager;
+    const { socketPath, harnessToken } = await boot({ mcp: { disabled: ["proj"] } }, fakeMcp);
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const { result } = await c.request(METHODS.mcpList, { cwd: "/some/project" });
+    expect(result.servers).toEqual([{ name: "proj", status: "disabled", toolNames: ["echo"], source: "project" }]);
     c.close();
   });
 

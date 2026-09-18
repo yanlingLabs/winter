@@ -167,6 +167,39 @@ describe("loadSettings", () => {
     expect(none.mcpServers).toBeUndefined();
   });
 
+  test("mcpServers accepts HTTP and SSE entries too (batch 3 item 3b), field-for-field", () => {
+    const s = Settings.parse({
+      schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
+      mcpServers: {
+        remoteHttp: { type: "http", url: "https://example.com/mcp", headers: { Authorization: "Bearer t" } },
+        remoteSse: { type: "sse", url: "https://example.com/sse" },
+      },
+    });
+    expect(s.mcpServers!["remoteHttp"]).toEqual({ type: "http", url: "https://example.com/mcp", headers: { Authorization: "Bearer t" } });
+    expect(s.mcpServers!["remoteSse"]).toEqual({ type: "sse", url: "https://example.com/sse" });
+  });
+
+  test("a malformed mcpServers entry is refused with a useful, field-pointing message", () => {
+    // Missing `command` on a type-less (→ stdio) entry.
+    const noCommand = Settings.safeParse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, mcpServers: { bad: {} } });
+    expect(noCommand.success).toBe(false);
+    if (!noCommand.success) expect(noCommand.error.issues.some((i) => i.path.join(".") === "mcpServers.bad.command")).toBe(true);
+
+    // Missing `url` on an http entry.
+    const noUrl = Settings.safeParse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, mcpServers: { bad: { type: "http" } } });
+    expect(noUrl.success).toBe(false);
+    if (!noUrl.success) expect(noUrl.error.issues.some((i) => i.path.join(".") === "mcpServers.bad.url")).toBe(true);
+
+    // A non-URL `url` string.
+    const badUrl = Settings.safeParse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, mcpServers: { bad: { type: "http", url: "not-a-url" } } });
+    expect(badUrl.success).toBe(false);
+    if (!badUrl.success) expect(badUrl.error.issues.some((i) => i.path.join(".") === "mcpServers.bad.url")).toBe(true);
+
+    // An unrecognized `type` discriminant.
+    const badType = Settings.safeParse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, mcpServers: { bad: { type: "grpc", url: "https://example.com" } } });
+    expect(badType.success).toBe(false);
+  });
+
   test("reviewer config parses; absent → undefined", () => {
     const s = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, reviewer: { enabled: true, model: "codex-oauth/gpt-5.4-mini", allow: ["git status"] } });
     expect(s.reviewer).toEqual({ enabled: true, model: tag("codex-oauth/gpt-5.4-mini"), allow: ["git status"] });

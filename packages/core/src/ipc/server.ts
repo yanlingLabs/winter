@@ -2008,17 +2008,26 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       // -----------------------------------------------------------------------------------------
       // Daemon settings surface batch 3 (item 3a): `mcp.list` now overlays LIVE settings onto
-      // whatever the daemon's own `McpManager` tracked (which — for `"user"` servers — is a
-      // BOOT-TIME snapshot; `McpManager.startAll` never re-runs on a settings edit, a pre-existing
-      // limitation this item does not attempt to fix). Two things this overlay adds that the
-      // manager itself cannot know:
+      // whatever the daemon's own `McpManager` tracked (which is a BOOT-TIME snapshot for "user"
+      // servers and an ensureProject-time snapshot for "project" ones; neither re-runs on a
+      // settings edit — a pre-existing limitation this item does not attempt to fix). Two things
+      // this overlay adds that the manager itself cannot know, for EVERY source (user/project/
+      // plugin alike — `configuredMcpServersFor` withholds a disabled server from the CHILD
+      // regardless of which tier configured it, so the report must not narrow to "user" only,
+      // which would show a withheld project server as still "connected"):
       //  - a NOW-disabled server (`settings.mcp.disabled`) is reported `status: "disabled"`
-      //    regardless of whatever status the manager cached at boot;
+      //    regardless of whatever status the manager cached at boot/ensureProject;
       //  - a configured HTTP/SSE server is UNION'D IN even though the manager never attempted it at
       //    all (no in-daemon client for those transports) — `status: "unmanaged"` (or `"disabled"`
       //    if also named in `settings.mcp.disabled`), `transport` set from its own `type`.
       // A stdio server added to settings AFTER boot is NOT synthesized here — the manager's own
       // "started at boot" gap is unrelated to this item and stays exactly as wide as it already was.
+      // KNOWN GAP, not routed around: `McpManager.doEnsureProject`/`startAll` have no `disabled`
+      // concept of their own, so the daemon's OWN registry (this leg of `mcp.list`'s source data,
+      // and `tool.list`/MCP resources) still actually STARTS a disabled project/user stdio server
+      // for itself — only the report here, and the copy `configuredMcpServersFor` builds for each
+      // session's OWN child, honour the disable. Closing that needs the manager to skip/stop a
+      // disabled server itself, which is out of this item's scope.
       // -----------------------------------------------------------------------------------------
       case METHODS.mcpList: {
         const p = parseParams(McpListParams, params);
@@ -2026,7 +2035,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const tracked = opts.mcp?.list(p.cwd) ?? [];
         const settings = liveSettingsFor(opts);
         const disabled = new Set(settings?.mcp?.disabled ?? []);
-        const overlaid = tracked.map((row) => (row.source === "user" && disabled.has(row.name) ? { ...row, status: "disabled" as const } : row));
+        const overlaid = tracked.map((row) => (disabled.has(row.name) ? { ...row, status: "disabled" as const } : row));
         const trackedNames = new Set(overlaid.map((r) => r.name));
         const unmanaged = Object.entries(settings?.mcpServers ?? {})
           .filter(([name, entry]) => entry.type !== "stdio" && !trackedNames.has(name))
