@@ -152,6 +152,7 @@ import {
   ProviderLogoutParams,
   ProviderStatusResult,
   VersionsGetResult,
+  SettingsSetSkillDeniedParams,
 } from "../src/methods";
 
 describe("SessionAttachParams", () => {
@@ -1515,5 +1516,25 @@ describe("versions.get official.schema (Minor 5a)", () => {
 
   test("official: null still parses (no staged bundle)", () => {
     expect(VersionsGetResult.parse({ ...base, official: null }).official).toBeNull();
+  });
+});
+
+// Minor 5d (fix wave, pre-merge review): `name` used to be a bare `z.string().min(1)`, reaching
+// `settings.ts`'s `skillDenyRule` (`Skill(${skillName})`) with no downstream validation at all.
+describe("SettingsSetSkillDeniedParams.name (Minor 5d)", () => {
+  test("accepts real skill-shaped names (lowercase alnum + dash)", () => {
+    for (const name of ["my-skill", "a", "skill123", "a".repeat(64)]) {
+      expect(SettingsSetSkillDeniedParams.safeParse({ name, denied: true }).success).toBe(true);
+    }
+  });
+
+  test("refuses a name carrying `)` — cannot inject rule-grammar structure into Skill(<name>)", () => {
+    expect(SettingsSetSkillDeniedParams.safeParse({ name: "x) Agent(fork", denied: true }).success).toBe(false);
+  });
+
+  test("refuses whitespace, uppercase, and over-length names", () => {
+    for (const name of ["my skill", "My-Skill", "a".repeat(65), ""]) {
+      expect(SettingsSetSkillDeniedParams.safeParse({ name, denied: true }).success).toBe(false);
+    }
   });
 });
