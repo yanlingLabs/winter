@@ -6,7 +6,11 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
 export const REQUIRED_WINTER_AGENT_SDK = "0.0.16";
-export const REQUIRED_WINTER_RUNTIME_SDK = "0.0.8";
+/** Bumped to 0.0.9 (daemon settings surface batch 3): `OptionsTemplatePolicy` gained `agents?:
+ *  Readonly<Record<string, unknown>>` — the router-package wall `official-options.ts`'s own comment
+ *  on `OfficialInputDeps.agents` used to name (a router version this low has no field to forward the
+ *  daemon's merged subagent definitions through) is CLOSED as of this pin. */
+export const REQUIRED_WINTER_RUNTIME_SDK = "0.0.9";
 /** P8c-3/versions: the official peer is pinned EXACT (`"0.3.250"` in package.json, no `^`) — the
  *  ladder's package door and the router's own `assertVersionMatrix` both key off this string
  *  matching the installed wrapper's manifest, never a range. */

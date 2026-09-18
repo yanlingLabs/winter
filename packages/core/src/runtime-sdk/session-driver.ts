@@ -66,6 +66,23 @@ import { WINTER_PEER_VERSIONS } from "./versions";
 import { winterSystemPromptFor } from "./system-prompt";
 import { DISPATCH_EFFORT } from "../agent/dispatch-config";
 import { loadUserAgentDefinitions, loadProjectAgentDefinitions, mergeAgentDefinitionTiers, type LoadedAgentDefinitions } from "../agent/agent-definitions";
+
+/**
+ * Daemon settings surface batch 3: the ONE merge both legs' builders call — `<home>/agents/*.md`
+ * (user tier) merged with a TRUSTED project's `<cwd>/.winter/agents/*.md` (project tier, trust-gated
+ * by `projectAgentDefinitions` itself — absent/untrusted degrades to the empty scan shape), project
+ * winning by name (the SDK's own precedence, batch 3 item 1). A fresh scan on every call, same as
+ * `loadUserAgentDefinitions` itself — no caching here either, so a new/edited/removed file reaches
+ * the very next incarnation on EITHER leg with no daemon restart.
+ */
+function mergedAgentDefinitions(
+  home: string,
+  cwd: string,
+  projectAgentDefinitions: ((cwd: string) => LoadedAgentDefinitions) | undefined,
+): Record<string, import("@yanlinglabs/winter-agent-sdk").AgentDefinition> {
+  const project = projectAgentDefinitions?.(cwd) ?? { definitions: {}, sources: [], rejected: [] };
+  return mergeAgentDefinitionTiers(loadUserAgentDefinitions(home), project).optionsMap;
+}
 import type { AgentRegistry } from "../agent/bg-agent-registry";
 import type { ContextAssembler } from "../agent/context";
 import { startWinterSession, unconsumedUserMessages, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
@@ -574,8 +591,10 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // Batch 3 (item 1): merged with the TRUSTED project tier (`deps.projectAgentDefinitions`,
         // trust-gated by the daemon's own wiring — absent/untrusted degrades to the empty scan
         // shape) via `mergeAgentDefinitionTiers`, restoring the SDK's own precedence (project wins
-        // over user, by name) instead of the user tier alone winning outright.
-        agents: mergeAgentDefinitionTiers(loadUserAgentDefinitions(home), deps.projectAgentDefinitions?.(cwd) ?? { definitions: {}, sources: [], rejected: [] }).optionsMap,
+        // over user, by name) instead of the user tier alone winning outright. `mergedAgentDefinitions`
+        // is the SAME helper the official leg's `inputDeps()` calls below, so both legs see the
+        // identical merged map from one owner.
+        agents: mergedAgentDefinitions(home, cwd, deps.projectAgentDefinitions),
       });
     };
 
@@ -757,6 +776,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       try { assertNoCapabilityCollision(configuredMcpServers, capabilities); } catch (err) {
         throw new WinterLegRefusal("winter_leg_unavailable", err instanceof Error ? err.message : String(err));
       }
+      // Router 0.0.9: the SAME merged (project-over-user) subagent map the Winter leg's `optionsFor`
+      // carries — one owner, one merge, both legs (`mergedAgentDefinitions`, above).
+      const agents = mergedAgentDefinitions(deps.home, capSession.cwd, deps.projectAgentDefinitions);
       // The SAME credential read `optionsFor` (the Winter incarnation builder, above) makes per
       // incarnation — `officialCredentialPlan`'s auto-derivation (`official-options.ts`) needs this
       // provider's `authRef` to inject `ANTHROPIC_API_KEY` at spawn.
@@ -819,6 +841,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // Batch 3 (item 3): threaded onto `officialInputFor` regardless of whether it's empty —
         // `{}` there is byte-identical to before item 3.
         configuredMcpServers,
+        // Router 0.0.9: threaded onto `officialInputFor` regardless of whether it's empty —
+        // `officialInputFor` itself omits the `options.agents` key entirely when empty.
+        agents,
         // Phase 9c (P9c-1): the LIVE settings snapshot (`deps.settings()` — the same hot holder
         // `create()`/`legForNew` already read above; never a boot snapshot) — `official-options.ts`'s
         // `officialInputFor` reads it ONLY through `officialSubscriptionAuthEnabled`, and
