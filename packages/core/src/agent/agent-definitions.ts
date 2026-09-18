@@ -32,7 +32,7 @@
 // `TrustStore` itself, so it stays testable with a plain temp directory and no daemon wiring.
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentDefinition, PermissionMode } from "@yanlinglabs/winter-agent-sdk";
+import type { AgentDefinition } from "@yanlinglabs/winter-agent-sdk";
 
 /** One rejected `<home>/agents/*.md` file — never silently skipped (measured against the SDK's own
  *  posture: a missing `name`/`description` is a rejection with a reason, not a silent drop). */
@@ -95,11 +95,6 @@ function isMemoryValue(v: string | undefined): v is "user" | "project" | "local"
   return v === "user" || v === "project" || v === "local";
 }
 
-const PERMISSION_MODES: readonly PermissionMode[] = ["default", "acceptEdits", "bypassPermissions", "plan", "dontAsk", "auto"];
-function isPermissionMode(v: string | undefined): v is PermissionMode {
-  return v !== undefined && (PERMISSION_MODES as readonly string[]).includes(v);
-}
-
 function toEffortValue(raw: string): NonNullable<AgentDefinition["effort"]> {
   const trimmed = raw.trim();
   if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
@@ -142,7 +137,23 @@ export function parseAgentDefinitionFile(raw: string, path: string): ParsedAgent
   const maxTurns = maxTurnsRaw !== undefined && Number.isFinite(Number(maxTurnsRaw)) ? Number(maxTurnsRaw) : undefined;
   const memory = attrs["memory"];
   const isolation = attrs["isolation"];
-  const permissionMode = attrs["permissionMode"];
+  // HIGH (fix wave, pre-merge review, finding 2b): `permissionMode` is DROPPED, never carried
+  // through to the parsed `AgentDefinition` — a definition file is a plain `.md` under
+  // `<home>/agents` or a trusted project's `<cwd>/.winter/agents`, and BOTH are writable by an
+  // ordinary session under `ask`/`auto`/`accept-edits` (there is no write fence on either directory
+  // before this fix — see `mode-options.ts`'s `controlPlaneDenyRules`, extended in the same fix, for
+  // that half). The pinned runtime honours a definition's OWN `permissionMode` over the session's
+  // whenever the session's is `default`/`dontAsk`/`plan`, and self-sets
+  // `allowDangerouslySkipPermissions` when that mode is `bypassPermissions` — so a self-authored
+  // definition naming `permissionMode: bypassPermissions` would mint an uncarded child from inside
+  // the very session the policy is meant to gate, with nothing about the file's OWN provenance
+  // (self-written this turn vs. hand-authored by the user before the session existed) available to
+  // tell them apart at parse time. Stripping here (rather than clamping against the session's live
+  // policy) is the choice: clamping would need this parser to know a caller's policy, turning a pure
+  // per-file parse into a per-session one, and — because the SAME file backs every session that ever
+  // reads `<home>/agents` — would still let a definition raise a LOW-privilege session's subagent to
+  // whatever a HIGH-privilege session's policy happens to clamp to. A definition's `permissionMode`
+  // is simply never honoured from a file; a spawn always runs at the invoking session's own mode.
   const definition: AgentDefinition = {
     description,
     prompt: body,
@@ -154,9 +165,6 @@ export function parseAgentDefinitionFile(raw: string, path: string): ParsedAgent
     ...(attrs["background"] !== undefined ? { background: attrs["background"] === "true" } : {}),
     ...(isMemoryValue(memory) ? { memory } : {}),
     ...(attrs["effort"] !== undefined ? { effort: toEffortValue(attrs["effort"]) } : {}),
-    // A typo'd permissionMode is dropped rather than mis-typed through, same posture `isMemoryValue`
-    // and the isolation check just below already apply.
-    ...(isPermissionMode(permissionMode) ? { permissionMode } : {}),
     ...(skills !== undefined ? { skills } : {}),
     ...(isolation === "worktree" || isolation === "remote" ? { isolation } : {}),
     ...(attrs["color"] !== undefined ? { color: attrs["color"] } : {}),

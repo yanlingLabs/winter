@@ -93,7 +93,7 @@ describe("parseAgentDefinitionFile", () => {
     expect(result.reason).toContain("no prompt body");
   });
 
-  test("optional fields map through: disallowedTools, skills, maxTurns, background, memory, effort, permissionMode, isolation, color", () => {
+  test("optional fields map through: disallowedTools, skills, maxTurns, background, memory, effort, isolation, color", () => {
     const raw = [
       "---",
       "name: full",
@@ -104,7 +104,6 @@ describe("parseAgentDefinitionFile", () => {
       "background: true",
       "memory: project",
       "effort: high",
-      "permissionMode: plan",
       "isolation: worktree",
       "color: blue",
       "---",
@@ -120,19 +119,35 @@ describe("parseAgentDefinitionFile", () => {
     expect(result.definition.background).toBe(true);
     expect(result.definition.memory).toBe("project");
     expect(result.definition.effort).toBe("high");
-    expect(result.definition.permissionMode).toBe("plan");
     expect(result.definition.isolation).toBe("worktree");
     expect(result.definition.color).toBe("blue");
   });
 
-  test("an unrecognized permissionMode/memory/isolation value is dropped, not mis-typed through", () => {
-    const raw = ["---", "name: typo", "description: x", "permissionMode: bogus", "memory: bogus", "isolation: bogus", "---", "", "Body."].join("\n");
+  test("an unrecognized memory/isolation value is dropped, not mis-typed through", () => {
+    const raw = ["---", "name: typo", "description: x", "memory: bogus", "isolation: bogus", "---", "", "Body."].join("\n");
     const result = parseAgentDefinitionFile(raw, "/h/agents/typo.md");
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("unreachable");
-    expect(result.definition.permissionMode).toBeUndefined();
     expect(result.definition.memory).toBeUndefined();
     expect(result.definition.isolation).toBeUndefined();
+  });
+
+  // HIGH (fix wave, pre-merge review, finding 2b): `permissionMode` is NEVER carried through from a
+  // frontmatter file, regardless of whether the value is a real `PermissionMode` — unlike every other
+  // optional field, a VALID `permissionMode` is exactly as dangerous as an invalid one (the pinned
+  // runtime honours a definition's own mode over the session's whenever the session's is
+  // `default`/`dontAsk`/`plan`, and self-sets `allowDangerouslySkipPermissions` for `bypassPermissions`
+  // specifically), and both `<home>/agents` and a trusted project's `.winter/agents` are plain files a
+  // session under `ask`/`auto`/`accept-edits` can write for itself.
+  test("permissionMode is stripped even when the value is a real PermissionMode (security, finding 2b)", () => {
+    for (const mode of ["bypassPermissions", "acceptEdits", "plan", "dontAsk", "auto", "default"]) {
+      const raw = ["---", "name: pwn", "description: x", `permissionMode: ${mode}`, "---", "", "Body."].join("\n");
+      const result = parseAgentDefinitionFile(raw, "/h/agents/pwn.md");
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("unreachable");
+      expect(result.definition.permissionMode).toBeUndefined();
+      expect("permissionMode" in result.definition).toBe(false); // not merely undefined — the key itself is absent
+    }
   });
 
   test("effort as a bare number string parses to a number", () => {
