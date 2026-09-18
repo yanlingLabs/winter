@@ -91,6 +91,30 @@ describe("projector: conversation fold (Winter 8b Task 10)", () => {
     expect(seen("TaskOutput")).toBe("agent_output");
   });
 
+  test("the two web built-ins project IDENTICALLY on both legs, with every input key intact (0.0.17)", () => {
+    // SDK 0.0.17 gives the Winter runtime its own `WebSearch`/`WebFetch`, copied from claude's — and
+    // the OFFICIAL leg keeps claude's native pair. Both legs put the SAME tool names on the wire, so
+    // both land on the same `web_search`/`web_fetch` rows through the one pair table: a transcript
+    // cannot tell which leg produced it, which is the whole point of the per-leg exposure rule.
+    // `argsJson` is the block's input VERBATIM (no key filter anywhere in `toolCalls`), so a client
+    // can render `query`/`allowed_domains`/`blocked_domains` and `url`/`prompt`.
+    const { projector } = makeProjector();
+    const search = accept(projector, assistantToolUse("toolu_s", "WebSearch", {
+      query: "winter agent sdk", allowed_domains: ["example.com"], blocked_domains: [],
+    }));
+    expect(search[0]).toMatchObject({ type: "tool_call", callId: "toolu_s", name: "web_search" });
+    expect(JSON.parse((search[0] as { argsJson: string }).argsJson)).toEqual({
+      query: "winter agent sdk", allowed_domains: ["example.com"], blocked_domains: [],
+    });
+    const fetched = accept(projector, assistantToolUse("toolu_f", "WebFetch", {
+      url: "https://example.com/doc", prompt: "what does it say about winter",
+    }));
+    expect(fetched[0]).toMatchObject({ type: "tool_call", callId: "toolu_f", name: "web_fetch" });
+    expect(JSON.parse((fetched[0] as { argsJson: string }).argsJson)).toEqual({
+      url: "https://example.com/doc", prompt: "what does it say about winter",
+    });
+  });
+
   test("text AND tool_use in one assistant message: assistant_message first, then the tool_call", () => {
     const { projector } = makeProjector();
     const out = accept(projector, {

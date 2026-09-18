@@ -100,7 +100,17 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     // 0.0.15 → 0.0.16 (request-layout + background-delivery parity): `git diff v0.0.15 v0.0.16 --
     // packages/runtime/src/provider/keychain-store.ts` came back EMPTY (0 lines) too; the mirror
     // stands unchanged.
-    expect(pkg.version).toBe("0.0.16");
+    //
+    // 0.0.16 → 0.0.17 (the two web tools): `git diff v0.0.16 v0.0.17 --
+    // packages/runtime/src/provider/keychain-store.ts` is +29/-0 and touches NOTHING the mirror
+    // covers — it ADDS `KeychainSecretReader`/`createKeychainSecretReader`, the RAW single-item read
+    // a TOOL's key (the Exa search key) is resolved through, beside the provider-credential `get`
+    // this mirror describes. `coerceMaterial` itself, its `MATERIAL_KINDS` set and every arm are
+    // untouched, so the line-by-line account below stands unchanged. (The raw reader deliberately
+    // interprets nothing — `provider/tool-secret.ts` accepts a BARE key string as well as
+    // `{"kind":"api-key",…}` — which is exactly why it is NOT a second thing for this mirror to
+    // mirror: no `CredentialMaterial` parse happens on that path at all.)
+    expect(pkg.version).toBe("0.0.17");
   });
 
 
