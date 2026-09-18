@@ -253,6 +253,27 @@ describe("loadSettings", () => {
       });
       expect(result.success).toBe(true);
     });
+
+    // Fix wave (advisor round 2): a raw `Settings.safeParse` proves the SCHEMA refuses the header,
+    // but the doors a user actually hits are `loadSettings` (boot, the settings watcher) and
+    // `saveSettings` — both of which used to render ONLY the issue's path
+    // (`renderSettingsIssues`'s predecessor: `issues.map((i) => i.path.join("."))`), dropping the
+    // custom issue's own `.message` entirely. A hand-edited settings.json with a credential-shaped
+    // header therefore threw "settings.json is invalid: mcpServers.x.headers.Authorization — fix or
+    // delete <path>" — naming the FIELD, but neither the rule nor the alternative the ruling's own
+    // text requires. This proves the thrown Error's MESSAGE (not just the raw zod issues) names both.
+    test("a hand-edited settings.json with a credential-shaped header is refused by loadSettings, naming the rule and the alternative", () => {
+      const p = tmpSettings({
+        schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
+        mcpServers: { bad: { type: "http", url: "https://example.com/mcp", headers: { Authorization: "Bearer sk-leaked" } } },
+      });
+      expect(() => loadSettings(p)).toThrow(/credential-shaped/);
+      expect(() => loadSettings(p)).toThrow(/\$\{env:VAR\}/);
+      // The value itself is never echoed into the error (no secret in an error message/log line).
+      try { loadSettings(p); throw new Error("unreachable"); } catch (err) {
+        expect((err as Error).message).not.toContain("sk-leaked");
+      }
+    });
   });
 
   test("reviewer config parses; absent → undefined", () => {
