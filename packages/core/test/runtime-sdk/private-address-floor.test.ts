@@ -59,6 +59,8 @@ const PRIVATE_URLS = [
   "http://10.0.0.1/",                  // RFC1918, second block
   "http://172.16.0.1/",                // RFC1918, third block
   "http://127.0.0.1:3000/",            // loopback
+  "http://app.localhost:5432/admin",   // the .localhost TLD (RFC 6761), not only the bare name
+  "https://a.b.localhost/",
   "https://printer.local/",            // mDNS name, two labels — reachable, unlike bare `localhost`
   "http://localhost:8080/",            // the single-label name
   "http://169.254.169.254/latest/",    // link-local, the metadata surface
