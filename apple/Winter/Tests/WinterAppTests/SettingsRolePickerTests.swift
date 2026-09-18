@@ -714,19 +714,16 @@ final class SettingsRolePickerTests: XCTestCase {
                           effort: effort, effortExplicit: effort != nil, efforts: efforts)
     }
 
-    /// THE FLAG. It ships false, and with it false NOTHING renders — for every shape, stale ones
-    /// included, and even with a write door wired.
-    func testTheFlagShipsOffAndOffRendersNothingForAnyShape() {
-        XCTAssertFalse(settingsRoleEffortControlEnabled,
-                       "flip ONLY when the daemon confirms a role's stored effort reaches the request")
+    /// THE FLAG's off-position still means what it always meant: with it false NOTHING renders — for
+    /// every shape, stale ones included, and even with a write door wired. The flag itself is ON now
+    /// (`testTheEffortControlIsLive`); this pins that switching it back off is a clean kill switch.
+    func testOffRendersNothingForAnyShape() {
         let shapes: [SettingsRoleValue] = [
             effortValue(efforts: nil), effortValue(efforts: []),
             effortValue(efforts: ["low", "high"]), effortValue(effort: "high", efforts: ["low"]),
             effortValue(effort: "high", efforts: nil), effortValue(effort: "ultra", efforts: ["low"]),
         ]
         for value in shapes {
-            XCTAssertEqual(roleEffortControl(enabled: settingsRoleEffortControlEnabled,
-                                             canWriteEffort: true, value: value), .hidden)
             XCTAssertEqual(roleEffortControl(enabled: false, canWriteEffort: true, value: value), .hidden)
         }
     }
@@ -847,5 +844,20 @@ final class SettingsRolePickerTests: XCTestCase {
         XCTAssertEqual(decoded[.dream]?.effort, "high")
         XCTAssertEqual(decoded[.dream]?.effortExplicit, true)
         XCTAssertEqual(decoded[.dream]?.efforts, ["high", "medium", "low"])
+    }
+
+    /// A catalog row can list "none" itself (deepseek-v4-flash: none/low/high/max). It must stay
+    /// where the row put it and must not be offered twice.
+    func testANoneTheRowListsIsKeptInPlaceAndNeverDuplicated() {
+        XCTAssertEqual(roleEffortOptions(["none", "low", "high", "max"]),
+                       ["none", "low", "high", "max"])
+        XCTAssertEqual(roleEffortOptions(["low", "high", "none"]), ["low", "high", "none"])
+        XCTAssertEqual(roleEffortOptions(["low", "medium", "high"]), ["low", "medium", "high", "none"],
+                       "an unlisted none is still appended beside a real vocabulary")
+    }
+
+    /// The flip condition is met (roles' efforts are spent): the switch is on.
+    func testTheEffortControlIsLive() {
+        XCTAssertTrue(settingsRoleEffortControlEnabled)
     }
 }

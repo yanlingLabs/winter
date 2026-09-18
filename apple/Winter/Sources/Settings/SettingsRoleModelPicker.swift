@@ -870,20 +870,25 @@ let roleModelPickerEligibilityNote =
 let roleModelPickerClearTitle = "Use the default"
 let roleModelPickerClearDetail = "Follows the default session model, and moves when it does."
 
-// MARK: - Reasoning effort — BUILT, and GATED OFF
+// MARK: - Reasoning effort — LIVE since 2026-09-18
 
-/// **THE ONE SWITCH for the per-role effort control. It is `false`, and with it false NOTHING about
-/// effort renders anywhere** — no menu, no "takes no effort setting" line, no mismatch note.
+/// **THE ONE SWITCH for the per-role effort control. ON.**
 ///
-/// WHAT FLIPS IT: the daemon session confirming that a role's STORED effort actually reaches the
-/// model request. Today the daemon stores and validates `settings.setModelRole`'s `effort`, but
-/// nothing spends it — so a control would let the user choose something with no effect, and a
-/// control that lies is worse than an absent one (user's standing rule). Flip it here, and only
-/// here, once that is confirmed; every rule it needs is already in `roleEffortControl` and tested.
+/// It was built gated OFF because the daemon stored and validated a role's effort while nothing
+/// SPENT it, and a control that lets you choose something with no effect is worse than none. The
+/// daemon session confirmed the flip condition (origin/main 00642f81): every role's stored effort now
+/// reaches its real consumer through one resolver — dispatch, dream, cleaner, research and its
+/// fallback, titles, the reviewer — mapped onto the role's CURRENT model at spend time rather than
+/// refused, so even a stale effort degrades to "mapped or omitted", never to a broken job.
 ///
-/// It also needs the three-argument write door (`SettingsRolesModel.RoleWriter`) wired, or the
-/// control stays hidden regardless (`canWriteEffort`).
-let settingsRoleEffortControlEnabled = false
+/// The advisor is the exception and needs nothing here: neither SDK's advisor option carries an
+/// effort (and the parity rule forbids inventing one), so its `efforts` is `null` whatever its model,
+/// and the null-vocabulary rule already renders no control. A null on a model that obviously HAS a
+/// vocabulary is correct there, not a bug.
+///
+/// Still needs the three-argument write door (`SettingsRolesModel.RoleWriter`) wired, or the control
+/// stays hidden (`canWriteEffort`). Setting this back to `false` hides every effort surface at once.
+let settingsRoleEffortControlEnabled = true
 
 /// Winter-level tiers that are SESSION concepts, refused by `setModelRole` on every role. Never
 /// offered, even if a catalog row were to list one.
@@ -898,6 +903,8 @@ let roleEffortNone = "none"
 /// - Otherwise the vocabulary minus `roleEffortNeverOffered`, then `"none"` appended — `"none"` is
 ///   offered EXACTLY when there is a real vocabulary to offer it beside, and nowhere else. A row
 ///   whose every entry is filtered away offers nothing (not a lone "none").
+/// - A row may LIST `"none"` itself (measured: `deepseek/deepseek-v4-flash` is none/low/high/max). It
+///   is then kept in the row's own position and never appended a second time.
 func roleEffortOptions(_ efforts: [String]?) -> [String] {
     guard let efforts else { return [] }
     var out: [String] = []
