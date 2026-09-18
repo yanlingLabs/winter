@@ -1543,6 +1543,107 @@ export const SettingsSetModelRoleResult = z.object({
 });
 
 // ---------------------------------------------------------------------------------------------
+// `models.catalog` — READ-ONLY, LOCAL role only (never added to `REMOTE_ALLOWED_METHODS`). The Mac
+// app's Roles pane is getting a model picker: families down the left, that family's models on the
+// right, then a provider list per model with PRICING shown per provider. `settings.modelRoles`'s
+// own `permitted` (above) already carries every provider/tag a role may resolve to, but not family
+// or pricing — and widening `permitted` to carry them was rejected: there are eight roles sharing
+// one `settings.modelRoles` call, so repeating the whole catalog on every entry would ship it eight
+// times over. This is ONE call, independent of role, carrying exactly the catalog facts the picker
+// needs to group and price whatever `permitted` already said it may offer — never re-derived by
+// the app against a catalog that moves every SDK bump.
+//
+// The eligibility floor is EXACTLY `permittedProviders`'s (settings.ts, exported for this reader)
+// — called, not re-derived — so the two provably cannot drift: every tag any role's `permitted`
+// can ever name resolves to a row in this method's `models`, and every `providerId` it names
+// resolves in `providers` (the core test suite's drift tripwire pins exactly this).
+// ---------------------------------------------------------------------------------------------
+export const ModelsCatalogParams = z.object({});
+
+export const ModelCatalogFamilySchema = z.object({
+  id: z.string(),
+  displayName: z.string(),
+  vendor: z.string(),
+  status: z.enum(["candidate", "supported"]),
+});
+
+export const ModelCatalogProviderSchema = z.object({
+  id: z.string(),
+  displayName: z.string(),
+  /** `WinterProviderDescriptor.pricingBasis` (WS-13b §1) — a `"subscription"`/`"free"` provider's
+   *  credential is not billed per token no matter what an individual model's `pricing` below says,
+   *  so the picker must gate its price COLUMN on this, never merely hide an absent number. */
+  pricingBasis: z.enum(["token", "subscription", "free"]),
+  /** The catalog's own `authKinds`, verbatim — informational, same role it plays on `CredentialRow`. */
+  authKinds: z.array(z.string()),
+  /** The credential slot this provider resolves to in `credentialInventory()`'s own derivation
+   *  (`runtime-sdk/keychain.ts`), or `null` when this catalog provider can hold no credential here
+   *  at all — e.g. the catalog's `console` provider (`authKinds: ["console-profile"]`), whose one
+   *  usable slot (`anthropic:console`) is filed under provider id `anthropic`, never `console`. A
+   *  NAME only (a Keychain secret NAME, never material) — same "names and booleans only" rule
+   *  `CredentialRow` states for itself above.
+   */
+  credentialSlotId: z.string().nullable(),
+  /** WHICH DOOR credentials this provider, so a consumer never has to read meaning into
+   *  `credentialSlotId: null`. `"keychain"`: a slot exists — join `credential.list` on
+   *  `credentialSlotId` and that is the whole readiness test. `"console-profile"`: credentialed by
+   *  `winter login --anthropic-console`, and readiness is the on-disk `ant` profile the daemon
+   *  re-checks LIVE at every spawn (`console_profile_missing`), so this read deliberately does not
+   *  answer it — the provider is offerable, not promised. `"none"`: catalog-eligible but this daemon
+   *  stores no credential for it. Without this field the first and third cases are indistinguishable,
+   *  and a picker that reads `null` as "cannot be credentialed" would present a correctly
+   *  signed-in Console user as unusable. */
+  credentialDoor: z.enum(["keychain", "console-profile", "none"]),
+});
+
+export const ModelCatalogPricingSchema = z.object({
+  inputPerMTokUsd: z.number(),
+  outputPerMTokUsd: z.number(),
+  cacheReadPerMTokUsd: z.number().optional(),
+  cacheWritePerMTokUsd: z.number().optional(),
+  /** `CapabilityEvidence.source` — kept because `costBasis` below is a function OF it
+   *  (`source === "official-doc"`); a consumer auditing a shown price needs to see what it rests on. */
+  source: z.string(),
+  confidence: z.string(),
+  observedAt: z.string().optional(),
+  sourceRef: z.string().optional(),
+});
+
+export const ModelCatalogModelSchema = z.object({
+  tag: ModelTagSchema,
+  canonicalModelId: z.string(),
+  providerId: z.string(),
+  familyId: z.string(),
+  /** Mirrors the catalog's `ModelStatus` (`"candidate"|"experimental"|"supported"|"deprecated"|
+   *  "blocked"`) as a bare string rather than a duplicated enum — a catalog bump adding a new
+   *  status value must not need a protocol edit here, same reasoning `CredentialRow.authKinds`
+   *  already applies to the provider auth-kind vocabulary. A `"blocked"` row never reaches this
+   *  array in the first place (`permittedProviders`'s own floor excludes it). */
+  status: z.string(),
+  /** `null` when the row carries no pricing evidence at all — NEVER a zero-filled object (R6-H: an
+   *  unpriced model must never be reported as free). */
+  pricing: ModelCatalogPricingSchema.nullable(),
+  /** `winter-provider-runtime`'s `estimateCostUsd` rule, computed here once rather than left to
+   *  every consumer to re-derive: `"list"` only when `pricing.source === "official-doc"` (the
+   *  vendor's own PUBLISHED price); an inferred/upstream/other-sourced price, or no price at all,
+   *  is `"unknown"` — never a guess dressed as a list price. */
+  costBasis: z.enum(["list", "unknown"]),
+});
+
+export const ModelsCatalogResult = z.object({
+  ok: z.literal(true),
+  /** The compiled catalog's own `schemaVersion` — the consumer's pin against the shape it depends on. */
+  schemaVersion: z.number().int(),
+  catalogVersion: z.string(),
+  /** Catalog order (`WinterCatalog.families`'s own doc: "sorted by id"). There is no canonical
+   *  STRENGTH order across families — WS-13c ranks only the SLOTS inside one family, never the
+   *  family list itself — so this is a stable but arbitrary order, never an ordinal to read as rank. */
+  families: z.array(ModelCatalogFamilySchema),
+  providers: z.array(ModelCatalogProviderSchema),
+  models: z.array(ModelCatalogModelSchema),
+});
+
+// ---------------------------------------------------------------------------------------------
 // Winter Phase 10a (O5, P10a-6): the Anthropic Console login RPC surface. `provider.login` is a
 // STARTER, never a blocker — the real login is interactive (the user pastes a one-time code off
 // Anthropic's own page, M2's measured "code-paste protocol"), so this method spawns it and returns
@@ -2367,4 +2468,7 @@ export const METHODS = {
   // Daemon settings surface (2026-09-17 plan, item 3) — read-only, LOCAL role only, same posture as
   // the four just above: never added to `REMOTE_ALLOWED_METHODS` or its parity test.
   agentsList: "agents.list",
+  // Roles pane model picker: catalog family/pricing facts, read-only, LOCAL role only — same
+  // posture as every entry just above (never added to `REMOTE_ALLOWED_METHODS` or its parity test).
+  modelsCatalog: "models.catalog",
 } as const;
