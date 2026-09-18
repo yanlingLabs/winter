@@ -250,14 +250,42 @@ final class TranscriptBrandTests: XCTestCase {
     /// 2026-09-17 (user: "drop our weird assistant font"; ChatGPT's app uses the system sans).
     /// Pinned on the resolved `NSFont`, and against the serif design by family, so a
     /// reintroduced serif reds here rather than slipping back in.
+    ///
+    /// The expectation resolves the DARK-MODE WEIGHT CORRECTION through the same pure rule the font
+    /// does (`transcriptProseRegularWeight`), rather than hard-coding `.regular`: the substitution
+    /// is real behaviour, and a pin that ignored it would be asserting a falsehood in whichever
+    /// appearance the test host happens to be in. The rule itself is pinned separately below.
     func testAssistantProseIsTheSystemSans() {
+        let weight = transcriptProseRegularWeight(isDark: transcriptProseIsDarkAppearance())
         let assistant = transcriptProseFont(.assistant, size: 14, weight: .regular)
         let sans = transcriptProseFont(.sans, size: 14, weight: .regular)
-        XCTAssertEqual(assistant, NSFont.systemFont(ofSize: 14, weight: .regular),
+        XCTAssertEqual(assistant, NSFont.systemFont(ofSize: 14, weight: weight),
                        "assistant prose is the plain system font, got \(assistant.fontName)")
-        XCTAssertEqual(sans, NSFont.systemFont(ofSize: 14, weight: .regular),
+        XCTAssertEqual(sans, NSFont.systemFont(ofSize: 14, weight: weight),
                        "the sans role is the plain system font, by doing nothing to it")
         XCTAssertFalse(isSerif(assistant), "assistant prose must not be serif any more")
+    }
+
+    /// The correction itself, appearance-independently: light stays `.regular`, dark steps to
+    /// `.light`. Measured reason in `transcriptProseRegularWeight`'s own doc — macOS stem darkening
+    /// against the reference's disabled smoothing, which only swells light-on-dark.
+    func testDarkProseStepsDownOneWeightAndLightProseDoesNot() {
+        XCTAssertEqual(transcriptProseRegularWeight(isDark: false), .regular)
+        XCTAssertEqual(transcriptProseRegularWeight(isDark: true), .light)
+    }
+
+    /// The trap that correction opened, pinned so it cannot reopen: emboldening a non-regular
+    /// system font through `NSFontManager` is a NO-OP, so bold must come from an explicit weight.
+    func testBoldIsRealEvenWhenTheBaseIsLight() {
+        let light = NSFont.systemFont(ofSize: 14, weight: .light)
+        let bold = Typography.converted(light, toHaveTrait: .boldFontMask)
+        XCTAssertNotEqual(bold, light, "a bold span off a Light base must not render as Light")
+        let weightOf: (NSFont) -> Double = { font in
+            let traits = font.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
+            return traits?[.weight] as? Double ?? 0
+        }
+        XCTAssertGreaterThan(weightOf(bold), weightOf(light),
+                             "the bold run has to carry more weight than the base it came from")
     }
 
     /// The family the system's own serif design resolves to, so the no-serif checks compare

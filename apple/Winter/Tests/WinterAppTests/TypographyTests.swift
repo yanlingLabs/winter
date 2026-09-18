@@ -104,14 +104,28 @@ final class TypographyTests: XCTestCase {
     /// The expected SPELLING for each `.font`/`.nsFont` expectation, keyed by role — what the
     /// doc's cell means, constructed the way the token file constructs it. Split from `macRoles`
     /// so the assertion reads `live == documented-meaning` rather than `live == live`.
+    /// The documented meaning of a SANS role, with the dark-appearance weight correction applied
+    /// (2026-09-18). brand.md still documents the DESIGNED weight — `.regular` — and that is what is
+    /// written at each call below; what this adds is the runtime substitution `Typography.uiWeight`
+    /// performs in dark mode, so the pin keeps asserting the documented table rather than silently
+    /// re-documenting Light as the design. Serif and monospaced roles do not route through it,
+    /// matching the token file.
+    private static func sansMeaning(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+        .system(size: size, weight: Typography.uiWeight(weight))
+    }
+
+    private static func sansMeaningNS(_ size: CGFloat, _ weight: NSFont.Weight = .regular) -> NSFont {
+        .systemFont(ofSize: size, weight: Typography.uiWeightNS(weight))
+    }
+
     private static let fontMeanings: [String: Font] = [
         "questionPreviewMono": .system(.body, design: .monospaced),
-        "composerPlusGlyph": .system(size: 17, weight: .medium),
-        "emptyStateGlyph": .system(size: 34, weight: .light),
+        "composerPlusGlyph": sansMeaning(17, .medium),
+        "emptyStateGlyph": sansMeaning(34, .light),
         "pairingCode": .system(size: 22, weight: .semibold, design: .monospaced),
-        "pairingGlyphLarge": .system(size: 36, weight: .regular),
-        "pairingGlyphMedium": .system(size: 30, weight: .regular),
-        "morphTrafficGlyph": .system(size: 8.5, weight: .bold),
+        "pairingGlyphLarge": sansMeaning(36),
+        "pairingGlyphMedium": sansMeaning(30),
+        "morphTrafficGlyph": sansMeaning(8.5, .bold),
         "paneTitle": .headline,
         "emptyStateTitle": .title2,
         "emptyStateSubtitle": .callout,
@@ -123,10 +137,10 @@ final class TypographyTests: XCTestCase {
     ]
 
     private static let nsFontMeanings: [String: NSFont] = [
-        "fieldCodeLabelNS": .systemFont(ofSize: 11, weight: .medium),
+        "fieldCodeLabelNS": sansMeaningNS(11, .medium),
         "fieldCodeBlockNS": .monospacedSystemFont(ofSize: 13, weight: .regular),
-        "shortcutKeyNS": .systemFont(ofSize: 11, weight: .regular),
-        "panelTabLabelNS": .systemFont(ofSize: 12, weight: .regular),
+        "shortcutKeyNS": sansMeaningNS(11),
+        "panelTabLabelNS": sansMeaningNS(12),
     ]
 
     /// One parsed doc row: the backticked role name and its Mac cell, raw.
@@ -304,7 +318,11 @@ final class TypographyTests: XCTestCase {
             (.system(size: 8.5, weight: .bold), 8.5), (.system(size: 17, weight: .medium), 17),
             (.system(size: 34, weight: .light), 34),
             (.system(size: 22, weight: .semibold, design: .monospaced), 22),
-            (.system(size: 36, weight: .regular), 36), (.system(size: 30, weight: .regular), 30),
+            // These two resolve through the dark-appearance weight correction, exactly as the
+            // meanings table above does — a probe built at the DESIGNED weight would never match
+            // the corrected Font in dark mode, and the cross-check would report a size drift that
+            // is really a weight substitution.
+            (Self.sansMeaning(36), 36), (Self.sansMeaning(30), 30),
             (.system(size: 20, weight: .semibold, design: .serif), 20),
             (.system(size: 38, weight: .regular, design: .serif), 38),
         ]
@@ -468,7 +486,11 @@ final class TypographyTests: XCTestCase {
                 count += code.components(separatedBy: token).count - 1
             }
         }
-        XCTAssertEqual(count, 21,
+        // 21 → 23 (2026-09-18, the dark-appearance weight correction): `Typography.converted`
+        // gained an explicit `.systemFont(… weight: .semibold)` — the bold a Light base cannot get
+        // from `NSFontManager` — and `Theme.assistantProse` resolves through the same corrected
+        // path. Both are weight plumbing on existing roles, so § 4.7 gains no new row.
+        XCTAssertEqual(count, 23,
             "the token files' font-construction count moved — if you added a role, § 4.7's "
             + "checklist first (doc row + mapping in TypographyTests), then update this pin")
     }
@@ -486,8 +508,8 @@ final class TypographyTests: XCTestCase {
                        transcriptProseMetrics(.sans).bodySize,
                        "the composer's default must derive from the user-message metrics")
         XCTAssertEqual(Typography.composerFieldSize, transcriptProseMetrics(.sans).bodySize)
-        XCTAssertEqual(Typography.composerField(), .system(size: transcriptProseMetrics(.sans).bodySize,
-                                                           weight: .regular))
+        XCTAssertEqual(Typography.composerField(),
+                       Self.sansMeaning(transcriptProseMetrics(.sans).bodySize))
         // The orb's message roles derive from the transcript roles — and the reply takes the
         // transcript's FACE as well as its size (final 2026-08-13 ruling: "font style and
         // size"): Theme.assistantProse, same spelling as the token builds.

@@ -389,6 +389,12 @@ final class BrowserRuntime {
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.title = "Winter browser parking"
+        // Belt, added 2026-09-18 while hunting stray browser windows. This one was NOT the cause —
+        // nothing in the app orders it in — but it is a real window hosting a live page, so a future
+        // all-windows sweep or a state restoration could surface it as a chromeless floating page.
+        // Neither can reach it now.
+        window.isExcludedFromWindowsMenu = true
+        window.isRestorable = false
         parkingWindowStorage = window
         return window
     }

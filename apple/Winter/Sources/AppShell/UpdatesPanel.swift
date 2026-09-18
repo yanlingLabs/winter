@@ -148,64 +148,175 @@ private struct UpdatesPanelBody: View {
 
 // MARK: - Release notes
 
-/// Whatever Sparkle handed us for this version, rendered as text.
+/// Whatever Sparkle handed us for this version, set in Winter's own type.
 ///
-/// **Deliberately de-styled.** The notes arrive as HTML (the appcast's `<description>` CDATA, or a
-/// downloaded `<sparkle:releaseNotesLink>` body) authored outside this app, and rendering it with
-/// its own fonts and colours would put Times New Roman on black text into a themed, dark-mode-aware
-/// panel — and would drive a whole second type system through a surface the typography sweep
-/// governs. So the HTML is flattened to its text and set in Winter's own type. The link is offered
-/// alongside for anyone who wants the formatted page.
+/// **Structured, not flattened — and not imported either.** The notes arrive as HTML: the appcast's
+/// `<description>`, which from the next release carries the SDK version line followed by the
+/// release notes as `h2`/`h3`/`p`/`ul`/`pre`/`code`/`strong`. The previous pass flattened all of
+/// that to `attributed.string`, which was right while a `<description>` was one plain line and is
+/// wrong now — it throws away the headings, lists and code the reader is here for.
 ///
-/// It also degrades to nothing: `UpdatesPanel` only builds this when notes exist, and today's
-/// appcast `<description>` is a bare version line (the richer CDATA + link is landing in the
-/// release script from another session), so "absent" is the common case and must not leave a box.
+/// It is still not rendered as HTML. `NSAttributedString(html:)` imports the document's OWN fonts
+/// and colours (Times New Roman on black, into a themed dark-mode-aware panel) and would drive a
+/// second type system straight through the surface `TypographyTests` sweeps. Instead
+/// `parseReleaseNotesHTML` — pure, table-tested, `Sources/Updates/ReleaseNotesMarkup.swift` —
+/// turns the markup into blocks, and every one of them is drawn below with `Typography`/`Theme`
+/// tokens. An unknown tag degrades to its text; raw markup never reaches the screen.
+///
+/// It also degrades to nothing: `UpdatesPanel` only builds this when notes exist, so "absent" stays
+/// a common case that must not leave an empty box. The link is offered when the feed carries a
+/// `<sparkle:releaseNotesLink>` — the new feed deliberately does NOT, so the inline path above is
+/// the one that renders.
 private struct ReleaseNotesSection: View {
     let notes: ReleaseNotes
     let link: URL?
 
-    @State private var text: String = ""
+    /// Parsed once per notes VALUE, in a `.task(id:)` — never per layout pass. The parse is pure
+    /// and cheap, but a 3800-character description re-parsed on every body evaluation would be a
+    /// silly thing to do to a scroll view.
+    @State private var blocks: [ReleaseNotesBlock] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             LibraryGroupHeader(title: "What's new")
-            if !text.isEmpty {
-                Text(text)
-                    .font(Typography.label())
-                    .foregroundStyle(Theme.textSecondary)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 10)
+            VStack(alignment: .leading, spacing: releaseNotesBlockSpacing) {
+                ForEach(Array(blocks.enumerated()), id: \.offset) { entry in
+                    ReleaseNotesBlockView(block: entry.element)
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
             if let link {
                 Link("Read the full notes", destination: link)
                     .font(Typography.caption())
                     .padding(.horizontal, 10)
             }
         }
-        .task(id: notes) { text = releaseNotesText(notes) }
+        .task(id: notes) { blocks = releaseNotesBlocks(notes) }
     }
 }
 
-/// Flatten release notes to plain text.
+/// One parsed block, in Winter's type.
 ///
-/// Not pure (HTML parsing goes through `NSAttributedString`, which is `@MainActor` and reads the
-/// text system), which is exactly why it is isolated here and driven from a `.task(id:)` rather
-/// than from a view body: parsing is done once per notes value, never per layout pass. Plain-text
-/// notes pass straight through. A parse failure falls back to the raw body rather than showing
-/// nothing — half-legible beats blank.
-@MainActor
-func releaseNotesText(_ notes: ReleaseNotes) -> String {
-    guard notes.isHTML else { return notes.body.trimmingCharacters(in: .whitespacesAndNewlines) }
-    guard let data = notes.body.data(using: .utf8),
-          let attributed = try? NSAttributedString(
-            data: data,
-            options: [.documentType: NSAttributedString.DocumentType.html,
-                      .characterEncoding: String.Encoding.utf8.rawValue],
-            documentAttributes: nil)
-    else { return notes.body.trimmingCharacters(in: .whitespacesAndNewlines) }
-    return attributed.string.trimmingCharacters(in: .whitespacesAndNewlines)
+/// The whole point of the pure/impure split: every DECISION (what is a heading, what is a bullet,
+/// which runs are code) was made in `ReleaseNotesMarkup.swift` and pinned by a table test. This
+/// view only chooses tokens.
+private struct ReleaseNotesBlockView: View {
+    let block: ReleaseNotesBlock
+
+    var body: some View {
+        switch block {
+        case .subtitle(let runs):
+            // Metadata, not notes: the SDK version pair reads as a quiet caption under the heading
+            // rather than as the first sentence of the release.
+            releaseNotesText(runs, style: .subtitle)
+                .foregroundStyle(Theme.textMuted)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .heading(let level, let runs):
+            releaseNotesText(runs, style: .heading(level))
+                .foregroundStyle(Theme.textPrimary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, releaseNotesHeadingLead)
+        case .paragraph(let runs):
+            releaseNotesText(runs, style: .body)
+                .foregroundStyle(Theme.textSecondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .bullet(let runs):
+            HStack(alignment: .firstTextBaseline, spacing: releaseNotesBulletGap) {
+                Text("•")
+                    .font(Typography.label())
+                    .foregroundStyle(Theme.textMuted)
+                releaseNotesText(runs, style: .body)
+                    .foregroundStyle(Theme.textSecondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.leading, releaseNotesBulletIndent)
+        case .code(let text):
+            // Wrapped, not horizontally scrolled: a nested scroll view inside the panel's own
+            // ScrollView is a worse trade than a long `winter login …` line folding.
+            Text(text)
+                .font(Typography.captionMono())
+                .foregroundStyle(Theme.textPrimary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(releaseNotesCodePadding)
+                .background(
+                    RoundedRectangle(cornerRadius: releaseNotesCodeCorner, style: .continuous)
+                        .fill(Theme.controlSurface))
+        }
+    }
 }
+
+/// Which register a set of runs is drawn in. One value per block kind, so the ladder lives in one
+/// `switch` rather than being spelled at four call sites.
+private enum ReleaseNotesTextStyle {
+    case subtitle
+    case heading(Int)
+    case body
+
+    /// The proportional face for a run, at the weight its marks ask for.
+    func font(strong: Bool) -> Font {
+        switch self {
+        case .subtitle:
+            return Typography.caption(strong ? .semibold : .regular)
+        case .heading(let level):
+            // h1 is the panel's largest step; h2 — the only level this feed actually emits — sits
+            // one under it; h3 and deeper share the row/control step. All semibold: a heading is
+            // heavy whether or not the author also bolded a word inside it.
+            if level <= 1 { return Typography.heading(.semibold) }
+            if level == 2 { return Typography.bodyLarge(.semibold) }
+            return Typography.control(.semibold)
+        case .body:
+            return Typography.label(strong ? .semibold : .regular)
+        }
+    }
+
+    /// The monospaced face for an inline `code` run, matched to its neighbours as closely as the
+    /// three mono steps allow (there is no 15 pt mono, so a heading's inline code sits at 13).
+    func monoFont(strong: Bool) -> Font {
+        switch self {
+        case .subtitle:
+            return Typography.captionMono(strong ? .semibold : .regular)
+        case .heading(let level):
+            return level <= 2 ? Typography.controlMono(.semibold) : Typography.labelMono(.semibold)
+        case .body:
+            return Typography.labelMono(strong ? .semibold : .regular)
+        }
+    }
+}
+
+/// Inline runs → one concatenated `Text`.
+///
+/// Concatenation rather than per-run views because a paragraph must WRAP across its runs: three
+/// `Text`s in an `HStack` would lay out as three unbreakable columns. `Text + Text` keeps it one
+/// paragraph, and per-run `.font(...)` is the only styling this surface is allowed (`.bold()` and
+/// friends are banned by the typography sweep — every face here comes from a named token).
+private func releaseNotesText(_ runs: [ReleaseNotesRun], style: ReleaseNotesTextStyle) -> Text {
+    runs.reduce(Text(verbatim: "")) { accumulated, run in
+        let face = run.isCode ? style.monoFont(strong: run.isStrong) : style.font(strong: run.isStrong)
+        return accumulated + Text(run.text).font(face)
+    }
+}
+
+// MARK: - Release-notes metrics
+
+/// The gap between two notes blocks. Headings buy extra room above them (`releaseNotesHeadingLead`)
+/// so a section reads as a section rather than as one more paragraph.
+let releaseNotesBlockSpacing: CGFloat = 7
+let releaseNotesHeadingLead: CGFloat = 5
+let releaseNotesBulletGap: CGFloat = 6
+let releaseNotesBulletIndent: CGFloat = 2
+let releaseNotesCodePadding: CGFloat = 8
+let releaseNotesCodeCorner: CGFloat = 6
 
 // MARK: - Metrics + glyphs
 

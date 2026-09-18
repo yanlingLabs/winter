@@ -1,6 +1,16 @@
 import SwiftUI
 
 // -----------------------------------------------------------------------------------------------
+// LEFT AS IT WAS by the 2026-09-18 settings restyle, deliberately. Every other section moved into
+// the card/row vocabulary (`SettingsChrome.swift`): a statement with one trailing control. This one
+// is not that shape — it is three EDITORS stacked (the Anthropic auth block with its own sheet, a
+// catalog-sized list of live `SecureField` credential rows, and a disclosure-group endpoint form).
+// A card row has room for one control; a credential row is a field, a state line and two buttons.
+// Carding it would shrink the fields and hide the states, so it keeps the surrounding
+// `SettingsSectionView` header and its own layout until it is redesigned on its own terms.
+// -----------------------------------------------------------------------------------------------
+
+// -----------------------------------------------------------------------------------------------
 // Settings → Providers (2026-09-17). ONE consolidated section (user's call), where the Dashboard's
 // `ProviderPane` has three top-level blocks stacked as peers: an OpenAI BYO-key form, the Anthropic
 // block, and the catalog-driven credentials list.

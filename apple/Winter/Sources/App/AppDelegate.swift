@@ -704,6 +704,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return nil
         }
         let client = model.client
+        // 2026-09-18 — the Roles picker's catalog seam. Built ONCE and handed to two places: the
+        // wiring (so the closure lives with every other daemon door) and
+        // `ModelCatalogFactsModel.shared`, the session cache the picker actually reads. Same
+        // closures both times, deliberately: two constructions could end up naming two daemons.
+        //
+        // The shared instance is a bridge — `SettingsSectionView` already holds this wiring and
+        // could pass `catalog:` into `SettingsRolesSection` directly, at which point `configure`
+        // here goes away. See `ModelCatalogFactsModel`'s own doc.
+        let modelsCatalog: () async throws -> ModelsCatalog = { try await client.modelsCatalog() }
+        let credentialList: () async throws -> [CredentialRow] = {
+            try await LiveCredentialsClient(client: client).list()
+        }
+        ModelCatalogFactsModel.shared.configure(catalog: modelsCatalog, credentials: credentialList)
         return DashboardWiring(
             daemonStatus: { try await client.daemonStatus() },
             quotaState: { try await client.quotaState() },
@@ -764,8 +777,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             sdkVersions: { try await sdkInstalledComponents(client.versionsGet()) },
             capabilitiesList: { try await client.capabilitiesList() },
             modelRoles: { try await client.settingsModelRoles() },
-            // Carried, not yet called — Settings → Roles is read-only for now. See the field's doc.
-            setModelRole: { role, model in try await client.setModelRole(role: role, model: model) }
+            setModelRole: { role, model in try await client.setModelRole(role: role, model: model) },
+            // 2026-09-18 — the picker's catalog + readiness reads, the same two closures the shared
+            // `ModelCatalogFactsModel` was configured with above. `models.catalog` is newer than
+            // most daemons on disk and answers `-32601` there, which the store treats as an answer
+            // and not a fault; `credential.list` has shipped since WS-19.
+            modelsCatalog: modelsCatalog,
+            credentialList: credentialList
         )
     }
 

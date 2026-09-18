@@ -18,8 +18,11 @@ import Foundation
 ///   It arrives AFTER `showUpdateFoundWithAppcastItem:`, so the panel renders the inline notes
 ///   first and upgrades in place when the download lands.
 ///
-/// Both are optional and both are routinely absent — as of today's appcast the `<description>` is
-/// a bare version line and there is no link at all. The panel renders NO notes section when this
+/// Both are optional and both are routinely absent. Every item live in the feed today
+/// (0.111.0 – 0.114.4) carries a bare one-line `<description>` and no link at all; from the next
+/// release the `<description>` carries that same SDK version line followed by the notes as
+/// semantic HTML, and still no link — so the INLINE path is the one that renders either way.
+/// `ReleaseNotesMarkup.swift` parses both shapes. The panel renders NO notes section when this
 /// resolves to nothing, rather than an empty box.
 struct ReleaseNotes: Equatable {
     /// `true` when the body is HTML; `false` for `plain-text`.

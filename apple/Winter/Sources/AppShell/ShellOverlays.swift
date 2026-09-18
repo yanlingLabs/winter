@@ -176,14 +176,26 @@ let shellOverlayCloseGutter: CGFloat = shellTitlebarButtonSize + 8
 
 // MARK: - The container
 
-/// The shared chrome every panel wears: a dimmed, click-away backdrop and one centred card with a
-/// titled header and a close button.
+/// THE card chrome, extracted (2026-09-18) so a surface that is not a `ShellOverlay` can wear it
+/// without copy-pasting eleven modifiers that must agree.
 ///
-/// Centred, unlike the search palette (which is top-pinned because its list grows and shrinks as
-/// you type). These three are fixed-size consultations, so centring is right for them and the
-/// palette's reasoning does not carry over.
-struct ShellFloatingPanel<Content: View>: View {
-    let overlay: ShellOverlay
+/// `ShellFloatingPanel` is now a one-line forwarder onto this, and Settings → Roles' model picker
+/// is the second caller. Everything that made a panel a panel lives here and nowhere else: the
+/// scrim and its click-away, the top inset, the fixed footprint, the clip, the material, the tint,
+/// the rim, the shadow, the close button in the corner, and the two environment values a hosted
+/// pane reads (`shellPanelCloseGutter`, `shellRowFillIsVibrant`).
+///
+/// The only thing the caller supplies beyond its content is the NAME — used for the accessibility
+/// label and the close button's own label. A `ShellOverlay` has one
+/// (`shellOverlayAccessibilityName`); the picker supplies its own sentence.
+///
+/// **Not parameterised by size.** The footprint is the search palette's, exactly, for the same
+/// reason the three panels share it: opening any of these surfaces must put the same rectangle in
+/// the same place rather than making the window jump. A caller wanting a different size does not
+/// want this card.
+struct ShellPanelCard<Content: View>: View {
+    /// What this surface is called, for VoiceOver and for the close button's label.
+    let accessibilityName: String
     let onClose: () -> Void
     @ViewBuilder let content: () -> Content
 
@@ -203,7 +215,10 @@ struct ShellFloatingPanel<Content: View>: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .environment(\.shellPanelCloseGutter, shellOverlayCloseGutter)
         }
-        .frame(width: shellOverlaySize(overlay).width, height: shellOverlaySize(overlay).height)
+        // The palette's footprint, read from the same two constants `shellOverlaySize` returns —
+        // that function ignores its argument and always answers this pair, so nothing changed when
+        // the card stopped taking an overlay.
+        .frame(width: searchPaletteWidth, height: shellOverlayHeight)
         // CLIPPED, not merely backed by a rounded shape (2026-09-18): a re-housed pane paints its
         // own background right to its own edges, so without this the card's bottom corners are
         // square wherever the content reaches them — visible on the devices panel.
@@ -225,15 +240,37 @@ struct ShellFloatingPanel<Content: View>: View {
         // own Refresh buttons is `shellPanelCloseGutter`, which those panes read and inset by.
         .overlay(alignment: .topTrailing) {
             ShellTitlebarButton(systemImage: "xmark",
-                                label: "Close \(shellOverlayAccessibilityName(overlay))",
+                                label: "Close \(accessibilityName)",
                                 action: onClose)
                 .padding(.top, 10)
                 .padding(.trailing, 10)
         }
-        .accessibilityLabel(shellOverlayAccessibilityName(overlay))
+        .accessibilityLabel(accessibilityName)
         // The panel is its own OPAQUE surface, so rows inside it keep the opaque greys rather than
         // the washes the translucent sidebar wears (see `ShellSidebarRowStyle`'s fill).
         .environment(\.shellRowFillIsVibrant, false)
+    }
+}
+
+/// The shared chrome every panel wears: a dimmed, click-away backdrop and one centred card with a
+/// titled header and a close button.
+///
+/// Centred, unlike the search palette (which is top-pinned because its list grows and shrinks as
+/// you type). These three are fixed-size consultations, so centring is right for them and the
+/// palette's reasoning does not carry over.
+///
+/// Since 2026-09-18 this is a NAME over `ShellPanelCard` and nothing else — the chrome moved there
+/// so Settings' model picker could wear the identical card. Behaviour is unchanged: the name it
+/// passes is the one this type always used.
+struct ShellFloatingPanel<Content: View>: View {
+    let overlay: ShellOverlay
+    let onClose: () -> Void
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        ShellPanelCard(accessibilityName: shellOverlayAccessibilityName(overlay),
+                       onClose: onClose,
+                       content: content)
     }
 }
 

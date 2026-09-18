@@ -418,24 +418,20 @@ struct PanelWebChrome: View {
                     .accessibilityLabel("Page")
                 }
             }
-            // Hover and editing: the ↗ at the trailing edge — open this page in the default browser.
-            .overlay(alignment: .trailing) {
-                if state != .rest {
-                    Button(action: openInDefaultBrowser) {
-                        Image(systemName: "arrow.up.right")
-                            .font(Typography.label())
-                            .foregroundStyle(Theme.textMuted)
-                            .frame(width: panelChromeButtonSize, height: panelChromeButtonSize)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!PanelURLPolicy.isAllowed(model.url))
-                    .padding(.trailing, 4)
-                    .transition(.opacity.combined(with: .scale(scale: 0.85)))
-                    .help("Open in Default Browser")
-                    .accessibilityLabel("Open in Default Browser")
-                }
-            }
+            // REMOVED 2026-09-18 — the ↗ "Open in Default Browser" button that used to sit here.
+            //
+            // It was a 28×28 hit area overlaid on the trailing end of the address field, appearing
+            // on hover and staying through editing. The field's own `TextField` still owned that
+            // region, and the overlay came later in the modifier chain, so the overlay won
+            // hit-testing: a click in the last 28 pt of the field — the natural place to click to
+            // focus a long URL, or to put the caret after the text you are already editing — launched
+            // Safari on the COMMITTED url. That is the "sometimes it spawns detached browser
+            // windows" the user reported: not CEF opening a window, our own button opening another
+            // application, from under the caret.
+            //
+            // The capability is not lost: "Open in Default Browser" is in the leading page menu and
+            // in the trailing ⋮ menu, which is where it lived before it was promoted here. A control
+            // that launches another app must not sit inside a text field's frame.
             .onHover { fieldHovered = $0 }
             // The three looks cross-fade instead of snapping (2026-09-17).
             .animation(.smooth(duration: 0.22), value: state)

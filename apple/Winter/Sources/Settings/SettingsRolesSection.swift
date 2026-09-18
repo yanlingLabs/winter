@@ -13,9 +13,16 @@ import WinterKit
 // CONSTRAINT on what may be chosen for it, and the permitted set the daemon can actually serve
 // today. `runtimes.advisorModel` is on the same door, so the advisor is a real row here now.
 //
-// STILL READ-ONLY, deliberately: the write wrapper exists (`WinterClient.setModelRole`, carried on
-// `DashboardWiring.setModelRole`) but no control here calls it. Pickers are the next step, and the
-// rule below about where their contents come from binds them.
+// WRITABLE SINCE 2026-09-18. Each row's model value is a door onto a two-step picker
+// (`SettingsRoleModelPicker.swift`): choose a model, then choose which provider serves it, and the
+// exact tag the daemon listed is written through `settings.setModelRole`. Rule 2 below is what
+// binds it: the picker's contents are `permitted` and nothing else, and it never composes a tag of
+// its own — the daemon validates a tag's SHAPE, not that a catalog row backs it, so a stitched
+// pair would be stored happily and fail at session start instead.
+//
+// The reply repaints the whole pane, because clearing or moving one role moves every role that was
+// following it. A row the daemon did not report, or did not name models for, stays exactly as
+// read-only as it was.
 //
 // **THE DAEMON MAY NOT HAVE THE METHOD.** It landed after the app learned to call it, so a
 // `winter-core` from before answers `-32601`. `SettingsRolesModel` turns that one code into
@@ -99,7 +106,37 @@ struct SettingsRoleValue: Equatable, Sendable {
     /// not a key is stored for it. A picker built on this alone will happily offer a provider the
     /// user has no credential for — pairing it with the credential state Settings → Providers
     /// already reads is what turns it into an honest list.
+    ///
+    /// **CORRECTED 2026-09-18 (from the daemon's own session): do NOT build that pairing on
+    /// `providerId`.** The list applies the blocked floor and nothing else, so it can name a
+    /// provider that has no credential SLOT at all (which would read as "no key" forever), and the
+    /// Anthropic Console arm's readiness is a live `ant` profile check with no Keychain slot
+    /// behind it.
+    ///
+    /// **ANSWERED, same day: `models.catalog` carries `credentialSlotId` + `credentialDoor` per
+    /// provider**, and the picker now joins on the SLOT and branches on the DOOR
+    /// (`roleProviderCredentialState`). The three doors render three different things, and two of
+    /// them render no credential state at all — see `SettingsRoleModelPicker.swift`'s header rule 2.
+    /// On a daemon without `models.catalog` this is all `.unknown`, which is the old behaviour.
     let permitted: [String]
+    /// The same set with the wire's PROVIDER GROUPING intact — what the picker is built on, since
+    /// its second step is "who serves this model".
+    ///
+    /// Defaulted, so every construction site that only cares about the value (previews, the older
+    /// tests) keeps compiling and simply yields an unpickable row.
+    let permittedProviders: [ModelRolePermittedProvider]
+
+    init(model: String?,
+         isExplicit: Bool,
+         constraint: String,
+         permitted: [String],
+         permittedProviders: [ModelRolePermittedProvider] = []) {
+        self.model = model
+        self.isExplicit = isExplicit
+        self.constraint = constraint
+        self.permitted = permitted
+        self.permittedProviders = permittedProviders
+    }
 }
 
 /// A named run of roles. Grouped rather than flat because the eight rows answer four different
@@ -232,7 +269,8 @@ func settingsModelRoleValues(_ roles: [String: ModelRoleValue]) -> [SettingsMode
             model: value.model,
             isExplicit: value.explicit,
             constraint: value.constraint,
-            permitted: value.permitted.flatMap(\.models)
+            permitted: value.permitted.flatMap(\.models),
+            permittedProviders: value.permitted
         )
     }
     return out
@@ -245,8 +283,11 @@ func settingsModelRoleValues(_ roles: [String: ModelRoleValue]) -> [SettingsMode
 @MainActor
 final class SettingsRolesModel: ObservableObject {
     typealias Loader = () async throws -> [String: ModelRoleValue]
+    /// `settings.setModelRole`, which answers with the WHOLE effective map — see `commit`.
+    typealias Writer = (_ role: String, _ model: String?) async throws -> [String: ModelRoleValue]
 
     private let loader: Loader?
+    private let writer: Writer?
 
     @Published private(set) var values: [SettingsModelRole: SettingsRoleValue] = [:]
     @Published private(set) var loading = false
@@ -254,11 +295,20 @@ final class SettingsRolesModel: ObservableObject {
     /// as an error.
     @Published private(set) var isUnsupported = false
     @Published private(set) var errorText: String?
+    /// A write in flight. The picker's rows go inert on it rather than queueing a second write.
+    @Published private(set) var writing = false
+    /// A failed write's sentence. Kept apart from `errorText` because it belongs INSIDE the picker
+    /// — the card is where the action was taken, and a message behind it is a message unread.
+    @Published private(set) var writeErrorText: String?
 
     var isUnwired: Bool { loader == nil }
+    /// Whether a value on this pane is a door. No writer = the rows stay exactly as read-only as
+    /// they were before the picker existed.
+    var canWrite: Bool { writer != nil }
 
-    init(loader: Loader? = nil) {
+    init(loader: Loader? = nil, writer: Writer? = nil) {
         self.loader = loader
+        self.writer = writer
     }
 
     func refresh() async {
@@ -281,6 +331,39 @@ final class SettingsRolesModel: ObservableObject {
             errorText = shellPanelErrorText("Couldn't read the model roles", detail: "\(error)")
         }
     }
+
+    func clearWriteError() { writeErrorText = nil }
+
+    /// Write one role and REPAINT FROM THE REPLY.
+    ///
+    /// `setModelRole` answers with the whole effective map, which is not a convenience — it is the
+    /// only correct source: clearing or moving one role moves every role that was following it, so
+    /// a pane that patched the single row it wrote would show eight stale ones. For the same reason
+    /// this never calls `refresh()` afterwards: a second round trip could only disagree with the
+    /// answer we were just handed.
+    ///
+    /// Returns true when the write landed, which is the picker's cue to close. On failure the last
+    /// good map is left exactly as it was — a refused write must not repaint anything — and the
+    /// daemon's words go through `shellPanelErrorText`, because a settings write can fail with a
+    /// raw schema dump that would otherwise be shown to a person as if it were a sentence.
+    @discardableResult
+    func commit(_ role: SettingsModelRole, model: String?) async -> Bool {
+        guard let writer, !writing else { return false }
+        writing = true
+        defer { writing = false }
+        do {
+            values = settingsModelRoleValues(try await writer(role.rawValue, model))
+            writeErrorText = nil
+            // A successful write also proves the read method is there, whatever an earlier answer
+            // latched.
+            isUnsupported = false
+            return true
+        } catch {
+            writeErrorText = shellPanelErrorText("Couldn't set \(settingsModelRoleTitle(role).lowercased())",
+                                                 detail: "\(error)")
+            return false
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -301,12 +384,33 @@ struct SettingsRolesSection: View {
     /// Directly-injected values, used when no loader has produced any. Kept for pure construction
     /// (previews, tests) — the live pane goes through `loader`.
     private let injected: [SettingsModelRole: SettingsRoleValue]
+    /// Families, pricing and credential doors, INJECTED DIRECTLY. Nil is the ordinary case and
+    /// means "use the store"; a non-nil value overrides it outright, which is what previews and
+    /// tests pass. See `SettingsRoleModelPicker.swift`'s header for what `.none` renders.
+    private let injectedFacts: ModelCatalogFacts?
+    /// Where the live facts come from — `models.catalog` joined with `credential.list`, read once
+    /// and kept. Defaulted to the shared instance because `SettingsSectionView` (a file this change
+    /// did not own) constructs this section with `loader:`/`writer:` only; passing `catalog:` there
+    /// is the one edit that turns this into an ordinary injected dependency.
+    @ObservedObject private var catalog: ModelCatalogFactsModel
+
+    /// Which role's picker is open. Nil = none, which is every state before someone clicks a value.
+    @State private var pickerRole: SettingsModelRole?
 
     init(values: [SettingsModelRole: SettingsRoleValue] = [:],
-         loader: SettingsRolesModel.Loader? = nil) {
+         loader: SettingsRolesModel.Loader? = nil,
+         writer: SettingsRolesModel.Writer? = nil,
+         facts: ModelCatalogFacts? = nil,
+         catalog: ModelCatalogFactsModel = .shared) {
         self.injected = values
-        _model = StateObject(wrappedValue: SettingsRolesModel(loader: loader))
+        self.injectedFacts = facts
+        self.catalog = catalog
+        _model = StateObject(wrappedValue: SettingsRolesModel(loader: loader, writer: writer))
     }
+
+    /// The injected value wins when there is one; otherwise the store's, which is `.none` until a
+    /// picker has opened at least once.
+    private var facts: ModelCatalogFacts { injectedFacts ?? catalog.facts }
 
     /// The loaded map wins once there is one; `injected` is the fallback, so a pane constructed
     /// with literal values behaves exactly as it did before the loader existed.
@@ -315,85 +419,122 @@ struct SettingsRolesSection: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                intro
-                if let errorText = model.errorText {
-                    Text(errorText)
-                        .font(Typography.caption())
-                        .foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true)
+        // 2026-09-18: rewritten in the settings card vocabulary (`SettingsChrome`). The pane was
+        // already the right SHAPE — title, explanation, trailing value — so this is presentation
+        // only: not one read, decision or piece of copy changed, and it is STILL read-only by
+        // construction (no binding, no button, nothing that can write a role).
+        //
+        // The page's subtitle is this pane's own intro sentence rather than
+        // `settingsSectionSubtitle(.roles)`: the two say the same thing and this is the longer,
+        // authored one. The sidebar keeps the short form, which is what a sidebar wants.
+        SettingsPage(title: settingsSectionTitle(.roles),
+                     subtitle: "Winter runs more than one model. These are the jobs it splits between them.") {
+            if let errorText = model.errorText {
+                SettingsGroup {
+                    SettingsNoteRow(errorText, isError: true)
                 }
-                ForEach(settingsModelRoleGroups) { group in
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(group.title)
-                            .font(Typography.caption(.semibold))
-                            .foregroundStyle(Theme.textMuted)
-                        VStack(alignment: .leading, spacing: 10) {
-                            ForEach(group.roles, id: \.self) { role in
-                                roleRow(role)
-                                if role != group.roles.last {
-                                    Divider()
-                                }
-                            }
-                        }
+            }
+            ForEach(settingsModelRoleGroups) { group in
+                SettingsGroup(group.title) {
+                    ForEach(group.roles, id: \.self) { role in
+                        roleRow(role)
                     }
                 }
             }
-            .padding(.top, 18)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         // Read-only and params-less, so re-asking on every open is free and always current — the
         // same re-seed-on-appear posture every other pane has. A daemon without the method answers
         // once and latches `isUnsupported`; it is not retried into a spin.
         .task { await model.refresh() }
+        // The picker rides the SETTINGS PANE, not the shell root — `ShellOverlay` is a closed enum
+        // whose cases the sidebar switches over exhaustively, and this surface does not own that
+        // file. Two visible consequences, both accepted rather than hidden: the scrim dims the
+        // settings detail area only (the settings sidebar stays lit), and the card's top inset is
+        // measured from this pane rather than the window, so it sits a little lower than ⌘K does.
+        // The CARD itself is the same one, from the same `ShellPanelCard`.
+        .overlay {
+            if let pickerRole, let value = values[pickerRole] {
+                SettingsRoleModelPicker(
+                    role: pickerRole,
+                    value: value,
+                    facts: facts,
+                    isWriting: model.writing,
+                    errorText: model.writeErrorText,
+                    onCommit: { tag in
+                        Task {
+                            if await model.commit(pickerRole, model: tag) { closePicker() }
+                        }
+                    },
+                    onClose: closePicker
+                )
+                .transition(.opacity)
+            }
+        }
     }
 
-    private var intro: some View {
-        Text("Winter runs more than one model. These are the jobs it splits between them.")
-            .font(Typography.label())
-            .foregroundStyle(Theme.textSecondary)
-            .fixedSize(horizontal: false, vertical: true)
+    private func closePicker() {
+        pickerRole = nil
+        model.clearWriteError()
     }
 
     @ViewBuilder
     private func roleRow(_ role: SettingsModelRole) -> some View {
         let value = values[role]
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text(settingsModelRoleTitle(role))
-                    .font(Typography.control(.semibold))
-                Spacer(minLength: 12)
+        SettingsRow(settingsModelRoleTitle(role),
+                    description: settingsModelRoleExplanation(role)) {
+            if let value, let constraint = settingsRoleConstraintNote(value.constraint) {
+                SettingsRowNote(constraint)
+            }
+            if value == nil {
+                SettingsRowNote(model.isUnwired ? settingsModelRoleUnwiredNote
+                                                : settingsModelRoleUnreadableNote)
+            }
+        } control: {
+            HStack(spacing: 8) {
                 if let value, settingsRoleFollowsSessionDefault(role, value: value) {
                     // Says WHY this value is what it is, and warns that it is not anchored: change
                     // the top row and this one follows.
-                    Text(settingsRoleValueBadge(value))
-                        .font(Typography.caption())
-                        .foregroundStyle(Theme.textMuted)
+                    SettingsBadge(settingsRoleValueBadge(value))
                 }
-                // Three different strings for three different facts: the tag, "None" for a role
-                // the daemon reported as cleared, and "—" for a role it did not report at all.
-                Text(value.map { $0.model ?? settingsModelRoleClearedValue }
-                     ?? settingsModelRoleUnknownValue)
-                    .font(Typography.controlMono())
-                    .foregroundStyle(value?.model == nil ? Theme.textMuted : Theme.textPrimary)
-                    .textSelection(.enabled)
-            }
-            Text(settingsModelRoleExplanation(role))
-                .font(Typography.caption())
-                .foregroundStyle(Theme.textMuted)
-                .fixedSize(horizontal: false, vertical: true)
-            if let value, let constraint = settingsRoleConstraintNote(value.constraint) {
-                Text(constraint)
-                    .font(Typography.caption())
-                    .foregroundStyle(Theme.textMuted)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if value == nil {
-                Text(model.isUnwired ? settingsModelRoleUnwiredNote : settingsModelRoleUnreadableNote)
-                    .font(Typography.caption())
-                    .foregroundStyle(Theme.textMuted)
+                // A DOOR when the daemon named models for this role and this app can write; the
+                // same text, inert, otherwise — an unreadable or unwritable row must look exactly
+                // as it did before the picker existed rather than offering a click that cannot
+                // land.
+                if settingsRoleIsPickable(value, canWrite: model.canWrite) {
+                    // The catalog read is LAZY and happens HERE, the first time a picker is
+                    // opened — not on `.task`. Settings is visited far more often than a model is
+                    // changed, and `models.catalog` is ~134 KB; paying for it on every visit to
+                    // Settings buys a table nobody looked at. `loadIfNeeded` is idempotent and
+                    // single-flight, so the click that opens the card can fire it unconditionally.
+                    Button {
+                        pickerRole = role
+                        Task { await catalog.loadIfNeeded() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            valueText(value)
+                            Image(systemName: "chevron.down")
+                                .font(Typography.caption())
+                                .foregroundStyle(Theme.textMuted)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Choose the model for \(settingsModelRoleTitle(role))")
+                } else {
+                    valueText(value)
+                        .textSelection(.enabled)
+                }
             }
         }
+    }
+
+    /// Three different strings for three different facts: the tag, "None" for a role the daemon
+    /// reported as cleared, and "—" for a role it did not report at all.
+    @ViewBuilder
+    private func valueText(_ value: SettingsRoleValue?) -> some View {
+        Text(value.map { $0.model ?? settingsModelRoleClearedValue }
+             ?? settingsModelRoleUnknownValue)
+            .font(Typography.controlMono())
+            .foregroundStyle(value?.model == nil ? Theme.textMuted : Theme.textPrimary)
     }
 }

@@ -106,7 +106,7 @@ enum Typography {
     /// (`MessageTextFormatter`, `ComposerTextView`). The sweep bans literal numbers as arguments
     /// to this API outside this file (rule R3), so "arbitrary" still means "token-derived".
     static func sansNS(ofSize size: CGFloat, _ weight: NSFont.Weight = .regular) -> NSFont {
-        .systemFont(ofSize: size, weight: weight)
+        .systemFont(ofSize: size, weight: uiWeightNS(weight))
     }
 
     /// Monospaced NSFont at an arbitrary size — same contract as `sansNS`.
@@ -174,7 +174,21 @@ enum Typography {
     /// the sweep can ban `NSFontManager` everywhere else. It keeps the family (New York stays
     /// New York; pinned by `TranscriptBrandTests.testSerifProseSurvivesBoldAndItalicConversion`).
     static func converted(_ font: NSFont, toHaveTrait trait: NSFontTraitMask) -> NSFont {
-        NSFontManager.shared.convert(font, toHaveTrait: trait)
+        let converted = NSFontManager.shared.convert(font, toHaveTrait: trait)
+        // MEASURED (2026-09-18, caught by `TranscriptBrandTests`' distinct-runs pin): the legacy
+        // font manager cannot find a bold sibling for a system font that is not at `.regular` — ask
+        // it to embolden `.AppleSystemUIFontLight` and it hands the SAME font straight back, so a
+        // `**bold**` span silently stops being bold. That became reachable the moment dark-mode
+        // prose started rendering at Light (`transcriptProseRegularWeight`).
+        //
+        // So when the conversion is a no-op, bold is asked for by WEIGHT instead of by trait. Only
+        // for the proportional system face: a monospaced or serif font has real bold siblings the
+        // manager does find, and rebuilding one as a system font would change the face.
+        guard trait == .boldFontMask, converted == font,
+              !font.fontDescriptor.symbolicTraits.contains(.monoSpace),
+              font.fontName.hasPrefix(".AppleSystemUIFont")
+        else { return converted }
+        return .systemFont(ofSize: font.pointSize, weight: .semibold)
     }
 
     /// The maths face — a real maths serif when the OS has one, walking the candidate list in
@@ -212,8 +226,28 @@ enum Typography {
 
     // MARK: Private constructors
 
+    /// The dark-appearance weight correction, applied to EVERY sans role rather than to transcript
+    /// prose alone (user call, 2026-09-18 — the first pass fixed the transcript and left the rest of
+    /// the UI visibly heavier than the reference).
+    ///
+    /// Same measured reason as `transcriptProseRegularWeight`: macOS stem-darkens native text while
+    /// the reference disables smoothing, and light-on-dark swells. Only `.regular` is corrected —
+    /// a semibold label is meant to be heavier than its neighbours, and thinning it would flatten
+    /// the contrast it exists to carry.
+    ///
+    /// SANS ONLY. Monospaced text is deliberately left alone: mono faces are already narrower per
+    /// stem, and a Light mono at caption size reads as broken rather than as light.
+    static func uiWeight(_ weight: Font.Weight) -> Font.Weight {
+        weight == .regular && transcriptProseIsDarkAppearance() ? .light : weight
+    }
+
+    /// The AppKit half of the same rule, for the `NSFont` call sites.
+    static func uiWeightNS(_ weight: NSFont.Weight) -> NSFont.Weight {
+        weight == .regular && transcriptProseIsDarkAppearance() ? .light : weight
+    }
+
     private static func sans(_ size: CGFloat, _ weight: Font.Weight) -> Font {
-        .system(size: size, weight: weight)
+        .system(size: size, weight: uiWeight(weight))
     }
 
     private static func mono(_ size: CGFloat, _ weight: Font.Weight) -> Font {
@@ -310,10 +344,42 @@ func transcriptProseMetrics(_ role: TranscriptProseRole) -> TranscriptProseMetri
 
 /// The face itself. `Theme.assistantProse` is where the serif binding lives (`docs/brand.md` § 4);
 /// everything else is the system sans by doing nothing to it.
+/// Prose's "regular", which is NOT `.regular` on a dark background (2026-09-18).
+///
+/// MEASURED against the ChatGPT reference at the same point size, same screenshot scale, same ink
+/// brightness: our strokes came out 4.15 px against their 3.34 px — 24% fatter — while x-height and
+/// ink luminance matched to within a pixel and five levels. So it is not size and not colour; it is
+/// STEM DARKENING, the smoothing macOS applies to native text and that the web reference turns off
+/// (`-webkit-font-smoothing: antialiased`). Dark backgrounds make it worse: light-on-dark text
+/// optically swells, which is exactly why web apps disable smoothing on dark UI.
+///
+/// SwiftUI gives no smoothing control, so the only lever is weight — and fractional weights do not
+/// help: probed on this OS, every value between `.regular` and `.light` renders IDENTICALLY to
+/// `.regular` (SF snaps to named weights here), so `.light` is the one real step, measured at 0.85×
+/// the stroke where the reference sits at 0.80×. Most of the gap, and the nearest thing available.
+///
+/// LIGHT APPEARANCE KEEPS `.regular`: dark-on-light does not swell, so the same substitution there
+/// would simply make the app's prose too thin.
+func transcriptProseRegularWeight(isDark: Bool) -> NSFont.Weight {
+    isDark ? .light : .regular
+}
+
+/// Whether the app is currently in its dark appearance. Read at font-construction time rather than
+/// threaded through every call site: this is a rendering correction, not a design token, and the
+/// only thing it may ever influence is the weight substitution above.
+func transcriptProseIsDarkAppearance() -> Bool {
+    NSApp?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+}
+
 func transcriptProseFont(_ role: TranscriptProseRole, size: CGFloat, weight: NSFont.Weight) -> NSFont {
+    // Only the REGULAR step is corrected. A bold span is meant to be heavier than its neighbours,
+    // and thinning it would flatten the very contrast it exists to carry.
+    let resolved = weight == .regular
+        ? transcriptProseRegularWeight(isDark: transcriptProseIsDarkAppearance())
+        : weight
     switch role {
-    case .assistant: return Theme.assistantProse(size: size, weight: weight)
-    case .sans: return Typography.sansNS(ofSize: size, weight)
+    case .assistant: return Theme.assistantProse(size: size, weight: resolved)
+    case .sans: return Typography.sansNS(ofSize: size, resolved)
     }
 }
 

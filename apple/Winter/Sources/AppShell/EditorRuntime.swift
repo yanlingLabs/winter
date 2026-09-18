@@ -1301,6 +1301,10 @@ final class EditorRuntime: ObservableObject {
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.title = "Winter editor (hidden)"
+        // Same belt as `BrowserRuntime.parkingWindow` (2026-09-18): a real window hosting live web
+        // content must not be reachable by a windows-menu sweep or by state restoration.
+        window.isExcludedFromWindowsMenu = true
+        window.isRestorable = false
         hiddenWindowStorage = window
         return window
     }

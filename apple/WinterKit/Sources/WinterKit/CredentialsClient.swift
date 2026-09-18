@@ -64,6 +64,20 @@ public struct CredentialRow: Equatable, Sendable, Identifiable {
     /// Where the user goes to change this credential: `"credential.set"` (this client),
     /// `"provider.login"` (the Anthropic section's own controls), `"cli-oauth"` (`winter login`).
     public let door: String
+    /// The inventory SLOT this row is about (`openai:default`, `anthropic:console`) — the same
+    /// string `models.catalog`'s `CatalogProvider.credentialSlotId` names, and the only correct key
+    /// to join the two on (2026-09-18).
+    ///
+    /// **Optional because today's daemon does not send it.** Rows have always been emitted per slot
+    /// (A-1: `anthropic` appears twice) but the slot's own id was never on the wire, so a client
+    /// that wants the join has to bridge it — see `roleProviderCredentialState` in the Winter app,
+    /// which derives it from `<providerId>:default` for the manageable api-key rows ONLY, and
+    /// answers "unknown" rather than "no key" when the derivation does not match a catalog slot.
+    /// When a daemon does send this, it wins outright and no derivation runs.
+    ///
+    /// NOT part of `id`: A-1 names `providerId|door|kind` as the client key, and changing that
+    /// would move every row's identity under a daemon that starts sending this field.
+    public let slotId: String?
 
     public var id: String { "\(providerId)|\(door)|\(kind ?? "")" }
 
@@ -76,7 +90,8 @@ public struct CredentialRow: Equatable, Sendable, Identifiable {
         present: Bool,
         kind: String?,
         risk: String,
-        door: String
+        door: String,
+        slotId: String? = nil
     ) {
         self.providerId = providerId
         self.displayName = displayName
@@ -87,6 +102,7 @@ public struct CredentialRow: Equatable, Sendable, Identifiable {
         self.kind = kind
         self.risk = risk
         self.door = door
+        self.slotId = slotId
     }
 }
 
@@ -216,7 +232,10 @@ public final class LiveCredentialsClient: CredentialsClient, Sendable {
             present: present,
             kind: row["kind"]?.stringValue,
             risk: risk,
-            door: door
+            door: door,
+            // Never a reason to skip a row: absent is the NORMAL answer today, and a row with no
+            // slot id is still a perfectly good credential row.
+            slotId: row["slotId"]?.stringValue
         )
     }
 
