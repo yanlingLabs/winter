@@ -766,6 +766,29 @@ describe("saveSettings", () => {
       expect(onDisk.runtimes.official).toEqual({ subscriptionAuth: false }); // `auth` dropped, not carried through
       expect(onDisk.permissions.deny).toEqual([skillDenyRule("bash-review")]);
     });
+
+    // Minor 5b (pre-merge review): corrects this file's own doc claim that "an unknown field nested
+    // inside one server's config still survives" a save. `McpServerSettingsEntry` is a
+    // `z.preprocess(...)` (a `"pipe"` def in zod v4) — `mergeUnknownKeys` does not special-case that
+    // def type, so it hits the leaf branch and `owned` wins outright for the WHOLE entry. An unknown
+    // field inside one server's config is dropped, and a legacy typeless stdio entry is normalized
+    // (an explicit `type: "stdio"` written back) on any unrelated save that round-trips it.
+    test("an unknown field nested inside one mcpServers entry does NOT survive a save (corrected doc, 5b)", () => {
+      const p = join(mkdtempSync(join(tmpdir(), "winter-save-mcp-entry-")), "settings.json");
+      wf(p, JSON.stringify({
+        schemaVersion: 3,
+        provider: { model: "codex-oauth/gpt-5.6-sol" },
+        // a typeless legacy stdio entry, with a field this schema has never modeled at all.
+        mcpServers: { everything: { command: "npx", args: ["-y", "@modelcontextprotocol/server-everything"], future: "field" } },
+      }, null, 2));
+      const before = loadSettings(p); // `future` is stripped in-memory (zod default: strip unknown)
+      saveSettings(p, setModelRole(before, "titles.model", "codex-oauth/gpt-5.6-luna"));
+
+      const onDisk = JSON.parse(readFileSync(p, "utf8"));
+      expect(onDisk.mcpServers.everything.future).toBeUndefined(); // NOT preserved (corrects the old doc claim)
+      expect(onDisk.mcpServers.everything.type).toBe("stdio"); // normalized on write, even though this save never touched mcpServers
+      expect(onDisk.mcpServers.everything.command).toBe("npx");
+    });
   });
 });
 

@@ -1164,8 +1164,19 @@ export function loadSettings(path: string, opts?: { presentProviders?: ReadonlyS
  * from a plain object: the record's OWN key set (which server, which provider) is itself daemon-
  * owned data, not schema-defined shape — a key present in `raw`'s map but absent from `owned`'s
  * means something upstream deliberately removed that entry, so it is dropped, never resurrected.
- * Only within an entry BOTH sides still share does this descend into that entry's own value schema,
- * so an unknown field nested inside one server's config still survives the same way.
+ * Only within an entry BOTH sides still share does this descend into that entry's own value schema —
+ * but that is NOT the same guarantee a plain object field gets. Minor correction (pre-merge review):
+ * `mcpServers`' own value schema (`McpServerSettingsEntry`) is a `z.preprocess(...)` — a `"pipe"` def
+ * in zod v4, which this switch does not special-case — so a value there hits the LEAF branch below
+ * and `owned` wins outright, exactly like a plain string/number leaf. An unknown field nested inside
+ * one server's config does NOT survive a save; it is silently dropped along with whatever else the
+ * preprocess step didn't preserve. A related, deliberate side effect of the same leaf treatment: a
+ * legacy typeless stdio entry (no `type` field on disk) is written back with an explicit
+ * `type: "stdio"` on ANY unrelated settings save that round-trips it through `loadSettings` →
+ * `saveSettings`, because the parsed/normalized shape (with the preprocess's own defaulting applied)
+ * is what `owned` carries. This is accepted, not fixed here — descending into a `"pipe"` schema to
+ * recover its pre-image would need the preprocess's own untransformed input, which zod does not
+ * expose, and the normalization itself is harmless (the stdio shape is byte-identical in meaning).
  */
 function mergeUnknownKeys(schema: unknown, raw: unknown, owned: unknown): unknown {
   const def = (schema as { def?: { type?: string; innerType?: unknown; valueType?: unknown } } | undefined)?.def;
