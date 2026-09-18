@@ -576,6 +576,11 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         tmpDir: deps.tmpDirOf(sessionId),
         outDir: deps.outDirOf(sessionId),
         signal: inc.abort.signal,
+        // The SAME probe `buildWinterOptions` gets below (one read, one incarnation): it decides
+        // whether this session's `research` server advertises `Search` at all, and `disallowedTools`
+        // decides the complementary `WebSearch`/`Search` withholding from the identical value. Two
+        // doors, one answer — see `capabilities/research.ts` for what disagreement would cost.
+        exaKeyPresent: exaPresent,
       };
       const capabilities = deps.buildSessionCapabilities(capSession);
       // Winter's own voice (Step 0(a)): the engine's `primaryDir`/`cwd`/`additionalWorkDirs` inputs,
@@ -840,6 +845,10 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       return stamped;
     };
 
+    // `exaKeyPresent` is deliberately UNSET here (⇒ read as present, `CapabilitySession`'s own
+    // convention). It gates only `Search`, whose `modes` are chat and dispatch, and this leg ships
+    // Code-only (P8c-1/P8c-2) — so the mode filter withholds the tool on the official leg whatever the
+    // key says, and probing the Keychain for an answer that decides nothing would be noise.
     const capSessionFor = (): CapabilitySession => ({
       sessionId, mode, cwd,
       roots: deps.rootsOf(sessionId),

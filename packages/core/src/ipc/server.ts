@@ -2184,9 +2184,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // capability tool, which only a Winter child is ever handed — the official leg's own web pair is
         // claude's and appears in no capability server. The key presence is probed LIVE here, per call,
         // for the same reason `credential.list` re-probes: a client that adds a key and re-reads must
-        // see the new answer with no restart. It decides nothing in THIS listing yet (no capability row
-        // is gated on it today) and is passed so that the moment lane B2 gates `research__Search` on it,
-        // this surface is already honest rather than one edit behind.
+        // see the new answer with no restart. It decides one row in THIS listing:
+        // `mcp__winter__research__Search` reports `exposure: false` for chat and dispatch when no key is
+        // stored, which is what a real session of that mode would get (`capabilities/research.ts` does
+        // not advertise the tool either) — so this surface answers the "why can't chat search?" question
+        // without a second, drifting explanation of the rule.
         const exaPresent = await exaKeyPresent(opts.secrets);
         const exposure = { leg: "winter" as const, exaKeyPresent: exaPresent };
         const disallowedByMode: Record<"code" | "dispatch" | "chat", Set<string>> = {
