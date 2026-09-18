@@ -128,15 +128,20 @@ describe("capabilities.list", () => {
     c.close();
   });
 
-  test("per-mode exposure matches disallowedToolsFor(mode, WINTER_CAPABILITY_TOOLS) exactly", async () => {
+  test("per-mode exposure matches the Winter leg's disallowedToolsFor for WINTER_CAPABILITY_TOOLS exactly", async () => {
     const { socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     const result = await c.request(METHODS.capabilitiesList, {});
+    // The listing reports the WINTER leg's answer (its rows are all `mcp__winter__*` capability
+    // tools, which only a Winter child ever sees). This test daemon has no Exa key in its throwaway
+    // Keychain service, so the handler's live probe answers `false` — spelled here rather than
+    // defaulted, since the default is the opposite (`true`, the narrower surface).
+    const exposure = { leg: "winter" as const, exaKeyPresent: false };
     const disallowed = {
-      code: new Set(disallowedToolsFor("code", WINTER_CAPABILITY_TOOLS)),
-      dispatch: new Set(disallowedToolsFor("dispatch", WINTER_CAPABILITY_TOOLS)),
-      chat: new Set(disallowedToolsFor("chat", WINTER_CAPABILITY_TOOLS)),
+      code: new Set(disallowedToolsFor("code", exposure, WINTER_CAPABILITY_TOOLS)),
+      dispatch: new Set(disallowedToolsFor("dispatch", exposure, WINTER_CAPABILITY_TOOLS)),
+      chat: new Set(disallowedToolsFor("chat", exposure, WINTER_CAPABILITY_TOOLS)),
     };
     for (const group of result.result.capabilities) {
       for (const tool of group.tools) {

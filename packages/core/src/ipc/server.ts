@@ -41,7 +41,7 @@ import type { TokenAuthority } from "../auth/tokens";
 import type { SecretStore } from "../auth/secret-store";
 import { readCredentialMaterial, writeOpenAiApiKey } from "../auth/credential-material";
 import { ANTHROPIC_CREDENTIAL_SECRET_NAME, credentialPresenceFrom } from "../runtime-sdk/keychain";
-import { credentialRows, credentialValueRefusal, evictSessionsForCredential, removeCredential, setCredential, CredentialStoreUnavailable } from "../runtime-sdk/credentials";
+import { credentialRows, credentialValueRefusal, evictSessionsForCredential, exaKeyPresent, removeCredential, setCredential, CredentialStoreUnavailable } from "../runtime-sdk/credentials";
 import { effectiveOfficialAuthFor } from "../runtime-sdk/official-options";
 import type { ConsoleProfileBroker } from "../auth/console-profile-broker";
 import type { RoutineStore } from "../routines/store";
@@ -900,6 +900,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       await evictSessionsForCredential({
         list: () => winter.list(),
         providerOf: (sessionId) => records.get(sessionId)?.providerId,
+        // 0.0.17: the `exa` row is keyed by LEG, not by the record's provider — the Exa key reaches a
+        // child only through the Winter leg's `Options.web`, and it decides that leg's tool surface.
+        legOf: (sessionId) => winter.legOf(sessionId),
         evict: (sessionId) => winter.evict(sessionId),
         log: (line) => console.error(line),
       }, providerId);
@@ -2174,10 +2177,22 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // The SAME table `session-driver.ts` passes every real session's `Options.disallowedTools`
         // through (`capabilityTools: WINTER_CAPABILITY_TOOLS`) — computed once per mode, not
         // per tool, since `disallowedToolsFor` itself is a pure O(table size) scan.
+        //
+        // 0.0.17: the answer now depends on the LEG and on whether an Exa key is stored, so both are
+        // supplied rather than defaulted. `leg: "winter"` is the right one for this listing even though
+        // code sessions can run on the official leg: every row it reports is a `mcp__winter__*`
+        // capability tool, which only a Winter child is ever handed — the official leg's own web pair is
+        // claude's and appears in no capability server. The key presence is probed LIVE here, per call,
+        // for the same reason `credential.list` re-probes: a client that adds a key and re-reads must
+        // see the new answer with no restart. It decides nothing in THIS listing yet (no capability row
+        // is gated on it today) and is passed so that the moment lane B2 gates `research__Search` on it,
+        // this surface is already honest rather than one edit behind.
+        const exaPresent = await exaKeyPresent(opts.secrets);
+        const exposure = { leg: "winter" as const, exaKeyPresent: exaPresent };
         const disallowedByMode: Record<"code" | "dispatch" | "chat", Set<string>> = {
-          code: new Set(disallowedToolsFor("code", WINTER_CAPABILITY_TOOLS)),
-          dispatch: new Set(disallowedToolsFor("dispatch", WINTER_CAPABILITY_TOOLS)),
-          chat: new Set(disallowedToolsFor("chat", WINTER_CAPABILITY_TOOLS)),
+          code: new Set(disallowedToolsFor("code", exposure, WINTER_CAPABILITY_TOOLS)),
+          dispatch: new Set(disallowedToolsFor("dispatch", exposure, WINTER_CAPABILITY_TOOLS)),
+          chat: new Set(disallowedToolsFor("chat", exposure, WINTER_CAPABILITY_TOOLS)),
         };
         const capabilities = CAPABILITY_SERVER_KEYS.map((key) => {
           // `capabilityToolName(key, "")` mints the exact `mcp__winter__<key>__` prefix every one

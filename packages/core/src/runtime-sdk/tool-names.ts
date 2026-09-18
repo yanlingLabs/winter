@@ -116,8 +116,13 @@ export const WINTER_OWN_TOOL_NAMES: ReadonlySet<string> = new Set(
  * fs/shell/repo surface at all.
  *
  * Two measured facts worth keeping:
- *  - **`WebFetch`/`WebSearch` are NOT advertised at 0.0.3.** They are still disallowed in every mode
- *    (P8b-33) — belt and braces against an SDK bump that starts advertising them.
+ *  - **`WebFetch`/`WebSearch` were NOT advertised at 0.0.3 — AT 0.0.17 THEY ARE**, in every default
+ *    `init.tools`, because that release gives the Winter runtime its own copies (on by default). The
+ *    base list below is left exactly as it was measured: it is a 0.0.3 measurement and re-pinning it
+ *    from a later release would erase the one fact it exists to record. The consequence for the two
+ *    consumers is spelled where each of them lives — `CHAT_DISALLOWED_BUILTINS` excludes both names
+ *    from its derivation (their exposure is `disallowedToolsFor`'s per-leg decision now, not a
+ *    constant's), and the chat/code e2e tripwires add them to the union they expect.
  *  - **`advisor` is not advertised either**, though it is one of Winter's four default tools: the
  *    host binds it, the runtime does not auto-register it.
  *
