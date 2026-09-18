@@ -4,7 +4,7 @@ import SwiftUI
 // The session list pages' chrome (2026-09-18) — the Chats and Code destinations, restyled to the
 // app's own vocabulary instead of an AppKit `List` under a segmented `Picker`:
 //
-//     Code                                            [ + New ]   ← settingsPageTitle + soft button
+//     Code                                            ( + New )   ← settingsPageTitle + the Next pill
 //     ( All )  Background   Archived                              ← the composer's mode switch
 //     ─────────────────────────────────────────────
 //     Fix the flaky socket test            ● Running   2 hours ago ← hover rows, the sidebar's style
@@ -35,7 +35,7 @@ struct SessionListPage<Tabs: View, Content: View>: View {
                         .foregroundStyle(Theme.textPrimary)
                     Spacer(minLength: 12)
                     if let actionTitle, let action {
-                        SettingsButton(actionTitle, action: action)
+                        SessionListNewButton(title: actionTitle, action: action)
                     }
                 }
                 tabs()
@@ -59,6 +59,30 @@ extension SessionListPage where Tabs == EmptyView {
          @ViewBuilder content: @escaping () -> Content) {
         self.init(title: title, actionTitle: actionTitle, action: action,
                   tabs: { EmptyView() }, content: content)
+    }
+}
+
+/// "+ New" as a PILL — the question card's Next button (`PendingCards.wideButton`): the same
+/// inverted-canvas capsule at the same height, sized to its label instead of the card's width.
+struct SessionListNewButton: View {
+    let title: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "plus")
+                    .font(Typography.control(.semibold))
+                Text(title)
+                    .font(Typography.control(.semibold))
+            }
+            .foregroundStyle(Theme.canvas)
+            .padding(.horizontal, 18)
+            .frame(height: pendingQuestionActionHeight)
+            .background(Capsule().fill(Theme.inverseCanvas))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
     }
 }
 
