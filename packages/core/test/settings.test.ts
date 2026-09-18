@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, computerUseEnabledFrom, lspEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialSubscriptionAuthEnabled, officialSubscriptionAuthFlagInert, DEFAULT_PROVIDER, pinsFor, setModelRole, setSkillDenied, skillDenyRule } from "../src/settings";
+import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, computerUseEnabledFrom, lspEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialSubscriptionAuthEnabled, officialSubscriptionAuthFlagInert, DEFAULT_PROVIDER, pinsFor, setModelRole, setSkillDenied, skillDenyRule, MODEL_ROLES } from "../src/settings";
+import { ModelRole as ProtocolModelRole } from "@yanlinglabs/winter-protocol";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
 import { UNSTATED_TAG, type ModelTag } from "../src/runtime-sdk/model-tag";
 import { setPluginEnabled } from "../src/plugins/lifecycle";
@@ -655,6 +656,25 @@ describe("lspEnabledFrom (Minor 5e: opt-out / default-ON)", () => {
 
   test("lsp.enabled: false → disabled", () => {
     expect(lspEnabledFrom(Settings.parse({ ...base, lsp: { enabled: false } }))).toBe(false);
+  });
+});
+
+// Minor 5f (fix wave, pre-merge review): `MODEL_ROLES` (settings.ts) and the protocol's `ModelRole`
+// enum (methods.ts) are hand-mirrored — protocol never depends on core, so there is no import to
+// enforce agreement, only that schema's own doc comment saying "kept in sync by hand". This is the
+// drift tripwire: every entry of the daemon's OWN list must parse through the wire enum, AND the two
+// lists must carry exactly the same members (not just "core's list is a subset of protocol's" —
+// either direction of drift is a real bug: a role the daemon serves that the wire schema refuses, or
+// a wire role the daemon has silently stopped serving).
+describe("MODEL_ROLES / protocol ModelRole parity (Minor 5f)", () => {
+  test("every daemon-side role parses through the protocol's wire enum", () => {
+    for (const role of MODEL_ROLES) {
+      expect(ProtocolModelRole.safeParse(role).success).toBe(true);
+    }
+  });
+
+  test("the two lists carry EXACTLY the same members — no drift in either direction", () => {
+    expect([...MODEL_ROLES].sort()).toEqual([...ProtocolModelRole.options].sort());
   });
 });
 
