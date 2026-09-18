@@ -291,12 +291,16 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     await c.hello(tokens.harness, "cli");
     const result = await c.request(METHODS.settingsModelRoles, {});
     expect(result.error).toBeUndefined();
-    for (const role of ["titles.model", "reviewer.model", "pins.dream", "pins.cleaner", "pins.research", "pins.researchFallback"] as const) {
+    for (const role of ["titles.model", "reviewer.model", "pins.dream", "pins.cleaner", "pins.researchFallback"] as const) {
       const providerIds = result.result.roles[role].permitted.map((p: any) => p.providerId);
       expect(providerIds).toEqual(["codex-oauth"]); // the BOUND backend — never settings' "openai"
     }
-    // "any"-constraint roles are unaffected — they never narrow to a single provider.
-    expect(result.result.roles["provider.model"].permitted.length).toBeGreaterThan(1);
+    // "any"-constraint roles are unaffected — they never narrow to a single provider. `pins.research`
+    // joined them on 2026-09-18: it is `WebFetch`'s page-digest model now, resolved inside the runtime
+    // child on any catalog provider with a credential, so the daemon's own bound backend has no say.
+    for (const role of ["provider.model", "pins.dispatch", "pins.research"] as const) {
+      expect(result.result.roles[role].permitted.length).toBeGreaterThan(1);
+    }
     c.close();
   });
 
