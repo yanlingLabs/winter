@@ -30,8 +30,17 @@ struct DispatchSurface: View {
             // Dispatch's own backdrop (user call, 2026-09-19): a particle grid that leans away from
             // the cursor. Tracked HERE, on the surface, so the pointer is seen over the transcript
             // and composer too — the field itself takes no hits.
-            .background(DispatchParticleField(pointer: pointer))
-            .onContinuousHover { phase in
+            // Under the titlebar band too (2026-09-19) — the empty strip above the thread was the
+            // one place without dots. The hover is read in GLOBAL space for the same reason: the
+            // field and this surface no longer share a local origin.
+            .background {
+                DispatchBackdrop(adapter: host.attachment?.adapter, pointer: pointer)
+                    // The detail card's own corners — a dot in the corner outside the card's curve
+                    // would sit on the sidebar.
+                    .clipShape(shellDetailCardShape)
+                    .ignoresSafeArea()
+            }
+            .onContinuousHover(coordinateSpace: .global) { phase in
                 switch phase {
                 case .active(let location): pointer = location
                 case .ended: pointer = nil
@@ -78,6 +87,30 @@ struct DispatchSurface: View {
             Text("Winter couldn't reach the daemon for it.")
         } actions: {
             Button("Try Again") { host.retryDispatchResolution() }
+        }
+    }
+}
+
+/// The particle field, told whether Dispatch is working. Its own view so it OBSERVES the attached
+/// session's adapter — the surface holds the host, which does not republish the adapter's turn state.
+private struct DispatchBackdrop: View {
+    let adapter: FieldStateAdapter?
+    let pointer: CGPoint?
+
+    var body: some View {
+        if let adapter {
+            LiveBackdrop(adapter: adapter, pointer: pointer)
+        } else {
+            DispatchParticleField(pointer: pointer)
+        }
+    }
+
+    private struct LiveBackdrop: View {
+        @ObservedObject var adapter: FieldStateAdapter
+        let pointer: CGPoint?
+
+        var body: some View {
+            DispatchParticleField(pointer: pointer, isWorking: adapter.turnRunning)
         }
     }
 }
