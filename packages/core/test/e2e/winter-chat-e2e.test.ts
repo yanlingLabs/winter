@@ -560,7 +560,10 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     } finally { queue.close(); abort.abort(); }
     const codeCaps = Object.entries(caps).flatMap(([server, cfg]) =>
       (cfg as { instance: { listTools(): Array<{ name: string }> } }).instance.listTools().map((t) => `mcp__${server}__${t.name}`));
-    const union = new Set([...WINTER_ADVERTISED_TOOLS_0_0_4_BASE, ...WINTER_ADVERTISED_MCP_TOOLS_0_0_4, ...codeCaps]);
+    // Agent SDK 0.0.17 advertises `WebFetch`/`WebSearch` in EVERY session (the 0.0.3 measurement the
+    // BASE constant records predates them), and code mode withholds neither — the 2026-09-18 ruling
+    // gives a Winter code session both.
+    const union = new Set([...WINTER_ADVERTISED_TOOLS_0_0_4_BASE, ...WINTER_ADVERTISED_MCP_TOOLS_0_0_4, "WebFetch", "WebSearch", ...codeCaps]);
     const pair = ["ToolSearch", "WaitForMcpServers"];
     const advertisedPair = pair.filter((p) => tools.includes(p));
     expect(advertisedPair).toHaveLength(1);

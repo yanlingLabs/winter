@@ -76,8 +76,11 @@ test("the internal seventh policy maps to default, NOT dontAsk", () => {
 // WS-20: `model`/`advisorModel` are branded `ModelTag` on `WinterOptionsInput`, but every fixture
 // in this file hand-writes them as plain tag-shaped string literals — `over` accepts plain strings
 // for both and casts once, here, rather than every call site wrapping its own `tag(...)`.
-function optionsInput(over: Partial<Omit<WinterOptionsInput, "model" | "advisorModel">> & { model?: string; advisorModel?: string } = {}): WinterOptionsInput {
-  const { model, advisorModel, ...rest } = over;
+function optionsInput(
+  over: Partial<Omit<WinterOptionsInput, "model" | "advisorModel" | "digestModel">>
+    & { model?: string; advisorModel?: string; digestModel?: string } = {},
+): WinterOptionsInput {
+  const { model, advisorModel, digestModel, ...rest } = over;
   return {
     mode: "code",
     policy: "ask",
@@ -92,6 +95,7 @@ function optionsInput(over: Partial<Omit<WinterOptionsInput, "model" | "advisorM
     ...rest,
     ...(model === undefined ? {} : { model: model as WinterOptionsInput["model"] }),
     ...(advisorModel === undefined ? {} : { advisorModel: advisorModel as WinterOptionsInput["advisorModel"] }),
+    ...(digestModel === undefined ? {} : { digestModel: digestModel as WinterOptionsInput["digestModel"] }),
   };
 }
 
@@ -1099,6 +1103,6 @@ test("the digest model is stated with its OWN authRef — and dropped rather tha
   // No digest model at all: the same shape, so the digest runs on the session's model.
   expect(buildWinterOptions(optionsInput({ model: "openai/gpt-5.6-sol" })).web?.fetch).not.toHaveProperty("digestModel");
   // A `winter-test/*` double is never stated (the child's own selection refuses the reserved namespace).
-  const double = buildWinterOptions(optionsInput({ model: "winter-test/echo", digestModel: "winter-test/echo2" as never }));
+  const double = buildWinterOptions(optionsInput({ model: "winter-test/echo", digestModel: "winter-test/echo2" }));
   expect(double.web?.fetch).not.toHaveProperty("digestModel");
 });

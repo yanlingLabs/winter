@@ -52,7 +52,7 @@ import { d30DefaultModel } from "./advisor-reviewer";
 import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
 import type { WinterRuntimeSdk, SessionMode } from "./create";
 import { clearSession } from "./diff-attach";
-import { credentialPresenceFrom, credentialRefFor } from "./keychain";
+import { credentialPresenceFrom, credentialRefFor, refMaterialPresent } from "./keychain";
 import { SHIPPED_DANGEROUS_DOMAINS } from "../agent/dangerous-domains";
 import { apiKeyProviderIsUnauthenticated, exaKeyPresent, missingCredentialDetail } from "./credentials";
 import { renderNoCredentialHint } from "./handoff";
@@ -633,12 +633,20 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       const digestProviderId = researchPin === UNSTATED_TAG ? undefined : (() => {
         try { return splitTag(researchPin).providerId; } catch { return undefined; }
       })();
-      const digestModel = researchPin !== UNSTATED_TAG && researchPin !== model
-        && digestProviderId !== undefined && credentials.byProvider[digestProviderId] !== undefined
-        ? researchPin
-        : undefined;
+      // The probe is of the ITEM THIS DOOR WOULD NAME, not of `credentials.byProvider` — that map is
+      // keyed by provider and conflates anthropic's two slots, so a console-only home would pass its
+      // api-key slot off as present and every WebFetch would then refuse typed on an empty item
+      // (`refMaterialPresent`'s own doc). One extra read, only when an explicit pin differs from the
+      // session's own model, which is the rare case.
+      const digestRef = digestProviderId === undefined || researchPin === model ? undefined : credentialRefFor(digestProviderId, deps.home);
+      const digestUsable = await refMaterialPresent(deps.secrets, digestRef);
+      const digestModel = researchPin !== UNSTATED_TAG && researchPin !== model && digestUsable ? researchPin : undefined;
       if (digestModel === undefined && researchPin !== model) {
-        log(`pins.research: ${researchPin === UNSTATED_TAG ? "resolves to no known slot for this daemon's own provider" : `names ${digestProviderId ?? "a provider this daemon cannot name"}, which has no stored credential`} — WebFetch will digest pages on this session's own model instead`);
+        log(`pins.research: ${
+          researchPin === UNSTATED_TAG ? "resolves to no known slot for this daemon's own provider"
+            : digestRef === undefined ? `names ${digestProviderId ?? "a provider"} whose credential this door cannot name (a console login lives in an \`ant\` profile, which a digest route never sees)`
+              : `names ${digestProviderId}, whose credential slot is empty`
+        } — WebFetch will digest pages on this session's own model instead`);
       }
       return buildWinterOptions({
         mode,
