@@ -188,16 +188,55 @@ const McpStdioServerSettings = z.object({
   args: z.array(z.string()).optional(),
   env: z.record(z.string(), z.string()).optional(),
 });
-const McpHttpServerSettings = z.object({
+
+/**
+ * RULING (fix wave, pre-merge review, item 6): `<home>/settings.json` is model-readable — reads are
+ * deliberately unrestricted (CLAUDE.md), and the bash sandbox/deny-rule fence only ever covers
+ * WRITES to it — so a bearer token or API key sitting in an HTTP/SSE MCP server's `headers` is
+ * agent-exfiltratable the moment any tool reads the file. That is the REAL tension with the hard
+ * "secrets live in the macOS Keychain… never on disk" rule: not the file's existence, this ONE field
+ * specifically. Refused at the settings door, case-insensitively, UNTIL `${env:VAR}`-style
+ * indirection or a Keychain locator exists for `headers` (neither is implemented today — this
+ * refusal is what stands in for that door until one lands): the four well-known credential-bearing
+ * header names, plus any name containing "token" or "secret" anywhere. Deliberately broad rather
+ * than an exact list — a header carrying credential material overwhelmingly says so in its own name
+ * (`X-Auth-Token`, `X-Secret-Key`, …), and the cost of a false positive (a legitimately-but-oddly-
+ * named benign header) is far lower than a missed credential landing on disk in the clear. A benign
+ * header (`Accept`, `X-Request-Id`, a custom non-credential marker, …) still passes through
+ * unchanged. This is a DELIBERATE, DOCUMENTED narrowing of what the SDKs themselves accept for
+ * `Options.mcpServers` — the pinned agent SDK's own `McpHttpServerConfig`/`McpSSEServerConfig`
+ * place no such restriction on `headers`, only Winter's own settings door does, ahead of the SDK.
+ */
+const CREDENTIAL_HEADER_EXACT_NAMES = new Set(["authorization", "x-api-key", "cookie", "proxy-authorization"]);
+function isCredentialShapedHeaderName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return CREDENTIAL_HEADER_EXACT_NAMES.has(lower) || lower.includes("token") || lower.includes("secret");
+}
+function refuseCredentialShapedHeaders<T extends z.ZodObject<{ headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>> }>>(schema: T) {
+  return schema.superRefine((value, ctx) => {
+    for (const name of Object.keys(value.headers ?? {})) {
+      if (!isCredentialShapedHeaderName(name)) continue;
+      ctx.addIssue({
+        code: "custom",
+        path: ["headers", name],
+        message:
+          `header "${name}" looks credential-shaped (Authorization/X-Api-Key/Cookie/Proxy-Authorization, or a name containing "token"/"secret") — ` +
+          `settings.json is model-readable, so MCP headers are not yet a safe place for credentials; use \${env:VAR}-style indirection once it exists, never a literal secret here`,
+      });
+    }
+  });
+}
+
+const McpHttpServerSettings = refuseCredentialShapedHeaders(z.object({
   type: z.literal("http"),
   url: z.string().url(),
   headers: z.record(z.string(), z.string()).optional(),
-});
-const McpSSEServerSettings = z.object({
+}));
+const McpSSEServerSettings = refuseCredentialShapedHeaders(z.object({
   type: z.literal("sse"),
   url: z.string().url(),
   headers: z.record(z.string(), z.string()).optional(),
-});
+}));
 /** A pre-item-3b entry (no `type` field at all) is stdio — the shape every `settings.mcpServers`
  *  entry has always had — normalized to the explicit-discriminant form BEFORE the discriminated
  *  union runs, so an existing home's settings.json keeps parsing byte-for-byte with no migration.

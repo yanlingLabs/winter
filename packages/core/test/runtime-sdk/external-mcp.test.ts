@@ -56,18 +56,24 @@ test("no settings, no cwd → nothing (a bare daemon forwards no servers)", () =
 
 // Daemon settings surface batch 3 (item 3b): HTTP/SSE settings.mcpServers entries survive into
 // Options.mcpServers, field-for-field, mirroring the agent SDK's own McpHttpServerConfig/
-// McpSSEServerConfig shapes.
+// McpSSEServerConfig shapes. Ruling (fix wave item 6): a credential-shaped header (e.g.
+// `Authorization`) is refused at the SETTINGS door (`Settings.parse`, `settings.test.ts`'s own
+// dedicated describe block) — it can never reach this function at all, so this fixture uses a
+// benign header. `configuredMcpServersFor` is the ONE function BOTH legs' options builders read
+// from (`mode-options.ts`'s `buildWinterOptions` and `official-options.ts`'s `officialInputFor`
+// both consume its output verbatim), so proving a benign header survives here is proving it reaches
+// both legs, not just one.
 test("an HTTP server and an SSE server pass through with their own shape (url, headers) — never coerced to stdio", () => {
   const settings = Settings.parse({
     schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
     mcpServers: {
-      httpOne: { type: "http", url: "https://example.com/mcp", headers: { Authorization: "Bearer t" } },
+      httpOne: { type: "http", url: "https://example.com/mcp", headers: { "X-Request-Id": "abc123" } },
       sseOne: { type: "sse", url: "https://example.com/sse" },
     },
   });
   const out = configuredMcpServersFor({ settings, cwd: undefined, trusted: () => false });
   expect(out).toEqual({
-    httpOne: { type: "http", url: "https://example.com/mcp", headers: { Authorization: "Bearer t" } },
+    httpOne: { type: "http", url: "https://example.com/mcp", headers: { "X-Request-Id": "abc123" } },
     sseOne: { type: "sse", url: "https://example.com/sse" },
   });
 });
