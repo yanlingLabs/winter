@@ -2301,12 +2301,18 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const settings = loadSettings(settingsPath);
         let next: Settings;
         try {
-          next = setModelRole(settings, p.role, p.model);
+          // `p.effort` is `.nullable().optional()`: forwarded VERBATIM, because the transform
+          // distinguishes all three states (absent = leave it, `null` = clear it, a string = set it)
+          // and flattening any pair of them here would lose a request the wire can express.
+          next = setModelRole(settings, p.role, p.model, p.effort);
         } catch (err) {
           // `setModelRole` throws a `TypeError` on a non-tag value, the `unstated/unstated`
           // sentinel, or `role: "provider.model"` with `model: null` — the params door's
           // `ModelTagSchema` already refused a BARE id, so the only way here is a shape-valid tag
           // the pinned catalog does not recognise, the sentinel, or that one role-specific rule.
+          // It throws the same `TypeError` for a refused `effort` too (a Winter-level tier, a level
+          // the role's model does not offer, an effort on a model that declares no vocabulary) — the
+          // effort gate's messages are `session.setEffort`'s own, and land as the same INVALID_PARAMS.
           throw new RpcFailure(ERR.INVALID_PARAMS, err instanceof Error ? err.message : String(err));
         }
         saveSettings(settingsPath, next);
@@ -2319,10 +2325,20 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // (`modelCatalogWire` calls the SAME unfiltered `permittedProviders()` those roles' "any"/
       // "same-as-session" `permitted` sets use, so there is nothing here for a `winterHome`-less
       // test server to degrade on).
+      //
+      // The ONE thing it is not settings-independent about is `providers[].credentialPresent`, and its
+      // two inputs are exactly `sync.config`'s (below): `credentialPresenceFrom(opts.secrets)` plus
+      // `opts.winterHome` for the console door's on-disk profile. Taken as an ALREADY-COMPUTED
+      // presence rather than probed inside the catalog reader — one Keychain probe per call, and the
+      // same rule `pickerModels` filters on, so the two listings cannot disagree. A server with no
+      // secret store wired degrades to "no stored credentials at all" (`{byProvider:{}}` / `home: ""`),
+      // i.e. every provider reports `credentialPresent: false` — the identical degradation
+      // `sync.config` documents for the identical absence, never a crash and never a guess.
       // -----------------------------------------------------------------------------------------
       case METHODS.modelsCatalog: {
         parseParams(ModelsCatalogParams, params);
-        return modelCatalogWire();
+        const credentials = opts.secrets ? await credentialPresenceFrom(opts.secrets) : { byProvider: {} };
+        return modelCatalogWire({ credentials, home: opts.winterHome ?? "" });
       }
       // -----------------------------------------------------------------------------------------
       // Daemon settings surface batch 3 (item 2) — the ONE write door for a skill's `Skill(<name>)`

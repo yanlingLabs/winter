@@ -1512,6 +1512,33 @@ export const ModelRoleInfoSchema = z.object({
   constraint: ModelRoleConstraintSchema,
   /** The providers/tags the daemon can actually serve for this role TODAY. */
   permitted: z.array(ModelRolePermittedProviderSchema),
+  /** 2026-09-18: the role's own reasoning effort — the EXPLICIT stored value, or `null` when none is
+   *  stored. Never a computed default: unlike `model` above, an absent effort is not "fall back to
+   *  something", it is "send no effort at all and let the provider's own default apply", and naming a
+   *  level here would make the UI show a choice the user never made. The provider's declared default,
+   *  when it has one, is `models.catalog`'s `defaultEffort` for the same tag.
+   *
+   *  Stored per role in `settings.roleEfforts.<role>`, with ONE exception: `provider.model` keeps its
+   *  established home, the sibling `settings.provider.reasoningEffort` (what `winter model --effort`
+   *  writes). This field reads whichever of the two owns the role, so a client never needs to know
+   *  which. */
+  effort: z.string().nullable(),
+  /** Whether `effort` is a stored value. Always equal to `effort !== null` today — it rides as its own
+   *  field so that stays true by contract rather than by coincidence, exactly as `explicit` does for
+   *  `model` (where the two genuinely differ). */
+  effortExplicit: z.boolean(),
+  /** The effort vocabulary of the role's CURRENT `model` — the same three-state field, with the same
+   *  meanings, as `models.catalog`'s `ModelCatalogModelSchema.efforts` (read its doc: `null` =  no
+   *  effort concept known, `[]` = a real model that takes no effort setting, `[…]` = the levels). It
+   *  rides here so a client can render this role's effort control from ONE call, without joining
+   *  `models.catalog` on `model` first.
+   *
+   *  `null` also covers a role whose `model` is `null` (an unset `runtimes.advisorModel`) and a
+   *  `winter-test/*` tag — neither has a catalog row to declare anything.
+   *
+   *  As on `models.catalog`, `"none"` is not prepended: `settings.setModelRole` accepts `"none"`
+   *  whenever this array is non-empty, so a control offering it adds it by that rule. */
+  efforts: z.array(z.string()).nullable(),
 });
 
 // LOCAL-ROLE ONLY (never added to `REMOTE_ALLOWED_METHODS`): read-only introspection for the Mac
@@ -1530,6 +1557,26 @@ export const SettingsSetModelRoleParams = z.object({
    *  role-specific rules (never the `unstated/unstated` sentinel, `provider.model` never `null`)
    *  are the handler's own `setModelRole` check, same split `SettingsSetAdvisorModelParams` has. */
   model: ModelTagSchema.nullable(),
+  /** 2026-09-18: the role's reasoning effort. `.nullable().optional()` on purpose — the three
+   *  states are three different requests and must stay distinguishable on the wire:
+   *    - ABSENT        — leave the stored effort exactly as it is.
+   *    - `null`        — clear it: the role sends no effort and the provider's default applies.
+   *    - a string      — set it, validated against the model this SAME call leaves the role on
+   *                      (the post-write `model`, so a model change and a matching effort land
+   *                      together or not at all).
+   *
+   *  Validation is the handler's (`setModelRole`, core settings.ts), and it is `session.setEffort`'s
+   *  posture: the value must be one the model's catalog row offers (its vocabulary, plus `"none"`
+   *  whenever that vocabulary is non-empty); a real catalog row with no vocabulary refuses ANY
+   *  effort; a model with no catalog row at all (`winter-test/*`) is not checked. A Winter-level
+   *  tier (`"ultra"`) is refused on every role today — see core's `roleAcceptsClientEffort`.
+   *
+   *  CAUTION — `model` above is a REQUIRED key: an effort-only change must re-send the role's current
+   *  tag (`settings.modelRoles`' `model`, or `null` for a role currently on its default). Sending
+   *  `model: null` there CLEARS a pinned override, and the effort is then validated against the
+   *  role's default model. Changing the model with `effort` absent keeps a stored effort even if the
+   *  new model does not offer it; the post-write `roles` echo shows it beside the new `efforts`. */
+  effort: z.string().nullable().optional(),
 });
 export const SettingsSetModelRoleResult = z.object({
   ok: z.literal(true),
@@ -1594,6 +1641,29 @@ export const ModelCatalogProviderSchema = z.object({
    *  and a picker that reads `null` as "cannot be credentialed" would present a correctly
    *  signed-in Console user as unusable. */
   credentialDoor: z.enum(["keychain", "console-profile", "none"]),
+  /** Whether the door named above is SATISFIED on this daemon's home right now — the readiness test
+   *  itself, answered daemon-side so no client has to perform it.
+   *
+   *  A client MUST NOT re-derive this by joining `credential.list` on `credentialSlotId`: that join
+   *  is wrong for both Anthropic doors, in opposite directions. `credential.list` is keyed by secret
+   *  NAME, and the `anthropic` row covers TWO accounts (`anthropic:default`, the user's api key;
+   *  `anthropic:console`, the console broker's bearer), so a `<providerId>:default` guess reports
+   *  `anthropic` as ready on a console-only home with no api key at all — and reports `console`
+   *  (whose only slot is filed under `anthropic`, never under its own id) as permanently unusable
+   *  even when the user is correctly signed in. The daemon answers `console` from the on-disk `ant`
+   *  profile and every other provider from its own Keychain slot; that is one rule
+   *  (`credentialPresentProbe`, core's `runtime-sdk/keychain.ts`), shared verbatim with the model
+   *  list `sync.config` serves, so the two can never disagree.
+   *
+   *  PRESENCE, NEVER VALIDITY: a stored key can be revoked and a console profile can be expired, and
+   *  only a real turn finds out. For the console door the daemon re-checks the profile LIVE at every
+   *  spawn (`console_profile_missing`), so `true` means offerable, not promised. A boolean only —
+   *  never a secret name beyond the `credentialSlotId` already above, and never material.
+   *
+   *  `false` for EVERY provider is also what a daemon with no secret store wired reports (a bare test
+   *  harness): absence of evidence reads as absence, the same degradation `sync.config`'s own
+   *  credential-filtered model list already takes on the identical inputs. */
+  credentialPresent: z.boolean(),
 });
 
 export const ModelCatalogPricingSchema = z.object({
@@ -1628,6 +1698,30 @@ export const ModelCatalogModelSchema = z.object({
    *  vendor's own PUBLISHED price); an inferred/upstream/other-sourced price, or no price at all,
    *  is `"unknown"` — never a guess dressed as a list price. */
   costBasis: z.enum(["list", "unknown"]),
+  /** The reasoning-effort vocabulary this row DECLARES, in the catalog's own order, verbatim.
+   *
+   *  THREE STATES, and the two empty-looking ones are NOT the same fact — a consumer that collapses
+   *  them renders the wrong control:
+   *    - `null`  — the row carries no `reasoning` block at all: the catalog knows of no effort
+   *                concept for this model (472 of 618 rows today). Render no effort control.
+   *    - `[]`    — the row HAS a `reasoning` block whose vocabulary is empty: reasoning is claimed,
+   *                but this model takes no effort SETTING (98 of 618 rows). Render the control
+   *                disabled, or say so — it is a known property of the model, not missing data.
+   *    - `[…]`   — the levels the endpoint accepts for this row.
+   *
+   *  `"none"` is deliberately NOT prepended, unlike `sync.config`'s `models[].efforts`: the catalog
+   *  excludes `"none"` on purpose (it is Winter's own "unset", not a vendor tier), and that prepend
+   *  is a PICKER convention of that one surface. This field carries what the catalog declares. A
+   *  client building a selection control adds `"none"` itself whenever this array is non-empty —
+   *  which is exactly what the daemon's own effort gates accept (`session.setEffort`,
+   *  `settings.setModelRole`'s `effort`). */
+  efforts: z.array(z.string()).nullable(),
+  /** The catalog's own `reasoning.defaultEffort` for this row, or `null` when it declares none —
+   *  optional even on rows that DO declare a vocabulary (15 of 48 today). `null` means "the catalog
+   *  names no default", never "there is no default": the provider still has one, just unobserved.
+   *  This is the value the daemon falls back to when an IMPLICIT effort is not in the row's
+   *  vocabulary (core's `implicitEffortFor`), so a UI showing "provider default" can name it. */
+  defaultEffort: z.string().nullable(),
 });
 
 export const ModelsCatalogResult = z.object({

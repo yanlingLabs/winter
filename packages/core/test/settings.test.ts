@@ -2,7 +2,7 @@ import { describe, expect, test, spyOn } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, computerUseEnabledFrom, lspEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialSubscriptionAuthEnabled, officialSubscriptionAuthFlagInert, DEFAULT_PROVIDER, pinsFor, setModelRole, modelRoleInfo, setSkillDenied, skillDenyRule, MODEL_ROLES } from "../src/settings";
+import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, computerUseEnabledFrom, lspEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialSubscriptionAuthEnabled, officialSubscriptionAuthFlagInert, DEFAULT_PROVIDER, pinsFor, setModelRole, modelRoleInfo, setSkillDenied, skillDenyRule, MODEL_ROLES, roleEffortFor, roleAcceptsClientEffort } from "../src/settings";
 import { ModelRole as ProtocolModelRole } from "@yanlinglabs/winter-protocol";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
 import { UNSTATED_TAG, type ModelTag } from "../src/runtime-sdk/model-tag";
@@ -1107,6 +1107,153 @@ describe("setModelRole: the catalog-membership check", () => {
     const unservable = "anthropic/claude-sonnet-5";
     expect(info.permitted.some((p) => p.models.includes(tag(unservable)))).toBe(false);
     expect(setModelRole(base, "titles.model", unservable).titles?.model).toBe(tag(unservable));
+  });
+});
+
+// -------------------------------------------------------------------------------------------------
+// 2026-09-18, item 3: a role's reasoning effort — the pure transforms and readers under
+// `settings.setModelRole`'s `effort` field. The RPC-level behaviour is
+// `test/ipc/settings-model-roles.test.ts`.
+// -------------------------------------------------------------------------------------------------
+describe("role reasoning efforts (roleEfforts / roleEffortFor / roleAcceptsClientEffort)", () => {
+  const base: Settings = { schemaVersion: 3, provider: { model: tag("codex-oauth/gpt-5.6-sol") } };
+
+  // The same literal-parity tripwire `MODEL_ROLES / protocol ModelRole parity` applies to the storage
+  // block: its keys are a THIRD hand-spelled copy of the role list (after `MODEL_ROLES` and the
+  // protocol enum), and they must stay exactly "every role except `provider.model`" — that exception
+  // is the whole reason the block's keys are not simply `MODEL_ROLES`.
+  test("the roleEfforts schema's keys are exactly MODEL_ROLES minus provider.model", () => {
+    const shape = (Settings.shape.roleEfforts as unknown as { unwrap(): { shape: Record<string, unknown> } }).unwrap().shape;
+    expect(Object.keys(shape).sort()).toEqual(MODEL_ROLES.filter((r) => r !== "provider.model").slice().sort());
+  });
+
+  test("roleEffortFor: absent everywhere means absent — no level is ever invented", () => {
+    for (const role of MODEL_ROLES) expect(roleEffortFor(base, role)).toBeUndefined();
+    expect(roleEffortFor(null, "pins.dispatch")).toBeUndefined();
+    expect(roleEffortFor(undefined, "provider.model")).toBeUndefined();
+  });
+
+  test("the block is keyed by the role id VERBATIM — the wire's `role` parameter is the settings key", () => {
+    const set = setModelRole(base, "pins.dispatch", "codex-oauth/gpt-5.6-terra", "high");
+    expect(set.roleEfforts).toEqual({ "pins.dispatch": "high" });
+    expect(roleEffortFor(set, "pins.dispatch")).toBe("high");
+    // Every role except `provider.model` is a key of this block, and each is independent.
+    const many = MODEL_ROLES.filter((r) => r !== "provider.model")
+      .reduce<Settings>((s, role) => setModelRole(s, role, "codex-oauth/gpt-5.6-terra", "low"), base);
+    expect(Object.keys(many.roleEfforts ?? {}).sort()).toEqual(MODEL_ROLES.filter((r) => r !== "provider.model").slice().sort());
+  });
+
+  test("provider.model reads and writes `provider.reasoningEffort`, never the new block", () => {
+    const set = setModelRole(base, "provider.model", "codex-oauth/gpt-5.6-sol", "max");
+    expect(set.provider.reasoningEffort).toBe("max");
+    expect(set.roleEfforts).toBeUndefined();
+    expect(roleEffortFor(set, "provider.model")).toBe("max");
+    // And an effort written the OLD way (`winter model --effort`) reads back through the role door.
+    const legacy = setReasoningEffort(base, "low");
+    expect(roleEffortFor(legacy, "provider.model")).toBe("low");
+    expect(modelRoleInfo(legacy, "provider.model")).toMatchObject({ effort: "low", effortExplicit: true });
+    // Clearing goes back through the same door.
+    expect(setModelRole(set, "provider.model", "codex-oauth/gpt-5.6-sol", null).provider.reasoningEffort).toBeUndefined();
+  });
+
+  test("absent `effort` leaves a stored one untouched; `null` clears it — the two are distinguishable", () => {
+    const withEffort = setModelRole(base, "pins.dream", "codex-oauth/gpt-5.6-luna", "high");
+    // A model-only write (the 3-argument call every pre-existing caller makes) changes nothing here.
+    const modelOnly = setModelRole(withEffort, "pins.dream", "codex-oauth/gpt-5.6-terra");
+    expect(modelOnly.pins?.dream).toBe(tag("codex-oauth/gpt-5.6-terra"));
+    expect(roleEffortFor(modelOnly, "pins.dream")).toBe("high");
+    expect(roleEffortFor(setModelRole(withEffort, "pins.dream", "codex-oauth/gpt-5.6-luna", null), "pins.dream")).toBeUndefined();
+  });
+
+  test("modelRoleInfo: efforts carries the CURRENT model's vocabulary, with null and [] kept apart", () => {
+    // A row with a vocabulary, in the catalog's own order and with no "none" prepended.
+    expect(modelRoleInfo(base, "provider.model").efforts).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    // A row with NO `reasoning` block at all.
+    const noBlock = setModelRole(base, "provider.model", "openai/gpt-5.4");
+    expect(modelRoleInfo(noBlock, "provider.model").efforts).toBeNull();
+    // A row WITH a `reasoning` block whose vocabulary is empty — a different fact, a different answer.
+    const emptyVocab = setModelRole(base, "pins.dispatch", "agnes/agnes-2.0-flash");
+    expect(modelRoleInfo(emptyVocab, "pins.dispatch").efforts).toEqual([]);
+    // A role naming no model at all has nothing to ask.
+    expect(modelRoleInfo(base, "runtimes.advisorModel")).toMatchObject({ model: null, efforts: null });
+  });
+
+  test("an effort outside the model's vocabulary is refused; \"none\" is accepted on any row that has one", () => {
+    // `openai/o4-mini` declares exactly ["low","medium","high"] — `"max"` is a perfectly real wire
+    // effort that THIS model does not offer, which is the case a per-model check exists for (a row
+    // offering all five, like the gpt-5.6 family, could never exercise it).
+    expect(modelRoleInfo(setModelRole(base, "pins.dispatch", "openai/o4-mini"), "pins.dispatch").efforts)
+      .toEqual(["low", "medium", "high"]);
+    expect(() => setModelRole(base, "pins.dispatch", "openai/o4-mini", "max"))
+      .toThrow(/effort 'max' is not accepted by model 'openai\/o4-mini' — supported: none, low, medium, high/);
+    expect(roleEffortFor(setModelRole(base, "pins.dispatch", "openai/o4-mini", "high"), "pins.dispatch")).toBe("high");
+    // `"none"` is never in a catalog vocabulary (it is Winter's own unset) but is always accepted on a
+    // row that HAS one — the `effortsForModel` rule, restated by this door.
+    expect(roleEffortFor(setModelRole(base, "pins.dispatch", "codex-oauth/gpt-5.6-terra", "none"), "pins.dispatch")).toBe("none");
+  });
+
+  test("the vocabulary is the row's OWN order, never sorted or normalised by this daemon", () => {
+    // `xai-oauth/grok-4.5` declares ["high","medium","low"] — strongest-first, the reverse of every
+    // other row's order. A consumer rendering a slider needs the catalog's order, not an opinion.
+    expect(modelRoleInfo(setModelRole(base, "pins.dispatch", "xai-oauth/grok-4.5"), "pins.dispatch").efforts)
+      .toEqual(["high", "medium", "low"]);
+  });
+
+  test("ANY effort is refused on a real catalog row that declares no vocabulary — both shapes of it", () => {
+    for (const model of ["openai/gpt-5.4", "agnes/agnes-2.0-flash"]) {
+      for (const effort of ["high", "none"]) {
+        expect(() => setModelRole(base, "pins.dispatch", model, effort)).toThrow(/declares no reasoning-effort vocabulary/);
+      }
+    }
+  });
+
+  test("a tag with no catalog row at all passes through unchecked — implicitEffortFor's own posture", () => {
+    // `winter-test/*` is not a catalog namespace (the harness doubles accept anything), so there is no
+    // evidence to refuse on. Same for any future BYO-endpoint id.
+    expect(roleEffortFor(setModelRole(base, "pins.dispatch", "winter-test/echo", "high"), "pins.dispatch")).toBe("high");
+  });
+
+  test("a Winter-level tier is refused on every role, and no role accepts one today", () => {
+    for (const role of MODEL_ROLES) expect(roleAcceptsClientEffort(role)).toBe(false);
+    for (const tier of CLIENT_EFFORTS) {
+      expect(() => setModelRole(base, "pins.dispatch", "codex-oauth/gpt-5.6-terra", tier)).toThrow(/Winter-level tier/);
+      expect(() => setModelRole(base, "provider.model", "codex-oauth/gpt-5.6-sol", tier)).toThrow(/Winter-level tier/);
+    }
+    // The dispatch arm is asked through `clientEffortEligible` rather than hardcoded, so the role
+    // answer and the session answer move together.
+    expect(clientEffortEligible("dispatch")).toBe(false);
+  });
+
+  test("a level the catalog could name but this daemon cannot STORE is refused at the door, not inside saveSettings", () => {
+    // `roleEfforts` is `z.enum(REASONING_EFFORTS)` (like its `provider.reasoningEffort` sibling), so a
+    // value outside that enum could never be persisted. Refusing it here keeps it an INVALID_PARAMS
+    // rather than a throw out of `saveSettings`'s own validation pass.
+    expect(REASONING_EFFORTS).not.toContain("minimal" as never);
+    expect(() => setModelRole(base, "pins.dispatch", "codex-oauth/gpt-5.6-terra", "MEDIUM"))
+      .toThrow(/is not a reasoning effort this daemon can store/);
+  });
+
+  test("a stored roleEfforts block survives an unrelated save (load → transform → save round trip)", () => {
+    const path = tmpSettings({
+      schemaVersion: 3,
+      provider: { model: "codex-oauth/gpt-5.6-sol" },
+      roleEfforts: { "pins.dream": "high", "titles.model": "low" },
+      someFutureKey: { kept: true },
+    });
+    // A write from a surface that knows nothing about efforts.
+    saveSettings(path, setSkillDenied(loadSettings(path), "some-skill", true));
+    const after = JSON.parse(readFileSync(path, "utf8"));
+    expect(after.roleEfforts).toEqual({ "pins.dream": "high", "titles.model": "low" });
+    expect(after.someFutureKey).toEqual({ kept: true });
+    // …and an entry this schema does not model inside the block rides through too (the block is not
+    // `.strict()`, so `mergeUnknownKeys`' general rule applies to it).
+    const path2 = tmpSettings({
+      schemaVersion: 3,
+      provider: { model: "codex-oauth/gpt-5.6-sol" },
+      roleEfforts: { "pins.dream": "high", "roles.notYetInvented": "high" },
+    });
+    saveSettings(path2, setSkillDenied(loadSettings(path2), "some-skill", true));
+    expect(JSON.parse(readFileSync(path2, "utf8")).roleEfforts).toEqual({ "pins.dream": "high", "roles.notYetInvented": "high" });
   });
 });
 

@@ -9,7 +9,10 @@ import { consoleProfileCredentialFile } from "./runtime-sdk/anthropic-paths";
 import { facingNameToTag, isModelTag, splitTag, UNSTATED_TAG, WINTER_TEST_PREFIX, type ModelTag } from "./runtime-sdk/model-tag";
 // The ONE catalog-row-by-tag lookup (WS-20) — imported rather than re-written here so a role write
 // and a session's own model resolution agree on what "this model exists" means, by construction.
-import { rowForTag } from "./runtime-sdk/provider-selection";
+// `effortVocabularyFor`: the ONE interpretation of a catalog row's `reasoning?.efforts`, shared with
+// `models.catalog` and `sync.config` so a role's advertised vocabulary and a model listing's can
+// never differ. Its `null`/`[]` distinction is what `modelRoleInfo.efforts` carries.
+import { effortVocabularyFor, rowForTag } from "./runtime-sdk/provider-selection";
 
 /** Reasoning-effort slugs valid on the wire — measured LIVE against the Codex OAuth endpoint
  *  (2026-07-30), one model at a time, NOT read off the /models catalogue text. That distinction
@@ -703,6 +706,40 @@ export const Settings = z.object({
     cleaner: ModelTagSchemaCore,
     research: ModelTagSchemaCore,
     researchFallback: ModelTagSchemaCore,
+  }).partial().optional(),
+  /**
+   * 2026-09-18: the reasoning effort each MODEL ROLE runs at. The keys are `MODEL_ROLES`' own strings
+   * VERBATIM — dots and all — and that is the entire reason for this shape: `settings.setModelRole`'s
+   * wire `role` parameter IS the key here, so the write door needs no role→path mapping table to keep
+   * in sync with `modelRoleConstraint`/`modelRoleInfo`. The alternative (an `effort` sibling inside
+   * each role's own block — `pins.dispatchEffort`, `titles.effort`, …) would scatter one concept
+   * across five blocks and put an effort under `runtimes`, where nothing else is per-role.
+   *
+   * EIGHT keys, not nine: `provider.model` is ABSENT by design. Its effort already has an established
+   * home in the sibling `provider.reasoningEffort` above — what `winter model --effort` writes and
+   * what every existing reader of the daemon's own default effort reads (`sync.config`'s
+   * `defaultEffort`, the engine's `resolveSel`) — and duplicating it here would create two places to
+   * disagree about one value. `roleEffortFor` (below) is the ONE reader that routes that role to its
+   * real home; nothing else needs to know about the exception.
+   *
+   * Every key optional, the whole block optional: an absent entry means "this role sends no effort,
+   * and the provider's own default applies" — never a level this file computes. `roleEffortFor` is the
+   * one place that default is spelled, per the file-wide `.optional()`-block convention.
+   *
+   * The value type is `z.enum(REASONING_EFFORTS)` — the same schema `provider.reasoningEffort` uses,
+   * for the same reason: a stored role effort is always something the wire will honour. Winter-level
+   * tiers (`CLIENT_EFFORTS`) are excluded by construction and refused at the write door as well (see
+   * `roleAcceptsClientEffort`), so no role can ever store a value the endpoint would 400 on.
+   */
+  roleEfforts: z.object({
+    "pins.dispatch": z.enum(REASONING_EFFORTS),
+    "pins.dream": z.enum(REASONING_EFFORTS),
+    "pins.cleaner": z.enum(REASONING_EFFORTS),
+    "pins.research": z.enum(REASONING_EFFORTS),
+    "pins.researchFallback": z.enum(REASONING_EFFORTS),
+    "titles.model": z.enum(REASONING_EFFORTS),
+    "reviewer.model": z.enum(REASONING_EFFORTS),
+    "runtimes.advisorModel": z.enum(REASONING_EFFORTS),
   }).partial().optional(),
 });
 export type Settings = z.infer<typeof Settings>;
@@ -1645,6 +1682,71 @@ export function permittedProviders(filterProviderIds?: ReadonlySet<string>): Arr
 }
 
 /**
+ * 2026-09-18: THE ONE READER of a role's stored reasoning effort — `undefined` means "no effort is
+ * stored for this role", and that is the whole default: the role's model runs with no effort field in
+ * the request and the provider's own default applies. Nothing here fabricates a level, for the reason
+ * `effortsForModel`'s own doc gives about `""` vs `"none"`: an unset effort omits the `reasoning`
+ * block entirely, and collapsing that to `"none"` would start sending an explicit level the user
+ * never chose.
+ *
+ * `provider.model` is routed to `settings.provider.reasoningEffort` — its established home, written by
+ * `winter model --effort` (`setReasoningEffort`) and read by every existing consumer of the daemon's
+ * own default effort. That role deliberately has NO `roleEfforts` entry (see the block's own schema
+ * comment): this function is the only place the exception is spelled, so every caller — the read
+ * (`modelRoleInfo`), the write (`setModelRole`) and any future consumer — asks one question and gets
+ * one answer.
+ */
+export function roleEffortFor(settings: Settings | null | undefined, role: ModelRole): string | undefined {
+  if (role === "provider.model") return settings?.provider?.reasoningEffort;
+  return settings?.roleEfforts?.[role];
+}
+
+/**
+ * 2026-09-18: may this role's effort be a WINTER-LEVEL tier (`CLIENT_EFFORTS`, e.g. `"ultra"`)?
+ *
+ * `clientEffortEligible` (above) answers this for a SESSION, by mode. A role is not a session, so the
+ * question has to be re-asked per role rather than by handing that function a mode — and in
+ * particular NEVER by handing it `undefined`, which it reads as "code" by the store-wide convention
+ * and would therefore admit a tier for every role that has no session at all.
+ *
+ * An exhaustive `switch`, so adding a tenth role is a TYPE ERROR here rather than a silent inheritance
+ * of whichever answer happened to be last. Every arm is `false` today, and each for its own reason:
+ *
+ *  - `pins.dispatch` — this model runs DISPATCH sessions, and `clientEffortEligible("dispatch")` is
+ *    already `false`: a tier rewrites the system prompt with a proactive-delegation posture, and a
+ *    dispatch session has its own base prompt and toolset. Asked through that function rather than
+ *    hardcoded, so the two move together if dispatch's eligibility ever changes.
+ *  - `provider.model` — a code session with no override of its own DOES fall back to this model, so
+ *    eligibility is not what refuses here: the STORAGE does. Its effort lives in
+ *    `provider.reasoningEffort`, whose schema is `z.enum(REASONING_EFFORTS)` — a tier cannot be
+ *    persisted there at all. A session that wants one selects it per-session (`session.setEffort`,
+ *    where `clientEffortEligible` governs), which is where a prompt-rewriting choice belongs anyway.
+ *  - the six `"internal-provider"` roles (`pins.dream`/`cleaner`/`research`/`researchFallback`,
+ *    `titles.model`, `reviewer.model`) — these are not sessions in any sense: they are the daemon's
+ *    own internal `Provider` calls (providers/manager.ts). There is no agent prompt for a tier to
+ *    rewrite and no `spawn_agent` for a delegation posture to name, and those calls do not run through
+ *    `AgentEngine.resolveSel` — the one place `wireEffort` translates a tier away — so a stored tier
+ *    would reach a request body verbatim and be refused by the endpoint's global `invalid_value` enum.
+ *    That is precisely the bug `CLIENT_EFFORTS`' own doc says must never be re-created.
+ *  - `runtimes.advisorModel` — the advisor is a TOOL inside somebody else's session, not a session. Its
+ *    host session's own tier (and prompt) is the one in play; a second, independent tier here would
+ *    have no prompt of its own to change.
+ */
+export function roleAcceptsClientEffort(role: ModelRole): boolean {
+  switch (role) {
+    case "pins.dispatch":
+      return clientEffortEligible("dispatch");
+    case "provider.model":
+      return false;
+    case "pins.dream": case "pins.cleaner": case "pins.research": case "pins.researchFallback":
+    case "titles.model": case "reviewer.model":
+      return false;
+    case "runtimes.advisorModel":
+      return false;
+  }
+}
+
+/**
  * WS-20: per-role read for `settings.modelRoles` (the Mac app's Roles pane) — the effective model
  * (an explicit override, or the SAME default rule the role's real consumer uses), whether that is
  * an explicit override, the routing `constraint` (`modelRoleConstraint` above), and the `permitted`
@@ -1667,8 +1769,42 @@ export function permittedProviders(filterProviderIds?: ReadonlySet<string>): Arr
  *
  * `runtimes.advisorModel`'s "unset" case has no single default to report at all (see
  * `modelRoleConstraint`'s own doc) — it reads back `null`, never a guess.
+ *
+ * 2026-09-18 — the EFFORT half (`effort`/`effortExplicit`/`efforts`). Deliberately unlike `model`
+ * above, `effort` reports ONLY what is stored: an absent effort is not "fall back to a default", it is
+ * "send no effort and let the provider's own default apply" (`roleEffortFor`'s doc), and naming a level
+ * for it would put a choice in the UI that the user never made. `efforts` is the role's CURRENT model's
+ * vocabulary, carried here so the effort control needs no second `models.catalog` lookup, with
+ * `effortVocabularyFor`'s three states intact (`null` = no vocabulary known — including a role whose
+ * `model` is itself `null`; `[]` = a real row that takes no effort setting).
  */
 export function modelRoleInfo(settings: Settings | null | undefined, role: ModelRole, boundProviderId?: string): {
+  model: ModelTag | null;
+  explicit: boolean;
+  constraint: ModelRoleConstraint;
+  permitted: Array<{ providerId: string; displayName: string; models: ModelTag[] }>;
+  effort: string | null;
+  effortExplicit: boolean;
+  efforts: string[] | null;
+} {
+  const base = modelRoleModel(settings, role, boundProviderId);
+  const storedEffort = roleEffortFor(settings, role);
+  return {
+    ...base,
+    effort: storedEffort ?? null,
+    effortExplicit: storedEffort !== undefined,
+    // `null` for a role with no model at all (an unset `runtimes.advisorModel`) — there is no row to
+    // ask, which is the same answer `effortVocabularyFor` gives for a tag it cannot find.
+    efforts: base.model === null ? null : effortVocabularyFor(base.model),
+  };
+}
+
+/** The MODEL half of `modelRoleInfo`, split out so the effort fields are added in exactly one place
+ *  rather than repeated across nine `return`s (and so `setModelRole` can resolve "which model does this
+ *  role sit on after my write" without also computing a vocabulary it is about to re-derive). Every
+ *  rule and caveat in `modelRoleInfo`'s own doc comment above applies to this function — it is that
+ *  function's body, not a second one. */
+function modelRoleModel(settings: Settings | null | undefined, role: ModelRole, boundProviderId?: string): {
   model: ModelTag | null;
   explicit: boolean;
   constraint: ModelRoleConstraint;
@@ -1767,7 +1903,128 @@ function assertCatalogBackedTag(tag: string, role: ModelRole): void {
   );
 }
 
-export function setModelRole(settings: Settings, role: ModelRole, model: string | null): Settings {
+/**
+ * 2026-09-18: `effort` — the role's reasoning effort, in the SAME write door as its model so a model
+ * change and a matching effort land together (one `saveSettings`) or not at all.
+ *
+ * THREE states, and they are three different requests:
+ *   - `undefined` (the argument absent) — the stored effort is left exactly as it is. NOTE that this
+ *     includes a model change that leaves a stored effort the new model does not offer: the effort is
+ *     not silently dropped, because the caller did not ask about it, and the post-write `roles` echo
+ *     reports it verbatim beside the new model's `efforts` so a client can see and fix it. The read
+ *     side never repairs it either — the consumer-side mapping for an effort a row does not list is
+ *     `implicitEffortFor` (runtime-sdk/provider-selection.ts), at the point the effort is SPENT.
+ *   - `null` — cleared: the role sends no effort and the provider's own default applies.
+ *   - a string — set, validated against the model this call leaves the role on (see
+ *     `assertRoleEffortSelectable`).
+ */
+export function setModelRole(settings: Settings, role: ModelRole, model: string | null, effort?: string | null): Settings {
+  const withModel = setModelRoleModel(settings, role, model);
+  if (effort === undefined) return withModel;
+  // Validated against the POST-WRITE model, never the one the role sat on when the call arrived: a
+  // single call that moves a role to a new model and picks an effort for it must be checked as the
+  // state it is creating, not the one it is leaving.
+  if (effort !== null) assertRoleEffortSelectable(withModel, role, effort);
+  return writeRoleEffort(withModel, role, effort);
+}
+
+/**
+ * The effort half's own validator — `ipc/server.ts`'s `assertEffortSelectable` (the ONE rule
+ * `session.setEffort` and `session.create` share), restated for a ROLE and kept word-for-word where
+ * the two say the same thing.
+ *
+ * It cannot simply CALL that function, for two reasons that are both about this being a role and not a
+ * session: its tier branch asks `clientEffortEligible(mode)` and a role has no mode (that question is
+ * `roleAcceptsClientEffort`'s, and handing the session function `undefined` would read as "code" and
+ * admit a tier everywhere), and it throws `RpcFailure` — an `ipc` type this module must not depend on.
+ * The transform throws `TypeError`, which `settings.setModelRole`'s handler already reports as
+ * `INVALID_PARAMS`, exactly like every other refusal from this door.
+ *
+ * The three model-facing rules are `assertEffortSelectable`'s, unchanged:
+ *   - a real catalog row whose vocabulary is empty (`null` OR `[]` — 570 of 618 rows) refuses ANY
+ *     effort, rather than letting one through to a child that will refuse it typed mid-turn;
+ *   - a row WITH a vocabulary accepts that vocabulary plus `"none"` (the `effortsForModel` rule: the
+ *     catalog omits `"none"` because it is Winter's unset, but the wire honours it once a model
+ *     reasons at all). Computed inline rather than imported from `ipc/sync.ts` — that module imports
+ *     this one, so the import would be a cycle; the ROW read underneath it is the shared
+ *     `effortVocabularyFor`, so the two cannot disagree about the catalog itself.
+ *   - a tag with NO catalog row (`winter-test/*`, a BYO endpoint's own id) passes through unchecked —
+ *     `implicitEffortFor`'s own posture, and for its reasons: the harness doubles accept anything and
+ *     an off-catalog endpoint offers this daemon no evidence either way, so refusing would be a guess
+ *     dressed as a rule.
+ */
+function assertRoleEffortSelectable(settings: Settings, role: ModelRole, effort: string): void {
+  if (isClientEffort(effort)) {
+    if (!roleAcceptsClientEffort(role)) {
+      throw new TypeError(
+        `${role}: effort ${JSON.stringify(effort)} is a Winter-level tier, and no model role accepts one — ` +
+          `a tier rewrites a session's system prompt, and no role's model is a code session's own (see ` +
+          `\`roleAcceptsClientEffort\` for the per-role reason). Select a tier per session instead ` +
+          `(\`session.setEffort\`); the efforts a role may store are: ${REASONING_EFFORTS.join(", ")}.`,
+      );
+    }
+    // UNREACHABLE today (every arm of `roleAcceptsClientEffort` is `false`). A tier is deliberately
+    // NOT then checked against the model's vocabulary — T5's ruling: the two branches are
+    // ALTERNATIVES, not layers, because a tier never reaches the endpoint. If a role is ever made to
+    // accept one, `roleEfforts`' value schema must widen in the SAME change or `saveSettings` will
+    // refuse the write.
+    return;
+  }
+  // The value must be STORABLE, checked before anything model-specific so a level the catalog might
+  // one day declare but this daemon cannot persist (`roleEfforts` is `z.enum(REASONING_EFFORTS)`, like
+  // its `provider.reasoningEffort` sibling) refuses typed HERE rather than throwing out of
+  // `saveSettings`'s own validation pass two lines later.
+  if (!(REASONING_EFFORTS as readonly string[]).includes(effort)) {
+    throw new TypeError(
+      `${role}: effort ${JSON.stringify(effort)} is not a reasoning effort this daemon can store — ` +
+        `supported: ${REASONING_EFFORTS.join(", ")}.`,
+    );
+  }
+  const model = modelRoleModel(settings, role).model;
+  if (model === null) {
+    // Only `runtimes.advisorModel` can reach this: cleared, it has no model at all (see
+    // `modelRoleConstraint`). Storing an effort for a model that does not exist yet would be an orphan
+    // nothing validates and nothing spends — refuse rather than accept a write with no meaning.
+    throw new TypeError(
+      `${role}: this role currently names no model, so an effort cannot be validated or applied — ` +
+        `set its model in the same call (or first), then the effort.`,
+    );
+  }
+  if (rowForTag(model) === undefined) return;
+  const vocabulary = effortVocabularyFor(model) ?? [];
+  const allowed = vocabulary.length > 0 ? ["none", ...vocabulary] : [];
+  if (allowed.length === 0) {
+    throw new TypeError(
+      `${role}: model '${model}' declares no reasoning-effort vocabulary — an effort cannot be set for ` +
+        `it (leave it on the provider's default).`,
+    );
+  }
+  if (!allowed.includes(effort)) {
+    throw new TypeError(
+      `${role}: effort '${effort}' is not accepted by model '${model}' — supported: ${allowed.join(", ")}.`,
+    );
+  }
+}
+
+/** The effort STORE — `roleEffortFor`'s write-side twin, and the only other place the
+ *  `provider.model` → `provider.reasoningEffort` exception is spelled. `null` clears. Preserves every
+ *  other entry in the block, and removes the block's last entry as an empty object rather than
+ *  deleting the block (schema-valid either way; `saveSettings`'s merge treats them identically). */
+function writeRoleEffort(settings: Settings, role: ModelRole, effort: string | null): Settings {
+  if (role === "provider.model") {
+    // `setReasoningEffort`'s own `undefined`-clears convention — the established door, reused rather
+    // than re-implemented, so `winter model --effort` and a role write cannot diverge.
+    return setReasoningEffort(settings, effort === null ? undefined : (effort as (typeof REASONING_EFFORTS)[number]));
+  }
+  const roleEfforts: Record<string, unknown> = { ...settings.roleEfforts };
+  if (effort === null) delete roleEfforts[role]; else roleEfforts[role] = effort;
+  return { ...settings, roleEfforts: roleEfforts as Settings["roleEfforts"] };
+}
+
+/** `setModelRole`'s MODEL half — see that function's own doc comment above (and the ruling comment
+ *  above `assertCatalogBackedTag`) for every rule here; this is that function's original body, split
+ *  out unchanged so the effort half can be applied after it in one transform. */
+function setModelRoleModel(settings: Settings, role: ModelRole, model: string | null): Settings {
   if (role === "runtimes.advisorModel") {
     // Validated HERE rather than inside `setAdvisorModel`: that function is also the door for
     // `winter model --advisor` and the v2→v3 migration, and this ruling is about what a ROLE WRITE

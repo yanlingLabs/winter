@@ -6,7 +6,7 @@ import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { assistantMemoryDirFor } from "../agent/memory-dir";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
 import { CLIENT_EFFORTS, isClientEffort } from "../settings";
-import { rowForTag } from "../runtime-sdk/provider-selection";
+import { effortVocabularyFor } from "../runtime-sdk/provider-selection";
 import { canonicalizeModelTag, UNSTATED_TAG } from "../runtime-sdk/model-tag";
 import { pickerModels } from "./picker-models";
 import type { SessionForkRef, SessionStore, SyncedEntry } from "../sessions/store";
@@ -681,10 +681,17 @@ export const NO_PROVIDER = "none";
  *  (settings.ts) for the measured story. A tag with no catalog row (the `UNSTATED_TAG` sentinel,
  *  or anything `rowForTag` cannot find) answers `[]` — nothing to accept, nothing to advertise.
  *
+ *  The row read itself is `effortVocabularyFor` (runtime-sdk/provider-selection.ts) — the ONE place
+ *  the catalog's `reasoning?.efforts` is interpreted, shared with `models.catalog` and
+ *  `settings.modelRoles`. This function DELIBERATELY collapses its `null` (no `reasoning` block at
+ *  all) and `[]` (a block with an empty vocabulary) into one `[]`: for "what will the endpoint
+ *  accept" they are the same answer — nothing. A surface that must tell the two apart (a UI deciding
+ *  between "no such control" and "not adjustable") reads the vocabulary function directly.
+ *
  *  Returns a fresh array every call — the caller owns its row and must not be able to mutate a
  *  shared array through it. */
 export function effortsForModel(tag: string): string[] {
-  const efforts = rowForTag(tag)?.reasoning?.efforts ?? [];
+  const efforts = effortVocabularyFor(tag) ?? [];
   return efforts.length > 0 ? ["none", ...efforts] : [];
 }
 

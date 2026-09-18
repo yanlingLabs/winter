@@ -4,9 +4,9 @@
 // `settings.modelRoles`'s `permitted` can ever name must resolve in `models.catalog`'s own
 // `models`/`providers` — that is the whole guarantee this method exists to give the picker.
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, ModelsCatalogResult } from "@yanlinglabs/winter-protocol";
 import { startIpcServer, REMOTE_ALLOWED_METHODS } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
@@ -14,6 +14,8 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 import { Settings, saveSettings, MODEL_ROLES } from "../../src/settings";
 import { costBasisFor } from "../../src/providers/model-catalog-wire";
+import { writeCredentialMaterial } from "../../src/auth/credential-material";
+import { consoleProfileCredentialFile } from "../../src/runtime-sdk/anthropic-paths";
 
 class TestClient {
   private decoder = new LineDecoder();
@@ -209,6 +211,120 @@ describe("models.catalog", () => {
     for (const model of result.result.models) {
       expect(familyIds.has(model.familyId)).toBe(true);
     }
+    c.close();
+  });
+
+  // -----------------------------------------------------------------------------------------------
+  // 2026-09-18, item 1: the effort vocabulary. The load-bearing assertion in this block is that
+  // `null` and `[]` are DIFFERENT answers on real catalog rows of each kind — a consumer renders
+  // "this model has no effort concept" and "this model's reasoning is not adjustable" differently,
+  // and `effortsForModel` (ipc/sync.ts), which collapses both to `[]`, cannot serve that.
+  // -----------------------------------------------------------------------------------------------
+  test("efforts: a real row with NO `reasoning` block at all reports null (never [])", async () => {
+    const { socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.modelsCatalog, {});
+    // `agentrouter/claude-opus-5` carries no `reasoning` block (472 of 618 rows are shaped like this
+    // in catalog v3.8.50+winter.1). `openai/gpt-5.4` is a second one, and the tag the sibling
+    // role-write tests already use.
+    for (const tag of ["agentrouter/claude-opus-5", "openai/gpt-5.4"]) {
+      const row = result.result.models.find((m: any) => m.tag === tag);
+      expect(row).toBeDefined();
+      expect(row.efforts).toBeNull();
+      expect(row.defaultEffort).toBeNull();
+    }
+    c.close();
+  });
+
+  test("efforts: a real row WITH a `reasoning` block whose vocabulary is empty reports [] (never null)", async () => {
+    const { socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.modelsCatalog, {});
+    // `agnes/agnes-2.0-flash` declares `reasoning.supported: true` with `efforts: []` — reasoning is
+    // claimed, but no effort level is selectable (98 of 618 rows).
+    const row = result.result.models.find((m: any) => m.tag === "agnes/agnes-2.0-flash");
+    expect(row).toBeDefined();
+    expect(row.efforts).toEqual([]);
+    expect(row.defaultEffort).toBeNull();
+    // Both shapes really are present in the same payload — the distinction is not theoretical.
+    expect(result.result.models.some((m: any) => m.efforts === null)).toBe(true);
+    expect(result.result.models.some((m: any) => Array.isArray(m.efforts) && m.efforts.length === 0)).toBe(true);
+    c.close();
+  });
+
+  test("efforts: a row with a vocabulary carries it in the catalog's own order, with NO \"none\" prepended", async () => {
+    const { socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.modelsCatalog, {});
+    const opus = result.result.models.find((m: any) => m.tag === "anthropic/claude-opus-5");
+    expect(opus.efforts).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    // `"none"` is Winter's own unset, deliberately absent from the catalog — `sync.config`'s picker
+    // prepends it as a UI convention; this surface carries catalog truth.
+    expect(opus.efforts).not.toContain("none");
+    // …and `defaultEffort` is independently optional: this row declares a vocabulary but no default.
+    expect(opus.defaultEffort).toBeNull();
+    // A row that DOES declare one carries it verbatim, and it is a member of its own vocabulary.
+    const terra = result.result.models.find((m: any) => m.tag === "codex-oauth/gpt-5.6-terra");
+    expect(terra.defaultEffort).toBe("medium");
+    expect(terra.efforts).toContain("medium");
+    c.close();
+  });
+
+  // -----------------------------------------------------------------------------------------------
+  // 2026-09-18, item 2: `credentialPresent` — readiness, answered daemon-side by the SAME rule
+  // `pickerModels` filters `sync.config`'s model list on.
+  // -----------------------------------------------------------------------------------------------
+  test("credentialPresent: false for every provider on a home with no stored credentials at all", async () => {
+    const { socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.modelsCatalog, {});
+    expect(result.result.providers.length).toBeGreaterThan(0);
+    for (const p of result.result.providers) expect(p.credentialPresent).toBe(false);
+    c.close();
+  });
+
+  test("credentialPresent: true for exactly the provider whose Keychain slot holds material", async () => {
+    const { home, socketPath, harnessToken } = await boot();
+    // Written through the SAME door the daemon reads (`writeCredentialMaterial` — a JSON
+    // `CredentialMaterial` record, never a bare string), into the throwaway FileSecretStore `boot`
+    // wired; never the real Keychain.
+    await writeCredentialMaterial(new FileSecretStore(join(home, "secrets")), "openai:default", { kind: "api-key", key: "sk-test" });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.modelsCatalog, {});
+    const byId = (id: string) => result.result.providers.find((p: any) => p.id === id);
+    expect(byId("openai").credentialPresent).toBe(true);
+    // Presence is per provider, never daemon-wide: nothing else moved.
+    expect(byId("codex-oauth").credentialPresent).toBe(false);
+    expect(byId("anthropic").credentialPresent).toBe(false);
+    expect(byId("console").credentialPresent).toBe(false);
+    c.close();
+  });
+
+  test("credentialPresent: `console` is answered from the ON-DISK ant profile, not from the inventory's \"anthropic\" key", async () => {
+    const { home, socketPath, harnessToken } = await boot();
+    // The console door's ONLY readiness signal — `winter login --anthropic-console` writes this file
+    // (`consoleProfileCredentialFile`). Its CONTENT is never read here (presence, not validity).
+    const profile = consoleProfileCredentialFile(home);
+    mkdirSync(dirname(profile), { recursive: true });
+    writeFileSync(profile, "{}");
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.modelsCatalog, {});
+    const byId = (id: string) => result.result.providers.find((p: any) => p.id === id);
+    expect(byId("console").credentialPresent).toBe(true);
+    // The whole reason this is computed daemon-side: `console` holds no Keychain slot of its own, so
+    // a client joining `credential.list` on `credentialSlotId` would have called it unusable…
+    expect(byId("console").credentialSlotId).toBeNull();
+    expect(byId("console").credentialDoor).toBe("console-profile");
+    // …and `anthropic` must NOT have turned ready off the back of it: its own slot
+    // (`anthropic:default`, an API KEY) is still empty, and the legacy inventory files both Anthropic
+    // accounts under that one provider id, which is exactly the conflation this rule avoids.
+    expect(byId("anthropic").credentialPresent).toBe(false);
     c.close();
   });
 

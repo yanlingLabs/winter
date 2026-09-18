@@ -322,6 +322,206 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     c.close();
   });
 
+  // -----------------------------------------------------------------------------------------------
+  // 2026-09-18, item 3: a role's reasoning effort. Storage is `settings.roleEfforts.<role>`, keyed by
+  // the SAME role ids the wire's `role` parameter uses — except `provider.model`, which keeps its
+  // established home in `settings.provider.reasoningEffort`.
+  // -----------------------------------------------------------------------------------------------
+  test("settings.modelRoles reads effort/effortExplicit/efforts for every role, with no effort stored", async () => {
+    const { socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol");
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.settingsModelRoles, {});
+    const roles = result.result.roles;
+    for (const role of MODEL_ROLES) {
+      // Nothing stored anywhere yet — and an absent effort is reported as absent, never defaulted to
+      // a level the user never chose.
+      expect(roles[role].effort).toBeNull();
+      expect(roles[role].effortExplicit).toBe(false);
+    }
+    // `efforts` is the CURRENT model's vocabulary, with the same three states `models.catalog` carries.
+    expect(roles["provider.model"].model).toBe("codex-oauth/gpt-5.6-sol");
+    expect(roles["provider.model"].efforts).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    // …and `null` for a role that names no model at all (an unset advisor) — nothing to ask a row about.
+    expect(roles["runtimes.advisorModel"].model).toBeNull();
+    expect(roles["runtimes.advisorModel"].efforts).toBeNull();
+    c.close();
+  });
+
+  test("effort: set, read back, and clear with null — stored in settings.roleEfforts keyed by the role id", async () => {
+    const { settingsPath, socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol");
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+
+    const set = await c.request(METHODS.settingsSetModelRole, { role: "pins.dispatch", model: "codex-oauth/gpt-5.6-terra", effort: "high" });
+    expect(set.error).toBeUndefined();
+    expect(set.result.roles["pins.dispatch"]).toMatchObject({ model: "codex-oauth/gpt-5.6-terra", effort: "high", effortExplicit: true });
+    // The wire's `role` IS the settings key — that is the whole point of the block's shape.
+    let written = JSON.parse(readFileSync(settingsPath, "utf8"));
+    expect(written.roleEfforts).toEqual({ "pins.dispatch": "high" });
+
+    // A live read (no restart) sees it, with the model's vocabulary beside it.
+    const read = await c.request(METHODS.settingsModelRoles, {});
+    expect(read.result.roles["pins.dispatch"]).toMatchObject({ effort: "high", effortExplicit: true });
+    expect(read.result.roles["pins.dispatch"].efforts).toContain("high");
+
+    const cleared = await c.request(METHODS.settingsSetModelRole, { role: "pins.dispatch", model: "codex-oauth/gpt-5.6-terra", effort: null });
+    expect(cleared.error).toBeUndefined();
+    expect(cleared.result.roles["pins.dispatch"]).toMatchObject({ effort: null, effortExplicit: false });
+    written = JSON.parse(readFileSync(settingsPath, "utf8"));
+    expect(written.roleEfforts?.["pins.dispatch"]).toBeUndefined();
+    c.close();
+  });
+
+  test("effort: ABSENT leaves a stored effort untouched — distinguishable from `null`", async () => {
+    const { settingsPath, socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol");
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    await c.request(METHODS.settingsSetModelRole, { role: "pins.dream", model: "codex-oauth/gpt-5.6-luna", effort: "low" });
+
+    // A model-only write on the SAME role — no `effort` key at all.
+    const modelOnly = await c.request(METHODS.settingsSetModelRole, { role: "pins.dream", model: "codex-oauth/gpt-5.6-terra" });
+    expect(modelOnly.error).toBeUndefined();
+    expect(modelOnly.result.roles["pins.dream"]).toMatchObject({ model: "codex-oauth/gpt-5.6-terra", effort: "low", effortExplicit: true });
+    const written = JSON.parse(readFileSync(settingsPath, "utf8"));
+    expect(written.roleEfforts["pins.dream"]).toBe("low");
+
+    // …and a write on a DIFFERENT role leaves it alone too (per-role storage, not one global effort).
+    await c.request(METHODS.settingsSetModelRole, { role: "pins.cleaner", model: "codex-oauth/gpt-5.6-luna", effort: "max" });
+    const both = JSON.parse(readFileSync(settingsPath, "utf8"));
+    expect(both.roleEfforts).toEqual({ "pins.dream": "low", "pins.cleaner": "max" });
+    c.close();
+  });
+
+  test("effort: provider.model round-trips through provider.reasoningEffort, NEVER through roleEfforts", async () => {
+    const { settingsPath, socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol");
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const set = await c.request(METHODS.settingsSetModelRole, { role: "provider.model", model: "codex-oauth/gpt-5.6-sol", effort: "xhigh" });
+    expect(set.error).toBeUndefined();
+    expect(set.result.roles["provider.model"]).toMatchObject({ effort: "xhigh", effortExplicit: true });
+    let written = JSON.parse(readFileSync(settingsPath, "utf8"));
+    // The established home — what `winter model --effort` writes and what `sync.config`'s
+    // `defaultEffort` reads. Duplicating it into `roleEfforts` would be two places to disagree.
+    expect(written.provider.reasoningEffort).toBe("xhigh");
+    expect(written.roleEfforts).toBeUndefined();
+
+    // And an effort written the OLD way is read back by the new role surface, unchanged.
+    const read = await c.request(METHODS.settingsModelRoles, {});
+    expect(read.result.roles["provider.model"].effort).toBe("xhigh");
+
+    const cleared = await c.request(METHODS.settingsSetModelRole, { role: "provider.model", model: "codex-oauth/gpt-5.6-sol", effort: null });
+    expect(cleared.result.roles["provider.model"]).toMatchObject({ effort: null, effortExplicit: false });
+    written = JSON.parse(readFileSync(settingsPath, "utf8"));
+    expect(written.provider.reasoningEffort).toBeUndefined();
+    c.close();
+  });
+
+  test("effort: a level outside the model's vocabulary is refused INVALID_PARAMS and nothing is written", async () => {
+    const { settingsPath, socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol");
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    // `openai/o4-mini` declares exactly ["low","medium","high"], so `"max"` — a perfectly real wire
+    // effort — is one THIS model does not offer.
+    const refused = await c.request(METHODS.settingsSetModelRole, { role: "pins.dispatch", model: "openai/o4-mini", effort: "max" });
+    expect(refused.error).toBeDefined();
+    expect(refused.error.code).toBe(-32602);
+    expect(refused.error.message).toContain("is not accepted by model 'openai/o4-mini'");
+    // The MODEL half is refused with it — one transform, one `saveSettings`, so a refused effort
+    // never leaves a half-applied write behind.
+    const written = JSON.parse(readFileSync(settingsPath, "utf8"));
+    expect(written.pins?.dispatch).toBeUndefined();
+    expect(written.roleEfforts).toBeUndefined();
+
+    // A level no role could STORE (outside `REASONING_EFFORTS`) refuses at the door too, rather than
+    // throwing out of `saveSettings`' own validation pass.
+    const unstorable = await c.request(METHODS.settingsSetModelRole, { role: "pins.dispatch", model: "codex-oauth/gpt-5.6-terra", effort: "minimal" });
+    expect(unstorable.error.code).toBe(-32602);
+    expect(unstorable.error.message).toContain("is not a reasoning effort this daemon can store");
+
+    // "none" IS accepted on a row with a vocabulary, even though the catalog never lists it.
+    const none = await c.request(METHODS.settingsSetModelRole, { role: "pins.dispatch", model: "codex-oauth/gpt-5.6-terra", effort: "none" });
+    expect(none.error).toBeUndefined();
+    expect(none.result.roles["pins.dispatch"].effort).toBe("none");
+    c.close();
+  });
+
+  test("effort: ANY effort is refused on a real catalog row that declares no vocabulary", async () => {
+    const { socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol");
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    // Two shapes of "no vocabulary", both refused, exactly as `session.setEffort` refuses them:
+    //   `openai/gpt-5.4`        — no `reasoning` block at all
+    //   `agnes/agnes-2.0-flash` — a `reasoning` block with `efforts: []`
+    for (const model of ["openai/gpt-5.4", "agnes/agnes-2.0-flash"]) {
+      for (const effort of ["high", "none"]) {
+        const refused = await c.request(METHODS.settingsSetModelRole, { role: "pins.dispatch", model, effort });
+        expect(refused.error).toBeDefined();
+        expect(refused.error.code).toBe(-32602);
+        expect(refused.error.message).toContain("declares no reasoning-effort vocabulary");
+      }
+    }
+    c.close();
+  });
+
+  test("effort: a Winter-level tier is refused on every role (no role's model is a code session's own)", async () => {
+    const { socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol");
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    for (const [role, model] of [
+      ["pins.dispatch", "codex-oauth/gpt-5.6-terra"],
+      ["provider.model", "codex-oauth/gpt-5.6-sol"],
+      ["pins.dream", "codex-oauth/gpt-5.6-luna"],
+      ["runtimes.advisorModel", "codex-oauth/gpt-5.6-terra"],
+    ] as const) {
+      const refused = await c.request(METHODS.settingsSetModelRole, { role, model, effort: "ultra" });
+      expect(refused.error).toBeDefined();
+      expect(refused.error.code).toBe(-32602);
+      expect(refused.error.message).toContain("Winter-level tier");
+    }
+    c.close();
+  });
+
+  test("effort: a cleared runtimes.advisorModel has no model to validate an effort against — refused, never an orphan", async () => {
+    const { settingsPath, socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol");
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const refused = await c.request(METHODS.settingsSetModelRole, { role: "runtimes.advisorModel", model: null, effort: "high" });
+    expect(refused.error).toBeDefined();
+    expect(refused.error.code).toBe(-32602);
+    expect(JSON.parse(readFileSync(settingsPath, "utf8")).roleEfforts).toBeUndefined();
+
+    // With a model in the same call it lands.
+    const ok = await c.request(METHODS.settingsSetModelRole, { role: "runtimes.advisorModel", model: "anthropic/claude-opus-5", effort: "high" });
+    expect(ok.error).toBeUndefined();
+    expect(ok.result.roles["runtimes.advisorModel"]).toMatchObject({ model: "anthropic/claude-opus-5", effort: "high" });
+    c.close();
+  });
+
+  test("a roleEfforts block survives a settings write that never mentions it (mergeUnknownKeys / load-save round trip)", async () => {
+    const { settingsPath, socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol");
+    // Seeded BY HAND, as a client that knows the key would leave it, then touched by a write from a
+    // DIFFERENT surface entirely (`settings.setSkillDenied` — no role, no effort anywhere in it).
+    const raw = JSON.parse(readFileSync(settingsPath, "utf8"));
+    raw.roleEfforts = { "pins.dream": "high", "titles.model": "low" };
+    raw.someFutureKey = { kept: true };
+    writeFileSync(settingsPath, JSON.stringify(raw));
+
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const denied = await c.request(METHODS.settingsSetSkillDenied, { name: "some-skill", denied: true });
+    expect(denied.error).toBeUndefined();
+
+    const after = JSON.parse(readFileSync(settingsPath, "utf8"));
+    expect(after.roleEfforts).toEqual({ "pins.dream": "high", "titles.model": "low" });
+    // The pre-existing unknown-key guarantee still holds beside it.
+    expect(after.someFutureKey).toEqual({ kept: true });
+    // …and a role write that names one role leaves the OTHER role's effort alone.
+    await c.request(METHODS.settingsSetModelRole, { role: "pins.cleaner", model: "codex-oauth/gpt-5.6-luna" });
+    expect(JSON.parse(readFileSync(settingsPath, "utf8")).roleEfforts).toEqual({ "pins.dream": "high", "titles.model": "low" });
+    c.close();
+  });
+
   test("not remote-allowed — local role only, for both methods", () => {
     expect(REMOTE_ALLOWED_METHODS.has(METHODS.settingsModelRoles)).toBe(false);
     expect(REMOTE_ALLOWED_METHODS.has(METHODS.settingsSetModelRole)).toBe(false);
