@@ -154,6 +154,21 @@ export const PermissionsSettings = z.object({
   dangerousDomains: z.object({
     added: z.array(z.string()).optional(),
   }).optional(),
+  /** Daemon settings surface batch 3 (item 2): SDK-grammar DENY rules — `Options.permissions.deny`
+   *  string entries (`"Skill(<name>)"`, `"Agent(<type>)"`, …), forwarded verbatim to BOTH legs
+   *  (`mode-options.ts`'s `permissionDenyRulesFor`, reused by `official-options.ts`) alongside the
+   *  fixed control-plane fence (`controlPlaneDenyRules`). This is a COMPLETELY SEPARATE mechanism
+   *  from `allow` above: `allow` feeds Winter's OWN engine-level approval gate
+   *  (`agent/permission-rules.ts`'s `PermissionRules`, a different grammar/evaluator entirely) and
+   *  never reaches `Options` at all; `deny` here rides straight into the pinned runtimes' own
+   *  permission evaluator, unparsed by anything in this repo. GLOBAL-scope only, the same posture
+   *  `allow`'s own doc states — a trusted project's `.winter/settings.json` cannot add to or clear
+   *  this list (no union-merge wiring for it in `project-settings.ts`, deliberately: unlike
+   *  `allow`/`additionalDirectories`, this is not a per-project override surface today). The one
+   *  shipped writer is `settings.setSkillDenied` (`ipc/server.ts`), which toggles a single
+   *  `Skill(<name>)` entry; a hand-written entry of any other shape is preserved and forwarded
+   *  unchanged (never validated against a known grammar — that is the pinned runtimes' job). */
+  deny: z.array(z.string()).optional(),
 });
 
 /** The default `runtimes.winterIdleTimeoutSec`, spelled once so the schema and the absent-block
@@ -1230,6 +1245,32 @@ export function setAdvisorModel(settings: Settings, model: string | undefined): 
     delete runtimes.advisorModel;
   }
   return { ...settings, runtimes: runtimes as Settings["runtimes"] };
+}
+
+/** The exact SDK-grammar rule string a skill toggle writes/removes — spelled once so the writer
+ *  (`setSkillDenied` below) and the reader (`ipc/server.ts`'s `skills.list` handler) can never
+ *  drift onto two different strings for the "same" skill. */
+export function skillDenyRule(skillName: string): string {
+  return `Skill(${skillName})`;
+}
+
+/**
+ * Daemon settings surface batch 3 (item 2): pure `Settings -> Settings` transform toggling ONE
+ * `Skill(<name>)` deny rule in `settings.permissions.deny` — the SAME "load, transform, save"
+ * pattern `setAdvisorModel`/`setModelRole` already use (`ipc/server.ts`'s `settings.setSkillDenied`
+ * handler). `denied: true` appends the rule (a no-op if already present — dedup, same posture
+ * `PermissionRules.append` uses for `allow`); `denied: false` removes it (a no-op if absent).
+ * Preserves every OTHER entry in `permissions.deny` untouched, INCLUDING a hand-written rule of a
+ * different shape (`"Agent(fork)"`, a malformed string, …) — this function only ever adds/removes
+ * its OWN exact `Skill(<name>)` string, never rewrites or validates the rest of the array.
+ */
+export function setSkillDenied(settings: Settings, skillName: string, denied: boolean): Settings {
+  const rule = skillDenyRule(skillName);
+  const current = settings.permissions?.deny ?? [];
+  const next = denied
+    ? (current.includes(rule) ? current : [...current, rule])
+    : current.filter((r) => r !== rule);
+  return { ...settings, permissions: { ...settings.permissions, deny: next } };
 }
 
 /**

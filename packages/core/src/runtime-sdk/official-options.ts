@@ -25,7 +25,7 @@ import type { CapabilityServerRecord } from "../capabilities";
 import { officialSubscriptionAuthEnabled, type Settings } from "../settings";
 import { canUseToolFor, type CanUseToolDeps } from "./approval-bridge";
 import { CORE_BRAND } from "./brand";
-import { controlPlaneDenyRules, disallowedToolsFor, sandboxConfigFor } from "./mode-options";
+import { permissionDenyRulesFor, disallowedToolsFor, sandboxConfigFor } from "./mode-options";
 import { officialCapabilityServersFor, type OfficialMcpModule } from "./official-capabilities";
 import { winterSystemPromptFor } from "./system-prompt";
 import { ClaudeExecutableUnavailable } from "./official-executable";
@@ -635,7 +635,12 @@ export function officialInputFor(
         // `controlPlaneDenyRules`'s `//`-anchored absolute forms UNCHANGED — no second anchoring
         // scheme was needed — confirmed by the same e2e denying a real `<home>/run/probe.txt` Read
         // and a real `<home>/runtimes/` Write while an ordinary cwd file Read still succeeds.
-        settings: { permissions: { deny: controlPlaneDenyRules(deps.home) }, sandbox: sandboxConfigFor(deps.home) },
+        //
+        // Batch 3 (item 2): `permissionDenyRulesFor` (not `controlPlaneDenyRules` directly) so this
+        // leg's deny list ALSO carries `settings.permissions.deny` (today's `Skill(<name>)` toggles)
+        // — the exact same combined list the Winter leg's `buildWinterOptions` now sends, never a
+        // second copy that could drift.
+        settings: { permissions: { deny: permissionDenyRulesFor(deps.home, deps.settings) }, sandbox: sandboxConfigFor(deps.home) },
         additionalDisallowedTools: disallowedToolsFor(input.mode),
         ...(deps.hooks === undefined ? {} : { hooks: deps.hooks }),
       } as RouterOfficialInput["options"],

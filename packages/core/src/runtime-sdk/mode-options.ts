@@ -218,10 +218,12 @@ export interface WinterOptionsInput {
    */
   /** WS-20: always a provider-qualified tag. */
   advisorModel?: ModelTag;
-  /** WS-20: no longer consumed by THIS file — the "anthropic" vs "console" arm is now the tag's
-   *  own prefix (`providerFor`, provider-selection.ts), not a settings-driven decision
-   *  `credentialRefFor` used to make. Kept on the interface because other callers may still pass
-   *  it for unrelated reasons; nothing here reads it. */
+  /** WS-20: the "anthropic" vs "console" arm is the tag's own prefix (`providerFor`,
+   *  provider-selection.ts), not a settings-driven decision `credentialRefFor` used to make — this
+   *  field is NOT consumed for that anymore. Batch 3 (item 2) gave it a second, unrelated consumer:
+   *  `permissionDenyRulesFor(input.home, input.settings)` reads `settings.permissions.deny` for the
+   *  extra SDK-grammar deny rules layered onto the fixed control-plane fence. Still just an input
+   *  the caller passes in — `buildWinterOptions` never reads a file itself. */
   settings?: Settings | null;
   /**
    * Daemon settings surface (2026-09-17 plan, item 3): `<home>/agents/*.md`, ALREADY PARSED by the
@@ -356,6 +358,22 @@ export function controlPlaneDenyRules(home: string): string[] {
 }
 
 /**
+ * Daemon settings surface batch 3 (item 2): `controlPlaneDenyRules(home)` (the FIXED control-plane
+ * fence above) PLUS whatever `settings.permissions.deny` names (user/daemon-authored SDK-grammar
+ * rules — today only `Skill(<name>)`, written by `settings.setSkillDenied`, but a hand-written entry
+ * of any other shape rides along unchanged). This is the ONE place both legs' `Options.permissions.
+ * deny` is assembled from, so `buildWinterOptions` (below) and `official-options.ts`'s
+ * `officialInputFor` reuse this exact function rather than each concatenating the two lists their
+ * own way — the same "provably the same fence on both legs" precedent `controlPlaneDenyRules`'s own
+ * doc states for `sandboxConfigFor`. `settings` is read from the ALREADY-RESOLVED input a caller
+ * passes in (never a file read here) — this function stays as pure as `controlPlaneDenyRules`
+ * itself, just with one more input.
+ */
+export function permissionDenyRulesFor(home: string, settings: Settings | null | undefined): string[] {
+  return [...controlPlaneDenyRules(home), ...(settings?.permissions?.deny ?? [])];
+}
+
+/**
  * The Bash sandbox (P8b-27c). `SandboxSettingsConfig` (`protocol/config.d.ts:83-101`) exposes
  * `filesystem.denyWrite`/`denyRead`, which is the same axis today's seatbelt profile uses
  * (`agent/sandbox.ts`: deny-by-default, read anywhere, write only under the given roots, plus an
@@ -460,7 +478,10 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     // cost is more frames per child turn, which the projector folds onto the child's threadId.
     forwardSubagentText: true,
     disallowedTools: disallowedToolsFor(input.mode, input.capabilityTools),
-    permissions: { deny: controlPlaneDenyRules(input.home) },
+    // Batch 3 (item 2): the fixed control-plane fence PLUS `settings.permissions.deny` (today just
+    // `Skill(<name>)` toggles) — see `permissionDenyRulesFor`'s own doc for why this reads
+    // `input.settings` rather than the vestigial "no longer consumed" note this field used to carry.
+    permissions: { deny: permissionDenyRulesFor(input.home, input.settings) },
     sandbox: sandboxConfigFor(input.home),
     // Agent SDK 0.0.16 defaults a spawn to BACKGROUND (claude's own default), which means a finished
     // child re-enters the model on a turn NOBODY PUSHED — a second `system/init`, an assistant
