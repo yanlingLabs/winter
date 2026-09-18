@@ -648,9 +648,9 @@ func toolGroupFragment(name: String, count: Int) -> String {
     // it came from.
     case "browser":
         return count == 1 ? "used the browser" : "used the browser \(count) times"
-    case "web_fetch", "ReadPage":
+    case "web_fetch", "WebFetch", "ReadPage":
         return count == 1 ? "fetched a page" : "fetched \(count) pages"
-    case "web_search", "Search":
+    case "web_search", "WebSearch", "Search":
         return count == 1 ? "searched the web" : "searched the web \(count) times"
     case "computer":
         return count == 1 ? "used the computer" : "used the computer \(count) times"

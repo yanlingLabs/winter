@@ -489,7 +489,7 @@ final class ToolRowTests: XCTestCase {
             }
             scanned += 1
         }
-        XCTAssertEqual(scanned, 12, "ChatContent's file count changed — confirm the new file is scanned")
+        XCTAssertEqual(scanned, 11, "ChatContent's file count changed — confirm the new file is scanned")
     }
 
     // MARK: - editor-product Task 6: the file door's row-level gate

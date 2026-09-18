@@ -1238,9 +1238,13 @@ enum SessionReducer {
             return verbLedToolDetail(verb, str("url") ?? str("selector") ?? str("direction") ?? str("until"))
 
         // ---- the web and page reading ---------------------------------------------------------
-        case "web_fetch":
+        // 2026-09-18 (web tools → claude parity): the runtime's WebFetch/WebSearch arrive under
+        // their host names (`hostToolNameFor`), but the claude names are accepted too. WebFetch's
+        // `prompt` and WebSearch's floor-injected `blocked_domains` are never the row's operand —
+        // the url and the query are.
+        case "web_fetch", "WebFetch":
             return str("url").flatMap(clipToolDetail)
-        case "web_search", "Search", "ToolSearch":
+        case "web_search", "WebSearch", "Search", "ToolSearch":
             return str("query").flatMap(clipToolDetail)
         // ReadPage takes a BATCH (`{pages:[{url, query?, …}]}`), never a bare url. The "+N more"
         // rides AFTER the clip on purpose: it is the signal that this row shows one of several

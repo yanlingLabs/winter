@@ -79,6 +79,16 @@ let settingsEndpointOverrides: [SettingsEndpointOverride] = [
 
 // -----------------------------------------------------------------------------------------------
 
+/// PURE: the line under a credential row. A key row says whether it is stored; a bespoke-OAuth row
+/// names its door. A row the daemon lists as NOT manageable yet whose door is `credential.set` is a
+/// RETIRED tool key (2026-09-18: the Brave `web-search` key, listed only while something is stored,
+/// and only to be removed) — "Enter a key here" would be exactly wrong for it.
+func settingsCredentialRowDescription(_ row: CredentialRow) -> String? {
+    if row.manageable { return row.present ? "Stored" : nil }
+    if row.door == "credential.set" { return "Retired: nothing uses this key any more. Remove it." }
+    return credentialDoorText(row.door)
+}
+
 /// Settings → Providers.
 struct SettingsProvidersSection: View {
     @ObservedObject var model: ProviderPaneModel
@@ -288,8 +298,7 @@ private struct SettingsProvidersKeyGroups: View {
         SettingsRow(row.displayName,
                     // A bespoke-OAuth row (Anthropic Console, Codex) never gets a field —
                     // `credential.set` would refuse it typed — so its door says where it is made.
-                    description: row.manageable ? (row.present ? "Stored" : nil)
-                                                : credentialDoorText(row.door)) {
+                    description: settingsCredentialRowDescription(row)) {
             if isEditing {
                 HStack(spacing: 8) {
                     SecureField("API key", text: Binding(
