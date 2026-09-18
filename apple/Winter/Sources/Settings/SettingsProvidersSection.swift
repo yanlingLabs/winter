@@ -175,7 +175,7 @@ struct SettingsProvidersSection: View {
                 .foregroundStyle(Theme.textMuted)
                 .frame(width: 120, alignment: .leading)
             field()
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(SettingsTextFieldStyle())
                 .font(Typography.control())
         }
     }
@@ -296,7 +296,7 @@ private struct SettingsProvidersKeyGroups: View {
                         get: { model.draft(for: row.providerId) },
                         set: { model.setDraft($0, for: row.providerId) }
                     ))
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(SettingsTextFieldStyle())
                     .font(Typography.control())
                     .onSubmit { save(row) }
                     SettingsButton("Save", isEnabled: model.canSave(row.providerId)) { save(row) }

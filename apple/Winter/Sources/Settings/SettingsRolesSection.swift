@@ -609,7 +609,8 @@ struct SettingsRolesSection: View {
                                                       fallbackValues: injected))
                         Task { await catalog.loadIfNeeded() }
                     } label: {
-                        SettingsMenuPill(valueString(value), isMuted: value?.model == nil)
+                        SettingsMenuPill(valueString(value), isMuted: value?.model == nil,
+                                         width: SettingsChrome.roleModelPillWidth)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Choose the model for \(settingsModelRoleTitle(role))")
@@ -637,7 +638,8 @@ struct SettingsRolesSection: View {
                     } label: {
                         let selection = roleEffortSelection(effort: value.effort, efforts: value.efforts)
                         SettingsMenuPill(roleEffortValueLabel(selection),
-                                         isMuted: selection == .modelDefault) {
+                                         isMuted: selection == .modelDefault,
+                                         width: SettingsChrome.roleEffortPillWidth) {
                             // A stale effort reads "Mismatch" with a warning glyph — never as a choice.
                             if case .stale = selection {
                                 Image(systemName: "exclamationmark.triangle")
@@ -668,5 +670,7 @@ struct SettingsRolesSection: View {
             .lineLimit(1)
             .truncationMode(.middle)
             .foregroundStyle(value?.model == nil ? Theme.textMuted : Theme.textSecondary)
+            .padding(.horizontal, SettingsChrome.controlHorizontalPadding)
+            .frame(width: SettingsChrome.roleModelPillWidth, alignment: .leading)
     }
 }

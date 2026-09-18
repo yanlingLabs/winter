@@ -1039,7 +1039,7 @@ func roleEffortWriteForChoice(_ choice: String?) -> ModelRoleEffortWrite {
 }
 
 let roleEffortTitle = "Reasoning effort"
-let roleEffortModelDefaultTitle = "Model default"
+let roleEffortModelDefaultTitle = "Default"
 let roleEffortNoSettingText = "This model takes no effort setting."
 /// PURE: the mismatch sentence. Names the stored value so the user can see what is wrong.
 func roleEffortStaleText(_ effort: String) -> String {
