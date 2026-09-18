@@ -30,7 +30,14 @@ export const DREAM_INSTRUCTION = [
 const SUBSTANTIVE = new Set(["user_message", "assistant_message", "child_update"]);
 
 export interface DreamerDeps {
-  provider: { provider: Provider; model: string }; // wrapper for parity with compactor/titler; model IGNORED — dreams pin pinsFor(settings).dream
+  // Daemon settings surface (2026-09-17 plan, item 2): `live`, when present, is
+  // `RebindableProvider.live` (providers/manager.ts) — the CURRENTLY BOUND backend's own identity,
+  // mutated in place by `refresh` on a hot `provider.model` write that crosses catalog providers.
+  // `runCycle` below compares `pinsFor(settings).dream`'s provider against THIS (falling back to
+  // `ownProviderFor(settings)` only when absent, e.g. a test double) rather than the pure settings
+  // read alone, which could disagree with the actual bound backend for as long as a rebind has not
+  // caught up — or forever, on a rebind that failed (no credential yet for the new provider).
+  provider: { provider: Provider; model: string; live?: () => { providerId?: string } }; // wrapper for parity with compactor/titler; model IGNORED — dreams pin pinsFor(settings).dream
   store: SessionStore;
   dir: () => string;                // assistantMemoryDirFor thunk
   enabled: () => boolean;           // memoryEnabledHot
@@ -127,7 +134,9 @@ export class Dreamer {
     // than guess; `internalModelFor` logs the field name (never the tag) so the mismatch is
     // diagnosable without a raw provider-config dump in the log.
     const settings = this.deps.settings();
-    const dreamModel = internalModelFor(pinsFor(settings).dream, { providerId: ownProviderFor(settings) }, "pins.dream");
+    // Item 2: the BOUND backend's own identity, not a pure settings read — see `DreamerDeps.provider`'s own doc comment.
+    const boundProviderId = this.deps.provider.live?.().providerId ?? ownProviderFor(settings);
+    const dreamModel = internalModelFor(pinsFor(settings).dream, { providerId: boundProviderId }, "pins.dream");
     if (dreamModel === undefined) return;
     const upTo = this.deps.store.lastSeq(dispatchId);
     const events = this.deps.store.read(dispatchId, state.watermarkSeq);

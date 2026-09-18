@@ -87,8 +87,10 @@ export interface CleanerStore {
 export interface CleanerDeps {
   /** Wrapper for parity with the Dreamer/compactor/titler; the `model` field is IGNORED — the
    *  cleaner pins `pinsFor(settings).cleaner`, exactly as `DreamerDeps.provider` documents for
-   *  dreams. */
-  provider: { provider: Provider; model: string };
+   *  dreams. `live`, when present, is `RebindableProvider.live` (providers/manager.ts, item 2) —
+   *  the CURRENTLY BOUND backend's identity; see `DreamerDeps.provider`'s own doc comment for why
+   *  `judge` below compares against this rather than a pure settings read. */
+  provider: { provider: Provider; model: string; live?: () => { providerId?: string } };
   // WS-20: hot settings read, same "re-read every call" discipline as every other settings-backed
   // getter — `pinsFor(deps.settings())` is called at each pass, never a boot snapshot.
   settings: () => Settings | null;
@@ -334,7 +336,9 @@ export class SessionCleaner {
     // comment's own header), so the session is kept and left unstamped for the next pass, same as
     // a provider error or a timeout.
     const settings = this.deps.settings();
-    const cleanerModel = internalModelFor(pinsFor(settings).cleaner, { providerId: ownProviderFor(settings) }, "pins.cleaner");
+    // Item 2: the BOUND backend's own identity, not a pure settings read — see `CleanerDeps.provider`'s own doc comment.
+    const boundProviderId = this.deps.provider.live?.().providerId ?? ownProviderFor(settings);
+    const cleanerModel = internalModelFor(pinsFor(settings).cleaner, { providerId: boundProviderId }, "pins.cleaner");
     if (cleanerModel === undefined) return null;
     const input: TurnInputItem[] = [{ type: "message", role: "user", content: renderTranscript(events) }];
     // The Dreamer's own abort-tied-to-the-race idiom, verbatim: without the signal a timeout only

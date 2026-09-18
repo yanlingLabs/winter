@@ -125,6 +125,15 @@ export interface ResearchDeps {
   // WS-20: hot settings read, same "re-read every call" discipline as every other settings-backed
   // getter — `pinsFor(deps.settings())` is called at each run, never a boot snapshot.
   settings: () => Settings | null;
+  /** Daemon settings surface (2026-09-17 plan, item 2): the CURRENTLY BOUND backend's own catalog
+   *  providerId — `agentProvider.live().providerId`, live over `RebindableProvider.refresh`
+   *  (providers/manager.ts). `provider` above is the RAW `Provider` (unlike Dreamer/SessionCleaner's
+   *  wrapper), so there is no `.live` to reach through it; this is the equivalent door. Absent (any
+   *  caller/test that predates item 2) falls back to `ownProviderFor(settings)`, the pure-settings
+   *  read this replaces — which could disagree with the actual bound backend for as long as a
+   *  rebind has not caught up, or forever, on a rebind that failed (no credential yet for the new
+   *  provider). */
+  providerId?: () => string;
   cache: PageCache;
   fetchFn?: typeof fetch;
   audit?: (line: Record<string, unknown>) => void;
@@ -439,7 +448,7 @@ async function runResearch(q: ResearchQuery, deps: ResearchDeps, externalSignal:
   // the bare id to the wrong backend silently.
   const settings = deps.settings();
   const pins = pinsFor(settings);
-  const ownProvider = ownProviderFor(settings);
+  const ownProvider = deps.providerId?.() ?? ownProviderFor(settings);
   const researchModel = internalModelFor(pins.research, { providerId: ownProvider }, "pins.research");
   if (researchModel === undefined) {
     return notReadReport("", state, "Research is unavailable (pins.research names a different provider than this daemon's own)");

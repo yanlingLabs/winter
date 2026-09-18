@@ -3,7 +3,7 @@ import type { SecretStore } from "../auth/secret-store";
 import { readOpenAiApiKey } from "../auth/credential-material";
 import { OPENAI_API_KEY_SECRET } from "../auth/legacy-secret-names";
 import { loadSettings, providerBaseUrlFor, INTERNAL_PROVIDER_IDS, type Settings } from "../settings";
-import type { Provider } from "./types";
+import type { ModelInfo, Provider, ProviderEvent, TurnRequest } from "./types";
 import { createCodexOauthRuntimeProvider, createOpenAiCompatibleRuntimeProvider } from "./runtime-provider";
 import { QuotaManager, withQuota } from "./quota";
 import { splitTag, type ModelTag } from "../runtime-sdk/model-tag";
@@ -123,10 +123,24 @@ function buildLiveModelResolver(
  * ONCE, never a boot refusal. A per-provider internal Provider (one instance per provider, built on
  * the SDK) is the real follow-up that would let this set grow; not attempted here.
  */
-export async function createProvider(settings: Settings, secrets: SecretStore, settingsPath?: string): Promise<ActiveProvider | null> {
+export async function createProvider(
+  settings: Settings,
+  secrets: SecretStore,
+  settingsPath?: string,
+  /**
+   * Daemon settings surface (2026-09-17 plan, item 2): an existing `QuotaManager` to wrap the
+   * freshly-built backend in, instead of a brand-new one. `createRebindableProvider`'s `refresh`
+   * passes the ORIGINAL instance across every rebuild so daemon.ts's exposed `quota` field (wired
+   * once into `startIpcServer`'s opts) stays the SAME object for the daemon's whole life — quota
+   * tracking is per-daemon, not per-provider-instance, so a `provider.model` write that crosses
+   * providers must not reset (or orphan) it. Every existing caller omits this and gets a fresh
+   * `QuotaManager`, unchanged.
+   */
+  existingQuota?: QuotaManager,
+): Promise<ActiveProvider | null> {
   const providerId = splitTag(settings.provider.model).providerId;
   if (!(INTERNAL_PROVIDER_IDS as readonly string[]).includes(providerId)) return null;
-  const quota = new QuotaManager();
+  const quota = existingQuota ?? new QuotaManager();
   let inner: Provider;
   if (providerId === "codex-oauth") {
     // P8c lane 5: onto the `@yanlinglabs/winter-provider-runtime` codex-oauth adapter — credential
@@ -152,6 +166,152 @@ export async function createProvider(settings: Settings, secrets: SecretStore, s
   }
   const liveModel = buildLiveModelResolver(settings, settingsPath, providerId);
   return { provider: withQuota(inner, quota), model: splitTag(settings.provider.model).modelId, quota, liveModel };
+}
+
+/**
+ * Daemon settings surface (2026-09-17 plan, item 2): a `Provider` whose underlying BACKEND can be
+ * replaced in place (`rebind`) without this object's own identity ever changing. This is the fix
+ * for the gap `settings.ts`'s `modelRoleInfo` doc comment names: `agentProvider` (daemon.ts) used
+ * to be built ONCE at boot from `settings.provider.model` and never rebuilt on a hot write, so a
+ * live `provider.model` change updated every LIVE bookkeeping read (`ownProviderFor`,
+ * `internalModelFor`'s comparison) before the actual bound backend caught up — the gate would say
+ * "yes, this pin routes to provider X" while the call it waved through still dispatched to
+ * whichever backend was live at boot.
+ *
+ * Several existing callers capture `.provider` directly rather than through a level of
+ * indirection (`agent/research.ts`'s runner takes `active.provider` itself, not a wrapper around
+ * it) — so the fix cannot be "reassign the wrapper's `.provider` field", it has to be "the object
+ * every caller is already holding to never changes identity, only what it forwards to". Every
+ * consumer that captured a `SwappableProvider` reference — directly, or one level removed through
+ * `agentProvider.provider` — sees a rebind with NO changes to its own code.
+ *
+ * `streamTurn` captures `this.current` at CALL time, so an in-flight call is never torn: it keeps
+ * running the async iterable it already got from whichever backend it started on, even if
+ * `rebind()` runs moments later. Only a call that starts AFTER `rebind()` returns dispatches to
+ * the new backend. This is what makes a hot swap safe with no drain/cancellation logic at all —
+ * the same property `settings-apply.ts`'s CU/LSP diffs get from a DIFFERENT mechanism (an explicit
+ * drain loop); a `Provider` needs no such loop because `rebind` never disposes of the old backend,
+ * it only stops handing it out.
+ */
+export class SwappableProvider implements Provider {
+  private current: Provider;
+  constructor(initial: Provider) {
+    this.current = initial;
+  }
+  get id(): string {
+    return this.current.id;
+  }
+  models(): ModelInfo[] {
+    return this.current.models();
+  }
+  streamTurn(req: TurnRequest): AsyncIterable<ProviderEvent> {
+    return this.current.streamTurn(req);
+  }
+  /** Never call from anywhere but `RebindableProvider.refresh` below — a bare `rebind` bypasses
+   *  that function's `providerId` bookkeeping, which is what stops a redundant rebuild from
+   *  running on every settings write that leaves `provider.model` on the SAME provider. */
+  rebind(next: Provider): void {
+    this.current = next;
+  }
+}
+
+/**
+ * Daemon settings surface (2026-09-17 plan, item 2): the daemon-boot-lifetime handle —
+ * `daemon.ts`'s `agentProvider` — that stays hot across a `provider.model` write. Structurally the
+ * SAME shape `createProvider`'s `ActiveProvider` already had (`provider`/`model`/`quota`/`live`,
+ * renamed from `liveModel` only because every existing consumer's own field is already called
+ * `live`, e.g. `SessionTitler`'s `deps.provider.live`) — every pre-existing consumer
+ * (`SessionTitler`, `BashReviewer`, `Dreamer`, `SessionCleaner`, the research runner, `daemon.ts`'s
+ * own `knownModels`/`liveSelection` closures) keeps working unmodified, because they were never
+ * typed against `ActiveProvider` directly, only against the narrower shape this also satisfies.
+ *
+ * `model`/`live` are MUTATED in place by `refresh` (never reassigned to a new object — this exact
+ * object is what every consumer captured), so the ONE remaining piece — `provider` — being a
+ * `SwappableProvider` is what makes the mutation visible even to a caller that unwrapped `.provider`
+ * at construction time and threw the wrapper away (research.ts).
+ */
+export interface RebindableProvider {
+  readonly provider: SwappableProvider;
+  model: string;
+  live: () => LiveModelSelection;
+  readonly quota: QuotaManager;
+  /**
+   * Re-resolves against `nextSettings`; rebuilds and rebinds ONLY when the resolved catalog
+   * `providerId` actually changed (a same-provider write — a new model on the SAME provider, an
+   * unrelated key entirely — is a cheap no-op: `splitTag` + a string compare, no network/keychain
+   * touch). Returns `true` on an actual rebind, `false` on every no-op AND on a failed rebuild
+   * (e.g. the new provider has no stored credential, or moved OUTSIDE `INTERNAL_PROVIDER_IDS`
+   * entirely) — a failed rebuild never tears down the OLD backend; it keeps serving every caller,
+   * logged once, exactly like a boot-time `createProvider` failure already is (see
+   * `createProvider`'s own null-branch comment). Never throws: every failure mode this function can
+   * hit is reported through the return value, because a throw here would reach
+   * `settings-apply.ts`'s single-flight apply loop and (per that file's own F1 discipline) risks
+   * wedging the NEXT hot-reload behind a retried rebuild of a provider that will never succeed.
+   */
+  refresh(nextSettings: Settings, secrets: SecretStore, settingsPath?: string): Promise<boolean>;
+}
+
+/**
+ * Builds the boot-time `RebindableProvider` and its `refresh` closure. `null` under the exact same
+ * condition `createProvider` itself answers `null` (a provider outside `INTERNAL_PROVIDER_IDS`) —
+ * daemon.ts's existing "no internal Provider, log once, everything downstream goes inert" path is
+ * unchanged for that case; `refresh` only ever matters once a REAL `RebindableProvider` exists to
+ * call it on.
+ */
+export async function createRebindableProvider(settings: Settings, secrets: SecretStore, settingsPath?: string): Promise<RebindableProvider | null> {
+  const active = await createProvider(settings, secrets, settingsPath);
+  if (active === null) return null;
+  const swappable = new SwappableProvider(active.provider);
+  let boundProviderId = splitTag(settings.provider.model).providerId;
+  const self: RebindableProvider = {
+    provider: swappable,
+    model: active.liveModel().model,
+    live: active.liveModel,
+    quota: active.quota,
+    async refresh(nextSettings, nextSecrets, nextSettingsPath) {
+      let nextProviderId: string;
+      try {
+        nextProviderId = splitTag(nextSettings.provider.model).providerId;
+      } catch {
+        return false; // malformed tag — Settings.parse would already have refused this file; never rebind on it
+      }
+      if (nextProviderId === boundProviderId) return false; // no provider-identity change — cheap no-op
+      if (!(INTERNAL_PROVIDER_IDS as readonly string[]).includes(nextProviderId)) {
+        // Moved OUTSIDE the internal-provider set entirely. There is nothing sane to rebind to —
+        // daemon.ts's boot-time null path has no running backend to preserve, but this one does,
+        // and "the daemon's own internal calls silently stop" is worse than "they keep running on
+        // the last provider that actually worked". Logged once; the OLD backend is left in place.
+        console.error(
+          `provider: settings.provider.model now names "${nextProviderId}" — the daemon's internal provider only rebuilds for ${INTERNAL_PROVIDER_IDS.join("/")}, so titles, the bash reviewer, the dreamer, the session cleaner, research, and turn compaction stay on "${boundProviderId}" until it's set back to one of those`,
+        );
+        return false;
+      }
+      let nextActive: ActiveProvider | null;
+      try {
+        // The SAME `self.quota` instance every rebuild since boot — see `createProvider`'s
+        // `existingQuota` param doc comment for why quota tracking is per-daemon, not
+        // per-provider-instance.
+        nextActive = await createProvider(nextSettings, nextSecrets, nextSettingsPath, self.quota);
+      } catch (err) {
+        // e.g. the new provider has no stored credential (`createProvider`'s openai branch throws
+        // fail-fast). Logged once; the OLD backend — still bound inside `swappable` — keeps serving
+        // every caller exactly as it did before this write.
+        console.error(`provider: rebuilding the internal provider for "${nextProviderId}" failed (${(err as Error).message}) — staying on "${boundProviderId}"`);
+        return false;
+      }
+      if (nextActive === null) return false; // guarded by the INTERNAL_PROVIDER_IDS check above; never reached in practice
+      // THE SWAP. `swappable`'s own identity never changes — every existing holder of it (directly,
+      // or through `self.provider`) sees this take effect on its very next call. An in-flight call
+      // already dispatched to the OLD backend keeps running (see `SwappableProvider.streamTurn`'s
+      // own doc comment) — nothing here waits for, cancels, or otherwise touches it.
+      swappable.rebind(nextActive.provider);
+      self.model = nextActive.liveModel().model;
+      self.live = nextActive.liveModel;
+      boundProviderId = nextProviderId;
+      return true;
+    },
+  };
+  return self;
 }
 
 /**

@@ -59,6 +59,21 @@ export interface SettingsApplyDeps {
   drainIntervalMs?: number; // default 50 — poll interval while draining
   sleep?: (ms: number) => Promise<void>; // injectable clock (default Bun.sleep) so the cap test never waits real seconds
   log?: (msg: string) => void;
+  /**
+   * Daemon settings surface (2026-09-17 plan, item 2): `RebindableProvider.refresh`
+   * (`providers/manager.ts`), pre-bound to `secrets`/`settingsPath` — called on EVERY settled
+   * settings apply (past the `prev === null` guard), never diffed against `ownProviderFor(prev)`
+   * vs. `ownProviderFor(next)` here. `refresh` already self-gates on its OWN internal
+   * `boundProviderId` (a cheap string compare, no network/keychain touch on a no-op) — see
+   * `applyAgentProviderDiff`'s own doc comment below for why gating the CALL on the settings diff
+   * too would leave a FAILED rebind (e.g. the user picked a new provider before storing its
+   * credential) stuck forever the moment `prev`/`next` agree again on the next apply, which is
+   * exactly the no-restart violation this item exists to close. Optional so a no-agentProvider
+   * daemon (or any pre-existing `SettingsApplyDeps` literal, including this file's own test helper)
+   * needs no change. Never awaited by the caller in a way that could reject the aggregate `apply()`
+   * — wrapped in its own try/catch below, same F1 discipline as the CU/LSP diffs.
+   */
+  refreshAgentProvider?: (next: Settings) => Promise<boolean> | boolean;
 }
 
 /**
@@ -120,6 +135,29 @@ export function makeApply(deps: SettingsApplyDeps): (prev: Settings | null, next
       }
     }
     await deps.teardownComputer();
+  }
+
+  /**
+   * Daemon settings surface (2026-09-17 plan, item 2): calls `deps.refreshAgentProvider` on every
+   * settled apply (past the two guards below) — it does NOT diff `ownProviderFor(prev)` against
+   * `ownProviderFor(next)` here, on purpose. `RebindableProvider.refresh` (providers/manager.ts)
+   * already self-gates on its OWN internal `boundProviderId` (a cheap string compare, no network/
+   * keychain touch on a no-op), which is a DIFFERENT question than "did `next` differ from `prev`":
+   * a rebind that FAILED (e.g. the user picked a new provider before storing its credential) leaves
+   * the bound backend on the OLD provider while `prev`/`next` both already read as the new one on
+   * every apply from then on — gating on the `prev`/`next` diff here would mean that failure is
+   * never retried, ever, for the rest of the daemon's life, which is exactly the no-restart
+   * violation this item exists to close. Refresh being cheap on its own no-op is what makes calling
+   * it unconditionally (module the two guards) the correct choice, not just the simpler one.
+   *
+   * `prev === null` (first apply) is skipped like `applyRuntimeOptionsDiff`'s own narration guard —
+   * `agentProvider` was already built against boot settings by `createRebindableProvider`, so there
+   * is nothing to rebind on the very first settled change.
+   */
+  async function applyAgentProviderDiff(prev: Settings | null, next: Settings): Promise<void> {
+    if (!deps.refreshAgentProvider) return;
+    if (prev === null) return;
+    await deps.refreshAgentProvider(next);
   }
 
   async function applyLspDiff(prev: Settings | null, next: Settings): Promise<void> {
@@ -276,6 +314,13 @@ export function makeApply(deps: SettingsApplyDeps): (prev: Settings | null, next
           await applyLspDiff(prev, next);
         } catch (err) {
           log(`lsp diff-apply failed (hot-apply left best-effort until the next change): ${errMsg(err)}`);
+        }
+      })(),
+      (async () => {
+        try {
+          await applyAgentProviderDiff(prev, next);
+        } catch (err) {
+          log(`agent provider rebind failed (best-effort — staying on the previous provider until the next change): ${errMsg(err)}`);
         }
       })(),
     ]);

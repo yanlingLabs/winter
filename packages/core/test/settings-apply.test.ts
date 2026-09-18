@@ -567,3 +567,86 @@ describe("makeApply: the runtime options diff (P8b Task 15)", () => {
     expect(lines.filter((l) => l.includes("subscriptionAuth") && l.includes("inert"))).toHaveLength(1);
   });
 });
+
+// Daemon settings surface (2026-09-17 plan, item 2): the agent-provider rebind diff. `providers/
+// manager.ts`'s `createRebindableProvider`/`refresh` own the actual rebuild-and-swap AND its own
+// self-gate (a cheap `boundProviderId` string compare) — this file's job is narrower: call
+// `deps.refreshAgentProvider` on EVERY settled apply past the `prev === null` guard, deliberately
+// WITHOUT its own `ownProviderFor(prev)` vs. `ownProviderFor(next)` diff (a same-provider model
+// change, or any unrelated key, still calls it — `refresh` itself no-ops cheaply), and never let a
+// rejection wedge or reject the aggregate apply. The reason this file must NOT re-diff: a rebind
+// that FAILED (no credential yet for the new provider) leaves the bound backend on the OLD
+// provider while `prev`/`next` already agree on the NEW one on every apply from then on — gating
+// the call here on that diff would mean the failure is retried never again, for the daemon's whole
+// life. Calling refresh unconditionally is what lets ANY later settings write (not just another
+// `provider.model` edit) retry a previously-failed rebind once the missing credential exists.
+describe("makeApply: the agent-provider rebind diff (2026-09-17 plan, item 2)", () => {
+  const withModel = (model: string) => ({ schemaVersion: 3 as const, provider: { model } }) as any;
+
+  test("a provider.model write that crosses catalog providers calls refreshAgentProvider with `next`", async () => {
+    const refreshAgentProvider = mock(() => Promise.resolve(true));
+    const apply = makeApply(baseDeps({ refreshAgentProvider }));
+    const next = withModel("openai/gpt-5.2");
+    await apply(withModel("codex-oauth/gpt-5.6-sol"), next);
+    expect(refreshAgentProvider).toHaveBeenCalledTimes(1);
+    expect(refreshAgentProvider).toHaveBeenCalledWith(next);
+  });
+
+  test("a same-provider model change (or any unrelated key) STILL calls refreshAgentProvider — the no-op decision belongs to refresh itself, not this diff", async () => {
+    const refreshAgentProvider = mock(() => Promise.resolve(true));
+    const apply = makeApply(baseDeps({ refreshAgentProvider }));
+    await apply(withModel("codex-oauth/gpt-5.6-sol"), withModel("codex-oauth/gpt-5.6-luna"));
+    await apply({ ...withModel("codex-oauth/gpt-5.6-luna"), lsp: { enabled: false } }, { ...withModel("codex-oauth/gpt-5.6-luna"), lsp: { enabled: true } });
+    expect(refreshAgentProvider).toHaveBeenCalledTimes(2);
+  });
+
+  test("a rebind that FAILED once is retried on the NEXT unrelated settings write, not stuck forever", async () => {
+    // Simulates `providers/manager.ts`'s own self-gate: the mock only reports success once its
+    // provider argument matches "openai" AND a credential has since become available — modeling a
+    // user picking openai/* before storing a key, then a later, wholly unrelated settings write
+    // (never another provider.model edit) after the key exists.
+    let credentialStored = false;
+    const refreshAgentProvider = mock((next: any) => Promise.resolve(next.provider.model.startsWith("openai/") && credentialStored));
+    const apply = makeApply(baseDeps({ refreshAgentProvider }));
+    await apply(withModel("codex-oauth/gpt-5.6-sol"), withModel("openai/gpt-5.2")); // fails: no credential yet
+    expect(refreshAgentProvider).toHaveBeenCalledTimes(1);
+    credentialStored = true;
+    // An UNRELATED settings write (lsp toggle) — `prev`/`next` both already name "openai", so a
+    // diff-gated implementation would never call refresh again; this one still does.
+    await apply({ ...withModel("openai/gpt-5.2"), lsp: { enabled: false } }, { ...withModel("openai/gpt-5.2"), lsp: { enabled: true } });
+    expect(refreshAgentProvider).toHaveBeenCalledTimes(2);
+    expect(await refreshAgentProvider.mock.results[1]!.value).toBe(true); // the retry succeeded
+  });
+
+  test("no refreshAgentProvider dep at all: the diff is a silent no-op — never a throw", async () => {
+    const apply = makeApply(baseDeps()); // no agentProvider / no refresh wired
+    await expect(apply(withModel("codex-oauth/gpt-5.6-sol"), withModel("openai/gpt-5.2"))).resolves.toBeUndefined();
+  });
+
+  test("prev === null (first apply) never calls refreshAgentProvider — nothing preceded it to diff against", async () => {
+    const refreshAgentProvider = mock(() => Promise.resolve(true));
+    const apply = makeApply(baseDeps({ refreshAgentProvider }));
+    await apply(null, withModel("openai/gpt-5.2"));
+    expect(refreshAgentProvider).not.toHaveBeenCalled();
+  });
+
+  test("a rejecting refreshAgentProvider is logged, never rejects apply() or abandons the other diffs", async () => {
+    const refreshAgentProvider = mock(() => Promise.reject(new Error("boom: refresh")));
+    const registerLsp = mock(() => {});
+    const warnings: string[] = [];
+    const apply = makeApply(baseDeps({ refreshAgentProvider, registerLsp, log: (m) => warnings.push(m) }));
+    await expect(apply(
+      { ...withModel("codex-oauth/gpt-5.6-sol"), lsp: { enabled: false } },
+      { ...withModel("openai/gpt-5.2"), lsp: { enabled: true } },
+    )).resolves.toBeUndefined();
+    expect(registerLsp).toHaveBeenCalledTimes(1); // the LSP diff runs to completion regardless
+    expect(warnings.some((w) => w.includes("agent provider rebind failed"))).toBe(true);
+  });
+
+  test("a resolving-but-false refreshAgentProvider (no-op inside providers/manager.ts) is still just a call — apply() never inspects the boolean", async () => {
+    const refreshAgentProvider = mock(() => Promise.resolve(false));
+    const apply = makeApply(baseDeps({ refreshAgentProvider }));
+    await expect(apply(withModel("codex-oauth/gpt-5.6-sol"), withModel("anthropic/claude-sonnet-5"))).resolves.toBeUndefined();
+    expect(refreshAgentProvider).toHaveBeenCalledTimes(1);
+  });
+});
