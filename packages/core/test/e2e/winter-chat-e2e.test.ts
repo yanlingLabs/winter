@@ -270,8 +270,15 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     ])].filter((t) => !disallowed.has(t)).sort();
     expect([...driver.init!.tools].sort()).toEqual(expected);
     // and, stated plainly: the four Winter defaults the child advertises (`advisor` is not
-    // advertised at 0.0.4), AskUserQuestion, and the three chat capability tools
-    expect(expected).toEqual([...CHAT_ALLOWED_WINTER_TOOLS.filter((t) => t !== "advisor"), "WebSearch", ...chatCaps].sort());
+    // advertised at 0.0.4), AskUserQuestion, and chat's capability tools THAT THIS SESSION GETS.
+    // `chatCaps` is the mode-level registration and must be filtered by the same `disallowed` set as
+    // above (2026-09-18): with no Exa key stored `Search` is withheld — that is the whole point of the
+    // gate — so the plainly-stated side has to withhold it too or the two sides describe different
+    // sessions. The remaining chat capability tool is `browser`; `ReadPage` retired with the ruling.
+    expect(expected).toEqual([
+      ...CHAT_ALLOWED_WINTER_TOOLS.filter((t) => t !== "advisor"), "WebSearch",
+      ...chatCaps.filter((t) => !disallowed.has(t)),
+    ].sort());
   }, 30_000);
 
   test("(b) tooluse → tool_call + tool_result + terminal, WINTER-shaped, and the child's fallback text on the unregistered tool", async () => {
