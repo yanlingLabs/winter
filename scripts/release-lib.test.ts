@@ -1,11 +1,15 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ROOT as REPO_ROOT } from "./version-lib";
 import {
+  appcastDescription,
   appcastInsertPlan,
   appcastItem,
   caskFrom,
+  releaseNotesHtml,
   dmgStagePlan,
   embeddedRuntimesDescriptionLine,
   NAME_SCAN_EXCLUSIONS,
@@ -101,12 +105,133 @@ describe("appcastItem", () => {
     const xml = appcastItem({ ...base, beta: false, description: "Winter agent SDK 0.0.4 · Claude Agent SDK 0.3.250" });
     expect(xml).toContain("<description><![CDATA[Winter agent SDK 0.0.4 · Claude Agent SDK 0.3.250]]></description>");
   });
+
+  test("item 9: a `]]>` in the description cannot close the CDATA early", () => {
+    const xml = appcastItem({ ...base, beta: false, description: "before ]]> after" });
+    expect(xml).toContain("<description><![CDATA[before ]]]]><![CDATA[> after]]></description>");
+    // Concatenating the CDATA sections' character data reproduces the input exactly.
+    const sections = [...xml.matchAll(/<!\[CDATA\[([\s\S]*?)]]>/g)].map((m) => m[1]);
+    expect(sections.join("")).toBe("before ]]> after");
+  });
 });
 
 describe("embeddedRuntimesDescriptionLine (P8d-2)", () => {
   test("names both pinned SDK versions", () => {
     expect(embeddedRuntimesDescriptionLine({ winterAgentSdk: REQUIRED_WINTER_AGENT_SDK, officialSdk: REQUIRED_CLAUDE_AGENT_SDK })).toBe(
       `Winter agent SDK ${REQUIRED_WINTER_AGENT_SDK} · Claude Agent SDK ${REQUIRED_CLAUDE_AGENT_SDK}`,
+    );
+  });
+});
+
+describe("releaseNotesHtml (2026-09-17 settings-surface plan, item 9)", () => {
+  const render = (md: string, version = "0.115.0") => releaseNotesHtml({ notesMarkdown: md, version });
+  const tmpDirs: string[] = [];
+  afterAll(() => { for (const d of tmpDirs) rmSync(d, { recursive: true, force: true }); });
+
+  test("headings h1-h3", () => {
+    expect(render("# Top\n\n## Mid\n\n### Low")).toBe("<h1>Top</h1>\n<h2>Mid</h2>\n<h3>Low</h3>");
+  });
+
+  test("the leading `# Winter <version>` heading is dropped for THIS version only", () => {
+    expect(render("# Winter 0.115.0\n\n## Something")).toBe("<h2>Something</h2>");
+    expect(render("# Winter 0.114.0\n\n## Something")).toBe("<h1>Winter 0.114.0</h1>\n<h2>Something</h2>");
+    // Only the FIRST block, never a later one.
+    expect(render("## Something\n\n# Winter 0.115.0")).toBe("<h2>Something</h2>\n<h1>Winter 0.115.0</h1>");
+  });
+
+  test("a paragraph's soft line wraps are joined with a single space", () => {
+    expect(render("One line\nand its wrap.\n\nA second paragraph.")).toBe("<p>One line and its wrap.</p>\n<p>A second paragraph.</p>");
+  });
+
+  test("bullets with indented continuation lines become one <li> each", () => {
+    expect(render("- first bullet\n  wrapped on\n  three lines\n- second bullet")).toBe(
+      "<ul>\n  <li>first bullet wrapped on three lines</li>\n  <li>second bullet</li>\n</ul>",
+    );
+  });
+
+  test("inline `code` and **bold**, escaped, including across a soft wrap", () => {
+    expect(render("A `settings.providers.<id>.baseUrl` key & a **bold\nspan**.")).toBe(
+      "<p>A <code>settings.providers.&lt;id&gt;.baseUrl</code> key &amp; a <strong>bold span</strong>.</p>",
+    );
+  });
+
+  test("a fence renders verbatim (escaped, never inline-converted) and drops the language hint", () => {
+    expect(render("```sh\nbrew install --cask winter && echo a<b **not bold**\n```")).toBe(
+      "<pre><code>brew install --cask winter &amp;&amp; echo a&lt;b **not bold**</code></pre>",
+    );
+  });
+
+  test("a `**` inside backticks stays literal", () => {
+    expect(render("The `**` marker.")).toBe("<p>The <code>**</code> marker.</p>");
+  });
+
+  // Every one of these is a construct no shipped notes file uses. The point is that adding one
+  // FAILS THE RELEASE rather than publishing mangled markup to every installed copy.
+  test.each([
+    ["a numbered list", "1. first\n2. second"],
+    ["a blockquote", "> quoted"],
+    ["a table row", "| a | b |"],
+    ["a nested bullet", "- outer\n  - inner"],
+    ["an h4", "#### too deep"],
+    ["a heading with no space", "#nospace"],
+    ["an unbalanced backtick", "one ` backtick"],
+    ["a stray asterisk", "a *single* emphasis"],
+    ["an unclosed fence", "```sh\nnever closed"],
+    ["a fence with an unsupported info string", "```sh {highlight}\nx\n```"],
+    ["a line indented outside a bullet", "para\n\n  orphan indent"],
+  ])("throws on %s", (_label, md) => {
+    expect(() => render(md)).toThrow(/release notes:/);
+  });
+
+  test("every notes file this repo has shipped renders, and renders into well-formed XML", () => {
+    const notesDir = join(REPO_ROOT, "releases", "notes");
+    const files = readdirSync(notesDir).filter((f: string) => f.endsWith(".md")).sort();
+    // A guard on the guard: if this ever globs zero files the assertions below all vacuously pass.
+    expect(files.length).toBeGreaterThanOrEqual(10);
+    const dir = mkdtempSync(join(tmpdir(), "winter-appcast-notes-"));
+    tmpDirs.push(dir);
+    for (const file of files) {
+      const version = file.replace(/\.md$/, "");
+      const description = appcastDescription({
+        versionLine: embeddedRuntimesDescriptionLine({ winterAgentSdk: REQUIRED_WINTER_AGENT_SDK, officialSdk: REQUIRED_CLAUDE_AGENT_SDK }),
+        version,
+        notesMarkdown: readFileSync(join(notesDir, file), "utf8"),
+      });
+      // The P8d-2 line is still there verbatim, first, and the notes follow it.
+      expect(description.startsWith(`<p>Winter agent SDK ${REQUIRED_WINTER_AGENT_SDK} · Claude Agent SDK ${REQUIRED_CLAUDE_AGENT_SDK}</p>\n`)).toBe(true);
+      expect(description.length).toBeGreaterThan(200);
+      // release.ts validates the whole feed with xmllint; do the same for one item here, since a
+      // CDATA or entity mistake in the rendered notes is exactly what would only surface there.
+      const item = appcastItem({
+        version,
+        zipName: `Winter-${version}.zip`,
+        edSignature: "sig==",
+        length: 1,
+        beta: false,
+        minSystem: "26.0",
+        description,
+      });
+      const xmlPath = join(dir, `${version}.xml`);
+      writeFileSync(xmlPath, `<?xml version="1.0" standalone="yes"?>\n<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel>\n${item}\n</channel></rss>\n`);
+      const lint = spawnSync("xmllint", ["--noout", xmlPath], { encoding: "utf8" });
+      expect(lint.error?.message ?? "").toBe(""); // xmllint missing would silently pass below
+      expect(`${file}: ${lint.stderr}`).toBe(`${file}: `);
+      expect(lint.status).toBe(0);
+    }
+  });
+});
+
+describe("appcastDescription (item 9)", () => {
+  const versionLine = "Winter agent SDK 0.0.16 · Claude Agent SDK 0.3.250";
+
+  test("no notes -> byte-identical to the pre-item-9 description", () => {
+    expect(appcastDescription({ versionLine, version: "0.115.0" })).toBe(versionLine);
+    expect(appcastDescription({ versionLine, version: "0.115.0", notesMarkdown: "   \n\n" })).toBe(versionLine);
+  });
+
+  test("with notes -> the version line first, then the rendered notes", () => {
+    expect(appcastDescription({ versionLine, version: "0.115.0", notesMarkdown: "# Winter 0.115.0\n\n## A change\n\nIt changed." })).toBe(
+      `<p>${versionLine}</p>\n<h2>A change</h2>\n<p>It changed.</p>`,
     );
   });
 });
