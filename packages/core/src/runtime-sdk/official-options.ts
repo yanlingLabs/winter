@@ -590,9 +590,12 @@ export function officialInputFor(
       // incomplete. `policy.settings` is not an escape hatch either: it becomes the vendor's own
       // flag-layer settings.json equivalent, whose real schema has no top-level `agents` key (agents
       // are always file-based for Claude Code too — this would be dropped/rejected the same way).
-      // `official-options-agents-wall.test.ts` pins this exact absence, named to the router version
-      // above, so a future bump that adds the field is a positive test failure, not a silent gap
-      // nobody notices. The Winter leg carries `agents` today (`mode-options.ts`'s
+      // `official-options.test.ts`'s "the agents wall" block pins BOTH today's absence AND the
+      // router version measured above — the version assertion is the actual tripwire (a bump
+      // changes `REQUIRED_WINTER_RUNTIME_SDK`, which fails that test and is the cue to re-check
+      // `OptionsTemplatePolicy`'s `.d.ts` by hand); `buildOfficialOptions` itself is not on this
+      // package's public `exports` map, so nothing here can call it to prove the drop mechanically.
+      // The Winter leg carries `agents` today (`mode-options.ts`'s
       // `buildWinterOptions`); this leg cannot, until the router grows the field.
       options: {
         // Structural assignment onto `OptionsTemplatePolicy` — the router 0.0.3 exports the type by

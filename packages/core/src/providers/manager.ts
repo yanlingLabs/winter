@@ -241,12 +241,22 @@ export interface RebindableProvider {
    * unrelated key entirely — is a cheap no-op: `splitTag` + a string compare, no network/keychain
    * touch). Returns `true` on an actual rebind, `false` on every no-op AND on a failed rebuild
    * (e.g. the new provider has no stored credential, or moved OUTSIDE `INTERNAL_PROVIDER_IDS`
-   * entirely) — a failed rebuild never tears down the OLD backend; it keeps serving every caller,
-   * logged once, exactly like a boot-time `createProvider` failure already is (see
-   * `createProvider`'s own null-branch comment). Never throws: every failure mode this function can
-   * hit is reported through the return value, because a throw here would reach
-   * `settings-apply.ts`'s single-flight apply loop and (per that file's own F1 discipline) risks
-   * wedging the NEXT hot-reload behind a retried rebuild of a provider that will never succeed.
+   * entirely) — a failed rebuild never tears down the OLD backend; it keeps serving every caller.
+   *
+   * NOT deduped: `settings-apply.ts`'s `applyAgentProviderDiff` calls this on EVERY settled apply
+   * (not gated on the provider having changed since the last one — see that function's own doc
+   * comment for why), so a settings.json stuck on a provider this can't rebuild to logs ONE line
+   * AND retries a real credential lookup on every UNRELATED settings write too (an LSP toggle, a
+   * plugin enable, …) for as long as it stays stuck — the same per-change narration
+   * `officialSubscriptionAuthFlagInert` already has elsewhere in this codebase (its own test pins
+   * "one line per settings change, not a one-time transition"), applied here rather than a novel
+   * choice. The alternative (dedup by `nextProviderId`) would trade that repeated diagnostic for
+   * silence on every write after the first — not obviously better, and not what this does today.
+   *
+   * Never throws: every failure mode this function can hit is reported through the return value,
+   * because a throw here would reach `settings-apply.ts`'s single-flight apply loop and (per that
+   * file's own F1 discipline) risks wedging the NEXT hot-reload behind a retried rebuild of a
+   * provider that will never succeed.
    */
   refresh(nextSettings: Settings, secrets: SecretStore, settingsPath?: string): Promise<boolean>;
 }
@@ -280,7 +290,8 @@ export async function createRebindableProvider(settings: Settings, secrets: Secr
         // Moved OUTSIDE the internal-provider set entirely. There is nothing sane to rebind to —
         // daemon.ts's boot-time null path has no running backend to preserve, but this one does,
         // and "the daemon's own internal calls silently stop" is worse than "they keep running on
-        // the last provider that actually worked". Logged once; the OLD backend is left in place.
+        // the last provider that actually worked". Logged on every attempt while stuck here (this
+        // function's own doc comment) — the OLD backend is left in place, always.
         console.error(
           `provider: settings.provider.model now names "${nextProviderId}" — the daemon's internal provider only rebuilds for ${INTERNAL_PROVIDER_IDS.join("/")}, so titles, the bash reviewer, the dreamer, the session cleaner, research, and turn compaction stay on "${boundProviderId}" until it's set back to one of those`,
         );
@@ -294,8 +305,8 @@ export async function createRebindableProvider(settings: Settings, secrets: Secr
         nextActive = await createProvider(nextSettings, nextSecrets, nextSettingsPath, self.quota);
       } catch (err) {
         // e.g. the new provider has no stored credential (`createProvider`'s openai branch throws
-        // fail-fast). Logged once; the OLD backend — still bound inside `swappable` — keeps serving
-        // every caller exactly as it did before this write.
+        // fail-fast). Logged on every attempt while stuck (this function's own doc comment); the
+        // OLD backend — still bound inside `swappable` — keeps serving every caller regardless.
         console.error(`provider: rebuilding the internal provider for "${nextProviderId}" failed (${(err as Error).message}) — staying on "${boundProviderId}"`);
         return false;
       }
