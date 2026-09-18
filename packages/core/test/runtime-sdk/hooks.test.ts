@@ -11,6 +11,7 @@ import { BashReviewer } from "../../src/agent/reviewer";
 import type { LspManager } from "../../src/agent/lsp/manager";
 import { readStoredDiff } from "../../src/diffs/store";
 import { pendingDiffSessions, takeFileDiff } from "../../src/runtime-sdk/diff-attach";
+import { SHIPPED_DANGEROUS_DOMAINS } from "../../src/agent/dangerous-domains";
 import { sessionHooksFor, type HookFacadeLike, type SessionHooksDeps } from "../../src/runtime-sdk/hooks";
 
 const abortSignal = () => new AbortController().signal;
@@ -312,5 +313,230 @@ describe("sessionHooksFor — the fileDiff producer", () => {
     expect(takeFileDiff("s_fence", "tu4")).toBeUndefined();
     rmSync(home, { recursive: true, force: true });
     rmSync(cwd, { recursive: true, force: true });
+  });
+});
+
+// ── The dangerous-domain floor, both legs (2026-09-18 ruling) ──────────────────────────────────
+//
+// Every case here drives the REAL callbacks `sessionHooksFor` registered, fetched out of the built
+// `Options["hooks"]` by their own matcher — never a hand-built copy of the hook function, so a group
+// that stopped being registered (or moved off its matcher) fails these tests rather than passing
+// them against a function nothing calls. The real-binary half (does the official `claude` honour the
+// `updatedInput` this returns, and does its deny reach the model) is `web-floor-measure.e2e.test.ts`.
+
+const FLOOR_SIZE = SHIPPED_DANGEROUS_DOMAINS.length;
+
+function floorHooks(deps: Partial<SessionHooksDeps> = {}): { fetch: HookCallbackMatcher["hooks"][number]; search: HookCallbackMatcher["hooks"][number]; built: ReturnType<typeof sessionHooksFor> } {
+  const built = sessionHooksFor({ ...baseDeps, ...deps });
+  return {
+    fetch: groupFor(built.winter?.PreToolUse, "WebFetch").hooks[0]!,
+    search: groupFor(built.winter?.PreToolUse, "WebSearch").hooks[0]!,
+    built,
+  };
+}
+
+async function fetchVerdict(url: unknown, deps: Partial<SessionHooksDeps> = {}): Promise<Record<string, unknown>> {
+  const { fetch } = floorHooks(deps);
+  return (await fetch(preInput({ tool_name: "WebFetch", tool_input: { url }, tool_use_id: "t1" }), "t1", { signal: abortSignal() })) as Record<string, unknown>;
+}
+
+async function searchVerdict(input: unknown, deps: Partial<SessionHooksDeps> = {}): Promise<Record<string, unknown>> {
+  const { search } = floorHooks(deps);
+  return (await search(preInput({ tool_name: "WebSearch", tool_input: input, tool_use_id: "t1" }), "t1", { signal: abortSignal() })) as Record<string, unknown>;
+}
+
+function denialReason(out: Record<string, unknown>): string | undefined {
+  const specific = out["hookSpecificOutput"] as { permissionDecision?: string; permissionDecisionReason?: string } | undefined;
+  return specific?.permissionDecision === "deny" ? specific.permissionDecisionReason : undefined;
+}
+
+function updatedInputOf(out: Record<string, unknown>): Record<string, unknown> | undefined {
+  const specific = out["hookSpecificOutput"] as { updatedInput?: Record<string, unknown>; permissionDecision?: string } | undefined;
+  return specific?.updatedInput;
+}
+
+describe("sessionHooksFor — the dangerous-domain floor on WebFetch", () => {
+  test("a plain floor host is denied, with the fixed refusal naming the host and the matched entry", async () => {
+    const out = await fetchVerdict("https://pastebin.com/raw/abc");
+    expect(denialReason(out)).toBe(
+      "refused by Winter's dangerous-domain safety floor: pastebin.com matches the blocked entry pastebin.com. This is a hard block, not a permission prompt — no approval, policy or retry can allow it (the list is settings.permissions.dangerousDomains). Find another source, or ask the user to change that setting.",
+    );
+    // The requested URL itself is never echoed back into the model's context.
+    expect(denialReason(out)).not.toContain("/raw/abc");
+  });
+
+  test("every spelling of the same host is denied: case, trailing dot, userinfo, port, http:, subdomain, all at once", async () => {
+    for (const url of [
+      "https://PASTEBIN.COM/x",
+      "https://pastebin.com./x",
+      "https://user:pw@pastebin.com/x",
+      "https://pastebin.com:8443/x",
+      "http://pastebin.com/x", // upgraded to https: by both runtimes; the scheme is not the question
+      "https://raw.pastebin.com/x",
+      "HTTPS://USER:pw@Deep.Sub.PasteBin.COM.:8443/x?q=1#f",
+    ]) {
+      const out = await fetchVerdict(url);
+      expect(denialReason(out), `expected a denial for ${url}`).toContain("pastebin.com matches the blocked entry pastebin.com");
+    }
+  });
+
+  test("a punycoded IDN url matches a user-added entry written in unicode", async () => {
+    const added = ["пример.рф"];
+    const out = await fetchVerdict("https://xn--e1afmkfd.xn--p1ai/drop", { dangerousDomainsAdded: () => added });
+    expect(denialReason(out)).toContain("matches the blocked entry пример.рф");
+    // and the same url in its unicode spelling, which `new URL` punycodes for us
+    expect(denialReason(await fetchVerdict("https://пример.рф/drop", { dangerousDomainsAdded: () => added }))).toContain("пример.рф");
+  });
+
+  test("a user-added entry with a wildcard/leading-dot spelling is honoured (the child's own matcher ignores both)", async () => {
+    const out = await fetchVerdict("https://drop.evil.example/x", { dangerousDomainsAdded: () => ["*.evil.example"] });
+    expect(denialReason(out)).toContain("matches the blocked entry *.evil.example");
+    expect(denialReason(await fetchVerdict("https://evil.example/x", { dangerousDomainsAdded: () => [".evil.example"] }))).toContain(".evil.example");
+  });
+
+  test("the suffix grammar is the floor's own: a prefix or a label-boundary-less lookalike is NOT a match", async () => {
+    for (const url of ["https://pastebin.com.evil.example/x", "https://evilpastebin.com/x", "https://example.com/pastebin.com"]) {
+      expect(await fetchVerdict(url), url).toEqual({});
+    }
+  });
+
+  test("the user-added half is read LIVE — an entry added between two calls is enforced on the second", async () => {
+    let added: string[] = [];
+    const deps = { dangerousDomainsAdded: () => added };
+    const { fetch } = floorHooks(deps);
+    const call = async () => (await fetch(preInput({ tool_name: "WebFetch", tool_input: { url: "https://exfil.example/x" }, tool_use_id: "t1" }), "t1", { signal: abortSignal() })) as Record<string, unknown>;
+    expect(await call()).toEqual({});
+    added = ["exfil.example"];
+    expect(denialReason(await call())).toContain("exfil.example");
+  });
+
+  test("an absent or throwing dangerousDomainsAdded still enforces the whole SHIPPED floor", async () => {
+    expect(denialReason(await fetchVerdict("https://webhook.site/abc"))).toContain("webhook.site");
+    const thrower = () => { throw new Error("settings read failed"); };
+    expect(denialReason(await fetchVerdict("https://webhook.site/abc", { dangerousDomainsAdded: thrower }))).toContain("webhook.site");
+  });
+
+  test("hostile / unparseable / absent urls pass through to the tool's own refusal, never a throw", async () => {
+    for (const url of [undefined, null, 42, true, {}, [], ["https://pastebin.com"], "", "not a url", "pastebin.com", "//pastebin.com/x", "file:///etc/passwd", "data:text/plain,hi", "javascript:alert(1)", "https://", `https://${"a".repeat(200_000)}.example/x`]) {
+      expect(await fetchVerdict(url), JSON.stringify(url)?.slice(0, 40) ?? String(url)).toEqual({});
+    }
+    // a hostile tool_input SHAPE (not an object at all, or one carrying __proto__) is "no fields"
+    for (const shape of [null, "a string", 7, [], { __proto__: { url: "https://pastebin.com/x" } }, JSON.parse('{"__proto__":{"url":"https://pastebin.com/x"}}')]) {
+      const { fetch } = floorHooks();
+      expect(await fetch(preInput({ tool_name: "WebFetch", tool_input: shape, tool_use_id: "t1" }), "t1", { signal: abortSignal() })).toEqual({});
+    }
+    expect(({} as Record<string, unknown>)["url"]).toBeUndefined(); // no prototype was polluted along the way
+  });
+
+  test("the group is matched: a non-web tool reaching this callback is a no-op", async () => {
+    const { fetch } = floorHooks();
+    expect(await fetch(preInput({ tool_name: "Bash", tool_input: { url: "https://pastebin.com/x" }, tool_use_id: "t1" }), "t1", { signal: abortSignal() })).toEqual({});
+  });
+});
+
+describe("sessionHooksFor — the dangerous-domain floor on WebSearch", () => {
+  test("a call with no domain lists gets the whole floor as blocked_domains, and nothing else changes", async () => {
+    const out = await searchVerdict({ query: "winter release notes" });
+    expect(updatedInputOf(out)).toEqual({ query: "winter release notes", blocked_domains: [...SHIPPED_DANGEROUS_DOMAINS] });
+    // no permissionDecision at all: a no-opinion transform is the only kind the SDK's reducer chains
+    // unconditionally (a hook whose own decision is outranked has its transform discarded).
+    expect((out["hookSpecificOutput"] as Record<string, unknown>)["permissionDecision"]).toBeUndefined();
+    expect(FLOOR_SIZE).toBe(38); // the floor's size, pinned: nowhere near the SDK's 1,000-entry list cap
+  });
+
+  test("the model's own blocked_domains are kept and the floor is unioned in, deduped case-insensitively", async () => {
+    const out = await searchVerdict({ query: "q", blocked_domains: ["ads.example", "PASTEBIN.COM"] });
+    const blocked = updatedInputOf(out)!["blocked_domains"] as string[];
+    expect(blocked.slice(0, FLOOR_SIZE)).toEqual([...SHIPPED_DANGEROUS_DOMAINS]); // the floor first
+    expect(blocked.slice(FLOOR_SIZE)).toEqual(["ads.example"]); // the model's own, minus its duplicate of a floor entry
+    expect(blocked.filter((d) => d.toLowerCase() === "pastebin.com")).toEqual(["pastebin.com"]); // the floor's spelling survived
+  });
+
+  test("a call already carrying exactly the floor is left alone (no pointless transform)", async () => {
+    expect(await searchVerdict({ query: "q", blocked_domains: [...SHIPPED_DANGEROUS_DOMAINS] })).toEqual({});
+  });
+
+  test("allowed_domains: floor entries are removed and blocked_domains is NEVER added (the two are mutually exclusive)", async () => {
+    const out = await searchVerdict({ query: "q", allowed_domains: ["docs.example", "pastebin.com", "raw.paste.ee"] });
+    expect(updatedInputOf(out)).toEqual({ query: "q", allowed_domains: ["docs.example"] });
+    expect(updatedInputOf(out)!["blocked_domains"]).toBeUndefined();
+  });
+
+  test("allowed_domains with nothing left after the floor is DENIED with the same fixed refusal", async () => {
+    const out = await searchVerdict({ query: "q", allowed_domains: ["pastebin.com", "ngrok.io"] });
+    expect(denialReason(out)).toContain("pastebin.com matches the blocked entry pastebin.com");
+    expect(updatedInputOf(out)).toBeUndefined();
+  });
+
+  test("an allow-list clear of the floor is untouched", async () => {
+    expect(await searchVerdict({ query: "q", allowed_domains: ["docs.example", "example.org"] })).toEqual({});
+  });
+
+  test("the transform carries ONLY the three declared keys — an invented key is dropped, not smuggled into a schema-validated transform", async () => {
+    const out = await searchVerdict({ query: "q", max_results: 40, __proto__: { polluted: true } });
+    expect(Object.keys(updatedInputOf(out)!).sort()).toEqual(["blocked_domains", "query"]);
+  });
+
+  test("over the SDK's 1,000-entry list cap the floor goes first and the model's tail is dropped, rather than refusing the call", async () => {
+    const own = Array.from({ length: 1200 }, (_, i) => `noise${i}.example`);
+    const blocked = updatedInputOf(await searchVerdict({ query: "q", blocked_domains: own }))!["blocked_domains"] as string[];
+    expect(blocked.length).toBe(1000);
+    expect(blocked.slice(0, FLOOR_SIZE)).toEqual([...SHIPPED_DANGEROUS_DOMAINS]);
+  });
+
+  test("a malformed or empty domain list reads as absent, and the floor is injected anyway", async () => {
+    for (const input of [{ query: "q", blocked_domains: [] }, { query: "q", blocked_domains: "pastebin.com" }, { query: "q", blocked_domains: [null, 3] }, { query: "q", allowed_domains: [] }, { query: "q", allowed_domains: "docs.example" }]) {
+      const blocked = updatedInputOf(await searchVerdict(input))!["blocked_domains"] as string[];
+      expect(blocked.slice(0, FLOOR_SIZE), JSON.stringify(input)).toEqual([...SHIPPED_DANGEROUS_DOMAINS]);
+    }
+  });
+
+  test("hostile input shapes never throw and still carry the floor where there is a call to carry it on", async () => {
+    for (const shape of [null, [], "a string", 7]) {
+      const out = await searchVerdict(shape);
+      expect(Object.keys(updatedInputOf(out)!)).toEqual(["blocked_domains"]);
+    }
+  });
+});
+
+describe("sessionHooksFor — the floor's wiring, ordering and both legs", () => {
+  test("`winter` and `official` are the SAME object — the floor cannot differ between the legs", () => {
+    const built = sessionHooksFor(baseDeps);
+    expect(built.official).toBe(built.winter);
+    expect(groupFor((built.official as { PreToolUse?: HookCallbackMatcher[] }).PreToolUse, "WebFetch")).toBe(groupFor(built.winter?.PreToolUse, "WebFetch"));
+  });
+
+  test("both groups are registered unconditionally, on the bare deps every mode shares", () => {
+    for (const deps of [baseDeps, { ...baseDeps, policy: () => "chat" as const }, { ...baseDeps, policy: () => "auto" as const }, { ...baseDeps, policy: () => "plan" as const }]) {
+      const matchers = sessionHooksFor(deps).winter?.PreToolUse ?? [];
+      expect(matchers.filter((m) => m.matcher === "WebFetch")).toHaveLength(1);
+      expect(matchers.filter((m) => m.matcher === "WebSearch")).toHaveLength(1);
+    }
+  });
+
+  test("the floor groups are registered LAST — a plugin transform can never land after them", () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-hooks-floor-order-"));
+    try {
+      const matchers = sessionHooksFor({
+        ...baseDeps, home,
+        hookFacade: { async runFor() { return []; } },
+        reviewer: new BashReviewer({ provider: { async *streamTurn() { /* never reached */ } } as never }),
+      }).winter?.PreToolUse ?? [];
+      expect(matchers.map((m) => m.matcher)).toEqual([undefined, "Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("a plugin pre-hook cannot un-deny a floor hit: the two are separate groups and deny outranks allow", async () => {
+    // The plugin group is the unmatched one and answers `allow`; the floor group is matched on
+    // WebFetch and answers `deny`. The SDK's reducer ranks deny above every other decision and
+    // short-circuits every hook after a committed deny, so the composite for this call is the deny —
+    // whatever the plugin said, and from whichever position it said it.
+    const hookFacade: HookFacadeLike = { async runFor() { return [{ pluginId: "p", result: { status: "ok", stdout: "" } }]; } };
+    const built = sessionHooksFor({ ...baseDeps, hookFacade });
+    const input = preInput({ tool_name: "WebFetch", tool_input: { url: "https://pastebin.com/x" }, tool_use_id: "t1" });
+    expect(await groupFor(built.winter?.PreToolUse, undefined).hooks[0]!(input, "t1", { signal: abortSignal() })).toEqual({});
+    expect(denialReason((await groupFor(built.winter?.PreToolUse, "WebFetch").hooks[0]!(input, "t1", { signal: abortSignal() })) as Record<string, unknown>)).toContain("pastebin.com");
   });
 });
