@@ -137,4 +137,38 @@ describe("settings.setSkillDenied + skills.list denial overlay", () => {
   test("not remote-allowed — local role only", () => {
     expect(REMOTE_ALLOWED_METHODS.has(METHODS.settingsSetSkillDenied)).toBe(false);
   });
+
+  // BLOCKER (fix wave, pre-merge review): a home whose settings.json is still v2-shaped on disk
+  // (the v2->v3 migration is in-memory only unless the daemon boot hook persists it) used to make
+  // saveSettings throw a raw zod dump on ANY write through this RPC. Exercised at the IPC layer
+  // (not just settings.ts directly) so the whole request/response path is proven, not just the
+  // pure transform.
+  test("succeeds against a v2-shaped settings.json on disk (BLOCKER)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-skill-denied-v2-"));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({
+      schemaVersion: 2,
+      provider: { type: "codex-oauth", model: "codex-oauth/gpt-5.6-sol" },
+    }));
+    mkdirSync(join(home, "skills", "my-skill"), { recursive: true });
+    writeFileSync(join(home, "skills", "my-skill", "SKILL.md"), "---\nname: my-skill\ndescription: a test skill\n---\n\nBody.");
+    const trust = new TrustStore(join(home, "trust.json"));
+    const skills = new SkillStore({ winterHome: home, trust });
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const secrets = new FileSecretStore(join(home, "secrets"));
+    const authority = new TokenAuthority(secrets);
+    const tokens = await authority.ensureTokens();
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets, skills });
+    stop = () => { server.stop(); store.close(); };
+
+    const c = await TestClient.connect(socketPath);
+    await c.hello(tokens.harness, "cli");
+    const setResult = await c.request(METHODS.settingsSetSkillDenied, { name: "my-skill", denied: true });
+    expect(setResult.error).toBeUndefined();
+    expect(setResult.result).toEqual({ ok: true, name: "my-skill", denied: true, rule: "Skill(my-skill)" });
+    const onDisk = JSON.parse(readFileSync(join(home, "settings.json"), "utf8"));
+    expect(onDisk.provider).toEqual({ model: "codex-oauth/gpt-5.6-sol" }); // `type` dropped, no longer poisons the write
+    expect(onDisk.permissions.deny).toEqual(["Skill(my-skill)"]);
+    c.close();
+  });
 });
