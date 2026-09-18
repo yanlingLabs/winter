@@ -418,7 +418,22 @@ export function sandboxConfigFor(home: string): SandboxSettingsConfig {
       // brand-aware (`sandbox/profile.ts:151-158`), and states that a user's own `denyWrite` cannot
       // defeat them — that is the protection that actually holds for the bash-redirect path, and it
       // is Winter's, not ours. Winter's contribution here is the daemon control plane.
-      denyWrite: [join(home, "run")],
+      // `runtimes` joined `run` here (2026-09-18) because the read list already had it and the write
+      // list did not, and on the OFFICIAL leg that asymmetry is reachable. Measured in
+      // `official-leg.e2e.test.ts`'s "8d MEASURED" test: that leg has NO path-independent out-of-cwd
+      // fence for Bash — containment there is these two lists plus `permissions.deny`, and a deny
+      // rule is per-tool (`Write(path)` does not constrain a `Bash` redirect). So `echo … >
+      // <home>/runtimes/bin/winter` had nothing stopping it, and that path is rung 4 of
+      // `resolveWinterExecutable`'s ladder (`runtime-sdk/executable.ts`) — code the NEXT spawn would
+      // run — while `<home>/runtimes/anthropic-config` holds the Console profile and
+      // `<home>/runtimes/claude-config` the official child's own state. The Winter leg was already
+      // covered (its seatbelt fences Bash to the working directory; the same e2e comment notes the
+      // contrast), so this closes the leg that was not.
+      //
+      // Nothing legitimate writes here through a TOOL: the runtime store is the daemon's own, and a
+      // child's internal writes (the official transcript store under `claude-config`) are the binary's,
+      // never its Bash sandbox's.
+      denyWrite: [join(home, "run"), join(home, "runtimes")],
       // The sole read denial Winter has ever had (CLAUDE.md: "the sole read denial is
       // `~/.winter/run`") — reads are otherwise deliberately unrestricted.
       // …plus `runtimes/` (8a: the runtime store is never model-readable — the engine's read tool
