@@ -105,6 +105,20 @@ export interface CapabilitySession {
   /** A per-session override of the daemon's `ComputerUseService`. Normally unset — the `computer`
    *  capability reads the daemon's single holder instead. */
   computerUse?: ComputerUseService;
+  /**
+   * Is an Exa API key stored for this incarnation? (2026-09-18, the web-tools ruling.)
+   *
+   * `research.ts` reads it to decide whether this session's server advertises `Search` at all: Exa's
+   * `/answer` endpoint requires a key, so without one the tool cannot work and the runtime's own
+   * `WebSearch` takes its place instead (`runtime-sdk/mode-options.ts`'s `disallowedToolsFor`, which
+   * names `Search` in `disallowedTools` in exactly the same case).
+   *
+   * **ABSENT READS AS `true`** — the same convention `ToolExposure.exaKeyPresent` keeps, and for the
+   * same reason: the two answers must never disagree, because a `disallowedTools` string that names a
+   * tool the server never advertised denies nothing, silently, and a server that advertises a tool
+   * `disallowedTools` withheld offers nothing, also silently. One value, one meaning, both doors.
+   */
+  exaKeyPresent?: boolean;
 }
 
 export interface CapabilityServerSpec {

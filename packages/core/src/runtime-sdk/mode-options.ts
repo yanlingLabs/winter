@@ -107,6 +107,16 @@ export const CAPABILITY_TOOL_MODES: Readonly<Record<string, { modes: readonly Se
 export const SDK_WEB_BUILTINS: readonly string[] = ["WebFetch", "WebSearch"];
 
 /**
+ * The daemon's own `Search`, by wire name — the ONE capability tool whose exposure depends on runtime
+ * state rather than on the mode alone, and the exact complement of `WebSearch`'s rule above.
+ *
+ * A literal, like every key in `CAPABILITY_TOOL_MODES`, and for the same reason: it is diffed against
+ * `capabilityToolName("research", "Search")` by the names test rather than computed here, so this
+ * module keeps no import edge into `capabilities/`.
+ */
+export const EXA_GATED_SEARCH_TOOL = "mcp__winter__research__Search";
+
+/**
  * Which runtime leg a tool list is being built for. The two legs' web surfaces are decided by
  * DIFFERENT owners — Winter's by this daemon's `Options.web`, claude's by claude — so the leg is a
  * REQUIRED argument rather than a defaulted one: a call site that forgets it would silently hand one
@@ -605,8 +615,9 @@ export function sandboxConfigFor(home: string): SandboxSettingsConfig {
  *   winter + code   nothing is added either: both tools are the code-mode web surface now.
  *   winter + chat   `WebSearch` is disallowed WHEN AN EXA KEY IS STORED, because the daemon's
  *   winter + disp.  `Search` (Exa answer mode) is then the search surface. With NO key `Search`
- *                   cannot work at all, so `WebSearch` — whose backend has an anonymous tier —
- *                   takes its place rather than leaving those two modes with no search.
+ *                   cannot work at all, so it is disallowed INSTEAD and `WebSearch` — whose backend
+ *                   has an anonymous tier — takes its place rather than leaving those two modes with
+ *                   no search. Exactly one of the two is withheld, never both and never neither.
  *
  * `WebFetch` is never disallowed on either leg in any mode any more.
  */
@@ -623,6 +634,13 @@ export function disallowedToolsFor(
   // `SDK_WEB_BUILTINS` for the ruling. A string in `disallowedTools` that the child does not
   // advertise is inert, so this is safe to state for a leg whose tool happens to be named otherwise.
   if (exposure.leg === "winter" && mode !== "code" && (exposure.exaKeyPresent ?? true)) out.push("WebSearch");
+  // …and its EXACT COMPLEMENT: with no key stored the daemon's own `Search` is withheld instead,
+  // because Exa's `/answer` endpoint cannot be called anonymously. The capability server makes the
+  // same decision on the same value (`capabilities/research.ts`, reading `CapabilitySession.
+  // exaKeyPresent`) — both are needed, and for opposite failure modes: a `disallowedTools` entry for a
+  // tool the server never advertised denies nothing, silently, while a server that advertises a tool
+  // this list withheld offers nothing, also silently.
+  if (exposure.leg === "winter" && exposure.exaKeyPresent === false) out.push(EXA_GATED_SEARCH_TOOL);
   return [...new Set(out)].sort();
 }
 

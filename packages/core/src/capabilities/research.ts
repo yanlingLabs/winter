@@ -42,8 +42,18 @@ export interface ResearchCapabilityDeps {
 }
 
 export function researchCapability(session: CapabilitySession, deps: ResearchCapabilityDeps): McpSdkServerConfigWithInstance {
-  return capabilityServer(
-    { key: "research", defs: [...searchToolDefs(deps.search), ...readPageToolDefs(deps.readPage)] },
-    session,
-  );
+  // THE OTHER HALF OF THE EXA GATE (2026-09-18 ruling). `Search` is Exa `/answer`, which REQUIRES a
+  // key, so with none stored the tool cannot work at all and the runtime's own `WebSearch` is exposed
+  // in its place (`mode-options.ts`'s `disallowedToolsFor`, which names `Search` in `disallowedTools`
+  // in exactly this case). Both doors must move together on the SAME value — see
+  // `CapabilitySession.exaKeyPresent`, whose absence reads as "a key is stored" here too.
+  //
+  // A zero-tool server is kept rather than dropped, exactly as a mode-filtered one is: the record's
+  // key set stays `CAPABILITY_SERVER_KEYS` (`index.ts`'s own contract) and a server advertising
+  // nothing is inert on the wire.
+  const defs = [
+    ...(session.exaKeyPresent === false ? [] : searchToolDefs(deps.search)),
+    ...readPageToolDefs(deps.readPage),
+  ];
+  return capabilityServer({ key: "research", defs }, session);
 }

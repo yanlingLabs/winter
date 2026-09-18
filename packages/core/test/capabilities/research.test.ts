@@ -70,6 +70,34 @@ describe("researchCapability: the server shape", () => {
   });
 });
 
+describe("researchCapability: Search's PRESENCE follows the Exa key (2026-09-18 ruling)", () => {
+  // The capability-build half of the gate. `mode-options.ts`'s `disallowedToolsFor` makes the
+  // complementary decision from the same value; both are needed, because a `disallowedTools` entry for
+  // a tool the server never advertised denies nothing and a server advertising a tool the list withheld
+  // offers nothing — silently, either way.
+  const deps = { search: {}, readPage: { cache: new PageCache() } };
+  const session = (over: Partial<CapabilitySession>): CapabilitySession =>
+    ({ sessionId: SID, mode: "chat", cwd: "/tmp", roots: ["/tmp"], ...over });
+
+  test("exaKeyPresent: false → the server advertises NO Search (it would be permanently uncallable)", () => {
+    const instance = researchCapability(session({ exaKeyPresent: false }), deps).instance as WinterMcpServerInstance;
+    expect(instance.listTools().map((t) => t.name)).not.toContain("Search");
+  });
+
+  test("exaKeyPresent: true, and ABSENT, both advertise it — absent reads as PRESENT, as ToolExposure does", () => {
+    for (const over of [{ exaKeyPresent: true }, {}]) {
+      const instance = researchCapability(session(over), deps).instance as WinterMcpServerInstance;
+      expect(instance.listTools().map((t) => t.name)).toContain("Search");
+    }
+  });
+
+  test("the server itself is still built and still named — only its tool list narrows", () => {
+    const server = researchCapability(session({ exaKeyPresent: false }), deps);
+    expect(server.name).toBe("winter__research");
+    expect(isWinterMcpServerInstance(server.instance)).toBe(true);
+  });
+});
+
 describe("researchCapability: the Exa key never leaves the daemon (C-6 / P8b-12)", () => {
   test("the serialized listTools() output contains no key, and nothing read one to build it", () => {
     const h = harness();
