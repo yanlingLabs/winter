@@ -748,6 +748,16 @@ describe("role efforts on the runtime leg (pins.dispatch, and provider.model's d
       expect(await spawnedEffort(withDefault("high"), { mode: "code", effort: "low" })).toBe("low");
     });
 
+    test("a STALE own effort (left behind by a model switch) is not spent: the child is never handed a level its model refuses", async () => {
+      // The field report: 'high' chosen on a reasoning model, then the session moved to a row with an
+      // EMPTY vocabulary — the child refused the next turn typed. The level is treated as unset.
+      expect(await spawnedEffort(settingsOf({}), { mode: "code", model: "deepseek-anthropic/deepseek-reasoner", effort: "high" })).toBeUndefined();
+      // ...and the implicit default takes over where the row has one to map onto.
+      expect(await spawnedEffort(withDefault("max"), { mode: "code", model: "openai/o4-mini", effort: "galactic" })).toBe("medium");
+      // A level the row DOES list is still spent verbatim.
+      expect(await spawnedEffort(settingsOf({}), { mode: "code", model: "anthropic/claude-opus-5", effort: "high" })).toBe("high");
+    });
+
     test("it is IMPLICIT: mapped onto the session's own model's row, or omitted — never forced, never a refusal", async () => {
       expect(await spawnedEffort(withDefault("max"), { mode: "code", model: "openai/o4-mini" })).toBe("medium");
       expect(await spawnedEffort(withDefault("medium"), { mode: "code", model: "deepseek/deepseek-v4-flash" })).toBeUndefined();
