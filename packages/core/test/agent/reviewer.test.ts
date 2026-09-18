@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { bashLooksSafe, BashReviewer, REVIEW_INSTRUCTION, FS_REVIEW_INSTRUCTION, EXTERNAL_REVIEW_INSTRUCTION } from "../../src/agent/reviewer";
 import { FakeProvider } from "../../src/agent/fake-provider";
 import type { ProviderEvent } from "../../src/providers/types";
 import { internalRoleEffortFor } from "../../src/providers/manager";
+import { RoleHealthRegistry } from "../../src/providers/role-health";
 import { Settings } from "../../src/settings";
 
 describe("bashLooksSafe", () => {
@@ -211,5 +215,35 @@ describe("BashReviewer: the reviewer.model role effort", () => {
     holder.settings = settingsOf({ roleEfforts: { "reviewer.model": "low" } });
     await reviewer.review({ command: "pwd" });
     expect(p.requests.map((r) => r.reasoningEffort)).toEqual([undefined, "low"]);
+  });
+});
+
+describe("BashReviewer role-health wiring (2026-09-18) — observation only", () => {
+  const handle = (script: any) => ({ provider: { provider: new FakeProvider(script), model: "fake" } });
+
+  test("a provider error records reviewer.model under the tag that ran, and STILL throws the same 'reviewer returned no JSON verdict' as before", async () => {
+    const roleHealth = new RoleHealthRegistry(mkdtempSync(join(tmpdir(), "winter-reviewer-rh-")));
+    const failing: any = { ...handle([[{ type: "error", code: "network", message: "ECONNRESET" }]]), boundProviderId: () => "openai", roleHealth };
+    const reviewer = new BashReviewer(failing);
+    // Unchanged: no text ever arrives, so review() still throws its pre-existing "no JSON verdict" error.
+    await expect(reviewer.review({ command: "ls" })).rejects.toThrow(/no JSON verdict/);
+    const problem = roleHealth.problemFor("reviewer.model", "openai/fake");
+    expect(problem).not.toBeNull();
+    expect(problem?.reason).toBe("provider-unavailable");
+  });
+
+  test("a successful review clears a previously recorded note", async () => {
+    const roleHealth = new RoleHealthRegistry(mkdtempSync(join(tmpdir(), "winter-reviewer-rh2-")));
+    roleHealth.recordFailure("reviewer.model", "openai/fake", { reason: "other", detail: "stale" });
+    const verdict: ProviderEvent[][] = [[{ type: "text_delta", delta: JSON.stringify({ verdict: "safe", reason: "ok" }) }, { type: "done", stopReason: "end_turn" }]];
+    const ok: any = { ...handle(verdict), boundProviderId: () => "openai", roleHealth };
+    const reviewer = new BashReviewer(ok);
+    expect(await reviewer.review({ command: "ls" })).toEqual({ verdict: "safe", reason: "ok" });
+    expect(roleHealth.problemFor("reviewer.model", "openai/fake")).toBeNull();
+  });
+
+  test("no boundProviderId/roleHealth wired (every pre-existing construction) -> unchanged", async () => {
+    const reviewer = new BashReviewer(handle([[{ type: "error", code: "network", message: "x" }]]) as any);
+    await expect(reviewer.review({ command: "ls" })).rejects.toThrow(/no JSON verdict/);
   });
 });

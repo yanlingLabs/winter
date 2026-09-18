@@ -4,6 +4,7 @@ import { hasOpenPanelTabs } from "../panel/store";
 import type { Settings } from "../settings";
 import { effortToSpendForRole, pinsFor, ownProviderFor } from "../settings";
 import { internalModelFor } from "../providers/manager";
+import { classifyProviderFailure, type RoleHealthRegistry, type SubscriptionQuotaSource } from "../providers/role-health";
 import { activityFor, type ActivityRow } from "./activity";
 import { appendCleanerLog } from "./cleaner-log";
 import { SYNCED_SESSION_ID_RE } from "./store";
@@ -90,7 +91,9 @@ export interface CleanerDeps {
    *  dreams. `live`, when present, is `RebindableProvider.live` (providers/manager.ts, item 2) —
    *  the CURRENTLY BOUND backend's identity; see `DreamerDeps.provider`'s own doc comment for why
    *  `judge` below compares against this rather than a pure settings read. */
-  provider: { provider: Provider; model: string; live?: () => { providerId?: string } };
+  // `quota?`: see `DreamerDeps.provider`'s identical field (agent/dreamer.ts) for the full doc —
+  // same `RebindableProvider.quota`, same reason, structurally satisfied with no adapter.
+  provider: { provider: Provider; model: string; live?: () => { providerId?: string }; quota?: SubscriptionQuotaSource };
   // WS-20: hot settings read, same "re-read every call" discipline as every other settings-backed
   // getter — `pinsFor(deps.settings())` is called at each pass, never a boot snapshot.
   settings: () => Settings | null;
@@ -120,6 +123,9 @@ export interface CleanerDeps {
    *  reaper takes (`ReaperDeps.onDelete`), for the same reason and with the same ordering: called
    *  only AFTER `deleteSession` succeeded. Absent on a daemon with no runtime spine. */
   onDelete?: (sessionId: string) => void;
+  /** 2026-09-18: quiet per-role failure notes (`providers/role-health.ts`) — OBSERVATION ONLY, never
+   *  changes `judge`'s "returns null for every failure mode" contract. Absent records nothing. */
+  roleHealth?: RoleHealthRegistry;
 }
 
 /** What one pass did. Tests/observability only — the Dreamer ignores it. */
@@ -350,16 +356,24 @@ export class SessionCleaner {
     // The Dreamer's own abort-tied-to-the-race idiom, verbatim: without the signal a timeout only
     // makes THIS call stop waiting while the detached generator keeps draining a hung connection.
     const ac = new AbortController();
+    // See dreamer.ts's identical `effectiveTag` comment — same recomposition, same reason.
+    const effectiveTag = `${boundProviderId}/${cleanerModel}`;
     let text = "";
+    let sawProviderError = false;
     const run = (async () => {
       for await (const ev of this.deps.provider.provider.streamTurn({
         model: cleanerModel, ...(cleanerEffort === undefined ? {} : { reasoningEffort: cleanerEffort }), instructions: CLEANER_INSTRUCTION,
         input, tools: [], signal: ac.signal,
       })) {
         if (ev.type === "text_delta") text += ev.delta;
-        else if (ev.type === "error") throw new Error(`provider error: ${ev.message}`);
+        else if (ev.type === "error") {
+          sawProviderError = true;
+          this.deps.roleHealth?.recordFailure("pins.cleaner", effectiveTag, classifyProviderFailure({ ...ev, subscriptionQuota: this.deps.provider.quota?.subscriptionQuota() }));
+          throw new Error(`provider error: ${ev.message}`);
+        }
         else if (ev.type === "done" && ev.stopReason === "aborted") throw new Error("judgment aborted");
       }
+      if (!sawProviderError) this.deps.roleHealth?.recordSuccess("pins.cleaner");
     })();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new Error("judgment timed out")), this.timeoutMs); });

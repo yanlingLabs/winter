@@ -17,13 +17,14 @@ import { ensureOutdir } from "./sessions/outdir";
 import { writeDiff, type DiffHeader } from "./diffs/store";
 import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
-import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, type Settings } from "./settings";
+import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, pinsFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, type Settings } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
 import { createRebindableProvider, internalModelFor, internalRoleEffortFor } from "./providers/manager";
 import type { Provider } from "./providers/types";
 import { QuotaManager } from "./providers/quota";
+import { RoleHealthRegistry, recordDispatchOutcome, type SubscriptionQuotaSource } from "./providers/role-health";
 import { ToolRegistry } from "./agent/tools/registry";
 import { WorkflowRuntime } from "./workflows/runtime";
 import { WorkflowStore } from "./workflows/store";
@@ -305,7 +306,11 @@ export async function startDaemon(opts: {
   // that injects a plain `FakeProvider` double never has one, and `settings-apply.ts`'s
   // `applyAgentProviderDiff` is itself a no-op with no `refreshAgentProvider` dep wired for it —
   // same "typed no-op, never a crash" shape every other optional hook on this options object has.
-  agentProvider?: { provider: Provider; model: string; live?: () => { model: string; reasoningEffort?: string; providerId?: string }; refresh?: (next: Settings, secrets: SecretStore, settingsPath?: string) => Promise<boolean> } | null;
+  // 2026-09-18: `quota?`, same optionality reasoning as `refresh` just above — a test double never
+  // has one, the real `RebindableProvider` (providers/manager.ts) always does. Widened here (rather
+  // than left for structural subtyping to paper over) so `daemon.ts`'s own `research` construction
+  // can read `agentProvider.quota` for role-health's `subscriptionQuota` input.
+  agentProvider?: { provider: Provider; model: string; live?: () => { model: string; reasoningEffort?: string; providerId?: string }; refresh?: (next: Settings, secrets: SecretStore, settingsPath?: string) => Promise<boolean>; quota?: SubscriptionQuotaSource } | null;
   /** TEST ONLY (fix round 1, M2) — threaded straight into `WinterLegDeps.officialConnectionOverride`;
    *  a production caller never sets this. See that field's own doc for why it exists at all. */
   officialConnectionOverride?: WinterLegDeps["officialConnectionOverride"];
@@ -458,6 +463,14 @@ export async function startDaemon(opts: {
   let activityDeriver: ActivityDeriver | undefined;
 
   const winterHome = dirs.home;
+
+  // Settings surface (role-health, 2026-09-18): quiet per-role failure notes for the Mac app's
+  // Roles pane — see `providers/role-health.ts` for the full design. Constructed unconditionally
+  // and this early because one of its consumers (dispatch, wired below via `hub.addObserver`) needs
+  // no `agentProvider` at all, and every other consumer (titler/reviewer/dreamer/cleaner/research,
+  // plus the two `settings.modelRoles`/`settings.setModelRole` RPC handlers) shares this ONE
+  // instance rather than each holding its own view of the same on-disk file.
+  const roleHealth = new RoleHealthRegistry(winterHome);
 
   // Loaded once, up front, so the settings-derived plugin consent (below) is available before
   // the SkillStore and PluginStore are built. A malformed settings.json degrades to `null` here
@@ -1383,7 +1396,14 @@ export async function startDaemon(opts: {
     model: agentProvider?.live?.().model ?? agentProvider?.model ?? "",
   });
   const titlesEffort = (): string | undefined => internalRoleEffortFor(settings, "titles.model", settings?.titles?.model, boundSelection());
-  const sessionTitler = agentProvider === null ? undefined : new SessionTitler({ provider: agentProvider, store, hub, model: titlesModel, effort: titlesEffort });
+  // 2026-09-18: quiet per-role failure notes — `boundSelection().providerId` is the SAME bound
+  // backend identity `titlesModel`/`titlesEffort` above already read, so the tag role-health records
+  // against is provably the one `titlesModel`'s own fall-through chose.
+  const boundProviderIdForRoles = (): string => boundSelection().providerId;
+  const sessionTitler = agentProvider === null ? undefined : new SessionTitler({
+    provider: agentProvider, store, hub, model: titlesModel, effort: titlesEffort,
+    boundProviderId: boundProviderIdForRoles, roleHealth,
+  });
   const titler = sessionTitler === undefined ? undefined : {
     maybeTitle: (sid: string): Promise<void> => (settings?.titles?.enabled === false ? Promise.resolve() : sessionTitler.maybeTitle(sid)),
   };
@@ -1445,7 +1465,10 @@ export async function startDaemon(opts: {
   const reviewerEffort = (): string | undefined => internalRoleEffortFor(settings, "reviewer.model", settings?.reviewer?.model, boundSelection());
   const bashReviewer = agentProvider === null || agentProvider === undefined
     ? undefined
-    : new BashReviewer({ provider: agentProvider, model: reviewerModel, effort: reviewerEffort });
+    : new BashReviewer({
+        provider: agentProvider, model: reviewerModel, effort: reviewerEffort,
+        boundProviderId: boundProviderIdForRoles, roleHealth,
+      });
   const hooksFor = (session: CapabilitySession) =>
     sessionHooksFor({
       sessionId: session.sessionId,
@@ -1488,6 +1511,34 @@ export async function startDaemon(opts: {
     } else if (event.type === "tool_result") {
       sinks.onToolResult({ ...event, generation: runtime?.records.get(event.sessionId)?.generation });
     }
+  });
+  // 2026-09-18 (role-health): dispatch is a REAL runtime session (unlike the six internal-Provider
+  // roles above, it never touches `agentProvider` — the router picks whichever leg/provider dispatch
+  // is configured for), so its terminal failures are observed the SAME way `sinks` above observes
+  // `tool_call`/`tool_result`: `hub.addObserver` fires for every appended event of EVERY session,
+  // filtered here to the ONE dispatch-singleton session (`store.dispatchSessionId()` — the same
+  // session id `dreamer.ts`/`cleaner.ts` already poll). This is additive-only: nothing here changes
+  // what `agent_error`/`turn_completed` carry or how any other consumer of them behaves.
+  hub.addObserver((event) => {
+    // Nit 1 (whole-branch review, sinks' own precedent 15 lines up): check the event TYPE first — a
+    // hub observer fires for every appended event of every session, and every other type here would
+    // otherwise pay a `dispatchSessionId()` SQL lookup (`SELECT … WHERE mode='dispatch'`) for
+    // nothing, the same waste that comment already flags for the generation lookup above.
+    if (event.type !== "agent_error" && event.type !== "turn_completed") return;
+    const dispatchId = store.dispatchSessionId();
+    if (dispatchId === undefined || event.sessionId !== dispatchId) return;
+    // The effective tag: the session's OWN durable record (`runtime-state.db`'s `providerId`/
+    // `modelRef` — the SAME per-session facts CLAUDE.md's "Durable per-session facts" section
+    // describes) when the runtime spine is online, since that is the tag THIS session actually ran
+    // on; `pinsFor(settings).dispatch` (the live settings default) only as a fallback for a daemon
+    // with no runtime spine at all (`runtime` undefined — role health then has no per-session record
+    // to read and the live pin is the best available approximation).
+    const rec = runtime?.records.get(event.sessionId);
+    const tag = rec ? `${rec.providerId}/${rec.modelRef}` : pinsFor(settings).dispatch;
+    // The actual decision (classify, and which events count) is `role-health.ts`'s own
+    // `recordDispatchOutcome` — factored out so it is unit-testable without a full daemon boot;
+    // this closure's only job is the filter above and resolving `tag`.
+    recordDispatchOutcome(event, tag, roleHealth);
   });
   // Daemon settings surface (2026-09-17 plan, item 3): hoisted alongside `winterDrivers` below (the
   // ONE producer) for the identical reason — the RPC that reads it must work on a daemon with or
@@ -1653,7 +1704,7 @@ export async function startDaemon(opts: {
     // already narrowed on (non-null here) — `.live?.()` reads the CURRENTLY BOUND backend's own
     // identity, so research's own `internalModelFor` gate agrees with whichever backend
     // `agentProvider.provider` (passed above) actually dispatches to, even after a hot rebind.
-    const research = createResearchRunner({ provider: agentProvider.provider, cache: pageCache, audit: (line) => audit.append(line), dangerousDomainsAdded, settings: () => settings, providerId: () => agentProvider!.live?.().providerId ?? ownProviderFor(settings) });
+    const research = createResearchRunner({ provider: agentProvider.provider, cache: pageCache, audit: (line) => audit.append(line), dangerousDomainsAdded, settings: () => settings, providerId: () => agentProvider!.live?.().providerId ?? ownProviderFor(settings), roleHealth, quota: agentProvider.quota });
     researchRunner = research; // the holder the `research` capability server reads (P8b Task 7)
     // B2 Task 4: the agent's browser. Four narrow deps, each the SAME thing the equivalent RPC uses —
     // `tabs` is the fold `panel.list` serves, `openTab` is the function `panel.openTab`'s handler
@@ -2034,6 +2085,9 @@ export async function startDaemon(opts: {
       // WS-20: hot settings read — `pinsFor(deps.settings()).dream` is what actually decides the
       // model now, never a boot snapshot (see Dreamer's own DreamerDeps.settings doc comment).
       settings: () => settings,
+      // 2026-09-18: quiet per-role failure notes — the ONE registry instance every consumer shares
+      // (constructed unconditionally near `winterHome` above).
+      roleHealth,
       // session-activity-hygiene T7 (spec §3): the cleaner rides THIS scheduler slot. Constructed
       // here (not at the top of the file) for the same reason the Dreamer is: it needs a provider,
       // and the signals it derives activity from (`engine`, `hub`) are only final by this point.
@@ -2062,6 +2116,7 @@ export async function startDaemon(opts: {
         // P8a Task 12: the second sanctioned deletion path takes runtime state with it too, exactly
         // as the reaper's does (WS-16 §16) — and, since Task 16, the session's Winter child.
         onDelete: onSessionDeleted,
+        roleHealth,
       }),
     });
     dreamer.start();
@@ -2301,6 +2356,9 @@ export async function startDaemon(opts: {
     // Fix wave (finding 4): the actually-bound internal-Provider backend, for settings.modelRoles/
     // settings.setModelRole's `permitted` computation — see this const's own doc comment above.
     boundProviderId,
+    // 2026-09-18: the shared role-health registry (constructed near `winterHome` above) — read by
+    // `settings.modelRoles`/`settings.setModelRole`'s handlers to merge a `problem` onto each role.
+    roleHealth,
     // Fix wave (finding 4b): the SAME retry lever `settings-apply.ts`'s hot-reload path calls on
     // every settled apply, now also reachable from `credential.set`'s handler — see that handler's
     // own doc comment for why a credential add needs this rather than waiting for an unrelated

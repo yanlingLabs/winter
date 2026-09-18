@@ -1,4 +1,5 @@
 import type { Provider, TurnInputItem } from "../providers/types";
+import { classifyProviderFailure, type RoleHealthRegistry, type SubscriptionQuotaSource } from "../providers/role-health";
 import type { SessionStore } from "../sessions/store";
 import type { SessionHub } from "../sessions/hub";
 
@@ -22,7 +23,7 @@ export class SessionTitler {
   // cross-provider rebind, forever. `live?.().model` is the hot resolver (`buildLiveModelResolver`,
   // providers/manager.ts) that re-reads settings.json on every call regardless of rebinding — see
   // `oneShot`'s own fallback below.
-  private readonly provider: { provider: Provider; model: string; live?: () => { model: string } };
+  private readonly provider: { provider: Provider; model: string; live?: () => { model: string }; quota?: SubscriptionQuotaSource };
   private readonly store: SessionStore;
   private readonly hub: SessionHub;
   // Daemon settings surface (2026-09-17 plan, item 4a): `titles.model` used to be resolved ONCE at
@@ -40,13 +41,19 @@ export class SessionTitler {
   // it. Absent, or answering `undefined`, sends no `reasoningEffort` at all, exactly as before.
   private readonly effort: (() => string | undefined) | undefined;
   private readonly timeoutMs: number;
+  // 2026-09-18: quiet per-role failure notes (`providers/role-health.ts`) — OBSERVATION ONLY, this
+  // class's own "NEVER throws" contract is unchanged. A live getter, same reason `model`/`effort`
+  // above are ones: `daemon.ts`'s own `boundProviderId` closure, re-read every call so a hot rebind
+  // is reflected in the tag a failure/success is recorded against.
+  private readonly boundProviderId: (() => string) | undefined;
+  private readonly roleHealth: RoleHealthRegistry | undefined;
   // Re-entrancy guard: the engine fires maybeTitle() fire-and-forget at every depth-0 turn
   // completion, and a slow model call must not overlap with itself for the same session (which
   // would otherwise race two "is it already titled" checks against the same not-yet-titled store).
   private readonly inFlight = new Set<string>();
 
   constructor(deps: {
-    provider: { provider: Provider; model: string; live?: () => { model: string } };
+    provider: { provider: Provider; model: string; live?: () => { model: string }; quota?: SubscriptionQuotaSource };
     store: SessionStore;
     hub: SessionHub;
     /** A live getter, re-read on every `maybeTitle()` call — never a boot snapshot. `undefined`
@@ -56,6 +63,10 @@ export class SessionTitler {
     model?: () => string | undefined;
     /** A live getter beside `model`, re-read on every `maybeTitle()` call — see the field's own doc. */
     effort?: () => string | undefined;
+    /** See the field's own doc comment above. Absent → role health records nothing for this role
+     *  (a test double, or a daemon whose `RoleHealthRegistry` was never wired). */
+    boundProviderId?: () => string;
+    roleHealth?: RoleHealthRegistry;
     timeoutMs?: number;
   }) {
     this.provider = deps.provider;
@@ -63,6 +74,8 @@ export class SessionTitler {
     this.hub = deps.hub;
     this.model = deps.model;
     this.effort = deps.effort;
+    this.boundProviderId = deps.boundProviderId;
+    this.roleHealth = deps.roleHealth;
     // A junk env value must fall back to the default, not become NaN — setTimeout(fn, NaN) fires
     // immediately (dreamer.ts's constructor guards the same footgun the same way).
     const n = Number(process.env.WINTER_TITLE_TIMEOUT_MS);
@@ -107,15 +120,18 @@ export class SessionTitler {
     const ac = new AbortController();
     const run = (async () => {
       let text = "";
+      let sawProviderError = false;
       // Read in the same synchronous breath as `model` below (no `await` between them), so the two
       // always come from one settings generation. Spread conditionally: an absent effort must leave
       // the request with NO `reasoningEffort` key, not an `undefined`-valued one.
       const effort = this.effort?.();
+      // Minor 5c: the LIVE bound model first (re-reads settings.json every call, unaffected by
+      // whether a rebind ever crossed providers), the static snapshot only when no `live` exists
+      // at all (a bare test double) — the SAME model this call is about to spend, so the tag
+      // recorded below is provably the one that ran.
+      const effectiveModel = this.model?.() ?? this.provider.live?.().model ?? this.provider.model;
       for await (const ev of this.provider.provider.streamTurn({
-        // Minor 5c: the LIVE bound model first (re-reads settings.json every call, unaffected by
-        // whether a rebind ever crossed providers), the static snapshot only when no `live` exists
-        // at all (a bare test double).
-        model: this.model?.() ?? this.provider.live?.().model ?? this.provider.model,
+        model: effectiveModel,
         ...(effort === undefined ? {} : { reasoningEffort: effort }),
         instructions: TITLE_INSTRUCTION,
         input: turnInput,
@@ -123,8 +139,17 @@ export class SessionTitler {
         signal: ac.signal,
       })) {
         if (ev.type === "text_delta") text += ev.delta;
+        // 2026-09-18: role health only — this class had NO branch for `ev.type === "error"` before
+        // (the loop simply kept waiting for the next event, which is what still happens: no
+        // `break`/`throw` added here). See this class's own module note above ("all failures logged
+        // + swallowed" — that swallowing is unchanged).
+        else if (ev.type === "error" && this.boundProviderId) {
+          sawProviderError = true;
+          this.roleHealth?.recordFailure("titles.model", `${this.boundProviderId()}/${effectiveModel}`, classifyProviderFailure({ ...ev, subscriptionQuota: this.provider.quota?.subscriptionQuota() }));
+        }
         else if (ev.type === "done" && ev.stopReason === "aborted") throw new Error("title generation aborted");
       }
+      if (!sawProviderError && this.boundProviderId) this.roleHealth?.recordSuccess("titles.model");
       return text;
     })();
 

@@ -106,6 +106,7 @@ import type { HardwareBroker } from "../peripheral/hardware";
 import { verbClass } from "../peripheral/hardware";
 import type { QuotaManager } from "../providers/quota";
 import { modelCatalogWire } from "../providers/model-catalog-wire";
+import { withProblemsForRoles, type RoleHealthRegistry } from "../providers/role-health";
 import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, readRawSettings } from "../settings";
 import { disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
@@ -364,6 +365,11 @@ export interface IpcServerOptions {
   // `boundProviderId` — absent (every pre-fix test, or a no-agentProvider daemon) falls back to
   // `ownProviderFor(settings)` there, unchanged.
   boundProviderId?: () => string;
+  // 2026-09-18: the shared role-health registry (daemon.ts, constructed once near `winterHome`) —
+  // read by `settings.modelRoles`/`settings.setModelRole` ONLY, to merge a `problem` onto each
+  // role's wire shape (`providers/role-health.ts`'s `withProblem`). Absent (every pre-existing
+  // test/caller) means `problem` reports `null` for every role — never a crash, never a guess.
+  roleHealth?: RoleHealthRegistry;
   // Fix wave (pre-merge review, finding 4b): `RebindableProvider.refresh` (providers/manager.ts),
   // pre-bound to `secrets`/`settingsPath` — the SAME closure `settings-apply.ts`'s hot-reload path
   // calls on every settled apply (`daemon.ts`'s `refreshAgentProviderHot`). `credential.set`'s
@@ -2287,7 +2293,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (opts.winterHome) {
           try { settings = loadSettings(join(opts.winterHome, "settings.json")); } catch { settings = null; }
         }
-        return { ok: true, roles: modelRolesFor(settings, opts.boundProviderId?.()) };
+        // 2026-09-18: `problem` is merged in HERE, not inside `modelRolesFor`/`modelRoleInfo`
+        // (settings.ts) — those stay pure `Settings -> …` readers with no fs/registry dependency;
+        // `withProblemsForRoles` is the wire-only augmentation (`providers/role-health.ts`'s own doc
+        // comment explains the split).
+        return { ok: true, roles: withProblemsForRoles(modelRolesFor(settings, opts.boundProviderId?.()), opts.roleHealth) };
       }
       // Daemon settings surface (2026-09-17 plan, item 4) — the ONE write door for all nine model
       // roles. LOCAL-ROLE ONLY. Mirrors `settings.setAdvisorModel`'s own handler shape exactly
@@ -2316,7 +2326,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           throw new RpcFailure(ERR.INVALID_PARAMS, err instanceof Error ? err.message : String(err));
         }
         saveSettings(settingsPath, next);
-        const roles = modelRolesFor(next, opts.boundProviderId?.());
+        const roles = withProblemsForRoles(modelRolesFor(next, opts.boundProviderId?.()), opts.roleHealth);
         return { ok: true, model: roles[p.role].model, roles };
       }
       // -----------------------------------------------------------------------------------------

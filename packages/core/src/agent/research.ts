@@ -5,6 +5,7 @@ import { READPAGE_PER_PAGE_CHAR_CAP, READPAGE_TOTAL_OUTPUT_CHAR_CAP } from "./to
 import type { Settings } from "../settings";
 import { effortToSpendForRole, pinsFor, ownProviderFor } from "../settings";
 import { internalModelFor } from "../providers/manager";
+import { classifyProviderFailure, type RoleHealthRegistry, type SubscriptionQuotaSource } from "../providers/role-health";
 
 /**
  * B2-T3: the ephemeral research sub-agent. A plain, radically reduced loop over
@@ -151,6 +152,17 @@ export interface ResearchDeps {
    *  card, so a match here is a hard refusal (see `handleFetchPage`'s and the seed-fetch's own
    *  checks below), never a request for a human's yes. */
   dangerousDomainsAdded?: (cwd?: string) => string[] | undefined;
+  /** 2026-09-18: quiet per-role failure notes (`providers/role-health.ts`) — OBSERVATION ONLY, never
+   *  changes any thrown/resolved shape below. Two roles share this runner (`pins.research`/
+   *  `pins.researchFallback`); each round records against whichever one actually ran it. */
+  roleHealth?: RoleHealthRegistry;
+  /** The SAME `RebindableProvider.quota` `DreamerDeps.provider.quota` documents (agent/dreamer.ts)
+   *  — a SEPARATE field here (unlike that class's wrapped `provider`) because `deps.provider` above
+   *  is the RAW `Provider` (daemon.ts hands this runner `agentProvider.provider`, not the whole
+   *  `RebindableProvider`), so there is no `.quota` to reach through it. daemon.ts wires this to
+   *  `agentProvider.quota` — the identical `QuotaManager` instance the internal Provider's own
+   *  `withQuota` wrapper reports subscription-quota frames into. */
+  quota?: SubscriptionQuotaSource;
 }
 
 interface RunState {
@@ -474,6 +486,11 @@ async function runResearch(q: ResearchQuery, deps: ResearchDeps, externalSignal:
 
     // Re-picked every round, because `usedFallback` can flip between two iterations of this loop.
     const roundEffort = usedFallback ? researchFallbackEffort : researchEffort;
+    // 2026-09-18: which ROLE this particular round actually spends, captured before `usedFallback`
+    // can flip below — a round that fails and THEN switches to the fallback still failed as the
+    // role it started as, never the one it is about to retry as.
+    const roleForThisRound: "pins.research" | "pins.researchFallback" = usedFallback ? "pins.researchFallback" : "pins.research";
+    const tagForThisRound = `${ownProvider}/${model}`;
     const iterator = deps.provider.streamTurn({
       model,
       instructions: RESEARCH_SYSTEM_PROMPT,
@@ -523,6 +540,12 @@ async function runResearch(q: ResearchQuery, deps: ResearchDeps, externalSignal:
     // Captured BEFORE the roundError check below (fix-round-1 Minor 2) — a LATER round's failure
     // must not discard an EARLIER round's own assistant text (a partial answer beats none).
     if (textBuf) lastText = textBuf;
+
+    // 2026-09-18: observation only — recorded before either of `roundError`'s own branches (the
+    // fallback retry or the throw below), which are both unchanged. A round with no error is the
+    // role's own success, whether or not the OVERALL run later times out or exhausts its rounds.
+    if (roundError) deps.roleHealth?.recordFailure(roleForThisRound, tagForThisRound, classifyProviderFailure({ ...roundError, subscriptionQuota: deps.quota?.subscriptionQuota() }));
+    else deps.roleHealth?.recordSuccess(roleForThisRound);
 
     if (roundError) {
       // WS-20 (review round 1, GUARD): `researchFallbackModel` is `undefined` when

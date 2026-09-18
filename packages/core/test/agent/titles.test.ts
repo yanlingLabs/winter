@@ -8,6 +8,7 @@ import { SessionTitler } from "../../src/agent/titles";
 import { FakeProvider } from "../../src/agent/fake-provider";
 import type { ModelInfo, Provider, ProviderEvent, TurnRequest } from "../../src/providers/types";
 import { internalRoleEffortFor } from "../../src/providers/manager";
+import { RoleHealthRegistry } from "../../src/providers/role-health";
 import { Settings } from "../../src/settings";
 
 function setup(script: ProviderEvent[][]) {
@@ -308,5 +309,54 @@ describe("SessionTitler: the titles.model role effort", () => {
     expect((await t.title()).reasoningEffort).toBe("high");
     t.holder.settings = settingsOf({});
     expect("reasoningEffort" in (await t.title())).toBe(false);
+  });
+});
+
+describe("SessionTitler role-health wiring (2026-09-18) — observation only", () => {
+  test("a provider error (a class titles.ts never had a branch for before) records titles.model, never throws or changes maybeTitle's swallow-and-log behaviour", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-titles-rh-home-"));
+    const store = new SessionStore(home);
+    const hub = new SessionHub(store);
+    const roleHealth = new RoleHealthRegistry(mkdtempSync(join(tmpdir(), "winter-titles-rh-registry-")));
+    const failing = new FakeProvider([[{ type: "error", code: "rate_limit", providerCode: "insufficient_quota", message: "429" }]]);
+    const titler = new SessionTitler({
+      provider: { provider: failing, model: "fake-1" }, store, hub,
+      boundProviderId: () => "openai", roleHealth,
+    });
+    const sessionId = store.createSession("global", { cwd: "/tmp" });
+    seedTurn(store, sessionId);
+
+    // maybeTitle's own contract: NEVER throws, and no title is written on a failed call.
+    await expect(titler.maybeTitle(sessionId)).resolves.toBeUndefined();
+    expect(store.getTitle(sessionId)).toBeNull();
+
+    const problem = roleHealth.problemFor("titles.model", "openai/fake-1");
+    expect(problem).not.toBeNull();
+    expect(problem?.reason).toBe("out-of-credits");
+  });
+
+  test("a successful title clears a previously recorded note", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-titles-rh-home2-"));
+    const store = new SessionStore(home);
+    const hub = new SessionHub(store);
+    const roleHealth = new RoleHealthRegistry(mkdtempSync(join(tmpdir(), "winter-titles-rh-registry2-")));
+    roleHealth.recordFailure("titles.model", "openai/fake-1", { reason: "other", detail: "stale" });
+    const ok = new FakeProvider(titleScript("Fix the login flow"));
+    const titler = new SessionTitler({
+      provider: { provider: ok, model: "fake-1" }, store, hub,
+      boundProviderId: () => "openai", roleHealth,
+    });
+    const sessionId = store.createSession("global", { cwd: "/tmp" });
+    seedTurn(store, sessionId);
+    await titler.maybeTitle(sessionId);
+    expect(store.getTitle(sessionId)).toBe("Fix the login flow");
+    expect(roleHealth.problemFor("titles.model", "openai/fake-1")).toBeNull();
+  });
+
+  test("no boundProviderId/roleHealth wired (every pre-existing construction) -> unchanged: still no throw", async () => {
+    const { store, titler, sessionId } = setup([[{ type: "error", code: "server", message: "boom" }]]);
+    seedTurn(store, sessionId);
+    await expect(titler.maybeTitle(sessionId)).resolves.toBeUndefined();
+    expect(store.getTitle(sessionId)).toBeNull();
   });
 });

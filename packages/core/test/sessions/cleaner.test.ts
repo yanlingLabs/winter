@@ -6,7 +6,9 @@ import type { Provider, ProviderEvent, TurnRequest } from "../../src/providers/t
 import { FakeProvider } from "../../src/agent/fake-provider";
 import { SessionEvent } from "@yanlinglabs/winter-protocol";
 import { SessionStore } from "../../src/sessions/store";
-import { Settings } from "../../src/settings";
+import { Settings, pinsFor, ownProviderFor } from "../../src/settings";
+import { splitTag } from "../../src/runtime-sdk/model-tag";
+import { RoleHealthRegistry } from "../../src/providers/role-health";
 import {
   SessionCleaner, renderTranscript, hasUserSetTitle, CLEANER_EFFORT, CLEANER_INSTRUCTION,
   CLEANER_MAX_JUDGMENTS_PER_PASS, CLEANER_MIN_IDLE_MS, CLEANER_TRANSCRIPT_MAX_CHARS,
@@ -808,6 +810,27 @@ describe("SessionCleaner — strict verdict parsing (ANY deviation ⇒ keep, NO 
       expect(store.judgedAt(id)).toBeNull();
       expect(errSpy).toHaveBeenCalled();
     } finally { errSpy.mockRestore(); }
+    store.close();
+  });
+
+  test("role-health (2026-09-18): a provider error records pins.cleaner under the tag that ran; a later success clears it; kept/unstamped is unchanged", async () => {
+    const { home, store } = freshStore();
+    junkSession(store);
+    const roleHealth = new RoleHealthRegistry(mkdtempSync(join(tmpdir(), "winter-cleaner-rh-home-")));
+    const failing = new FakeProvider([[{ type: "error", code: "auth", message: "401" }]]);
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    const expectedTag = `${ownProviderFor(null)}/${splitTag(pinsFor(null).cleaner).modelId}`;
+    try {
+      await makeCleaner(store, home, failing, { now: agedNow, roleHealth }).runPass();
+      const problem = roleHealth.problemFor("pins.cleaner", expectedTag);
+      expect(problem).not.toBeNull();
+      expect(problem?.reason).toBe("credential-rejected");
+    } finally { errSpy.mockRestore(); }
+
+    junkSession(store);
+    const ok = keepVotingJudge();
+    await makeCleaner(store, home, ok, { now: agedNow, roleHealth }).runPass();
+    expect(roleHealth.problemFor("pins.cleaner", expectedTag)).toBeNull();
     store.close();
   });
 

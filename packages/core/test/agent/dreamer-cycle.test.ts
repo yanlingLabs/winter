@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { SessionStore } from "../../src/sessions/store";
 import { FakeProvider } from "../../src/agent/fake-provider";
 import { Dreamer, DREAM_INSTRUCTION, DREAM_MIN_EVENTS, DREAM_MIN_SPACING_MS, DREAM_EFFORT, DREAM_WINDOW_MAX_CHARS } from "../../src/agent/dreamer";
-import { pinsFor, Settings } from "../../src/settings";
+import { pinsFor, ownProviderFor, Settings } from "../../src/settings";
 import { splitTag } from "../../src/runtime-sdk/model-tag";
+import { RoleHealthRegistry } from "../../src/providers/role-health";
 
 // WS-20: `DREAM_MODEL` is deleted — the model is now `pinsFor(settings).dream`, live per tick
 // (dreamer.ts). Every `new Dreamer(...)` fixture in this file passes `settings: () => null`, so
@@ -278,5 +279,65 @@ describe("Dreamer: the pins.dream role effort", () => {
     clock += DREAM_MIN_SPACING_MS + 1;
     await dreamer.tick();
     expect(provider.requests.map((r) => r.reasoningEffort)).toEqual([DREAM_EFFORT, "xhigh", DREAM_EFFORT]);
+  });
+});
+
+describe("Dreamer role-health wiring (2026-09-18) — observation only", () => {
+  test("a provider error records pins.dream under the tag that actually ran; a later success clears it; the throw/log shape is unchanged", async () => {
+    const { store, dispatchId, dir } = setup("winter-dreamer-rolehealth-");
+    fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
+    const roleHealth = new RoleHealthRegistry(mkdtempSync(join(tmpdir(), "winter-dreamer-rh-home-")));
+    const failing = new FakeProvider([[{ type: "error", code: "rate_limit", providerCode: "usage_limit_reached", message: "429" }]]);
+    const dreamer = new Dreamer({
+      settings: () => null, provider: { provider: failing, model: "ignored" }, store, dir: () => dir,
+      enabled: () => true, activeTurnCount: () => 0, roleHealth,
+    });
+    // Unchanged existing behaviour: tick() itself never throws (the scheduler precedent) — the
+    // thrown "provider error: 429" is caught and logged inside tick, not surfaced here.
+    await expect(dreamer.tick()).resolves.toBeUndefined();
+
+    const expectedTag = `${ownProviderFor(null)}/${DREAM_MODEL_UNDER_TEST}`;
+    const problem = roleHealth.problemFor("pins.dream", expectedTag);
+    expect(problem).not.toBeNull();
+    expect(problem?.reason).toBe("usage-limit");
+    expect(problem?.model).toBe(expectedTag);
+
+    // A later successful cycle clears the note.
+    fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
+    const ok = new FakeProvider([[{ type: "text_delta", delta: '{"ops":[]}' }, { type: "done", stopReason: "end_turn" }]]);
+    const dreamer2 = new Dreamer({
+      settings: () => null, provider: { provider: ok, model: "ignored" }, store, dir: () => dir,
+      enabled: () => true, activeTurnCount: () => 0, roleHealth, now: () => Date.now() + DREAM_MIN_SPACING_MS + 1,
+    });
+    await dreamer2.tick();
+    expect(roleHealth.problemFor("pins.dream", expectedTag)).toBeNull();
+  });
+
+  test("a rate_limit error with NO retryAfterMs still gets retryAt from the provider's own subscriptionQuota report", async () => {
+    const { store, dispatchId, dir } = setup("winter-dreamer-quota-");
+    fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
+    const roleHealth = new RoleHealthRegistry(mkdtempSync(join(tmpdir(), "winter-dreamer-rh-quota-")));
+    const failing = new FakeProvider([[{ type: "error", code: "rate_limit", providerCode: "usage_limit_reached", message: "429" }]]);
+    const dreamer = new Dreamer({
+      settings: () => null,
+      provider: { provider: failing, model: "ignored", quota: { subscriptionQuota: () => ({ info: { status: "rejected", resetsAt: 2_000_000 }, at: 1 }) } },
+      store, dir: () => dir, enabled: () => true, activeTurnCount: () => 0, roleHealth,
+    });
+    await dreamer.tick();
+    const expectedTag = `${ownProviderFor(null)}/${DREAM_MODEL_UNDER_TEST}`;
+    const problem = roleHealth.problemFor("pins.dream", expectedTag);
+    expect(problem?.reason).toBe("usage-limit");
+    expect(problem?.retryAt).toBe(new Date(2_000_000 * 1000).toISOString());
+  });
+
+  test("no roleHealth wired -> tick() behaves exactly as before (no crash, no note anywhere to check)", async () => {
+    const { store, dispatchId, dir } = setup("winter-dreamer-norolehealth-");
+    fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
+    const failing = new FakeProvider([[{ type: "error", code: "rate_limit", message: "429" }]]);
+    const dreamer = new Dreamer({
+      settings: () => null, provider: { provider: failing, model: "ignored" }, store, dir: () => dir,
+      enabled: () => true, activeTurnCount: () => 0,
+    });
+    await expect(dreamer.tick()).resolves.toBeUndefined();
   });
 });
