@@ -94,6 +94,7 @@ import { ROOT, nextVersion, readCanonical } from "./version-lib";
 import {
   GH_REPO,
   NAME_SCAN_EXCLUSIONS,
+  appcastDescription,
   appcastInsertPlan,
   appcastItem,
   caskFrom,
@@ -101,6 +102,7 @@ import {
   embeddedRuntimesDescriptionLine,
   preflight,
   nameScanPlan,
+  releaseNotesHtml,
   publishGuard,
   resolveSigningIdentity,
   row16Gate,
@@ -333,6 +335,40 @@ if (!NO_BUMP) {
 }
 const version = readCanonical();
 console.log(`Releasing version ${version}${BETA ? " (beta)" : ""}`);
+
+// ---------------------------------------------------------------------------
+// 2a. Release notes (2026-09-17 daemon-settings-surface plan, item 9): read and RENDER here —
+//     before the build, the notarization submission and every gate — so a missing notes file or one
+//     using a construct the renderer does not support costs seconds instead of failing after a
+//     notarization round trip. The rendered HTML is only USED in section 10's appcast item.
+//
+//     Required, not optional: every release since 0.111.0 ships `releases/notes/<version>.md`, the
+//     feed is what an installed copy shows the user before it replaces itself, and the failure mode
+//     of "notes silently absent" is invisible until after publishing. Note the ordering with the
+//     bump above — releasing WITHOUT `--no-bump` writes a version whose notes file cannot exist yet,
+//     so the notes are written and committed first and the release runs `--no-bump`, which is the
+//     documented flow for every release this repo has cut.
+// ---------------------------------------------------------------------------
+const notesPath = join(ROOT, "releases", "notes", `${version}.md`);
+if (!existsSync(notesPath)) {
+  fail(
+    `release notes missing: ${relative(ROOT, notesPath)}\n` +
+      `  Every release's user-facing notes go in that file (the Sparkle feed's <description> is built\n` +
+      `  from it, so an installed copy shows it before updating). Write and commit it, then re-run\n` +
+      `  with --no-bump to release this same version.`,
+  );
+}
+const notesMarkdown = readFileSync(notesPath, "utf8");
+// Rendered HERE only to prove it renders. Section 10 composes the real `<description>` with
+// `appcastDescription`, which re-runs this same pure conversion — the whole element is assembled in
+// ONE place, and the embedded-runtime line it puts first comes from the staged VERSIONS.json that
+// only exists after the build.
+try {
+  const notesHtml = releaseNotesHtml({ notesMarkdown, version });
+  console.log(`Release notes: ${relative(ROOT, notesPath)} -> ${notesHtml.length} bytes of HTML for the appcast.`);
+} catch (e) {
+  fail(`${relative(ROOT, notesPath)}: ${(e as Error).message}`);
+}
 
 // ---------------------------------------------------------------------------
 // 2b. Ensure the vendored `ant` binary is present BEFORE the build (fix wave, F5). NOTE: the
@@ -1175,9 +1211,21 @@ const item = appcastItem({
   beta: BETA,
   minSystem: MIN_SYSTEM,
   // P8d-2: names the embedded runtime pair this exact release ships, from the SAME VERSIONS.json
-  // the signing checks above already verified — never re-typed.
-  description: embeddedRuntimesDescriptionLine({ winterAgentSdk: embeddedVersions.winterAgentSdk, officialSdk: embeddedVersions.officialSdk }),
+  // the signing checks above already verified — never re-typed. Item 9 keeps that line first and
+  // appends `releases/notes/<version>.md` as HTML (already proven to render, in section 2a).
+  description: appcastDescription({
+    versionLine: embeddedRuntimesDescriptionLine({ winterAgentSdk: embeddedVersions.winterAgentSdk, officialSdk: embeddedVersions.officialSdk }),
+    version,
+    notesMarkdown,
+  }),
 });
+// Item 9: the rendered item is written to OUT on EVERY run, dry or real, for two reasons — it is the
+// exact bytes section 11b's identity gate reads (the notes are prose, the one place in the feed where
+// a name could reach a published file that no git hook sees before `release.ts` commits it), and a
+// rehearsal should leave the item on disk to eyeball. Distinct from `appcast-preview.xml`, which is
+// the whole feed and dry-run-only.
+const appcastItemPath = join(OUT, "appcast-item.xml");
+writeFileSync(appcastItemPath, `${item}\n`);
 let appcastPlan: ReturnType<typeof appcastInsertPlan>;
 try {
   appcastPlan = appcastInsertPlan({ dryRun: DRY_RUN, version, appcastXml, item });
@@ -1295,7 +1343,12 @@ for (const re of NAME_SCAN_EXCLUSIONS) {
   console.log(`  rule ${re.source} -> ${hits.length} path(s) not scanned`);
   for (const h of hits.slice(0, 3)) console.log(`    e.g. ${h.slice(app.length + 1)}`);
 }
-sh([`"${nameGuard}" artifacts`, ...scan.targets.map((t) => `"${t}"`), `"${caskOutPath}"`].join(" "));
+// `appcastItemPath` (item 9) joins the cask as a rendered TEXT artifact this gate must read: the
+// `<description>` now carries prose written by hand in `releases/notes/<version>.md`, and the
+// rendered item is what lands in the published feed. The notes file itself is tracked, so the git
+// hooks do scan it at commit time — but the gate that decides whether a RELEASE may go out must not
+// depend on that having happened, for the same reason section 11b exists at all.
+sh([`"${nameGuard}" artifacts`, ...scan.targets.map((t) => `"${t}"`), `"${caskOutPath}"`, `"${appcastItemPath}"`].join(" "));
 
 // ---------------------------------------------------------------------------
 // 11c. WS-20: `catalogueStaleness`/`CODEX_MODELS_VERIFIED` deleted along with `CODEX_MODELS` —

@@ -50,6 +50,16 @@ export const GH_REPO = "yanlingLabs/winter";
  * new to THIS repo's template, never a new element invented for this) — never a bespoke element.
  * `embeddedRuntimesDescriptionLine` is the one caller release.ts uses to fill it, naming the
  * embedded runtime pair for a release.
+ *
+ * Item 9 (2026-09-17 daemon-settings-surface plan) fills the SAME element with the release notes as
+ * HTML (`appcastDescription`), so the text can now be long and marked up. Two consequences handled
+ * here: a `]]>` anywhere in it would close the CDATA early (impossible from `releaseNotesHtml`,
+ * which escapes `>`, but this function accepts any string from any caller), so it is split across
+ * two CDATA sections — the standard XML idiom, and the concatenated character data is unchanged.
+ * Deliberately NOT added: `<sparkle:releaseNotesLink>`. Sparkle's own source is explicit that a
+ * link REPLACES the embedded notes rather than supplementing them (`SUUpdateAlert.m`: the
+ * description is used only `if (_updateItem.releaseNotesURL == nil)`, and `SPUUIBasedUpdateDriver`
+ * downloads the URL up front), so adding one would swap these rendered notes for a fetched page.
  */
 export function appcastItem(i: {
   version: string;
@@ -62,7 +72,8 @@ export function appcastItem(i: {
 }): string {
   const url = `https://github.com/${GH_REPO}/releases/download/v${i.version}/${i.zipName}`;
   const channel = i.beta ? "\n      <sparkle:channel>beta</sparkle:channel>" : "";
-  const description = i.description ? `\n      <description><![CDATA[${i.description}]]></description>` : "";
+  const cdataSafe = i.description?.replaceAll("]]>", "]]]]><![CDATA[>");
+  const description = cdataSafe ? `\n      <description><![CDATA[${cdataSafe}]]></description>` : "";
   return `    <item>
       <title>${i.version}</title>${description}
       <sparkle:version>${i.version}</sparkle:version>
@@ -70,6 +81,126 @@ export function appcastItem(i: {
       <sparkle:minimumSystemVersion>${i.minSystem}</sparkle:minimumSystemVersion>
       <enclosure url="${url}" sparkle:edSignature="${i.edSignature}" length="${i.length}" type="application/octet-stream"/>
     </item>`;
+}
+
+/**
+ * Turns one `releases/notes/<version>.md` into the HTML Sparkle shows in its update pane
+ * (2026-09-17 daemon-settings-surface plan, item 9). Pure and total: every input either renders
+ * or THROWS — a release must never publish half-converted markup into a feed that auto-updates
+ * every installed copy.
+ *
+ * The supported subset is exactly what the ten shipped notes files use, measured, not guessed:
+ * `#`/`##`/`###` headings, blank-line-separated paragraphs with soft line wraps, `- ` bullets with
+ * two-space continuation lines, ``` fences, `` `code` `` and `**bold**`. ANYTHING else — a numbered
+ * list, a blockquote, a table, a nested bullet, a stray `*`, an unbalanced backtick or fence — is a
+ * throw naming the line, because the alternative is a silently mangled pane in front of every user.
+ * Widening the subset is a deliberate edit here plus a test, not something a notes file can do on
+ * its own.
+ *
+ * NOT markdown-complete and never will be: this renders OUR notes files, and their shape is a
+ * convention this repo controls.
+ */
+export function releaseNotesHtml(i: { notesMarkdown: string; version: string }): string {
+  const escape = (s: string): string => s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+
+  // Inline pass, run on a whole (already line-joined) block so a `**bold**` or `` `code` `` span
+  // that straddles a soft wrap still converts. Code spans are tokenized FIRST and their contents
+  // only escaped — never bold-substituted — so a literal `**` inside backticks survives.
+  const inline = (text: string, where: string): string => {
+    const parts = text.split("`");
+    if (parts.length % 2 === 0) throw new Error(`release notes: unbalanced \` in ${where}: ${text}`);
+    return parts
+      .map((part, idx) => {
+        if (idx % 2 === 1) return `<code>${escape(part)}</code>`;
+        const bolded = escape(part).replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+        if (bolded.includes("*")) throw new Error(`release notes: stray \`*\` (only \`**bold**\` is supported) in ${where}: ${text}`);
+        return bolded;
+      })
+      .join("");
+  };
+
+  const lines = i.notesMarkdown.replaceAll("\r\n", "\n").split("\n");
+  const blocks: string[] = [];
+  let n = 0;
+  while (n < lines.length) {
+    const line = lines[n]!;
+    if (line.trim() === "") {
+      n++;
+      continue;
+    }
+    // A fence's content is verbatim — escaped, never inline-converted (a `**` in a shell command
+    // is a glob, not bold). The language hint is validated and then dropped: Sparkle's pane has no
+    // syntax highlighter to give it to.
+    const fence = /^```([a-z]*)$/.exec(line);
+    if (line.startsWith("```")) {
+      if (fence === null) throw new Error(`release notes: line ${n + 1} opens a fence with an unsupported info string: ${line}`);
+      const body: string[] = [];
+      n++;
+      while (n < lines.length && lines[n] !== "```") {
+        body.push(lines[n]!);
+        n++;
+      }
+      if (n >= lines.length) throw new Error(`release notes: unclosed \`\`\` fence opened at line ${n - body.length}`);
+      n++; // the closing fence
+      blocks.push(`<pre><code>${escape(body.join("\n"))}</code></pre>`);
+      continue;
+    }
+    const heading = /^(#{1,3}) (.+)$/.exec(line);
+    if (heading !== null) {
+      const level = heading[1]!.length;
+      blocks.push(`<h${level}>${inline(heading[2]!.trim(), `the heading on line ${n + 1}`)}</h${level}>`);
+      n++;
+      continue;
+    }
+    if (line.startsWith("#")) throw new Error(`release notes: line ${n + 1} is a heading deeper than h3 or has no space after the #: ${line}`);
+    if (line.startsWith("- ")) {
+      const items: string[] = [];
+      while (n < lines.length && lines[n]!.startsWith("- ")) {
+        const parts = [lines[n]!.slice(2).trim()];
+        n++;
+        // Continuations are the soft-wrapped remainder of the same bullet: indented, non-empty,
+        // and not themselves a new bullet.
+        while (n < lines.length && /^\s+\S/.test(lines[n]!) && !lines[n]!.trimStart().startsWith("- ")) {
+          parts.push(lines[n]!.trim());
+          n++;
+        }
+        if (n < lines.length && /^\s+- /.test(lines[n]!)) throw new Error(`release notes: nested bullets are not supported (line ${n + 1}): ${lines[n]}`);
+        items.push(`  <li>${inline(parts.join(" "), `the bullet ending on line ${n}`)}</li>`);
+      }
+      blocks.push(`<ul>\n${items.join("\n")}\n</ul>`);
+      continue;
+    }
+    if (/^\s/.test(line)) throw new Error(`release notes: line ${n + 1} is indented outside a bullet or fence: ${line}`);
+    if (/^([*+>|]|\d+\.)\s/.test(line)) throw new Error(`release notes: line ${n + 1} uses an unsupported construct (only #/##/###, - bullets, \`\`\` fences and paragraphs): ${line}`);
+    const paragraph: string[] = [];
+    const startedAt = n + 1;
+    while (n < lines.length && lines[n]!.trim() !== "" && !lines[n]!.startsWith("- ") && !lines[n]!.startsWith("#") && !lines[n]!.startsWith("```")) {
+      paragraph.push(lines[n]!.trim());
+      n++;
+    }
+    blocks.push(`<p>${inline(paragraph.join(" "), `the paragraph starting on line ${startedAt}`)}</p>`);
+  }
+
+  // Every notes file opens with `# Winter <version>`, and Sparkle's own pane is already titled
+  // with the app name and this exact version (plus the `<title>` element of the item). Repeating it
+  // as the first heading of the body is the third copy on one screen, so that ONE heading — matched
+  // against this release's version, nothing else — is dropped.
+  if (blocks[0] === `<h1>Winter ${i.version}</h1>`) blocks.shift();
+  return blocks.join("\n");
+}
+
+/**
+ * Composes the appcast item's `<description>` (plan item 9): the embedded-runtime line FIRST — the
+ * whole of what this element carried before item 9, so anything reading the feed for it still finds
+ * it verbatim — then the rendered notes.
+ *
+ * `notesMarkdown` omitted returns the bare line, byte-identical to the pre-item-9 description, so a
+ * release with no notes file degrades to exactly the old feed shape rather than to something new.
+ */
+export function appcastDescription(i: { versionLine: string; version: string; notesMarkdown?: string }): string {
+  if (i.notesMarkdown === undefined || i.notesMarkdown.trim() === "") return i.versionLine;
+  const notes = releaseNotesHtml({ notesMarkdown: i.notesMarkdown, version: i.version });
+  return `<p>${i.versionLine}</p>\n${notes}`;
 }
 
 /** Interpolates a brew cask template (T3's packaging/winter.rb.tmpl) — `{{version}}`/`{{sha256}}`/`{{url}}`. */
