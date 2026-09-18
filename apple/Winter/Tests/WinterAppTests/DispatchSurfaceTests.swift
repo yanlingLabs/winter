@@ -3,9 +3,8 @@ import WinterProtocol
 import WinterKit
 @testable import Winter
 
-/// app-shell T5: the dispatch surface's own tests. Two families:
-///  - PURE: `fleetCounts`/`fleetStripTapDestination`, driven directly.
-///  - the wire: `ShellSessionHost.apply(destination: .mode(.dispatch))` resolving `session.dispatch`
+/// app-shell T5: the dispatch surface's own tests —
+/// the wire: `ShellSessionHost.apply(destination: .mode(.dispatch))` resolving `session.dispatch`
 ///    over the bare management connection and attaching through the ordinary `select` door — reuses
 ///    `ShellSessionHostTests`'/`ModeLandingViewTests`' `ShellScriptedTransport`/`ShellTransportFactory`
 ///    (same test target, `internal` by default); `makeHost`/`connectedManagementClient`/
@@ -14,48 +13,32 @@ import WinterKit
 ///    than share it).
 @MainActor
 final class DispatchSurfaceTests: XCTestCase {
-    // MARK: - Fleet strip (PURE)
+    // MARK: - The work panel and the backdrop (PURE)
 
-    private func rows() -> [SessionSummary] {
-        [
-            SessionSummary(sessionId: "s_active_1", title: "One", createdAt: 5, scope: "global", cwd: "/repo", mode: "code", activity: "active"),
-            SessionSummary(sessionId: "s_active_2", title: "Two", createdAt: 4, scope: "global", cwd: "/repo", mode: "code", activity: "active"),
-            SessionSummary(sessionId: "s_bg", title: "Three", createdAt: 3, scope: "global", cwd: "/repo", mode: "code", activity: "background"),
-            SessionSummary(sessionId: "s_idle", title: "Four", createdAt: 2, scope: "global", cwd: "/repo", mode: "code", activity: "idle"),
-            SessionSummary(sessionId: "s_archived", title: "Five", createdAt: 1, scope: "global", cwd: "/repo", mode: "code", activity: "archived"),
-            SessionSummary(sessionId: "s_chat", title: "Chat", createdAt: 0, scope: "global", cwd: nil, mode: "chat", activity: nil),
-            SessionSummary(sessionId: "s_dispatch", title: "Dispatch", createdAt: -1, scope: "global", cwd: nil, mode: "dispatch", activity: nil),
+    /// Dispatch's panel lists ITS children that are running — active before backgrounded, newest
+    /// first — never idle/archived ones, and never another session's.
+    func testManagedRunningSessionsAreTheDispatchChildrenStillRunning() {
+        let rows = [
+            SessionSummary(sessionId: "a", title: "A", createdAt: 1, scope: "global", cwd: "/r", mode: "code", parentSessionId: "d", activity: "background"),
+            SessionSummary(sessionId: "b", title: "B", createdAt: 2, scope: "global", cwd: "/r", mode: "code", parentSessionId: "d", activity: "active"),
+            SessionSummary(sessionId: "c", title: "C", createdAt: 3, scope: "global", cwd: "/r", mode: "code", parentSessionId: "d", activity: "active"),
+            SessionSummary(sessionId: "i", title: "I", createdAt: 4, scope: "global", cwd: "/r", mode: "code", parentSessionId: "d", activity: "idle"),
+            SessionSummary(sessionId: "x", title: "X", createdAt: 5, scope: "global", cwd: "/r", mode: "code", parentSessionId: "other", activity: "active"),
         ]
+        XCTAssertEqual(dispatchManagedRunningSessions(rows, dispatchSessionId: "d").map(\.sessionId), ["c", "b", "a"])
     }
 
-    func testFleetCountsCountRunningAndBackgroundOnly() {
-        let counts = fleetCounts(rows())
-        XCTAssertEqual(counts.running, 2, "only activity == active counts as running")
-        XCTAssertEqual(counts.background, 1)
-    }
-
-    func testFleetCountsAreZeroForEmptyRows() {
-        let counts = fleetCounts([])
-        XCTAssertEqual(counts.running, 0)
-        XCTAssertEqual(counts.background, 0)
-    }
-
-    /// Dispatch/chat rows carry no `activity` at all (`ACTIVITY_MODES`) — a directory of ONLY
-    /// non-participating rows must count nothing, not crash, not miscount by falling back to `mode`.
-    func testFleetCountsIgnoreNonParticipatingModes() {
-        let onlyNonParticipating = [
-            SessionSummary(sessionId: "c1", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "chat", activity: nil),
-            SessionSummary(sessionId: "d1", title: nil, createdAt: 2, scope: "global", cwd: nil, mode: "dispatch", activity: nil),
-        ]
-        let counts = fleetCounts(onlyNonParticipating)
-        XCTAssertEqual(counts.running, 0)
-        XCTAssertEqual(counts.background, 0)
-    }
-
-    /// The design's "tapping a count navigates to… the code landing" — pinned as a decision, not
-    /// left to whatever the button closure happens to call (`DispatchSurface.fleetCountButton`).
-    func testFleetStripTapDestinationIsTheCodeLanding() {
-        XCTAssertEqual(fleetStripTapDestination(), .mode(.code))
+    /// The particles move only inside the cursor's reach, away from it, and not at all without it.
+    func testParticleOffsetPushesAwayWithinReachOnly() {
+        let pointer = CGPoint(x: 100, y: 100)
+        let near = dispatchParticleOffset(point: CGPoint(x: 120, y: 100), pointer: pointer, strength: 1)
+        XCTAssertGreaterThan(near.dx, 0, "pushed away from the cursor")
+        XCTAssertEqual(near.dy, 0, accuracy: 0.0001)
+        XCTAssertLessThanOrEqual(near.dx, dispatchParticleMaxPush)
+        let far = dispatchParticleOffset(point: CGPoint(x: 100 + dispatchParticleReach + 1, y: 100), pointer: pointer, strength: 1)
+        XCTAssertEqual(far.influence, 0)
+        let absent = dispatchParticleOffset(point: CGPoint(x: 120, y: 100), pointer: pointer, strength: 0)
+        XCTAssertEqual(absent.dx, 0)
     }
 
     // MARK: - Harness (dispatch resolution, through the real host)

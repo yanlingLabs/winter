@@ -113,8 +113,10 @@ struct ShellRootView: View {
     @StateObject private var fallbackPanelStore = PanelStore()
     private var panelStore: PanelStore { host?.panelStore ?? fallbackPanelStore }
 
-    /// The work-panel toggle shows only where the panel can: an attached, non-chat session.
+    /// The work-panel toggle shows only where the panel can: an attached, non-chat session — and
+    /// the Dispatch surface (2026-09-19), whose panel lists the sessions it is running.
     private var showsWorkPanelToggle: Bool {
+        if case .mode(.dispatch) = nav.destination { return true }
         guard case .session(let sessionId) = nav.destination else { return false }
         guard let row = directory.rows.first(where: { $0.sessionId == sessionId }) else { return false }
         return row.mode != "chat"

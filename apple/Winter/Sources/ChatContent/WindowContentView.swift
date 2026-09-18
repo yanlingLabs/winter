@@ -313,7 +313,7 @@ struct WindowContentView<Accessory: View>: View {
         HStack(alignment: .top, spacing: 0) {
             contentColumn
             if showsWorkPanel {
-                floatingCard { subagentBlock }
+                floatingCard { workPanelBlock }
                     .frame(width: floatingSubagentBlockWidth)
                     .padding(.top, topInset + 8)
                     .padding(.trailing, 16)
@@ -326,6 +326,19 @@ struct WindowContentView<Accessory: View>: View {
     /// `composerCardMode != nil`) and never to a chat session.
     private var showsWorkPanel: Bool {
         workPanelVisible && composerCardMode != nil && !adapter.isChatSession
+    }
+
+    /// What the work panel shows: a DISPATCH session's running managed sessions (2026-09-19 — the
+    /// sessions it dispatched are its real workers), every other session's subagents.
+    @ViewBuilder
+    private var workPanelBlock: some View {
+        if let sidebars, let row = currentSidebarSessionSummary, row.mode == "dispatch" {
+            DispatchManagedSessionsBlock(directory: sidebars.directory,
+                                         dispatchSessionId: row.sessionId,
+                                         onSelect: sidebars.onSelect)
+        } else {
+            subagentBlock
+        }
     }
 
     /// The floating subagents block's body: a header, the live rows, or an empty line.
@@ -1132,4 +1145,58 @@ func modelSwitchConfirmMessage(warnings: [String], portable: [String]) -> String
         lines.append("Still carries over: \(portable.joined(separator: ", "))")
     }
     return lines.joined(separator: "\n")
+}
+
+// MARK: - Dispatch's work panel (2026-09-19)
+
+/// PURE: the sessions a dispatch session is running — its children (`parentSessionId`) that are
+/// active or backgrounded, active first, newest first within each.
+func dispatchManagedRunningSessions(_ rows: [SessionSummary], dispatchSessionId: String) -> [SessionSummary] {
+    let rank = ["active": 0, "background": 1]
+    return rows
+        .filter { $0.parentSessionId == dispatchSessionId && rank[$0.activity ?? ""] != nil }
+        .sorted {
+            let a = rank[$0.activity ?? ""] ?? 2, b = rank[$1.activity ?? ""] ?? 2
+            return a != b ? a < b : $0.createdAt > $1.createdAt
+        }
+}
+
+/// The dispatch session's work panel: its running managed sessions, each a door to that session.
+/// Its own view so it OBSERVES the directory — the window view holds the wiring unobserved.
+struct DispatchManagedSessionsBlock: View {
+    @ObservedObject var directory: SessionDirectory
+    let dispatchSessionId: String
+    let onSelect: (String) -> Void
+
+    var body: some View {
+        let running = dispatchManagedRunningSessions(directory.rows, dispatchSessionId: dispatchSessionId)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Running sessions")
+                .font(Typography.caption(.semibold))
+                .foregroundStyle(.secondary)
+            if running.isEmpty {
+                Text("None running")
+                    .font(Typography.caption())
+                    .foregroundStyle(Theme.textMuted)
+            } else {
+                ForEach(running) { row in
+                    Button { onSelect(row.sessionId) } label: {
+                        HStack(spacing: 6) {
+                            Text(sessionDisplayTitle(row.title))
+                                .font(Typography.caption())
+                                .foregroundStyle(Theme.textPrimary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            Spacer(minLength: 4)
+                            ActivityChip(activity: row.activity)
+                        }
+                        .padding(.horizontal, 6)
+                        .frame(height: 26)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(ShellSidebarRowStyle(isSelected: false))
+                }
+            }
+        }
+    }
 }
