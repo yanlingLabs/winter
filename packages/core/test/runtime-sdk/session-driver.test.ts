@@ -553,6 +553,48 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
     } finally { t.close(); }
   });
 
+  // Whole-branch review M1: an OFF-CATALOG `pins.research` used to be stated whenever a credential for
+  // its provider happened to be stored — and the child advertises `WebFetch` only while its digest
+  // model resolves, so that one hand-edited settings line WITHDREW THE TOOL from every Winter session,
+  // chat included, where the base prompt still names it. Nothing logged, because the drop branch was
+  // never taken.
+  test("an off-catalog pins.research is DROPPED, not stated — WebFetch must not vanish for it (M1)", async () => {
+    const settings = {
+      provider: { model: "openai/gpt-5.6-sol" },
+      // Shape-valid (that is all `ModelTagSchemaCore` checks) and backed by no catalog row.
+      pins: { research: "openai/gpt-5.6-does-not-exist" },
+      runtimes: { winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 },
+    } as unknown as Settings;
+    const t = table({ settings: () => settings });
+    try {
+      // A credential for that provider IS stored, so the presence probe alone would have passed it.
+      await new FileSecretStore(join(t.home, "secrets.json")).set("openai:default", JSON.stringify({ kind: "api-key", key: "k" }));
+      const session = await t.drivers.create(t.store.createSession("t", { mode: "chat" }));
+      expect(t.q().options.web?.fetch).not.toHaveProperty("digestModel");
+      expect(t.logs.some((l) => l.includes("pins.research") && l.includes("no model in the pinned catalog carries"))).toBe(true);
+      await session.end();
+    } finally { t.close(); }
+  });
+
+  test("a catalog-backed cross-provider pin IS stated, and says whose credential pays for it", async () => {
+    const settings = {
+      provider: { model: "openai/gpt-5.6-sol" },
+      pins: { research: "codex-oauth/gpt-5.6-luna" },
+      runtimes: { winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 },
+    } as unknown as Settings;
+    const t = table({ settings: () => settings });
+    try {
+      await new FileSecretStore(join(t.home, "secrets.json")).set("codex-oauth:default", JSON.stringify({ kind: "api-key", key: "k" }));
+      const session = await t.drivers.create(t.store.createSession("t", { mode: "chat" }));
+      expect(t.q().options.web?.fetch?.digestModel).toBe("codex-oauth/gpt-5.6-luna");
+      expect(t.q().options.web?.fetch?.authRef).toMatchObject({ kind: "keychain", account: "codex-oauth:default" });
+      // Both providers named, neither credential — this is new spend on a key the session never named.
+      expect(t.logs.some((l) => l.includes("runs on openai") && l.includes("digest runs on codex-oauth"))).toBe(true);
+      expect(t.logs.join("\n")).not.toContain("\"k\"");
+      await session.end();
+    } finally { t.close(); }
+  });
+
   // 2026-09-18 (agent SDK 0.0.17): the `exa` TOOL row is keyed by LEG, not by the record's provider.
   // It used to evict nothing, correctly — the daemon's own Search/ReadPage read that key per call. Now
   // `Options.web.search.authRef` names it AND its presence decides the tool surface itself, both fixed

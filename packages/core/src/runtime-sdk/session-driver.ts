@@ -61,7 +61,7 @@ import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
 import { attachOfficialSession, attachWinterSession } from "./messaging";
 import { buildWinterOptions, permissionModeFor } from "./mode-options";
 import { providerFor, rowForTag, testProviderNameFor } from "./provider-selection";
-import { splitTag, UNSTATED_TAG, isModelTag, type ModelTag } from "./model-tag";
+import { splitTag, UNSTATED_TAG, isModelTag, WINTER_TEST_PREFIX, type ModelTag } from "./model-tag";
 import { winterSessions } from "./sessions";
 import { WINTER_PEER_VERSIONS } from "./versions";
 import { winterSystemPromptFor } from "./system-prompt";
@@ -649,13 +649,34 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // session's own model, which is the rare case.
       const digestRef = digestProviderId === undefined || researchPin === model ? undefined : credentialRefFor(digestProviderId, deps.home);
       const digestUsable = await refMaterialPresent(deps.secrets, digestRef);
-      const digestModel = researchPin !== UNSTATED_TAG && researchPin !== model && digestUsable ? researchPin : undefined;
+      // AND the tag must actually BE a catalog row (whole-branch review M1). This is the one check
+      // whose absence WITHDREW THE TOOL: the child advertises `WebFetch` only while its digest model
+      // resolves, so a hand-edited `pins.research` naming a model no catalog row carries — the zod
+      // schema checks the tag's SHAPE only, and `settings.setModelRole`'s catalog check guards just
+      // that one door — made `WebFetch` disappear from every Winter session, chat included, where the
+      // base prompt still names it. Same NON-throwing catalog membership test the RPC door runs
+      // (`rowForTag`, the `assertCatalogBackedTag` family), and a miss drops the pin exactly like a
+      // missing credential does. `winter-test/*` is excluded by construction: it is not a catalog
+      // provider at all, and `buildWinterOptions` drops it independently.
+      const digestOffCatalog = researchPin !== UNSTATED_TAG && researchPin !== model
+        && !researchPin.startsWith(WINTER_TEST_PREFIX) && rowForTag(researchPin) === undefined;
+      const digestModel = researchPin !== UNSTATED_TAG && researchPin !== model && digestUsable && !digestOffCatalog
+        ? researchPin
+        : undefined;
       if (digestModel === undefined && researchPin !== model) {
         log(`pins.research: ${
           researchPin === UNSTATED_TAG ? "resolves to no known slot for this daemon's own provider"
-            : digestRef === undefined ? `names ${digestProviderId ?? "a provider"} whose credential this door cannot name (a console login lives in an \`ant\` profile, which a digest route never sees)`
-              : `names ${digestProviderId}, whose credential slot is empty`
+            : digestOffCatalog ? `names ${JSON.stringify(researchPin)}, which no model in the pinned catalog carries`
+              : digestRef === undefined ? `names ${digestProviderId ?? "a provider"} whose credential this door cannot name (a console login lives in an \`ant\` profile, which a digest route never sees)`
+                : `names ${digestProviderId}, whose credential slot is empty`
         } — WebFetch will digest pages on this session's own model instead`);
+      }
+      // A cross-provider digest is legitimate and stays silent in production logs at `info` — but it
+      // is new spend on a credential the session never named (`pins.research` defaults to the DAEMON's
+      // own provider, not the session's), so it is worth one debug line naming both providers when the
+      // two differ. Providers only: never a credential, never a locator.
+      if (digestModel !== undefined && selection !== undefined && digestProviderId !== undefined && digestProviderId !== selection.providerId) {
+        deps.log?.(`pins.research: this session runs on ${selection.providerId} and its WebFetch digest runs on ${digestProviderId} — that provider's own credential pays for it`);
       }
       return buildWinterOptions({
         mode,
