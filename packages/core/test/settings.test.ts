@@ -2,9 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialSubscriptionAuthEnabled, officialSubscriptionAuthFlagInert, DEFAULT_PROVIDER, pinsFor } from "../src/settings";
+import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialSubscriptionAuthEnabled, officialSubscriptionAuthFlagInert, DEFAULT_PROVIDER, pinsFor, setModelRole } from "../src/settings";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
 import { UNSTATED_TAG, type ModelTag } from "../src/runtime-sdk/model-tag";
+import { setPluginEnabled } from "../src/plugins/lifecycle";
 
 // WS-20: the pre-migration default bare id — used ONLY inside a raw v2 (or v1) fixture that
 // exercises `loadSettings`'s OWN migration; every v3 fixture below uses `DEFAULT_PROVIDER.model`
@@ -585,6 +586,95 @@ describe("saveSettings", () => {
   test("throws on an invalid object (bad schemaVersion) and does not write", () => {
     const p = join(mkdtempSync(join(tmpdir(), "winter-save-")), "settings.json");
     expect(() => saveSettings(p, { schemaVersion: 1, provider: { model: "codex-oauth/gpt-5.4" } } as unknown as Settings)).toThrow();
+  });
+
+  // Item 5a (2026-09-17 plan): the round-trip merge. Ordering rule: daemon-owned keys always win;
+  // unknown keys (schema-unmodeled, at ANY depth) survive untouched from whatever is currently on
+  // disk. Every test below hand-writes the ON-DISK file with an unknown top-level key AND an
+  // unknown key nested inside a KNOWN block (`reviewer`), then exercises a real write path that
+  // never touches either, and asserts both survived.
+  describe("round-trips unknown keys (item 5a)", () => {
+    function diskWithUnknownKeys(p: string) {
+      wf(p, JSON.stringify({
+        schemaVersion: 3,
+        provider: { model: "codex-oauth/gpt-5.6-sol" },
+        // unknown TOP-LEVEL key — an entire block this schema has never heard of (the "hand-written
+        // SDK-format block" scenario named in the plan).
+        enabledPlugins: ["foo", "bar"],
+        // unknown key NESTED inside a KNOWN, non-strict block — `reviewer` only models
+        // enabled/model/allow/classes; `hooks` here is the claude-agent-sdk's own hook-config
+        // shape, not Winter's `hooks.enabled` key, and lives inside a block Winter DOES define.
+        reviewer: { enabled: true, hooks: { PreToolUse: [{ matcher: "Bash", hooks: [] }] } },
+      }, null, 2));
+    }
+
+    test("survives a setModelRole write (titles.model)", () => {
+      const p = join(mkdtempSync(join(tmpdir(), "winter-save-unknown-")), "settings.json");
+      diskWithUnknownKeys(p);
+      const before = loadSettings(p);
+      const next = setModelRole(before, "titles.model", "codex-oauth/gpt-5.6-luna");
+      saveSettings(p, next);
+
+      const onDisk = JSON.parse(readFileSync(p, "utf8"));
+      expect(onDisk.enabledPlugins).toEqual(["foo", "bar"]);
+      expect(onDisk.reviewer.hooks).toEqual({ PreToolUse: [{ matcher: "Bash", hooks: [] }] });
+      expect(onDisk.reviewer.enabled).toBe(true); // the known sibling key is untouched too
+      expect(onDisk.titles.model).toBe("codex-oauth/gpt-5.6-luna"); // the actual write landed
+      // loadSettings still round-trips fine — the unknown keys don't break re-parsing (zod strips
+      // them from the IN-MEMORY Settings object, which is correct; they only need to survive on disk).
+      expect(loadSettings(p).titles?.model).toBe(tag("codex-oauth/gpt-5.6-luna"));
+    });
+
+    test("survives a plugin.enable-shaped write (setPluginEnabled)", () => {
+      const p = join(mkdtempSync(join(tmpdir(), "winter-save-unknown-")), "settings.json");
+      diskWithUnknownKeys(p);
+      const before = loadSettings(p);
+      const next = setPluginEnabled(before, "my-plugin", true);
+      saveSettings(p, next);
+
+      const onDisk = JSON.parse(readFileSync(p, "utf8"));
+      expect(onDisk.enabledPlugins).toEqual(["foo", "bar"]);
+      expect(onDisk.reviewer.hooks).toEqual({ PreToolUse: [{ matcher: "Bash", hooks: [] }] });
+      expect(onDisk.plugins.enabled).toEqual(["my-plugin"]); // the actual write landed
+    });
+
+    test("a torn on-disk file falls back to writing the caller's value verbatim (no crash, no merge attempted)", () => {
+      const p = join(mkdtempSync(join(tmpdir(), "winter-save-unknown-")), "settings.json");
+      wf(p, "{not valid json"); // torn
+      const s: Settings = { schemaVersion: 3, provider: { model: tag("codex-oauth/gpt-5.6-sol") } };
+      expect(() => saveSettings(p, s)).not.toThrow();
+      expect(loadSettings(p)).toEqual(s); // healed: the file is valid again, with no unknown keys to recover
+    });
+
+    test("clearing a known field (setModelRole → null) removes it even though it survives on disk before the write", () => {
+      const p = join(mkdtempSync(join(tmpdir(), "winter-save-unknown-")), "settings.json");
+      wf(p, JSON.stringify({
+        schemaVersion: 3,
+        provider: { model: "codex-oauth/gpt-5.6-sol" },
+        enabledPlugins: ["foo"],
+        titles: { enabled: true, model: "codex-oauth/gpt-5.6-luna" },
+      }, null, 2));
+      const before = loadSettings(p);
+      const next = setModelRole(before, "titles.model", null); // clear the override
+      saveSettings(p, next);
+
+      const onDisk = JSON.parse(readFileSync(p, "utf8"));
+      expect(onDisk.enabledPlugins).toEqual(["foo"]); // unrelated unknown key untouched
+      expect(onDisk.titles.enabled).toBe(true); // known sibling key untouched
+      expect(onDisk.titles.model).toBeUndefined(); // the clear won — daemon-owned keys win
+    });
+
+    test("does not trigger extra writes (single writeFileSync call — no reload-storm risk)", () => {
+      const p = join(mkdtempSync(join(tmpdir(), "winter-save-unknown-")), "settings.json");
+      diskWithUnknownKeys(p);
+      const before = loadSettings(p);
+      saveSettings(p, setModelRole(before, "titles.model", "codex-oauth/gpt-5.6-luna"));
+      // A second identical save is idempotent — merging is deterministic, not additive/growing.
+      const afterFirst = readFileSync(p, "utf8");
+      saveSettings(p, loadSettings(p));
+      const afterSecond = readFileSync(p, "utf8");
+      expect(JSON.parse(afterSecond)).toEqual(JSON.parse(afterFirst));
+    });
   });
 });
 
