@@ -85,6 +85,20 @@ func composerModelPanelGroup(_ groups: [RoleModelFamilyGroup], effective: String
     return groups.first
 }
 
+/// PURE: whether picking `newModel` must CLEAR the effort in force first. An effort only means
+/// something against the model it was chosen for: a model whose catalogue row names no levels (or
+/// not this one) would have the stale value sent on the next turn, and the daemon refuses that turn
+/// ("declares no effort vocabulary"). A Winter tier (`ultra`) survives only onto a model that has
+/// wire levels at all — the same rule `effortPickerOptions` offers tiers by. A model the catalogue
+/// does not list is "not told", never a reason to clear.
+func composerEffortClearsOnModelChange(effort: String?, newModel: String,
+                                       catalogue: SyncConfigSnapshot) -> Bool {
+    guard let effort, let row = catalogue.models.first(where: { $0.id == newModel }) else { return false }
+    if row.efforts.contains(effort) { return false }
+    if !row.efforts.isEmpty, catalogue.clientEfforts.contains(effort) { return false }
+    return true
+}
+
 // MARK: - The anchor
 
 /// What the model button hands the shell while its panel is open: where it is, and the live row and
@@ -131,6 +145,16 @@ struct ComposerModelPanelLayer: View {
     /// The "Other" door — opens the full-size card through the shell's modal layer.
     let onOther: (ComposerModelRow, @escaping (String) -> Void) -> Void
 
+    /// Every model commit from either picker: an effort the new model cannot take is cleared FIRST
+    /// (`composerEffortClearsOnModelChange`), so no turn ever goes out carrying it.
+    private func commitModel(_ tag: String?) {
+        if let tag, composerEffortClearsOnModelChange(effort: entry.row.effort, newModel: tag,
+                                                      catalogue: entry.row.catalogue) {
+            entry.onSetEffort(nil)
+        }
+        entry.onSetModel(tag)
+    }
+
     var body: some View {
         GeometryReader { proxy in
             let button = proxy[entry.anchor]
@@ -141,9 +165,9 @@ struct ComposerModelPanelLayer: View {
                 VStack(spacing: 0) {
                     Spacer(minLength: 0)
                     ComposerModelPanel(row: entry.row,
-                                       onSetModel: entry.onSetModel,
+                                       onSetModel: commitModel,
                                        onSetEffort: entry.onSetEffort,
-                                       onOther: { onOther(entry.row, { entry.onSetModel($0) }) },
+                                       onOther: { onOther(entry.row, { commitModel($0) }) },
                                        onClose: entry.onClose)
                 }
                 .frame(width: composerModelPanelWidth,

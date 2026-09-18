@@ -526,6 +526,25 @@ final class ComposerChromeTests: XCTestCase {
                        "no catalogue row: the tag's model portion, never the provider")
     }
 
+    /// Switching to a model that cannot take the effort in force clears it first — the daemon
+    /// refuses a turn carrying a level the model's catalogue row does not declare.
+    func testAModelSwitchClearsAnEffortTheNewModelCannotTake() {
+        let catalogue = SyncConfigSnapshot(provider: "x", defaultModel: "x/r",
+            models: [SyncConfigModelInfo(id: "x/r", providerId: "x", displayName: "R", facingName: nil, efforts: ["low", "high"]),
+                     SyncConfigModelInfo(id: "x/none", providerId: "x", displayName: "N", facingName: nil, efforts: [])],
+            defaultEffort: "", clientEfforts: ["ultra"])
+        XCTAssertTrue(composerEffortClearsOnModelChange(effort: "high", newModel: "x/none", catalogue: catalogue),
+                      "no vocabulary at all: the stale level must go")
+        XCTAssertFalse(composerEffortClearsOnModelChange(effort: "high", newModel: "x/r", catalogue: catalogue))
+        XCTAssertTrue(composerEffortClearsOnModelChange(effort: "max", newModel: "x/r", catalogue: catalogue))
+        XCTAssertFalse(composerEffortClearsOnModelChange(effort: "ultra", newModel: "x/r", catalogue: catalogue),
+                       "a tier rides onto a model with wire levels")
+        XCTAssertTrue(composerEffortClearsOnModelChange(effort: "ultra", newModel: "x/none", catalogue: catalogue))
+        XCTAssertFalse(composerEffortClearsOnModelChange(effort: nil, newModel: "x/none", catalogue: catalogue))
+        XCTAssertFalse(composerEffortClearsOnModelChange(effort: "high", newModel: "y/unlisted", catalogue: catalogue),
+                       "not told is never a reason to clear")
+    }
+
     /// The panel's offerable set is the session catalogue, grouped by provider in its own order,
     /// and the panel centres over the button without leaving the window.
     func testComposerPanelPermittedSetAndPlacement() {
