@@ -297,14 +297,14 @@ struct TranscriptProseMetrics: Equatable {
 func transcriptProseMetrics(_ role: TranscriptProseRole) -> TranscriptProseMetrics {
     switch role {
     case .sans:
-        // Unified onto the assistant's sizes by the 2026-08-13 ruling (iOS canonical: its user
-        // bubble and serif prose share `.body`). Only the leading stays the sans register's own.
-        // Until the ruling this was the donor's 14 / 13.5 / drop 0.5 / [20, 17, 15.5, 14.5].
-        return TranscriptProseMetrics(bodySize: 15.5, quoteSize: 15, lineSpacing: 3,
-                                      codeSizeDrop: 2, headingSizes: [22, 19, 17, 16])
+        // ChatGPT's Mac app, measured 2026-09-17 (SF Pro, 2× capture): body and user bubble
+        // both 14 pt on a ~23 pt line pitch (14 pt SF's natural 16.7 + 6). Headings are not in
+        // the reference capture — they reuse the donor's 14-pt run. Both roles are one ladder.
+        return TranscriptProseMetrics(bodySize: 14, quoteSize: 13.5, lineSpacing: 6,
+                                      codeSizeDrop: 1.5, headingSizes: [20, 17, 15.5, 14.5])
     case .assistant:
-        return TranscriptProseMetrics(bodySize: 15.5, quoteSize: 15, lineSpacing: 5,
-                                      codeSizeDrop: 2, headingSizes: [22, 19, 17, 16])
+        return TranscriptProseMetrics(bodySize: 14, quoteSize: 13.5, lineSpacing: 6,
+                                      codeSizeDrop: 1.5, headingSizes: [20, 17, 15.5, 14.5])
     }
 }
 
@@ -340,12 +340,13 @@ enum QuestionCardType {
     /// ratio 1.00). Reading it from `transcriptProseMetrics` is what makes that an invariant rather
     /// than two constants that happen to agree today — change the prose ladder and this follows.
     static var question: CGFloat { transcriptProseMetrics(.assistant).bodySize }
-    /// iOS `.callout`, 16/17 = 0.94 → 14.5. The option label and a frozen card's answer row.
-    static let option: CGFloat = 14.5
-    /// iOS `.footnote`, 13/17 = 0.76 → 12. Option descriptions and notes.
-    static let secondary: CGFloat = 12
-    /// iOS `.caption`, 12/17 = 0.71 → 11. Header chips and pills — already this value.
-    static let pill: CGFloat = 11
+    /// iOS `.callout`, 16/17 = 0.94 → 13 on the 14 pt ladder. The option label and a frozen
+    /// card's answer row.
+    static let option: CGFloat = 13
+    /// iOS `.footnote`, 13/17 = 0.76 → 10.5 on the 14 pt ladder. Option descriptions and notes.
+    static let secondary: CGFloat = 10.5
+    /// iOS `.caption`, 12/17 = 0.71 → 10 on the 14 pt ladder. Header chips and pills.
+    static let pill: CGFloat = 10
 }
 
 extension Typography {

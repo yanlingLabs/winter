@@ -12,7 +12,7 @@ import SwiftUI
 ///    `Theme.swift`'s doc comments, which is exactly the mistake brand.md § 6 records the iOS side
 ///    making (two of its comments quote hexes their own assets no longer carry).
 /// 2. **Behavioural pins.** What a prose role actually renders as: a real `NSFont`, and the fonts a
-///    real `AttributedString` comes out carrying. These carry the weight of the serif claim.
+///    real `AttributedString` comes out carrying. These carry the weight of the face claim.
 /// 3. **Wiring pins**, labelled as such where they appear — they say "this call site declares that
 ///    role", which is nearly a restatement of the code. Kept because they are what a mutation trips,
 ///    not counted as coverage.
@@ -27,22 +27,31 @@ final class TranscriptBrandTests: XCTestCase {
     /// `docs/brand.md` § 1, transcribed. Light, dark, and alpha (only `ComposerRim` carries one).
     private static let documentedPalette: [String: (light: String, dark: String, lightAlpha: CGFloat, darkAlpha: CGFloat)] = [
         // The eleven mirrored from iOS
-        "Canvas": ("F5F4F0", "181816", 1, 1),
-        "CardSurface": ("F9F9F7", "20201F", 1, 1),
-        "SelectionPill": ("E8E6E1", "0B0B0B", 1, 1),
-        "ElevatedSurface": ("F2F2F7", "272726", 1, 1),
-        "ControlSurface": ("F0EFEC", "32322F", 1, 1),
-        "BubbleUser": ("F0EFEC", "32322F", 1, 1),
-        "ComposerSurface": ("F9F9F7", "272726", 1, 1),
-        "ComposerRim": ("FFFFFF", "FFFFFF", 0.90, 0.08),
-        "TextMuted": ("7A7974", "9E9D96", 1, 1),
-        "InverseCanvas": ("2A2A27", "FAF9F5", 1, 1),
-        "AccentColor": ("2E9484", "2E9484", 1, 1),
+        "Canvas": ("FCFCFC", "262626", 1, 1),
+        "CardSurface": ("FFFFFF", "181818", 1, 1),
+        "SelectionPill": ("EFF0F0", "383838", 1, 1),
+        "ElevatedSurface": ("F7F7F7", "232323", 1, 1),
+        "ControlSurface": ("F0F0F0", "323232", 1, 1),
+        "BubbleUser": ("EAF3FD", "223D72", 1, 1),
+        "ComposerSurface": ("FFFFFF", "353535", 1, 1),
+        "ComposerRim": ("E5E5E5", "414141", 1, 1),
+        "TextMuted": ("767778", "8B8B8B", 1, 1),
+        "TextPrimary": ("1A1C1F", "FFFFFF", 1, 1),
+        "TextSecondary": ("3B3D3F", "DEDEDE", 1, 1),
+        "ChromeHover": ("EDEDEE", "2A2A2A", 1, 1),
+        "ChromeSelected": ("F3F3F4", "242424", 1, 1),
+        "TextPlaceholder": ("C7C7C8", "686868", 1, 1),
+        "InverseCanvas": ("1A1C1F", "FFFFFF", 1, 1),
+        "AccentColor": ("8CCBF0", "8CCBF0", 1, 1),
         // The three Mac-only tokens
-        "RowHover": ("EFEDE8", "101010", 1, 1),
-        "Hairline": ("E5E2DC", "2A2A28", 1, 1),
-        "HairlineElevated": ("D8D5CF", "3A3A38", 1, 1),
-        "PaletteSurface": ("FFFFFF", "272726", 1, 1),
+        "RowHover": ("F5F6F6", "2F2F2F", 1, 1),
+        // The vibrant pane's row states (2026-09-17): luminance washes, the fourth and fifth rows
+        // in this table to carry an alpha — black in light, white in dark.
+        "RowHoverVibrant": ("000000", "FFFFFF", 0.04, 0.06),
+        "SelectionPillVibrant": ("000000", "FFFFFF", 0.07, 0.10),
+        "Hairline": ("EAEAEA", "373737", 1, 1),
+        "HairlineElevated": ("DADADB", "3C3C3C", 1, 1),
+        "PaletteSurface": ("FFFFFF", "2D2D2D", 1, 1),
         // diff-tabs — the diff pair (two foreground roles, two row washes). Task 9 landed the roles
         // PROVISIONALLY; Task 10 measured them and this table is now transcribed from
         // `docs/brand.md` § 3.6 like every row above it. The dark red MOVED in that measurement
@@ -53,27 +62,6 @@ final class TranscriptBrandTests: XCTestCase {
         "DiffAdded": ("1F7A3D", "4CC38A", 1, 1),
         "DiffAddedWash": ("22C55E", "22C55E", 0.10, 0.16),
         "DiffRemovedWash": ("EF4444", "EF4444", 0.10, 0.16),
-        // diff-tabs Task 12 — the five panel-kind tints (Mac-only: the panel strip has no iOS
-        // surface). Same hue both appearances; only the alpha differs. The dark alpha is the
-        // brief's uniform 14% provisional, unchanged, for all five. The LIGHT alpha is the
-        // brief's uniform 8% provisional ONLY for `document`/`note` — `web`/`code`/`diff` were
-        // measured to drown `RowHover`'s hover cue at 8% (as low as 1.009:1) and are tuned down
-        // to where the hover delta and the wash's own visibility against `CardSurface` are equal,
-        // the best either can do given those two tokens are fixed. `docs/brand.md` § 3.7
-        // publishes every ratio and the identity behind the floor.
-        // Ladder retune, live-gate ruling 2026-08-15 (brand.md § 3.7): rest alphas — light a flat
-        // 0.12, dark 0.19 except note's 0.17 (the label-legibility ceiling at the selected rung).
-        "PanelKindWebTint": ("3B82F6", "3B82F6", 0.12, 0.19),
-        "PanelKindDocumentTint": ("F59E0B", "F59E0B", 0.12, 0.19),
-        "PanelKindCodeTint": ("8B5CF6", "8B5CF6", 0.12, 0.19),
-        "PanelKindNoteTint": ("EAB308", "EAB308", 0.12, 0.17),
-        "PanelKindDiffTint": ("22C55E", "22C55E", 0.12, 0.19),
-        // editor-product Task 2 — the sixth panel-kind tint, added under the SAME ladder model
-        // (this task shipped after the live-gate ruling, never saw the old RowHover-occlusion
-        // model at all). Slate, at the same flat 0.12 / 0.19 rest alphas as web/document/code/diff
-        // — measured to clear every § 3.7 floor with margin at those values, no note-style
-        // exception needed.
-        "PanelKindFilesTint": ("64748B", "64748B", 0.12, 0.19),
     ]
 
     /// The catalog IS the palette brand.md publishes. `SidebarBrandTests` already pins that every
@@ -256,98 +244,39 @@ final class TranscriptBrandTests: XCTestCase {
                Int(color.blueComponent * 255 + 0.5))
     }
 
-    // MARK: - 2. Serif assistant prose (brand.md § 4, allowlist binding #4)
+    // MARK: - 2. Assistant prose is the system sans (brand.md § 4 — serif binding #4 retired)
 
-    /// The claim in one assertion: what Winter SAYS is set in a serif, and nothing else on this
-    /// surface is. Pinned on the resolved `NSFont`, not on the enum case that asked for it — a role
-    /// that silently fell back to the system sans (the `guard` in `Theme.assistantProse`) would
-    /// still satisfy any check written against the case.
-    ///
-    /// Serif-ness is read off the FAMILY rather than `symbolicTraits`: measured on this OS, the
-    /// system serif reports symbolic traits of `0x0`, identical to the system sans — the serif class
-    /// bits are simply not set on it, so a trait check would pass on either face and prove nothing.
-    func testAssistantProseIsSerifAndTheSansRoleIsNot() {
-        let assistant = transcriptProseFont(.assistant, size: 15.5, weight: .regular)
+    /// What Winter SAYS is set in the plain system font — the serif binding was retired on
+    /// 2026-09-17 (user: "drop our weird assistant font"; ChatGPT's app uses the system sans).
+    /// Pinned on the resolved `NSFont`, and against the serif design by family, so a
+    /// reintroduced serif reds here rather than slipping back in.
+    func testAssistantProseIsTheSystemSans() {
+        let assistant = transcriptProseFont(.assistant, size: 14, weight: .regular)
         let sans = transcriptProseFont(.sans, size: 14, weight: .regular)
-
-        XCTAssertTrue(isSerif(assistant),
-                      "assistant prose must resolve to a serif face, got \(assistant.fontName)")
-        XCTAssertFalse(isSerif(sans), "the sans role must NOT be serif, got \(sans.fontName)")
+        XCTAssertEqual(assistant, NSFont.systemFont(ofSize: 14, weight: .regular),
+                       "assistant prose is the plain system font, got \(assistant.fontName)")
         XCTAssertEqual(sans, NSFont.systemFont(ofSize: 14, weight: .regular),
                        "the sans role is the plain system font, by doing nothing to it")
-        XCTAssertNotEqual(assistant.familyName, sans.familyName,
-                          "the two roles must be visibly different faces")
-        XCTAssertFalse(assistant.fontDescriptor.symbolicTraits.contains(.monoSpace))
+        XCTAssertFalse(isSerif(assistant), "assistant prose must not be serif any more")
     }
 
-    /// The serif is New York — the system serif brand.md § 4 names, no bundled font file. Pinned by
-    /// name because "which serif" is the instruction; a different serif substituted later would
-    /// satisfy every family comparison above while changing the product's voice. Same convention
-    /// `SidebarBrandTests` uses for the sidebar's SF Symbols.
-    func testTheSerifIsNewYork() {
-        XCTAssertTrue(transcriptProseFont(.assistant, size: 15.5, weight: .regular)
-            .fontName.contains("NewYork"),
-                      "brand.md § 4 names New York as the system serif")
-    }
-
-    /// The family the system's own serif design resolves to, computed once so every serif check
-    /// below compares against a real font rather than a hardcoded internal family name.
+    /// The family the system's own serif design resolves to, so the no-serif checks compare
+    /// against a real font rather than a hardcoded internal family name.
     private func isSerif(_ font: NSFont) -> Bool {
         let reference = NSFont.systemFont(ofSize: 14)
         guard let descriptor = reference.fontDescriptor.withDesign(.serif),
-              let serif = NSFont(descriptor: descriptor, size: 14) else {
-            XCTFail("this OS has no system serif design at all"); return false
-        }
+              let serif = NSFont(descriptor: descriptor, size: 14) else { return false }
         return font.familyName == serif.familyName
     }
 
-    /// The failure this catches is invisible and would ruin the effect: `NSFontManager.convert` is
-    /// how `MessageTextFormatter` builds every **bold** and *italic* run, and it is free to fall back
-    /// to a different family when the requested trait is unavailable. If it did, every emphasis in a
-    /// serif paragraph would render in SF mid-sentence. Measured to hold on this OS; pinned so it
-    /// stays measured rather than assumed.
-    func testSerifProseSurvivesBoldAndItalicConversion() {
-        let serif = transcriptProseFont(.assistant, size: 15.5, weight: .regular)
-        for trait in [NSFontTraitMask.boldFontMask, .italicFontMask] {
-            let converted = NSFontManager.shared.convert(serif, toHaveTrait: trait)
-            XCTAssertTrue(isSerif(converted),
-                          "a \(trait == .boldFontMask ? "bold" : "italic") run left the serif family "
-                          + "(became \(converted.fontName))")
-            XCTAssertEqual(converted.pointSize, serif.pointSize, "…and it must not resize either")
-        }
-    }
-
-    /// **The parity pin, rewritten by ruling (2026-08-13: "the iOS here is source of truth. the
-    /// Mac should follow it").** Until that ruling this test asserted the OPPOSITE — x-height
-    /// (optical) parity, with the serif taking more points — encoding the measurement as law.
-    /// The ruling retired the measurement's rule-status: iOS sets both prose roles at one nominal
-    /// style, so the Mac's two roles now share ONE ladder, and this pins that sharing in both
-    /// directions — every size equal, the faces distinct, the serif leading strictly wider (iOS's
-    /// own lineSpacing(6)-on-serif-only distinction).
-    ///
-    /// The old measurement survives as the ACCEPTED PROPERTY (brand.md § 4.1): at the shared size
-    /// the serif genuinely reads ~10% optically lighter. Pinned as a fact so the doc's claim
-    /// stays measured — if the OS ever changed the faces until it stopped being true, the doc
-    /// would be wrong and this would say so.
-    func testTheTwoProseRolesShareOneNominalSizeByRuling() {
-        let serif = transcriptProseMetrics(.assistant)
-        let sans = transcriptProseMetrics(.sans)
-        XCTAssertEqual(serif.bodySize, sans.bodySize, "one body size, by ruling")
-        XCTAssertEqual(serif.quoteSize, sans.quoteSize, "one quote size")
-        XCTAssertEqual(serif.headingSizes, sans.headingSizes, "one heading run")
-        XCTAssertEqual(serif.codeSizeDrop, sans.codeSizeDrop, "one inline-code drop")
-        XCTAssertGreaterThan(serif.lineSpacing, sans.lineSpacing,
-                             "leading is the ONE metric the roles keep distinct — serif wider")
-
-        let serifBody = transcriptProseFont(.assistant, size: serif.bodySize, weight: .regular)
-        let sansBody = transcriptProseFont(.sans, size: sans.bodySize, weight: .regular)
-        XCTAssertEqual(serifBody.pointSize, sansBody.pointSize, "the same nominal size, rendered")
-        XCTAssertNotEqual(serifBody.familyName, sansBody.familyName,
-                          "…in two visibly different faces")
-        // The accepted property, kept measured: New York's shorter x-height means the serif
-        // reads optically lighter at the shared size (~10% on this OS).
-        XCTAssertLessThan(serifBody.xHeight, sansBody.xHeight,
-                          "brand.md § 4.1's accepted property stopped being true on this OS")
+    /// The two prose roles are ONE ladder — every metric shared, the same face. ChatGPT's
+    /// measured capture (2026-09-17) sets the user bubble and the reply at the same 14 pt on the
+    /// same ~23 pt line pitch, so even the leading no longer differs.
+    func testTheTwoProseRolesShareOneLadder() {
+        XCTAssertEqual(transcriptProseMetrics(.assistant), transcriptProseMetrics(.sans))
+        let metrics = transcriptProseMetrics(.assistant)
+        XCTAssertEqual(transcriptProseFont(.assistant, size: metrics.bodySize, weight: .regular),
+                       transcriptProseFont(.sans, size: metrics.bodySize, weight: .regular))
     }
 
     /// The renderer is where the face actually lands: `MessageTextFormatter` builds an
@@ -355,7 +284,7 @@ final class TranscriptBrandTests: XCTestCase {
     /// rather than the helper feeding it. Code runs stay monospaced in BOTH roles — a serif code
     /// span would be its own defect.
     func testTheMarkdownRendererCarriesTheRolesFaceAndKeepsCodeMonospaced() {
-        for (role, wantSerif) in [(TranscriptProseRole.assistant, true), (.sans, false)] {
+        for role in [TranscriptProseRole.assistant, .sans] {
             let metrics = transcriptProseMetrics(role)
             let string = MessageTextFormatter.chatInlineAttributedString(
                 "plain **bold** and `code`",
@@ -371,8 +300,7 @@ final class TranscriptBrandTests: XCTestCase {
             let proseFonts = fonts.filter { !$0.fontDescriptor.symbolicTraits.contains(.monoSpace) }
             XCTAssertFalse(proseFonts.isEmpty, "\(role) produced no prose runs")
             for font in proseFonts {
-                XCTAssertEqual(isSerif(font), wantSerif,
-                               "\(role): a prose run rendered as \(font.fontName)")
+                XCTAssertFalse(isSerif(font), "\(role): a prose run rendered as \(font.fontName)")
             }
             XCTAssertTrue(fonts.contains { $0.fontDescriptor.symbolicTraits.contains(.monoSpace) },
                           "\(role): the `code` span must stay monospaced")
@@ -502,10 +430,11 @@ final class TranscriptBrandTests: XCTestCase {
             }
             scanned += 1
         }
+        // 11 since the header-only `WorkingDirsMenu.swift` was deleted (2026-09-17).
         // Exact, not a floor (fix round 1, review M3): `> 10` against 12 files quietly tolerated
         // deleting two of them, which would have made the ban pass by scanning less.
         XCTAssertEqual(scanned, try chatContentSources().count)
-        XCTAssertEqual(scanned, 12, "ChatContent's file count changed — confirm the new file is scanned")
+        XCTAssertEqual(scanned, 11, "ChatContent's file count changed — confirm the new file is scanned")
     }
 
     /// **The fence on IMPORTANT-1's fix itself.** The two pins above prove `HairlineElevated` is a
@@ -540,10 +469,11 @@ final class TranscriptBrandTests: XCTestCase {
                 }
             }
         }
-        XCTAssertEqual(elevatedSites, 6,
+        XCTAssertEqual(elevatedSites, 8,
                        "the question separator, the code-block rim, the latest pill, the "
-                       + "interaction card's own rim, the pending box's option separators and its "
-                       + "header pills — all six, or this pin is passing because the rules stopped "
+                       + "interaction card's own rim, the pending box's option separators, its "
+                       + "header pills, the inline sidebars' divider and the floating cards' rim "
+                       + "— all eight, or this pin is passing because the rules stopped "
                        + "being drawn at all")
     }
 
@@ -568,12 +498,12 @@ final class TranscriptBrandTests: XCTestCase {
     /// job; this pins what the shared figures ARE.
     func testTheUnifiedLadderCarriesTheRuledValues() {
         let sans = transcriptProseMetrics(.sans)
-        XCTAssertEqual(sans.bodySize, 15.5)
-        XCTAssertEqual(sans.quoteSize, 15)
-        XCTAssertEqual(sans.lineSpacing, 3, "the sans keeps its own tighter leading")
-        XCTAssertEqual([1, 2, 3, 4].map(sans.headingSize), [22, 19, 17, 16])
-        XCTAssertEqual(sans.codeSize(for: sans.bodySize), 13.5,
-                       "inline code still lands where this surface always set it")
+        XCTAssertEqual(sans.bodySize, 14, "ChatGPT's measured body size")
+        XCTAssertEqual(sans.quoteSize, 13.5)
+        XCTAssertEqual(sans.lineSpacing, 6, "≈23 pt pitch, ChatGPT's measured rhythm")
+        XCTAssertEqual([1, 2, 3, 4].map(sans.headingSize), [20, 17, 15.5, 14.5])
+        XCTAssertEqual(sans.codeSize(for: sans.bodySize), 12.5,
+                       "inline code matches the 12.5 pt code-block face")
     }
 
     /// Both ladders must be internally ordered — a heading that is smaller than the body it heads,
@@ -610,7 +540,7 @@ final class TranscriptBrandTests: XCTestCase {
         }
     }
 
-    /// Inline code lands on ONE size (13.5 for body text) against either face. Before the
+    /// Inline code lands on ONE size (12.5 for body text) against either role. Before the
     /// 2026-08-13 unification the two roles got there by two DIFFERENT drops (0.5 sans, 2 serif —
     /// bodies differed, drops compensated) and this test asserted that inequality; the ruling
     /// unified the bodies, so one shared drop now does it by construction, and the inequality
@@ -620,8 +550,8 @@ final class TranscriptBrandTests: XCTestCase {
         let sans = transcriptProseMetrics(.sans)
         XCTAssertEqual(assistant.codeSize(for: assistant.bodySize),
                        sans.codeSize(for: sans.bodySize))
-        XCTAssertEqual(assistant.codeSize(for: assistant.bodySize), 13.5,
-                       "the size this surface has always used for body-text code")
+        XCTAssertEqual(assistant.codeSize(for: assistant.bodySize), 12.5,
+                       "body-text code sits on the code-block face's 12.5")
         XCTAssertEqual(assistant.codeSizeDrop, sans.codeSizeDrop,
                        "one shared drop since the ladders unified")
     }

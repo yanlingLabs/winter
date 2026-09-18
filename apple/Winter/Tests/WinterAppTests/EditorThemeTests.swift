@@ -110,7 +110,7 @@ final class EditorThemeTests: XCTestCase {
     /// that happens to produce the same JSON shape twice.
     ///
     /// **`editorCursor.foreground` is the one deliberate exception** — `AccentColor`'s own asset is
-    /// the SAME `#2E9484` in both appearances (`Theme.accent`'s doc: "stays out of navigation",
+    /// the SAME `#8CCBF0` in both appearances (`Theme.accent`'s doc: "stays out of navigation",
     /// the one brand hue that does not shift with the scheme), so a real, non-buggy payload
     /// reproduces that identity rather than hiding it.
     func testLightAndDarkResolveToDifferentColorsThroughout() throws {
@@ -139,11 +139,11 @@ final class EditorThemeTests: XCTestCase {
     /// a code bug; every other test in this file stays green either way (none of them hardcode a hex).
     func testExactStringPinForLightScheme() {
         let expected = """
-        {"base":"vs","colors":{"editor.background":"#F9F9F7","editor.foreground":"#262626",\
-        "editor.lineHighlightBackground":"#EFEDE8","editor.selectionBackground":"#E8E6E1",\
-        "editorCursor.foreground":"#2E9484"},"inherit":true,"rules":[{"foreground":"0088FF",\
+        {"base":"vs","colors":{"editor.background":"#FFFFFF","editor.foreground":"#272727",\
+        "editor.lineHighlightBackground":"#F5F6F6","editor.selectionBackground":"#EFF0F0",\
+        "editorCursor.foreground":"#8CCBF0"},"inherit":true,"rules":[{"foreground":"0088FF",\
         "token":"keyword"},{"foreground":"34C759","token":"string"},{"foreground":"CB30E0",\
-        "token":"number"},{"foreground":"7D7D7C","token":"comment"},{"foreground":"0088FF",\
+        "token":"number"},{"foreground":"808080","token":"comment"},{"foreground":"0088FF",\
         "token":"type"}]}
         """
         XCTAssertEqual(EditorTheme.tokensJSON(for: .light), expected)
