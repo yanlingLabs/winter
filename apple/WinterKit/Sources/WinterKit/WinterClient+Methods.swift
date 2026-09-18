@@ -1719,10 +1719,16 @@ public struct ModelRoleValue: Equatable, Sendable {
     /// non-empty = the efforts the daemon will accept (plus `"none"`, which it accepts but never
     /// lists). Same meaning as `CatalogModel.efforts`.
     public let efforts: [String]?
+    /// The role's CURRENT problem — its last failure, classified daemon-side — or nil when it has
+    /// none (or the daemon predates the field). Cleared daemon-side by the role's next successful
+    /// call and whenever its effective model changes, so a client renders exactly what is reported
+    /// and never ages anything out itself.
+    public let problem: ModelRoleProblem?
 
     public init(model: String?, explicit: Bool, constraint: String,
                 permitted: [ModelRolePermittedProvider],
-                effort: String? = nil, effortExplicit: Bool = false, efforts: [String]? = nil) {
+                effort: String? = nil, effortExplicit: Bool = false, efforts: [String]? = nil,
+                problem: ModelRoleProblem? = nil) {
         self.model = model
         self.explicit = explicit
         self.constraint = constraint
@@ -1730,6 +1736,53 @@ public struct ModelRoleValue: Equatable, Sendable {
         self.effort = effort
         self.effortExplicit = effortExplicit
         self.efforts = efforts
+        self.problem = problem
+    }
+}
+
+/// `settings.modelRoles`' per-role `problem`: `null | { reason, detail, model, at, retryAt? }`.
+///
+/// Every field is carried RAW. `reason` is the daemon's classification (`rate-limited`,
+/// `usage-limit`, `out-of-credits`, `credential-rejected`, `no-credential`, `model-unavailable`,
+/// `provider-unavailable`, `other`, …) kept as a STRING — a reason a later daemon adds must reach
+/// the screen, not be dropped by a closed enum. `at`/`retryAt` stay ISO-8601 strings; parsing them
+/// is the consumer's job, so an unparseable timestamp costs a time, never the whole note.
+public struct ModelRoleProblem: Equatable, Sendable {
+    public let reason: String
+    /// One short line, sanitized and capped daemon-side. Consumers still clip it.
+    public let detail: String?
+    /// The EFFECTIVE tag that failed at the time — which may differ from the role's model now.
+    public let model: String?
+    public let at: String?
+    /// Present ONLY when the provider said when it comes back (retry-after, a plan window's reset).
+    public let retryAt: String?
+
+    public init(reason: String, detail: String? = nil, model: String? = nil,
+                at: String? = nil, retryAt: String? = nil) {
+        self.reason = reason
+        self.detail = detail
+        self.model = model
+        self.at = at
+        self.retryAt = retryAt
+    }
+}
+
+/// What `settings.setModelRole` is told about a role's MODEL — the same three states as
+/// `ModelRoleEffortWrite`:
+///
+/// - `.leave` — the key is OMITTED: the stored model (pinned or defaulted) is left untouched.
+///   **Only meaningful once the daemon makes `model` optional** (it is required-nullable today, so
+///   a daemon without that change refuses the request); a call omitting BOTH fields is refused.
+/// - `.clear` — a literal `"model": null`: unpin, back to the derived default.
+/// - `.set(tag)` — `"model": "<tag>"`, always provider-qualified.
+public enum ModelRoleModelWrite: Equatable, Sendable {
+    case leave
+    case clear
+    case set(String)
+
+    /// The two-state spelling every older caller used: a tag sets it, nil clears it.
+    public init(_ tag: String?) {
+        self = tag.map { .set($0) } ?? .clear
     }
 }
 
@@ -1845,7 +1898,18 @@ extension WinterClient {
                 effortExplicit: o["effortExplicit"]?.boolValue ?? false,
                 // `null` and an absent key both decode to nil ("no reasoning block"), while `[]`
                 // stays `[]` — the distinction the whole effort control turns on.
-                efforts: effortVocabulary(o["efforts"])
+                efforts: effortVocabulary(o["efforts"]),
+                // `null`/absent = no current problem. A problem with no `reason` has nothing to say
+                // and is dropped; every other field is optional so a thinner shape still renders.
+                problem: o["problem"]?.objectValue.flatMap { p in
+                    p["reason"]?.stringValue.map { reason in
+                        ModelRoleProblem(reason: reason,
+                                         detail: p["detail"]?.stringValue,
+                                         model: p["model"]?.stringValue,
+                                         at: p["at"]?.stringValue,
+                                         retryAt: p["retryAt"]?.stringValue)
+                    }
+                }
             )
         }
         return out
@@ -1880,15 +1944,21 @@ extension WinterClient {
     /// **`effort` is the THIRD state, and it is spelled out rather than optional-ed.** `.leave` omits
     /// the key (leave the stored effort untouched), `.clear` sends a literal `"effort": null` (back to
     /// the model's default), `.set` sends the string. The default is `.leave`, so every existing
-    /// caller sends exactly the bytes it always did. `model` stays required-nullable, so an
-    /// effort-only change must re-send the role's current tag.
+    /// caller sends exactly the bytes it always did.
+    ///
+    /// **`model` is three-state too** (`ModelRoleModelWrite`), for the daemon change that makes it
+    /// optional (absent = leave the model untouched). Until that lands `model` is required-nullable
+    /// daemon-side, so callers send `.set`/`.clear`; `.leave` OMITS the key, exactly as the effort's
+    /// `.leave` does. The `String?` overload below keeps every older call site's bytes identical.
     @discardableResult
-    public func setModelRole(role: String, model: String?,
+    public func setModelRole(role: String, model: ModelRoleModelWrite,
                              effort: ModelRoleEffortWrite = .leave) async throws -> [String: ModelRoleValue] {
-        var params: [String: JSONValue] = [
-            "role": .string(role),
-            "model": model.map { JSONValue.string($0) } ?? .null,
-        ]
+        var params: [String: JSONValue] = ["role": .string(role)]
+        switch model {
+        case .leave: break
+        case .clear: params["model"] = .null
+        case let .set(tag): params["model"] = .string(tag)
+        }
         switch effort {
         case .leave: break
         case .clear: params["effort"] = .null
@@ -1896,6 +1966,13 @@ extension WinterClient {
         }
         let r = try await request("settings.setModelRole", params: .object(params))
         return decodeModelRoles(r)
+    }
+
+    /// The two-state spelling: a tag sets the model, `nil` sends a literal `"model": null`.
+    @discardableResult
+    public func setModelRole(role: String, model: String?,
+                             effort: ModelRoleEffortWrite = .leave) async throws -> [String: ModelRoleValue] {
+        try await setModelRole(role: role, model: ModelRoleModelWrite(model), effort: effort)
     }
 }
 

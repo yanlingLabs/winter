@@ -133,6 +133,9 @@ struct SettingsRoleValue: Equatable, Sendable {
     /// The CURRENT model's effort vocabulary, in the wire's order. `nil` = no reasoning block, `[]`
     /// = an empty vocabulary — two different facts (`roleEffortControl`).
     let efforts: [String]?
+    /// The role's CURRENT problem as the daemon reported it (`settings.modelRoles`' `problem`), or
+    /// nil. Rendered only in the page's "Notes" group (`SettingsRoleNotes.swift`), never on the row.
+    let problem: RoleProblem?
 
     init(model: String?,
          isExplicit: Bool,
@@ -141,7 +144,8 @@ struct SettingsRoleValue: Equatable, Sendable {
          permittedProviders: [ModelRolePermittedProvider] = [],
          effort: String? = nil,
          effortExplicit: Bool = false,
-         efforts: [String]? = nil) {
+         efforts: [String]? = nil,
+         problem: RoleProblem? = nil) {
         self.model = model
         self.isExplicit = isExplicit
         self.constraint = constraint
@@ -150,6 +154,7 @@ struct SettingsRoleValue: Equatable, Sendable {
         self.effort = effort
         self.effortExplicit = effortExplicit
         self.efforts = efforts
+        self.problem = problem
     }
 }
 
@@ -283,7 +288,8 @@ func settingsModelRoleValues(_ roles: [String: ModelRoleValue]) -> [SettingsMode
             permittedProviders: value.permitted,
             effort: value.effort,
             effortExplicit: value.effortExplicit,
-            efforts: value.efforts
+            efforts: value.efforts,
+            problem: value.problem.map(roleProblem)
         )
     }
     return out
@@ -304,7 +310,10 @@ final class SettingsRolesModel: ObservableObject {
     /// still works. The live app passes THIS one (`SettingsSurface.swift`, `wiring?.setModelRole`).
     /// Where it is nil, (a) no effort door renders (`canWriteEffort`), and (b) a model change falls
     /// back to `writer`, so the `effort: null` rule 5 asks for cannot be sent.
-    typealias RoleWriter = (_ role: String, _ model: String?, _ effort: ModelRoleEffortWrite)
+    ///
+    /// The MODEL is three-state as well (`ModelRoleModelWrite`), so an effort-only write can send
+    /// `.leave` once the daemon makes `model` optional — see `roleEffortOnlyModelWrite`.
+    typealias RoleWriter = (_ role: String, _ model: ModelRoleModelWrite, _ effort: ModelRoleEffortWrite)
         async throws -> [String: ModelRoleValue]
 
     private let loader: Loader?
@@ -397,11 +406,24 @@ final class SettingsRolesModel: ObservableObject {
     /// goes through it with the effort key absent (see `RoleWriter` for why that is today's wire),
     /// and a `.set` is REFUSED here rather than silently dropped — a chosen effort that never
     /// reached the daemon would be the exact lie the gated control exists to avoid.
+    ///
+    /// A write that would change NOTHING (`model: .leave` and `effort: .leave`) is refused here —
+    /// the daemon refuses it too. A `model: .leave` through the two-argument `writer` is refused as
+    /// well: that door can only spell a tag or `null`, and turning "leave" into either would be a
+    /// write nobody asked for.
     @discardableResult
     func commit(_ role: SettingsModelRole, model: String?,
                 effort: ModelRoleEffortWrite = .leave) async -> Bool {
+        await commit(role, model: ModelRoleModelWrite(model), effort: effort)
+    }
+
+    @discardableResult
+    func commit(_ role: SettingsModelRole, model: ModelRoleModelWrite,
+                effort: ModelRoleEffortWrite) async -> Bool {
         guard canWrite, !writing else { return false }
+        if model == .leave, effort == .leave { return false }
         if roleWriter == nil, case .set = effort { return false }
+        if roleWriter == nil, model == .leave { return false }
         writing = true
         defer { writing = false }
         do {
@@ -409,7 +431,12 @@ final class SettingsRolesModel: ObservableObject {
             if let roleWriter {
                 reply = try await roleWriter(role.rawValue, model, effort)
             } else if let writer {
-                reply = try await writer(role.rawValue, model)
+                let tag: String?
+                switch model {
+                case let .set(t): tag = t
+                case .clear, .leave: tag = nil
+                }
+                reply = try await writer(role.rawValue, tag)
             } else {
                 return false
             }
@@ -516,6 +543,18 @@ struct SettingsRolesSection: View {
                     }
                 }
             }
+            // "Notes" — a role's last failure (rate limit, usage limit, credits, …), said calmly at
+            // the very bottom instead of failing silently or raising an error on screen. Absent
+            // ENTIRELY when nothing is reported: no empty header, no "all clear". It rides the same
+            // read and the same write reply as the values, so it repaints with them.
+            let notes = settingsRoleNotes(values, now: Date())
+            if !notes.isEmpty {
+                SettingsGroup(settingsRoleNotesTitle) {
+                    ForEach(notes) { note in
+                        SettingsRoleNoteRow(note: note)
+                    }
+                }
+            }
         }
         // Read-only and params-less, so re-asking on every open is free and always current — the
         // same re-seed-on-appear posture every other pane has. A daemon without the method answers
@@ -586,9 +625,10 @@ struct SettingsRolesSection: View {
                 }
                 // The role's REASONING EFFORT — its own value and its own card (2026-09-18), never
                 // folded into the model picker. Shown only where `settingsRoleEffortIsPickable`
-                // says so: a real vocabulary on an EXPLICIT model (an effort-only write re-sends
-                // the tag, which would pin a derived one), or a stale leftover that must stay
-                // visible and clearable. The advisor's `efforts` is always null, so it never shows.
+                // says so: a real vocabulary on the role's EFFECTIVE model — defaulted roles
+                // included, whose effort-only write sends `model: null` and so stays unpinned
+                // (`roleEffortOnlyModelWrite`) — or a stale leftover that must stay visible and
+                // clearable. The advisor's `efforts` is always null, so it never shows.
                 if let value,
                    settingsRoleEffortIsPickable(value, canWriteEffort: model.canWriteEffort,
                                                 canPresent: picker != nil) {

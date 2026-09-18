@@ -75,13 +75,13 @@ func roleEffortDetailComment(_ highlighted: String?) -> String? {
 /// PURE: whether a Roles row shows its effort door.
 ///
 /// Built on `roleEffortControl`, so it inherits every existing guard — the flag, an effort-capable
-/// writer, and an EXPLICIT model (an effort-only write re-sends the current tag, which on a derived
-/// role would pin it). On top of that:
+/// writer, and an EFFECTIVE model. A DEFAULTED role qualifies too: its effort-only write sends
+/// `model: null` and stays unpinned (`roleEffortOnlyModelWrite`). On top of that:
 /// - a real vocabulary (`.menu`) → shown;
 /// - no vocabulary but a STALE stored effort (`.noSetting(stale: x)`) → shown as a mismatch, so the
 ///   leftover can still be seen and cleared rather than vanish;
 /// - no vocabulary and nothing stored → not shown. The advisor lands here: its `efforts` is always
-///   null, since neither SDK's advisor option carries an effort.
+///   null, since neither SDK's advisor option carries an effort (parity-blocked, not forgotten).
 func settingsRoleEffortIsPickable(_ value: SettingsRoleValue?, canWriteEffort: Bool,
                                   canPresent: Bool,
                                   enabled: Bool = settingsRoleEffortControlEnabled) -> Bool {

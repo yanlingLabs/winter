@@ -1869,6 +1869,55 @@ extension MethodWrapperTests {
         XCTAssertTrue(bothNull["effort"] is NSNull)
     }
 
+    /// The MODEL's three states on the wire, mirroring the effort's: `.leave` OMITS the key, `.clear`
+    /// sends a literal `null`, `.set` sends the tag. And the `String?` overload is byte-identical to
+    /// `.set`/`.clear`, so every older caller sends what it always did.
+    func testModelRoleModelWriteKeepsAbsentAndNullApart() async throws {
+        let (client, t) = try await connected()
+        let map = #"{"ok":true,"roles":{}}"#
+        let (leaveReq, _) = try await roundTrip(t, sentIndex: 1, result: map) {
+            try await client.setModelRole(role: "pins.dream", model: ModelRoleModelWrite.leave, effort: .set("low"))
+        }
+        let leave = try XCTUnwrap(leaveReq["params"] as? [String: Any])
+        XCTAssertFalse(leave.keys.contains("model"), "`.leave` OMITS the model key")
+        XCTAssertEqual(leave["effort"] as? String, "low")
+
+        let (clearReq, _) = try await roundTrip(t, sentIndex: 2, result: map) {
+            try await client.setModelRole(role: "pins.dream", model: ModelRoleModelWrite.clear, effort: .set("low"))
+        }
+        let clear = try XCTUnwrap(clearReq["params"] as? [String: Any])
+        XCTAssertTrue(clear.keys.contains("model"))
+        XCTAssertTrue(clear["model"] is NSNull, "`.clear` is a literal JSON null")
+
+        let (setReq, _) = try await roundTrip(t, sentIndex: 3, result: map) {
+            try await client.setModelRole(role: "pins.dream", model: ModelRoleModelWrite.set("a/x"))
+        }
+        let set = try XCTUnwrap(setReq["params"] as? [String: Any])
+        XCTAssertEqual(set["model"] as? String, "a/x")
+        XCTAssertFalse(set.keys.contains("effort"))
+
+        XCTAssertEqual(ModelRoleModelWrite("a/x"), .set("a/x"))
+        XCTAssertEqual(ModelRoleModelWrite(nil), .clear)
+    }
+
+    /// `problem` rides `settings.modelRoles`: every field carried raw (reason as a STRING, times as
+    /// ISO strings), `retryAt` optional, `null`/absent = none, and a problem with no reason dropped.
+    func testModelRoleProblemDecodesRawAndOptional() async throws {
+        let (client, t) = try await connected()
+        let map = #"{"ok":true,"roles":{ "pins.dream":{"model":"a/x","explicit":false,"problem":{"reason":"usage-limit","detail":"Plan window exhausted","model":"codex-oauth/gpt-5.6-terra","at":"2026-09-18T10:00:00.000Z","retryAt":"2026-09-18T15:00:00Z"}}, "pins.cleaner":{"model":"a/x","explicit":false,"problem":{"reason":"some-future-reason","detail":"d","model":"a/x","at":"2026-09-18T10:00:00Z"}}, "titles.model":{"model":"a/x","explicit":false,"problem":null}, "reviewer.model":{"model":"a/x","explicit":false}, "pins.research":{"model":"a/x","explicit":false,"problem":{"detail":"no reason"}} }}"#
+        let (_, roles) = try await roundTrip(t, sentIndex: 1, result: map) { try await client.settingsModelRoles() }
+        XCTAssertEqual(roles["pins.dream"]?.problem,
+                       ModelRoleProblem(reason: "usage-limit", detail: "Plan window exhausted",
+                                        model: "codex-oauth/gpt-5.6-terra",
+                                        at: "2026-09-18T10:00:00.000Z", retryAt: "2026-09-18T15:00:00Z"))
+        XCTAssertEqual(roles["pins.cleaner"]?.problem?.reason, "some-future-reason",
+                       "an unknown reason is carried, not dropped")
+        XCTAssertNil(roles["pins.cleaner"]?.problem?.retryAt)
+        XCTAssertNil(roles["titles.model"]?.problem, "null = no problem")
+        XCTAssertNil(roles["reviewer.model"]?.problem, "absent = no problem (older daemon)")
+        XCTAssertNil(roles["pins.research"]?.problem, "no reason = nothing to say")
+    }
+
     /// THE DEGRADATION CONTRACT. Today's shipped daemon implements none of these four, so each one
     /// comes back `-32601` — and every surface keys on `isMethodNotFound` to render its existing
     /// "waiting on the daemon" state instead of an error. A wrapper that swallowed this into an
