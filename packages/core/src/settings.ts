@@ -1969,10 +1969,22 @@ export function modelRolesFor(settings: Settings | null | undefined, boundProvid
  * same "a caller explicitly selecting it here is never a real request" rule) and DELEGATES to
  * `setAdvisorModel` for the advisor role rather than duplicating its transform.
  *
- * `model: null` clears an optional role's override, falling back to `modelRoleInfo`'s own default
- * rule. `provider.model` has no "unset" state at all (`ProviderSettings.model` is a REQUIRED field)
- * and THROWS on `null` rather than silently doing nothing — the caller (the RPC handler) reports
- * this the same way it reports an unresolvable tag, `ERR.INVALID_PARAMS`.
+ * `model` is now a THREE-way key, mirroring `effort`'s own established three-way meaning below
+ * (2026-09-18, the "make model optional" fix): ABSENT leaves the role's stored model exactly as it
+ * is (an effort-only write no longer has to re-send the current tag — see the ruling comment right
+ * above `assertCatalogBackedTag`'s USER RULING for why re-sending used to be load-bearing and
+ * dangerous: a defaulted role's client had to send `model: null` to change only the effort, which
+ * SILENTLY UNPINS the role if another client pinned it in the gap between that client's last read
+ * and this write landing); `null` clears an optional role's override, falling back to
+ * `modelRoleInfo`'s own default rule; a tag sets it. `provider.model` still has no "unset" state at
+ * all (`ProviderSettings.model` is a REQUIRED field) and THROWS on `null` rather than silently doing
+ * nothing — the caller (the RPC handler) reports this the same way it reports an unresolvable tag,
+ * `ERR.INVALID_PARAMS` — but now accepts `model` ABSENT (an effort-only `provider.reasoningEffort`
+ * write) exactly like every other role.
+ *
+ * A call with BOTH `model` and `effort` absent is refused — there is nothing left for this door to
+ * do, and silently returning the settings unchanged would read as success for a call that changed
+ * nothing on purpose or by a caller bug either way; the ambiguity is refused rather than guessed at.
  */
 /**
  * USER RULING 2026-09-18: a model role may only be set to a tag the PINNED CATALOG actually backs.
@@ -2024,8 +2036,11 @@ function assertCatalogBackedTag(tag: string, role: ModelRole): void {
  *   - a string — set, validated against the model this call leaves the role on (see
  *     `assertRoleEffortSelectable`).
  */
-export function setModelRole(settings: Settings, role: ModelRole, model: string | null, effort?: string | null): Settings {
-  const withModel = setModelRoleModel(settings, role, model);
+export function setModelRole(settings: Settings, role: ModelRole, model?: string | null, effort?: string | null): Settings {
+  if (model === undefined && effort === undefined) {
+    throw new TypeError(`${role}: neither model nor effort was given — there is nothing to change (pass model to change the pin, effort to change the reasoning level, or both)`);
+  }
+  const withModel = model === undefined ? settings : setModelRoleModel(settings, role, model);
   if (effort === undefined) return withModel;
   // Validated against the POST-WRITE model, never the one the role sat on when the call arrived: a
   // single call that moves a role to a new model and picks an effort for it must be checked as the

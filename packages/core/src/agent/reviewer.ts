@@ -1,4 +1,5 @@
 import type { Provider, TurnInputItem } from "../providers/types";
+import { classifyProviderFailure, type RoleHealthRegistry, type SubscriptionQuotaSource } from "../providers/role-health";
 
 export interface ReviewVerdict {
   verdict: "safe" | "unsafe";
@@ -89,7 +90,7 @@ export class BashReviewer {
   // field — see that class's doc comment for the full "same-provider rebind never moves the static
   // snapshot" explanation. `live` is `RebindableProvider.live`, optional only for a structurally
   // typed test double with no `.live` at all.
-  private readonly provider: { provider: Provider; model: string; live?: () => { model: string } };
+  private readonly provider: { provider: Provider; model: string; live?: () => { model: string }; quota?: SubscriptionQuotaSource };
   // Daemon settings surface (2026-09-17 plan, item 4a): same live-getter fix as `SessionTitler`'s
   // `model` (titles.ts) — `reviewer.model` used to be resolved ONCE at daemon.ts construction time
   // and handed here as a plain string, a boot snapshot CLAUDE.md's no-restart rule forbids. `model`
@@ -102,11 +103,24 @@ export class BashReviewer {
   // it. Absent, or answering `undefined`, sends no `reasoningEffort` at all, exactly as before.
   private readonly effort: (() => string | undefined) | undefined;
   private readonly timeoutMs: number;
+  // 2026-09-18: quiet per-role failure notes — see `SessionTitler`'s identical fields (titles.ts)
+  // for the full doc; this class's own `review()` throw shape is unchanged either way.
+  private readonly boundProviderId: (() => string) | undefined;
+  private readonly roleHealth: RoleHealthRegistry | undefined;
 
-  constructor(deps: { provider: { provider: Provider; model: string; live?: () => { model: string } }; model?: () => string | undefined; effort?: () => string | undefined; timeoutMs?: number }) {
+  constructor(deps: {
+    provider: { provider: Provider; model: string; live?: () => { model: string }; quota?: SubscriptionQuotaSource };
+    model?: () => string | undefined;
+    effort?: () => string | undefined;
+    boundProviderId?: () => string;
+    roleHealth?: RoleHealthRegistry;
+    timeoutMs?: number;
+  }) {
     this.provider = deps.provider;
     this.model = deps.model;
     this.effort = deps.effort;
+    this.boundProviderId = deps.boundProviderId;
+    this.roleHealth = deps.roleHealth;
     this.timeoutMs = deps.timeoutMs ?? Number(process.env.WINTER_REVIEW_TIMEOUT_MS ?? 15000);
   }
 
@@ -126,11 +140,13 @@ export class BashReviewer {
 
     const run = (async () => {
       let text = "";
+      let sawProviderError = false;
       // Same synchronous breath as `model` below — see `SessionTitler.oneShot`'s identical read.
       const effort = this.effort?.();
+      // Minor 5c: the LIVE bound model first — see `SessionTitler.oneShot`'s identical fallback.
+      const effectiveModel = this.model?.() ?? this.provider.live?.().model ?? this.provider.model;
       for await (const ev of this.provider.provider.streamTurn({
-        // Minor 5c: the LIVE bound model first — see `SessionTitler.oneShot`'s identical fallback.
-        model: this.model?.() ?? this.provider.live?.().model ?? this.provider.model,
+        model: effectiveModel,
         ...(effort === undefined ? {} : { reasoningEffort: effort }),
         instructions,
         input: turnInput,
@@ -138,8 +154,15 @@ export class BashReviewer {
         signal,
       })) {
         if (ev.type === "text_delta") text += ev.delta;
+        // 2026-09-18: role health only — see `SessionTitler.oneShot`'s identical branch; this class
+        // also had no `error` handling before, and still does not break/throw on it here.
+        else if (ev.type === "error" && this.boundProviderId) {
+          sawProviderError = true;
+          this.roleHealth?.recordFailure("reviewer.model", `${this.boundProviderId()}/${effectiveModel}`, classifyProviderFailure({ ...ev, subscriptionQuota: this.provider.quota?.subscriptionQuota() }));
+        }
         else if (ev.type === "done" && ev.stopReason === "aborted") throw new Error("review aborted");
       }
+      if (!sawProviderError && this.boundProviderId) this.roleHealth?.recordSuccess("reviewer.model");
       const m = text.match(/\{[\s\S]*\}/);
       if (!m) throw new Error(`reviewer returned no JSON verdict: ${text.slice(0, 80)}`);
       const parsed = JSON.parse(m[0]) as { verdict?: unknown; reason?: unknown };

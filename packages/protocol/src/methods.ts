@@ -1539,6 +1539,30 @@ export const ModelRoleInfoSchema = z.object({
    *  As on `models.catalog`, `"none"` is not prepended: `settings.setModelRole` accepts `"none"`
    *  whenever this array is non-empty, so a control offering it adds it by that rule. */
   efforts: z.array(z.string()).nullable(),
+  /** 2026-09-18: a quiet per-role failure note for the Mac app's Roles pane's "Notes" section — the
+   *  role's most recent terminal failure (rate limit, usage/quota limit, no credits, a rejected or
+   *  missing credential, an unavailable model/provider, …), or `null` when there is none to show.
+   *  ALWAYS present (never an optional key) so a client can render "no problem" without a second
+   *  check. Cleared the instant a LATER call for this role succeeds, or when the role's effective
+   *  `model` (the sibling field above) no longer equals the tag that failed — a note about a
+   *  resolved problem, or about a model this role no longer runs, is exactly the noise this field
+   *  exists to avoid (`packages/core/src/providers/role-health.ts`'s own doc comment has the full
+   *  design). `reason` is a raw string, not an enum, so a new value reaches the UI with no protocol
+   *  change — today's vocabulary: `rate-limited`, `usage-limit`, `out-of-credits`,
+   *  `credential-rejected`, `no-credential`, `model-unavailable`, `provider-unavailable`, `other`. */
+  problem: z.object({
+    reason: z.string(),
+    /** ONE short human line — never the provider's raw error body (see role-health.ts's own
+     *  `classifyProviderFailure` for what may and may not reach this field). */
+    detail: z.string(),
+    /** The provider-qualified tag that failed — compared against this same info's own `model`
+     *  field to decide whether the note is still current (see this field's own doc above). */
+    model: z.string(),
+    /** ISO — when this problem was recorded. */
+    at: z.string(),
+    /** ISO — when the provider (or its subscription window) said this resolves, if it said so. */
+    retryAt: z.string().optional(),
+  }).nullable(),
 });
 
 // LOCAL-ROLE ONLY (never added to `REMOTE_ALLOWED_METHODS`): read-only introspection for the Mac
@@ -1549,33 +1573,37 @@ export const SettingsModelRolesResult = z.object({
   roles: z.record(ModelRole, ModelRoleInfoSchema),
 });
 
-// LOCAL-ROLE ONLY. `model: null` clears an optional role's override; `provider.model` refuses
-// `null` (no "unset" state — the handler's own `setModelRole` check, reported as INVALID_PARAMS).
+// LOCAL-ROLE ONLY. `model`/`effort` share ONE three-way meaning (2026-09-18: `model` WIDENED from
+// required-nullable to `.nullable().optional()`, closing a real race — an effort-only write used to
+// have to re-send the role's current tag, and re-sending `null` for a DEFAULTED role SILENTLY
+// UNPINS it if another client pinned that role in the gap since this client's last read):
+//   - ABSENT   — leave the stored value exactly as it is.
+//   - `null`   — clear it (`model`: fall back to the role's default; `effort`: the role sends none
+//                and the provider's own default applies). `provider.model` is the one exception —
+//                it has no "unset" state at all (`ProviderSettings.model` is a REQUIRED field) and
+//                refuses `model: null` typed, same as always, but now accepts `model` ABSENT for an
+//                effort-only `provider.reasoningEffort` write like every other role.
+//   - a value  — set it. A model change and a matching effort validate and land TOGETHER (the
+//                effort is checked against the model this SAME call leaves the role on).
+// `model` and `effort` BOTH absent is refused (INVALID_PARAMS) — there is nothing for this door to
+// do, and returning success would read as one for a call that changed nothing on purpose or by a
+// caller bug either way.
 export const SettingsSetModelRoleParams = z.object({
   role: ModelRole,
-  /** Shape-only check here (a provider-qualified tag, or `null`); provider EXISTENCE and the
-   *  role-specific rules (never the `unstated/unstated` sentinel, `provider.model` never `null`)
-   *  are the handler's own `setModelRole` check, same split `SettingsSetAdvisorModelParams` has. */
-  model: ModelTagSchema.nullable(),
-  /** 2026-09-18: the role's reasoning effort. `.nullable().optional()` on purpose — the three
-   *  states are three different requests and must stay distinguishable on the wire:
-   *    - ABSENT        — leave the stored effort exactly as it is.
-   *    - `null`        — clear it: the role sends no effort and the provider's default applies.
-   *    - a string      — set it, validated against the model this SAME call leaves the role on
-   *                      (the post-write `model`, so a model change and a matching effort land
-   *                      together or not at all).
-   *
-   *  Validation is the handler's (`setModelRole`, core settings.ts), and it is `session.setEffort`'s
-   *  posture: the value must be one the model's catalog row offers (its vocabulary, plus `"none"`
-   *  whenever that vocabulary is non-empty); a real catalog row with no vocabulary refuses ANY
-   *  effort; a model with no catalog row at all (`winter-test/*`) is not checked. A Winter-level
-   *  tier (`"ultra"`) is refused on every role today — see core's `roleAcceptsClientEffort`.
-   *
-   *  CAUTION — `model` above is a REQUIRED key: an effort-only change must re-send the role's current
-   *  tag (`settings.modelRoles`' `model`, or `null` for a role currently on its default). Sending
-   *  `model: null` there CLEARS a pinned override, and the effort is then validated against the
-   *  role's default model. Changing the model with `effort` absent keeps a stored effort even if the
-   *  new model does not offer it; the post-write `roles` echo shows it beside the new `efforts`. */
+  /** Shape-only check here (a provider-qualified tag, `null`, or absent); provider EXISTENCE and
+   *  the role-specific rules (never the `unstated/unstated` sentinel, `provider.model` never
+   *  `null`) are the handler's own `setModelRole` check, same split `SettingsSetAdvisorModelParams`
+   *  has. See this const's own header comment for the full three-way meaning. */
+  model: ModelTagSchema.nullable().optional(),
+  /** The role's reasoning effort — see this const's own header comment for the shared three-way
+   *  meaning. Validation is the handler's (`setModelRole`, core settings.ts), and it is
+   *  `session.setEffort`'s posture: the value must be one the model's catalog row offers (its
+   *  vocabulary, plus `"none"` whenever that vocabulary is non-empty); a real catalog row with no
+   *  vocabulary refuses ANY effort; a model with no catalog row at all (`winter-test/*`) is not
+   *  checked. A Winter-level tier (`"ultra"`) is refused on every role today — see core's
+   *  `roleAcceptsClientEffort`. Changing the model with `effort` absent keeps a stored effort even
+   *  if the new model does not offer it; the post-write `roles` echo shows it beside the new
+   *  `efforts`. */
   effort: z.string().nullable().optional(),
 });
 export const SettingsSetModelRoleResult = z.object({

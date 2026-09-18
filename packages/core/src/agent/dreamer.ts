@@ -5,6 +5,7 @@ import type { SessionStore } from "../sessions/store";
 import type { Settings } from "../settings";
 import { effortToSpendForRole, pinsFor, ownProviderFor } from "../settings";
 import { internalModelFor } from "../providers/manager";
+import { classifyProviderFailure, type RoleHealthRegistry, type SubscriptionQuotaSource } from "../providers/role-health";
 import { applyOps, validateOps, RESERVED_FILES, MAX_FILES } from "./dream-ops";
 
 // WS-20: the model half is no longer a hardcoded constant — see `pinsFor(settings).dream` in
@@ -37,7 +38,14 @@ export interface DreamerDeps {
   // `ownProviderFor(settings)` only when absent, e.g. a test double) rather than the pure settings
   // read alone, which could disagree with the actual bound backend for as long as a rebind has not
   // caught up — or forever, on a rebind that failed (no credential yet for the new provider).
-  provider: { provider: Provider; model: string; live?: () => { providerId?: string } }; // wrapper for parity with compactor/titler; model IGNORED — dreams pin pinsFor(settings).dream
+  // `quota?`: the SAME `RebindableProvider.quota` (providers/manager.ts) a real `agentProvider`
+  // already carries — structurally satisfied with no adapter, since `Dreamer` is always constructed
+  // with the WHOLE `RebindableProvider` object as `provider` (daemon.ts) and this type only narrows
+  // which of its fields this class reads. Feeds `classifyProviderFailure`'s `subscriptionQuota`
+  // input so a Codex usage-limit note can carry the account's own reported reset time even when the
+  // failing round itself carried no `retryAfterMs`. Absent (every test double) means role-health
+  // just never has that extra signal — `retryAfterMs` alone, when present, still works.
+  provider: { provider: Provider; model: string; live?: () => { providerId?: string }; quota?: SubscriptionQuotaSource }; // wrapper for parity with compactor/titler; model IGNORED — dreams pin pinsFor(settings).dream
   store: SessionStore;
   dir: () => string;                // assistantMemoryDirFor thunk
   enabled: () => boolean;           // memoryEnabledHot
@@ -62,6 +70,10 @@ export interface DreamerDeps {
    *  The one thing the two do share is the re-entrancy guard, which is why the cleaner's provider
    *  call carries its own timeout — a hung judgment would otherwise wedge dreaming too. */
   cleaner?: { runPass(): Promise<unknown> };
+  /** 2026-09-18: quiet per-role failure notes (`providers/role-health.ts`) — OBSERVATION ONLY, never
+   *  changes what `runCycle` throws/logs. Absent (every pre-existing test double) records nothing,
+   *  same as a daemon with no `winterHome` to persist against. */
+  roleHealth?: RoleHealthRegistry;
 }
 
 interface DreamState { watermarkSeq: number; lastDreamAt: number }
@@ -170,7 +182,12 @@ export class Dreamer {
     // leaking a connection every tick. `ac` ties the provider call's lifetime to the race: aborted
     // in the SAME finally that clears the timer, whichever side of the race wins.
     const ac = new AbortController();
+    // 2026-09-18: the EFFECTIVE tag this cycle actually runs on — `dreamModel` above is already the
+    // bare id verified to name `boundProviderId`, so recomposing the qualified tag here is exactly
+    // the daemon's own `liveModel` recomposition (daemon.ts), just local to this call.
+    const effectiveTag = `${boundProviderId}/${dreamModel}`;
     let text = "";
+    let sawProviderError = false;
     const run = (async () => {
       // The internal `Provider` abstraction speaks bare model ids in ITS OWN dialect (the same
       // single backend `agentProvider` was constructed for) — `dreamModel`, computed once above
@@ -180,9 +197,19 @@ export class Dreamer {
         model: dreamModel, ...(dreamEffort === undefined ? {} : { reasoningEffort: dreamEffort }), instructions: DREAM_INSTRUCTION, input, tools: [], signal: ac.signal,
       })) {
         if (ev.type === "text_delta") text += ev.delta;
-        else if (ev.type === "error") throw new Error(`provider error: ${ev.message}`);
+        else if (ev.type === "error") {
+          // Observation only (this method's throw/catch shape is unchanged) — the classifier reads
+          // ONLY the structured fields already on the event, never `ev.message` for its DECISION.
+          sawProviderError = true;
+          this.deps.roleHealth?.recordFailure("pins.dream", effectiveTag, classifyProviderFailure({ ...ev, subscriptionQuota: this.deps.provider.quota?.subscriptionQuota() }));
+          throw new Error(`provider error: ${ev.message}`);
+        }
         else if (ev.type === "done" && ev.stopReason === "aborted") throw new Error("dream aborted");
       }
+      // A "done" that is not an aborted stop, with no error event seen: the provider call itself
+      // succeeded. Recorded here (before the JSON parse/apply below) because role health is about
+      // the PROVIDER CALL, not about whether the model's reply happened to be well-formed JSON.
+      if (!sawProviderError) this.deps.roleHealth?.recordSuccess("pins.dream");
     })();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new Error("dream timed out")), this.timeoutMs); });
