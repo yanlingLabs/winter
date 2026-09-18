@@ -20,6 +20,11 @@
 //   3. Diagnostics-after-edit (`agent/lsp/auto-diagnostics.ts`, ported to Winter's own tool
 //      names/shapes at Task 3.2) — a `PostToolUse` group per file-mutating tool that appends the
 //      diagnostics block as `additionalContext`.
+//   4a. The DANGEROUS-DOMAIN FLOOR on the two web built-ins (2026-09-18, user ruling; §5 below) —
+//      a `PreToolUse` group per web tool: `WebFetch` on a floor host is DENIED with one fixed
+//      refusal, and `WebSearch` carries the floor into the call itself through `updatedInput`. Not a
+//      port of anything the retired engine had: it is the only enforcement of the floor that exists
+//      on the OFFICIAL leg at all, where claude's native web tools take no host-supplied option.
 //   4. The `fileDiff` producer (Task 3.3) — a `PreToolUse` group per file-mutating tool that
 //      snapshots the file (bounded by `DIFF_PATCH_MAX_BYTES`; over the bound, or unreadable, or
 //      outside the session's fence: no diff, never an error) and a `PostToolUse` group that diffs,
@@ -60,6 +65,7 @@ import type {
   PostToolUseFailureHookInput, PostToolUseHookInput, PreToolUseHookInput,
 } from "@yanlinglabs/winter-agent-sdk";
 import type { FileDiffSummary } from "@yanlinglabs/winter-protocol";
+import { SHIPPED_DANGEROUS_DOMAINS, dangerousHostMatch, dangerousUrlMatch } from "../agent/dangerous-domains";
 import { BashReviewer, bashLooksSafe } from "../agent/reviewer";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import { AUTO_DIAG_TOOL_NAMES, autoDiagnosticsSuffix } from "../agent/lsp/auto-diagnostics";
@@ -121,6 +127,22 @@ export interface SessionHooksDeps {
   lsp?: () => LspManager | undefined;
   /** Hot; default true when absent (mirrors `settings.lsp.autoDiagnostics`'s own default). */
   autoDiagnosticsEnabled?: () => boolean | undefined;
+
+  /**
+   * THIS session's project-resolved `settings.permissions.dangerousDomains.added`, read LIVE — the
+   * daemon's own `dangerousDomainsAdded(cwd)` getter (project-overlay aware) with this session's cwd
+   * already bound, so the floor hook below never has to know how to read settings or which project
+   * this session is in. Re-read on every matching web call, so an entry the user adds to
+   * `settings.json` is enforced on this session's very NEXT `WebFetch`, with no daemon restart and
+   * no new incarnation — the `Options.web.blockedDomains` the child was spawned with cannot do that
+   * (a spawned child keeps its own `Options` until it next incarnates), which is one more reason the
+   * host-side floor is not merely a duplicate of it.
+   *
+   * ABSENT IS SAFE, NOT OPEN: the floor hook unions `SHIPPED_DANGEROUS_DOMAINS` itself, so a caller
+   * that never wires this still gets the whole shipped floor — only the USER-added half depends on
+   * the wiring. A getter that THROWS reads as "no additions" (never propagates into the child).
+   */
+  dangerousDomainsAdded?: () => readonly string[] | undefined;
 }
 
 function readRootsOf(roots: string[], tmpDir?: string): string[] {
@@ -139,6 +161,17 @@ function deny(reason: string): HookJSONOutput {
 
 function ask(reason: string): HookJSONOutput {
   return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask", permissionDecisionReason: reason } };
+}
+
+/** A `PreToolUse` INPUT TRANSFORM and NOTHING ELSE — deliberately with no `permissionDecision` at
+ *  all. Measured in the pinned agent SDK's hook reducer (`hooks/reducer.ts`, WS-08 §4 rules 2-3): a
+ *  hook that proposes a decision contributes its transform only when its own decision's rank EQUALS
+ *  the final winning rank across every hook for that event, while a NO-OPINION hook's transform
+ *  "always chains (they proposed no decision, so nothing of theirs was ever overridden)". So a bare
+ *  `allow` here would have silently dropped the floor's injected `blocked_domains` the moment any
+ *  OTHER PreToolUse hook (a plugin's) answered `ask` or `defer` for the same call. */
+function transformInput(next: Record<string, unknown>): HookJSONOutput {
+  return { hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput: next } };
 }
 
 /** Review r1 MAJOR 1: `deps.hookFacade.runFor(...)` is a call into another subsystem (a plugin's
@@ -381,6 +414,208 @@ function diagnosticsPostToolUseHook(deps: SessionHooksDeps): HookCallback {
   };
 }
 
+// ── 5. The dangerous-domain floor, on BOTH legs ────────────────────────────────────────────────
+//
+// **WHY THIS EXISTS AT ALL, given `Options.web.blockedDomains`.** At agent SDK 0.0.17 a WINTER child
+// enforces the floor inside its own executors: `WebFetch` refuses a listed host on the input url, on
+// every redirect hop and on a cache hit, and `WebSearch` sends the list as the backend's exclusion
+// filter AND re-filters the hits locally. Nothing equivalent exists on the OFFICIAL leg — claude's
+// native `WebFetch`/`WebSearch` are the user's ruling now (both tools stay, with claude's own
+// behaviour), and `official-options.ts` sends no `web` block at all because claude has no such
+// option to send it to. So on that leg this hook is the ONLY thing between a floor domain and the
+// network, and `Options.hooks` is the one surface both legs share (`sessionHooksFor`'s own header).
+//
+// On the Winter leg it is defence in depth, and it EARNS that on its own terms: it is the earlier
+// refusal (before the executor, so the transcript carries a policy sentence instead of a tool error),
+// and it reads `dangerousDomainsAdded` LIVE, where the child's `blockedDomains` is frozen at the
+// spawn it was built for until that session next incarnates.
+//
+// **WHY DENY AND NEVER ASK.** The spine lane measured that a Winter child's executor-level
+// `blockedDomains` refuses a listed host even after an approved `ask` — so an `ask` here would raise
+// a card whose approval provably cannot take effect on the leg where a card exists at all, and
+// chat/dispatch never prompt in the first place. A floor hit is a hard refusal in every mode; that is
+// the ruling ("dangerous domains are hard-blocked"), and `mode-options.ts`'s `webOptionsFor` says the
+// same thing about the same list.
+
+/** The two tool names this floor is keyed on. Both runtimes ship the pair under the SAME two names
+ *  (`mode-options.ts`'s `SDK_WEB_BUILTINS`), and the official binary reports them unchanged to a
+ *  `PreToolUse` hook (measured — `test/runtime-sdk/web-floor-measure.e2e.test.ts`), which is what
+ *  lets one matcher pair serve both legs. */
+export const WEB_FLOOR_FETCH_TOOL = "WebFetch";
+export const WEB_FLOOR_SEARCH_TOOL = "WebSearch";
+
+/**
+ * The most entries a `WebSearch` domain list may carry before the injection below stands down rather
+ * than widening it — the agent SDK's own `MAX_DOMAIN_LIST_ENTRIES` (`tools/impl/web-search.ts`),
+ * which REFUSES the whole call with `Error: blocked_domains has N entries; at most 1,000 are
+ * accepted`. Unioning the floor into a list the model had already filled to the brim would therefore
+ * turn a working search into a hard error — the floor breaking a call it has no opinion about. See
+ * `webSearchFloorHook` for what happens instead.
+ */
+export const WEB_SEARCH_DOMAIN_LIST_CAP = 1000;
+
+/** THIS session's effective floor: the shipped constant ∪ the user's per-project additions, read
+ *  live. The shipped half is unconditional — an unwired or throwing `dangerousDomainsAdded` costs
+ *  only the user-added half, never the floor itself. */
+function effectiveDangerousDomains(deps: SessionHooksDeps): string[] {
+  let added: readonly string[] = [];
+  try {
+    added = deps.dangerousDomainsAdded?.() ?? [];
+  } catch (err) {
+    logFacadeThrow("the dangerousDomainsAdded getter", err);
+  }
+  return [...SHIPPED_DANGEROUS_DOMAINS, ...(Array.isArray(added) ? added.filter((d): d is string => typeof d === "string") : [])];
+}
+
+/**
+ * The one refusal sentence, FIXED: the same text for every hit, on either leg, in every mode. Names
+ * the host and the matched list entry (so the model can tell a policy block from a network failure,
+ * and a human reading the transcript can find the entry) and says plainly that nothing can approve
+ * it, so the model re-plans instead of retrying or asking.
+ *
+ * Deliberately does NOT echo the requested URL. The host is a value this daemon DERIVED (`new URL`'s
+ * own normalization); a raw url's path/query is attacker-supplied text from whatever page told the
+ * model to fetch it, and a refusal string is read straight back into the model's context.
+ */
+export function dangerousDomainFloorRefusal(host: string, matchedEntry: string): string {
+  return `refused by Winter's dangerous-domain safety floor: ${host} matches the blocked entry ${matchedEntry}. This is a hard block, not a permission prompt — no approval, policy or retry can allow it (the list is settings.permissions.dangerousDomains). Find another source, or ask the user to change that setting.`;
+}
+
+/** `PreToolUse`, matched on `WebFetch` — the floor on the fetch's own target host.
+ *
+ *  UNPARSEABLE OR HOSTLESS urls PASS THROUGH (`dangerousUrlMatch` answers `null`): nothing dangerous
+ *  can be said about a url with no host, and the tool's own input refusal is both clearer and closer
+ *  to the mistake. A non-string (or absent) `url` is the same case.
+ *
+ *  A CROSS-HOST REDIRECT IS NOT A HOLE, and it is why a host-side hook is enough for a tool that
+ *  walks redirects itself: claude's `WebFetch` does NOT follow a cross-host redirect — it returns
+ *  `REDIRECT DETECTED` to the model and asks it to call again with the redirect url — so the second
+ *  call arrives at this hook like any other, and the short-link-into-a-paste-host route is checked on
+ *  the hop that would actually reach it. (A Winter child re-checks every hop inside its own executor
+ *  as well.) Same-host and bare-`www.` redirects are auto-followed on both legs, and a same-host hop
+ *  cannot cross a suffix-matched floor entry. */
+function webFetchFloorHook(deps: SessionHooksDeps): HookCallback {
+  return async (input) => {
+    const pre = input as PreToolUseHookInput;
+    if (pre.tool_name !== WEB_FLOOR_FETCH_TOOL) return allow();
+    const record = plainRecord(pre.tool_input);
+    const match = dangerousUrlMatch(record["url"], effectiveDangerousDomains(deps));
+    if (match === null) return allow();
+    return deny(dangerousDomainFloorRefusal(match.host, match.matchedEntry));
+  };
+}
+
+/**
+ * `PreToolUse`, matched on `WebSearch` — the floor as a FILTER ON THE CALL, through `updatedInput`.
+ *
+ * A search has no single target host to check before it runs, so the floor rides the call instead:
+ *
+ *   no domain list          `blocked_domains` = the floor.
+ *   `blocked_domains` only  `blocked_domains` = the floor ∪ the model's own (deduped).
+ *   `allowed_domains`       the two lists are MUTUALLY EXCLUSIVE — claude refuses a call carrying
+ *                           both outright (`Error: Cannot specify both allowed_domains and
+ *                           blocked_domains in the same request`, and the Winter executor carries the
+ *                           identical rule), so `blocked_domains` is NOT added. Floor-listed entries
+ *                           are removed from the allow-list instead, and an allow-list that is
+ *                           NOTHING BUT floor entries is a search that may only return blocked
+ *                           domains: denied, with the same fixed refusal.
+ *
+ * The transform is rebuilt from the three DECLARED input keys only, never spread from the raw input:
+ * claude schema-validates a hook's `updatedInput` (`updatedInput failed schema for …`, then "falling
+ * back to original tool input"), its first-party `WebSearch` schema carries
+ * `additionalProperties: false`, and a silent fall-back to the original input is exactly the failure
+ * mode a safety floor must not have. A key the model invented outside those three is dropped —
+ * which is what claude's own schema would have done to it.
+ *
+ * WHAT IT DOES NOT COVER (stated, not silently accepted): an allow-list entry BROADER than a floor
+ * entry — `example.com` when the floor lists `paste.example.com`, or a bare TLD — is kept, because
+ * it is not itself a floor match, and on the official leg nothing then stops a blocked subdomain from
+ * being SURFACED as a search hit (a Winter child re-filters its own hits locally, claude cannot be
+ * asked to). The exfiltration itself still cannot happen: FETCHING any surfaced link goes through
+ * `webFetchFloorHook` above, on both legs.
+ */
+function webSearchFloorHook(deps: SessionHooksDeps): HookCallback {
+  return async (input) => {
+    const pre = input as PreToolUseHookInput;
+    if (pre.tool_name !== WEB_FLOOR_SEARCH_TOOL) return allow();
+    const floor = effectiveDangerousDomains(deps);
+    if (floor.length === 0) return allow();
+    const record = plainRecord(pre.tool_input);
+    const allowed = domainList(record["allowed_domains"]);
+
+    if (allowed !== undefined) {
+      const kept = allowed.filter((domain) => dangerousHostMatch(domain, floor) === null);
+      if (kept.length === allowed.length) return allow(); // nothing of the floor is in the allow-list
+      if (kept.length === 0) {
+        const first = dangerousHostMatch(allowed[0], floor);
+        return deny(dangerousDomainFloorRefusal(allowed[0] ?? "the requested domain", first ?? floor[0]!));
+      }
+      return transformInput(webSearchInput(record, { allowed_domains: kept }));
+    }
+
+    const own = domainList(record["blocked_domains"]) ?? [];
+    const union = dedupeDomains([...floor, ...own]);
+    // Over the SDK's own list cap the floor stands down rather than turning a working search into
+    // `Error: blocked_domains has N entries` — the floor first, so what is dropped is the tail of a
+    // model-supplied list of >962 domains (an absurd input, and a RESULT FILTER either way, never a
+    // safety boundary: the fetch of anything it lets through is still floor-denied).
+    const capped = union.length > WEB_SEARCH_DOMAIN_LIST_CAP ? union.slice(0, WEB_SEARCH_DOMAIN_LIST_CAP) : union;
+    if (sameDomains(own, capped)) return allow(); // the model already asked for exactly this
+    return transformInput(webSearchInput(record, { blocked_domains: capped }));
+  };
+}
+
+/** `tool_input` as a plain record, for any hostile shape — `null`, an array, a string, a number all
+ *  read as "no fields", never a throw and never a prototype walk (`Object.create(null)`-based copy,
+ *  so a `__proto__` key in the model's own JSON is data here rather than an assignment). */
+function plainRecord(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return Object.create(null) as Record<string, unknown>;
+  const out = Object.create(null) as Record<string, unknown>;
+  for (const key of Object.keys(value)) out[key] = (value as Record<string, unknown>)[key];
+  return out;
+}
+
+/** A `WebSearch` domain list as the tools themselves read it: an array of non-blank strings, or
+ *  `undefined` for absent, empty, all-blank, or the wrong type entirely. Mirrors the agent SDK's own
+ *  `stringArray` collapse of an explicitly-empty list to "absent" — a list that filters nothing is
+ *  indistinguishable in effect from not having named the field. A wrong TYPE is also `undefined`
+ *  here, which is the safe direction for this hook: the `blocked_domains` branch then injects the
+ *  floor, and the tool's own validation still refuses the malformed field afterwards. */
+function domainList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const strings = value.filter((v): v is string => typeof v === "string" && v.trim().length > 0);
+  return strings.length > 0 ? strings : undefined;
+}
+
+/** Case-insensitive dedupe that keeps the FIRST spelling of each domain (so the floor's own entries
+ *  survive verbatim when a model happened to list one too) and never grows past what it was given. */
+function dedupeDomains(domains: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const domain of domains) {
+    const key = domain.trim().toLowerCase();
+    if (key.length === 0 || seen.has(key)) continue;
+    seen.add(key);
+    out.push(domain);
+  }
+  return out;
+}
+
+function sameDomains(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((v, i) => v === b[i]);
+}
+
+/** The transform, built from the three DECLARED `WebSearch` keys only — see `webSearchFloorHook`. */
+function webSearchInput(record: Record<string, unknown>, patch: { allowed_domains?: string[]; blocked_domains?: string[] }): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if ("query" in record) out["query"] = record["query"]; // verbatim, whatever it is: the tool's own schema/validation owns it
+  if (patch.allowed_domains !== undefined) out["allowed_domains"] = patch.allowed_domains;
+  else if ("allowed_domains" in record) out["allowed_domains"] = record["allowed_domains"];
+  if (patch.blocked_domains !== undefined) out["blocked_domains"] = patch.blocked_domains;
+  else if ("blocked_domains" in record) out["blocked_domains"] = record["blocked_domains"];
+  return out;
+}
+
 /** `{ winter, official }` — fix wave M4 (ruling P8c-19): BOTH legs get the same groups, built ONCE
  *  from the same `deps` and the same per-tool hook functions (this file's header explains why the
  *  two SDKs' `HookCallback`/`HookCallbackMatcher`/`HookEvent` shapes make that safe rather than a
@@ -403,6 +638,18 @@ export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hook
     for (const tool of Object.keys(DIFF_TOOL_FILE_PATH_ARG)) {
       preToolUse.push({ matcher: tool, hooks: [fileDiffPreToolUseHook(deps, pending)] });
     }
+  }
+  // The dangerous-domain floor — registered UNCONDITIONALLY (the shipped half of the list is a
+  // constant; there is no configuration under which a session opts out) and LAST, deliberately:
+  //
+  //  - DENY needs no ordering help. `deny` is the strictest rank in the SDK's own hook reducer
+  //    (deny > defer > ask > allow > none) and a committed deny short-circuits every hook after it,
+  //    so a plugin's `allow` can never un-deny a floor hit from any position.
+  //  - The TRANSFORM does. Several hooks' `transformedInput`s compose in evaluation order, LAST
+  //    WRITER WINS — so a plugin pre-tool hook that one day rewrites a `WebSearch` call's own
+  //    `blocked_domains` must not be able to land after the floor and drop it. Last here means last.
+  for (const tool of [WEB_FLOOR_FETCH_TOOL, WEB_FLOOR_SEARCH_TOOL]) {
+    preToolUse.push({ matcher: tool, hooks: [tool === WEB_FLOOR_FETCH_TOOL ? webFetchFloorHook(deps) : webSearchFloorHook(deps)] });
   }
 
   const postToolUse: HookCallbackMatcher[] = [{ hooks: [pluginPostToolUseHook(deps)] }];

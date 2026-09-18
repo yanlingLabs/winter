@@ -1,12 +1,19 @@
 /**
- * SP-approvals Task 10 (user addition 2026-07-21, spec §7 "Web tools"): web_fetch is free by
- * default like every other tool now, but keeps ONE safety floor no policy can silence — a fetch
- * whose target host is a known/likely exfiltration or tunnel-provider endpoint still needs a
- * human's yes. This is the SHIPPED half of the "effective dangerous set" the engine's pre-exec
- * check consults (`effective = SHIPPED_DANGEROUS_DOMAINS ∪ settings.permissions.dangerousDomains.
- * added` — see engine.ts's webFetchGate); the shipped list is an in-code constant, immutable by
- * construction ("the user can remove only the ones he added" — deleting an entry from
+ * SP-approvals Task 10 (user addition 2026-07-21, spec §7 "Web tools"): the web tools are free by
+ * default like every other tool, but keep ONE safety floor no policy can silence — a fetch whose
+ * target host is a known/likely exfiltration or tunnel-provider endpoint is refused. This is the
+ * SHIPPED half of the "effective dangerous set" (`effective = SHIPPED_DANGEROUS_DOMAINS ∪
+ * settings.permissions.dangerousDomains.added`); the shipped list is an in-code constant, immutable
+ * by construction ("the user can remove only the ones he added" — deleting an entry from
  * settings.json can only ever shrink the USER half, never this one).
+ *
+ * 2026-09-18 (user ruling, agent SDK 0.0.17): the floor is a HARD refusal now, on both runtime legs,
+ * and no longer an approval card anywhere. Three enforcers consult this one list: a Winter child's
+ * own executors, through `Options.web.blockedDomains` (`runtime-sdk/mode-options.ts`); the host-side
+ * `PreToolUse` floor hook, which is what makes it policy on the OFFICIAL leg, where nothing else in
+ * Winter can reach claude's native web tools (`runtime-sdk/hooks.ts`); and the daemon's own
+ * `Search`. The pre-8c engine's `webFetchGate` — which earlier revisions of this comment named as
+ * the consumer — was retired with the engine and no longer exists in any form.
  *
  * Curated for the REAL threat this floor exists for: a page the model was asked to summarize (or
  * a prompt-injected instruction hidden in one) telling it to `web_fetch` a secret/credential/file
@@ -116,4 +123,80 @@ export function dangerousDomainMatch(host: string, entries: readonly string[]): 
     if (h === e || h.endsWith(`.${e}`)) return entry;
   }
   return null;
+}
+
+/**
+ * `entry`/`host` normalization for the two helpers below — lowercase, no `*.` or `.` prefix, no
+ * trailing root dot. ADDITIVE (2026-09-18, the web-tools floor on both legs): `dangerousDomainMatch`
+ * above deliberately normalizes only the HOST side and only the trailing dot, because its other
+ * caller (`permission-rules.ts`'s `WebFetch(domain:…)` matching) must keep answering exactly what it
+ * always has. The runtime child's own `blockedDomains` matcher, though, documents "a leading `*.` or
+ * `.` and a trailing `.` are ignored" for ENTRIES (agent SDK 0.0.17, `WebToolsConfig.blockedDomains`),
+ * so a user who writes `added: ["*.evil.example"]` is honoured inside a Winter child and would NOT
+ * have been honoured by a host-side check built on the bare matcher — a silent divergence on the leg
+ * where the host-side check is the ONLY enforcement (the official one). Normalizing both sides here
+ * closes it without touching the shared matcher.
+ */
+function normalizeDomainLabel(value: string): string {
+  let v = value.trim().toLowerCase();
+  if (v.startsWith("*.")) v = v.slice(2);
+  while (v.startsWith(".")) v = v.slice(1);
+  while (v.endsWith(".")) v = v.slice(0, -1);
+  return v;
+}
+
+/**
+ * `dangerousDomainMatch` for a HOST-OR-DOMAIN string rather than a url — the form a `WebSearch`
+ * call's own `allowed_domains`/`blocked_domains` entries take. Normalizes BOTH sides
+ * (`normalizeDomainLabel`), then delegates: the suffix grammar and the returned-LIST-ENTRY contract
+ * are the shared matcher's, never a second one. Returns the matched list entry VERBATIM (not its
+ * normalized form), so a refusal or an audit line names what the user or the shipped list actually
+ * wrote. Empty/unreadable input never matches.
+ */
+export function dangerousHostMatch(host: unknown, entries: readonly string[]): string | null {
+  if (typeof host !== "string") return null;
+  const h = normalizeDomainLabel(host);
+  if (!h) return null;
+  for (const entry of entries) {
+    if (typeof entry !== "string") continue;
+    const e = normalizeDomainLabel(entry);
+    if (!e) continue;
+    if (dangerousDomainMatch(h, [e]) !== null) return entry;
+  }
+  return null;
+}
+
+export interface DangerousUrlMatch {
+  /** The url's hostname, as `new URL` normalized it (lowercased, IDN already punycoded). */
+  host: string;
+  /** The matched list entry, verbatim. */
+  matchedEntry: string;
+}
+
+/**
+ * The floor check for a URL — the ONE normalizer every host-side `WebFetch` check uses
+ * (`runtime-sdk/hooks.ts`'s floor hook today; `tools/page-core.ts`'s `checkDangerousDomain` is the
+ * same act against the same matcher, kept because its callers pass the shipped list implicitly).
+ * `new URL` does the heavy lifting, and doing it that way is the point: it lowercases the host,
+ * punycodes an IDN one, drops userinfo and the port, and leaves a trailing root dot for
+ * `normalizeDomainLabel` to strip — so `https://USER:pw@PasteBin.COM.:8443/x` and
+ * `http://pastebin.com/x` (which both runtimes upgrade to `https:`) are the same host to this
+ * function, because the SCHEME and the port are not part of the question being asked.
+ *
+ * NEVER THROWS, and answers `null` for anything unparseable or hostless — a hook built on it must
+ * hand an unreadable url to the tool's own refusal rather than invent a verdict about it (the same
+ * rule `checkDangerousDomain` states for itself).
+ */
+export function dangerousUrlMatch(rawUrl: unknown, entries: readonly string[]): DangerousUrlMatch | null {
+  if (typeof rawUrl !== "string" || rawUrl.length === 0) return null;
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  const host = url.hostname.toLowerCase();
+  if (!host) return null;
+  const matchedEntry = dangerousHostMatch(host, entries);
+  return matchedEntry === null ? null : { host: normalizeDomainLabel(host), matchedEntry };
 }

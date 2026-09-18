@@ -1482,6 +1482,11 @@ export async function startDaemon(opts: {
       policy: () => { try { return store.meta(session.sessionId).approvalPolicy; } catch { return undefined; } },
       lsp: () => lspManager ?? undefined,
       autoDiagnosticsEnabled: () => winterLspAutoDiagnosticsEnabled(session.cwd),
+      // 2026-09-18 (the web-tools floor, both legs): the SAME project-overlay-aware getter every
+      // other consumer of the dangerous-domain list is wired to, with THIS session's cwd bound —
+      // so the host-side floor hook, a Winter child's `Options.web.blockedDomains` and the daemon's
+      // own `Search` are provably reading one list. `hooks.ts` unions the shipped half itself.
+      dangerousDomainsAdded: () => dangerousDomainsAdded(session.cwd),
     });
   // ── P8c integration Wiring 2: the notification/schedule sinks (lane 2's `sinks.ts`, P8c-11) ────
   // `hub.addObserver` (Dispatch/Phase 7's existing fan-out of every appended event of EVERY
