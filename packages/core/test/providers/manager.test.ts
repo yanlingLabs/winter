@@ -322,7 +322,7 @@ describe("createRebindableProvider / refresh (item 2 — the internal Provider f
     expect(active.provider.id).toBe("codex-oauth");
   });
 
-  test("moving OUTSIDE INTERNAL_PROVIDER_IDS leaves the old backend bound, logged once, never torn down", async () => {
+  test("moving OUTSIDE INTERNAL_PROVIDER_IDS leaves the old backend bound, logs one line for this one call, never torn down", async () => {
     const store = new FileSecretStore(mkdtempSync(join(tmpdir(), "s-")));
     const settingsPath = tmpSettingsFile({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings);
     const active = await createRebindableProvider(
@@ -346,6 +346,33 @@ describe("createRebindableProvider / refresh (item 2 — the internal Provider f
     expect(active.provider).toBe(providerRefBefore);
     expect(active.provider.id).toBe("codex-oauth"); // the old backend keeps serving every caller
     expect(lines).toHaveLength(1);
+  });
+
+  test("NOT deduped: a settings write that leaves the provider STILL stuck logs AGAIN, every time — settings-apply.ts's applyAgentProviderDiff calls refresh unconditionally, and this function does not suppress a repeated failure", async () => {
+    const store = new FileSecretStore(mkdtempSync(join(tmpdir(), "s-")));
+    const settingsPath = tmpSettingsFile({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings);
+    const active = await createRebindableProvider(
+      { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings,
+      store,
+      settingsPath,
+    );
+    if (active === null) throw new Error("expected a real RebindableProvider (codex-oauth)");
+
+    const lines: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+    const stuck = { schemaVersion: 3, provider: { model: "anthropic/claude-sonnet-5" } } as Settings;
+    try {
+      // Three calls with the IDENTICAL still-outside-INTERNAL_PROVIDER_IDS settings, modeling three
+      // unrelated settings.json writes (an LSP toggle, a plugin enable, …) landing while stuck.
+      await active.refresh(stuck, store, settingsPath);
+      await active.refresh(stuck, store, settingsPath);
+      await active.refresh(stuck, store, settingsPath);
+    } finally {
+      console.error = realError;
+    }
+    expect(lines).toHaveLength(3); // one line PER CALL, not deduped to one for the daemon's life
+    expect(active.provider.id).toBe("codex-oauth"); // still never torn down
   });
 
   test("a failed rebuild (no stored credential for the new provider) leaves the old backend bound", async () => {

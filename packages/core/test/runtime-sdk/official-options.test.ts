@@ -802,18 +802,29 @@ describe("effectiveOfficialAuthFor (O6, provider.status; WS-20: presence alone)"
 // currently pinned router version (`REQUIRED_WINTER_RUNTIME_SDK`, versions.ts) — see this block's
 // own construction site in official-options.ts for the measured reason (`buildOfficialOptions`
 // builds its result field-by-field off only the fields the type declares; it does not forward
-// arbitrary extra `policy` keys). This test pins the CURRENT absence, named to the router version,
-// so a future bump that adds the field turns this into a FAILING test someone has to notice and
-// act on, rather than a silent gap nobody revisits.
-describe(`officialInputFor — the agents wall (item 3; router ${REQUIRED_WINTER_RUNTIME_SDK} has no Options.agents route)`, () => {
-  test("officialInputFor's own output carries no agents key anywhere reachable", () => {
+// arbitrary extra `policy` keys).
+//
+// HONEST LIMIT OF THIS TEST: `buildOfficialOptions` itself is NOT part of
+// `@yanlinglabs/winter-runtime-sdk`'s public `exports` map (only `.` and `./testing` are —
+// checked directly against the installed package.json), so this file cannot call it to prove the
+// field is dropped even if someone added it to `OptionsTemplatePolicy` without wiring it here — a
+// router bump that adds `agents` support would NOT make the assertion below fail on its own; it
+// only fails if OFFICIAL-OPTIONS.TS itself regresses (starts building `options.agents` for a policy
+// object the router still ignores). The version-pin assertion is the actual "someone has to look"
+// tripwire, the same shape `CONSOLE_AUTH_ROUTER_MIN`'s own gate test uses elsewhere in this file: a
+// router bump changes `REQUIRED_WINTER_RUNTIME_SDK`, which fails THIS assertion, which is the cue
+// to re-check `OptionsTemplatePolicy`'s dist `.d.ts` for an `agents` field by hand and wire it if
+// one now exists.
+describe("officialInputFor — the agents wall (item 3; no Options.agents route on the official leg)", () => {
+  test("the router version this wall was measured against — bump this ONLY after re-checking OptionsTemplatePolicy for an agents field", () => {
+    expect(REQUIRED_WINTER_RUNTIME_SDK).toBe("0.0.8");
+  });
+
+  test("officialInputFor's own output carries no agents key anywhere reachable (today's construction, not a router-level guarantee — see this block's own header)", () => {
     const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
     const result = officialInputFor(input, minimalDeps());
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
     expect((result.input.options as Record<string, unknown> | undefined)?.["agents"]).toBeUndefined();
-    // Belt: `OptionsTemplatePolicy` itself has no `agents` member at all — this repeats the
-    // assertion structurally (Object.keys never contains it), so a future field ADDED to the type
-    // but never wired here still fails loudly rather than passing on an absent-by-coincidence value.
     expect(Object.keys(result.input.options ?? {})).not.toContain("agents");
   });
 });
