@@ -768,8 +768,9 @@ final class SettingsRolePickerTests: XCTestCase {
     }
 
     /// The whole control, flag ON: `null` → nothing (unless a leftover must be named); `[]` → the
-    /// quiet line, never an empty menu; a vocabulary → the menu with its selection; and hidden for
-    /// a DERIVED role (an effort write would pin its model) or with no effort-capable writer.
+    /// quiet line, never an empty menu; a vocabulary → the menu with its selection — on a DEFAULTED
+    /// role too (its effort-only write sends `model: null`); hidden with no effective model or no
+    /// effort-capable writer.
     func testTheControlWithTheFlagOn() {
         func control(_ v: SettingsRoleValue, canWrite: Bool = true) -> RoleEffortControl {
             roleEffortControl(enabled: true, canWriteEffort: canWrite, value: v)
@@ -785,7 +786,12 @@ final class SettingsRolePickerTests: XCTestCase {
         XCTAssertEqual(control(effortValue(effort: "xhigh", efforts: ["low", "high"])),
                        .menu(options: ["low", "high", "none"], selection: .stale("xhigh")))
         XCTAssertEqual(control(effortValue(efforts: ["low"]), canWrite: false), .hidden)
-        XCTAssertEqual(control(effortValue(explicit: false, efforts: ["low"])), .hidden)
+        XCTAssertEqual(control(effortValue(explicit: false, efforts: ["low"])),
+                       .menu(options: ["low", "none"], selection: .modelDefault),
+                       "a DEFAULTED role shows its default model's vocabulary (its write sends model: null)")
+        XCTAssertEqual(control(effortValue(explicit: false, effort: "high", efforts: ["low", "high"])),
+                       .menu(options: ["low", "high", "none"], selection: .valid("high")),
+                       "a defaulted role's STORED effort — invisible before — now renders and can be cleared")
         XCTAssertEqual(control(effortValue(model: nil, efforts: ["low"])), .hidden)
     }
 
@@ -856,6 +862,92 @@ final class SettingsRolePickerTests: XCTestCase {
                        "an unlisted none is still appended beside a real vocabulary")
     }
 
+    /// THE EFFORT-ONLY WRITE RULE, as a table. Today (`model` required-nullable): an explicit role
+    /// re-sends its tag, a DEFAULTED role sends `model: null` and NEVER its effective tag (that would
+    /// pin the default), and `provider.model` always re-sends its tag — it can never produce null.
+    func testTheEffortOnlyWriteSendsTheRightModelForEveryRole() {
+        func write(_ role: SettingsModelRole, _ v: SettingsRoleValue,
+                   optional: Bool = false) -> ModelRoleModelWrite {
+            roleEffortOnlyModelWrite(role: role, value: v, modelIsOptional: optional)
+        }
+        let explicit = effortValue(model: "a/x", explicit: true, efforts: ["low"])
+        let defaulted = effortValue(model: "a/default", explicit: false, efforts: ["low"])
+        let cleared = effortValue(model: nil, explicit: false, efforts: nil)
+
+        let table: [(SettingsModelRole, SettingsRoleValue, ModelRoleModelWrite)] = [
+            (.dispatch, explicit, .set("a/x")),
+            (.dispatch, defaulted, .clear),
+            (.dream, defaulted, .clear),
+            (.research, defaulted, .clear),
+            (.titles, explicit, .set("a/x")),
+            (.dream, cleared, .clear),
+            (.sessionDefault, explicit, .set("a/x")),
+            (.sessionDefault, defaulted, .set("a/default")),
+            (.sessionDefault, cleared, .leave),
+        ]
+        for (role, value, expected) in table {
+            XCTAssertEqual(write(role, value), expected, "\(role) explicit=\(value.isExplicit)")
+        }
+        // A defaulted role NEVER sends its effective tag, on any clearable role.
+        for role in SettingsModelRole.allCases where role != .sessionDefault {
+            XCTAssertEqual(write(role, defaulted), .clear, "\(role)")
+            XCTAssertNotEqual(write(role, defaulted), .set("a/default"), "\(role) would be pinned")
+        }
+        // The default session model can never produce `null`, whatever its shape.
+        for value in [explicit, defaulted, cleared] {
+            XCTAssertNotEqual(write(.sessionDefault, value), .clear)
+        }
+        // THE FLIP: once the daemon's `model` is optional, every role leaves the model alone.
+        for role in SettingsModelRole.allCases {
+            for value in [explicit, defaulted, cleared] {
+                XCTAssertEqual(write(role, value, optional: true), .leave, "\(role)")
+            }
+        }
+        XCTAssertFalse(setModelRoleModelIsOptional, "not landed daemon-side yet — flip with the daemon change")
+    }
+
+    /// "Use the default" on a role that is ALREADY defaulted moves nothing, so the effort it now
+    /// carries is left; on an explicit role it unpins, so the effort goes.
+    func testReChoosingTheDefaultOnADefaultedRoleKeepsItsEffort() {
+        XCTAssertEqual(roleEffortWriteForModelChange(currentModel: "a/d", newModel: nil, keepEffort: false,
+                                                     currentIsExplicit: false), .leave)
+        XCTAssertEqual(roleEffortWriteForModelChange(currentModel: "a/x", newModel: nil, keepEffort: false,
+                                                     currentIsExplicit: true), .clear)
+        XCTAssertEqual(roleEffortWriteForModelChange(currentModel: "a/d", newModel: "a/y", keepEffort: false,
+                                                     currentIsExplicit: false), .clear)
+    }
+
+    /// The model's MODEL door: `.leave` + `.leave` is refused (it changes nothing), a `.leave` model
+    /// never goes through the two-argument writer, and the three-state writer gets it verbatim.
+    @MainActor
+    func testTheModelWriteReachesTheWriterAndANoOpIsRefused() async {
+        final class Box: @unchecked Sendable { var model: ModelRoleModelWrite?; var legacy: [String?] = [] }
+        let box = Box()
+        let full = SettingsRolesModel(loader: { [:] }, roleWriter: { _, model, _ in
+            box.model = model
+            return [:]
+        })
+        let noOp = await full.commit(.dispatch, model: ModelRoleModelWrite.leave, effort: .leave)
+        XCTAssertFalse(noOp)
+        XCTAssertNil(box.model)
+        let effortOnly = await full.commit(.dispatch, model: ModelRoleModelWrite.clear, effort: .set("low"))
+        XCTAssertTrue(effortOnly)
+        XCTAssertEqual(box.model, .clear)
+        let legacyString = await full.commit(.dispatch, model: nil)
+        XCTAssertTrue(legacyString)
+        XCTAssertEqual(box.model, .clear, "the String? spelling maps nil to .clear")
+
+        let legacy = SettingsRolesModel(loader: { [:] }, writer: { _, model in
+            box.legacy.append(model)
+            return [:]
+        })
+        let leaveOnLegacy = await legacy.commit(.dispatch, model: ModelRoleModelWrite.leave, effort: .clear)
+        XCTAssertFalse(leaveOnLegacy, "the two-argument door cannot spell `leave`")
+        let setOnLegacy = await legacy.commit(.dispatch, model: ModelRoleModelWrite.set("a/y"), effort: .clear)
+        XCTAssertTrue(setOnLegacy)
+        XCTAssertEqual(box.legacy, ["a/y"])
+    }
+
     /// The flip condition is met (roles' efforts are spent): the switch is on.
     func testTheEffortControlIsLive() {
         XCTAssertTrue(settingsRoleEffortControlEnabled)
@@ -887,9 +979,9 @@ final class SettingsRolePickerTests: XCTestCase {
         }
     }
 
-    /// The row's effort door: only on an EXPLICIT model with a real vocabulary (a derived role
-    /// would be silently PINNED by the effort-only write's re-sent tag), or with a stale leftover
-    /// that must stay visible and clearable. Never for the advisor's `efforts: null`, never
+    /// The row's effort door: on any role whose EFFECTIVE model has a real vocabulary — defaulted
+    /// roles included, whose effort-only write sends `model: null` and so stays unpinned — or with a
+    /// stale leftover that must stay visible and clearable. Never for the advisor's `efforts: null`, never
     /// without a writer or a place to present, never with the flag off.
     func testTheRowShowsAnEffortDoorOnlyWhereOneCanLand() {
         func pickable(_ v: SettingsRoleValue?, canWrite: Bool = true, canPresent: Bool = true,
@@ -904,9 +996,12 @@ final class SettingsRolePickerTests: XCTestCase {
         XCTAssertFalse(pickable(effortValue(efforts: nil)), "the advisor's shape: nothing")
         XCTAssertFalse(pickable(effortValue(efforts: [])))
         XCTAssertFalse(pickable(effortValue(efforts: ["ultra"])), "nothing offerable")
-        XCTAssertFalse(pickable(effortValue(explicit: false, efforts: ["low"])),
-                       "derived: the re-sent tag would pin it")
-        XCTAssertFalse(pickable(effortValue(explicit: false, effort: "x", efforts: nil)))
+        XCTAssertTrue(pickable(effortValue(explicit: false, efforts: ["low"])),
+                      "defaulted: its effort-only write sends model: null, so it stays unpinned")
+        XCTAssertTrue(pickable(effortValue(explicit: false, effort: "x", efforts: nil)),
+                      "a defaulted role's stale leftover is clearable too")
+        XCTAssertFalse(pickable(effortValue(explicit: false, efforts: nil)),
+                       "the advisor's shape, defaulted: still nothing")
         XCTAssertFalse(pickable(effortValue(model: nil, efforts: ["low"])))
         XCTAssertFalse(pickable(effortValue(efforts: ["low"]), canWrite: false))
         XCTAssertFalse(pickable(effortValue(efforts: ["low"]), canPresent: false))

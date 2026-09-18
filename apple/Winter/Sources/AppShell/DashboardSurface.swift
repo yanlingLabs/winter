@@ -265,7 +265,7 @@ struct DashboardWiring {
     /// set. Carried even while the effort control is gated off, because the picker still sends a
     /// CLEAR alongside every model change: without it a role would keep an effort the new model may
     /// not offer, harmless only until the day something spends a role's effort.
-    var setModelRole: ((_ role: String, _ model: String?, _ effort: ModelRoleEffortWrite) async throws
+    var setModelRole: ((_ role: String, _ model: ModelRoleModelWrite, _ effort: ModelRoleEffortWrite) async throws
         -> [String: ModelRoleValue])? = nil
 
     /// 2026-09-18 — `models.catalog`: the pinned provider catalog as this daemon resolved it. What

@@ -879,7 +879,8 @@ let roleModelPickerClearDetail = "Follows the default session model, and moves w
 /// fallback, titles, the reviewer — mapped onto the role's CURRENT model at spend time rather than
 /// refused, so even a stale effort degrades to "mapped or omitted", never to a broken job.
 ///
-/// The advisor is the exception and needs nothing here: neither SDK's advisor option carries an
+/// The advisor is the exception and needs nothing here (parity-blocked, not forgotten — see
+/// `roleEffortControl`): neither SDK's advisor option carries an
 /// effort (and the parity rule forbids inventing one), so its `efforts` is `null` whatever its model,
 /// and the null-vocabulary rule already renders no control. A null on a model that obviously HAS a
 /// vocabulary is correct there, not a bug.
@@ -947,18 +948,28 @@ enum RoleEffortControl: Equatable, Sendable {
 /// PURE: the whole control decision. Takes `enabled` as a parameter so the tests can drive the
 /// rules with the flag both ways; the view passes `settingsRoleEffortControlEnabled`.
 ///
-/// Hidden unless enabled AND an effort can reach the wire AND the role has an EXPLICIT model: an
-/// effort-only write must re-send the role's current tag (`model` is required-nullable), and doing
-/// that on a DERIVED role would silently pin its model — a side effect nobody asked for.
+/// Hidden unless enabled AND an effort can reach the wire AND the role has an EFFECTIVE model
+/// (`value.model` — the default's tag when the role is only defaulted).
+///
+/// **Defaulted roles get the control too (2026-09-18).** It used to require an EXPLICIT model,
+/// because an effort-only write had to re-send the role's tag and re-sending a defaulted one would
+/// silently PIN it. The daemon offers a better door: `{ model: null, effort: X }` leaves the role
+/// UNPINNED and validates X against its DEFAULT model. `roleEffortOnlyModelWrite` decides which of the
+/// two a given role sends — so dispatch, dreaming and research, usually defaulted, show theirs.
 ///
 /// Then: `nil` vocabulary → hidden (or a mismatch note if an effort is stored); `[]` (or nothing
 /// offerable) → a quiet "takes no effort setting", plus the mismatch if any; otherwise the menu.
 func roleEffortControl(enabled: Bool, canWriteEffort: Bool,
                        value: SettingsRoleValue) -> RoleEffortControl {
-    guard enabled, canWriteEffort, value.isExplicit, value.model != nil else { return .hidden }
+    guard enabled, canWriteEffort, value.model != nil else { return .hidden }
     let options = roleEffortOptions(value.efforts)
     guard !options.isEmpty else {
         // `nil`: no reasoning block — no control at all, unless a leftover must be named.
+        //
+        // THE ADVISOR LANDS HERE, and that is PARITY-BLOCKED, NOT FORGOTTEN: neither SDK's advisor
+        // option carries an effort, and a capability the Claude Agent SDK does not expose is not
+        // added unilaterally (user's standing rule). The daemon therefore always reports its
+        // `efforts` as null, whatever its model. Do not special-case it into a menu.
         guard value.efforts != nil else {
             return value.effort.map { .noSetting(stale: $0) } ?? .hidden
         }
@@ -972,10 +983,52 @@ func roleEffortControl(enabled: Bool, canWriteEffort: Bool,
 /// PURE: the effort to send ALONGSIDE a model change. A different model → `.clear` (a stored
 /// effort the new model may not offer must not survive the switch), unless the user explicitly
 /// kept it. The same model → `.leave`.
+///
+/// `currentIsExplicit`: choosing "Use the default" (`newModel == nil`) on a role that is ALREADY
+/// defaulted moves nothing — its effective model stays the default it was validated against — so
+/// the effort is left. Without this, re-clicking the ticked "Use the default" row would silently
+/// wipe the effort a defaulted role now carries (visible since defaulted roles got the control).
 func roleEffortWriteForModelChange(currentModel: String?, newModel: String?,
-                                   keepEffort: Bool) -> ModelRoleEffortWrite {
+                                   keepEffort: Bool,
+                                   currentIsExplicit: Bool = true) -> ModelRoleEffortWrite {
+    if newModel == nil, !currentIsExplicit { return .leave }
     guard currentModel != newModel, !keepEffort else { return .leave }
     return .clear
+}
+
+/// Whether the daemon's `settings.setModelRole` accepts an ABSENT `model` (= leave the model
+/// untouched). **FALSE today**: `model` is required-nullable.
+///
+/// FLIP CONDITION: the daemon session lands `model` as OPTIONAL on `setModelRole` (absent = leave,
+/// `null` = clear, a tag = set; a call with neither field refused). Flipping this to `true` is the
+/// ONE-LINE change that turns every effort-only write into `.leave`, which also closes the race
+/// today's rule has (another client pins a defaulted role between our read and our write, and our
+/// `model: null` silently unpins it). An app running against an older daemon after the flip would
+/// get its effort-only writes refused, so flip it only with the daemon change in the field.
+let setModelRoleModelIsOptional = false
+
+/// PURE: the `model` an EFFORT-ONLY write sends.
+///
+/// Once `modelIsOptional` holds: `.leave`, for every role — the model is simply not touched.
+///
+/// Until then (`model` is required, so something must be sent):
+/// - An EXPLICIT role re-sends its own tag (`.set`) — unchanged, so the pin is unchanged.
+/// - A DEFAULTED role sends `.clear` (`model: null`): the daemon leaves it UNPINNED and validates the
+///   effort against its default model. It must NEVER send its effective tag — that would pin the
+///   default as it happens to be today, and the role would stop following the default session
+///   model.
+/// - `provider.model` (the default session model) refuses `null` — it cannot be cleared — so it
+///   always re-sends its tag, explicit flag or not. Tied to `settingsRoleAllowsClearing` rather
+///   than to a second list of roles, so the two rules cannot drift apart. With no tag to send
+///   (impossible data) it gets `.leave`, which the daemon refuses — never `.clear`.
+/// - A CLEARED role (no effective model) → `.clear`, its own current state; the effort control is
+///   hidden there anyway.
+func roleEffortOnlyModelWrite(role: SettingsModelRole, value: SettingsRoleValue,
+                              modelIsOptional: Bool = setModelRoleModelIsOptional) -> ModelRoleModelWrite {
+    if modelIsOptional { return .leave }
+    let canClear = settingsRoleAllowsClearing(role)
+    if let model = value.model, value.isExplicit || !canClear { return .set(model) }
+    return canClear ? .clear : .leave
 }
 
 /// PURE: the effort to send when the user picks one from the menu. `nil` = "Model default".
@@ -1511,8 +1564,8 @@ struct SettingsRolePickerHost: View {
                                          onClose: onClose)
             } else {
                 // The role vanished from under an open card (a reply that no longer reports it), or
-                // — for the effort card — a reply left it with no effort door (its model became
-                // derived, or lost its vocabulary). Rendering nothing would leave the shell
+                // — for the effort card — a reply left it with no effort door (its model was
+                // cleared, or lost its vocabulary). Rendering nothing would leave the shell
                 // believing a picker is up with no way to dismiss it, so the card closes itself.
                 Color.clear.onAppear(perform: onClose)
             }
@@ -1539,19 +1592,21 @@ struct SettingsRolePickerHost: View {
     /// the three-argument writer is wired — see `SettingsRolesModel.RoleWriter`.
     private func commit(_ tag: String?) {
         let effort = roleEffortWriteForModelChange(currentModel: value?.model, newModel: tag,
-                                                   keepEffort: false)
+                                                   keepEffort: false,
+                                                   currentIsExplicit: value?.isExplicit ?? true)
         Task {
             if await roles.commit(request.role, model: tag, effort: effort) { onClose() }
         }
     }
 
-    /// An effort-only write from the effort card: re-sends the role's CURRENT tag (the wire's
-    /// `model` is required-nullable). Only reachable on an EXPLICIT role — the card exists only
-    /// when `settingsRoleEffortIsPickable` holds, which goes through `roleEffortControl`'s
-    /// explicit-model guard — so the re-send can never pin a model that was merely derived.
+    /// An effort-only write from the effort card. `roleEffortOnlyModelWrite` decides what the
+    /// `model` field carries: an EXPLICIT role re-sends its own tag, a DEFAULTED role sends `null`
+    /// (stays unpinned; the daemon validates against its default), the default session model always
+    /// re-sends its tag — and, once the daemon makes `model` optional, every role sends nothing.
     /// Closes on success, like a model commit.
     private func commitEffort(_ effort: ModelRoleEffortWrite) {
-        guard let value, value.isExplicit, let model = value.model else { return }
+        guard let value, value.model != nil else { return }
+        let model = roleEffortOnlyModelWrite(role: request.role, value: value)
         Task {
             if await roles.commit(request.role, model: model, effort: effort) { onClose() }
         }
