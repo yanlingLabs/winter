@@ -1032,9 +1032,118 @@ export function loadSettings(path: string, opts?: { presentProviders?: ReadonlyS
   return result;
 }
 
+/**
+ * Daemon settings surface (2026-09-17 plan, item 5a): the round-trip merge every `saveSettings`
+ * write applies so a key the daemon's own `Settings` schema does not model is never silently
+ * dropped by an unrelated write (a `setModelRole`, a `plugin.enable`, …). Without this, `saveSettings`
+ * persisted `Settings.parse(s)`'s own (discarded) validation as proof of shape but wrote `s` itself
+ * verbatim — which is already correct for every field THIS schema knows about (an absent optional
+ * block stays absent, never backfilled with its `.prefault()`/`.default()` value — see the doc on
+ * `runtimes.retention` above for why that distinction matters), but `s` can never carry a field the
+ * schema has no shape for at all, because every real `Settings` value existing in this codebase was
+ * itself produced by parsing against this same schema at some earlier point (`loadSettings`, a pure
+ * `Settings -> Settings` transform, or a hand-built test literal) — so a hand-written SDK-format
+ * block (`hooks.PreToolUse`, an entire unrelated top-level key like `enabledPlugins`) that lives only
+ * on disk is invisible to `s` by construction and would otherwise be erased the moment anything else
+ * writes settings.json.
+ *
+ * THE ORDERING RULE, decided here once: **daemon-owned keys always win; unknown keys survive
+ * untouched.** A key is "daemon-owned" when this exact `Settings` schema (descended structurally —
+ * through `ZodObject` shapes and `ZodRecord` value schemas, unwrapping `optional`/`nullable`/
+ * `default`/`prefault`/`readonly`/`catch`) defines it at that nesting level, REGARDLESS of whether
+ * `owned` currently holds a value there — an owned key that is absent/cleared in `owned` is removed
+ * from the merged result even if `raw` (the file on disk right now) still has it, because clearing a
+ * known field is itself a daemon-owned decision, not an accident. A key this schema does NOT define
+ * at that level (at any depth) is never touched: it is copied from `raw` verbatim, because `owned`
+ * cannot originate one (see above) and there is nothing for the daemon to decide about it. A LEAF
+ * (string/number/boolean/enum/array/anything not itself an object/record) always takes `owned`'s
+ * value wholesale — a leaf has no "extra keys" of its own to lose. `.strict()` blocks
+ * (`ProviderSettings`, `runtimes.official`) need no special case: `Settings.parse` already throws
+ * before an unknown key inside one of those ever reaches this merge (their own schema comments), so
+ * there is nothing there this function could be asked to preserve that would not already have
+ * refused the whole file at load time.
+ *
+ * A `z.record(...)` field (`mcpServers`, `providers`, `plugins.consents`) is treated differently
+ * from a plain object: the record's OWN key set (which server, which provider) is itself daemon-
+ * owned data, not schema-defined shape — a key present in `raw`'s map but absent from `owned`'s
+ * means something upstream deliberately removed that entry, so it is dropped, never resurrected.
+ * Only within an entry BOTH sides still share does this descend into that entry's own value schema,
+ * so an unknown field nested inside one server's config still survives the same way.
+ */
+function mergeUnknownKeys(schema: unknown, raw: unknown, owned: unknown): unknown {
+  const def = (schema as { def?: { type?: string; innerType?: unknown; valueType?: unknown } } | undefined)?.def;
+  switch (def?.type) {
+    case "optional":
+    case "nullable":
+    case "default":
+    case "prefault":
+    case "readonly":
+    case "catch":
+      // A wrapper carries no shape of its own — recurse into what it wraps with the SAME pair.
+      return mergeUnknownKeys(def.innerType, raw, owned);
+    case "object": {
+      // The whole block is absent/cleared in `owned` — a daemon-owned decision, propagates as-is
+      // (never backfilled from `raw`, matching `saveSettings`'s pre-existing "write `s` verbatim,
+      // an absent optional block stays absent" contract).
+      if (owned === undefined) return undefined;
+      const rawObj = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+      const ownedObj = owned && typeof owned === "object" && !Array.isArray(owned) ? (owned as Record<string, unknown>) : {};
+      const shape = (schema as { shape: Record<string, unknown> }).shape;
+      const out: Record<string, unknown> = { ...rawObj }; // unknown keys survive by default
+      for (const key of Object.keys(shape)) {
+        const merged = mergeUnknownKeys(shape[key], rawObj[key], ownedObj[key]);
+        if (merged === undefined) delete out[key];
+        else out[key] = merged;
+      }
+      // Belt-and-suspenders: an `owned` value built by hand (never parsed) COULD carry a property
+      // this schema has no shape for at all. Such a key is daemon-owned in spirit (the caller put it
+      // there deliberately) but schema-unknown, so it is carried through only when `raw` didn't
+      // already decide its fate above.
+      for (const key of Object.keys(ownedObj)) {
+        if (!(key in shape) && !(key in out)) out[key] = ownedObj[key];
+      }
+      return out;
+    }
+    case "record": {
+      if (owned === undefined) return undefined;
+      const rawObj = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+      const ownedObj = owned && typeof owned === "object" && !Array.isArray(owned) ? (owned as Record<string, unknown>) : {};
+      const valueSchema = def.valueType;
+      const out: Record<string, unknown> = {};
+      for (const key of Object.keys(ownedObj)) {
+        out[key] = mergeUnknownKeys(valueSchema, rawObj[key], ownedObj[key]);
+      }
+      return out;
+    }
+    default:
+      // Leaf type (string/number/boolean/enum/literal/union/array/…) — `owned` wins outright.
+      return owned;
+  }
+}
+
 export function saveSettings(path: string, s: Settings): void {
   Settings.parse(s); // validate before writing — never persist an invalid settings file
-  writeFileSync(path, JSON.stringify(s, null, 2) + "\n");
+  // Item 5a (2026-09-17 plan): merge onto the CURRENT on-disk shape so a key this schema does not
+  // model — anywhere from a stray top-level field to one nested inside a block this schema DOES
+  // define — rides through untouched. `readRawSettings` is `null` for an absent OR unparsable
+  // (torn) file: there is nothing on disk to preserve keys FROM in either case, so the write falls
+  // back to the pre-existing verbatim behavior — which is itself the correct recovery for a torn
+  // file (the next good write replaces the garbage with a valid one; whatever keys lived only in the
+  // unreadable bytes cannot be recovered by construction, same as any other torn-file loss).
+  const raw = readRawSettings(path);
+  const merged = raw === null ? s : (mergeUnknownKeys(Settings, raw, s) as Settings);
+  // Second validation pass, on the MERGED shape (review round 2): `s` alone can be valid while the
+  // merge just copied an unknown key from a `.strict()` block ON DISK (`provider`,
+  // `runtimes.official` — see their own schema comments) straight through untouched, because
+  // nothing else in this function ever decided that key's fate. Practically this can only happen
+  // when the file drifted AFTER whatever produced `s` last read it (a hand edit racing this write,
+  // or a caller that built `s` from something other than `loadSettings`) — `loadSettings` itself
+  // already refuses to load a file with a stray key in one of those two blocks, so an ordinary
+  // read-transform-write cycle never reaches this. Refuse to persist the result if IT is not a
+  // valid `Settings` file — the SAME "never persist an invalid settings file" contract as the line
+  // above, extended to what this function actually writes rather than only what the caller handed it.
+  Settings.parse(merged);
+  writeFileSync(path, JSON.stringify(merged, null, 2) + "\n");
 }
 
 /** Parse a settings file to a raw object for OVERLAY merging (no zod, no migration) — absent/torn → null. */
