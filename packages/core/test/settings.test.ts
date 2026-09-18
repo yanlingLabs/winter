@@ -2,7 +2,7 @@ import { describe, expect, test, spyOn } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, computerUseEnabledFrom, lspEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialSubscriptionAuthEnabled, officialSubscriptionAuthFlagInert, DEFAULT_PROVIDER, pinsFor, setModelRole, modelRoleInfo, setSkillDenied, skillDenyRule, MODEL_ROLES, roleEffortFor, roleAcceptsClientEffort } from "../src/settings";
+import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, computerUseEnabledFrom, lspEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialSubscriptionAuthEnabled, officialSubscriptionAuthFlagInert, DEFAULT_PROVIDER, pinsFor, setModelRole, modelRoleInfo, setSkillDenied, skillDenyRule, MODEL_ROLES, roleEffortFor, roleAcceptsClientEffort, roleCarriesEffort, effortToSpendForRole } from "../src/settings";
 import { ModelRole as ProtocolModelRole } from "@yanlinglabs/winter-protocol";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
 import { UNSTATED_TAG, type ModelTag } from "../src/runtime-sdk/model-tag";
@@ -1138,9 +1138,12 @@ describe("role reasoning efforts (roleEfforts / roleEffortFor / roleAcceptsClien
     expect(set.roleEfforts).toEqual({ "pins.dispatch": "high" });
     expect(roleEffortFor(set, "pins.dispatch")).toBe("high");
     // Every role except `provider.model` is a key of this block, and each is independent.
-    const many = MODEL_ROLES.filter((r) => r !== "provider.model")
-      .reduce<Settings>((s, role) => setModelRole(s, role, "codex-oauth/gpt-5.6-terra", "low"), base);
-    expect(Object.keys(many.roleEfforts ?? {}).sort()).toEqual(MODEL_ROLES.filter((r) => r !== "provider.model").slice().sort());
+    // CHANGED 2026-09-18 (the spend side): "every role" became "every role whose call path can CARRY an
+    // effort" — the door now refuses one for `runtimes.advisorModel` (`roleCarriesEffort`), so it can no
+    // longer be written through here. The SCHEMA still has its key (the keys-parity test just above).
+    const writable = MODEL_ROLES.filter((r) => r !== "provider.model" && roleCarriesEffort(r));
+    const many = writable.reduce<Settings>((s, role) => setModelRole(s, role, "codex-oauth/gpt-5.6-terra", "low"), base);
+    expect(Object.keys(many.roleEfforts ?? {}).sort()).toEqual(writable.slice().sort());
   });
 
   test("provider.model reads and writes `provider.reasoningEffort`, never the new block", () => {
@@ -1211,6 +1214,68 @@ describe("role reasoning efforts (roleEfforts / roleEffortFor / roleAcceptsClien
     // `winter-test/*` is not a catalog namespace (the harness doubles accept anything), so there is no
     // evidence to refuse on. Same for any future BYO-endpoint id.
     expect(roleEffortFor(setModelRole(base, "pins.dispatch", "winter-test/echo", "high"), "pins.dispatch")).toBe("high");
+  });
+
+  // ── 2026-09-18, the SPEND side: `effortToSpendForRole` is the one resolver every consumer calls. ──
+  describe("effortToSpendForRole (the one spend-side resolver)", () => {
+    const withEffort = (role: Exclude<(typeof MODEL_ROLES)[number], "provider.model">, effort: (typeof REASONING_EFFORTS)[number]): Settings =>
+      ({ ...base, roleEfforts: { [role]: effort } });
+
+    test("nothing stored → the consumer's own default, VERBATIM (never mapped, never invented)", () => {
+      // Raw on purpose: the internal callers have always sent their constant unmapped, and an untouched
+      // install must keep sending exactly that — even to a row that does not list it.
+      expect(effortToSpendForRole(base, "pins.dream", "openai/gpt-5.4", "medium")).toBe("medium");
+      expect(effortToSpendForRole(base, "pins.research", "codex-oauth/gpt-5.6-luna", "none")).toBe("none");
+      expect(effortToSpendForRole(base, "titles.model", "codex-oauth/gpt-5.6-sol", undefined)).toBeUndefined();
+      expect(effortToSpendForRole(null, "pins.dispatch", "codex-oauth/gpt-5.6-terra", "medium")).toBe("medium");
+      expect(effortToSpendForRole(undefined, "provider.model", "codex-oauth/gpt-5.6-sol", undefined)).toBeUndefined();
+    });
+
+    test("a stored effort the model offers is spent, over the consumer default", () => {
+      expect(effortToSpendForRole(withEffort("pins.dream", "high"), "pins.dream", "codex-oauth/gpt-5.6-terra", "medium")).toBe("high");
+      expect(effortToSpendForRole(withEffort("titles.model", "low"), "titles.model", "codex-oauth/gpt-5.6-sol", undefined)).toBe("low");
+      // provider.model reads its established home, never roleEfforts.
+      expect(effortToSpendForRole({ ...base, provider: { ...base.provider, reasoningEffort: "xhigh" } }, "provider.model", "codex-oauth/gpt-5.6-sol", undefined)).toBe("xhigh");
+      // …and per-role: one role's stored effort is not another's.
+      expect(effortToSpendForRole(withEffort("pins.dream", "high"), "pins.cleaner", "codex-oauth/gpt-5.6-terra", "low")).toBe("low");
+    });
+
+    test("a stored effort the model does NOT offer is mapped or omitted — never a throw, never the consumer default", () => {
+      // The model moved under the stored effort (the write door allows that on purpose).
+      // o4-mini lists low/medium/high with defaultEffort medium: `max` maps onto the row's default.
+      expect(effortToSpendForRole(withEffort("pins.dream", "max"), "pins.dream", "openai/o4-mini", "medium")).toBe("medium");
+      // deepseek-v4-flash lists none/low/high/max and declares NO default: `medium` has nowhere to map.
+      expect(effortToSpendForRole(withEffort("pins.dispatch", "medium"), "pins.dispatch", "deepseek/deepseek-v4-flash", "medium")).toBeUndefined();
+      // A row with no vocabulary at all: omitted — NOT the consumer's "low", which the user overrode.
+      expect(effortToSpendForRole(withEffort("pins.cleaner", "high"), "pins.cleaner", "openai/gpt-5.4", "low")).toBeUndefined();
+      // No catalog row (a harness double, a BYO endpoint's own id): passed through, implicitEffortFor's posture.
+      expect(effortToSpendForRole(withEffort("pins.dispatch", "high"), "pins.dispatch", "winter-test/echo", "medium")).toBe("high");
+    });
+
+    test("\"none\" bypasses the vocabulary mapping — it must never be rewritten to the row's defaultEffort", () => {
+      // terra's vocabulary has no "none" and its defaultEffort is "medium": through `implicitEffortFor`
+      // an explicit "no reasoning" would silently become "medium". The write door's rule applies instead.
+      expect(effortToSpendForRole(withEffort("pins.dream", "none"), "pins.dream", "codex-oauth/gpt-5.6-terra", "medium")).toBe("none");
+      expect(effortToSpendForRole(withEffort("pins.dream", "none"), "pins.dream", "winter-test/echo", "medium")).toBe("none");
+      // …and a row with no vocabulary takes no effort of any kind, "none" included.
+      expect(effortToSpendForRole(withEffort("pins.dream", "none"), "pins.dream", "openai/gpt-5.4", "medium")).toBeUndefined();
+    });
+
+    test("runtimes.advisorModel carries no effort: a stale stored value is inert, the read offers no control, the write refuses", () => {
+      expect(roleCarriesEffort("runtimes.advisorModel")).toBe(false);
+      for (const role of MODEL_ROLES) if (role !== "runtimes.advisorModel") expect(roleCarriesEffort(role)).toBe(true);
+      // A settings.json written while the door briefly accepted one still LOADS (the schema keeps the key)…
+      const stale = Settings.parse({ ...base, runtimes: { advisorModel: "codex-oauth/gpt-5.6-terra" }, roleEfforts: { "runtimes.advisorModel": "high" } });
+      // …is never spent…
+      expect(effortToSpendForRole(stale, "runtimes.advisorModel", "codex-oauth/gpt-5.6-terra", undefined)).toBeUndefined();
+      // …is reported verbatim so a client can see it, beside NO vocabulary (= render no control)…
+      expect(modelRoleInfo(stale, "runtimes.advisorModel")).toMatchObject({ model: "codex-oauth/gpt-5.6-terra", effort: "high", efforts: null });
+      // …can always be cleared, and can never be set again.
+      expect(roleEffortFor(setModelRole(stale, "runtimes.advisorModel", "codex-oauth/gpt-5.6-terra", null), "runtimes.advisorModel")).toBeUndefined();
+      expect(() => setModelRole(base, "runtimes.advisorModel", "codex-oauth/gpt-5.6-terra", "high")).toThrow(/cannot run at a chosen reasoning effort/);
+      // A tier keeps its own, more specific refusal.
+      expect(() => setModelRole(base, "runtimes.advisorModel", "codex-oauth/gpt-5.6-terra", "ultra")).toThrow(/Winter-level tier/);
+    });
   });
 
   test("a Winter-level tier is refused on every role, and no role accepts one today", () => {

@@ -33,6 +33,12 @@ export class SessionTitler {
   // shape `daemon.ts` already uses for `screenshotMaxDim`/`reviewerEnabled`/etc.), called fresh on
   // every `maybeTitle()` — so a live `titles.model` write reaches the very next title, no restart.
   private readonly model: (() => string | undefined) | undefined;
+  // 2026-09-18: the role's reasoning effort (`settings.roleEfforts`), a getter for the same reason
+  // `model` above is one — read on every call, so a Roles-pane change reaches the very next request
+  // with no restart. ALREADY RESOLVED by the caller (`providers/manager.ts`'s `internalRoleEffortFor`:
+  // mapped onto the row this call will actually run on, never a refusal) — this class only forwards
+  // it. Absent, or answering `undefined`, sends no `reasoningEffort` at all, exactly as before.
+  private readonly effort: (() => string | undefined) | undefined;
   private readonly timeoutMs: number;
   // Re-entrancy guard: the engine fires maybeTitle() fire-and-forget at every depth-0 turn
   // completion, and a slow model call must not overlap with itself for the same session (which
@@ -48,12 +54,15 @@ export class SessionTitler {
      *  deps.provider.model` — the LIVE bound model when available (Minor 5c), the static snapshot
      *  only as a last resort (a test double with no `.live` at all). */
     model?: () => string | undefined;
+    /** A live getter beside `model`, re-read on every `maybeTitle()` call — see the field's own doc. */
+    effort?: () => string | undefined;
     timeoutMs?: number;
   }) {
     this.provider = deps.provider;
     this.store = deps.store;
     this.hub = deps.hub;
     this.model = deps.model;
+    this.effort = deps.effort;
     // A junk env value must fall back to the default, not become NaN — setTimeout(fn, NaN) fires
     // immediately (dreamer.ts's constructor guards the same footgun the same way).
     const n = Number(process.env.WINTER_TITLE_TIMEOUT_MS);
@@ -98,11 +107,16 @@ export class SessionTitler {
     const ac = new AbortController();
     const run = (async () => {
       let text = "";
+      // Read in the same synchronous breath as `model` below (no `await` between them), so the two
+      // always come from one settings generation. Spread conditionally: an absent effort must leave
+      // the request with NO `reasoningEffort` key, not an `undefined`-valued one.
+      const effort = this.effort?.();
       for await (const ev of this.provider.provider.streamTurn({
         // Minor 5c: the LIVE bound model first (re-reads settings.json every call, unaffected by
         // whether a rebind ever crossed providers), the static snapshot only when no `live` exists
         // at all (a bare test double).
         model: this.model?.() ?? this.provider.live?.().model ?? this.provider.model,
+        ...(effort === undefined ? {} : { reasoningEffort: effort }),
         instructions: TITLE_INSTRUCTION,
         input: turnInput,
         tools: [],

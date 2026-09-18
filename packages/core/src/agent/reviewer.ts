@@ -95,11 +95,18 @@ export class BashReviewer {
   // and handed here as a plain string, a boot snapshot CLAUDE.md's no-restart rule forbids. `model`
   // is now the getter itself, re-read on every `review()` call.
   private readonly model: (() => string | undefined) | undefined;
+  // 2026-09-18: the role's reasoning effort (`settings.roleEfforts`), a getter for the same reason
+  // `model` above is one — read on every call, so a Roles-pane change reaches the very next request
+  // with no restart. ALREADY RESOLVED by the caller (`providers/manager.ts`'s `internalRoleEffortFor`:
+  // mapped onto the row this call will actually run on, never a refusal) — this class only forwards
+  // it. Absent, or answering `undefined`, sends no `reasoningEffort` at all, exactly as before.
+  private readonly effort: (() => string | undefined) | undefined;
   private readonly timeoutMs: number;
 
-  constructor(deps: { provider: { provider: Provider; model: string; live?: () => { model: string } }; model?: () => string | undefined; timeoutMs?: number }) {
+  constructor(deps: { provider: { provider: Provider; model: string; live?: () => { model: string } }; model?: () => string | undefined; effort?: () => string | undefined; timeoutMs?: number }) {
     this.provider = deps.provider;
     this.model = deps.model;
+    this.effort = deps.effort;
     this.timeoutMs = deps.timeoutMs ?? Number(process.env.WINTER_REVIEW_TIMEOUT_MS ?? 15000);
   }
 
@@ -119,9 +126,12 @@ export class BashReviewer {
 
     const run = (async () => {
       let text = "";
+      // Same synchronous breath as `model` below — see `SessionTitler.oneShot`'s identical read.
+      const effort = this.effort?.();
       for await (const ev of this.provider.provider.streamTurn({
         // Minor 5c: the LIVE bound model first — see `SessionTitler.oneShot`'s identical fallback.
         model: this.model?.() ?? this.provider.live?.().model ?? this.provider.model,
+        ...(effort === undefined ? {} : { reasoningEffort: effort }),
         instructions,
         input: turnInput,
         tools: [],

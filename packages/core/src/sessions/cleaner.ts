@@ -2,7 +2,7 @@ import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { Provider, TurnInputItem } from "../providers/types";
 import { hasOpenPanelTabs } from "../panel/store";
 import type { Settings } from "../settings";
-import { pinsFor, ownProviderFor } from "../settings";
+import { effortToSpendForRole, pinsFor, ownProviderFor } from "../settings";
 import { internalModelFor } from "../providers/manager";
 import { activityFor, type ActivityRow } from "./activity";
 import { appendCleanerLog } from "./cleaner-log";
@@ -338,8 +338,14 @@ export class SessionCleaner {
     const settings = this.deps.settings();
     // Item 2: the BOUND backend's own identity, not a pure settings read — see `CleanerDeps.provider`'s own doc comment.
     const boundProviderId = this.deps.provider.live?.().providerId ?? ownProviderFor(settings);
-    const cleanerModel = internalModelFor(pinsFor(settings).cleaner, { providerId: boundProviderId }, "pins.cleaner");
+    const cleanerPin = pinsFor(settings).cleaner;
+    const cleanerModel = internalModelFor(cleanerPin, { providerId: boundProviderId }, "pins.cleaner");
     if (cleanerModel === undefined) return null;
+    // 2026-09-18: the role's stored effort, off the SAME live `settings` read as the pin — next
+    // judgment, no restart. Mapped onto the pin's row and never a throw (this method's contract is
+    // "null for every failure mode", and an effort must not become a new one); nothing stored is
+    // `CLEANER_EFFORT`, raw, exactly as before. See `effortToSpendForRole`.
+    const cleanerEffort = effortToSpendForRole(settings, "pins.cleaner", cleanerPin, CLEANER_EFFORT);
     const input: TurnInputItem[] = [{ type: "message", role: "user", content: renderTranscript(events) }];
     // The Dreamer's own abort-tied-to-the-race idiom, verbatim: without the signal a timeout only
     // makes THIS call stop waiting while the detached generator keeps draining a hung connection.
@@ -347,7 +353,7 @@ export class SessionCleaner {
     let text = "";
     const run = (async () => {
       for await (const ev of this.deps.provider.provider.streamTurn({
-        model: cleanerModel, reasoningEffort: CLEANER_EFFORT, instructions: CLEANER_INSTRUCTION,
+        model: cleanerModel, ...(cleanerEffort === undefined ? {} : { reasoningEffort: cleanerEffort }), instructions: CLEANER_INSTRUCTION,
         input, tools: [], signal: ac.signal,
       })) {
         if (ev.type === "text_delta") text += ev.delta;

@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
-import { createProvider, createRebindableProvider, internalModelFor, OPENAI_API_KEY_SECRET, SwappableProvider } from "../../src/providers/manager";
+import { createProvider, createRebindableProvider, internalModelFor, internalRoleEffortFor, OPENAI_API_KEY_SECRET, SwappableProvider } from "../../src/providers/manager";
 import type { Settings } from "../../src/settings";
 import type { ModelTag } from "../../src/runtime-sdk/model-tag";
 import type { ModelInfo, Provider, ProviderEvent, TurnRequest } from "../../src/providers/types";
@@ -199,6 +199,42 @@ describe("internalModelFor (WS-20 review round 1, GUARD)", () => {
     expect(lines[0]).toContain("pins.dream");
     expect(lines[0]).toContain("openai");
     expect(lines[0]).toContain("codex-oauth");
+  });
+});
+
+// 2026-09-18: the effort for the two internal roles whose model FALLS BACK rather than skipping.
+// What actually reaches the request is asserted in agent/titles.test.ts and agent/reviewer.test.ts,
+// which wire this function exactly as daemon.ts does; this pins the row it maps against.
+describe("internalRoleEffortFor (titles.model / reviewer.model)", () => {
+  const settingsOf = (over: Record<string, unknown>): Settings =>
+    ({ schemaVersion: 3, provider: { model: "openai/gpt-5.6-sol" }, ...over }) as Settings;
+  const bound = { providerId: "openai", model: "gpt-5.6-sol" };
+
+  test("nothing stored → undefined: these roles never sent an effort, and still do not", () => {
+    expect(internalRoleEffortFor(settingsOf({}), "titles.model", undefined, bound)).toBeUndefined();
+    expect(internalRoleEffortFor(null, "reviewer.model", undefined, bound)).toBeUndefined();
+  });
+
+  test("an unset pin runs on the bound model — the effort is mapped onto THAT row, recomposed as a tag", () => {
+    const s = settingsOf({ roleEfforts: { "titles.model": "max" } });
+    expect(internalRoleEffortFor(s, "titles.model", undefined, bound)).toBe("max");
+    expect(internalRoleEffortFor(s, "titles.model", undefined, { providerId: "openai", model: "o4-mini" })).toBe("medium");
+    expect(internalRoleEffortFor(s, "titles.model", undefined, { providerId: "openai", model: "gpt-5.4" })).toBeUndefined();
+  });
+
+  test("a pin on the bound provider is the row; a pin on ANOTHER provider is not (it was refused) — and no log line is written here", () => {
+    const lines: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+    try {
+      const s = settingsOf({ roleEfforts: { "reviewer.model": "xhigh" } });
+      expect(internalRoleEffortFor(s, "reviewer.model", "openai/o4-mini" as ModelTag, bound)).toBe("medium");        // the pin's row
+      expect(internalRoleEffortFor(s, "reviewer.model", "anthropic/claude-opus-5" as ModelTag, bound)).toBe("xhigh"); // the BOUND row (sol lists xhigh)
+      expect(internalRoleEffortFor(s, "reviewer.model", "anthropic/claude-opus-5" as ModelTag, { providerId: "openai", model: "o4-mini" })).toBe("medium");
+      // Per-role: the titler's effort is not the reviewer's.
+      expect(internalRoleEffortFor(s, "titles.model", undefined, bound)).toBeUndefined();
+    } finally { console.error = realError; }
+    expect(lines).toEqual([]);
   });
 });
 

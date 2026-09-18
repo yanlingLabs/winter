@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { Provider, TurnInputItem } from "../providers/types";
 import type { SessionStore } from "../sessions/store";
 import type { Settings } from "../settings";
-import { pinsFor, ownProviderFor } from "../settings";
+import { effortToSpendForRole, pinsFor, ownProviderFor } from "../settings";
 import { internalModelFor } from "../providers/manager";
 import { applyOps, validateOps, RESERVED_FILES, MAX_FILES } from "./dream-ops";
 
@@ -136,8 +136,15 @@ export class Dreamer {
     const settings = this.deps.settings();
     // Item 2: the BOUND backend's own identity, not a pure settings read — see `DreamerDeps.provider`'s own doc comment.
     const boundProviderId = this.deps.provider.live?.().providerId ?? ownProviderFor(settings);
-    const dreamModel = internalModelFor(pinsFor(settings).dream, { providerId: boundProviderId }, "pins.dream");
+    const dreamPin = pinsFor(settings).dream;
+    const dreamModel = internalModelFor(dreamPin, { providerId: boundProviderId }, "pins.dream");
     if (dreamModel === undefined) return;
+    // 2026-09-18: the role's stored effort (`settings.roleEfforts["pins.dream"]`), off the SAME live
+    // `settings` read as the pin just above — so a Roles-pane change lands on the next cycle, and the
+    // model and its effort can never come from two different settings generations. Mapped onto the
+    // pin's own row and never a refusal; with nothing stored it is `DREAM_EFFORT`, raw, exactly as
+    // before (see `effortToSpendForRole`). Resolved against the TAG: `dreamModel` is already bare.
+    const dreamEffort = effortToSpendForRole(settings, "pins.dream", dreamPin, DREAM_EFFORT);
     const upTo = this.deps.store.lastSeq(dispatchId);
     const events = this.deps.store.read(dispatchId, state.watermarkSeq);
     const lines: string[] = [];
@@ -170,7 +177,7 @@ export class Dreamer {
       // via `internalModelFor`, is already that bare id, verified to name the SAME provider this
       // Provider instance is bound to.
       for await (const ev of this.deps.provider.provider.streamTurn({
-        model: dreamModel, reasoningEffort: DREAM_EFFORT, instructions: DREAM_INSTRUCTION, input, tools: [], signal: ac.signal,
+        model: dreamModel, ...(dreamEffort === undefined ? {} : { reasoningEffort: dreamEffort }), instructions: DREAM_INSTRUCTION, input, tools: [], signal: ac.signal,
       })) {
         if (ev.type === "text_delta") text += ev.delta;
         else if (ev.type === "error") throw new Error(`provider error: ${ev.message}`);

@@ -6,6 +6,7 @@ import type { Provider, ProviderEvent, TurnRequest } from "../../src/providers/t
 import { FakeProvider } from "../../src/agent/fake-provider";
 import { SessionEvent } from "@yanlinglabs/winter-protocol";
 import { SessionStore } from "../../src/sessions/store";
+import { Settings } from "../../src/settings";
 import {
   SessionCleaner, renderTranscript, hasUserSetTitle, CLEANER_EFFORT, CLEANER_INSTRUCTION,
   CLEANER_MAX_JUDGMENTS_PER_PASS, CLEANER_MIN_IDLE_MS, CLEANER_TRANSCRIPT_MAX_CHARS,
@@ -1127,5 +1128,58 @@ describe("hasUserSetTitle — the title rail is vacuous today, by verification (
     const titled: any = { type: "session_titled", sessionId: "s", threadId: "main", title: "t", seq: 1, ts: 0 };
     const parsed = SessionEvent.parse(titled);
     expect(Object.keys(parsed).sort()).toEqual(["seq", "sessionId", "threadId", "title", "ts", "type"]);
+  });
+});
+
+// 2026-09-18: `settings.roleEfforts["pins.cleaner"]` — the role's stored effort, spent on the judgment
+// request. Asserted on the OUTGOING `TurnRequest`; the resolver's own rules are unit-tested in
+// settings.test.ts. A keep-voting judge throughout, so each judged session is stamped and the next
+// pass needs a fresh candidate.
+describe("SessionCleaner: the pins.cleaner role effort", () => {
+  const settingsOf = (over: Record<string, unknown>): Settings =>
+    Settings.parse({ schemaVersion: 3, provider: { model: "openai/gpt-5.6-sol" }, ...over });
+
+  async function judgeOnce(settings: Settings | null): Promise<TurnRequest> {
+    const { home, store } = freshStore();
+    junkSession(store);
+    const provider = keepVotingJudge();
+    await makeCleaner(store, home, provider, { now: agedNow, settings: () => settings }).runPass();
+    expect(provider.requests).toHaveLength(1);
+    store.close();
+    return provider.requests[0]!;
+  }
+
+  test("absent → CLEANER_EFFORT, raw, exactly as before", async () => {
+    expect((await judgeOnce(settingsOf({}))).reasoningEffort).toBe(CLEANER_EFFORT);
+    expect((await judgeOnce(settingsOf({ pins: { cleaner: "openai/gpt-5.4" } }))).reasoningEffort).toBe(CLEANER_EFFORT);
+  });
+
+  test("a stored effort the pin's model offers reaches the request — and only this role's", async () => {
+    expect((await judgeOnce(settingsOf({ roleEfforts: { "pins.cleaner": "high" } }))).reasoningEffort).toBe("high");
+    // The Dreamer's effort is a different role's: it must not move the cleaner's.
+    expect((await judgeOnce(settingsOf({ roleEfforts: { "pins.dream": "max" } }))).reasoningEffort).toBe(CLEANER_EFFORT);
+  });
+
+  test("a stored effort the pin's model does NOT offer is mapped or omitted — the judgment still runs", async () => {
+    const mapped = await judgeOnce(settingsOf({ pins: { cleaner: "openai/o4-mini" }, roleEfforts: { "pins.cleaner": "xhigh" } }));
+    expect(mapped.model).toBe("o4-mini");
+    expect(mapped.reasoningEffort).toBe("medium"); // the row's own defaultEffort
+    const omitted = await judgeOnce(settingsOf({ pins: { cleaner: "openai/gpt-5.4" }, roleEfforts: { "pins.cleaner": "high" } }));
+    expect(omitted.model).toBe("gpt-5.4");
+    expect("reasoningEffort" in omitted).toBe(false);
+  });
+
+  test("a settings change lands on the NEXT pass of the SAME cleaner — no restart", async () => {
+    const { home, store } = freshStore();
+    const provider = keepVotingJudge();
+    let live: Settings = settingsOf({});
+    const cleaner = makeCleaner(store, home, provider, { now: agedNow, settings: () => live });
+    junkSession(store);
+    await cleaner.runPass();
+    live = settingsOf({ roleEfforts: { "pins.cleaner": "max" } });
+    junkSession(store);
+    await cleaner.runPass();
+    expect(provider.requests.map((r) => r.reasoningEffort)).toEqual([CLEANER_EFFORT, "max"]);
+    store.close();
   });
 });

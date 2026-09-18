@@ -3,7 +3,7 @@ import type { Provider, ProviderEvent, TurnInputItem, ToolSpec } from "../provid
 import { fetchCleanPage, renderLines, PageCoreError, checkDangerousDomain, dangerousDomainRefusal, type PageCache, type CleanPage } from "./tools/page-core";
 import { READPAGE_PER_PAGE_CHAR_CAP, READPAGE_TOTAL_OUTPUT_CHAR_CAP } from "./tools/read-page";
 import type { Settings } from "../settings";
-import { pinsFor, ownProviderFor } from "../settings";
+import { effortToSpendForRole, pinsFor, ownProviderFor } from "../settings";
 import { internalModelFor } from "../providers/manager";
 
 /**
@@ -458,6 +458,13 @@ async function runResearch(q: ResearchQuery, deps: ResearchDeps, externalSignal:
   const researchFallbackModel = internalModelFor(pins.researchFallback, { providerId: ownProvider }, "pins.researchFallback");
   let model: string = researchModel;
   let usedFallback = false;
+  // 2026-09-18: TWO roles, so two efforts — and the effort must FOLLOW the fallback switch below: a
+  // level chosen for `pins.research`'s model says nothing about `pins.researchFallback`'s. Both are
+  // resolved against their pin's TAG (`model` above is already bare) from the one live `settings`
+  // read this run started with, mapped onto that row and never a refusal. Nothing stored is
+  // `RESEARCH_EFFORT`, raw, on both — exactly what every round sent before. See `effortToSpendForRole`.
+  const researchEffort = effortToSpendForRole(settings, "pins.research", pins.research, RESEARCH_EFFORT);
+  const researchFallbackEffort = effortToSpendForRole(settings, "pins.researchFallback", pins.researchFallback, RESEARCH_EFFORT);
   let lastText = "";
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -465,13 +472,15 @@ async function runResearch(q: ResearchQuery, deps: ResearchDeps, externalSignal:
       return notReadReport(lastText, state, "Research timed out before finishing");
     }
 
+    // Re-picked every round, because `usedFallback` can flip between two iterations of this loop.
+    const roundEffort = usedFallback ? researchFallbackEffort : researchEffort;
     const iterator = deps.provider.streamTurn({
       model,
       instructions: RESEARCH_SYSTEM_PROMPT,
       input,
       tools: [FETCH_PAGE_TOOL],
       signal,
-      reasoningEffort: RESEARCH_EFFORT,
+      ...(roundEffort === undefined ? {} : { reasoningEffort: roundEffort }),
     })[Symbol.asyncIterator]();
 
     let textBuf = "";

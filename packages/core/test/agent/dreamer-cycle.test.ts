@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "../../src/sessions/store";
 import { FakeProvider } from "../../src/agent/fake-provider";
-import { Dreamer, DREAM_INSTRUCTION, DREAM_MIN_EVENTS, DREAM_EFFORT, DREAM_WINDOW_MAX_CHARS } from "../../src/agent/dreamer";
-import { pinsFor } from "../../src/settings";
+import { Dreamer, DREAM_INSTRUCTION, DREAM_MIN_EVENTS, DREAM_MIN_SPACING_MS, DREAM_EFFORT, DREAM_WINDOW_MAX_CHARS } from "../../src/agent/dreamer";
+import { pinsFor, Settings } from "../../src/settings";
 import { splitTag } from "../../src/runtime-sdk/model-tag";
 
 // WS-20: `DREAM_MODEL` is deleted — the model is now `pinsFor(settings).dream`, live per tick
@@ -215,5 +215,68 @@ describe("Dreamer.tick", () => {
     // Oldest trimmed away, newest survives -> trims OLDEST, not newest.
     expect(content).not.toContain(`${big}-0`);
     expect(content).toContain(`${big}-49`);
+  });
+});
+
+// 2026-09-18: `settings.roleEfforts["pins.dream"]` — the role's stored effort, spent on the dream
+// request. Asserted on the OUTGOING `TurnRequest` (what the provider is actually handed), never on
+// the resolver: `effortToSpendForRole` has its own unit tests in settings.test.ts.
+describe("Dreamer: the pins.dream role effort", () => {
+  const settingsOf = (over: Record<string, unknown>): Settings =>
+    Settings.parse({ schemaVersion: 3, provider: { model: "openai/gpt-5.6-sol" }, ...over });
+
+  async function dreamOnce(settings: Settings | null) {
+    const { store, dispatchId, dir } = setup("winter-dreamer-effort-");
+    fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
+    const provider = okProvider();
+    await new Dreamer({ settings: () => settings, provider: { provider, model: "x" }, store, dir: () => dir, enabled: () => true, activeTurnCount: () => 0 }).tick();
+    expect(provider.requests).toHaveLength(1);
+    return provider.requests[0]!;
+  }
+
+  test("absent → DREAM_EFFORT, raw, exactly as before (a settings file with no roleEfforts is not a change)", async () => {
+    expect((await dreamOnce(settingsOf({}))).reasoningEffort).toBe(DREAM_EFFORT);
+    // Raw even on a pin whose row lists no efforts at all: the default was never mapped, and still is not.
+    expect((await dreamOnce(settingsOf({ pins: { dream: "openai/gpt-5.4" } }))).reasoningEffort).toBe(DREAM_EFFORT);
+  });
+
+  test("a stored effort the pin's model offers reaches the request", async () => {
+    const req = await dreamOnce(settingsOf({ roleEfforts: { "pins.dream": "high" } }));
+    expect(req.reasoningEffort).toBe("high");
+    expect(req.model).toBe(splitTag(pinsFor(settingsOf({})).dream).modelId);
+  });
+
+  test("a stored effort the pin's model does NOT offer is mapped or omitted — the dream still runs", async () => {
+    // o4-mini: low/medium/high, defaultEffort medium → `max` maps onto the row's own default.
+    const mapped = await dreamOnce(settingsOf({ pins: { dream: "openai/o4-mini" }, roleEfforts: { "pins.dream": "max" } }));
+    expect(mapped.model).toBe("o4-mini");
+    expect(mapped.reasoningEffort).toBe("medium");
+    // gpt-5.4: no vocabulary → the request carries NO effort key at all (not DREAM_EFFORT: the user overrode it).
+    const omitted = await dreamOnce(settingsOf({ pins: { dream: "openai/gpt-5.4" }, roleEfforts: { "pins.dream": "high" } }));
+    expect(omitted.model).toBe("gpt-5.4");
+    expect("reasoningEffort" in omitted).toBe(false);
+  });
+
+  test("a stored \"none\" is sent verbatim — the internal Provider's own meaning of it (RESEARCH_EFFORT's), never remapped to the row default", async () => {
+    expect((await dreamOnce(settingsOf({ roleEfforts: { "pins.dream": "none" } }))).reasoningEffort).toBe("none");
+  });
+
+  test("a settings change lands on the NEXT cycle of the SAME Dreamer — no restart, no re-construction", async () => {
+    const { store, dispatchId, dir } = setup("winter-dreamer-effort-live-");
+    fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
+    const provider = new FakeProvider([[{ type: "text_delta", delta: '{"ops":[]}' }, { type: "done", stopReason: "end_turn" }]]);
+    let live: Settings = settingsOf({});
+    let clock = 10 * DREAM_MIN_SPACING_MS;
+    const dreamer = new Dreamer({ settings: () => live, provider: { provider, model: "x" }, store, dir: () => dir, enabled: () => true, activeTurnCount: () => 0, now: () => clock });
+    await dreamer.tick();
+    live = settingsOf({ roleEfforts: { "pins.dream": "xhigh" } });
+    fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
+    clock += DREAM_MIN_SPACING_MS + 1;
+    await dreamer.tick();
+    live = settingsOf({});
+    fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
+    clock += DREAM_MIN_SPACING_MS + 1;
+    await dreamer.tick();
+    expect(provider.requests.map((r) => r.reasoningEffort)).toEqual([DREAM_EFFORT, "xhigh", DREAM_EFFORT]);
   });
 });

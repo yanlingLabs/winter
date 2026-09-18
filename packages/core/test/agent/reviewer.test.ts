@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { bashLooksSafe, BashReviewer, REVIEW_INSTRUCTION, FS_REVIEW_INSTRUCTION, EXTERNAL_REVIEW_INSTRUCTION } from "../../src/agent/reviewer";
 import { FakeProvider } from "../../src/agent/fake-provider";
 import type { ProviderEvent } from "../../src/providers/types";
+import { internalRoleEffortFor } from "../../src/providers/manager";
+import { Settings } from "../../src/settings";
 
 describe("bashLooksSafe", () => {
   test("read-only argv0, no metachars → bypass", () => {
@@ -157,5 +159,57 @@ describe("BashReviewer", () => {
     const content = (p.requests[0]!.input[0] as any).content as string;
     expect(content).toContain('mcp__fs__delete {"path":"/etc/passwd"}');
     expect(content).not.toContain("COMMAND:");
+  });
+});
+
+// 2026-09-18: `settings.roleEfforts["reviewer.model"]` — wired EXACTLY as daemon.ts wires it
+// (`internalRoleEffortFor` over a live settings holder and the bound selection), asserted on the
+// OUTGOING `TurnRequest`. See titles.test.ts's twin block for the fall-through-to-bound-model case.
+describe("BashReviewer: the reviewer.model role effort", () => {
+  const settingsOf = (over: Record<string, unknown>): Settings =>
+    Settings.parse({ schemaVersion: 3, provider: { model: "openai/gpt-5.6-sol" }, ...over });
+  const BOUND = { providerId: "openai", model: "gpt-5.6-sol" };
+  const safe: ProviderEvent[] = [{ type: "text_delta", delta: '{"verdict":"safe","reason":"ok"}' }, { type: "done", stopReason: "end_turn" }];
+
+  function liveReviewer(initial: Settings) {
+    const p = new FakeProvider([safe]);
+    const holder = { settings: initial };
+    const reviewer = new BashReviewer({
+      provider: { provider: p, model: BOUND.model, live: () => BOUND },
+      effort: () => internalRoleEffortFor(holder.settings, "reviewer.model", holder.settings.reviewer?.model, BOUND),
+    });
+    return { p, holder, reviewer };
+  }
+
+  test("absent → the request carries NO reasoningEffort key at all, exactly as before", async () => {
+    const { p, reviewer } = liveReviewer(settingsOf({}));
+    await reviewer.review({ command: "ls" });
+    expect("reasoningEffort" in p.requests[0]!).toBe(false);
+    const bare = new FakeProvider([safe]);
+    await new BashReviewer({ provider: { provider: bare, model: "fake" } }).review({ command: "ls" });
+    expect("reasoningEffort" in bare.requests[0]!).toBe(false);
+  });
+
+  test("a stored effort the model offers reaches the request", async () => {
+    const { p, reviewer } = liveReviewer(settingsOf({ roleEfforts: { "reviewer.model": "high" } }));
+    await reviewer.review({ command: "ls" });
+    expect(p.requests[0]!.reasoningEffort).toBe("high");
+  });
+
+  test("a stored effort the model does NOT offer is mapped or omitted — a verdict still comes back, never a throw", async () => {
+    const mapped = liveReviewer(settingsOf({ reviewer: { model: "openai/o4-mini" }, roleEfforts: { "reviewer.model": "xhigh" } }));
+    expect(await mapped.reviewer.review({ command: "ls" })).toEqual({ verdict: "safe", reason: "ok" });
+    expect(mapped.p.requests[0]!.reasoningEffort).toBe("medium");
+    const omitted = liveReviewer(settingsOf({ reviewer: { model: "openai/gpt-5.4" }, roleEfforts: { "reviewer.model": "high" } }));
+    expect(await omitted.reviewer.review({ command: "ls" })).toEqual({ verdict: "safe", reason: "ok" });
+    expect("reasoningEffort" in omitted.p.requests[0]!).toBe(false);
+  });
+
+  test("a settings change lands on the NEXT review from the SAME reviewer — no restart", async () => {
+    const { p, holder, reviewer } = liveReviewer(settingsOf({}));
+    await reviewer.review({ command: "ls" });
+    holder.settings = settingsOf({ roleEfforts: { "reviewer.model": "low" } });
+    await reviewer.review({ command: "pwd" });
+    expect(p.requests.map((r) => r.reasoningEffort)).toEqual([undefined, "low"]);
   });
 });

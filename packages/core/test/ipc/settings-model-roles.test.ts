@@ -491,10 +491,23 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     expect(refused.error.code).toBe(-32602);
     expect(JSON.parse(readFileSync(settingsPath, "utf8")).roleEfforts).toBeUndefined();
 
-    // With a model in the same call it lands.
-    const ok = await c.request(METHODS.settingsSetModelRole, { role: "runtimes.advisorModel", model: "anthropic/claude-opus-5", effort: "high" });
-    expect(ok.error).toBeUndefined();
-    expect(ok.result.roles["runtimes.advisorModel"]).toMatchObject({ model: "anthropic/claude-opus-5", effort: "high" });
+    // CHANGED 2026-09-18 (the spend side). This half used to assert "with a model in the same call it
+    // lands". It no longer may: neither agent SDK's advisor option can carry an effort
+    // (`roleCarriesEffort`), so a stored one could never be spent, and the door now refuses it on ANY
+    // model rather than store a value nothing honours. The write is atomic — the model half of the
+    // refused call must not land either.
+    const withModel = await c.request(METHODS.settingsSetModelRole, { role: "runtimes.advisorModel", model: "anthropic/claude-opus-5", effort: "high" });
+    expect(withModel.error).toBeDefined();
+    expect(withModel.error.code).toBe(-32602);
+    expect(withModel.error.message).toContain("cannot run at a chosen reasoning effort");
+    const after = JSON.parse(readFileSync(settingsPath, "utf8"));
+    expect(after.roleEfforts).toBeUndefined();
+    expect(after.runtimes?.advisorModel).toBeUndefined();
+
+    // …and the read side never offers a control for it, even once the role names a model WITH a vocabulary.
+    const set = await c.request(METHODS.settingsSetModelRole, { role: "runtimes.advisorModel", model: "codex-oauth/gpt-5.6-terra" });
+    expect(set.error).toBeUndefined();
+    expect(set.result.roles["runtimes.advisorModel"]).toMatchObject({ model: "codex-oauth/gpt-5.6-terra", effort: null, efforts: null });
     c.close();
   });
 
