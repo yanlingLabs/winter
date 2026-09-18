@@ -65,7 +65,7 @@ import type {
   PostToolUseFailureHookInput, PostToolUseHookInput, PreToolUseHookInput,
 } from "@yanlinglabs/winter-agent-sdk";
 import type { FileDiffSummary } from "@yanlinglabs/winter-protocol";
-import { SHIPPED_DANGEROUS_DOMAINS, dangerousHostMatch, dangerousUrlMatch } from "../agent/dangerous-domains";
+import { SHIPPED_DANGEROUS_DOMAINS, dangerousHostMatch, dangerousUrlMatch, normalizeDangerousDomain } from "../agent/dangerous-domains";
 import { BashReviewer, bashLooksSafe } from "../agent/reviewer";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import { AUTO_DIAG_TOOL_NAMES, autoDiagnosticsSuffix } from "../agent/lsp/auto-diagnostics";
@@ -547,8 +547,11 @@ function webSearchFloorHook(deps: SessionHooksDeps): HookCallback {
       const kept = allowed.filter((domain) => dangerousHostMatch(domain, floor) === null);
       if (kept.length === allowed.length) return allow(); // nothing of the floor is in the allow-list
       if (kept.length === 0) {
-        const first = dangerousHostMatch(allowed[0], floor);
-        return deny(dangerousDomainFloorRefusal(allowed[0] ?? "the requested domain", first ?? floor[0]!));
+        // Named from the FIRST floor-matched entry, normalized the same way the matcher read it — an
+        // allow-list entry is the one value in this path the model wrote itself, so it goes into a
+        // model-readable refusal in its normalized form, never raw.
+        const hit = allowed.map((domain) => ({ domain, entry: dangerousHostMatch(domain, floor) })).find((x) => x.entry !== null)!;
+        return deny(dangerousDomainFloorRefusal(normalizeDangerousDomain(hit.domain), hit.entry!));
       }
       return transformInput(webSearchInput(record, { allowed_domains: kept }));
     }

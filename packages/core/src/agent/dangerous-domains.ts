@@ -137,7 +137,7 @@ export function dangerousDomainMatch(host: string, entries: readonly string[]): 
  * where the host-side check is the ONLY enforcement (the official one). Normalizing both sides here
  * closes it without touching the shared matcher.
  */
-function normalizeDomainLabel(value: string): string {
+export function normalizeDangerousDomain(value: string): string {
   let v = value.trim().toLowerCase();
   if (v.startsWith("*.")) v = v.slice(2);
   while (v.startsWith(".")) v = v.slice(1);
@@ -148,18 +148,18 @@ function normalizeDomainLabel(value: string): string {
 /**
  * `dangerousDomainMatch` for a HOST-OR-DOMAIN string rather than a url — the form a `WebSearch`
  * call's own `allowed_domains`/`blocked_domains` entries take. Normalizes BOTH sides
- * (`normalizeDomainLabel`), then delegates: the suffix grammar and the returned-LIST-ENTRY contract
+ * (`normalizeDangerousDomain`), then delegates: the suffix grammar and the returned-LIST-ENTRY contract
  * are the shared matcher's, never a second one. Returns the matched list entry VERBATIM (not its
  * normalized form), so a refusal or an audit line names what the user or the shipped list actually
  * wrote. Empty/unreadable input never matches.
  */
 export function dangerousHostMatch(host: unknown, entries: readonly string[]): string | null {
   if (typeof host !== "string") return null;
-  const h = asciiDomain(normalizeDomainLabel(host));
+  const h = asciiDomain(normalizeDangerousDomain(host));
   if (!h) return null;
   for (const entry of entries) {
     if (typeof entry !== "string") continue;
-    const e = asciiDomain(normalizeDomainLabel(entry));
+    const e = asciiDomain(normalizeDangerousDomain(entry));
     if (!e) continue;
     if (dangerousDomainMatch(h, [e]) !== null) return entry;
   }
@@ -198,7 +198,7 @@ export interface DangerousUrlMatch {
  * same act against the same matcher, kept because its callers pass the shipped list implicitly).
  * `new URL` does the heavy lifting, and doing it that way is the point: it lowercases the host,
  * punycodes an IDN one, drops userinfo and the port, and leaves a trailing root dot for
- * `normalizeDomainLabel` to strip — so `https://USER:pw@PasteBin.COM.:8443/x` and
+ * `normalizeDangerousDomain` to strip — so `https://USER:pw@PasteBin.COM.:8443/x` and
  * `http://pastebin.com/x` (which both runtimes upgrade to `https:`) are the same host to this
  * function, because the SCHEME and the port are not part of the question being asked.
  *
@@ -217,5 +217,5 @@ export function dangerousUrlMatch(rawUrl: unknown, entries: readonly string[]): 
   const host = url.hostname.toLowerCase();
   if (!host) return null;
   const matchedEntry = dangerousHostMatch(host, entries);
-  return matchedEntry === null ? null : { host: normalizeDomainLabel(host), matchedEntry };
+  return matchedEntry === null ? null : { host: normalizeDangerousDomain(host), matchedEntry };
 }

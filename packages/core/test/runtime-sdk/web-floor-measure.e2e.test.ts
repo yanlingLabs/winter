@@ -44,7 +44,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { query, type HookCallback, type HookCallbackMatcher, type Options, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type CanUseTool, type HookCallback, type HookCallbackMatcher, type Options, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { anthropicFake, startFake, type FakeServer } from "@yanlinglabs/winter-provider-conformance";
 import { SHIPPED_DANGEROUS_DOMAINS } from "../../src/agent/dangerous-domains";
 import { sessionHooksFor, type HookFacadeLike } from "../../src/runtime-sdk/hooks";
@@ -124,6 +124,8 @@ interface Measured {
   messages: SDKMessage[];
   /** `tool_name` per PreToolUse invocation of the FLOOR groups, in order — the matcher proof. */
   hookCalls: Array<{ toolName: string; input: unknown }>;
+  /** What `canUseTool` was handed, when one was wired — the hook's transform, or the model's own? */
+  canUseToolCalls: Array<{ toolName: string; input: unknown }>;
   trapHits: string[];
 }
 
@@ -135,6 +137,10 @@ async function measure(opts: {
   binary: string;
   firstTurn: Parameters<typeof anthropicFake.anthropicTurnResponse>[0];
   dangerousDomainsAdded?: () => readonly string[] | undefined;
+  /** When set, the run uses `permissionMode: "default"` with a `canUseTool` that echoes the input it
+   *  was handed back as `updatedInput` — byte-for-byte what `approval-bridge.ts` returns on an
+   *  approved call (`{ behavior: "allow", updatedInput: input }`, three call sites). */
+  throughCanUseTool?: boolean;
 }): Promise<Measured> {
   const root = mkdtempSync(join(tmpdir(), "winter-web-floor-measure-"));
   const home = join(root, "home");
@@ -143,6 +149,11 @@ async function measure(opts: {
   for (const dir of [home, cfg, cwd, join(home, "tmp")]) mkdirSync(dir, { recursive: true });
   const trap = startProxyTrap();
   const hookCalls: Array<{ toolName: string; input: unknown }> = [];
+  const canUseToolCalls: Array<{ toolName: string; input: unknown }> = [];
+  const canUseTool: CanUseTool = async (toolName, input) => {
+    canUseToolCalls.push({ toolName, input });
+    return { behavior: "allow", updatedInput: input };
+  };
 
   // A live plugin facade ahead of the floor group: it answers `ok` (no verdict), which is exactly the
   // shape whose composition with a no-decision transform has never been measured on this leg.
@@ -209,8 +220,9 @@ async function measure(opts: {
         model: LOOPBACK_MODEL_ID,
         cwd,
         hooks,
-        permissionMode: "bypassPermissions",
-        allowDangerouslySkipPermissions: true,
+        ...(opts.throughCanUseTool === true
+          ? { permissionMode: "default" as const, canUseTool }
+          : { permissionMode: "bypassPermissions" as const, allowDangerouslySkipPermissions: true }),
         settingSources: [],
         maxTurns: 4,
         env: {
@@ -246,7 +258,8 @@ async function measure(opts: {
     }
     // Structural facts only (never the system/tools prose) — the same logging discipline the sibling
     // conformance family keeps, and what makes a run's evidence readable in a report.
-    console.error(`[web-floor] ${requests.length} loopback request(s); hook fired for [${hookCalls.map((c) => c.toolName).join(",")}]; ${trap.hits.length} trap hit(s)`);
+    console.error(`[web-floor] ${requests.length} loopback request(s); hook fired for [${hookCalls.map((c) => c.toolName).join(",")}]; canUseTool fired for [${canUseToolCalls.map((c) => c.toolName).join(",")}]; ${trap.hits.length} trap hit(s)`);
+    for (const call of canUseToolCalls) console.error(`[web-floor]   canUseTool(${call.toolName}) received ${JSON.stringify(call.input)}`);
     for (const [i, body] of requests.entries()) {
       const serverTool = serverToolOf(body);
       const parts = [`#${i + 1}`, `tools=${Array.isArray(body["tools"]) ? (body["tools"] as Body[]).length : 0}`, `messages=${Array.isArray(body["messages"]) ? (body["messages"] as Body[]).length : 0}`];
@@ -255,7 +268,7 @@ async function measure(opts: {
       if (results.length > 0) parts.push(`tool_results=${JSON.stringify(results.map(([id, r]) => [id, r.isError, r.content.slice(0, 400)]))}`);
       console.error(`[web-floor]   ${parts.join(" ")}`);
     }
-    return { requests, messages, hookCalls, trapHits: [...trap.hits] };
+    return { requests, messages, hookCalls, canUseToolCalls, trapHits: [...trap.hits] };
   } finally {
     await fake?.close();
     trap.stop();
@@ -314,6 +327,26 @@ describe.skipIf(!ENABLED)("web-floor measurement (WINTER_MEASURE_WEB_FLOOR=1)", 
       // Nothing left the box — which for WebFetch is ALSO the proof the deny landed before the tool:
       // its preflight targets a hardcoded Anthropic host that does not follow ANTHROPIC_BASE_URL, so a
       // fetch that actually ran would be recorded here.
+      expect(got.trapHits).toEqual([]);
+    }, 180_000);
+
+    test("WebSearch THROUGH canUseTool (the production path): the transform survives the permission round trip", async () => {
+      // The three tests above run in `bypassPermissions`, where no permission decision is requested at
+      // all. Production does not: claude's own `WebSearch` is `checkPermissions` passthrough ("requires
+      // permission"), so a real code session goes hook → permission pipeline → Winter's
+      // `approval-bridge.ts` `canUseTool` → `{ behavior: "allow", updatedInput: input }`. That echo is
+      // the hazard this test exists for — if claude handed the bridge the MODEL's original args, the
+      // echo would revert the floor's transform on the one leg where the hook is the only enforcement.
+      const got = await measure({ binary, firstTurn: toolUseTurn("WebSearch", { query: "winter release notes" }), throughCanUseTool: true });
+
+      expect(got.hookCalls.map((c) => c.toolName)).toEqual(["WebSearch"]);
+      expect(got.canUseToolCalls.map((c) => c.toolName)).toEqual(["WebSearch"]);
+      // What the bridge is handed IS the transformed call — the floor's list, not the model's two keys.
+      expect(got.canUseToolCalls[0]!.input).toEqual({ query: "winter release notes", blocked_domains: [...SHIPPED_DANGEROUS_DOMAINS] });
+
+      const inner = got.requests.filter(isInnerSearchRequest);
+      expect(inner.length, `no inner web_search request was made; ${got.requests.length} request(s) seen`).toBeGreaterThan(0);
+      expect(serverToolOf(inner[0]!)!["blocked_domains"]).toEqual([...SHIPPED_DANGEROUS_DOMAINS]);
       expect(got.trapHits).toEqual([]);
     }, 180_000);
 
