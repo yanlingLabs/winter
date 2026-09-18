@@ -1244,7 +1244,7 @@ export function loadSettings(path: string, opts?: { presentProviders?: ReadonlyS
       if (loggedCredentialHeaderStrips.has(key)) continue;
       loggedCredentialHeaderStrips.add(key);
       console.error(
-        `settings: mcp server "${serverName}" header "${headerName}" is credential-shaped — dropped from its headers at load; settings.json is model-readable, so a literal credential there is not safe — use \${env:VAR}-style indirection once it exists, never a literal secret here`,
+        `settings: mcp server "${serverName}" header "${headerName}" is credential-shaped — dropped from its headers at load, so that server will authenticate as if it were absent, AND the next settings write removes it from ${path} for good. settings.json is model-readable, so a literal credential there is not safe — use \${env:VAR}-style indirection once it exists, never a literal secret here`,
       );
     }
   }
