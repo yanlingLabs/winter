@@ -61,7 +61,11 @@ enum SettingsChrome {
     /// its soft buttons in.
     static let controlCornerRadius: CGFloat = 8
     static let controlHorizontalPadding: CGFloat = 12
-    static let controlVerticalPadding: CGFloat = 6
+    /// Every trailing control's height — pills, soft buttons and fields line up row to row.
+    static let controlHeight: CGFloat = 30
+    /// The Roles page's two pills, fixed so the column never follows the value's length.
+    static let roleModelPillWidth: CGFloat = 230
+    static let roleEffortPillWidth: CGFloat = 120
     /// The content column never runs the full width of a wide window — long descriptions become
     /// unreadable and a trailing toggle ends up a foot away from the label it belongs to.
     static let contentMaxWidth: CGFloat = 800
@@ -426,7 +430,7 @@ struct SettingsSoftButtonStyle: ButtonStyle {
                 .font(Typography.body())
                 .foregroundStyle(isDestructive ? AnyShapeStyle(Color.red) : AnyShapeStyle(Theme.textPrimary))
                 .padding(.horizontal, SettingsChrome.controlHorizontalPadding)
-                .padding(.vertical, SettingsChrome.controlVerticalPadding)
+                .frame(height: SettingsChrome.controlHeight)
                 .background(
                     RoundedRectangle(cornerRadius: SettingsChrome.controlCornerRadius, style: .continuous)
                         .fill(isHovered || configuration.isPressed ? Theme.chromeHover : Theme.controlSurface)
@@ -444,11 +448,16 @@ struct SettingsSoftButtonStyle: ButtonStyle {
 struct SettingsMenuPill<Leading: View>: View {
     let text: String
     var isMuted: Bool = false
+    /// A FIXED width, when given (user call, 2026-09-18): a column of pills whose widths follow
+    /// their values reads ragged and jumps when a value changes. The text truncates inside it.
+    var width: CGFloat? = nil
     private let leading: Leading
 
-    init(_ text: String, isMuted: Bool = false, @ViewBuilder leading: () -> Leading) {
+    init(_ text: String, isMuted: Bool = false, width: CGFloat? = nil,
+         @ViewBuilder leading: () -> Leading) {
         self.text = text
         self.isMuted = isMuted
+        self.width = width
         self.leading = leading()
     }
 
@@ -462,12 +471,13 @@ struct SettingsMenuPill<Leading: View>: View {
                 .foregroundStyle(isMuted ? Theme.textMuted : Theme.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.middle)
+            if width != nil { Spacer(minLength: 4) }
             Image(systemName: "chevron.down")
                 .font(Typography.caption(.medium))
                 .foregroundStyle(Theme.textSecondary)
         }
         .padding(.horizontal, SettingsChrome.controlHorizontalPadding)
-        .padding(.vertical, SettingsChrome.controlVerticalPadding)
+        .frame(width: width, height: SettingsChrome.controlHeight)
         .background(
             RoundedRectangle(cornerRadius: SettingsChrome.controlCornerRadius, style: .continuous)
                 .fill(isHovered ? Theme.chromeHover : Color.clear)
@@ -482,8 +492,28 @@ struct SettingsMenuPill<Leading: View>: View {
 }
 
 extension SettingsMenuPill where Leading == EmptyView {
-    init(_ text: String, isMuted: Bool = false) {
-        self.init(text, isMuted: isMuted, leading: { EmptyView() })
+    init(_ text: String, isMuted: Bool = false, width: CGFloat? = nil) {
+        self.init(text, isMuted: isMuted, width: width, leading: { EmptyView() })
+    }
+}
+
+/// A text field in the settings vocabulary: the pill's continuous corner and hairline rim instead
+/// of AppKit's square-ish `.roundedBorder` bezel, so fields and buttons share one corner.
+struct SettingsTextFieldStyle: TextFieldStyle {
+    func _body(configuration: TextField<Self._Label>) -> some View {
+        configuration
+            .textFieldStyle(.plain)
+            .font(Typography.control())
+            .padding(.horizontal, 10)
+            .frame(height: SettingsChrome.controlHeight)
+            .background(
+                RoundedRectangle(cornerRadius: SettingsChrome.controlCornerRadius, style: .continuous)
+                    .fill(Theme.controlSurface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: SettingsChrome.controlCornerRadius, style: .continuous)
+                    .strokeBorder(Theme.hairlineElevated, lineWidth: 1)
+            )
     }
 }
 

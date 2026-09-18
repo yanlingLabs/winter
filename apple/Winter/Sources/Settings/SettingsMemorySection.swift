@@ -134,7 +134,7 @@ struct SettingsMemorySection: View {
                         .font(Typography.body())
                         .foregroundStyle(Theme.textPrimary)
                     TextField("Description", text: $model.editedDescription)
-                        .textFieldStyle(.roundedBorder)
+                        .textFieldStyle(SettingsTextFieldStyle())
                         .font(Typography.control())
                 }
                 .padding(.horizontal, SettingsChrome.rowHorizontalPadding)
