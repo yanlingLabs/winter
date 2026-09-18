@@ -168,6 +168,20 @@ struct SettingsModelRoleGroup: Identifiable, Hashable, Sendable {
     let roles: [SettingsModelRole]
 }
 
+/// PURE: a role the daemon has retired (2026-09-18: `pins.researchFallback` — `permitted: []`, a
+/// write of any tag refused, `null` still clears). It is shown ONLY while a value is still stored,
+/// and then only as something to clear.
+func settingsRoleIsRetired(_ role: SettingsModelRole) -> Bool {
+    role == .researchFallback
+}
+
+/// PURE: whether a role's row is on the page — every live role, and a retired one only while it
+/// still holds an explicit value.
+func settingsRoleRowIsShown(_ role: SettingsModelRole, value: SettingsRoleValue?) -> Bool {
+    guard settingsRoleIsRetired(role) else { return true }
+    return value?.isExplicit == true && value?.model != nil
+}
+
 /// THE role information architecture. `settingsModelRoleOrder` derives from it, so the rendered
 /// list and the order can never disagree (same device as `settingsSectionGroups`).
 let settingsModelRoleGroups: [SettingsModelRoleGroup] = [
@@ -216,9 +230,10 @@ func settingsModelRoleExplanation(_ role: SettingsModelRole) -> String {
     case .titles:
         return "Names a chat from its first exchange, so the sidebar isn't a list of \"New chat\"."
     case .research:
-        return "The short-lived research helper that reads pages and searches the web for an answer."
+        // 2026-09-18 (web tools → claude parity): WebFetch's page-digest model now.
+        return "Reads the pages a session fetches and hands the model a digest of each."
     case .researchFallback:
-        return "Used when the research model can't be reached or refuses the job."
+        return "Retired: web fetches no longer fall back to a second model. Clear the stored value."
     case .bashReviewer:
         return "Reads a shell command before it runs and flags the dangerous ones. Only on the auto policy."
     case .advisor:
@@ -537,9 +552,12 @@ struct SettingsRolesSection: View {
                 }
             }
             ForEach(settingsModelRoleGroups) { group in
-                SettingsGroup(group.title) {
-                    ForEach(group.roles, id: \.self) { role in
-                        roleRow(role)
+                let shown = group.roles.filter { settingsRoleRowIsShown($0, value: values[$0]) }
+                if !shown.isEmpty {
+                    SettingsGroup(group.title) {
+                        ForEach(shown, id: \.self) { role in
+                            roleRow(role)
+                        }
                     }
                 }
             }
@@ -586,6 +604,19 @@ struct SettingsRolesSection: View {
                                                 : settingsModelRoleUnreadableNote)
             }
         } control: {
+            if settingsRoleIsRetired(role) {
+                // Clear-only: the daemon refuses any tag for a retired role.
+                SettingsButton("Clear", isEnabled: model.canWrite) {
+                    Task { await model.commit(role, model: .clear, effort: .leave) }
+                }
+            } else {
+                activeControl(role, value: value)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func activeControl(_ role: SettingsModelRole, value: SettingsRoleValue?) -> some View {
             HStack(spacing: 8) {
                 // NO "Pinned"/"Default" badge (user call, 2026-09-18). The `explicit` fact behind it
                 // is untouched and still decides the picker's checkmark — only the chip is gone.
@@ -652,7 +683,6 @@ struct SettingsRolesSection: View {
                     .accessibilityLabel("Choose the reasoning effort for \(settingsModelRoleTitle(role))")
                 }
             }
-        }
     }
 
     /// Three different strings for three different facts: the tag, "None" for a role the daemon

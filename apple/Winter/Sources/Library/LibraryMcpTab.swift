@@ -117,7 +117,8 @@ func mcpServersGroupedBySource(_ servers: [McpServerRow]) -> [(source: String, s
     return groups
 }
 
-/// The eight capability keys the daemon registers today (`capabilities/`, per CLAUDE.md's tool
+/// The seven capability keys the daemon registers today (`web` retired 2026-09-18 — the runtime
+/// brings WebFetch/WebSearch now) (`capabilities/`, per CLAUDE.md's tool
 /// surface section) — a LABELLED GUESS, not an inventory. `external` is dynamic (one entry per
 /// plugin that contributes tools), so even this list cannot be complete.
 ///
@@ -126,7 +127,7 @@ func mcpServersGroupedBySource(_ servers: [McpServerRow]) -> [(source: String, s
 /// so it can never be mistaken for the real inventory. When the RPC answers, nothing below reads
 /// this list.
 let winterCapabilityKeysKnownToday: [String] = [
-    "sessions", "computer", "browser", "office", "research", "web", "lsp", "external",
+    "sessions", "computer", "browser", "office", "research", "lsp", "external",
 ]
 
 /// The mode display order — the order a session's life makes sense in, and the same order
