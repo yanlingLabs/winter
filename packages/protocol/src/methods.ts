@@ -489,8 +489,11 @@ export const SettingsSetSkillDeniedResult = z.object({ ok: z.literal(true), name
  * Swift side stores this field as a plain `String`, never an exhaustive `switch`, so widening it
  * here cannot break `apple/WinterKit`'s build. `source`'s own enum is untouched (still
  * `"user"|"project"|"plugin"` — no "the daemon itself" slot, per this schema's neighboring RPCs'
- * own precedent). `transport` is new and optional — set for every settings-configured (`"user"`)
- * row, omitted for `"project"`/`"plugin"` rows (always stdio today, so it would say nothing new).
+ * own precedent). `transport` is new and optional — set ONLY on a row this daemon SYNTHESIZES for a
+ * configured HTTP/SSE entry the manager never itself attempted (`status: "unmanaged"`/`"disabled"`,
+ * ipc/server.ts's `mcp.list` handler); omitted on every row the manager itself tracked (started at
+ * boot or via `ensureProject`), because that manager only ever runs stdio servers — the field would
+ * say nothing new there.
  */
 export const McpServerStatusSchema = z.object({
   name: z.string(),
@@ -634,11 +637,12 @@ export const VersionsGetResult = z.object({
  *
  *  - `definitions`: the daemon's OWN parse of `<home>/agents/*.md` MERGED with a trusted project's
  *    `<cwd>/.winter/agents/*.md` (`agent-definitions.ts`'s `mergeAgentDefinitionTiers`), the SAME
- *    merged map passed as `Options.agents` on the Winter leg today (`mode-options.ts`'s
- *    `buildWinterOptions`) — the official leg has no route for it yet (a measured router-package
- *    gap, `official-options.ts`'s own comment on the construction site). Batch 3 (item 1): EVERY
- *    definition from BOTH tiers is reported, tagged `tier`, with a losing USER-tier row (same name
- *    as a project row) flagged `shadowed` rather than silently dropped — the project tier always
+ *    merged map passed as `Options.agents` on BOTH legs (`mode-options.ts`'s `buildWinterOptions`
+ *    for Winter; `official-options.ts`'s `officialInputFor`, router 0.0.9's `OptionsTemplatePolicy.
+ *    agents`, for official — a router-package gap this daemon once had to report, closed as of that
+ *    pin). Batch 3 (item 1): EVERY definition from BOTH tiers is reported, tagged `tier`, with a
+ *    losing USER-tier row (same name as a project row) flagged `shadowed` rather than silently
+ *    dropped — the project tier always
  *    wins the actual `Options.agents` slot (the SDK's own precedence), but the panel can still show
  *    what lost and why. `cwd` absent, or an untrusted `cwd`, reports the user tier alone (no project
  *    row can ever appear — never a looser trust gate than `optionsFor`'s own).
