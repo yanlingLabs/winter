@@ -42,7 +42,7 @@ const CONTEXT_LENGTH_CODES = new Set(["context_length_exceeded"]);
  *  `contains` is unsafe here because `mapHttpError` embeds RAW BODY TEXT, and a 400 body routinely
  *  echoes the offending input back — i.e. the user's own prose ("explain how context length
  *  works") can land in `message`. `\b` likewise keeps `subcontext_length_exceeded_flag` and
- *  `contextlength` from matching. Compare `agent/research.ts`'s looser `/context.length/`, which
+ *  `contextlength` from matching. Compare the retired research runner's looser `/context.length/`, which
  *  is safe there only because it guards a much weaker decision (whether to burn one retry).
  *
  *  KNOWN, ACCEPTED false positive (T1 review M2): an unrelated 400 with NO structured code whose

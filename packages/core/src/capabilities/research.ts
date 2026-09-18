@@ -1,33 +1,30 @@
-// The `research` capability server (C-6 / P8b-12) — `Search` and `ReadPage`: chat's and dispatch's
-// web surface.
+// The `research` capability server (C-6 / P8b-12) — **`Search`, and nothing else**: chat's and
+// dispatch's own search surface, beside the runtime's claude-shaped web tools.
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// WHY THESE ARE WINTER'S TOOLS AND NOT THE SDK'S WebSearch/WebFetch
+// WHY `Search` IS STILL WINTER'S TOOL WHEN THE CHILD HAS ITS OWN WebSearch
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// WS-06 §5 originally folded `Search`/`ReadPage` into the SDK's built-in web tools "in the chat-mode
-// advertised set". C-6 overturned that, and the reason is daemon state the built-ins cannot have
-// (Winter map §5.1 trap (ii)):
+// Because chat asks a question and needs an ANSWER. `Search` is Exa's answer mode (`search.ts`): one
+// call, a written answer, its sources listed. `WebSearch` returns links to chase — and chat has no
+// page-reading tool to chase them with, by design. That is the user's ruling (2026-09-18), and it is
+// the ONLY remaining reason a daemon-owned web tool exists: the earlier ones (the Exa key and the
+// dangerous-domain floor being daemon state a built-in could not reach) expired at agent SDK 0.0.17,
+// which hands the child both through `Options.web`.
 //
-//   1. **The Exa key.** `Search` reaches it through `deps.secret(EXA_API_KEY_SECRET)` — the daemon's
-//      `KeychainSecretStore`. A built-in WebSearch has no key and would simply fail; worse, a
-//      capability that resolved the key EARLY would put it somewhere it could be observed.
-//   2. **The dangerous-domain floor.** `dangerousDomainsAdded` is the per-project, hot, user-added
-//      half of the effective list, shared by `Search`, `ReadPage`, the research runner and the
-//      browser tool as literally the same function reference. `ReadPage` has NO approval flow, so a
-//      match is a hard refusal; `Search` withholds a matching result before the model ever sees it.
-//   3. **`ssrfGuard`** — page-core's resolver-level guard (metadata IPs, private ranges, redirect
-//      re-checks on every hop).
+// `ReadPage` and the ephemeral multi-page research runner LEFT with the same ruling. The child's own
+// `WebFetch` reads a page the way claude does — locally, with a digest pass on `pins.research` — and
+// answer-mode `Search` covers the multi-page report the runner used to write. Neither has a
+// daemon-side counterpart any more, and nothing here should grow one back without a ruling.
 //
 // THE KEY IS READ AT CALL TIME, NEVER AT CONSTRUCTION, AND NEVER IN `listTools()`. That is not a
-// convention this file adopts — it is the shape of the tools themselves: `deps.secret` is a
-// closure the tool `await`s inside `run`, and `listTools()` renders only name/description/schema
-// through `ToolRegistry.specFor`. Nothing in this module ever holds key material; nothing in this
-// module can. `test/capabilities/research.test.ts` pins all three: no key anywhere in the
-// serialized `listTools()`, a metadata-IP URL refused with today's message, and a fake Exa on
-// `127.0.0.1:0` receiving the key header for a real `Search` call.
+// convention this file adopts — it is the shape of the tool itself: `deps.secret` is a closure
+// `Search` `await`s inside `run`, and `listTools()` renders only name/description/schema through
+// `ToolRegistry.specFor`. Nothing in this module ever holds key material; nothing in this module can.
+// `test/capabilities/research.test.ts` pins it: no key anywhere in the serialized `listTools()`,
+// nothing reading the store to build it, and a fake Exa on `127.0.0.1:0` receiving the key HEADER for
+// a real `Search` call.
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
-import { readPageToolDefs, type ReadPageDeps } from "../agent/tools/read-page";
 import { searchToolDefs, type SearchToolDeps } from "../agent/tools/search";
 import { capabilityServer, type CapabilitySession } from "./server";
 
@@ -36,9 +33,6 @@ export interface ResearchCapabilityDeps {
    *  `registerSearchTool`. `secret` is `(name) => secrets.get(name)` over the daemon's single
    *  `SecretStore`; it is CALLED inside `run`, never here. */
   search: SearchToolDeps;
-  /** `ReadPage`'s deps — the SAME `PageCache` instance the ephemeral research runner shares, so a
-   *  report's citations resolve from the identical cache a follow-up `ReadPage` would hit. */
-  readPage: ReadPageDeps;
 }
 
 export function researchCapability(session: CapabilitySession, deps: ResearchCapabilityDeps): McpSdkServerConfigWithInstance {
@@ -48,12 +42,9 @@ export function researchCapability(session: CapabilitySession, deps: ResearchCap
   // in exactly this case). Both doors must move together on the SAME value — see
   // `CapabilitySession.exaKeyPresent`, whose absence reads as "a key is stored" here too.
   //
-  // A zero-tool server is kept rather than dropped, exactly as a mode-filtered one is: the record's
+  // A zero-tool server is KEPT rather than dropped, exactly as a mode-filtered one is: the record's
   // key set stays `CAPABILITY_SERVER_KEYS` (`index.ts`'s own contract) and a server advertising
   // nothing is inert on the wire.
-  const defs = [
-    ...(session.exaKeyPresent === false ? [] : searchToolDefs(deps.search)),
-    ...readPageToolDefs(deps.readPage),
-  ];
+  const defs = session.exaKeyPresent === false ? [] : searchToolDefs(deps.search);
   return capabilityServer({ key: "research", defs }, session);
 }

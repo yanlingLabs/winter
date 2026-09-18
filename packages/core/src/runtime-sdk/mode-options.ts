@@ -73,16 +73,15 @@ export const CAPABILITY_TOOL_MODES: Readonly<Record<string, { modes: readonly Se
   "mcp__winter__office__docs": { modes: ["code", "dispatch"] },
   "mcp__winter__office__sheets": { modes: ["code", "dispatch"] },
   "mcp__winter__office__slides": { modes: ["code", "dispatch"] },
+  // `Search` — chat's and dispatch's own search tool (Exa ANSWER mode). Its exposure ALSO depends on
+  // whether an Exa key is stored, which is runtime state, so `disallowedToolsFor` decides that half;
+  // this row states the mode registration, as every other row does.
   "mcp__winter__research__Search": { modes: ["chat", "dispatch"] },
-  "mcp__winter__research__ReadPage": { modes: ["chat", "dispatch"] },
-  // The daemon's OWN web pair, code-only (`agent/tools/web.ts:1011,1090` declare `modes: ["code"]`).
-  // P8b-33's reason for ALSO disallowing the SDK's built-ins in every mode ("they carry neither the
-  // Exa key nor the dangerous-domain floor") expired at agent SDK 0.0.17, which gives both of them a
-  // host-supplied `Options.web` — the Exa key as an `authRef` the child resolves itself, and the
-  // floor as `blockedDomains`. See `SDK_WEB_BUILTINS` and `disallowedToolsFor` for the per-LEG rule
-  // that replaces it. These two rows stay exactly as they are until lane B2 retires them.
-  "mcp__winter__web__web_fetch": { modes: ["code"] },
-  "mcp__winter__web__web_search": { modes: ["code"] },
+  // `mcp__winter__research__ReadPage` and the `mcp__winter__web__*` pair were here until the 2026-09-18
+  // web-tools ruling. P8b-33's reason for a daemon-owned web pair ("the SDK's built-ins carry neither
+  // the Exa key nor the dangerous-domain floor") expired at agent SDK 0.0.17, which gives the child
+  // both through `Options.web` — so the daemon's copies retired rather than shadowing the real tools.
+  // See `SDK_WEB_BUILTINS` for the per-LEG rule that replaces them.
   // Fix wave (review F7): the `lsp` capability server — code-only, as the registry door was.
   "mcp__winter__lsp__lsp": { modes: ["code"] },
 };
@@ -182,15 +181,16 @@ export function fsRootAnchored(pathOrPattern: string): string {
  * **What CHAT is allowed to call**, by Winter name — the whole set, pinned as a literal.
  *
  * Chat is "conversation-with-a-memory": no filesystem, no shell, no repo (the shipped Chat Slice A
- * design; `registry.namesForMode("chat")` is `{AskQuestion, Search, ReadPage, browser}` today). On
- * the Winter leg that becomes `AskUserQuestion` (the one tool that replaced `AskQuestion`), the two
- * `research` capability tools, the `browser` capability tool, and Winter's own four default tools
+ * design; `registry.namesForMode("chat")` is `{AskQuestion, Search, browser}` today). On
+ * the Winter leg that becomes `AskUserQuestion` (the one tool that replaced `AskQuestion`), the
+ * `research` capability's `Search`, the `browser` capability tool, and Winter's own four default tools
  * (P8b-28, allowed silently in every mode).
  *
  * Everything else a Winter child advertises is in chat's `disallowedTools`.
  *
- * 2026-09-18 (user ruling): `WebFetch` joins it. Chat reads pages today through the `research`
- * capability's `ReadPage`; the SDK's own `WebFetch` is the same act done the way claude does it, with
+ * 2026-09-18 (user ruling): `WebFetch` joins it, and it is now the ONLY way chat reads a page — the
+ * `research` capability's `ReadPage` retired in the same change. The SDK's own `WebFetch` does that act
+ * the way claude does, with
  * the daemon's domain floor and a `privateAddressPolicy` of `deny` (chat never asks, so a private
  * target is refused rather than prompted). `WebSearch` is NOT in this literal: whether chat sees it
  * depends on whether an Exa key is stored, which is runtime state and therefore `disallowedToolsFor`'s

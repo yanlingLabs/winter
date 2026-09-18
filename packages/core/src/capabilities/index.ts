@@ -14,7 +14,6 @@ export { computerCapability, type ComputerCapabilityDeps } from "./computer";
 export { browserCapability, type BrowserCapabilityDeps } from "./browser";
 export { officeCapability, type OfficeCapabilityDeps } from "./office";
 export { researchCapability, type ResearchCapabilityDeps } from "./research";
-export { webCapability, type WebCapabilityDeps } from "./web";
 export { lspCapability, type LspCapabilityDeps } from "./lsp";
 export { externalCapability, type ExternalCapabilityDeps, type ExternalToolSource } from "./external";
 
@@ -26,7 +25,6 @@ import { officeCapability, type OfficeCapabilityDeps } from "./office";
 import { researchCapability, type ResearchCapabilityDeps } from "./research";
 import type { CapabilitySession } from "./server";
 import { sessionsCapability, type SessionsCapabilityDeps } from "./sessions";
-import { webCapability, type WebCapabilityDeps } from "./web";
 import { lspCapability, type LspCapabilityDeps } from "./lsp";
 import { externalCapability, type ExternalCapabilityDeps } from "./external";
 
@@ -41,7 +39,6 @@ export interface CapabilityDeps {
   browser: BrowserCapabilityDeps;
   office: OfficeCapabilityDeps;
   research: ResearchCapabilityDeps;
-  web: WebCapabilityDeps;
   /** Fix wave (review F7): the `lsp` capability over the daemon's single `LspManager` holder. */
   lsp: LspCapabilityDeps;
   /** Phase 8c Lane 3, Task 3.4: plugin-contributed tools, per session. Optional — absent registers
@@ -105,7 +102,6 @@ export function buildCapabilitiesFor(
   servers.push(browserCapability(session, deps.browser));
   servers.push(officeCapability(session, deps.office));
   servers.push(researchCapability(session, deps.research));
-  servers.push(webCapability(session, deps.web));
   servers.push(lspCapability(session, deps.lsp));
   servers.push(externalCapability(session, deps.external ?? {}));
   const record: Record<string, McpSdkServerConfigWithInstance> = {};

@@ -74,8 +74,8 @@ export interface CapabilitySession {
   cwd: string;
   /** `roots[0]` MUST be the primary cwd, as `ToolContext` documents. */
   roots: string[];
-  /** ⚠️ REQUIRED for `web_fetch`, which saves its converted page under it and THROWS when it is
-   *  unset. A driver that omits it makes every code-mode fetch fail; pinned by a test. */
+  /** The session's own temp scratch dir. No capability tool requires it today (the one that did,
+   *  `web_fetch`, retired in 2026-09-18's web-tools ruling), and the drivers still supply it. */
   tmpDir?: string;
   outDir?: string;
   /** The session's abort signal — `computer`'s `wait` and every dispatched panel command honour it. */
@@ -149,7 +149,7 @@ export interface CapabilityServerSpec {
  *
  * Without it, a chat session's `sessions` server would advertise AND execute `manage_session` —
  * which can background, archive or interrupt any session by id — and its `web` server would serve
- * `web_fetch`/`web_search`, neither of which chat is ever offered today. `ToolRegistry.execute` does
+ * the retired `web_fetch`/`web_search`, neither of which chat was ever offered. `ToolRegistry.execute` does
  * NOT enforce `modes` (mode there resolves `argsFor` and deferral only; the engine's mode gate is
  * `namesForMode`, which runs at ADVERTISEMENT time), so nothing downstream would have caught it.
  *
