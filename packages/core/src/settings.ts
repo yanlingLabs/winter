@@ -874,6 +874,23 @@ export const lspAutoDiagnosticsEnabledFrom = (s: Settings): boolean => s.lsp?.au
  *  so the two can never drift. */
 export const cleanerEnabledFrom = (s: Settings): boolean => s.cleaner?.enabled !== false;
 
+/** Minor 5e (fix wave, pre-merge review): computer use (Phase 5 CU) opt-in gate — the ONE place
+ *  `settings.computerUse.enabled === true` is decided, replacing THREE independently hand-spelled
+ *  copies (daemon.ts's boot registration gate, daemon.ts's own `computerUseEnabled` live getter,
+ *  and `ipc/server.ts`'s `capabilities.list` handler — `settings-apply.ts`'s `cuEnabled` closure is
+ *  the fourth). Deliberately `=== true` (not the `!== false` shape every OTHER gate in this file
+ *  has) — computer use is opt-in/default-OFF, "the strongest reading of 'full-auto CU requires
+ *  explicit opt-in'" (the schema's own doc on `computerUse.enabled`). */
+export const computerUseEnabledFrom = (s: Settings): boolean => s.computerUse?.enabled === true;
+
+/** Minor 5e (fix wave, pre-merge review): LSP integration (Phase 5f) opt-out gate — the ONE place
+ *  `settings.lsp.enabled !== false` is decided, same "one reader" consolidation as
+ *  `computerUseEnabledFrom` just above. Default-ON, the SAME `!== false` shape as
+ *  `hooksEnabledFrom`/`memoryEnabledFrom`/`cleanerEnabledFrom` above — only an explicit `false`
+ *  turns the `lsp` tool off entirely. Distinct from `lspAutoDiagnosticsEnabledFrom` above, which
+ *  gates only the automatic post-edit-diagnostics append, not the tool's existence. */
+export const lspEnabledFrom = (s: Settings): boolean => s.lsp?.enabled !== false;
+
 // WS-20: the pre-deprecation `gpt-5.4` default is gone (there is no more CODEX_MODELS allowlist to
 // deprecate against) — points at `gpt-5.6-sol`, prefixed as a codex-oauth tag: the ONE default a
 // fresh install (no settings.json at all) or a v1-or-legacy file (no real provider info) lands on.

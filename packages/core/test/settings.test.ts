@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialSubscriptionAuthEnabled, officialSubscriptionAuthFlagInert, DEFAULT_PROVIDER, pinsFor, setModelRole, setSkillDenied, skillDenyRule } from "../src/settings";
+import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, computerUseEnabledFrom, lspEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialSubscriptionAuthEnabled, officialSubscriptionAuthFlagInert, DEFAULT_PROVIDER, pinsFor, setModelRole, setSkillDenied, skillDenyRule } from "../src/settings";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
 import { UNSTATED_TAG, type ModelTag } from "../src/runtime-sdk/model-tag";
 import { setPluginEnabled } from "../src/plugins/lifecycle";
@@ -611,6 +611,50 @@ describe("cleanerEnabledFrom (session-activity-hygiene T7: cleaner.enabled defau
     const p = join(mkdtempSync(join(tmpdir(), "winter-cleaner-settings-")), "settings.json");
     saveSettings(p, Settings.parse({ ...base, cleaner: { enabled: false } }));
     expect(cleanerEnabledFrom(loadSettings(p))).toBe(false);
+  });
+});
+
+// Minor 5e (fix wave, pre-merge review): `computerUseEnabledFrom`/`lspEnabledFrom` consolidate what
+// used to be FOUR independently hand-spelled copies each (daemon.ts's boot gate + its own live
+// getter, settings-apply.ts's hot-toggle closure, and ipc/server.ts's capabilities.list handler)
+// into one reader apiece.
+describe("computerUseEnabledFrom (Minor 5e: opt-in / default-OFF)", () => {
+  const base = { schemaVersion: 3 as const, provider: { model: "codex-oauth/gpt-5.4" } };
+
+  test("computerUse block absent → disabled", () => {
+    expect(computerUseEnabledFrom(Settings.parse(base))).toBe(false);
+  });
+
+  test("computerUse.enabled absent (block present, field absent) → disabled", () => {
+    expect(computerUseEnabledFrom(Settings.parse({ ...base, computerUse: {} }))).toBe(false);
+  });
+
+  test("computerUse.enabled: true → enabled", () => {
+    expect(computerUseEnabledFrom(Settings.parse({ ...base, computerUse: { enabled: true } }))).toBe(true);
+  });
+
+  test("computerUse.enabled: false → disabled", () => {
+    expect(computerUseEnabledFrom(Settings.parse({ ...base, computerUse: { enabled: false } }))).toBe(false);
+  });
+});
+
+describe("lspEnabledFrom (Minor 5e: opt-out / default-ON)", () => {
+  const base = { schemaVersion: 3 as const, provider: { model: "codex-oauth/gpt-5.4" } };
+
+  test("lsp block absent → enabled", () => {
+    expect(lspEnabledFrom(Settings.parse(base))).toBe(true);
+  });
+
+  test("lsp.enabled absent (block present, field absent) → enabled", () => {
+    expect(lspEnabledFrom(Settings.parse({ ...base, lsp: {} }))).toBe(true);
+  });
+
+  test("lsp.enabled: true → enabled", () => {
+    expect(lspEnabledFrom(Settings.parse({ ...base, lsp: { enabled: true } }))).toBe(true);
+  });
+
+  test("lsp.enabled: false → disabled", () => {
+    expect(lspEnabledFrom(Settings.parse({ ...base, lsp: { enabled: false } }))).toBe(false);
   });
 });
 
