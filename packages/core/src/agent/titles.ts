@@ -13,7 +13,16 @@ export const TITLE_INSTRUCTION =
  *  necessarily attached to it). Fire-and-forget safe: NEVER throws; at most one title is ever
  *  generated per session. */
 export class SessionTitler {
-  private readonly provider: { provider: Provider; model: string };
+  // Minor 5c (fix wave, pre-merge review): `live` is `RebindableProvider.live` (providers/manager.ts)
+  // — OPTIONAL only because `deps.provider` is structurally typed (a plain `{provider, model}` test
+  // double has no `.live` at all), never because a real daemon omits it. `model` (the static field)
+  // only moves on a rebind that CROSSES catalog providers (`RebindableProvider.refresh`'s own early
+  // return on a same-provider write) — a same-provider model change (e.g. one gpt-5.6 row to
+  // another) left `this.provider.model` on whatever was bound at BOOT, or at the last actual
+  // cross-provider rebind, forever. `live?.().model` is the hot resolver (`buildLiveModelResolver`,
+  // providers/manager.ts) that re-reads settings.json on every call regardless of rebinding — see
+  // `oneShot`'s own fallback below.
+  private readonly provider: { provider: Provider; model: string; live?: () => { model: string } };
   private readonly store: SessionStore;
   private readonly hub: SessionHub;
   // Daemon settings surface (2026-09-17 plan, item 4a): `titles.model` used to be resolved ONCE at
@@ -31,12 +40,13 @@ export class SessionTitler {
   private readonly inFlight = new Set<string>();
 
   constructor(deps: {
-    provider: { provider: Provider; model: string };
+    provider: { provider: Provider; model: string; live?: () => { model: string } };
     store: SessionStore;
     hub: SessionHub;
     /** A live getter, re-read on every `maybeTitle()` call — never a boot snapshot. `undefined`
-     *  (the getter itself, or its return value) falls back to `deps.provider.model`, unchanged
-     *  from before this was a getter. */
+     *  (the getter itself, or its return value) falls back to `deps.provider.live?.().model ??
+     *  deps.provider.model` — the LIVE bound model when available (Minor 5c), the static snapshot
+     *  only as a last resort (a test double with no `.live` at all). */
     model?: () => string | undefined;
     timeoutMs?: number;
   }) {
@@ -89,7 +99,10 @@ export class SessionTitler {
     const run = (async () => {
       let text = "";
       for await (const ev of this.provider.provider.streamTurn({
-        model: this.model?.() ?? this.provider.model,
+        // Minor 5c: the LIVE bound model first (re-reads settings.json every call, unaffected by
+        // whether a rebind ever crossed providers), the static snapshot only when no `live` exists
+        // at all (a bare test double).
+        model: this.model?.() ?? this.provider.live?.().model ?? this.provider.model,
         instructions: TITLE_INSTRUCTION,
         input: turnInput,
         tools: [],
