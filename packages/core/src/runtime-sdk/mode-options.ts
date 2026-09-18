@@ -610,8 +610,9 @@ export function sandboxConfigFor(home: string): SandboxSettingsConfig {
  * required parameter cannot follow an optional one and this one may not be defaulted (see
  * `ToolExposure`). The web rule it decides (0.0.17, user ruling 2026-09-18):
  *
- *   official        nothing is added. claude's native `WebFetch`/`WebSearch` stay, with claude's own
- *                   per-domain approval behaviour, which the ruling keeps verbatim.
+ *   official        nothing is added: claude's NATIVE `WebFetch`/`WebSearch` stay. (Their APPROVALS
+ *                   are Winter's, not claude's — see `official-options.ts`'s own note at the call
+ *                   site, and `approval-bridge.ts`'s private-address floor.)
  *   winter + code   nothing is added either: both tools are the code-mode web surface now.
  *   winter + chat   `WebSearch` is disallowed WHEN AN EXA KEY IS STORED, because the daemon's
  *   winter + disp.  `Search` (Exa answer mode) is then the search surface. With NO key `Search`
@@ -640,7 +641,11 @@ export function disallowedToolsFor(
   // exaKeyPresent`) — both are needed, and for opposite failure modes: a `disallowedTools` entry for a
   // tool the server never advertised denies nothing, silently, while a server that advertises a tool
   // this list withheld offers nothing, also silently.
-  if (exposure.leg === "winter" && exposure.exaKeyPresent === false) out.push(EXA_GATED_SEARCH_TOOL);
+  // The MODE guard mirrors the clause above deliberately (whole-branch review NIT): `Search` is a
+  // chat/dispatch tool, so code mode's answer comes from the base scan and nothing else. Without it
+  // this line also pushed the name for `code`, where it was deduped and inert — a true no-op, and an
+  // asymmetry that read as an oversight to the next person to touch either clause.
+  if (exposure.leg === "winter" && mode !== "code" && exposure.exaKeyPresent === false) out.push(EXA_GATED_SEARCH_TOOL);
   return [...new Set(out)].sort();
 }
 

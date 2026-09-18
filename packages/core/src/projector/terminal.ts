@@ -30,16 +30,19 @@ import { classifyResult } from "./errors";
  * So:
  *  - `inputTokens` / `outputTokens` = this turn's DELTA against the previous result's totals. Exact.
  *  - `contextTokens` — the engine's definition is "the largest single round's input"
- *    (`engine.ts:2693-2696`, `Math.max` over rounds), which the wire cannot reconstruct. On a
- *    ONE-ROUND turn the delta IS that figure exactly, so it is reported. On a multi-round turn the
- *    delta is the SUM of rounds, which over-states the context by a factor of the round count —
- *    and the consumer (`engine.ts:1689`'s auto-compaction trigger) scans backwards for the last
- *    `turn_completed` with `contextTokens > 0`, so a fabricated high figure would compact
- *    prematurely and repeatedly, losing context on purpose. `contextTokens` is therefore OMITTED
- *    rather than guessed, and the trigger falls back to the last exact reading; the overflow-driven
- *    compaction path remains the backstop. **This is a stated fidelity gap, not an oversight, and
- *    the SDK 0.0.4 carry that closes it is: expose per-round input usage on the wire (or a
- *    `context_used` field on `result`).**
+ *    (`Math.max` over rounds), which the wire cannot reconstruct. On a ONE-ROUND turn the delta IS
+ *    that figure exactly, so it is reported; on a multi-round turn the delta is the SUM of rounds,
+ *    which over-states the context by a factor of the round count, so the field is OMITTED rather
+ *    than guessed. **This is a stated fidelity gap, not an oversight**, and the SDK carry that closes
+ *    it is: expose per-round input usage on the wire (or a `context_used` field on `result`).
+ *
+ *    **WHO READS IT TODAY** (corrected 2026-09-18, whole-branch review N2 — this block used to cite an
+ *    auto-compaction trigger that scanned back for the last positive reading, and no such consumer
+ *    exists any more): NOTHING in the daemon. The Winter leg's child compacts itself, and
+ *    `session.compact` answers `not_supported_on_winter_leg`; the only reader of the field in either
+ *    language is `apple/WinterKit`'s own probe binary. So an omitted figure costs a diagnostic, not a
+ *    behaviour — which is why the 0.0.17 rules below can afford to omit it as widely as they do, and
+ *    why the case for getting it RIGHT is honesty rather than harm avoidance.
  *  - No `modelUsage` at all (an unpriced row — the measured case for every `winter-test/*` double)
  *    → zeros and no `contextTokens`. Nothing is fabricated.
  *
@@ -58,11 +61,18 @@ import { classifyResult } from "./errors";
  *     SESSION'S OWN model, so it lands on the MAIN row; `WebFetch`'s digest lands on its own row when
  *     a `digestModel` is stated, and on the main row when it is not).
  *
- * So summing is not a degradation any more, it is a wrong answer that COMPACTS: the auto-compaction
- * trigger scans back for the last `turn_completed` with `contextTokens > 0`, and an inflated figure
- * compacts prematurely and repeatedly. Hence `mainExact` below — and hence `sawSharedRowActivity`,
- * because a MATCH alone is not enough: a child on the inherited model and `WebSearch`'s inner pass
- * both accrue into the very row this figure reads.
+ * So summing stopped being a degradation and became a WRONG ANSWER: a figure labelled "this
+ * conversation's context" that silently carries a subagent's whole run and every inner web pass. Hence
+ * `mainExact` below — and hence `sawSharedRowActivity`, because a MATCH alone is not enough: a child on
+ * the inherited model and `WebSearch`'s inner pass both accrue into the very row this figure reads.
+ *
+ * **HOW OFTEN THAT OMITS, stated rather than discovered later** (review N2): `sawSharedRowActivity` is
+ * set by ANY `WebFetch`/`WebSearch`/spawn tool-use block, ANY `system/task_*` frame, or a background
+ * child still open at the terminal — and the window is terminal-to-terminal, so an interrupt's trailing
+ * `task_notification` carries into the next turn as well. A web-heavy or subagent-heavy code turn
+ * therefore reports no `contextTokens` at all, essentially always. With no consumer in the daemon (see
+ * above) that is a diagnostic going quiet, not a regression; the alternative was a number nobody could
+ * trust.
  *
  * `inputTokens`/`outputTokens` DELIBERATELY still sum every row (decision, P-B1 item 4): they are
  * what the turn SPENT, and from 0.0.17 on a subagent's and an inner pass's generations are real
@@ -142,11 +152,19 @@ const rowInputOf = (row: LedgerRow): number =>
  *
  * Two rungs and no third:
  *  1. the KEY, exactly (`init.winter_provider.modelKey`, which the child guarantees equals the row
- *     key; or `init.model` on a leg that sends no `winter_provider` — the official leg, whose
- *     `modelUsage` keys and `init.model` are the same vendor id, so its behaviour is unchanged);
+ *     key; or `init.model` on a leg that sends no `winter_provider` — the official leg);
  *  2. the UNIQUE row whose key ends with `/${modelId}` — the qualified key for the bare id the
  *     daemon passed. **Unique, not first:** two providers can serve the same model id, and picking
  *     one of two candidates would be a guess presented as an exact reading.
+ *
+ * **THE OFFICIAL LEG IS UNMEASURED** (review N3 — an earlier version of this comment asserted its
+ * behaviour was "unchanged", on a premise nobody has checked). No official-leg `modelUsage` frame
+ * exists anywhere in this repository's fixtures: every one of them is keyed `winter-test/echo`. What
+ * IS structural is that claude's row keys carry no `/`, so rung 2 can never fire there — the answer is
+ * rung 1 or nothing. If `init.model` is an ALIAS while the rows are keyed by the dated id, this
+ * reports `mainExact: false` and OMITS `contextTokens` where the pre-0.0.17 code reported an inflated
+ * whole-ledger sum. Omitting an unknown is the right direction, and with no consumer (see the block
+ * above) it costs nothing; a real captured frame is what would let anyone claim more than that.
  */
 function mainRowKeyOf(keys: readonly string[], key: string | undefined, modelId: string | undefined): string | undefined {
   if (key !== undefined && keys.includes(key)) return key;

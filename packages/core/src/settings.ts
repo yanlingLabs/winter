@@ -1947,8 +1947,10 @@ export function modelRoleInfo(settings: Settings | null | undefined, role: Model
     // `null` for a role with no model at all (an unset `runtimes.advisorModel`) — there is no row to
     // ask, which is the same answer `effortVocabularyFor` gives for a tag it cannot find.
     //
-    // ALSO `null` for a role whose call path cannot carry an effort at all (`roleCarriesEffort` —
-    // today `runtimes.advisorModel`, whatever model it names): `null` is the "render no control" state,
+    // ALSO `null` for a role whose call path cannot carry an effort at all (`roleCarriesEffort` — as of
+    // 2026-09-18 that is THREE roles, whatever model each names: `runtimes.advisorModel`, `pins.research`
+    // — `WebFetch`'s digest, whose `WebFetchConfig` has no effort field — and `pins.researchFallback`,
+    // whose consumer retired with the research runner): `null` is the "render no control" state,
     // and a control that stores a value nothing can ever spend is worse than no control. `effort`
     // above still reports a stale stored value verbatim, so a client can see it and clear it.
     efforts: base.model === null || !roleCarriesEffort(role) ? null : effortVocabularyFor(base.model),
