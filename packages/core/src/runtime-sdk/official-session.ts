@@ -485,6 +485,12 @@ class OfficialSessionImpl implements OfficialSession {
           // modelId half, split at this boundary (explicit; see L3.5's measurement note).
           model: splitTag(this.deps.selection.modelRef).modelId,
           pathToClaudeCodeExecutable: built.pathToClaudeCodeExecutable,
+          // The session's effort, as a TOP-LEVEL option — the only place the official runtime reads
+          // one (`Options.effort`, the pinned sdk.d.ts), and one the router forwards untouched. Until
+          // 2026-09-18 this leg set none, so `session.setEffort` was a no-op on every Claude model;
+          // see `session-driver.ts`'s `spendEffortFor`, which both legs now share. Absent = the
+          // runtime's own default, exactly as before.
+          ...(this.deps.sessionInput().spendEffort === undefined ? {} : { effort: this.deps.sessionInput().spendEffort }),
           // WS-16 §6: force the vendor to use OUR pre-allocated backend uuid on a fresh start —
           // `Options.sessionId` (must be a valid UUID; carried, never checked, for a RESUME, which
           // is a Task 1.2 carry: multi-incarnation resume is unmeasured against this runtime).

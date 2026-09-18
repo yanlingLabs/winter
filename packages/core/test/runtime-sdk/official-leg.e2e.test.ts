@@ -242,7 +242,7 @@ async function buildWorld(
     ...(hooks === undefined ? {} : { hooks }),
   };
 
-  const sessionInput: OfficialSessionInput = { sessionId, mode, cwd, primary: cwd };
+  const sessionInput: OfficialSessionInput = { sessionId, mode, cwd, primary: cwd, spendEffort: undefined };
 
   const session = startOfficialSession({
     sessionId,
@@ -1070,7 +1070,7 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       const events: SessionEvent[] = [];
       eventsFor.set(sessionId, events);
       const checkpoints = new MemCheckpoints();
-      const sessionInput: OfficialSessionInput = { sessionId, mode: "code", cwd, primary: cwd };
+      const sessionInput: OfficialSessionInput = { sessionId, mode: "code", cwd, primary: cwd, spendEffort: undefined };
       const inputDeps: OfficialInputDeps = {
         home,
         selection: selectionFor(),
@@ -1439,7 +1439,7 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       const events: SessionEvent[] = [];
       eventsFor.set(sessionId, events);
       const checkpoints = new MemCheckpoints();
-      const sessionInput: OfficialSessionInput = { sessionId, mode: "code", cwd, primary: cwd };
+      const sessionInput: OfficialSessionInput = { sessionId, mode: "code", cwd, primary: cwd, spendEffort: undefined };
       const inputDeps: OfficialInputDeps = {
         home,
         selection: selectionFor(),

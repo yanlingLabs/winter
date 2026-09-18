@@ -182,6 +182,26 @@ const modeOf = (raw: string | undefined): SessionMode => (raw === "chat" || raw 
 const SDK_EFFORTS: ReadonlySet<string> = new Set(["low", "medium", "high", "xhigh", "max"]);
 const sdkEffortOf = (raw: string | undefined): EffortLevel | undefined => (raw !== undefined && SDK_EFFORTS.has(raw) ? (raw as EffortLevel) : undefined);
 
+/**
+ * The effort a session SPENDS on its requests — ONE expression, for BOTH legs.
+ *
+ * It exists as a function because the official leg had NO effort at all until 2026-09-18: its
+ * `OfficialSessionInput.effort` reached only `winterSystemPromptFor` (where it toggles the
+ * `ultra` delegation paragraph) and never the query's `Options`. `session.setEffort` succeeded, every
+ * client displayed the choice, and the `claude` child never received it — so on a Claude model the
+ * effort picker was a no-op while the identical picker worked on every other model. The router was
+ * not the obstacle (it forwards top-level `Options` untouched and has no effort handling of its own);
+ * the daemon simply never set the field. Both legs now call THIS, so they cannot drift apart again:
+ *  - the session's OWN effort first, verbatim (explicit — the child refuses it typed when unsupported);
+ *  - else dispatch's role effort on a dispatch session, else the daemon default
+ *    (`provider.reasoningEffort`), each IMPLICIT and therefore mapped onto `model`'s own vocabulary;
+ *  - `sdkEffortOf` last, which drops `"none"` and Winter's `ultra` tier — neither is an SDK
+ *    `EffortLevel`, and "no effort sent" is what both already mean on the Winter leg.
+ */
+function spendEffortFor(settings: Settings | null | undefined, mode: SessionMode, model: string, liveEffort: string | undefined): EffortLevel | undefined {
+  return sdkEffortOf(liveEffort ?? (mode === "dispatch" ? dispatchEffortFor(settings, model) : effortToSpendForRole(settings, "provider.model", model, undefined)));
+}
+
 export interface WinterLegDeps {
   home: string;
   /** `WINTER_PROFILE` for the child (`""` on dist). */
@@ -493,7 +513,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // `live.effort` stays first on both arms and stays verbatim (explicit; the child refuses it typed
       // when unsupported). `sdkEffortOf` then drops `"none"`/`ultra` on every path alike, so a role's
       // stored `"none"` is spent exactly as a session's is: the request carries no effort.
-      const effort = sdkEffortOf(live.effort ?? (mode === "dispatch" ? dispatchEffortFor(settings, model) : effortToSpendForRole(settings, "provider.model", model, undefined)));
+      const effort = spendEffortFor(settings, mode, model, live.effort);
       // WS-20: `model` is ALWAYS a provider-qualified tag now (or the winter-test escape hatch) —
       // `providerFor` names exactly its provider, no inventory-order tie-break, no "router's decided
       // provider" hotfix needed (that hotfix existed only because a BARE id could be ambiguous).
@@ -777,6 +797,13 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         outDir: deps.outDirOf(sessionId),
         extraDirs,
         ...(live.effort === undefined ? {} : { effort: live.effort }),
+        // The effort this session SPENDS, computed by the SAME function the Winter leg uses (its own
+        // doc carries why). Kept apart from `effort` just above on purpose: that one is the RAW
+        // stored value and may be Winter's `ultra` tier, which `winterSystemPromptFor` needs to see
+        // to add the delegation paragraph; this one is what may go on the wire. The model is this
+        // session's own decided tag — `selection.modelRef`, the same one `official-session.ts`
+        // splits into the query's `model`.
+        spendEffort: spendEffortFor(deps.settings(), mode, live.model ?? selection.modelRef, live.effort),
         ...(live.origin === undefined ? {} : { origin: live.origin }),
         // `OfficialSessionInput.primary`'s own doc: kept DISTINCT from `cwd` above (which already
         // defaulted to the session tmp dir) so `officialInputFor` can tell a genuinely workdir-less

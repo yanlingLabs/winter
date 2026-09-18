@@ -358,6 +358,14 @@ export interface OfficialSessionInput {
    *  bucket a session writes to, which is the exact class of bug this field was added to end. Every
    *  site must now SAY which it is, and the compiler checks that it did. */
   primary: string | undefined;
+  /** The effort this session SPENDS — `session-driver.ts`'s `spendEffortFor`, the same function the
+   *  Winter leg's `Options.effort` comes from. Distinct from `effort` above (the RAW stored value,
+   *  possibly Winter's `ultra` tier, which only the system prompt reads). `official-session.ts` puts
+   *  this on the query's top-level `Options.effort`, which the router forwards untouched.
+   *
+   *  Required-but-possibly-undefined for the same reason `primary` is: an optional field a
+   *  construction site could forget is exactly how this leg came to send no effort at all. */
+  spendEffort: import("@yanlinglabs/winter-agent-sdk").EffortLevel | undefined;
 }
 
 export interface OfficialInputDeps {
