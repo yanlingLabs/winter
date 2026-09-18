@@ -609,13 +609,7 @@ struct SettingsRolesSection: View {
                                                       fallbackValues: injected))
                         Task { await catalog.loadIfNeeded() }
                     } label: {
-                        HStack(spacing: 6) {
-                            valueText(value)
-                            Image(systemName: "chevron.down")
-                                .font(Typography.caption())
-                                .foregroundStyle(Theme.textMuted)
-                        }
-                        .contentShape(Rectangle())
+                        SettingsMenuPill(valueString(value), isMuted: value?.model == nil)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Choose the model for \(settingsModelRoleTitle(role))")
@@ -641,13 +635,16 @@ struct SettingsRolesSection: View {
                                                       fallbackValues: injected,
                                                       kind: .effort))
                     } label: {
-                        HStack(spacing: 6) {
-                            effortText(value)
-                            Image(systemName: "chevron.down")
-                                .font(Typography.caption())
-                                .foregroundStyle(Theme.textMuted)
+                        let selection = roleEffortSelection(effort: value.effort, efforts: value.efforts)
+                        SettingsMenuPill(roleEffortValueLabel(selection),
+                                         isMuted: selection == .modelDefault) {
+                            // A stale effort reads "Mismatch" with a warning glyph — never as a choice.
+                            if case .stale = selection {
+                                Image(systemName: "exclamationmark.triangle")
+                                    .font(Typography.caption())
+                                    .foregroundStyle(Theme.textSecondary)
+                            }
                         }
-                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Choose the reasoning effort for \(settingsModelRoleTitle(role))")
@@ -656,29 +653,20 @@ struct SettingsRolesSection: View {
         }
     }
 
-    /// The effort value. A stale effort reads "Mismatch" with a warning glyph — never as a choice.
-    @ViewBuilder
-    private func effortText(_ value: SettingsRoleValue) -> some View {
-        let selection = roleEffortSelection(effort: value.effort, efforts: value.efforts)
-        HStack(spacing: 4) {
-            if case .stale = selection {
-                Image(systemName: "exclamationmark.triangle")
-                    .font(Typography.caption())
-                    .foregroundStyle(Theme.textSecondary)
-            }
-            Text(roleEffortValueLabel(selection))
-                .font(Typography.controlMono())
-                .foregroundStyle(selection == .modelDefault ? Theme.textMuted : Theme.textPrimary)
-        }
-    }
-
     /// Three different strings for three different facts: the tag, "None" for a role the daemon
     /// reported as cleared, and "—" for a role it did not report at all.
+    private func valueString(_ value: SettingsRoleValue?) -> String {
+        value.map { $0.model ?? settingsModelRoleClearedValue } ?? settingsModelRoleUnknownValue
+    }
+
+    /// The read-only form: the same string, in the row's value ink, with no pill around it — a
+    /// rimmed pill that did nothing on click would be a broken menu.
     @ViewBuilder
     private func valueText(_ value: SettingsRoleValue?) -> some View {
-        Text(value.map { $0.model ?? settingsModelRoleClearedValue }
-             ?? settingsModelRoleUnknownValue)
-            .font(Typography.controlMono())
-            .foregroundStyle(value?.model == nil ? Theme.textMuted : Theme.textPrimary)
+        Text(valueString(value))
+            .font(Typography.body())
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .foregroundStyle(value?.model == nil ? Theme.textMuted : Theme.textSecondary)
     }
 }

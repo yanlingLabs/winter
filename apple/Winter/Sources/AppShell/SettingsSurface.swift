@@ -305,26 +305,21 @@ func settingsSectionIsComing(_ section: SettingsSection) -> Bool {
     settingsSectionComingCopy(section) != nil
 }
 
-/// The page a coming section shows. The same posture — and the same two type levels — as
-/// `SettingsSectionPlaceholder`, deliberately: a placeholder that looked like a live settings page
-/// (a card, a row, a disabled toggle) would read as a broken setting, which is worse than an empty
-/// list. This reads as "not here yet", then says where the thing lives in the meantime.
+/// The page a coming section shows: the same `SettingsPage` title every built page wears, then one
+/// card whose single row says "Not built yet" and, under it, what belongs here and where it is
+/// configured today. No toggle, no disabled control — a placeholder that looked like a live
+/// setting would read as a broken one.
 struct SettingsSectionComing: View {
+    let section: SettingsSection
     let copy: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Not built yet.")
-                .font(Typography.body())
-                .foregroundStyle(Theme.textSecondary)
-            Text(copy)
-                .font(Typography.emptyStateSubtitle)
-                .foregroundStyle(Theme.textMuted)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
+        SettingsPage(title: settingsSectionTitle(section)) {
+            SettingsGroup {
+                SettingsRow("Not built yet", description: copy) { EmptyView() }
+                    .textSelection(.enabled)
+            }
         }
-        .frame(maxWidth: 560, alignment: .leading)
-        .padding(.top, 18)
     }
 }
 
@@ -418,41 +413,6 @@ struct SettingsSidebarContent: View {
     }
 }
 
-/// PURE: whether this section's body prints its own title, so `SettingsSectionView` must not print
-/// one above it.
-///
-/// Two ways a body ends up owning its heading, and after the 2026-09-18 restyle they are both the
-/// common case:
-///
-/// - a **settings-native section** built on `SettingsPage` (`SettingsChrome.swift`), which draws
-///   the large left-aligned title, the subtitle, the scroll and the margins itself — `.roles`,
-///   `.quota`, `.trust`, `.peripheral`, `.commandLine`, `.launchAtLogin`, `.daemonStatus`;
-/// - a **re-housed Dashboard pane**, which draws its own `Typography.paneTitle` and padding inside
-///   its own `ScrollView` — `.memory` and `.workflows`, the two left as they are.
-///
-/// `.providers` is the only arm that still relies on the header above it.
-///
-/// A placeholder is NOT a body of either kind — with no wiring the body is
-/// `SettingsSectionPlaceholder`, which draws no title and would leave you looking at an unnamed
-/// panel. So the caller ANDs this with "there is wiring", except for `.roles`, which renders
-/// wiring or not.
-func settingsSectionBodyDrawsItsOwnHeader(_ section: SettingsSection) -> Bool {
-    switch section {
-    case .providers: return false
-    // A coming section's body is `SettingsSectionComing`, which — like the placeholder — draws no
-    // title, so the header above it has to.
-    case .profile, .personalization, .notifications, .voice, .appearance, .shortcuts,
-         .importChats, .archivedChats, .runtimes, .sessions, .permissions, .computerUse, .browser,
-         .appshots:
-        return false
-    // The Plugins door and the four links are built on `SettingsPage`, which prints its own title.
-    case .plugins, .support, .feedback, .discord, .donate:
-        return true
-    case .roles, .quota, .memory, .workflows, .trust, .peripheral,
-         .commandLine, .launchAtLogin, .daemonStatus: return true
-    }
-}
-
 /// PURE: whether a section's page is answered before `SettingsSectionView` looks for daemon
 /// wiring at all — the ones that read nothing from the daemon: Roles (which reads it if there),
 /// every coming page, the Plugins door and the four links. Every other section needs wiring and
@@ -498,41 +458,12 @@ struct SettingsSectionView: View {
     /// needs (`SettingsLibraryPresenting`). Nil renders the page's rows honestly inert.
     var library: (any SettingsLibraryPresenting)? = nil
 
+    /// EVERY arm is a `SettingsPage` since the 2026-09-18 ChatGPT pass — built pages, coming
+    /// pages and the no-wiring placeholder alike — so the page, not this view, draws the title, the
+    /// scroll and the centred column. There is no second header path left to disagree with it.
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // A re-housed pane draws its own title, padding and scroll, so adding OUR header above
-            // it prints the section's name twice with two different paddings. The header is for the
-            // sections authored here; the panes speak for themselves.
-            if !bodyDrawsItsOwnHeader {
-                header
-                Divider()
-                    .padding(.top, 14)
-            }
-            body(for: section)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        }
-        .padding(bodyDrawsItsOwnHeader ? 0 : 24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    /// A body only speaks for itself when it is actually rendering — with no wiring the body is the
-    /// placeholder, which needs our header to name it. `.roles` is the exception: it renders
-    /// (through `SettingsPage`, with its own title) whether or not there is wiring at all.
-    private var bodyDrawsItsOwnHeader: Bool {
-        if settingsSectionRendersWithoutWiring(section) {
-            return settingsSectionBodyDrawsItsOwnHeader(section)
-        }
-        return settingsSectionBodyDrawsItsOwnHeader(section) && wiring != nil
-    }
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(settingsSectionTitle(section))
-                .font(Typography.emptyStateTitle)
-            Text(settingsSectionSubtitle(section))
-                .font(Typography.emptyStateSubtitle)
-                .foregroundStyle(Theme.textMuted)
-        }
+        body(for: section)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     @ViewBuilder
@@ -574,7 +505,7 @@ struct SettingsSectionView: View {
             // Answered BEFORE the wiring unwrap too: a coming section's page reads nothing from
             // the daemon, so an app without wiring must not be told "no daemon wiring" about a
             // section wiring would not help.
-            SettingsSectionComing(copy: settingsSectionComingCopy(section) ?? "")
+            SettingsSectionComing(section: section, copy: settingsSectionComingCopy(section) ?? "")
         default:
             if let wiring {
                 wired(section, wiring)
@@ -593,29 +524,17 @@ struct SettingsSectionView: View {
             // ONE consolidated Providers surface (user's call), sharing the Dashboard pane's
             // view-models rather than minting new ones — see `SettingsProvidersSection`.
             //
-            // LEFT UN-CARDED in the 2026-09-18 restyle, deliberately: this section is three
-            // EDITORS (an Anthropic auth block with its own sheet, a ~100-row catalog of live
-            // `SecureField`s, and a disclosure-group endpoint form), not a list of statements with
-            // one affordance each. A `SettingsCard` row has room for one control; a credential row
-            // is a text field, a state line and two buttons. Forcing it in would shrink the fields
-            // and hide the states. It keeps `SettingsSectionView`'s header — the only arm that
-            // still does.
+            // Carded since the ChatGPT pass (2026-09-18): the key field opens under one row
+            // at a time instead of every row carrying a live SecureField.
             SettingsProvidersSection(model: wiring.providerModel)
         case .quota:
             SettingsQuotaSection(fetch: wiring.quotaState)
         case .memory:
-            // LEFT AS THE DASHBOARD PANE in the 2026-09-18 restyle, deliberately: Memory is a
-            // browser — a searchable list of memory documents with a selected-item detail view and
-            // its own editing affordances. That is a master/detail shape, not a column of rows with
-            // trailing controls, and a card would only add a rim around a list that already scrolls
-            // inside one. It draws its own `Typography.paneTitle` header, which is why
-            // `settingsSectionBodyDrawsItsOwnHeader` answers true for it.
-            MemoryPane(model: wiring.memoryModel)
+            // The pane's list/detail split, re-set as a drill-in on the same model.
+            SettingsMemorySection(model: wiring.memoryModel)
         case .workflows:
-            // LEFT AS THE DASHBOARD PANE, for the same reason as `.memory`: Workflows is a list of
-            // saved orchestrations plus the runs currently in flight, each with progress and its
-            // own per-run detail. A settings row cannot carry a running thing.
-            WorkflowsPane(model: wiring.workflowsModel)
+            // The pane's Saved and Runs lists, re-set as two cards on the same model.
+            SettingsWorkflowsSection(model: wiring.workflowsModel)
         case .trust:
             SettingsTrustSection(list: wiring.trustList, remove: wiring.trustRemove)
         case .peripheral:
@@ -634,7 +553,7 @@ struct SettingsSectionView: View {
              .importChats, .archivedChats, .runtimes, .sessions, .permissions, .computerUse,
              .browser, .appshots:
             // Unreachable, for the same reason as `.roles` below: `body(for:)` answers them first.
-            SettingsSectionComing(copy: settingsSectionComingCopy(section) ?? "")
+            SettingsSectionComing(section: section, copy: settingsSectionComingCopy(section) ?? "")
         case .plugins:
             // Unreachable: answered in `body(for:)`.
             SettingsPluginsSection(library: library)
@@ -658,14 +577,11 @@ struct SettingsSectionPlaceholder: View {
     let hasWiring: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(hasWiring ? "Not moved here yet." : "This app is running without daemon wiring.")
-                .font(Typography.body())
-                .foregroundStyle(Theme.textSecondary)
-            Text(settingsSectionSubtitle(section))
-                .font(Typography.emptyStateSubtitle)
-                .foregroundStyle(Theme.textMuted)
+        SettingsPage(title: settingsSectionTitle(section)) {
+            SettingsGroup {
+                SettingsRow(hasWiring ? "Not moved here yet" : "This app is running without daemon wiring",
+                            description: settingsSectionSubtitle(section)) { EmptyView() }
+            }
         }
-        .padding(.top, 18)
     }
 }

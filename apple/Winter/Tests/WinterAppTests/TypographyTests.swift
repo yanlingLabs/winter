@@ -59,6 +59,7 @@ final class TypographyTests: XCTestCase {
         // Composer
         "composerField": .derived,
         "composerPlusGlyph": .font(Typography.composerPlusGlyph),
+        "settingsPageTitle": .font(Typography.settingsPageTitle),
         "composerModelPill": .sizeOnly(Typography.controlSize),
         "composerSend": .sizeOnly(Typography.bodyLargeSize),
         // The Mac chrome scale
@@ -121,6 +122,7 @@ final class TypographyTests: XCTestCase {
     private static let fontMeanings: [String: Font] = [
         "questionPreviewMono": .system(.body, design: .monospaced),
         "composerPlusGlyph": sansMeaning(17, .medium),
+        "settingsPageTitle": sansMeaning(26, .regular),
         "emptyStateGlyph": sansMeaning(34, .light),
         "pairingCode": .system(size: 22, weight: .semibold, design: .monospaced),
         "pairingGlyphLarge": sansMeaning(36),
@@ -322,7 +324,7 @@ final class TypographyTests: XCTestCase {
             // meanings table above does — a probe built at the DESIGNED weight would never match
             // the corrected Font in dark mode, and the cross-check would report a size drift that
             // is really a weight substitution.
-            (Self.sansMeaning(36), 36), (Self.sansMeaning(30), 30),
+            (Self.sansMeaning(36), 36), (Self.sansMeaning(30), 30), (Self.sansMeaning(26), 26),
             (.system(size: 20, weight: .semibold, design: .serif), 20),
             (.system(size: 38, weight: .regular, design: .serif), 38),
         ]
