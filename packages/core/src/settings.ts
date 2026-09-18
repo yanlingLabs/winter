@@ -1183,6 +1183,21 @@ function mergeUnknownKeys(schema: unknown, raw: unknown, owned: unknown): unknow
       // (never backfilled from `raw`, matching `saveSettings`'s pre-existing "write `s` verbatim,
       // an absent optional block stays absent" contract).
       if (owned === undefined) return undefined;
+      // BLOCKER FIX (fix wave, pre-merge review): a `.strict()` block (`provider`,
+      // `runtimes.official`) accepts NOTHING this schema does not itself model — `Settings.parse`
+      // already refuses a stray key inside one at LOAD time (their own schema comments), so any
+      // such key still sitting in `raw` can only be a block that predates the `.strict()` schema
+      // and was never rewritten to disk (the v2→v3 migration's `provider.type`/`provider.baseUrl`
+      // strip is IN-MEMORY only unless `persistMigration` was passed — see `loadSettings`). The
+      // general "unknown keys survive by copying `raw` first" rule below would carry that stray key
+      // straight into the merged result, and the second `Settings.parse` in `saveSettings` would
+      // then throw on every write to that home. Detected via zod v4's own `catchall: z.never()`
+      // marker rather than a hand-kept list of strict schemas, so a future `.strict()` block gets
+      // this for free. `owned` wins OUTRIGHT here — nothing from disk is preserved for this
+      // subtree — because `loadSettings` would have refused those keys anyway, so there is nothing
+      // legitimate on disk this could lose.
+      const isStrict = (schema as { def?: { catchall?: { def?: { type?: string } } } }).def?.catchall?.def?.type === "never";
+      if (isStrict) return owned;
       const rawObj = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
       const ownedObj = owned && typeof owned === "object" && !Array.isArray(owned) ? (owned as Record<string, unknown>) : {};
       const shape = (schema as { shape: Record<string, unknown> }).shape;
@@ -1218,8 +1233,24 @@ function mergeUnknownKeys(schema: unknown, raw: unknown, owned: unknown): unknow
   }
 }
 
+/** BLOCKER FIX (fix wave, pre-merge review): `Settings.parse` throwing straight out of
+ *  `saveSettings` hands every caller a raw zod issue dump (`unrecognized_keys ["type"] at
+ *  ["provider"]`, or worse across several errors) as the error's `.message` — exactly the class of
+ *  silent-strip-turned-opaque-throw this branch exists to fix, just at the other end. `loadSettings`
+ *  already renders its own parse failures as a readable, actionable sentence
+ *  (`"settings.json is invalid: <fields> — fix or delete <path>"`); this is the same rendering,
+ *  reused so both doors speak one language. Every `saveSettings` caller — the CLI's direct calls and
+ *  every `ipc/server.ts` handler (`settings.setModelRole`, `settings.setSkillDenied`, `mcp.enable`,
+ *  `mcp.disable`, and any future one) — gets this for free rather than needing its own try/catch. */
+function readableSettingsParseError(path: string, error: z.ZodError, context: string): Error {
+  return new Error(`settings.json ${context}: ${error.issues.map((i) => i.path.join(".") || "(root)").join(", ")} — fix or delete ${path}`);
+}
+
 export function saveSettings(path: string, s: Settings): void {
-  Settings.parse(s); // validate before writing — never persist an invalid settings file
+  {
+    const parsed = Settings.safeParse(s); // validate before writing — never persist an invalid settings file
+    if (!parsed.success) throw readableSettingsParseError(path, parsed.error, "write refused (the value being saved is invalid)");
+  }
   // Item 5a (2026-09-17 plan): merge onto the CURRENT on-disk shape so a key this schema does not
   // model — anywhere from a stray top-level field to one nested inside a block this schema DOES
   // define — rides through untouched. `readRawSettings` is `null` for an absent OR unparsable
@@ -1232,14 +1263,15 @@ export function saveSettings(path: string, s: Settings): void {
   // Second validation pass, on the MERGED shape (review round 2): `s` alone can be valid while the
   // merge just copied an unknown key from a `.strict()` block ON DISK (`provider`,
   // `runtimes.official` — see their own schema comments) straight through untouched, because
-  // nothing else in this function ever decided that key's fate. Practically this can only happen
-  // when the file drifted AFTER whatever produced `s` last read it (a hand edit racing this write,
-  // or a caller that built `s` from something other than `loadSettings`) — `loadSettings` itself
-  // already refuses to load a file with a stray key in one of those two blocks, so an ordinary
-  // read-transform-write cycle never reaches this. Refuse to persist the result if IT is not a
+  // nothing else in this function ever decided that key's fate. The BLOCKER fix above (the `.strict()`
+  // branch in `mergeUnknownKeys`'s object case) means a `.strict()` block's stray on-disk key can no
+  // longer reach here at all — `owned` wins outright for that whole block — but this pass stays as
+  // belt-and-suspenders for any OTHER shape this merge could someday get wrong, with the same
+  // readable rendering rather than a raw dump either way. Refuse to persist the result if IT is not a
   // valid `Settings` file — the SAME "never persist an invalid settings file" contract as the line
   // above, extended to what this function actually writes rather than only what the caller handed it.
-  Settings.parse(merged);
+  const mergedParsed = Settings.safeParse(merged);
+  if (!mergedParsed.success) throw readableSettingsParseError(path, mergedParsed.error, "write refused after merging with the on-disk file");
   writeFileSync(path, JSON.stringify(merged, null, 2) + "\n");
 }
 

@@ -714,6 +714,58 @@ describe("saveSettings", () => {
       const afterSecond = readFileSync(p, "utf8");
       expect(JSON.parse(afterSecond)).toEqual(JSON.parse(afterFirst));
     });
+
+    // BLOCKER (fix wave, pre-merge review): a home still v2-shaped ON DISK (the v2→v3 migration is
+    // in-memory only unless `persistMigration: true`, which only the daemon boot hook passes) used
+    // to make EVERY settings write throw — `mergeUnknownKeys`'s object case copied the on-disk
+    // `provider` block's stray `type`/`baseUrl` keys straight into the merged result, and the
+    // `.strict()` schema then refused them at the second `Settings.parse`. Measured red before the
+    // fix: `unrecognized_keys ["type"] at ["provider"]`.
+    test("a v2-shaped `provider` block on disk survives a setModelRole write (BLOCKER)", () => {
+      const p = join(mkdtempSync(join(tmpdir(), "winter-save-v2-provider-")), "settings.json");
+      wf(p, JSON.stringify({
+        schemaVersion: 2,
+        provider: { type: "codex-oauth", model: "codex-oauth/gpt-5.6-sol" },
+      }, null, 2));
+      const before = loadSettings(p); // migrates in memory only — the file on disk stays v2-shaped
+      expect(() => saveSettings(p, setModelRole(before, "titles.model", "codex-oauth/gpt-5.6-luna"))).not.toThrow();
+
+      const onDisk = JSON.parse(readFileSync(p, "utf8"));
+      expect(onDisk.schemaVersion).toBe(3);
+      expect(onDisk.provider).toEqual({ model: "codex-oauth/gpt-5.6-sol" }); // `type` dropped, not carried through
+      expect(onDisk.titles.model).toBe("codex-oauth/gpt-5.6-luna");
+      expect(loadSettings(p).titles?.model).toBe(tag("codex-oauth/gpt-5.6-luna"));
+    });
+
+    // Same shape for `runtimes.official` — the OTHER `.strict()` block, guarding against a stray
+    // legacy `auth` key surviving from a v2-or-earlier `runtimes.official.auth` write. Unlike the
+    // `provider` block, this one is `.optional()` at the `runtimes.official` level, so the fixture
+    // must keep `runtimes.official` PRESENT in the owned value too — otherwise the whole block is
+    // simply absent-and-cleared (a different, already-correct code path) and the `.strict()` branch
+    // is never reached at all.
+    test("a stray legacy `runtimes.official.auth` key on disk survives a setSkillDenied write (BLOCKER)", () => {
+      const p = join(mkdtempSync(join(tmpdir(), "winter-save-v2-official-")), "settings.json");
+      wf(p, JSON.stringify({
+        schemaVersion: 3,
+        provider: { model: "codex-oauth/gpt-5.6-sol" },
+        runtimes: { official: { auth: "console", subscriptionAuth: false } },
+      }, null, 2));
+      // `loadSettings` on a schemaVersion-3 file does NOT run the v2→v3 migration — it straight-up
+      // refuses a stray `auth` key inside the `.strict()` `runtimes.official` block, so this fixture
+      // (which deliberately still has the stray key ON DISK) is built by hand rather than via
+      // `loadSettings(p)`, exactly the "file drifted after `s` was last read" scenario the function's
+      // own comment names.
+      const before: Settings = {
+        schemaVersion: 3,
+        provider: { model: tag("codex-oauth/gpt-5.6-sol") },
+        runtimes: { official: { subscriptionAuth: false } } as Settings["runtimes"],
+      };
+      expect(() => saveSettings(p, setSkillDenied(before, "bash-review", true))).not.toThrow();
+
+      const onDisk = JSON.parse(readFileSync(p, "utf8"));
+      expect(onDisk.runtimes.official).toEqual({ subscriptionAuth: false }); // `auth` dropped, not carried through
+      expect(onDisk.permissions.deny).toEqual([skillDenyRule("bash-review")]);
+    });
   });
 });
 
