@@ -7,6 +7,9 @@ import { ensureGlobalGitignore, WINTER_PERSONAL_IGNORES } from "./global-gitigno
 import { OFFICIAL_SUBSCRIPTION_AUTH_APPROVED } from "./runtime-sdk/versions";
 import { consoleProfileCredentialFile } from "./runtime-sdk/anthropic-paths";
 import { facingNameToTag, isModelTag, splitTag, UNSTATED_TAG, WINTER_TEST_PREFIX, type ModelTag } from "./runtime-sdk/model-tag";
+// The ONE catalog-row-by-tag lookup (WS-20) — imported rather than re-written here so a role write
+// and a session's own model resolution agree on what "this model exists" means, by construction.
+import { rowForTag } from "./runtime-sdk/provider-selection";
 
 /** Reasoning-effort slugs valid on the wire — measured LIVE against the Codex OAuth endpoint
  *  (2026-07-30), one model at a time, NOT read off the /models catalogue text. That distinction
@@ -1729,15 +1732,60 @@ export function modelRolesFor(settings: Settings | null | undefined, boundProvid
  * and THROWS on `null` rather than silently doing nothing — the caller (the RPC handler) reports
  * this the same way it reports an unresolvable tag, `ERR.INVALID_PARAMS`.
  */
+/**
+ * USER RULING 2026-09-18: a model role may only be set to a tag the PINNED CATALOG actually backs.
+ * Before this, `setModelRole` checked the tag's SHAPE and nothing else, so
+ * `settings.setModelRole("pins.dispatch", "openai/does-not-exist")` was written to settings.json and
+ * failed much later — at the first dispatch spawn, as a refusal with no obvious connection to the
+ * write that caused it. The Roles-pane picker was the only thing keeping unusable values out, which
+ * makes every other caller of that RPC (a hand-made call, the TUI, a future client) a way in.
+ *
+ * The check is CATALOG MEMBERSHIP, deliberately not the role's own `permitted` set, because those
+ * answer different questions and only the first is a write-time fact:
+ *   - "does this model exist" — permanent, and what this refuses.
+ *   - "can this role run it right now" — situational. `modelRoleConstraint`'s `"internal-provider"`
+ *     roles narrow `permitted` to the CURRENTLY BOUND provider, so gating the write on `permitted`
+ *     would refuse pinning a role to a provider the user is about to bind, and would strand a
+ *     stored pin whose provider is temporarily unbound. Clients already receive `constraint` and
+ *     `permitted` from `modelRoleInfo` and can grey a row out without the daemon refusing it.
+ *
+ * `winter-test/*` is exempt by construction, not by leniency: it is not a catalog provider at all
+ * (`provider-selection.ts`'s `WINTER_TEST_MODEL_PREFIX` doc — "must never be resolved against one"),
+ * and `setProviderModel`'s own comment records that `provider.model` has always accepted it.
+ *
+ * Clearing a role (`null`/empty, where the role allows it) is never checked — there is no tag to
+ * verify, and a user must always be able to get back to a role's default.
+ */
+function assertCatalogBackedTag(tag: string, role: ModelRole): void {
+  if (tag.startsWith(WINTER_TEST_PREFIX)) return;
+  if (rowForTag(tag) !== undefined) return;
+  throw new TypeError(
+    `${role}: no model in the pinned catalog has the tag ${JSON.stringify(tag)} — ` +
+      `a role can only name a model this daemon can actually serve. The tags it will accept are the ` +
+      `ones \`settings.modelRoles\` reports as \`permitted\` for this role (and \`models.catalog\` lists ` +
+      `in full); a tag that merely LOOKS like \`provider/model\` is not enough.`,
+  );
+}
+
 export function setModelRole(settings: Settings, role: ModelRole, model: string | null): Settings {
-  if (role === "runtimes.advisorModel") return setAdvisorModel(settings, model ?? undefined);
+  if (role === "runtimes.advisorModel") {
+    // Validated HERE rather than inside `setAdvisorModel`: that function is also the door for
+    // `winter model --advisor` and the v2→v3 migration, and this ruling is about what a ROLE WRITE
+    // through `settings.setModelRole` may contain — the same reason `provider.model`'s check sits
+    // below instead of inside `setProviderModel`.
+    const advisor = model?.trim();
+    if (advisor) assertCatalogBackedTag(advisor, role);
+    return setAdvisorModel(settings, model ?? undefined);
+  }
   if (role === "provider.model") {
     if (model === null) throw new TypeError("provider.model: this role has no \"unset\" state (it is a required field) — pass a tag, never null");
     if (!isModelTag(model) || model === UNSTATED_TAG) throw new TypeError(`not a model tag: ${JSON.stringify(model)}`);
+    assertCatalogBackedTag(model, role);
     return setProviderModel(settings, model as ModelTag);
   }
   const trimmed = model?.trim();
   if (trimmed && (!isModelTag(trimmed) || trimmed === UNSTATED_TAG)) throw new TypeError(`not a model tag: ${JSON.stringify(trimmed)}`);
+  if (trimmed) assertCatalogBackedTag(trimmed, role);
   const value = trimmed ? (trimmed as ModelTag) : undefined;
   switch (role) {
     case "pins.dispatch": case "pins.dream": case "pins.cleaner": case "pins.research": case "pins.researchFallback": {

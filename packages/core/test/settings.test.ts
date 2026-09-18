@@ -2,7 +2,7 @@ import { describe, expect, test, spyOn } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, computerUseEnabledFrom, lspEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialSubscriptionAuthEnabled, officialSubscriptionAuthFlagInert, DEFAULT_PROVIDER, pinsFor, setModelRole, setSkillDenied, skillDenyRule, MODEL_ROLES } from "../src/settings";
+import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, computerUseEnabledFrom, lspEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialSubscriptionAuthEnabled, officialSubscriptionAuthFlagInert, DEFAULT_PROVIDER, pinsFor, setModelRole, modelRoleInfo, setSkillDenied, skillDenyRule, MODEL_ROLES } from "../src/settings";
 import { ModelRole as ProtocolModelRole } from "@yanlinglabs/winter-protocol";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
 import { UNSTATED_TAG, type ModelTag } from "../src/runtime-sdk/model-tag";
@@ -1062,6 +1062,51 @@ describe("setProviderModel / setReasoningEffort (winter model CLI's pure transfo
     const next = setProviderModel(s, tag("anthropic/claude-sonnet-5"));
     expect(next.provider.model).toBe(tag("anthropic/claude-sonnet-5"));
     expect(() => Settings.parse(next)).not.toThrow();
+  });
+});
+
+// USER RULING 2026-09-18: a role write must name a model the pinned catalog actually backs. Before
+// this, only the tag's SHAPE was checked, so an unbacked tag was written to settings.json and failed
+// later at the spawn that tried to use it — with the Roles-pane picker as the only real gate.
+describe("setModelRole: the catalog-membership check", () => {
+  const base: Settings = { schemaVersion: 3, provider: { model: tag("codex-oauth/gpt-5.6-sol") } };
+
+  test("a shape-valid tag no catalog row backs is REFUSED, for every role that takes one", () => {
+    for (const role of ["pins.dispatch", "titles.model", "reviewer.model", "provider.model", "runtimes.advisorModel"] as const) {
+      expect(() => setModelRole(base, role, "openai/model-that-does-not-exist")).toThrow(/no model in the pinned catalog/);
+    }
+  });
+
+  test("a real catalog tag is accepted", () => {
+    expect(setModelRole(base, "pins.dispatch", "anthropic/claude-sonnet-5").pins?.dispatch).toBe(tag("anthropic/claude-sonnet-5"));
+    expect(setModelRole(base, "provider.model", "anthropic/claude-sonnet-5").provider.model).toBe(tag("anthropic/claude-sonnet-5"));
+  });
+
+  // Not leniency: `winter-test/*` is not a catalog provider at all (provider-selection.ts's
+  // WINTER_TEST_MODEL_PREFIX — "must never be resolved against one"), and setProviderModel has always
+  // taken it. A catalog lookup would refuse every test harness that names its own fake model.
+  test("winter-test/* is exempt, because it is not a catalog namespace", () => {
+    expect(setModelRole(base, "pins.dispatch", "winter-test/echo").pins?.dispatch).toBe(tag("winter-test/echo"));
+    expect(setModelRole(base, "provider.model", "winter-test/echo").provider.model).toBe(tag("winter-test/echo"));
+  });
+
+  // The check must never stand between a user and a role's default.
+  test("clearing a role is never catalog-checked", () => {
+    const withPin = setModelRole(base, "pins.dispatch", "anthropic/claude-sonnet-5");
+    expect(setModelRole(withPin, "pins.dispatch", null).pins?.dispatch).toBeUndefined();
+    expect(setModelRole(withPin, "runtimes.advisorModel", null).runtimes?.advisorModel).toBeUndefined();
+  });
+
+  // The membership test is the CATALOG, deliberately not the role's own `permitted` set: an
+  // "internal-provider" role narrows `permitted` to the CURRENTLY BOUND provider, so gating the write
+  // on it would refuse pinning a role to a provider the user is about to bind. Existence and
+  // present-tense usability are different questions, and clients already receive `constraint`.
+  test("a catalog tag an internal-provider role cannot serve TODAY is still accepted", () => {
+    const info = modelRoleInfo(base, "titles.model", "openai");
+    expect(info.constraint).toBe("internal-provider");
+    const unservable = "anthropic/claude-sonnet-5";
+    expect(info.permitted.some((p) => p.models.includes(tag(unservable)))).toBe(false);
+    expect(setModelRole(base, "titles.model", unservable).titles?.model).toBe(tag(unservable));
   });
 });
 
