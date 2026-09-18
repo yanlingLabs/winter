@@ -12,6 +12,15 @@ Source: `packages/core/src/agent/tools/` + daemon wiring (`packages/core/src/dae
 "Deferred = Yes" reflects the per-tool `deferred: true` flag, active whenever built-in
 ToolSearch deferral is on (which it is in the production daemon).
 
+**The web rows are the exception to that sourcing** (2026-09-18, the web-tools ruling): the
+daemon's own `web_fetch`/`web_search`/`ReadPage` and its multi-page research sub-agent are
+RETIRED. The spawned runtime child brings claude-shaped `WebFetch`/`WebSearch` instead, and the
+daemon supplies what a built-in could not reach on its own — the Exa key as a Keychain locator
+and the dangerous-domain floor as `blockedDomains` — through `Options.web`. Deferral has no
+meaning for a child's built-ins (they are advertised up front), hence `No` on all three web rows
+below. The one daemon-owned web tool left is `Search`, and chat/dispatch get exactly one search
+tool: `Search` with an Exa key, `WebSearch` without.
+
 | Tool | Deferred | What it does |
 |------|:--------:|--------------|
 | **Filesystem — read** | | |
@@ -51,9 +60,10 @@ ToolSearch deferral is on (which it is in the production daemon).
 | `memory_read` | Yes | Read the full body of a saved memory fact by name. |
 | `memory_write` | Yes | Save a durable fact to recall in future sessions. |
 | `memory_delete` | Yes | Delete a saved memory fact by name. |
-| **Web** (only network-capable tools) | | |
-| `web_fetch` | Yes | Fetch a URL and return a readable-text preview, saving the full page to a file. |
-| `web_search` | Yes | Search the web via Brave and return a numbered list of results. |
+| **Web** | | |
+| `WebFetch` | No | **The runtime child's own**, claude-shaped: fetch a URL and answer a question about that page (page digest on `pins.research`). Every mode, both legs. |
+| `WebSearch` | No | **The runtime child's own**, claude-shaped. Code mode always; chat/dispatch only when NO Exa key is stored. |
+| `Search` | No | **The daemon's**, chat/dispatch only, and only when an Exa key IS stored: Exa ANSWER mode — one call, a written answer plus its sources. |
 | **Code intelligence (LSP)** | | |
 | `lsp_diagnostics` | Yes | Get language-server errors/warnings for a file (TS/JS/Swift). |
 | `lsp_definition` | Yes | Find the definition of the symbol at a position. |
@@ -66,8 +76,8 @@ ToolSearch deferral is on (which it is in the production daemon).
 | `computer` | No* | Control the Mac: read the AX tree, screenshot, click/drag/type/scroll, wait. |
 | `ToolSearch` | — | Load deferred tools' schemas so they become callable. |
 
-**40 built-in tools total** (Dispatch mode's `session_spawn` is the latest addition, after
-task-30's `push_notification`). Notes:
+**Counts below predate the engine's retirement and the web-tools ruling; the per-tool rows are
+what to trust.** Notes:
 
 - `computer` (`No*`) is only *registered* when `settings.computerUse.enabled` is on; when
   present it's not deferred.
