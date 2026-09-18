@@ -595,6 +595,10 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       const systemPrompt = deps.assembler === undefined ? undefined : winterSystemPromptFor(deps.assembler, {
         mode, origin: live.origin, primary, cwd: primary ?? deps.tmpDirOf(sessionId),
         outDir: deps.outDirOf(sessionId), extraDirs, effort: live.effort,
+        // THE THIRD READER of this one probe, and the reason it is threaded rather than re-derived:
+        // chat's and dispatch's base prompts NAME their search tool, and the prompt must name the one
+        // `disallowedTools` and the capability server actually gave this incarnation.
+        exaKeyPresent: exaPresent,
       });
       // P8b-36 obligation: any other server merged into the same record must not shadow a
       // daemon-owned one. Since the fix wave the configured user/project MCP servers ARE merged
