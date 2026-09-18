@@ -172,6 +172,45 @@ describe.if(isMac)("McpManager.stopServer (finding 3)", () => {
   });
 });
 
+// MEDIUM (fix wave, pre-merge review, finding 3, symmetry) — regression coverage caught by a
+// second review pass: `startOneUserServer` used to stop the old client WITHOUT unregistering its
+// tools, so re-registering under `startOne`'s "throw" collision mode hit a duplicate-name
+// `registry.register` and turned an ordinary `mcp.enable` (on an ALREADY-running, or never-disabled,
+// name) into a dead process with a "failed" status. `startOneUserServer` now calls `this.
+// stopServer(name)` first, which unregisters too.
+describe.if(isMac)("McpManager.startOneUserServer (finding 3, symmetry — regression)", () => {
+  test("enabling an ALREADY-RUNNING server (never disabled) does not kill it — connects clean, no collision", async () => {
+    const registry = new ToolRegistry();
+    const mgr = new McpManager({ registry, trust: new TrustStore(join(realDir(), "trust.json")) });
+    const cfg = { command: "bun", args: ["run", FIXTURE] };
+    await mgr.startAll({ fake: cfg });
+    expect(registry.has("mcp__fake__echo")).toBe(true);
+    expect(mgr.list().find((s) => s.name === "fake")?.status).toBe("connected");
+
+    // The regression: calling startOneUserServer on a name that was never stopped/disabled.
+    await mgr.startOneUserServer("fake", cfg);
+    expect(registry.has("mcp__fake__echo")).toBe(true);
+    expect(mgr.list().find((s) => s.name === "fake")?.status).toBe("connected"); // NOT "failed"
+    const out = await registry.execute("mcp__fake__echo", { msg: "hi" }, ctx());
+    expect(out.output).toBe("echo: hi"); // the tool actually still works, not a stale registration
+    mgr.stopAll();
+  });
+
+  test("enabling a genuinely stopped/disabled server restarts it clean", async () => {
+    const registry = new ToolRegistry();
+    const mgr = new McpManager({ registry, trust: new TrustStore(join(realDir(), "trust.json")) });
+    const cfg = { command: "bun", args: ["run", FIXTURE] };
+    await mgr.startAll({ fake: cfg });
+    mgr.stopServer("fake");
+    expect(registry.has("mcp__fake__echo")).toBe(false);
+
+    await mgr.startOneUserServer("fake", cfg);
+    expect(registry.has("mcp__fake__echo")).toBe(true);
+    expect(mgr.list().find((s) => s.name === "fake")?.status).toBe("connected");
+    mgr.stopAll();
+  });
+});
+
 describe.if(isMac)("McpManager.list(cwd) + stopAll", () => {
   test("list(trusted cwd) includes the project server (source project); list() only user", async () => {
     const dir = projDir();
