@@ -148,6 +148,30 @@ export class WinterClient {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  /**
+   * Daemon settings surface batch 3 (item 4) — THE FAILURE MODE THIS DOOR HAS: a plain (non-
+   * `.strict()`) zod object schema's `safeParse` STRIPS any key on the raw wire object that the
+   * schema doesn't declare — silently, no error, `r.success` stays `true`. This is why
+   * `manifestHooks` never reached a single caller before batch 1: the daemon's `plugins.list`
+   * handler had been sending it on the wire the whole time, but `PluginInfoSchema` (protocol/src/
+   * methods.ts) hadn't been given the field yet, so every `validated(PluginInfoSchema, …)` call
+   * here quietly returned an object with `manifestHooks` already gone — nothing in this file, or in
+   * any caller, ever saw a parse failure to investigate.
+   *
+   * WHAT TO DO when the daemon starts sending a new field: add it to the corresponding result
+   * schema in `packages/protocol/src/methods.ts` (as `.optional()` if older daemons may still omit
+   * it) BEFORE — or in the same change as — the code here or in a caller that reads it. Adding the
+   * field to the schema is necessary AND sufficient; nothing else in this file needs to change for
+   * the new field to start surviving `validated()`.
+   *
+   * A cheap, non-invasive structural guard this file's own style would tolerate (proposed, NOT
+   * implemented — the caller of this task decided a real fix belongs in the report, not a
+   * behavioral change slipped into a "just add a comment" item): in a dev/debug build only, after a
+   * successful parse, compare `Object.keys(raw)` (when `raw` is a plain object) against
+   * `Object.keys(r.data)` and `console.error` once per `method` the first time a key is seen on the
+   * wire that the parsed result doesn't carry — a same-process early-warning for exactly this class
+   * of silent drop, without ever failing a real request or touching production behavior.
+   */
   private validated(schema: { safeParse(v: unknown): any }, raw: unknown, method: string): any {
     const r = schema.safeParse(raw);
     if (!r.success) throw new Error(`invalid result from server for ${method}`);
