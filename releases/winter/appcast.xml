@@ -131,5 +131,25 @@
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
       <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.115.0/Winter-0.115.0.zip" sparkle:edSignature="LkXq4S0wHepYfExThEGSfCTvCozshJDm1Rfd+xvpqrmD1W4ej8drhVTe1yYB0EZcJ6crebtwc3mZnyoTBMJmBA==" length="508609414" type="application/octet-stream"/>
     </item>
+      <item>
+      <title>0.115.1</title>
+      <description><![CDATA[<p>Winter agent SDK 0.0.17 · Claude Agent SDK 0.3.250</p>
+<h2>Winter's own jobs run on your model</h2>
+<p>Chat titles, the purge, dreaming and the command reviewer only ran when your default model was a Codex or OpenAI one. With any other default they were quietly switched off.</p>
+<ul>
+  <li>These jobs now run on any model except Claude ones. By default they use your default model's provider, or a Codex or OpenAI sign-in if you have one; you can choose each one in <strong>Settings › Roles</strong>.</li>
+  <li>When one of them cannot run, <strong>Roles › Notes</strong> says why — no key for its provider, or no model chosen — instead of saying nothing.</li>
+  <li>The command reviewer never stops: if its chosen model cannot run, it keeps reviewing on another and says so.</li>
+  <li>Settings changes now apply without a restart whatever your default model is.</li>
+</ul>
+<h2>Fixes</h2>
+<ul>
+  <li>The <strong>Remove</strong> buttons in <strong>Settings › Providers</strong> open their confirmation again.</li>
+</ul>]]></description>
+      <sparkle:version>0.115.1</sparkle:version>
+      <sparkle:shortVersionString>0.115.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.115.1/Winter-0.115.1.zip" sparkle:edSignature="PZuscKPgxzdYW7MRJi2wSTS15Y6w48OTXkcD8C/4Ez2bXtYqCxtxNCdnkIZUf9vfHKKlCBoGWH60RMBLC3S7BQ==" length="508616423" type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>
