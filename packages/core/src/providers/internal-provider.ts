@@ -30,7 +30,7 @@ import type { SecretStore } from "../auth/secret-store";
 import { credentialInventory } from "../runtime-sdk/keychain";
 import { implicitEffortFor, rowForTag } from "../runtime-sdk/provider-selection";
 import { providerBaseUrlFor, type Settings } from "../settings";
-import { catalogApiEndpointFor, internalAdapterFor } from "./internal-adapters";
+import { catalogApiEndpointFor, catalogApiEndpointRawFor, internalAdapterFor } from "./internal-adapters";
 import { credentialStoreOverSecretStore } from "./credential-store";
 import { runtimeBackedProvider } from "./runtime-provider";
 import type { Provider } from "./types";
@@ -95,7 +95,12 @@ export function buildInternalProvider(cfg: {
   // request to whatever the adapter would have guessed.
   const override = providerBaseUrlFor(cfg.settings, providerId);
   const baseUrl = cfg.testBackendUrl ?? override ?? catalogApiEndpointFor(providerId);
-  if (baseUrl === undefined) {
+  // `undefined` is legitimate for a family that serves exactly one catalog provider — the adapter's own
+  // generated default applies, which is what the two retired factories relied on
+  // (`catalogApiEndpointFor`'s doc). It is a REFUSAL only for a multi-provider family, which has no
+  // default to fall back to: sending a request to whatever such an adapter would have guessed is worse
+  // than saying the provider is unusable.
+  if (baseUrl === undefined && catalogApiEndpointRawFor(providerId) === undefined) {
     return { refusal: { code: "provider-unsupported", detail: `the pinned catalog ships no API endpoint for ${providerId}` } };
   }
   // `local: true` ONLY for an endpoint the USER entered (`providers.<id>.baseUrl`) or the loopback test
@@ -111,7 +116,7 @@ export function buildInternalProvider(cfg: {
     id: providerId,
     adapter,
     context: {
-      connection: { providerId, baseUrl, ...(local ? { local: true } : {}) },
+      connection: { providerId, ...(baseUrl === undefined ? {} : { baseUrl }), ...(local ? { local: true } : {}) },
       credentials: credentialStoreOverSecretStore(cfg.secrets),
       authRef: { kind: "keychain", account },
       stallTimeoutMs: 60_000,

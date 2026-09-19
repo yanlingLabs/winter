@@ -125,7 +125,9 @@ export function createInternalProviderView(deps: {
  * ever touches a secret store.
  */
 export function staticInternalProviderView(credentialed: Iterable<string> = []): InternalProviderView {
-  const set: ReadonlySet<string> = new Set(credentialed);
+  // Filtered to the eligible set for consistency with the real view — nothing on this path consults
+  // `credentialed` today, but an unfiltered snapshot would be a different shape for no reason.
+  const set: ReadonlySet<string> = new Set([...credentialed].filter((id) => internalEligibleProviderIds().has(id)));
   const snapshot: InternalProviderSnapshot = { credentialed: set };
   return {
     eligible: () => internalEligibleProviderIds(),
