@@ -60,8 +60,14 @@ export interface InternalProviderView {
   /** The one-line human summary `daemon.ts` prints at boot and `refresh()` prints on a change — the
    *  SAME sentence, so the log never has two spellings of the same fact. */
   summary(): string;
-  /** Re-probes the eligible slots and updates the snapshot. Never throws. */
-  refresh(): Promise<void>;
+  /**
+   * Re-probes the eligible slots and updates the snapshot. Never throws.
+   *
+   * `quiet` suppresses the change line for the ONE caller that prints `summary()` itself right after:
+   * `daemon.ts`'s boot. Without it a first boot whose legacy credential migration just wrote a key
+   * prints two lines about the same fact — the seed→probe diff, then the summary.
+   */
+  refresh(opts?: { quiet?: boolean }): Promise<void>;
 }
 
 export function createInternalProviderView(deps: {
@@ -93,7 +99,7 @@ export function createInternalProviderView(deps: {
     generation: () => generation,
     changedAt: () => changedAt,
     summary: () => summaryOf(credentialed),
-    async refresh() {
+    async refresh(opts) {
       // Only the ELIGIBLE slots, never the whole ~150-row inventory: this runs on every credential
       // write and the rows for providers Winter's jobs can never use would be pure cost.
       const slots = credentialInventory().filter((s) => eligible.has(s.provider));
@@ -113,7 +119,7 @@ export function createInternalProviderView(deps: {
       snapshot = { credentialed };
       generation += 1;
       changedAt = new Date().toISOString();
-      log(`${summaryOf(next)} (was ${describe(before)})`);
+      if (opts?.quiet !== true) log(`${summaryOf(next)} (was ${describe(before)})`);
     },
   };
   return view;

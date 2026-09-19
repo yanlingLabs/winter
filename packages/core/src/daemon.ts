@@ -831,7 +831,9 @@ export async function startDaemon(opts: {
     internalRouter = staticInternalRouter({ view: internalView, provider: opts.agentProvider.provider, model: opts.agentProvider.model });
   } else if (settings) {
     internalView = createInternalProviderView({ secrets, seed: presentProviders });
-    await internalView.refresh();
+    // `quiet`: the summary below is the boot's ONE line about this. Without it a first boot whose
+    // legacy credential migration just wrote a key prints the seed→probe diff AND the summary.
+    await internalView.refresh({ quiet: true });
     internalRouter = createInternalRouter({ view: internalView, secrets });
     // THE boot line, replacing the every-boot "the daemon's internal provider only builds for
     // codex-oauth/openai … are inert" one. Accurate in both directions: which providers Winter's own
