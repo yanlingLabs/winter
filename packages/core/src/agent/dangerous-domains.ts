@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 /**
  * SP-approvals Task 10 (user addition 2026-07-21, spec §7 "Web tools"): the web tools are free by
  * default like every other tool, but keep ONE safety floor no policy can silence — a fetch whose
@@ -151,7 +152,7 @@ export function dangerousDomainMatch(host: string, entries: readonly string[]): 
  */
 export function normalizeDangerousDomain(value: string): string {
   let v = value.trim().toLowerCase();
-  if (v.startsWith("*.")) v = v.slice(2);
+  while (v.startsWith("*.")) v = v.slice(2); // repeated, as the runtime child strips it: `*.*.h` is `h`, not an entry that matches nothing
   while (v.startsWith(".")) v = v.slice(1);
   const asUrl = hostnameOfUrlShaped(v);
   if (asUrl !== undefined) v = asUrl;
@@ -180,6 +181,12 @@ function hostnameOfUrlShaped(value: string): string | undefined {
   return undefined;
 }
 
+/** An IPv4/IPv6 literal, bracketed or bare — the forms `URL.hostname` and a user entry can carry. */
+function isIpLiteral(value: string): boolean {
+  const bare = value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1) : value;
+  return isIP(bare) !== 0;
+}
+
 /**
  * `dangerousDomainMatch` for a HOST-OR-DOMAIN string rather than a url — the form a `WebSearch`
  * call's own `allowed_domains`/`blocked_domains` entries take. Normalizes BOTH sides
@@ -196,7 +203,13 @@ export function dangerousHostMatch(host: unknown, entries: readonly string[]): s
     if (typeof entry !== "string") continue;
     const e = asciiDomain(normalizeDangerousDomain(entry));
     if (!e) continue;
-    if (dangerousDomainMatch(h, [e]) !== null) return entry;
+    // The runtime child's own matcher (its `blockedDomains` filter) has two EXACT-ONLY rules, and this
+    // one must agree with it — on the official leg this is the only enforcer there is. A SINGLE-LABEL
+    // entry (`com`, `localhost`) is never a suffix: one typo'd or truncated user entry would otherwise
+    // block every `.com`. And an IP LITERAL on either side is never a suffix relation: `0.1` is not a
+    // parent of `127.0.0.1`. The shipped list is all multi-label names, so it is unaffected.
+    const exactOnly = !e.includes(".") || isIpLiteral(e) || isIpLiteral(h);
+    if (exactOnly ? h === e : dangerousDomainMatch(h, [e]) !== null) return entry;
   }
   return null;
 }

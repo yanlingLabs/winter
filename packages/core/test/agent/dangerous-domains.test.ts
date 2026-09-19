@@ -175,3 +175,29 @@ describe("normalizeDangerousDomain — url-shaped user entries (N1)", () => {
     expect(dangerousHostMatch("notevil.example", ["https://evil.example/x"])).toBeNull();
   });
 });
+
+// 2026-09-19: the runtime child's own `blockedDomains` matcher has two EXACT-ONLY rules; this host-side
+// matcher (the only floor on the official leg) must agree with it rather than over-block.
+describe("dangerousHostMatch — exact-only entries", () => {
+  test("a single-label entry never acts as a suffix: `com` does not block every .com", () => {
+    expect(dangerousHostMatch("example.com", ["com"])).toBeNull();
+    expect(dangerousHostMatch("localhost", ["localhost"])).toBe("localhost");
+    expect(dangerousHostMatch("app.localhost", ["localhost"])).toBeNull();
+  });
+  test("an IP literal on either side is never a suffix relation", () => {
+    expect(dangerousHostMatch("127.0.0.1", ["0.1"])).toBeNull();
+    expect(dangerousHostMatch("127.0.0.1", ["0.0.1"])).toBeNull();
+    expect(dangerousHostMatch("127.0.0.1", ["127.0.0.1"])).toBe("127.0.0.1");
+    expect(dangerousHostMatch("[::1]", ["::1"])).toBeNull(); // bracketed host vs bare entry: different spellings, never a suffix guess
+  });
+  test("a repeated wildcard prefix is one entry, not an entry that matches nothing", () => {
+    expect(normalizeDangerousDomain("*.*.evil.example")).toBe("evil.example");
+    expect(dangerousHostMatch("a.evil.example", ["*.*.evil.example"])).toBe("*.*.evil.example");
+  });
+  test("every shipped entry still matches itself and a subdomain of itself", () => {
+    for (const entry of SHIPPED_DANGEROUS_DOMAINS) {
+      expect(dangerousHostMatch(entry, SHIPPED_DANGEROUS_DOMAINS)).toBe(entry);
+      expect(dangerousHostMatch(`sub.${entry}`, SHIPPED_DANGEROUS_DOMAINS)).toBe(entry);
+    }
+  });
+});
