@@ -341,3 +341,65 @@ describe("Dreamer role-health wiring (2026-09-18) — observation only", () => {
     await expect(dreamer.tick()).resolves.toBeUndefined();
   });
 });
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// B-1 (2026-09-19 review): the scheduler's slot reconciles the internal-jobs credential snapshot.
+//
+// `winter login` and bare `winter logout` write `codex-oauth:default` IN-PROCESS — no RPC, by design —
+// so a long-running daemon that nobody poked has to notice on its own. The dreamer's tick is where it
+// does, plus any `auth`-classified provider failure (the logout symptom: the snapshot still says the
+// credential is there, the provider says it is not).
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+describe("the dreamer reconciles the internal-jobs credential snapshot", () => {
+  test("every tick asks for a re-probe, even when the dream pass itself is gated out", async () => {
+    const { store, dir } = setup("winter-dreamer-refresh-");
+    let asked = 0;
+    const dreamer = new Dreamer({
+      provider: { provider: okProvider(), model: "unused" },
+      store, dir: () => dir, settings: () => null,
+      // `enabled: false` gates the dream pass out entirely — the reconcile must still happen, because
+      // it is about the DAEMON's credentials, not about whether this particular job is going to run.
+      enabled: () => false, activeTurnCount: () => 0,
+      refreshCredentials: () => { asked += 1; },
+    });
+    await dreamer.tick();
+    await dreamer.tick();
+    expect(asked).toBe(2);
+  });
+
+  test("an `auth`-class provider failure asks for a re-probe (the `winter logout` symptom)", async () => {
+    const { store, dispatchId, dir } = setup("winter-dreamer-refresh-auth-");
+    fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
+    let asked = 0;
+    const dreamer = new Dreamer({
+      provider: {
+        provider: new FakeProvider([[{ type: "error", code: "auth", message: "invalid credential" }]]),
+        model: "unused",
+      },
+      store, dir: () => dir, settings: () => null,
+      enabled: () => true, activeTurnCount: () => 0,
+      refreshCredentials: () => { asked += 1; },
+    });
+    await dreamer.tick();
+    // Once for the tick itself, once for the rejected credential — both are the same rate-limited,
+    // non-blocking ask inside `InternalProviderView.refreshSoon`.
+    expect(asked).toBe(2);
+  });
+
+  test("a NON-auth failure does not ask (a 429 says nothing about which credentials exist)", async () => {
+    const { store, dispatchId, dir } = setup("winter-dreamer-refresh-429-");
+    fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
+    let asked = 0;
+    const dreamer = new Dreamer({
+      provider: {
+        provider: new FakeProvider([[{ type: "error", code: "rate_limit", message: "429" }]]),
+        model: "unused",
+      },
+      store, dir: () => dir, settings: () => null,
+      enabled: () => true, activeTurnCount: () => 0,
+      refreshCredentials: () => { asked += 1; },
+    });
+    await dreamer.tick();
+    expect(asked).toBe(1); // the tick's own ask, and nothing more
+  });
+});

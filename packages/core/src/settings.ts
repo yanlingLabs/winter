@@ -1833,7 +1833,8 @@ export function internalEligibleProviderIds(): ReadonlySet<string> {
  * WHICH eligible provider Winter's own jobs PREFER, given a live credential snapshot — the answer
  * an internal role with no explicit pin follows.
  *
- * Two rungs, and the first is the whole point of the 2026-09-19 fix: `settings.provider.model`'s own
+ * Three rungs, and the first is the whole point of the 2026-09-19 fix (the THIRD produces no runnable
+ * default at all — see its own comment in the body): `settings.provider.model`'s own
  * provider wins whenever it is eligible AND credentialed, so a DeepSeek user with a DeepSeek key gets
  * titles on DeepSeek with ZERO setup. Only when the session default's provider cannot serve these
  * jobs (a Claude default, or an eligible provider with no key stored yet) does this fall to
@@ -1864,6 +1865,18 @@ export function preferredInternalProviderFor(
   // explicit pin (`no-default-model`, `internalRoleEffectiveTag` below).
   for (const id of INTERNAL_PROVIDER_IDS) {
     if (eligible.has(id) && snapshot.credentialed.has(id)) return id;
+  }
+  // THE LAST RUNG EXISTS ONLY TO NAME A REFUSAL, and it is worth being explicit about why, because it
+  // looks like the guess the rung above just removed and is the opposite of one.
+  //
+  // A home with (say) only a Groq key and a Claude session default HAS a credential Winter could use —
+  // it just has no model on it that the user can be said to have chosen. Answering `undefined` here
+  // would report `no-internal-credential` ("sign in / add a key"), which is both wrong and unactionable
+  // for that user: they already did. So this names the provider, `internalRoleDefaultTagFor` still
+  // refuses to invent a model on it, and the role reports `no-default-model` ("pick a model") pointing
+  // at the provider in question. NOTHING EVER RUNS off this rung — it produces no tag by construction.
+  for (const id of internalProviderPreferenceOrder()) {
+    if (snapshot.credentialed.has(id)) return id;
   }
   return undefined;
 }
@@ -2112,8 +2125,18 @@ export function roleCarriesEffort(role: ModelRole): boolean {
  *     (`assertRoleEffortSelectable`), so what was selectable at write time is what is spent. What
  *     `"none"` then MEANS is the transport's business, not a second meaning invented here: the runtime
  *     leg's `sdkEffortOf` drops it (exactly what it does to a session's own stored `"none"` — the SDK's
- *     `EffortLevel` has no such member, so the request carries no effort), and the internal `Provider`
- *     sends it verbatim (exactly what `RESEARCH_EFFORT` has always done).
+ *     `EffortLevel` has no such member, so the request carries no effort).
+ *
+ *     2026-09-19 (review M-1) — the INTERNAL `Provider` path DROPS it too now, and this paragraph is why.
+ *     It used to send `"none"` verbatim, which was only ever safe because those adapters were built with
+ *     no descriptors at all; with real ones the SDK's `mapEffort` refuses `"none"` outright, and piping it
+ *     through `implicitEffortFor` to dodge that would hit exactly the miss-to-`defaultEffort` trap this
+ *     case exists to avoid (measured: `"none"` on `codex-oauth/gpt-5.6-terra` came back `"medium"`). So
+ *     `internalWireEffortFor` (providers/internal-provider.ts) drops it, and the honest consequence is
+ *     that the request carries NO effort and the PROVIDER's own default applies: **Winter cannot express
+ *     `"none"` on this path yet.** SDK CARRY — the catalog omits `"none"` from the vocabularies whose
+ *     endpoints demonstrably accept it (`openai/gpt-5.6-terra`'s own live-probe `sourceRef` records that
+ *     it is), so either the catalog lists it or `mapEffort` grows a sanctioned "send no reasoning block".
  *
  *  3. ANY OTHER LEVEL -> `implicitEffortFor(model, stored)`: sent when the row lists it, else the row's
  *     own default, else omitted. NEVER a refusal and never a throw — the write door validated the

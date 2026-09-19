@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileSecretStore, OPENAI_API_KEY_SECRET, CODEX_SECRET_NAMES, writeCredentialMaterial } from "@yanlinglabs/winter-core";
-import { runCredentialsRoute, runLogoutOpenAiRoute, writeCredentialThroughDaemonOrLocally, credentialEffectNote, type CredentialRpcDoor } from "../src/main";
+import { runCredentialsRoute, runLogoutOpenAiRoute, writeCredentialThroughDaemonOrLocally, notifyDaemonOfOutOfBandCredentialChange, credentialEffectNote, type CredentialRpcDoor } from "../src/main";
 import { METHODS } from "@yanlinglabs/winter-protocol";
 
 // WS-19 (W19-11, acceptance B-4) — `winter credentials` and `winter logout --openai`.
@@ -299,5 +299,51 @@ describe("the daemon door (fix round 4)", () => {
     expect(calls[0]!.params).toEqual({ providerId: "exa", apiKey: SENTINEL });
     // The value never touched this process's own store on that path — the daemon wrote it.
     expect(await secrets.get("exa-api-key")).toBeNull();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// B-1 (2026-09-19 review): `winter login` (ChatGPT/Codex) and bare `winter logout` write
+// `codex-oauth:default` IN-PROCESS and cannot go through `credential.set` (that door takes an API-KEY
+// string; this material is an OAuth record). So a LIVE daemon has to be told, or its cached
+// "which providers can Winter's own jobs run on" snapshot stays wrong until a restart.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+describe("notifyDaemonOfOutOfBandCredentialChange", () => {
+  /** The same shape the WS-19 block above uses, scoped here (that one is a nested helper). */
+  function poked(answers: Record<string, unknown> = {}) {
+    const calls: Array<{ method: string; params: unknown }> = [];
+    const door: CredentialRpcDoor = {
+      request: async (method: string, params?: unknown) => {
+        calls.push({ method, params });
+        const answer = answers[method];
+        if (answer instanceof Error) throw answer;
+        return answer ?? { ok: true };
+      },
+      close: () => {},
+    };
+    return { door, calls };
+  }
+
+  test("pokes a live daemon through credential.list — the handler that reconciles its view", async () => {
+    const { door, calls } = poked({ [METHODS.credentialList]: { providers: [] } });
+    expect(await notifyDaemonOfOutOfBandCredentialChange(async () => door)).toBe(true);
+    expect(calls.map((c) => c.method)).toEqual([METHODS.credentialList]);
+    // An EXISTING method on purpose: a new one would engage the whole RPC checklist for a call whose
+    // result nobody reads.
+    expect(calls[0]!.params).toEqual({});
+  });
+
+  test("answers false with no daemon — `winter login` has always worked with the daemon down", async () => {
+    expect(await notifyDaemonOfOutOfBandCredentialChange(async () => undefined)).toBe(false);
+  });
+
+  test("answers false on a refusal or a dropped socket, and never throws into the login flow", async () => {
+    const { door } = poked({ [METHODS.credentialList]: new Error("request timed out") });
+    expect(await notifyDaemonOfOutOfBandCredentialChange(async () => door)).toBe(false);
+  });
+
+  test("the printed note tells the truth either way", () => {
+    expect(credentialEffectNote("daemon")).toContain("in effect now");
+    expect(credentialEffectNote("in-process")).toContain("stored only");
   });
 });
