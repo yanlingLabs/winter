@@ -16,6 +16,13 @@ import { facingNameToTag, isModelTag, splitTag, UNSTATED_TAG, WINTER_TEST_PREFIX
 // to (`effortToSpendForRole` below) — the same function the dispatch pin's fixed tier already goes
 // through, so a role effort and a code constant are mapped by one rule.
 import { effortVocabularyFor, implicitEffortFor, rowForTag } from "./runtime-sdk/provider-selection";
+// 2026-09-19 (the internal-jobs widening): the two catalog-derived inputs to
+// `internalEligibleProviderIds` below. `credentialInventory` is which providers this daemon can store
+// a credential for at all; `internalDrivableAdapterIds` is which adapter families the daemon's own
+// `Provider` translation can drive. Both are leaf reads — neither module imports this one, so these
+// are static imports rather than a lazy hop.
+import { credentialInventory } from "./runtime-sdk/keychain";
+import { internalDrivableAdapterIds } from "./providers/internal-adapters";
 
 /** Reasoning-effort slugs valid on the wire — measured LIVE against the Codex OAuth endpoint
  *  (2026-07-30), one model at a time, NOT read off the /models catalogue text. That distinction
@@ -1741,6 +1748,174 @@ export function permittedProviders(filterProviderIds?: ReadonlySet<string>): Arr
     const models = catalog.models.filter((m) => m.providerId === p.id && m.status !== "blocked").map((m) => m.key as ModelTag);
     if (models.length === 0) continue;
     out.push({ providerId: p.id, displayName: p.displayName, models });
+  }
+  return out;
+}
+
+/**
+ * USER RULING 2026-09-19: Winter's OWN background jobs — session titles, the bash safety reviewer,
+ * the dreamer and the session cleaner — never run on a FIRST-PARTY CLAUDE provider. "claude models
+ * run through anthropic which has its own reviewer anyway": the official leg exists for Claude, and
+ * a Winter-internal job that borrowed an Anthropic credential would be spending a subscription/
+ * Console entitlement on work the user never asked for.
+ *
+ * The three ids, and why each is here: `anthropic` (the API-key row), `console` (the Console-profile
+ * row) and `cc` (reserved for the claude.ai subscription arm, `runtime-sdk/create.ts`'s tag prefixes).
+ * This is an exclusion by PROVIDER ID, deliberately NOT by adapter family — a third-party provider
+ * that merely speaks the Anthropic dialect (`deepseek-anthropic`, `zai-anthropic`, `kimi-coding`, …)
+ * is an ordinary token-priced vendor and stays eligible.
+ */
+export const CLAUDE_FIRST_PARTY_PROVIDER_IDS = ["anthropic", "console", "cc"] as const;
+
+/**
+ * A LIVE snapshot of which providers this home actually holds credential material for, threaded
+ * into the otherwise-pure readers below.
+ *
+ * Credential presence is an ASYNCHRONOUS fact (a Keychain read, ~150 slots wide) and every reader
+ * in this module is synchronous and pure, so presence is never probed here — it arrives as a value.
+ * `providers/internal-view.ts` owns the one snapshot the daemon threads everywhere (seeded from
+ * `daemon.ts`'s own boot probe, refreshed on every credential write), which is what makes the wire
+ * (`settings.modelRoles`), the default-tag readers below and the actual dispatcher
+ * (`providers/internal-router.ts`) provably read the SAME answer — the generalisation of the
+ * anti-race property `createRebindableProvider`'s header describes.
+ *
+ * ABSENT means "no snapshot was threaded": every reader then falls back to the pre-2026-09-19
+ * behaviour (derive from `settings.provider.model` alone), which is what keeps ~10 existing
+ * `pinsFor` callers and every test that predates this unchanged.
+ */
+export interface InternalProviderSnapshot {
+  /** Eligible providers (`internalEligibleProviderIds`) whose credential slot holds material NOW. */
+  credentialed: ReadonlySet<string>;
+}
+
+let memoisedInternalEligible: ReadonlySet<string> | undefined;
+
+/**
+ * WHICH catalog providers Winter's own jobs may run on — derived from the pinned catalog, never a
+ * hand-kept list (the same discipline `credentialInventory()` already follows for credential slots).
+ *
+ * Four conditions, each for its own reason:
+ *  1. the provider is an ordinary model-role candidate at all — `permittedProviders()`'s own floor
+ *     (`scope === "llm"`, `risk.class !== "blocked"`), reused rather than restated;
+ *  2. it is not a first-party Claude provider (`CLAUDE_FIRST_PARTY_PROVIDER_IDS`, the user's ruling);
+ *  3. this daemon has a credential SLOT for it — a row in `credentialInventory()`. That inventory is
+ *     itself catalog-derived and already excludes every `requiresUserEndpoint` row (`azure-ai`, `oci`
+ *     — whose shipped endpoint is a placeholder host), every local-none row and every cloud-
+ *     credential-chain-only row, so a provider with no way to store a key is absent by construction
+ *     rather than by a denylist;
+ *  4. the daemon can actually DRIVE its adapter family — `INTERNAL_ADAPTER_IDS`
+ *     (`providers/internal-adapters.ts`). `bedrock`/`vertex` are the exclusions with teeth: their
+ *     credential material is `aws`/`gcp-*`, which `providers/credential-store.ts` refuses typed.
+ *
+ * Memoised: `loadCatalog()` is itself memoised and immutable for the life of the process.
+ */
+export function internalEligibleProviderIds(): ReadonlySet<string> {
+  if (memoisedInternalEligible !== undefined) return memoisedInternalEligible;
+  const excluded = new Set<string>(CLAUDE_FIRST_PARTY_PROVIDER_IDS);
+  const withSlots = new Set(credentialSlotProviderIds());
+  const drivable = internalDrivableAdapterIds();
+  const out = new Set<string>();
+  for (const p of permittedProviders()) {
+    if (excluded.has(p.providerId)) continue;
+    if (!withSlots.has(p.providerId)) continue;
+    const adapterId = loadCatalog().providers.find((c) => c.id === p.providerId)?.adapterId;
+    if (adapterId === undefined || !drivable.has(adapterId)) continue;
+    out.add(p.providerId);
+  }
+  memoisedInternalEligible = out;
+  return out;
+}
+
+/**
+ * WHICH eligible provider Winter's own jobs PREFER, given a live credential snapshot — the answer
+ * an internal role with no explicit pin follows.
+ *
+ * Two rungs, and the first is the whole point of the 2026-09-19 fix: `settings.provider.model`'s own
+ * provider wins whenever it is eligible AND credentialed, so a DeepSeek user with a DeepSeek key gets
+ * titles on DeepSeek with ZERO setup. Only when the session default's provider cannot serve these
+ * jobs (a Claude default, or an eligible provider with no key stored yet) does this fall to
+ * `internalProviderPreferenceOrder()`'s first credentialed member — never to Claude, which is not in
+ * the eligible set at all.
+ *
+ * `undefined` means "nothing runnable": every internal role then reports `no-internal-credential`
+ * (`providers/internal-router.ts`) and the jobs are inert — one log line per change, never per call.
+ *
+ * With NO snapshot this reports `ownProviderFor(settings)` when eligible and `undefined` otherwise —
+ * i.e. exactly the pre-2026-09-19 "is the daemon's own provider internal" question, so a caller that
+ * threads no snapshot is unchanged.
+ */
+export function preferredInternalProviderFor(
+  settings: Settings | null | undefined,
+  snapshot?: InternalProviderSnapshot,
+): string | undefined {
+  const eligible = internalEligibleProviderIds();
+  const own = ownProviderFor(settings);
+  if (snapshot === undefined) return eligible.has(own) ? own : undefined;
+  if (eligible.has(own) && snapshot.credentialed.has(own)) return own;
+  for (const id of internalProviderPreferenceOrder()) {
+    if (snapshot.credentialed.has(id)) return id;
+  }
+  return undefined;
+}
+
+/**
+ * The deterministic fallback order — `INTERNAL_PROVIDER_IDS` first, in their own order (the two
+ * providers Winter's jobs have always run on; a user who signed in with ChatGPT expects the dreamer
+ * on Codex, not on whichever third-party key happens to be stored too), then every other eligible
+ * provider in `credentialInventory()` order, which is the ONE provider ordering this daemon already
+ * pins deliberately (see that function's "THE ORDER IS LOAD-BEARING" note).
+ *
+ * Deterministic by construction: no `Set` iteration order and no catalog scan order leaks into it.
+ */
+export function internalProviderPreferenceOrder(): readonly string[] {
+  const eligible = internalEligibleProviderIds();
+  const head = (INTERNAL_PROVIDER_IDS as readonly string[]).filter((id) => eligible.has(id));
+  const seen = new Set(head);
+  const tail = credentialSlotProviderIds().filter((id) => eligible.has(id) && !seen.has(id));
+  return [...head, ...tail];
+}
+
+/**
+ * The DEFAULT model for an internal role sitting on `providerId` — the rule that had to be invented
+ * because today's defaults are FACING NAMES (`terra`/`luna`) that only the OpenAI family declares,
+ * and 2026-09-19 lets these roles run on any eligible provider.
+ *
+ * Four rungs, in order, and the order is the design:
+ *  1. the provider's own `terra`/`luna` family slot (`facingNameToTag`) — the family-slot machinery,
+ *     used FIRST so codex-oauth/openai users' defaults are byte-identical to what they were before;
+ *  2. `settings.provider.model` itself, when this IS the session default's provider — the model the
+ *     user already picked, never a model this code chose for them. This is the DeepSeek case: no
+ *     `terra` slot exists on that provider, and titling on the user's own default is both correct and
+ *     zero-setup;
+ *  3. the provider's `terra`/`luna`-equivalent by way of nothing — there is no such thing, so instead
+ *     the provider's FIRST non-blocked llm row in catalog order. Deterministic, and the honest answer
+ *     for "run this job on a provider the user has a key for but has never named a model on";
+ *  4. `settings.provider.model` as the final fallback, so this never fabricates a tag and never
+ *     throws (the same posture `pinsFor` adopted after the 0.114.1 field report).
+ */
+export function internalRoleDefaultTagFor(
+  settings: Settings | null | undefined,
+  providerId: string,
+  slot: "terra" | "luna",
+): ModelTag {
+  const primary = (settings?.provider?.model ?? DEFAULT_PROVIDER.model) as ModelTag;
+  const slotted = facingNameToTag(providerId, slot);
+  if (slotted !== undefined) return slotted;
+  if (providerId === ownProviderFor(settings)) return primary;
+  const first = loadCatalog().models.find((m) => m.providerId === providerId && m.status !== "blocked");
+  return (first?.key as ModelTag) ?? primary;
+}
+
+/** The provider ids `credentialInventory()` names, de-duplicated, in inventory order. Spelled here
+ *  (rather than inline twice above) because the inventory carries TWO rows for `anthropic` and the
+ *  order of the FIRST occurrence is what `internalProviderPreferenceOrder` promises. */
+function credentialSlotProviderIds(): readonly string[] {
+    const out: string[] = [];
+  const seen = new Set<string>();
+  for (const slot of credentialInventory()) {
+    if (seen.has(slot.provider)) continue;
+    seen.add(slot.provider);
+    out.push(slot.provider);
   }
   return out;
 }
