@@ -27,6 +27,9 @@ struct TranscriptView: View {
     var onOpenFile: ((String) -> Void)? = nil
     /// editor-product Task 6 — see `WindowContentView.sessionHasWorkingDirectory`'s own doc.
     var sessionHasWorkingDirectory: Bool = false
+    /// How far the floating composer covers the transcript's bottom (the shell, where the
+    /// transcript runs beneath it) — the "latest" pill sits above it. Zero elsewhere.
+    var bottomOverlayInset: CGFloat = 0
     @State private var nearBottom = true
     @State private var showLatestPill = false
 
@@ -92,7 +95,8 @@ struct TranscriptView: View {
                 if new > old { follow(proxy) }
             }
             .overlay(alignment: .bottomTrailing) {
-                if showLatestPill { latestPill(proxy) }
+                // Above the floating composer when the transcript runs beneath it.
+                if showLatestPill { latestPill(proxy).padding(.bottom, bottomOverlayInset) }
             }
         }
     }
