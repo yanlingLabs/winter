@@ -263,6 +263,23 @@ class RuntimeBackedProvider implements Provider {
 }
 
 /**
+ * 2026-09-19: the class's constructor, as a function — `providers/internal-provider.ts` builds ONE of
+ * these per credentialed catalog provider (adapter + context assembled from the catalog and the
+ * credential inventory), instead of the two hardcoded factories below. Exported rather than the class
+ * so nothing outside this file can depend on `RuntimeBackedProvider`'s identity: every consumer only
+ * ever depended on `Provider`, which is exactly what made the per-provider fan-out possible.
+ */
+export function runtimeBackedProvider(cfg: {
+  id: string;
+  adapter: ProviderAdapter;
+  context: ProviderContext;
+  models: () => ModelInfo[];
+  onSubscriptionQuota?: (info: Record<string, unknown>) => void;
+}): Provider {
+  return new RuntimeBackedProvider(cfg);
+}
+
+/**
  * `settings.provider.type === "openai-compatible"`: `local: true` on the connection profile is a
  * DELIBERATE compatibility decision, not an oversight — provider-runtime's endpoint policy refuses
  * a plain-http or literal loopback/private-address base URL unless the connection declares itself
