@@ -83,5 +83,53 @@
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
       <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.114.4/Winter-0.114.4.zip" sparkle:edSignature="nTnSh5ZGev+V82s6q3W5++Dy0lbZmwP2CGFDYStsKyzXY2Sb1qUwxcJbjlm5YbRU4Odxb9GDjzEf1MjCyfkODQ==" length="507926708" type="application/octet-stream"/>
     </item>
+      <item>
+      <title>0.115.0</title>
+      <description><![CDATA[<p>Winter agent SDK 0.0.17 · Claude Agent SDK 0.3.250</p>
+<h2>A new look for the Mac app</h2>
+<p>The window is redrawn in the ChatGPT app's shape: a translucent sidebar that shows the desktop through it and fades at its edges, a centred transcript that runs from the top of the window to the bottom beneath a see-through composer, and one quiet type scale throughout.</p>
+<ul>
+  <li>The composer's model button reads the model's short name ("5.6 Sol", "Fable 5.1"). Clicking it opens a small panel with the models in the current family, their providers and prices, an <strong>Other models</strong> card with every family, and an <strong>Effort</strong> list.</li>
+  <li>Switching to a model that cannot take the effort you had chosen now clears it, instead of the next turn being refused.</li>
+  <li>The Chats and Code lists, the Library (skills, plugins, hooks, MCP servers and agents), paired devices and updates all share one glass panel style.</li>
+  <li>Updates are checked and downloaded inside the app, with release notes and the installed versions of Winter, its runtimes and Chromium.</li>
+</ul>
+<h2>Settings</h2>
+<p>Settings is now a page of its own, laid out like ChatGPT's, with a searchable sidebar.</p>
+<ul>
+  <li><strong>Roles</strong> chooses the model and reasoning effort for each job Winter runs: new sessions, Dispatch, dreaming, the purge, chat titles, the page reader, the command reviewer and the advisor. A role whose model is failing (usage limits, no credits) shows a short note instead of failing silently.</li>
+  <li><strong>Providers</strong> lists your keys and sign-ins, with a search over every provider you can add.</li>
+  <li><strong>Plugins</strong> opens the Library at plugins, skills, hooks, MCP servers or agents.</li>
+</ul>
+<h2>Dispatch</h2>
+<ul>
+  <li>The Dispatch thread has its own backdrop: a field of particles that leans away from the pointer, and sends a pulse outward from the composer while Dispatch is working.</li>
+  <li>The work panel toggle now works on Dispatch too, and lists the sessions it is running.</li>
+  <li>The Dispatch composer shows only the approval mode; its model is chosen in Settings.</li>
+</ul>
+<h2>Web tools follow Claude Code</h2>
+<ul>
+  <li>Sessions use <strong>WebFetch</strong> (reads a page and answers a question about it) and <strong>WebSearch</strong>, in Claude Code's own shapes.</li>
+  <li>Chat and Dispatch answer through <strong>Search</strong>, which returns a written answer with its sources. On the Mac and the CLI it falls back to WebSearch when no Exa key is stored; the iPhone's own chat still needs the Exa key. Adding or removing the Exa key takes effect on the next turn.</li>
+  <li>Dangerous domains are now a hard block in every mode, Code included, and the block reaches Claude models' own web tools too.</li>
+  <li>Fetching a private or local address asks first in Code, and is refused in Chat and Dispatch.</li>
+  <li>The Brave web-search key is retired: a stored one can be removed but no longer added.</li>
+  <li>The <strong>Research</strong> role is now the model that digests fetched pages; its fallback role is retired.</li>
+</ul>
+<h2>Fixes</h2>
+<ul>
+  <li>Changing a running session's approval mode now takes effect immediately on Claude models too, and a refused change says so beside the picker.</li>
+  <li>Empty chats that only ever had a browser tab open are cleaned up after a day.</li>
+  <li>A chat whose first reply failed still gets a title.</li>
+  <li>MCP servers can be enabled and disabled from settings, and a disabled server stays stopped.</li>
+  <li>A skill can be turned off, and agents defined in your home folder reach every session.</li>
+  <li>Stopping a turn now really stops a running foreground shell command.</li>
+  <li>A session's cost now includes the subagents it runs, which were never priced before — so it can read higher than it used to.</li>
+</ul>]]></description>
+      <sparkle:version>0.115.0</sparkle:version>
+      <sparkle:shortVersionString>0.115.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.115.0/Winter-0.115.0.zip" sparkle:edSignature="LkXq4S0wHepYfExThEGSfCTvCozshJDm1Rfd+xvpqrmD1W4ej8drhVTe1yYB0EZcJ6crebtwc3mZnyoTBMJmBA==" length="508609414" type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>
