@@ -9,7 +9,9 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 import { EXA_API_KEY_SECRET } from "../../src/agent/tools/search";
 import { WEB_SEARCH_API_KEY_SECRET } from "../../src/agent/tools/web";
-import { CODEX_SECRET_NAMES, readCredentialMaterial, writeCredentialMaterial } from "../../src/auth/credential-material";
+import { CODEX_SECRET_NAMES, CREDENTIAL_MATERIAL_NAMES, clearCredentialMaterial, readCredentialMaterial, writeCredentialMaterial } from "../../src/auth/credential-material";
+import { createInternalProviderView } from "../../src/providers/internal-view";
+import { createInternalRouter } from "../../src/providers/internal-router";
 import { ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
 
 // WS-19 (W19-3/4/5, W19-10) — the three credential RPCs over the REAL socket, in BOTH roles.
@@ -335,55 +337,91 @@ describe("credential.list / credential.set / credential.remove (WS-19)", () => {
     c.close();
   });
 
-  // MEDIUM (fix wave, pre-merge review, finding 4b): `credential.set` used to touch only LIVE
-  // SESSION children (`evictSessionsForCredentialChange`, above) — the daemon's own INTERNAL
-  // Provider (a separate `RebindableProvider`, providers/manager.ts) never got a retry, so a
-  // rebind that failed for lack of a stored credential stayed stuck until some UNRELATED
-  // settings.json write reached `settings-apply.ts`'s own retry. `refreshAgentProvider` is injected
-  // here as a spy standing in for that closure — this file has no real `agentProvider` wired at
-  // all, so a real rebind cannot be exercised end to end; the obligation this test carries is
-  // narrower and load-bearing on its own: `credential.set` calls the retry hook, with the CURRENT
-  // on-disk settings, exactly once per successful set.
-  test("finding 4b: credential.set retries a stuck internal-Provider rebind immediately (no unrelated write needed)", async () => {
-    const home = mkdtempSync(join(tmpdir(), "ws19-cred-rpc-rebind-"));
+  // 2026-09-19 (review N-5): these two tests used to pin `refreshAgentProvider`, the retry lever for the
+  // single-instance `RebindableProvider`. That handle is retired — nothing reads it — so the OBLIGATION
+  // moved rather than went away: a credential write must make the daemon's own internal-jobs view
+  // reconcile before the RPC returns, and must never fail when that reconcile does. Same two tests,
+  // against the seam that actually carries it now (`opts.internalRouter.view`).
+  test("credential.set reconciles the internal-jobs view before returning (no unrelated write needed)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ws19-cred-rpc-internal-"));
     writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "openai/gpt-5.6-sol" } }));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "auth-secrets")));
     const tokens = await authority.ensureTokens();
     const secrets = new FileSecretStore(join(home, "secrets"));
-    const refreshCalls: string[] = [];
-    const refreshAgentProvider = (next: { provider: { model: string } }) => { refreshCalls.push(next.provider.model); return true; };
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, secrets, winterHome: home, refreshAgentProvider });
+    const view = createInternalProviderView({ secrets, log: () => {} });
+    await view.refresh();
+    expect(view.credentialed().has("openai")).toBe(false);
+    const internalRouter = createInternalRouter({ view, secrets });
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, secrets, winterHome: home, internalRouter });
     cleanup = () => { server.stop(); store.close(); rmSync(home, { recursive: true, force: true }); };
 
     const c = await TestClient.connect(socketPath);
     await c.hello(tokens.harness, "test");
     const set = await c.request(METHODS.credentialSet, { providerId: "openai", apiKey: SENTINEL });
     expect(set.error).toBeUndefined();
-    expect(refreshCalls).toEqual(["openai/gpt-5.6-sol"]); // called with the CURRENT on-disk settings
+    // Reconciled BEFORE the reply — not on some later unrelated write.
+    expect(view.credentialed().has("openai")).toBe(true);
+    const removed = await c.request(METHODS.credentialRemove, { providerId: "openai" });
+    expect(removed.error).toBeUndefined();
+    expect(view.credentialed().has("openai")).toBe(false);
     c.close();
   });
 
-  test("finding 4b: a successful credential.set never fails even when the retry hook itself throws", async () => {
-    const home = mkdtempSync(join(tmpdir(), "ws19-cred-rpc-rebind-throws-"));
+  test("a successful credential.set never fails even when the reconcile itself throws", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ws19-cred-rpc-internal-throws-"));
     writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "openai/gpt-5.6-sol" } }));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "auth-secrets")));
     const tokens = await authority.ensureTokens();
     const secrets = new FileSecretStore(join(home, "secrets"));
-    const server = startIpcServer({
-      socketPath, serverVersion: "test", tokens: authority, store, secrets, winterHome: home,
-      refreshAgentProvider: () => { throw new Error("rebuild failed"); },
-    });
+    const view = createInternalProviderView({ secrets, log: () => {} });
+    const internalRouter = {
+      ...createInternalRouter({ view, secrets }),
+      view: { ...view, refresh: async () => { throw new Error("probe exploded"); } },
+    } as unknown as Parameters<typeof startIpcServer>[0]["internalRouter"];
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, secrets, winterHome: home, internalRouter });
     cleanup = () => { server.stop(); store.close(); rmSync(home, { recursive: true, force: true }); };
 
     const c = await TestClient.connect(socketPath);
     await c.hello(tokens.harness, "test");
     const set = await c.request(METHODS.credentialSet, { providerId: "openai", apiKey: SENTINEL });
     expect(set.error).toBeUndefined();
-    expect(set.result).toEqual({ ok: true }); // the credential IS saved regardless — best-effort retry only
+    expect(set.result).toEqual({ ok: true }); // the credential IS saved regardless — best-effort reconcile
+    c.close();
+  });
+
+  // B-1 (review): `winter login` / `winter logout` write `codex-oauth:default` IN-PROCESS and cannot go
+  // through `credential.set`, so `credential.list` is the door they poke afterwards. Its handler
+  // reconciles the view for exactly that reason.
+  test("credential.list reconciles the view — the door winter login/logout pokes", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ws19-cred-rpc-list-refresh-"));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } }));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "auth-secrets")));
+    const tokens = await authority.ensureTokens();
+    const secrets = new FileSecretStore(join(home, "secrets"));
+    const view = createInternalProviderView({ secrets, log: () => {} });
+    await view.refresh();
+    const internalRouter = createInternalRouter({ view, secrets });
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, secrets, winterHome: home, internalRouter });
+    cleanup = () => { server.stop(); store.close(); rmSync(home, { recursive: true, force: true }); };
+
+    const c = await TestClient.connect(socketPath);
+    await c.hello(tokens.harness, "test");
+    expect(view.credentialed().has("codex-oauth")).toBe(false);
+    // …the CLI's own in-process write, which the daemon cannot see on its own.
+    await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at" });
+    const listed = await c.request(METHODS.credentialList, {});
+    expect(listed.error).toBeUndefined();
+    expect(view.credentialed().has("codex-oauth")).toBe(true);
+    // …and the logout direction.
+    await clearCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth);
+    await c.request(METHODS.credentialList, {});
+    expect(view.credentialed().has("codex-oauth")).toBe(false);
     c.close();
   });
 });

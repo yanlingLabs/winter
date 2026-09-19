@@ -1855,8 +1855,15 @@ export function preferredInternalProviderFor(
   const own = ownProviderFor(settings);
   if (snapshot === undefined) return eligible.has(own) ? own : undefined;
   if (eligible.has(own) && snapshot.credentialed.has(own)) return own;
-  for (const id of internalProviderPreferenceOrder()) {
-    if (snapshot.credentialed.has(id)) return id;
+  // M-3 RULING (2026-09-19, review): the fallback considers ONLY `INTERNAL_PROVIDER_IDS`. The wider
+  // `internalProviderPreferenceOrder()` tail is gone from this path: it is alphabetical inventory order
+  // over ~94 providers, so "the first credentialed one" is a coin toss the user never asked for, and
+  // only 3 of those 94 declare a `terra` slot — a default on any of the others had to guess a model.
+  // Never guess a provider AND a model the user did not choose: codex-oauth/openai are the two Winter's
+  // own jobs have always run on, they both declare the family slots, and anything else needs an
+  // explicit pin (`no-default-model`, `internalRoleEffectiveTag` below).
+  for (const id of INTERNAL_PROVIDER_IDS) {
+    if (eligible.has(id) && snapshot.credentialed.has(id)) return id;
   }
   return undefined;
 }
@@ -1883,30 +1890,30 @@ export function internalProviderPreferenceOrder(): readonly string[] {
  * because today's defaults are FACING NAMES (`terra`/`luna`) that only the OpenAI family declares,
  * and 2026-09-19 lets these roles run on any eligible provider.
  *
- * Four rungs, in order, and the order is the design:
+ * TWO rungs, and there is deliberately no third:
  *  1. the provider's own `terra`/`luna` family slot (`facingNameToTag`) — the family-slot machinery,
  *     used FIRST so codex-oauth/openai users' defaults are byte-identical to what they were before;
  *  2. `settings.provider.model` itself, when this IS the session default's provider — the model the
  *     user already picked, never a model this code chose for them. This is the DeepSeek case: no
  *     `terra` slot exists on that provider, and titling on the user's own default is both correct and
- *     zero-setup;
- *  3. the provider's `terra`/`luna`-equivalent by way of nothing — there is no such thing, so instead
- *     the provider's FIRST non-blocked llm row in catalog order. Deterministic, and the honest answer
- *     for "run this job on a provider the user has a key for but has never named a model on";
- *  4. `settings.provider.model` as the final fallback, so this never fabricates a tag and never
- *     throws (the same posture `pinsFor` adopted after the 0.114.1 field report).
+ *     zero-setup.
+ *
+ * `undefined` otherwise, which is a REFUSAL and the point of M-3 (review, 2026-09-19). A first draft had
+ * a third rung — "the provider's first non-blocked llm row in catalog order" — and measurement killed
+ * it: only 3 of 94 eligible providers declare a `terra` slot, catalog/inventory order is alphabetical,
+ * and that rung picked things like `agentrouter/claude-opus-4-8`, `kilocode/anthropic/claude-opus-5`, a
+ * `-Base` completion model and a vision model. Winter does not choose a model on a provider the user
+ * did not choose: the role reports `no-default-model` and stays inert until the user picks one.
  */
 export function internalRoleDefaultTagFor(
   settings: Settings | null | undefined,
   providerId: string,
   slot: "terra" | "luna",
-): ModelTag {
-  const primary = (settings?.provider?.model ?? DEFAULT_PROVIDER.model) as ModelTag;
+): ModelTag | undefined {
   const slotted = facingNameToTag(providerId, slot);
   if (slotted !== undefined) return slotted;
-  if (providerId === ownProviderFor(settings)) return primary;
-  const first = loadCatalog().models.find((m) => m.providerId === providerId && m.status !== "blocked");
-  return (first?.key as ModelTag) ?? primary;
+  if (providerId === ownProviderFor(settings)) return (settings?.provider?.model ?? DEFAULT_PROVIDER.model) as ModelTag;
+  return undefined;
 }
 
 /**
@@ -1932,7 +1939,27 @@ export function internalRoleEffectiveTag(
   if (explicit !== undefined) return explicit;
   const preferred = preferredInternalProviderFor(settings, snapshot);
   if (preferred === undefined) return null;
-  return internalRoleDefaultTagFor(settings, preferred, INTERNAL_ROLE_SLOT[role]);
+  return internalRoleDefaultTagFor(settings, preferred, INTERNAL_ROLE_SLOT[role]) ?? null;
+}
+
+/**
+ * M-3: WHY a role has no effective tag — the two cases `internalRoleEffectiveTag`'s `null` collapses,
+ * which the wire has to tell apart because they have different fixes.
+ *
+ *  - `"no-credential"`: nothing Winter's jobs can use holds a credential. Fix: sign in / add a key.
+ *  - `"no-default-model"`: a provider IS credentialed, but Winter will not choose a model on it
+ *    (no family slot, and it is not the session default's provider). Fix: pick one in Settings › Roles.
+ *
+ * `undefined` when the role HAS a tag — there is nothing to explain.
+ */
+export function internalRoleNoTagReason(
+  settings: Settings | null | undefined,
+  role: InternalJobRole,
+  snapshot?: InternalProviderSnapshot,
+): { reason: "no-credential" | "no-default-model"; providerId?: string } | undefined {
+  if (internalRoleEffectiveTag(settings, role, snapshot) !== null) return undefined;
+  const preferred = preferredInternalProviderFor(settings, snapshot);
+  return preferred === undefined ? { reason: "no-credential" } : { reason: "no-default-model", providerId: preferred };
 }
 
 /** The four LIVE roles that run on Winter's own internal calls. `pins.researchFallback` is retired (its
@@ -1970,7 +1997,7 @@ export function explicitInternalRolePin(settings: Settings | null | undefined, r
  *  (rather than inline twice above) because the inventory carries TWO rows for `anthropic` and the
  *  order of the FIRST occurrence is what `internalProviderPreferenceOrder` promises. */
 function credentialSlotProviderIds(): readonly string[] {
-    const out: string[] = [];
+  const out: string[] = [];
   const seen = new Set<string>();
   for (const slot of credentialInventory()) {
     if (seen.has(slot.provider)) continue;
@@ -2356,7 +2383,23 @@ function assertInternalJobRoleTag(tag: string, role: InternalJobRole): void {
   if (tag.startsWith(WINTER_TEST_PREFIX)) return;
   let providerId: string;
   try { providerId = splitTag(tag).providerId; } catch { return; } // shape is `assertCatalogBackedTag`'s job
-  if (internalEligibleProviderIds().has(providerId)) return;
+  if (internalEligibleProviderIds().has(providerId)) {
+    // M-3 (review): the PROVIDER being eligible is not enough — the ROW has to be one Winter's own
+    // one-shot chat call can actually issue. Two checks, both permanent catalog facts (never the
+    // situational credential question, which stays a `problem` rather than a refusal):
+    //   - not `status: "blocked"` — the one status the registry itself refuses to resolve;
+    //   - `scope: "llm"` on its provider AND a chat/responses/messages-capable endpoint, which is what
+    //     "the provider is drivable" already guarantees via the adapter table — so this is really the
+    //     row-level half: an embedding/image/`-Base` completion row on an otherwise-fine provider.
+    const row = rowForTag(tag);
+    if (row !== undefined && row.status === "blocked") {
+      throw new TypeError(
+        `${role}: ${JSON.stringify(tag)} is marked blocked in the pinned catalog — Winter will not issue its own ` +
+          `background calls against a blocked model. Pick another from this role's \`permitted\` set.`,
+      );
+    }
+    return;
+  }
   const display = loadCatalog().providers.find((p) => p.id === providerId)?.displayName ?? providerId;
   const claude = (CLAUDE_FIRST_PARTY_PROVIDER_IDS as readonly string[]).includes(providerId);
   throw new TypeError(

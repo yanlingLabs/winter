@@ -68,7 +68,28 @@ export interface InternalProviderView {
    * prints two lines about the same fact — the seed→probe diff, then the summary.
    */
   refresh(opts?: { quiet?: boolean }): Promise<void>;
+  /**
+   * SELF-HEAL (B-1): fire a `refresh()` in the background and return immediately. Rate-limited to at
+   * most one probe per `REFRESH_SOON_MIN_MS`, and coalescing (a second call while one is in flight is a
+   * no-op), so a hot loop of refused internal calls cannot turn into a Keychain probe per call.
+   *
+   * WHY THIS EXISTS. `credential.set`/`credential.remove` are not the only doors onto the material
+   * these jobs read: `winter login` (the ChatGPT/Codex OAuth flow) and bare `winter logout` write
+   * `codex-oauth:default` IN-PROCESS, by design — a login door whose first move is to reach the daemon
+   * is useless in exactly the state a user reaches for it. Before the per-provider fan-out the codex arm
+   * resolved its material per call and so picked those up for free; a cached presence snapshot does not.
+   * So the snapshot heals itself from the symptom: a refusal that a fresh probe could plausibly fix
+   * (nothing credentialed, the preferred provider uncredentialed, or a credential the provider rejected)
+   * asks for one. The CLI ALSO tells a live daemon directly (`credential.list`, whose handler refreshes)
+   * — belt and braces, because the poke only works when the socket is up and this works regardless.
+   */
+  refreshSoon(): void;
 }
+
+/** The self-heal floor — at most one background probe per 30 s per view. Long enough that a refused
+ *  job in a tight loop costs nothing, short enough that a user who just ran `winter login` in another
+ *  terminal does not notice the gap. */
+export const REFRESH_SOON_MIN_MS = 30_000;
 
 export function createInternalProviderView(deps: {
   secrets: SecretStore;
@@ -76,6 +97,8 @@ export function createInternalProviderView(deps: {
    *  seeding from it is what makes the very first internal call after boot see the real answer. */
   seed?: ReadonlySet<string>;
   log?: (message: string) => void;
+  /** Injectable clock — `refreshSoon`'s rate limiter only, so a test can drive it without waiting 30 s. */
+  now?: () => number;
 }): InternalProviderView {
   const eligible = internalEligibleProviderIds();
   const log = deps.log ?? ((m: string) => console.error(m));
@@ -83,6 +106,8 @@ export function createInternalProviderView(deps: {
   let generation = 0;
   let changedAt = new Date().toISOString();
   let snapshot: InternalProviderSnapshot = { credentialed };
+  let lastSoonAt = 0;
+  let soonInFlight = false;
 
   const describe = (set: ReadonlySet<string>): string =>
     set.size === 0 ? "none" : internalProviderPreferenceOrder().filter((id) => set.has(id)).join(", ");
@@ -99,6 +124,17 @@ export function createInternalProviderView(deps: {
     generation: () => generation,
     changedAt: () => changedAt,
     summary: () => summaryOf(credentialed),
+    refreshSoon() {
+      if (soonInFlight) return;
+      const now = deps.now?.() ?? Date.now();
+      if (now - lastSoonAt < REFRESH_SOON_MIN_MS) return;
+      lastSoonAt = now;
+      soonInFlight = true;
+      // Never awaited by the caller and never able to reject: `refresh` already reports every failure
+      // through its own log line, and a throw out of a fire-and-forget probe would be an unhandled
+      // rejection in a background job's hot path.
+      void view.refresh().catch(() => {}).finally(() => { soonInFlight = false; });
+    },
     async refresh(opts) {
       // Only the ELIGIBLE slots, never the whole ~150-row inventory: this runs on every credential
       // write and the rows for providers Winter's jobs can never use would be pure cost.
@@ -141,6 +177,7 @@ export function staticInternalProviderView(credentialed: Iterable<string> = []):
     snapshot: () => snapshot,
     preferred: (settings) => preferredInternalProviderFor(settings, snapshot),
     generation: () => 0,
+    refreshSoon: () => {},
     changedAt: () => STATIC_CHANGED_AT,
     summary: () => (set.size === 0 ? "internal-provider: no credentialed provider (injected view)" : `internal-provider: Winter's own jobs can run on ${[...set].join(", ")} (injected view)`),
     refresh: async () => {},

@@ -59,6 +59,10 @@ export interface DreamerDeps {
    * exactly one of the two paths is used per cycle.
    */
   resolve?: () => InternalCall | InternalRefusal;
+  /** B-1: `InternalProviderView.refreshSoon` — reconciles the internal-jobs credential snapshot from the
+   *  scheduler's own slot (and after a rejected credential), so an out-of-band `winter login`/`winter
+   *  logout` is picked up with no restart. Rate-limited and non-blocking inside. Absent in every double. */
+  refreshCredentials?: () => void;
   store: SessionStore;
   dir: () => string;                // assistantMemoryDirFor thunk
   enabled: () => boolean;           // memoryEnabledHot
@@ -124,6 +128,11 @@ export class Dreamer {
     if (this.inFlight) return;
     this.inFlight = true;
     try {
+      // B-1 (2026-09-19): the scheduler's slot is the natural place to reconcile the internal-jobs
+      // credential snapshot — a `winter login`/`winter logout` that happened out of band (both write the
+      // Keychain in-process) is picked up here even on a daemon nothing else poked. Rate-limited and
+      // non-blocking inside `refreshSoon`, so this is a no-op on the overwhelming majority of ticks.
+      this.deps.refreshCredentials?.();
       try { await this.dreamPass(); }
       catch (e) { console.error(`[dreamer] tick failed: ${String(e)}`); }
       if (this.deps.cleaner) {
@@ -224,6 +233,10 @@ export class Dreamer {
           // Observation only (this method's throw/catch shape is unchanged) — the classifier reads
           // ONLY the structured fields already on the event, never `ev.message` for its DECISION.
           sawProviderError = true;
+          // B-1: a credential the provider REJECTED (or one it says is missing) is the other symptom of a
+          // stale snapshot — `winter logout` leaves the daemon believing codex is still signed in. Ask for
+          // a rate-limited re-probe so the next cycle is right; never blocking, never per call.
+          if (ev.code === "auth") this.deps.refreshCredentials?.();
           this.deps.roleHealth?.recordFailure("pins.dream", effectiveTag, classifyProviderFailure({ ...ev, subscriptionQuota: dreamQuota?.subscriptionQuota() }));
           throw new Error(`provider error: ${ev.message}`);
         }

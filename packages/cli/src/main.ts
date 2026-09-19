@@ -1235,6 +1235,43 @@ export async function writeCredentialThroughDaemonOrLocally(
     : { ok: true, via: "in-process", removed: outcome.removed };
 }
 
+/**
+ * B-1 (2026-09-19): tell a LIVE daemon that the Keychain moved under it.
+ *
+ * `winter login` (the ChatGPT/Codex OAuth flow) and bare `winter logout` write
+ * `codex-oauth:default` IN-PROCESS — deliberately, and they always have: a login door whose first move
+ * is to reach the daemon is useless in exactly the state a user reaches for it. They cannot go through
+ * `credential.set`/`credential.remove` either, since that door takes an API-KEY string and this material
+ * is an OAuth record.
+ *
+ * So a running daemon has no way to learn about them. Since the daemon's own background jobs (titles,
+ * the bash safety reviewer, the dreamer, the session cleaner) resolve their provider from a CACHED
+ * credential-presence snapshot, that meant: sign in with ChatGPT, and those jobs stay inert until a
+ * restart; sign out, and they keep trying a credential that is gone. This closes it by calling
+ * `credential.list`, whose handler reconciles the daemon's view (an EXISTING method on purpose — a new
+ * one would engage CLAUDE.md's whole RPC checklist for a call that returns nothing new).
+ *
+ * Best-effort by construction: no daemon, no token, a stale socket, a refusal — all answer `false`, and
+ * the caller says "stored only" exactly as it did before. The daemon-side router ALSO self-heals from the
+ * symptom (a refused internal call asks for a rate-limited re-probe), so this is the fast path, not the
+ * only one.
+ */
+export async function notifyDaemonOfOutOfBandCredentialChange(
+  openDaemon: () => Promise<CredentialRpcDoor | undefined>,
+): Promise<boolean> {
+  const door = await openDaemon();
+  if (door === undefined) return false;
+  try {
+    const { METHODS } = await import("@yanlinglabs/winter-protocol");
+    await door.request(METHODS.credentialList, {});
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try { door.close(); } catch { /* already closed */ }
+  }
+}
+
 /** What a credential verb prints about WHERE the change landed — the difference between "it is in
  *  effect now" and "it is stored, and the next turn will pick it up". */
 export function credentialEffectNote(via: "daemon" | "in-process"): string {
@@ -2245,7 +2282,11 @@ if (import.meta.main) {
       openBrowser: async (url) => { Bun.spawn(["open", url]); },
     });
     await new CodexAuthStore(secrets).save(tokens);
-    console.log(`${AQUA}◍ signed in with ChatGPT${RESET} ${DIM}(account ${tokens.accountId ?? "unknown"})${RESET}`);
+    // B-1: this write never went through the daemon (see `notifyDaemonOfOutOfBandCredentialChange`),
+    // so a running daemon's internal-jobs view has to be told or titles/the reviewer/the dreamer/the
+    // cleaner stay inert until a restart.
+    const toldDaemon = await notifyDaemonOfOutOfBandCredentialChange(openCredentialDaemonDoor);
+    console.log(`${AQUA}◍ signed in with ChatGPT${RESET} ${DIM}(account ${tokens.accountId ?? "unknown"})${RESET} — ${credentialEffectNote(toldDaemon ? "daemon" : "in-process")}`);
     break;
   }
   // -----------------------------------------------------------------------------------------
@@ -2359,7 +2400,10 @@ if (import.meta.main) {
     // actually reads — blanking only the legacy five would leave a signed-out install still
     // holding a live codex-oauth:default record the child happily authenticates with.
     await clearCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth);
-    console.log("signed out");
+    // B-1, the logout direction — without this a running daemon keeps believing codex is signed in and
+    // every internal job fails as `credential-rejected` rather than going quietly inert.
+    const toldDaemonOnLogout = await notifyDaemonOfOutOfBandCredentialChange(openCredentialDaemonDoor);
+    console.log(`signed out — ${credentialEffectNote(toldDaemonOnLogout ? "daemon" : "in-process")}`);
     break;
   }
   case "provider": {

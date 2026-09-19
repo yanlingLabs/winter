@@ -96,6 +96,8 @@ export interface CleanerDeps {
   // same `RebindableProvider.quota`, same reason, structurally satisfied with no adapter.
   /** The LEGACY double path — see `resolve`. Omitted by a real daemon. */
   provider?: { provider: Provider; model: string; live?: () => { providerId?: string }; quota?: SubscriptionQuotaSource };
+  /** B-1: `InternalProviderView.refreshSoon` — see `Dreamer.tick()`. Absent in every test double. */
+  refreshCredentials?: () => void;
   /** 2026-09-19: the internal-jobs resolver — see `DreamerDeps.resolve`'s identical field
    *  (agent/dreamer.ts) for the full doc, including why the legacy `provider` beside it still exists. */
   resolve?: () => InternalCall | InternalRefusal;
@@ -382,6 +384,10 @@ export class SessionCleaner {
         if (ev.type === "text_delta") text += ev.delta;
         else if (ev.type === "error") {
           sawProviderError = true;
+          // B-1: a credential the provider REJECTED (or one it says is missing) is the other symptom of a
+          // stale snapshot — `winter logout` leaves the daemon believing codex is still signed in. Ask for
+          // a rate-limited re-probe so the next cycle is right; never blocking, never per call.
+          if (ev.code === "auth") this.deps.refreshCredentials?.();
           this.deps.roleHealth?.recordFailure("pins.cleaner", effectiveTag, classifyProviderFailure({ ...ev, subscriptionQuota: cleanerQuota?.subscriptionQuota() }));
           throw new Error(`provider error: ${ev.message}`);
         }

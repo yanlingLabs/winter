@@ -50,6 +50,24 @@ export function internalCredentialAccountFor(providerId: string): string | undef
  */
 export function internalWireEffortFor(tag: string, effort: string | undefined): string | undefined {
   if (effort === undefined) return undefined;
+  // M-1 (review): `"none"` must NEVER reach `implicitEffortFor`. That function answers "is `wanted` in
+  // the row's vocabulary, else the row's `defaultEffort`", and `settings.ts`'s `effortToSpendForRole`
+  // says in writing why `"none"` may not go through it: the catalog omits `"none"` from almost every
+  // vocabulary (it is Winter's own "off", not a vendor tier), so the lookup MISSES and falls to the
+  // row's default — silently turning a user's explicit "no reasoning" into `"medium"` on every
+  // openai/codex row. Dropped instead.
+  //
+  // THE HONEST CONSEQUENCE, stated rather than hidden: dropping it means the request carries NO effort
+  // at all, so the PROVIDER's own default applies — which for a gpt-5.6 row is `medium`. Winter cannot
+  // express `"none"` on this path yet. It is not a regression (before the per-provider fan-out these
+  // adapters were built with `descriptors: () => undefined` and forwarded `"none"` verbatim, and nothing
+  // proved the endpoint honoured it) and it is not a choice this module can fix: the SDK's `mapEffort`
+  // refuses `"none"` against a real descriptor, and the catalog omits it from the vocabulary even where
+  // the endpoint's own live probe recorded that it is accepted (`openai/gpt-5.6-terra`'s `sourceRef`
+  // says so explicitly). SDK CARRY: either the catalog lists `"none"` in the vocabularies whose
+  // endpoints accept it, or `mapEffort` grows a sanctioned "send no reasoning block" answer. Until then
+  // a role's `"none"` reads as "the provider's default" for these jobs.
+  if (effort === "none") return undefined;
   if (rowForTag(tag) === undefined) return effort;
   return implicitEffortFor(tag, effort);
 }
