@@ -43,7 +43,7 @@ import {
   type OfficialPermissionMode,
   type OfficialSessionInput,
 } from "../../src/runtime-sdk/official-options";
-import { CONSOLE_AUTH_ROUTER_MIN, REQUIRED_WINTER_RUNTIME_SDK } from "../../src/runtime-sdk/versions";
+import { CONSOLE_AUTH_ROUTER_MIN, REQUIRED_WINTER_RUNTIME_SDK, versionAtLeast } from "../../src/runtime-sdk/versions";
 
 // ⚠️ Bun's `mock.module` overwrites properties on the ALREADY-LOADED module's own namespace object
 // IN PLACE (its own doc comment: "exports are overwritten") — so `winterAgentSdk.transcriptProjectKey`
@@ -326,6 +326,53 @@ function minimalDeps(overrides: Partial<OfficialInputDeps> = {}): OfficialInputD
     ...overrides,
   };
 }
+
+// The live approval-mode change, the DAEMON's own half (router 0.0.10). `createApprovalBridge`'s §10
+// `dontAsk` arm answers ALLOW without consulting Winter's broker at all — correct while a session's
+// mode could not change, and the widest hole in this whole change once it can: a session spawned
+// `dont-ask` and switched to `ask` kept auto-allowing EVERY tool call, with no card and no event,
+// because the bridge held the literal it was built with. The mode is now a getter over the same live
+// policy the broker's gate reads, so both halves move together.
+//
+// Measured through the bridge the session would actually run (`input.options.canUseTool`), by calling
+// it — `plan` is the destination policy because the gate denies under it SYNCHRONOUSLY, so the test
+// needs no approval answer to tell "the broker was consulted" from "the bridge short-circuited".
+describe("officialInputFor — the approval bridge's mode follows a live session.setPolicy", () => {
+  const ask = async (bridge: unknown, toolName: string) =>
+    (bridge as (name: string, input: Record<string, unknown>, rest: Record<string, unknown>) => Promise<{ behavior: string }>)(
+      toolName,
+      { file_path: "/repo/x.txt", content: "x" },
+      { signal: new AbortController().signal, requestId: "r1", toolUseID: "t1" },
+    );
+
+  test("a dont-ask session switched to plan stops auto-allowing, on the SAME bridge", async () => {
+    const policy: { current: "dont-ask" | "plan" } = { current: "dont-ask" };
+    const deps = minimalDeps({
+      policy: "dont-ask",
+      canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: () => policy.current, emit: () => {} },
+    });
+    const result = officialInputFor({ sessionId: "s_1", mode: "code", cwd: "/repo", primary: "/repo", spendEffort: undefined }, deps);
+    if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
+    const bridge = (result.input.options as { canUseTool?: unknown }).canUseTool;
+    expect(bridge).toBeDefined();
+    // `dontAsk`: allowed, and the broker was never asked (§10).
+    expect((await ask(bridge, "Write")).behavior).toBe("allow");
+    // …and after the live switch the SAME bridge consults the broker, whose gate denies under `plan`.
+    policy.current = "plan";
+    expect((await ask(bridge, "Write")).behavior).toBe("deny");
+  });
+
+  test("a bare-value policy (no getter) keeps the captured behaviour exactly", async () => {
+    const deps = minimalDeps({
+      policy: "dont-ask",
+      canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "dont-ask", emit: () => {} },
+    });
+    const result = officialInputFor({ sessionId: "s_1", mode: "code", cwd: "/repo", primary: "/repo", spendEffort: undefined }, deps);
+    if (!("input" in result)) throw new Error("officialInputFor unexpectedly refused");
+    const bridge = (result.input.options as { canUseTool?: unknown }).canUseTool;
+    expect((await ask(bridge, "Write")).behavior).toBe("allow");
+  });
+});
 
 describe("officialInputFor — official_project_key_too_deep", () => {
   afterEach(async () => {
@@ -1120,7 +1167,11 @@ describe("officialInputFor — agents (router 0.0.9) reach both legs identically
   }
 
   test("the router version agents support was measured against", () => {
-    expect(REQUIRED_WINTER_RUNTIME_SDK).toBe("0.0.9");
+    // AT OR ABOVE, not equal (the pin moved to 0.0.10 for the live permission-mode change): what this
+    // block depends on is `OptionsTemplatePolicy.agents`, which landed in 0.0.9 and does not move
+    // with every later router release. An equality assertion here would fail every bump for a reason
+    // that has nothing to do with agents.
+    expect(versionAtLeast(REQUIRED_WINTER_RUNTIME_SDK, "0.0.9")).toBe(true);
   });
 
   test("a non-empty agents map reaches this leg's options.agents, byte-identical to what the Winter leg's buildWinterOptions carries for the SAME map", () => {
