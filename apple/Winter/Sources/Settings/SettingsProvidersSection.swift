@@ -259,7 +259,11 @@ private struct SettingsProvidersKeyGroups: View {
     var body: some View {
         let connected = model.rows.filter(\.present)
         let available = model.rows.filter { !$0.present }
-        Group {
+        // A VStack, NOT a `Group` (2026-09-19 fix): modifiers on a `Group` are applied to EACH of
+        // its children, so the removal dialog below was attached once per card — several
+        // presenters for one `pendingRemoval`, and none of them showed, which read as a Remove
+        // button that did nothing. The page's own spacing is reproduced so the layout is unchanged.
+        VStack(alignment: .leading, spacing: SettingsChrome.groupGap) {
             if let loadErrorText = model.loadErrorText {
                 SettingsGroup {
                     SettingsNoteRow(loadErrorText, isError: true)
