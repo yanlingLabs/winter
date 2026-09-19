@@ -39,6 +39,22 @@ export const SYNCED_SESSION_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{
  *  strict "> 24h" convention T5's demotion sweep uses for an unrelated threshold. */
 export const EMPTY_SESSION_GRACE_MS = 10 * 60_000;
 
+/** The reaper's LONGER gate for a TAB-ONLY session — no `user_message`, no `assistant_message`, and an
+ *  open panel tab (user ruling 2026-09-19: "empty chats pile up" — purge them automatically).
+ *
+ *  An open tab was content to the reaper since panel-shell T12, and correctly so at the 10-minute
+ *  gate: the Mac's New-chat page MINTS a session the moment the work panel is revealed with no tabs
+ *  (the user's own 2026-08-09 rule) and binds it WITHOUT attaching, so "unattached for ten minutes"
+ *  describes a tab the user may be reading right now. But immune FOREVER was the defect: 65 such
+ *  sessions, hours to days old, none with a single message, sat in one dev home and no door could
+ *  ever remove them (the LLM cleaner rails them as `open-tabs` and never judges them).
+ *
+ *  So the tab still protects the session — for a day, measured from its LAST event rather than its
+ *  creation (`lastEventTs`: the log's mtime, and every navigation appends), not from the mint. A
+ *  session the user is actually browsing in keeps renewing that clock; one that was minted by a
+ *  panel reveal and abandoned stops. Strict `>` like the cleaner's own 24 h idle gate. */
+export const TAB_ONLY_SESSION_GRACE_MS = 24 * 60 * 60_000;
+
 /** Chat Slice D task 2: fork provenance — mirrors the protocol's `SessionForkRef`. */
 export interface SessionForkRef { sessionId: string; atSeq: number }
 
@@ -787,6 +803,11 @@ export class SessionStore {
    *  see as empty, worthless junk, so it carries its OWN rail (`hasOpenPanelTabs`, panel-shell T14)
    *  rather than relying on this fix — this reaper narrowing alone would not have been enough.
    *
+   *  2026-09-19: T12's protection is no longer permanent. A TAB-ONLY session (no message, an open
+   *  tab) is a candidate once its LAST event is older than `TAB_ONLY_SESSION_GRACE_MS` — see that
+   *  constant for why a day, and why from the last event. The cleaner's `open-tabs` rail is
+   *  untouched: such a session is still never JUDGED; this reaper is the one door that removes it.
+   *
    *  panel-shell T16 (alignment, not a defect in either T12 or T14 — each was correct in its own
    *  scope): T12's check here originally READ differently from T14's cleaner rail — this method
    *  checked the bare `panel_tab_opened` event's PRESENCE ("ever opened one"), while
@@ -812,9 +833,15 @@ export class SessionStore {
     for (const { session_id: sessionId } of rows) {
       if (attachedCount(sessionId) !== 0) continue;
       const events = this.read(sessionId);
-      const hasContent = events.some((e) => e.type === "user_message" || e.type === "assistant_message")
-        || hasOpenPanelTabs(events);
-      if (!hasContent) candidates.push(sessionId);
+      if (events.some((e) => e.type === "user_message" || e.type === "assistant_message")) continue;
+      // Tab-only: protected by its open tab until it has sat untouched for `TAB_ONLY_SESSION_GRACE_MS`
+      // (see that constant). A stat failure reads as "just touched" — the conservative direction.
+      if (hasOpenPanelTabs(events)) {
+        let lastTs = nowMs;
+        try { lastTs = this.lastEventTs(sessionId); } catch { /* keep it */ }
+        if (lastTs >= nowMs - TAB_ONLY_SESSION_GRACE_MS) continue;
+      }
+      candidates.push(sessionId);
     }
     return candidates;
   }

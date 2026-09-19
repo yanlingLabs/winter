@@ -79,6 +79,17 @@ let settingsEndpointOverrides: [SettingsEndpointOverride] = [
 
 // -----------------------------------------------------------------------------------------------
 
+/// PURE: the credential rows matching a search — on the facing name or the provider id,
+/// case-insensitively. Blank matches everything, so the unfiltered list is the same code path.
+func settingsProvidersMatching(_ query: String, in rows: [CredentialRow]) -> [CredentialRow] {
+    let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return rows }
+    return rows.filter {
+        $0.displayName.localizedCaseInsensitiveContains(trimmed)
+            || $0.providerId.localizedCaseInsensitiveContains(trimmed)
+    }
+}
+
 /// PURE: the line under a credential row. A key row says whether it is stored; a bespoke-OAuth row
 /// names its door. A row the daemon lists as NOT manageable yet whose door is `credential.set` is a
 /// RETIRED tool key (2026-09-18: the Brave `web-search` key, listed only while something is stored,
@@ -242,6 +253,8 @@ private struct SettingsProvidersKeyGroups: View {
     /// The one row whose key field is open, or nil. Local: which row you are typing into is a
     /// gesture, not state the model needs to know about.
     @State private var editing: String?
+    /// The "Add a provider" filter. Local and never persisted, like the settings sidebar's own.
+    @State private var query = ""
 
     var body: some View {
         let connected = model.rows.filter(\.present)
@@ -262,9 +275,16 @@ private struct SettingsProvidersKeyGroups: View {
                 }
             }
             if !available.isEmpty {
+                let matches = settingsProvidersMatching(query, in: available)
                 SettingsGroup("Add a provider") {
+                    // The search is the card's FIRST ROW (user call, 2026-09-19), not a bar above
+                    // it: it filters this list and nothing else, so it lives inside it.
+                    SettingsInlineSearchRow(query: $query, placeholder: "Search \(available.count) providers")
                     SettingsNoteRow("Keys live only in this Mac's Keychain. Adding or removing one takes effect immediately — no restart.")
-                    ForEach(available) { row in
+                    if matches.isEmpty {
+                        SettingsNoteRow("No provider matches “\(query.trimmingCharacters(in: .whitespacesAndNewlines))”.")
+                    }
+                    ForEach(matches) { row in
                         credentialRow(row)
                     }
                 }

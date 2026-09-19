@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@yanlinglabs/winter-protocol";
-import { SessionStore, EMPTY_SESSION_GRACE_MS } from "../../src/sessions/store";
+import { SessionStore, EMPTY_SESSION_GRACE_MS, TAB_ONLY_SESSION_GRACE_MS } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
 import { appendCleanerLog } from "../../src/sessions/cleaner-log";
 import { reapEmptySessions, type ReaperStore } from "../../src/sessions/reaper";
@@ -180,6 +180,36 @@ describe("SessionStore.emptySessionIds (session-activity-hygiene T6)", () => {
     const trulyEmpty = store.createSession("global");
     const nowMs = Math.max(agedNow(store, withTab, 1), agedNow(store, trulyEmpty, 1));
     expect(store.emptySessionIds(NOBODY_ATTACHED, nowMs)).toEqual([trulyEmpty]);
+    store.close();
+  });
+
+  // 2026-09-19 (user ruling: "empty chats pile up"): an open tab used to protect a message-less
+  // session FOREVER, so every panel reveal on the Mac's New-chat page left a permanent sidebar row.
+  // The tab now protects it for `TAB_ONLY_SESSION_GRACE_MS` measured from its LAST event.
+  test("a tab-only session is protected for a day after its LAST event, then reaped — and a touched one renews the clock", () => {
+    const store = freshStore();
+    const id = store.createSession("global");
+    store.append(id, { type: "panel_tab_opened", sessionId: id, tabId: "t1", kind: "web" });
+    const last = store.lastEventTs(id);
+    expect(store.emptySessionIds(NOBODY_ATTACHED, last + TAB_ONLY_SESSION_GRACE_MS)).toEqual([]);      // exactly a day: still protected (strict >)
+    expect(store.emptySessionIds(NOBODY_ATTACHED, last + TAB_ONLY_SESSION_GRACE_MS + 1)).toEqual([id]);  // a day and a millisecond: reapable
+    expect(store.emptySessionIds(() => 1, last + TAB_ONLY_SESSION_GRACE_MS + 1)).toEqual([]);            // attached: never
+    // A navigation a day later is a fresh LAST event: the clock restarts from it, not from the mint.
+    const touched = new Date(last + TAB_ONLY_SESSION_GRACE_MS + 60_000);
+    utimesSync(store.transcriptPath(id), touched, touched);
+    expect(store.emptySessionIds(NOBODY_ATTACHED, last + TAB_ONLY_SESSION_GRACE_MS + 120_000)).toEqual([]);
+    store.close();
+  });
+
+  test("the longer gate is for tab-ONLY sessions: one message keeps a tabbed session forever, and dispatch stays excluded", () => {
+    const store = freshStore();
+    const talked = store.createSession("global");
+    store.append(talked, { type: "panel_tab_opened", sessionId: talked, tabId: "t1", kind: "web" });
+    store.append(talked, { type: "user_message", sessionId: talked, threadId: "main", text: "hello", clientName: "t" });
+    const dispatch = store.createSession("global", { mode: "dispatch" });
+    store.append(dispatch, { type: "panel_tab_opened", sessionId: dispatch, tabId: "t1", kind: "web" });
+    const far = Math.max(store.lastEventTs(talked), store.lastEventTs(dispatch)) + 30 * TAB_ONLY_SESSION_GRACE_MS;
+    expect(store.emptySessionIds(NOBODY_ATTACHED, far)).toEqual([]);
     store.close();
   });
 
