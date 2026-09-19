@@ -888,11 +888,28 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
     const w = driverWorld();
     try {
       await writeCredentialMaterial(w.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
-      const sid = w.store.createSession("t", { mode: "code", model: MODEL });
+      // A row that LISTS `high`. (`MODEL`'s own row declares no reasoning block at all in the pinned
+      // catalog, so `session.setEffort` refuses an effort for it and — since 2026-09-19 — a level
+      // stranded on such a row is treated as unset at spend time; see the next test.)
+      const sid = w.store.createSession("t", { mode: "code", model: "anthropic/claude-opus-5" });
       w.store.setEffort(sid, "high");
       await w.drivers.create(sid);
       expect(w.capturedOptions).toHaveLength(1);
       expect((w.capturedOptions[0] as Record<string, unknown>)["effort"]).toBe("high");
+    } finally {
+      await w.close();
+    }
+  });
+
+  test("an effort stranded on a row that takes none is NOT handed to the official child either — one rule, both legs", async () => {
+    const w = driverWorld();
+    try {
+      await writeCredentialMaterial(w.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
+      const sid = w.store.createSession("t", { mode: "code", model: MODEL });
+      w.store.setEffort(sid, "high");
+      await w.drivers.create(sid);
+      expect(w.capturedOptions).toHaveLength(1);
+      expect((w.capturedOptions[0] as Record<string, unknown>)["effort"]).toBeUndefined();
     } finally {
       await w.close();
     }
