@@ -1,4 +1,5 @@
 import type { Provider, TurnInputItem } from "../providers/types";
+import { isInternalRefusal, type InternalCallSource } from "../providers/internal-router";
 import { classifyProviderFailure, type RoleHealthRegistry, type SubscriptionQuotaSource } from "../providers/role-health";
 
 export interface ReviewVerdict {
@@ -107,6 +108,9 @@ export class BashReviewer {
   // for the full doc; this class's own `review()` throw shape is unchanged either way.
   private readonly boundProviderId: (() => string) | undefined;
   private readonly roleHealth: RoleHealthRegistry | undefined;
+  /** 2026-09-19: the internal-jobs resolver — see `SessionTitler`'s identical field (titles.ts) for the
+   *  full doc, including why the four legacy getters beside it still exist. */
+  private readonly source: InternalCallSource | undefined;
 
   constructor(deps: {
     provider: { provider: Provider; model: string; live?: () => { model: string }; quota?: SubscriptionQuotaSource };
@@ -115,8 +119,11 @@ export class BashReviewer {
     boundProviderId?: () => string;
     roleHealth?: RoleHealthRegistry;
     timeoutMs?: number;
+    /** See the field's own doc comment. A real daemon passes this and nothing else. */
+    source?: InternalCallSource;
   }) {
     this.provider = deps.provider;
+    this.source = deps.source;
     this.model = deps.model;
     this.effort = deps.effort;
     this.boundProviderId = deps.boundProviderId;
@@ -138,14 +145,29 @@ export class BashReviewer {
         : `${cls === "fs" ? "WRITE TARGET" : "TOOL CALL"}:\n${(input as { precis: string }).precis}`;
     const turnInput: TurnInputItem[] = [{ type: "message", role: "user", content }];
 
+    // 2026-09-19: resolved ONCE per call — see `SessionTitler.oneShot`'s identical read. A refusal
+    // THROWS rather than returning a verdict, which is this class's own documented contract for "no
+    // valid verdict could be obtained": the caller escalates to a human instead of allowing the call.
+    const resolved = this.source?.();
+    if (resolved !== undefined && isInternalRefusal(resolved)) {
+      throw new Error(`the bash safety reviewer has no runnable model (${resolved.reason}): ${resolved.detail}`);
+    }
+    const wire: { provider: Provider; model: string; effort: string | undefined; tag: string | undefined; quota: SubscriptionQuotaSource | undefined } =
+      resolved === undefined
+        ? {
+            provider: this.provider.provider,
+            model: this.model?.() ?? this.provider.live?.().model ?? this.provider.model,
+            effort: this.effort?.(),
+            tag: this.boundProviderId === undefined ? undefined : `${this.boundProviderId()}/${this.model?.() ?? this.provider.live?.().model ?? this.provider.model}`,
+            quota: this.provider.quota,
+          }
+        : { provider: resolved.provider, model: resolved.model, effort: resolved.effort, tag: resolved.tag, quota: resolved.quota };
     const run = (async () => {
       let text = "";
       let sawProviderError = false;
-      // Same synchronous breath as `model` below — see `SessionTitler.oneShot`'s identical read.
-      const effort = this.effort?.();
-      // Minor 5c: the LIVE bound model first — see `SessionTitler.oneShot`'s identical fallback.
-      const effectiveModel = this.model?.() ?? this.provider.live?.().model ?? this.provider.model;
-      for await (const ev of this.provider.provider.streamTurn({
+      const effort = wire.effort;
+      const effectiveModel = wire.model;
+      for await (const ev of wire.provider.streamTurn({
         model: effectiveModel,
         ...(effort === undefined ? {} : { reasoningEffort: effort }),
         instructions,
@@ -156,13 +178,13 @@ export class BashReviewer {
         if (ev.type === "text_delta") text += ev.delta;
         // 2026-09-18: role health only — see `SessionTitler.oneShot`'s identical branch; this class
         // also had no `error` handling before, and still does not break/throw on it here.
-        else if (ev.type === "error" && this.boundProviderId) {
+        else if (ev.type === "error" && wire.tag !== undefined) {
           sawProviderError = true;
-          this.roleHealth?.recordFailure("reviewer.model", `${this.boundProviderId()}/${effectiveModel}`, classifyProviderFailure({ ...ev, subscriptionQuota: this.provider.quota?.subscriptionQuota() }));
+          this.roleHealth?.recordFailure("reviewer.model", wire.tag, classifyProviderFailure({ ...ev, subscriptionQuota: wire.quota?.subscriptionQuota() }));
         }
         else if (ev.type === "done" && ev.stopReason === "aborted") throw new Error("review aborted");
       }
-      if (!sawProviderError && this.boundProviderId) this.roleHealth?.recordSuccess("reviewer.model");
+      if (!sawProviderError && wire.tag !== undefined) this.roleHealth?.recordSuccess("reviewer.model");
       const m = text.match(/\{[\s\S]*\}/);
       if (!m) throw new Error(`reviewer returned no JSON verdict: ${text.slice(0, 80)}`);
       const parsed = JSON.parse(m[0]) as { verdict?: unknown; reason?: unknown };

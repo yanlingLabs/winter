@@ -4,6 +4,7 @@ import { hasOpenPanelTabs } from "../panel/store";
 import type { Settings } from "../settings";
 import { effortToSpendForRole, pinsFor, ownProviderFor } from "../settings";
 import { internalModelFor } from "../providers/manager";
+import { isInternalRefusal, type InternalCall, type InternalRefusal } from "../providers/internal-router";
 import { classifyProviderFailure, type RoleHealthRegistry, type SubscriptionQuotaSource } from "../providers/role-health";
 import { activityFor, type ActivityRow } from "./activity";
 import { appendCleanerLog } from "./cleaner-log";
@@ -94,6 +95,9 @@ export interface CleanerDeps {
   // `quota?`: see `DreamerDeps.provider`'s identical field (agent/dreamer.ts) for the full doc —
   // same `RebindableProvider.quota`, same reason, structurally satisfied with no adapter.
   provider: { provider: Provider; model: string; live?: () => { providerId?: string }; quota?: SubscriptionQuotaSource };
+  /** 2026-09-19: the internal-jobs resolver — see `DreamerDeps.resolve`'s identical field
+   *  (agent/dreamer.ts) for the full doc, including why the legacy `provider` beside it still exists. */
+  resolve?: () => InternalCall | InternalRefusal;
   // WS-20: hot settings read, same "re-read every call" discipline as every other settings-backed
   // getter — `pinsFor(deps.settings())` is called at each pass, never a boot snapshot.
   settings: () => Settings | null;
@@ -342,16 +346,24 @@ export class SessionCleaner {
     // comment's own header), so the session is kept and left unstamped for the next pass, same as
     // a provider error or a timeout.
     const settings = this.deps.settings();
-    // Item 2: the BOUND backend's own identity, not a pure settings read — see `CleanerDeps.provider`'s own doc comment.
-    const boundProviderId = this.deps.provider.live?.().providerId ?? ownProviderFor(settings);
-    const cleanerPin = pinsFor(settings).cleaner;
-    const cleanerModel = internalModelFor(cleanerPin, { providerId: boundProviderId }, "pins.cleaner");
+    // 2026-09-19: ONE resolution per judgment — see the Dreamer's identical read. A refusal folds into
+    // this method's own "null for every failure mode" contract, so the session is kept and left
+    // unstamped for the next pass.
+    const resolved = this.deps.resolve?.();
+    if (resolved !== undefined && isInternalRefusal(resolved)) return null;
+    const boundProviderId = resolved?.providerId ?? this.deps.provider.live?.().providerId ?? ownProviderFor(settings);
+    const cleanerPin = resolved?.tag ?? pinsFor(settings).cleaner;
+    const cleanerModel = resolved !== undefined
+      ? resolved.model
+      : internalModelFor(cleanerPin, { providerId: boundProviderId }, "pins.cleaner");
     if (cleanerModel === undefined) return null;
+    const cleanerProvider = resolved?.provider ?? this.deps.provider.provider;
+    const cleanerQuota = resolved?.quota ?? this.deps.provider.quota;
     // 2026-09-18: the role's stored effort, off the SAME live `settings` read as the pin — next
     // judgment, no restart. Mapped onto the pin's row and never a throw (this method's contract is
     // "null for every failure mode", and an effort must not become a new one); nothing stored is
     // `CLEANER_EFFORT`, raw, exactly as before. See `effortToSpendForRole`.
-    const cleanerEffort = effortToSpendForRole(settings, "pins.cleaner", cleanerPin, CLEANER_EFFORT);
+    const cleanerEffort = resolved !== undefined ? resolved.effort : effortToSpendForRole(settings, "pins.cleaner", cleanerPin, CLEANER_EFFORT);
     const input: TurnInputItem[] = [{ type: "message", role: "user", content: renderTranscript(events) }];
     // The Dreamer's own abort-tied-to-the-race idiom, verbatim: without the signal a timeout only
     // makes THIS call stop waiting while the detached generator keeps draining a hung connection.
@@ -361,14 +373,14 @@ export class SessionCleaner {
     let text = "";
     let sawProviderError = false;
     const run = (async () => {
-      for await (const ev of this.deps.provider.provider.streamTurn({
+      for await (const ev of cleanerProvider.streamTurn({
         model: cleanerModel, ...(cleanerEffort === undefined ? {} : { reasoningEffort: cleanerEffort }), instructions: CLEANER_INSTRUCTION,
         input, tools: [], signal: ac.signal,
       })) {
         if (ev.type === "text_delta") text += ev.delta;
         else if (ev.type === "error") {
           sawProviderError = true;
-          this.deps.roleHealth?.recordFailure("pins.cleaner", effectiveTag, classifyProviderFailure({ ...ev, subscriptionQuota: this.deps.provider.quota?.subscriptionQuota() }));
+          this.deps.roleHealth?.recordFailure("pins.cleaner", effectiveTag, classifyProviderFailure({ ...ev, subscriptionQuota: cleanerQuota?.subscriptionQuota() }));
           throw new Error(`provider error: ${ev.message}`);
         }
         else if (ev.type === "done" && ev.stopReason === "aborted") throw new Error("judgment aborted");

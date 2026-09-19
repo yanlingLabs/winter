@@ -5,6 +5,7 @@ import type { SessionStore } from "../sessions/store";
 import type { Settings } from "../settings";
 import { effortToSpendForRole, pinsFor, ownProviderFor } from "../settings";
 import { internalModelFor } from "../providers/manager";
+import { isInternalRefusal, type InternalCall, type InternalRefusal } from "../providers/internal-router";
 import { classifyProviderFailure, type RoleHealthRegistry, type SubscriptionQuotaSource } from "../providers/role-health";
 import { applyOps, validateOps, RESERVED_FILES, MAX_FILES } from "./dream-ops";
 
@@ -46,6 +47,17 @@ export interface DreamerDeps {
   // failing round itself carried no `retryAfterMs`. Absent (every test double) means role-health
   // just never has that extra signal — `retryAfterMs` alone, when present, still works.
   provider: { provider: Provider; model: string; live?: () => { providerId?: string }; quota?: SubscriptionQuotaSource }; // wrapper for parity with compactor/titler; model IGNORED — dreams pin pinsFor(settings).dream
+  /**
+   * 2026-09-19: the internal-jobs resolver (`providers/internal-router.ts`'s `resolve("pins.dream",
+   * settings)`, bound to the live settings holder) — the ONE seam a real daemon wires. It answers the
+   * `Provider`, the bare model, the qualified tag and the already-normalised effort together, so a pin
+   * naming a provider other than `settings.provider.model`'s now RUNS ON ITS OWN PROVIDER instead of
+   * being skipped: `internalModelFor`'s guard becomes the fix it was standing in for.
+   *
+   * Optional only because ~6 test files construct this class with a bare `{provider, model}` double;
+   * exactly one of the two paths is used per cycle.
+   */
+  resolve?: () => InternalCall | InternalRefusal;
   store: SessionStore;
   dir: () => string;                // assistantMemoryDirFor thunk
   enabled: () => boolean;           // memoryEnabledHot
@@ -146,17 +158,26 @@ export class Dreamer {
     // than guess; `internalModelFor` logs the field name (never the tag) so the mismatch is
     // diagnosable without a raw provider-config dump in the log.
     const settings = this.deps.settings();
-    // Item 2: the BOUND backend's own identity, not a pure settings read — see `DreamerDeps.provider`'s own doc comment.
-    const boundProviderId = this.deps.provider.live?.().providerId ?? ownProviderFor(settings);
-    const dreamPin = pinsFor(settings).dream;
-    const dreamModel = internalModelFor(dreamPin, { providerId: boundProviderId }, "pins.dream");
+    // 2026-09-19: ONE resolution for the whole cycle — provider, model, tag and effort from a single
+    // settings/credential generation. A refusal skips the cycle, exactly as an `internalModelFor`
+    // mismatch used to, but for the honest reasons only (nothing credentialed, or an explicit pin on a
+    // provider Winter's jobs cannot use) rather than for "the pin names a provider we did not bind".
+    const resolved = this.deps.resolve?.();
+    if (resolved !== undefined && isInternalRefusal(resolved)) return;
+    const boundProviderId = resolved?.providerId ?? this.deps.provider.live?.().providerId ?? ownProviderFor(settings);
+    const dreamPin = resolved?.tag ?? pinsFor(settings).dream;
+    const dreamModel = resolved !== undefined
+      ? resolved.model
+      : internalModelFor(dreamPin, { providerId: boundProviderId }, "pins.dream");
     if (dreamModel === undefined) return;
+    const dreamProvider = resolved?.provider ?? this.deps.provider.provider;
+    const dreamQuota = resolved?.quota ?? this.deps.provider.quota;
     // 2026-09-18: the role's stored effort (`settings.roleEfforts["pins.dream"]`), off the SAME live
     // `settings` read as the pin just above — so a Roles-pane change lands on the next cycle, and the
     // model and its effort can never come from two different settings generations. Mapped onto the
     // pin's own row and never a refusal; with nothing stored it is `DREAM_EFFORT`, raw, exactly as
     // before (see `effortToSpendForRole`). Resolved against the TAG: `dreamModel` is already bare.
-    const dreamEffort = effortToSpendForRole(settings, "pins.dream", dreamPin, DREAM_EFFORT);
+    const dreamEffort = resolved !== undefined ? resolved.effort : effortToSpendForRole(settings, "pins.dream", dreamPin, DREAM_EFFORT);
     const upTo = this.deps.store.lastSeq(dispatchId);
     const events = this.deps.store.read(dispatchId, state.watermarkSeq);
     const lines: string[] = [];
@@ -193,7 +214,7 @@ export class Dreamer {
       // single backend `agentProvider` was constructed for) — `dreamModel`, computed once above
       // via `internalModelFor`, is already that bare id, verified to name the SAME provider this
       // Provider instance is bound to.
-      for await (const ev of this.deps.provider.provider.streamTurn({
+      for await (const ev of dreamProvider.streamTurn({
         model: dreamModel, ...(dreamEffort === undefined ? {} : { reasoningEffort: dreamEffort }), instructions: DREAM_INSTRUCTION, input, tools: [], signal: ac.signal,
       })) {
         if (ev.type === "text_delta") text += ev.delta;
@@ -201,7 +222,7 @@ export class Dreamer {
           // Observation only (this method's throw/catch shape is unchanged) — the classifier reads
           // ONLY the structured fields already on the event, never `ev.message` for its DECISION.
           sawProviderError = true;
-          this.deps.roleHealth?.recordFailure("pins.dream", effectiveTag, classifyProviderFailure({ ...ev, subscriptionQuota: this.deps.provider.quota?.subscriptionQuota() }));
+          this.deps.roleHealth?.recordFailure("pins.dream", effectiveTag, classifyProviderFailure({ ...ev, subscriptionQuota: dreamQuota?.subscriptionQuota() }));
           throw new Error(`provider error: ${ev.message}`);
         }
         else if (ev.type === "done" && ev.stopReason === "aborted") throw new Error("dream aborted");

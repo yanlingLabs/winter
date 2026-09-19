@@ -1,4 +1,5 @@
 import type { Provider, TurnInputItem } from "../providers/types";
+import { isInternalRefusal, type InternalCallSource } from "../providers/internal-router";
 import { classifyProviderFailure, type RoleHealthRegistry, type SubscriptionQuotaSource } from "../providers/role-health";
 import type { SessionStore } from "../sessions/store";
 import type { SessionHub } from "../sessions/hub";
@@ -47,6 +48,19 @@ export class SessionTitler {
   // is reflected in the tag a failure/success is recorded against.
   private readonly boundProviderId: (() => string) | undefined;
   private readonly roleHealth: RoleHealthRegistry | undefined;
+  /**
+   * 2026-09-19: the ONE seam a real daemon wires — `providers/internal-router.ts`'s
+   * `resolve("titles.model", settings)`, bound to the live settings holder. It answers the `Provider`,
+   * the bare model, the qualified tag and the already-normalised effort together, so this class no
+   * longer has to combine four independently-resolved getters (which is how a pin naming one provider
+   * and a backend bound to another could ever meet).
+   *
+   * Optional, and that is the ONLY reason `provider`/`model`/`effort`/`boundProviderId` still exist:
+   * ~10 test files construct this class with a bare `{provider, model}` double, and those doubles are
+   * the legacy path, not a production one. Exactly one of the two is used per call — `source` when
+   * given, the getters otherwise.
+   */
+  private readonly source: InternalCallSource | undefined;
   // Re-entrancy guard: the engine fires maybeTitle() fire-and-forget at every depth-0 turn
   // completion, and a slow model call must not overlap with itself for the same session (which
   // would otherwise race two "is it already titled" checks against the same not-yet-titled store).
@@ -68,8 +82,11 @@ export class SessionTitler {
     boundProviderId?: () => string;
     roleHealth?: RoleHealthRegistry;
     timeoutMs?: number;
+    /** See the field's own doc comment. A real daemon passes this and nothing else. */
+    source?: InternalCallSource;
   }) {
     this.provider = deps.provider;
+    this.source = deps.source;
     this.store = deps.store;
     this.hub = deps.hub;
     this.model = deps.model;
@@ -118,19 +135,30 @@ export class SessionTitler {
     // under a hung provider, leaking a connection. `ac` ties the provider call's lifetime to the
     // race: aborted in the SAME finally that clears the timer, whichever side of the race wins.
     const ac = new AbortController();
+    // 2026-09-19: resolved ONCE per call, so the provider, the model, the tag and the effort provably
+    // come from one settings/credential generation. A refusal means the job is not runnable right now
+    // (no credentialed provider, or an explicit pin on one Winter cannot use): return empty, which
+    // `maybeTitle` already treats as "no title", exactly as a blank model reply does.
+    const resolved = this.source?.();
+    if (resolved !== undefined && isInternalRefusal(resolved)) return "";
+    const wire: { provider: Provider; model: string; effort: string | undefined; tag: string | undefined; quota: SubscriptionQuotaSource | undefined } =
+      resolved === undefined
+        ? {
+            provider: this.provider.provider,
+            // Read in the same synchronous breath as the effort (no `await` between them), so the two
+            // always come from one settings generation.
+            model: this.model?.() ?? this.provider.live?.().model ?? this.provider.model,
+            effort: this.effort?.(),
+            tag: this.boundProviderId === undefined ? undefined : `${this.boundProviderId()}/${this.model?.() ?? this.provider.live?.().model ?? this.provider.model}`,
+            quota: this.provider.quota,
+          }
+        : { provider: resolved.provider, model: resolved.model, effort: resolved.effort, tag: resolved.tag, quota: resolved.quota };
     const run = (async () => {
       let text = "";
       let sawProviderError = false;
-      // Read in the same synchronous breath as `model` below (no `await` between them), so the two
-      // always come from one settings generation. Spread conditionally: an absent effort must leave
-      // the request with NO `reasoningEffort` key, not an `undefined`-valued one.
-      const effort = this.effort?.();
-      // Minor 5c: the LIVE bound model first (re-reads settings.json every call, unaffected by
-      // whether a rebind ever crossed providers), the static snapshot only when no `live` exists
-      // at all (a bare test double) — the SAME model this call is about to spend, so the tag
-      // recorded below is provably the one that ran.
-      const effectiveModel = this.model?.() ?? this.provider.live?.().model ?? this.provider.model;
-      for await (const ev of this.provider.provider.streamTurn({
+      const effort = wire.effort;
+      const effectiveModel = wire.model;
+      for await (const ev of wire.provider.streamTurn({
         model: effectiveModel,
         ...(effort === undefined ? {} : { reasoningEffort: effort }),
         instructions: TITLE_INSTRUCTION,
@@ -143,13 +171,13 @@ export class SessionTitler {
         // (the loop simply kept waiting for the next event, which is what still happens: no
         // `break`/`throw` added here). See this class's own module note above ("all failures logged
         // + swallowed" — that swallowing is unchanged).
-        else if (ev.type === "error" && this.boundProviderId) {
+        else if (ev.type === "error" && wire.tag !== undefined) {
           sawProviderError = true;
-          this.roleHealth?.recordFailure("titles.model", `${this.boundProviderId()}/${effectiveModel}`, classifyProviderFailure({ ...ev, subscriptionQuota: this.provider.quota?.subscriptionQuota() }));
+          this.roleHealth?.recordFailure("titles.model", wire.tag, classifyProviderFailure({ ...ev, subscriptionQuota: wire.quota?.subscriptionQuota() }));
         }
         else if (ev.type === "done" && ev.stopReason === "aborted") throw new Error("title generation aborted");
       }
-      if (!sawProviderError && this.boundProviderId) this.roleHealth?.recordSuccess("titles.model");
+      if (!sawProviderError && wire.tag !== undefined) this.roleHealth?.recordSuccess("titles.model");
       return text;
     })();
 
