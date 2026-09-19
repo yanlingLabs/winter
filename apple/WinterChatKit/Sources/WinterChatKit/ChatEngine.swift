@@ -347,8 +347,7 @@ public final class ChatEngine: @unchecked Sendable {
             }
             // T7 contract: the tool returns an empty-callId result; the engine rebinds via .attaching.
             let result = await SearchTool.run(query: args.query, key: tools.exaKey, http: tools.http,
-                                              maxResults: args.maxResults, dangerousAdded: tools.dangerousAdded,
-                                              signal: signal)
+                                              dangerousAdded: tools.dangerousAdded, signal: signal)
             return result.attaching(callId: call.id)
 
         case "ReadPage":
@@ -454,13 +453,12 @@ public final class ChatEngine: @unchecked Sendable {
         return "No answer within \(seconds)s — the user is not available right now. Answer as best you can and say what you assumed."
     }
 
-    private struct SearchArgs { let query: String; let maxResults: Int? }
+    private struct SearchArgs { let query: String }
     private func decodeSearchArgs(_ json: String) -> SearchArgs? {
         guard let data = json.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let query = object["query"] as? String, !query.isEmpty else { return nil }
-        let max = (object["max_results"] as? NSNumber)?.intValue
-        return SearchArgs(query: query, maxResults: max)
+        return SearchArgs(query: query)
     }
 
     private struct AskArgs { let question: String; let options: [String] }
