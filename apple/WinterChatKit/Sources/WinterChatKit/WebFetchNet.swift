@@ -32,11 +32,11 @@ import Foundation
 ///     there is nothing to reimplement.
 public enum WebFetchNet {
     /// `WEB_FETCH_MAX_BYTES`.
-    static let maxBytes = 10_485_760
+    public static let maxBytes = 10_485_760
     /// `WEB_FETCH_TIMEOUT_MS` — PER HOP in claude too, by design, not a shared total budget.
-    static let timeout: TimeInterval = 60
+    public static let timeout: TimeInterval = 60
     /// `WEB_FETCH_MAX_REDIRECTS`. Counts redirects FOLLOWED, not total requests.
-    static let maxRedirects = 10
+    public static let maxRedirects = 10
     /// The SDK sends `winter/<version>`; this kit carries no version constant of its own, so the
     /// product name alone is the default and a caller may state a fuller one.
     public static let defaultUserAgent = "winter"
@@ -132,7 +132,11 @@ public enum WebFetchNet {
                         return .tooManyRedirects(message: "Too many redirects (exceeded \(maxRedirects))")
                     }
                     redirectsFollowed += 1
-                    current = target
+                    // NORMALISED, not taken raw: `whatwgNormalize` is what makes the followed url's
+                    // spelling (lowercase scheme+host, an elided default port, a non-empty path) the
+                    // same string WHATWG would have produced — and that string becomes `finalUrl`, the
+                    // value a cache hit re-checks its floor against.
+                    current = URL(string: whatwgNormalize(target)) ?? target
                     continue
                 }
                 return .redirectBlocked(message: renderRedirectDetected(

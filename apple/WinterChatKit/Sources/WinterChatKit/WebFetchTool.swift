@@ -62,6 +62,10 @@ public enum WebFetchTool {
         public let digestModel: String
         public let dangerousAdded: [String]
         public let userAgent: String
+        /// The PER-HOP timeout and the body cap. Defaults are claude's own (60 s, 10 MiB); a test
+        /// narrows them so a cap can be crossed without moving ten megabytes.
+        public let timeout: TimeInterval
+        public let maxBytes: Int
         public let now: @Sendable () -> Date
 
         public init(http: any ChatHTTP,
@@ -70,6 +74,8 @@ public enum WebFetchTool {
                     digestModel: String,
                     dangerousAdded: [String] = [],
                     userAgent: String = WebFetchNet.defaultUserAgent,
+                    timeout: TimeInterval = WebFetchNet.timeout,
+                    maxBytes: Int = WebFetchNet.maxBytes,
                     now: @escaping @Sendable () -> Date = { Date() }) {
             self.http = http
             self.cache = cache
@@ -77,6 +83,8 @@ public enum WebFetchTool {
             self.digestModel = digestModel
             self.dangerousAdded = dangerousAdded
             self.userAgent = userAgent
+            self.timeout = timeout
+            self.maxBytes = maxBytes
             self.now = now
         }
     }
@@ -172,7 +180,8 @@ public enum WebFetchTool {
                 inputURL: inputURLString,
                 prompt: prompt,
                 http: deps.http,
-                options: WebFetchNet.Options(dangerousAdded: deps.dangerousAdded, userAgent: deps.userAgent),
+                options: WebFetchNet.Options(dangerousAdded: deps.dangerousAdded, userAgent: deps.userAgent,
+                                             timeout: deps.timeout, maxBytes: deps.maxBytes),
                 signal: signal)
 
             switch outcome {
