@@ -179,11 +179,21 @@ final class SettingsRoleNotesTests: XCTestCase {
     /// The two reasons the internal-job roles report when they cannot run at all.
     func testInternalJobReasonsHaveCalmWording() {
         let now = Date()
-        for reason in ["provider-unsupported", "no-internal-credential"] {
+        for reason in ["provider-unsupported", "no-internal-credential", "no-default-model"] {
             let text = roleProblemText(RoleProblem(reason: reason, detail: "raw daemon detail", model: nil,
                                                    at: nil, retryAt: nil), now: now)
             XCTAssertEqual(text, roleProblemWordings[reason])
             XCTAssertFalse(text.contains("raw daemon detail"), "our wording, not the daemon's text")
         }
+    }
+
+    /// A problem that names no model (`model: ""`) carries nil, so its row shows no tag.
+    func testAnEmptyProblemModelIsNoModel() {
+        let value = SettingsRoleValue(model: nil, isExplicit: false, constraint: "internal-provider", permitted: [],
+                                      problem: RoleProblem(reason: "no-default-model", detail: nil, model: "",
+                                                           at: nil, retryAt: nil))
+        let notes = settingsRoleNotes([.titles: value], now: Date())
+        XCTAssertEqual(notes.count, 1)
+        XCTAssertNil(notes.first?.model)
     }
 }
