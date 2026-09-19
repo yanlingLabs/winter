@@ -304,6 +304,9 @@ struct WindowContentView<Accessory: View>: View {
                 // animates too instead of snapping between two states that are both "a box".
                 .animation(.smooth(duration: 0.3),
                            value: composerMorphQuestion(adapter.pendingInteractions)?.callId)
+                // With a bleed, the composer carries the bottom gap itself, so the transcript
+                // behind it runs to the window's edge instead of stopping 16 pt short of it.
+                .padding(.bottom, topBleed > 0 ? 16 : 0)
             }
         }
         .padding(.horizontal, 16)
@@ -311,7 +314,7 @@ struct WindowContentView<Accessory: View>: View {
         // `TranscriptTopBleed`) so its content can scroll up under the band; nothing else in this
         // column sits at the top.
         .padding(.top, topBleed > 0 ? 0 : topInset)
-        .padding(.bottom, 16)
+        .padding(.bottom, topBleed > 0 ? 0 : 16)
     }
 
     /// The page: the chat column, and — for a non-chat session in the app shell, while the
@@ -1213,7 +1216,7 @@ struct DispatchManagedSessionsBlock: View {
 // MARK: - The transcript under the titlebar band (2026-09-19)
 
 /// Lets the transcript scroll up under the titlebar band and fade out there, instead of stopping at
-/// a hard line below an empty strip. No-op at `bleed == 0` (every surface but the shell).
+/// a hard line below an empty strip — and fade at the window's bottom edge too, under the composer. No-op at `bleed == 0` (every surface but the shell).
 ///
 /// The content keeps its old resting place — a scroll MARGIN of `bleed + inset` — so nothing moves
 /// until you scroll; the fade is a mask over the band plus a short ramp below it, eased so the
@@ -1236,6 +1239,10 @@ struct TranscriptTopBleed: ViewModifier {
                         ], startPoint: .top, endPoint: .bottom)
                         .frame(height: bleed + transcriptTopFadeRamp)
                         Color.black
+                        // …and the bottom edge, under the (see-through) composer: the text fades
+                        // out as it reaches the window's edge rather than being cut at a line.
+                        LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+                            .frame(height: transcriptBottomFadeHeight)
                     }
                 }
         } else {
@@ -1246,3 +1253,5 @@ struct TranscriptTopBleed: ViewModifier {
 
 /// How far below the band the fade finishes.
 let transcriptTopFadeRamp: CGFloat = 18
+/// The fade at the transcript's bottom edge, under the composer.
+let transcriptBottomFadeHeight: CGFloat = 28

@@ -25,13 +25,18 @@ let dispatchParticleMaxPush: CGFloat = 9
 let dispatchParticleRestOpacity: Double = 0.10
 let dispatchParticleLitOpacity: Double = 0.38
 
-/// The working pulse: its period, the ring's half-width, where it starts (the composer, this far
-/// above the field's bottom edge), and how much it lifts and pushes the dots it crosses.
-let dispatchPulsePeriod: Double = 2.8
-let dispatchPulseBand: CGFloat = 80
-let dispatchPulseOriginFromBottom: CGFloat = 110
-let dispatchPulseLift: Double = 0.30
-let dispatchPulsePush: CGFloat = 3
+/// The working pulse: its period, the wave's half-width, and how much it lifts, grows and pushes the
+/// dots it crosses. It starts IN THE SHAPE OF THE COMPOSER — the wave is a distance from the
+/// composer's rounded outline, not from a point — and grows outward until it has left the page.
+let dispatchPulsePeriod: Double = 3.2
+let dispatchPulseBand: CGFloat = 110
+let dispatchPulseLift: Double = 0.55
+let dispatchPulseGrow: CGFloat = 0.7
+let dispatchPulsePush: CGFloat = 6
+/// Fallback outline when the composer has not reported its frame: a composer-sized rounded rect
+/// centred near the bottom of the field.
+let dispatchPulseFallbackSize = CGSize(width: 640, height: 130)
+let dispatchPulseCornerRadius: CGFloat = 30
 
 /// PURE: how far (and which way) one grid point moves for a cursor at `pointer`, scaled by
 /// `strength` (0 = no cursor, 1 = fully present). A smooth, zero-slope-at-the-edge falloff so the
@@ -47,15 +52,26 @@ func dispatchParticleOffset(point: CGPoint, pointer: CGPoint, strength: CGFloat)
     return (vx / distance * push, vy / distance * push, influence)
 }
 
-/// PURE: the pulse's effect on one point — 0…1 — for a ring at `ringRadius` around `origin`,
-/// fading as it travels (`travelled`: 0 at birth → 1 at the far edge).
-func dispatchPulseInfluence(point: CGPoint, origin: CGPoint, ringRadius: CGFloat, travelled: CGFloat) -> CGFloat {
-    let vx = point.x - origin.x, vy = point.y - origin.y
-    let d = (vx * vx + vy * vy).squareRoot()
-    let x = abs(d - ringRadius) / dispatchPulseBand
+/// PURE: a point's distance OUTSIDE a rounded rect (0 on or inside it) — the signed-distance
+/// formula, clamped. The pulse measures from this, so its wave is the composer's shape, inflated.
+func dispatchDistanceOutside(_ point: CGPoint, rect: CGRect, cornerRadius: CGFloat) -> CGFloat {
+    let r = min(cornerRadius, rect.width / 2, rect.height / 2)
+    let qx = abs(point.x - rect.midX) - (rect.width / 2 - r)
+    let qy = abs(point.y - rect.midY) - (rect.height / 2 - r)
+    let outside = (max(qx, 0) * max(qx, 0) + max(qy, 0) * max(qy, 0)).squareRoot()
+    return max(0, outside + min(max(qx, qy), 0) - r)
+}
+
+/// PURE: the pulse's effect on one point — 0…1 — for a wave `ringRadius` out from the composer's
+/// outline (`distance` is the point's own distance from it), fading as it travels (`travelled`:
+/// 0 at birth → 1 at the far edge). The fade is slow at first, so the wave keeps its strength
+/// most of the way across the page.
+func dispatchPulseInfluence(distance: CGFloat, ringRadius: CGFloat, travelled: CGFloat) -> CGFloat {
+    let x = abs(distance - ringRadius) / dispatchPulseBand
     guard x < 1 else { return 0 }
     let bump = (1 - x * x) * (1 - x * x)
-    return bump * max(0, 1 - travelled)
+    let t = min(max(travelled, 0), 1)
+    return bump * (1 - t * t)
 }
 
 /// The field. `pointer` is in GLOBAL coordinates — the hover is tracked on the surface while the
@@ -64,6 +80,8 @@ func dispatchPulseInfluence(point: CGPoint, origin: CGPoint, ringRadius: CGFloat
 struct DispatchParticleField: View {
     let pointer: CGPoint?
     var isWorking: Bool = false
+    /// The composer face's frame in GLOBAL coordinates (`ComposerFaceFrameKey`), or nil.
+    var composerFrame: CGRect? = nil
 
     /// The cursor the dots actually respond to — it trails the real one, and `strength` fades in and
     /// out, so the field eases rather than snapping when the pointer enters, moves or leaves.
@@ -97,11 +115,18 @@ struct DispatchParticleField: View {
             let seconds = timeline.date.timeIntervalSinceReferenceDate
             let phase = CGFloat(seconds.truncatingRemainder(dividingBy: dispatchPulsePeriod) / dispatchPulsePeriod)
             Canvas { context, size in
-                let origin = CGPoint(x: size.width / 2, y: size.height - dispatchPulseOriginFromBottom)
-                // Far enough to leave the top corners before it fades out.
-                let farthest = ((size.width / 2) * (size.width / 2) + origin.y * origin.y).squareRoot()
-                    + dispatchPulseBand
-                let ringRadius = phase * farthest
+                // The composer's outline in this field's space — or a composer-sized stand-in.
+                let shape = composerFrame.map { $0.offsetBy(dx: -frameOrigin.x, dy: -frameOrigin.y) }
+                    ?? CGRect(x: (size.width - dispatchPulseFallbackSize.width) / 2,
+                              y: size.height - dispatchPulseFallbackSize.height - 16,
+                              width: dispatchPulseFallbackSize.width,
+                              height: dispatchPulseFallbackSize.height)
+                // Far enough to clear the farthest corner of the page before it fades out.
+                let farthest = [CGPoint(x: 0, y: 0), CGPoint(x: size.width, y: 0),
+                                CGPoint(x: 0, y: size.height), CGPoint(x: size.width, y: size.height)]
+                    .map { dispatchDistanceOutside($0, rect: shape, cornerRadius: dispatchPulseCornerRadius) }
+                    .max() ?? 0
+                let ringRadius = phase * (farthest + dispatchPulseBand)
                 let columns = Int(size.width / dispatchParticleSpacing) + 1
                 let rows = Int(size.height / dispatchParticleSpacing) + 1
                 // Centre the grid so the margins match on both sides.
@@ -115,10 +140,15 @@ struct DispatchParticleField: View {
                         var pulse: CGFloat = 0
                         var pdx: CGFloat = 0, pdy: CGFloat = 0
                         if pulseStrength > 0.001 {
-                            pulse = dispatchPulseInfluence(point: base, origin: origin, ringRadius: ringRadius,
-                                                           travelled: phase) * pulseStrength
+                            let distance = dispatchDistanceOutside(base, rect: shape,
+                                                                   cornerRadius: dispatchPulseCornerRadius)
+                            pulse = distance > 0
+                                ? dispatchPulseInfluence(distance: distance, ringRadius: ringRadius,
+                                                         travelled: phase) * pulseStrength
+                                : 0
                             if pulse > 0 {
-                                let vx = base.x - origin.x, vy = base.y - origin.y
+                                // Pushed away from the composer's centre — outward, like the wave.
+                                let vx = base.x - shape.midX, vy = base.y - shape.midY
                                 let len = max(0.001, (vx * vx + vy * vy).squareRoot())
                                 pdx = vx / len * dispatchPulsePush * pulse
                                 pdy = vy / len * dispatchPulsePush * pulse
@@ -127,7 +157,7 @@ struct DispatchParticleField: View {
                         let opacity = min(1, dispatchParticleRestOpacity
                             + (dispatchParticleLitOpacity - dispatchParticleRestOpacity) * Double(offset.influence)
                             + dispatchPulseLift * Double(pulse))
-                        let r = dispatchParticleRadius * (1 + 0.5 * offset.influence + 0.35 * pulse)
+                        let r = dispatchParticleRadius * (1 + 0.5 * offset.influence + dispatchPulseGrow * pulse)
                         let rect = CGRect(x: base.x + offset.dx + pdx - r, y: base.y + offset.dy + pdy - r,
                                           width: r * 2, height: r * 2)
                         context.fill(Path(ellipseIn: rect), with: .color(Theme.textPrimary.opacity(opacity)))
