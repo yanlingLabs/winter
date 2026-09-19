@@ -102,14 +102,20 @@ describe("validateModelTag", () => {
 // `validateInternalProviderModelTag` gate is GONE; `internalProviderNote` is its informational
 // replacement, printed to stderr alongside the write rather than blocking it.
 describe("internalProviderNote", () => {
-  test("undefined for an internal provider (codex-oauth/openai) — nothing to say", () => {
+  test("undefined for any provider Winter's own jobs can run on — nothing to say", () => {
     expect(internalProviderNote("codex-oauth/gpt-5.6-terra")).toBeUndefined();
     expect(internalProviderNote("openai/gpt-5.6")).toBeUndefined();
+    // 2026-09-19: DeepSeek is eligible now, so choosing it says nothing — the jobs simply follow it.
+    expect(internalProviderNote("deepseek/deepseek-v4-flash")).toBeUndefined();
   });
 
-  test("a heads-up for a real, non-internal catalog provider — never a refusal", () => {
+  test("a heads-up for a provider Winter's own jobs cannot be driven over — never a refusal, never 'inert'", () => {
     const note = internalProviderNote("anthropic/claude-opus-5");
-    expect(note).toBe("note: anthropic is not one of the daemon's internal providers (codex-oauth, openai); titles, review, dreaming and research are inert until provider.model names one of those");
+    expect(note).toContain("can't run on anthropic");
+    // The jobs FALL BACK now; they are not inert, and nothing hinges on provider.model.
+    expect(note).toContain("whichever provider you have a usable credential for");
+    expect(note).not.toContain("inert");
+    expect(note).toContain("Your sessions are unaffected.");
   });
 });
 
