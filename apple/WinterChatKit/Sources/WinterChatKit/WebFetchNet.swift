@@ -132,11 +132,17 @@ public enum WebFetchNet {
                         return .tooManyRedirects(message: "Too many redirects (exceeded \(maxRedirects))")
                     }
                     redirectsFollowed += 1
-                    // NORMALISED, not taken raw: `whatwgNormalize` is what makes the followed url's
-                    // spelling (lowercase scheme+host, an elided default port, a non-empty path) the
-                    // same string WHATWG would have produced — and that string becomes `finalUrl`, the
-                    // value a cache hit re-checks its floor against.
-                    current = URL(string: whatwgNormalize(target)) ?? target
+                    // NORMALISED, not taken raw, in BOTH the ways WHATWG's own parser already has by
+                    // the time the SDK assigns `current = target`:
+                    //   * `whatwgNormalize` — lowercase scheme+host, an elided default port, a
+                    //     non-empty path. That string becomes `finalUrl`, which a cache hit re-checks
+                    //     its floor against.
+                    //   * `.standardized` — dot-segment collapsing, which `whatwgNormalize`
+                    //     deliberately does not do (it is shared with `PageFetcher`'s differentially
+                    //     pinned link extraction). Without it a followed hop's `current` would carry
+                    //     `/doc/../blog/y` into the NEXT iteration's `scopeOf`, which reads a collapsed
+                    //     path — two readings of one url, which is how a scope escape starts.
+                    current = (URL(string: whatwgNormalize(target)) ?? target).standardized
                     continue
                 }
                 return .redirectBlocked(message: renderRedirectDetected(
@@ -273,7 +279,12 @@ public enum WebFetchNet {
 
     /// `${target.origin}${target.pathname}${target.search}${target.hash}` — deliberately WITHOUT any
     /// userinfo, which `origin` drops in WHATWG and which must never be echoed back to the model.
-    private static func displayTarget(_ url: URL) -> String {
+    ///
+    /// `.standardized` first, because `target.pathname` in the SDK is ALREADY dot-collapsed by the URL
+    /// parser: this line is the url the model is told to re-call with, so relaying `/a/../b` rather
+    /// than `/b` would hand it a path some servers 404 on and would not be the string claude prints.
+    private static func displayTarget(_ rawURL: URL) -> String {
+        let url = rawURL.standardized
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: true) else {
             return url.absoluteString
         }

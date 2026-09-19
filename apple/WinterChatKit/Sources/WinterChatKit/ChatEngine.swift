@@ -67,9 +67,22 @@ public protocol LocalSession: Sendable {
 ///
 /// `exaKey` decides the TOOL SURFACE, not just one tool's behaviour: with a key stored the session
 /// gets `Search` (Exa's `/answer`), without one it does not — the same gate the daemon applies at
-/// three doors. `systemPrompt` therefore defaults to the paragraph that matches, rather than to a
-/// constant that would have to name both.
+/// three doors.
+///
+/// **THE PROMPT IS A BUILDER, NOT A STRING, AND THAT IS THE POINT** (whole-branch review m3). A caller
+/// that composes its own instructions on top of the base paragraph — which the iOS app does, folding in
+/// the date, the user's instructions and the replicated memory bucket — would otherwise have to pick an
+/// `exaKeyPresent` value itself, and the cheapest thing to pick when a compile breaks is a literal
+/// `true`. That would put `Search` in a keyless session's prompt while the tool list withheld it, which
+/// is the exact failure the per-session prompt exists to prevent. So there is no way to hand this type
+/// a finished string: a custom prompt is `(Bool) -> String`, and this type applies its OWN
+/// `exaKeyPresent` to it — the same stored value the engine reads for the tool list. The two doors
+/// cannot disagree, because there is only one value and no API that takes another.
 public struct ChatToolset: Sendable {
+    /// A base prompt composed for ONE session. The argument is whether this session was given `Search`;
+    /// a caller builds on `ChatEngine.defaultSystemPrompt(exaKeyPresent:)` with it.
+    public typealias SystemPromptBuilder = @Sendable (_ exaKeyPresent: Bool) -> String
+
     public let http: any ChatHTTP
     public let exaKey: String?
     /// `WebFetch`'s converted-page cache (15 min, keyed on the requested url). One per chat session:
@@ -79,13 +92,18 @@ public struct ChatToolset: Sendable {
     public let dangerousAdded: [String]
     public let digestProvider: (any ChatProvider)?
     public let userAgent: String
-    public let systemPrompt: String
     public let reasoningEffort: String?
     public let askTimeout: Duration
 
+    private let systemPromptBuilder: SystemPromptBuilder
+
     /// True when this session was given `Search` — i.e. when an Exa key is stored. The engine's tool
-    /// list and the default prompt paragraph both read THIS, so they can never disagree.
+    /// list and this toolset's own prompt both read THIS one stored value, so they can never disagree.
     public var exaKeyPresent: Bool { !(exaKey ?? "").isEmpty }
+
+    /// The base prompt for THIS session — the builder applied to this session's own `exaKeyPresent`.
+    /// There is deliberately no setter and no string-taking initializer; see the type's header.
+    public var systemPrompt: String { systemPromptBuilder(exaKeyPresent) }
 
     public init(http: any ChatHTTP,
                 cache: WebFetchCache,
@@ -93,7 +111,7 @@ public struct ChatToolset: Sendable {
                 dangerousAdded: [String] = [],
                 digestProvider: (any ChatProvider)? = nil,
                 userAgent: String = WebFetchNet.defaultUserAgent,
-                systemPrompt: String? = nil,
+                systemPrompt: SystemPromptBuilder? = nil,
                 reasoningEffort: String? = nil,
                 askTimeout: Duration = .seconds(300)) {
         self.http = http
@@ -104,8 +122,7 @@ public struct ChatToolset: Sendable {
         self.userAgent = userAgent
         self.reasoningEffort = reasoningEffort
         self.askTimeout = askTimeout
-        self.systemPrompt = systemPrompt
-            ?? ChatEngine.defaultSystemPrompt(exaKeyPresent: !(exaKey ?? "").isEmpty)
+        self.systemPromptBuilder = systemPrompt ?? { ChatEngine.defaultSystemPrompt(exaKeyPresent: $0) }
     }
 }
 
@@ -250,8 +267,12 @@ public final class ChatEngine: @unchecked Sendable {
 
             // WS-20: `model` (the param this func/`runTurn` was handed) is a tag; the provider wire
             // wants the bare modelId only.
+            // ONE read of the gate, feeding BOTH doors: the advertised tool list and the base prompt.
+            // `ChatToolset.systemPrompt` applies the same stored `exaKeyPresent` to its builder, so a
+            // caller's own composition cannot name a tool this list withholds.
+            let exaKeyPresent = tools.exaKeyPresent
             let request = ProviderTurnRequest(model: modelIdPortion(of: model), instructions: tools.systemPrompt,
-                                              input: input, tools: Self.toolSpecs(exaKeyPresent: tools.exaKeyPresent),
+                                              input: input, tools: Self.toolSpecs(exaKeyPresent: exaKeyPresent),
                                               reasoningEffort: tools.reasoningEffort)
             let stream = provider.streamTurn(request)
             // Transient assistant_delta seq = the current head (non-advancing) — captured as a

@@ -102,7 +102,10 @@ public enum DangerousDomains {
     /// non-ASCII character, so the common path pays nothing.
     public static func normalizeEntry(_ value: String) -> String {
         var v = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if v.hasPrefix("*.") { v = String(v.dropFirst(2)) }
+        // REPEATED, not one: `_domains.ts`'s own `normalizeDomain` strips `/^(\*\.)+/`, so the runtime
+        // child honours `*.*.evil.example` and a single `if` here would have left that entry matching
+        // nothing at all. (The daemon's `normalizeDangerousDomain` strips one — see the report.)
+        while v.hasPrefix("*.") { v = String(v.dropFirst(2)) }
         while v.hasPrefix(".") { v = String(v.dropFirst()) }
         if let host = hostnameOfUrlShaped(v) { v = host }
         while v.hasSuffix(".") { v = String(v.dropLast()) }
@@ -136,19 +139,46 @@ public enum DangerousDomains {
         return host.lowercased()
     }
 
-    /// TS `dangerousHostMatch` — `match` for a HOST-OR-DOMAIN string, with BOTH sides normalized
-    /// (`normalizeEntry`) before the shared suffix grammar decides. Returns the matched list entry
-    /// VERBATIM (not its normalized form), so a refusal names what the user or the shipped list
-    /// actually wrote. Empty/unreadable input never matches.
+    /// `match` for a HOST-OR-DOMAIN string, with BOTH sides normalized (`normalizeEntry`) — and with the
+    /// runtime child's own TWO EXACT-ONLY rules, which the plain suffix grammar does not have
+    /// (`_domains.ts`'s `hostMatchesDomain`, the matcher a Winter child actually applies to
+    /// `blockedDomains`):
+    ///
+    ///   * **an IP literal never matches by suffix**, on either side. A suffix of an address is not a
+    ///     parent of it: a typo'd `0.1` must not block `127.0.0.1`, and `127.0.0.1` must not be read as
+    ///     a subdomain of `example.com`. (A value carrying a `:` counts as an IP literal here — that
+    ///     covers both the bracketed and the bare IPv6 spellings, since `URL` hands back the bare one.)
+    ///   * **a SINGLE-LABEL entry never matches by suffix.** As a suffix, one truncated or mistyped
+    ///     `com` would silently block every `.com` there is; exactly, `localhost` still blocks
+    ///     `localhost`.
+    ///
+    /// The shipped list is unaffected — all 38 entries are multi-label names and none is a dotted quad —
+    /// so suffix matching still covers every subdomain of every one of them.
+    ///
+    /// Returns the matched list entry VERBATIM (not its normalized form), so a refusal names what the
+    /// user or the shipped list actually wrote. Empty/unreadable input never matches.
     public static func hostMatch(host: String, entries: [String]) -> String? {
         let h = normalizeEntry(host)
         guard !h.isEmpty else { return nil }
+        let hostIsLiteral = isIPLiteral(h)
         for entry in entries {
             let e = normalizeEntry(entry)
             guard !e.isEmpty else { continue }
+            if hostIsLiteral || isIPLiteral(e) || !e.contains(".") {
+                if h == e { return entry }
+                continue
+            }
             if match(host: h, entries: [e]) != nil { return entry }
         }
         return nil
+    }
+
+    /// `_domains.ts`'s `isIpLiteral`, widened by one case: a bracketed authority, a dotted quad, or
+    /// anything carrying a `:` (a bare IPv6 address, which is the form `URL.host` answers and the form
+    /// `normalizeEntry` leaves alone when the URL parser cannot read it).
+    private static func isIPLiteral(_ value: String) -> Bool {
+        if value.hasPrefix("[") || value.contains(":") { return true }
+        return value.range(of: "^[0-9]{1,3}(\\.[0-9]{1,3}){3}$", options: .regularExpression) != nil
     }
 
     /// TS `checkDangerousDomain`, URL-typed. `extra` is the caller-resolved user-added half

@@ -110,6 +110,47 @@ final class ChatToolSurfaceTests: XCTestCase {
         }
     }
 
+    /// m3: a CUSTOM prompt is a builder, and the toolset applies its OWN gate to it. A caller composing
+    /// memory sections on top of the base paragraph therefore cannot pick the wrong arm — the value it
+    /// receives is the same one the tool list is built from, and there is no API that takes a finished
+    /// string.
+    func testACustomPromptBuilderReceivesTheSessionsOwnGateValue() {
+        final class Seen: @unchecked Sendable { var values: [Bool] = [] }
+        let seen = Seen()
+        let builder: ChatToolset.SystemPromptBuilder = { keyPresent in
+            seen.values.append(keyPresent)
+            return "MEMORY\n\n" + ChatEngine.defaultSystemPrompt(exaKeyPresent: keyPresent)
+        }
+
+        let keyless = ChatToolset(http: ScriptedChatHTTP(), cache: WebFetchCache(), exaKey: nil,
+                                  systemPrompt: builder)
+        XCTAssertTrue(keyless.systemPrompt.hasPrefix("MEMORY\n\n"))
+        XCTAssertFalse(keyless.systemPrompt.contains("You can Search the web."))
+        XCTAssertEqual(seen.values.last, false, "a keyless toolset hands the builder `false`")
+
+        let keyed = ChatToolset(http: ScriptedChatHTTP(), cache: WebFetchCache(), exaKey: "k",
+                                systemPrompt: builder)
+        XCTAssertTrue(keyed.systemPrompt.contains("You can Search the web."))
+        XCTAssertEqual(seen.values.last, true, "and a keyed one hands it `true`")
+    }
+
+    /// The composed prompt still cannot name a tool the list withholds — the property the builder makes
+    /// unrepresentable, asserted end to end through a real turn.
+    func testACustomComposedPromptStillAgreesWithTheAdvertisedList() async {
+        let provider = ScriptedChatProvider([[.textDelta("hi"), .done(.endTurn)]])
+        let clock = t0
+        let engine = ChatEngine(provider: provider, now: { clock })
+        let tools = ChatToolset(http: ScriptedChatHTTP(), cache: WebFetchCache(), exaKey: nil,
+                                systemPrompt: { "Today is Tuesday.\n\n" + ChatEngine.defaultSystemPrompt(exaKeyPresent: $0) })
+        await engine.runTurn(session: ScriptedLocalSession(), userText: "hi", model: "m",
+                             tools: tools, emit: { _ in })
+
+        let instructions = provider.request(0).instructions ?? ""
+        XCTAssertTrue(instructions.hasPrefix("Today is Tuesday."))
+        XCTAssertFalse(instructions.contains("You can Search the web."))
+        XCTAssertEqual(provider.request(0).tools.map(\.name), ["WebFetch", "AskQuestion"])
+    }
+
     // MARK: - what actually reaches the provider
 
     func testTheTurnAdvertisesTheSessionsOwnToolListAndPrompt() async {
