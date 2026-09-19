@@ -1247,7 +1247,7 @@ struct TranscriptTopBleed: ViewModifier {
                             .init(color: .black, location: 1),
                         ], startPoint: .top, endPoint: .bottom)
                         .frame(height: bleed + transcriptTopFadeRamp)
-                        Color.black
+                        Rectangle()   // opaque = fully shown; a mask colour never renders
                         // …and the bottom edge, under the (see-through) composer: the text fades
                         // out as it reaches the window's edge rather than being cut at a line.
                         LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
