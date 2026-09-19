@@ -90,7 +90,9 @@ let roleProblemWordings: [String: String] = [
     // 2026-09-19, the daemon's internal-job roles (titles, the purge, dreaming, the reviewer):
     // a role that cannot run at all, said calmly rather than left silent.
     "provider-unsupported": "Winter can't run this job on that provider yet, so it isn't running.",
-    "no-internal-credential": "Not running — sign in with ChatGPT (Codex) or add an OpenAI key in Providers.",
+    "no-internal-credential": "Not running — add a key for any provider in Providers, or sign in with ChatGPT.",
+    // No model chosen, and none Winter will pick for you on this provider.
+    "no-default-model": "Pick a model for this job — Winter won't choose one for you on this provider.",
 ]
 
 /// When there is nothing better to say: an `other` (or unknown) reason with no detail.
@@ -161,7 +163,9 @@ func settingsRoleNotes(_ values: [SettingsModelRole: SettingsRoleValue], now: Da
                        locale: Locale = .autoupdatingCurrent) -> [RoleNote] {
     settingsModelRoleOrder.compactMap { role in
         guard let problem = values[role]?.problem else { return nil }
-        return RoleNote(role: role, model: problem.model,
+        // An empty tag means "no model at all" (`no-internal-credential`, `no-default-model`) —
+        // carried as nil so the row shows nothing rather than a blank.
+        return RoleNote(role: role, model: problem.model.flatMap { $0.isEmpty ? nil : $0 },
                         text: roleProblemText(problem, now: now, calendar: calendar, locale: locale))
     }
 }
@@ -173,8 +177,8 @@ struct SettingsRoleNoteRow: View {
 
     var body: some View {
         SettingsRow(settingsModelRoleTitle(note.role), description: note.text) {
-            Text(note.model ?? settingsModelRoleUnknownValue)
-                .font(Typography.controlMono())
+            Text(note.model ?? "")
+                .font(Typography.control())
                 .foregroundStyle(Theme.textMuted)
                 .lineLimit(1)
                 .truncationMode(.middle)
