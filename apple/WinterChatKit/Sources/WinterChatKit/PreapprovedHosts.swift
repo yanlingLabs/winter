@@ -147,6 +147,10 @@ enum PreapprovedHosts {
     /// `wX(hostname, pathname)`, verbatim: an EXACT hostname match (no subdomains) against the
     /// hostname-only half, OR a hostname with a registered path prefix whose pathname is that prefix
     /// or a `/`-bounded child of it.
+    ///
+    /// `pathname` must ALREADY be WHATWG-shaped — percent-encoded and dot-segment-collapsed. Every
+    /// in-kit caller goes through `standardizedPath`, which is what produces that; a raw
+    /// `URL.path` here would reopen the scope escape that function's header documents.
     static func isPreapproved(host: String, pathname: String) -> Bool {
         if hostnameOnly.contains(host) { return true }
         guard let prefixes = pathPrefixes[host] else { return false }
@@ -155,7 +159,7 @@ enum PreapprovedHosts {
     }
 
     static func isPreapproved(_ url: URL) -> Bool {
-        isPreapproved(host: WebFetchURL.bareHost(url), pathname: rawPath(url))
+        isPreapproved(host: WebFetchURL.bareHost(url), pathname: standardizedPath(url))
     }
 
     /// The scope's own host, that host with a leading `www.` stripped, and that stripped form with
@@ -179,7 +183,7 @@ enum PreapprovedHosts {
     /// `scope != nil && …` guard then short-circuits to "no restriction at all" — auto-following a
     /// third hop genuinely outside `/docs`.
     static func scopeOf(_ url: URL) -> Match? {
-        let pathname = rawPath(url)
+        let pathname = standardizedPath(url)
         for host in candidateHosts(WebFetchURL.bareHost(url)) {
             if hostnameOnly.contains(host) { return Match(host: host, pathPrefix: nil) }
             guard let prefixes = pathPrefixes[host] else { continue }
@@ -198,16 +202,31 @@ enum PreapprovedHosts {
         let acceptable: Set<String> = [from.host, stripped, "www.\(stripped)"]
         guard acceptable.contains(WebFetchURL.bareHost(url)) else { return false }
         guard let prefix = from.pathPrefix else { return true } // a hostname-only scope covers the host
-        let pathname = rawPath(url)
+        let pathname = standardizedPath(url)
         if hasEncodedTraversal(pathname) { return false }
         return pathname == prefix || pathname.hasPrefix("\(prefix)/")
     }
 
-    /// WHATWG `URL.pathname` — the PERCENT-ENCODED path, because the encoded-traversal guard reads
-    /// `%2f`/`%5c`/`%2e` off exactly that string, and a decoded path would have already collapsed them.
+    /// WHATWG `URL.pathname`, which is TWO things this needs and `Foundation.URL.path` is only one of:
+    ///
+    ///   * **PERCENT-ENCODED**, because the encoded-traversal guard reads `%2f`/`%5c`/`%2e` off exactly
+    ///     this string — a decoded path would already have collapsed them into real separators;
+    ///   * **DOT-SEGMENT-COLLAPSED**, which WHATWG's basic URL parser does at parse time and Foundation
+    ///     does not. That gap was a real scope escape (whole-branch review M1, measured):
+    ///     `https://claude.com/docs/../evil` matched the `claude.com/docs` entry because the raw path
+    ///     literally starts with `/docs`, so the page got the PERMISSIVE quoting guidelines and was
+    ///     eligible for the verbatim markdown passthrough — and `staysWithinScope` said a redirect to
+    ///     `…/anthropics/../someuser/repo` stayed inside the `github.com/anthropics` scope, so
+    ///     `isEligibleAutoFollow` FOLLOWED a hop that had left it. claude answers `false` to all three.
+    ///
+    /// `URL.standardized` collapses `.`/`..` (and `..` above the root, exactly as WHATWG does) while
+    /// leaving every percent-escape alone — `/docs/%2e%2e/evil` and `/docs/..%2fevil` come through
+    /// untouched, which is what keeps `hasEncodedTraversal` the thing that catches them. Query, fragment,
+    /// host and port all survive.
+    ///
     /// Always at least `/` for an http(s) url, matching WHATWG's non-empty-path rule.
-    private static func rawPath(_ url: URL) -> String {
-        let path = url.path(percentEncoded: true)
+    static func standardizedPath(_ url: URL) -> String {
+        let path = url.standardized.path(percentEncoded: true)
         return path.isEmpty ? "/" : path
     }
 }

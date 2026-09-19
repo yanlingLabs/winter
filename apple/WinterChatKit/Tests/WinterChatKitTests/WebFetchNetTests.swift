@@ -116,6 +116,64 @@ final class WebFetchNetTests: XCTestCase {
         guard case .success = await perform("https://go.dev/doc/tutorial", inside) else { return XCTFail() }
     }
 
+    /// The same escape as a REDIRECT: `isEligibleAutoFollow` consults `staysWithinScope`, so before the
+    /// fix a same-host hop out of `/doc` was auto-FOLLOWED instead of returned to the model.
+    func testARedirectThatEscapesAPathScopeWithDotSegmentsIsReturnedNotFollowed() async {
+        let http = ScriptedChatHTTP([.redirect(status: 301, location: "/doc/../blog/y")])
+        guard case .redirectBlocked(let message) = await perform("https://go.dev/doc/x", http) else {
+            return XCTFail("the hop left the /doc scope and must be RETURNED, not followed")
+        }
+        XCTAssertTrue(message.contains("https://go.dev/blog/y"),
+                      "and the relayed url is the collapsed one the model should re-call with")
+        XCTAssertEqual(http.requestCount, 1)
+    }
+
+    /// The collapse is applied to the FOLLOWED url too, so the next iteration's `scopeOf` and the cached
+    /// `finalUrl` read one spelling rather than two.
+    func testAFollowedHopCarriesItsCollapsedPathOnward() async {
+        let http = ScriptedChatHTTP([.redirect(status: 301, location: "/doc/a/../b"), .plainText("BODY")])
+        guard case .success(let finalURL, _, _, _, _) = await perform("https://go.dev/doc/x", http) else {
+            return XCTFail()
+        }
+        XCTAssertEqual(finalURL, "https://go.dev/doc/b")
+        XCTAssertEqual(http.requestedURLs.last, "https://go.dev/doc/b")
+    }
+
+    func testAScopeMatchesTheWwwVariantThreeWays() {
+        // A scope matched on `claude.com/docs` still resolves for a `www.`-prefixed hop, which is what
+        // keeps the third hop of a `www.` chain bounded instead of unrestricted.
+        let scope = PreapprovedHosts.scopeOf(URL(string: "https://www.claude.com/docs/a")!)
+        XCTAssertEqual(scope, PreapprovedHosts.Match(host: "claude.com", pathPrefix: "/docs"))
+        XCTAssertTrue(PreapprovedHosts.staysWithinScope(scope!, URL(string: "https://www.claude.com/docs/b")!))
+        XCTAssertFalse(PreapprovedHosts.staysWithinScope(scope!, URL(string: "https://www.claude.com/other")!))
+    }
+
+    func testCgnatIsPrivateHereAndAbsentFromTheDaemonMirroringGuard() {
+        XCTAssertTrue(PrivateAddress.isLexicallyPrivate("100.64.0.1"))
+        XCTAssertTrue(PrivateAddress.isLexicallyPrivate("100.127.255.255"))
+        XCTAssertFalse(PrivateAddress.isLexicallyPrivate("100.63.255.255"), "just below the /10")
+        XCTAssertFalse(PrivateAddress.isLexicallyPrivate("100.128.0.1"), "just above it")
+        // `ssrfGuard` is a byte-for-byte mirror of the daemon's guard and deliberately does NOT carry
+        // this range; that is why the classification lives in its own type.
+        XCTAssertNil(ssrfGuard("https://100.64.0.1/x"))
+    }
+
+    func testTheReservedNameRuleCoversAllFourSdkForms() {
+        for host in ["localhost", "app.localhost", "local", "printer.local", "PRINTER.LOCAL", "printer.local."] {
+            XCTAssertTrue(PrivateAddress.isLexicallyPrivate(host), host)
+        }
+        for host in ["notlocalhost.test", "localhost.example.com", "a.test"] {
+            XCTAssertFalse(PrivateAddress.isLexicallyPrivate(host), host)
+        }
+    }
+
+    func testIpv4MappedIpv6GoesThroughTheSameTable() {
+        XCTAssertTrue(PrivateAddress.isLexicallyPrivate("::ffff:127.0.0.1"))
+        XCTAssertTrue(PrivateAddress.isLexicallyPrivate("::ffff:7f00:1"))
+        XCTAssertTrue(PrivateAddress.isLexicallyPrivate("::ffff:100.64.0.1"))
+        XCTAssertFalse(PrivateAddress.isLexicallyPrivate("::ffff:1.1.1.1"))
+    }
+
     // MARK: - hop bound
 
     /// The bound counts redirects FOLLOWED, not requests: the initial request is never a hop, so the
@@ -260,39 +318,68 @@ final class WebFetchPredicateTests: XCTestCase {
         XCTAssertFalse(PreapprovedHosts.isPreapproved(URL(string: "https://go.dev/doc%252e%252e/admin")!))
     }
 
-    func testAScopeMatchesTheWwwVariantThreeWays() {
-        // A scope matched on `claude.com/docs` still resolves for a `www.`-prefixed hop, which is what
-        // keeps the third hop of a `www.` chain bounded instead of unrestricted.
-        let scope = PreapprovedHosts.scopeOf(URL(string: "https://www.claude.com/docs/a")!)
-        XCTAssertEqual(scope, PreapprovedHosts.Match(host: "claude.com", pathPrefix: "/docs"))
-        XCTAssertTrue(PreapprovedHosts.staysWithinScope(scope!, URL(string: "https://www.claude.com/docs/b")!))
-        XCTAssertFalse(PreapprovedHosts.staysWithinScope(scope!, URL(string: "https://www.claude.com/other")!))
+    /// WHOLE-BRANCH REVIEW M1. WHATWG's parser collapses `.`/`..` at parse time; `Foundation.URL.path`
+    /// does not, so a raw path let `/docs/../evil` match the `claude.com/docs` entry and carried the
+    /// PERMISSIVE quoting guidelines (and the verbatim markdown passthrough) outside the scope.
+    func testDotSegmentsCannotEscapeAPathScope() {
+        XCTAssertFalse(PreapprovedHosts.isPreapproved(URL(string: "https://claude.com/docs/../evil")!),
+                       "claude answers false: its pathname is already /evil")
+        XCTAssertFalse(PreapprovedHosts.isPreapproved(URL(string: "https://claude.com/docs/..")!))
+        XCTAssertFalse(PreapprovedHosts.isPreapproved(URL(string: "https://github.com/anthropics/../someuser/repo")!))
+        XCTAssertFalse(PreapprovedHosts.isPreapproved(URL(string: "https://go.dev/doc/a/../../blog/x")!))
+        // `.` and an in-scope `..` still resolve INSIDE the scope, so a legitimate url is unaffected.
+        XCTAssertTrue(PreapprovedHosts.isPreapproved(URL(string: "https://claude.com/docs/./a")!))
+        XCTAssertTrue(PreapprovedHosts.isPreapproved(URL(string: "https://claude.com/docs/a/b/../c")!))
+        // The ENCODED forms are left untouched by the collapse, which is what keeps the encoded-traversal
+        // guard the thing that catches them rather than the collapse silently absorbing the class.
+        XCTAssertFalse(PreapprovedHosts.isPreapproved(URL(string: "https://claude.com/docs/%2e%2e/evil")!))
+        XCTAssertFalse(PreapprovedHosts.isPreapproved(URL(string: "https://claude.com/docs/..%2fevil")!))
     }
 
-    func testCgnatIsPrivateHereAndAbsentFromTheDaemonMirroringGuard() {
-        XCTAssertTrue(PrivateAddress.isLexicallyPrivate("100.64.0.1"))
-        XCTAssertTrue(PrivateAddress.isLexicallyPrivate("100.127.255.255"))
-        XCTAssertFalse(PrivateAddress.isLexicallyPrivate("100.63.255.255"), "just below the /10")
-        XCTAssertFalse(PrivateAddress.isLexicallyPrivate("100.128.0.1"), "just above it")
-        // `ssrfGuard` is a byte-for-byte mirror of the daemon's guard and deliberately does NOT carry
-        // this range; that is why the classification lives in its own type.
-        XCTAssertNil(ssrfGuard("https://100.64.0.1/x"))
+    func testDotSegmentsCannotEscapeAScopeThroughStaysWithinScope() {
+        let scope = PreapprovedHosts.scopeOf(URL(string: "https://github.com/anthropics/claude")!)
+        XCTAssertEqual(scope, PreapprovedHosts.Match(host: "github.com", pathPrefix: "/anthropics"))
+        XCTAssertFalse(PreapprovedHosts.staysWithinScope(scope!, URL(string: "https://github.com/anthropics/../someuser/repo")!),
+                       "the hop has LEFT the scope; a raw path said it had not")
+        XCTAssertTrue(PreapprovedHosts.staysWithinScope(scope!, URL(string: "https://github.com/anthropics/./claude")!))
     }
 
-    func testTheReservedNameRuleCoversAllFourSdkForms() {
-        for host in ["localhost", "app.localhost", "local", "printer.local", "PRINTER.LOCAL", "printer.local."] {
-            XCTAssertTrue(PrivateAddress.isLexicallyPrivate(host), host)
+    // MARK: - the floor's two exact-only rules (whole-branch review m2)
+
+    func testASingleLabelEntryMatchesExactlyAndNeverAsASuffix() {
+        XCTAssertNil(DangerousDomains.hostMatch(host: "example.com", entries: ["com"]),
+                     "one truncated entry must not block every .com there is")
+        XCTAssertNil(DangerousDomains.hostMatch(host: "a.localhost", entries: ["localhost"]))
+        XCTAssertEqual(DangerousDomains.hostMatch(host: "localhost", entries: ["localhost"]), "localhost",
+                       "exactly, it still matches")
+    }
+
+    func testAnIpLiteralMatchesExactlyOnEitherSide() {
+        XCTAssertNil(DangerousDomains.hostMatch(host: "127.0.0.1", entries: ["0.1"]),
+                     "a suffix of an address is not a parent of it")
+        XCTAssertNil(DangerousDomains.hostMatch(host: "127.0.0.1", entries: ["example.com"]),
+                     "and an address is never a subdomain of a name")
+        XCTAssertEqual(DangerousDomains.hostMatch(host: "127.0.0.1", entries: ["127.0.0.1"]), "127.0.0.1")
+        XCTAssertNil(DangerousDomains.hostMatch(host: "::1", entries: ["1"]))
+        XCTAssertEqual(DangerousDomains.hostMatch(host: "::1", entries: ["::1"]), "::1")
+    }
+
+    func testRepeatedWildcardPrefixesAreStripped() {
+        XCTAssertEqual(DangerousDomains.normalizeEntry("*.*.evil.example"), "evil.example")
+        XCTAssertEqual(DangerousDomains.hostMatch(host: "a.evil.example", entries: ["*.*.evil.example"]),
+                       "*.*.evil.example")
+    }
+
+    /// The exact-only rules must leave the SHIPPED list byte-identical: every entry is a multi-label
+    /// name and none is a dotted quad, so suffix matching still covers every subdomain of every one.
+    func testTheShippedListStillMatchesEverySubdomain() {
+        for entry in DangerousDomains.shipped {
+            XCTAssertEqual(DangerousDomains.hostMatch(host: entry, entries: DangerousDomains.shipped), entry)
+            XCTAssertEqual(DangerousDomains.hostMatch(host: "sub.\(entry)", entries: DangerousDomains.shipped), entry,
+                           "suffix matching still applies to \(entry)")
         }
-        for host in ["notlocalhost.test", "localhost.example.com", "a.test"] {
-            XCTAssertFalse(PrivateAddress.isLexicallyPrivate(host), host)
-        }
-    }
-
-    func testIpv4MappedIpv6GoesThroughTheSameTable() {
-        XCTAssertTrue(PrivateAddress.isLexicallyPrivate("::ffff:127.0.0.1"))
-        XCTAssertTrue(PrivateAddress.isLexicallyPrivate("::ffff:7f00:1"))
-        XCTAssertTrue(PrivateAddress.isLexicallyPrivate("::ffff:100.64.0.1"))
-        XCTAssertFalse(PrivateAddress.isLexicallyPrivate("::ffff:1.1.1.1"))
+        XCTAssertNil(DangerousDomains.hostMatch(host: "notpastebin.com", entries: DangerousDomains.shipped))
+        XCTAssertNil(DangerousDomains.hostMatch(host: "pastebin.com.evil.test", entries: DangerousDomains.shipped))
     }
 
     func testAnOrdinaryDnsNameIsNotLexicallyDecidable() {

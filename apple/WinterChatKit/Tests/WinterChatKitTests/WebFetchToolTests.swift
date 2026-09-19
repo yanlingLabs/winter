@@ -13,7 +13,7 @@ import XCTest
 final class WebFetchToolTests: XCTestCase {
     private let t0 = Date(timeIntervalSince1970: 1_700_000_000)
 
-    private func args(_ url: String, _ prompt: String = "what is this page about?") -> String {
+    fileprivate func args(_ url: String, _ prompt: String = "what is this page about?") -> String {
         let data = try! JSONSerialization.data(withJSONObject: ["url": url, "prompt": prompt])
         return String(decoding: data, as: UTF8.self)
     }
@@ -28,7 +28,7 @@ final class WebFetchToolTests: XCTestCase {
         return ScriptedChatProvider([events])
     }
 
-    private func deps(_ http: ScriptedChatHTTP,
+    fileprivate func deps(_ http: ScriptedChatHTTP,
                       _ provider: any ChatProvider,
                       cache: WebFetchCache = WebFetchCache(),
                       dangerousAdded: [String] = [],
@@ -469,6 +469,27 @@ final class WebFetchToolTests: XCTestCase {
         XCTAssertTrue(outcome.result.isError)
         XCTAssertEqual(outcome.result.content, "WebFetch was interrupted.")
         XCTAssertEqual(http.requestCount, 0)
+    }
+
+    /// An interrupt that arrives while the DIGEST pass is streaming must end the tool call promptly with
+    /// the aborted result — not sit behind an abandoned await until the model finishes on its own.
+    func testAnAbortDuringTheDigestPassEndsTheCallPromptly() async {
+        let http = ScriptedChatHTTP([.plainText("PAGE")])
+        let hanging = HangingProvider(prefix: [.textDelta("partial answer")])
+        let signal = ChatAbortSignal()
+        let call = Task { await WebFetchTool.run(argumentsJSON: self.args("https://a.test/x"),
+                                                deps: self.deps(http, hanging), signal: signal) }
+        // Wait until the digest model is genuinely streaming, then interrupt. Asserted rather than
+        // best-effort: a test that abandoned the wait would still see "interrupted" and would be
+        // proving nothing about the digest pass at all.
+        do { try await TestGate.poll(until: { hanging.streaming.isOpen }) } catch {
+            return XCTFail("the digest pass never started streaming")
+        }
+        signal.abort()
+        let outcome = await call.value
+        XCTAssertTrue(outcome.result.isError)
+        XCTAssertEqual(outcome.result.content, "WebFetch was interrupted.")
+        XCTAssertEqual(http.requestCount, 1, "the page was fetched; only the digest was cut short")
     }
 
     func testAStalledFetchTimesOutWithTheSharedSentence() async {
