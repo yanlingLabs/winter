@@ -87,6 +87,10 @@ let roleProblemWordings: [String: String] = [
     "no-credential": "No credential is stored for this provider.",
     "model-unavailable": "This model isn't available from the provider right now.",
     "provider-unavailable": "The provider couldn't be reached — usually temporary.",
+    // 2026-09-19, the daemon's internal-job roles (titles, the purge, dreaming, the reviewer):
+    // a role that cannot run at all, said calmly rather than left silent.
+    "provider-unsupported": "Winter can't run this job on that provider yet, so it isn't running.",
+    "no-internal-credential": "Not running — sign in with ChatGPT (Codex) or add an OpenAI key in Providers.",
 ]
 
 /// When there is nothing better to say: an `other` (or unknown) reason with no detail.

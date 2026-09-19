@@ -175,4 +175,15 @@ final class SettingsRoleNotesTests: XCTestCase {
         XCTAssertNil(decoded[.cleaner]?.problem?.at)
         XCTAssertNil(decoded[.titles]?.problem)
     }
+
+    /// The two reasons the internal-job roles report when they cannot run at all.
+    func testInternalJobReasonsHaveCalmWording() {
+        let now = Date()
+        for reason in ["provider-unsupported", "no-internal-credential"] {
+            let text = roleProblemText(RoleProblem(reason: reason, detail: "raw daemon detail", model: nil,
+                                                   at: nil, retryAt: nil), now: now)
+            XCTAssertEqual(text, roleProblemWordings[reason])
+            XCTAssertFalse(text.contains("raw daemon detail"), "our wording, not the daemon's text")
+        }
+    }
 }
