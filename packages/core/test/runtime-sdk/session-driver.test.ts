@@ -232,7 +232,7 @@ describe("createWinterSessionDrivers — the table", () => {
     } finally { t.close(); }
   });
 
-  test("fix wave (review row 4): the titler is fired after the main thread's turn_completed — once per completed turn, never before the result, never on an error terminal", async () => {
+  test("fix wave (review row 4): the titler is fired after the main thread's turn_completed — once per completed turn, never before the result, and on an error terminal too", async () => {
     const titled: string[] = [];
     const t = table({ titler: { maybeTitle: async (sid) => { titled.push(sid); } } });
     try {
@@ -252,12 +252,13 @@ describe("createWinterSessionDrivers — the table", () => {
       t.q().emit(result());
       await Bun.sleep(10);
       expect(titled).toEqual([sid, sid]);
-      // an ERROR terminal does not: the child dies mid-turn → turn_completed(error) + agent_error
+      // an ERROR terminal fires it too (2026-09-19): a chat whose first turn fails would otherwise
+      // stay untitled for good. The child dies mid-turn → turn_completed(error) + agent_error.
       await session.send("boom", "cli");
       t.q().fail(Object.assign(new Error("child crashed"), { name: "Error" }));
       await session.done;
       expect(t.store.read(sid).filter((e) => e.type === "turn_completed").map((e) => (e as { stopReason: string }).stopReason)).toEqual(["end_turn", "end_turn", "error"]);
-      expect(titled).toEqual([sid, sid]);
+      expect(titled).toEqual([sid, sid, sid]);
     } finally { t.close(); }
   });
 

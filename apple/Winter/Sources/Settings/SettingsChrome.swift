@@ -517,6 +517,42 @@ struct SettingsTextFieldStyle: TextFieldStyle {
     }
 }
 
+// MARK: - A search row inside a card
+
+/// A filter that is a ROW of the card it filters — magnifier, borderless field, clear button — at
+/// a row's own insets, so it separates from the rows under it with the card's hairline like any
+/// other row. For a long list whose search belongs to it alone (Providers → Add a provider).
+struct SettingsInlineSearchRow: View {
+    @Binding var query: String
+    var placeholder: String = "Search"
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(Typography.control())
+                .foregroundStyle(Theme.textMuted)
+            TextField(placeholder, text: $query)
+                .textFieldStyle(.plain)
+                .font(Typography.body())
+                .foregroundStyle(Theme.textPrimary)
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(Typography.control())
+                        .foregroundStyle(Theme.textMuted)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, SettingsChrome.rowHorizontalPadding)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 // MARK: - The sidebar's search field
 
 /// The field above the settings section list. Filters the list live; it is NOT the app's own

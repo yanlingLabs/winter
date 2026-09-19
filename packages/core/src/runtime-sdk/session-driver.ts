@@ -491,11 +491,15 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       claimedInBatch = 0;
       // The engine's titling moment, reproduced at the ONE place every persisted Winter-leg event
       // passes: after the main thread's `turn_completed` is in the log (so `maybeTitle`'s read of
-      // the first user/assistant pair sees a complete turn). Never on an error terminal.
+      // the first user/assistant pair sees a complete turn). ON AN ERROR TERMINAL TOO (2026-09-19):
+      // a chat whose FIRST turn fails — a usage limit, a refused model — used to stay untitled for
+      // good when the user never sent a second message, a permanent "New chat" row. The titler runs
+      // on the daemon's own internal provider, not the session's, and already titles from the user's
+      // message alone when there is no reply; it is at-most-once and never throws, so a failed
+      // attempt costs one logged line and the next completed turn simply tries again.
       if (deps.titler !== undefined && event.type === "turn_completed") {
         const threadId = (event as { threadId?: string }).threadId;
-        const stop = (event as { stopReason?: string }).stopReason;
-        if ((threadId === undefined || threadId === "main") && stop !== "error") {
+        if (threadId === undefined || threadId === "main") {
           try { void deps.titler.maybeTitle(sessionId); } catch { /* maybeTitle never throws by contract; belt only */ }
         }
       }
@@ -881,8 +885,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       claimedInBatch = 0;
       if (deps.titler !== undefined && event.type === "turn_completed") {
         const threadId = (event as { threadId?: string }).threadId;
-        const stop = (event as { stopReason?: string }).stopReason;
-        if ((threadId === undefined || threadId === "main") && stop !== "error") {
+        if (threadId === undefined || threadId === "main") { // error terminals included — see the Winter leg's twin above
           try { void deps.titler.maybeTitle(sessionId); } catch { /* maybeTitle never throws by contract; belt only */ }
         }
       }

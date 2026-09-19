@@ -360,3 +360,19 @@ describe("SessionTitler role-health wiring (2026-09-18) — observation only", (
     expect(store.getTitle(sessionId)).toBeNull();
   });
 });
+
+// 2026-09-19: a chat whose FIRST turn fails (a usage limit, a refused model) has a user_message and
+// no assistant_message. The drivers now fire the titler on an error terminal too, so this is the
+// shape it must handle: title from the user's message alone rather than leave "New chat" forever.
+describe("a first turn that failed still gets a title", () => {
+  test("titles from the user's message alone when there is no assistant reply", async () => {
+    const { store, titler, sessionId, provider } = setup(titleScript("Fix the login flow"));
+    store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: "how do I fix the login flow?", clientName: "test" });
+    store.append(sessionId, { type: "agent_error", sessionId, threadId: "main", message: "usage limit reached", code: "rate_limited" } as never);
+    await titler.maybeTitle(sessionId);
+    expect(store.getTitle(sessionId)).toBe("Fix the login flow");
+    const sent = JSON.stringify((provider as unknown as { requests: unknown[] }).requests[0]);
+    expect(sent).toContain("how do I fix the login flow?");
+    expect(sent).toContain("(none)");
+  });
+});
