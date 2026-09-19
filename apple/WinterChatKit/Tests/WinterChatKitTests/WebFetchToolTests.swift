@@ -178,9 +178,10 @@ final class WebFetchToolTests: XCTestCase {
     }
 
     func testACrossHostRedirectIsReturnedToTheModelVerbatimAndIsNotAnError() async {
+        let cache = WebFetchCache()
         let http = ScriptedChatHTTP([.redirect(status: 301, location: "https://b.test/moved?q=1#frag")])
         let outcome = await WebFetchTool.run(argumentsJSON: args("https://a.test/start", "who wrote it?"),
-                                            deps: deps(http, digester("never called")))
+                                            deps: deps(http, digester("never called"), cache: cache))
         XCTAssertFalse(outcome.result.isError, "the fetch WORKED; the redirect is information, not a failure")
         XCTAssertEqual(outcome.result.content, """
         REDIRECT DETECTED: The URL redirects to a location that was not fetched automatically.
@@ -194,6 +195,8 @@ final class WebFetchToolTests: XCTestCase {
         - prompt: "who wrote it?"
         """)
         XCTAssertEqual(http.requestCount, 1, "the redirect target is never fetched")
+        let cached = await cache.count
+        XCTAssertEqual(cached, 0, "a redirect is never cached — a replayed REDIRECT DETECTED would carry stale routing")
     }
 
     func testANonHttpRedirectTargetHasItsUrlLineWithheld() async {
@@ -216,8 +219,9 @@ final class WebFetchToolTests: XCTestCase {
     // MARK: - non-2xx
 
     func testANonTwoHundredIsNotAnErrorResultAndCarriesTheFixedReasonPhrase() async {
+        let cache = WebFetchCache()
         let http = ScriptedChatHTTP([.text("server-internal detail", status: 404)])
-        let outcome = await WebFetchTool.run(argumentsJSON: args("https://a.test/x"), deps: deps(http, digester("x")))
+        let outcome = await WebFetchTool.run(argumentsJSON: args("https://a.test/x"), deps: deps(http, digester("x"), cache: cache))
         XCTAssertFalse(outcome.result.isError, "the server ANSWERED; that is information the model acts on")
         XCTAssertEqual(outcome.result.content, """
         The server returned HTTP 404 Not Found.
@@ -225,6 +229,8 @@ final class WebFetchToolTests: XCTestCase {
         The response body was not retrieved. If this URL requires authentication, use an authenticated tool (e.g. `gh` for GitHub, or an MCP-provided fetch tool) instead of WebFetch.
         """)
         XCTAssertFalse(outcome.result.content.contains("server-internal detail"))
+        let cached = await cache.count
+        XCTAssertEqual(cached, 0, "a non-2xx is never cached either")
     }
 
     func testANumericRetryAfterIsRelayedAndANonNumericOneIsNot() async {
