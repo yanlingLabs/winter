@@ -2,34 +2,53 @@ import Foundation
 
 /// Chat's Exa-backed web search — the Swift port of `packages/core/src/agent/tools/search.ts`.
 ///
-/// One `POST https://api.exa.ai/search` returns each result WITH its excerpt inline (`contents:
-/// { text: { maxCharacters } }` rides the SAME request body), so chat gets results + excerpts in a
-/// SINGLE call rather than code mode's two-step web_search + web_fetch. There is no `read` tool in
-/// chat, so whatever this returns inline is ALL the model gets — the output is hard-capped.
+/// **ANSWER MODE** (the 2026-09-18 ruling, which retired the `/search` shape this file used to
+/// carry): one `POST https://api.exa.ai/answer` runs a search AND writes a grounded answer over the
+/// results, so the model gets a finished, cited answer in a single call rather than rows to chase.
+/// That is the whole reason this tool exists beside the runtime's own `WebSearch`: chat's model is
+/// small and `WebSearch` hands it links.
+///
+/// ONE FIELD, AND THAT IS THE SCHEMA. The `/search` era's `max_results` is gone with the endpoint:
+/// `/answer` returns an answer, not a page of rows, and how many sources it consulted is the
+/// provider's judgement, not a caller's dial. Every other Exa request field (`model`, `systemPrompt`,
+/// `text`, …) is deliberately unexposed, exactly as the daemon's copy leaves them.
+///
+/// `/answer` REQUIRES a key, so this tool's PRESENCE is gated on one being stored — `ChatEngine`
+/// advertises `Search` only when `ChatToolset.exaKey` is non-empty, mirroring the daemon's two doors
+/// (`capabilities/research.ts` and `disallowedToolsFor`). The `noKey` branch below is therefore
+/// unreachable through a real session and is kept anyway: a typed, actionable failure is the right
+/// answer for a direct caller and for the window between a key being removed and the next turn.
 ///
 /// TWO security properties are ported verbatim, and both are pinned by tests:
-///   1. **The API key never appears in any error string.** The real transport can embed a bad
-///      header VALUE in its own error text; this tool never interpolates a caught error into the
-///      model-visible result — every failure message is static. (`search.ts`'s `replaceAll(key, …)`
-///      redaction has nothing to redact here because nothing dynamic is built.)
-///   2. **Dangerous-domain results are STRIPPED before the model sees them, and the withheld count
-///      is STATED.** Advertising a link the page-read hard-block would refuse anyway is a
-///      half-measure (the model tries it, fails, retries); a shorter list must read as a deliberate
-///      filter, never an incomplete one.
+///   1. **The API key never appears in any error string.** The real transport can embed a bad header
+///      VALUE in its own error text; this tool never interpolates a caught error into the
+///      model-visible result — every failure message is static or derived from the status code alone.
+///      A provider's own error BODY never crosses into the result either: it can echo request
+///      headers (and therefore the key) and is attacker-influenced text besides.
+///   2. **Dangerous-domain citations are STRIPPED before the model sees them, and the withheld count
+///      is STATED.** Citing a floor-listed page while blocking every read of it is a half-measure —
+///      the model would just try the link, fail, and retry — and a shorter source list must read as
+///      a deliberate filter, never an incomplete one.
 public enum SearchTool {
-    static let requestTimeout: TimeInterval = 15 // search.ts REQUEST_TIMEOUT_MS
-    static let defaultResults = 5
-    static let maxResults = 10
-    static let excerptChars = 1200 // search.ts EXCERPT_CHARS — per result, also asked of Exa server-side
-    static let totalOutputChars = 30_000 // search.ts TOTAL_OUTPUT_CHARS — whole-response cap
-    static let searchURL = URL(string: "https://api.exa.ai/search")!
-    /// A generous ceiling on the Exa JSON body — the excerpts are already server-capped, so this
-    /// only ever bites a hostile response. Uses `sendCapped` (non-redirect-following, byte-capped)
-    /// rather than `send` for the same reason `search.ts` sets `redirect: "manual"`: a 3xx must
-    /// never carry `x-api-key` onward to a host outside Exa's control.
+    /// `search.ts` REQUEST_TIMEOUT_MS. `/answer` SYNTHESIZES — it searches and then writes — so it is
+    /// materially slower than the old `/search` round trip; the 15 s that endpoint was tuned for
+    /// would time out answers that were going to arrive.
+    static let requestTimeout: TimeInterval = 45
+    /// `search.ts` ANSWER_CHARS — the synthesized answer itself.
+    static let answerChars = 24_000
+    /// `search.ts` MAX_CITATIONS — rendered as a sources list; the provider decides how many it used.
+    static let maxCitations = 20
+    /// `search.ts` TOTAL_OUTPUT_CHARS — whole-response cap. Chat has no page-reading escape hatch on
+    /// the answer, so this is a correctness bound, not just a safety one.
+    static let totalOutputChars = 30_000
+    static let answerURL = URL(string: "https://api.exa.ai/answer")!
+    /// A generous ceiling on the Exa JSON body — the answer is already server-bounded, so this only
+    /// ever bites a hostile response. Uses `sendCapped` (non-redirect-following, byte-capped) rather
+    /// than `send` for the same reason `search.ts` sets `redirect: "manual"`: a 3xx must never carry
+    /// `x-api-key` onward to a host outside Exa's control.
     static let maxResponseBytes = 5 * 1024 * 1024
 
-    // T7-review M1: `public` so Task 12's phone reword can reach it (chat has no CLI `winter login`).
+    // T7-review M1: `public` so the phone's own reword can reach it (chat has no CLI `winter login`).
     public static let noKeyMessage = "Search needs an API key — store one with: winter login --exa-key (from exa.ai)"
 
     /// Runs one search. `key` is the Exa API key (nil/empty → the no-key error); `http` is the kit's
@@ -38,7 +57,6 @@ public enum SearchTool {
     public static func run(query: String,
                            key: String?,
                            http: any ChatHTTP,
-                           maxResults requestedMax: Int? = nil,
                            dangerousAdded: [String] = [],
                            signal: ChatAbortSignal? = nil,
                            callId: String = "") async -> ToolResult {
@@ -46,14 +64,12 @@ public enum SearchTool {
 
         guard let key, !key.isEmpty else { return fail(noKeyMessage) }
 
-        let count = min(max(requestedMax ?? defaultResults, 1), maxResults)
-
-        var request = URLRequest(url: searchURL)
+        var request = URLRequest(url: answerURL)
         request.httpMethod = "POST"
         request.setValue(key, forHTTPHeaderField: "x-api-key")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.timeoutInterval = requestTimeout
-        request.httpBody = encodeBody(query: query, numResults: count)
+        request.httpBody = encodeBody(query: query)
 
         let capped: CappedResponse
         do {
@@ -69,87 +85,123 @@ public enum SearchTool {
         }
 
         guard capped.response.statusCode == 200 else {
-            return fail("search failed: HTTP \(capped.response.statusCode)")
+            // ACTIONABLE, and never the provider's own body — only the status code crosses over,
+            // mapped to the one sentence that says what to DO.
+            return fail(statusMessage(capped.response.statusCode))
         }
 
-        // Lenient shape-checking, mirroring `search.ts`'s `isValidExaResults`: a non-object body or
-        // an absent `results` → no results (ok); a `results` that is not an array, or an array with
-        // any non-object element → parse_error.
         let json = try? JSONSerialization.jsonObject(with: capped.body)
-        let rawResults: [[String: Any]]
-        if let object = json as? [String: Any] {
-            if let resultsValue = object["results"] {
-                guard let array = resultsValue as? [Any] else {
+        guard let object = json as? [String: Any] else {
+            // A body that is valid JSON but not an object carries neither `answer` nor `citations`,
+            // so it is the same "this renderer cannot speak for that shape" case as an unparseable
+            // one. `search.ts` reaches the identical outcome by indexing `undefined` off a non-object
+            // and then finding an empty answer with no citations — this states it once instead.
+            return fail("search failed: could not parse response")
+        }
+
+        // Shape-checking, mirroring `search.ts`'s `isValidExaCitations`: absent is fine; anything that
+        // is not an array of non-null objects is a parse error, so the render below can never throw.
+        let rawCitationsValue = object["citations"]
+        var citationDicts: [[String: Any]] = []
+        if let rawCitationsValue, !(rawCitationsValue is NSNull) {
+            guard let array = rawCitationsValue as? [Any] else {
+                return fail("search failed: malformed response from search service")
+            }
+            for item in array {
+                guard let dict = item as? [String: Any] else {
                     return fail("search failed: malformed response from search service")
                 }
-                var parsed: [[String: Any]] = []
-                for item in array {
-                    guard let dict = item as? [String: Any] else {
-                        return fail("search failed: malformed response from search service")
-                    }
-                    parsed.append(dict)
-                }
-                rawResults = parsed
-            } else {
-                rawResults = []
+                citationDicts.append(dict)
             }
-        } else if json == nil {
-            return fail("search failed: could not parse response")
-        } else {
-            rawResults = [] // a non-object body (e.g. a bare array) → `.results` undefined → no results
         }
 
-        let sliced = Array(rawResults.prefix(count))
+        // `answer` is a string unless `outputSchema` was sent, which this tool never sends. Anything
+        // else is a shape this renderer cannot speak for, so it is a parse error rather than a
+        // `String(describing:)` that would hand the model `[object Object]` labelled as an answer.
+        let rawAnswer = object["answer"]
+        var fullAnswer = ""
+        if let rawAnswer, !(rawAnswer is NSNull) {
+            guard let text = rawAnswer as? String else {
+                return fail("search failed: malformed response from search service")
+            }
+            fullAnswer = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        // NEVER a silent slice: an answer cut mid-sentence reads as a complete one, and a model that
+        // cannot tell the difference will present half a conclusion as the whole of it.
+        let answer = truncateUTF16Count(fullAnswer) > answerChars
+            ? truncateUTF16(fullAnswer, to: answerChars) + "\n\n[answer truncated]"
+            : fullAnswer
 
-        // Strip dangerous results BEFORE they reach the model; state the withheld count so a shorter
-        // list reads as a deliberate filter, never a silent drop.
+        // The dangerous-domain floor, applied to the CITED urls. Never a SILENT drop: the withheld
+        // count is always stated, so the model (and anyone reading the transcript) knows the source
+        // list was filtered, not merely short.
         var withheld = 0
-        let results = sliced.filter { result in
-            guard let url = result["url"] as? String, DangerousDomains.matches(url, extra: dangerousAdded) else { return true }
+        let citations = citationDicts.prefix(maxCitations).filter { citation in
+            guard let url = citation["url"] as? String,
+                  DangerousDomains.matches(url, extra: dangerousAdded) else { return true }
             withheld += 1
             return false
         }
         let withheldNote = withheld > 0
-            ? "\n\n[\(withheld) result\(withheld == 1 ? "" : "s") withheld — matched the dangerous-domain list]"
+            ? "\n\n[\(withheld) source\(withheld == 1 ? "" : "s") withheld — matched the dangerous-domain list]"
             : ""
 
-        if results.isEmpty {
-            return ToolResult(callId: callId, content: "no results for \(query)\(withheldNote)", isError: false)
+        if answer.isEmpty {
+            return ToolResult(callId: callId, content: "no answer for \(query)\(withheldNote)", isError: false)
         }
 
-        let rendered = results.enumerated().map { index, result -> String in
-            let title = (result["title"] as? String) ?? "-"
-            let url = (result["url"] as? String) ?? "-"
-            let excerptRaw = (result["text"] as? String) ?? ""
-            let excerpt = truncateUTF16(excerptRaw, to: excerptChars).trimmingCharacters(in: .whitespacesAndNewlines)
-            return "\(index + 1). \(title)\n   \(url)\n   \(excerpt.isEmpty ? "(no excerpt)" : excerpt)"
-        }.joined(separator: "\n\n")
+        // An answer with NOTHING left to attribute is still the answer — the user asked a question
+        // and a refusal here would be a worse outcome than an honest label. It is MARKED, because an
+        // unsourced answer is exactly the one a model must not present as cited fact.
+        let sources: String
+        if citations.isEmpty {
+            let why = withheld > 0
+                ? "every source was withheld by the dangerous-domain list"
+                : "the search service returned no sources"
+            sources = "\n\n[unsourced — \(why); say so if you repeat this]"
+        } else {
+            sources = "\n\nSources:\n" + citations.enumerated().map { index, citation -> String in
+                let rawTitle = (citation["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let title = rawTitle.isEmpty ? "-" : rawTitle
+                let url = (citation["url"] as? String) ?? "-"
+                return "\(index + 1). \(title)\n   \(url)"
+            }.joined(separator: "\n")
+        }
 
-        // Hard cap: chat has no save-to-file escape hatch, so this is a correctness bound, not just
-        // safety. `search.ts`'s marker rides a few bytes past its own cap (slice-then-append) — kept
-        // identical here rather than reserving the marker length as ReadPage/Research do.
-        let capped2 = truncateUTF16Count(rendered) > totalOutputChars
-            ? truncateUTF16(rendered, to: totalOutputChars) + "\n\n[results truncated]"
+        let rendered = answer + sources
+        let cappedOutput = truncateUTF16Count(rendered) > totalOutputChars
+            ? truncateUTF16(rendered, to: totalOutputChars) + "\n\n[truncated]"
             : rendered
-        return ToolResult(callId: callId, content: capped2 + withheldNote, isError: false)
+        return ToolResult(callId: callId, content: cappedOutput + withheldNote, isError: false)
     }
 
     // MARK: - request body
 
-    private struct ExaBody: Encodable {
+    private struct ExaAnswerBody: Encodable {
         let query: String
-        let numResults: Int
-        let contents: Contents
-        struct Contents: Encodable {
-            let text: Text
-            struct Text: Encodable { let maxCharacters: Int }
-        }
     }
 
-    private static func encodeBody(query: String, numResults: Int) -> Data {
-        let body = ExaBody(query: query, numResults: numResults,
-                           contents: .init(text: .init(maxCharacters: excerptChars)))
-        return (try? JSONEncoder().encode(body)) ?? Data()
+    private static func encodeBody(query: String) -> Data {
+        (try? JSONEncoder().encode(ExaAnswerBody(query: query))) ?? Data()
+    }
+
+    // MARK: - status → one actionable sentence
+
+    /// `search.ts`'s `statusMessage`: one sentence per documented failure, each naming the action that
+    /// clears it. Deliberately the ONLY thing derived from a failed response — never its body.
+    static func statusMessage(_ status: Int) -> String {
+        switch status {
+        case 401, 403:
+            return "search failed: the stored Exa API key was rejected — replace it with `winter credentials set exa` (or `winter login --exa-key`)"
+        case 402:
+            return "search failed: this Exa account is out of credits or over its budget — top it up at exa.ai, or answer from what you already know and say the search was unavailable"
+        case 429:
+            return "search failed: the search service is rate-limiting this key — wait a little before searching again, and do not retry in a loop"
+        case 400:
+            return "search failed: the search service rejected the request as malformed — try a plainer question"
+        default:
+            return "search failed: the search service is unavailable (HTTP \(status))"
+        }
     }
 
     /// One hop, non-redirect-following (`sendCapped`), with the external signal wired to tear the

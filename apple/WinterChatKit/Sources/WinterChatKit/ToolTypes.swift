@@ -42,6 +42,38 @@ public struct ToolResult: Sendable, Equatable {
     }
 }
 
+/// Tokens a tool spent on a provider call OF ITS OWN — `WebFetch`'s digest pass today.
+///
+/// It exists because such a call is invisible to the turn loop otherwise: the engine only ever sees
+/// `usage` events from the rounds IT streams, so an inner pass would be billed to nobody. The engine
+/// folds this into the turn's `inputTokens`/`outputTokens` (which are BILLING sums) and deliberately
+/// NOT into `contextTokens`, which means "how full the conversation's context actually got" and is the
+/// max over the MAIN rounds' inputs — a digest prompt is a separate, throwaway context and counting it
+/// there would make the Mac's auto-compaction trigger fire on a number that is not the conversation.
+public struct ToolUsage: Sendable, Equatable {
+    public var inputTokens: Int
+    public var outputTokens: Int
+
+    public static let zero = ToolUsage(inputTokens: 0, outputTokens: 0)
+
+    public init(inputTokens: Int, outputTokens: Int) {
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+    }
+}
+
+/// A tool's answer plus whatever it spent getting there. Only the tools that make their own provider
+/// calls return one; the rest answer a bare `ToolResult` and the engine wraps it with `.zero`.
+public struct ToolOutcome: Sendable {
+    public let result: ToolResult
+    public let usage: ToolUsage
+
+    public init(result: ToolResult, usage: ToolUsage = .zero) {
+        self.result = result
+        self.usage = usage
+    }
+}
+
 // MARK: - provider seam
 
 /// One event a provider streams for a turn — the Swift mirror of `providers/types.ts`'s

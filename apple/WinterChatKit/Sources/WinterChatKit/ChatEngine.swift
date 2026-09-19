@@ -18,7 +18,7 @@ func modelIdPortion(of tag: String) -> String {
 /// The phone's standalone chat turn-loop — the Swift counterpart of the daemon's chat turn
 /// (`packages/core/src/agent/engine.ts`), radically reduced to exactly what a phone-local chat
 /// session needs: stream from the provider, emit typed WinterProtocol `SessionEvent`s, dispatch chat's
-/// three tools, and continue on the model's tool calls until it answers. Two engines, ONE event
+/// tools, and continue on the model's tool calls until it answers. Two engines, ONE event
 /// dialect — the fixture round-trip test proves an engine-emitted event decodes through the same
 /// WinterProtocol coders the daemon's events do, which is why Slice C's transcript UI works unchanged.
 ///
@@ -58,66 +58,125 @@ public protocol LocalSession: Sendable {
 
 // MARK: - toolset
 
-/// Everything the three chat tools need for a turn, bundled so `runTurn` stays a clean 5-parameter
-/// call. The main-turn provider is the engine's own (`ChatEngine.init`); `researchProvider` is the
-/// model the `ReadPage`-`query` research sub-agent drives (nil → the engine's own provider, which is
-/// the production shape: one `ResponsesClient` serves both).
+/// Everything the chat tools need for a turn, bundled so `runTurn` stays a clean 5-parameter call.
+///
+/// The main-turn provider is the engine's own (`ChatEngine.init`); `digestProvider` is the model
+/// `WebFetch` reads a page with (nil → the engine's own provider, which is the production shape: one
+/// `ResponsesClient` serves both). It replaces the retired `researchProvider`, which drove the
+/// multi-page research sub-agent behind `ReadPage`'s `query` entries.
+///
+/// `exaKey` decides the TOOL SURFACE, not just one tool's behaviour: with a key stored the session
+/// gets `Search` (Exa's `/answer`), without one it does not — the same gate the daemon applies at
+/// three doors.
+///
+/// **THE PROMPT IS A BUILDER, NOT A STRING, AND THAT IS THE POINT** (whole-branch review m3). A caller
+/// that composes its own instructions on top of the base paragraph — which the iOS app does, folding in
+/// the date, the user's instructions and the replicated memory bucket — would otherwise have to pick an
+/// `exaKeyPresent` value itself, and the cheapest thing to pick when a compile breaks is a literal
+/// `true`. That would put `Search` in a keyless session's prompt while the tool list withheld it, which
+/// is the exact failure the per-session prompt exists to prevent. So there is no way to hand this type
+/// a finished string: a custom prompt is `(Bool) -> String`, and this type applies its OWN
+/// `exaKeyPresent` to it — the same stored value the engine reads for the tool list. The two doors
+/// cannot disagree, because there is only one value and no API that takes another.
 public struct ChatToolset: Sendable {
+    /// A base prompt composed for ONE session. The argument is whether this session was given `Search`;
+    /// a caller builds on `ChatEngine.defaultSystemPrompt(exaKeyPresent:)` with it.
+    public typealias SystemPromptBuilder = @Sendable (_ exaKeyPresent: Bool) -> String
+
     public let http: any ChatHTTP
     public let exaKey: String?
-    public let fetcher: PageFetcher
+    /// `WebFetch`'s converted-page cache (15 min, keyed on the requested url). One per chat session:
+    /// it holds fetched web content, so sharing it across sessions would leak one conversation's
+    /// pages into another's.
+    public let cache: WebFetchCache
     public let dangerousAdded: [String]
-    public let researchProvider: (any ChatProvider)?
-    public let researchDeadline: Duration
-    public let systemPrompt: String
+    public let digestProvider: (any ChatProvider)?
+    public let userAgent: String
     public let reasoningEffort: String?
     public let askTimeout: Duration
 
+    private let systemPromptBuilder: SystemPromptBuilder
+
+    /// True when this session was given `Search` — i.e. when an Exa key is stored. The engine's tool
+    /// list and this toolset's own prompt both read THIS one stored value, so they can never disagree.
+    public var exaKeyPresent: Bool { !(exaKey ?? "").isEmpty }
+
+    /// The base prompt for THIS session — the builder applied to this session's own `exaKeyPresent`.
+    /// There is deliberately no setter and no string-taking initializer; see the type's header.
+    public var systemPrompt: String { systemPromptBuilder(exaKeyPresent) }
+
     public init(http: any ChatHTTP,
-                fetcher: PageFetcher,
+                cache: WebFetchCache,
                 exaKey: String? = nil,
                 dangerousAdded: [String] = [],
-                researchProvider: (any ChatProvider)? = nil,
-                researchDeadline: Duration = .seconds(180),
-                systemPrompt: String = ChatEngine.defaultSystemPrompt,
+                digestProvider: (any ChatProvider)? = nil,
+                userAgent: String = WebFetchNet.defaultUserAgent,
+                systemPrompt: SystemPromptBuilder? = nil,
                 reasoningEffort: String? = nil,
                 askTimeout: Duration = .seconds(300)) {
         self.http = http
         self.exaKey = exaKey
-        self.fetcher = fetcher
+        self.cache = cache
         self.dangerousAdded = dangerousAdded
-        self.researchProvider = researchProvider
-        self.researchDeadline = researchDeadline
-        self.systemPrompt = systemPrompt
+        self.digestProvider = digestProvider
+        self.userAgent = userAgent
         self.reasoningEffort = reasoningEffort
         self.askTimeout = askTimeout
+        self.systemPromptBuilder = systemPrompt ?? { ChatEngine.defaultSystemPrompt(exaKeyPresent: $0) }
     }
 }
 
 // MARK: - the engine
 
 public final class ChatEngine: @unchecked Sendable {
-    /// Chat's base prompt — the Swift port of `chat-prompt.ts`'s `CHAT_SYSTEM_PROMPT`. Task 11's view
-    /// model composes the fuller instructions (date, user instructions, the replicated memory bucket)
-    /// on top of this via `ChatToolset.systemPrompt`; this is the floor.
-    public static let defaultSystemPrompt = [
-        "You are Winter in Chat mode: a conversation, not an agent. You have no access to this machine — no files, no shell, no repository — and you never imply otherwise.",
-        "",
-        "# What you are here for",
-        "Thinking things through with the user: questions, explanations, drafting, planning, remembering.",
-        "You share the assistant memory that Winter builds across conversations — use what you know about the user, and do not re-ask what is already established.",
-        "",
-        "# Honesty about your reach",
-        "If something needs the user's files, code, or terminal, say so plainly and point at the mode that can do it (Code for a project, Dispatch to coordinate work).",
-        "Never guess at file contents or command output. You cannot see them.",
-        "",
-        "# Looking things up",
-        "You can Search the web. Do it whenever a fact might have changed since you were trained, or the user asks about something current — do not guess and do not hedge about not knowing. Say where a fact came from.",
-        "You can also open a result with ReadPage to read the actual page, and re-load a range you cited later with the same lineStart/lineEnd.",
-        "",
-        "# Asking",
-        "When a choice is genuinely the user's to make, use AskQuestion rather than assuming.",
-    ].joined(separator: "\n")
+    /// Chat's base prompt for ONE session — the Swift port of `chat-prompt.ts`'s `chatSystemPrompt`.
+    /// A FUNCTION, not a constant, for the same reason it is one on the daemon: the web paragraph
+    /// depends on whether an Exa key is stored, and a constant would have to name BOTH search tools and
+    /// let the model discover which one it actually has by calling the wrong one. Naming a tool the
+    /// session was not given is how a model ends up apologising for a tool that "failed" when it was
+    /// never there.
+    ///
+    /// The phone's view model composes the fuller instructions (date, user instructions, the replicated
+    /// memory bucket) on top of this via `ChatToolset.systemPrompt`; this is the floor.
+    public static func defaultSystemPrompt(exaKeyPresent: Bool) -> String {
+        ([
+            "You are Winter in Chat mode: a conversation, not an agent. You have no access to this machine — no files, no shell, no repository — and you never imply otherwise.",
+            "",
+            "# What you are here for",
+            "Thinking things through with the user: questions, explanations, drafting, planning, remembering.",
+            "You share the assistant memory that Winter builds across conversations — use what you know about the user, and do not re-ask what is already established.",
+            "",
+            "# Honesty about your reach",
+            "If something needs the user's files, code, or terminal, say so plainly and point at the mode that can do it (Code for a project, Dispatch to coordinate work).",
+            "Never guess at file contents or command output. You cannot see them.",
+            "",
+            "# Looking things up",
+        ] + lookingThingsUp(exaKeyPresent) + [
+            "",
+            "# Asking",
+            "When a choice is genuinely the user's to make, use AskQuestion rather than assuming.",
+        ]).joined(separator: "\n")
+    }
+
+    /// The web paragraph, which is the ONE part of chat's prompt that depends on runtime state.
+    ///
+    /// The key-present arm is the daemon's own wording, verbatim, so a conversation reads the same
+    /// whichever engine answered it. The key-ABSENT arm deliberately DIVERGES from the daemon's, which
+    /// tells the model to "search the web with WebSearch": this engine does not yet carry `WebSearch`
+    /// (the keyless, Exa-MCP-backed search), so a keyless phone session has `WebFetch` and nothing
+    /// else, and the prompt says exactly that. When `WebSearch` lands here, this arm becomes the
+    /// daemon's text.
+    private static func lookingThingsUp(_ exaKeyPresent: Bool) -> [String] {
+        exaKeyPresent
+            ? [
+                "You can Search the web. Ask it a real question, not keywords: it comes back with a written answer and the pages that answer came from. Do it whenever a fact might have changed since you were trained, or the user asks about something current — do not guess and do not hedge about not knowing. Say where a fact came from, and never present an answer it marked unsourced as if it were cited.",
+                "You can also open any page with WebFetch — give it a URL and what you want to know from it, and you get an answer read off that page.",
+            ]
+            : [
+                "You can open any page with WebFetch — give it a URL and what you want to know from it, and you get an answer read off that page. Use it whenever a fact might have changed since you were trained, or the user asks about something current — do not guess and do not hedge about not knowing. Say where a fact came from.",
+                "(The user has not stored an Exa API key, so Winter's own Search tool — one call, a written answer with sources — is not available in this conversation, and this conversation has no keyless web search either: you can only open a page whose URL you already have. `winter login --exa-key` turns Search on.)",
+            ]
+    }
 
     /// Runaway guard — a well-behaved model ends in a handful of rounds; this only bounds a model that
     /// somehow keeps calling tools forever.
@@ -208,8 +267,12 @@ public final class ChatEngine: @unchecked Sendable {
 
             // WS-20: `model` (the param this func/`runTurn` was handed) is a tag; the provider wire
             // wants the bare modelId only.
+            // ONE read of the gate, feeding BOTH doors: the advertised tool list and the base prompt.
+            // `ChatToolset.systemPrompt` applies the same stored `exaKeyPresent` to its builder, so a
+            // caller's own composition cannot name a tool this list withholds.
+            let exaKeyPresent = tools.exaKeyPresent
             let request = ProviderTurnRequest(model: modelIdPortion(of: model), instructions: tools.systemPrompt,
-                                              input: input, tools: Self.toolSpecs,
+                                              input: input, tools: Self.toolSpecs(exaKeyPresent: exaKeyPresent),
                                               reasoningEffort: tools.reasoningEffort)
             let stream = provider.streamTurn(request)
             // Transient assistant_delta seq = the current head (non-advancing) — captured as a
@@ -267,8 +330,16 @@ public final class ChatEngine: @unchecked Sendable {
                 input.append(.functionCall(callId: call.id, name: call.name, argumentsJSON: call.argumentsJSON))
             }
             for call in outcome.calls {
-                let result = await dispatch(call: call, tools: tools, session: session,
-                                            signal: signal, seq: seq, emit: emit)
+                let dispatched = await dispatch(call: call, tools: tools, session: session, model: model,
+                                                signal: signal, seq: seq, emit: emit)
+                let result = dispatched.result
+                // A tool's OWN provider call (WebFetch's digest pass) is real spend, so it joins the
+                // turn's BILLING totals — and deliberately not `contextTokens`, which is the max over the
+                // MAIN rounds' inputs and means "how full the conversation got". A digest prompt is a
+                // separate, throwaway context; counting it would make the Mac's auto-compaction trigger
+                // fire on a number that is not the conversation's size.
+                inputTokens += dispatched.usage.inputTokens
+                outputTokens += dispatched.usage.outputTokens
                 emit(.toolResult(.init(seq: seq.next(), sessionId: sid, ts: nowMs(), threadId: MainThread,
                                        callId: call.id, output: result.content, isError: result.isError)))
                 input.append(.toolResult(callId: call.id, output: result.content, isError: result.isError))
@@ -337,41 +408,51 @@ public final class ChatEngine: @unchecked Sendable {
 
     // MARK: - tool dispatch
 
+    /// Returns the tool's answer AND whatever it spent on provider calls of its own (`WebFetch`'s
+    /// digest pass) — see `ToolUsage` for why that has to travel back to the loop rather than being
+    /// invisible.
     private func dispatch(call: RoundCall, tools: ChatToolset, session: any LocalSession,
+                          model: String,
                           signal: ChatAbortSignal, seq: SeqAllocator,
-                          emit: @escaping @Sendable (SessionEvent) -> Void) async -> ToolResult {
+                          emit: @escaping @Sendable (SessionEvent) -> Void) async -> ToolOutcome {
+        func bare(_ result: ToolResult) -> ToolOutcome { ToolOutcome(result: result) }
+
         switch call.name {
         case "Search":
+            // Still dispatched when no key is stored, even though the spec was then never advertised:
+            // a model that calls it anyway (a hallucination, or a key removed mid-session) gets the
+            // tool's own actionable `store one with: winter login --exa-key` sentence rather than a
+            // bare "unknown tool".
             guard let args = decodeSearchArgs(call.argumentsJSON) else {
-                return ToolResult(callId: call.id, content: "invalid Search arguments — expected { query }", isError: true)
+                return bare(ToolResult(callId: call.id, content: "invalid Search arguments — expected { query }", isError: true))
             }
             // T7 contract: the tool returns an empty-callId result; the engine rebinds via .attaching.
             let result = await SearchTool.run(query: args.query, key: tools.exaKey, http: tools.http,
-                                              maxResults: args.maxResults, dangerousAdded: tools.dangerousAdded,
-                                              signal: signal)
-            return result.attaching(callId: call.id)
+                                              dangerousAdded: tools.dangerousAdded, signal: signal)
+            return bare(result.attaching(callId: call.id))
 
-        case "ReadPage":
-            let researchProvider = tools.researchProvider ?? provider
-            let dangerousAdded = tools.dangerousAdded
-            let fetcher = tools.fetcher
-            let deadline = tools.researchDeadline
-            let research: ReadPageTool.ResearchHook = { query, url, maxPages, sig in
-                let runner = ResearchRunner(fetcher: fetcher, dangerousAdded: dangerousAdded)
-                return await runner.run(query: query, urls: [url], provider: researchProvider,
-                                        deadline: deadline, maxPages: maxPages, signal: sig)
-            }
-            let result = await ReadPageTool.run(argumentsJSON: call.argumentsJSON, fetcher: tools.fetcher,
-                                                research: research, dangerousAdded: tools.dangerousAdded,
-                                                signal: signal)
-            return result.attaching(callId: call.id)
+        case "WebFetch":
+            let deps = WebFetchTool.Deps(
+                http: tools.http,
+                cache: tools.cache,
+                // The engine's OWN provider unless the caller stated another — one `ResponsesClient`
+                // serving both passes is the production shape.
+                digestProvider: tools.digestProvider ?? provider,
+                // The provider wire wants the bare modelId; `model` here is the session's TAG.
+                digestModel: modelIdPortion(of: model),
+                dangerousAdded: tools.dangerousAdded,
+                userAgent: tools.userAgent,
+                now: now)
+            let outcome = await WebFetchTool.run(argumentsJSON: call.argumentsJSON, deps: deps,
+                                                signal: signal, callId: call.id)
+            return outcome
 
         case "AskQuestion":
-            return await handleAskQuestion(call: call, tools: tools, session: session,
-                                           signal: signal, seq: seq, emit: emit)
+            return bare(await handleAskQuestion(call: call, tools: tools, session: session,
+                                                signal: signal, seq: seq, emit: emit))
 
         default:
-            return ToolResult(callId: call.id, content: "unknown tool: \(call.name)", isError: true)
+            return bare(ToolResult(callId: call.id, content: "unknown tool: \(call.name)", isError: true))
         }
     }
 
@@ -428,20 +509,52 @@ public final class ChatEngine: @unchecked Sendable {
 
     // MARK: - tool specs (advertised every turn)
 
-    static let toolSpecs: [ProviderToolSpec] = [
-        ProviderToolSpec(
-            name: "Search",
-            description: "Search the web and get back results WITH an excerpt of each page, in a single fast call. Use it freely whenever a fact might be newer than you are, or when the user asks about something current. Cite the URL when you use what it returns. Requires a stored Exa API key (winter login --exa-key).",
-            parametersJSON: #"{"type":"object","properties":{"query":{"type":"string","minLength":1},"max_results":{"type":"integer","minimum":1}},"required":["query"],"additionalProperties":false}"#),
-        ProviderToolSpec(
-            name: "ReadPage",
-            description: "Read one or more web pages as clean, line-numbered markdown, each followed by a 'Links:' tail listing that page's outbound links. Batch up to 8 pages in a single call — each entry is independent. With no lineStart/lineEnd the whole page loads (subject to a per-page size cap); give lineStart/lineEnd to load just that inclusive line range instead. Cite what you used as '<url> lines:N-M', using the RESOLVED url shown in the output (after any redirect) — never the url you originally requested. Give an entry 'query' instead of a line range to run background research over that page and its links — you get back a cited report instead of the raw page. 'query' and a line range cannot both be set on the same entry.",
-            parametersJSON: #"{"type":"object","properties":{"pages":{"type":"array","minItems":1,"maxItems":8,"items":{"type":"object","properties":{"url":{"type":"string","minLength":1},"query":{"type":"string","minLength":1},"lineStart":{"type":"integer","minimum":1},"lineEnd":{"type":"integer","minimum":1},"max_pages":{"type":"integer","minimum":1}},"required":["url"],"additionalProperties":false}}},"required":["pages"],"additionalProperties":false}"#),
-        ProviderToolSpec(
-            name: "AskQuestion",
-            description: "Ask the user one question when a choice is genuinely theirs to make and you cannot resolve it from the conversation. Give 2-4 short, distinct option labels. Do NOT add an 'Other' option: the interface always offers a free-text 'Other' itself. Options are labels only — no descriptions. If you recommend one, put it first and append ' (Recommended)' to its label. The user's answer is returned to you; if nobody answers in time you'll be told to proceed.",
-            parametersJSON: #"{"type":"object","properties":{"question":{"type":"string","minLength":1},"options":{"type":"array","minItems":2,"maxItems":4,"items":{"type":"object","properties":{"label":{"type":"string","minLength":1}},"required":["label"],"additionalProperties":false}}},"required":["question","options"],"additionalProperties":false}"#),
-    ]
+    /// The tools ONE session is given, decided by whether an Exa key is stored — the phone's half of
+    /// the daemon's "exactly one search tool" rule.
+    ///
+    /// WITH a key: `Search` (Exa `/answer`) + `WebFetch` + `AskQuestion`.
+    /// WITHOUT one: `WebFetch` + `AskQuestion`. `Search` cannot be offered — `/answer` has no anonymous
+    /// tier — and the keyless replacement the daemon has (`WebSearch`, backed by Exa's hosted MCP) is
+    /// not carried by this engine yet, which is why `lookingThingsUp` says so in as many words instead
+    /// of leaving the model to find out.
+    static func toolSpecs(exaKeyPresent: Bool) -> [ProviderToolSpec] {
+        (exaKeyPresent ? [searchSpec] : []) + [webFetchSpec, askQuestionSpec]
+    }
+
+    /// The daemon's own `Search` description, verbatim (`agent/tools/search.ts`), and its one-field
+    /// schema — `/answer` returns an answer, not a page of rows.
+    static let searchSpec = ProviderToolSpec(
+        name: "Search",
+        description: "Search the web and get back a written answer with its sources, in a single call. Ask a real question, not keywords — a search engine answers it and the answer comes back already synthesized, followed by the pages it came from. Use it freely whenever a fact might be newer than you are, or when the user asks about something current, and cite the URLs you used.",
+        parametersJSON: #"{"type":"object","properties":{"query":{"type":"string","minLength":1}},"required":["query"],"additionalProperties":false}"#)
+
+    /// claude's own `WebFetch` interface strings, from the agent SDK's descriptor.
+    ///
+    /// THE **LEAN** DESCRIPTION, deliberately: claude picks lean-vs-full by the session's model, and
+    /// chat's is exactly the small conversational model the lean text exists for. The full variant also
+    /// ends on "for GitHub URLs, prefer the gh CLI via Bash", and chat has no Bash. The `15 minutes` is
+    /// rendered from `WebFetchCache.defaultTTL` rather than re-typed, as claude renders it from its own
+    /// constant.
+    ///
+    /// THE **PORTABLE** SCHEMA rendering: no `$schema`, no `additionalProperties`, no `format: "uri"`.
+    /// Those three are claude's own wire bytes for a first-party Anthropic session; this engine talks to
+    /// a `/responses`-shaped endpoint, and several function-calling dialects refuse keywords they do not
+    /// know.
+    static let webFetchSpec = ProviderToolSpec(
+        name: "WebFetch",
+        description: """
+        Fetches a URL, converts the page to markdown, and answers `prompt` against it using a small fast model.
+
+        - Fails on authenticated/private URLs — use an authenticated MCP tool or `gh` for those instead.
+        - HTTP is upgraded to HTTPS. Cross-host redirects are returned to you rather than followed; call again with the redirect URL.
+        - Responses are cached for \(Int(WebFetchCache.defaultTTL / 60)) minutes per URL.
+        """,
+        parametersJSON: #"{"type":"object","properties":{"url":{"type":"string","description":"The URL to fetch content from"},"prompt":{"type":"string","description":"The prompt to run on the fetched content"}},"required":["url","prompt"]}"#)
+
+    static let askQuestionSpec = ProviderToolSpec(
+        name: "AskQuestion",
+        description: "Ask the user one question when a choice is genuinely theirs to make and you cannot resolve it from the conversation. Give 2-4 short, distinct option labels. Do NOT add an 'Other' option: the interface always offers a free-text 'Other' itself. Options are labels only — no descriptions. If you recommend one, put it first and append ' (Recommended)' to its label. The user's answer is returned to you; if nobody answers in time you'll be told to proceed.",
+        parametersJSON: #"{"type":"object","properties":{"question":{"type":"string","minLength":1},"options":{"type":"array","minItems":2,"maxItems":4,"items":{"type":"object","properties":{"label":{"type":"string","minLength":1}},"required":["label"],"additionalProperties":false}}},"required":["question","options"],"additionalProperties":false}"#)
 
     // MARK: - helpers
 
@@ -454,13 +567,12 @@ public final class ChatEngine: @unchecked Sendable {
         return "No answer within \(seconds)s — the user is not available right now. Answer as best you can and say what you assumed."
     }
 
-    private struct SearchArgs { let query: String; let maxResults: Int? }
+    private struct SearchArgs { let query: String }
     private func decodeSearchArgs(_ json: String) -> SearchArgs? {
         guard let data = json.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let query = object["query"] as? String, !query.isEmpty else { return nil }
-        let max = (object["max_results"] as? NSNumber)?.intValue
-        return SearchArgs(query: query, maxResults: max)
+        return SearchArgs(query: query)
     }
 
     private struct AskArgs { let question: String; let options: [String] }

@@ -83,6 +83,104 @@ public enum DangerousDomains {
         return nil
     }
 
+    /// TS `normalizeDangerousDomain` (2026-09-18, the web-tools floor on both legs). `match` above
+    /// deliberately normalizes only the HOST side and only the trailing dot, because the daemon's
+    /// `permission-rules.ts` caller must keep answering exactly what it always has. The runtime
+    /// child's own `blockedDomains` matcher, though, ignores a leading `*.`/`.` and a trailing `.` on
+    /// ENTRIES, and it URL-PARSES every entry — so `*.evil.example`, `https://evil.example`,
+    /// `evil.example:8080`, `evil.example/admin` and `user@evil.example` are all things a user does in
+    /// fact write into `settings.permissions.dangerousDomains.added`, and a host-side check on the raw
+    /// string honoured none of them. Normalizing BOTH sides here closes that divergence without
+    /// touching the shared matcher.
+    ///
+    /// NEVER throws: every caller is a per-entry loop in a security floor, and one malformed entry
+    /// must not take the rest of the list with it. An unparseable value keeps its bare normalization.
+    ///
+    /// IDN: the value is returned in its ASCII (punycode) form, which is what every url's own
+    /// `host` is already in — so a user who writes `пример.рф` while the url says
+    /// `xn--e1afmkfd.xn--p1ai` still matches. Computed only when the value actually carries a
+    /// non-ASCII character, so the common path pays nothing.
+    public static func normalizeEntry(_ value: String) -> String {
+        var v = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        // REPEATED, not one: `_domains.ts`'s own `normalizeDomain` strips `/^(\*\.)+/`, so the runtime
+        // child honours `*.*.evil.example` and a single `if` here would have left that entry matching
+        // nothing at all. (The daemon's `normalizeDangerousDomain` strips one — see the report.)
+        while v.hasPrefix("*.") { v = String(v.dropFirst(2)) }
+        while v.hasPrefix(".") { v = String(v.dropFirst()) }
+        if let host = hostnameOfUrlShaped(v) { v = host }
+        while v.hasSuffix(".") { v = String(v.dropLast()) }
+        return asciiDomain(v)
+    }
+
+    /// The hostname of a URL-SHAPED entry, or `nil` when the value is a plain domain (the common case,
+    /// which pays nothing) or is unparseable.
+    ///
+    /// `//` is accepted as a scheme-relative form; a value with no scheme but with a `/`, `:` or `@`
+    /// after the host is given one, because `evil.example:8080` alone parses `evil.example:` as a
+    /// SCHEME and answers no host. A bracketed IPv6 authority keeps whatever `URL.host` answers.
+    private static func hostnameOfUrlShaped(_ value: String) -> String? {
+        let hasScheme = value.range(of: "^[a-z][a-z0-9+\\-.]*://", options: .regularExpression) != nil
+            || value.hasPrefix("//")
+        if !hasScheme, value.range(of: "[/:@]", options: .regularExpression) == nil { return nil }
+        let candidate = hasScheme
+            ? (value.hasPrefix("//") ? "http:\(value)" : value)
+            : "http://\(value)"
+        guard let host = URL(string: candidate)?.host(percentEncoded: false), !host.isEmpty else { return nil }
+        return host.lowercased()
+    }
+
+    /// A domain in its ASCII (punycode) form. An unconvertible value is returned unchanged rather
+    /// than dropped.
+    private static func asciiDomain(_ domain: String) -> String {
+        guard domain.unicodeScalars.contains(where: { !$0.isASCII }) else { return domain }
+        guard let host = URL(string: "https://\(domain)")?.host(percentEncoded: false), !host.isEmpty else {
+            return domain
+        }
+        return host.lowercased()
+    }
+
+    /// `match` for a HOST-OR-DOMAIN string, with BOTH sides normalized (`normalizeEntry`) — and with the
+    /// runtime child's own TWO EXACT-ONLY rules, which the plain suffix grammar does not have
+    /// (`_domains.ts`'s `hostMatchesDomain`, the matcher a Winter child actually applies to
+    /// `blockedDomains`):
+    ///
+    ///   * **an IP literal never matches by suffix**, on either side. A suffix of an address is not a
+    ///     parent of it: a typo'd `0.1` must not block `127.0.0.1`, and `127.0.0.1` must not be read as
+    ///     a subdomain of `example.com`. (A value carrying a `:` counts as an IP literal here — that
+    ///     covers both the bracketed and the bare IPv6 spellings, since `URL` hands back the bare one.)
+    ///   * **a SINGLE-LABEL entry never matches by suffix.** As a suffix, one truncated or mistyped
+    ///     `com` would silently block every `.com` there is; exactly, `localhost` still blocks
+    ///     `localhost`.
+    ///
+    /// The shipped list is unaffected — all 38 entries are multi-label names and none is a dotted quad —
+    /// so suffix matching still covers every subdomain of every one of them.
+    ///
+    /// Returns the matched list entry VERBATIM (not its normalized form), so a refusal names what the
+    /// user or the shipped list actually wrote. Empty/unreadable input never matches.
+    public static func hostMatch(host: String, entries: [String]) -> String? {
+        let h = normalizeEntry(host)
+        guard !h.isEmpty else { return nil }
+        let hostIsLiteral = isIPLiteral(h)
+        for entry in entries {
+            let e = normalizeEntry(entry)
+            guard !e.isEmpty else { continue }
+            if hostIsLiteral || isIPLiteral(e) || !e.contains(".") {
+                if h == e { return entry }
+                continue
+            }
+            if match(host: h, entries: [e]) != nil { return entry }
+        }
+        return nil
+    }
+
+    /// `_domains.ts`'s `isIpLiteral`, widened by one case: a bracketed authority, a dotted quad, or
+    /// anything carrying a `:` (a bare IPv6 address, which is the form `URL.host` answers and the form
+    /// `normalizeEntry` leaves alone when the URL parser cannot read it).
+    private static func isIPLiteral(_ value: String) -> Bool {
+        if value.hasPrefix("[") || value.contains(":") { return true }
+        return value.range(of: "^[0-9]{1,3}(\\.[0-9]{1,3}){3}$", options: .regularExpression) != nil
+    }
+
     /// TS `checkDangerousDomain`, URL-typed. `extra` is the caller-resolved user-added half
     /// (`settings.permissions.dangerousDomains.added`) — this type never reads settings itself.
     ///
@@ -91,8 +189,11 @@ public enum DangerousDomains {
     public static func check(_ url: URL, extra: [String] = []) -> DangerousDomainHit? {
         guard let rawHost = url.host(percentEncoded: false), !rawHost.isEmpty else { return nil }
         let host = rawHost.lowercased()
-        guard let entry = match(host: host, entries: shipped + extra) else { return nil }
-        return DangerousDomainHit(host: host, matchedEntry: entry)
+        // `hostMatch`, not the bare `match`: a user-written `*.evil.example` or
+        // `https://evil.example/admin` is honoured by the runtime child's own matcher, so it must be
+        // honoured here too or the floor is weaker on the side that is the only enforcer.
+        guard let entry = hostMatch(host: host, entries: shipped + extra) else { return nil }
+        return DangerousDomainHit(host: normalizeEntry(host), matchedEntry: entry)
     }
 
     /// String-typed overload for a model-supplied url. An unparseable url returns `nil`, same as the

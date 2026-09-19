@@ -16,9 +16,7 @@ final class ChatEngineTests: XCTestCase {
     /// A toolset with no live tools wired past `http` — enough for turns whose tools are never called.
     private func toolset(http: ChatHTTP = ScriptedChatHTTP(), exaKey: String? = nil,
                          askTimeout: Duration = .seconds(300)) -> ChatToolset {
-        let clock = t0
-        let fetcher = PageFetcher(http: http, cache: PageCache(), now: { clock })
-        return ChatToolset(http: http, fetcher: fetcher, exaKey: exaKey, askTimeout: askTimeout)
+        ChatToolset(http: http, cache: WebFetchCache(), exaKey: exaKey, askTimeout: askTimeout)
     }
 
     // MARK: - basic turn
@@ -136,7 +134,7 @@ final class ChatEngineTests: XCTestCase {
     // MARK: - tool round-trip
 
     func testToolRoundTripSearch() async {
-        let searchHTTP = ScriptedChatHTTP([.json(["results": [["title": "T", "url": "https://ex.com", "text": "excerpt"]]])])
+        let searchHTTP = ScriptedChatHTTP([.json(["answer": "It is fine.", "citations": [["title": "T", "url": "https://ex.com"]]])])
         let provider = ScriptedChatProvider([
             [.toolCall(callId: "c1", name: "Search", argumentsJSON: #"{"query":"weather"}"#), .done(.toolCalls)],
             [.textDelta("The weather is fine."), .done(.endTurn)],
@@ -152,7 +150,8 @@ final class ChatEngineTests: XCTestCase {
         guard case .toolResult(let result) = collector.events[3] else { return XCTFail() }
         XCTAssertEqual(result.callId, "c1")
         XCTAssertFalse(result.isError)
-        XCTAssertTrue(result.output.contains("https://ex.com"), "the Exa result rode into the tool_result")
+        XCTAssertTrue(result.output.contains("https://ex.com"), "the Exa answer's sources rode into the tool_result")
+        XCTAssertTrue(result.output.hasPrefix("It is fine."), "and so did the synthesized answer")
         // Round 1's request carried the function_call + its output back to the model.
         let round1 = provider.request(1).input
         XCTAssertTrue(round1.contains { if case .functionCall(let id, _, _) = $0 { return id == "c1" } else { return false } })
