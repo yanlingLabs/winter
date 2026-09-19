@@ -1906,6 +1906,63 @@ export function internalRoleDefaultTagFor(
   return (first?.key as ModelTag) ?? primary;
 }
 
+/**
+ * THE ONE effective-model rule for an internal-jobs role — the explicit pin, else the preferred
+ * credentialed provider's default row. `null` ONLY when the role has no pin and nothing is credentialed
+ * (there is then no model to report and no job to run).
+ *
+ * Lives HERE, pure and sync, rather than in `providers/internal-router.ts`, because BOTH the wire
+ * (`modelRoleModel` below, which cannot import the router) and the dispatcher must answer it — and two
+ * spellings of "explicit ?? preferred ?? default" is exactly how the pre-2026-09-19 bookkeeping and the
+ * actually-bound backend came to disagree.
+ *
+ * A role's `explicit` tag is reported VERBATIM even when it names a provider Winter's own jobs cannot
+ * run (a Claude pin): the role really does sit on that model, and the reason it is not running rides the
+ * `problem` field instead. Never silently substituted.
+ */
+export function internalRoleEffectiveTag(
+  settings: Settings | null | undefined,
+  role: InternalJobRole,
+  snapshot?: InternalProviderSnapshot,
+): ModelTag | null {
+  const explicit = explicitInternalRolePin(settings, role);
+  if (explicit !== undefined) return explicit;
+  const preferred = preferredInternalProviderFor(settings, snapshot);
+  if (preferred === undefined) return null;
+  return internalRoleDefaultTagFor(settings, preferred, INTERNAL_ROLE_SLOT[role]);
+}
+
+/** The four LIVE roles that run on Winter's own internal calls. `pins.researchFallback` is retired (its
+ *  consumer went with `ReadPage`, itself since retired) and turn compaction has NO production consumer
+ *  at all — `agent/compactor.ts` is constructed only by its own test and the golden-capture script — so
+ *  neither is here: a role in this union is one something actually calls. */
+export const INTERNAL_JOB_ROLES = ["titles.model", "reviewer.model", "pins.dream", "pins.cleaner"] as const;
+export type InternalJobRole = (typeof INTERNAL_JOB_ROLES)[number];
+
+export function isInternalJobRole(role: ModelRole): role is InternalJobRole {
+  return (INTERNAL_JOB_ROLES as readonly string[]).includes(role);
+}
+
+/** Each internal role's default family slot — `terra` for all four, which is what `pinsFor` defaulted
+ *  dream/cleaner to and what `titles.model`/`reviewer.model` inherited from `provider.model`'s own
+ *  provider before 2026-09-19. Spelled once so the wire and the dispatcher cannot differ. */
+const INTERNAL_ROLE_SLOT: Readonly<Record<InternalJobRole, "terra" | "luna">> = {
+  "titles.model": "terra",
+  "reviewer.model": "terra",
+  "pins.dream": "terra",
+  "pins.cleaner": "terra",
+};
+
+/** Where each internal role's EXPLICIT override actually lives in settings.json. */
+export function explicitInternalRolePin(settings: Settings | null | undefined, role: InternalJobRole): ModelTag | undefined {
+  switch (role) {
+    case "titles.model": return settings?.titles?.model;
+    case "reviewer.model": return settings?.reviewer?.model;
+    case "pins.dream": return settings?.pins?.dream;
+    case "pins.cleaner": return settings?.pins?.cleaner;
+  }
+}
+
 /** The provider ids `credentialInventory()` names, de-duplicated, in inventory order. Spelled here
  *  (rather than inline twice above) because the inventory carries TWO rows for `anthropic` and the
  *  order of the FIRST occurrence is what `internalProviderPreferenceOrder` promises. */

@@ -354,3 +354,29 @@ describe("codex-oauth and openai still work over their own loopback fakes", () =
     }
   });
 });
+
+describe("a user-entered providers.<id>.baseUrl", () => {
+  test("keeps Winter's historically unrestricted BYO-endpoint behaviour — a loopback override streams", async () => {
+    const model = "gpt-5.6-terra";
+    const fake = await openaiResponsesFake.startOpenAiResponsesFake({
+      scenarios: { [model]: [openaiResponsesFake.responsesStream({ text: ["Local Title"] })] },
+    });
+    try {
+      const secrets = secretsStore();
+      await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-openai" });
+      // NO `testBackendUrl`: the loopback url arrives the way a real user's does, through settings.
+      const router = await routerFor(secrets);
+      const call = router.resolve("titles.model", settingsWith(`openai/${model}`, { providers: { openai: { baseUrl: fake.url } } }));
+      if (isInternalRefusal(call)) throw new Error(`refused: ${call.reason} ${call.detail}`);
+      const out: string[] = [];
+      for await (const ev of call.provider.streamTurn({ model: call.model, instructions: "t", input: [{ type: "message", role: "user", content: "hi" }], tools: [] })) {
+        if (ev.type === "text_delta") out.push(ev.delta);
+        if (ev.type === "error") throw new Error(`provider error: ${ev.message}`);
+      }
+      expect(out.join("")).toBe("Local Title");
+      expect(fake.requests.length).toBe(1);
+    } finally {
+      await fake.close();
+    }
+  });
+});
