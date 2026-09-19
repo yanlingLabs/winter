@@ -2191,7 +2191,7 @@ export function roleAcceptsClientEffort(role: ModelRole): boolean {
  * `effortVocabularyFor`'s three states intact (`null` = no vocabulary known — including a role whose
  * `model` is itself `null`; `[]` = a real row that takes no effort setting).
  */
-export function modelRoleInfo(settings: Settings | null | undefined, role: ModelRole, boundProviderId?: string): {
+export function modelRoleInfo(settings: Settings | null | undefined, role: ModelRole, boundProviderId?: string, internal?: InternalProviderSnapshot): {
   model: ModelTag | null;
   explicit: boolean;
   constraint: ModelRoleConstraint;
@@ -2200,7 +2200,7 @@ export function modelRoleInfo(settings: Settings | null | undefined, role: Model
   effortExplicit: boolean;
   efforts: string[] | null;
 } {
-  const base = modelRoleModel(settings, role, boundProviderId);
+  const base = modelRoleModel(settings, role, boundProviderId, internal);
   const storedEffort = roleEffortFor(settings, role);
   return {
     ...base,
@@ -2224,7 +2224,7 @@ export function modelRoleInfo(settings: Settings | null | undefined, role: Model
  *  role sit on after my write" without also computing a vocabulary it is about to re-derive). Every
  *  rule and caveat in `modelRoleInfo`'s own doc comment above applies to this function — it is that
  *  function's body, not a second one. */
-function modelRoleModel(settings: Settings | null | undefined, role: ModelRole, boundProviderId?: string): {
+function modelRoleModel(settings: Settings | null | undefined, role: ModelRole, boundProviderId?: string, internal?: InternalProviderSnapshot): {
   model: ModelTag | null;
   explicit: boolean;
   constraint: ModelRoleConstraint;
@@ -2234,18 +2234,33 @@ function modelRoleModel(settings: Settings | null | undefined, role: ModelRole, 
   // Fix wave (finding 4): the BOUND backend when known, never a pure settings re-derivation — see
   // this function's own doc comment for why the two can disagree.
   const effectiveProvider = boundProviderId ?? ownProviderFor(settings);
+  // 2026-09-19 (the internal-jobs widening): an `"internal-provider"` role's picker offers EVERY
+  // eligible provider — not the one currently bound, which is what left this user's Roles pane with
+  // `permitted: []` and no picker at all, and not only the CREDENTIALED ones either: that is exactly
+  // what the `"any"` roles do (`models.catalog` carries `credentialPresent` per provider beside this,
+  // so a client greys a row rather than losing it), and it is what lets a user pin a role to a provider
+  // they are about to add a key for. The pre-2026-09-19 single-provider answer is kept ONLY for a
+  // caller that threads no snapshot, so every existing test reads unchanged.
   const permitted = constraint === "internal-provider"
-    ? ((INTERNAL_PROVIDER_IDS as readonly string[]).includes(effectiveProvider) ? permittedProviders(new Set([effectiveProvider])) : [])
+    ? (internal !== undefined
+        ? permittedProviders(internalEligibleProviderIds())
+        : (INTERNAL_PROVIDER_IDS as readonly string[]).includes(effectiveProvider) ? permittedProviders(new Set([effectiveProvider])) : [])
     : permittedProviders();
   const primaryModel = (settings?.provider?.model ?? DEFAULT_PROVIDER.model) as ModelTag;
 
   switch (role) {
     case "pins.dispatch":
       return { model: pinsFor(settings).dispatch, explicit: settings?.pins?.dispatch !== undefined, constraint, permitted };
+    // 2026-09-19: the internal roles report `internalRoleEffectiveTag` (explicit pin, else the
+    // PREFERRED CREDENTIALED provider's default row) whenever a snapshot is threaded — the SAME rule
+    // `providers/internal-router.ts` dispatches on, so the pane can never show a model the job would
+    // not actually use. `null` is a NEW possibility for these four (nothing credentialed at all, so
+    // there is no model to name); the schema already allows it — `runtimes.advisorModel` reports `null`
+    // for an unset advisor — and the accompanying `problem` says why.
     case "pins.dream":
-      return { model: pinsFor(settings).dream, explicit: settings?.pins?.dream !== undefined, constraint, permitted };
+      return { model: internal !== undefined ? internalRoleEffectiveTag(settings, "pins.dream", internal) : pinsFor(settings).dream, explicit: settings?.pins?.dream !== undefined, constraint, permitted };
     case "pins.cleaner":
-      return { model: pinsFor(settings).cleaner, explicit: settings?.pins?.cleaner !== undefined, constraint, permitted };
+      return { model: internal !== undefined ? internalRoleEffectiveTag(settings, "pins.cleaner", internal) : pinsFor(settings).cleaner, explicit: settings?.pins?.cleaner !== undefined, constraint, permitted };
     case "pins.research":
       return { model: pinsFor(settings).research, explicit: settings?.pins?.research !== undefined, constraint, permitted };
     // RETIRED (2026-09-18, the web-tools ruling): its ONE consumer was the multi-page research runner,
@@ -2263,9 +2278,9 @@ function modelRoleModel(settings: Settings | null | undefined, role: ModelRole, 
       // always carries a real, currently-effective value — there is no "unset" state to distinguish.
       return { model: primaryModel, explicit: true, constraint, permitted };
     case "titles.model":
-      return { model: settings?.titles?.model ?? primaryModel, explicit: settings?.titles?.model !== undefined, constraint, permitted };
+      return { model: internal !== undefined ? internalRoleEffectiveTag(settings, "titles.model", internal) : settings?.titles?.model ?? primaryModel, explicit: settings?.titles?.model !== undefined, constraint, permitted };
     case "reviewer.model":
-      return { model: settings?.reviewer?.model ?? primaryModel, explicit: settings?.reviewer?.model !== undefined, constraint, permitted };
+      return { model: internal !== undefined ? internalRoleEffectiveTag(settings, "reviewer.model", internal) : settings?.reviewer?.model ?? primaryModel, explicit: settings?.reviewer?.model !== undefined, constraint, permitted };
     case "runtimes.advisorModel": {
       const raw = settings?.runtimes?.advisorModel?.trim();
       return { model: raw ? (raw as ModelTag) : null, explicit: Boolean(raw), constraint, permitted };
@@ -2278,9 +2293,9 @@ function modelRoleModel(settings: Settings | null | undefined, role: ModelRole, 
  *  `"internal-provider"`/`"any"` role's default) without a second round trip. `boundProviderId`
  *  (fix wave, finding 4): forwarded verbatim to every `modelRoleInfo` call — see that function's
  *  own doc comment. */
-export function modelRolesFor(settings: Settings | null | undefined, boundProviderId?: string): Record<ModelRole, ReturnType<typeof modelRoleInfo>> {
+export function modelRolesFor(settings: Settings | null | undefined, boundProviderId?: string, internal?: InternalProviderSnapshot): Record<ModelRole, ReturnType<typeof modelRoleInfo>> {
   const out = {} as Record<ModelRole, ReturnType<typeof modelRoleInfo>>;
-  for (const role of MODEL_ROLES) out[role] = modelRoleInfo(settings, role, boundProviderId);
+  for (const role of MODEL_ROLES) out[role] = modelRoleInfo(settings, role, boundProviderId, internal);
   return out;
 }
 
@@ -2332,6 +2347,24 @@ export function modelRolesFor(settings: Settings | null | undefined, boundProvid
  * Clearing a role (`null`/empty, where the role allows it) is never checked — there is no tag to
  * verify, and a user must always be able to get back to a role's default.
  */
+/** `setModelRole`'s internal-jobs gate — see its own call site for the accept/refuse split. Exempts
+ *  `winter-test/*` for the same reason `assertCatalogBackedTag` does: it is not a catalog provider. */
+function assertInternalJobRoleTag(tag: string, role: InternalJobRole): void {
+  if (tag.startsWith(WINTER_TEST_PREFIX)) return;
+  let providerId: string;
+  try { providerId = splitTag(tag).providerId; } catch { return; } // shape is `assertCatalogBackedTag`'s job
+  if (internalEligibleProviderIds().has(providerId)) return;
+  const display = loadCatalog().providers.find((p) => p.id === providerId)?.displayName ?? providerId;
+  const claude = (CLAUDE_FIRST_PARTY_PROVIDER_IDS as readonly string[]).includes(providerId);
+  throw new TypeError(
+    `${role}: Winter's own background jobs can't run on ${display}. ` +
+      (claude
+        ? `Claude models run through Anthropic's own runtime, which brings its own reviewer — so titles, the bash safety reviewer, the dreamer and the session cleaner never borrow an Anthropic credential. `
+        : `Winter has no way to drive that provider for its own calls (its credential shape or its API family is not one the daemon can use). `) +
+      `Pick a model from the providers \`settings.modelRoles\` reports as \`permitted\` for this role, or clear the pin (model: null) to use the default.`,
+  );
+}
+
 function assertCatalogBackedTag(tag: string, role: ModelRole): void {
   if (tag.startsWith(WINTER_TEST_PREFIX)) return;
   if (rowForTag(tag) !== undefined) return;
@@ -2371,6 +2404,16 @@ export function setModelRole(settings: Settings, role: ModelRole, model?: string
         `runtime's own WebFetch (whose digest model is \`pins.research\`), so a model stored here would ` +
         `never be used. Pass model: null to clear a value stored before the retirement.`,
     );
+  }
+  // 2026-09-19 (the internal-jobs widening): an internal-jobs role may only name a provider Winter's
+  // own background calls can actually be driven over. Refused on the PERMANENT facts only — a
+  // first-party Claude provider (the user's own ruling: those run through the official leg, which has
+  // its own reviewer) or an adapter family the daemon cannot drive — never on the situational one.
+  // An ELIGIBLE provider with no key stored yet is ACCEPTED: that is precisely the case
+  // `assertCatalogBackedTag`'s own doc says a write must not refuse ("a provider the user is about to
+  // bind"), and the role reports `no-credential` on its `problem` until the key arrives.
+  if (isInternalJobRole(role) && typeof model === "string" && model.trim() !== "") {
+    assertInternalJobRoleTag(model.trim(), role);
   }
   const withModel = model === undefined ? settings : setModelRoleModel(settings, role, model);
   if (effort === undefined) return withModel;

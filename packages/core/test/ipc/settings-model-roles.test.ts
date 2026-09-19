@@ -12,6 +12,9 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 import { Settings, saveSettings, MODEL_ROLES } from "../../src/settings";
 import { RoleHealthRegistry } from "../../src/providers/role-health";
+import { createInternalProviderView } from "../../src/providers/internal-view";
+import { createInternalRouter } from "../../src/providers/internal-router";
+import { writeCredentialMaterial } from "../../src/auth/credential-material";
 
 class TestClient {
   private decoder = new LineDecoder();
@@ -58,7 +61,10 @@ describe("settings.modelRoles / settings.setModelRole", () => {
   let stop: (() => void) | undefined;
   afterEach(() => { stop?.(); stop = undefined; });
 
-  async function boot(providerModel = "codex-oauth/gpt-5.6-sol", opts: { roleHealth?: RoleHealthRegistry } = {}) {
+  /** `internalCredentials`: which provider slots to store throwaway material in AND wire the real
+   *  internal-jobs router over — the 2026-09-19 shape a production daemon always has. Omitted keeps the
+   *  bare pre-2026-09-19 server (no router), which is what every older test in this file asserts. */
+  async function boot(providerModel = "codex-oauth/gpt-5.6-sol", opts: { roleHealth?: RoleHealthRegistry; internalCredentials?: string[] } = {}) {
     const home = mkdtempSync(join(tmpdir(), "winter-model-roles-"));
     const settingsPath = join(home, "settings.json");
     saveSettings(settingsPath, Settings.parse({ schemaVersion: 3, provider: { model: providerModel } }));
@@ -67,7 +73,14 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     const secrets = new FileSecretStore(join(home, "secrets"));
     const authority = new TokenAuthority(secrets);
     const tokens = await authority.ensureTokens();
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets, roleHealth: opts.roleHealth });
+    let internalRouter: ReturnType<typeof createInternalRouter> | undefined;
+    if (opts.internalCredentials !== undefined) {
+      for (const slot of opts.internalCredentials) await writeCredentialMaterial(secrets, slot, { kind: "api-key", key: "sk-test" });
+      const view = createInternalProviderView({ secrets, log: () => {} });
+      await view.refresh();
+      internalRouter = createInternalRouter({ view, secrets });
+    }
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets, roleHealth: opts.roleHealth, ...(internalRouter ? { internalRouter } : {}) });
     stop = () => { server.stop(); store.close(); };
     return { home, settingsPath, socketPath, harnessToken: tokens.harness };
   }
@@ -252,26 +265,150 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     c.close();
   });
 
-  // An "unroutable for that role" tag is REPORTED, not schema-refused: `internalModelFor`'s own
-  // design is to accept the write (any real catalog tag is a valid model) and skip the run/log one
-  // line when the pin's provider disagrees with the daemon's own internal Provider — so `pins.dream`
-  // etc. accept a tag naming a DIFFERENT provider than `ownProviderFor(settings)`, and the choice
-  // this item's brief asks to state is: the read (`settings.modelRoles`) is where that mismatch
-  // becomes visible — `permitted` never lists that provider's tags for an "internal-provider" role
-  // whose own provider does not match, so the UI can flag it, even though the WRITE itself succeeds.
-  test("an unroutable-for-that-role tag is accepted by the write (internalModelFor's own runtime gate, not a schema refusal) and reported as not permitted by the read", async () => {
+  // 2026-09-19 (the internal-jobs widening): this test used to pin "the write always accepts, the read
+  // reports" for an internal-jobs role, on the strength of `internalModelFor` skipping a mismatched pin
+  // at run time. Both halves moved, and on a principled line:
+  //
+  //  - a PERMANENTLY unrunnable provider (a first-party Claude row — Claude runs through Anthropic's
+  //    own runtime, which brings its own reviewer) is refused AT THE WRITE, because no future credential
+  //    makes it runnable and storing it would only produce a role that silently never runs;
+  //  - an ELIGIBLE provider with no credential yet is accepted and LISTED as permitted — the old test's
+  //    own rationale ("a provider the user is about to bind") applies to exactly that case.
+  test("an internal-jobs role refuses a permanently-unrunnable provider at the write, and says why", async () => {
     const { socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol");
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
-    // anthropic is a real catalog provider but NOT the daemon's own internal provider
-    // (ownProviderFor === "codex-oauth" here) and not in INTERNAL_PROVIDER_IDS either way.
     const set = await c.request(METHODS.settingsSetModelRole, { role: "pins.dream", model: "anthropic/claude-opus-5" });
+    expect(set.error?.code).toBe(-32602);
+    expect(set.error?.message).toContain("can't run on Anthropic");
+    expect(set.error?.message).toContain("its own reviewer");
+    c.close();
+  });
+
+  test("an internal-jobs role accepts an eligible-but-uncredentialed provider, and lists it as permitted", async () => {
+    const { socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol", { internalCredentials: ["codex-oauth:default"] });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const set = await c.request(METHODS.settingsSetModelRole, { role: "pins.dream", model: "deepseek/deepseek-v4-flash" });
     expect(set.error).toBeUndefined();
-    expect(set.result.model).toBe("anthropic/claude-opus-5");
-    // But `permitted` for pins.dream (an "internal-provider" role) never lists anthropic — only
-    // whatever ownProviderFor(settings) resolves to, when that provider is internal at all.
+    expect(set.result.model).toBe("deepseek/deepseek-v4-flash");
     const permittedProviderIds = set.result.roles["pins.dream"].permitted.map((p: any) => p.providerId);
+    expect(permittedProviderIds).toContain("deepseek");
+    // Never a Claude provider, whatever else is listed.
     expect(permittedProviderIds).not.toContain("anthropic");
+    expect(permittedProviderIds).not.toContain("console");
+    c.close();
+  });
+
+  // -------------------------------------------------------------------------------------------
+  // 2026-09-19: the DERIVED role problems. These are recomputed from the live view on every read
+  // (never written to role-health.json), so they clear themselves the moment the condition clears.
+  // -------------------------------------------------------------------------------------------
+  test("a DeepSeek default with a Codex credential: the internal roles have a real model, a picker and NO problem", async () => {
+    const { socketPath, harnessToken } = await boot("deepseek/deepseek-v4-flash", { internalCredentials: ["codex-oauth:default"] });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const res = await c.request(METHODS.settingsModelRoles, {});
+    for (const role of ["titles.model", "reviewer.model", "pins.dream", "pins.cleaner"]) {
+      const info = res.result.roles[role];
+      expect(info.problem).toBeNull();
+      expect(info.model).toBe("codex-oauth/gpt-5.6-terra");
+      expect(info.permitted.length).toBeGreaterThan(1);
+      const ids = info.permitted.map((p: any) => p.providerId);
+      expect(ids).toContain("codex-oauth");
+      expect(ids).toContain("deepseek");
+      expect(ids).not.toContain("anthropic");
+    }
+    c.close();
+  });
+
+  test("a DeepSeek default with a DeepSeek key: zero setup — the roles sit on the user's own model", async () => {
+    const { socketPath, harnessToken } = await boot("deepseek/deepseek-v4-flash", { internalCredentials: ["deepseek:default"] });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const res = await c.request(METHODS.settingsModelRoles, {});
+    expect(res.result.roles["titles.model"].model).toBe("deepseek/deepseek-v4-flash");
+    expect(res.result.roles["titles.model"].problem).toBeNull();
+    c.close();
+  });
+
+  test("no internal credential: every internal role reports no-internal-credential, with the logins that fix it", async () => {
+    const { socketPath, harnessToken } = await boot("deepseek/deepseek-v4-flash", { internalCredentials: [] });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const res = await c.request(METHODS.settingsModelRoles, {});
+    for (const role of ["titles.model", "reviewer.model", "pins.dream", "pins.cleaner"]) {
+      const info = res.result.roles[role];
+      expect(info.problem?.reason).toBe("no-internal-credential");
+      expect(info.problem?.detail).toContain("ChatGPT");
+      expect(info.problem?.detail).toContain("credentials set");
+      expect(info.model).toBeNull();
+    }
+    // The `"any"` roles are untouched: they route through the runtime SDK, not through this.
+    expect(res.result.roles["pins.dispatch"].problem).toBeNull();
+    expect(res.result.roles["provider.model"].problem).toBeNull();
+    c.close();
+  });
+
+  test("an explicit pin on an eligible provider with no key: no-credential, naming that provider", async () => {
+    const { socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol", { internalCredentials: ["codex-oauth:default"] });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const set = await c.request(METHODS.settingsSetModelRole, { role: "pins.cleaner", model: "deepseek/deepseek-v4-flash" });
+    expect(set.error).toBeUndefined();
+    const info = set.result.roles["pins.cleaner"];
+    expect(info.problem?.reason).toBe("no-credential");
+    expect(info.problem?.detail).toContain("DeepSeek");
+    expect(info.problem?.model).toBe("deepseek/deepseek-v4-flash");
+    // Its sibling roles are fine — a problem is per role, never daemon-wide.
+    expect(set.result.roles["titles.model"].problem).toBeNull();
+    c.close();
+  });
+
+  test("a stored pin on a provider that became ineligible reports provider-unsupported (a settings.json written before the ruling)", async () => {
+    const { socketPath, harnessToken, settingsPath } = await boot("codex-oauth/gpt-5.6-sol", { internalCredentials: ["codex-oauth:default"] });
+    // Written by hand, the way an old settings.json carries it — the write door refuses this now.
+    const raw = JSON.parse(readFileSync(settingsPath, "utf8"));
+    writeFileSync(settingsPath, JSON.stringify({ ...raw, titles: { model: "anthropic/claude-opus-5" } }, null, 2));
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const res = await c.request(METHODS.settingsModelRoles, {});
+    const info = res.result.roles["titles.model"];
+    expect(info.problem?.reason).toBe("provider-unsupported");
+    expect(info.problem?.detail).toBe("Anthropic can't be used for Winter's own jobs yet");
+    // The role's own model is still reported verbatim so the user can SEE and clear it.
+    expect(info.model).toBe("anthropic/claude-opus-5");
+    c.close();
+  });
+
+  test("the derived problem clears itself the moment the pin is cleared — nothing persisted to unwind", async () => {
+    const { socketPath, harnessToken, settingsPath } = await boot("codex-oauth/gpt-5.6-sol", { internalCredentials: ["codex-oauth:default"] });
+    const raw = JSON.parse(readFileSync(settingsPath, "utf8"));
+    writeFileSync(settingsPath, JSON.stringify({ ...raw, titles: { model: "anthropic/claude-opus-5" } }, null, 2));
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    expect((await c.request(METHODS.settingsModelRoles, {})).result.roles["titles.model"].problem?.reason).toBe("provider-unsupported");
+    const cleared = await c.request(METHODS.settingsSetModelRole, { role: "titles.model", model: null });
+    expect(cleared.error).toBeUndefined();
+    expect(cleared.result.roles["titles.model"].problem).toBeNull();
+    expect((await c.request(METHODS.settingsModelRoles, {})).result.roles["titles.model"].problem).toBeNull();
+    c.close();
+  });
+
+  test("storing a credential clears no-internal-credential on the very next read — no restart", async () => {
+    const { socketPath, harnessToken } = await boot("deepseek/deepseek-v4-flash", { internalCredentials: [] });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    expect((await c.request(METHODS.settingsModelRoles, {})).result.roles["pins.dream"].problem?.reason).toBe("no-internal-credential");
+    const set = await c.request(METHODS.credentialSet, { providerId: "deepseek", apiKey: "sk-deepseek-test-value" });
+    expect(set.error).toBeUndefined();
+    const after = (await c.request(METHODS.settingsModelRoles, {})).result.roles["pins.dream"];
+    expect(after.problem).toBeNull();
+    expect(after.model).toBe("deepseek/deepseek-v4-flash");
+    // …and removing it again makes them inert, cleanly.
+    const removed = await c.request(METHODS.credentialRemove, { providerId: "deepseek" });
+    expect(removed.error).toBeUndefined();
+    expect((await c.request(METHODS.settingsModelRoles, {})).result.roles["pins.dream"].problem?.reason).toBe("no-internal-credential");
     c.close();
   });
 

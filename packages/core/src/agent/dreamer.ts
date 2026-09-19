@@ -5,7 +5,7 @@ import type { SessionStore } from "../sessions/store";
 import type { Settings } from "../settings";
 import { effortToSpendForRole, pinsFor, ownProviderFor } from "../settings";
 import { internalModelFor } from "../providers/manager";
-import { isInternalRefusal, type InternalCall, type InternalRefusal } from "../providers/internal-router";
+import { isInternalRefusal, requireInternalWiring, type InternalCall, type InternalRefusal } from "../providers/internal-router";
 import { classifyProviderFailure, type RoleHealthRegistry, type SubscriptionQuotaSource } from "../providers/role-health";
 import { applyOps, validateOps, RESERVED_FILES, MAX_FILES } from "./dream-ops";
 
@@ -46,7 +46,8 @@ export interface DreamerDeps {
   // input so a Codex usage-limit note can carry the account's own reported reset time even when the
   // failing round itself carried no `retryAfterMs`. Absent (every test double) means role-health
   // just never has that extra signal — `retryAfterMs` alone, when present, still works.
-  provider: { provider: Provider; model: string; live?: () => { providerId?: string }; quota?: SubscriptionQuotaSource }; // wrapper for parity with compactor/titler; model IGNORED — dreams pin pinsFor(settings).dream
+  /** The LEGACY double path — see `resolve`. Omitted by a real daemon. */
+  provider?: { provider: Provider; model: string; live?: () => { providerId?: string }; quota?: SubscriptionQuotaSource }; // wrapper for parity with compactor/titler; model IGNORED — dreams pin pinsFor(settings).dream
   /**
    * 2026-09-19: the internal-jobs resolver (`providers/internal-router.ts`'s `resolve("pins.dream",
    * settings)`, bound to the live settings holder) — the ONE seam a real daemon wires. It answers the
@@ -164,14 +165,15 @@ export class Dreamer {
     // provider Winter's jobs cannot use) rather than for "the pin names a provider we did not bind".
     const resolved = this.deps.resolve?.();
     if (resolved !== undefined && isInternalRefusal(resolved)) return;
-    const boundProviderId = resolved?.providerId ?? this.deps.provider.live?.().providerId ?? ownProviderFor(settings);
+    const boundProviderId = resolved?.providerId ?? this.deps.provider?.live?.().providerId ?? ownProviderFor(settings);
     const dreamPin = resolved?.tag ?? pinsFor(settings).dream;
     const dreamModel = resolved !== undefined
       ? resolved.model
       : internalModelFor(dreamPin, { providerId: boundProviderId }, "pins.dream");
     if (dreamModel === undefined) return;
-    const dreamProvider = resolved?.provider ?? this.deps.provider.provider;
-    const dreamQuota = resolved?.quota ?? this.deps.provider.quota;
+    const dreamProvider = resolved?.provider ?? this.deps.provider?.provider;
+    if (dreamProvider === undefined) requireInternalWiring("Dreamer");
+    const dreamQuota = resolved?.quota ?? this.deps.provider?.quota;
     // 2026-09-18: the role's stored effort (`settings.roleEfforts["pins.dream"]`), off the SAME live
     // `settings` read as the pin just above — so a Roles-pane change lands on the next cycle, and the
     // model and its effort can never come from two different settings generations. Mapped onto the

@@ -4,7 +4,7 @@ import { hasOpenPanelTabs } from "../panel/store";
 import type { Settings } from "../settings";
 import { effortToSpendForRole, pinsFor, ownProviderFor } from "../settings";
 import { internalModelFor } from "../providers/manager";
-import { isInternalRefusal, type InternalCall, type InternalRefusal } from "../providers/internal-router";
+import { isInternalRefusal, requireInternalWiring, type InternalCall, type InternalRefusal } from "../providers/internal-router";
 import { classifyProviderFailure, type RoleHealthRegistry, type SubscriptionQuotaSource } from "../providers/role-health";
 import { activityFor, type ActivityRow } from "./activity";
 import { appendCleanerLog } from "./cleaner-log";
@@ -94,7 +94,8 @@ export interface CleanerDeps {
    *  `judge` below compares against this rather than a pure settings read. */
   // `quota?`: see `DreamerDeps.provider`'s identical field (agent/dreamer.ts) for the full doc —
   // same `RebindableProvider.quota`, same reason, structurally satisfied with no adapter.
-  provider: { provider: Provider; model: string; live?: () => { providerId?: string }; quota?: SubscriptionQuotaSource };
+  /** The LEGACY double path — see `resolve`. Omitted by a real daemon. */
+  provider?: { provider: Provider; model: string; live?: () => { providerId?: string }; quota?: SubscriptionQuotaSource };
   /** 2026-09-19: the internal-jobs resolver — see `DreamerDeps.resolve`'s identical field
    *  (agent/dreamer.ts) for the full doc, including why the legacy `provider` beside it still exists. */
   resolve?: () => InternalCall | InternalRefusal;
@@ -351,14 +352,15 @@ export class SessionCleaner {
     // unstamped for the next pass.
     const resolved = this.deps.resolve?.();
     if (resolved !== undefined && isInternalRefusal(resolved)) return null;
-    const boundProviderId = resolved?.providerId ?? this.deps.provider.live?.().providerId ?? ownProviderFor(settings);
+    const boundProviderId = resolved?.providerId ?? this.deps.provider?.live?.().providerId ?? ownProviderFor(settings);
     const cleanerPin = resolved?.tag ?? pinsFor(settings).cleaner;
     const cleanerModel = resolved !== undefined
       ? resolved.model
       : internalModelFor(cleanerPin, { providerId: boundProviderId }, "pins.cleaner");
     if (cleanerModel === undefined) return null;
-    const cleanerProvider = resolved?.provider ?? this.deps.provider.provider;
-    const cleanerQuota = resolved?.quota ?? this.deps.provider.quota;
+    const cleanerProvider = resolved?.provider ?? this.deps.provider?.provider;
+    if (cleanerProvider === undefined) requireInternalWiring("SessionCleaner");
+    const cleanerQuota = resolved?.quota ?? this.deps.provider?.quota;
     // 2026-09-18: the role's stored effort, off the SAME live `settings` read as the pin — next
     // judgment, no restart. Mapped onto the pin's row and never a throw (this method's contract is
     // "null for every failure mode", and an effort must not become a new one); nothing stored is

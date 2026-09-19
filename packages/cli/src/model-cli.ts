@@ -2,7 +2,7 @@
 // unit-tested without going through the top-level `if (import.meta.main)` dispatch. Mirrors
 // plugin-cli.ts's split: main.ts owns the I/O (loadSettings/saveSettings/connect), this file
 // owns the parse/validate decisions.
-import { REASONING_EFFORTS, rowForTag, isModelTag, modelTagIsKnown, splitTag, UNSTATED_TAG, WINTER_TEST_PREFIX, INTERNAL_PROVIDER_IDS } from "@yanlinglabs/winter-core";
+import { REASONING_EFFORTS, rowForTag, isModelTag, modelTagIsKnown, splitTag, UNSTATED_TAG, WINTER_TEST_PREFIX, internalEligibleProviderIds } from "@yanlinglabs/winter-core";
 import type { Settings } from "@yanlinglabs/winter-core";
 
 export type ModelCliAction =
@@ -134,19 +134,18 @@ export function validateModelTag(tag: string, settings?: Settings): string | und
   return undefined;
 }
 
-/** WS-20 (design correction after item 4): `settings.provider.model` may name ANY catalog
- *  provider — `winter model <tag>` no longer REFUSES a non-internal one (a user whose default
- *  model is Claude must be able to boot). When the chosen provider is outside
- *  `INTERNAL_PROVIDER_IDS` (core's own `codex-oauth`/`openai`), the daemon simply does not build
- *  its internal `Provider` instance and the features that lean on it — titles, review, dreaming,
- *  research — go inert (one daemon log line, not a refusal). This is the CLI's own heads-up for
- *  that, printed to stderr alongside (never blocking) the write: `undefined` when the provider
- *  IS internal (nothing to say). Precondition: `tag` is already a validated tag (`validateModelTag`
- *  returned `undefined` for it) — `splitTag` is called unguarded. */
+/** `settings.provider.model` may name ANY catalog provider, and since 2026-09-19 so may Winter's own
+ *  background jobs — they run on whichever ELIGIBLE provider has a credential
+ *  (`internalEligibleProviderIds`, core's settings.ts), independently of this field. So the note is now
+ *  only about the ZERO-SETUP case: when the chosen provider is one Winter's jobs cannot be driven over
+ *  (a first-party Claude row, or an adapter family the daemon cannot use), those jobs fall back to
+ *  another credentialed provider rather than following this model — worth saying once, never a refusal
+ *  and never a claim that anything is inert. `undefined` when the provider IS eligible (nothing to say).
+ *  Precondition: `tag` is already a validated tag — `splitTag` is called unguarded. */
 export function internalProviderNote(tag: string): string | undefined {
   const { providerId } = splitTag(tag);
-  if ((INTERNAL_PROVIDER_IDS as readonly string[]).includes(providerId)) return undefined;
-  return `note: ${providerId} is not one of the daemon's internal providers (codex-oauth, openai); titles, review, dreaming and research are inert until provider.model names one of those`;
+  if (internalEligibleProviderIds().has(providerId)) return undefined;
+  return `note: Winter's own background jobs (titles, the bash safety reviewer, dreaming, the session cleaner) can't run on ${providerId} — they'll use whichever provider you have a usable credential for instead. Your sessions are unaffected.`;
 }
 
 /** Validates a reasoning-effort slug against REASONING_EFFORTS (settings.ts — the wire-valid

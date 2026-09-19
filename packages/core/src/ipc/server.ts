@@ -108,6 +108,8 @@ import { verbClass } from "../peripheral/hardware";
 import type { QuotaManager } from "../providers/quota";
 import { modelCatalogWire } from "../providers/model-catalog-wire";
 import { withProblemsForRoles, type RoleHealthRegistry } from "../providers/role-health";
+import type { InternalRouter } from "../providers/internal-router";
+import { internalRoleProblemsFor } from "../providers/internal-role-problems";
 import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, readRawSettings } from "../settings";
 import { disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
@@ -381,6 +383,16 @@ export interface IpcServerOptions {
   // the no-restart-rule violation this closes. Optional — absent (every pre-fix test, or a
   // no-agentProvider daemon) makes the retry a no-op, unchanged from today's behavior.
   refreshAgentProvider?: (next: Settings) => Promise<boolean> | boolean;
+  /**
+   * 2026-09-19: the internal-jobs router (`providers/internal-router.ts`), the ONE thing that decides
+   * whether Winter's own background jobs (titles, the bash reviewer, the dreamer, the session cleaner)
+   * can run and on which provider. Read by `settings.modelRoles`/`settings.setModelRole` for the
+   * internal roles' `permitted` set and their DERIVED `problem`, and by `credential.set`/
+   * `credential.remove`, which AWAIT `view.refresh()` before returning so "add a key, the next
+   * internal call runs" is a guarantee rather than a race. Absent (every pre-existing test, and the
+   * deliberately provider-less boot) means the internal roles report the pre-2026-09-19 shape.
+   */
+  internalRouter?: InternalRouter;
   // Phase 4b Task 4 (spec §3): the plugin tool bridge. `registry` is the SAME ToolRegistry the
   // AgentEngine executes tool calls against (daemon.ts shares the one instance) — tool.register
   // registers `plugin__<pluginId>__<tool>` into it; the socket close() handler and the
@@ -914,6 +926,19 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
    * pre-fix behaviour — the same "a successful credential.set must never read as a failure" contract
    * `evictSessionsForCredentialChange` already has.
    */
+  /**
+   * 2026-09-19: re-probe which providers Winter's own jobs can run on, AWAITED before
+   * `credential.set`/`credential.remove` return — so the very next internal call (and the very next
+   * `settings.modelRoles` read) sees the key that was just stored, with no daemon restart. The view
+   * narrates the change itself, once, and only when the set actually moved.
+   *
+   * Best-effort in the same sense as its neighbour: `refresh()` never throws (it keeps the last good
+   * set and logs on a probe failure), so a successful credential write can never read as a failure.
+   */
+  async function refreshInternalProvidersAfterCredentialChange(): Promise<void> {
+    await opts.internalRouter?.view.refresh();
+  }
+
   async function retryStuckRebindAfterCredentialChange(): Promise<void> {
     if (!opts.refreshAgentProvider || !opts.winterHome) return;
     try {
@@ -2300,7 +2325,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // (settings.ts) — those stay pure `Settings -> …` readers with no fs/registry dependency;
         // `withProblemsForRoles` is the wire-only augmentation (`providers/role-health.ts`'s own doc
         // comment explains the split).
-        return { ok: true, roles: withProblemsForRoles(modelRolesFor(settings, opts.boundProviderId?.()), opts.roleHealth) };
+        return { ok: true, roles: internalRoleProblemsFor(withProblemsForRoles(modelRolesFor(settings, opts.boundProviderId?.(), opts.internalRouter?.view.snapshot()), opts.roleHealth), settings, opts.internalRouter) };
       }
       // Daemon settings surface (2026-09-17 plan, item 4) — the ONE write door for all nine model
       // roles. LOCAL-ROLE ONLY. Mirrors `settings.setAdvisorModel`'s own handler shape exactly
@@ -2329,7 +2354,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           throw new RpcFailure(ERR.INVALID_PARAMS, err instanceof Error ? err.message : String(err));
         }
         saveSettings(settingsPath, next);
-        const roles = withProblemsForRoles(modelRolesFor(next, opts.boundProviderId?.()), opts.roleHealth);
+        const roles = internalRoleProblemsFor(withProblemsForRoles(modelRolesFor(next, opts.boundProviderId?.(), opts.internalRouter?.view.snapshot()), opts.roleHealth), next, opts.internalRouter);
         return { ok: true, model: roles[p.role].model, roles };
       }
       // -----------------------------------------------------------------------------------------
@@ -3579,6 +3604,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // Fix wave (finding 4b): a stuck internal-Provider rebind (no credential yet for the newly
         // chosen provider) is retried NOW, not on the next unrelated settings write.
         await retryStuckRebindAfterCredentialChange();
+        await refreshInternalProvidersAfterCredentialChange();
         return { ok: true };
       }
 
@@ -3588,6 +3614,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const outcome = await removeCredential(opts.secrets, p.providerId);
         if ("code" in outcome) throw credentialRpcFailure(outcome);
         await evictSessionsForCredentialChange(p.providerId);
+        // 2026-09-19: the mirror of `credential.set`'s own refresh — removing the LAST credential a
+        // Winter job could run on must make those jobs inert on the next call, cleanly and at once.
+        await refreshInternalProvidersAfterCredentialChange();
         return { ok: true, removed: outcome.removed };
       }
 

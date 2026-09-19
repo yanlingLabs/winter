@@ -1097,16 +1097,33 @@ describe("setModelRole: the catalog-membership check", () => {
     expect(setModelRole(withPin, "runtimes.advisorModel", null).runtimes?.advisorModel).toBeUndefined();
   });
 
-  // The membership test is the CATALOG, deliberately not the role's own `permitted` set: an
-  // "internal-provider" role narrows `permitted` to the CURRENTLY BOUND provider, so gating the write
-  // on it would refuse pinning a role to a provider the user is about to bind. Existence and
+  // The membership test is the CATALOG, deliberately not the role's own `permitted` set: existence and
   // present-tense usability are different questions, and clients already receive `constraint`.
-  test("a catalog tag an internal-provider role cannot serve TODAY is still accepted", () => {
-    const info = modelRoleInfo(base, "titles.model", "openai");
+  //
+  // 2026-09-19 SPLIT: for an internal-jobs role that now has two answers, on the situational/permanent
+  // line. An ELIGIBLE provider with no credential stored yet is still accepted — it is exactly the
+  // "a provider the user is about to bind" case this test was written for. A PERMANENTLY ineligible one
+  // (a first-party Claude row, or an adapter family the daemon cannot drive) is refused at the door,
+  // because no future credential makes it runnable.
+  test("an internal-jobs role accepts an eligible provider with no credential stored yet", () => {
+    const info = modelRoleInfo(base, "titles.model", "openai", { credentialed: new Set(["codex-oauth"]) });
     expect(info.constraint).toBe("internal-provider");
-    const unservable = "anthropic/claude-sonnet-5";
-    expect(info.permitted.some((p) => p.models.includes(tag(unservable)))).toBe(false);
-    expect(setModelRole(base, "titles.model", unservable).titles?.model).toBe(tag(unservable));
+    const notYetCredentialed = "deepseek/deepseek-v4-flash";
+    // Listed as permitted (the picker offers it; `models.catalog` carries the credential state beside it).
+    expect(info.permitted.some((p) => p.models.includes(tag(notYetCredentialed)))).toBe(true);
+    expect(setModelRole(base, "titles.model", notYetCredentialed).titles?.model).toBe(tag(notYetCredentialed));
+  });
+
+  test("an internal-jobs role REFUSES a first-party Claude provider, and says why", () => {
+    expect(() => setModelRole(base, "titles.model", "anthropic/claude-sonnet-5")).toThrow(/can't run on Anthropic/);
+    expect(() => setModelRole(base, "pins.dream", "anthropic/claude-sonnet-5")).toThrow(/its own reviewer/);
+    // `pins.dispatch` is an `"any"` role routed through the runtime SDK — untouched by the gate.
+    expect(setModelRole(base, "pins.dispatch", "anthropic/claude-sonnet-5").pins?.dispatch).toBe(tag("anthropic/claude-sonnet-5"));
+  });
+
+  test("clearing an internal-jobs role is never gated — a pin stored before the ruling can be removed", () => {
+    const withClaudePin: Settings = { ...base, titles: { model: tag("anthropic/claude-sonnet-5") } };
+    expect(setModelRole(withClaudePin, "titles.model", null).titles?.model).toBeUndefined();
   });
 });
 

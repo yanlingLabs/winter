@@ -1,5 +1,5 @@
 import type { Provider, TurnInputItem } from "../providers/types";
-import { isInternalRefusal, type InternalCallSource } from "../providers/internal-router";
+import { isInternalRefusal, requireInternalWiring, type InternalCallSource } from "../providers/internal-router";
 import { classifyProviderFailure, type RoleHealthRegistry, type SubscriptionQuotaSource } from "../providers/role-health";
 import type { SessionStore } from "../sessions/store";
 import type { SessionHub } from "../sessions/hub";
@@ -24,7 +24,7 @@ export class SessionTitler {
   // cross-provider rebind, forever. `live?.().model` is the hot resolver (`buildLiveModelResolver`,
   // providers/manager.ts) that re-reads settings.json on every call regardless of rebinding — see
   // `oneShot`'s own fallback below.
-  private readonly provider: { provider: Provider; model: string; live?: () => { model: string }; quota?: SubscriptionQuotaSource };
+  private readonly provider: { provider: Provider; model: string; live?: () => { model: string }; quota?: SubscriptionQuotaSource } | undefined;
   private readonly store: SessionStore;
   private readonly hub: SessionHub;
   // Daemon settings surface (2026-09-17 plan, item 4a): `titles.model` used to be resolved ONCE at
@@ -67,7 +67,8 @@ export class SessionTitler {
   private readonly inFlight = new Set<string>();
 
   constructor(deps: {
-    provider: { provider: Provider; model: string; live?: () => { model: string }; quota?: SubscriptionQuotaSource };
+    /** The LEGACY double path — see `source`. Omitted by a real daemon. */
+    provider?: { provider: Provider; model: string; live?: () => { model: string }; quota?: SubscriptionQuotaSource };
     store: SessionStore;
     hub: SessionHub;
     /** A live getter, re-read on every `maybeTitle()` call — never a boot snapshot. `undefined`
@@ -143,7 +144,9 @@ export class SessionTitler {
     if (resolved !== undefined && isInternalRefusal(resolved)) return "";
     const wire: { provider: Provider; model: string; effort: string | undefined; tag: string | undefined; quota: SubscriptionQuotaSource | undefined } =
       resolved === undefined
-        ? {
+        ? this.provider === undefined
+          ? requireInternalWiring("SessionTitler")
+          : {
             provider: this.provider.provider,
             // Read in the same synchronous breath as the effort (no `await` between them), so the two
             // always come from one settings generation.

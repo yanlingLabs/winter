@@ -69,6 +69,15 @@ export interface InternalCall {
 export type InternalCallSource = () => InternalCall | InternalRefusal;
 
 /**
+ * 2026-09-19: EXACTLY ONE of `source`/`resolve` (what a real daemon wires) or `provider` (the legacy
+ * structurally-typed double ~16 test files construct) must be given. Spelled once here so all four
+ * internal-job consumers refuse the same way instead of reading `undefined.provider`.
+ */
+export function requireInternalWiring(what: string): never {
+  throw new Error(`${what}: neither an internal-jobs resolver nor a provider handle was wired`);
+}
+
+/**
  * The two reason strings the Mac's Roles pane already ships wording for, plus the pre-existing
  * `no-credential`:
  *

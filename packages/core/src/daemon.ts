@@ -22,6 +22,8 @@ import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
 import { createRebindableProvider, internalModelFor, internalRoleEffortFor } from "./providers/manager";
+import { createInternalProviderView, staticInternalProviderView, type InternalProviderView } from "./providers/internal-view";
+import { createInternalRouter, staticInternalRouter, type InternalRouter } from "./providers/internal-router";
 import type { Provider } from "./providers/types";
 import { QuotaManager } from "./providers/quota";
 import { RoleHealthRegistry, recordDispatchOutcome, type SubscriptionQuotaSource } from "./providers/role-health";
@@ -809,8 +811,38 @@ export async function startDaemon(opts: {
   const credentialMigration = await migrateLegacyCredentialMaterial(secrets);
   console.log(`credentials: openai ${credentialMigration.openai}, codex-oauth ${credentialMigration.codexOauth}`);
 
+  // 2026-09-19: the internal-jobs view and router — built AFTER `migrateLegacyCredentialMaterial`
+  // above, deliberately, because that migration can WRITE `openai:default`/`codex-oauth:default` and a
+  // view seeded from the boot probe (line ~374, taken before it ran) would otherwise miss a
+  // just-migrated key until the first credential write. `bootPresence` still seeds it so the probe is
+  // not paid twice, and the `refresh()` below (eligible slots only, ~94 rows) is what makes it true.
+  //
+  // `null` ONLY for `opts.agentProvider === null` — the deliberate "no internal jobs" boot
+  // (`runtime-state/probe.ts`, and the tests that assert a provider-less daemon). Everything else gets
+  // a router: a home with no credential yet is a router whose every `resolve()` refuses, NOT the
+  // absence of one, which is the whole point — storing a key then works with no restart.
+  let internalView: InternalProviderView | undefined;
+  let internalRouter: InternalRouter | null = null;
+  if (opts.agentProvider === null) {
+    internalRouter = null;
+  } else if (opts.agentProvider !== undefined) {
+    // An injected double: every role resolves to it, which is what those tests assert.
+    internalView = staticInternalProviderView(presentProviders);
+    internalRouter = staticInternalRouter({ view: internalView, provider: opts.agentProvider.provider, model: opts.agentProvider.model });
+  } else if (settings) {
+    internalView = createInternalProviderView({ secrets, seed: presentProviders });
+    await internalView.refresh();
+    internalRouter = createInternalRouter({ view: internalView, secrets });
+    // THE boot line, replacing the every-boot "the daemon's internal provider only builds for
+    // codex-oauth/openai … are inert" one. Accurate in both directions: which providers Winter's own
+    // jobs can run on, or — when none — exactly why and what would fix it. The SAME sentence
+    // `view.refresh()` prints on a later change (`InternalProviderView.summary`), never a second
+    // spelling of the same fact, and never a credential value.
+    console.error(internalView.summary());
+  }
+
   let agentProvider = opts.agentProvider;
-  let quota: QuotaManager | undefined;
+  let quota: QuotaManager | undefined = internalRouter?.quota;
   if (agentProvider === undefined) {
     if (settings) {
       try {
@@ -830,9 +862,10 @@ export async function startDaemon(opts: {
           // but the daemon's single process-wide internal Provider genuinely cannot be built for
           // it. Logged ONCE, naming exactly what goes inert — never a boot refusal; every other
           // daemon function (sessions, the RPC surface, settings) works normally.
-          console.error(
-            `provider: settings.provider.model names "${splitTag(settings.provider.model).providerId}" — the daemon's internal provider only builds for ${INTERNAL_PROVIDER_IDS.join("/")}, so titles, the bash reviewer, the dreamer, the session cleaner, research, and turn compaction are inert until it's set to one of those (a session's own model is unaffected)`,
-          );
+          // 2026-09-19: NOT a diagnostic any more. Winter's own jobs no longer depend on this legacy
+          // handle at all — `internalRouter` above decides them, and it already printed the accurate
+          // line. This arm only means `settings.provider.model` names a provider the RETIRED
+          // single-instance builder could not be built for, which by itself now costs nothing.
           agentProvider = null;
         } else {
           // `model` here is the RESOLVED (not raw) boot selection — active.model is the raw
@@ -1383,8 +1416,14 @@ export async function startDaemon(opts: {
   // backend identity `titlesModel`/`titlesEffort` above already read, so the tag role-health records
   // against is provably the one `titlesModel`'s own fall-through chose.
   const boundProviderIdForRoles = (): string => boundSelection().providerId;
-  const sessionTitler = agentProvider === null ? undefined : new SessionTitler({
-    provider: agentProvider, store, hub, model: titlesModel, effort: titlesEffort,
+  // 2026-09-19: `source` supersedes `provider`/`model`/`effort`/`boundProviderId` entirely (see
+  // `SessionTitler`'s own field doc) — it resolves the provider, the bare model, the tag and the
+  // already-row-mapped effort from ONE settings/credential generation, on every call. The legacy
+  // getters stay wired only so a daemon booted with an injected double still has them; `source` wins.
+  const sessionTitler = internalRouter === null ? undefined : new SessionTitler({
+    ...(agentProvider ? { provider: agentProvider } : {}),
+    source: () => internalRouter!.resolve("titles.model", settings),
+    store, hub, model: titlesModel, effort: titlesEffort,
     boundProviderId: boundProviderIdForRoles, roleHealth,
   });
   const titler = sessionTitler === undefined ? undefined : {
@@ -1446,10 +1485,12 @@ export async function startDaemon(opts: {
   };
   // The effort half, exactly as `titlesEffort` above (same getter shape, same fall-through rule).
   const reviewerEffort = (): string | undefined => internalRoleEffortFor(settings, "reviewer.model", settings?.reviewer?.model, boundSelection());
-  const bashReviewer = agentProvider === null || agentProvider === undefined
+  const bashReviewer = internalRouter === null
     ? undefined
     : new BashReviewer({
-        provider: agentProvider, model: reviewerModel, effort: reviewerEffort,
+        ...(agentProvider ? { provider: agentProvider } : {}),
+        source: () => internalRouter!.resolve("reviewer.model", settings),
+        model: reviewerModel, effort: reviewerEffort,
         boundProviderId: boundProviderIdForRoles, roleHealth,
       });
   const hooksFor = (session: CapabilitySession) =>
@@ -1638,7 +1679,15 @@ export async function startDaemon(opts: {
     facetFor: (sid) => { const backend = runtime?.records.get(sid)?.backendSessionId; return backend === undefined || runtimeSdk === undefined ? undefined : attachedFacetFor(runtimeSdk, backend); },
   });
 
-  if (agentProvider) {
+  // 2026-09-19: the gate now asks "does this daemon run Winter's own jobs at all" — `internalRouter`
+  // — instead of "was a single internal `Provider` built for `settings.provider.model`". The two used
+  // to be the same question, and that is the bug: a DeepSeek-default home got `agentProvider = null`
+  // and therefore no ToolRegistry, no plugins, no dreamer/cleaner AND — the part nobody noticed — NO
+  // SETTINGS WATCHER, so every hot setting was a boot snapshot for that user, in direct violation of
+  // CLAUDE.md's "no setting may ever require a daemon restart". `internalRouter` is non-null whenever
+  // `settings` loaded and the caller did not explicitly pass `agentProvider: null`, so this gate is
+  // now about the deliberate provider-less boot (`runtime-state/probe.ts`) and nothing else.
+  if (internalRouter) {
     const registry = new ToolRegistry();
     sharedRegistry = registry;
     // Reads-unrestricted (user rule, memory/reads-unrestricted.md, task-10): read/ls/glob/grep get
@@ -2041,7 +2090,9 @@ export async function startDaemon(opts: {
     // time, not a boot-time snapshot — `engine` is already its final value by this point in the
     // gate, same as `dispatchChildren`'s own runTurn/isRunning/interrupt closures just above).
     dreamer = new Dreamer({
-      provider: agentProvider,
+      ...(agentProvider ? { provider: agentProvider } : {}),
+      // 2026-09-19: the ONE resolution per cycle — see `DreamerDeps.resolve`.
+      resolve: () => internalRouter!.resolve("pins.dream", settings),
       store,
       dir: () => assistantMemoryDirFor({ winterHome }),
       enabled: memoryEnabledHot,
@@ -2067,7 +2118,8 @@ export async function startDaemon(opts: {
       // attachments, running turns, background work — are read from the SAME hub and the SAME
       // engine `session.list` reads, so the two can never disagree about a live session.
       cleaner: new SessionCleaner({
-        provider: agentProvider,
+        ...(agentProvider ? { provider: agentProvider } : {}),
+        resolve: () => internalRouter!.resolve("pins.cleaner", settings),
         store,
         attachedCount: (sid) => hub.attachedCount(sid),
         turnRunning: (sid) => signals.isRunning(sid),
@@ -2321,6 +2373,10 @@ export async function startDaemon(opts: {
     // Fix wave (finding 4): the actually-bound internal-Provider backend, for settings.modelRoles/
     // settings.setModelRole's `permitted` computation — see this const's own doc comment above.
     boundProviderId,
+    // 2026-09-19: the internal-jobs router — `settings.modelRoles`/`settings.setModelRole` read it for
+    // the internal roles' `permitted` set and their derived `problem`, and `credential.set`/
+    // `credential.remove` await its view's refresh before returning.
+    ...(internalRouter === null ? {} : { internalRouter }),
     // 2026-09-18: the shared role-health registry (constructed near `winterHome` above) — read by
     // `settings.modelRoles`/`settings.setModelRole`'s handlers to merge a `problem` onto each role.
     roleHealth,
