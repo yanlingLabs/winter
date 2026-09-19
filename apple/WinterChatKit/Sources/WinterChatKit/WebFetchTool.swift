@@ -253,9 +253,12 @@ public enum WebFetchTool {
     // MARK: - refusals
 
     /// The `deny` arm of the SDK's `privateAddressRefusal`, which is the only arm this engine has.
-    /// The `FETCHABLE_TARGET_SHAPE` tail is appended for a LEXICALLY private host — which here is every
-    /// private host there can be, since lexical is the only classification done (see `PrivateAddress`).
-    /// The conditional is kept so the text stays honest if that ever changes.
+    ///
+    /// The `FETCHABLE_TARGET_SHAPE` tail is appended for a LEXICALLY private host, which TODAY is every
+    /// private host there can be — lexical is the only classification this engine does, so the tail is
+    /// in practice unconditional (the SDK's own `deny` branch is the same shape; the conditional is
+    /// there because the SDK's LATE case, private by resolution only, omits it, and that case becomes
+    /// reachable the day DNS classification does).
     static func privateAddressRefusal(_ host: String) -> String {
         var bare = host
         if bare.hasPrefix("["), bare.hasSuffix("]") { bare = String(bare.dropFirst().dropLast()) }
