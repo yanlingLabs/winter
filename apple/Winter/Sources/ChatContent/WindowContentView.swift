@@ -102,6 +102,10 @@ struct WindowContentView<Accessory: View>: View {
     /// this view is recreated (e.g. a new session), which is fine: there's nothing worth
     /// preserving about a stale expand/collapse choice across sessions.
     @State private var expandedCompleted = false
+    /// The floating composer cluster's measured height (with a bleed only) — the transcript's
+    /// bottom scroll margin, so its last message comes to rest above the composer while everything
+    /// else scrolls on beneath it.
+    @State private var composerClusterHeight: CGFloat = 0
 
     /// Task 6 (2e-iii): the outer container's measured width, fed by `.onGeometryChange` (2c lesson:
     /// NEVER GeometryReader-in-ScrollView). `0` until the first layout pass — treated as "not yet
@@ -225,9 +229,11 @@ struct WindowContentView<Accessory: View>: View {
                 onQuestion: adapter.onQuestionRespond,
                 onPlan: adapter.onPlanRespond
             ), onOpenDiff: onOpenDiff, onOpenFile: onOpenFile,
-            sessionHasWorkingDirectory: sessionHasWorkingDirectory)
+            sessionHasWorkingDirectory: sessionHasWorkingDirectory,
+            bottomOverlayInset: topBleed > 0 ? composerClusterHeight : 0)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .modifier(TranscriptTopBleed(bleed: topBleed, inset: topInset))
+            .modifier(TranscriptTopBleed(bleed: topBleed, inset: topInset,
+                                         bottomMargin: composerClusterHeight + 10))
             // The composer FLOATS over the transcript (user call, 2026-08-12: "the composer should
             // float over the transcript and not have that hard background"). It used to be the next
             // sibling in this `VStack`, which reserved it a strip the transcript stopped above —
@@ -242,7 +248,7 @@ struct WindowContentView<Accessory: View>: View {
             // The pinned tasks and live subagents ride along deliberately: they are the same class
             // of thing as the composer — current state, not transcript — and leaving them in the
             // flow would just move the hard edge up by their height.
-            .safeAreaInset(edge: .bottom, spacing: 10) {
+            .modifier(ComposerClusterPlacement(floats: topBleed > 0, height: $composerClusterHeight) {
                 VStack(spacing: 10) {
                     // The task list FLOATS just above the composer (2026-09-17), as its own card at
                     // the composer's width.
@@ -307,7 +313,7 @@ struct WindowContentView<Accessory: View>: View {
                 // With a bleed, the composer carries the bottom gap itself, so the transcript
                 // behind it runs to the window's edge instead of stopping 16 pt short of it.
                 .padding(.bottom, topBleed > 0 ? 16 : 0)
-            }
+            })
         }
         .padding(.horizontal, 16)
         // With a bleed, the TRANSCRIPT carries the top offset as a scroll margin (see
@@ -1224,11 +1230,14 @@ struct DispatchManagedSessionsBlock: View {
 struct TranscriptTopBleed: ViewModifier {
     let bleed: CGFloat
     let inset: CGFloat
+    /// The floating composer's height — the rest position of the last message.
+    var bottomMargin: CGFloat = 0
 
     func body(content: Content) -> some View {
         if bleed > 0 {
             content
                 .contentMargins(.top, bleed + inset, for: .scrollContent)
+                .contentMargins(.bottom, bottomMargin, for: .scrollContent)
                 .mask {
                     VStack(spacing: 0) {
                         LinearGradient(stops: [
@@ -1254,4 +1263,30 @@ struct TranscriptTopBleed: ViewModifier {
 /// How far below the band the fade finishes.
 let transcriptTopFadeRamp: CGFloat = 18
 /// The fade at the transcript's bottom edge, under the composer.
-let transcriptBottomFadeHeight: CGFloat = 28
+let transcriptBottomFadeHeight: CGFloat = 36
+
+/// Where the composer cluster goes. Normally a bottom SAFE-AREA INSET — the transcript's frame
+/// stops above it. With a bleed (the shell, 2026-09-19) it FLOATS over the transcript instead, which
+/// then runs edge to edge behind the see-through composer: the transcript reads its measured
+/// height (`height`) as a bottom scroll margin.
+struct ComposerClusterPlacement<Cluster: View>: ViewModifier {
+    let floats: Bool
+    @Binding var height: CGFloat
+    let cluster: Cluster
+
+    init(floats: Bool, height: Binding<CGFloat>, @ViewBuilder cluster: () -> Cluster) {
+        self.floats = floats
+        self._height = height
+        self.cluster = cluster()
+    }
+
+    func body(content: Content) -> some View {
+        if floats {
+            content.overlay(alignment: .bottom) {
+                cluster.onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+            }
+        } else {
+            content.safeAreaInset(edge: .bottom, spacing: 10) { cluster }
+        }
+    }
+}
