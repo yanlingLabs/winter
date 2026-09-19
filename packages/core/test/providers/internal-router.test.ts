@@ -71,7 +71,7 @@ describe("a DeepSeek default with only a DeepSeek key", () => {
       expect(isInternalRefusal(call)).toBe(false);
       if (isInternalRefusal(call)) return;
       expect(call.providerId).toBe("deepseek");
-      expect(call.tag).toBe("deepseek/deepseek-v4-flash");
+      expect(String(call.tag)).toBe("deepseek/deepseek-v4-flash");
       expect(call.model).toBe("deepseek-v4-flash");
 
       const home = mkdtempSync(join(tmpdir(), "winter-internal-router-home-"));
@@ -127,7 +127,7 @@ describe("a DeepSeek default with a Codex OAuth login", () => {
     expect(isInternalRefusal(call)).toBe(false);
     if (isInternalRefusal(call)) return;
     expect(call.providerId).toBe("codex-oauth");
-    expect(call.tag).toBe("codex-oauth/gpt-5.6-terra");
+    expect(String(call.tag)).toBe("codex-oauth/gpt-5.6-terra");
   });
 });
 
@@ -158,7 +158,7 @@ describe("a Claude default", () => {
     if (!isInternalRefusal(call)) return;
     expect(call.reason).toBe("provider-unsupported");
     expect(call.detail).toContain("can't be used for Winter's own jobs yet");
-    expect(call.tag).toBe("anthropic/claude-fable-1");
+    expect(String(call.tag)).toBe("anthropic/claude-fable-1");
   });
 });
 
@@ -207,7 +207,7 @@ describe("no internal credential at all", () => {
     expect(isInternalRefusal(call)).toBe(true);
     if (!isInternalRefusal(call)) return;
     expect(call.reason).toBe("no-credential");
-    expect(call.tag).toBe("deepseek/deepseek-v4-flash");
+    expect(String(call.tag)).toBe("deepseek/deepseek-v4-flash");
   });
 });
 
@@ -265,7 +265,7 @@ describe("hot transitions", () => {
     if (!isInternalRefusal(first)) expect(first.providerId).toBe("deepseek");
     if (!isInternalRefusal(second)) expect(second.providerId).toBe("openai");
     // `openai`'s terra row, not the user's luna default: the family slot wins when the provider has one.
-    if (!isInternalRefusal(second)) expect(second.tag).toBe("openai/gpt-5.6-terra");
+    if (!isInternalRefusal(second)) expect(String(second.tag)).toBe("openai/gpt-5.6-terra");
   });
 
   test("changing a role pin moves that role alone on the next call", async () => {
