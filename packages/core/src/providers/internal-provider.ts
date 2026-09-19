@@ -93,24 +93,25 @@ export function buildInternalProvider(cfg: {
   // The user's own override wins; otherwise the catalog's endpoint. A multi-provider adapter family has
   // no vendor default of its own, so an absent endpoint here is a real refusal rather than a silent
   // request to whatever the adapter would have guessed.
-  const baseUrl = cfg.testBackendUrl ?? providerBaseUrlFor(cfg.settings, providerId) ?? catalogApiEndpointFor(providerId);
+  const override = providerBaseUrlFor(cfg.settings, providerId);
+  const baseUrl = cfg.testBackendUrl ?? override ?? catalogApiEndpointFor(providerId);
   if (baseUrl === undefined) {
     return { refusal: { code: "provider-unsupported", detail: `the pinned catalog ships no API endpoint for ${providerId}` } };
   }
+  // `local: true` ONLY for an endpoint the USER entered (`providers.<id>.baseUrl`) or the loopback test
+  // seam. The pre-2026-09-19 openai-compatible factory declared it unconditionally to preserve Winter's
+  // historically unrestricted BYO-endpoint behaviour — "arbitrary API models are legitimate there" —
+  // and that carve-out has to survive: an `openai` user pointed at `http://localhost:11434` (Ollama,
+  // LM Studio, a LAN gateway) would otherwise have every internal job refused by the runtime's
+  // plain-http/private-address endpoint policy. It is deliberately NOT extended to the ~94 CATALOG
+  // endpoints, which would disable that policy for all of them; measured 2026-09-19, every shipped
+  // public https endpoint passes with `local` absent.
+  const local = cfg.testBackendUrl !== undefined || override !== undefined;
   const provider = runtimeBackedProvider({
     id: providerId,
     adapter,
     context: {
-      connection: {
-        providerId,
-        baseUrl,
-        // `local: true` ONLY for the loopback test seam. The pre-2026-09-19 openai-compatible factory
-        // declared it unconditionally to keep Winter's historically unrestricted BYO-endpoint behaviour;
-        // that carve-out belonged to a single user-entered endpoint, and applying it to ~94 catalog
-        // providers would disable the SSRF-shaped endpoint policy for all of them. Measured 2026-09-19:
-        // every shipped public https endpoint passes the policy with `local` absent.
-        ...(cfg.testBackendUrl === undefined ? {} : { local: true }),
-      },
+      connection: { providerId, baseUrl, ...(local ? { local: true } : {}) },
       credentials: credentialStoreOverSecretStore(cfg.secrets),
       authRef: { kind: "keychain", account },
       stallTimeoutMs: 60_000,

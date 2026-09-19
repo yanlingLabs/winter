@@ -28,26 +28,22 @@ import type { SecretStore } from "../auth/secret-store";
 import { splitTag, type ModelTag } from "../runtime-sdk/model-tag";
 import {
   effortToSpendForRole,
-  internalRoleDefaultTagFor,
-  pinsFor,
-  type ModelRole,
+  explicitInternalRolePin,
+  internalRoleEffectiveTag,
+  type InternalJobRole,
   type Settings,
 } from "../settings";
 import { buildInternalProvider, internalWireEffortFor } from "./internal-provider";
+import { INTERNAL_JOBS_LOGIN_HINT } from "./internal-login-hint";
 import type { InternalProviderView } from "./internal-view";
 import { QuotaManager, withQuota } from "./quota";
 import type { Provider } from "./types";
 
-/** The four LIVE roles that run on Winter's own internal calls. `pins.researchFallback` is retired
- *  (its consumer went with `ReadPage`) and turn compaction has no production consumer at all
- *  (`agent/compactor.ts` is constructed only by tests and the golden-capture script), so neither is
- *  here — a role in this union is a role something actually calls. */
-export const INTERNAL_ROLES = ["titles.model", "reviewer.model", "pins.dream", "pins.cleaner"] as const;
-export type InternalRole = (typeof INTERNAL_ROLES)[number];
-
-export function isInternalRole(role: ModelRole): role is InternalRole {
-  return (INTERNAL_ROLES as readonly string[]).includes(role);
-}
+/** The role union and its membership test live in `settings.ts` (`INTERNAL_JOB_ROLES`) beside the pure
+ *  effective-tag rule both this module and the wire read — re-exported here so a consumer holding a
+ *  router needs no second import. */
+export type InternalRole = InternalJobRole;
+export { INTERNAL_JOB_ROLES as INTERNAL_ROLES, isInternalJobRole as isInternalRole } from "../settings";
 
 export interface InternalCall {
   provider: Provider;
@@ -98,15 +94,6 @@ export interface InternalRouter {
   resolve(role: InternalRole, settings: Settings | null | undefined): InternalCall | InternalRefusal;
 }
 
-/** `titles.model`/`reviewer.model` default to their provider's `terra` row; `pins.dream`/`pins.cleaner`
- *  likewise (`pinsFor`'s own pre-2026-09-19 default for both slots). Spelled once. */
-const SLOT_FOR_ROLE: Readonly<Record<InternalRole, "terra" | "luna">> = {
-  "titles.model": "terra",
-  "reviewer.model": "terra",
-  "pins.dream": "terra",
-  "pins.cleaner": "terra",
-};
-
 /** The consumer defaults that predate roles being able to store an effort — passed through
  *  `effortToSpendForRole` verbatim, exactly as each consumer did before, and then normalised onto the
  *  row by `internalWireEffortFor`. `undefined` for titles/the reviewer: neither ever sent one. */
@@ -117,23 +104,8 @@ const CONSUMER_EFFORT: Readonly<Record<InternalRole, string | undefined>> = {
   "pins.cleaner": "low",
 };
 
-function explicitPinFor(role: InternalRole, settings: Settings | null | undefined): ModelTag | undefined {
-  switch (role) {
-    case "titles.model": return settings?.titles?.model;
-    case "reviewer.model": return settings?.reviewer?.model;
-    case "pins.dream": return settings?.pins?.dream;
-    case "pins.cleaner": return settings?.pins?.cleaner;
-  }
-}
-
 function providerDisplayName(providerId: string): string {
   return loadCatalog().providers.find((p) => p.id === providerId)?.displayName ?? providerId;
-}
-
-/** The actionable half of `no-internal-credential`'s detail — which logins would enable these jobs.
- *  Names the two doors a user actually has, never a value and never a slot name. */
-function loginHint(): string {
-  return "sign in with ChatGPT (Codex) or store an API key for a provider Winter can use (Settings › Providers, or `winter credentials set <provider>`)";
 }
 
 export function createInternalRouter(deps: {
@@ -168,13 +140,8 @@ export function createInternalRouter(deps: {
     return provider;
   };
 
-  const effectiveTag = (role: InternalRole, settings: Settings | null | undefined): ModelTag | null => {
-    const explicit = explicitPinFor(role, settings);
-    if (explicit !== undefined) return explicit;
-    const preferred = deps.view.preferred(settings);
-    if (preferred === undefined) return null;
-    return internalRoleDefaultTagFor(settings, preferred, SLOT_FOR_ROLE[role]);
-  };
+  const effectiveTag = (role: InternalRole, settings: Settings | null | undefined): ModelTag | null =>
+    internalRoleEffectiveTag(settings, role, deps.view.snapshot());
 
   return {
     view: deps.view,
@@ -183,7 +150,7 @@ export function createInternalRouter(deps: {
     resolve(role, settings) {
       const tag = effectiveTag(role, settings);
       if (tag === null) {
-        return { reason: "no-internal-credential", detail: `no provider Winter's own jobs can run on has a credential stored — ${loginHint()}`, tag: null };
+        return { reason: "no-internal-credential", detail: `no provider Winter's own jobs can run on has a credential stored — ${INTERNAL_JOBS_LOGIN_HINT}`, tag: null };
       }
       let providerId: string;
       let model: string;
@@ -239,9 +206,9 @@ export function staticInternalRouter(cfg: {
   return {
     view: cfg.view,
     quota,
-    effectiveTag: (role, settings) => explicitPinFor(role, settings) ?? tag,
+    effectiveTag: (role, settings) => explicitInternalRolePin(settings, role) ?? tag,
     resolve(role, settings) {
-      const pinned = explicitPinFor(role, settings);
+      const pinned = explicitInternalRolePin(settings, role);
       // An explicit pin still decides the MODEL (that is what every pre-existing test that sets
       // `settings.pins.dream` asserts) but never the backend: there is only one here.
       const effectiveTag = pinned ?? tag;
@@ -253,15 +220,3 @@ export function staticInternalRouter(cfg: {
   };
 }
 
-/** `pinsFor`, threaded with the router's own live snapshot — the ONE call site that makes
- *  `pins.dispatch`/`pins.research` (both `"any"`-constraint, routed through the runtime SDK) keep their
- *  existing resolution while the internal slots follow the new rule. Kept here rather than inside
- *  `pinsFor` so that function's ~10 existing callers are untouched. */
-export function internalAwarePins(router: InternalRouter, settings: Settings | null | undefined): ReturnType<typeof pinsFor> {
-  const base = pinsFor(settings);
-  return {
-    ...base,
-    dream: router.effectiveTag("pins.dream", settings) ?? base.dream,
-    cleaner: router.effectiveTag("pins.cleaner", settings) ?? base.cleaner,
-  };
-}
