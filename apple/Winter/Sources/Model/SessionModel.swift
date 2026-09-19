@@ -1249,10 +1249,14 @@ enum SessionReducer {
         // ReadPage takes a BATCH (`{pages:[{url, query?, …}]}`), never a bare url. The "+N more"
         // rides AFTER the clip on purpose: it is the signal that this row shows one of several
         // urls, so it must not be the part a long url cuts off.
+        // A bare `{url}` is accepted too (2026-09-19): the phone's own chat engine has written
+        // ReadPage rows in that shape, and they sync into the same transcripts.
         case "ReadPage":
             guard let pages = obj["pages"] as? [Any],
                   let first = pages.first as? [String: Any],
-                  let url = toolArgString(first, "url").flatMap(clipToolDetail) else { return nil }
+                  let url = toolArgString(first, "url").flatMap(clipToolDetail) else {
+                return str("url").flatMap(clipToolDetail)
+            }
             return pages.count > 1 ? "\(url) (+\(pages.count - 1) more)" : url
 
         // ---- verb-led: language server, computer use, scheduling ------------------------------

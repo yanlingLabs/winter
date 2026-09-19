@@ -316,6 +316,14 @@ final class ActivityCaptureTests: XCTestCase {
         XCTAssertNil(detail("ReadPage", #"{"pages":[]}"#))
     }
 
+    /// The phone's own chat engine wrote ReadPage rows as a bare `{url}`; they sync into the same
+    /// transcripts, so the row shows that url too (a batch still wins when present).
+    func testReadPageBareUrlFromThePhoneEngineShowsTheUrl() {
+        XCTAssertEqual(detail("ReadPage", #"{"url":"https://p.example/page"}"#), "https://p.example/page")
+        XCTAssertEqual(detail("WebFetch", #"{"url":"https://w.example","prompt":"summarise"}"#), "https://w.example",
+                       "WebFetch's prompt is never the operand")
+    }
+
     // MARK: lsp / computer — action-led, like browser
 
     func testLspDetailIsActionAndFilePath() {
