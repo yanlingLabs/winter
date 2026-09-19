@@ -2233,9 +2233,13 @@ export async function startDaemon(opts: {
   // WS-20: `model` is the TAG (`settings.provider.model`, already provider-qualified) — never
   // `agentProvider.model`, which is the BARE modelId half split at the internal-Provider boundary
   // (providers/manager.ts).
-  // 2026-09-19: `settings`, not the retired `agentProvider` — see its own doc comment above for why
-  // gating these on that handle served a DeepSeek/Claude-default home no default model at all.
-  const providerInfo = settings
+  // 2026-09-19: gated on `internalRouter` (non-null whenever this daemon runs its own subsystem at
+  // all) and NOT on the retired `agentProvider` handle — that handle was null for any home whose
+  // `settings.provider.model` named a non-codex/openai provider, so `daemon.status` and `sync.config`
+  // served a DeepSeek- or Claude-default home no default model at all. The DELIBERATE provider-less
+  // boot (`agentProvider: null`, `runtime-state/probe.ts`) still reports `null` here, which is the
+  // distinction the field was actually carrying.
+  const providerInfo = internalRouter && settings
     ? { id: providerIdFromSettingsTag(settings) ?? "none", model: settings.provider.model }
     : null;
 
@@ -2259,7 +2263,7 @@ export async function startDaemon(opts: {
   // instead of two independent getters — a wider seam for a race nobody can observe. Not done
   // deliberately; do not "fix" it by caching the selection across calls, which would break the hot
   // read that is the actual contract here.
-  const liveSelection = settings
+  const liveSelection = internalRouter && settings
     ? () => {
         const s = settings!;
         const effort = s.provider.reasoningEffort;
@@ -2276,7 +2280,7 @@ export async function startDaemon(opts: {
   // which no client can compare against a catalog provider id or a tag's own prefix. `undefined`
   // on a no-provider daemon (or an unset `settings.provider.model`) — ipc/sync.ts degrades that to
   // `"none"`, never to `""`.
-  const liveProvider = settings ? () => providerIdFromSettingsTag(settings) ?? "none" : undefined;
+  const liveProvider = internalRouter ? () => providerIdFromSettingsTag(settings) ?? "none" : undefined;
   // Fix wave (pre-merge review, finding 4): DELIBERATELY different from `liveProvider` just above —
   // that field is a pure settings read, boot-bound to the CATALOGUE `sync.config` shows on purpose;
   // this one is the actually-BOUND backend, the same `agentProvider?.live?.().providerId ??
