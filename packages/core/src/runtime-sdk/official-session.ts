@@ -22,7 +22,7 @@ import { MAIN_THREAD, ProjectorRefusedError, classifyThrown, createProjector, ty
 import type { WinterRuntimeSdk, SessionMode } from "./create";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import { officialSubscriptionAuthEnabled } from "../settings";
-import { ensureOfficialConfigDir, OfficialConsoleProfileMissing, OfficialConsoleRouterUnsupported, OfficialCredentialPlanRefused, officialInputFor, OfficialProjectKeyTooDeep, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
+import { ensureOfficialConfigDir, OfficialConsoleProfileMissing, OfficialConsoleRouterUnsupported, OfficialCredentialPlanRefused, officialInputFor, officialPermissionModeFor, OfficialProjectKeyTooDeep, type OfficialInputDeps, type OfficialPermissionMode, type OfficialSessionInput } from "./official-options";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import { attachOfficialSession, type OfficialSessionAttachHandle, type OfficialSessionAttachment } from "./messaging";
 // P10a-h: the SAME grace window `WinterSession.end()` races against — reused, not reinvented, so
@@ -149,12 +149,20 @@ export interface OfficialSession {
   steer(text: string, clientName?: string): Promise<{ seq: number; injected: boolean }>;
   interrupt(): Promise<{ wasRunning: boolean }>;
   compact(): Promise<never>;
-  /** No live model switch exists on `OfficialQuery` (WS-14's seam: `interrupt()` is its only
-   *  member) — takes effect on the NEXT incarnation, via `sessionInput()`'s own live re-read. */
+  /** Still next-incarnation-only on this leg, and NOT for want of a member: the pinned runtime's
+   *  `Query.setModel(model?)` exists and router 0.0.10 forwards it by trap. A same-leg Claude->Claude
+   *  switch is routed through the handoff machinery (`handoff.ts`'s pre-flight review reads the LIVE
+   *  tip's model, and this leg's effort/thinking derive from the model at `Options` build time), so
+   *  wiring it here would make two owners of one fact. Takes effect on the next incarnation, via
+   *  `sessionInput()`'s own live re-read. */
   setModel(model?: string): Promise<void>;
-  /** Same signature as `WinterSession.setPolicy` (so both satisfy `LegSession`); a no-op today —
-   *  see this member's own doc comment above `setModel` for why. A resumed incarnation re-reads
-   *  the session's live policy through `sessionInput()`/`officialInputFor`'s own broker build. */
+  /** Same signature as `WinterSession.setPolicy` (so both satisfy `LegSession`). LIVE as of router
+   *  0.0.10: a live child is told through `Query.setPermissionMode`, with the mode this leg's own
+   *  `officialPermissionModeFor` maps the policy to — the SAME mapping the spawn path uses, so the
+   *  live mode and the next incarnation's mode can never disagree. Between incarnations it stays a
+   *  no-op: a resumed incarnation re-reads the session's live policy through
+   *  `sessionInput()`/`officialInputFor`'s own broker build. REJECTS when the child (or the router's
+   *  own mode rule) refuses, so `session.setPolicy` can report the failure. */
   setPolicy(policy: SessionApprovalPolicy): Promise<void>;
   end(): Promise<void>;
   /** UNMEASURED — see `steer`'s own note; today a delivery while `resumable` is simply held, same
@@ -277,7 +285,10 @@ function managedAuthPolicyBlockLine(err: unknown): string | undefined {
 interface Incarnation {
   stream: OfficialInputStream;
   projector: Projector;
-  query: AsyncIterable<unknown> & { interrupt(): Promise<unknown> };
+  /** The router's own `OfficialQuery`, narrowed to the two control requests this leg makes on a LIVE
+   *  child: `interrupt()` (WS-14 §9) and — as of router 0.0.10 — `setPermissionMode()` (§10). Both are
+   *  control messages on the same streaming stdin, so both apply to the turn that is RUNNING. */
+  query: AsyncIterable<unknown> & { interrupt(): Promise<unknown>; setPermissionMode(mode: OfficialPermissionMode): Promise<void> };
   /** M1: the same controller `Options.abortController` carries — `runtime.trackQuery`'s own key. */
   abort: AbortController;
   done: Promise<void>;
@@ -398,13 +409,36 @@ class OfficialSessionImpl implements OfficialSession {
   }
 
   async setModel(_model?: string): Promise<void> {
-    // No live model switch on `OfficialQuery` — the next incarnation reads `sessionInput()` live.
+    // Deliberately next-incarnation-only — see the interface member's own doc for why the pin's
+    // `Query.setModel` is not wired here. The next incarnation reads `sessionInput()` live.
     return Promise.resolve();
   }
 
-  async setPolicy(_policy: SessionApprovalPolicy): Promise<void> {
-    // No live permission-mode switch on `OfficialQuery` either — same posture as `setModel`.
-    return Promise.resolve();
+  async setPolicy(policy: SessionApprovalPolicy): Promise<void> {
+    // THE LIVE HALF (router 0.0.10). Before this, an official child kept the `permissionMode` it was
+    // SPAWNED with for the whole generation: a Code session switched from `accept-edits` to `ask`
+    // went on auto-approving every edit INSIDE the child — `canUseTool` is not even consulted for an
+    // edit in that mode, so no card was raised and nothing in the transcript said so — and a switch
+    // into or out of `plan` did nothing at all until the next incarnation. `WinterSession.setPolicy`
+    // has always done this (`winter-session.ts`); this is the same two lines, one leg over.
+    //
+    // `officialPermissionModeFor`, NOT a second mapping: it carries this leg's bypass floor
+    // (`bypass` -> `acceptEdits`, never `bypassPermissions`, D14/P8c-2) and it is the same function
+    // `official-options.ts` builds `Options.permissionMode` from — so the live mode and the mode the
+    // next incarnation would spawn with are the same value by construction. The router refuses
+    // `bypassPermissions` on this door too (`assertPermissionModeAllowed`), which this mapping can
+    // never reach: defence in depth, not a second rule.
+    //
+    // IMMEDIATE, NOT AT THE NEXT IDLE BOUNDARY: `setPermissionMode` is a control request on the same
+    // streaming stdin `interrupt()` uses, so the runtime applies it to the turn that is RUNNING —
+    // which is the entire point (the mid-turn tool call that would otherwise be auto-approved is the
+    // one the user is trying to stop). Nothing is queued and nothing waits for `idle()`.
+    //
+    // NOT LIVE = NO-OP, deliberately: a resumable/ended instance has no child to tell, and the next
+    // incarnation re-reads the store's policy through `inputDeps()` anyway (this session's `policy`
+    // is never a snapshot). A THROW from the child propagates — `session.setPolicy`'s RPC turns it
+    // into a failure the user sees, rather than a stored policy the child never adopted.
+    if (this.stateValue === "live" && this.inc !== undefined) await this.inc.query.setPermissionMode(officialPermissionModeFor(policy));
   }
 
   end(): Promise<void> {

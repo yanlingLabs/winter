@@ -18,11 +18,11 @@ import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@yanlinglabs/winter-protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type NewSessionEvent, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import type { ReviewerResolver } from "@yanlinglabs/winter-agent-sdk/tools";
 import { ApprovalBroker } from "../../src/agent/approvals";
-import { PermissionGate } from "../../src/agent/gate";
+import { PermissionGate, type SessionApprovalPolicy } from "../../src/agent/gate";
 import { QuestionBroker } from "../../src/agent/questions";
 import { SkillStore } from "../../src/agent/skills";
 import { TrustStore } from "../../src/agent/trust";
@@ -143,8 +143,17 @@ const probeDef: ToolDefinition = {
 };
 
 async function buildWorld(
-  selection: RuntimeSelection, secretsDir: string, baseUrl: string, policy: "auto" | "dont-ask" | "plan" = "auto",
+  selection: RuntimeSelection, secretsDir: string, baseUrl: string, policy: SessionApprovalPolicy = "auto",
   opts: {
+    /** The broker the bridge raises cards on. Supplied when a test wants to SEE a card (and answer
+     *  it); every other caller gets a fresh one it never reads, exactly as before. */
+    approvals?: ApprovalBroker;
+    /** The LIVE policy the approval bridge reads per call — production passes a getter for exactly
+     *  this reason (`approval-bridge.ts`: "a `session.setPolicy` mid-session is seen by the NEXT
+     *  call"). Absent ⇒ the static `policy` argument, byte-identical to before. */
+    livePolicy?: () => SessionApprovalPolicy;
+    /** Where the bridge's own card events go (`approval_requested`/…). Absent ⇒ dropped. */
+    emit?: (event: NewSessionEvent) => void;
     reviewer?: BashReviewer; mode?: "code" | "chat"; hookFacade?: SessionHooksDeps["hookFacade"]; advisorReviewer?: ReviewerResolver; onIncarnationStart?: (abort: AbortController) => void;
     /** P9a-10: an alternate session id (default "s_official_e2e") — needed the moment a test wants
      *  a NAMED, addressable session (e.g. "row4hold-b") rather than the shared fixed id every other
@@ -231,11 +240,11 @@ async function buildWorld(
     assembler,
     capabilities,
     canUseToolDeps: {
-      approvals: new ApprovalBroker(),
+      approvals: opts.approvals ?? new ApprovalBroker(),
       questions: new QuestionBroker(),
       gate: new PermissionGate(),
-      policy,
-      emit: () => {},
+      policy: opts.livePolicy ?? policy,
+      emit: opts.emit ?? (() => {}),
     },
     policy,
     env: { ...process.env, HOME: hermetic.home },
@@ -519,8 +528,8 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
   // below scripts a PLACEHOLDER turn to satisfy the call signature, then overwrites `turns[0]` with
   // the real absolute path once `buildWorld` has minted this run's `home`/`cwd`, before calling
   // `session.send`. The fake sees only the overwritten script.
-  const PLACEHOLDER_TURN = (name: string, jsonChunks: string[]): AnthropicTurnScript => (
-    { blocks: [{ type: "tool_use", id: "call_1", name, jsonChunks }], stopReason: "tool_use" }
+  const PLACEHOLDER_TURN = (name: string, jsonChunks: string[], id = "call_1"): AnthropicTurnScript => (
+    { blocks: [{ type: "tool_use", id, name, jsonChunks }], stopReason: "tool_use" }
   );
   const DONE_TURN: AnthropicTurnScript = { blocks: [{ type: "text", chunks: ["done"] }], stopReason: "end_turn" };
 
@@ -1683,6 +1692,177 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       await pair.cleanup();
     }
   }, 90_000);
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // THE LIVE APPROVAL-MODE CHANGE, MEASURED ON THE REAL BINARY (router 0.0.10).
+  //
+  // THE BUG. `Options.permissionMode` is fixed for a generation, and until router 0.0.10 the seam
+  // exposed no way to change it — so `OfficialSession.setPolicy` was a documented no-op, and a
+  // session's stored policy and its child's mode drifted apart for the rest of the generation.
+  //
+  // WHICH MODE ACTUALLY HIDES A CALL FROM WINTER IN THIS DAEMON'S OWN CONFIGURATION — measured, and
+  // NOT the one the bug report guessed. Two runs of this very harness settled it:
+  //   * `accept-edits` -> `ask` was ALREADY effective: with Winter's `settings` in play the child asks
+  //     about an edit even under `acceptEdits`, so the bridge (which reads the stored policy per call)
+  //     already decided it. A version of this test spawned `accept-edits` PASSED with the live
+  //     `setPolicy` disabled — vacuous, and deleted for it.
+  //   * `dont-ask` is the real hole, and it is the widest: `createApprovalBridge`'s §10 `dontAsk` arm
+  //     answers ALLOW without consulting Winter's broker at all, so a session switched out of
+  //     `dont-ask` kept auto-allowing EVERY tool call — no card, no event, nothing in the transcript —
+  //     until its next incarnation. Closing it took BOTH halves of this change: the child's own mode
+  //     (`Query.setPermissionMode`) and the daemon's bridge reading its mode live
+  //     (`official-options.ts`'s `modeNow`).
+  // The CHILD's half is isolated from Winter's own gate in `live-permission-mode-measure.e2e.test.ts`
+  // (the raw pinned binary: under `acceptEdits` `canUseTool` is never invoked for a `Write`, and after
+  // a mid-turn `setPermissionMode("default")` it is).
+  //
+  // THE SHAPE. One turn, two `Write` calls, with the loopback held between them (`beforeTurn`):
+  //   * Write #1 lands while the child is `dontAsk` — no card, although the bridge behind it is on
+  //     `ask` and would have raised one;
+  //   * the test then calls `session.setPolicy("ask")` — the daemon's own door — and only then
+  //     releases the loopback;
+  //   * Write #2, in the SAME turn, raises a REAL approval card through Winter's own bridge, which
+  //     the test answers.
+  // One `turn_started`/`turn_completed` pair over the whole thing is what makes it mid-turn rather
+  // than next-turn — `setPermissionMode` is a control request on the streaming stdin, the same
+  // channel `interrupt` uses, and this is the proof the runtime applies it to the turn in flight.
+  //
+  // HERMETIC: the loopback fake, a fake credential, a hermetic child `HOME`, a temp cwd. No network,
+  // no `~/.claude`, no real key.
+  test("a live setPolicy reaches the running child: dont-ask hides the call, then ask raises a card MID-TURN", async () => {
+    const policyRef: { current: SessionApprovalPolicy } = { current: "dont-ask" };
+    const approvals = new ApprovalBroker();
+    const emitted: NewSessionEvent[] = [];
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let switchedAt: number | undefined;
+
+    const turns: AnthropicTurnScript[] = [
+      PLACEHOLDER_TURN("Write", [JSON.stringify({ file_path: "/placeholder-a", content: "first" })]),
+      PLACEHOLDER_TURN("Write", [JSON.stringify({ file_path: "/placeholder-b", content: "second" })], "call_2"),
+      DONE_TURN,
+    ];
+    await withAnthropicLoopback(
+      turns,
+      async (fake) => {
+        const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+        // THE PRODUCTION SHAPE, both halves: the session spawns in `dont-ask` (so the child's own
+        // `permissionMode` is `dontAsk` and the bridge's mode getter answers `dontAsk` too) and the
+        // stored policy moves first, exactly as `ipc/server.ts` writes it before calling the leg.
+        const w = await buildWorld(selectionFor(), secretsDir, fake.url, "dont-ask", {
+          approvals,
+          livePolicy: () => policyRef.current,
+          emit: (e) => { emitted.push(e); },
+        });
+        const fileA = join(w.cwd, "a.txt");
+        const fileB = join(w.cwd, "b.txt");
+        turns[0] = PLACEHOLDER_TURN("Write", [JSON.stringify({ file_path: fileA, content: "first" })]);
+        turns[1] = PLACEHOLDER_TURN("Write", [JSON.stringify({ file_path: fileB, content: "second" })], "call_2");
+
+        await w.session.send("write the two files you were scripted to write");
+
+        // ── the accept-edits half: the edit lands with nobody asked ─────────────────────────────
+        const deadline = Date.now() + 45_000;
+        while (!existsSync(fileA) && Date.now() < deadline) await Bun.sleep(25);
+        expect(existsSync(fileA)).toBe(true);
+        // NOBODY WAS ASKED, and under `dont-ask` that is correct — §10's rule. What the bug made of it
+        // is the point: this silence used to survive the switch, for every tool, for the rest of the
+        // generation.
+        expect(approvals.list("s_official_e2e")).toEqual([]);
+        expect(emitted.filter((e) => e.type === "approval_requested")).toEqual([]);
+        expect(w.session.turnRunning).toBe(true);
+
+        // ── the switch, on the LIVE session, through the daemon's own door ──────────────────────
+        policyRef.current = "ask"; // what `store.setApprovalPolicy` does in production, before the leg call
+        await w.session.setPolicy("ask");
+        switchedAt = Date.now();
+        release?.();
+
+        // ── the ask half: the SECOND write, in the SAME turn, raises a real card ────────────────
+        const cardDeadline = Date.now() + 45_000;
+        let card = approvals.list("s_official_e2e")[0];
+        while (card === undefined && Date.now() < cardDeadline) {
+          await Bun.sleep(25);
+          card = approvals.list("s_official_e2e")[0];
+        }
+        console.warn(`[0.0.10 MEASURED] the card raised after the live switch: ${JSON.stringify(card)} (${switchedAt === undefined ? "?" : Date.now() - switchedAt}ms after setPolicy returned)`);
+        expect(card).toBeDefined();
+        // `write`, lowercase: the broker records Winter's OWN canonical tool name, not the wire
+        // `Write` the runtime asked about (`tool-names.ts`'s pairing) — measured, and asserted as
+        // measured rather than as assumed.
+        expect(card!.toolName).toBe("write");
+        // ...and it is a real card on the real event surface, not just a broker entry.
+        expect(emitted.filter((e) => e.type === "approval_requested").length).toBeGreaterThan(0);
+        // The file the card is about must not exist YET — the call is parked on the answer.
+        expect(existsSync(fileB)).toBe(false);
+        approvals.resolve("s_official_e2e", card!.callId, true, "the e2e measurement");
+
+        await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+        expect(existsSync(fileB)).toBe(true);
+        // MID-TURN, not next-turn: one turn covered both writes and the switch between them.
+        expect(w.events.filter((e) => e.type === "turn_started")).toHaveLength(1);
+        expect(w.events.filter((e) => e.type === "turn_completed")).toHaveLength(1);
+        console.warn(`[0.0.10 MEASURED] one turn, two Writes: events = ${w.events.map((e) => e.type).join(",")}`);
+      },
+      // The loopback is held before the SECOND scripted turn, so the switch cannot race the child's
+      // own round trip: the first Write has landed and the next tool has not been asked for yet.
+      { beforeTurn: async (index) => { if (index === 1) await held; } },
+    );
+  }, 120_000);
+
+  // LEAVING PLAN, mid-turn, through the production-shaped pair: the stored policy moves first (the
+  // `policyRef` the bridge reads, which is what `store.setApprovalPolicy` does in `ipc/server.ts`)
+  // and then the live child is told. Both halves move, deliberately — MEASURED (same harness, bridge
+  // held at `accept-edits` while the child ran `plan`): a `plan` child whose bridge ALLOWS an edit
+  // creates the file, so plan's enforcement on this leg is Winter's own gate rather than the
+  // runtime's mode. What this test therefore proves is that leaving plan takes effect on the RUNNING
+  // turn rather than at the next incarnation — not that the child alone blocked the first write.
+  test("a live setPolicy out of plan lets the SAME turn's next edit through", async () => {
+    const policyRef: { current: SessionApprovalPolicy } = { current: "plan" };
+    const approvals = new ApprovalBroker();
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+
+    const turns: AnthropicTurnScript[] = [
+      PLACEHOLDER_TURN("Write", [JSON.stringify({ file_path: "/placeholder-a", content: "first" })]),
+      PLACEHOLDER_TURN("Write", [JSON.stringify({ file_path: "/placeholder-b", content: "second" })], "call_2"),
+      DONE_TURN,
+    ];
+    await withAnthropicLoopback(
+      turns,
+      async (fake) => {
+        const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+        const w = await buildWorld(selectionFor(), secretsDir, fake.url, "plan", {
+          approvals,
+          livePolicy: () => policyRef.current,
+        });
+        const fileA = join(w.cwd, "plan-a.txt");
+        const fileB = join(w.cwd, "plan-b.txt");
+        turns[0] = PLACEHOLDER_TURN("Write", [JSON.stringify({ file_path: fileA, content: "first" })]);
+        turns[1] = PLACEHOLDER_TURN("Write", [JSON.stringify({ file_path: fileB, content: "second" })], "call_2");
+
+        await w.session.send("write the two files you were scripted to write");
+        // The refusal text is printed rather than assumed — under `plan` it is Winter's gate that
+        // denies (`canUseTool: deny … policy=plan reason=gate`), and the model is told so.
+        const first = await waitFor(w.events, (e) => e.type === "tool_result", 45_000) as SessionEvent & { isError?: boolean; output?: string };
+        console.warn(`[0.0.10 MEASURED] under plan, the first Write's tool_result = ${JSON.stringify({ isError: first.isError, output: String(first.output).slice(0, 200) })}`);
+        expect(first.isError).toBe(true);
+        expect(existsSync(fileA)).toBe(false);
+
+        policyRef.current = "accept-edits"; // what `store.setApprovalPolicy` does, before the leg call
+        await w.session.setPolicy("accept-edits");
+        release?.();
+
+        await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+        // THE SAME TURN's next edit lands: leaving plan took effect on the running child.
+        expect(existsSync(fileB)).toBe(true);
+        expect(w.events.filter((e) => e.type === "turn_started")).toHaveLength(1);
+        console.warn(`[0.0.10 MEASURED] plan -> accept-edits in one turn: events = ${w.events.map((e) => e.type).join(",")}`);
+      },
+      { beforeTurn: async (index) => { if (index === 1) await held; } },
+    );
+  }, 120_000);
+
 });
 
 test("claude runtime bed resolves on this machine (sanity: the platform package really installed)", () => {

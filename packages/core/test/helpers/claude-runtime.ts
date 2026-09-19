@@ -122,7 +122,16 @@ export function cleanupHermeticOfficialHomes(): void {
 export async function withAnthropicLoopback<T>(
   turns: readonly AnthropicTurnScript[],
   fn: (fake: FakeServer, requests: () => RecordedRequest[]) => Promise<T>,
-  opts: { delayFirstResponseMs?: number } = {},
+  opts: {
+    delayFirstResponseMs?: number;
+    /**
+     * Awaited BEFORE the scripted turn at `index` is served — the door a test needs to do something
+     * to the session WHILE a turn is in flight (its first tool call has already run and its next one
+     * has not been asked for yet). Without it, anything a test does between two tool calls is a race
+     * against the child's own round trip.
+     */
+    beforeTurn?: (index: number) => Promise<void>;
+  } = {},
 ): Promise<T> {
   let firstResponseServed = false;
   const fake = await startFake({
@@ -141,6 +150,7 @@ export async function withAnthropicLoopback<T>(
             // identical reason: the runtime can make side requests (a title, a summary) that a bare
             // counter would misattribute a scripted turn to.
             const index = Math.min(countToolResultBlocks(recorded.body), turns.length - 1);
+            if (opts.beforeTurn !== undefined) await opts.beforeTurn(Math.max(index, 0));
             const turn = turns[Math.max(index, 0)] ?? { blocks: [{ type: "text", chunks: ["ok"] }] };
             return anthropicFake.anthropicTurnResponse(turn);
           }
