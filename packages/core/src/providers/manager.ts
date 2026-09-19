@@ -122,6 +122,14 @@ function buildLiveModelResolver(
  * as "no internal Provider" — titles/reviewer/dreamer/cleaner/compaction go inert, logged
  * ONCE, never a boot refusal. A per-provider internal Provider (one instance per provider, built on
  * the SDK) is the real follow-up that would let this set grow; not attempted here.
+ *
+ * 2026-09-19 — THAT FOLLOW-UP LANDED, and this function is no longer on any production path.
+ * `providers/internal-router.ts` + `internal-provider.ts` build one internal `Provider` per
+ * CREDENTIALED catalog provider and resolve it per ROLE, so Winter's own background jobs no longer
+ * depend on `settings.provider.model` at all and `INTERNAL_PROVIDER_IDS` no longer gates them. This
+ * builder (and `createRebindableProvider`/`SwappableProvider`/`internalModelFor`/
+ * `internalRoleEffortFor` below) survives ONLY for the tests that still construct it directly and for
+ * an injected `agentProvider` double; `daemon.ts` stopped calling it. Do not wire it into anything new.
  */
 export async function createProvider(
   settings: Settings,
@@ -293,7 +301,7 @@ export async function createRebindableProvider(settings: Settings, secrets: Secr
         // the last provider that actually worked". Logged on every attempt while stuck here (this
         // function's own doc comment) — the OLD backend is left in place, always.
         console.error(
-          `provider: settings.provider.model now names "${nextProviderId}" — the daemon's internal provider only rebuilds for ${INTERNAL_PROVIDER_IDS.join("/")}, so titles, the bash reviewer, the dreamer, the session cleaner, and turn compaction stay on "${boundProviderId}" until it's set back to one of those`,
+          `provider: settings.provider.model now names "${nextProviderId}" — the daemon's internal provider only rebuilds for ${INTERNAL_PROVIDER_IDS.join("/")}, so this RETIRED single-instance handle stays on "${boundProviderId}" (Winter's own background jobs are unaffected — they run through providers/internal-router.ts)`,
         );
         return false;
       }
@@ -352,6 +360,13 @@ export async function createRebindableProvider(settings: Settings, secrets: Secr
  * Deliberately NOT a redesign of the internal-Provider abstraction (still exactly one instance,
  * still bare-id-only at its own boundary) — that is a follow-up if the mismatch turns out to
  * matter in practice; this is the guard that makes a mismatch loud instead of silent today.
+ *
+ * 2026-09-19 — SUPERSEDED. The mismatch this guard made loud turned out to be the BUG, not a
+ * diagnostic: a pin naming a provider other than the bound one is a perfectly reasonable request, and
+ * skipping the run made titles/the dreamer/the cleaner silently stop for any user whose session default
+ * was not codex-oauth/openai. `internal-router.ts`'s `resolve(role, settings)` now RESOLVES the pin's
+ * own provider instead of refusing it. Retained for the tests that still exercise it directly; no
+ * production caller remains.
  */
 export function internalModelFor(pin: ModelTag, provider: { providerId: string }, fieldName: string): string | undefined {
   const { providerId, modelId } = splitTag(pin);

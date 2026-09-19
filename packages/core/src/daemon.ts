@@ -841,63 +841,26 @@ export async function startDaemon(opts: {
     console.error(internalView.summary());
   }
 
-  let agentProvider = opts.agentProvider;
-  let quota: QuotaManager | undefined = internalRouter?.quota;
-  if (agentProvider === undefined) {
-    if (settings) {
-      try {
-        // Daemon settings surface (2026-09-17 plan, item 2): `createRebindableProvider` instead of
-        // `createProvider` directly — the returned `.provider` is a `SwappableProvider` (stable
-        // identity, swappable backend) and `.refresh` is what `settings-apply.ts`'s
-        // `applyAgentProviderDiff` calls on a hot `provider.model` write that crosses catalog
-        // providers, so titles/the bash reviewer/the dreamer/the session cleaner/research all end
-        // up on the NEW provider with no daemon restart — see `providers/manager.ts`'s own doc
-        // comment on `RebindableProvider` for why a stable identity (not a reassigned variable) is
-        // what makes this reach every existing consumer unmodified.
-        const active = await createRebindableProvider(settings, secrets, dirs.settingsPath);
-        if (active === null) {
-          // WS-20 (review round 4): `settings.provider.model` names a provider OUTSIDE
-          // `INTERNAL_PROVIDER_IDS` (codex-oauth/openai) — a real, unconstrained choice for a
-          // SESSION's own default model (routed per-session through the runtime SDK, unaffected),
-          // but the daemon's single process-wide internal Provider genuinely cannot be built for
-          // it. Logged ONCE, naming exactly what goes inert — never a boot refusal; every other
-          // daemon function (sessions, the RPC surface, settings) works normally.
-          // 2026-09-19: NOT a diagnostic any more. Winter's own jobs no longer depend on this legacy
-          // handle at all — `internalRouter` above decides them, and it already printed the accurate
-          // line. This arm only means `settings.provider.model` names a provider the RETIRED
-          // single-instance builder could not be built for, which by itself now costs nothing.
-          agentProvider = null;
-        } else {
-          // `model` here is the RESOLVED (not raw) boot selection — active.model is the raw
-          // settings.json value, which for codex-oauth may be a since-deprecated slug (e.g.
-          // "gpt-5.4"). Everything that consumes this snapshot directly rather than calling `live`
-          // per-turn (Compactor's own summarization turn, BashReviewer, SessionTitler, the
-          // daemon-status `providerInfo` below) needs a model the backend will actually accept, so
-          // resolve once here via the SAME deprecation-fallback path `live` uses on every turn.
-          // `live` itself is still wired separately below (EngineConfig.provider.live) so turns
-          // keep re-resolving on every call, not just at this boot snapshot.
-          //
-          // `agentProvider` is now the SAME object `active` itself is (no `{ provider: ..., model:
-          // ... }` literal copy) — item 2's whole point is that `.model`/`.live`/`.provider` on
-          // THIS EXACT object get mutated in place by `active.refresh(...)`, so every consumer that
-          // captured `agentProvider` (SessionTitler, BashReviewer, Dreamer, SessionCleaner) or
-          // `agentProvider.provider` alone sees a rebind with no code of its
-          // own changing.
-          agentProvider = active;
-          quota = active.quota;
-        }
-      } catch (err) {
-        console.error(`agent disabled: ${(err as Error).message}`);
-        agentProvider = null;
-      }
-    } else {
-      agentProvider = null;
-    }
-  }
-  // Test-injected / disabled-agent paths never went through createProvider() (so never got a
-  // real QuotaManager wrapping the provider) — quota.state() still needs SOMETHING to read, so
-  // fall back to an inert manager that just reports the zero/ok defaults.
-  quota ??= new QuotaManager();
+  /**
+   * 2026-09-19: the RETIRED single-instance handle. `createRebindableProvider` is no longer called on
+   * a production boot at all — `internalRouter` above owns every internal call, one `Provider` per
+   * credentialed provider, resolved per role. Keeping the builder alive here cost three things that
+   * are all now wrong:
+   *
+   *  - a spurious `agent disabled: no API key stored — run: winter login --api-key` line on any
+   *    openai-default home without an OpenAI key, describing a handle nothing reads;
+   *  - a second Keychain read of material `internalView.refresh()` has already probed;
+   *  - the `providerInfo`/`liveSelection`/`liveProvider` reads below were GATED on it being non-null,
+   *    so `sync.config` served a DeepSeek- or Claude-default home NO default model at all. Those are
+   *    pure settings reads and are now gated on `settings` instead, which is what they always meant.
+   *
+   * `opts.agentProvider` itself stays: it is the injected-double seam (`staticInternalRouter` above
+   * wraps it) and `null` is still the deliberate "no internal jobs" boot.
+   */
+  const agentProvider = opts.agentProvider ?? null;
+  // The daemon's ONE quota ledger — the router's, so a per-provider instance reports into the same
+  // place `daemon.status`/`sync.config` read. An inert manager only for a boot with no router at all.
+  const quota: QuotaManager = internalRouter?.quota ?? new QuotaManager();
 
   // Fix wave (pre-merge review, finding 4b): the ONE `RebindableProvider.refresh` retry lever,
   // hoisted here (rather than re-derived at each call site) so `settings-apply.ts`'s hot-reload
@@ -906,6 +869,9 @@ export async function startDaemon(opts: {
   // itself self-gates on its own internal `boundProviderId` compare (a cheap no-op when nothing
   // changed) — see `RebindableProvider.refresh`'s own doc comment — so calling it unconditionally
   // from BOTH triggers is correct, not merely convenient.
+  // 2026-09-19: DEAD for a production boot (nothing calls `createRebindableProvider` any more) and
+  // unnecessary either way — the router resolves per call and caches against `view.generation()`, so a
+  // settings apply needs no rebuild. Kept only for an injected double that still carries `refresh`.
   const refreshAgentProviderHot = agentProvider?.refresh
     ? (next: Settings) => agentProvider!.refresh!(next, secrets, dirs.settingsPath)
     : undefined;
@@ -1658,7 +1624,10 @@ export async function startDaemon(opts: {
     hasBackgroundWork: (sid) => (bgAgents?.list(sid) ?? []).some((a) => a.status === "running"),
     interrupt: (sid) => { const d = winterDrivers.get(sid); if (d === undefined || !d.turnRunning) return { wasRunning: false }; void d.interrupt(); return { wasRunning: true }; },
     activeTurnCount: () => winterDrivers.list().filter((d) => d.turnRunning).length,
-    knownModels: () => agentProvider?.provider.models() ?? [],
+    // Always empty: the internal `Provider`s are adapter-backed and report no model list of their own
+    // (`runtimeBackedProvider`'s `models: () => []`). `pickerModels()` (ipc/picker-models.ts) is the
+    // real model listing — see `runtime-provider.ts`'s WS-20 L3.6 note.
+    knownModels: () => [],
     // engine.ts's `grantDenied`, verbatim: at/under a prefix, or an ANCESTOR of one (fence
     // containment is subtree-based; granting an ancestor of ~/.winter/run would open the control plane).
     isGrantDenied: (dir) => {
@@ -2262,7 +2231,9 @@ export async function startDaemon(opts: {
   // WS-20: `model` is the TAG (`settings.provider.model`, already provider-qualified) — never
   // `agentProvider.model`, which is the BARE modelId half split at the internal-Provider boundary
   // (providers/manager.ts).
-  const providerInfo = agentProvider && settings
+  // 2026-09-19: `settings`, not the retired `agentProvider` — see its own doc comment above for why
+  // gating these on that handle served a DeepSeek/Claude-default home no default model at all.
+  const providerInfo = settings
     ? { id: providerIdFromSettingsTag(settings) ?? "none", model: settings.provider.model }
     : null;
 
@@ -2286,8 +2257,12 @@ export async function startDaemon(opts: {
   // instead of two independent getters — a wider seam for a race nobody can observe. Not done
   // deliberately; do not "fix" it by caching the selection across calls, which would break the hot
   // read that is the actual contract here.
-  const liveSelection = agentProvider
-    ? () => agentProvider!.live?.() ?? { model: agentProvider!.model }
+  const liveSelection = settings
+    ? () => {
+        const s = settings!;
+        const effort = s.provider.reasoningEffort;
+        return { model: splitTag(s.provider.model).modelId, providerId: splitTag(s.provider.model).providerId, ...(effort === undefined ? {} : { reasoningEffort: effort }) };
+      }
     : undefined;
   // Whole-branch review C1, corrected under WS-20 review round 1 (MAJOR): WHICH provider
   // `sync.config`'s own `provider` field reports. Read off `providerIdFromSettingsTag(settings)`
@@ -2299,14 +2274,17 @@ export async function startDaemon(opts: {
   // which no client can compare against a catalog provider id or a tag's own prefix. `undefined`
   // on a no-provider daemon (or an unset `settings.provider.model`) — ipc/sync.ts degrades that to
   // `"none"`, never to `""`.
-  const liveProvider = agentProvider ? () => providerIdFromSettingsTag(settings) ?? "none" : undefined;
+  const liveProvider = settings ? () => providerIdFromSettingsTag(settings) ?? "none" : undefined;
   // Fix wave (pre-merge review, finding 4): DELIBERATELY different from `liveProvider` just above —
   // that field is a pure settings read, boot-bound to the CATALOGUE `sync.config` shows on purpose;
   // this one is the actually-BOUND backend, the same `agentProvider?.live?.().providerId ??
   // ownProviderFor(settings)` comparison `internalModelFor` and the `titles.model`/`reviewer.model`
   // gates below already use. `settings.modelRoles`/`settings.setModelRole` (ipc/server.ts) are the
   // only consumers.
-  const boundProviderId = () => agentProvider?.live?.().providerId ?? ownProviderFor(settings);
+  // 2026-09-19: the internal-jobs roles no longer have a single "bound" provider — `permitted` and the
+  // per-role `model` come from `internalRouter.view`'s snapshot (threaded separately). This stays only
+  // as the pre-router fallback every `modelRoleInfo` caller without a snapshot still reads.
+  const boundProviderId = () => ownProviderFor(settings);
   // WS-20: `liveModel()` is a TAG — composed from the hot `liveSelection().providerId` (the CATALOG
   // providerId, boot-bound like everything else about provider identity, but read off
   // `LiveModelSelection` itself rather than `Provider.id` above, which is NOT always a real catalog
