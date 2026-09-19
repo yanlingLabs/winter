@@ -347,6 +347,19 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(settingsSectionsMatching("hooks", in: all).isEmpty, "Hooks is a row on Plugins")
     }
 
+    /// Providers → Add a provider's in-card search: name or id, case-insensitive; blank = all.
+    func testProviderSearchMatchesNameOrIdAndBlankIsEverything() {
+        let rows = [FakeCredentialsClient.row(providerId: "openrouter", displayName: "OpenRouter"),
+                    FakeCredentialsClient.row(providerId: "deepseek", displayName: "DeepSeek"),
+                    FakeCredentialsClient.row(providerId: "ai21", displayName: "AI21 Labs")]
+        XCTAssertEqual(settingsProvidersMatching("", in: rows).count, 3)
+        XCTAssertEqual(settingsProvidersMatching("  ", in: rows).count, 3)
+        XCTAssertEqual(settingsProvidersMatching("seek", in: rows).map(\.providerId), ["deepseek"])
+        XCTAssertEqual(settingsProvidersMatching("LABS", in: rows).map(\.providerId), ["ai21"])
+        XCTAssertEqual(settingsProvidersMatching("ai21", in: rows).map(\.providerId), ["ai21"], "the id matches too")
+        XCTAssertTrue(settingsProvidersMatching("zzz", in: rows).isEmpty)
+    }
+
     // MARK: - The coming settings sections (2026-09-18)
 
     /// The placeholder sections: every one is in the sidebar, reachable by the same title filter
