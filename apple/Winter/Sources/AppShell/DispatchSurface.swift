@@ -34,12 +34,15 @@ struct DispatchSurface: View {
             // one place without dots. The hover is read in GLOBAL space for the same reason: the
             // field and this surface no longer share a local origin.
             .background {
-                DispatchBackdrop(adapter: host.attachment?.adapter, pointer: pointer)
+                DispatchBackdrop(adapter: host.attachment?.adapter, pointer: pointer,
+                                 composerFrame: composerFrame)
                     // The detail card's own corners — a dot in the corner outside the card's curve
                     // would sit on the sidebar.
                     .clipShape(shellDetailCardShape)
                     .ignoresSafeArea()
             }
+            // The composer's outline, which the working pulse grows out of.
+            .onPreferenceChange(ComposerFaceFrameKey.self) { composerFrame = $0 }
             .onContinuousHover(coordinateSpace: .global) { phase in
                 switch phase {
                 case .active(let location): pointer = location
@@ -49,8 +52,10 @@ struct DispatchSurface: View {
             .navigationTitle(SessionMode.dispatch.title)
     }
 
-    /// The cursor over this surface, in its own coordinates, or nil.
+    /// The cursor over this surface, in GLOBAL coordinates, or nil.
     @State private var pointer: CGPoint?
+    /// The composer face's global frame, or nil before it has laid out.
+    @State private var composerFrame: CGRect?
 
     @ViewBuilder
     private var content: some View {
@@ -96,21 +101,24 @@ struct DispatchSurface: View {
 private struct DispatchBackdrop: View {
     let adapter: FieldStateAdapter?
     let pointer: CGPoint?
+    let composerFrame: CGRect?
 
     var body: some View {
         if let adapter {
-            LiveBackdrop(adapter: adapter, pointer: pointer)
+            LiveBackdrop(adapter: adapter, pointer: pointer, composerFrame: composerFrame)
         } else {
-            DispatchParticleField(pointer: pointer)
+            DispatchParticleField(pointer: pointer, composerFrame: composerFrame)
         }
     }
 
     private struct LiveBackdrop: View {
         @ObservedObject var adapter: FieldStateAdapter
         let pointer: CGPoint?
+        let composerFrame: CGRect?
 
         var body: some View {
-            DispatchParticleField(pointer: pointer, isWorking: adapter.turnRunning)
+            DispatchParticleField(pointer: pointer, isWorking: adapter.turnRunning,
+                                  composerFrame: composerFrame)
         }
     }
 }

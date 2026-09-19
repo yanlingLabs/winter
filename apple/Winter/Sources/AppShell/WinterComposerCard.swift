@@ -591,6 +591,13 @@ struct WinterComposerCard: View {
             controlRow(accessory: accessory, modelRow: modelRow)
         }
         .frame(height: newChatComposerHeight)
+        // Where the composer's face is, in window space — Dispatch's pulse grows outward from this
+        // exact outline (`ComposerFaceFrameKey`, read by `DispatchSurface`). Nobody else listens.
+        .background {
+            GeometryReader { geo in
+                Color.clear.preference(key: ComposerFaceFrameKey.self, value: geo.frame(in: .global))
+            }
+        }
         // The composer keeps its OWN complete face and border — all four corners, always. That is
         // what makes the strip read as a second surface behind it rather than as this card growing
         // a section.
@@ -818,5 +825,13 @@ struct ComposerQuestionBox: View {
         // the fill an infinite width to paint and the box would have been full-bleed with a cap
         // drawn only around its contents — the exact bug this change is fixing, one layer in.
         .frame(maxWidth: .infinity, alignment: .center)
+    }
+}
+
+/// The composer face's frame in GLOBAL coordinates, published for Dispatch's pulse.
+struct ComposerFaceFrameKey: PreferenceKey {
+    static var defaultValue: CGRect? { nil }
+    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
+        if let next = nextValue() { value = next }
     }
 }

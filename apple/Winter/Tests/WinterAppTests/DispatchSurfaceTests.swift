@@ -41,15 +41,18 @@ final class DispatchSurfaceTests: XCTestCase {
         XCTAssertEqual(absent.dx, 0)
     }
 
-    /// The working pulse lifts only the dots near its ring, and fades out as it travels.
-    func testPulseTouchesOnlyTheRingAndFadesAsItTravels() {
-        let origin = CGPoint(x: 0, y: 0)
-        let onRing = dispatchPulseInfluence(point: CGPoint(x: 200, y: 0), origin: origin, ringRadius: 200, travelled: 0)
-        XCTAssertEqual(onRing, 1, accuracy: 0.0001)
-        XCTAssertEqual(dispatchPulseInfluence(point: CGPoint(x: 200 + dispatchPulseBand + 1, y: 0), origin: origin,
-                                              ringRadius: 200, travelled: 0), 0)
-        let late = dispatchPulseInfluence(point: CGPoint(x: 200, y: 0), origin: origin, ringRadius: 200, travelled: 0.75)
-        XCTAssertEqual(late, 0.25, accuracy: 0.0001)
+    /// The working pulse is the composer's outline, inflated: distance is measured from the
+    /// rounded rect (zero inside it), the wave touches only its band, and it fades as it travels.
+    func testPulseGrowsOutOfTheComposersShape() {
+        let composer = CGRect(x: 100, y: 500, width: 400, height: 100)
+        XCTAssertEqual(dispatchDistanceOutside(CGPoint(x: 300, y: 550), rect: composer, cornerRadius: 30), 0,
+                       "inside the composer is distance zero")
+        XCTAssertEqual(dispatchDistanceOutside(CGPoint(x: 300, y: 450), rect: composer, cornerRadius: 30), 50,
+                       accuracy: 0.0001, "straight above the flat top edge")
+        XCTAssertEqual(dispatchPulseInfluence(distance: 200, ringRadius: 200, travelled: 0), 1, accuracy: 0.0001)
+        XCTAssertEqual(dispatchPulseInfluence(distance: 200 + dispatchPulseBand + 1, ringRadius: 200, travelled: 0), 0)
+        XCTAssertEqual(dispatchPulseInfluence(distance: 200, ringRadius: 200, travelled: 0.5), 0.75, accuracy: 0.0001,
+                       "keeps most of its strength halfway across")
     }
 
     // MARK: - Harness (dispatch resolution, through the real host)
