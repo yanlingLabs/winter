@@ -13,8 +13,9 @@ import { join } from "node:path";
 import { codexFake, openaiChatFake, openaiResponsesFake } from "@yanlinglabs/winter-provider-conformance/fakes";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { CREDENTIAL_MATERIAL_NAMES, writeCredentialMaterial, clearCredentialMaterial } from "../../src/auth/credential-material";
-import { createInternalProviderView } from "../../src/providers/internal-view";
-import { createInternalRouter, isInternalRefusal, type InternalRouter } from "../../src/providers/internal-router";
+import { createInternalProviderView, staticInternalProviderView, REFRESH_SOON_MIN_MS } from "../../src/providers/internal-view";
+import { createInternalRouter, staticInternalRouter, isInternalRefusal, type InternalRouter } from "../../src/providers/internal-router";
+import type { Provider } from "../../src/providers/types";
 import { internalEligibleProviderIds, CLAUDE_FIRST_PARTY_PROVIDER_IDS, Settings, setModelRole } from "../../src/settings";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
@@ -378,5 +379,221 @@ describe("a user-entered providers.<id>.baseUrl", () => {
     } finally {
       await fake.close();
     }
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 2026-09-19 review fixes: B-1 (self-heal), M-1 (effort "none"), M-2 (per-provider quota),
+// M-3 (no-default-model).
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+describe("B-1: the snapshot self-heals from an out-of-band credential write", () => {
+  test("`winter login`'s in-process codex write is picked up without a restart", async () => {
+    const secrets = secretsStore();
+    let clock = 1_000_000;
+    const view = createInternalProviderView({ secrets, log: () => {}, now: () => clock });
+    await view.refresh();
+    const router = createInternalRouter({ view, secrets });
+    const settings = settingsWith("deepseek/deepseek-v4-flash");
+
+    // Inert, and the refusal asked for a background probe.
+    expect(isInternalRefusal(router.resolve("titles.model", settings))).toBe(true);
+    await Bun.sleep(30); // let that first probe settle — `refreshSoon` coalesces while one is in flight
+    // …the CLI writes the material itself, exactly as `winter login` does.
+    await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at" });
+    clock += REFRESH_SOON_MIN_MS + 1; // past the self-heal floor
+    router.resolve("titles.model", settings); // fires the probe
+    await Bun.sleep(30);
+    const healed = router.resolve("titles.model", settings);
+    expect(isInternalRefusal(healed)).toBe(false);
+    if (!isInternalRefusal(healed)) expect(healed.providerId).toBe("codex-oauth");
+  });
+
+  test("`winter logout`'s in-process clear is picked up too — the jobs go inert, not credential-rejected", async () => {
+    const secrets = secretsStore();
+    await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at" });
+    const view = createInternalProviderView({ secrets, log: () => {} });
+    await view.refresh();
+    const router = createInternalRouter({ view, secrets });
+    const settings = settingsWith("codex-oauth/gpt-5.6-sol");
+    expect(isInternalRefusal(router.resolve("pins.dream", settings))).toBe(false);
+
+    await clearCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth);
+    // STATED HONESTLY: the router cannot self-heal from THIS direction on its own. A stale-but-present
+    // snapshot makes `resolve()` SUCCEED, so no refusal fires and nothing asks for a probe — the call
+    // then fails at the provider as an `auth` error. That is exactly why the logout direction has two
+    // other carriers, and both are exercised: the CLI pokes `credential.list` after its in-process clear
+    // (`test/ipc/credentials-rpc.test.ts`), and the dreamer asks for a re-probe once per tick AND on any
+    // `auth`-classified failure (`test/agent/dreamer-cycle.test.ts`). Either one lands here:
+    await view.refresh();
+    const after = router.resolve("pins.dream", settings);
+    expect(isInternalRefusal(after)).toBe(true);
+    if (isInternalRefusal(after)) expect(after.reason).toBe("no-internal-credential");
+  });
+
+  test("the self-heal is rate-limited — a hot loop of refusals is not a Keychain probe per call", async () => {
+    const secrets = secretsStore();
+    let clock = 1_000_000;
+    // Counted at the STORE, which is what a probe actually costs — `refreshSoon` closes over the
+    // view's own `refresh`, so wrapping the view object could not observe it.
+    let reads = 0;
+    const counting = { get: (n: string) => { reads += 1; return secrets.get(n); }, set: (n: string, v: string) => secrets.set(n, v), delete: (n: string) => secrets.delete(n) };
+    const view = createInternalProviderView({ secrets: counting, log: () => {}, now: () => clock });
+    await view.refresh();
+    const perProbe = reads;
+    expect(perProbe).toBeGreaterThan(0);
+    const router = createInternalRouter({ view, secrets: counting });
+    const settings = settingsWith("deepseek/deepseek-v4-flash");
+    for (let i = 0; i < 50; i += 1) router.resolve("titles.model", settings);
+    await Bun.sleep(40);
+    // ONE probe for 50 refused calls, not 50.
+    expect(reads).toBe(perProbe * 2);
+    // …and a second window admits exactly one more.
+    clock += REFRESH_SOON_MIN_MS + 1;
+    for (let i = 0; i < 50; i += 1) router.resolve("titles.model", settings);
+    await Bun.sleep(40);
+    expect(reads).toBe(perProbe * 3);
+  });
+
+  test("an EXPLICIT pin on an uncredentialed provider does NOT probe (nothing else writes that slot)", async () => {
+    const secrets = secretsStore();
+    await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at" });
+    let reads = 0;
+    const counting = { get: (n: string) => { reads += 1; return secrets.get(n); }, set: (n: string, v: string) => secrets.set(n, v), delete: (n: string) => secrets.delete(n) };
+    const view = createInternalProviderView({ secrets: counting, log: () => {} });
+    await view.refresh();
+    const afterSeed = reads;
+    const router = createInternalRouter({ view, secrets: counting });
+    const pinned = settingsWith("codex-oauth/gpt-5.6-sol", { pins: { dream: "deepseek/deepseek-v4-flash" } });
+    const call = router.resolve("pins.dream", pinned);
+    await Bun.sleep(40);
+    expect(isInternalRefusal(call)).toBe(true);
+    if (isInternalRefusal(call)) expect(call.reason).toBe("no-credential");
+    expect(reads).toBe(afterSeed); // no probe at all
+  });
+});
+
+describe("M-1: an explicit effort of `none`", () => {
+  test("is never turned into the row's defaultEffort — it is dropped, so the provider's default applies", async () => {
+    const secrets = secretsStore();
+    await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at" });
+    const router = await routerFor(secrets);
+    // `codex-oauth/gpt-5.6-terra`'s vocabulary is [low, medium, high, xhigh, max] — no `"none"`, so
+    // `implicitEffortFor` would MISS and fall through to the row's defaultEffort, `"medium"`.
+    const settings = settingsWith("codex-oauth/gpt-5.6-sol", { roleEfforts: { "pins.dream": "none" } });
+    const call = router.resolve("pins.dream", settings);
+    if (isInternalRefusal(call)) throw new Error("expected a live call");
+    expect(call.effort).toBeUndefined();
+    expect(call.effort).not.toBe("medium");
+  });
+
+  test("a stored tier the row DOES list still survives", async () => {
+    const secrets = secretsStore();
+    await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at" });
+    const router = await routerFor(secrets);
+    const call = router.resolve("pins.dream", settingsWith("codex-oauth/gpt-5.6-sol", { roleEfforts: { "pins.dream": "high" } }));
+    if (isInternalRefusal(call)) throw new Error("expected a live call");
+    expect(call.effort).toBe("high");
+  });
+
+  test("the static test double runs the SAME effort rule production does", () => {
+    const view = staticInternalProviderView(["codex-oauth"]);
+    const fake: Provider = { id: "fake", models: () => [], streamTurn: () => (async function* () {})() };
+    const router = staticInternalRouter({ view, provider: fake, model: "gpt-5.6-terra", tag: "codex-oauth/gpt-5.6-terra" as never });
+    const none = router.resolve("pins.dream", settingsWith("codex-oauth/gpt-5.6-sol", { roleEfforts: { "pins.dream": "none" } }));
+    if (isInternalRefusal(none)) throw new Error("expected a live call");
+    expect(none.effort).toBeUndefined();
+    // …and the dreamer's own unmappable constant is dropped on a deepseek row here too.
+    const ds = staticInternalRouter({ view, provider: fake, model: "deepseek-v4-flash", tag: "deepseek/deepseek-v4-flash" as never });
+    const dream = ds.resolve("pins.dream", settingsWith("deepseek/deepseek-v4-flash"));
+    if (isInternalRefusal(dream)) throw new Error("expected a live call");
+    expect(dream.effort).toBeUndefined();
+  });
+});
+
+describe("M-2: one quota ledger per provider", () => {
+  test("a Codex usage-limit 429 cannot stall a healthy DeepSeek role", async () => {
+    const secrets = secretsStore();
+    await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at" });
+    await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-deepseek" });
+    const router = await routerFor(secrets);
+    const settings = settingsWith("codex-oauth/gpt-5.6-sol", {
+      titles: { model: "codex-oauth/gpt-5.6-terra" },
+      pins: { dream: "deepseek/deepseek-v4-flash" },
+    });
+    const codex = router.resolve("titles.model", settings);
+    const deepseek = router.resolve("pins.dream", settings);
+    if (isInternalRefusal(codex) || isInternalRefusal(deepseek)) throw new Error("expected two live calls");
+    expect(codex.quota).not.toBe(deepseek.quota);
+    const codexLedger = router.quotaFor("codex-oauth");
+    const deepseekLedger = router.quotaFor("deepseek");
+    expect(codexLedger).toBeDefined();
+    expect(deepseekLedger).toBeDefined();
+    // An hour-scale rate limit on the codex ledger leaves the deepseek one untouched. Before the split
+    // this single `limitedUntil` stalled BOTH roles for the full hour.
+    codexLedger!.noteRateLimit(3_600_000);
+    expect(codexLedger!.state().kind).toBe("limited");
+    expect(deepseekLedger!.state().kind).toBe("ok");
+  });
+
+  test("daemon.status still reads the codex-oauth ledger for a codex user", async () => {
+    const secrets = secretsStore();
+    await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at" });
+    await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-deepseek" });
+    const router = await routerFor(secrets);
+    const settings = settingsWith("codex-oauth/gpt-5.6-sol", { pins: { dream: "deepseek/deepseek-v4-flash" } });
+    router.resolve("pins.dream", settings);   // deepseek's ledger exists FIRST
+    router.resolve("titles.model", settings); // then codex's
+    const codexLedger = router.quotaFor("codex-oauth");
+    expect(codexLedger).toBeDefined();
+    expect(router.quota).toBe(codexLedger!);
+  });
+});
+
+describe("M-3: Winter never guesses a model on a provider the user did not choose", () => {
+  test("a credentialed provider with no family slot and no session-default claim reports no-default-model", async () => {
+    const secrets = secretsStore();
+    // `groq` is eligible and credentialed, declares no terra slot, and is NOT provider.model's provider.
+    await writeCredentialMaterial(secrets, "groq:default", { kind: "api-key", key: "sk-groq" });
+    const router = await routerFor(secrets);
+    // A Claude default: rung 1 fails (not eligible), rung 2 fails (no codex/openai key), rung 3 names
+    // Groq so the refusal can point at it — but never invents a model on it.
+    const call = router.resolve("titles.model", settingsWith("anthropic/claude-fable-1"));
+    expect(isInternalRefusal(call)).toBe(true);
+    if (!isInternalRefusal(call)) return;
+    expect(call.reason).toBe("no-default-model");
+    expect(call.detail).toBe("pick a model for this job in Settings › Roles — Winter won't choose one on Groq for you");
+    expect(call.tag).toBeNull();
+  });
+
+  test("a credentialed OWN provider with no slot still uses the user's own model (the DeepSeek case)", async () => {
+    const secrets = secretsStore();
+    await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-deepseek" });
+    const router = await routerFor(secrets);
+    const call = router.resolve("titles.model", settingsWith("deepseek/deepseek-v4-flash"));
+    if (isInternalRefusal(call)) throw new Error(`refused: ${call.reason}`);
+    expect(String(call.tag)).toBe("deepseek/deepseek-v4-flash");
+  });
+
+  test("the fallback only ever considers codex-oauth/openai — never an alphabetical third party", async () => {
+    const secrets = secretsStore();
+    // `agentrouter` sorts before `codex-oauth` in inventory order and was what the retired rung picked.
+    await writeCredentialMaterial(secrets, "agentrouter:default", { kind: "api-key", key: "sk-ar" });
+    await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-openai" });
+    const router = await routerFor(secrets);
+    const call = router.resolve("pins.cleaner", settingsWith("anthropic/claude-fable-1"));
+    if (isInternalRefusal(call)) throw new Error(`refused: ${call.reason}`);
+    expect(call.providerId).toBe("openai");
+    expect(String(call.tag)).toBe("openai/gpt-5.6-terra");
+  });
+
+  test("no-default-model when a third-party key is the ONLY one and it IS the session default's sibling", async () => {
+    const secrets = secretsStore();
+    await writeCredentialMaterial(secrets, "groq:default", { kind: "api-key", key: "sk-groq" });
+    const router = await routerFor(secrets);
+    // groq IS provider.model's provider here, so rung 2 of the DEFAULT rule applies: the user's own tag.
+    const own = router.resolve("titles.model", settingsWith("groq/llama-3.3-70b-versatile"));
+    if (isInternalRefusal(own)) throw new Error(`refused: ${own.reason}`);
+    expect(String(own.tag)).toBe("groq/llama-3.3-70b-versatile");
   });
 });

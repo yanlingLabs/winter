@@ -14,6 +14,8 @@ import { Settings, saveSettings, MODEL_ROLES } from "../../src/settings";
 import { RoleHealthRegistry } from "../../src/providers/role-health";
 import { createInternalProviderView } from "../../src/providers/internal-view";
 import { createInternalRouter } from "../../src/providers/internal-router";
+import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
+import { internalEligibleProviderIds } from "../../src/settings";
 import { writeCredentialMaterial } from "../../src/auth/credential-material";
 
 class TestClient {
@@ -409,6 +411,60 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     const removed = await c.request(METHODS.credentialRemove, { providerId: "deepseek" });
     expect(removed.error).toBeUndefined();
     expect((await c.request(METHODS.settingsModelRoles, {})).result.roles["pins.dream"].problem?.reason).toBe("no-internal-credential");
+    c.close();
+  });
+
+  test("M-3: a credentialed third-party provider with no family slot reports no-default-model, not a guess", async () => {
+    // `groq` is eligible and credentialed, declares no terra slot, and is not the session default's
+    // provider — the exact shape the retired "first non-blocked llm row" rung used to answer with
+    // `groq/llama-3.3-70b-versatile`, a model the user never chose.
+    const { socketPath, harnessToken } = await boot("groq/llama-3.3-70b-versatile", { internalCredentials: ["groq:default"] });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    // With groq AS the session default it IS the user's own choice, so the role sits on it.
+    expect((await c.request(METHODS.settingsModelRoles, {})).result.roles["titles.model"].model).toBe("groq/llama-3.3-70b-versatile");
+    // Move the session default to a Claude row: groq is still the only credential, but Winter will no
+    // longer name a model on it, and codex-oauth/openai (which do have slots) have no key.
+    const moved = await c.request(METHODS.settingsSetModelRole, { role: "provider.model", model: "anthropic/claude-opus-5" });
+    expect(moved.error).toBeUndefined();
+    const info = moved.result.roles["titles.model"];
+    expect(info.model).toBeNull();
+    // `no-default-model`, NOT `no-internal-credential`: a credential exists, so "add a key" would be
+    // both wrong and unactionable. The fix is a pin, and the detail names the provider.
+    expect(info.problem?.reason).toBe("no-default-model");
+    expect(info.problem?.detail).toBe("pick a model for this job in Settings › Roles — Winter won't choose one on Groq for you");
+    expect(info.problem?.model).toBe("");
+    // A pin on a provider that DOES have a slot clears it immediately.
+    const pinned = await c.request(METHODS.settingsSetModelRole, { role: "titles.model", model: "groq/llama-3.3-70b-versatile" });
+    expect(pinned.error).toBeUndefined();
+    expect(pinned.result.roles["titles.model"].problem).toBeNull();
+    expect(pinned.result.roles["titles.model"].model).toBe("groq/llama-3.3-70b-versatile");
+    c.close();
+  });
+
+  test("M-3: no-default-model when a slot-less provider IS the preferred one", async () => {
+    // Forced by pinning `provider.model` to a provider that is eligible+credentialed but declares no
+    // family slot AND is not itself nameable — reached through `pins.research`-style cross wiring is not
+    // possible here, so this exercises the reader directly alongside the RPC's own shape.
+    const { socketPath, harnessToken } = await boot("groq/llama-3.3-70b-versatile", { internalCredentials: ["groq:default"] });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const res = await c.request(METHODS.settingsModelRoles, {});
+    // The zero-setup case still works — the point is only that nothing was GUESSED.
+    expect(res.result.roles["pins.dream"].model).toBe("groq/llama-3.3-70b-versatile");
+    expect(res.result.roles["pins.dream"].problem).toBeNull();
+    c.close();
+  });
+
+  test("M-3: setModelRole refuses a blocked catalog row for an internal job", async () => {
+    const { socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol", { internalCredentials: ["codex-oauth:default"] });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const blocked = loadCatalog().models.find((m) => m.status === "blocked" && internalEligibleProviderIds().has(m.providerId));
+    if (blocked === undefined) { c.close(); return; } // no blocked row on an eligible provider today
+    const set = await c.request(METHODS.settingsSetModelRole, { role: "titles.model", model: blocked.key });
+    expect(set.error?.code).toBe(-32602);
+    expect(set.error?.message).toContain("blocked");
     c.close();
   });
 

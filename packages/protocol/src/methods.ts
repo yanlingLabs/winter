@@ -1554,7 +1554,9 @@ export const ModelRoleInfoSchema = z.object({
    *  (the role's explicit tag names a provider Winter's own background jobs cannot run on — `detail`
    *  names the provider's display name, e.g. "Anthropic can't be used for Winter's own jobs yet") and
    *  `no-internal-credential` (no provider those jobs can use has a credential stored — `detail` names
-   *  the logins that would enable it). Those two are DERIVED on every read rather than recorded
+   *  the logins that would enable it) and `no-default-model` (one IS stored, but Winter will not choose a
+   *  model on that provider — `detail` says to pick one and names the provider; the fix is a pin, not a
+   *  credential, which is why it is not `no-credential`). Those two are DERIVED on every read rather than recorded
    *  (`packages/core/src/providers/internal-role-problems.ts`), so they clear themselves the moment the
    *  condition clears and never outlive it in `role-health.json`. No schema change was needed: `reason`
    *  has always been a raw string for exactly this reason. */

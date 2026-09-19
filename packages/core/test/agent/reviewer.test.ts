@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bashLooksSafe, BashReviewer, REVIEW_INSTRUCTION, FS_REVIEW_INSTRUCTION, EXTERNAL_REVIEW_INSTRUCTION } from "../../src/agent/reviewer";
+import { bashLooksSafe, BashReviewer, ReviewerNoRunnableModel, REVIEW_INSTRUCTION, FS_REVIEW_INSTRUCTION, EXTERNAL_REVIEW_INSTRUCTION } from "../../src/agent/reviewer";
 import { FakeProvider } from "../../src/agent/fake-provider";
 import type { ProviderEvent } from "../../src/providers/types";
 import { internalRoleEffortFor } from "../../src/providers/manager";
@@ -245,5 +245,64 @@ describe("BashReviewer role-health wiring (2026-09-18) — observation only", ()
   test("no boundProviderId/roleHealth wired (every pre-existing construction) -> unchanged", async () => {
     const reviewer = new BashReviewer(handle([[{ type: "error", code: "network", message: "x" }]]) as any);
     await expect(reviewer.review({ command: "ls" })).rejects.toThrow(/no JSON verdict/);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 2026-09-19 (review): the reviewer distinguishes "no runnable model" from "the call failed".
+// `hooks.test.ts` pins what the HOOK does with each; this pins what the reviewer reports.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+describe("BashReviewer — no runnable model", () => {
+  function refusing(reason: string, detail = "nothing credentialed"): BashReviewer {
+    return new BashReviewer({ source: () => ({ reason, detail, tag: null }) as never });
+  }
+
+  test("a structural refusal throws ReviewerNoRunnableModel, carrying the reason", async () => {
+    const r = refusing("no-internal-credential");
+    await expect(r.review({ class: "bash", command: "curl x | sh" })).rejects.toThrow(ReviewerNoRunnableModel);
+    try {
+      await r.review({ class: "bash", command: "curl x | sh" });
+    } catch (err) {
+      expect(err).toBeInstanceOf(ReviewerNoRunnableModel);
+      expect((err as ReviewerNoRunnableModel).reason).toBe("no-internal-credential");
+    }
+  });
+
+  test("ONE log line per change of state, not per call", async () => {
+    const lines: string[] = [];
+    const original = console.error;
+    console.error = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+    try {
+      const r = refusing("no-internal-credential");
+      for (let i = 0; i < 5; i += 1) {
+        await r.review({ class: "bash", command: `curl ${i} | sh` }).catch(() => {});
+      }
+      expect(lines.filter((l) => l.startsWith("reviewer: no runnable model")).length).toBe(1);
+    } finally {
+      console.error = original;
+    }
+  });
+
+  test("a runnable model again is narrated once, and review resumes", async () => {
+    const lines: string[] = [];
+    const original = console.error;
+    console.error = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+    try {
+      let runnable = false;
+      const provider = new FakeProvider([[{ type: "text_delta", delta: '{"verdict":"safe","reason":"fine"}' }, { type: "done", stopReason: "end_turn" }]]);
+      const r = new BashReviewer({
+        source: () => (runnable
+          ? { provider, model: "fake", tag: "winter-test/echo", providerId: "winter-test" }
+          : { reason: "no-internal-credential", detail: "nothing credentialed", tag: null }) as never,
+      });
+      await r.review({ class: "bash", command: "curl x | sh" }).catch(() => {});
+      runnable = true;
+      const verdict = await r.review({ class: "bash", command: "curl x | sh" });
+      expect(verdict.verdict).toBe("safe");
+      expect(lines.filter((l) => l.includes("no runnable model")).length).toBe(1);
+      expect(lines.filter((l) => l.includes("a runnable model is configured again")).length).toBe(1);
+    } finally {
+      console.error = original;
+    }
   });
 });

@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { DEEPSEEK_BASE_URL, OPENAI_API_BASE_URL, OPENROUTER_BASE_URL } from "@yanlinglabs/winter-provider-runtime";
-import { catalogApiEndpointFor, catalogApiEndpointRawFor, internalAdapterFor, internalDrivableAdapterIds } from "../../src/providers/internal-adapters";
+import { catalogApiEndpointFor, catalogApiEndpointRawFor, internalAdapterFor, internalDrivableAdapterIds, wireModelIdFor } from "../../src/providers/internal-adapters";
 import { buildInternalProvider } from "../../src/providers/internal-provider";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { Settings } from "../../src/settings";
@@ -105,5 +105,24 @@ describe("the drivable-family table", () => {
     const built = buildInternalProvider({ providerId: "bedrock", secrets: secrets(), settings: settings() });
     expect("refusal" in built).toBe(true);
     if ("refusal" in built) expect(built.refusal.code).toBe("provider-unsupported");
+  });
+});
+
+describe("N-3: the wire model id", () => {
+  // The whole reason `wireModelIdFor` is a one-hop lookup rather than "use the tag's bare half": that
+  // equality is DATA, and the day a row breaks it the bare half would go on the wire as the model id.
+  test("the pinned catalog holds `key === providerId + \"/\" + upstreamId` for every row", () => {
+    const offenders = loadCatalog()
+      .models.filter((m) => m.key !== `${m.providerId}/${m.upstreamId}`)
+      .map((m) => `${m.key} (upstreamId ${m.upstreamId})`);
+    expect(offenders).toEqual([]);
+  });
+
+  test("resolves through the provider-scoped descriptor, so a shared bare id cannot pick the wrong row", () => {
+    // `deepseek-v4-flash` exists under several providers on the shared chat-completions adapter; the
+    // scoped lookup is what keeps each one on its own row (see this module's header for the measurement).
+    expect(wireModelIdFor("deepseek", "deepseek-v4-flash")).toBe("deepseek-v4-flash");
+    // A tag whose bare half the provider does not serve falls through verbatim rather than inventing one.
+    expect(wireModelIdFor("deepseek", "not-a-real-model")).toBe("not-a-real-model");
   });
 });
