@@ -597,3 +597,70 @@ describe("M-3: Winter never guesses a model on a provider the user did not choos
     expect(String(own.tag)).toBe("groq/llama-3.3-70b-versatile");
   });
 });
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// USER RULING 2026-09-19: `reviewer.model` is a SAFETY gate, so an unrunnable EXPLICIT pin must not
+// switch it off — it runs on the answer an unpinned reviewer would get. The other three internal
+// roles keep "a refused pin is inert with a note": spending a credential on a provider the user did
+// not choose for titles/dreams/cleanup is worse than not running it.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+describe("the reviewer's pin fallback", () => {
+  async function codexHome(pin: string) {
+    const secrets = secretsStore();
+    await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at" });
+    const router = await routerFor(secrets);
+    return { router, settings: settingsWith("codex-oauth/gpt-5.6-sol", { reviewer: { model: pin } }) };
+  }
+
+  test("pinned to an UNCREDENTIALED provider: reviews on the codex default, carrying the pin's own issue", async () => {
+    const { router, settings } = await codexHome("deepseek/deepseek-v4-flash");
+    const call = router.resolve("reviewer.model", settings, { fallbackToDefault: true });
+    expect(isInternalRefusal(call)).toBe(false);
+    if (isInternalRefusal(call)) return;
+    expect(call.providerId).toBe("codex-oauth");
+    expect(String(call.tag)).toBe("codex-oauth/gpt-5.6-terra");
+    // The pin's issue rides along so the wire can still report it.
+    expect(call.pinRefusal?.reason).toBe("no-credential");
+    expect(call.pinRefusal?.detail).toBe("no credential is stored for DeepSeek");
+    expect(String(call.pinRefusal?.tag)).toBe("deepseek/deepseek-v4-flash");
+  });
+
+  test("pinned to anthropic/*: same — reviews on the default, pin reported as provider-unsupported", async () => {
+    const { router, settings } = await codexHome("anthropic/claude-opus-5");
+    const call = router.resolve("reviewer.model", settings, { fallbackToDefault: true });
+    expect(isInternalRefusal(call)).toBe(false);
+    if (isInternalRefusal(call)) return;
+    expect(String(call.tag)).toBe("codex-oauth/gpt-5.6-terra");
+    expect(call.pinRefusal?.reason).toBe("provider-unsupported");
+    expect(call.pinRefusal?.detail).toBe("Anthropic can't be used for Winter's own jobs yet");
+  });
+
+  test("a RUNNABLE pin is untouched — no fallback, no pinRefusal", async () => {
+    const { router, settings } = await codexHome("codex-oauth/gpt-5.6-luna");
+    const call = router.resolve("reviewer.model", settings, { fallbackToDefault: true });
+    if (isInternalRefusal(call)) throw new Error("expected a live call");
+    expect(String(call.tag)).toBe("codex-oauth/gpt-5.6-luna");
+    expect(call.pinRefusal).toBeUndefined();
+  });
+
+  test("no fallback available: the structural refusal stands (this is the hook's allow() path)", async () => {
+    const secrets = secretsStore();
+    const router = await routerFor(secrets); // nothing credentialed at all
+    const settings = settingsWith("deepseek/deepseek-v4-flash", { reviewer: { model: "anthropic/claude-opus-5" } });
+    const call = router.resolve("reviewer.model", settings, { fallbackToDefault: true });
+    expect(isInternalRefusal(call)).toBe(true);
+    if (isInternalRefusal(call)) expect(call.reason).toBe("no-internal-credential");
+  });
+
+  test("THE ASYMMETRY: titles/dreamer/cleaner never fall back, even when asked the same way", async () => {
+    const { router, settings } = await codexHome("deepseek/deepseek-v4-flash");
+    const pinnedEverywhere = { ...settings, titles: { model: "deepseek/deepseek-v4-flash" as never }, pins: { dream: "deepseek/deepseek-v4-flash" as never, cleaner: "deepseek/deepseek-v4-flash" as never } };
+    for (const role of ["titles.model", "pins.dream", "pins.cleaner"] as const) {
+      // Even WITH the option set — nothing passes it for these roles, and it would change nothing if it did,
+      // because the option is only consulted for a refusal and these stay refused by design.
+      const call = router.resolve(role, pinnedEverywhere, { fallbackToDefault: true });
+      expect(isInternalRefusal(call)).toBe(true);
+      if (isInternalRefusal(call)) expect(call.reason).toBe("no-credential");
+    }
+  });
+});

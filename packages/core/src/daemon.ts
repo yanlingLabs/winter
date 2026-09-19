@@ -1457,7 +1457,10 @@ export async function startDaemon(opts: {
     ? undefined
     : new BashReviewer({
         ...(agentProvider ? { provider: agentProvider } : {}),
-        source: () => internalRouter!.resolve("reviewer.model", settings),
+        // USER RULING 2026-09-19: the reviewer is a SAFETY gate, so an unrunnable PIN falls back to the
+        // default rule's answer and RUNS — `providers/internal-router.ts`'s `ResolveOptions` has the full
+        // argument, including why the other three internal roles deliberately do NOT do this.
+        source: () => internalRouter!.resolve("reviewer.model", settings, { fallbackToDefault: true }),
         refreshCredentials: () => internalRouter!.view.refreshSoon(),
         model: reviewerModel, effort: reviewerEffort,
         boundProviderId: boundProviderIdForRoles, roleHealth,

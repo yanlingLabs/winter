@@ -1947,8 +1947,12 @@ export function internalRoleEffectiveTag(
   settings: Settings | null | undefined,
   role: InternalJobRole,
   snapshot?: InternalProviderSnapshot,
+  /** `ignoreExplicitPin`: answer as if the role had NO pin — the reviewer's pin fallback (user ruling
+   *  2026-09-19, `providers/internal-router.ts`'s `ResolveOptions`) asks exactly this question when a
+   *  pinned reviewer's own tag turns out to be unrunnable. No other caller passes it. */
+  opts?: { ignoreExplicitPin?: boolean },
 ): ModelTag | null {
-  const explicit = explicitInternalRolePin(settings, role);
+  const explicit = opts?.ignoreExplicitPin === true ? undefined : explicitInternalRolePin(settings, role);
   if (explicit !== undefined) return explicit;
   const preferred = preferredInternalProviderFor(settings, snapshot);
   if (preferred === undefined) return null;

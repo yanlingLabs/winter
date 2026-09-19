@@ -63,6 +63,12 @@ export interface InternalCall {
    *  can read `subscriptionQuota()` without a second dep (it used to come off
    *  `RebindableProvider.quota`). Shared across every provider: see `createInternalRouter`. */
   quota?: SubscriptionQuotaSource;
+  /**
+   * Set ONLY on a `fallbackToDefault` call whose explicit pin was unrunnable (see `ResolveOptions`): this
+   * call is live and will run, on the DEFAULT tag, and `pinRefusal` is the pin's own issue so the wire can
+   * still report it. `pinRefusal.tag` is the pin; this call's own `tag` is what is actually running.
+   */
+  pinRefusal?: InternalRefusal;
 }
 
 /** What a consumer of the internal provider is handed per call — the one seam
@@ -140,7 +146,28 @@ export interface InternalRouter {
    *  Answers even for a role that cannot run (an explicit pin on an unsupported provider is still that
    *  role's model), and `null` only when the role has no pin and nothing to default onto. */
   effectiveTag(role: InternalRole, settings: Settings | null | undefined): ModelTag | null;
-  resolve(role: InternalRole, settings: Settings | null | undefined): InternalCall | InternalRefusal;
+  resolve(role: InternalRole, settings: Settings | null | undefined, opts?: ResolveOptions): InternalCall | InternalRefusal;
+}
+
+/**
+ * USER RULING 2026-09-19: `fallbackToDefault` is for `reviewer.model` AND NOTHING ELSE.
+ *
+ * A SAFETY job must not switch itself off because of a pin mistake. When the reviewer's EXPLICIT pin is
+ * unrunnable — `provider-unsupported` (a pre-ruling Claude pin) or `no-credential` (pinned to a provider
+ * whose key has not arrived; a state the write door deliberately admits) — the reviewer RUNS on the
+ * answer an UNPINNED reviewer would get (the default rule's rungs 1-2), and the role's `problem` still
+ * reports the pin's own issue with a "meanwhile" note saying what it is actually reviewing on
+ * (`internal-role-problems.ts`). Only when the default rule has no answer either
+ * (`no-internal-credential`/`no-default-model`) does the hook's structural `allow()` path apply.
+ *
+ * DELIBERATELY NOT for titles/the dreamer/the cleaner: for those, spending a credential on a provider the
+ * user did not choose for that job is worse than not running it, so a refused pin stays inert with a note.
+ * The asymmetry is the whole point — one of these four is a safety gate and three are conveniences — and
+ * `resolve` ENFORCES it on the role rather than trusting callers to pass this flag correctly, so setting it
+ * for another role is inert by construction.
+ */
+export interface ResolveOptions {
+  fallbackToDefault?: boolean;
 }
 
 /** The consumer defaults that predate roles being able to store an effort — passed through
@@ -205,6 +232,53 @@ export function createInternalRouter(deps: {
   const effectiveTag = (role: InternalRole, settings: Settings | null | undefined): ModelTag | null =>
     internalRoleEffectiveTag(settings, role, deps.view.snapshot());
 
+  /** Resolve ONE already-chosen tag. Split out of `resolve` so the reviewer's pin fallback can ask the
+   *  same question twice — once for the pin, once for the default — with no second spelling of the rules. */
+  const resolveTag = (role: InternalRole, settings: Settings | null | undefined, tag: ModelTag): InternalCall | InternalRefusal => {
+    let providerId: string;
+    let model: string;
+    try {
+      ({ providerId, modelId: model } = splitTag(tag));
+    } catch {
+      return { reason: "provider-unsupported", detail: `${JSON.stringify(tag)} is not a provider-qualified model tag`, tag };
+    }
+    if (!deps.view.eligible().has(providerId)) {
+      return { reason: "provider-unsupported", detail: `${providerDisplayName(providerId)} can't be used for Winter's own jobs yet`, tag };
+    }
+    if (!deps.view.credentialed().has(providerId)) {
+      // NO self-heal here, and the reason is worth recording: this branch is reachable ONLY through an
+      // EXPLICIT pin. Every rung of `preferredInternalProviderFor` tests `credentialed.has(id)`, so a
+      // DEFAULTED role's tag is on a credentialed provider by construction and an uncredentialed default
+      // surfaces as `no-internal-credential`/`no-default-model` (both of which do probe). A pin on some
+      // other provider is a deliberate choice whose credential nothing writes behind the user's back.
+      return { reason: "no-credential", detail: `no credential is stored for ${providerDisplayName(providerId)}`, tag };
+    }
+    const provider = providerFor(providerId, settings);
+    if (provider === null) {
+      return { reason: "provider-unsupported", detail: `${providerDisplayName(providerId)} can't be used for Winter's own jobs yet`, tag };
+    }
+    const wanted = effortToSpendForRole(settings, role, tag, CONSUMER_EFFORT[role]);
+    const effort = internalWireEffortFor(tag, wanted);
+    return { provider, model: wireModelIdFor(providerId, model), tag, providerId, quota: quotaFor(providerId), ...(effort === undefined ? {} : { effort }) };
+  };
+
+  /** The refusal for "no tag at all" — shared by `resolve` and the pin-fallback path. */
+  const noTagRefusal = (role: InternalRole, settings: Settings | null | undefined): InternalRefusal => {
+    const why = internalRoleNoTagReason(settings, role, deps.view.snapshot());
+    if (why?.reason === "no-default-model") {
+      // A credential IS present — a probe would not change this answer, so no self-heal here.
+      return {
+        reason: "no-default-model",
+        detail: `pick a model for this job in Settings › Roles — Winter won't choose one on ${providerDisplayName(why.providerId ?? "")} for you`,
+        tag: null,
+      };
+    }
+    // SELF-HEAL (B-1): `winter login` writes `codex-oauth:default` in-process, so a cached snapshot can
+    // be stale in exactly this state. Non-blocking and rate-limited — the NEXT call is right.
+    deps.view.refreshSoon();
+    return { reason: "no-internal-credential", detail: `no provider Winter's own jobs can run on has a credential stored — ${INTERNAL_JOBS_LOGIN_HINT}`, tag: null };
+  };
+
   return {
     view: deps.view,
     quotaFor: (providerId) => quotas.get(providerId),
@@ -214,61 +288,30 @@ export function createInternalRouter(deps: {
       return quotas.get("codex-oauth") ?? [...quotas.values()][0] ?? quotaFor("codex-oauth");
     },
     effectiveTag,
-    resolve(role, settings) {
+    resolve(role, settings, opts) {
       const tag = effectiveTag(role, settings);
-      if (tag === null) {
-        const why = internalRoleNoTagReason(settings, role, deps.view.snapshot());
-        if (why?.reason === "no-default-model") {
-          // A credential IS present — a probe would not change this answer, so no self-heal here.
-          return {
-            reason: "no-default-model",
-            detail: `pick a model for this job in Settings › Roles — Winter won't choose one on ${providerDisplayName(why.providerId ?? "")} for you`,
-            tag: null,
-          };
-        }
-        // SELF-HEAL (B-1): `winter login` writes `codex-oauth:default` in-process, so a cached snapshot
-        // can be stale in exactly this state. Non-blocking and rate-limited — the NEXT call is right.
-        deps.view.refreshSoon();
-        return { reason: "no-internal-credential", detail: `no provider Winter's own jobs can run on has a credential stored — ${INTERNAL_JOBS_LOGIN_HINT}`, tag: null };
-      }
-      let providerId: string;
-      let model: string;
-      try {
-        ({ providerId, modelId: model } = splitTag(tag));
-      } catch {
-        return { reason: "provider-unsupported", detail: `${JSON.stringify(tag)} is not a provider-qualified model tag`, tag };
-      }
-      if (!deps.view.eligible().has(providerId)) {
-        return {
-          reason: "provider-unsupported",
-          detail: `${providerDisplayName(providerId)} can't be used for Winter's own jobs yet`,
-          tag,
-        };
-      }
-      if (!deps.view.credentialed().has(providerId)) {
-        // NO self-heal here, and the reason is worth recording: this branch is reachable ONLY through an
-        // EXPLICIT pin. Every rung of `preferredInternalProviderFor` tests `credentialed.has(id)`, so a
-        // DEFAULTED role's tag is on a credentialed provider by construction and an uncredentialed default
-        // surfaces as `no-internal-credential`/`no-default-model` above (both of which do probe). A pin on
-        // some other provider is a deliberate choice whose credential nothing writes behind the user's
-        // back, so probing on it would be noise.
-        return {
-          reason: "no-credential",
-          detail: `no credential is stored for ${providerDisplayName(providerId)}`,
-          tag,
-        };
-      }
-      const provider = providerFor(providerId, settings);
-      if (provider === null) {
-        return {
-          reason: "provider-unsupported",
-          detail: `${providerDisplayName(providerId)} can't be used for Winter's own jobs yet`,
-          tag,
-        };
-      }
-      const wanted = effortToSpendForRole(settings, role, tag, CONSUMER_EFFORT[role]);
-      const effort = internalWireEffortFor(tag, wanted);
-      return { provider, model: wireModelIdFor(providerId, model), tag, providerId, quota: quotaFor(providerId), ...(effort === undefined ? {} : { effort }) };
+      if (tag === null) return noTagRefusal(role, settings);
+      const first = resolveTag(role, settings, tag);
+      if (!isInternalRefusal(first)) return first;
+      // THE REVIEWER'S PIN FALLBACK (user ruling — see `ResolveOptions`). Only for a refusal about the PIN
+      // itself, and only when a pin is what produced this tag: the default rule's own answers
+      // (`no-internal-credential`/`no-default-model`) are handled above and have nothing to fall back to.
+      if (opts?.fallbackToDefault !== true) return first;
+      // THE ASYMMETRY IS ENFORCED HERE, not left to the call sites. `reviewer.model` is the only safety
+      // gate of the four; for titles/the dreamer/the cleaner, spending a credential on a provider the user
+      // did not choose for that job is worse than not running it, so a refused pin stays inert with a note.
+      // Gating on the role rather than trusting every present and future caller to pass the flag correctly
+      // is what makes that a property of the router instead of a convention.
+      if (role !== "reviewer.model") return first;
+      if (explicitInternalRolePin(settings, role) === undefined) return first;
+      if (first.reason !== "provider-unsupported" && first.reason !== "no-credential") return first;
+      const fallbackTag = internalRoleEffectiveTag(settings, role, deps.view.snapshot(), { ignoreExplicitPin: true });
+      if (fallbackTag === null) return noTagRefusal(role, settings);
+      const second = resolveTag(role, settings, fallbackTag);
+      // The default rule can only land on a credentialed, eligible provider, so a refusal here would be a
+      // build failure (an unusable endpoint). Report the PIN's issue in that case — it is the actionable one.
+      if (isInternalRefusal(second)) return first;
+      return { ...second, pinRefusal: first };
     },
   };
 }
