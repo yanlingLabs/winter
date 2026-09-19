@@ -831,9 +831,14 @@ export async function startDaemon(opts: {
     internalRouter = staticInternalRouter({ view: internalView, provider: opts.agentProvider.provider, model: opts.agentProvider.model });
   } else if (settings) {
     internalView = createInternalProviderView({ secrets, seed: presentProviders });
-    // `quiet`: the summary below is the boot's ONE line about this. Without it a first boot whose
-    // legacy credential migration just wrote a key prints the seed→probe diff AND the summary.
-    await internalView.refresh({ quiet: true });
+    // N-2 (review): ONE probe at boot, not two. `presentProviders` is `credentialPresenceFrom`'s own
+    // result from a few hundred lines up, and the ONLY thing that can have moved it since is
+    // `migrateLegacyCredentialMaterial` just above — which reports, per provider, whether it actually
+    // wrote anything. So the seed stands unless it did. `quiet`: the summary below is the boot's one
+    // line about this, and without it a re-probe would print the seed→probe diff as well.
+    if (credentialMigration.openai === "migrated" || credentialMigration.codexOauth === "migrated") {
+      await internalView.refresh({ quiet: true });
+    }
     internalRouter = createInternalRouter({ view: internalView, secrets });
     // THE boot line, replacing the every-boot "the daemon's internal provider only builds for
     // codex-oauth/openai … are inert" one. Accurate in both directions: which providers Winter's own
@@ -871,12 +876,6 @@ export async function startDaemon(opts: {
   // itself self-gates on its own internal `boundProviderId` compare (a cheap no-op when nothing
   // changed) — see `RebindableProvider.refresh`'s own doc comment — so calling it unconditionally
   // from BOTH triggers is correct, not merely convenient.
-  // 2026-09-19: DEAD for a production boot (nothing calls `createRebindableProvider` any more) and
-  // unnecessary either way — the router resolves per call and caches against `view.generation()`, so a
-  // settings apply needs no rebuild. Kept only for an injected double that still carries `refresh`.
-  const refreshAgentProviderHot = agentProvider?.refresh
-    ? (next: Settings) => agentProvider!.refresh!(next, secrets, dirs.settingsPath)
-    : undefined;
 
   // SP-approvals Task 5: hoisted alongside `engine` — same "declared null/undefined above, assigned
   // inside the gate" shape as `dreamer`/`mcp`/etc below. PermissionRules itself needs no provider
@@ -2064,6 +2063,7 @@ export async function startDaemon(opts: {
       ...(agentProvider ? { provider: agentProvider } : {}),
       // 2026-09-19: the ONE resolution per cycle — see `DreamerDeps.resolve`.
       resolve: () => internalRouter!.resolve("pins.dream", settings),
+      refreshCredentials: () => internalRouter!.view.refreshSoon(),
       store,
       dir: () => assistantMemoryDirFor({ winterHome }),
       enabled: memoryEnabledHot,
@@ -2091,6 +2091,7 @@ export async function startDaemon(opts: {
       cleaner: new SessionCleaner({
         ...(agentProvider ? { provider: agentProvider } : {}),
         resolve: () => internalRouter!.resolve("pins.cleaner", settings),
+        refreshCredentials: () => internalRouter!.view.refreshSoon(),
         store,
         attachedCount: (sid) => hub.attachedCount(sid),
         turnRunning: (sid) => signals.isRunning(sid),
@@ -2169,11 +2170,6 @@ export async function startDaemon(opts: {
       // and is undefined until then, so the call is a typed no-op today — but a retention widening
       // on a running daemon reaches it the moment that task fills it in.
       runtimeSdk,
-      // Daemon settings surface (2026-09-17 plan, item 2); fix wave (finding 4b): the shared
-      // closure hoisted right after `agentProvider` itself is finalized, above — see its own doc
-      // comment. Reused verbatim here AND by `startIpcServer`'s own `refreshAgentProvider` option
-      // (`credential.set`'s retry), never two independently-drifting copies.
-      refreshAgentProvider: refreshAgentProviderHot,
       log: (msg) => console.error(`settings-apply: ${msg}`),
     });
     settingsWatcher = new SettingsWatcher({
@@ -2368,7 +2364,6 @@ export async function startDaemon(opts: {
     // every settled apply, now also reachable from `credential.set`'s handler — see that handler's
     // own doc comment for why a credential add needs this rather than waiting for an unrelated
     // settings write to trigger the next `refresh()`.
-    refreshAgentProvider: refreshAgentProviderHot,
     mcp: mcp ?? undefined,
     // Phase 4b Task 4: the plugin tool bridge. `registry` is undefined whenever agentProvider is
     // null (see `sharedRegistry`'s doc comment above). `supervisor`, unlike `registry`, is now

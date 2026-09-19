@@ -30,9 +30,11 @@ import {
   effortToSpendForRole,
   explicitInternalRolePin,
   internalRoleEffectiveTag,
+  internalRoleNoTagReason,
   type InternalJobRole,
   type Settings,
 } from "../settings";
+import { wireModelIdFor } from "./internal-adapters";
 import { buildInternalProvider, internalWireEffortFor } from "./internal-provider";
 import { INTERNAL_JOBS_LOGIN_HINT } from "./internal-login-hint";
 import type { InternalProviderView } from "./internal-view";
@@ -89,9 +91,14 @@ export function requireInternalWiring(what: string): never {
  *    already renders it.
  *  - `"no-internal-credential"` — NO eligible provider holds a credential at all, so there is nothing
  *    for a defaulted role to fall back to and every internal role is inert together.
+ *  - `"no-default-model"` (M-3) — a provider IS credentialed, but Winter will not CHOOSE a model on it:
+ *    it declares no `terra`/`luna` family slot and it is not `settings.provider.model`'s own provider,
+ *    so there is no model the user can be said to have picked. The fix is a pin, not a credential, so it
+ *    has to be a different reason from `no-credential` — see `internalRoleDefaultTagFor`'s own doc for
+ *    the measurement that made guessing unacceptable.
  */
 export interface InternalRefusal {
-  reason: "provider-unsupported" | "no-credential" | "no-internal-credential";
+  reason: "provider-unsupported" | "no-credential" | "no-internal-credential" | "no-default-model";
   detail: string;
   /** The tag the refusal is ABOUT — the role's explicit pin, or `null` when the role has no pin and
    *  nothing to default onto. `role-health.ts`'s `problemFor` compares a note's model against the
@@ -105,6 +112,20 @@ export function isInternalRefusal(v: InternalCall | InternalRefusal): v is Inter
 
 export interface InternalRouter {
   readonly view: InternalProviderView;
+  /**
+   * M-3/M-2: the quota ledger for ONE provider, created on first use and keyed exactly like the
+   * `Provider` cache. `undefined` for a provider that has never been called.
+   *
+   * ONE PER PROVIDER, not one shared (M-2, review): `QuotaManager` carries a global `limitedUntil`, so a
+   * Codex usage-limit 429 — whose `retryAfterMs` is hour-scale — used to stall a perfectly healthy
+   * DeepSeek role through the shared instance. A rate limit is a fact about one vendor's account.
+   */
+  quotaFor(providerId: string): QuotaManager | undefined;
+  /**
+   * What `daemon.status`/`sync.config` read. UNCHANGED for a codex user, which is the compatibility
+   * requirement: it is the `codex-oauth` manager when that provider has one (the only backend that ever
+   * reported a subscription quota), else the first manager created. See `createInternalRouter`.
+   */
   readonly quota: QuotaManager;
   /** The role's EFFECTIVE tag — what `settings.modelRoles` reports and what a problem is keyed to.
    *  Answers even for a role that cannot run (an explicit pin on an unsupported provider is still that
@@ -136,7 +157,19 @@ export function createInternalRouter(deps: {
   /** TEST-ONLY: a loopback base URL per provider id, threaded into `buildInternalProvider`. */
   testBackendUrl?: (providerId: string) => string | undefined;
 }): InternalRouter {
-  const quota = deps.quota ?? new QuotaManager();
+  // M-2: ONE ledger PER PROVIDER, created lazily and keyed like the `Provider` cache. A `deps.quota`
+  // (tests, and any caller that wants to observe one) seeds the FIRST provider asked for, so a
+  // single-provider test sees exactly what it did before.
+  const quotas = new Map<string, QuotaManager>();
+  let seedQuota = deps.quota;
+  const quotaFor = (providerId: string): QuotaManager => {
+    const hit = quotas.get(providerId);
+    if (hit !== undefined) return hit;
+    const made = seedQuota ?? new QuotaManager();
+    seedQuota = undefined;
+    quotas.set(providerId, made);
+    return made;
+  };
   const cache = new Map<string, { generation: number; baseUrl: string | undefined; provider: Provider | null }>();
 
   const providerFor = (providerId: string, settings: Settings | null | undefined): Provider | null => {
@@ -144,6 +177,7 @@ export function createInternalRouter(deps: {
     const baseUrl = settings?.providers?.[providerId]?.baseUrl;
     const hit = cache.get(providerId);
     if (hit !== undefined && hit.generation === generation && hit.baseUrl === baseUrl) return hit.provider;
+    const quota = quotaFor(providerId);
     const built = buildInternalProvider({
       providerId,
       secrets: deps.secrets,
@@ -164,11 +198,32 @@ export function createInternalRouter(deps: {
 
   return {
     view: deps.view,
-    quota,
+    quotaFor: (providerId) => quotas.get(providerId),
+    // `daemon.status`/`sync.config`'s single number. `codex-oauth` FIRST and by name: it is the only
+    // backend that ever reports a subscription quota (`quotaEvent`), so a codex user's status reads
+    // byte-identically to before the split. Otherwise the first ledger created — and the TOKEN counters
+    // it carries are that provider's alone, not a cross-vendor sum. Deliberate: summing tokens across
+    // vendors would put an OpenAI-priced count and a DeepSeek-priced count in one field with no way to
+    // tell them apart, which is a wrong number that reads as authoritative. The RPC shape is unchanged.
+    get quota(): QuotaManager {
+      return quotas.get("codex-oauth") ?? [...quotas.values()][0] ?? quotaFor("codex-oauth");
+    },
     effectiveTag,
     resolve(role, settings) {
       const tag = effectiveTag(role, settings);
       if (tag === null) {
+        const why = internalRoleNoTagReason(settings, role, deps.view.snapshot());
+        if (why?.reason === "no-default-model") {
+          // A credential IS present — a probe would not change this answer, so no self-heal here.
+          return {
+            reason: "no-default-model",
+            detail: `pick a model for this job in Settings › Roles — Winter won't choose one on ${providerDisplayName(why.providerId ?? "")} for you`,
+            tag: null,
+          };
+        }
+        // SELF-HEAL (B-1): `winter login` writes `codex-oauth:default` in-process, so a cached snapshot
+        // can be stale in exactly this state. Non-blocking and rate-limited — the NEXT call is right.
+        deps.view.refreshSoon();
         return { reason: "no-internal-credential", detail: `no provider Winter's own jobs can run on has a credential stored — ${INTERNAL_JOBS_LOGIN_HINT}`, tag: null };
       }
       let providerId: string;
@@ -186,6 +241,11 @@ export function createInternalRouter(deps: {
         };
       }
       if (!deps.view.credentialed().has(providerId)) {
+        // SELF-HEAL (B-1), but only for a provider the user did NOT pin: an unpinned role is on the
+        // preferred provider, which is the one `winter login`'s in-process write can have just filled.
+        // An explicit pin on some other provider is a deliberate choice whose credential nothing else
+        // writes, so probing on it would be noise.
+        if (explicitInternalRolePin(settings, role) === undefined) deps.view.refreshSoon();
         return {
           reason: "no-credential",
           detail: `no credential is stored for ${providerDisplayName(providerId)}`,
@@ -202,7 +262,7 @@ export function createInternalRouter(deps: {
       }
       const wanted = effortToSpendForRole(settings, role, tag, CONSUMER_EFFORT[role]);
       const effort = internalWireEffortFor(tag, wanted);
-      return { provider, model, tag, providerId, quota, ...(effort === undefined ? {} : { effort }) };
+      return { provider, model: wireModelIdFor(providerId, model), tag, providerId, quota: quotaFor(providerId), ...(effort === undefined ? {} : { effort }) };
     },
   };
 }
@@ -225,6 +285,7 @@ export function staticInternalRouter(cfg: {
   return {
     view: cfg.view,
     quota,
+    quotaFor: () => quota,
     effectiveTag: (role, settings) => explicitInternalRolePin(settings, role) ?? tag,
     resolve(role, settings) {
       const pinned = explicitInternalRolePin(settings, role);
@@ -233,8 +294,12 @@ export function staticInternalRouter(cfg: {
       const effectiveTag = pinned ?? tag;
       let model = cfg.model;
       try { model = splitTag(effectiveTag).modelId; } catch { /* a non-tag double keeps the given model */ }
+      // M-1 (review): through the SAME `internalWireEffortFor` production uses. ~16 test doubles run
+      // this path, so it is what actually exercises the effort rule — a second, laxer spelling here
+      // would mean the `"none"`/unmappable-tier behaviour was never under test at all.
       const wanted = effortToSpendForRole(settings, role, effectiveTag, CONSUMER_EFFORT[role]);
-      return { provider: cfg.provider, model, tag: effectiveTag, quota, providerId: (() => { try { return splitTag(effectiveTag).providerId; } catch { return cfg.provider.id; } })(), ...(wanted === undefined ? {} : { effort: wanted }) };
+      const effort = internalWireEffortFor(effectiveTag, wanted);
+      return { provider: cfg.provider, model, tag: effectiveTag, quota, providerId: (() => { try { return splitTag(effectiveTag).providerId; } catch { return cfg.provider.id; } })(), ...(effort === undefined ? {} : { effort }) };
     },
   };
 }

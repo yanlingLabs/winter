@@ -1,5 +1,31 @@
 import type { Provider, TurnInputItem } from "../providers/types";
 import { isInternalRefusal, requireInternalWiring, type InternalCallSource } from "../providers/internal-router";
+
+/**
+ * 2026-09-19 (review): the reviewer has NO RUNNABLE MODEL — structurally, not transiently.
+ *
+ * This is a DIFFERENT failure from "the call was attempted and did not produce a verdict" (a timeout, a
+ * malformed verdict, a 429), and the hook has to tell them apart because the safe answer differs:
+ *
+ *  - STRUCTURAL (`no-internal-credential` / `no-default-model`): no provider Winter's own jobs can use is
+ *    configured on this home AT ALL. Before the per-provider fan-out such a home had no `BashReviewer`
+ *    instance at all and `bashReviewerHook`'s very first line answered `allow()` — i.e. Winter never
+ *    reviewed bash there. A Claude-only home is exactly this case BY THE USER'S OWN RULING (Claude
+ *    providers are excluded because those models run through Anthropic's own runtime, which brings its
+ *    own reviewer), and the Mac creates code sessions with `approvalPolicy: "auto"`. Turning that into an
+ *    approval card on every non-trivially-safe bash call would be a card storm for a whole class of user
+ *    who never had this gate — and on the OFFICIAL leg `hooks.ts` records that an `ask` from this hook is
+ *    UNMEASURED, so if the bridge cannot route it the command is DENIED. So structural means `allow()`,
+ *    byte-identical to the pre-branch behaviour for that home.
+ *  - TRANSIENT (everything else): this home HAS a runnable provider and the call failed. `ask()` — let a
+ *    human decide — which is what shipped and stays.
+ */
+export class ReviewerNoRunnableModel extends Error {
+  constructor(readonly reason: string, detail: string) {
+    super(`the bash safety reviewer has no runnable model (${reason}): ${detail}`);
+    this.name = "ReviewerNoRunnableModel";
+  }
+}
 import { classifyProviderFailure, type RoleHealthRegistry, type SubscriptionQuotaSource } from "../providers/role-health";
 
 export interface ReviewVerdict {
@@ -111,6 +137,8 @@ export class BashReviewer {
   /** 2026-09-19: the internal-jobs resolver — see `SessionTitler`'s identical field (titles.ts) for the
    *  full doc, including why the four legacy getters beside it still exist. */
   private readonly source: InternalCallSource | undefined;
+  /** The last STRUCTURAL unavailability narrated, so the line above is per state change, not per call. */
+  private lastUnavailableReason: string | undefined;
 
   constructor(deps: {
     /** The LEGACY double path — see `source`. Omitted by a real daemon. */
@@ -151,7 +179,17 @@ export class BashReviewer {
     // valid verdict could be obtained": the caller escalates to a human instead of allowing the call.
     const resolved = this.source?.();
     if (resolved !== undefined && isInternalRefusal(resolved)) {
-      throw new Error(`the bash safety reviewer has no runnable model (${resolved.reason}): ${resolved.detail}`);
+      // ONE LINE PER CHANGE OF STATE, never per call — this fires on every unsafe-looking bash command
+      // under `auto`, and a home in this state stays in it until the user signs in or pins a model.
+      if (this.lastUnavailableReason !== resolved.reason) {
+        this.lastUnavailableReason = resolved.reason;
+        console.error(`reviewer: no runnable model (${resolved.reason}) — ${resolved.detail}; Winter is not reviewing bash commands on this home`);
+      }
+      throw new ReviewerNoRunnableModel(resolved.reason, resolved.detail);
+    }
+    if (this.lastUnavailableReason !== undefined) {
+      console.error(`reviewer: a runnable model is configured again — bash review is active`);
+      this.lastUnavailableReason = undefined;
     }
     const wire: { provider: Provider; model: string; effort: string | undefined; tag: string | undefined; quota: SubscriptionQuotaSource | undefined } =
       resolved === undefined

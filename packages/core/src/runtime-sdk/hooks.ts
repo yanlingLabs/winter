@@ -66,7 +66,7 @@ import type {
 } from "@yanlinglabs/winter-agent-sdk";
 import type { FileDiffSummary } from "@yanlinglabs/winter-protocol";
 import { SHIPPED_DANGEROUS_DOMAINS, dangerousHostMatch, dangerousUrlMatch, normalizeDangerousDomain } from "../agent/dangerous-domains";
-import { BashReviewer, bashLooksSafe } from "../agent/reviewer";
+import { BashReviewer, ReviewerNoRunnableModel, bashLooksSafe } from "../agent/reviewer";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import { AUTO_DIAG_TOOL_NAMES, autoDiagnosticsSuffix } from "../agent/lsp/auto-diagnostics";
 import type { LspManager } from "../agent/lsp/manager";
@@ -305,7 +305,13 @@ function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
       const verdict = await deps.reviewer.review({ class: "bash", command }, signal);
       if (verdict.verdict === "unsafe") return deny(verdict.reason || "the safety reviewer judged this command unsafe");
       return allow();
-    } catch {
+    } catch (err) {
+      // 2026-09-19 (review): STRUCTURAL vs TRANSIENT — see `ReviewerNoRunnableModel`'s own doc for the
+      // full argument. No provider Winter's own jobs can use is configured on this home, so there is no
+      // review to be had and there never was one: `allow()`, exactly what this hook's own first line
+      // answered when such a home had no `BashReviewer` at all. The reviewer has already logged the
+      // state change once; nothing is logged per call here.
+      if (err instanceof ReviewerNoRunnableModel) return allow();
       // carry: measure `ask` end-to-end against a real child before trusting it as the sole net.
       return ask("reviewer unavailable — escalating for manual approval");
     }

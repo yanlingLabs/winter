@@ -373,16 +373,6 @@ export interface IpcServerOptions {
   // role's wire shape (`providers/role-health.ts`'s `withProblem`). Absent (every pre-existing
   // test/caller) means `problem` reports `null` for every role — never a crash, never a guess.
   roleHealth?: RoleHealthRegistry;
-  // Fix wave (pre-merge review, finding 4b): `RebindableProvider.refresh` (providers/manager.ts),
-  // pre-bound to `secrets`/`settingsPath` — the SAME closure `settings-apply.ts`'s hot-reload path
-  // calls on every settled apply (`daemon.ts`'s `refreshAgentProviderHot`). `credential.set`'s
-  // handler calls this AFTER a successful store, so a credential added for a provider the daemon's
-  // internal Provider previously failed to rebind to (no stored credential yet) is retried
-  // immediately — without this, the only thing that unstuck a failed rebind was an UNRELATED
-  // settings.json write reaching `settings-apply.ts`'s own unconditional retry, which is exactly
-  // the no-restart-rule violation this closes. Optional — absent (every pre-fix test, or a
-  // no-agentProvider daemon) makes the retry a no-op, unchanged from today's behavior.
-  refreshAgentProvider?: (next: Settings) => Promise<boolean> | boolean;
   /**
    * 2026-09-19: the internal-jobs router (`providers/internal-router.ts`), the ONE thing that decides
    * whether Winter's own background jobs (titles, the bash reviewer, the dreamer, the session cleaner)
@@ -910,49 +900,27 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   }
 
   /**
-   * Fix wave (pre-merge review, finding 4b): the daemon's own INTERNAL Provider
-   * (`RebindableProvider`, `providers/manager.ts`) is a SEPARATE thing from the live session
-   * children `evictSessionsForCredentialChange` just above replaces — `credential.set` used to
-   * touch only the latter, so a rebind that previously failed for lack of a stored credential
-   * stayed stuck on the OLD provider until some UNRELATED settings.json write reached
-   * `settings-apply.ts`'s own unconditional `refresh()` retry (which is exactly the no-restart-rule
-   * violation this closes: a credential write is itself a settings-adjacent change and must not
-   * need a second, unrelated one to take effect). Best-effort and deliberately does not read the
-   * `providerId` this credential was FOR before deciding whether to call `refresh` — `refresh`
-   * itself already self-gates on its own internal bound-provider compare (a cheap no-op when
-   * `settings.provider.model` doesn't name the provider this credential is for), so gating here
-   * too would only duplicate that check for no benefit. Every failure mode (no `refreshAgentProvider`
-   * wired, no `winterHome`, a torn settings.json, `refresh` itself throwing) degrades to exactly the
-   * pre-fix behaviour — the same "a successful credential.set must never read as a failure" contract
-   * `evictSessionsForCredentialChange` already has.
-   */
-  /**
    * 2026-09-19: re-probe which providers Winter's own jobs can run on, AWAITED before
-   * `credential.set`/`credential.remove` return — so the very next internal call (and the very next
-   * `settings.modelRoles` read) sees the key that was just stored, with no daemon restart. The view
-   * narrates the change itself, once, and only when the set actually moved.
+   * `credential.set`/`credential.remove`/`credential.list` return — so the very next internal call
+   * (and the very next `settings.modelRoles` read) sees material that was just stored or removed, with
+   * no daemon restart.
    *
-   * Best-effort in the same sense as its neighbour: `refresh()` never throws (it keeps the last good
-   * set and logs on a probe failure), so a successful credential write can never read as a failure.
+   * The view narrates a change itself, once, and only when the set actually moved.
+   *
+   * GENUINELY best-effort, and the `catch` is load-bearing rather than defensive: the real
+   * `InternalProviderView.refresh` already reports every failure through its own log line and cannot
+   * reject, but this is an injectable dependency and a successful credential write must never read as a
+   * failure because the daemon's own bookkeeping had a bad day. (A test stub that throws proved the
+   * earlier uncaught version turned a stored credential into an RPC error.)
    */
   async function refreshInternalProvidersAfterCredentialChange(): Promise<void> {
-    await opts.internalRouter?.view.refresh();
-  }
-
-  async function retryStuckRebindAfterCredentialChange(): Promise<void> {
-    if (!opts.refreshAgentProvider || !opts.winterHome) return;
     try {
-      const settings = loadSettings(join(opts.winterHome, "settings.json"));
-      await opts.refreshAgentProvider(settings);
+      await opts.internalRouter?.view.refresh();
     } catch (err) {
-      console.error(`credentials: retrying the internal provider's rebind failed (${err instanceof Error ? err.name : "unknown"}) — it stays on whichever backend is currently bound`);
+      console.error(`credentials: reconciling the internal-jobs view failed (${err instanceof Error ? err.name : "unknown"}) — it keeps the set it had`);
     }
   }
 
-  /** P8b Task 16 / P8c-14: the session's live driver (Winter OR official), resuming one when its
-   *  record says so (a daemon restart, an idle timeout). `undefined` ⇒ the engine's, exactly as
-   *  today. A typed refusal on the resume path (the binary is gone, a selection refusal) becomes
-   *  the RPC error. */
   async function ensureWinterSession(sessionId: string): Promise<LegSession | undefined> {
     if (opts.winter === undefined) return undefined;
     try { return await opts.winter.ensure(sessionId); } catch (err) { rpcFromWinterRefusal(err); }
@@ -3567,7 +3535,21 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         parseParams(CredentialListParams, params);
         if (!opts.secrets) throw new RpcFailure(ERR.INTERNAL, "credential.list is not available on this server (no secret store configured)", { code: "credential_store_unavailable" });
         try {
-          return { providers: await credentialRows(opts.secrets, opts.winterHome) };
+          // B-1 (review): THIS is the door `winter login` / `winter logout` poke after writing
+          // `codex-oauth:default` in-process. Those two write the Keychain directly and always have —
+          // a login door whose first move is to reach the daemon is useless in exactly the state a user
+          // reaches for it — so the daemon's cached "which providers can Winter's own jobs run on"
+          // snapshot has no other way to learn about them while it is running.
+          //
+          // An EXISTING method rather than a new one (CLAUDE.md's RPC checklist would otherwise apply to
+          // four mirrored lists): this handler already probes credential presence for its own answer, so
+          // reconciling the daemon's own view from the same breath is the cheapest possible place for it
+          // and cannot report anything the caller was not already being told. Nothing about the result
+          // changes; a remote caller (this method is already on the allowlist) triggers the same probe it
+          // triggers for its own rows and learns nothing new.
+          const rows = await credentialRows(opts.secrets, opts.winterHome);
+          await refreshInternalProvidersAfterCredentialChange();
+          return { providers: rows };
         } catch (err) {
           // Review Minor 4: a store that would not answer ANY probe is a typed refusal, never a
           // list of absent rows — "you have no credentials" is a confident, wrong answer that
@@ -3601,9 +3583,6 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const refusal = await setCredential(opts.secrets, p.providerId, p.apiKey);
         if (refusal !== undefined) throw credentialRpcFailure(refusal);
         await evictSessionsForCredentialChange(p.providerId);
-        // Fix wave (finding 4b): a stuck internal-Provider rebind (no credential yet for the newly
-        // chosen provider) is retried NOW, not on the next unrelated settings write.
-        await retryStuckRebindAfterCredentialChange();
         await refreshInternalProvidersAfterCredentialChange();
         return { ok: true };
       }

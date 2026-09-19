@@ -87,6 +87,21 @@ export function internalDrivableAdapterIds(): ReadonlySet<string> {
   return new Set(Object.keys(FACTORIES));
 }
 
+/**
+ * N-3: the model id to put ON THE WIRE for one tag's bare half, resolved through the SAME
+ * provider-scoped descriptor the adapter itself will use — `upstreamId` when the row has one, else the
+ * bare id verbatim.
+ *
+ * The catalog's own invariant is `key === providerId + "/" + upstreamId` (pinned across every row by
+ * `internal-adapters.test.ts`), so this is a no-op for every shipped row today. It is here because the
+ * invariant is DATA, not a type: a future row whose key and upstream id differ would otherwise have the
+ * key's bare half sent as the model id, which the endpoint would reject — and the failure would look
+ * like a bad model name rather than a lookup that needed one hop.
+ */
+export function wireModelIdFor(providerId: string, bareModelId: string): string {
+  return descriptorsForProvider(providerId)(bareModelId)?.upstreamId ?? bareModelId;
+}
+
 /** Builds the adapter for one catalog provider, or `undefined` when its family is not drivable —
  *  the one place the table is consulted for a real turn. */
 export function internalAdapterFor(providerId: string, opts: { tokenUrl?: string } = {}): ProviderAdapter | undefined {
