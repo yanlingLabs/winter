@@ -1549,7 +1549,15 @@ export const ModelRoleInfoSchema = z.object({
    *  exists to avoid (`packages/core/src/providers/role-health.ts`'s own doc comment has the full
    *  design). `reason` is a raw string, not an enum, so a new value reaches the UI with no protocol
    *  change — today's vocabulary: `rate-limited`, `usage-limit`, `out-of-credits`,
-   *  `credential-rejected`, `no-credential`, `model-unavailable`, `provider-unavailable`, `other`. */
+   *  `credential-rejected`, `no-credential`, `model-unavailable`, `provider-unavailable`, `other`, plus
+   *  the two STRUCTURAL reasons an internal-jobs role can carry (2026-09-19): `provider-unsupported`
+   *  (the role's explicit tag names a provider Winter's own background jobs cannot run on — `detail`
+   *  names the provider's display name, e.g. "Anthropic can't be used for Winter's own jobs yet") and
+   *  `no-internal-credential` (no provider those jobs can use has a credential stored — `detail` names
+   *  the logins that would enable it). Those two are DERIVED on every read rather than recorded
+   *  (`packages/core/src/providers/internal-role-problems.ts`), so they clear themselves the moment the
+   *  condition clears and never outlive it in `role-health.json`. No schema change was needed: `reason`
+   *  has always been a raw string for exactly this reason. */
   problem: z.object({
     reason: z.string(),
     /** ONE short human line — never the provider's raw error body (see role-health.ts's own

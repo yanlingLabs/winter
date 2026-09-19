@@ -56,7 +56,9 @@ export interface ClassifiedFailure {
   /** A raw string on the wire (protocol's `problem.reason` is `z.string()`, not an enum) so a new
    *  value reaches the UI without a protocol change. Today's vocabulary: `rate-limited`,
    *  `usage-limit`, `out-of-credits`, `credential-rejected`, `no-credential`, `model-unavailable`,
-   *  `provider-unavailable`, `other`. */
+   *  `provider-unavailable`, `other` — plus the two STRUCTURAL reasons `internal-role-problems.ts`
+   *  overlays for an internal-jobs role (`provider-unsupported`, `no-internal-credential`), which this
+   *  classifier never produces and this registry never stores: they are derived per read. */
   reason: string;
   /** ONE short human line (capped ~160 chars), built from the CLASSIFIED facts — never the raw
    *  provider message for an `auth`-class failure (the safest rule the brief asks for: an auth body

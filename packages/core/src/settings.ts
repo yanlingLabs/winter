@@ -156,9 +156,12 @@ export function effortRefusalFor(effort: string, model: string, mode: string | u
  * an explicit `model` on `session.create` always has been. The constraint belongs where the
  * internal Provider is actually BUILT, not on the field a session's own default also reads.
  *
- * Exported so the CLI can reuse it as the `createProvider`-equivalent predicate (e.g. deciding
- * whether `winter provider configure`'s own restart-needed banner applies) — never again as a
- * `settings.provider.model` write-time refusal.
+ * 2026-09-19 — THIS CONSTANT NO LONGER GATES ANYTHING. Winter's own background jobs run on any
+ * provider in `internalEligibleProviderIds()` (below) that holds a credential, whatever
+ * `settings.provider.model` says, so neither the builder nor the roles consult this set as a
+ * predicate. It survives as the HEAD of `internalProviderPreferenceOrder()`: the two providers those
+ * jobs have always run on, preferred over a third-party key that happens to be stored too. The
+ * retired single-instance builder in `providers/manager.ts` still reads it; nothing else should.
  */
 export const INTERNAL_PROVIDER_IDS = ["codex-oauth", "openai"] as const;
 
