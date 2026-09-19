@@ -87,7 +87,7 @@ private let privateRefusal = "refusing to fetch a private address"
 /// The private/loopback/link-local IPv4 table, keyed on the first two octets — the direct port of
 /// the TS's `ipv4Refusal`. Shared by literal IPv4 hosts AND by IPv4-mapped IPv6 addresses, which
 /// resolve to the exact same 32 bits and must not evade the check by being spelled as IPv6.
-private func ipv4TableRefusal(_ a: Int, _ b: Int) -> String? {
+func ipv4TableRefusal(_ a: Int, _ b: Int) -> String? {
     if a == 127 || a == 10 || a == 0
         || (a == 172 && b >= 16 && b <= 31)
         || (a == 192 && b == 168)
@@ -204,7 +204,7 @@ private func parsePart(_ part: String, _ policy: RadixPolicy) -> UInt64? {
 /// this helper says nothing about it; what covers that host is the superset property described in the
 /// header. This helper is a PARITY device — it keeps Foundation's verdict identical to WHATWG's on 38
 /// spellings WHATWG rejects outright — and nothing more.
-private func hasInvalidOctalOctet(_ host: String) -> Bool {
+func hasInvalidOctalOctet(_ host: String) -> Bool {
     let parts = host.components(separatedBy: ".")
     guard (1 ... 4).contains(parts.count) else { return false }
     guard parts.allSatisfy({ !$0.isEmpty && $0.allSatisfy { $0.isASCII && $0.isNumber } }) else { return false }
@@ -220,7 +220,7 @@ private func hasInvalidOctalOctet(_ host: String) -> Bool {
 /// not one has no legitimate use, and refusing it keeps it out of the resolver entirely. Only the
 /// LAST label is consulted, exactly as the spec has it, so `8.8.8.8.nip.io` and `2021.example.com`
 /// are untouched.
-private func looksNumericButIsNotAnAddress(_ host: String) -> Bool {
+func looksNumericButIsNotAnAddress(_ host: String) -> Bool {
     guard let last = host.components(separatedBy: ".").last else { return false }
     let isDigits = !last.isEmpty && last.allSatisfy { $0.isASCII && $0.isNumber }
     let isHex = (last.hasPrefix("0x") || last.hasPrefix("0X"))
