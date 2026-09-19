@@ -37,6 +37,7 @@ import { buildInternalProvider, internalWireEffortFor } from "./internal-provide
 import { INTERNAL_JOBS_LOGIN_HINT } from "./internal-login-hint";
 import type { InternalProviderView } from "./internal-view";
 import { QuotaManager, withQuota } from "./quota";
+import type { SubscriptionQuotaSource } from "./role-health";
 import type { Provider } from "./types";
 
 /** The role union and its membership test live in `settings.ts` (`INTERNAL_JOB_ROLES`) beside the pure
@@ -56,7 +57,16 @@ export interface InternalCall {
   /** Already mapped onto the row `tag` names, and omitted when the row cannot take it
    *  (`internalWireEffortFor`). */
   effort?: string;
+  /** The daemon's ONE `QuotaManager` — carried on the call so a consumer's role-health classification
+   *  can read `subscriptionQuota()` without a second dep (it used to come off
+   *  `RebindableProvider.quota`). Shared across every provider: see `createInternalRouter`. */
+  quota?: SubscriptionQuotaSource;
 }
+
+/** What a consumer of the internal provider is handed per call — the one seam
+ *  `SessionTitler`/`BashReviewer`/`Dreamer`/`SessionCleaner` take instead of a `Provider` plus four
+ *  getters. Re-resolved on EVERY call, which is what makes a settings, pin or credential change hot. */
+export type InternalCallSource = () => InternalCall | InternalRefusal;
 
 /**
  * The two reason strings the Mac's Roles pane already ships wording for, plus the pre-existing
@@ -183,7 +193,7 @@ export function createInternalRouter(deps: {
       }
       const wanted = effortToSpendForRole(settings, role, tag, CONSUMER_EFFORT[role]);
       const effort = internalWireEffortFor(tag, wanted);
-      return { provider, model, tag, providerId, ...(effort === undefined ? {} : { effort }) };
+      return { provider, model, tag, providerId, quota, ...(effort === undefined ? {} : { effort }) };
     },
   };
 }
@@ -215,7 +225,7 @@ export function staticInternalRouter(cfg: {
       let model = cfg.model;
       try { model = splitTag(effectiveTag).modelId; } catch { /* a non-tag double keeps the given model */ }
       const wanted = effortToSpendForRole(settings, role, effectiveTag, CONSUMER_EFFORT[role]);
-      return { provider: cfg.provider, model, tag: effectiveTag, providerId: (() => { try { return splitTag(effectiveTag).providerId; } catch { return cfg.provider.id; } })(), ...(wanted === undefined ? {} : { effort: wanted }) };
+      return { provider: cfg.provider, model, tag: effectiveTag, quota, providerId: (() => { try { return splitTag(effectiveTag).providerId; } catch { return cfg.provider.id; } })(), ...(wanted === undefined ? {} : { effort: wanted }) };
     },
   };
 }
