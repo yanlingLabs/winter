@@ -2421,6 +2421,19 @@ function assertInternalJobRoleTag(tag: string, role: InternalJobRole): void {
           `background calls against a blocked model. Pick another from this role's \`permitted\` set.`,
       );
     }
+    // The row must be reachable by the ONE request shape these jobs issue: a single chat/responses turn.
+    // `WinterModelDescriptor.endpoints` is the per-row fact (`"chat" | "responses" | "embeddings" |
+    // "image" | "audio" | "video"`) — the Anthropic-dialect providers declare `"chat"` too, so this is a
+    // capability test rather than a dialect one. MEASURED 2026-09-19: all 571 rows on the 94 eligible
+    // providers already declare chat or responses, so this refuses nothing today. It is a TRIPWIRE, and a
+    // cheap one: the day the catalog adds an embeddings-only or image-only row to an otherwise-fine
+    // provider, a pin on it would otherwise be accepted and then fail every background call.
+    if (row !== undefined && !row.endpoints.includes("chat") && !row.endpoints.includes("responses")) {
+      throw new TypeError(
+        `${role}: ${JSON.stringify(tag)} serves only ${row.endpoints.join("/")} — Winter's own background jobs issue a ` +
+          `single chat/responses turn, so this model cannot run one. Pick another from this role's \`permitted\` set.`,
+      );
+    }
     return;
   }
   const display = loadCatalog().providers.find((p) => p.id === providerId)?.displayName ?? providerId;

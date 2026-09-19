@@ -61,6 +61,8 @@ export class SessionTitler {
    * given, the getters otherwise.
    */
   private readonly source: InternalCallSource | undefined;
+  /** B-1: see the constructor dep of the same name. */
+  private readonly refreshCredentials: (() => void) | undefined;
   // Re-entrancy guard: the engine fires maybeTitle() fire-and-forget at every depth-0 turn
   // completion, and a slow model call must not overlap with itself for the same session (which
   // would otherwise race two "is it already titled" checks against the same not-yet-titled store).
@@ -85,9 +87,15 @@ export class SessionTitler {
     timeoutMs?: number;
     /** See the field's own doc comment. A real daemon passes this and nothing else. */
     source?: InternalCallSource;
+    /** B-1: `InternalProviderView.refreshSoon` — asked when the provider REJECTS the credential, which
+     *  is the `winter logout` symptom (the snapshot still says it is there). Titles are the most frequent
+     *  internal call — every session's first turn — so this is the fastest carrier of all of them.
+     *  Rate-limited and non-blocking inside. Absent in every test double. */
+    refreshCredentials?: () => void;
   }) {
     this.provider = deps.provider;
     this.source = deps.source;
+    this.refreshCredentials = deps.refreshCredentials;
     this.store = deps.store;
     this.hub = deps.hub;
     this.model = deps.model;
@@ -176,6 +184,9 @@ export class SessionTitler {
         // + swallowed" — that swallowing is unchanged).
         else if (ev.type === "error" && wire.tag !== undefined) {
           sawProviderError = true;
+          // B-1: a REJECTED credential is the `winter logout` symptom — ask for a rate-limited re-probe
+          // so the next call goes quietly inert instead of failing the same way again.
+          if (ev.code === "auth") this.refreshCredentials?.();
           this.roleHealth?.recordFailure("titles.model", wire.tag, classifyProviderFailure({ ...ev, subscriptionQuota: wire.quota?.subscriptionQuota() }));
         }
         else if (ev.type === "done" && ev.stopReason === "aborted") throw new Error("title generation aborted");

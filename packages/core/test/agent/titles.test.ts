@@ -376,3 +376,45 @@ describe("a first turn that failed still gets a title", () => {
     expect(sent).toContain("(none)");
   });
 });
+
+// B-1 (2026-09-19 review): titles are the most frequent internal call — every session's first turn —
+// so after a `winter logout` they are the first thing to fail `credential-rejected`. A rejected
+// credential asks for a rate-limited re-probe so the next call goes quietly inert instead.
+describe("SessionTitler — the credential-rejection self-heal", () => {
+  function titlerWith(events: ProviderEvent[][], onRefresh: () => void) {
+    const home = mkdtempSync(join(tmpdir(), "winter-titles-refresh-"));
+    const store = new SessionStore(home);
+    const hub = new SessionHub(store);
+    const provider = new FakeProvider(events);
+    const titler = new SessionTitler({
+      provider: { provider, model: "fake-1" },
+      store, hub,
+      boundProviderId: () => "openai",
+      refreshCredentials: onRefresh,
+    });
+    const sessionId = store.createSession("global", { cwd: "/tmp" });
+    seedTurn(store, sessionId);
+    return { titler, sessionId };
+  }
+
+  test("an `auth` error asks for a re-probe", async () => {
+    let asked = 0;
+    const { titler, sessionId } = titlerWith([[{ type: "error", code: "auth", message: "invalid credential" }]], () => { asked += 1; });
+    await titler.maybeTitle(sessionId);
+    expect(asked).toBe(1);
+  });
+
+  test("a NON-auth error does not — a 429 says nothing about which credentials exist", async () => {
+    let asked = 0;
+    const { titler, sessionId } = titlerWith([[{ type: "error", code: "rate_limit", message: "429" }]], () => { asked += 1; });
+    await titler.maybeTitle(sessionId);
+    expect(asked).toBe(0);
+  });
+
+  test("a successful title asks for nothing", async () => {
+    let asked = 0;
+    const { titler, sessionId } = titlerWith(titleScript("All Good Here"), () => { asked += 1; });
+    await titler.maybeTitle(sessionId);
+    expect(asked).toBe(0);
+  });
+});
