@@ -95,13 +95,39 @@ export function internalAdapterFor(providerId: string, opts: { tokenUrl?: string
   return FACTORIES[adapterId]?.(providerId, opts);
 }
 
-/** The catalog's own `api` endpoint for a provider — what `ConnectionProfile.baseUrl` must carry for
- *  a multi-provider adapter family (which has no vendor default of its own to fall back to). No
- *  `endpointOrigin` is stamped: the runtime reserves `"reviewed"` for its own copy path
- *  (`ConnectionProfile.endpointOrigin`'s doc), and an absent value reads as `"user"`, which the
- *  endpoint policy accepts for every shipped public https endpoint (measured 2026-09-19:
- *  `evaluateEndpoint` answers `ok` for `https://api.deepseek.com` with the field absent). */
+/**
+ * The catalog's own `api` endpoint for a provider — what `ConnectionProfile.baseUrl` must carry for a
+ * MULTI-provider adapter family, which has no vendor default of its own to fall back to.
+ *
+ * `undefined` for a family that serves exactly ONE catalog provider, deliberately, mirroring the
+ * runtime's own `generatedBaseUrlForAdapter` rule (`createShippedAdapters`): such an adapter carries a
+ * built-in default, `resolveEndpoint` PREFERS `connection.baseUrl` when one is set, and the two
+ * factories this replaced passed no base URL at all for codex-oauth/openai. Measured 2026-09-19 the two
+ * agree byte-for-byte (`CODEX.backendUrl` = `https://chatgpt.com/backend-api/codex` = the catalog's
+ * `codex-oauth` api; `OPENAI_API_BASE_URL` = `https://api.openai.com/v1` = the catalog's `openai` api),
+ * so forcing the catalog value would be a no-op TODAY — but a later catalog or SDK bump that moved one
+ * of them would silently redirect every existing codex/openai user's internal calls, and no loopback
+ * test could see it (they all override the URL). Deferring to the adapter keeps the pre-existing
+ * behaviour exactly; `internal-adapters.test.ts` pins the equality so a divergence is a test failure.
+ *
+ * No `endpointOrigin` is stamped: the runtime reserves `"reviewed"` for its own copy path
+ * (`ConnectionProfile.endpointOrigin`'s doc), and an absent value reads as `"user"`, which the endpoint
+ * policy accepts for every shipped public https endpoint (measured: `evaluateEndpoint` answers `ok` for
+ * `https://api.deepseek.com` with the field absent).
+ */
 export function catalogApiEndpointFor(providerId: string): string | undefined {
+  const catalog = loadCatalog();
+  const provider = catalog.providers.find((p) => p.id === providerId);
+  if (provider === undefined) return undefined;
+  const siblings = catalog.providers.filter((p) => p.adapterId === provider.adapterId).length;
+  if (siblings === 1) return undefined; // the adapter's own generated default — see the doc above
+  const api = provider.defaultEndpoints?.api;
+  return api !== undefined && api.length > 0 ? api : undefined;
+}
+
+/** The catalog `api` endpoint verbatim, WITHOUT the single-provider deferral — for the test that pins
+ *  the SDK's own constants against it, and for a caller that genuinely wants the catalog's answer. */
+export function catalogApiEndpointRawFor(providerId: string): string | undefined {
   const api = loadCatalog().providers.find((p) => p.id === providerId)?.defaultEndpoints?.api;
   return api !== undefined && api.length > 0 ? api : undefined;
 }
