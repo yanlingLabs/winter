@@ -45,9 +45,3 @@ extension ProviderTurnRequest {
         return nil
     }
 }
-
-/// Builds a FetchPage tool-call event with a JSON `urls` array.
-func fetchPageCall(_ callId: String, _ urls: [String]) -> ProviderEvent {
-    let json = (try? JSONSerialization.data(withJSONObject: ["urls": urls])).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
-    return .toolCall(callId: callId, name: ResearchRunner.fetchPageToolName, argumentsJSON: json)
-}

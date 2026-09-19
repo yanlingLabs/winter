@@ -299,8 +299,7 @@ final class LocalEventStoreTests: XCTestCase {
         ])
         let clock = t0
         let engine = ChatEngine(provider: provider, now: { clock })
-        let fetcher = PageFetcher(http: ScriptedChatHTTP(), cache: PageCache(), now: { clock })
-        let tools = ChatToolset(http: ScriptedChatHTTP(), fetcher: fetcher)
+        let tools = ChatToolset(http: ScriptedChatHTTP(), cache: WebFetchCache())
 
         await engine.runTurn(session: s, userText: "one", model: "m", tools: tools, emit: s.emit)
         await engine.runTurn(session: s, userText: "two", model: "m", tools: tools, emit: s.emit)
