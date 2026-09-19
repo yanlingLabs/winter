@@ -137,6 +137,8 @@ export class BashReviewer {
   /** 2026-09-19: the internal-jobs resolver — see `SessionTitler`'s identical field (titles.ts) for the
    *  full doc, including why the four legacy getters beside it still exist. */
   private readonly source: InternalCallSource | undefined;
+  /** B-1: see the constructor dep of the same name. */
+  private readonly refreshCredentials: (() => void) | undefined;
   /** The last STRUCTURAL unavailability narrated, so the line above is per state change, not per call. */
   private lastUnavailableReason: string | undefined;
 
@@ -150,9 +152,15 @@ export class BashReviewer {
     timeoutMs?: number;
     /** See the field's own doc comment. A real daemon passes this and nothing else. */
     source?: InternalCallSource;
+    /** B-1: `InternalProviderView.refreshSoon` — asked when the provider REJECTS the credential, which
+     *  is the `winter logout` symptom (the snapshot still says it is there). Titles are the most frequent
+     *  internal call — every session's first turn — so this is the fastest carrier of all of them.
+     *  Rate-limited and non-blocking inside. Absent in every test double. */
+    refreshCredentials?: () => void;
   }) {
     this.provider = deps.provider;
     this.source = deps.source;
+    this.refreshCredentials = deps.refreshCredentials;
     this.model = deps.model;
     this.effort = deps.effort;
     this.boundProviderId = deps.boundProviderId;
@@ -221,6 +229,9 @@ export class BashReviewer {
         // also had no `error` handling before, and still does not break/throw on it here.
         else if (ev.type === "error" && wire.tag !== undefined) {
           sawProviderError = true;
+          // B-1: a REJECTED credential is the `winter logout` symptom — ask for a rate-limited re-probe
+          // so the next call goes quietly inert instead of failing the same way again.
+          if (ev.code === "auth") this.refreshCredentials?.();
           this.roleHealth?.recordFailure("reviewer.model", wire.tag, classifyProviderFailure({ ...ev, subscriptionQuota: wire.quota?.subscriptionQuota() }));
         }
         else if (ev.type === "done" && ev.stopReason === "aborted") throw new Error("review aborted");

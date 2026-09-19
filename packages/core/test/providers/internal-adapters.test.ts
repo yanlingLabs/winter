@@ -18,7 +18,7 @@ import { DEEPSEEK_BASE_URL, OPENAI_API_BASE_URL, OPENROUTER_BASE_URL } from "@ya
 import { catalogApiEndpointFor, catalogApiEndpointRawFor, internalAdapterFor, internalDrivableAdapterIds, wireModelIdFor } from "../../src/providers/internal-adapters";
 import { buildInternalProvider } from "../../src/providers/internal-provider";
 import { FileSecretStore } from "../../src/auth/secret-store";
-import { Settings } from "../../src/settings";
+import { Settings, internalEligibleProviderIds } from "../../src/settings";
 
 const secrets = (): FileSecretStore => new FileSecretStore(mkdtempSync(join(tmpdir(), "winter-internal-adapters-")));
 const settings = (extra: Record<string, unknown> = {}): Settings =>
@@ -124,5 +124,30 @@ describe("N-3: the wire model id", () => {
     expect(wireModelIdFor("deepseek", "deepseek-v4-flash")).toBe("deepseek-v4-flash");
     // A tag whose bare half the provider does not serve falls through verbatim rather than inventing one.
     expect(wireModelIdFor("deepseek", "not-a-real-model")).toBe("not-a-real-model");
+  });
+});
+
+describe("M-3: the row-level capability tripwire", () => {
+  // Measured 2026-09-19: all 571 rows on the 94 eligible providers declare `chat` or `responses`, and
+  // none is blocked — so `setModelRole`'s row check refuses nothing today. This asserts the measurement,
+  // so the day the catalog adds an embeddings-only row to an otherwise-fine provider the tripwire's
+  // existence is visible here rather than discovered by a background job failing every call.
+  test("every row on an eligible provider is reachable by a single chat/responses turn", () => {
+    const eligible = internalEligibleProviderIds();
+    const rows = loadCatalog().models.filter((m) => eligible.has(m.providerId));
+    expect(rows.length).toBeGreaterThan(400);
+    const unreachable = rows
+      .filter((m) => !m.endpoints.includes("chat") && !m.endpoints.includes("responses"))
+      .map((m) => `${m.key} [${m.endpoints.join(",")}]`);
+    expect(unreachable).toEqual([]);
+    expect(rows.filter((m) => m.status === "blocked").map((m) => m.key)).toEqual([]);
+  });
+
+  test("every eligible row accepts text input — these jobs send nothing else", () => {
+    const eligible = internalEligibleProviderIds();
+    const noText = loadCatalog()
+      .models.filter((m) => eligible.has(m.providerId) && !(m.inputModalities?.value ?? ["text"]).includes("text"))
+      .map((m) => m.key);
+    expect(noText).toEqual([]);
   });
 });

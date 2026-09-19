@@ -122,9 +122,18 @@ export interface InternalRouter {
    */
   quotaFor(providerId: string): QuotaManager | undefined;
   /**
-   * What `daemon.status`/`sync.config` read. UNCHANGED for a codex user, which is the compatibility
-   * requirement: it is the `codex-oauth` manager when that provider has one (the only backend that ever
-   * reported a subscription quota), else the first manager created. See `createInternalRouter`.
+   * What `daemon.status`/`sync.config` read — THE `codex-oauth` LEDGER, always.
+   *
+   * `daemon.ts` reads this ONCE at boot into the value it hands `startIpcServer`, when the map is still
+   * empty, so the getter's own fallback creates the codex ledger and that is the one status reports for
+   * the daemon's whole life. Deliberate, and it is the compatibility requirement: codex-oauth is the only
+   * backend that ever reports a subscription quota (`quotaEvent`), so a codex user's status reads exactly
+   * as it did before the per-provider split. A home that never calls codex-oauth therefore shows an inert
+   * zero/ok ledger — which is ALSO what it showed before this branch (a null `agentProvider` meant
+   * `daemon.ts` substituted a fresh, never-written `QuotaManager`), so nothing regressed; it is simply
+   * not a cross-vendor view. Per-provider numbers are `quotaFor`, and the token counters on any one
+   * ledger are that provider's alone — summing an OpenAI-priced count and a DeepSeek-priced count into
+   * one field would be a wrong number that reads as authoritative. The RPC shape is unchanged.
    */
   readonly quota: QuotaManager;
   /** The role's EFFECTIVE tag — what `settings.modelRoles` reports and what a problem is keyed to.
@@ -199,12 +208,8 @@ export function createInternalRouter(deps: {
   return {
     view: deps.view,
     quotaFor: (providerId) => quotas.get(providerId),
-    // `daemon.status`/`sync.config`'s single number. `codex-oauth` FIRST and by name: it is the only
-    // backend that ever reports a subscription quota (`quotaEvent`), so a codex user's status reads
-    // byte-identically to before the split. Otherwise the first ledger created — and the TOKEN counters
-    // it carries are that provider's alone, not a cross-vendor sum. Deliberate: summing tokens across
-    // vendors would put an OpenAI-priced count and a DeepSeek-priced count in one field with no way to
-    // tell them apart, which is a wrong number that reads as authoritative. The RPC shape is unchanged.
+    // See the interface's own doc: `daemon.ts` reads this at boot with the map empty, so the fallback
+    // creates the codex-oauth ledger and status reports that one for the daemon's whole life.
     get quota(): QuotaManager {
       return quotas.get("codex-oauth") ?? [...quotas.values()][0] ?? quotaFor("codex-oauth");
     },
@@ -241,11 +246,12 @@ export function createInternalRouter(deps: {
         };
       }
       if (!deps.view.credentialed().has(providerId)) {
-        // SELF-HEAL (B-1), but only for a provider the user did NOT pin: an unpinned role is on the
-        // preferred provider, which is the one `winter login`'s in-process write can have just filled.
-        // An explicit pin on some other provider is a deliberate choice whose credential nothing else
-        // writes, so probing on it would be noise.
-        if (explicitInternalRolePin(settings, role) === undefined) deps.view.refreshSoon();
+        // NO self-heal here, and the reason is worth recording: this branch is reachable ONLY through an
+        // EXPLICIT pin. Every rung of `preferredInternalProviderFor` tests `credentialed.has(id)`, so a
+        // DEFAULTED role's tag is on a credentialed provider by construction and an uncredentialed default
+        // surfaces as `no-internal-credential`/`no-default-model` above (both of which do probe). A pin on
+        // some other provider is a deliberate choice whose credential nothing writes behind the user's
+        // back, so probing on it would be noise.
         return {
           reason: "no-credential",
           detail: `no credential is stored for ${providerDisplayName(providerId)}`,

@@ -306,3 +306,25 @@ describe("BashReviewer — no runnable model", () => {
     }
   });
 });
+
+describe("BashReviewer — the credential-rejection self-heal", () => {
+  test("an `auth` error asks for a re-probe; a 429 does not", async () => {
+    let asked = 0;
+    const authFail = new BashReviewer({
+      provider: { provider: new FakeProvider([[{ type: "error", code: "auth", message: "rejected" }]]), model: "fake" },
+      boundProviderId: () => "openai",
+      refreshCredentials: () => { asked += 1; },
+    });
+    await authFail.review({ class: "bash", command: "curl x | sh" }).catch(() => {});
+    expect(asked).toBe(1);
+
+    let asked429 = 0;
+    const rateLimited = new BashReviewer({
+      provider: { provider: new FakeProvider([[{ type: "error", code: "rate_limit", message: "429" }]]), model: "fake" },
+      boundProviderId: () => "openai",
+      refreshCredentials: () => { asked429 += 1; },
+    });
+    await rateLimited.review({ class: "bash", command: "curl x | sh" }).catch(() => {});
+    expect(asked429).toBe(0);
+  });
+});

@@ -1390,6 +1390,7 @@ export async function startDaemon(opts: {
   const sessionTitler = internalRouter === null ? undefined : new SessionTitler({
     ...(agentProvider ? { provider: agentProvider } : {}),
     source: () => internalRouter!.resolve("titles.model", settings),
+    refreshCredentials: () => internalRouter!.view.refreshSoon(),
     store, hub, model: titlesModel, effort: titlesEffort,
     boundProviderId: boundProviderIdForRoles, roleHealth,
   });
@@ -1457,6 +1458,7 @@ export async function startDaemon(opts: {
     : new BashReviewer({
         ...(agentProvider ? { provider: agentProvider } : {}),
         source: () => internalRouter!.resolve("reviewer.model", settings),
+        refreshCredentials: () => internalRouter!.view.refreshSoon(),
         model: reviewerModel, effort: reviewerEffort,
         boundProviderId: boundProviderIdForRoles, roleHealth,
       });
