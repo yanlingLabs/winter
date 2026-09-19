@@ -53,7 +53,7 @@
         "@yanlinglabs/winter-protocol": "workspace:*",
         "@yanlinglabs/winter-provider-catalog": "0.0.17",
         "@yanlinglabs/winter-provider-runtime": "^0.0.17",
-        "@yanlinglabs/winter-runtime-sdk": "^0.0.9",
+        "@yanlinglabs/winter-runtime-sdk": "^0.0.10",
         "unpdf": "^1.6.2",
         "zod": "^4.0.0",
       },
@@ -171,7 +171,7 @@
 
     "@yanlinglabs/winter-provider-runtime": ["@yanlinglabs/winter-provider-runtime@0.0.17", "", { "dependencies": { "@yanlinglabs/winter-agent-sdk": "0.0.17", "@yanlinglabs/winter-provider-catalog": "0.0.17" } }, "sha512-DPA+8FqbRmeZHg0LGaLCfpkCz2HNx92RJqLZnki2IznqcbLMb+mxvAGDG+1rIXDPHYY9YFNWGt5M+hUd5qe+EQ=="],
 
-    "@yanlinglabs/winter-runtime-sdk": ["@yanlinglabs/winter-runtime-sdk@0.0.9", "", { "peerDependencies": { "@anthropic-ai/claude-agent-sdk": "0.3.250", "@yanlinglabs/winter-agent-sdk": ">=0.0.13 <0.1.0", "@yanlinglabs/winter-conformance": ">=0.0.3 <0.1.0", "@yanlinglabs/winter-provider-catalog": ">=0.0.10 <0.1.0", "@yanlinglabs/winter-provider-conformance": ">=0.0.3 <0.1.0", "@yanlinglabs/winter-provider-runtime": ">=0.0.10 <0.1.0" }, "optionalPeers": ["@anthropic-ai/claude-agent-sdk", "@yanlinglabs/winter-conformance", "@yanlinglabs/winter-provider-conformance"] }, "sha512-pQtSZN00ITmmjjBy41MKfrK55a51kVgwIXPN1GyVfsKAuQ4a+7OfmU4JMwaabaLW6zoScMxHmR02RuPcwx4SfA=="],
+    "@yanlinglabs/winter-runtime-sdk": ["@yanlinglabs/winter-runtime-sdk@0.0.10", "", { "peerDependencies": { "@anthropic-ai/claude-agent-sdk": "0.3.250", "@yanlinglabs/winter-agent-sdk": ">=0.0.13 <0.1.0", "@yanlinglabs/winter-conformance": ">=0.0.3 <0.1.0", "@yanlinglabs/winter-provider-catalog": ">=0.0.10 <0.1.0", "@yanlinglabs/winter-provider-conformance": ">=0.0.3 <0.1.0", "@yanlinglabs/winter-provider-runtime": ">=0.0.10 <0.1.0" }, "optionalPeers": ["@anthropic-ai/claude-agent-sdk", "@yanlinglabs/winter-conformance", "@yanlinglabs/winter-provider-conformance"] }, "sha512-RqfhxqlzhfpfRG9eQvpI4eX5IbHgpDgQnFv6DFhmy8MdEgoYFLX4I0cTB7RsxI0VHBY/RUkYp6p3WqdkR5TAXw=="],
 
     "accepts": ["accepts@2.0.0", "", { "dependencies": { "mime-types": "^3.0.0", "negotiator": "^1.0.0" } }, "sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng=="],
 
