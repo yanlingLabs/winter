@@ -468,6 +468,69 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     c.close();
   });
 
+  // USER RULING 2026-09-19: the reviewer is a safety gate, so an unrunnable pin does not switch it off.
+  // The pane must show BOTH facts: the pin needs fixing, AND the gate is still up meanwhile.
+  test("reviewer.model pinned to an uncredentialed provider: the problem is the PIN's, with a `meanwhile` clause", async () => {
+    const { socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol", { internalCredentials: ["codex-oauth:default"] });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const set = await c.request(METHODS.settingsSetModelRole, { role: "reviewer.model", model: "deepseek/deepseek-v4-flash" });
+    expect(set.error).toBeUndefined();
+    const info = set.result.roles["reviewer.model"];
+    // The role's own model is the pin, reported verbatim so the user can see and change it.
+    expect(info.model).toBe("deepseek/deepseek-v4-flash");
+    expect(info.problem?.reason).toBe("no-credential");
+    expect(info.problem?.detail).toBe("no credential is stored for DeepSeek — reviewing on codex-oauth/gpt-5.6-terra meanwhile");
+    expect(info.problem?.model).toBe("deepseek/deepseek-v4-flash");
+    c.close();
+  });
+
+  test("reviewer.model with a pre-ruling Claude pin (written by hand): same, as provider-unsupported", async () => {
+    const { socketPath, harnessToken, settingsPath } = await boot("codex-oauth/gpt-5.6-sol", { internalCredentials: ["codex-oauth:default"] });
+    const raw = JSON.parse(readFileSync(settingsPath, "utf8"));
+    writeFileSync(settingsPath, JSON.stringify({ ...raw, reviewer: { model: "anthropic/claude-opus-5" } }, null, 2));
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const info = (await c.request(METHODS.settingsModelRoles, {})).result.roles["reviewer.model"];
+    expect(info.problem?.reason).toBe("provider-unsupported");
+    expect(info.problem?.detail).toBe("Anthropic can't be used for Winter's own jobs yet — reviewing on codex-oauth/gpt-5.6-terra meanwhile");
+    c.close();
+  });
+
+  test("THE ASYMMETRY on the wire: the same pin on titles gets NO `meanwhile` — that job really is inert", async () => {
+    const { socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol", { internalCredentials: ["codex-oauth:default"] });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const set = await c.request(METHODS.settingsSetModelRole, { role: "titles.model", model: "deepseek/deepseek-v4-flash" });
+    expect(set.error).toBeUndefined();
+    const info = set.result.roles["titles.model"];
+    expect(info.problem?.reason).toBe("no-credential");
+    expect(info.problem?.detail).toBe("no credential is stored for DeepSeek");
+    expect(info.problem?.detail).not.toContain("meanwhile");
+    c.close();
+  });
+
+  test("a RUNNABLE reviewer pin has no problem at all", async () => {
+    const { socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol", { internalCredentials: ["codex-oauth:default"] });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const set = await c.request(METHODS.settingsSetModelRole, { role: "reviewer.model", model: "codex-oauth/gpt-5.6-luna" });
+    expect(set.result.roles["reviewer.model"].problem).toBeNull();
+    c.close();
+  });
+
+  test("nothing to fall back to: the reviewer reports the structural refusal (the hook then allows)", async () => {
+    const { socketPath, harnessToken, settingsPath } = await boot("deepseek/deepseek-v4-flash", { internalCredentials: [] });
+    const raw = JSON.parse(readFileSync(settingsPath, "utf8"));
+    writeFileSync(settingsPath, JSON.stringify({ ...raw, reviewer: { model: "anthropic/claude-opus-5" } }, null, 2));
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const info = (await c.request(METHODS.settingsModelRoles, {})).result.roles["reviewer.model"];
+    expect(info.problem?.reason).toBe("no-internal-credential");
+    expect(info.problem?.detail).not.toContain("meanwhile");
+    c.close();
+  });
+
   test("provider.model cascade: changing it moves pins.dispatch's default AND titles/reviewer's approximated default", async () => {
     const { socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol");
     const c = await TestClient.connect(socketPath);

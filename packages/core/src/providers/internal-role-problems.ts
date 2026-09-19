@@ -17,6 +17,11 @@
  * `problemFor`'s own doc comment already names that as "exactly the noise this field exists to avoid".
  * Derived state clears itself by construction; that is the whole reason to derive it.
  *
+ * THE REVIEWER'S FALLBACK: `reviewer.model` is a SAFETY gate, so an unrunnable pin does not switch it off
+ * — it runs on the default rule's answer instead (`ResolveOptions.fallbackToDefault`). The role still
+ * reports the pin's own problem, because the pin is what the user has to fix; the `detail` gains a
+ * "meanwhile" clause naming the tag actually reviewing, so the pane never implies the gate is down.
+ *
  * PRECEDENCE: a structural problem WINS over a recorded one. A persisted "rate-limited" note about a
  * model the role cannot even reach any more is misleading — the user's problem is the credential, not
  * the rate limit — and the recorded note is left untouched underneath, so it comes back the moment the
@@ -55,10 +60,27 @@ export function internalRoleProblemsFor<T extends { model: string | null; proble
       out[role] = info;
       continue;
     }
-    const resolved = router.resolve(role, settings);
-    out[role] = isInternalRefusal(resolved)
-      ? { ...info, problem: { reason: resolved.reason, detail: resolved.detail, model: resolved.tag ?? "", at } }
-      : info;
+    // `reviewer.model` is asked with the SAME `fallbackToDefault` the reviewer itself uses, so the pane can
+    // never report a state the running job is not in (user ruling 2026-09-19).
+    const resolved = router.resolve(role, settings, role === "reviewer.model" ? { fallbackToDefault: true } : undefined);
+    if (isInternalRefusal(resolved)) {
+      out[role] = { ...info, problem: { reason: resolved.reason, detail: resolved.detail, model: resolved.tag ?? "", at } };
+      continue;
+    }
+    // A LIVE call that still has something to report: the reviewer's explicit pin was unrunnable and it
+    // fell back. The problem is about the PIN — its reason, its tag — with a "meanwhile" clause naming
+    // what is actually reviewing, so the user knows the safety gate did NOT switch itself off.
+    out[role] = resolved.pinRefusal === undefined
+      ? info
+      : {
+          ...info,
+          problem: {
+            reason: resolved.pinRefusal.reason,
+            detail: `${resolved.pinRefusal.detail} — reviewing on ${resolved.tag} meanwhile`,
+            model: resolved.pinRefusal.tag ?? "",
+            at,
+          },
+        };
   }
   return out;
 }

