@@ -568,12 +568,29 @@ export function officialInputFor(
   }
 
   // Fix round 1 (item 0): the REAL bridge (router 0.0.3) — never the fail-closed default a bare
-  // broker used to fall through to. `mode` here is the SAME `permissionMode` this session's
+  // broker used to fall through to. `mode` is the SAME `permissionMode` this session's
   // `options.permissionMode` carries below, so the containment floor and the broker agree on it.
+  //
+  // READ LIVE, NOT CAPTURED (router 0.0.10). This bridge's `dontAsk` arm answers ALLOW without
+  // consulting Winter's broker at all — that is §10's rule, and it was correct while a session's mode
+  // could not change. `session.setPolicy` on a live child makes a captured literal a real hole, and it
+  // is the WIDEST one in this change: a session spawned `dont-ask` and switched to `ask` kept
+  // auto-allowing EVERY tool call, not just edits, because this arm short-circuited before the gate or
+  // a card was ever reached — measured end to end (`official-leg.e2e.test.ts`, "dont-ask hides the
+  // call"). So the mode is a getter over the SAME live policy the broker's own gate reads
+  // (`canUseToolDeps.policy`, which production passes as a function for exactly this reason), mapped
+  // through the SAME `officialPermissionModeFor` the spawn uses. Both halves therefore move together:
+  // the child's own mode (`OfficialSession.setPolicy` -> `Query.setPermissionMode`) and this bridge.
+  // A `canUseToolDeps.policy` that is a bare value (every unit-test double) falls back to `deps.policy`
+  // — byte-identical to the captured behaviour, since neither can change between incarnations.
+  const livePolicy = deps.canUseToolDeps.policy;
+  const modeNow = typeof livePolicy === "function"
+    ? (): RouterOfficialPermissionMode => officialPermissionModeFor(livePolicy())
+    : permissionMode;
   const canUseTool = createApprovalBridge({
     broker: officialBrokerFor({ ...deps.canUseToolDeps, sessionId: input.sessionId, mode: input.mode, cwd: input.cwd }),
     brand: CORE_BRAND,
-    mode: permissionMode,
+    mode: modeNow,
   });
   const systemPromptAppend = winterSystemPromptFor(deps.assembler, {
     mode: input.mode,

@@ -135,6 +135,14 @@ class FakeOfficialQuery {
   throw(e: unknown): Promise<IteratorResult<Frame>> { this.fail(e); return Promise.reject(e); }
   [Symbol.asyncIterator](): this { return this; }
   async interrupt(): Promise<unknown> { this.interrupts++; return undefined; }
+  /** Router 0.0.10's §10 control request — every mode the child was actually told, in order. */
+  readonly modes: string[] = [];
+  /** Set by a test that wants the CHILD to be the one that refuses (a runtime that will not take it). */
+  refuseMode = false;
+  async setPermissionMode(mode: string): Promise<void> {
+    if (this.refuseMode) throw new Error("the runtime refused the control request");
+    this.modes.push(mode);
+  }
 }
 
 // ── the harness ──────────────────────────────────────────────────────────────────────────────────
@@ -462,6 +470,67 @@ describe("m7 — end() is terminal", () => {
 });
 
 // ── m8 ───────────────────────────────────────────────────────────────────────────────────────────
+
+// ── the live permission-mode change (router 0.0.10) ──────────────────────────────────────────────
+//
+// BEFORE THIS, `setPolicy` was a documented no-op on this leg, and the consequence was silent: a Code
+// session spawned `accept-edits` and switched to `ask` kept auto-approving every edit inside the child
+// (the runtime does not consult `canUseTool` for an edit in that mode, so there was no card and no
+// trace), and a switch into or out of `plan` did nothing at all until the next incarnation. The
+// mapping is `officialPermissionModeFor`, the SAME one `official-options.ts` builds
+// `Options.permissionMode` from, so the live mode and the next incarnation's mode cannot disagree.
+describe("setPolicy — a live child is told now", () => {
+  test("a live session forwards the mapped mode to the child", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID));
+    await h.settled();
+
+    await h.session.setPolicy("ask");
+    await h.session.setPolicy("plan");
+    await h.session.setPolicy("dont-ask");
+    await h.session.setPolicy("accept-edits");
+    // `ask` -> `default` and `dont-ask` -> `dontAsk` are the mapping's own spellings, not this test's.
+    expect(h.q().modes).toEqual(["default", "plan", "dontAsk", "acceptEdits"]);
+  });
+
+  test("`bypass` lands on acceptEdits, never bypassPermissions (D14/P8c-2's floor, live too)", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID));
+    await h.settled();
+    await h.session.setPolicy("bypass");
+    expect(h.q().modes).toEqual(["acceptEdits"]);
+  });
+
+  test("a session that is not live is a no-op — the next incarnation reads the policy live", async () => {
+    const h = harness();
+    // NEVER OPENED: no child exists, so there is nothing to tell and nothing to fail.
+    await h.session.setPolicy("ask");
+    expect(h.queries).toHaveLength(0);
+
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID));
+    h.q().emit(result());
+    await h.settled();
+    await h.session.end();
+    await h.settled();
+    const before = h.q().modes.length;
+    await h.session.setPolicy("plan");
+    expect(h.q().modes).toHaveLength(before);
+  });
+
+  test("a child that refuses the change REJECTS — never a swallowed no-op", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID));
+    await h.settled();
+    h.q().refuseMode = true;
+    // `session.setPolicy`'s RPC reverts the stored policy and reports the failure on this rejection;
+    // a resolved promise here would make that impossible and the surface would silently lie.
+    await expect(h.session.setPolicy("ask")).rejects.toThrow(/refused the control request/);
+  });
+});
 
 describe("m8 — backend id mismatch", () => {
   test("a system/init whose uuid differs from the pre-allocated backendSessionId ends the session with a typed terminal", async () => {

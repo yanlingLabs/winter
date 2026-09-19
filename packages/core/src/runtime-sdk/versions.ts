@@ -6,11 +6,17 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
 export const REQUIRED_WINTER_AGENT_SDK = "0.0.17";
-/** Bumped to 0.0.9 (daemon settings surface batch 3): `OptionsTemplatePolicy` gained `agents?:
+/** Bumped to 0.0.10 (the official leg's LIVE permission-mode change): the router's `OfficialQuery`
+ *  gained `setPermissionMode(mode)`, so `OfficialSession.setPolicy` can tell a RUNNING claude child
+ *  about an approval-mode change instead of waiting for its next incarnation. No floor constant of
+ *  the `CONSOLE_AUTH_ROUTER_MIN` kind is needed for it: that pattern exists for a feature whose floor
+ *  is ABOVE the current pin, and this pin IS the floor — a router below it does not type-check here
+ *  at all, and the installed===REQUIRED gate is what proves the running daemon has it.
+ *  0.0.9 (daemon settings surface batch 3) added `OptionsTemplatePolicy.agents?:
  *  Readonly<Record<string, unknown>>` — the router-package wall `official-options.ts`'s own comment
  *  on `OfficialInputDeps.agents` used to name (a router version this low has no field to forward the
- *  daemon's merged subagent definitions through) is CLOSED as of this pin. */
-export const REQUIRED_WINTER_RUNTIME_SDK = "0.0.9";
+ *  daemon's merged subagent definitions through) is CLOSED as of that pin. */
+export const REQUIRED_WINTER_RUNTIME_SDK = "0.0.10";
 /** P8c-3/versions: the official peer is pinned EXACT (`"0.3.250"` in package.json, no `^`) — the
  *  ladder's package door and the router's own `assertVersionMatrix` both key off this string
  *  matching the installed wrapper's manifest, never a range. */

@@ -50,6 +50,7 @@ import type { WorkflowStore } from "../workflows/store";
 import type { MemoryStore, MemoryErrorKind } from "../agent/memory";
 import { listMemoryDir, readMemoryDir, writeMemoryDir, deleteMemoryDir, auditTailMemDir } from "../agent/memory-file-ops";
 import type { SessionStore } from "../sessions/store";
+import type { SessionApprovalPolicy } from "../agent/gate";
 import { readHistoryPage } from "../sessions/history";
 import {
   makeActivityDeriver, makeSessionSignalsDeriver, participatesInActivity,
@@ -2520,15 +2521,45 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (targetMode === "dispatch" && p.policy === "plan") {
           throw new RpcFailure(ERR.INVALID_PARAMS, "plan policy is not available for dispatch sessions — dispatch never asks permissions");
         }
+        // The policy this session is on RIGHT NOW, read before the write, because the write may have
+        // to be undone below. `meta()` throws for an unknown id exactly as `setApprovalPolicy` does,
+        // and that refusal belongs to the write — so a failure here is swallowed and the write's own
+        // NOT_FOUND wins, same precedent as `targetMode` above.
+        let previous: SessionApprovalPolicy | undefined;
+        try { previous = opts.store.meta(p.sessionId).approvalPolicy; } catch { /* unknown id — the write below refuses */ }
         try {
           opts.store.setApprovalPolicy(p.sessionId, p.policy);
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }
-        // P8b Task 17 Step 0(b): a LIVE Winter child learns the new policy now (`setPermissionMode`);
-        // the bridge's policy getter already reads the store live, and a resumable session re-reads
-        // it when it reopens. Fire-and-forget, like `session.setModel`'s own driver call.
-        opts.winter?.get(p.sessionId)?.setPolicy(p.policy).catch((err) => console.error(`winter-leg: setPolicy for ${p.sessionId} failed: ${err instanceof Error ? err.name : "unknown"}`));
+        // P8b Task 17 Step 0(b): a LIVE child learns the new policy NOW — `Query.setPermissionMode`,
+        // on whichever leg it is running (`WinterSessionDrivers.get` answers for both). The bridge's
+        // policy getter already reads the store live, and a resumable session re-reads it when it
+        // reopens, so this call is only about the child that is already up.
+        //
+        // AWAITED, AND A FAILURE IS REPORTED (it used to be fire-and-forget, logged and dropped).
+        // Two things made that wrong once the official leg gained a live setter: the router refuses a
+        // mode this branch may not offer, and a child can refuse or be gone — and in both cases the
+        // daemon would have answered `{ ok: true }` while the child went on auto-approving edits in
+        // the mode it was spawned with. The Mac's picker shows "Couldn't switch to X — try again" on
+        // an RPC error and silently adopts the new mode otherwise, so a swallowed failure is a UI
+        // that lies. AND THE STORE IS PUT BACK: leaving `ask` persisted while the live child is still
+        // in `accept-edits` is strictly worse than either end state — the user would be told the
+        // switch failed by a surface whose next read says it succeeded, and this session's own gate
+        // would start denying calls the child never asks about.
+        const live = opts.winter?.get(p.sessionId);
+        if (live !== undefined) {
+          try {
+            await live.setPolicy(p.policy);
+          } catch (err) {
+            if (previous !== undefined) {
+              try { opts.store.setApprovalPolicy(p.sessionId, previous); } catch { /* the row went away under us; the refusal below is still the honest answer */ }
+            }
+            const detail = err instanceof Error ? err.message : "unknown";
+            console.error(`session.setPolicy for ${p.sessionId} was refused by its live child: ${detail}`);
+            throw new RpcFailure(ERR.INTERNAL, `the running session refused the approval-mode change — ${detail}`);
+          }
+        }
         return { ok: true };
       }
       // Chat Slice D task 1: per-session model override — mode-agnostic for chat/code (unlike
