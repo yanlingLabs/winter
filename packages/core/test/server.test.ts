@@ -2,7 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, readFileSync, realpathSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@yanlinglabs/winter-protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, PluginEnableResult, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startDaemon, type RunningDaemon, CORE_VERSION } from "../src/daemon";
 import { startIpcServer } from "../src/ipc/server";
 import { SessionStore } from "../src/sessions/store";
@@ -1078,9 +1078,7 @@ describe("daemon IPC", () => {
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 3,
       provider: { model: "codex-oauth/gpt-5.4" },
-      // Lane B (2026-09-23, review): this legacy plugin SHIPS A SKILL, so it requires the `exec`
-      // consent class — and consent is per class, so its legacy .mcp.json needs it too.
-      plugins: { enabled: ["demo"], consents: { demo: { exec: 1 } } },
+      plugins: { enabled: ["demo"] },
     }));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     const fake = new FakeProvider([[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]]);
@@ -2228,6 +2226,32 @@ describe("daemon IPC", () => {
       expect(res.result.consentBlock[0]).toBe("plugin runner requests:");
       expect(res.result.consentBlock).toContain("entry: bun index.ts");
       expect(readFileSync(srv.settingsPath, "utf8")).toBe(before); // no mutation
+
+      c.close(); srv.stop();
+    });
+
+    // Lane B (2026-09-23, controller ruling): a LEGACY plugin needs no consent record — enabling it is
+    // the user's trust decision — but it ships skills that will now reach a session, so the enable
+    // answers with the disclosure a client shows ("a skill can run shell commands when a session uses it").
+    test("(a2) plugin.enable on a legacy plugin that ships skills: enabled with NO consent record, and the result carries the skills notice", async () => {
+      const srv = await bootLifecycleServer();
+      mkdirSync(join(srv.pluginsRoot, "oldie", "skills", "greet"), { recursive: true });
+      writeFileSync(join(srv.pluginsRoot, "oldie", "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: hi\n---\nbody");
+      writeFileSync(join(srv.pluginsRoot, "oldie", "plugin.json"), JSON.stringify({ description: "legacy" }));
+      const c = await TestClient.connect(srv.socketPath);
+      await c.hello(srv.harnessToken, "cli-enable-legacy");
+
+      const res = await c.request(METHODS.pluginEnable, { name: "oldie" });
+      expect(res.result.ok).toBe(true);
+      expect(res.result.notice).toEqual(["plugin oldie:", "skills: greet — a skill can run shell commands when a session uses it"]);
+      expect(PluginEnableResult.safeParse(res.result).success).toBe(true);
+      const settings = JSON.parse(readFileSync(srv.settingsPath, "utf8"));
+      expect(settings.plugins.enabled).toEqual(["oldie"]);
+      expect(settings.plugins.consents?.oldie).toBeUndefined();
+
+      // A plugin with nothing to disclose answers exactly as before — no `notice` key at all.
+      const runner = await c.request(METHODS.pluginEnable, { name: "runner", consent: true });
+      expect("notice" in runner.result).toBe(false);
 
       c.close(); srv.stop();
     });

@@ -123,7 +123,7 @@ import {
 } from "../runtime-sdk/versions";
 import { dispatchPinMessage } from "../agent/dispatch-config";
 import {
-  deriveInstallName, installPluginFromDir, missingConsents, buildConsentBlock, applyFreshPluginConsent,
+  deriveInstallName, installPluginFromDir, missingConsents, buildConsentBlock, enableNotice, applyFreshPluginConsent,
   setPluginEnabled, grantPluginConsents, removePluginFromSettings, removePluginDir, stripPluginConsents,
   type InstallPluginResult,
 } from "../plugins/lifecycle";
@@ -3822,7 +3822,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         invalidateLivePluginsCache();
         rebuildHookRegistry();
         const updated = livePlugins().find((pl) => pl.name === p.name) ?? info;
-        return { ok: true, status: hotApplyStart(updated) };
+        // Lane B (2026-09-23): the no-consent disclosure (a legacy plugin that ships skills — a skill
+        // can run shell commands), for a client to show; absent when there is nothing to say.
+        const notice = enableNotice(info);
+        return { ok: true, status: hotApplyStart(updated), ...(notice.length > 0 ? { notice } : {}) };
       }
       case METHODS.pluginDisable: {
         const p = parseParams(PluginDisableParams, params);

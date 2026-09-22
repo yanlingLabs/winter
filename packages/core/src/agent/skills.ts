@@ -438,7 +438,9 @@ export class SkillStore {
     const colon = meta.name.indexOf(":");
     const plugin = meta.name.slice(0, colon);
     if (eligible !== null && !eligible.has(plugin)) {
-      return { loadsInSessions: false, sessionNote: `Enable the ${plugin} plugin and grant its "exec" consent to use its skills in Code sessions — a skill can run shell commands.` };
+      // A legacy plugin needs no consent record (enabling it is the trust decision); a manifest plugin
+      // that ships skills needs `exec` — hence "if it asks for one".
+      return { loadsInSessions: false, sessionNote: `Enable the ${plugin} plugin (and grant its "exec" consent if it asks for one) to use its skills in Code sessions — a skill can run shell commands.` };
     }
     if (!SDK_PLUGIN_NAME_PATTERN.test(plugin) || !SDK_SKILL_NAME_PATTERN.test(meta.name.slice(colon + 1))) {
       return { loadsInSessions: false, sessionNote: "The agent runtime refuses this name — plugin and skill names must be lowercase letters, digits and dashes." };
