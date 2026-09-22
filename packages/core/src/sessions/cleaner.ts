@@ -28,6 +28,36 @@ export const CLEANER_MAX_JUDGMENTS_PER_PASS = 10;
  *  from real work — rather than an arbitrary prefix. */
 export const CLEANER_TRANSCRIPT_MAX_CHARS = 4000;
 
+/**
+ * D2 (2026-09-22 dist-session-fixes): a failed judgment (timeout, provider error, or an unparseable
+ * answer) leaves the session UNSTAMPED BY DESIGN — see `judge`'s own doc — so a later pass tries
+ * again. Without a cooldown, "a later pass" is the very NEXT one: `Dreamer.tick` re-runs
+ * `runPass` on its own schedule (`DREAM_TICK_MS`, dreamer.ts) regardless of whether the last
+ * attempt failed, so a session that fails for a PERSISTENT reason gets rejudged EVERY pass, forever,
+ * burning a full provider call each time for a session that will keep failing the same way. That is
+ * the retry storm the dist log showed (`[cleaner] judgment failed (keeping, unstamped): Error:
+ * judgment timed out`, repeating every pass).
+ *
+ * Measured root cause of THAT specific timeout (same-day follow-up): the cleaner's pinned role
+ * effort of `"none"` was, at the time, dropped by `internalWireEffortFor`
+ * (`providers/internal-provider.ts`) rather than sent, so the request carried no effort at all and
+ * the provider's own default applied — `"medium"` for a `gpt-5.6` row — which is slower than the
+ * `CLEANER_EFFORT = "low"` this class is tuned for. That mapping is now fixed (a role effort of
+ * `"none"` on a row with no `"none"` tier of its own sends the row's LOWEST declared tier instead of
+ * escalating to the provider's default), so THIS particular cause of a slow, timing-out judgment is
+ * gone — but the cooldown below is not a band-aid for that one cause: any OTHER persistent failure
+ * (an auth problem, a genuinely overloaded provider, a row with no declared vocabulary at all still
+ * running slower than expected) would produce the identical retry-storm shape, and the cooldown is
+ * what stops it regardless of why a judgment failed.
+ *
+ * The cooldown skips a recently-FAILED candidate BEFORE it is charged to the per-pass judgment
+ * budget (`CLEANER_MAX_JUDGMENTS_PER_PASS`) — a backed-off session must not crowd out a candidate
+ * that could actually be judged this pass. It is in-memory only (the `SessionCleaner` instance's own
+ * `lastFailureAt` map, the same shape as `SessionTitler`'s `inFlight` guard): a daemon restart clears
+ * it, which is fine — a fresh incarnation gets one immediate retry, never fewer.
+ */
+export const CLEANER_RETRY_BACKOFF_MS = 30 * 60 * 1000; // 30 min
+
 /** Spec §3: the cleaner "rides the existing Dreaming cycle (its scheduler, its model configuration,
  *  low effort)". WS-20: the model is `pinsFor(settings).cleaner` — DEFAULTS to the SAME value as
  *  `pinsFor(settings).dream` (both fall back to the `<provider>/gpt-5.6-terra` rule), but is
@@ -122,9 +152,18 @@ export interface CleanerDeps {
   /** Injectable clock (the `ReaperDeps.now`/`DreamerDeps.now` precedent) — defaults to the real
    *  `Date.now`, so every test controls "24 hours have passed" without a real wait. */
   now?: () => number;
-  /** Per-judgment provider timeout. Defaults to 60s. Load-bearing rather than cosmetic: the
-   *  cleaner runs inside `Dreamer.tick`'s re-entrancy guard, so a provider that never answers would
-   *  wedge dreaming as well as cleaning, permanently. */
+  /** Per-judgment provider timeout. Defaults to 120s (D2, 2026-09-22: raised from the original 60s
+   *  — measured cause: a role effort of `"none"` was, at the time, dropped by
+   *  `internalWireEffortFor` rather than sent, so the request carried no effort and the provider's
+   *  own default applied, `"medium"` for a `gpt-5.6` row rather than the `CLEANER_EFFORT = "low"`
+   *  this class is tuned for; 60s timed out routinely against `codex-oauth/gpt-5.6-luna` in the dist
+   *  log this fixes. That mapping is now corrected — see `CLEANER_RETRY_BACKOFF_MS`'s doc — so a
+   *  `"none"`-pinned role on a reasoning-capable row no longer escalates to the provider's default.
+   *  120s is KEPT anyway rather than reverted: a row with no declared vocabulary at all still runs at
+   *  whatever the provider's own default is, and this is a background job with nobody waiting on it).
+   *  Load-bearing rather than cosmetic: the cleaner runs inside `Dreamer.tick`'s re-entrancy guard, so
+   *  a provider that never answers would wedge dreaming as well as cleaning, permanently — matched to
+   *  the Dreamer's own `120_000` default (`DreamerDeps.timeoutMs`) for the same class of reason. */
   timeoutMs?: number;
   /** P8a Task 12 (WS-16 §16): the deleted session's RUNTIME state goes with it — the same hook the
    *  reaper takes (`ReaperDeps.onDelete`), for the same reason and with the same ordering: called
@@ -164,10 +203,14 @@ interface Verdict { verdict: "keep" | "delete"; reason: string }
 export class SessionCleaner {
   private readonly now: () => number;
   private readonly timeoutMs: number;
+  /** D2: the retry-storm cooldown's own state — see `CLEANER_RETRY_BACKOFF_MS`'s doc. Keyed by
+   *  session id, cleared the moment a judgment actually lands (keep or delete) so a session that
+   *  recovers is never held back by a stale entry. */
+  private readonly lastFailureAt = new Map<string, number>();
 
   constructor(private readonly deps: CleanerDeps) {
     this.now = deps.now ?? Date.now;
-    this.timeoutMs = deps.timeoutMs ?? 60_000;
+    this.timeoutMs = deps.timeoutMs ?? 120_000;
   }
 
   /** One cleaning pass. NEVER throws. */
@@ -200,12 +243,20 @@ export class SessionCleaner {
 
         // Path 2 — the budget caps provider calls only; the loop keeps walking so the hung path
         // above is never starved behind it.
+        //
+        // D2: the retry-storm cooldown, checked BEFORE the budget is charged — a candidate that
+        // just failed does not steal a slot from one that could actually be judged this pass. Not a
+        // rail (`railFor` answers a categorical, permanent-until-it-isn't fact; this is a plain
+        // "we just tried and it didn't work" timer), so it lives here rather than in that gate.
+        const lastFailure = this.lastFailureAt.get(sessionId);
+        if (lastFailure !== undefined && nowMs - lastFailure < CLEANER_RETRY_BACKOFF_MS) continue;
         if (judgments >= CLEANER_MAX_JUDGMENTS_PER_PASS) continue;
         judgments++;
         const verdict = await this.judge(events);
         // Parse failure / provider error / timeout: KEEP, and deliberately do NOT stamp — the
-        // session is unexamined, not judged, so the next pass tries again.
-        if (!verdict) continue;
+        // session is unexamined, not judged, so a LATER pass tries again, once the cooldown lifts.
+        if (!verdict) { this.lastFailureAt.set(sessionId, nowMs); continue; }
+        this.lastFailureAt.delete(sessionId);
 
         if (verdict.verdict === "keep") {
           this.deps.store.markJudged(sessionId, nowMs);

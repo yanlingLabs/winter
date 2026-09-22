@@ -15,6 +15,7 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { CREDENTIAL_MATERIAL_NAMES, writeCredentialMaterial, clearCredentialMaterial } from "../../src/auth/credential-material";
 import { createInternalProviderView, staticInternalProviderView, REFRESH_SOON_MIN_MS } from "../../src/providers/internal-view";
 import { createInternalRouter, staticInternalRouter, isInternalRefusal, type InternalRouter } from "../../src/providers/internal-router";
+import { internalWireEffortFor } from "../../src/providers/internal-provider";
 import type { Provider } from "../../src/providers/types";
 import { internalEligibleProviderIds, CLAUDE_FIRST_PARTY_PROVIDER_IDS, Settings, setModelRole } from "../../src/settings";
 import { SessionStore } from "../../src/sessions/store";
@@ -473,18 +474,66 @@ describe("B-1: the snapshot self-heals from an out-of-band credential write", ()
   });
 });
 
-describe("M-1: an explicit effort of `none`", () => {
-  test("is never turned into the row's defaultEffort — it is dropped, so the provider's default applies", async () => {
+describe("M-1 / D2 follow-up (2026-09-22): an explicit effort of `none`", () => {
+  test("is never turned into the row's defaultEffort — it maps to the row's OWN LOWEST declared tier instead", async () => {
     const secrets = secretsStore();
     await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at" });
     const router = await routerFor(secrets);
     // `codex-oauth/gpt-5.6-terra`'s vocabulary is [low, medium, high, xhigh, max] — no `"none"`, so
-    // `implicitEffortFor` would MISS and fall through to the row's defaultEffort, `"medium"`.
+    // `implicitEffortFor` would MISS and fall through to the row's defaultEffort, `"medium"` — an
+    // ESCALATION past what a role asking for `"none"` (for speed) wanted. The rule sends the row's
+    // lowest declared tier ("low") instead: less reasoning than the escalation, never more, and never
+    // a tier this row does not itself declare.
     const settings = settingsWith("codex-oauth/gpt-5.6-sol", { roleEfforts: { "pins.dream": "none" } });
     const call = router.resolve("pins.dream", settings);
     if (isInternalRefusal(call)) throw new Error("expected a live call");
-    expect(call.effort).toBeUndefined();
+    expect(call.effort).toBe("low");
     expect(call.effort).not.toBe("medium");
+  });
+
+  test("a row whose vocabulary already lists \"none\" keeps today's drop — its adapter wire handling of \"none\" is unmeasured, out of scope here", async () => {
+    const secrets = secretsStore();
+    await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-deepseek" });
+    const router = await routerFor(secrets);
+    // `deepseek/deepseek-v4-flash`'s vocabulary is [none, low, high, max] — `"none"` IS one of its own
+    // declared tiers (27 rows in the pinned catalog carry it this way), but the controller's ruling
+    // scoped the fix to rows that DON'T declare `"none"`: this case is deliberately UNCHANGED.
+    const settings = settingsWith("deepseek/deepseek-v4-flash", { roleEfforts: { "pins.dream": "none" } });
+    const call = router.resolve("pins.dream", settings);
+    if (isInternalRefusal(call)) throw new Error("expected a live call");
+    expect(call.effort).toBeUndefined();
+  });
+
+  test("the dist case, verbatim: codex-oauth/gpt-5.6-luna with role effort \"none\" sends its lowest declared effort", () => {
+    // Direct unit coverage of `internalWireEffortFor` itself, against the REAL pinned catalog row the
+    // dist log's cleaner timeout ran on (`[cleaner] judgment failed ... judgment timed out`,
+    // `pins.cleaner` pinned to `codex-oauth/gpt-5.6-luna`, `roleEfforts: {"pins.cleaner": "none"}`).
+    expect(internalWireEffortFor("codex-oauth/gpt-5.6-luna", "none")).toBe("low");
+  });
+
+  test("the dist case through the router: pins.cleaner on gpt-5.6-luna with effort \"none\" resolves to \"low\", never \"medium\"", async () => {
+    const secrets = secretsStore();
+    await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at" });
+    const router = await routerFor(secrets);
+    const settings = settingsWith("codex-oauth/gpt-5.6-sol", {
+      pins: { cleaner: "codex-oauth/gpt-5.6-luna" },
+      roleEfforts: { "pins.cleaner": "none" },
+    });
+    const call = router.resolve("pins.cleaner", settings);
+    if (isInternalRefusal(call)) throw new Error("expected a live call");
+    expect(call.tag).toBe("codex-oauth/gpt-5.6-luna" as never);
+    expect(call.effort).toBe("low");
+    expect(call.effort).not.toBe("medium");
+  });
+
+  test("a row with NO declared vocabulary at all still sends nothing", () => {
+    const view = staticInternalProviderView(["codex-oauth"]);
+    const fake: Provider = { id: "fake", models: () => [], streamTurn: () => (async function* () {})() };
+    // `openai/gpt-4o` carries no `reasoning` block at all — nothing to pick a "lowest" tier from.
+    const router = staticInternalRouter({ view, provider: fake, model: "gpt-4o", tag: "openai/gpt-4o" as never });
+    const call = router.resolve("pins.dream", settingsWith("openai/gpt-4o", { roleEfforts: { "pins.dream": "none" } }));
+    if (isInternalRefusal(call)) throw new Error("expected a live call");
+    expect(call.effort).toBeUndefined();
   });
 
   test("a stored tier the row DOES list still survives", async () => {
@@ -502,8 +551,10 @@ describe("M-1: an explicit effort of `none`", () => {
     const router = staticInternalRouter({ view, provider: fake, model: "gpt-5.6-terra", tag: "codex-oauth/gpt-5.6-terra" as never });
     const none = router.resolve("pins.dream", settingsWith("codex-oauth/gpt-5.6-sol", { roleEfforts: { "pins.dream": "none" } }));
     if (isInternalRefusal(none)) throw new Error("expected a live call");
-    expect(none.effort).toBeUndefined();
-    // …and the dreamer's own unmappable constant is dropped on a deepseek row here too.
+    expect(none.effort).toBe("low"); // gpt-5.6-terra's own lowest declared tier, not the provider's "medium" default
+    // …and the dreamer's own unmappable constant ("medium", not in this row's vocabulary at all) is
+    // still dropped on a deepseek row here — unaffected by the `"none"` rule above, since "medium" is
+    // never `"none"`.
     const ds = staticInternalRouter({ view, provider: fake, model: "deepseek-v4-flash", tag: "deepseek/deepseek-v4-flash" as never });
     const dream = ds.resolve("pins.dream", settingsWith("deepseek/deepseek-v4-flash"));
     if (isInternalRefusal(dream)) throw new Error("expected a live call");

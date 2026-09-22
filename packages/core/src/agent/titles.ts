@@ -105,7 +105,22 @@ export class SessionTitler {
     // A junk env value must fall back to the default, not become NaN — setTimeout(fn, NaN) fires
     // immediately (dreamer.ts's constructor guards the same footgun the same way).
     const n = Number(process.env.WINTER_TITLE_TIMEOUT_MS);
-    this.timeoutMs = deps.timeoutMs ?? (Number.isFinite(n) && n > 0 ? n : 15000);
+    // D2 (2026-09-22 dist-session-fixes): raised from 15000. Measured cause of the dist log's
+    // "title timeout after 15000ms" — `titles.model`'s stored role effort of `"none"` was, at the
+    // time, dropped by `internalWireEffortFor` (providers/internal-provider.ts) rather than sent, so
+    // a reasoning-capable row ran at the PROVIDER's own default effort (e.g. `"medium"` for a gpt-5.6
+    // row) instead of the fast/no-reasoning call titling was designed for. A same-day follow-up fixed
+    // that mapping (a role effort of `"none"` on a row with no `"none"` tier of its own now sends the
+    // row's LOWEST declared tier instead of dropping to the provider's default), so the escalation
+    // this constant was raised for no longer happens on a reasoning-capable row — but a row with NO
+    // declared vocabulary at all (e.g. `zai-anthropic/glm-4.7-flash`, the OTHER dist timeout this same
+    // fix touched) still sends nothing, and a foreign dialect-compatible endpoint can still just be
+    // slower than OpenAI's own infrastructure. Titling is fire-and-forget with no retry storm to
+    // worry about (`maybeTitle`'s own `store.getTitle` guard makes it at most once per session,
+    // ever), so there is nothing but this constant standing between a slow-but-real title and a
+    // wasted, empty one — kept at 45s rather than reverted, since a background job loses nothing by
+    // waiting longer.
+    this.timeoutMs = deps.timeoutMs ?? (Number.isFinite(n) && n > 0 ? n : 45000);
   }
 
   /** Fire-and-forget safe: NEVER throws (all failures logged + swallowed); at most one title per
