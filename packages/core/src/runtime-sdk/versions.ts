@@ -1,3 +1,6 @@
+/// <reference path="./claude-agent-sdk-manifest.ts" />
+// (The reference pulls the ambient manifest declaration into EVERY program that compiles this file —
+// the CLI's tsconfig reaches core only through its imports, never by globbing core's `src`.)
 import { SDK_VERSION } from "@yanlinglabs/winter-agent-sdk";
 import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 // The wrapper's manifest, EMBEDDED by `bun build --compile` (typed by `claude-agent-sdk-manifest.ts`
