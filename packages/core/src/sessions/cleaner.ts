@@ -33,13 +33,22 @@ export const CLEANER_TRANSCRIPT_MAX_CHARS = 4000;
  * answer) leaves the session UNSTAMPED BY DESIGN — see `judge`'s own doc — so a later pass tries
  * again. Without a cooldown, "a later pass" is the very NEXT one: `Dreamer.tick` re-runs
  * `runPass` on its own schedule (`DREAM_TICK_MS`, dreamer.ts) regardless of whether the last
- * attempt failed, and a session that fails for a PERSISTENT reason (measured root cause: a role
- * effort of `"none"` is dropped by `internalWireEffortFor`, `providers/internal-provider.ts`, so the
- * request carries no effort at all and the provider's own default applies — `"medium"` for a
- * gpt-5.6 row — which is slower than the `CLEANER_EFFORT = "low"` this class was tuned for) gets
- * rejudged EVERY pass, forever, burning a full provider call each time for a session that will keep
- * failing the same way. That is the retry storm the dist log showed (`[cleaner] judgment failed
- * (keeping, unstamped): Error: judgment timed out`, repeating every pass).
+ * attempt failed, so a session that fails for a PERSISTENT reason gets rejudged EVERY pass, forever,
+ * burning a full provider call each time for a session that will keep failing the same way. That is
+ * the retry storm the dist log showed (`[cleaner] judgment failed (keeping, unstamped): Error:
+ * judgment timed out`, repeating every pass).
+ *
+ * Measured root cause of THAT specific timeout (same-day follow-up): the cleaner's pinned role
+ * effort of `"none"` was, at the time, dropped by `internalWireEffortFor`
+ * (`providers/internal-provider.ts`) rather than sent, so the request carried no effort at all and
+ * the provider's own default applied — `"medium"` for a `gpt-5.6` row — which is slower than the
+ * `CLEANER_EFFORT = "low"` this class is tuned for. That mapping is now fixed (a role effort of
+ * `"none"` on a row with no `"none"` tier of its own sends the row's LOWEST declared tier instead of
+ * escalating to the provider's default), so THIS particular cause of a slow, timing-out judgment is
+ * gone — but the cooldown below is not a band-aid for that one cause: any OTHER persistent failure
+ * (an auth problem, a genuinely overloaded provider, a row with no declared vocabulary at all still
+ * running slower than expected) would produce the identical retry-storm shape, and the cooldown is
+ * what stops it regardless of why a judgment failed.
  *
  * The cooldown skips a recently-FAILED candidate BEFORE it is charged to the per-pass judgment
  * budget (`CLEANER_MAX_JUDGMENTS_PER_PASS`) — a backed-off session must not crowd out a candidate
@@ -144,15 +153,17 @@ export interface CleanerDeps {
    *  `Date.now`, so every test controls "24 hours have passed" without a real wait. */
   now?: () => number;
   /** Per-judgment provider timeout. Defaults to 120s (D2, 2026-09-22: raised from the original 60s
-   *  — a role effort of `"none"` is dropped by `internalWireEffortFor` rather than sent, so the
-   *  request carries no effort and the provider's own default applies, which for a `gpt-5.6` row is
-   *  `"medium"` rather than the `CLEANER_EFFORT = "low"` this class is tuned for; 60s was measured
-   *  too tight for that default and timed out routinely against `codex-oauth/gpt-5.6-luna` in the
-   *  dist log this fixes). Load-bearing rather than cosmetic: the cleaner runs inside
-   *  `Dreamer.tick`'s re-entrancy guard, so a provider that never answers would wedge dreaming as
-   *  well as cleaning, permanently — matched to the Dreamer's own `120_000` default
-   *  (`DreamerDeps.timeoutMs`) for the same reason, since both jobs can now run at that same
-   *  provider-default effort. */
+   *  — measured cause: a role effort of `"none"` was, at the time, dropped by
+   *  `internalWireEffortFor` rather than sent, so the request carried no effort and the provider's
+   *  own default applied, `"medium"` for a `gpt-5.6` row rather than the `CLEANER_EFFORT = "low"`
+   *  this class is tuned for; 60s timed out routinely against `codex-oauth/gpt-5.6-luna` in the dist
+   *  log this fixes. That mapping is now corrected — see `CLEANER_RETRY_BACKOFF_MS`'s doc — so a
+   *  `"none"`-pinned role on a reasoning-capable row no longer escalates to the provider's default.
+   *  120s is KEPT anyway rather than reverted: a row with no declared vocabulary at all still runs at
+   *  whatever the provider's own default is, and this is a background job with nobody waiting on it).
+   *  Load-bearing rather than cosmetic: the cleaner runs inside `Dreamer.tick`'s re-entrancy guard, so
+   *  a provider that never answers would wedge dreaming as well as cleaning, permanently — matched to
+   *  the Dreamer's own `120_000` default (`DreamerDeps.timeoutMs`) for the same class of reason. */
   timeoutMs?: number;
   /** P8a Task 12 (WS-16 §16): the deleted session's RUNTIME state goes with it — the same hook the
    *  reaper takes (`ReaperDeps.onDelete`), for the same reason and with the same ordering: called
