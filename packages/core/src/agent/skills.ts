@@ -3,6 +3,7 @@ import { join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SdkPluginConfig } from "@yanlinglabs/winter-agent-sdk";
 import type { TrustStore } from "./trust";
+import { skillPluginViewsRoot } from "./paths";
 import { skillDenyRule } from "../settings";
 
 // Phase 5c Task 3: `author?` mirrors T1's `author: winter` frontmatter stamp (writeSelf below) back
@@ -125,10 +126,16 @@ const USER_ROOT_EXCLUDE = new Set(["self"]); // the self/ subdir is scanned sepa
 const SDK_SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const SDK_PLUGIN_NAME_PATTERN = /^\.?[a-z0-9][a-z0-9-]{0,63}$/;
 
-/** Where the daemon keeps the skills-only plugin views it hands a child (`childSkillSurface`). */
-export function skillPluginViewsRoot(winterHome: string): string {
-  return join(winterHome, "runtimes", "skill-plugins");
-}
+/**
+ * Human names for the tiers the agent runtime cannot load yet — the subject of `sessionNote`.
+ * `builtin` is the Winter-shipped tier (`packages/core/skills`).
+ */
+const UNDELIVERABLE_TIER_LABEL: Readonly<Record<Exclude<SkillMeta["source"], "plugin">, string>> = {
+  project: "Project",
+  user: "Your own",
+  self: "Self-authored",
+  builtin: "Built-in",
+};
 
 /**
  * Build (or repair) the skills-only view of ONE plugin: `<views>/<plugin>/` holding exactly one
@@ -142,12 +149,14 @@ export function skillPluginViewsRoot(winterHome: string): string {
  * with no manifest and nothing but `skills` gives the child exactly the daemon's skills, under
  * exactly the daemon's names, and nothing else.
  *
- * UNDER `<home>/runtimes`, deliberately: that tree is fenced from every tool on both legs (the
- * `Write`/`Edit` deny rules and the Bash sandbox's `denyWrite`, `mode-options.ts`), so a session
- * cannot plant a manifest in a view and have the NEXT incarnation's child run its hooks. The child
- * itself reads the files, not a tool, so the matching read fence does not get in the Skill tool's way.
- * Rebuilt on every call anyway — anything but the one `skills` link is removed and a re-pointed
- * link is replaced — so the view is a function of `<home>/plugins`, never of what was left in it.
+ * UNDER `<home>/cache/skill-plugins` (`skillPluginViewsRoot`, `agent/paths.ts`): READABLE, because a
+ * skill points the model at its own supporting files by path and a view under `<home>/runtimes` was
+ * denied to Read/Glob/Grep and to the Bash sandbox; DISPOSABLE, because it is rebuilt before every
+ * spawn and Migration B skips `cache/**`; and WRITE-FENCED — `mode-options.ts` denies the write tools
+ * and the Bash sandbox that subtree on both legs, so a session cannot plant a manifest in a view and
+ * have the NEXT incarnation's child run its hooks as a plugin's. Rebuilt on every call anyway —
+ * anything but the one `skills` link is removed and a re-pointed link is replaced — so the view is a
+ * function of `<home>/plugins`, never of what was left in it.
  * Removal never follows a link (measured on Bun: `rmSync(…, { recursive: true })` unlinks a symlink,
  * nested or not, and leaves its target alone; the `skills` link itself is `unlinkSync`ed).
  *
@@ -176,6 +185,23 @@ function ensureSkillPluginView(winterHome: string, plugin: string): string | nul
     return root;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Delete every view whose plugin no longer contributes a skill (removed, disabled, or emptied) — the
+ * views are the daemon's own disposable state, so nothing is left dangling after a plugin goes. A child
+ * already running keeps what it indexed at startup; a later `Skill` call for a pruned plugin answers
+ * "could not be read", which is the honest answer for a plugin the user just turned off. Never creates
+ * the root, and removal never follows a link (see `ensureSkillPluginView`). Best-effort, never throws.
+ */
+function pruneSkillPluginViews(winterHome: string, keep: ReadonlySet<string>): void {
+  const root = skillPluginViewsRoot(winterHome);
+  let entries: string[];
+  try { entries = readdirSync(root); } catch { return; }   // no views yet
+  for (const entry of entries) {
+    if (keep.has(entry)) continue;
+    try { rmSync(join(root, entry), { recursive: true, force: true }); } catch { /* best effort */ }
   }
 }
 
@@ -284,7 +310,8 @@ export class SkillStore {
    * They are therefore also absent from `skills`, which may name only what the child can index.
    *
    * Empty (`{ plugins: [], skills: [] }`) when no plugin contributes a skill, so a caller can leave
-   * both options off entirely. The views are (re)built here, which is the one side effect.
+   * both options off entirely. The views are (re)built here — and the views of plugins that no longer
+   * contribute (removed, disabled, emptied) are deleted — which is the one side effect.
    */
   childSkillSurface(input: { cwd: string | null; deny?: readonly string[] }): { plugins: SdkPluginConfig[]; skills: string[] } {
     const denied = new Set(input.deny ?? []);
@@ -293,9 +320,7 @@ export class SkillStore {
     const viewed = new Map<string, boolean>();
     for (const meta of this.list({ cwd: input.cwd })) {
       if (meta.source !== "plugin") continue;
-      const colon = meta.name.indexOf(":");
-      const plugin = meta.name.slice(0, colon);
-      const skill = meta.name.slice(colon + 1);
+      const plugin = meta.name.slice(0, meta.name.indexOf(":"));
       if (!viewed.has(plugin)) {
         const root = ensureSkillPluginView(this.winterHome, plugin);
         viewed.set(plugin, root !== null);
@@ -304,11 +329,34 @@ export class SkillStore {
       if (!viewed.get(plugin)) continue;
       // A name either SDK jail refuses is still handed over inside its plugin (the child then says on
       // its stderr why it did not load) but never named here, where one unknown name fails the list.
-      if (!SDK_PLUGIN_NAME_PATTERN.test(plugin) || !SDK_SKILL_NAME_PATTERN.test(skill)) continue;
+      if (!this.sessionAvailability(meta).loadsInSessions) continue;
       if (denied.has(skillDenyRule(meta.name))) continue;
       skills.push(meta.name);
     }
+    pruneSkillPluginViews(this.winterHome, new Set(viewed.keys()));
     return { plugins, skills };
+  }
+
+  /**
+   * **Can a session actually load this skill?** — the ONE rule `childSkillSurface` filters by and
+   * `skills.list` reports per skill (`loadsInSessions`/`sessionNote`), so no surface can call a skill
+   * usable that a session's runtime child cannot load. Independent of `Skill(<name>)` deny rules,
+   * which `skills.list` reports on their own (`denied`).
+   *
+   * Only the PLUGIN tier reaches a child (see `childSkillSurface`), and only under names the agent
+   * SDK's own jails accept. Every other tier is listed — it exists and `skills.read` serves it — but
+   * says, truthfully, that no session can load it yet (neither the agent SDK nor claude's has a door
+   * for bare-named host skills: discovery is settings-source-gated, which the daemon must keep off).
+   */
+  sessionAvailability(meta: Pick<SkillMeta, "name" | "source">): { loadsInSessions: boolean; sessionNote?: string } {
+    if (meta.source !== "plugin") {
+      return { loadsInSessions: false, sessionNote: `${UNDELIVERABLE_TIER_LABEL[meta.source]} skills can't be loaded by a session yet — only plugin skills reach the agent runtime.` };
+    }
+    const colon = meta.name.indexOf(":");
+    if (!SDK_PLUGIN_NAME_PATTERN.test(meta.name.slice(0, colon)) || !SDK_SKILL_NAME_PATTERN.test(meta.name.slice(colon + 1))) {
+      return { loadsInSessions: false, sessionNote: "The agent runtime refuses this name — plugin and skill names must be lowercase letters, digits and dashes." };
+    }
+    return { loadsInSessions: true };
   }
 
   /** Root of the self-authored scope: `~/.winter/skills/self` — the same path `discover` scans as source "self". */

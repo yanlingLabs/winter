@@ -296,7 +296,11 @@ test("the control-plane deny rules cover the four write tools × the control-pla
     // control-plane filenames above, just for a directory of them.
     expect(deny).toContain(`${tool}(//h/agents/**)`);
     expect(deny).toContain(`${tool}(//**/.winter/agents/**)`);
+    // B1 follow-up: the skills-only plugin views — a planted manifest there becomes the next child's
+    // plugin hooks. Write-fenced; deliberately NOT read-fenced (a skill reads its own files).
+    expect(deny).toContain(`${tool}(//h/cache/skill-plugins/**)`);
   }
+  for (const tool of ["Read", "Glob", "Grep"]) expect(deny.some((r) => r.startsWith(`${tool}(`) && r.includes("/cache"))).toBe(false);
   // Task 17: + the engine's read-tool denials, carried: Read/Glob/Grep × { run/**, runtimes/** }
   for (const tool of ["Read", "Glob", "Grep"]) {
     expect(deny).toContain(`${tool}(//h/run/**)`);
@@ -312,7 +316,7 @@ test("the control-plane deny rules cover the four write tools × the control-pla
   for (const tool of ["Edit", "Write", "MultiEdit", "NotebookEdit", "Read", "Glob", "Grep"]) {
     expect(deny).toContain(`${tool}(${claudeResumeTarget})`);
   }
-  expect(deny).toHaveLength(4 * 10 + 3 * 3);
+  expect(deny).toHaveLength(4 * 11 + 3 * 3);
 });
 
 // Daemon settings surface batch 3 (item 2): `settings.permissions.deny` (Skill(<name>) toggles,
@@ -326,14 +330,14 @@ test("item 2: settings.permissions.deny is appended after the fixed control-plan
   const deny = buildWinterOptions(optionsInput({ home: "/h", settings })).permissions!.deny!;
   expect(deny.slice(-2)).toEqual(["Skill(writing-skills)", "Agent(fork)"]);
   // The fixed fence is untouched (same count this file's other test pins).
-  expect(deny).toHaveLength(4 * 10 + 3 * 3 + 2);
+  expect(deny).toHaveLength(4 * 11 + 3 * 3 + 2);
 });
 
 test("item 2: an absent settings.permissions.deny changes nothing — byte-identical to before item 2", () => {
   const withNull = buildWinterOptions(optionsInput({ home: "/h", settings: null })).permissions!.deny!;
   const withUndefined = buildWinterOptions(optionsInput({ home: "/h" })).permissions!.deny!;
-  expect(withNull).toHaveLength(4 * 10 + 3 * 3);
-  expect(withUndefined).toHaveLength(4 * 10 + 3 * 3);
+  expect(withNull).toHaveLength(4 * 11 + 3 * 3);
+  expect(withUndefined).toHaveLength(4 * 11 + 3 * 3);
 });
 
 // Winter Phase 10b (D1-3, W18-9): a read of a `claude-resume-*` staging root is denied — proved
@@ -399,7 +403,8 @@ test("every deny rule is //-anchored, and resolves to the fence target it names"
   expect(specs.has(`/${join(tmpdir(), "claude-resume-*", "**")}`)).toBe(true); // P8d-12's staging root
   expect(specs.has(`/${join(home, "agents")}/**`)).toBe(true);     // finding 2c: the user's own agent definitions
   expect(specs.has(`//**/.winter/agents/**`)).toBe(true);          // finding 2c: any project's, any depth
-  expect(specs.size).toBe(11);
+  expect(specs.has(`/${join(home, "cache", "skill-plugins")}/**`)).toBe(true); // B1: the skills-only plugin views
+  expect(specs.size).toBe(12);
   // The two inert forms must never reappear.
   for (const s of specs) {
     expect({ s, singleSlashAbsolute: /^\/[^/]/.test(s) }).toEqual({ s, singleSlashAbsolute: false });
@@ -428,7 +433,8 @@ test("the Bash sandbox names real DIRECTORIES, because its consumer renders seat
   // in official-leg.e2e.test.ts), and a per-tool `Write(path)` deny rule does not constrain a Bash
   // redirect — so `<home>/runtimes/bin/winter`, rung 4 of `resolveWinterExecutable`'s ladder, was
   // writable there. If either list loses it, that is the regression this line exists to catch.
-  expect(sb.filesystem!.denyWrite).toEqual(["/h/run", "/h/runtimes"]);
+  // B1 follow-up: + the skills-only plugin views (write only — see `controlPlaneDenyRules`).
+  expect(sb.filesystem!.denyWrite).toEqual(["/h/run", "/h/runtimes", "/h/cache/skill-plugins"]);
   // CLAUDE.md: "the sole read denial is ~/.winter/run" — reads are otherwise unrestricted.
   expect(sb.filesystem!.denyRead).toEqual(["/h/run", "/h/runtimes"]);   // Task 17: runtimes/ is model-denied (8a)
   for (const p of [...sb.filesystem!.denyWrite!, ...sb.filesystem!.denyRead!]) {

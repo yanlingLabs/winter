@@ -58,8 +58,8 @@ describeWithWinterBinary("B1 measurement — the daemon's plugin skills inside a
       const messages: Array<Record<string, unknown>> = [];
       // THE DAEMON'S OWN OPTIONS, not a hand-built subset: `buildWinterOptions` is what production
       // spawns with, so the measurement runs under the same `settingSources: []`, the same Bash sandbox
-      // (`denyRead`/`denyWrite` on `<home>/runtimes`, where the views live) and the same
-      // `Read/Glob/Grep(<home>/runtimes/**)` deny rules — the fence a view under that tree must not trip.
+      // and the same deny rules — including the WRITE fence on the views' own subtree
+      // (`<home>/cache/skill-plugins`), which the child's own plugin loading must not trip.
       const options = buildWinterOptions({
         mode: "code", policy: "auto", sessionId: "00000000-0000-4000-8000-0000000000b1", home, cwd,
         model: "winter-test/reflect" as ModelTag, credentials: { byProvider: {} } as unknown as CredentialPresence,
@@ -71,8 +71,9 @@ describeWithWinterBinary("B1 measurement — the daemon's plugin skills inside a
         plugins: surface.plugins, skills: surface.skills,
       });
       expect(options.settingSources).toEqual([]);
-      expect(options.sandbox?.filesystem?.denyRead).toContain(join(home, "runtimes"));
-      expect(options.permissions?.deny?.some((r) => r.startsWith("Read(") && r.includes(join(home, "runtimes")))).toBe(true);
+      expect(surface.plugins[0]!.path.startsWith(join(home, "cache", "skill-plugins") + "/")).toBe(true);
+      expect(options.sandbox?.filesystem?.denyWrite).toContain(join(home, "cache", "skill-plugins"));
+      expect(options.permissions?.deny?.some((r) => r.startsWith("Write(") && r.includes(join(home, "cache", "skill-plugins")))).toBe(true);
       const q = query({ prompt: queue, options });
       queue.push("list your skills");
       try {
