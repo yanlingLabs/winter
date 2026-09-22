@@ -259,6 +259,35 @@ describe("route functions (no daemon — direct settings.json / .mcp.json writes
     expect(outcome.warning).toBeUndefined();
   });
 
+  // Review round 2 addendum: `-H` on a stdio add and `-e` on an http/sse add are both silently
+  // DROPPED by `buildMcpEntry` (it only ever reads `headerArgs` for http/sse, `envArgs` for stdio)
+  // — with no warning, a user who typed `-H "Authorization: …"` on a stdio server would have no way
+  // to know it never reached the entry. Mirrors claude's own "flag ignored for this transport"
+  // warning (`addCommand.ts:240-249`).
+  test("add warns when -H is given on a stdio entry (silently dropped otherwise)", async () => {
+    const outcome = await runMcpAddRoute(["-H", "Authorization: Bearer x", "my-server", "npx"], deps());
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected ok");
+    expect(outcome.warning).toMatch(/-H\/--header is only used for http\/sse/);
+  });
+
+  test("add warns when -e is given on an http/sse entry (silently dropped otherwise)", async () => {
+    const outcome = await runMcpAddRoute(["-t", "http", "-e", "A=1", "my-server", "https://example.com/mcp"], deps());
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected ok");
+    expect(outcome.warning).toMatch(/-e\/--env is only used for stdio/);
+  });
+
+  test("add combines the URL-heuristic warning and the wrong-flag warning when both apply", async () => {
+    const outcome = await runMcpAddRoute(["-H", "Authorization: Bearer x", "my-server", "https://mcp.sentry.dev/mcp"], deps());
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("expected ok");
+    expect(outcome.warning).toMatch(/looks like a URL/);
+    expect(outcome.warning).toMatch(/-H\/--header is only used for http\/sse/);
+    const rendered = renderMcpAddOutcome(outcome);
+    expect(rendered.match(/^Warning: /gm)?.length).toBe(2); // each warning gets its own "Warning: " line
+  });
+
   test("remove with an explicit scope removes just there, idempotently", async () => {
     await runMcpAddRoute(["my-server", "npx"], deps());
     const first = await runMcpRemoveRoute(["my-server", "-s", "user"], deps());
@@ -278,6 +307,26 @@ describe("route functions (no daemon — direct settings.json / .mcp.json writes
     expect(outcome).toEqual({ ok: false, message: 'No MCP server found with name: "never-added"' });
   });
 
+  // Review round 2, minor 2: a malformed project .mcp.json must never be silently read as "not
+  // there" by the ambient (no -s) remove — it surfaces the parse error, same as `mcp get` does,
+  // rather than falsely reporting "No MCP server found" for a name that might well be sitting in
+  // that unreadable file.
+  test("remove with no scope surfaces a malformed project .mcp.json's parse error, rather than reporting the name as absent", async () => {
+    writeFileSync(join(cwd, ".mcp.json"), "{ not json");
+    const outcome = await runMcpRemoveRoute(["anything"], deps());
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("expected refusal");
+    expect(outcome).not.toHaveProperty("multi");
+    expect((outcome as { message: string }).message).toMatch(/not valid JSON/);
+  });
+
+  test("remove with an EXPLICIT -s user still works normally even when the project's .mcp.json is malformed (the malformed-file refusal is scoped to the ambient lookup only)", async () => {
+    await runMcpAddRoute(["my-server", "npx"], deps());
+    writeFileSync(join(cwd, ".mcp.json"), "{ not json");
+    const outcome = await runMcpRemoveRoute(["my-server", "-s", "user"], deps());
+    expect(outcome).toEqual({ ok: true, scope: "user", name: "my-server", removed: true });
+  });
+
   test("remove with no scope and the name in BOTH scopes reports the ambiguity", async () => {
     await runMcpAddRoute(["dup", "npx"], deps());
     await runMcpAddRoute(["-s", "project", "dup", "npx"], deps());
@@ -289,6 +338,22 @@ describe("route functions (no daemon — direct settings.json / .mcp.json writes
     await runMcpAddRoute(["my-server", "npx", "arg"], deps());
     const outcome = await runMcpGetRoute(["my-server"], deps());
     expect(outcome).toEqual({ ok: true, found: true, name: "my-server", scope: "user", transport: "stdio", command: "npx", args: ["arg"], env: undefined });
+  });
+
+  // Review round 2, minor 3: the NO-DAEMON path used to never report `strippedHeaders` at all —
+  // only the RPC handler did. A hand-edited settings.json carrying a credential-shaped header must
+  // surface the SAME "this was dropped at read time" signal on both paths.
+  test("get (no daemon) reports strippedHeaders for a hand-edited settings.json entry with a credential-shaped header, same as the RPC path", async () => {
+    writeFileSync(join(winterHome, "settings.json"), JSON.stringify({
+      schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
+      mcpServers: { remote: { type: "http", url: "https://example.com/mcp", headers: { Authorization: "Bearer sk-secret", "X-Request-Id": "abc" } } },
+    }));
+    const outcome = await runMcpGetRoute(["remote"], deps());
+    expect(outcome).toEqual({
+      ok: true, found: true, name: "remote", scope: "user", transport: "http",
+      url: "https://example.com/mcp", headers: { "X-Request-Id": "abc" },
+      strippedHeaders: ["Authorization"],
+    });
   });
 
   test("get falls back to project scope when not in user scope", async () => {

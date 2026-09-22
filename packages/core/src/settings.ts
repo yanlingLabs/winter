@@ -362,14 +362,13 @@ const McpSSEServerSettings = refuseCredentialShapedHeaders(z.object({
  *  `type`, …) fails with the discriminated union's own per-branch message — a useful "which shape
  *  did you mean" error rather than a plain-union's aggregated wall of text.
  *
- *  Exported as a VALUE (not just the `McpServerSettingsEntry` type below) so `agent/mcp/
- *  project-file.ts`'s `parseProjectMcpServers` can reuse this EXACT schema, per-entry, to validate
- *  a project's `<cwd>/.mcp.json` — the shape the daemon already knows how to hand to either leg
- *  (stdio/http/sse), including the credential-shaped-header refusal on an http/sse entry. That is
- *  the one and only reason this is exported: nothing in `settings.ts` itself needed the value form
- *  before (only `Settings`'s own `mcpServers` field, and `saveSettings`'s validation, ever called it,
- *  both in this file). */
-export const McpServerSettingsEntry = z.preprocess(
+ *  NEVER reuse this schema (including its `refuseCredentialShapedHeaders` refinement) for a
+ *  project's `<cwd>/.mcp.json` — a review round briefly did, which silently dropped a git-shared
+ *  http/sse entry the moment it carried an `Authorization` header (claude's own reader accepts and
+ *  forwards such headers verbatim). `agent/mcp/project-file.ts`'s `ProjectMcpEntrySchema` is the
+ *  project-scope equivalent, defined fresh there without that refinement — see its own header for
+ *  the ruling. This one stays private to `settings.ts` (not exported as a value) again. */
+const McpServerSettingsEntry = z.preprocess(
   (v) => (v && typeof v === "object" && !Array.isArray(v) && !("type" in v) ? { ...(v as object), type: "stdio" } : v),
   z.discriminatedUnion("type", [McpStdioServerSettings, McpHttpServerSettings, McpSSEServerSettings]),
 );
