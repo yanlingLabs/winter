@@ -140,6 +140,9 @@ test("disableBypassPermissionsMode is set for every policy except bypass itself"
 // over material `ContextAssembler`/`SkillStore`/`Options.agents` already supply. (It does NOT make the
 // child parse `<home>/settings.json`: that cascade has no production call site at 0.0.16. See the
 // comment on the field itself in mode-options.ts.)
+// 0.0.17 CORRECTION: that cascade IS wired in production now (`production-wiring.ts`'s
+// `resolveSettingsDetailed`), so a `"user"` source would ALSO make the child parse the daemon's own
+// `<home>/settings.json` as a settings tier — `settingSources: []` is more load-bearing, not less.
 test("every cell discovers no settings tier of its own and keeps the foreground spawn default", () => {
   for (const mode of MODES) {
     for (const policy of POLICIES) {
@@ -148,6 +151,30 @@ test("every cell discovers no settings tier of its own and keeps the foreground 
       expect(o.settingSources).toEqual([]);
     }
   }
+});
+
+// B1 (2026-09-22): with `settingSources: []` a local plugin is the ONE skill source the child still
+// indexes, so the daemon's resolved plugin skills ride `Options.plugins` (skills-only views, built by
+// `SkillStore.childSkillSurface`) and `Options.skills` names which of them the session may invoke.
+test("B1: the daemon's skill surface rides Options.plugins + Options.skills verbatim; none ⇒ neither key", () => {
+  const plugins = [{ type: "local" as const, path: "/tmp/winter-home/runtimes/skill-plugins/superpowers", skipMcpDiscovery: true }];
+  const o = buildWinterOptions(optionsInput({ mode: "code", plugins, skills: ["superpowers:brainstorming"] }));
+  expect(o.plugins).toEqual(plugins);
+  expect(o.skills).toEqual(["superpowers:brainstorming"]);
+  // An empty list is a real answer (every plugin skill denied): the SDK reads `[]` as "none", which
+  // is exactly what the daemon means — never "all", which is what dropping the key would say.
+  expect(buildWinterOptions(optionsInput({ mode: "code", plugins, skills: [] })).skills).toEqual([]);
+  for (const mode of MODES) {
+    for (const policy of POLICIES) {
+      const bare = buildWinterOptions(optionsInput({ mode, policy }));
+      expect("plugins" in bare).toBe(false);
+      expect("skills" in bare).toBe(false);
+    }
+  }
+  // No plugin ⇒ no `skills` either: with nothing indexed, a filter would only add a validation warning.
+  const noPlugins = buildWinterOptions(optionsInput({ mode: "code", plugins: [], skills: [] }));
+  expect("plugins" in noPlugins).toBe(false);
+  expect("skills" in noPlugins).toBe(false);
 });
 
 // USER RULING 2026-09-18: reads are globally allowed, stated as an allow rule rather than left to a
