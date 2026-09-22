@@ -823,24 +823,36 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     // is the same credential (and therefore the same already-configured provider connection) the
     // session's own turn already resolved — never an independent, uninstructed lookup.
     //
-    // WS-20 (review round 2, nit a): a CROSS-provider advisor is DROPPED, not guessed at. The pinned
-    // SDK's `AdvisorConfig` shape (`protocol/config.d.ts`) has NO `providerId` field — only
-    // `model`/`authRef` — so this door has no way to PIN the advisor to its own provider identity;
-    // the only safe lever is "same provider as the session's own model, or nothing at all". Threading
-    // `advisorProvider`'s own authRef for a genuinely cross-provider advisor (the OLD behavior) risked
-    // a credential/provider mismatch this shape cannot express or verify. Logged once, naming the
-    // setting, so a misconfigured `runtimes.advisorModel` is visible rather than silently inert.
-    const advisorProvider = providerFor(input.advisorModel, input.home);
-    const sameProvider = provider !== undefined && advisorProvider !== undefined && provider.providerId === advisorProvider.providerId;
-    if (sameProvider) {
-      options.advisor = {
-        model: input.advisorModel.startsWith(WINTER_TEST_PREFIX) ? input.advisorModel : splitTag(input.advisorModel).modelId,
-        ...(provider!.authRef === undefined ? {} : { authRef: provider!.authRef }),
-      };
+    // D3 (2026-09-22) — THE PROVIDER IDENTITY IS THE TAG ITSELF. `advisor.model` is the FULL qualified
+    // tag, never `splitTag(...).modelId`: the pinned SDK 0.0.17 resolves a `<providerId>/<model>`
+    // advisor key to ITS OWN provider (`provider/slots.ts`'s qualified-key door — a full catalog key
+    // passes unfiltered with its own providerId — then `session-provider.ts` builds the reviewer on
+    // `config.advisor.authRef`, "the advisor's OWN authRef, never the session's"). That is exactly how
+    // `WebFetch`'s digest model already runs cross-provider (`digestOptionsFor`, below). The BARE id
+    // this door used to send is what made the SDK read the advisor under the SESSION's provider, which
+    // is why WS-20 had to drop every cross-provider advisor — on every spawn, in the dist log, for a
+    // session on deepseek with `runtimes.advisorModel: codex-oauth/gpt-5.6-sol`.
+    //
+    // `authRef` is the advisor's OWN provider's Keychain locator, stated explicitly for the M7 reason
+    // above (the child's own fallback would resolve the BRAND's Keychain service, which is the dist
+    // service even for a dev-profile daemon). A same-provider advisor gets the identical locator the
+    // session's own provider carries, so that case is unchanged apart from the full tag.
+    //
+    // The reserved `winter-test/*` double travels whole and names no credential. Only a genuinely
+    // UNROUTABLE tag — `providerFor` answers nothing for the `unstated/unstated` sentinel a hand-edited
+    // settings file can carry — is dropped, logged once per spawn naming the setting.
+    if (input.advisorModel.startsWith(WINTER_TEST_PREFIX)) {
+      options.advisor = { model: input.advisorModel };
     } else {
-      console.error(
-        `runtimes.advisorModel: names a different provider than the session's own model (or one side is unroutable) — dropping the advisor rather than guessing which credential it should use`,
-      );
+      const advisorProvider = providerFor(input.advisorModel, input.home);
+      if (advisorProvider !== undefined) {
+        options.advisor = {
+          model: input.advisorModel,
+          ...(advisorProvider.authRef === undefined ? {} : { authRef: advisorProvider.authRef }),
+        };
+      } else {
+        console.error(`runtimes.advisorModel: ${JSON.stringify(input.advisorModel)} names no provider — dropping the advisor rather than guessing which one it means`);
+      }
     }
   }
   if (provider) options.provider = input.connection === undefined ? provider : { ...provider, connection: input.connection };
