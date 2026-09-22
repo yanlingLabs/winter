@@ -89,6 +89,7 @@ import { Chalk } from "chalk";
 import wrapAnsi from "wrap-ansi";
 import { METHODS, type ApprovalPolicy, type SessionActivity, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import { POLICY_ORDER } from "./policy-order";
+import { policySwitchNotes } from "./policy-switch-notes";
 import { modelIdPortion } from "../model-cli";
 import { initialState, reduce, statusChromeModel, type AgentRow, type Block, type LocalEvent, type PendingCard, type TuiState } from "./state";
 import { makeFlattenCache, makeStreamRenderer } from "./flatten-blocks";
@@ -896,7 +897,11 @@ export function App({
     policyInFlight.current = true;
     const next = POLICY_ORDER[(POLICY_ORDER.indexOf(policy) + 1) % POLICY_ORDER.length]!;
     Promise.resolve(client.setPolicy(sessionId, next))
-      .then(() => { setPolicy(next); }) // advance the bar only on success (mirror main.ts:392)
+      .then((result) => {
+        setPolicy(next); // advance the bar only on success (mirror main.ts:392)
+        // A bypass crossing says when it lands, and a turn still bypassing says so (lane B).
+        for (const line of policySwitchNotes(next, result)) appendNote(line);
+      })
       .catch(() => { /* failure: leave the bar unchanged, same as legacy */ })
       .finally(() => { policyInFlight.current = false; });
   };
