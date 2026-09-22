@@ -475,6 +475,13 @@ export async function runMcpRemoveRoute(args: string[], deps: McpRouteDeps): Pro
 export type McpGetOutcome =
   | { ok: true; found: false; name: string }
   | {
+      // NOTE: for `scope: "project"`, `transport: "stdio"` asserts the SCHEME (Winter's project
+      // scope is stdio-only by design), not that this particular entry parsed as one — an entry
+      // present in the file but not shaped like `{command, args?, env?}` (an http/sse entry a human
+      // or claude wrote there) still reports `transport: "stdio"` with `command` left `undefined`;
+      // that absence is the actual "not recognized" signal (`renderMcpGetOutcome` checks it, and
+      // `asStdioProjectEntry`'s own doc explains why the CLI can't tell this apart from the wire
+      // side without the runtime schema, which the core package deliberately does not export).
       ok: true; found: true; name: string; scope: McpScope; transport: McpTransport;
       command?: string; args?: string[]; env?: Record<string, string>;
       url?: string; headers?: Record<string, string>; disabled?: boolean; strippedHeaders?: string[];

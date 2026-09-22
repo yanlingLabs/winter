@@ -2,13 +2,26 @@
 // format (git-shared, stdio-only), previously duplicated verbatim in TWO places
 // (`agent/mcp/manager.ts`'s own `ProjectMcpConfig`, `runtime-sdk/external-mcp.ts`'s own copy) with
 // nothing keeping the two in sync beyond "nobody has changed one without the other yet". Both now
-// import the schema from here; `winter mcp add/remove --scope project` (`mcp-cli.ts`) is the THIRD
-// consumer this file exists to keep from becoming a fourth silently-drifting copy.
+// import the schema from here.
 //
 // Deliberately stdio-only, matching every existing reader: `configuredMcpServersFor` and
 // `McpManager.doEnsureProject`/`startPlugins` have never accepted an http/sse project entry, so
 // `winter mcp add --scope project --transport http` is refused one door earlier, in `mcp-cli.ts`,
 // before it would ever reach a shape this schema can't express.
+//
+// TWO READER/WRITER PAIRS, deliberately, for two different callers:
+//   - `readProjectMcpConfig`/`writeProjectMcpConfig`/`ProjectMcpConfig` (typed, stdio-only,
+//     degrades a missing/malformed file to `{}`) — for a caller that already has a fully-typed,
+//     validated shape in hand and just wants ordinary read/write. Today that is only this file's
+//     own tests; `manager.ts`/`external-mcp.ts` call `ProjectMcpConfig.parse(...)` themselves
+//     (they need the exact "record none on any parse failure" degrade inline with their own
+//     control flow), and the CLI's WRITE door (below) does not use these either — kept as the
+//     schema's own natural typed API, not because anything currently calls it.
+//   - `readRawProjectMcpConfig`/`writeRawProjectMcpConfig` (untyped, refuses on a malformed file) —
+//     THE WRITE DOOR. `winter mcp add/remove --scope project` (`mcp-cli.ts`) uses ONLY this pair.
+//     See that function's own doc for why a write can never go through the typed pair above: one
+//     stdio-only `.parse()` failure anywhere in the map would make a write silently drop every
+//     OTHER server in the file.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
