@@ -225,11 +225,21 @@ describe("WinterClient", () => {
     client.close();
   });
 
+  // 2026-09-19 (daemon.ts's `providerInfo`, see its own doc comment): `daemon.status`'s `provider`
+  // field is derived from `settings.provider.model` (the tag) whenever an internal router is built
+  // at all — never from the injected `agentProvider` handle's own id/model — so a DeepSeek/Claude-
+  // default home (whose daemon never builds a real `agentProvider`) still reports its real default
+  // model instead of `null`. `boot()` with no argument ALSO builds a non-null router here (settings
+  // are present, so daemon.ts's `else if (settings)` branch fires) — the explicit `boot(null)` above
+  // is the ONLY thing that forces `provider: null`, so `FakeProvider` below is not load-bearing for
+  // the router, just this suite's existing convention for "a provider is configured". Either way the
+  // reported identity comes from `WINTER_SEED`'s `provider.model` (`winter-test/echo`), never the
+  // FakeProvider's own `"fake"`/`"fake-1"`.
   test("daemonStatus reports the configured provider", async () => {
     await boot(new FakeProvider([]));
     const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "dsp", onEvent: () => {} });
     const status = await client.daemonStatus();
-    expect(status.provider).toEqual({ id: "fake", model: "fake-1" });
+    expect(status.provider).toEqual({ id: "winter-test", model: "winter-test/echo" });
     client.close();
   });
 
