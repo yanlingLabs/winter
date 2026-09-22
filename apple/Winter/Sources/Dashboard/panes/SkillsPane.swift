@@ -316,6 +316,14 @@ struct SkillsPane: View {
                 .font(Typography.caption())
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
+            // 2026-09-22 (lane B): a skill no session can load says so, in the daemon's own words —
+            // listing it bare would read as "available to the agent", which it is not.
+            if let note = skill.notInSessionsNote {
+                Text(note)
+                    .font(Typography.caption())
+                    .foregroundStyle(.orange)
+                    .lineLimit(3)
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)

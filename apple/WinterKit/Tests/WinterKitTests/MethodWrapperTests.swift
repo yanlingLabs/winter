@@ -817,6 +817,23 @@ final class MethodWrapperTests: XCTestCase {
         XCTAssertEqual(skills[1].source, "self")
         XCTAssertEqual(skills[1].author, "winter")
         XCTAssertEqual(skills[2].claudeFormat, true)
+        // An older daemon sends no session fields: nil, and no note (never read as "loads").
+        XCTAssertNil(skills[0].loadsInSessions)
+        XCTAssertNil(skills[0].notInSessionsNote)
+    }
+
+    /// 2026-09-22 (lane B): `loadsInSessions`/`sessionNote` round-trip, and `notInSessionsNote` is the
+    /// daemon's own sentence for a skill no session can load — nothing for one that loads.
+    func testSkillsListDecodesSessionAvailability() async throws {
+        let (client, t) = try await connected()
+
+        let (_, skills) = try await roundTrip(t, sentIndex: 1,
+            result: #"{"ok":true,"skills":[{"name":"greet","description":"say hi","source":"user","path":"/h/skills/greet","loadsInSessions":false,"sessionNote":"Your own skills can't be loaded by a session yet — only plugin skills reach the agent runtime."},{"name":"superpowers:brainstorming","description":"explore","source":"plugin","path":"/h/plugins/superpowers/skills/brainstorming","loadsInSessions":true}]}"#
+        ) { try await client.skillsList() }
+        XCTAssertEqual(skills[0].loadsInSessions, false)
+        XCTAssertEqual(skills[0].notInSessionsNote, "Your own skills can't be loaded by a session yet — only plugin skills reach the agent runtime.")
+        XCTAssertEqual(skills[1].loadsInSessions, true)
+        XCTAssertNil(skills[1].notInSessionsNote)
     }
 
     func testSkillsReadDecodesFullBody() async throws {
