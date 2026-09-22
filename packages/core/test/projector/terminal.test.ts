@@ -240,6 +240,62 @@ describe("projector: turn_completed usage (the contextTokens contract)", () => {
     expect(out[0]!.contextTokens).toBeUndefined();
   });
 
+  // ── 2026-09-22 (C1): a turn's usage WITHOUT a priced ledger ────────────────────────────────────
+  //
+  // The Winter runtime puts usage on the wire ONLY through `modelUsage`, and ONLY for a PRICED
+  // generation (agent SDK 0.0.17 `engine.ts:2547-2562` + `session-provider.ts:829`): a subscription
+  // row (`codex-oauth/*`, `pricingBasis: "subscription"`) and every row with no pricing evidence
+  // (`deepseek*/*`, `zai*/*`) therefore report NOTHING, and every `turn_completed` since the
+  // 2026-09-16 provider fix read 0/0. Claude's own result carries the turn's usage in `usage`
+  // (`NonNullableUsage`, snake_case, per `ask()` — i.e. per turn) beside the session-cumulative
+  // `modelUsage`; that is the shape the daemon reads when the ledger is absent.
+  test("no modelUsage but a claude-shaped per-turn `usage`: the turn's own figures are reported (C1)", () => {
+    const { projector, debugs } = makeProjector();
+    accept(projector, init());
+    beginTurn(projector, "do it");
+    accept(projector, assistantText("hi"));
+    const out = accept(projector, result({
+      usage: { input_tokens: 300, output_tokens: 40, cache_read_input_tokens: 900, cache_creation_input_tokens: 0 },
+    })) as TC[];
+    expect(out[0]).toMatchObject({ inputTokens: 1200, outputTokens: 40, contextTokens: 1200 });
+    // It is NOT the unpriced "nothing is known" case, so that line must not be logged for it.
+    expect(debugs.filter((d) => d.includes("unpriced catalog row")).length).toBe(0);
+  });
+
+  test("a per-turn `usage` is NOT cumulative: the second turn reports its own figures, not a delta (C1)", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    beginTurn(projector, "one");
+    accept(projector, assistantText("one"));
+    accept(projector, result({ usage: { input_tokens: 1000, output_tokens: 20 } }));
+    beginTurn(projector, "two");
+    accept(projector, assistantText("two"));
+    const second = accept(projector, result({ usage: { input_tokens: 1400, output_tokens: 30 } })) as TC[];
+    expect(second[0]).toMatchObject({ inputTokens: 1400, outputTokens: 30 });
+  });
+
+  test("a multi-round turn's `usage` omits contextTokens (a sum of rounds is not a context size) (C1)", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    beginTurn(projector, "do it");
+    accept(projector, assistantToolUse("t1", "Read", {}));
+    accept(projector, toolResult("t1", "contents"));
+    accept(projector, assistantText("summary"));
+    const out = accept(projector, result({ usage: { input_tokens: 3300, output_tokens: 37 } })) as TC[];
+    expect(out[0]).toMatchObject({ inputTokens: 3300, outputTokens: 37 });
+    expect(out[0]!.contextTokens).toBeUndefined();
+  });
+
+  test("when BOTH are present the priced ledger wins — it is what the turn SPENT, subagents included (C1)", () => {
+    // The official leg sends both; its behaviour must not move.
+    const { projector } = makeProjector();
+    accept(projector, init());
+    beginTurn(projector, "do it");
+    accept(projector, assistantText("hi"));
+    const out = accept(projector, result({ modelUsage: modelUsage(5000, 90), usage: { input_tokens: 1, output_tokens: 1 } })) as TC[];
+    expect(out[0]).toMatchObject({ inputTokens: 5000, outputTokens: 90 });
+  });
+
   test("usage totals across several model rows are summed", () => {
     const { projector } = makeProjector();
     accept(projector, assistantText("hi"));

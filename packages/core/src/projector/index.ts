@@ -11,14 +11,14 @@ import { createEchoWindow, type EchoWindow } from "./dedupe";
 import { classifyThrown, sanitizeDetail } from "./errors";
 import { isKnownUnpersistedKind, kindOf, summarize } from "./hooks";
 import { isQuestionTool } from "./questions";
-import { projectTerminal, sharesMainLedgerRow, totalsOf, type MainModelKey, type UsageTotals } from "./terminal";
+import { projectTerminal, sharesMainLedgerRow, totalsOf, turnUsageOf, type MainModelKey, type UsageTotals } from "./terminal";
 import { hostToolNameFor } from "../runtime-sdk/tool-names";
 import { ProjectorRefusedError } from "./types";
 import type { CheckpointStore, ProjectedBatch, ProjectedEvent, Projector, ProjectorDeps, ProjectorRefusal, ProtocolSdkMessage } from "./types";
 
 export { PROJECTED_EVENT_COVERAGE, SUBAGENT_TRANSCRIPT_INCLUDE } from "./event-coverage";
 export { createEchoWindow, ECHO_WINDOW, type EchoWindow } from "./dedupe";
-export { projectTerminal, sharesMainLedgerRow, totalsOf, type MainModelKey, type UsageTotals } from "./terminal";
+export { projectTerminal, sharesMainLedgerRow, totalsOf, turnUsageOf, type MainModelKey, type UsageTotals } from "./terminal";
 export {
   AGENT_ERROR_CODES, classifyResult, classifyThrown, codeForHttpStatus, sanitizeDetail,
   type AgentErrorCode, type ClassifiedError,
@@ -477,7 +477,9 @@ class ProjectorImpl implements Projector {
       // absent field reads as "not known", a zero reads as "measured, and it was nothing", and
       // `engine.ts:1689`'s compaction trigger skips a zero either way. Logged ONCE per session:
       // an unpriced row is a property of the model, so one line per turn would be noise.
-      if (totalsOf(msg as ResultFrameLike, this.mainModel) === undefined && !this.loggedUnpricedUsage) {
+      // C1 (2026-09-22): a result with no ledger but a claude-shaped per-turn `usage` is NOT this
+      // case — its figures are reported (`terminal.ts`'s `turnUsageOf`), so the line would lie.
+      if (totalsOf(msg as ResultFrameLike, this.mainModel) === undefined && turnUsageOf(resultFrame) === undefined && !this.loggedUnpricedUsage) {
         this.loggedUnpricedUsage = true;
         this.deps.log.debug?.("[projector] the result carries no modelUsage (unpriced catalog row) — token counts report 0 and contextTokens is omitted", {
           sessionId: this.deps.sessionId,
