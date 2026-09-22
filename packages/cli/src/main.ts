@@ -34,6 +34,7 @@ import {
 import {
   applyFreshPluginConsent,
   buildConsentBlock,
+  enableNotice,
   installNeedsConsentHint,
   installPlugin,
   missingConsents,
@@ -1891,6 +1892,9 @@ if (import.meta.main) {
         process.exit(0);
       }
 
+      // Lane B (2026-09-23): a plugin that needs no consent (a legacy one) but ships skills says so —
+      // its skills now reach a session, and a skill can run shell commands.
+      for (const line of enableNotice(info)) console.log(line);
       saveSettings(settingsPath, setPluginEnabled(settings, name, true));
       console.log(`${AQUA}${name} enabled${RESET} — restart the daemon to apply`);
       process.exit(0);

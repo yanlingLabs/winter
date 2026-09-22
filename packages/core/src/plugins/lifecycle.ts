@@ -5,6 +5,7 @@
 import { cpSync, existsSync, rmSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import type { Settings } from "../settings";
+import { skillsPayloadLines } from "../agent/plugin-manifest";
 
 /** git-url basename minus a trailing `.git`, unless an explicit override is given. */
 export function deriveInstallName(url: string, override?: string): string {
@@ -100,6 +101,20 @@ export function buildConsentBlock(info: ConsentBlockPlugin): string[] {
     for (const perm of info.hardwarePermissions) lines.push(`hardware access via Winter.app helper: ${perm}`);
   }
   return lines;
+}
+
+/**
+ * Lane B (2026-09-23, controller ruling): the disclosure an enable prints for a plugin that needs NO
+ * consent — today exactly a LEGACY plugin that ships skills. Enabling such a plugin is the user's trust
+ * decision (no consent class is added, so its `.mcp.json` keeps working exactly as before), but its
+ * skills will now reach a session, and a skill can run shell commands — so the enable says so. Empty
+ * when the plugin requires a consent class (the consent block discloses everything then) or ships no
+ * skill.
+ */
+export function enableNotice(info: ConsentBlockPlugin & { skills?: readonly string[] }): string[] {
+  if (info.requiredConsents.length > 0) return [];
+  const lines = skillsPayloadLines(info.skills);
+  return lines.length === 0 ? [] : [`plugin ${info.name}:`, ...lines];
 }
 
 /** Record a fresh consent timestamp (Date.now() at grant time, per class) for `name`, merging

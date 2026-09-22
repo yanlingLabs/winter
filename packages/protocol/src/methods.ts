@@ -1296,7 +1296,9 @@ export const PluginsInstallResult = z.union([
  *  there's just nothing to hot-spawn onto). */
 export const PluginEnableParams = z.object({ name: z.string().min(1), consent: z.boolean().optional() });
 export const PluginEnableResult = z.union([
-  z.object({ ok: z.literal(true), status: PluginRuntimeStatusSchema }),
+  // `notice` (lane B, 2026-09-23): the disclosure for a plugin that needs no consent but ships skills
+  // ("a skill can run shell commands when a session uses it"); absent when there is nothing to say.
+  z.object({ ok: z.literal(true), status: PluginRuntimeStatusSchema, notice: z.array(z.string()).optional() }),
   z.object({ code: z.literal("needs_consent"), requiredConsents: z.array(z.string()), consentBlock: z.array(z.string()) }),
   z.object({ code: z.literal("unknown_plugin") }),
 ]);

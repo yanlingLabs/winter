@@ -45,6 +45,7 @@ export {
   setPluginEnabled,
   missingConsents,
   buildConsentBlock,
+  enableNotice,
   grantPluginConsents,
   applyFreshPluginConsent,
   stripPluginConsents,
