@@ -621,7 +621,12 @@ targets:
           # and OTHER_CODE_SIGN_FLAGS=--timestamp. Notarization requires every nested Mach-O to
           # carry the hardened-runtime flag, so this nested resign must request it explicitly.
           # Release-only (see CONFIGURATION check above) — dev/Debug builds never reach this line.
-          codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --options runtime --timestamp "${DEST_RES}/winter-core"
+          # A2 (2026-09-22): --entitlements scripts/bun-jit.entitlements (exactly allow-jit). winter-core
+          # is a bun (JavaScriptCore) binary: under the hardened runtime WITHOUT allow-jit it runs
+          # JIT-less, with no SharedArrayBuffer — which @anthropic-ai/claude-agent-sdk touches at module
+          # top level, so the official leg never loaded in any shipped daemon (ReferenceError) — and ~5x
+          # slower. Pinned by release.ts's HARDENING_PINS and scripts/release.test.ts.
+          codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --options runtime --timestamp --entitlements "${SRCROOT}/../../scripts/bun-jit.entitlements" "${DEST_RES}/winter-core"
       # Winter Phase 8d (P8d-1/P8d-2): the SECOND embedded binary, right after winter-core, same
       # Release-only shape. The body lives in scripts/embed-runtimes.sh (not inline, unlike the
       # script above) because it has a real gate worth unit-testing standalone

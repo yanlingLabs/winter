@@ -15,10 +15,13 @@
  *   2. `mkdtemp` a throwaway WINTER_HOME.
  *   3. Take a signature of the user's REAL homes (`~/.winter`, `~/.winter-dev`) BEFORE the run —
  *      WHAT EXISTS there, never when it was written (see `homeSignature`).
- *   4. `spawn(dist/winter-core, ["__runtime-state-probe"], { env: { WINTER_HOME: tmp, ... } })` —
+ *   3b. (A2) Copy the binary to a temp dir and sign the copy the way the Release app signs
+ *      winter-core: ad-hoc identity, `--options runtime`, `--entitlements scripts/bun-jit.entitlements`.
+ *   4. `spawn(<signed copy>, ["__runtime-state-probe"], { env: { WINTER_HOME: tmp, ... } })` —
  *      the static argv route in packages/cli/src/main.ts, beside `__workflow-worker`.
  *   5. Parse the one JSON line it prints; assert `ok`, `online`, `userVersion` ===
- *      RUNTIME_STATE_SCHEMA_VERSION, and that `dbPath` is inside the temp home.
+ *      RUNTIME_STATE_SCHEMA_VERSION, that `dbPath` is inside the temp home, and (A2) that the
+ *      router handle constructed (`runtimeSdk`) and the official peer loaded (`officialPeer`).
  *   6. Re-take the real-home signature and assert it is UNCHANGED — a probe that quietly fell back
  *      to `resolveWinterHome()` would otherwise pass every other assertion here.
  *   7. `rm -rf` the temp home — in a `finally`, on the failure paths too (the tokens the probe
@@ -35,7 +38,7 @@
 
 import { Database } from "bun:sqlite";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,6 +47,8 @@ import { RUNTIME_STATE_SCHEMA_VERSION } from "../packages/core/src/runtime-state
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(SCRIPTS_DIR, "..");
 const DIST_BINARY = join(REPO_ROOT, "dist", "winter-core");
+/** The entitlements the Release app signs winter-core (and the embedded `winter` runtime) with. */
+const BUN_JIT_ENTITLEMENTS = join(REPO_ROOT, "scripts", "bun-jit.entitlements");
 const COMPILE_TIMEOUT_MS = 180_000;
 /** The probe boots a whole daemon (lock, store, twelve recovery steps, retention sweep) and stops
  *  it again. Seconds in practice; this only guards against a genuine hang. */
@@ -147,10 +152,33 @@ async function main(): Promise<void> {
   const before = REAL_HOMES.map(homeSignature);
   log(`--- Step 3: signature taken for ${REAL_HOMES.join(", ")} ---`);
 
+  // ---- Step 3b (A2): sign a COPY exactly the way the Release app signs winter-core ------------
+  // `apple/Winter/project.yml`'s "Embed winter-core" re-signs with `--options runtime` (the hardened
+  // runtime notarization requires) and `--entitlements scripts/bun-jit.entitlements`. Under the
+  // hardened runtime WITHOUT `com.apple.security.cs.allow-jit`, JavaScriptCore runs JIT-less and
+  // `SharedArrayBuffer` does not exist — `@anthropic-ai/claude-agent-sdk`'s `sdk.mjs` touches it at
+  // module top level, so the official peer failed to import in every shipped daemon
+  // (`ReferenceError`), while an UNSIGNED compile (what this gate used to run) has the JIT and could
+  // never see it. An ad-hoc identity (`-`) reproduces the runtime posture exactly (measured: the
+  // same ReferenceError without the entitlement, the peer loads with it).
+  const signedDir = mkdtempSync(join(tmpdir(), "winter-runtime-state-bin-"));
+  const probeBinary = join(signedDir, "winter-core");
+  copyFileSync(DIST_BINARY, probeBinary);
+  chmodSync(probeBinary, 0o755);
+  log(`\n--- Step 3b: codesign ${probeBinary} (ad-hoc, --options runtime, --entitlements ${BUN_JIT_ENTITLEMENTS}) ---`);
+  const sign = spawnSync("codesign", ["--force", "--sign", "-", "--options", "runtime", "--entitlements", BUN_JIT_ENTITLEMENTS, probeBinary], { encoding: "utf8" });
+  if (sign.status !== 0) {
+    rmSync(tmpHome, { recursive: true, force: true });
+    rmSync(signedDir, { recursive: true, force: true });
+    fail(`codesign of the probe copy failed (exit ${sign.status ?? sign.signal}): ${(sign.stderr ?? "").trim()}`);
+  }
+  const dvv = spawnSync("codesign", ["-dvv", probeBinary], { encoding: "utf8" });
+  log(`(info) ${`${dvv.stdout ?? ""}${dvv.stderr ?? ""}`.split("\n").filter((l) => l.startsWith("CodeDirectory") || l.startsWith("Identifier")).join(" | ")}`);
+
   try {
     // ---- Step 4: run the compiled binary's probe route ----------------------------------------
-    log(`\n--- Step 4: spawn ${DIST_BINARY} __runtime-state-probe ---`);
-    const child = spawn(DIST_BINARY, ["__runtime-state-probe"], {
+    log(`\n--- Step 4: spawn ${probeBinary} __runtime-state-probe ---`);
+    const child = spawn(probeBinary, ["__runtime-state-probe"], {
       stdio: ["ignore", "pipe", "pipe"],
       // A DELIBERATELY NARROW env: PATH and HOME only, plus the temp home. Inheriting process.env
       // would drag this shell's WINTER_HOME/WINTER_PROFILE in and could point a real daemon boot at a
@@ -165,7 +193,9 @@ async function main(): Promise<void> {
       // staging sweep (P8d-12) falls back to the REAL machine's `os.tmpdir()` — the one thing this
       // script's own header says it must never touch. Pointed at a subdir of the same temp home
       // this script already `rm -rf`s in its `finally`.
-      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir(), WINTER_HOME: tmpHome, WINTER_PROFILE: "dev", WINTER_CLAUDE_RESUME_SCAN_ROOT: join(tmpHome, "claude-resume-scan") },
+      // `WINTER_LOGIN_SHELL_PATH: "off"` (A1): the probe boots a real `startDaemon`, which would
+      // otherwise run the developer's own login shell (their rc files) to resolve PATH.
+      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir(), WINTER_HOME: tmpHome, WINTER_PROFILE: "dev", WINTER_CLAUDE_RESUME_SCAN_ROOT: join(tmpHome, "claude-resume-scan"), WINTER_LOGIN_SHELL_PATH: "off" },
     });
     let stdout = "";
     let stderr = "";
@@ -220,6 +250,10 @@ async function main(): Promise<void> {
       ["result.home is the temp home", result.home === tmpHome],
       ["runtime-state.db exists on disk in the temp home", existsSync(join(tmpHome, "runtimes", "runtime-state.db"))],
       ["the probe used a FileSecretStore, never the Keychain (tokens landed under the temp home)", existsSync(join(tmpHome, "probe-secrets"))],
+      // A2: the runtime handle itself — a `RuntimeSdkVersionError`/bad brand takes BOTH legs down.
+      ["result.runtimeSdk === true (the router handle constructed on the Release-signed binary)", result.runtimeSdk === true],
+      // A2: the official peer loaded under the hardened runtime AND was declared to the router.
+      ["result.officialPeer === true (@anthropic-ai/claude-agent-sdk loaded and declared, hardened runtime + JIT entitlement)", result.officialPeer === true],
       ["probe exited 0", exitCode === 0],
       ...untouched.map(([dir, ok]) => [`${dir}: same files, same runtime-state.db user_version`, ok] as [string, boolean]),
     ];
@@ -236,7 +270,10 @@ async function main(): Promise<void> {
         "`runtime state reported offline` error -> `openRuntimeStateDb` refused inside $bunfs, which " +
         "is the 8a carry itself failing; (c) userVersion 0 -> the migrations did not run; (d) a real " +
         "home changed -> the probe resolved a home instead of reading WINTER_HOME, which is the one " +
-        "failure this script must never let through."
+        "failure this script must never let through; (e) runtimeSdk false -> grep the stderr above for " +
+        "`winter runtime sdk unavailable` (a peer the router cannot version, a bad brand); (f) " +
+        "officialPeer false -> grep it for `the official peer ... did not load` (a missing JIT " +
+        "entitlement reads `ReferenceError: SharedArrayBuffer is not defined`) or `could not be established`."
       );
     }
 
@@ -250,7 +287,8 @@ async function main(): Promise<void> {
     // Runs on EVERY path now, failures included (review F-1): the temp home holds
     // `probe-secrets/{harness,admin,remote}-token`, and a failed proof must not leave them on disk.
     rmSync(tmpHome, { recursive: true, force: true });
-    log(`\n(cleanup) removed ${tmpHome}`);
+    rmSync(signedDir, { recursive: true, force: true });
+    log(`\n(cleanup) removed ${tmpHome} and ${signedDir}`);
   }
 }
 
