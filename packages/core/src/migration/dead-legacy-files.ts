@@ -1,11 +1,11 @@
-// A3 (2026-09-22): top-level files a legacy `~/.norma[-dev]` home carries that NOTHING in Winter
-// reads — and that mislead a model reading the home. In s_56fc the agent "installed" an MCP server by
-// editing `~/.winter/mcp.json`, a file Migration B had copied byte-for-byte from `~/.norma/mcp.json`
-// and that no code has ever opened.
+// A3 (2026-09-22): top-level files a legacy home (`legacy-names.ts`'s `LEGACY_HOME_DIR`) carries
+// that NOTHING in Winter reads — and that mislead a model reading the home. In s_56fc the agent
+// "installed" an MCP server by editing `~/.winter/mcp.json`, a file Migration B had copied
+// byte-for-byte from the legacy home's `mcp.json` and that no code has ever opened.
 //
 // THE EVIDENCE, per file (2026-09-22 sweep): no reader of `<home>/<name>` anywhere in
 // `packages/*/src` or `apple/*`, and `git log -S` finds none of these names ever added to this repo
-// — they come from pre-v2 Norma. The agent SDK's only `mcp.json` reader is the PROJECT file
+// — they predate it. The agent SDK's only `mcp.json` reader is the PROJECT file
 // `<cwd>/.winter/mcp.json`, gated on `settingSources` including `project` (the daemon passes `[]`).
 // MCP servers come from `settings.json → mcpServers` and a trusted project's `.mcp.json`
 // (`daemon.ts`'s `configuredMcpServersFor`, `runtime-sdk/external-mcp.ts`, `agent/mcp/manager.ts`).
