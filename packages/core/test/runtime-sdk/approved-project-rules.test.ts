@@ -1,0 +1,155 @@
+// Review I2 (2026-09-23): "Allow … in this project" must take effect in an UNTRUSTED project.
+//
+// The Mac app never marks a project trusted (it never calls `daemon.trustDir`), and the saved-rules
+// reader applies a project's in-repo `.winter/permissions.local.json` only when the project IS trusted
+// (a cloned repository can ship that file). So for every Mac project the card offered the option, the
+// user chose it, the rule was written — and never applied. The daemon now also records such an answer
+// in its OWN `<home>/permissions/projects.json` (written only by `approval.respond`, write-fenced from
+// every tool), and that record applies regardless of trust; a forged in-repo file still does not.
+import { describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@yanlinglabs/winter-protocol";
+import { ApprovalBroker } from "../../src/agent/approvals";
+import { ApprovedProjectRules } from "../../src/agent/approved-project-rules";
+import { PermissionRules } from "../../src/agent/permission-rules";
+import { TrustStore } from "../../src/agent/trust";
+import { FileSecretStore } from "../../src/auth/secret-store";
+import { TokenAuthority } from "../../src/auth/tokens";
+import { startIpcServer } from "../../src/ipc/server";
+import { ProjectSettingsResolver } from "../../src/project-settings";
+import { persistedAllowRulesFor } from "../../src/runtime-sdk/mode-options";
+import { SessionStore } from "../../src/sessions/store";
+
+function realDir(prefix: string): string { return realpathSync(mkdtempSync(join(tmpdir(), prefix))); }
+
+class TestClient {
+  private decoder = new LineDecoder();
+  private nextId = 1;
+  private pending = new Map<number, (msg: any) => void>();
+  private socket!: Awaited<ReturnType<typeof Bun.connect>>;
+  private writer!: ConnWriter;
+  static async connect(socketPath: string): Promise<TestClient> {
+    const c = new TestClient();
+    c.socket = await Bun.connect({
+      unix: socketPath,
+      socket: {
+        data(_s, chunk) {
+          for (const line of c.decoder.push(chunk)) {
+            const msg = JSON.parse(line);
+            if (msg.id !== undefined && c.pending.has(msg.id)) { c.pending.get(msg.id)!(msg); c.pending.delete(msg.id); }
+          }
+        },
+        drain(_s) { c.writer.onDrain(); },
+      },
+    });
+    c.writer = new ConnWriter(c.socket as unknown as WritableSocket);
+    return c;
+  }
+  request(method: string, params?: unknown): Promise<any> {
+    const id = this.nextId++;
+    this.writer.enqueue(encodeLine({ jsonrpc: "2.0", id, method, params }));
+    return new Promise((resolve) => this.pending.set(id, resolve));
+  }
+  close(): void { this.socket.end(); }
+}
+
+describe("ApprovedProjectRules — the daemon's own record", () => {
+  test("records per CANONICAL root (a symlinked spelling is the same project), dedupes, and lives under <home>/permissions", () => {
+    const home = realDir("winter-approved-home-");
+    const repo = realDir("winter-approved-repo-");
+    const alias = join(realDir("winter-approved-alias-"), "link");
+    symlinkSync(repo, alias);
+    const store = new ApprovedProjectRules({ winterHome: home });
+    store.record(repo, "Bash(npm test)");
+    store.record(alias, "Bash(npm test)");
+    store.record(alias, "Bash(make:*)");
+    expect(store.rulesFor(repo)).toEqual(["Bash(npm test)", "Bash(make:*)"]);
+    expect(store.rulesFor(alias)).toEqual(["Bash(npm test)", "Bash(make:*)"]);
+    expect(store.file()).toBe(join(home, "permissions", "projects.json"));
+    expect(JSON.parse(readFileSync(store.file(), "utf8")).projects[repo]).toEqual(["Bash(npm test)", "Bash(make:*)"]);
+  });
+
+  test("a malformed record reads as nothing and is never overwritten by a new approval", () => {
+    const home = realDir("winter-approved-bad-");
+    mkdirSync(join(home, "permissions"), { recursive: true });
+    writeFileSync(join(home, "permissions", "projects.json"), "{ not json");
+    const store = new ApprovedProjectRules({ winterHome: home });
+    expect(store.rulesFor("/anything")).toEqual([]);
+    expect(() => store.record("/anything", "Bash(x)")).toThrow();
+    expect(readFileSync(join(home, "permissions", "projects.json"), "utf8")).toBe("{ not json");
+  });
+});
+
+describe("approval.respond → the next incarnation's saved rules, in an UNTRUSTED project", () => {
+  async function world() {
+    const home = realDir("winter-approved-ipc-");
+    const repo = realDir("winter-approved-ipc-repo-");
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
+    const tokens = await authority.ensureTokens();
+    const broker = new ApprovalBroker();
+    const trust = new TrustStore(join(home, "trust.json"));
+    const resolver = new ProjectSettingsResolver({ base: () => null, trust });
+    const permissionRules = new PermissionRules({ globalAllow: (root) => resolver.effective(root)?.permissions?.allow, winterHome: home });
+    const approvedProjectRules = new ApprovedProjectRules({ winterHome: home });
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, broker, permissionRules, approvedProjectRules });
+    const client = await TestClient.connect(socketPath);
+    await client.request(METHODS.hello, { protocolVersion: PROTOCOL_VERSION, role: "harness", token: tokens.harness, clientName: "approver" });
+    // The daemon's own reader, exactly as `daemon.ts` wires it (the project root of a non-git dir is
+    // the dir itself).
+    const savedRulesFor = (cwd: string) => persistedAllowRulesFor(cwd, {
+      projectRootOf: (c) => c,
+      effectiveSettings: (root) => resolver.effective(root),
+      approvedProjectRules: (root) => approvedProjectRules.rulesFor(root),
+      projectRules: (root) => permissionRules.rulesFor(root).project,
+      isTrusted: (dir) => trust.isTrusted(dir),
+    });
+    return { home, repo, store, broker, trust, client, savedRulesFor, stop: () => { client.close(); server.stop(); store.close(); } };
+  }
+
+  test("approving \"in this project\" reaches the saved rules even though the project was never trusted", async () => {
+    const w = await world();
+    try {
+      expect(w.trust.isTrusted(w.repo)).toBe(false);
+      const sessionId = w.store.createSession("global", { approvalPolicy: "ask", cwd: w.repo });
+      const options = [{ id: "allow_project", label: 'Allow "Bash(npm test)" in this project', rule: "Bash(npm test)", scope: "project" as const }];
+      void w.broker.wait(sessionId, "c1", 5000, { toolName: "bash", summary: "npm test", issuedAt: Date.now(), expiresAt: Date.now() + 5000, options });
+      const res = await w.client.request(METHODS.approvalRespond, { sessionId, callId: "c1", approved: true, optionId: "allow_project" });
+      expect(res.result).toEqual({ ok: true, alreadyResolved: false });
+
+      expect(existsSync(join(w.home, "permissions", "projects.json"))).toBe(true);
+      expect(w.savedRulesFor(w.repo)).toEqual(["Bash(npm test)"]);
+    } finally {
+      w.stop();
+    }
+  });
+
+  test("a DENIED rule-bearing answer records nothing", async () => {
+    const w = await world();
+    try {
+      const sessionId = w.store.createSession("global", { approvalPolicy: "ask", cwd: w.repo });
+      const options = [{ id: "allow_project", label: "x", rule: "Bash(rm -rf build)", scope: "project" as const }];
+      void w.broker.wait(sessionId, "c2", 5000, { toolName: "bash", summary: "rm", issuedAt: Date.now(), expiresAt: Date.now() + 5000, options });
+      await w.client.request(METHODS.approvalRespond, { sessionId, callId: "c2", approved: false, optionId: "allow_project" });
+      expect(w.savedRulesFor(w.repo)).toEqual([]);
+    } finally {
+      w.stop();
+    }
+  });
+
+  test("a FORGED in-repo .winter/permissions.local.json in an untrusted project is not applied — and applies once trusted", async () => {
+    const w = await world();
+    try {
+      mkdirSync(join(w.repo, ".winter"), { recursive: true });
+      writeFileSync(join(w.repo, ".winter", "permissions.local.json"), JSON.stringify({ allow: ["Bash", "Edit"] }));
+      expect(w.savedRulesFor(w.repo)).toEqual([]);
+      w.trust.trust(w.repo);
+      expect(w.savedRulesFor(w.repo)).toEqual(["Bash", "Edit"]);
+    } finally {
+      w.stop();
+    }
+  });
+});

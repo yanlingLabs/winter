@@ -6,7 +6,7 @@ import type {
 } from "@yanlinglabs/winter-agent-sdk";
 import { RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
-import { skillPluginViewsRoot } from "../agent/paths";
+import { approvedProjectRulesDir, skillPluginViewsRoot } from "../agent/paths";
 import { parseRule } from "../agent/permission-rules";
 import { keychainService } from "../profile";
 import type { SessionApprovalPolicy } from "../agent/gate";
@@ -540,6 +540,9 @@ export function controlPlaneDenyRules(home: string): string[] {
     // …and every INSTALLED plugin: a session must not plant a SKILL.md, a hook or a manifest into one.
     // Plugins are installed by the daemon's own lifecycle verbs, never by a tool.
     fsRootAnchored([join(home, "plugins"), "**"].join("/")),
+    // Review I2: the daemon's own record of rules approved "in this project" — applied to a child
+    // WITHOUT a trust check (it cannot come from a repository), so writing it would be a self-grant.
+    fsRootAnchored([approvedProjectRulesDir(home), "**"].join("/")),
   ];
   // Task 17: the engine's read tool denied `<home>/run` and `<home>/runtimes` (the runtime store,
   // 8a's model-denied directory); the Winter leg's read-class tools carry the same two denials.
@@ -697,7 +700,9 @@ const WINTER_RULE_HEAD = /^(?:BashUnsandboxed|Bash|Edit|Computer|Worktree|WebFet
  *  - a project's `.winter/settings.json` `permissions.allow` — only when the project is TRUSTED:
  *    `effectiveSettings` is `ProjectSettingsResolver.effective`, which unions the overlay in for a
  *    trusted root and returns the base verbatim otherwise.
- *  - the project's `.winter/permissions.local.json` (the "in this project" scope) — only when
+ *  - the daemon's own record of rules approved "in this project" (`approvedProjectRules`) — always:
+ *    it lives under `<home>`, write-fenced, and only `approval.respond` writes it.
+ *  - the project's `.winter/permissions.local.json` (the in-repo copy of that scope) — only when
  *    TRUSTED too. The rules store itself never gated this file on trust (the retired engine consulted
  *    it card-by-card); a child that acts on it without asking needs the same gate as the overlay,
  *    because a cloned repository can ship one (`git add -f`, the fix-wave A1 finding for
@@ -710,12 +715,18 @@ export function persistedAllowRulesFor(cwd: string, deps: {
   projectRootOf: (cwd: string) => string | null;
   effectiveSettings: (projectRoot: string | null) => Settings | null;
   projectRules?: (projectRoot: string) => readonly string[];
+  /** The daemon's OWN record of rules the user approved "in this project" from a card
+   *  (`agent/approved-project-rules.ts`, under `<home>`, written only by `approval.respond`). Applied
+   *  REGARDLESS of trust (review I2): a repository cannot forge it, and the Mac app never marks a
+   *  project trusted, so gating it would make every Mac project's "in this project" answer a no-op. */
+  approvedProjectRules?: (projectRoot: string) => readonly string[];
   isTrusted: (dir: string) => boolean;
 }): string[] {
   const root = deps.projectRootOf(cwd);
   const settingsAllow = deps.effectiveSettings(root)?.permissions?.allow ?? [];
+  const approved = root !== null && deps.approvedProjectRules !== undefined ? deps.approvedProjectRules(root) : [];
   const projectAllow = root !== null && deps.projectRules !== undefined && deps.isTrusted(root) ? deps.projectRules(root) : [];
-  return [...new Set([...settingsAllow, ...projectAllow])];
+  return [...new Set([...settingsAllow, ...approved, ...projectAllow])];
 }
 
 export function sandboxConfigFor(home: string): SandboxSettingsConfig {
@@ -753,7 +764,8 @@ export function sandboxConfigFor(home: string): SandboxSettingsConfig {
       // command hooks there would be run by the next child — see `controlPlaneDenyRules`' matching
       // entry. Write only; the views stay readable (a skill reads its own supporting files).
       // …and every installed plugin (review M6) — same reason as the write-tool rule.
-      denyWrite: [join(home, "run"), join(home, "runtimes"), skillPluginViewsRoot(home), join(home, "plugins")],
+      // …and the daemon's approved-project-rules record (review I2) — a self-grant if writable.
+      denyWrite: [join(home, "run"), join(home, "runtimes"), skillPluginViewsRoot(home), join(home, "plugins"), approvedProjectRulesDir(home)],
       // The sole read denial Winter has ever had (CLAUDE.md: "the sole read denial is
       // `~/.winter/run`") — reads are otherwise deliberately unrestricted.
       // …plus `runtimes/` (8a: the runtime store is never model-readable — the engine's read tool

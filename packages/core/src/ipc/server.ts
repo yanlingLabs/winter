@@ -82,6 +82,7 @@ import { parseModelTag, canonicalizeModelTag, splitTag, UNSTATED_TAG, type Model
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import type { ApprovalBroker } from "../agent/approvals";
 import type { PermissionRules } from "../agent/permission-rules";
+import type { ApprovedProjectRules } from "../agent/approved-project-rules";
 import { repoRootFor } from "../agent/memory-dir";
 import type { QuestionBroker } from "../agent/questions";
 import type { TaskStore } from "../agent/task-store";
@@ -291,6 +292,10 @@ export interface IpcServerOptions {
   // same "typed no-op, never a crash" precedent as `broker`/`dirs`/etc below — since without an
   // engine there is no approval flow that could ever produce a rule-bearing optionId to persist.
   permissionRules?: PermissionRules;
+  /** Review I2 (lane B): the daemon's own record of rules approved "in this project"
+   *  (`agent/approved-project-rules.ts`), written alongside `permissionRules`' in-repo copy by
+   *  `approval.respond` — the one writer. Absent (a bare test server) = not recorded. */
+  approvedProjectRules?: ApprovedProjectRules;
   dirs?: SessionDirectories; // live allowed-roots per session; addDir/setCwd need it
   trust?: TrustStore;        // per-directory trust; session.create result + daemon.trustDir
   bg?: BackgroundTaskRegistry; // background bash tasks; bg.list/peek/kill/killAll
@@ -2472,9 +2477,23 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             // usable project root (a null session cwd, or one nested inside/equal to winterHome) —
             // the approval outcome must never hang or fail on a persistence problem, so a failure
             // here only logs; `resolve()` below still runs unconditionally either way.
+            const cwd = opts.store.meta(p.sessionId).cwd;
+            const projectRoot = cwd ? repoRootFor(cwd) : null;
+            // Review I2 (lane B): a PROJECT-scoped answer is ALSO recorded in the daemon's own
+            // `<home>/permissions/projects.json` — the copy a child applies whether or not the project
+            // is trusted, because only this path writes it (a repository cannot forge it). The in-repo
+            // `.winter/permissions.local.json` below is still written, and still applies only when the
+            // project is trusted. Recorded FIRST and separately, so a read-only repository or a
+            // refused in-repo write never loses the user's answer.
+            if ((option.scope ?? "project") === "project" && projectRoot !== null && opts.approvedProjectRules) {
+              try {
+                opts.approvedProjectRules.record(projectRoot, option.rule);
+              } catch (err) {
+                console.error(`approval.respond: failed to record the approved project rule ${JSON.stringify(option.rule)} for session ${p.sessionId}: ${(err as Error).message}`);
+              }
+            }
             try {
-              const cwd = opts.store.meta(p.sessionId).cwd;
-              opts.permissionRules.append(option.rule, option.scope ?? "project", cwd ? repoRootFor(cwd) : null);
+              opts.permissionRules.append(option.rule, option.scope ?? "project", projectRoot);
             } catch (err) {
               console.error(`approval.respond: failed to persist permission rule ${JSON.stringify(option.rule)} for session ${p.sessionId}: ${(err as Error).message}`);
             }
