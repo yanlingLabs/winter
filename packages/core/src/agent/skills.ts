@@ -120,8 +120,9 @@ const USER_ROOT_EXCLUDE = new Set(["self"]); // the self/ subdir is scanned sepa
 /**
  * The agent SDK's own name jails (`runtime/src/skills/frontmatter.ts`, pinned 0.0.17): a skill's
  * resolved name, and a plugin name. A name failing either is REFUSED by the child's index (with a
- * warning on its stderr), so it is never put in `Options.skills` — naming an unindexed skill there
- * fails the option's validation for the whole list.
+ * warning on its stderr), so it is never put in `Options.skills`: the SDK answers an unknown name
+ * there with a warning and drops only that name (`validateSkillsOption`), which would be noise for a
+ * skill the daemon already knows the child cannot index.
  */
 const SDK_SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const SDK_PLUGIN_NAME_PATTERN = /^\.?[a-z0-9][a-z0-9-]{0,63}$/;
