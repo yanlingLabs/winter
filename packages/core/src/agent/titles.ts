@@ -105,7 +105,15 @@ export class SessionTitler {
     // A junk env value must fall back to the default, not become NaN — setTimeout(fn, NaN) fires
     // immediately (dreamer.ts's constructor guards the same footgun the same way).
     const n = Number(process.env.WINTER_TITLE_TIMEOUT_MS);
-    this.timeoutMs = deps.timeoutMs ?? (Number.isFinite(n) && n > 0 ? n : 15000);
+    // D2 (2026-09-22 dist-session-fixes): raised from 15000. Measured cause of the dist log's
+    // "title timeout after 15000ms" — `titles.model`'s stored role effort of `"none"` is dropped by
+    // `internalWireEffortFor` (providers/internal-provider.ts) rather than sent, so a reasoning-
+    // capable row runs at the PROVIDER's own default effort (e.g. `"medium"` for a gpt-5.6 row)
+    // instead of the fast/no-reasoning call titling was designed for, and can legitimately exceed
+    // 15s. Titling is fire-and-forget with no retry storm to worry about (`maybeTitle`'s own
+    // `store.getTitle` guard makes it at most once per session, ever), so there is nothing but this
+    // constant standing between a slow-but-real title and a wasted, empty one.
+    this.timeoutMs = deps.timeoutMs ?? (Number.isFinite(n) && n > 0 ? n : 45000);
   }
 
   /** Fire-and-forget safe: NEVER throws (all failures logged + swallowed); at most one title per
