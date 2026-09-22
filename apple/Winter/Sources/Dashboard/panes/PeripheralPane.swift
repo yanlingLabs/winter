@@ -7,15 +7,17 @@ func holderDisplay(kind: String, id: String) -> String {
     "\(kind):\(id)"
 }
 
-/// "expires in <elapsed>" / "expired" — derived purely from `expiresAt` (ms epoch) and `nowMs`.
-/// `PeripheralLeaseInfo` carries no separate "granted at" timestamp (`PeripheralProvider.handle`
-/// never captures `LeaseGranted.ts`), so remaining-time-to-expiry is this pane's "age" signal —
-/// reuses `formatElapsed`, same as the Daemon-status pane's uptime.
-func peripheralLeaseAgeText(expiresAt: Int, nowMs: Int) -> String {
-    let remaining = expiresAt - nowMs
-    guard remaining > 0 else { return "expired" }
-    return "expires in \(formatElapsed(remaining))"
-}
+/// F1 fix (2026-09-22): this pane used to read "expires in <elapsed>" / "expired" derived from
+/// `PeripheralLeaseInfo.expiresAt` (a value stamped once at grant time and never updated — the
+/// broker renews it server-side on every heartbeat without emitting an event for the extension),
+/// so a lease well within a normal, actively-renewed session would read "expired" the moment its
+/// ORIGINAL 15s grant window passed, even though it was still very much held. `expiresAt` is not a
+/// live signal, so this no longer does time arithmetic on it at all: every lease still present in
+/// `activeLeases` is, by construction (see `shouldServe`'s own comment in `PeripheralProvider.swift`),
+/// one the broker still considers held — "active" is the only honest thing to say about it. Kept
+/// as a named pure function (rather than a literal at each call site) so `DashboardTests` still has
+/// something to pin.
+func peripheralLeaseStateText() -> String { "active" }
 
 /// Task 5 (2f-ii): the Dashboard's Peripheral pane — spec §B: "active leases (class, holder, age)
 /// + the panic button (same action as the menu item)". `provider` is injected directly (an
@@ -51,7 +53,7 @@ struct PeripheralPane: View {
                                 Text(holderDisplay(kind: lease.holder.kind, id: lease.holder.id))
                                     .font(Typography.captionMono())
                                     .foregroundStyle(.secondary)
-                                Text(peripheralLeaseAgeText(expiresAt: lease.expiresAt, nowMs: Int(Date().timeIntervalSince1970 * 1000)))
+                                Text(peripheralLeaseStateText())
                                     .font(Typography.caption())
                                     .foregroundStyle(.secondary)
                             }
