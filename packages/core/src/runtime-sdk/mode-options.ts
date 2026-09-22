@@ -532,6 +532,14 @@ export function controlPlaneDenyRules(home: string): string[] {
     // only: the views are deliberately READABLE, because a skill points the model at its own files.
     // The daemon also rebuilds each view before every spawn; this closes the window in between.
     fsRootAnchored([skillPluginViewsRoot(home), "**"].join("/")),
+    // Review M6 (2026-09-23): the runtime store, write-denied to the write TOOLS too. It was read-denied
+    // (below) and in the Bash sandbox's `denyWrite`, but `Write(<home>/runtimes/bin/winter)` — rung 4
+    // of `resolveWinterExecutable`'s ladder, code the NEXT spawn runs — had no rule against it, and a
+    // saved `Edit` (→ `Edit` + `Write` in the child, `sdkAllowRulesFor`) would allow it natively.
+    fsRootAnchored([join(home, "runtimes"), "**"].join("/")),
+    // …and every INSTALLED plugin: a session must not plant a SKILL.md, a hook or a manifest into one.
+    // Plugins are installed by the daemon's own lifecycle verbs, never by a tool.
+    fsRootAnchored([join(home, "plugins"), "**"].join("/")),
   ];
   // Task 17: the engine's read tool denied `<home>/run` and `<home>/runtimes` (the runtime store,
   // 8a's model-denied directory); the Winter leg's read-class tools carry the same two denials.
@@ -744,7 +752,8 @@ export function sandboxConfigFor(home: string): SandboxSettingsConfig {
       // …and the skills-only plugin views (B1 follow-up): a Bash redirect planting a manifest with
       // command hooks there would be run by the next child — see `controlPlaneDenyRules`' matching
       // entry. Write only; the views stay readable (a skill reads its own supporting files).
-      denyWrite: [join(home, "run"), join(home, "runtimes"), skillPluginViewsRoot(home)],
+      // …and every installed plugin (review M6) — same reason as the write-tool rule.
+      denyWrite: [join(home, "run"), join(home, "runtimes"), skillPluginViewsRoot(home), join(home, "plugins")],
       // The sole read denial Winter has ever had (CLAUDE.md: "the sole read denial is
       // `~/.winter/run`") — reads are otherwise deliberately unrestricted.
       // …plus `runtimes/` (8a: the runtime store is never model-readable — the engine's read tool
