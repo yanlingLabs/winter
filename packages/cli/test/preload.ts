@@ -18,3 +18,6 @@ process.env[LEGACY_HOME_ENV] = mkdtempSync(join(tmpdir(), "winter-test-legacy-ho
 // NON-default `WINTER_HOME` (P9c-15's guard), so it is inert against a real `~/.winter[-dev]` home
 // and active only for these tests' own temp homes. The named service has no items.
 process.env.WINTER_KEYCHAIN_SERVICE = "com.winter.core.test-isolated";
+// Login-shell PATH: the SAME switch packages/core/test/preload.ts sets — a CLI test that spawns
+// `daemon run` (or boots `startDaemon()` in-process) must never run the developer's real login shell.
+process.env.WINTER_LOGIN_SHELL_PATH = "off";
