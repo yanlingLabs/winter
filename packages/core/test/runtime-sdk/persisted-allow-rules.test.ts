@@ -147,6 +147,29 @@ describe("both legs' Options carry the saved rules — after Winter's fixed ones
   });
 });
 
+// Router 0.0.11 (lane B): the official leg gets the SAME skills-only plugin views the Winter leg's
+// child does, through the router's `plugins` policy (which no longer names `<cwd>/.winter` itself).
+describe("official leg: the skills-only views ride the router's plugins policy", () => {
+  test("views become `{local, absolute, skipMcpDiscovery: true}` entries; deny aliases join the deny list", () => {
+    const deps = minimalOfficialDeps({
+      skillPlugins: [{ type: "local", path: "/Users/x/.winter/cache/skill-plugins/superpowers", skipMcpDiscovery: true }],
+      skillDenyAliases: ["Skill(superpowers:dir-name)"],
+    });
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
+    const result = officialInputFor(input, deps);
+    if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
+    const options = result.input.options as { plugins?: unknown[]; settings?: { permissions?: { deny?: string[] } } };
+    expect(options.plugins).toEqual([{ type: "local", path: "/Users/x/.winter/cache/skill-plugins/superpowers", skipMcpDiscovery: true }]);
+    expect(options.settings?.permissions?.deny?.slice(-1)).toEqual(["Skill(superpowers:dir-name)"]);
+  });
+
+  test("no views → no `plugins` key at all (the official leg then loads no plugin)", () => {
+    const result = officialInputFor({ sessionId: "s_1", mode: "code", cwd: "/r", primary: "/r", spendEffort: undefined }, minimalOfficialDeps({ skillPlugins: [] }));
+    if (!("input" in result)) throw new Error("refused");
+    expect("plugins" in (result.input.options as object)).toBe(false);
+  });
+});
+
 // The same shape official-options.test.ts's own `minimalDeps` builds.
 function minimalOfficialDeps(over: Partial<OfficialInputDeps>): OfficialInputDeps {
   const selection: RuntimeSelection = {

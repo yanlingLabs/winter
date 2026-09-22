@@ -1070,6 +1070,14 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // Lane B: the SAME saved-rule read the Winter leg's `optionsFor` makes, for this leg's
         // flag-settings `permissions.allow` (translated there by the same `sdkAllowRulesFor`).
         ...(deps.persistedAllowRules === undefined ? {} : { persistedAllow: deps.persistedAllowRules(capSession.cwd) }),
+        // Lane B (router 0.0.11): the SAME skills-only plugin views the Winter leg's child gets —
+        // enabled + `exec`-consented plugins only (`SkillStore.childSkillSurface`) — handed to claude
+        // through the router's `plugins` policy, plus the deny rules under claude's own skill spelling.
+        ...(() => {
+          if (mode !== "code" || deps.skills === undefined) return {};
+          const surface = deps.skills.childSkillSurface({ cwd: capSession.cwd, deny: deps.settings()?.permissions?.deny ?? [] });
+          return { skillPlugins: surface.plugins, skillDenyAliases: surface.officialDeny };
+        })(),
         // Phase 9c (P9c-1): the LIVE settings snapshot (`deps.settings()` — the same hot holder
         // `create()`/`legForNew` already read above; never a boot snapshot) — `official-options.ts`'s
         // `officialInputFor` reads it ONLY through `officialSubscriptionAuthEnabled`, and

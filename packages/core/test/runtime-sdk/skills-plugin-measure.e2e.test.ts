@@ -26,6 +26,9 @@ import { buildWinterOptions } from "../../src/runtime-sdk/mode-options";
 import type { ModelTag } from "../../src/runtime-sdk/model-tag";
 import { createHostPromptQueue } from "../../src/runtime-sdk/prompt-queue";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
+import { query as claudeQuery, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { anthropicFake, startFake } from "@yanlinglabs/winter-provider-conformance";
+import { claudeRuntimeForTests, describeWithClaudeRuntime, LOOPBACK_MODEL_ID } from "../helpers/claude-runtime";
 
 function writeSkill(dir: string, name: string, description: string): void {
   mkdirSync(dir, { recursive: true });
@@ -107,4 +110,55 @@ describeWithWinterBinary("B1 measurement — the daemon's plugin skills inside a
       for (const dir of [home, cwd]) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
     }
   }, 60_000);
+});
+
+// Router 0.0.11 (lane B, 2026-09-23): the SAME skills-only view, handed to the REAL pinned `claude`
+// (0.3.250) exactly as the router's `plugins` policy forwards it — `{local, <abs view>,
+// skipMcpDiscovery: true}`, `settingSources: []`. claude names a manifest-less plugin by its directory
+// and its skills `<plugin>:<skill dir>`, which is the daemon's own spelling for these fixtures.
+describeWithClaudeRuntime("official leg: the skills-only view inside a real claude child", () => {
+  test("claude indexes the view's skills under the daemon's names, and nothing of the plugin besides", async () => {
+    const bed = claudeRuntimeForTests()!;
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "winter-b1-claude-")));
+    const home = join(root, "home"), cfg = join(root, "cfg"), cwd = join(root, "cwd"), winterHome = join(root, "winter");
+    for (const d of [home, cfg, cwd, join(home, "tmp"), winterHome]) mkdirSync(d, { recursive: true });
+    const marker = join(root, "HOOK_RAN");
+    const plugin = join(winterHome, "plugins", "superpowers");
+    writeSkill(join(plugin, "skills", "brainstorming"), "brainstorming", "BRAINSTORM_SENTINEL");
+    mkdirSync(join(plugin, "hooks"), { recursive: true });
+    writeFileSync(join(plugin, "hooks", "hooks.json"), JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: [{ type: "command", command: `touch ${marker}` }] }] } }));
+    const store = new SkillStore({ winterHome, trust: new TrustStore(join(winterHome, "trust.json")), plugins: { sessionEligible: () => new Set(["superpowers"]) } });
+    const surface = store.childSkillSurface({ cwd });
+    const fake = await startFake({ routes: [{ path: "*", handler: async (_req, recorded) => {
+      if (!(recorded.path === "/v1/messages" && recorded.method === "POST")) return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+      return anthropicFake.anthropicTurnResponse({ blocks: [{ type: "text", chunks: ["done"] }], stopReason: "end_turn" });
+    } }] });
+    try {
+      const q = claudeQuery({
+        prompt: "hi",
+        options: {
+          pathToClaudeCodeExecutable: bed.executable, model: LOOPBACK_MODEL_ID, cwd, settingSources: [], maxTurns: 1,
+          plugins: surface.plugins.map((p) => ({ type: "local" as const, path: p.path, skipMcpDiscovery: true })),
+          env: {
+            HOME: home, USER: "m", LOGNAME: "m", SHELL: "/bin/zsh", LANG: "en_US.UTF-8", TMPDIR: `${join(home, "tmp")}/`, PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+            CLAUDE_CONFIG_DIR: cfg, ANTHROPIC_BASE_URL: fake.url, ANTHROPIC_API_KEY: "sk-ant-fake-b1-measure-0000",
+            CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", DISABLE_AUTOUPDATER: "1", CLAUDE_CODE_MAX_RETRIES: "0",
+          },
+        },
+      });
+      let init: { skills?: string[]; plugins?: Array<{ name: string }> } | undefined;
+      for await (const m of q as AsyncIterable<SDKMessage>) {
+        const t = m as { type: string; subtype?: string };
+        if (t.type === "system" && t.subtype === "init") init = m as never;
+        if (t.type === "result") break;
+      }
+      expect(init?.skills).toContain("superpowers:brainstorming");
+      expect((init?.plugins ?? []).map((p) => p.name)).toEqual(["superpowers"]);
+      // The real plugin's hooks.json is NOT in the view, so it never runs.
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      await fake.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 120_000);
 });
