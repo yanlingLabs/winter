@@ -11,7 +11,7 @@ import { gateClassFor, gateToolNameFor, WINTER_OWN_TOOL_NAMES } from "./tool-nam
 import { controlPlaneTargetForCall, controlPlaneDenialMessage } from "./control-plane";
 import { outdirPath } from "../sessions/outdir";
 import { askUserQuestionBridge, ASK_USER_QUESTION_TOOL } from "./question-bridge";
-import { consoleBridgeLogger, NO_PARK_TIMEOUT_MS, REVIEWER_ESCALATION_REASON, type BridgeLogger } from "./bridge-common";
+import { consoleBridgeLogger, NO_PARK_TIMEOUT_MS, REVIEWER_ESCALATION_REASON, takeReviewerNoVerdict, type BridgeLogger } from "./bridge-common";
 import type { BridgedPlanRequest } from "./plan-bridge";
 
 export { NO_PARK_TIMEOUT_MS, type BridgeLogger } from "./bridge-common";
@@ -503,13 +503,17 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     // persisted allow rules (`mode-options.ts`'s `permissions.allow` carries only Winter's own reads).
     //
     // (5b') THE REVIEWER'S NO-VERDICT. The reviewer answers a PreToolUse `ask` when it could reach no
-    // verdict (`hooks.ts`'s `REVIEWER_ESCALATION_REASON`), and the child hands that text back here
-    // verbatim as `decisionReason` — the only hook-forced ask that arrives looking like a plain call.
-    // Under `auto` the gate says `allow` for `bash`, so without this the escalation meant to reach a
-    // human ran the command silently (it did, for every bash call, before this line existed). Narrows
-    // only: a gate `deny` stays a deny, and a never-prompting session turns the card into its typed
-    // deny below.
-    if (decision === "allow" && reviewerCouldNotJudge(ctx.decisionReason)) {
+    // verdict, and that ask arrives here looking like a plain call. Recognised two ways: the NOTE the
+    // hook leaves (`bridge-common.ts`'s `noteReviewerNoVerdict`, keyed by this call's id) — the ONLY
+    // channel that survives a sandbox escape, whose `decisionReason` the child replaces with its own
+    // mandatory-interaction text — and the reviewer's own reason string, which the child passes
+    // through verbatim for an ordinary bash call. Under `auto` the gate says `allow` for `bash`, so
+    // without this the escalation meant to reach a human ran the command silently (it did, for every
+    // plain bash call, before this line existed). Narrows only: a gate `deny` stays a deny, and a
+    // never-prompting session turns the card into its typed deny below. The note is consumed on
+    // every call that gets this far, whatever the verdict, so none lingers.
+    const reviewerNoted = takeReviewerNoVerdict(deps.sessionId, ctx.toolUseID);
+    if (decision === "allow" && (reviewerNoted || reviewerCouldNotJudge(ctx.decisionReason))) {
       log.info(`canUseTool: escalate session=${deps.sessionId} tool=${toolName} reason=reviewer-no-verdict`);
       decision = "ask";
     }
