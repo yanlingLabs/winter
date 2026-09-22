@@ -10,6 +10,7 @@ import {
   SessionAddDirParams, SessionSetCwdParams, TrustDirParams,
   BgListParams, BgPeekParams, BgKillParams, BgKillAllParams,
   SessionSteerParams, SessionInterruptParams, SessionCompactParams, SkillsListParams, McpListParams, McpEnableParams, McpDisableParams,
+  McpAddParams, McpRemoveParams, McpGetParams,
   SkillsReadParams, SkillsWriteParams, SkillsDeleteParams,
   PluginsListParams, AskUserRespondParams, TaskListParams, PlanRespondParams, SessionSetPolicyParams,
   SessionSetModelParams, SessionSetEffortParams, SessionSetActivityParams, SessionSetDirsParams,
@@ -111,6 +112,7 @@ import { withProblemsForRoles, type RoleHealthRegistry } from "../providers/role
 import type { InternalRouter } from "../providers/internal-router";
 import { internalRoleProblemsFor } from "../providers/internal-role-problems";
 import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, readRawSettings } from "../settings";
+import { addUserMcpServer, removeUserMcpServer } from "../agent/mcp/mcp-write";
 import { disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
 import { diagnoseRuntimes } from "../runtime-sdk/runtimes-doctor";
@@ -2136,6 +2138,90 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const cfg = stdioMcpServersFor(next)[p.name];
         if (cfg) await opts.mcp?.startOneUserServer(p.name, cfg);
         return { ok: true, name: p.name, enabled: true };
+      }
+      // -----------------------------------------------------------------------------------------
+      // `winter mcp add`/`add-json`/`remove` (CLI parity with `claude mcp add`/`remove`) — USER
+      // scope only; `mcp-cli.ts`'s own header explains why project scope (`<cwd>/.mcp.json`) is
+      // never RPC-routed at all. Both handlers delegate the actual "is this a valid write" decision
+      // to `agent/mcp/mcp-write.ts` (`addUserMcpServer`/`removeUserMcpServer`) — the SAME functions
+      // the CLI's no-daemon fallback calls, so the two write paths (daemon live vs. not) can never
+      // silently diverge on what they accept. Two DISTINCT failure shapes on add: a name-rule
+      // refusal (reserved namespace, already-exists) throws from `addUserMcpServer` itself; a
+      // schema refusal (the credential-shaped-header door, `refuseCredentialShapedHeaders`) throws
+      // from `saveSettings` one line later — both are caught here and reported as
+      // `ERR.INVALID_PARAMS`, never `ERR.INTERNAL`, since either one is the CALLER's input being
+      // wrong, not a server fault.
+      // -----------------------------------------------------------------------------------------
+      case METHODS.mcpAdd: {
+        const p = parseParams(McpAddParams, params);
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "mcp.add is not available on this server (no winterHome configured)");
+        const settingsPath = join(opts.winterHome, "settings.json");
+        let next: Settings;
+        try {
+          next = addUserMcpServer(loadSettings(settingsPath), p.name, p.entry);
+        } catch (err) {
+          throw new RpcFailure(ERR.INVALID_PARAMS, (err as Error).message);
+        }
+        try {
+          saveSettings(settingsPath, next);
+        } catch (err) {
+          throw new RpcFailure(ERR.INVALID_PARAMS, (err as Error).message);
+        }
+        // Mirrors `mcp.enable`'s own restart (symmetry, same rationale): a newly-added stdio user
+        // server must be usable on THIS incarnation's next turn, not just after a daemon restart —
+        // an http/sse entry has no in-daemon client (never started here either way), and a name
+        // ALSO listed in `mcp.disabled` is correctly excluded by `stdioMcpServersFor` (added, but
+        // stays stopped until enabled — `started: false` says so honestly).
+        let started = false;
+        if (p.entry.type === "stdio") {
+          const cfg = stdioMcpServersFor(next)[p.name];
+          if (cfg) { await opts.mcp?.startOneUserServer(p.name, cfg); started = true; }
+        }
+        return { ok: true, name: p.name, transport: p.entry.type, started };
+      }
+      case METHODS.mcpRemove: {
+        const p = parseParams(McpRemoveParams, params);
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "mcp.remove is not available on this server (no winterHome configured)");
+        const settingsPath = join(opts.winterHome, "settings.json");
+        const { settings: next, removed } = removeUserMcpServer(loadSettings(settingsPath), p.name);
+        if (removed) {
+          saveSettings(settingsPath, next);
+          // Stop a live tracked instance now, same as `mcp.disable` — a removed server must not go
+          // on answering tool calls until the next daemon restart.
+          opts.mcp?.stopServer(p.name);
+        }
+        return { ok: true, name: p.name, removed };
+      }
+      // -----------------------------------------------------------------------------------------
+      // `winter mcp get <name>` — read-only, degrades to `found: false` rather than throwing on a
+      // missing `winterHome` (this is a read, not a write door; same "typed absence, never a crash"
+      // posture `mcp.list` already has). Reports the FULL configured shape (`mcp.list` deliberately
+      // does not — that RPC is a live-status listing, not a config reader) plus the same
+      // `strippedHeaders` read-door correction `mcp.list` reports, computed the identical way (off
+      // the RAW file, never off the already-stripped `settings` value, which by construction can no
+      // longer say what it removed).
+      // -----------------------------------------------------------------------------------------
+      case METHODS.mcpGet: {
+        const p = parseParams(McpGetParams, params);
+        const settings = liveSettingsFor(opts);
+        const entry = settings?.mcpServers?.[p.name];
+        if (!entry) return { ok: true, name: p.name, found: false };
+        const disabled = new Set(settings?.mcp?.disabled ?? []);
+        const strippedHeaders = opts.winterHome
+          ? stripCredentialShapedMcpHeaders(readRawSettings(join(opts.winterHome, "settings.json")) ?? {})[p.name]
+          : undefined;
+        const base = {
+          ok: true as const,
+          name: p.name,
+          found: true as const,
+          transport: entry.type,
+          disabled: disabled.has(p.name),
+          ...(strippedHeaders && strippedHeaders.length > 0 ? { strippedHeaders } : {}),
+        };
+        if (entry.type === "stdio") {
+          return { ...base, command: entry.command, ...(entry.args ? { args: entry.args } : {}), ...(entry.env ? { env: entry.env } : {}) };
+        }
+        return { ...base, url: entry.url, ...(entry.headers ? { headers: entry.headers } : {}) };
       }
       // -----------------------------------------------------------------------------------------
       // Daemon settings surface (2026-09-17 plan, item 2). LOCAL-ROLE ONLY: never added to

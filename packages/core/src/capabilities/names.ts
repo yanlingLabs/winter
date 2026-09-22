@@ -99,6 +99,20 @@ export function capabilityServerName(serverKey: string): string {
 }
 
 /**
+ * The names a CONFIGURED MCP server (`settings.mcpServers`, a trusted project's `.mcp.json`) must
+ * never be allowed to take — the brand's own namespace plus every daemon-owned capability server
+ * name. `assertNoCapabilityCollision` (`capabilities/index.ts`) already refuses these at SESSION
+ * SPAWN, but that is one door too late for a write door: a configured server named e.g.
+ * `winter__browser` would sit in settings.json refusing every session created afterward rather than
+ * being refused at the moment it's added. `winter mcp add`/`mcp.add` (`agent/mcp/mcp-write.ts`)
+ * check this SET before the write ever reaches `saveSettings`. Claude has no equivalent check
+ * because it owns no daemon MCP servers of its own to collide with.
+ */
+export function reservedMcpServerNames(): Set<string> {
+  return new Set<string>([CORE_BRAND.mcpServerName, ...CAPABILITY_SERVER_KEYS.map((k) => capabilityServerName(k))]);
+}
+
+/**
  * What Task 9's per-mode exposure table has to reproduce for each capability tool.
  *
  * `modes` is TODAY'S REGISTRATION, verbatim — the `modes` field on the tool's own `ToolDefinition`

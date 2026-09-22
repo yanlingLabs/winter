@@ -5,7 +5,7 @@
 // SESSION and handed to that session's own `Options.mcpServers`, not to the handle-wide
 // construction-time `capabilities` list — see `server.ts`'s header for the measurement behind that
 // (there is no per-call session identity on `callTool`, so the identity has to be a closure).
-export { capabilityToolName, capabilityServerName, WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS } from "./names";
+export { capabilityToolName, capabilityServerName, WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, reservedMcpServerNames } from "./names";
 export type { CapabilityServerKey, CapabilityToolFacts, WinterCapabilityToolName, SessionMode } from "./names";
 export type { CapabilitySession, CapabilityServerSpec } from "./server";
 export { capabilityServer } from "./server";

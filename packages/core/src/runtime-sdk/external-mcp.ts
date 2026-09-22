@@ -24,17 +24,14 @@
 // the driver, which refuses the SESSION (typed) rather than choose.
 import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { z } from "zod";
 import type { McpServerConfig } from "@yanlinglabs/winter-agent-sdk";
 import type { McpServerSettingsEntry, Settings } from "../settings";
+import { ProjectMcpConfig } from "../agent/mcp/project-file";
 
-const ProjectMcpConfig = z.object({
-  mcpServers: z.record(z.string(), z.object({
-    command: z.string().min(1),
-    args: z.array(z.string()).optional(),
-    env: z.record(z.string(), z.string()).optional(),
-  })).optional(),
-});
+// `ProjectMcpConfig` (the `.mcp.json` schema) now lives in `../agent/mcp/project-file` — shared
+// with `agent/mcp/manager.ts`'s own reader and the CLI's `mcp add/remove --scope project`
+// (`mcp-cli.ts`), which previously would have been a THIRD hand-copied duplicate of this exact
+// shape (this file and the manager each had their own before).
 
 export interface ConfiguredMcpInput {
   /** THE LIVE settings (a getter's answer, never a boot snapshot). */

@@ -2,19 +2,16 @@ import { z } from "zod";
 import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { McpStdioClient } from "./client";
+import { ProjectMcpConfig } from "./project-file";
 import type { ToolRegistry } from "../tools/registry";
 import type { TrustStore } from "../trust";
 
 export interface McpServerStatus { name: string; status: "connected" | "failed"; toolNames: string[]; source: "user" | "project" | "plugin" }
 export interface McpServerConfig { command: string; args?: string[]; env?: Record<string, string> }
 
-const ProjectMcpConfig = z.object({
-  mcpServers: z.record(z.string(), z.object({
-    command: z.string().min(1),
-    args: z.array(z.string()).optional(),
-    env: z.record(z.string(), z.string()).optional(),
-  })).optional(),
-});
+// `ProjectMcpConfig` (the `.mcp.json` schema) now lives in `./project-file` — shared with
+// `runtime-sdk/external-mcp.ts` and the CLI's `mcp add/remove --scope project` (`mcp-cli.ts`),
+// which previously would have been a THIRD hand-copied duplicate of this exact shape.
 type ProjectState = { kind: "none" } | { kind: "started"; servers: McpServerStatus[]; clients: Array<{ name: string; client: McpStdioClient }>; toolNames: string[] };
 type StartOneResult = { status: "connected" | "failed"; toolNames: string[]; client?: McpStdioClient };
 
