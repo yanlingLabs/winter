@@ -159,6 +159,45 @@ describe("SkillStore.childSkillSurface — the plugin skills a Winter child can 
     expect(options.sandbox?.filesystem?.denyWrite).toContain(skillPluginViewsRoot(home));
   });
 
+  // Review I1 (2026-09-23), the probe reproduced: a planted `<views>/<plugin>` -> `victim/` link had
+  // the victim's contents removed, because the rebuild listed and deleted THROUGH it.
+  test("I1: a view planted as a link to someone else's directory is replaced — the victim is untouched", () => {
+    const { home, trust } = world();
+    writeSkill(join(home, "plugins", "p", "skills"), "alpha", "alpha", "A");
+    const victim = realDir();
+    writeFileSync(join(victim, "precious.txt"), "keep me");
+    mkdirSync(join(victim, "nested"), { recursive: true });
+    writeFileSync(join(victim, "nested", "also.txt"), "keep me too");
+    mkdirSync(skillPluginViewsRoot(home), { recursive: true });
+    symlinkSync(victim, join(skillPluginViewsRoot(home), "p"));
+    // …and a stale entry that is ALSO a link to the victim, to be pruned.
+    symlinkSync(victim, join(skillPluginViewsRoot(home), "gone"));
+
+    const s = new SkillStore({ winterHome: home, trust });
+    expect(s.childSkillSurface({ cwd: null }).skills).toEqual(["p:alpha"]);
+    expect(existsSync(join(victim, "precious.txt"))).toBe(true);
+    expect(existsSync(join(victim, "nested", "also.txt"))).toBe(true);
+    const view = join(skillPluginViewsRoot(home), "p");
+    expect(lstatSync(view).isSymbolicLink()).toBe(false);
+    expect(readdirSync(view)).toEqual(["skills"]);
+    expect(existsSync(join(skillPluginViewsRoot(home), "gone"))).toBe(false);
+  });
+
+  test("I1: `<home>/cache` swapped for a link is replaced by a real directory — never worked through", () => {
+    const { home, trust } = world();
+    writeSkill(join(home, "plugins", "p", "skills"), "alpha", "alpha", "A");
+    const elsewhere = realDir();
+    mkdirSync(join(elsewhere, "skill-plugins", "stale"), { recursive: true });
+    writeFileSync(join(elsewhere, "skill-plugins", "stale", "precious.txt"), "keep me");
+    symlinkSync(elsewhere, join(home, "cache"));
+
+    const s = new SkillStore({ winterHome: home, trust });
+    expect(s.childSkillSurface({ cwd: null }).skills).toEqual(["p:alpha"]);
+    expect(lstatSync(join(home, "cache")).isSymbolicLink()).toBe(false);
+    expect(existsSync(join(elsewhere, "skill-plugins", "stale", "precious.txt"))).toBe(true);
+    expect(realpathSync(s.childSkillSurface({ cwd: null }).plugins[0]!.path)).toBe(join(realpathSync(home), "cache", "skill-plugins", "p"));
+  });
+
   test("a rebuild removes the views of plugins that were removed or disabled", () => {
     const { home, trust } = world();
     writeSkill(join(home, "plugins", "keep", "skills"), "a", "a", "A");

@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, readlinkSync, lstatSync, statSync, existsSync, mkdirSync, writeFileSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
+import { readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync, existsSync, mkdirSync, writeFileSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
 import { join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SdkPluginConfig } from "@yanlinglabs/winter-agent-sdk";
@@ -163,24 +163,22 @@ const UNDELIVERABLE_TIER_LABEL: Readonly<Record<Exclude<SkillMeta["source"], "pl
  * Synchronous from first line to last: the daemon is the only writer and a single JS thread, so two
  * incarnations opening together can never interleave inside it. `null` when the filesystem refuses.
  */
-function ensureSkillPluginView(winterHome: string, plugin: string): string | null {
-  const root = join(skillPluginViewsRoot(winterHome), plugin);
+function ensureSkillPluginView(viewsRoot: string, winterHome: string, plugin: string): string | null {
+  const root = join(viewsRoot, plugin);
   const link = join(root, "skills");
   const target = join(winterHome, "plugins", plugin, "skills");
   try {
-    mkdirSync(root, { recursive: true });
+    // The view DIRECTORY must be a real directory the daemon made — never a planted link: every
+    // readdir/rm below goes THROUGH it, so a `<views>/<plugin>` -> `victim/` link would otherwise have
+    // the victim's contents removed (review I1, reproduced by a probe).
+    ensureRealDirectory(root);
     for (const entry of readdirSync(root)) {
-      if (entry !== "skills") rmSync(join(root, entry), { recursive: true, force: true });
+      if (entry !== "skills") removeEntryNoFollow(join(root, entry));
     }
     let current: string | undefined;
     try { current = readlinkSync(link); } catch { /* absent, or not a symlink */ }
     if (current === target) return root;
-    // A stale LINK is unlinked (never followed — the directory it points at is the user's own
-    // plugin); anything else under that name is not the daemon's and is removed outright.
-    let stale: ReturnType<typeof lstatSync> | undefined;
-    try { stale = lstatSync(link); } catch { /* absent */ }
-    if (stale?.isSymbolicLink()) unlinkSync(link);
-    else if (stale !== undefined) rmSync(link, { recursive: true, force: true });
+    removeEntryNoFollow(link);
     symlinkSync(target, link);
     return root;
   } catch {
@@ -189,19 +187,64 @@ function ensureSkillPluginView(winterHome: string, plugin: string): string | nul
 }
 
 /**
+ * Make `path` a REAL directory: a symlink there is unlinked (never followed), any other non-directory
+ * is removed, and the directory is created if absent — non-recursively, so its PARENT must already be
+ * one the caller made real. Throws when the filesystem refuses.
+ */
+function ensureRealDirectory(path: string): void {
+  let st: ReturnType<typeof lstatSync> | undefined;
+  try { st = lstatSync(path); } catch { /* absent */ }
+  if (st?.isDirectory()) return;
+  if (st !== undefined) removeEntryNoFollow(path);
+  mkdirSync(path);
+}
+
+/** Remove one directory entry WITHOUT following it: a symlink is unlinked; a real directory is removed
+ *  recursively (measured on Bun: nested links inside are unlinked, their targets untouched). */
+function removeEntryNoFollow(path: string): void {
+  let st: ReturnType<typeof lstatSync> | undefined;
+  try { st = lstatSync(path); } catch { return; }   // already gone
+  if (st.isSymbolicLink() || !st.isDirectory()) unlinkSync(path);
+  else rmSync(path, { recursive: true, force: true });
+}
+
+/**
+ * The views root, made safe to work under — or `null` (with ONE log line) when it cannot be.
+ *
+ * `<home>/cache` is not write-fenced (only the views' own subtree is), so a session whose writable
+ * roots include `<home>` could swap `cache` — or `cache/skill-plugins` — for a symlink to anywhere,
+ * and every rebuild and prune would then run inside the target (review I1). Each level is made a
+ * real directory first, and the result is then checked by REALPATH against the home's own: anything
+ * other than `<realpath(home)>/cache/skill-plugins` means something moved underneath us, and this
+ * spawn simply gets no plugin skills rather than a daemon that deletes through a link.
+ */
+function safeSkillPluginViewsRoot(winterHome: string): string | null {
+  const root = skillPluginViewsRoot(winterHome);
+  try {
+    ensureRealDirectory(join(winterHome, "cache"));
+    ensureRealDirectory(root);
+    const expected = join(realpathSync(winterHome), "cache", "skill-plugins");
+    if (realpathSync(root) !== expected) throw new Error(`${root} resolves to ${realpathSync(root)}, not ${expected}`);
+    return root;
+  } catch (err) {
+    console.error(`skills: not handing plugin skills to this session — the views directory is not the daemon's own (${err instanceof Error ? err.message : String(err)})`);
+    return null;
+  }
+}
+
+/**
  * Delete every view whose plugin no longer contributes a skill (removed, disabled, or emptied) — the
  * views are the daemon's own disposable state, so nothing is left dangling after a plugin goes. A child
  * already running keeps what it indexed at startup; a later `Skill` call for a pruned plugin answers
- * "could not be read", which is the honest answer for a plugin the user just turned off. Never creates
- * the root, and removal never follows a link (see `ensureSkillPluginView`). Best-effort, never throws.
+ * "could not be read", which is the honest answer for a plugin the user just turned off. Runs only
+ * under a root `safeSkillPluginViewsRoot` vouched for, and never follows an entry. Never throws.
  */
-function pruneSkillPluginViews(winterHome: string, keep: ReadonlySet<string>): void {
-  const root = skillPluginViewsRoot(winterHome);
+function pruneSkillPluginViews(viewsRoot: string, keep: ReadonlySet<string>): void {
   let entries: string[];
-  try { entries = readdirSync(root); } catch { return; }   // no views yet
+  try { entries = readdirSync(viewsRoot); } catch { return; }
   for (const entry of entries) {
     if (keep.has(entry)) continue;
-    try { rmSync(join(root, entry), { recursive: true, force: true }); } catch { /* best effort */ }
+    try { removeEntryNoFollow(join(viewsRoot, entry)); } catch { /* best effort */ }
   }
 }
 
@@ -317,23 +360,31 @@ export class SkillStore {
     const denied = new Set(input.deny ?? []);
     const plugins: SdkPluginConfig[] = [];
     const skills: string[] = [];
+    const pluginMetas = this.list({ cwd: input.cwd }).filter((m) => m.source === "plugin");
+    // No plugin skill and no views left over from an earlier spawn: nothing to build or prune, and
+    // nothing is created on disk.
+    let leftovers = false;
+    try { lstatSync(skillPluginViewsRoot(this.winterHome)); leftovers = true; } catch { /* none */ }
+    if (pluginMetas.length === 0 && !leftovers) return { plugins, skills };
+    const viewsRoot = safeSkillPluginViewsRoot(this.winterHome);
+    if (viewsRoot === null) return { plugins, skills };
     const viewed = new Map<string, boolean>();
-    for (const meta of this.list({ cwd: input.cwd })) {
-      if (meta.source !== "plugin") continue;
+    for (const meta of pluginMetas) {
       const plugin = meta.name.slice(0, meta.name.indexOf(":"));
       if (!viewed.has(plugin)) {
-        const root = ensureSkillPluginView(this.winterHome, plugin);
+        const root = ensureSkillPluginView(viewsRoot, this.winterHome, plugin);
         viewed.set(plugin, root !== null);
         if (root !== null) plugins.push({ type: "local", path: root, skipMcpDiscovery: true });
       }
       if (!viewed.get(plugin)) continue;
       // A name either SDK jail refuses is still handed over inside its plugin (the child then says on
-      // its stderr why it did not load) but never named here, where one unknown name fails the list.
+      // its stderr why it did not load) but never named here: the SDK drops an unknown `skills` name
+      // with a warning, and the list should name only what the child can index.
       if (!this.sessionAvailability(meta).loadsInSessions) continue;
       if (denied.has(skillDenyRule(meta.name))) continue;
       skills.push(meta.name);
     }
-    pruneSkillPluginViews(this.winterHome, new Set(viewed.keys()));
+    pruneSkillPluginViews(viewsRoot, new Set(viewed.keys()));
     return { plugins, skills };
   }
 
