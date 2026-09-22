@@ -392,7 +392,15 @@ function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
     if (escape && escapeFloorHit(command, deps.home) !== undefined) return allow();
     if (!escape && bashLooksSafe(command, deps.reviewerAllow?.() ?? [])) return allow();
     try {
-      const verdict = await deps.reviewer.review({ class: "bash", command, ...(escape ? { unsandboxed: true } : {}) }, signal);
+      // C3 round 3: for an escape the reviewer also sees the session's cwd (what "outside the project"
+      // means) and the call's own `description` as the JUSTIFICATION — DATA, never instructions, under
+      // the same rule the reviewer applies to any justification. A sandboxed call's request is unchanged.
+      const { description } = bashEscapeInput(input);
+      const cwd = deps.roots[0];
+      const verdict = await deps.reviewer.review({
+        class: "bash", command,
+        ...(escape ? { unsandboxed: true, ...(description !== undefined ? { justification: description } : {}), ...(cwd !== undefined && cwd.length > 0 ? { cwd } : {}) } : {}),
+      }, signal);
       if (verdict.verdict === "unsafe") return deny(verdict.reason || "the safety reviewer judged this command unsafe");
       if (escape) noteReviewerCleared(deps.sessionId, toolUseID ?? (typeof (pre as { tool_use_id?: unknown }).tool_use_id === "string" ? (pre as { tool_use_id: string }).tool_use_id : undefined), command);
       return allow();
