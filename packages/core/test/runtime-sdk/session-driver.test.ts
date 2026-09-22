@@ -709,6 +709,23 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
     } finally { t.close(); }
   });
 
+  // Review M2 (2026-09-23): the advisor pin follows the `pins.research` digest rule in full — an
+  // off-catalog pin, and a cross-provider pin whose credential has no Keychain LOCATOR at all (a
+  // `console/*` login lives in an `ant` profile), fall back to the family default too.
+  test("M2: an off-catalog advisor pin, or a cross-provider pin with no credential locator, falls back to the D30 default", async () => {
+    for (const pin of ["openai/no-such-model-anywhere", "console/claude-fable-5-1"]) {
+      const settings = { runtimes: { advisorModel: pin, winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } } as unknown as Settings;
+      const t = table({ settings: () => settings });
+      try {
+        const sid = t.store.createSession("t", { mode: "code", model: "openai/gpt-5.6-sol", approvalPolicy: "ask" });
+        const s = await t.drivers.create(sid);
+        expect({ pin, advisor: t.q().options.advisor }).toEqual({ pin, advisor: { model: "openai/gpt-6-astra", authRef: expect.objectContaining({ account: "openai:default" }) } });
+        expect(t.logs.some((l) => l.includes("runtimes.advisorModel"))).toBe(true);
+        await s.end();
+      } finally { t.close(); }
+    }
+  });
+
   // B2 (2026-09-22): `session.setPolicy` across the bypass boundary replaces the child through THIS
   // table's `evict` (ipc/server.ts's `replaceChildForPolicy`). The table half of that claim: the next
   // incarnation re-reads the stored policy, so both spawn-time bypass facts follow it — in, and back out.
