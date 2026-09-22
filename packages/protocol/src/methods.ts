@@ -822,7 +822,16 @@ export const PlanRespondParams = z.object({
 export const PlanRespondResult = z.object({ ok: z.literal(true), alreadyResolved: z.boolean() });
 
 export const SessionSetPolicyParams = z.object({ sessionId: z.string().min(1), policy: ApprovalPolicy });
-export const SessionSetPolicyResult = z.object({ ok: z.literal(true) });
+export const SessionSetPolicyResult = z.object({
+  ok: z.literal(true),
+  /** 2026-09-22/23 (lane B): set only when the change crossed the BYPASS boundary on a live
+   *  Winter-leg child, which is REPLACED (resumably) rather than told — `"now"` when it was idle,
+   *  `"at-idle"` when a turn was running and the replacement waits for its end. */
+  replaced: z.enum(["now", "at-idle"]).optional(),
+  /** Set when a running turn could not leave bypass at once (review M4): it keeps bypassing approvals
+   *  until it ends, and a client should say so rather than show the new mode as already in force. */
+  warning: z.string().optional(),
+});
 
 // Chat Slice D Task 1: per-session model override, mode-agnostic — unlike session.setPolicy
 // (chat rejects EVERY value, plan-immunity's fixed policy), session.setModel works identically
