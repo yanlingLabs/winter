@@ -763,6 +763,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         runtimeKind: "winter-agent",
         nextSeq: () => deps.store.lastSeq(sessionId) + (++claimedInBatch),
         priorTodos: () => readWinterTasks(deps.store, sessionId),
+        // C2 (lane C, 2026-09-22): a card the child abandoned (an interrupt's `[interrupted]` result)
+        // is withdrawn before that result lands — this SDK never cancels the pending `canUseTool`.
+        onToolResults: (callIds) => { for (const callId of callIds) canUseTool.withdrawPending(callId); },
         checkpoint: checkpoints,
         now: () => new Date().toISOString(),
         log: {

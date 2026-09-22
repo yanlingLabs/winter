@@ -44,7 +44,11 @@ import { classifyResult } from "./errors";
  *    behaviour — which is why the 0.0.17 rules below can afford to omit it as widely as they do, and
  *    why the case for getting it RIGHT is honesty rather than harm avoidance.
  *  - No `modelUsage` at all (an unpriced row — the measured case for every `winter-test/*` double)
- *    → zeros and no `contextTokens`. Nothing is fabricated.
+ *    → zeros and no `contextTokens`. Nothing is fabricated. UNLESS the result carries claude's own
+ *    per-turn `usage` block, which is then the turn's figure (2026-09-22, C1 — see `turnUsageOf`).
+ *    "Unpriced" turned out to be every row the user runs on (codex-oauth is subscription-based and
+ *    the deepseek/zai rows carry no pricing), which is why every `turn_completed` since the
+ *    2026-09-16 provider fix read 0/0; the fix that closes it for the Winter leg is an SDK carry.
  *
  * ── AGENT SDK 0.0.17 (P-B1): THE LEDGER IS NO LONGER THE MAIN LOOP'S ────────────────────────────
  *
@@ -199,6 +203,43 @@ export function totalsOf(result: ResultFrame, main?: MainModelKey): UsageTotals 
   return { input, output, main: rowInputOf(mainRow), mainExact: true };
 }
 
+/**
+ * ── THE TURN'S OWN `usage` — READ ONLY WHEN THERE IS NO PRICED LEDGER (2026-09-22, C1) ──────────
+ *
+ * Claude's `result` carries two usage blocks: `modelUsage` (session-CUMULATIVE, every API call,
+ * keyed by model — `cost-tracker.ts`) and `usage` (`NonNullableUsage`, snake_case, accumulated over
+ * ONE `ask()` — i.e. over this turn's main-loop rounds, `QueryEngine.ts`'s `totalUsage`; the SDK
+ * print loop builds a fresh engine per dequeued prompt). The Winter runtime sends neither for an
+ * UNPRICED row: agent SDK 0.0.17 folds a generation into `modelUsage` only once `priceUsage` answers
+ * (`engine.ts` `priceGeneration`), and `session-provider.ts` refuses every subscription row and every
+ * row with no `pricing` evidence — which is every `codex-oauth`, `deepseek`, `deepseek-anthropic` and
+ * `zai-anthropic` row in the pinned catalog, i.e. every provider the user actually runs on. That, and not the projector, is why every `turn_completed`
+ * since 2026-09-16 read 0/0 (the SDK carry is in the lane report).
+ *
+ * So the rule, and why it is this rule:
+ *  - `modelUsage` present → it wins, unchanged. It is what the turn SPENT (subagents and the web
+ *    tools' inner passes included — see `UsageTotals`), and the official leg always sends it, so the
+ *    official leg's figures do not move.
+ *  - `modelUsage` absent, `usage` present → the turn's figures ARE `usage` (per turn, so no delta),
+ *    and `contextTokens` follows the same exactness rule as the ledger path (one round, nothing
+ *    else spent in the window). The cumulative baseline is left where it was.
+ *  - neither → the P8b-30 zeros, as before.
+ *
+ * `undefined` when the block is absent or carries no number at all: an empty object is "not
+ * reported", never "measured, and it was nothing".
+ */
+export function turnUsageOf(result: ResultFrame): { input: number; output: number } | undefined {
+  const usage = (result as { usage?: unknown }).usage;
+  if (typeof usage !== "object" || usage === null) return undefined;
+  const u = usage as Record<string, unknown>;
+  const fields = ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"];
+  if (!fields.some((f) => typeof u[f] === "number")) return undefined;
+  return {
+    input: num(u.input_tokens) + num(u.cache_read_input_tokens) + num(u.cache_creation_input_tokens),
+    output: num(u.output_tokens),
+  };
+}
+
 export interface TerminalInput {
   result: ResultFrame;
   sessionId: string;
@@ -236,8 +277,10 @@ export interface TerminalOutput { events: ProjectedEvent[]; totals: UsageTotals 
 export function projectTerminal(input: TerminalInput): TerminalOutput {
   const { result, sessionId, threadId, previous, rounds, mainModel } = input;
   const totals = totalsOf(result, mainModel);
-  const inputTokens = totals === undefined ? 0 : Math.max(0, totals.input - (previous?.input ?? 0));
-  const outputTokens = totals === undefined ? 0 : Math.max(0, totals.output - (previous?.output ?? 0));
+  // C1 (2026-09-22): the turn's own `usage`, consulted ONLY when there is no ledger — see `turnUsageOf`.
+  const turnUsage = totals === undefined ? turnUsageOf(result) : undefined;
+  const inputTokens = totals !== undefined ? Math.max(0, totals.input - (previous?.input ?? 0)) : turnUsage?.input ?? 0;
+  const outputTokens = totals !== undefined ? Math.max(0, totals.output - (previous?.output ?? 0)) : turnUsage?.output ?? 0;
   // `rounds === 1`, not `<= 1` (m8, review r1): a `result` with priced usage but NO assistant frame
   // at all has zero observed rounds, and calling that "one round, therefore exact" states a
   // measurement nobody made. Exactly one round is the only shape where the delta IS the round.
@@ -245,8 +288,11 @@ export function projectTerminal(input: TerminalInput): TerminalOutput {
   // 0.0.17 (P-B1): BOTH ends of the delta must be the session's own row, and nothing else may have
   // spent on it in this window — see `UsageTotals.mainExact` and `sawSharedRowActivity`.
   const mainExact = totals !== undefined && totals.mainExact && (previous === undefined || previous.mainExact);
-  const contextTokens = mainExact && rounds === 1 && mainDelta > 0 && input.sawSharedRowActivity !== true
-    ? { contextTokens: mainDelta }
+  // The per-turn `usage` path needs no row match and no delta — it IS this turn — but the same two
+  // exactness conditions hold: one round, and nothing else spent in the window.
+  const contextFigure = totals !== undefined ? (mainExact ? mainDelta : 0) : turnUsage?.input ?? 0;
+  const contextTokens = rounds === 1 && contextFigure > 0 && input.sawSharedRowActivity !== true
+    ? { contextTokens: contextFigure }
     : {};
 
   const interrupted = (result as { interrupted?: unknown }).interrupted === true;

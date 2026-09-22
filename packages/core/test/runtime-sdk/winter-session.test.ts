@@ -278,10 +278,13 @@ describe("startWinterSession — one incarnation", () => {
     await h.settled();
     expect(h.q().pushed).toEqual(["A", "S"]);
     expect(h.events.filter((e) => e.type === "user_message").map((e) => (e as { clientName: string }).clientName)).toEqual(["cli", "steer"]);
-    expect(seen(h, "turn_started")).toHaveLength(2);
+    // C2 (2026-09-22): S is pushed now, but its turn STARTS when A's ends — so its turn_started is
+    // announced right after A's turn_completed, never before it (s_5d314c81045e seq 24-30).
+    expect(seen(h, "turn_started")).toHaveLength(1);
     h.q().emit(result()); h.q().emit(result());
     await h.settled();
     expect(seen(h, "turn_completed")).toHaveLength(2);
+    expect(h.types()).toEqual(["user_message", "turn_started", "user_message", "turn_completed", "turn_started", "turn_completed"]);
     // a steer with nothing running is not "injected" — it started the turn
     const s2 = await h.session.steer("T");
     expect(s2.injected).toBe(false);
@@ -779,11 +782,16 @@ describe("startWinterSession — resume", () => {
     h.q().emit(init(h.q().options));
     await h.session.send("A", "cli");
     await h.session.send("B", "cli");     // held
-    await h.session.steer("S", "cli");    // pushes now: its turn_started lands after B's user_message
+    await h.session.steer("S", "cli");    // pushes now; its turn_started waits for A's terminal (C2)
     expect(h.q().pushed).toEqual(["A", "S"]);
-    expect(h.types()).toEqual(["user_message", "turn_started", "user_message", "user_message", "turn_started"]);
+    expect(h.types()).toEqual(["user_message", "turn_started", "user_message", "user_message"]);
+    // In THIS window S is pushed but has not started: a crash here kills it with the child, so it is
+    // owed too — and re-pushing it on resume is right (before C2 its early turn_started lost it).
+    expect(unconsumedUserMessages(h.events)).toEqual(["B", "S"]);
+    await h.session.interrupt();          // ends A's turn — S's turn_started is announced right after
+    await h.settled();
+    expect(h.types()).toEqual(["user_message", "turn_started", "user_message", "user_message", "turn_completed", "turn_started"]);
     expect(unconsumedUserMessages(h.events)).toEqual(["B"]);
-    await h.session.interrupt();          // ends A's turn; S's is still open on the wire
     h.q().emit(result());                 // S's own result (P8b-38)
     await h.settled();
     await h.session.end();
@@ -806,7 +814,32 @@ describe("startWinterSession — resume", () => {
     h.attachments[0]!.session.push("<agent-message>D</agent-message>");
     await h.settled();
     expect(h.q().pushed).toEqual(["A", "<agent-message>D</agent-message>"]);
+    // C2: D is pushed but has not STARTED (A still runs), so a crash in this window re-pushes it too.
+    expect(unconsumedUserMessages(h.events)).toEqual(["B", "<agent-message>D</agent-message>"]);
+    // A's terminal starts D — its turn_started pairs with ITS OWN message, and B stays owed.
+    h.q().emit(result());
+    await h.settled();
     expect(unconsumedUserMessages(h.events)).toEqual(["B"]);
+  });
+
+  test("C2: a message appended while a push is still unannounced first announces it — a turn_started is never separated from its own message", async () => {
+    // steer S, then send B while A runs: without the early announcement S's turn_started would land
+    // after B's user_message and the adjacency scan would pair it with B — re-pushing S and dropping B.
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "cli");
+    await h.session.steer("S", "cli");
+    await h.session.send("B", "cli");     // held; S is announced BEFORE B's user_message lands
+    expect(h.types()).toEqual(["user_message", "turn_started", "user_message", "turn_started", "user_message"]);
+    expect(unconsumedUserMessages(h.events)).toEqual(["B"]);
+    h.q().emit(result());                 // A ends: S was already announced, nothing more
+    await h.settled();
+    expect(seen(h, "turn_started")).toHaveLength(2);
+    h.q().emit(result());                 // S ends: B (pushed at A's result) starts now
+    await h.settled();
+    expect(h.types().slice(-3)).toEqual(["turn_completed", "turn_completed", "turn_started"]);
+    expect(unconsumedUserMessages(h.events)).toEqual([]);
   });
 
   test("P8b-40: the crash window — a message PUSHED whose turn_started never got appended is re-pushed on resume (the persisted contract is the pair)", () => {

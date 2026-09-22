@@ -70,16 +70,41 @@ export interface AskUserQuestionDeps {
  * **Fail-closed** (P8b-19): a timeout, an abort, an unparseable input, an emit failure or an empty
  * answer map all return a typed deny. There is no path that allows the call without a human answer.
  */
-export function askUserQuestionBridge(
-  deps: AskUserQuestionDeps,
-): (toolUseID: string, input: unknown, ctx: { signal: AbortSignal; agentID?: string }) => Promise<PermissionResult> {
+export type AskUserQuestionBridge = ((toolUseID: string, input: unknown, ctx: { signal: AbortSignal; agentID?: string }) => Promise<PermissionResult>) & {
+  /**
+   * 2026-09-22 (C2): the child has abandoned this call (its `tool_result` is on the wire), so a
+   * question still pending for it is moot. Emits `question_resolved{answers:{}, by:"aborted"}`
+   * SYNCHRONOUSLY — the caller appends the child's `tool_result` right after, and the withdrawal
+   * must land first — and the parked invocation then skips its own emit. `true` iff one was pending.
+   */
+  withdraw(callId: string): boolean;
+};
+
+export function askUserQuestionBridge(deps: AskUserQuestionDeps): AskUserQuestionBridge {
   const threadId = deps.threadId ?? "main";
   const log = deps.log;
   /** `callId` → how many stale invocations must SKIP their own `question_resolved` emit, because
    *  the superseding one already emitted it in the right order. */
   const supersededEmits = new Map<string, number>();
+  /** `callId` → how many parked invocations must skip their `aborted` emit because `withdraw` already
+   *  put it out (C2). A separate count from `supersededEmits`: the two withdrawals carry different
+   *  `by` values and are consumed by different branches. */
+  const withdrawnEmits = new Map<string, number>();
 
-  return async (toolUseID, input, ctx): Promise<PermissionResult> => {
+  const withdraw = (callId: string): boolean => {
+    const { sessionId } = deps;
+    if (deps.questions.respond(sessionId, callId, {}, "aborted").alreadyResolved) return false;
+    withdrawnEmits.set(callId, (withdrawnEmits.get(callId) ?? 0) + 1);
+    log?.info(`AskUserQuestion: withdrawn session=${sessionId} call=${callId} reason=the child abandoned the call`);
+    try {
+      deps.emit({ type: "question_resolved", sessionId, threadId, callId, answers: {}, by: "aborted" });
+    } catch (err) {
+      log?.error(`AskUserQuestion: failed to emit the withdrawal session=${sessionId} call=${callId}: ${(err as Error).message}`);
+    }
+    return true;
+  };
+
+  const ask = async (toolUseID: string, input: unknown, ctx: { signal: AbortSignal; agentID?: string }): Promise<PermissionResult> => {
     const { sessionId } = deps;
     const callId = toolUseID;
 
@@ -158,9 +183,14 @@ export function askUserQuestionBridge(
     // a second `question_resolved` — the withdrawal went out in the right order above, and a
     // duplicate arriving here (after the replacement question) would dismiss the live card.
     const suppressions = supersededEmits.get(callId) ?? 0;
+    const withdrawals = withdrawnEmits.get(callId) ?? 0;
     if (by === "superseded" && suppressions > 0) {
       if (suppressions > 1) supersededEmits.set(callId, suppressions - 1);
       else supersededEmits.delete(callId);
+    } else if (by === "aborted" && withdrawals > 0) {
+      // C2: `withdraw` already emitted this resolution, ahead of the child's `tool_result`.
+      if (withdrawals > 1) withdrawnEmits.set(callId, withdrawals - 1);
+      else withdrawnEmits.delete(callId);
     } else {
       deps.emit({
         type: "question_resolved", sessionId, threadId, callId,
@@ -208,4 +238,5 @@ export function askUserQuestionBridge(
       decisionClassification: "user_temporary",
     };
   };
+  return Object.assign(ask, { withdraw });
 }

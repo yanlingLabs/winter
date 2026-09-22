@@ -59,7 +59,9 @@
 // floor on the official leg — the ordering the fix-wave brief calls for. `official-options.ts`
 // (lane 1's file) threads this value into `OptionsTemplatePolicy.hooks` via `session-driver.ts`'s
 // `hooksFor(session).official`, already wired at integration.
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename } from "node:path";
 import type {
   HookCallback, HookCallbackMatcher, HookJSONOutput, Options,
   PostToolUseFailureHookInput, PostToolUseHookInput, PreToolUseHookInput,
@@ -75,6 +77,7 @@ import { computeLineDiff } from "../diffs/myers";
 import { DIFF_PATCH_MAX_BYTES, mintDiffId, writeDiff } from "../diffs/store";
 import type { HookResult } from "../plugins/hook-runner";
 import { attachFileDiff } from "./diff-attach";
+import { REVIEWER_ESCALATION_REASON, noteReviewerCleared } from "./bridge-common";
 
 /** The subset of `plugins/hook-registry.ts`'s `HookFacade` this module depends on — injected
  *  rather than imported concretely so a fake can stand in for tests with no real plugin process
@@ -273,6 +276,82 @@ function pluginPostToolUseFailureHook(deps: SessionHooksDeps): HookCallback {
   };
 }
 
+// ── 2a. The control-plane floor for a SANDBOX ESCAPE (every policy, bypass included) ────────────
+//
+// 2026-09-22 (C3 round 3, lane C). An escape (`dangerouslyDisableSandbox: true`) leaves the seatbelt
+// behind, and the seatbelt WAS the bash half of two floors: the control-plane write fence
+// (`permissions.local.json` / `settings.json` / `settings.local.json`, where writing one is a
+// self-grant — the bridge's own fence at `approval-bridge.ts` (2) reads write-class tool inputs only)
+// and the daemon's own state under `<home>/run` and `<home>/runtimes` (credentials, the socket, the
+// `winter` binary `resolveWinterExecutable`'s rung 4 would run). Claude keeps its equivalent floor
+// bypass-immune (`utils/permissions/permissions.ts` ~1252-1260, `filesystem.ts` ~643-650) and denies
+// rather than prompts, so this does the same: a DETERMINISTIC deny, before any reviewer call, under
+// every policy and on both legs (`sessionHooksFor` feeds both). A PreToolUse deny is terminal ahead of
+// every permission mode (agent SDK 0.0.17 `permissions/evaluator.ts` ~1657).
+//
+// Conservative on purpose: a substring match on the three filenames and on every spelling of the
+// two home paths this file can predict — the literal home (and its realpath), `~`/`$HOME`/`${HOME}`
+// for a home under the user's own, `$WINTER_HOME`/`${WINTER_HOME}`, and `<home basename>/run` for a
+// command that `cd`s there first — compared case-insensitively (a default macOS volume is). A false
+// positive costs a typed deny the model can route around by running the command sandboxed; a false
+// negative costs the floor. A command that builds the path at run time (`$(…)`, variables of its
+// own) is beyond any static check — the reviewer still judges what is left.
+
+const ESCAPE_FLOOR_FILENAMES: readonly string[] = ["permissions.local.json", "settings.json", "settings.local.json"];
+
+/** Every spelling of `<home>/run` (a prefix of `<home>/runtimes` too) this check can predict, lowercased. */
+function homeStateNeedles(home: string | undefined): string[] {
+  if (home === undefined || home.length === 0) return [];
+  const homes = new Set<string>([home.replace(/\/+$/, "")]);
+  try { homes.add(realpathSync(home).replace(/\/+$/, "")); } catch { /* not created yet: the literal spelling is the one a command could name */ }
+  const prefixes = new Set<string>(["$WINTER_HOME", "${WINTER_HOME}"]);
+  const userHome = homedir().replace(/\/+$/, "");
+  for (const h of homes) {
+    prefixes.add(h);
+    if (userHome.length > 0 && h.startsWith(`${userHome}/`)) {
+      const rest = h.slice(userHome.length);
+      for (const tilde of ["~", "$HOME", "${HOME}"]) prefixes.add(`${tilde}${rest}`);
+    }
+    const base = basename(h);
+    if (base.length > 0) prefixes.add(base);
+  }
+  return [...prefixes].map((p) => `${p}/run`.toLowerCase());
+}
+
+/**
+ * What a sandbox escape's command names that the floor forbids, or `undefined`. Exported for the
+ * tests; the hook below is its one production caller besides the reviewer's own skip.
+ */
+export function escapeFloorHit(command: string, home: string | undefined): string | undefined {
+  const c = command.toLowerCase();
+  for (const name of ESCAPE_FLOOR_FILENAMES) if (c.includes(name)) return name;
+  for (const needle of homeStateNeedles(home)) if (c.includes(needle)) return "Winter's own state (<home>/run, <home>/runtimes)";
+  return undefined;
+}
+
+export function escapeFloorDenial(hit: string): string {
+  return `Bash was not run — a command that asks to run outside the sandbox (dangerouslyDisableSandbox) may not touch ${hit}. ` +
+    "Winter's control-plane files (permissions.local.json, settings.json, settings.local.json) and its own state under <home>/run and <home>/runtimes are off-limits to unsandboxed commands under every approval mode. Run the command inside the sandbox, or ask the user to make this change.";
+}
+
+const bashEscapeInput = (input: unknown): { command: string; escape: boolean; description?: string } => {
+  const ti = (input as PreToolUseHookInput).tool_input as { command?: unknown; dangerouslyDisableSandbox?: unknown; description?: unknown } | null | undefined;
+  return {
+    command: typeof ti?.command === "string" ? ti.command : "",
+    escape: ti?.dangerouslyDisableSandbox === true,
+    ...(typeof ti?.description === "string" && ti.description.trim().length > 0 ? { description: ti.description } : {}),
+  };
+};
+
+function escapeFloorHook(deps: SessionHooksDeps): HookCallback {
+  return async (input) => {
+    const { command, escape } = bashEscapeInput(input);
+    if (!escape) return allow();
+    const hit = escapeFloorHit(command, deps.home);
+    return hit === undefined ? allow() : deny(escapeFloorDenial(hit));
+  };
+}
+
 // ── 2. Bash safety reviewer ─────────────────────────────────────────────────────────────────────
 
 /** `PreToolUse`, matched on `"Bash"` — the reviewer is the auto-policy GATE (see this file's own
@@ -291,7 +370,7 @@ function pluginPostToolUseFailureHook(deps: SessionHooksDeps): HookCallback {
  *  real child — carry: measure `ask` end-to-end (a real approval_requested reaching the phone/CLI)
  *  before relying on it as the sole safety net for a reviewer outage. */
 function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
-  return async (input, _toolUseID, { signal }) => {
+  return async (input, toolUseID, { signal }) => {
     if (!deps.reviewer) return allow();
     if (deps.policy?.() !== "auto") return allow();
     if (deps.reviewerEnabled?.() === false) return allow();
@@ -300,10 +379,30 @@ function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
       ? (pre.tool_input as { command: string }).command
       : "";
     if (!command) return allow();
-    if (bashLooksSafe(command, deps.reviewerAllow?.() ?? [])) return allow();
+    // C3-1 (lane C, 2026-09-22): a SANDBOX ESCAPE is never waved through on its first word or an
+    // allow-list entry — `bashLooksSafe` assumes the sandbox (a read-only `cat` is harmless inside it
+    // and reads `~/.ssh` outside it) — and the reviewer is told the command runs WITHOUT the sandbox.
+    // Only a `safe` verdict records the CLEARANCE the approval bridge requires before it runs an escape
+    // under `auto`; every early `allow()` above (no reviewer, not `auto`, disabled, no command) and
+    // every failure below records none, so the bridge cards it (`bridge-common.ts`'s
+    // `noteReviewerCleared` — fail closed by construction).
+    const escape = (pre.tool_input as { dangerouslyDisableSandbox?: unknown } | null | undefined)?.dangerouslyDisableSandbox === true;
+    // §2a's floor denies this one on its own, whatever the order the hooks run in; never spend (or
+    // record) a review on it.
+    if (escape && escapeFloorHit(command, deps.home) !== undefined) return allow();
+    if (!escape && bashLooksSafe(command, deps.reviewerAllow?.() ?? [])) return allow();
     try {
-      const verdict = await deps.reviewer.review({ class: "bash", command }, signal);
+      // C3 round 3: for an escape the reviewer also sees the session's cwd (what "outside the project"
+      // means) and the call's own `description` as the JUSTIFICATION — DATA, never instructions, under
+      // the same rule the reviewer applies to any justification. A sandboxed call's request is unchanged.
+      const { description } = bashEscapeInput(input);
+      const cwd = deps.roots[0];
+      const verdict = await deps.reviewer.review({
+        class: "bash", command,
+        ...(escape ? { unsandboxed: true, ...(description !== undefined ? { justification: description } : {}), ...(cwd !== undefined && cwd.length > 0 ? { cwd } : {}) } : {}),
+      }, signal);
       if (verdict.verdict === "unsafe") return deny(verdict.reason || "the safety reviewer judged this command unsafe");
+      if (escape) noteReviewerCleared(deps.sessionId, toolUseID ?? (typeof (pre as { tool_use_id?: unknown }).tool_use_id === "string" ? (pre as { tool_use_id: string }).tool_use_id : undefined), command);
       return allow();
     } catch (err) {
       // 2026-09-19 (review): STRUCTURAL vs TRANSIENT — see `ReviewerNoRunnableModel`'s own doc for the
@@ -312,8 +411,12 @@ function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
       // answered when such a home had no `BashReviewer` at all. The reviewer has already logged the
       // state change once; nothing is logged per call here.
       if (err instanceof ReviewerNoRunnableModel) return allow();
-      // carry: measure `ask` end-to-end against a real child before trusting it as the sole net.
-      return ask("reviewer unavailable — escalating for manual approval");
+      // C3 (2026-09-22) — traced in the SDK source, not yet measured on a live child: this `ask`
+      // reaches `canUseTool`, where the gate's `auto` allow used to answer it, i.e. silently ran it.
+      // For a PLAIN bash call the child keeps this reason and the bridge cards on it
+      // (`reviewerCouldNotJudge`); for an escape the child replaces it, and the bridge cards because
+      // no clearance was recorded above.
+      return ask(REVIEWER_ESCALATION_REASON);
     }
   };
 }
@@ -670,6 +773,10 @@ export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hook
 
   const preToolUse: HookCallbackMatcher[] = [{ hooks: [pluginPreToolUseHook(deps)] }];
   if (deps.reviewer) preToolUse.push({ matcher: "Bash", hooks: [bashReviewerHook(deps)] });
+  // C3 round 3: the escape floor runs under EVERY policy, reviewer or none — see §2a. Its position
+  // does not matter: a deny outranks every other hook answer, and the reviewer skips (never reviews,
+  // never clears) a command this floor denies, whichever of the two runs first.
+  preToolUse.push({ matcher: "Bash", hooks: [escapeFloorHook(deps)] });
   if (deps.home) {
     for (const tool of Object.keys(DIFF_TOOL_FILE_PATH_ARG)) {
       preToolUse.push({ matcher: tool, hooks: [fileDiffPreToolUseHook(deps, pending)] });

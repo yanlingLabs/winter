@@ -11,7 +11,7 @@ import { gateClassFor, gateToolNameFor, WINTER_OWN_TOOL_NAMES } from "./tool-nam
 import { controlPlaneTargetForCall, controlPlaneDenialMessage } from "./control-plane";
 import { outdirPath } from "../sessions/outdir";
 import { askUserQuestionBridge, ASK_USER_QUESTION_TOOL } from "./question-bridge";
-import { consoleBridgeLogger, NO_PARK_TIMEOUT_MS, type BridgeLogger } from "./bridge-common";
+import { consoleBridgeLogger, NO_PARK_TIMEOUT_MS, REVIEWER_ESCALATION_REASON, takeReviewerCleared, type BridgeLogger } from "./bridge-common";
 import type { BridgedPlanRequest } from "./plan-bridge";
 
 export { NO_PARK_TIMEOUT_MS, type BridgeLogger } from "./bridge-common";
@@ -100,7 +100,13 @@ export interface CanUseToolDeps {
    * tolerated. Absent ⇒ `ExitPlanMode` falls through to the ordinary gate path (today: an
    * unclassified tool name, `"ask"`-shaped) — never a crash, matching every other optional dep in
    * this file. */
-  planBridge?: { onExitPlanMode(req: BridgedPlanRequest): Promise<PermissionResult> };
+  planBridge?: {
+    onExitPlanMode(req: BridgedPlanRequest): Promise<PermissionResult>;
+    /** `plan-bridge.ts`'s `respond` — present on the real bridge; used ONLY by `withdrawPending`
+     *  (C2) to settle a plan card the child abandoned. Optional so a caller's narrower plan bridge
+     *  still type-checks; absent ⇒ a plan card is simply not reachable from here. */
+    respond?(sessionId: string, callId: string, decision: { approved: boolean; feedback?: string; autoAccept: boolean }, by: string): { ok: true; alreadyResolved: boolean };
+  };
 }
 
 /** The deny text a policy that never prompts hands back to the model. Copied VERBATIM from
@@ -202,13 +208,12 @@ export function isBlessedOutputPath(deps: { home?: string; sessionId: string }, 
   return p === prefix || p.startsWith(prefix + sep);
 }
 
-/** A `bash` call asking for a full sandbox escape (`dangerouslyDisableSandbox: true`). Takes the
- *  WINTER tool name — the escape arg is Winter's own, and the Winter built-in that carries it arrives
- *  as `Bash`. Exported so the matrix test can pin the predicate as well as the verdict. */
-export function isUnsandboxedBashEscape(gateToolName: string, input: unknown): boolean {
-  if (gateToolName !== "bash") return false;
-  if (typeof input !== "object" || input === null) return false;
-  return (input as Record<string, unknown>).dangerouslyDisableSandbox === true;
+/** Did the bash safety reviewer escalate this call because it could reach NO verdict? The child
+ *  passes a PreToolUse hook's reason through as `decisionReason` verbatim (and joins several hooks'
+ *  reasons into one), so this is a containment test on the daemon's OWN string — never a read of the
+ *  runtime's private vocabulary, which (5c) below still refuses to act on. */
+export function reviewerCouldNotJudge(decisionReason: string | undefined): boolean {
+  return typeof decisionReason === "string" && decisionReason.includes(REVIEWER_ESCALATION_REASON);
 }
 
 /** Splits a Winter/CC rule string (`Bash(git push:*)`, `Edit(/foo)`, bare `WebFetch`) back into the
@@ -318,7 +323,8 @@ export function approvalOptionsFromSuggestions(suggestions: readonly PermissionU
  * task report: the in-project write/edit silencing under `ask`; `controlPlaneFileTarget` and the
  * `~/.winter` grant denylist; the out-of-root `dirGrant` card; the web class's and `browser`'s
  * dangerous-domain floors (which move with the capability tools, P8b-12); bash's always-card
- * escalation args; and the safety reviewer. It also performs no rules-store READ, so a standing
+ * escalation args (P8b-31 re-asserted the sandbox-escape one here until C3 retired it for claude
+ * parity — see (5b)); and the safety reviewer. It also performs no rules-store READ, so a standing
  * rule that silences a card today does not silence it here — Winter's own rule stages do that.
  */
 
@@ -352,14 +358,44 @@ function planRequestFor(
   };
 }
 
-export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
+/**
+ * The bridge's `CanUseTool`, plus the ONE door for a card the child itself has abandoned (C2).
+ *
+ * `withdrawPending(callId)`: the child produced a `tool_result` for this call (the driver learns it
+ * from the projector's `onToolResults`), so an approval card or a question still pending for it can
+ * never be answered usefully. On the Winter leg this is the ONLY way such a card closes after an
+ * interrupt — agent SDK 0.0.17 abandons the pending permission request inside the child
+ * (`engine.ts`'s `raceInterrupt` around `evaluateWithFreshPolicy`) and never cancels this callback:
+ * it has no `control_cancel_request`, which is what claude's CLI sends on an abort
+ * (`cli/structuredIO.ts`) and what makes the claude SDK abort the callback's `signal`, i.e. what
+ * makes `onAbort` below fire on the official leg. Without it the card stayed pending for ~24.8 days
+ * and every client kept it on screen (s_5d314c81045e seq 24-30).
+ *
+ * The withdrawal is `approval_resolved{approved:false, by:"aborted"}` / `question_resolved{answers:{},
+ * by:"aborted"}` — the very shapes `onAbort` already emits for the same fact, no new field, no new
+ * `by` value — emitted SYNCHRONOUSLY so it lands ahead of the `tool_result` the driver appends next;
+ * the parked invocation then skips its own emit (the supersede path's suppression pattern). A plan
+ * card (`ExitPlanMode`) is closed too, through `deps.planBridge.respond` — its `plan_resolved{approved:
+ * false, by:"aborted"}` lands just after the `tool_result` (see the branch). Returns whether anything
+ * was pending; never throws.
+ *
+ * **RESIDUAL GAP, documented rather than fixed (C2 review):** the trigger is the child's `tool_result`
+ * for the call. A card whose call NEVER gets one still dangles — the child process dying mid-wait
+ * WITHOUT the incarnation's `AbortController` firing (a crash, a kill from outside; `end()` does abort
+ * it, which settles the card through `onAbort`), or a future runtime that abandons a call without
+ * padding its result. The SDK-side fix is claude's `control_cancel_request` (lane E carry); until then
+ * such a card closes only when a human answers it or the ~24.8-day park expires.
+ */
+export type ApprovalBridge = CanUseTool & { withdrawPending(callId: string): boolean };
+
+export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
   const log = deps.log ?? consoleBridgeLogger;
   const now = deps.now ?? (() => Date.now());
   const threadId = deps.threadId ?? "main";
   const policyNow = (): SessionApprovalPolicy =>
     typeof deps.policy === "function" ? deps.policy() : deps.policy;
-  // Per-callId suppression counts for the supersede path — see `raiseCard`'s supersede branch.
-  const state: BridgeState = { supersededEmits: new Map() };
+  // Per-callId suppression counts for the supersede and withdraw paths — see `raiseCard`.
+  const state: BridgeState = { supersededEmits: new Map(), withdrawnEmits: new Map() };
 
   const askQuestion = askUserQuestionBridge({
     sessionId: deps.sessionId,
@@ -370,7 +406,39 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
     now,
   });
 
-  return async (toolName, input, ctx): Promise<PermissionResult> => {
+  const withdrawPending = (callId: string): boolean => {
+    const { sessionId } = deps;
+    try {
+      if (deps.approvals.pendingMeta(sessionId, callId) !== undefined) {
+        state.withdrawnEmits.set(callId, (state.withdrawnEmits.get(callId) ?? 0) + 1);
+        deps.approvals.resolve(sessionId, callId, false, "aborted");
+        log.info(`canUseTool: withdrawn session=${sessionId} call=${callId} reason=the child abandoned the call`);
+        try {
+          deps.emit({ type: "approval_resolved", sessionId, threadId, callId, approved: false, by: "aborted" });
+        } catch (err) {
+          log.error(`canUseTool: failed to emit the withdrawal session=${sessionId} call=${callId}: ${(err as Error).message}`);
+        }
+        return true;
+      }
+      if (askQuestion.withdraw(callId)) return true;
+      // A plan card (`ExitPlanMode`): settled through the plan bridge's own `respond`. Its
+      // `plan_resolved{approved:false, by:"aborted"}` is emitted by the parked `onExitPlanMode` on
+      // its next tick — i.e. just AFTER the child's `tool_result`, not before it. Still the card's
+      // one truthful close; synchronous ordering there would need a suppression path inside
+      // `plan-bridge.ts`, which nothing else needs.
+      const plan = deps.planBridge?.respond?.(sessionId, callId, { approved: false, autoAccept: false }, "aborted");
+      if (plan !== undefined && !plan.alreadyResolved) {
+        log.info(`canUseTool: withdrawn plan session=${sessionId} call=${callId} reason=the child abandoned the call`);
+        return true;
+      }
+      return false;
+    } catch (err) {
+      log.error(`canUseTool: withdrawal failed session=${sessionId} call=${callId}: ${(err as Error).message}`);
+      return false;
+    }
+  };
+
+  const canUse: CanUseTool = async (toolName, input, ctx): Promise<PermissionResult> => {
     // (1) A question, not a permission.
     if (toolName === ASK_USER_QUESTION_TOOL) {
       return await askQuestion(ctx.toolUseID, input, ctx);
@@ -434,23 +502,51 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
     // (5) engine.ts:4341 — dont-ask declines everything it would otherwise card, with no prompt.
     if (decision === "ask" && policy === "dont-ask") decision = "deny";
 
-    // (5b) P8b-31 — THE SANDBOX-ESCAPE FLOOR. `engine.ts:4518`'s branch condition is
-    //   `call.name === "bash" && bashEscalation.dangerouslyDisableSandbox
-    //    && !unsandboxedRuleAllowed && meta.approvalPolicy !== "bypass"`
-    // and its own comment enumerates the disposition: plan denied it (the deny branch), dont-ask
-    // denied it (the ask→deny flip above), bypass ran it silently (the branch guard), and
-    // auto/ask/accept-edits all CARD. The gate cannot see arguments, so it returns a flat `allow`
-    // for `bash` under `auto` — which on the Winter leg would run a FULL SANDBOX ESCAPE with no
-    // human in the loop, in code and dispatch alike. Re-asserted here because the bridge is the
-    // only place left that can: Winter surfaces exactly this call at `canUseTool` in every mode.
+    // (5b) C3 (lane C, 2026-09-22) — AN UNSANDBOXED ESCAPE TAKES CLAUDE'S VERDICT, NOT AN ALWAYS-CARD.
+    // This line used to be P8b-31's ALWAYS-CARD, re-asserting the retired engine's own
+    // `engine.ts:4518` branch: every `dangerouslyDisableSandbox: true` call carded under `auto`, and
+    // was a typed deny in dispatch, whatever rule or mode stood behind it. Claude (reference source,
+    // cited in full in `mode-matrix.test.ts`): the flag makes `shouldUseSandbox` false
+    // (`tools/BashTool/shouldUseSandbox.ts:136-141`), which removes ONLY the sandbox AUTO-ALLOW
+    // (`bashPermissions.ts:1829-1842`); an allow rule then allows it (`bashPermissions.ts:1132-1142`),
+    // bypass allows it (`utils/permissions/permissions.ts:1255-1269`), default and acceptEdits prompt,
+    // dontAsk denies, and auto hands it to its classifier — which runs it ONLY on a positive verdict and
+    // otherwise fails closed or prompts (`permissions.ts:845-875`).
     //
-    // Placed AFTER the dont-ask flip so plan/dont-ask keep their denies, and gated on
-    // `decision === "allow"` + `policy !== "bypass"` so it reproduces the engine's condition
-    // exactly — `ask`/`accept-edits` already resolve to `"ask"` and are untouched, and `bypass`
-    // keeps running it silently. `!unsandboxedRuleAllowed` has no analogue here: the bridge performs
-    // no rules-store read at all, so a standing `BashUnsandboxed(...)` rule does NOT pre-clear an
-    // escape on this leg — strictly more conservative than today, and recorded as such.
-    if (decision === "allow" && policy !== "bypass" && isUnsandboxedBashEscape(classificationName, input)) {
+    // So: plan → deny, dont-ask → deny (the flip above), ask/accept-edits → a card, bypass → allow —
+    // the gate's own `bash` verdicts — and under `auto` (C3-1) the escape runs ONLY with the bash
+    // safety reviewer's CLEARANCE for this very call: a `safe` verdict under the unsandboxed
+    // instruction, recorded by the PreToolUse hook (`bridge-common.ts`'s `noteReviewerCleared`). No
+    // clearance — no reviewer wired, the reviewer disabled, no runnable model, a transient failure, a
+    // missing call id, an evicted note — is a card in code and a typed deny wherever nobody can answer
+    // one (dispatch, a dispatch child, a stale chat row). Chat never runs an escape at all. The sandbox
+    // WAS the bash floor for the control-plane files and `<home>/runtimes` (the fence at (2) covers the
+    // write-class tools only), which is why nothing weaker than a positive verdict may stand in for it.
+    //
+    // The card's text is unchanged — an escape still reads `bash (UNSANDBOXED): …`. WHAT STILL CARDS
+    // AN ESCAPE UNDER A MATCHING ALLOW RULE is outside this file: the agent SDK's RULING P3-J makes the
+    // flag "mandatory interaction" ahead of its allow-rule stage (0.0.17
+    // `permissions/evaluator.ts:1852-1869`), and the daemon never hands the child the user's persisted
+    // allow rules (`mode-options.ts`'s `permissions.allow` carries only Winter's own reads).
+    const escape = classificationName === "bash" && typeof input === "object" && input !== null
+      && (input as Record<string, unknown>).dangerouslyDisableSandbox === true;
+    // Consumed on every escape that gets this far, whatever the verdict, so none lingers.
+    // Bound to the very command the reviewer judged (C3 round 3): a rewritten input is not cleared.
+    const cleared = escape && takeReviewerCleared(deps.sessionId, ctx.toolUseID, (input as Record<string, unknown>).command);
+    if (decision === "allow" && escape && policy === "auto" && (!cleared || deps.mode === "chat")) {
+      log.info(`canUseTool: escalate session=${deps.sessionId} tool=${toolName} reason=${cleared ? "escape-in-chat" : "escape-not-cleared"}`);
+      decision = "ask";
+    }
+
+    // (5b') THE REVIEWER'S NO-VERDICT on a PLAIN bash call. The reviewer answers a PreToolUse `ask`
+    // when it could reach no verdict, and for an ordinary call the child passes its reason through
+    // verbatim as `decisionReason` (an escape's is replaced by P3-J's, which is why (5b) needs the
+    // positive clearance instead). Under `auto` the gate says `allow` for `bash`, so without this the
+    // escalation meant to reach a human ran the command silently — it did, for every plain bash call,
+    // before this line existed. Narrows only: a gate `deny` stays a deny, and a never-prompting
+    // session turns the card into its typed deny below.
+    if (decision === "allow" && reviewerCouldNotJudge(ctx.decisionReason)) {
+      log.info(`canUseTool: escalate session=${deps.sessionId} tool=${toolName} reason=reviewer-no-verdict`);
       decision = "ask";
     }
 
@@ -500,8 +596,8 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
     // (5d) THE PRIVATE-ADDRESS FLOOR (whole-branch review B1/M2). See `privateWebFetchTarget` for
     // what went wrong without it and why the judgement is the daemon's own.
     //
-    // Under EVERY policy, `bypass` included — unlike (5b)'s sandbox-escape floor, which excludes
-    // bypass to reproduce the engine's own condition exactly. The condition being reproduced here is
+    // Under EVERY policy, `bypass` included — unlike the retired P8b-31 sandbox-escape floor (see
+    // (5b)), which excluded bypass to reproduce the engine's own condition. The condition being reproduced here is
     // the SDK's, and the SDK's is "ask even in `bypassPermissions`, even under a broad allow rule,
     // even after a hook pre-approved it": only an allow rule naming that exact host, or
     // `privateAddressPolicy: "allow"`, is consent, and neither of those is a session policy. A
@@ -554,13 +650,17 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
 
     return await raiseCard(deps, { log, now, threadId, policy, state, privateTarget }, toolName, gateToolName, input, ctx);
   };
+  return Object.assign(canUse, { withdrawPending });
 }
 
-/** Per-`canUseToolFor` mutable state. Only the supersede path needs any. */
+/** Per-`canUseToolFor` mutable state. Only the supersede and withdraw paths need any. */
 interface BridgeState {
   /** `callId` → how many stale invocations must SKIP their own `approval_resolved` emit, because
    *  the superseding invocation already emitted it synchronously and in the right order. */
   supersededEmits: Map<string, number>;
+  /** `callId` → how many parked invocations must skip their `aborted` emit because
+   *  `withdrawPending` already emitted it (C2). Separate from `supersededEmits`: different `by`. */
+  withdrawnEmits: Map<string, number>;
 }
 
 /**
@@ -726,9 +826,14 @@ async function raiseCard(
   // branch, and a duplicate arriving here (after the replacement request) would dismiss the live
   // card, which is the whole defect that ordering fixes.
   const suppressions = env.state.supersededEmits.get(callId) ?? 0;
+  const withdrawals = env.state.withdrawnEmits.get(callId) ?? 0;
   if (by === "superseded" && suppressions > 0) {
     if (suppressions > 1) env.state.supersededEmits.set(callId, suppressions - 1);
     else env.state.supersededEmits.delete(callId);
+  } else if (by === "aborted" && withdrawals > 0) {
+    // C2: `withdrawPending` already emitted this resolution, ahead of the child's `tool_result`.
+    if (withdrawals > 1) env.state.withdrawnEmits.set(callId, withdrawals - 1);
+    else env.state.withdrawnEmits.delete(callId);
   } else {
     deps.emit({ type: "approval_resolved", sessionId, threadId: env.threadId, callId, approved, by });
   }
