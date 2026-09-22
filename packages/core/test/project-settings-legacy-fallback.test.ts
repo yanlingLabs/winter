@@ -11,7 +11,7 @@ function tmpDir(prefix: string): string {
   return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
 }
 function minimalBase(overrides: Record<string, unknown> = {}): Settings {
-  return Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" }, ...overrides });
+  return Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/x" }, ...overrides });
 }
 
 describe("ProjectSettingsResolver — legacy project settings-overlay fallback (P9c-4)", () => {
