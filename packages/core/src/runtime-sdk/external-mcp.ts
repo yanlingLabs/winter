@@ -34,8 +34,10 @@ import { extractRawMcpServers, parseProjectMcpServers } from "../agent/mcp/proje
 // `agent/mcp/manager.ts`'s own reader and the CLI's `mcp add/remove --scope project`/`mcp get`
 // (`mcp-cli.ts`), which previously would have been a THIRD hand-copied duplicate of this exact
 // shape (this file and the manager each had their own before). `parseProjectMcpServers` is the
-// PARITY FIX (controller-directed): validates the project's `mcpServers` map PER ENTRY against the
-// same stdio/http/sse shape `settings.mcpServers` accepts, instead of the old one-shot
+// PARITY FIX (controller-directed): validates the project's `mcpServers` map PER ENTRY against
+// `ProjectMcpEntrySchema` — the stdio/http/sse shapes `settings.mcpServers` accepts but WITHOUT the
+// settings write door's credential-header refusal, so a project entry's headers reach the child
+// verbatim as they do in claude (never swap in `McpServerSettingsEntry` here) — instead of the old one-shot
 // `ProjectMcpConfig.parse(...)` that failed the WHOLE map (and so contributed NOTHING to the
 // session) the moment any single entry — an http/sse one, most commonly — didn't fit.
 
