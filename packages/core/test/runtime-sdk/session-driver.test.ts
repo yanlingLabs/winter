@@ -640,7 +640,7 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
         mkdirSync(join(t.home, "plugins", "superpowers", "skills", name), { recursive: true });
         writeFileSync(join(t.home, "plugins", "superpowers", "skills", name, "SKILL.md"), `---\nname: ${name}\ndescription: ${name} skill\n---\nbody\n`);
       }
-      const view = join(t.home, "runtimes", "skill-plugins", "superpowers");
+      const view = join(t.home, "cache", "skill-plugins", "superpowers");
 
       const code = t.store.createSession("t", { mode: "code", model: "winter-test/echo", approvalPolicy: "ask" });
       const session = await t.drivers.create(code);

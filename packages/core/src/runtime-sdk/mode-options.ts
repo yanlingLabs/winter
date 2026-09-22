@@ -6,6 +6,7 @@ import type {
 } from "@yanlinglabs/winter-agent-sdk";
 import { RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
+import { skillPluginViewsRoot } from "../agent/paths";
 import { keychainService } from "../profile";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import type { Settings } from "../settings";
@@ -515,6 +516,13 @@ export function controlPlaneDenyRules(home: string): string[] {
     // own doc states for the host-side fence vs. the deny-rule fence.
     fsRootAnchored([join(home, "agents"), "**"].join("/")),
     fsRootAnchored(["**", ".winter", "agents", "**"].join("/")),
+    // B1 follow-up (2026-09-22): the skills-only plugin VIEWS (`SkillStore.childSkillSurface`,
+    // `agent/paths.ts`'s `skillPluginViewsRoot`). The next child loads each view as a local plugin,
+    // and a local plugin's manifest may declare COMMAND HOOKS the child runs outside the Bash sandbox —
+    // so a file written here is a self-grant of the same class as the definitions above. Write-fenced
+    // only: the views are deliberately READABLE, because a skill points the model at its own files.
+    // The daemon also rebuilds each view before every spawn; this closes the window in between.
+    fsRootAnchored([skillPluginViewsRoot(home), "**"].join("/")),
   ];
   // Task 17: the engine's read tool denied `<home>/run` and `<home>/runtimes` (the runtime store,
   // 8a's model-denied directory); the Winter leg's read-class tools carry the same two denials.
@@ -615,7 +623,10 @@ export function sandboxConfigFor(home: string): SandboxSettingsConfig {
       // Nothing legitimate writes here through a TOOL: the runtime store is the daemon's own, and a
       // child's internal writes (the official transcript store under `claude-config`) are the binary's,
       // never its Bash sandbox's.
-      denyWrite: [join(home, "run"), join(home, "runtimes")],
+      // …and the skills-only plugin views (B1 follow-up): a Bash redirect planting a manifest with
+      // command hooks there would be run by the next child — see `controlPlaneDenyRules`' matching
+      // entry. Write only; the views stay readable (a skill reads its own supporting files).
+      denyWrite: [join(home, "run"), join(home, "runtimes"), skillPluginViewsRoot(home)],
       // The sole read denial Winter has ever had (CLAUDE.md: "the sole read denial is
       // `~/.winter/run`") — reads are otherwise deliberately unrestricted.
       // …plus `runtimes/` (8a: the runtime store is never model-readable — the engine's read tool
