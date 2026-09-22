@@ -352,14 +352,35 @@ function planRequestFor(
   };
 }
 
-export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
+/**
+ * The bridge's `CanUseTool`, plus the ONE door for a card the child itself has abandoned (C2).
+ *
+ * `withdrawPending(callId)`: the child produced a `tool_result` for this call (the driver learns it
+ * from the projector's `onToolResults`), so an approval card or a question still pending for it can
+ * never be answered usefully. On the Winter leg this is the ONLY way such a card closes after an
+ * interrupt — agent SDK 0.0.17 abandons the pending permission request inside the child
+ * (`engine.ts`'s `raceInterrupt` around `evaluateWithFreshPolicy`) and never cancels this callback:
+ * it has no `control_cancel_request`, which is what claude's CLI sends on an abort
+ * (`cli/structuredIO.ts`) and what makes the claude SDK abort the callback's `signal`, i.e. what
+ * makes `onAbort` below fire on the official leg. Without it the card stayed pending for ~24.8 days
+ * and every client kept it on screen (s_5d314c81045e seq 24-30).
+ *
+ * The withdrawal is `approval_resolved{approved:false, by:"aborted"}` / `question_resolved{answers:{},
+ * by:"aborted"}` — the very shapes `onAbort` already emits for the same fact, no new field, no new
+ * `by` value — emitted SYNCHRONOUSLY so it lands ahead of the `tool_result` the driver appends next;
+ * the parked invocation then skips its own emit (the supersede path's suppression pattern). Returns
+ * whether anything was pending; never throws.
+ */
+export type ApprovalBridge = CanUseTool & { withdrawPending(callId: string): boolean };
+
+export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
   const log = deps.log ?? consoleBridgeLogger;
   const now = deps.now ?? (() => Date.now());
   const threadId = deps.threadId ?? "main";
   const policyNow = (): SessionApprovalPolicy =>
     typeof deps.policy === "function" ? deps.policy() : deps.policy;
-  // Per-callId suppression counts for the supersede path — see `raiseCard`'s supersede branch.
-  const state: BridgeState = { supersededEmits: new Map() };
+  // Per-callId suppression counts for the supersede and withdraw paths — see `raiseCard`.
+  const state: BridgeState = { supersededEmits: new Map(), withdrawnEmits: new Map() };
 
   const askQuestion = askUserQuestionBridge({
     sessionId: deps.sessionId,
@@ -370,7 +391,28 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
     now,
   });
 
-  return async (toolName, input, ctx): Promise<PermissionResult> => {
+  const withdrawPending = (callId: string): boolean => {
+    const { sessionId } = deps;
+    try {
+      if (deps.approvals.pendingMeta(sessionId, callId) !== undefined) {
+        state.withdrawnEmits.set(callId, (state.withdrawnEmits.get(callId) ?? 0) + 1);
+        deps.approvals.resolve(sessionId, callId, false, "aborted");
+        log.info(`canUseTool: withdrawn session=${sessionId} call=${callId} reason=the child abandoned the call`);
+        try {
+          deps.emit({ type: "approval_resolved", sessionId, threadId, callId, approved: false, by: "aborted" });
+        } catch (err) {
+          log.error(`canUseTool: failed to emit the withdrawal session=${sessionId} call=${callId}: ${(err as Error).message}`);
+        }
+        return true;
+      }
+      return askQuestion.withdraw(callId);
+    } catch (err) {
+      log.error(`canUseTool: withdrawal failed session=${sessionId} call=${callId}: ${(err as Error).message}`);
+      return false;
+    }
+  };
+
+  const canUse: CanUseTool = async (toolName, input, ctx): Promise<PermissionResult> => {
     // (1) A question, not a permission.
     if (toolName === ASK_USER_QUESTION_TOOL) {
       return await askQuestion(ctx.toolUseID, input, ctx);
@@ -554,13 +596,17 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
 
     return await raiseCard(deps, { log, now, threadId, policy, state, privateTarget }, toolName, gateToolName, input, ctx);
   };
+  return Object.assign(canUse, { withdrawPending });
 }
 
-/** Per-`canUseToolFor` mutable state. Only the supersede path needs any. */
+/** Per-`canUseToolFor` mutable state. Only the supersede and withdraw paths need any. */
 interface BridgeState {
   /** `callId` → how many stale invocations must SKIP their own `approval_resolved` emit, because
    *  the superseding invocation already emitted it synchronously and in the right order. */
   supersededEmits: Map<string, number>;
+  /** `callId` → how many parked invocations must skip their `aborted` emit because
+   *  `withdrawPending` already emitted it (C2). Separate from `supersededEmits`: different `by`. */
+  withdrawnEmits: Map<string, number>;
 }
 
 /**
@@ -726,9 +772,14 @@ async function raiseCard(
   // branch, and a duplicate arriving here (after the replacement request) would dismiss the live
   // card, which is the whole defect that ordering fixes.
   const suppressions = env.state.supersededEmits.get(callId) ?? 0;
+  const withdrawals = env.state.withdrawnEmits.get(callId) ?? 0;
   if (by === "superseded" && suppressions > 0) {
     if (suppressions > 1) env.state.supersededEmits.set(callId, suppressions - 1);
     else env.state.supersededEmits.delete(callId);
+  } else if (by === "aborted" && withdrawals > 0) {
+    // C2: `withdrawPending` already emitted this resolution, ahead of the child's `tool_result`.
+    if (withdrawals > 1) env.state.withdrawnEmits.set(callId, withdrawals - 1);
+    else env.state.withdrawnEmits.delete(callId);
   } else {
     deps.emit({ type: "approval_resolved", sessionId, threadId: env.threadId, callId, approved, by });
   }
