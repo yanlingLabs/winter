@@ -44,6 +44,10 @@ import {
   stripPluginConsents,
 } from "./plugin-cli";
 import { parseModelArgs, validateEffort, validateModelTag, internalProviderNote, validateAdvisorSlug, renderModelListing, modelDisplayWithHint, type ModelListingRow } from "./model-cli";
+import {
+  runMcpAddRoute, runMcpAddJsonRoute, runMcpRemoveRoute, runMcpGetRoute,
+  renderMcpAddOutcome, renderMcpRemoveOutcome, renderMcpGetOutcome,
+} from "./mcp-cli";
 import { formatElapsed, formatTokens } from "./task-display";
 import { formatRoutineDetail } from "./routines-cli";
 import { runAgentsCommand } from "./agents-cli";
@@ -1797,14 +1801,76 @@ if (import.meta.main) {
     process.exit(0);
   }
   case "mcp": {
-    const c = await connect("cli-mcp");
-    const servers = await c.listMcp(process.cwd());
-    if (!servers.length) console.log("no MCP servers configured");
-    for (const s of servers) {
-      console.log(`${AQUA}${s.name}${RESET}  ${DIM}(${s.source}, ${s.status})${RESET}  ${s.toolNames.map((t) => `mcp__${s.name}__${t}`).join(", ")}`);
+    const sub = process.argv[3];
+    const rest = process.argv.slice(4);
+
+    // Bare `winter mcp` / `winter mcp list` — unchanged: the live-status listing, over a real
+    // daemon connection (autolaunch is fine here, same as every other read verb — `connect()`).
+    if (sub === undefined || sub === "list") {
+      const c = await connect("cli-mcp");
+      const servers = await c.listMcp(process.cwd());
+      if (!servers.length) console.log("no MCP servers configured");
+      for (const s of servers) {
+        console.log(`${AQUA}${s.name}${RESET}  ${DIM}(${s.source}, ${s.status})${RESET}  ${s.toolNames.map((t) => `mcp__${s.name}__${t}`).join(", ")}`);
+      }
+      c.close();
+      process.exit(0);
     }
-    c.close();
-    process.exit(0);
+
+    // `add`/`add-json`/`remove`/`get` (CLI parity with `claude mcp add`/`add-json`/`remove`/`get`,
+    // `mcp-cli.ts`'s own header) — USER-scope writes go through the daemon's `mcp.add`/`mcp.remove`
+    // RPC when it's live; project scope (`<cwd>/.mcp.json`) is always a direct file read/write,
+    // daemon or not (that file isn't daemon state). Deliberately `openCredentialDaemonDoor()`, never
+    // `connect()`: these are write verbs, and `connect()` auto-launches the dist app on a dead
+    // socket — exactly the "surprise, not a service" `openCredentialDaemonDoor`'s own doc warns
+    // against for `winter login`/`credentials`.
+    if (sub === "add" || sub === "add-json" || sub === "remove" || sub === "get") {
+      const winterHome = resolveWinterHome();
+      const door = await openCredentialDaemonDoor();
+      // `openCredentialDaemonDoor` is typed narrowly (`CredentialRpcDoor`: `request`/`close` only —
+      // it exists for the credential verbs above), so its typed `mcpAdd`/`mcpRemove`/`mcpGet`
+      // convenience methods (`client.ts`) aren't visible through it here. Adapted onto `mcp-cli.ts`'s
+      // own `McpDoor` shape via the SAME generic `.request()` every verb on this connection uses —
+      // no behavior difference from calling the typed methods directly, just a narrower door type.
+      const mcpDoor = door ? {
+        mcpAdd: (name: string, entry: unknown) => door.request(METHODS.mcpAdd, { name, entry }),
+        mcpRemove: (name: string) => door.request(METHODS.mcpRemove, { name }),
+        mcpGet: (name: string) => door.request(METHODS.mcpGet, { name }),
+      } : undefined;
+      const deps = { cwd: process.cwd(), winterHome, door: mcpDoor };
+      if (sub === "add") {
+        const outcome = await runMcpAddRoute(rest, deps);
+        console.log(renderMcpAddOutcome(outcome));
+        door?.close();
+        process.exit(outcome.ok ? 0 : 1);
+      }
+      if (sub === "add-json") {
+        const outcome = await runMcpAddJsonRoute(rest, deps);
+        console.log(renderMcpAddOutcome(outcome));
+        door?.close();
+        process.exit(outcome.ok ? 0 : 1);
+      }
+      if (sub === "remove") {
+        const outcome = await runMcpRemoveRoute(rest, deps);
+        console.log(renderMcpRemoveOutcome(outcome));
+        door?.close();
+        process.exit(outcome.ok ? 0 : 1);
+      }
+      // sub === "get" — "not found" is a typed, non-throwing result (`found: false`), but still
+      // exits 1 (mirrors claude's own `mcpGetHandler`, which `cliError`s on a missing name).
+      const outcome = await runMcpGetRoute(rest, deps);
+      console.log(renderMcpGetOutcome(outcome));
+      door?.close();
+      if (!outcome.ok) process.exit(1);
+      process.exit(outcome.found ? 0 : 1);
+    }
+
+    // Skipped, deliberately (see the report): `serve` (Winter has no "act as an MCP server" mode),
+    // `add-from-claude-desktop` (an Ink dialog over Claude Desktop's OWN config format — not
+    // trivially mappable), `reset-project-choices` (Winter has no per-project approve/reject ledger
+    // for `.mcp.json` servers — `winter trust`'s directory-level TrustStore is the only gate).
+    console.error("usage: winter mcp [list] | get <name> | add [-s user|project] [-t stdio|sse|http] [-e KEY=value...] [-H \"Name: value\"...] <name> <commandOrUrl> [-- args...] | add-json [-s user|project] <name> <json> | remove <name> [-s user|project]");
+    process.exit(1);
   }
   case "plugin": {
     const sub = process.argv[3];
