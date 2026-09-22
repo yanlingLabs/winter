@@ -547,6 +547,15 @@ class ProjectorImpl implements Projector {
       // C2: the turn queued next starts NOW — its `turn_started` follows this `turn_completed`, in
       // the same batch, unless `announceQueuedTurns` already put it out. Stamped outside the claim,
       // exactly like `beginTurn`'s own: a `turn_started` is the host's push, not a projected source.
+      //
+      // RESIDUAL GAP, documented rather than fixed (C2 review): the shift is one per terminal, FIFO,
+      // and assumes the next terminal on the wire belongs to the next HOST push. A turn the CHILD
+      // starts on its own (a background-task notification turn, `engine.ts`'s `pumpNotifications`)
+      // landing between a held push and its start would spend this shift on its own terminal and
+      // announce the held push's `turn_started` one turn early — the pre-C2 misordering, for that one
+      // push. Today the daemon keeps spawns foreground by default (`mode-options.ts`'s
+      // `backgroundByDefault: false`), which is what keeps unsolicited turns rare; the projector has
+      // no host-vs-child marker on a `result` to tell them apart.
       const next = this.queuedStarts.shift();
       if (next !== undefined && !next.announced) {
         const started = this.stampBatch([this.turnStarted()]);

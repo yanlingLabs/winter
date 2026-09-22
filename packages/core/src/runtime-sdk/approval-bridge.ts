@@ -378,6 +378,13 @@ function planRequestFor(
  * card (`ExitPlanMode`) is closed too, through `deps.planBridge.respond` — its `plan_resolved{approved:
  * false, by:"aborted"}` lands just after the `tool_result` (see the branch). Returns whether anything
  * was pending; never throws.
+ *
+ * **RESIDUAL GAP, documented rather than fixed (C2 review):** the trigger is the child's `tool_result`
+ * for the call. A card whose call NEVER gets one still dangles — the child process dying mid-wait
+ * WITHOUT the incarnation's `AbortController` firing (a crash, a kill from outside; `end()` does abort
+ * it, which settles the card through `onAbort`), or a future runtime that abandons a call without
+ * padding its result. The SDK-side fix is claude's `control_cancel_request` (lane E carry); until then
+ * such a card closes only when a human answers it or the ~24.8-day park expires.
  */
 export type ApprovalBridge = CanUseTool & { withdrawPending(callId: string): boolean };
 
