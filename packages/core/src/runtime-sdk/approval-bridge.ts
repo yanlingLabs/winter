@@ -100,7 +100,13 @@ export interface CanUseToolDeps {
    * tolerated. Absent ⇒ `ExitPlanMode` falls through to the ordinary gate path (today: an
    * unclassified tool name, `"ask"`-shaped) — never a crash, matching every other optional dep in
    * this file. */
-  planBridge?: { onExitPlanMode(req: BridgedPlanRequest): Promise<PermissionResult> };
+  planBridge?: {
+    onExitPlanMode(req: BridgedPlanRequest): Promise<PermissionResult>;
+    /** `plan-bridge.ts`'s `respond` — present on the real bridge; used ONLY by `withdrawPending`
+     *  (C2) to settle a plan card the child abandoned. Optional so a caller's narrower plan bridge
+     *  still type-checks; absent ⇒ a plan card is simply not reachable from here. */
+    respond?(sessionId: string, callId: string, decision: { approved: boolean; feedback?: string; autoAccept: boolean }, by: string): { ok: true; alreadyResolved: boolean };
+  };
 }
 
 /** The deny text a policy that never prompts hands back to the model. Copied VERBATIM from
@@ -368,8 +374,10 @@ function planRequestFor(
  * The withdrawal is `approval_resolved{approved:false, by:"aborted"}` / `question_resolved{answers:{},
  * by:"aborted"}` — the very shapes `onAbort` already emits for the same fact, no new field, no new
  * `by` value — emitted SYNCHRONOUSLY so it lands ahead of the `tool_result` the driver appends next;
- * the parked invocation then skips its own emit (the supersede path's suppression pattern). Returns
- * whether anything was pending; never throws.
+ * the parked invocation then skips its own emit (the supersede path's suppression pattern). A plan
+ * card (`ExitPlanMode`) is closed too, through `deps.planBridge.respond` — its `plan_resolved{approved:
+ * false, by:"aborted"}` lands just after the `tool_result` (see the branch). Returns whether anything
+ * was pending; never throws.
  */
 export type ApprovalBridge = CanUseTool & { withdrawPending(callId: string): boolean };
 
@@ -405,7 +413,18 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
         }
         return true;
       }
-      return askQuestion.withdraw(callId);
+      if (askQuestion.withdraw(callId)) return true;
+      // A plan card (`ExitPlanMode`): settled through the plan bridge's own `respond`. Its
+      // `plan_resolved{approved:false, by:"aborted"}` is emitted by the parked `onExitPlanMode` on
+      // its next tick — i.e. just AFTER the child's `tool_result`, not before it. Still the card's
+      // one truthful close; synchronous ordering there would need a suppression path inside
+      // `plan-bridge.ts`, which nothing else needs.
+      const plan = deps.planBridge?.respond?.(sessionId, callId, { approved: false, autoAccept: false }, "aborted");
+      if (plan !== undefined && !plan.alreadyResolved) {
+        log.info(`canUseTool: withdrawn plan session=${sessionId} call=${callId} reason=the child abandoned the call`);
+        return true;
+      }
+      return false;
     } catch (err) {
       log.error(`canUseTool: withdrawal failed session=${sessionId} call=${callId}: ${(err as Error).message}`);
       return false;
