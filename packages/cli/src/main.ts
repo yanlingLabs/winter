@@ -51,6 +51,7 @@ import { mountAgents } from "./tui/agents-view";
 import { MEMORY_USAGE, formatDeleted, formatFactDetail, parseMemoryArgs, runMemoryRoute } from "./memory-cli";
 import { formatOptionLines, isOtherChoice, parseQuestionAnswer } from "./questions";
 import { parsePlanResponse } from "./plan-response";
+import { legacyFilesDoctorLine } from "./doctor-legacy-files";
 import { makeEventBridge, type EventBridge } from "./tui/event-bridge";
 
 const AQUA = "\x1b[38;2;53;214;232m";
@@ -1574,6 +1575,10 @@ if (import.meta.main) {
       } catch (err) {
         console.log(`${AQUA}migration:${RESET} ${DIM}unavailable (${err instanceof Error ? err.message : "unknown error"})${RESET}`);
       }
+      // A3: legacy top-level files an earlier migration copied that nothing reads — the same one line
+      // the daemon logs at boot. Named, never touched.
+      const legacyLine = legacyFilesDoctorLine(home);
+      if (legacyLine !== undefined) console.log(`${AQUA}${legacyLine}${RESET}`);
     };
     // Winter Phase 10a (O7, P10a-2): IN-PROCESS like the two sections above — a plain filesystem
     // presence check (`anthropicConsoleProfileExists`'s own daemon-side equivalent, without

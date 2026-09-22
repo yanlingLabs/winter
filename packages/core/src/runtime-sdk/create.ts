@@ -185,9 +185,19 @@ async function resolveOfficialPeer(load: () => Promise<unknown>, log?: (line: st
   try {
     return (await load()) as OfficialPeer;
   } catch (err) {
-    log?.(`the official peer (@anthropic-ai/claude-agent-sdk) did not load — the official leg is unavailable on this daemon process: ${err instanceof Error ? err.name : "unknown"}`);
+    log?.(`the official peer (@anthropic-ai/claude-agent-sdk) did not load — the official leg is unavailable on this daemon process: ${describeLoadError(err)}`);
     return undefined;
   }
+}
+
+/** `Name: message`, first line only, capped — an import failure's message names a missing global
+ *  or module, never credential material, but a bundler stack can be long and multi-line. The bare
+ *  name alone (`ReferenceError`) was what the dist log carried for a week: undiagnosable. */
+export function describeLoadError(err: unknown): string {
+  if (!(err instanceof Error)) return "unknown";
+  const first = (err.message ?? "").split("\n")[0]!.trim();
+  const text = first === "" ? err.name : `${err.name}: ${first}`;
+  return text.length > 200 ? `${text.slice(0, 200)}…` : text;
 }
 
 export interface WinterRuntimeSdk {
@@ -362,7 +372,17 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
   if (claudeAgentSdkVersionMismatch) {
     deps.log?.(`the installed @anthropic-ai/claude-agent-sdk is ${installedClaudeAgentSdkVersion}, but this daemon pins ${REQUIRED_CLAUDE_AGENT_SDK} — the official leg is unavailable until they match (Winter unaffected)`);
   }
-  const officialModule = claudeAgentSdkVersionMismatch ? undefined : officialModuleRaw;
+  // A2: a peer that LOADED but whose version this host cannot declare is never forwarded. The
+  // router's version matrix needs a version for every peer it is handed; with none declared it
+  // falls back to resolving a `package.json` on disk, which does not exist inside a compiled
+  // `$bunfs` binary — and its `RuntimeSdkVersionError` then fails the WHOLE handle, the Winter leg
+  // included. `versions.ts` bundles the manifest so this should not happen; if it ever does, the
+  // official leg degrades alone.
+  const claudeAgentSdkVersionUnknown = officialModuleRaw !== undefined && installedClaudeAgentSdkVersion === undefined;
+  if (claudeAgentSdkVersionUnknown) {
+    deps.log?.(`the official peer (@anthropic-ai/claude-agent-sdk) loaded, but its version could not be established — the official leg is unavailable on this daemon process (Winter unaffected)`);
+  }
+  const officialModule = claudeAgentSdkVersionMismatch || claudeAgentSdkVersionUnknown ? undefined : officialModuleRaw;
   const claudeExecutableResolution = resolveClaudeExecutable({
     setting: winterOptionsFromSettings(deps.settings()).claudeExecutable,
     env: process.env,

@@ -109,6 +109,27 @@ describe("planMigrationB — classification (Step 1)", () => {
     expect(byDest.get(join("cache", "z"))).toBe("skipped");
     expect(byDest.get("daemon.log")).toBe("skipped");
   });
+
+  test("A3: the provably-dead top-level legacy files are skipped, never copied — only at the top level", async () => {
+    const legacyHome = tempDir();
+    const home = tempDir();
+    seedLegacyHome(legacyHome);
+    for (const name of ["mcp.json", "tools.json", "toolsets.json", "permissions.json", "app-state.json"]) write(join(legacyHome, name), "{}");
+    // Same names deeper down are someone else's files (a plugin's own mcp.json, a project's) — copied.
+    write(join(legacyHome, "plugins", "p1", "mcp.json"), "{}");
+    write(join(legacyHome, "app-state", "cli-install-offered"), "");
+    const plan = await planMigrationB({ legacyHome, home, profile: "dev" });
+    const byDest = new Map(plan.entries.map((e) => [e.dest.slice(home.length + 1), e.status]));
+    for (const name of ["mcp.json", "tools.json", "toolsets.json", "permissions.json", "app-state.json"]) expect(byDest.get(name)).toBe("skipped");
+    expect(byDest.get(join("plugins", "p1", "mcp.json"))).toBe("copied");
+    expect(byDest.get(join("app-state", "cli-install-offered"))).toBe("copied");
+    const manifest = await runMigrationB(plan, noopDeps());
+    expect(existsSync(join(home, "mcp.json"))).toBe(false);
+    expect(existsSync(join(home, "app-state.json"))).toBe(false);
+    // The legacy home is never touched.
+    expect(existsSync(join(legacyHome, "mcp.json"))).toBe(true);
+    expect(manifest.entries.find((e) => e.dest === join(home, "tools.json"))?.status).toBe("skipped");
+  });
 });
 
 describe("runMigrationB — copy + manifest (Step 1)", () => {

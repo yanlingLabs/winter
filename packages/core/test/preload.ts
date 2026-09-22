@@ -28,3 +28,8 @@ process.env[LEGACY_HOME_ENV] = mkdtempSync(join(tmpdir(), "winter-test-legacy-ho
 // instead of blocking on a macOS Keychain consent dialog or, worse, reading the user's real
 // `openai:default`/`codex-oauth:default`/`anthropic:default` material.
 process.env.WINTER_KEYCHAIN_SERVICE = "com.winter.core.test-isolated";
+// Login-shell PATH (`src/login-shell-path.ts`): every `startDaemon` boot resolves the user's login
+// shell PATH by default. No test may run the developer's REAL login shell (their rc files, their
+// agents) — this turns that off for every in-process boot AND every daemon subprocess a test spawns
+// (they inherit `process.env`). A test that exercises the resolution injects a fake runner instead.
+process.env.WINTER_LOGIN_SHELL_PATH = "off";

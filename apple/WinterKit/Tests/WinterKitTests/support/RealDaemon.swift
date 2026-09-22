@@ -185,6 +185,11 @@ struct RealDaemon {
         //
         // The named service holds no items, and nothing in this suite writes to it.
         env["WINTER_KEYCHAIN_SERVICE"] = "com.winter.core.winterkit-tests-throwaway"
+        // Login-shell PATH (`packages/core/src/login-shell-path.ts`): `startDaemon` resolves the
+        // user's login-shell PATH at boot by default. A `bun -e` fixture never loads the TS test
+        // preload that turns it off, so it is turned off here — no test runs the developer's real
+        // login shell (their rc files).
+        env["WINTER_LOGIN_SHELL_PATH"] = "off"
         process.environment = env
         process.standardOutput = stdoutHandle
         process.standardError = stderrHandle

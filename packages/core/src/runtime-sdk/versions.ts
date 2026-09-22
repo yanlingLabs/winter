@@ -1,7 +1,13 @@
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
+/// <reference path="./claude-agent-sdk-manifest.ts" />
+// (The reference pulls the ambient manifest declaration into EVERY program that compiles this file —
+// the CLI's tsconfig reaches core only through its imports, never by globbing core's `src`.)
 import { SDK_VERSION } from "@yanlinglabs/winter-agent-sdk";
 import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
+// The wrapper's manifest, EMBEDDED by `bun build --compile` (typed by `claude-agent-sdk-manifest.ts`
+// — the package's `exports` map does not list `./package.json`, so TypeScript cannot resolve it on
+// its own; bun resolves and bundles it regardless, measured in a `--compile` binary). A JSON file,
+// not the SDK's code: importing it evaluates nothing of the SDK.
+import claudeAgentSdkManifest from "@anthropic-ai/claude-agent-sdk/package.json" with { type: "json" };
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
@@ -23,22 +29,21 @@ export const REQUIRED_WINTER_RUNTIME_SDK = "0.0.10";
 export const REQUIRED_CLAUDE_AGENT_SDK = "0.3.250";
 
 /**
- * The installed `@anthropic-ai/claude-agent-sdk`'s own declared version, or `undefined` when the
- * optional peer is not installed at all (Winter-only host — never a throw).
+ * The `@anthropic-ai/claude-agent-sdk` wrapper's own declared version — the copy THIS process
+ * actually loads — or `undefined` when it cannot be established (never a throw).
  *
- * `createRequire` resolves against a REAL `node_modules`, which is exactly the doorway
- * `official-executable.ts`'s package door already depends on and exactly what does NOT exist inside
- * a compiled `$bunfs` binary (P8b-4's own reasoning) — so this answers `undefined` there too, and
- * `create.ts`'s own installed===REQUIRED check (Task 1.1) is what refuses the OFFICIAL leg on a
- * mismatch, never the daemon as a whole.
+ * A2 (2026-09-22): read from the manifest the bundler EMBEDS beside the wrapper's code (the static
+ * JSON import above), not from a `createRequire` probe of `node_modules`. That probe answered
+ * `undefined` inside every compiled `$bunfs` binary — there is no `node_modules` there — so the
+ * shipped daemon handed the router a loaded `claude` peer with no declared version, and the
+ * router's version matrix (which then looks for a `package.json` on disk itself) threw
+ * `RuntimeSdkVersionError`, failing the whole handle. That was masked in the dist app only because
+ * the peer never loaded at all there (the missing JIT entitlement — see `create.ts`). The bundled
+ * manifest is the same file in dev and compiled builds, so this is now the one answer everywhere.
  */
 export function installedClaudeAgentSdkVersion(): string | undefined {
-  try {
-    const pkgJsonPath = createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk/package.json");
-    return (JSON.parse(readFileSync(pkgJsonPath, "utf8")) as { version: string }).version;
-  } catch {
-    return undefined;
-  }
+  const version = (claudeAgentSdkManifest as { version?: unknown } | undefined)?.version;
+  return typeof version === "string" && version !== "" ? version : undefined;
 }
 
 /**

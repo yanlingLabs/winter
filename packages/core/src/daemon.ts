@@ -79,7 +79,7 @@ import { makeApply } from "./settings-apply";
 import { SettingsWatcher } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { restampStep } from "./runtime-state/recovery";
-import { createWinterRuntimeSdk, type WinterRuntimeSdk } from "./runtime-sdk/create";
+import { createWinterRuntimeSdk, describeLoadError, type WinterRuntimeSdk } from "./runtime-sdk/create";
 import { ClaudeExecutableUnavailable } from "./runtime-sdk/official-executable";
 import { createConsoleProfileBroker } from "./auth/console-profile-broker";
 import { resolveAntExecutable } from "./runtime-sdk/bundle-layout";
@@ -98,6 +98,8 @@ import { makeDaemonRoutineRunner } from "./routines/runner";
 import { makeRoutineScheduler } from "./routines/scheduler";
 import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import { CORE_VERSION } from "./version";
+import { applyLoginShellPath, describeLoginShellPath, type LoginShellPathDeps } from "./login-shell-path";
+import { describeDeadLegacyFiles, findDeadLegacyFiles } from "./migration/dead-legacy-files";
 
 export { CORE_VERSION } from "./version";
 
@@ -331,6 +333,10 @@ export async function startDaemon(opts: {
      *  this; the real boot hook always checks against the real home directory. */
     homedirOverride?: () => string;
   };
+  /** The login-shell PATH resolution at boot (`login-shell-path.ts`). Absent: the real login shell,
+   *  unless `WINTER_LOGIN_SHELL_PATH=off` (both test preloads set it). `false`: skipped. An object:
+   *  the test seam (a fake runner and/or env to update). */
+  loginShellPath?: LoginShellPathDeps | false;
 } = {}): Promise<RunningDaemon> {
   const startedAt = Date.now();
   const home = opts.home ?? resolveWinterHome();
@@ -447,8 +453,26 @@ export async function startDaemon(opts: {
   const dirs = bootstrapWinterDir(home);
   const lock: Lock = await acquireLock(dirs.lockPath, dirs.socketPath);
 
+  // A3: legacy top-level files an earlier Migration B copied but nothing reads (`mcp.json`,
+  // `tools.json`, …). One line when any exist — never touched, only named (`winter doctor` repeats it).
+  const deadLegacyLine = describeDeadLegacyFiles(findDeadLegacyFiles(home), home);
+  if (deadLegacyLine !== undefined) console.error(deadLegacyLine);
+
   const authority = new TokenAuthority(secrets);
   const tokens = await authority.ensureTokens();
+
+  // The user's login-shell PATH, merged into THIS process's environment before anything below can
+  // spawn — an app/Sparkle/launchd-launched daemon otherwise inherits LaunchServices' bare
+  // `/usr/bin:/bin:/usr/sbin:/sbin`, and every child (the Winter child and its Bash tool, stdio MCP
+  // servers, plugins) would get that. After the lock, so a second daemon that loses the race never
+  // pays for a shell; after `ensureTokens`, so a slow or broken rc file (up to the 5 s bound) never
+  // delays the tokens a first-boot client is waiting for (P9c-20). Nothing between the lock and
+  // here spawns a process. Bounded and never throwing (see `login-shell-path.ts`, which also states
+  // the rule every spawn must follow to see the result: pass an env built from `process.env`).
+  if (opts.loginShellPath !== false) {
+    const outcome = await applyLoginShellPath(opts.loginShellPath ?? {});
+    if (outcome.source !== "disabled") console.error(describeLoginShellPath(outcome));
+  }
 
   const store = new SessionStore(dirs.home, { presentProviders, effortStaleFor: (effort, model, mode) => effortRefusalFor(effort, model, mode) !== undefined });
   const hub = new SessionHub(store);
@@ -1186,7 +1210,9 @@ export async function startDaemon(opts: {
     });
   } catch (err) {
     const code = (err as { code?: string })?.code ?? (err as Error)?.constructor?.name ?? "unknown";
-    console.error(`runtime-sdk: winter runtime sdk unavailable (${code}) — every session.create/session.dispatch will refuse typed (winter_leg_unavailable); there is no engine leg`);
+    // A2: the message too (one line, bounded) — `RuntimeSdkVersionError` alone does not say WHICH
+    // peer's version failed, which is the whole diagnosis.
+    console.error(`runtime-sdk: winter runtime sdk unavailable (${code}: ${describeLoadError(err)}) — every session.create/session.dispatch will refuse typed (winter_leg_unavailable); there is no engine leg`);
     runtimeSdk = undefined;
   }
 
