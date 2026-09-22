@@ -79,7 +79,7 @@ import { makeApply } from "./settings-apply";
 import { SettingsWatcher } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { restampStep } from "./runtime-state/recovery";
-import { createWinterRuntimeSdk, type WinterRuntimeSdk } from "./runtime-sdk/create";
+import { createWinterRuntimeSdk, describeLoadError, type WinterRuntimeSdk } from "./runtime-sdk/create";
 import { ClaudeExecutableUnavailable } from "./runtime-sdk/official-executable";
 import { createConsoleProfileBroker } from "./auth/console-profile-broker";
 import { resolveAntExecutable } from "./runtime-sdk/bundle-layout";
@@ -1201,7 +1201,9 @@ export async function startDaemon(opts: {
     });
   } catch (err) {
     const code = (err as { code?: string })?.code ?? (err as Error)?.constructor?.name ?? "unknown";
-    console.error(`runtime-sdk: winter runtime sdk unavailable (${code}) — every session.create/session.dispatch will refuse typed (winter_leg_unavailable); there is no engine leg`);
+    // A2: the message too (one line, bounded) — `RuntimeSdkVersionError` alone does not say WHICH
+    // peer's version failed, which is the whole diagnosis.
+    console.error(`runtime-sdk: winter runtime sdk unavailable (${code}: ${describeLoadError(err)}) — every session.create/session.dispatch will refuse typed (winter_leg_unavailable); there is no engine leg`);
     runtimeSdk = undefined;
   }
 

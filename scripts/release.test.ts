@@ -127,3 +127,34 @@ if (!antDvv.includes("Identifier=com.winter.ant")) {
     expect(fixture).toContain('antDvv.includes("Identifier=com.winter.ant")');
   });
 });
+
+// A2 (2026-09-22): the bun-compiled binaries Winter signs itself carry EXACTLY the JIT entitlement.
+// Under the hardened runtime without `com.apple.security.cs.allow-jit`, JavaScriptCore runs JIT-less:
+// `SharedArrayBuffer` does not exist (so `@anthropic-ai/claude-agent-sdk`'s top-level
+// `new SharedArrayBuffer(4)` threw `ReferenceError` and the official leg never loaded in any shipped
+// daemon) and everything else runs ~5x slower (measured: 228 ms -> 1179 ms on one loop+JSON bench;
+// 206 ms with the entitlement). The signing sites and the release gate's expectation must agree, so
+// all of them are pinned here against the ONE entitlements file.
+describe("A2: winter-core is signed with the bun JIT entitlement, and the release gate expects exactly that", () => {
+  const REPO_ROOT = join(import.meta.dir, "..");
+  const entitlementsPath = join(REPO_ROOT, "scripts", "bun-jit.entitlements");
+  const projectYml = readFileSync(join(REPO_ROOT, "apple", "Winter", "project.yml"), "utf8");
+
+  test("scripts/bun-jit.entitlements grants exactly com.apple.security.cs.allow-jit", () => {
+    const text = readFileSync(entitlementsPath, "utf8");
+    const keys = [...text.matchAll(/<key>([^<]+)<\/key>/g)].map((m) => m[1]);
+    expect(keys).toEqual(["com.apple.security.cs.allow-jit"]);
+    expect(text).toMatch(/<key>com\.apple\.security\.cs\.allow-jit<\/key>\s*<true\/>/);
+  });
+
+  test("project.yml's Embed winter-core re-sign passes that entitlements file", () => {
+    const line = projectYml.split("\n").find((l) => l.includes("codesign --force") && l.includes('"${DEST_RES}/winter-core"'));
+    expect(line).toBeDefined();
+    expect(line).toContain("--options runtime");
+    expect(line).toContain('--entitlements "${SRCROOT}/../../scripts/bun-jit.entitlements"');
+  });
+
+  test("release.ts's HARDENING_PINS expects exactly allow-jit on winter-core", () => {
+    expect(source).toContain('{ path: join(app, "Contents", "Resources", "winter-core"), label: "winter-core", expect: [JIT] }');
+  });
+});

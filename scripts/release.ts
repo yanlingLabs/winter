@@ -847,7 +847,14 @@ const CEF_JIT_HELPERS = ["Winter Helper (Renderer)", "Winter Helper (GPU)"];
 const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
   { path: app, label: "Winter.app", expect: [] },
   { path: join(app, "Contents", "MacOS", "WinterHelper"), label: "WinterHelper", expect: [] },
-  { path: join(app, "Contents", "Resources", "winter-core"), label: "winter-core", expect: [] },
+  // A2 (2026-09-22): winter-core is a bun (JavaScriptCore) binary and carries exactly `allow-jit`
+  // (`scripts/bun-jit.entitlements`), the same single relaxation Chrome gives its JIT helpers and
+  // Anthropic's own bun-compiled `claude` ships with. Without it, under the hardened runtime, JSC runs
+  // JIT-less with no `SharedArrayBuffer`: `@anthropic-ai/claude-agent-sdk`'s top-level
+  // `new SharedArrayBuffer(4)` threw `ReferenceError` in every shipped daemon (the official leg never
+  // loaded), and the daemon ran ~5x slower (measured 228 ms -> 1179 ms; 206 ms with the entitlement).
+  // Nothing else: no `disable-library-validation`, no `allow-unsigned-executable-memory`.
+  { path: join(app, "Contents", "Resources", "winter-core"), label: "winter-core", expect: [JIT] },
   // office-plumbing wave — Winter's own compiled binary, same posture as WinterHelper/winter-core
   // above (no hardened-runtime relaxation of any kind). The vendored LibreOffice product-set is
   // deliberately NOT enrolled here — see the team-ID-only probe on libmergedlo.dylib above this
