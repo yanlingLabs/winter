@@ -9,9 +9,24 @@ import WinterProtocol
 
 // -----------------------------------------------------------------------------------------------
 // Pure decision core (spec §A4/A3 posture, mirrored from `packages/core/src/peripheral/broker.ts`'s
-// `leaseDecision`/`expiredLeases`): neither type below touches the network, the clock (`nowMs` is
-// an explicit argument), or Carbon/AppKit — `shouldServe` is the one function this task's tests
-// exercise directly.
+// `leaseDecision`/`expiredLeases`): neither type below touches the network or Carbon/AppKit —
+// `shouldServe` is the one function this task's tests exercise directly.
+//
+// F1 fix (2026-09-22): `shouldServe` does NOT check wall-clock expiry against its own
+// (`PeripheralLeaseInfo.expiresAt`) copy of the lease's expiry. The broker (`PeripheralBroker`,
+// `packages/core/src/peripheral/broker.ts`) is the sole authority on expiry: it renews a held
+// lease's `expiresAt` server-side on every heartbeat (`renew()`, ~5s cadence from
+// `agent/computer-use.ts`'s `armHeartbeat`/`renewAll`) WITHOUT emitting any event for the
+// extension, so this provider's locally-cached `expiresAt` (captured once from `lease_granted`)
+// goes stale roughly every 15s (the broker's own `expiryMs` default) even while the lease is very
+// much still alive. `PeripheralBroker.call()` re-validates expiry itself, against its OWN live
+// `expiresAt`, before it ever pushes a `peripheral_call_requested` to this provider — a call this
+// function receives already passed that check. And a lease that genuinely expires is dropped
+// server-side by the sweep (`expiredLeases`/`dropLease`), which emits `lease_lost` — this
+// provider's `handle()` removes it from `activeLeases` on that event, so a truly-gone lease is
+// caught here anyway, correctly, as `lease_not_found`. Denying on a merely-stale local `expiresAt`
+// was the bug (spec F1): every capability call more than ~15s after the FIRST one failed
+// `expired` even though the lease was still held and being renewed.
 // -----------------------------------------------------------------------------------------------
 
 /// The provider's own local view of one active lease — built entirely from `lease_granted`/
@@ -21,6 +36,12 @@ import WinterProtocol
 /// `tokenHash` (sha256 hex of the raw token, carried by `lease_granted` — spec §A1: "no token, no
 /// service") is what `shouldServe` compares `sha256(call.token)` against; the raw token itself is
 /// never stored here or anywhere else provider-side.
+///
+/// `expiresAt` is the GRANT-TIME value only — captured once from `lease_granted` and never
+/// updated (the broker's `renew()` moves its own copy forward on every heartbeat but emits no
+/// event for it, F1). It goes stale within one heartbeat of a lease that is very much still held,
+/// so nothing may gate a decision on it (`shouldServe` does not) — the UI may still show it as a
+/// coarse "how long ago was this granted" hint, never as a live "time remaining."
 struct PeripheralLeaseInfo: Identifiable, Equatable {
     var id: String { leaseId }
     let leaseId: String
@@ -62,8 +83,8 @@ func sha256Hex(_ token: String) -> String {
 }
 
 /// Validates `call` against the provider's locally-tracked `leases` (from `lease_granted`/
-/// `lease_lost`) at `nowMs`. Spec §A1: "the provider validates token+class+expiry on EVERY call —
-/// no token, no service" — this function IS that check; core validating the same triple in
+/// `lease_lost`). Spec §A1: "the provider validates token+class on EVERY call — no token, no
+/// service" — this function IS that check; core validating the same pair in
 /// `PeripheralBroker.call()` (`packages/core/src/peripheral/broker.ts`) before ever pushing
 /// `peripheral_call_requested` does not make this optional here, since a leaseId alone (with a
 /// garbage/guessed token) must never be served. `call.token` is hashed and compared against
@@ -71,7 +92,16 @@ func sha256Hex(_ token: String) -> String {
 /// implementations must stay byte-identical (see `sha256Hex` above). The provider never trusts
 /// `call.class` over what it was actually granted for `call.leaseId`: a mismatch is
 /// `class_mismatch`, not a silent reclassification.
-func shouldServe(_ call: PeripheralCallRequest, leases: [PeripheralLeaseInfo], nowMs: Int) -> PeripheralServeDecision {
+///
+/// Deliberately NOT a check here: expiry. `PeripheralBroker.call()` is the sole authority on
+/// expiry — it validates against its own, LIVE (heartbeat-renewed) `expiresAt` before ever pushing
+/// this call, and a lease this provider still lists in `leases` but the broker considers expired
+/// cannot happen without also emitting `lease_lost` first (which `handle()` uses to remove it from
+/// `leases`), so a lease found here by `leaseId` is, by construction, one the broker still
+/// considers live. Comparing against `PeripheralLeaseInfo.expiresAt` (a value stamped once from
+/// `lease_granted` and never updated on renewal — F1) would deny an actually-live, actively-renewed
+/// lease the moment its ORIGINAL 15s grant window passed.
+func shouldServe(_ call: PeripheralCallRequest, leases: [PeripheralLeaseInfo]) -> PeripheralServeDecision {
     guard let lease = leases.first(where: { $0.leaseId == call.leaseId }) else {
         return .deny("lease_not_found")
     }
@@ -80,9 +110,6 @@ func shouldServe(_ call: PeripheralCallRequest, leases: [PeripheralLeaseInfo], n
     }
     guard lease.class == call.class else {
         return .deny("class_mismatch")
-    }
-    guard nowMs < lease.expiresAt else {
-        return .deny("expired")
     }
     guard cuSupportedClasses.contains(call.class) else {
         return .deny("unsupported_class")
@@ -264,8 +291,7 @@ final class PeripheralProvider: ObservableObject {
 
     private func respond(to call: SessionEvent.PeripheralCallRequested) async {
         let request = PeripheralCallRequest(requestId: call.requestId, leaseId: call.leaseId, token: call.token, class: call.class, payloadJson: call.payloadJson)
-        let nowMs = Int(Date().timeIntervalSince1970 * 1000)
-        switch shouldServe(request, leases: activeLeases, nowMs: nowMs) {
+        switch shouldServe(request, leases: activeLeases) {
         case .serve:
             if call.class == "noop" {
                 await serveNoop(requestId: call.requestId, payloadJson: call.payloadJson)
