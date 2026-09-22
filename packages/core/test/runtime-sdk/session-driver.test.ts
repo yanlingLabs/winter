@@ -22,6 +22,7 @@ import { TrustStore } from "../../src/agent/trust";
 import { PermissionGate } from "../../src/agent/gate";
 import { QuestionBroker } from "../../src/agent/questions";
 import { FileSecretStore } from "../../src/auth/secret-store";
+import { CREDENTIAL_MATERIAL_NAMES, writeCredentialMaterial } from "../../src/auth/credential-material";
 import { CORE_BRAND } from "../../src/runtime-sdk/brand";
 import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import { createWinterSessionDrivers, refusalMayBeCredentialShaped, type WinterLegDeps } from "../../src/runtime-sdk/session-driver";
@@ -662,6 +663,30 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
         await s.end();
       }
       await session.end();
+    } finally { t.close(); }
+  });
+
+  // D3 follow-up (2026-09-22): a cross-provider `runtimes.advisorModel` pin is honoured on its own
+  // provider's credential — but, exactly like `pins.research`'s digest, a pin whose provider has NO
+  // stored material is not stated: a present-but-unusable `Options.advisor` makes every `advisor` call
+  // fail, while the family default keeps the tool working. Falls back to the D30 default, logged.
+  test("D3: a cross-provider advisor pin rides the child when its provider holds material; a KEYLESS one falls back to the D30 default", async () => {
+    const secrets = new FileSecretStore(join(mkdtempSync(join(tmpdir(), "winter-advisor-secrets-")), "secrets.json"));
+    const settings = { runtimes: { advisorModel: "codex-oauth/gpt-5.6-sol", winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } } as unknown as Settings;
+    const t = table({ settings: () => settings, secrets });
+    try {
+      const sid = t.store.createSession("t", { mode: "code", model: "openai/gpt-5.6-sol", approvalPolicy: "ask" });
+      const first = await t.drivers.create(sid);
+      // No codex-oauth material: the D30 default for an openai session, on openai's own locator.
+      expect(t.q().options.advisor).toEqual({ model: "openai/gpt-6-astra", authRef: expect.objectContaining({ account: "openai:default" }) });
+      expect(t.logs.some((l) => l.includes("runtimes.advisorModel") && l.includes("codex-oauth"))).toBe(true);
+      await first.end();
+
+      await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "api-key", key: "sk-test-not-real" });
+      await t.drivers.evict(sid);
+      await (await t.drivers.ensure(sid))!.open();
+      expect(t.q().options.advisor).toEqual({ model: "codex-oauth/gpt-5.6-sol", authRef: expect.objectContaining({ account: "codex-oauth:default" }) });
+      await t.drivers.evict(sid);
     } finally { t.close(); }
   });
 
