@@ -37,6 +37,7 @@ import {
   type MigrationManifest,
 } from "./manifest";
 import { rekeySettings } from "./rekey-settings";
+import { DEAD_LEGACY_TOP_LEVEL_FILES } from "./dead-legacy-files";
 
 export { MIGRATION_B_SECRET_NAMES } from "../auth/legacy-secret-names";
 export { readMigrationManifest, manifestFileState, manifestPath } from "./manifest";
@@ -236,13 +237,18 @@ function walkLegacyHome(root: string, sub = ""): WalkedFile[] {
 
 /** The disposable-set classification (Task M Step 1, verbatim): anything under `run/`, any file
  *  named `index.db` at any depth, any `*.db-shm`/`*.db-wal`, anything under `logs/` or `cache/`, and
- *  top-level `daemon.log` are never copied byte-for-byte; top-level `settings.json` is re-keyed
+ *  top-level `daemon.log` are never copied byte-for-byte, nor are the provably-dead top-level legacy
+ *  files (`DEAD_LEGACY_TOP_LEVEL_FILES`, A3); top-level `settings.json` is re-keyed
  *  rather than copied verbatim; everything else, copied. A non-regular source (symlink/socket/etc)
  *  is always `"skipped"`, regardless of path. */
 function classify(rel: string, isRegular: boolean): MigrationEntryStatus {
   if (!isRegular) return "skipped";
   if (rel === "settings.json") return "rekeyed";
   if (rel === "daemon.log") return "skipped";
+  // A3: top-level legacy files no current code reads (`dead-legacy-files.ts` carries the evidence).
+  // Copying them only misleads — an agent edited a copied `mcp.json` believing it configured MCP.
+  // Reusing `"skipped"` keeps the schemaVersion-1 manifest shape unchanged.
+  if (DEAD_LEGACY_TOP_LEVEL_FILES.includes(rel)) return "skipped";
   if (rel.startsWith("run/") || rel.startsWith("logs/") || rel.startsWith("cache/")) return "skipped";
   const base = rel.slice(rel.lastIndexOf("/") + 1);
   if (base === "index.db") return "rebuilt";
