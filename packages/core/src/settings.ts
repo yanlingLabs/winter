@@ -928,6 +928,30 @@ export function setMcpServerDisabled(settings: Settings, name: string, disabled:
 }
 
 /**
+ * `winter mcp add`/`mcp.add`'s USER-scope write door: a pure `Settings -> Settings` transform that
+ * sets (adds or replaces) one `mcpServers` entry by name. Mirrors `setMcpServerDisabled`'s own
+ * posture exactly — never validates `name` against a reserved/existing-name rule; that is a HIGHER
+ * door's job (`agent/mcp/mcp-write.ts`'s `addUserMcpServer`, the one function both `ipc/server.ts`'s
+ * `mcp.add` handler and the CLI's no-daemon fallback call, so the two write paths can never drift on
+ * what counts as a valid add). The caller still owes `saveSettings` a call afterward — THAT is where
+ * the real enforcement lives (the full `Settings` schema, including the credential-shaped-header
+ * refusal on an http/sse entry); this function only shapes the record.
+ */
+export function setMcpServerEntry(settings: Settings, name: string, entry: McpServerSettingsEntry): Settings {
+  return { ...settings, mcpServers: { ...(settings.mcpServers ?? {}), [name]: entry } };
+}
+
+/** The remove-side mirror of `setMcpServerEntry` — deletes one `mcpServers` entry by name.
+ *  A no-op (returns `settings` unchanged) when the name isn't present, same "idempotent, never
+ *  throws on its own input" posture `setMcpServerDisabled` already has. */
+export function removeMcpServerEntry(settings: Settings, name: string): Settings {
+  if (!settings.mcpServers || !(name in settings.mcpServers)) return settings;
+  const rest = { ...settings.mcpServers };
+  delete rest[name];
+  return { ...settings, mcpServers: rest };
+}
+
+/**
  * Phase 9c (P9c-1) / pre-release hardening: the ONE reader of `runtimes.official.subscriptionAuth`
  * — absent means OFF (blocked); only an explicit `true` on the SETTINGS FLAG opens the door, and
  * even then only while the compile-time approval gate (`OFFICIAL_SUBSCRIPTION_AUTH_APPROVED`,

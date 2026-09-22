@@ -12,8 +12,22 @@ export {
   loadSettings, saveSettings, loadPermissionDirs, addLocalDir,
   REASONING_EFFORTS, setProviderModel, setReasoningEffort, setOutputStyle, setAdvisorModel, memoryEnabledFrom,
   workflowsEnabledFrom, keywordTriggerEnabledFrom,
-  type Settings,
+  setMcpServerEntry, removeMcpServerEntry,
+  type Settings, type McpServerSettingsEntry,
 } from "./settings";
+// `winter mcp add/remove` (CLI parity with `claude mcp add/remove`): the ONE validated write door
+// for either scope (`agent/mcp/mcp-write.ts`'s own header explains the reuse), plus the project
+// (`.mcp.json`) file helpers that scope needs directly — that file is never daemon state / never
+// RPC-routed, so the CLI reads and writes it itself with or without a daemon running.
+export {
+  validateMcpServerName, addUserMcpServer, removeUserMcpServer, addProjectMcpServer, removeProjectMcpServer,
+} from "./agent/mcp/mcp-write";
+export {
+  readProjectMcpConfig, writeProjectMcpConfig, projectMcpConfigPath, projectMcpConfigExists,
+  readRawProjectMcpConfig, writeRawProjectMcpConfig,
+  type ProjectMcpConfig, type ProjectMcpServerEntry,
+} from "./agent/mcp/project-file";
+export { reservedMcpServerNames } from "./capabilities/names";
 // Winter Phase 8d (Task 4.3): `winter model --advisor <slug>` validates against the SAME pinned
 // catalog `session.setModel`'s handler consults — the CLI runs with no live daemon/RPC for this
 // command (direct settings.json read/write, `case "model"`'s own doc comment), so the STATIC
