@@ -5,7 +5,7 @@ import type { CanUseTool, PermissionMode } from "@yanlinglabs/winter-agent-sdk";
 import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { RESUME_STAGING_PREFIX, isResumeStagingRoot, resumeStagingRoot } from "@yanlinglabs/winter-runtime-sdk";
 import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
-import { Settings } from "../../src/settings";
+import { Settings, modelRoleConstraint } from "../../src/settings";
 import { keychainService } from "../../src/profile";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { QuestionBroker } from "../../src/agent/questions";
@@ -1013,45 +1013,58 @@ test("Task 16 / P8b-30: a BYO `connection` rides provider.connection; without a 
 // override the session itself is using (measured root cause of `advisor-winter-leg-e2e.test.ts`'s
 // F2 case hanging on a real machine's Keychain consent dialog against a freshly re-signed
 // `dist/winter`).
-test("M7: same-provider advisor gets authRef — the SAME ref providerSelectionFor already resolved for the session", () => {
+// D3 (2026-09-22): `advisor.model` is the FULL qualified tag. The pinned SDK 0.0.17 resolves a
+// `<providerId>/<model>` advisor key to ITS OWN provider (`slots.ts`'s qualified-key door, then
+// `session-provider.ts` builds the reviewer on `config.advisor.authRef`) — the same way `WebFetch`'s
+// digest model already runs cross-provider. The bare modelId the daemon used to send is what made the
+// SDK read it under the SESSION's provider, which is why a cross-provider advisor had to be dropped.
+test("M7/D3: a same-provider advisor names its full tag and its provider's own authRef", () => {
   const credentials: CredentialPresence = { byProvider: { openai: "keychain" } };
   const o = buildWinterOptions(optionsInput({ model: "openai/gpt-5.6-sol", advisorModel: "openai/gpt-6-astra", credentials }));
-  expect(o.advisor).toEqual({ model: "gpt-6-astra", authRef: o.provider!.authRef }); // WS-20: advisor.model is also the BARE modelId now
+  expect(o.advisor).toEqual({ model: "openai/gpt-6-astra", authRef: o.provider!.authRef });
   expect(o.advisor!.authRef).toEqual(expect.objectContaining({ kind: "keychain" }));
 });
 
-// WS-20 (review round 2, nit a): the pinned SDK's `AdvisorConfig` has no `providerId` field, so a
-// cross-provider (or unroutable) advisor can never be PINNED to its own provider through this door
-// — the only safe rule left is same-provider-only. `Options.advisor` is DROPPED entirely rather
-// than guessed at, superseding the old "falls through to the advisor's own resolved authRef" M7
-// behavior this test used to pin.
-test("nit(a): cross-provider (or unroutable) advisor is DROPPED entirely — never guessed at", () => {
-  const credentials: CredentialPresence = { byProvider: { openai: "keychain" } };
-  // The advisor's own model names no catalog identity at all (Winter's inventory cannot serve it) —
-  // `providerSelectionFor` answers `undefined`, so there is no provider to agree with the session's.
-  const o = buildWinterOptions(optionsInput({ model: "openai/gpt-5.6-sol", advisorModel: "winter-test/echo", credentials }));
+// D3: the dist log's case — every spawn dropped `codex-oauth/gpt-5.6-sol` for sessions on deepseek.
+test("D3: a CROSS-provider advisor reaches the child on its OWN provider's credential, never the session's", () => {
+  const o = buildWinterOptions(optionsInput({ model: "deepseek-anthropic/deepseek-v4-flash", advisorModel: "codex-oauth/gpt-5.6-sol", credentials: NO_CREDS }));
+  expect(o.provider).toEqual({ providerId: "deepseek-anthropic", authRef: expect.objectContaining({ kind: "keychain", account: "deepseek-anthropic:default" }) });
+  expect(o.advisor).toEqual({ model: "codex-oauth/gpt-5.6-sol", authRef: expect.objectContaining({ kind: "keychain", account: "codex-oauth:default" }) });
+  expect(o.advisor!.authRef).not.toEqual(o.provider!.authRef);
+  // …and the settings surface stops telling the Mac the advisor "follows whatever the session runs".
+  expect(modelRoleConstraint("runtimes.advisorModel")).toBe("any");
+});
+
+// D3: a session with no provider of its own (a `winter-test/*` double) still gets an advisor that
+// names one — the advisor's routing no longer depends on agreeing with the session's.
+test("D3: the session having NO resolvable provider (winter-test/*) no longer drops a routable advisor", () => {
+  const o = buildWinterOptions(optionsInput({ model: "winter-test/echo", advisorModel: "openai/gpt-6-astra", credentials: NO_CREDS }));
+  expect(o.provider).toBeUndefined();
+  expect(o.advisor).toEqual({ model: "openai/gpt-6-astra", authRef: expect.objectContaining({ kind: "keychain", account: "openai:default" }) });
+});
+
+// The reserved test double travels WHOLE, as it always has (it is not a provider tag, and the SDK's
+// qualified-key door passes the reserved namespace through); it names no credential.
+test("D3: a winter-test advisor double is passed whole, with no authRef", () => {
+  const o = buildWinterOptions(optionsInput({ model: "openai/gpt-5.6-sol", advisorModel: "winter-test/echo", credentials: NO_CREDS }));
+  expect(o.advisor).toEqual({ model: "winter-test/echo" });
+});
+
+// D3: only a GENUINELY unroutable advisor tag is dropped — the `unstated/unstated` sentinel a
+// hand-edited settings file can carry (`isModelTag` accepts it) names no provider at all.
+test("D3: an unroutable advisor tag (the unstated sentinel) is dropped, never guessed at", () => {
+  const o = buildWinterOptions(optionsInput({ model: "openai/gpt-5.6-sol", advisorModel: "unstated/unstated", credentials: NO_CREDS }));
   expect(o.advisor).toBeUndefined();
 });
 
 // WS-20: `providerFor` names a provider's credential LOCATOR unconditionally — a tag always
 // resolves to exactly its provider, never gated on `credentials` presence (that field is now
 // unread by this file; presence-based refusal is `beforeTurn`'s own separate job) — so the
-// same-provider advisor STILL gets the session's own authRef even with `NO_CREDS` passed in.
-test("M7: the shared provider's authRef threads through regardless of the (now-unread) credentials presence input", () => {
+// advisor STILL gets its provider's authRef even with `NO_CREDS` passed in.
+test("M7: the advisor's authRef threads through regardless of the (now-unread) credentials presence input", () => {
   const o = buildWinterOptions(optionsInput({ model: "openai/gpt-5.6-sol", advisorModel: "openai/gpt-6-astra", credentials: NO_CREDS }));
   expect(o.provider!.authRef).toEqual(expect.objectContaining({ kind: "keychain", account: "openai:default" }));
-  expect(o.advisor).toEqual({ model: "gpt-6-astra", authRef: o.provider!.authRef });
-});
-
-// WS-20 (review round 2, nit a): supersedes the OLD "threads the advisor's own resolved authRef
-// regardless of the session's own provider" M7 behavior — a session with no resolvable provider at
-// all has nothing to agree with, so `sameProvider` is false and the advisor is DROPPED, same as any
-// other non-matching pair.
-test("nit(a): the session having NO resolvable provider at all (winter-test/*) drops the advisor too", () => {
-  const credentials: CredentialPresence = { byProvider: { openai: "keychain" } };
-  const o = buildWinterOptions(optionsInput({ model: "winter-test/echo", advisorModel: "openai/gpt-6-astra", credentials }));
-  expect(o.provider).toBeUndefined();
-  expect(o.advisor).toBeUndefined();
+  expect(o.advisor).toEqual({ model: "openai/gpt-6-astra", authRef: o.provider!.authRef });
 });
 
 test("M7: no advisorModel at all -> no Options.advisor key, unchanged from before this fix", () => {
