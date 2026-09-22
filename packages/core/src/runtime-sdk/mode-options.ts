@@ -614,9 +614,9 @@ export const GLOBAL_READ_ALLOW_RULES: readonly string[] = ["Read", "Glob", "Grep
  *                                       (lane C's parity ruling — see `sandboxConfigFor`'s last note).
  *   `Edit`                             → `Edit` + `Write` (Winter's rule covered both; the agent SDK
  *                                       matches a bare rule's tool name literally).
- *   `Edit(<abs dir>)`                  → `Edit(//<abs dir>/**)` + `Write(//<abs dir>/**)` — Winter's
- *                                       writable-DIRECTORY declaration, in the root-anchored form that
- *                                       actually binds (`fsRootAnchored`'s own note).
+ *   `Edit(<abs dir>)`                  NOT forwarded: Winter's writable-DIRECTORY declaration, which never
+ *                                       silenced a card — as an allow rule it would. (Its runtime
+ *                                       counterpart is `additionalDirectories`, a separate door.)
  *   `Computer`                         → `mcp__winter__computer__computer` (the capability's wire name).
  *   `Worktree`                         → `EnterWorktree` + `ExitWorktree`.
  *   `WebFetch(domain:h)`               unchanged.
@@ -650,15 +650,18 @@ export function sdkAllowRulesFor(winterRules: readonly string[]): string[] {
       case "bash_unsandboxed":
         out.push(parsed.kind === "any" ? "Bash" : parsed.kind === "prefix" ? `Bash(${parsed.value}:*)` : `Bash(${parsed.value})`);
         break;
-      case "edit": {
+      case "edit":
+        // `Edit(<abs dir>)` is NOT an allow rule in Winter's grammar: it declares a WRITABLE DIRECTORY
+        // and never silences a card (`ruleMatches` returns false for kind "path"). Turning it into
+        // `Edit(//dir/**)` would let every write there land card-free — wider than what was saved.
+        // Its runtime equivalent is `additionalDirectories`, a separate door; nothing is forwarded here.
+        if (parsed.kind === "path") break;
         // BOTH tools: Winter's `Edit` rule has always covered `write` and `edit` alike
         // (`permission-rules.ts`'s `toolForCallName`), while the agent SDK matches a rule's tool name
         // literally — measured on the 0.0.17 binary, a saved `Edit` alone still sent a `Write` to
         // `canUseTool` (`persisted-allow-measure.e2e.test.ts`).
-        const spec = parsed.kind === "path" ? `(${fsRootAnchored(`${parsed.value!.replace(/\/+$/, "")}/**`)})` : "";
-        out.push(`Edit${spec}`, `Write${spec}`);
+        out.push("Edit", "Write");
         break;
-      }
       case "computer":
         out.push("mcp__winter__computer__computer");
         break;

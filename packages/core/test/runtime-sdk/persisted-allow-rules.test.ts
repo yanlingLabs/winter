@@ -47,16 +47,19 @@ describe("sdkAllowRulesFor — Winter's saved-rule grammar, as the runtimes read
       .toEqual(["Bash(git status)", "Bash(gh repo:*)", "Bash", "Bash(curl:*)"]);
   });
 
-  test("Edit, Edit(<abs dir>), Computer, Worktree and WebFetch(domain:) map onto the runtimes' own names", () => {
+  test("Edit, Computer, Worktree and WebFetch(domain:) map onto the runtimes' own names", () => {
     // `Edit` covers `Write` too, as it always did in Winter — the SDK matches a bare rule's tool name
     // literally, so both are stated (measured: `persisted-allow-measure.e2e.test.ts`).
-    expect(sdkAllowRulesFor(["Edit", "Edit(/Users/x/scratch)", "Computer", "Worktree", "WebFetch(domain:example.com)"])).toEqual([
+    expect(sdkAllowRulesFor(["Edit", "Computer", "Worktree", "WebFetch(domain:example.com)"])).toEqual([
       "Edit", "Write",
-      "Edit(//Users/x/scratch/**)", "Write(//Users/x/scratch/**)",
       "mcp__winter__computer__computer",
       "EnterWorktree", "ExitWorktree",
       "WebFetch(domain:example.com)",
     ]);
+  });
+
+  test("Edit(<abs dir>) is NOT forwarded: it declares a writable directory and never silenced a card — as an allow rule it would", () => {
+    expect(sdkAllowRulesFor(["Edit(/Users/x/scratch)"])).toEqual([]);
   });
 
   test("a value containing `*` is NOT forwarded: in the runtimes' grammar it is a glob, i.e. a WIDER rule than the one saved", () => {
