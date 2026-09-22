@@ -531,7 +531,8 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     const escape = classificationName === "bash" && typeof input === "object" && input !== null
       && (input as Record<string, unknown>).dangerouslyDisableSandbox === true;
     // Consumed on every escape that gets this far, whatever the verdict, so none lingers.
-    const cleared = escape && takeReviewerCleared(deps.sessionId, ctx.toolUseID);
+    // Bound to the very command the reviewer judged (C3 round 3): a rewritten input is not cleared.
+    const cleared = escape && takeReviewerCleared(deps.sessionId, ctx.toolUseID, (input as Record<string, unknown>).command);
     if (decision === "allow" && escape && policy === "auto" && (!cleared || deps.mode === "chat")) {
       log.info(`canUseTool: escalate session=${deps.sessionId} tool=${toolName} reason=${cleared ? "escape-in-chat" : "escape-not-cleared"}`);
       decision = "ask";
