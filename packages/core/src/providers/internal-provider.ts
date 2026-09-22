@@ -23,13 +23,28 @@
  *   - `"medium"` on a `deepseek` row (vocabulary `[none, low, high, max]`) — the dreamer's own
  *     `DREAM_EFFORT` constant, which `effortToSpendForRole` returns UNMAPPED when nothing is stored.
  * A refused turn is a silently-dead background job, so the effort is mapped onto the row that is
- * actually about to be called (`implicitEffortFor`) and DROPPED when it cannot be — the same thing the
- * runtime leg's own `sdkEffortOf` does with a session's stored `"none"`.
+ * actually about to be called (`implicitEffortFor`) — with `"none"` given its OWN rule below, since
+ * `implicitEffortFor`'s ordinary fallback (the row's `defaultEffort`) is exactly backwards for it.
+ *
+ * D2 (2026-09-22, dist-session-fixes follow-up): the first cut of this rule DROPPED `"none"`
+ * outright whenever the row's vocabulary lacked it, on the reasoning that `implicitEffortFor`'s
+ * fallback (the row's `defaultEffort`) could land on something as heavy as `"medium"` — an
+ * ESCALATION, never what a role asking for `"none"` wanted. That measurement was right about the
+ * fallback but wrong about the fix: dropping the effort field entirely does not avoid the
+ * escalation, it just lets the PROVIDER pick the escalation instead of Winter (still `"medium"` for
+ * a `gpt-5.6` row, per its own `defaultEffort`) — which is precisely the root cause the dist log's
+ * `[cleaner]`/`[titles]` timeouts traced back to: a role pinned to `"none"` for SPEED ran slower
+ * than the row's `CLEANER_EFFORT = "low"` design point, not faster. The rule now sends the row's own
+ * LOWEST declared tier instead (`REASONING_EFFORTS`' canonical order below, which is `EFFORT_LADDER`
+ * — `openai/shared.ts` — with `"none"` prepended; every value any catalog row's `reasoning.efforts`
+ * carries is drawn from this exact set, verified against the full pinned catalog) — asking the
+ * PROVIDER for LESS reasoning than the escalation, never more, and never inventing a tier the row
+ * does not itself declare.
  */
 import type { SecretStore } from "../auth/secret-store";
 import { credentialInventory } from "../runtime-sdk/keychain";
 import { implicitEffortFor, rowForTag } from "../runtime-sdk/provider-selection";
-import { providerBaseUrlFor, type Settings } from "../settings";
+import { providerBaseUrlFor, REASONING_EFFORTS, type Settings } from "../settings";
 import { catalogApiEndpointFor, catalogApiEndpointRawFor, internalAdapterFor } from "./internal-adapters";
 import { credentialStoreOverSecretStore } from "./credential-store";
 import { runtimeBackedProvider } from "./runtime-provider";
@@ -42,34 +57,49 @@ export function internalCredentialAccountFor(providerId: string): string | undef
 }
 
 /**
- * The effort actually put on an internal request for `tag`. `undefined` in, `undefined` out; anything
- * the row cannot take is dropped rather than sent — see this module's header for the measurement.
+ * The effort actually put on an internal request for `tag`. `undefined` in, `undefined` out.
  *
  * A tag with NO catalog row (`winter-test/*`, a harness double) passes through verbatim:
  * `implicitEffortFor` already takes that posture, and refusing there would be a guess dressed as a rule.
  */
 export function internalWireEffortFor(tag: string, effort: string | undefined): string | undefined {
   if (effort === undefined) return undefined;
-  // M-1 (review): `"none"` must NEVER reach `implicitEffortFor`. That function answers "is `wanted` in
-  // the row's vocabulary, else the row's `defaultEffort`", and `settings.ts`'s `effortToSpendForRole`
-  // says in writing why `"none"` may not go through it: the catalog omits `"none"` from almost every
-  // vocabulary (it is Winter's own "off", not a vendor tier), so the lookup MISSES and falls to the
-  // row's default — silently turning a user's explicit "no reasoning" into `"medium"` on every
-  // openai/codex row. Dropped instead.
+  // M-1 (review) / D2 follow-up (2026-09-22): `"none"` must NEVER reach `implicitEffortFor`. That
+  // function answers "is `wanted` in the row's vocabulary, else the row's `defaultEffort`", and
+  // `defaultEffort` is exactly backwards for `"none"` — it is a role asking for LESS reasoning, and
+  // falling to the row's own default (often `"medium"`) would silently give it MORE instead.
   //
-  // THE HONEST CONSEQUENCE, stated rather than hidden: dropping it means the request carries NO effort
-  // at all, so the PROVIDER's own default applies — which for a gpt-5.6 row is `medium`. Winter cannot
-  // express `"none"` on this path yet. It is not a regression (before the per-provider fan-out these
-  // adapters were built with `descriptors: () => undefined` and forwarded `"none"` verbatim, and nothing
-  // proved the endpoint honoured it) and it is not a choice this module can fix: the SDK's `mapEffort`
-  // refuses `"none"` against a real descriptor, and the catalog omits it from the vocabulary even where
-  // the endpoint's own live probe recorded that it is accepted (`openai/gpt-5.6-terra`'s `sourceRef`
-  // says so explicitly). SDK CARRY: either the catalog lists `"none"` in the vocabularies whose
-  // endpoints accept it, or `mapEffort` grows a sanctioned "send no reasoning block" answer. Until then
-  // a role's `"none"` reads as "the provider's default" for these jobs.
-  if (effort === "none") return undefined;
+  // The rule, in full, scoped precisely to what was measured and asked for (controller ruling,
+  // 2026-09-22): a row with NO declared vocabulary at all takes no effort setting, so nothing is
+  // sent (unchanged). A row whose vocabulary already lists `"none"` itself is UNCHANGED too — some
+  // catalog rows genuinely carry it as a real tier (e.g. `crof/deepseek-v4-flash`'s
+  // `[none, low, medium, high, max]`, 27 rows total measured against the pinned catalog), and how the
+  // adapter wire-handles a row that already declares `"none"` is a separate, unmeasured question this
+  // fix does not touch — it still drops, exactly as before. ONLY the remaining case changes: a row
+  // that DOES reason but declares no `"none"` tier of its own now gets its OWN LOWEST declared effort
+  // (`REASONING_EFFORTS`' canonical low-to-high order, this module's header) rather than dropping the
+  // field and letting the provider's own (higher) default apply. `REASONING_EFFORTS.find(...)` always
+  // finds a match on this path — verified against the full pinned catalog, every `reasoning.efforts`
+  // value across every row is one of its members.
+  if (effort === "none") {
+    const vocab = rowForTag(tag)?.reasoning?.efforts ?? [];
+    if (vocab.length === 0 || vocab.includes("none")) return undefined;
+    const lowest = REASONING_EFFORTS.find((e) => vocab.includes(e));
+    if (lowest !== undefined) noteNoneSubstitutedOnce(tag, lowest);
+    return lowest;
+  }
   if (rowForTag(tag) === undefined) return effort;
   return implicitEffortFor(tag, effort);
+}
+
+const noneSubstitutedNoted = new Set<string>();
+/** One line per tag per process (the `staleEffortNoted`/`session-driver.ts` precedent) — an internal
+ *  job re-resolves its effort on every call, so this must never become a per-call log. */
+function noteNoneSubstitutedOnce(tag: string, sentEffort: string): void {
+  if (noneSubstitutedNoted.has(tag)) return;
+  if (noneSubstitutedNoted.size > 256) noneSubstitutedNoted.clear();
+  noneSubstitutedNoted.add(tag);
+  console.error(`internal role effort "none" is not on "${tag}"'s own vocabulary — sending its lowest declared effort ("${sentEffort}") instead of letting the provider's own (higher) default apply`);
 }
 
 export interface InternalProviderBuildRefusal {

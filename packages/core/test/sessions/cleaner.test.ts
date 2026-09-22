@@ -11,7 +11,7 @@ import { splitTag } from "../../src/runtime-sdk/model-tag";
 import { RoleHealthRegistry } from "../../src/providers/role-health";
 import {
   SessionCleaner, renderTranscript, hasUserSetTitle, CLEANER_EFFORT, CLEANER_INSTRUCTION,
-  CLEANER_MAX_JUDGMENTS_PER_PASS, CLEANER_MIN_IDLE_MS, CLEANER_TRANSCRIPT_MAX_CHARS,
+  CLEANER_MAX_JUDGMENTS_PER_PASS, CLEANER_MIN_IDLE_MS, CLEANER_RETRY_BACKOFF_MS, CLEANER_TRANSCRIPT_MAX_CHARS,
   type CleanerDeps, type CleanerStore,
 } from "../../src/sessions/cleaner";
 
@@ -879,6 +879,66 @@ describe("SessionCleaner — strict verdict parsing (ANY deviation ⇒ keep, NO 
     await makeCleaner(store, home, provider, { now: agedNow }).runPass();
 
     expect(cleanerLines(home)[0].reason.length).toBeLessThanOrEqual(200);
+    store.close();
+  });
+});
+
+describe("SessionCleaner — D2 (2026-09-22): the retry-storm cooldown", () => {
+  test("a session that just failed a judgment is NOT rejudged again before the cooldown lifts", async () => {
+    const { home, store } = freshStore();
+    const id = junkSession(store);
+    // Malformed forever (FakeProvider replays its last script entry) — every call fails identically.
+    const provider = rawJudge("no JSON here at all");
+    const cleaner = makeCleaner(store, home, provider, { now: agedNow });
+
+    await cleaner.runPass(); // first attempt: charged, fails, backed off
+    await cleaner.runPass(); // same instant (agedNow is fixed) -- must be skipped, not re-asked
+
+    expect(provider.requests).toHaveLength(1);
+    expect(store.list().some((r) => r.sessionId === id)).toBe(true);
+    expect(store.judgedAt(id)).toBeNull();
+    store.close();
+  });
+
+  const MALFORMED: ProviderEvent[] = [{ type: "text_delta", delta: "no JSON here at all" }, { type: "done", stopReason: "end_turn" }];
+  const KEEP: ProviderEvent[] = [{ type: "text_delta", delta: '{"verdict":"keep","reason":"real work"}' }, { type: "done", stopReason: "end_turn" }];
+
+  test("a backed-off candidate does not consume the per-pass judgment budget", async () => {
+    const { home, store } = freshStore();
+    const failedId = junkSession(store, { ageMs: DAY + 60_000 + 999_000 }); // oldest -> judged first
+    // script[0] fails `failedId` in pass 1; script[1..] answer the 10 fresh candidates in pass 2.
+    const provider = new FakeProvider([MALFORMED, ...Array.from({ length: CLEANER_MAX_JUDGMENTS_PER_PASS }, () => KEEP)]);
+    const cleaner = makeCleaner(store, home, provider, { now: agedNow });
+
+    await cleaner.runPass(); // fails `failedId`, backs it off; nothing else exists yet to judge
+    expect(provider.requests).toHaveLength(1);
+    expect(store.judgedAt(failedId)).toBeNull();
+
+    const ids = Array.from({ length: CLEANER_MAX_JUDGMENTS_PER_PASS }, (_, i) => junkSession(store, { ageMs: DAY + 60_000 + (100 - i) * 1000 }));
+    const result = await cleaner.runPass(); // same instant (agedNow is fixed) -- failedId still cooling down
+
+    expect(provider.requests).toHaveLength(1 + CLEANER_MAX_JUDGMENTS_PER_PASS); // the whole budget spent on the OTHER 10
+    expect(result.kept).toEqual(ids); // every judgeable one, none of the budget lost to `failedId`
+    expect(store.judgedAt(failedId)).toBeNull(); // still cooling down, still unjudged
+    store.close();
+  });
+
+  test("the SAME session IS rejudged once the cooldown lifts", async () => {
+    const { home, store } = freshStore();
+    const id = junkSession(store);
+    let t = AGED_NOW;
+    const provider = new FakeProvider([MALFORMED, KEEP]);
+    const cleaner = makeCleaner(store, home, provider, { now: () => t });
+
+    await cleaner.runPass();
+    expect(provider.requests).toHaveLength(1);
+    expect(store.judgedAt(id)).toBeNull();
+
+    t += CLEANER_RETRY_BACKOFF_MS + 1; // cooldown elapsed
+    await cleaner.runPass();
+
+    expect(provider.requests).toHaveLength(2); // asked again -- the cooldown lifted
+    expect(store.judgedAt(id)).toBe(t);
     store.close();
   });
 });
