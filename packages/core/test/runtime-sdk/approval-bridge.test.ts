@@ -10,9 +10,10 @@ import { PermissionGate, type SessionApprovalPolicy } from "../../src/agent/gate
 import { PermissionRules } from "../../src/agent/permission-rules";
 import {
   canUseToolFor, neverPromptsMessage, approvalOptionsFromSuggestions,
-  NO_PARK_TIMEOUT_MS, type BridgeLogger, type BridgedApprovalRequest, type CanUseToolDeps,
+  NO_PARK_TIMEOUT_MS, type ApprovalBridge, type BridgeLogger, type BridgedApprovalRequest, type CanUseToolDeps,
 } from "../../src/runtime-sdk/approval-bridge";
 import { gateToolNameFor } from "../../src/runtime-sdk/tool-names";
+import { planBridgeFor } from "../../src/runtime-sdk/plan-bridge";
 
 const SESSION = "sess-1";
 const FIXED_NOW = 1_700_000_000_000;
@@ -24,7 +25,7 @@ type Harness = {
   events: NewSessionEvent[];
   approvals: ApprovalBroker;
   questions: QuestionBroker;
-  canUse: CanUseTool;
+  canUse: ApprovalBridge;
 };
 
 function harness(over: Partial<CanUseToolDeps> = {}): Harness {
@@ -338,6 +339,80 @@ test("a rejecting broker denies AND withdraws — no card is ever left uncloseab
   expect(res.behavior).toBe("deny");
   expect(h.events.map((e) => (e as { type: string }).type)).toEqual(["approval_requested", "approval_resolved"]);
   expect(h.events[1]).toMatchObject({ approved: false, by: "broker-error" });
+});
+
+// -------------------------------------------------------------------------------------------
+// C2 (2026-09-22): a card the CHILD has abandoned is withdrawn. On the Winter leg an interrupt
+// abandons a pending permission request inside the child without aborting this callback's signal
+// (agent SDK 0.0.17 has no `control_cancel_request`), so the only fact that says so is the child's
+// own `[interrupted]` tool_result — the projector hands its call id to `withdrawPending`.
+// -------------------------------------------------------------------------------------------
+
+test("withdrawPending settles an abandoned card: approval_resolved{aborted} emitted SYNCHRONOUSLY, the call denied, no duplicate", async () => {
+  const h = harness();
+  const pending = h.canUse("Bash", { command: "curl x", dangerouslyDisableSandbox: true }, requestCtx());
+  expect(h.events).toHaveLength(1);
+
+  expect(h.canUse.withdrawPending("tu1")).toBe(true);
+  // synchronous: the driver appends the child's tool_result right after this returns, and the
+  // withdrawal must land FIRST
+  expect(h.events[1]).toEqual({
+    type: "approval_resolved", sessionId: SESSION, threadId: "main", callId: "tu1", approved: false, by: "aborted",
+  });
+  const res = (await pending)!;
+  expect(res.behavior).toBe("deny");
+  expect((res as { message: string }).message).toContain("the turn was aborted");
+  expect((res as { decisionClassification?: string }).decisionClassification).toBeUndefined();
+  // the parked invocation does NOT emit a second resolution when it resumes
+  expect(h.events).toHaveLength(2);
+  expect(h.approvals.list(SESSION)).toEqual([]);
+});
+
+test("withdrawPending with nothing pending is a no-op — an answered card is never re-resolved", async () => {
+  const h = harness();
+  const pending = h.canUse("Bash", { command: "x" }, requestCtx());
+  h.approvals.resolve(SESSION, "tu1", true, "user");
+  await pending;
+  const before = h.events.length;
+  expect(h.canUse.withdrawPending("tu1")).toBe(false);
+  expect(h.canUse.withdrawPending("never-asked")).toBe(false);
+  expect(h.events).toHaveLength(before);
+});
+
+test("a withdrawal and a later abort of the same card produce ONE resolution", async () => {
+  const ac = new AbortController();
+  const h = harness();
+  const pending = h.canUse("Bash", { command: "x" }, requestCtx({ controller: ac }));
+  h.canUse.withdrawPending("tu1");
+  ac.abort();
+  await pending;
+  expect(h.events.map((e) => (e as { type: string }).type)).toEqual(["approval_requested", "approval_resolved"]);
+});
+
+test("withdrawPending also settles a pending AskUserQuestion: question_resolved{answers:{}, by:aborted}, once", async () => {
+  const h = harness();
+  const input = { questions: [{ question: "Which?", header: "Pick", options: [{ label: "A" }, { label: "B" }] }] };
+  const pending = h.canUse("AskUserQuestion", input, requestCtx());
+  expect(h.canUse.withdrawPending("tu1")).toBe(true);
+  expect(h.events[1]).toEqual({ type: "question_resolved", sessionId: SESSION, threadId: "main", callId: "tu1", answers: {}, by: "aborted" });
+  const res = (await pending)!;
+  expect(res.behavior).toBe("deny");
+  expect(h.events).toHaveLength(2);
+});
+
+test("withdrawPending also closes a pending PLAN card: plan_resolved{approved:false, by:aborted}, and the plan is not approved", async () => {
+  const events: NewSessionEvent[] = [];
+  const policies: string[] = [];
+  const planBridge = planBridgeFor({ emit: (e) => { events.push(e); }, setPolicy: (_s, p) => { policies.push(p); }, log: silent });
+  const h = harness({ policy: "plan", planBridge, emit: (e) => { events.push(e); } });
+  const pending = h.canUse("ExitPlanMode", { plan: "do the thing" }, requestCtx());
+  expect(events.map((e) => (e as { type: string }).type)).toEqual(["plan_presented"]);
+  expect(h.canUse.withdrawPending("tu1")).toBe(true);
+  const res = (await pending)!;
+  expect(res.behavior).toBe("deny");
+  expect(events[1]).toMatchObject({ type: "plan_resolved", callId: "tu1", approved: false, by: "aborted" });
+  expect(policies).toEqual([]);   // an abandoned plan never leaves plan mode
+  expect(h.canUse.withdrawPending("tu1")).toBe(false);
 });
 
 // -------------------------------------------------------------------------------------------

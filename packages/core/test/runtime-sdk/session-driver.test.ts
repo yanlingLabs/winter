@@ -344,6 +344,49 @@ describe("createWinterSessionDrivers — the table", () => {
       await session.end();
     } finally { t.close(); }
   });
+
+  test("C2 (lane C): a steer + interrupt while a card is pending — the card is withdrawn BEFORE the child's tool_result, approval.list is empty, and the turn boundaries land in order", async () => {
+    // s_5d314c81045e seq 24-30, through the REAL table: the bridge the driver hands the child, the
+    // projector's `onToolResults`, the store's own seqs. The agent SDK never cancels a pending
+    // `canUseTool` on an interrupt, so the child's padded `[interrupted]` result is the only signal.
+    const approvals = new ApprovalBroker();
+    const t = table({ approvals });
+    try {
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd: t.home, approvalPolicy: "ask" });
+      const session = await t.drivers.create(sid);
+      await session.send("fetch it", "cli");
+      const input = { command: "curl https://example.com", dangerouslyDisableSandbox: true };
+      t.q().emit({ type: "assistant", message: { content: [{ type: "tool_use", id: "call_1", name: "Bash", input }] } });
+      await Bun.sleep(10);
+      const canUseTool = t.q().options.canUseTool!;
+      const pending = canUseTool("Bash", input, { signal: new AbortController().signal, toolUseID: "call_1", requestId: "r1" } as Parameters<typeof canUseTool>[2]);
+      expect(approvals.list(sid).map((a) => a.callId)).toEqual(["call_1"]);
+      await session.steer("sooo");
+      // the child pads the abandoned call, then ends the turn as interrupted
+      t.q().emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "call_1", content: "[interrupted]", interrupted: true }] } });
+      await session.interrupt();
+      await expect(pending).resolves.toMatchObject({ behavior: "deny" });
+      t.q().emit({ type: "assistant", message: { content: [{ type: "text", text: "ok" }] } });
+      t.q().emit(result());
+      await Bun.sleep(20);
+
+      expect(approvals.list(sid)).toEqual([]);
+      const events = t.store.read(sid) as Array<{ type: string; seq: number; callId?: string; by?: string; stopReason?: string; clientName?: string }>;
+      const seqOf = (pred: (e: (typeof events)[number]) => boolean): number => events.find(pred)!.seq;
+      const resolvedSeq = seqOf((e) => e.type === "approval_resolved" && e.callId === "call_1");
+      const toolResultSeq = seqOf((e) => e.type === "tool_result" && e.callId === "call_1");
+      expect(resolvedSeq).toBeLessThan(toolResultSeq);
+      expect(events.filter((e) => e.type === "approval_resolved")).toHaveLength(1);
+      expect(events.find((e) => e.type === "approval_resolved")).toMatchObject({ callId: "call_1", by: "aborted" });
+      expect(events.map((e) => (e.type === "turn_completed" ? `turn_completed:${e.stopReason}` : e.type))
+        .filter((x) => x !== "session_created" && x !== "assistant_delta" && x !== "harness_attached" && x !== "harness_detached")).toEqual([
+        "user_message", "turn_started", "tool_call", "approval_requested", "user_message",
+        "approval_resolved", "tool_result", "turn_completed:aborted",
+        "turn_started", "assistant_message", "turn_completed:end_turn",
+      ]);
+      await session.end();
+    } finally { t.close(); }
+  });
 });
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════

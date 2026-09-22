@@ -226,7 +226,10 @@ const REAL_TIMERS: WinterTimers = {
  * a text the host owes the child; every main-thread `turn_started` is one it has pushed (the
  * projector's `beginTurn` is the ONLY producer, and the driver calls it exactly once per push, at
  * the push — `beginAndPush` appends the `turn_started` RIGHT AFTER the message it runs, except for
- * a held send released later, whose `turn_started` lands after younger messages).
+ * a held send released later, whose `turn_started` lands after younger messages, and — since C2 —
+ * a push made while a turn runs, whose `turn_started` the projector holds until that turn's
+ * `turn_completed`; `appendUser` announces any still held before the next message lands, so no
+ * younger message ever separates a pushed text from its `turn_started`).
  *
  * PAIRING IS BY ADJACENCY, NEVER FIFO (P8b-40): a `turn_started` pairs with the NEAREST PRECEDING
  * unpaired `user_message`. A steer or a delivery pushes immediately while an older send is still
@@ -238,6 +241,13 @@ const REAL_TIMERS: WinterTimers = {
  * therefore RE-PUSHED on resume: the persisted contract is the pair, and a push without its half
  * never reached it. The projector's own pass-through `user_message` (`clientName: "winter"`, a
  * `user` frame the host never pushed) is not a debt.
+ *
+ * AT-LEAST-ONCE, documented (C2 review): since C2 a push made while a turn runs keeps its
+ * `turn_started` unannounced until that turn ends, so a daemon crash in that window re-pushes the
+ * text on resume. That is right when the text never started (it died with the child — before C2 its
+ * early `turn_started` made the scan skip it, i.e. LOST it), and a duplicate when the child had in
+ * fact begun it in the instant before the crash. Delivery is therefore at-least-once across a crash,
+ * never at-most-once; the log alone cannot tell "pushed and begun" from "pushed and not yet begun".
  */
 export function unconsumedUserMessages(events: readonly SessionEvent[]): string[] {
   const owed: string[] = [];
@@ -703,6 +713,11 @@ class WinterSessionImpl implements WinterSession {
   }
 
   private appendUser(text: string, clientName: string): number {
+    // C2 (lane C, 2026-09-22): a turn pushed while another ran has its `turn_started` held by the
+    // projector until that turn ends (turn boundaries in order). Any still held is announced HERE,
+    // before this message lands, so a `turn_started` is never separated from its own message by a
+    // younger one — the adjacency pairing `unconsumedUserMessages` rests on.
+    if (this.inc !== undefined) this.emit(this.inc.projector.announceQueuedTurns());
     return this.deps.append({ type: "user_message", sessionId: this.sessionId, threadId: MAIN_THREAD, text, clientName }).seq;
   }
 

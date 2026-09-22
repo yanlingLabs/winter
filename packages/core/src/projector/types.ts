@@ -128,6 +128,22 @@ export interface ProjectorDeps {
    * swap, resume) would find no tracked row and be dropped. Absent → start empty.
    */
   priorTodos?: () => readonly { id: string; subject: string; status: string; activeForm?: string }[];
+  /**
+   * 2026-09-22 (C2): the child has produced a `tool_result` for these call ids (any thread), so
+   * nothing may still be waiting on a HUMAN for them — an approval card or a question for such a call
+   * is moot. Called BEFORE the frame's events are stamped, so whatever the driver appends here (the
+   * bridge's `approval_resolved`/`question_resolved` withdrawal) lands ahead of the `tool_result`
+   * and the stamped seqs stay exact.
+   *
+   * WHY IT EXISTS: an interrupt abandons a pending permission request inside the Winter child (agent
+   * SDK 0.0.17 `engine.ts`'s `raceInterrupt` around `evaluateWithFreshPolicy`) WITHOUT cancelling the
+   * host's `canUseTool` — the SDK has no `control_cancel_request` (claude's CLI sends one and the
+   * claude SDK aborts the callback's signal) — so the card stayed pending forever. The child's own
+   * padded `[interrupted]` result is the one fact on the wire that says it gave up.
+   *
+   * Called on a replayed prefix too (harmless: nothing is pending then). A throw is swallowed.
+   */
+  onToolResults?: (callIds: readonly string[]) => void;
 }
 
 /**
@@ -184,26 +200,39 @@ export interface Projector {
    * `true`, into every child's model-greppable transcript as well. It also records the pushed text
    * in the echo window, which is what makes `dedupe.ts` reachable at all.
    *
-   * ── A MID-TURN STEER IS NOT A NEW BEGUN TURN ────────────────────────────────────────────────
+   * ── A MID-TURN PUSH IS ITS OWN TURN, AND IT STARTS WHEN THE RUNNING ONE ENDS ────────────────
    *
-   * `session.send` and `session.steer` are both pushes into the same host-owned queue (P8b-5), but
-   * they differ in exactly the way this door cares about: `send` starts a turn, while `steer` joins
-   * the turn already running (the child drains it at its next round top). So the rule stays "ONE
-   * `result` per begun turn", and **a steer must not call `beginTurn`** — under the current
-   * understanding it produces no terminal of its own, and an extra `beginTurn` would leave
-   * `openTurns` permanently >= 1, silently weakening the guard so a stray or duplicate `result` is
-   * projected instead of dropped. It would also put a mid-turn `turn_started` in the log, which the
-   * engine never emits.
+   * MEASURED (P8b-38, `test/projector/real-child.test.ts`'s steer measurement against the built
+   * binary): on the Winter wire a push made while a turn runs — a `steer`, a messaging delivery —
+   * yields its OWN `result`, because the child queues it as its next envelope (agent SDK 0.0.17
+   * `engine.ts`: a `user` frame goes to `userFrames`, drained one turn at a time). So the driver calls
+   * `beginTurn` for every push, a steer included, and the rule stays "ONE `result` per begun turn".
    *
-   * **THIS IS NOT MEASURED, AND IT IS A TASK 16 MEASUREMENT OBLIGATION.** Task 10's recording
-   * deliberately gated its second envelope on the first `result` "so the turns stay separable", so
-   * it says nothing about a mid-turn push. Drive a `steer` against the built binary and COUNT the
-   * `result`s: if a steered-in message terminates on its own, the driver must call `beginTurn` for
-   * the steer too — otherwise that terminal is dropped by the `openTurns === 0 && !sawFrame` guard
-   * whenever the steer produced no frames first, which is the same defect this door was added to
-   * fix, on the steer path.
+   * Since C2 (2026-09-22) such a push's `turn_started` is NOT returned here: it is held and announced
+   * right after the running turn's `turn_completed` — where that turn actually starts — or earlier
+   * through `announceQueuedTurns`. Whether "a turn is running" is the projector's own push count
+   * (`openTurns`), so the hold rests on P8b-38 staying true: if a child ever answered two pushes
+   * with ONE `result`, the second push's `turn_started` would wait for a terminal that never comes
+   * (until the next host message announces it), and a resume in between would re-push its text.
+   * The official leg (claude folds a mid-turn message into the running turn) never holds.
    */
   beginTurn(input: { text: string; at?: string }): ProjectedBatch;
+  /**
+   * 2026-09-22 (C2): announce NOW every push whose `turn_started` `beginTurn` is still holding.
+   *
+   * On the Winter leg a push made while one of the host's turns is still open (a steer, a delivery,
+   * a held send released at a `result` while a steer runs) returns NO `turn_started` from `beginTurn`:
+   * the child queues it as its own later turn, so it is announced right after the running turn's
+   * `turn_completed`, one per terminal — the log's turn boundaries in the order they happen.
+   *
+   * The durable queue's adjacency pairing (`winter-session.ts`'s `unconsumedUserMessages`: a
+   * `turn_started` pairs with the NEAREST PRECEDING unpaired `user_message`) needs a pushed message
+   * and its `turn_started` never to be separated by a YOUNGER `user_message`. So the driver calls this
+   * before it appends any `user_message`: a push still unannounced at that moment is announced there
+   * (the order then degrades to the pre-C2 shape for that one push, and the pairing stays exact).
+   * Idempotent; empty when nothing is held.
+   */
+  announceQueuedTurns(): ProjectedBatch;
   /** Fold one wire message into zero or more `SessionEvent`s, in emission order. */
   accept(msg: ProtocolSdkMessage): ProjectedBatch;
   /** True between the first frame of a turn and its `result`. */

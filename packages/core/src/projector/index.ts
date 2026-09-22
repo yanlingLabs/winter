@@ -11,14 +11,14 @@ import { createEchoWindow, type EchoWindow } from "./dedupe";
 import { classifyThrown, sanitizeDetail } from "./errors";
 import { isKnownUnpersistedKind, kindOf, summarize } from "./hooks";
 import { isQuestionTool } from "./questions";
-import { projectTerminal, sharesMainLedgerRow, totalsOf, type MainModelKey, type UsageTotals } from "./terminal";
+import { projectTerminal, sharesMainLedgerRow, totalsOf, turnUsageOf, type MainModelKey, type UsageTotals } from "./terminal";
 import { hostToolNameFor } from "../runtime-sdk/tool-names";
 import { ProjectorRefusedError } from "./types";
 import type { CheckpointStore, ProjectedBatch, ProjectedEvent, Projector, ProjectorDeps, ProjectorRefusal, ProtocolSdkMessage } from "./types";
 
 export { PROJECTED_EVENT_COVERAGE, SUBAGENT_TRANSCRIPT_INCLUDE } from "./event-coverage";
 export { createEchoWindow, ECHO_WINDOW, type EchoWindow } from "./dedupe";
-export { projectTerminal, sharesMainLedgerRow, totalsOf, type MainModelKey, type UsageTotals } from "./terminal";
+export { projectTerminal, sharesMainLedgerRow, totalsOf, turnUsageOf, type MainModelKey, type UsageTotals } from "./terminal";
 export {
   AGENT_ERROR_CODES, classifyResult, classifyThrown, codeForHttpStatus, sanitizeDetail,
   type AgentErrorCode, type ClassifiedError,
@@ -200,6 +200,13 @@ class ProjectorImpl implements Projector {
   /** True once this turn's terminal has been emitted, so an "error-result-then-throw" ResultError
    *  is recognised as the pair of a result already projected rather than projected twice. */
   private terminalEmitted = false;
+  /**
+   * C2 (2026-09-22): pushes the host made while one of its turns was still open, in PUSH order —
+   * each is a turn the child will run after the ones ahead of it. `announced` is set once its
+   * `turn_started` is out (early, through `announceQueuedTurns`), so its own start does not announce
+   * it again. One entry is shifted per projected terminal: the turn that starts next.
+   */
+  private readonly queuedStarts: Array<{ announced: boolean }> = [];
 
   /** Seed the to-do map from the session's persisted rows, once — see `ProjectorDeps.priorTodos`.
    *  Never throws: a failed read leaves the map empty, which is today's behaviour. */
@@ -242,31 +249,53 @@ class ProjectorImpl implements Projector {
    * `turn_started`, and the host appends THAT event rather than one of its own — see
    * `PROJECTED_EVENT_COVERAGE.turn_started` for what two producers would cost.
    *
-   * ── A MID-TURN STEER IS NOT A NEW BEGUN TURN ────────────────────────────────────────────────
+   * ── A MID-TURN PUSH IS ITS OWN TURN, AND IT STARTS WHEN THE RUNNING ONE ENDS ────────────────
    *
-   * `session.send` and `session.steer` are both pushes into the same host-owned queue (P8b-5), but
-   * they differ in exactly the way this door cares about: `send` starts a turn, while `steer` joins
-   * the turn already running (the child drains it at its next round top). So the rule stays "ONE
-   * `result` per begun turn", and **a steer must not call `beginTurn`** — under the current
-   * understanding it produces no terminal of its own, and an extra `beginTurn` would leave
-   * `openTurns` permanently ≥ 1, silently weakening the guard so a stray or duplicate `result` is
-   * projected instead of dropped. It would also put a mid-turn `turn_started` in the log, which the
-   * engine never emits.
-   *
-   * **THIS IS NOT MEASURED, AND IT IS A TASK 16 MEASUREMENT OBLIGATION.** Task 10's recording
-   * deliberately gated its second envelope on the first `result` "so the turns stay separable", so
-   * it says nothing about a mid-turn push. Drive a `steer` against the built binary and COUNT the
-   * `result`s: if a steered-in message terminates on its own, the driver must call `beginTurn` for
-   * the steer too — otherwise that terminal is dropped by the `openTurns === 0 && !sawFrame` guard
-   * whenever the steer produced no frames first, which is the same defect this door was added to
-   * fix, on the steer path.
+   * MEASURED (P8b-38 — `test/projector/real-child.test.ts` counts the `result`s against the built
+   * binary): a push made while a turn runs (a `steer`, a messaging delivery) yields its OWN `result`,
+   * because the child queues it as its next envelope. So the driver calls `beginTurn` for every push
+   * and the rule stays "ONE `result` per begun turn". See `Projector.beginTurn` (`types.ts`) for the
+   * C2 hold below and the one assumption it rests on.
    */
   beginTurn(input: { text: string; at?: string }): ProjectedBatch {
     this.commitPending();
+    // C2 (2026-09-22): on the Winter wire a mid-turn push is the child's NEXT turn, so its
+    // `turn_started` is held and announced right after the running turn's terminal (or earlier,
+    // through `announceQueuedTurns`). "Running" is this projector's own push count — see the
+    // interface doc for what that rests on.
+    const running = this.openTurns > 0;
     this.openTurns++;
     this.echo.pushed(input.text);
-    return this.stampBatch([{ type: "turn_started", sessionId: this.deps.sessionId, threadId: MAIN_THREAD }]);
+    if (running && this.holdsTurnStarts) {
+      this.queuedStarts.push({ announced: false });
+      return EMPTY_BATCH();
+    }
+    return this.stampBatch([this.turnStarted()]);
   }
+
+  announceQueuedTurns(): ProjectedBatch {
+    const out: ProjectedEvent[] = [];
+    for (const q of this.queuedStarts) {
+      if (q.announced) continue;
+      q.announced = true;
+      out.push(this.turnStarted());
+    }
+    return out.length === 0 ? EMPTY_BATCH() : this.stampBatch(out);
+  }
+
+  private turnStarted(): ProjectedEvent {
+    return { type: "turn_started", sessionId: this.deps.sessionId, threadId: MAIN_THREAD };
+  }
+
+  /**
+   * Only the Winter leg holds a mid-turn push's `turn_started` (C2). The OFFICIAL leg's child is
+   * claude, which folds a message that arrives mid-turn INTO the running turn (a `queued_command`
+   * attachment at the next tool round — no terminal of its own), so a held announcement there would
+   * be released by a terminal that is not its own and leave a `turn_started` no `turn_completed`
+   * ever follows. That leg keeps the push-time announcement (its steer accounting is its own carry,
+   * `official-session.ts`'s "UNMEASURED" note).
+   */
+  private get holdsTurnStarts(): boolean { return (this.deps.runtimeKind ?? "winter-agent") === "winter-agent"; }
   get lastResultAt(): string | undefined { return this.resultAt; }
 
   accept(msg: ProtocolSdkMessage): ProjectedBatch {
@@ -390,6 +419,11 @@ class ProjectorImpl implements Projector {
       this.roundIndex++;
       const threadId = threadIdOf(userFrame);
       if (hasToolResults(userFrame)) {
+        // C2 (2026-09-22): the child is done with these calls, so no human can still be owed an
+        // answer for them — settled BEFORE this frame is stamped (see `ProjectorDeps.onToolResults`).
+        this.settleCalls(userFrame.message.content
+          .filter((b) => b.type === "tool_result" && typeof b.tool_use_id === "string" && b.tool_use_id.length > 0)
+          .map((b) => b.tool_use_id as string));
         const firstResult = userFrame.message.content.find((b) => b.type === "tool_result" && typeof b.tool_use_id === "string");
         const sourceId = `tr:${(firstResult?.tool_use_id as string | undefined) ?? `${this.turnIndex}:${this.roundIndex}`}`;
         return claim(sourceId, () => {
@@ -477,7 +511,9 @@ class ProjectorImpl implements Projector {
       // absent field reads as "not known", a zero reads as "measured, and it was nothing", and
       // `engine.ts:1689`'s compaction trigger skips a zero either way. Logged ONCE per session:
       // an unpriced row is a property of the model, so one line per turn would be noise.
-      if (totalsOf(msg as ResultFrameLike, this.mainModel) === undefined && !this.loggedUnpricedUsage) {
+      // C1 (2026-09-22): a result with no ledger but a claude-shaped per-turn `usage` is NOT this
+      // case — its figures are reported (`terminal.ts`'s `turnUsageOf`), so the line would lie.
+      if (totalsOf(msg as ResultFrameLike, this.mainModel) === undefined && turnUsageOf(resultFrame) === undefined && !this.loggedUnpricedUsage) {
         this.loggedUnpricedUsage = true;
         this.deps.log.debug?.("[projector] the result carries no modelUsage (unpriced catalog row) — token counts report 0 and contextTokens is omitted", {
           sessionId: this.deps.sessionId,
@@ -508,6 +544,23 @@ class ProjectorImpl implements Projector {
       if (this.openTurns > 0) this.openTurns--;
       this.terminalEmitted = true;
       this.resultAt = this.deps.now();
+      // C2: the turn queued next starts NOW — its `turn_started` follows this `turn_completed`, in
+      // the same batch, unless `announceQueuedTurns` already put it out. Stamped outside the claim,
+      // exactly like `beginTurn`'s own: a `turn_started` is the host's push, not a projected source.
+      //
+      // RESIDUAL GAP, documented rather than fixed (C2 review): the shift is one per terminal, FIFO,
+      // and assumes the next terminal on the wire belongs to the next HOST push. A turn the CHILD
+      // starts on its own (a background-task notification turn, `engine.ts`'s `pumpNotifications`)
+      // landing between a held push and its start would spend this shift on its own terminal and
+      // announce the held push's `turn_started` one turn early — the pre-C2 misordering, for that one
+      // push. Today the daemon keeps spawns foreground by default (`mode-options.ts`'s
+      // `backgroundByDefault: false`), which is what keeps unsolicited turns rare; the projector has
+      // no host-vs-child marker on a `result` to tell them apart.
+      const next = this.queuedStarts.shift();
+      if (next !== undefined && !next.announced) {
+        const started = this.stampBatch([this.turnStarted()]);
+        return { ...events, persist: [...events.persist, ...started.persist] };
+      }
       return events;
     }
 
@@ -584,6 +637,16 @@ class ProjectorImpl implements Projector {
 
   flush(): void { this.commitPending(); }
 
+  /** `deps.onToolResults`, never allowed to break the fold (a driver's own bookkeeping). */
+  private settleCalls(callIds: string[]): void {
+    if (callIds.length === 0 || this.deps.onToolResults === undefined) return;
+    try {
+      this.deps.onToolResults(callIds);
+    } catch (err) {
+      this.deps.log.warn?.("[projector] onToolResults threw — ignored", { sessionId: this.deps.sessionId, error: err instanceof Error ? err.name : "unknown" });
+    }
+  }
+
   get refusals(): readonly ProjectorRefusal[] { return this.refused; }
 
   /**
@@ -616,6 +679,10 @@ class ProjectorImpl implements Projector {
     this.running = false;
     this.sawFrame = false;
     if (this.openTurns > 0) this.openTurns--;
+    // C2: the stream is gone, and every push still queued behind the failed turn died with the child.
+    // Nothing is announced for them — a push with no `turn_started` after its `user_message` is
+    // exactly what the next incarnation's `unconsumed` scan re-pushes.
+    this.queuedStarts.length = 0;
     this.resultAt = this.deps.now();
     this.turnIndex++;
     this.roundIndex = 0;
