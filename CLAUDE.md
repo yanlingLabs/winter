@@ -28,6 +28,8 @@ bun test -t "test name"              # one test by name
 # The "built binary through a real daemon" e2e files (test/e2e/winter-{chat,code,dispatch}-e2e, official-leg.e2e)
 # need WINTER_RUNTIME_EXECUTABLE="$PWD/dist/winter" (built by `bun run build:winter`); without it the daemon
 # resolves the npm platform binary and the pid scan for dist/winter FAILS rather than skips.
+# Every daemon boot merges the user's login-shell PATH into its own (core/src/login-shell-path.ts);
+# WINTER_LOGIN_SHELL_PATH=off (or 0/false) skips it — both test preloads set it, so no test runs your real shell.
 pnpm typecheck:core                  # tsc --noEmit (also typecheck:protocol)
 
 # Protocol codegen — REQUIRED after changing packages/protocol/src/events.ts

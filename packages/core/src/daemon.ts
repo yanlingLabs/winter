@@ -453,16 +453,6 @@ export async function startDaemon(opts: {
   const dirs = bootstrapWinterDir(home);
   const lock: Lock = await acquireLock(dirs.lockPath, dirs.socketPath);
 
-  // The user's login-shell PATH, merged into THIS process's environment before anything below can
-  // spawn — an app/Sparkle/launchd-launched daemon otherwise inherits LaunchServices' bare
-  // `/usr/bin:/bin:/usr/sbin:/sbin`, and every child (the Winter child and its Bash tool, stdio MCP
-  // servers, plugins) inherits that in turn. After the lock, so a second daemon that loses the race
-  // never pays for a shell. Bounded and never throwing (see `login-shell-path.ts`).
-  if (opts.loginShellPath !== false) {
-    const outcome = await applyLoginShellPath(opts.loginShellPath ?? {});
-    if (outcome.source !== "disabled") console.error(describeLoginShellPath(outcome));
-  }
-
   // A3: legacy top-level files an earlier Migration B copied but nothing reads (`mcp.json`,
   // `tools.json`, …). One line when any exist — never touched, only named (`winter doctor` repeats it).
   const deadLegacyLine = describeDeadLegacyFiles(findDeadLegacyFiles(home), home);
@@ -470,6 +460,19 @@ export async function startDaemon(opts: {
 
   const authority = new TokenAuthority(secrets);
   const tokens = await authority.ensureTokens();
+
+  // The user's login-shell PATH, merged into THIS process's environment before anything below can
+  // spawn — an app/Sparkle/launchd-launched daemon otherwise inherits LaunchServices' bare
+  // `/usr/bin:/bin:/usr/sbin:/sbin`, and every child (the Winter child and its Bash tool, stdio MCP
+  // servers, plugins) would get that. After the lock, so a second daemon that loses the race never
+  // pays for a shell; after `ensureTokens`, so a slow or broken rc file (up to the 5 s bound) never
+  // delays the tokens a first-boot client is waiting for (P9c-20). Nothing between the lock and
+  // here spawns a process. Bounded and never throwing (see `login-shell-path.ts`, which also states
+  // the rule every spawn must follow to see the result: pass an env built from `process.env`).
+  if (opts.loginShellPath !== false) {
+    const outcome = await applyLoginShellPath(opts.loginShellPath ?? {});
+    if (outcome.source !== "disabled") console.error(describeLoginShellPath(outcome));
+  }
 
   const store = new SessionStore(dirs.home, { presentProviders, effortStaleFor: (effort, model, mode) => effortRefusalFor(effort, model, mode) !== undefined });
   const hub = new SessionHub(store);
