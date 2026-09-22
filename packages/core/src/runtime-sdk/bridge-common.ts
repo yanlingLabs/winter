@@ -40,3 +40,40 @@ export const NO_PARK_TIMEOUT_MS = 2 ** 31 - 1;
  * (C3, lane C, 2026-09-22). Lives here, beside the bridges, so neither side imports the other.
  */
 export const REVIEWER_ESCALATION_REASON = "reviewer unavailable — escalating for manual approval";
+
+/**
+ * WHICH calls the reviewer escalated with no verdict — keyed `sessionId` + the call's `toolUseID`,
+ * the same identity the approval broker keys on (C3 follow-up, lane C, 2026-09-22).
+ *
+ * The reason string above is NOT enough on its own, and exactly where it matters most: for a
+ * `dangerouslyDisableSandbox: true` call the agent SDK's stage 3 names its OWN mandatory-interaction
+ * reason and drops the hook's (0.0.17 `permissions/evaluator.ts` ~1976-1985: `askEntry` >
+ * AskUserQuestion > the P3-J sandbox override > … > `hookAskMessage`), and a hook `allow` is only
+ * resolved AFTER stage 3 — so every escape reaches `canUseTool` with the same P3-J text whether the
+ * reviewer passed it or could not judge it. The hook and the bridge are built in different places
+ * (`daemon.ts`'s `hooksFor`, `session-driver.ts`'s `canUseToolFor`) and meet only here, in-process,
+ * so the hook NOTES the call and the bridge TAKES it.
+ *
+ * Bounded: an entry the bridge never takes (the turn was interrupted between the hook and the
+ * permission request) is evicted oldest-first past the cap, and a stale id can only ever narrow a
+ * verdict — a `toolUseID` is unique per call.
+ */
+const reviewerNoVerdict = new Set<string>();
+const REVIEWER_NO_VERDICT_CAP = 512;
+const noVerdictKey = (sessionId: string, toolUseID: string): string => `${sessionId}\u0000${toolUseID}`;
+
+export function noteReviewerNoVerdict(sessionId: string, toolUseID: string | undefined): void {
+  if (toolUseID === undefined || toolUseID.length === 0) return;
+  reviewerNoVerdict.add(noVerdictKey(sessionId, toolUseID));
+  while (reviewerNoVerdict.size > REVIEWER_NO_VERDICT_CAP) {
+    const oldest = reviewerNoVerdict.values().next().value;
+    if (oldest === undefined) break;
+    reviewerNoVerdict.delete(oldest);
+  }
+}
+
+/** Consumes the note: `true` at most once per call. */
+export function takeReviewerNoVerdict(sessionId: string, toolUseID: string | undefined): boolean {
+  if (toolUseID === undefined || toolUseID.length === 0) return false;
+  return reviewerNoVerdict.delete(noVerdictKey(sessionId, toolUseID));
+}

@@ -75,7 +75,7 @@ import { computeLineDiff } from "../diffs/myers";
 import { DIFF_PATCH_MAX_BYTES, mintDiffId, writeDiff } from "../diffs/store";
 import type { HookResult } from "../plugins/hook-runner";
 import { attachFileDiff } from "./diff-attach";
-import { REVIEWER_ESCALATION_REASON } from "./bridge-common";
+import { REVIEWER_ESCALATION_REASON, noteReviewerNoVerdict } from "./bridge-common";
 
 /** The subset of `plugins/hook-registry.ts`'s `HookFacade` this module depends on — injected
  *  rather than imported concretely so a fake can stand in for tests with no real plugin process
@@ -292,7 +292,7 @@ function pluginPostToolUseFailureHook(deps: SessionHooksDeps): HookCallback {
  *  real child — carry: measure `ask` end-to-end (a real approval_requested reaching the phone/CLI)
  *  before relying on it as the sole safety net for a reviewer outage. */
 function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
-  return async (input, _toolUseID, { signal }) => {
+  return async (input, toolUseID, { signal }) => {
     if (!deps.reviewer) return allow();
     if (deps.policy?.() !== "auto") return allow();
     if (deps.reviewerEnabled?.() === false) return allow();
@@ -313,9 +313,11 @@ function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
       // answered when such a home had no `BashReviewer` at all. The reviewer has already logged the
       // state change once; nothing is logged per call here.
       if (err instanceof ReviewerNoRunnableModel) return allow();
-      // C3 (2026-09-22) — traced in the SDK source, not yet measured on a live child: the child hands
-      // this `ask` to `canUseTool` with the reason verbatim, and the approval bridge now cards it
-      // (`reviewerCouldNotJudge`); before, the gate's `auto` allow answered it, i.e. silently ran it.
+      // C3 (2026-09-22) — traced in the SDK source, not yet measured on a live child: this `ask`
+      // reaches `canUseTool`, where the gate's `auto` allow used to answer it, i.e. silently ran it.
+      // The bridge now cards it, and recognises it by this NOTE — for a sandbox escape the child
+      // replaces this hook's reason with its own (`bridge-common.ts`'s `noteReviewerNoVerdict`).
+      noteReviewerNoVerdict(deps.sessionId, toolUseID ?? (typeof (pre as { tool_use_id?: unknown }).tool_use_id === "string" ? (pre as { tool_use_id: string }).tool_use_id : undefined));
       return ask(REVIEWER_ESCALATION_REASON);
     }
   };
