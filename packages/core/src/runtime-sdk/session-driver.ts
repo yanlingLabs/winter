@@ -661,7 +661,23 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // invalid stored value to "unset", falling through to the same D30 default an absent value
       // already gets, rather than handing a malformed string to the spawn boundary.
       const rawAdvisorModel = winterOptionsFromSettings(settings).advisorModel;
-      const advisorModel = rawAdvisorModel !== undefined && isModelTag(rawAdvisorModel) ? rawAdvisorModel : d30DefaultModel(model);
+      const pinnedAdvisor = rawAdvisorModel !== undefined && isModelTag(rawAdvisorModel) ? rawAdvisorModel : undefined;
+      let advisorModel = pinnedAdvisor ?? d30DefaultModel(model);
+      // D3 (2026-09-22): a pin on ANOTHER provider now runs there, on that provider's own credential
+      // (`buildWinterOptions` sends the full tag + its `authRef`). The `pins.research` rule below
+      // applies to it for the same reason: a stated advisor whose Keychain slot is EMPTY makes every
+      // `advisor` call a typed refusal, while the family default keeps the tool working — so such a pin
+      // is not stated, and the D30 default is, with one line naming the setting. Only a Keychain-backed
+      // slot is probed: a provider with no locator (a `console/*` Claude login lives in an `ant`
+      // profile) resolves its own credential in the child, exactly as it did before this change.
+      if (pinnedAdvisor !== undefined && pinnedAdvisor !== UNSTATED_TAG && !pinnedAdvisor.startsWith(WINTER_TEST_PREFIX)) {
+        const advisorProviderId = splitTag(pinnedAdvisor).providerId;
+        const advisorRef = advisorProviderId === selection?.providerId ? undefined : credentialRefFor(advisorProviderId, deps.home);
+        if (advisorRef !== undefined && !(await refMaterialPresent(deps.secrets, advisorRef))) {
+          advisorModel = d30DefaultModel(model);
+          log(`runtimes.advisorModel: names ${advisorProviderId}, whose credential slot is empty — the advisor runs on this session's family default${advisorModel === undefined ? " (the child's own)" : ` (${advisorModel})`} instead`);
+        }
+      }
       // 2026-09-18 (user ruling): `pins.research` is `WebFetch`'s PAGE-DIGEST model. Read LIVE here
       // like every other per-incarnation value, and DROPPED — rather than stated — in the three cases
       // where stating it would make every `WebFetch` call in the session a typed refusal (the SDK
