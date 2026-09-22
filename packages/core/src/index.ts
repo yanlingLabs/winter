@@ -24,8 +24,8 @@ export {
 } from "./agent/mcp/mcp-write";
 export {
   readProjectMcpConfig, writeProjectMcpConfig, projectMcpConfigPath, projectMcpConfigExists,
-  readRawProjectMcpConfig, writeRawProjectMcpConfig,
-  type ProjectMcpConfig, type ProjectMcpServerEntry,
+  readRawProjectMcpConfig, writeRawProjectMcpConfig, parseProjectMcpServers,
+  type ProjectMcpConfig, type ProjectMcpServerEntry, type ParsedProjectMcpServers, type SkippedProjectMcpServer,
 } from "./agent/mcp/project-file";
 export { reservedMcpServerNames } from "./capabilities/names";
 // Winter Phase 8d (Task 4.3): `winter model --advisor <slug>` validates against the SAME pinned

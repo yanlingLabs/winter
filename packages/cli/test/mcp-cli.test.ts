@@ -182,11 +182,11 @@ describe("route functions (no daemon — direct settings.json / .mcp.json writes
     expect(outcome).toEqual({ ok: false, message: expect.stringMatching(/no private per-project MCP scope/) });
   });
 
-  test("add --scope project --transport http is refused (that file is stdio-only)", async () => {
+  test("add --scope project --transport http is refused — the WRITE door only writes stdio (the reader itself now accepts http/sse, per-entry)", async () => {
     const outcome = await runMcpAddRoute(["-s", "project", "-t", "http", "remote", "https://example.com/mcp"], deps());
     expect(outcome.ok).toBe(false);
     if (outcome.ok) throw new Error("expected refusal");
-    expect(outcome.message).toMatch(/stdio-only/);
+    expect(outcome.message).toMatch(/only writes a stdio entry/);
   });
 
   test("add --scope project writes <cwd>/.mcp.json and reports trust status", async () => {
@@ -299,6 +299,29 @@ describe("route functions (no daemon — direct settings.json / .mcp.json writes
 
   test("get on an absent name reports found:false", async () => {
     expect(await runMcpGetRoute(["never-added"], deps())).toEqual({ ok: true, found: false, name: "never-added" });
+  });
+
+  // PARITY FIX (controller-directed): `mcp get`'s project-scope path now shares the daemon's own
+  // per-entry parser (`parseProjectMcpServers`) — an http/sse project entry reports its REAL
+  // transport (previously always reported "stdio", deferred item 3), and a present-but-invalid
+  // entry is `found: true` with `unrecognized` set (the schema's own reason), never silently
+  // absent, and never breaks the lookup of a sibling name in the same file.
+  test("get on a project-scope http entry reports its real transport (not always 'stdio')", async () => {
+    writeFileSync(join(cwd, ".mcp.json"), JSON.stringify({ mcpServers: { remote: { type: "http", url: "https://example.com/mcp" } } }));
+    const outcome = await runMcpGetRoute(["remote"], deps());
+    expect(outcome).toEqual({ ok: true, found: true, name: "remote", scope: "project", transport: "http", url: "https://example.com/mcp", headers: undefined, cwd });
+  });
+
+  test("get on a project-scope entry that fails every recognized shape reports found:true with `unrecognized` set, and does not break a sibling lookup", async () => {
+    writeFileSync(join(cwd, ".mcp.json"), JSON.stringify({
+      mcpServers: { broken: { type: "stdio" }, sibling: { command: "npx" } },
+    }));
+    const brokenOutcome = await runMcpGetRoute(["broken"], deps());
+    expect(brokenOutcome.ok).toBe(true);
+    if (!brokenOutcome.ok || !brokenOutcome.found) throw new Error("expected found:true");
+    expect(brokenOutcome.unrecognized).toBeDefined();
+    const siblingOutcome = await runMcpGetRoute(["sibling"], deps());
+    expect(siblingOutcome).toEqual({ ok: true, found: true, name: "sibling", scope: "project", transport: "stdio", command: "npx", args: undefined, env: undefined, cwd });
   });
 });
 

@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   readProjectMcpConfig, writeProjectMcpConfig, projectMcpConfigPath, projectMcpConfigExists,
-  readRawProjectMcpConfig, writeRawProjectMcpConfig,
+  readRawProjectMcpConfig, writeRawProjectMcpConfig, parseProjectMcpServers,
 } from "../../../src/agent/mcp/project-file";
 
 describe("project-file", () => {
@@ -119,6 +119,36 @@ describe("project-file", () => {
       const after = JSON.parse(readFileSync(projectMcpConfigPath(dir), "utf8"));
       expect(after.someOtherTopLevelKey).toBe("keep-me");
       expect(after.mcpServers["my-server"]).toEqual({ command: "npx" });
+    });
+  });
+
+  describe("parseProjectMcpServers (the shared PER-ENTRY parser — controller-directed parity fix)", () => {
+    test("a mixed map (stdio + http + sse + one malformed entry) validates the three good ones and skips the bad one, naming it", () => {
+      const { servers, skipped } = parseProjectMcpServers({
+        stdioOne: { command: "npx", args: ["pkg"] },
+        stdioWithType: { type: "stdio", command: "bun" },
+        httpOne: { type: "http", url: "https://example.com/mcp" },
+        sseOne: { type: "sse", url: "https://example.com/sse" },
+        broken: { type: "stdio" }, // missing `command`
+      });
+      expect(servers.stdioOne).toEqual({ type: "stdio", command: "npx", args: ["pkg"] });
+      expect(servers.stdioWithType).toEqual({ type: "stdio", command: "bun" });
+      expect(servers.httpOne).toEqual({ type: "http", url: "https://example.com/mcp" });
+      expect(servers.sseOne).toEqual({ type: "sse", url: "https://example.com/sse" });
+      expect(servers.broken).toBeUndefined();
+      expect(skipped).toEqual([{ name: "broken", reason: expect.any(String) }]);
+    });
+
+    test("a credential-shaped header on an http/sse entry is skipped, not silently accepted (same posture as settings.mcpServers)", () => {
+      const { servers, skipped } = parseProjectMcpServers({
+        remote: { type: "http", url: "https://example.com/mcp", headers: { Authorization: "Bearer sk-secret" } },
+      });
+      expect(servers.remote).toBeUndefined();
+      expect(skipped).toEqual([{ name: "remote", reason: expect.stringContaining("credential-shaped") }]);
+    });
+
+    test("an empty map validates to no servers and no skips", () => {
+      expect(parseProjectMcpServers({})).toEqual({ servers: {}, skipped: [] });
     });
   });
 });
