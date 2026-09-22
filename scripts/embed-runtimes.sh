@@ -82,12 +82,23 @@ if [ ! -f "${WINTER}" ] || [ ! -f "${CLAUDE}" ]; then
 fi
 
 # --- Step 3: re-sign winter with a STABLE identifier (P8d-2) --------------------------------
-codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --identifier com.winter.runtime --options runtime --timestamp "${WINTER}"
+# A2 (2026-09-22): plus exactly the JIT entitlement (scripts/bun-jit.entitlements). `winter` is a
+# bun (JavaScriptCore) binary; under the hardened runtime without allow-jit it runs JIT-less (no
+# SharedArrayBuffer, ~5x slower) — the same fault that kept the official peer from loading in
+# winter-core. The entitlement is not part of the designated requirement (identifier + team), so the
+# Keychain ACL keyed on com.winter.runtime is unaffected. `ant` (Go, Step 5) needs none.
+codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --identifier com.winter.runtime --options runtime --timestamp --entitlements "${SCRIPT_DIR}/bun-jit.entitlements" "${WINTER}"
 
 WINTER_DVV="$(codesign -dvv "${WINTER}" 2>&1 || true)"
 if ! echo "${WINTER_DVV}" | grep -q "^Identifier=com.winter.runtime$"; then
   echo "error: winter re-sign did not land the stable identifier com.winter.runtime:" >&2
   echo "${WINTER_DVV}" >&2
+  exit 1
+fi
+WINTER_ENTS="$(codesign -d --entitlements - --xml "${WINTER}" 2>/dev/null || true)"
+if ! echo "${WINTER_ENTS}" | grep -q "com.apple.security.cs.allow-jit"; then
+  echo "error: winter re-sign did not land the allow-jit entitlement (scripts/bun-jit.entitlements):" >&2
+  echo "${WINTER_ENTS}" >&2
   exit 1
 fi
 

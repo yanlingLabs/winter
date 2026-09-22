@@ -157,6 +157,31 @@ describe("createWinterRuntimeSdk — the options it hands the router", () => {
     expect(opts.peerVersions?.claudeAgentSdk).toBeUndefined();
   });
 
+  test("A2: a LOADED peer whose version cannot be established is dropped — the router never sees peers.claude without a declared version", async () => {
+    // The compiled `$bunfs` shape: the import succeeds, but no manifest can be resolved at runtime.
+    // Forwarding `peers.claude` with `claudeAgentSdk: undefined` makes the router's version matrix
+    // throw `RuntimeSdkVersionError` at construction — and that kills the WHOLE handle, the Winter
+    // leg included. It must degrade to "the official leg is unavailable" instead.
+    const lines: string[] = [];
+    const { opts, handle } = await build({ log: (line) => lines.push(line) }, undefined, undefined, () => undefined);
+    expect(opts.peers.winter).toBeDefined();
+    expect(opts.peers.claude).toBeUndefined();
+    expect(opts.peerVersions?.claudeAgentSdk).toBeUndefined();
+    expect(await handle.officialPeer()).toBeUndefined();
+    expect(lines.some((l) => l.includes("version") && l.includes("official leg is unavailable"))).toBe(true);
+  });
+
+  test("A2: a failed peer import logs the error MESSAGE — one line, bounded", async () => {
+    const lines: string[] = [];
+    const long = `SharedArrayBuffer is not defined\n${"x".repeat(2_000)}`;
+    await build({ log: (line) => lines.push(line) }, undefined, () => Promise.reject(new ReferenceError(long)));
+    const line = lines.find((l) => l.includes("official peer"));
+    expect(line).toBeDefined();
+    expect(line).toContain("ReferenceError: SharedArrayBuffer is not defined");
+    expect(line!.includes("\n")).toBe(false);
+    expect(line!.length).toBeLessThan(400);
+  });
+
   test("the official permission class is forwarded to both adapters when declared", async () => {
     const sessionPermissionClass = () => "unknown" as const;
     const { opts } = await build({ sessionPermissionClass });

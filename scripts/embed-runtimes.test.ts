@@ -98,6 +98,13 @@ describe("embed-runtimes.sh (P8d-1/P8d-2 postCompileScript body, standalone)", (
       // build-phase proof, not release.ts's real-team-identity gate).
       const winterDvv = spawnSync("codesign", ["-dvv", join(dest, "winter")], { encoding: "utf8" });
       expect(`${winterDvv.stdout}${winterDvv.stderr}`).toContain("Identifier=com.winter.runtime");
+      // A2: exactly the JIT entitlement on winter (a bun binary); none on ant (Go).
+      const csKeys = (path: string): string[] => {
+        const xml = spawnSync("codesign", ["-d", "--entitlements", "-", "--xml", path], { encoding: "utf8" }).stdout ?? "";
+        return [...xml.matchAll(/<key>(com\.apple\.security\.cs\.[^<]+)<\/key>/g)].map((m) => m[1]!);
+      };
+      expect(csKeys(join(dest, "winter"))).toEqual(["com.apple.security.cs.allow-jit"]);
+      expect(csKeys(join(dest, "ant", "ant"))).toEqual([]);
 
       // claude: untouched, still verifies as the real Anthropic-signed artifact.
       const claudeVerify = spawnSync("codesign", ["--verify", "--strict", join(dest, "claude-official", "claude")], { encoding: "utf8" });
