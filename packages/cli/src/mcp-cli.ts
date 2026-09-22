@@ -39,6 +39,7 @@ import {
   loadSettings, saveSettings, addUserMcpServer, removeUserMcpServer,
   addProjectMcpServer, removeProjectMcpServer, readRawProjectMcpConfig, writeRawProjectMcpConfig,
   parseProjectMcpServers, projectMcpConfigPath, TrustStore,
+  stripCredentialShapedMcpHeaders, readRawSettings,
   type McpServerSettingsEntry, type ProjectMcpServerEntry,
 } from "@yanlinglabs/winter-core";
 import { McpAddEntrySchema } from "@yanlinglabs/winter-protocol";
@@ -258,6 +259,22 @@ export function buildMcpEntry(parsed: McpAddParsed, transport: McpTransport): Mc
   };
 }
 
+/** claude's own stdio branch warns (never refuses) when an OAuth-only flag was given on stdio
+ *  (`addCommand.ts:240-249`, reference clone) — same idea here for `-H`/`-e` on the WRONG
+ *  transport: `buildMcpEntry` only ever reads `headerArgs` for http/sse and `envArgs` for stdio, so
+ *  the other one is silently dropped with NO signal at all otherwise — a user who typed `-H
+ *  "Authorization: …"` on a stdio add would have no way to know it never reached the entry. */
+function wrongTransportFlagWarnings(parsed: McpAddParsed, transport: McpTransport): string[] {
+  const warnings: string[] = [];
+  if (transport === "stdio" && parsed.headerArgs.length > 0) {
+    warnings.push("-H/--header is only used for http/sse servers and was ignored for this stdio entry");
+  }
+  if (transport !== "stdio" && parsed.envArgs.length > 0) {
+    warnings.push(`-e/--env is only used for stdio servers and was ignored for this ${transport} entry`);
+  }
+  return warnings;
+}
+
 // ------------------------------------------------------------------------------------------------
 // Route functions — the full round trip (I/O via the injected door and `@yanlinglabs/winter-core`),
 // returning a plain outcome object. Nothing here prints or exits; `main.ts`'s `case "mcp"` does.
@@ -345,10 +362,15 @@ export async function runMcpAddRoute(args: string[], deps: McpRouteDeps): Promis
 
   // Mirrors claude's own "did you mean --transport http/sse" heuristic (`addCommand.ts`): only
   // when the transport was NOT given explicitly — an explicit `-t stdio` on a URL-shaped command is
-  // the user's own deliberate choice, never second-guessed.
-  const warning = parsed.transportRaw === undefined && looksLikeMcpUrl(parsed.commandOrUrl)
-    ? `the command "${parsed.commandOrUrl}" looks like a URL, but is being added as a stdio server because --transport was not specified — for an http server use "-t http", for sse use "-t sse"`
-    : undefined;
+  // the user's own deliberate choice, never second-guessed. Combined with the wrong-transport-flag
+  // warnings above (`-H` on stdio, `-e` on http/sse) — either, both, or neither may fire.
+  const warnings = [
+    ...(parsed.transportRaw === undefined && looksLikeMcpUrl(parsed.commandOrUrl)
+      ? [`the command "${parsed.commandOrUrl}" looks like a URL, but is being added as a stdio server because --transport was not specified — for an http server use "-t http", for sse use "-t sse"`]
+      : []),
+    ...wrongTransportFlagWarnings(parsed, transport),
+  ];
+  const warning = warnings.length > 0 ? warnings.join("\n") : undefined;
 
   let outcome: McpAddOutcome;
   if (scopeResult.scope === "project") {
@@ -414,9 +436,19 @@ async function userScopeHasServer(deps: McpRouteDeps, name: string): Promise<boo
   try { return loadSettings(join(deps.winterHome, "settings.json")).mcpServers?.[name] !== undefined; } catch { return false; }
 }
 
-function projectScopeHasServer(deps: McpRouteDeps, name: string): boolean {
+/** Tri-state, not a boolean: a malformed project `.mcp.json` must never be silently read as "not
+ *  there" (a review caught the ambient `mcp remove` — no `-s` — doing exactly that, which could
+ *  make a REAL project-scope entry vanish from the "which scope did you mean" reasoning entirely,
+ *  or worse, "not found anywhere" when it was actually sitting in a file this command simply
+ *  couldn't parse). `runMcpRemoveRoute`'s ambient branch surfaces the parse error instead, the same
+ *  way `mcp get` already does. */
+type ProjectScopeCheck = { kind: "found" } | { kind: "absent" } | { kind: "malformed"; message: string };
+
+function projectScopeHasServer(deps: McpRouteDeps, name: string): ProjectScopeCheck {
   const read = readRawProjectMcpConfig(deps.cwd);
-  return read.kind === "ok" && Object.hasOwn(read.servers, name);
+  if (read.kind === "malformed") return { kind: "malformed", message: malformedProjectFileMessage(deps.cwd, `checking for "${name}"`) };
+  if (read.kind === "absent") return { kind: "absent" };
+  return { kind: Object.hasOwn(read.servers, name) ? "found" : "absent" };
 }
 
 async function removeUserScope(deps: McpRouteDeps, name: string): Promise<{ removed: boolean }> {
@@ -463,7 +495,12 @@ export async function runMcpRemoveRoute(args: string[], deps: McpRouteDeps): Pro
     return { ok: true, scope: "project", name: parsed.name, removed: projectResult.removed, cwd: deps.cwd };
   }
 
-  const [inUser, inProject] = await Promise.all([userScopeHasServer(deps, parsed.name), Promise.resolve(projectScopeHasServer(deps, parsed.name))]);
+  const [inUser, projectCheck] = await Promise.all([userScopeHasServer(deps, parsed.name), Promise.resolve(projectScopeHasServer(deps, parsed.name))]);
+  // A malformed project file is NEVER silently read as "not there" — this command can't tell
+  // whether the name is ALSO in project scope, so it surfaces the parse error rather than guess
+  // either "user only" or "found nowhere", exactly as `mcp get` already does for this file.
+  if (projectCheck.kind === "malformed") return { ok: false, message: projectCheck.message };
+  const inProject = projectCheck.kind === "found";
   if (inUser && inProject) return { ok: false, multi: true, name: parsed.name, scopes: ["user", "project"] };
   if (inUser) {
     const { removed } = await removeUserScope(deps, parsed.name);
@@ -518,11 +555,17 @@ export async function runMcpGetRoute(args: string[], deps: McpRouteDeps): Promis
     } catch { /* fall through to project scope below */ }
   } else {
     try {
-      const entry = loadSettings(join(deps.winterHome, "settings.json")).mcpServers?.[name];
+      const settingsPath = join(deps.winterHome, "settings.json");
+      const entry = loadSettings(settingsPath).mcpServers?.[name];
       if (entry) {
+        // Read-door correction, matching the RPC handler's own `mcp.get` exactly (`ipc/server.ts`):
+        // which credential-shaped headers `loadSettings` silently stripped for THIS server, read
+        // fresh off the RAW file — `entry` above, by construction, can no longer say what it lost.
+        const strippedHeaders = stripCredentialShapedMcpHeaders(readRawSettings(settingsPath) ?? {})[name];
         return {
           ok: true, found: true, name, scope: "user", transport: entry.type,
           ...(entry.type === "stdio" ? { command: entry.command, args: entry.args, env: entry.env } : { url: entry.url, headers: entry.headers }),
+          ...(strippedHeaders && strippedHeaders.length > 0 ? { strippedHeaders } : {}),
         };
       }
     } catch { /* no settings.json yet — fall through */ }
@@ -557,7 +600,9 @@ function scopeLabel(scope: McpScope, cwd?: string): string {
 
 export function renderMcpAddOutcome(outcome: McpAddOutcome): string {
   if (!outcome.ok) return outcome.message;
-  const warningLine = outcome.warning ? `Warning: ${outcome.warning}\n` : "";
+  // `outcome.warning` may carry more than one warning, newline-joined (`runMcpAddRoute`) — each
+  // gets its own "Warning: " line rather than only the first.
+  const warningLine = outcome.warning ? `${outcome.warning.split("\n").map((w) => `Warning: ${w}`).join("\n")}\n` : "";
   if (outcome.scope === "project") {
     const trustNote = outcome.trusted ? "" : ` — not yet loaded: this project is not trusted yet (run \`winter trust ${outcome.cwd}\` to trust it)`;
     return `${warningLine}Added ${outcome.transport} MCP server "${outcome.name}" to ${scopeLabel("project", outcome.cwd)}${trustNote}`;

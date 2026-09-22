@@ -93,6 +93,23 @@ test("the SAME mixed .mcp.json, untrusted, still contributes nothing — the tru
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// RULING (review round 2): a project's .mcp.json is git-shared, claude-formatted, and NOT
+// settings.json — its http/sse entries must reach the child with their headers VERBATIM, credential-
+// shaped or not (a real team's shared MCP server routinely authenticates via a header in the
+// committed file, and claude's own reader forwards it as-is). An earlier draft of the per-entry fix
+// reused settings.mcpServers' own schema (refuseCredentialShapedHeaders included) and so silently
+// DROPPED such an entry — this is the regression test for that reversal.
+test("a project-scope http entry with a credential-shaped header (Authorization) reaches the child VERBATIM — never refused, never stripped (parity with claude, not settings.json's own posture)", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "winter-ext-mcp-project-cred-header-")));
+  try {
+    writeFileSync(join(dir, ".mcp.json"), JSON.stringify({
+      mcpServers: { credhttp: { type: "http", url: "https://example.com/mcp", headers: { Authorization: "Bearer sk-team-shared" } } },
+    }));
+    const out = configuredMcpServersFor({ settings: null, cwd: dir, trusted: () => true });
+    expect(out).toEqual({ credhttp: { type: "http", url: "https://example.com/mcp", headers: { Authorization: "Bearer sk-team-shared" } } });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("no settings, no cwd → nothing (a bare daemon forwards no servers)", () => {
   expect(configuredMcpServersFor({ settings: undefined, cwd: undefined, trusted: () => true })).toEqual({});
   expect(configuredMcpServersFor({ settings: null, cwd: "", trusted: () => true })).toEqual({});

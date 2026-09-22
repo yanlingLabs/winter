@@ -13,6 +13,11 @@ export {
   REASONING_EFFORTS, setProviderModel, setReasoningEffort, setOutputStyle, setAdvisorModel, memoryEnabledFrom,
   workflowsEnabledFrom, keywordTriggerEnabledFrom,
   setMcpServerEntry, removeMcpServerEntry,
+  // `winter mcp get`'s no-daemon path (`mcp-cli.ts`) needs the SAME read-door correction the RPC
+  // handler already applies (`ipc/server.ts`'s `mcp.get`/`mcp.list`): which credential-shaped
+  // headers `loadSettings` silently stripped from a USER-scope entry, read fresh off the raw file
+  // (never off the already-stripped `Settings` value, which can no longer say what it removed).
+  stripCredentialShapedMcpHeaders, readRawSettings,
   type Settings, type McpServerSettingsEntry,
 } from "./settings";
 // `winter mcp add/remove` (CLI parity with `claude mcp add/remove`): the ONE validated write door
@@ -25,7 +30,8 @@ export {
 export {
   readProjectMcpConfig, writeProjectMcpConfig, projectMcpConfigPath, projectMcpConfigExists,
   readRawProjectMcpConfig, writeRawProjectMcpConfig, parseProjectMcpServers,
-  type ProjectMcpConfig, type ProjectMcpServerEntry, type ParsedProjectMcpServers, type SkippedProjectMcpServer,
+  type ProjectMcpConfig, type ProjectMcpServerEntry, type ProjectMcpEntry,
+  type ParsedProjectMcpServers, type SkippedProjectMcpServer,
 } from "./agent/mcp/project-file";
 export { reservedMcpServerNames } from "./capabilities/names";
 // Winter Phase 8d (Task 4.3): `winter model --advisor <slug>` validates against the SAME pinned

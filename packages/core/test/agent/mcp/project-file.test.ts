@@ -3,7 +3,7 @@
 // `winter mcp add/remove --scope project` (`mcp-cli.ts`). Uses a real temp dir (this is
 // deliberately I/O, not a pure function) — never touches `~/.winter*`.
 import { describe, expect, test, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync, chmodSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -139,16 +139,71 @@ describe("project-file", () => {
       expect(skipped).toEqual([{ name: "broken", reason: expect.any(String) }]);
     });
 
-    test("a credential-shaped header on an http/sse entry is skipped, not silently accepted (same posture as settings.mcpServers)", () => {
+    // RULING (review round 2, reversing an earlier draft of this fix): a project's .mcp.json is
+    // NOT settings.json — a git-shared team file whose http/sse entry frequently authenticates via
+    // a header IN the committed file, exactly as claude's own reader accepts it. This MUST NOT go
+    // through settings.mcpServers' refuseCredentialShapedHeaders refinement; the header reaches the
+    // child verbatim, parity with claude, not a new hole.
+    test("a credential-shaped header on a project-scope http/sse entry is KEPT verbatim — NOT the settings.mcpServers refusal (parity with claude's own .mcp.json reader)", () => {
       const { servers, skipped } = parseProjectMcpServers({
         remote: { type: "http", url: "https://example.com/mcp", headers: { Authorization: "Bearer sk-secret" } },
       });
-      expect(servers.remote).toBeUndefined();
-      expect(skipped).toEqual([{ name: "remote", reason: expect.stringContaining("credential-shaped") }]);
+      expect(skipped).toEqual([]);
+      expect(servers.remote).toEqual({ type: "http", url: "https://example.com/mcp", headers: { Authorization: "Bearer sk-secret" } });
     });
 
     test("an empty map validates to no servers and no skips", () => {
       expect(parseProjectMcpServers({})).toEqual({ servers: {}, skipped: [] });
+    });
+  });
+
+  // Review round 2, minor 4: writes are now atomic (temp file in the same dir + rename), preserving
+  // the existing file's mode — a crash or kill mid-`writeFileSync` must never leave a team's
+  // git-shared `.mcp.json` truncated or empty.
+  describe("atomic writes (writeProjectMcpConfig / writeRawProjectMcpConfig)", () => {
+    test("writeRawProjectMcpConfig leaves no stray temp file behind, and the final content is correct", () => {
+      const dir = tempDir();
+      writeRawProjectMcpConfig(dir, {}, { "my-server": { command: "npx" } });
+      const entries = readdirSync(dir);
+      expect(entries).toEqual([".mcp.json"]); // no leftover .tmp file
+      expect(readRawProjectMcpConfig(dir)).toEqual({ kind: "ok", raw: { mcpServers: { "my-server": { command: "npx" } } }, servers: { "my-server": { command: "npx" } } });
+    });
+
+    test("writeProjectMcpConfig leaves no stray temp file behind", () => {
+      const dir = tempDir();
+      writeProjectMcpConfig(dir, { mcpServers: { "my-server": { command: "npx" } } });
+      expect(readdirSync(dir)).toEqual([".mcp.json"]);
+    });
+
+    test("writeRawProjectMcpConfig preserves the existing file's mode across a rewrite", () => {
+      const dir = tempDir();
+      writeRawProjectMcpConfig(dir, {}, { one: { command: "npx" } });
+      const path = projectMcpConfigPath(dir);
+      chmodSync(path, 0o640);
+      const modeBefore = statSync(path).mode & 0o777;
+      expect(modeBefore).toBe(0o640);
+      writeRawProjectMcpConfig(dir, {}, { one: { command: "npx" }, two: { command: "bun" } });
+      const modeAfter = statSync(path).mode & 0o777;
+      expect(modeAfter).toBe(0o640);
+    });
+
+    test("a fresh file (no prior mode to preserve) still writes successfully", () => {
+      const dir = tempDir();
+      expect(() => writeRawProjectMcpConfig(dir, {}, { one: { command: "npx" } })).not.toThrow();
+      expect(readRawProjectMcpConfig(dir).kind).toBe("ok");
+    });
+
+    test("a failed write (directory made read-only) never leaves a stray temp file behind", () => {
+      if (process.getuid && process.getuid() === 0) return; // root bypasses the permission check this test relies on
+      const dir = tempDir();
+      writeRawProjectMcpConfig(dir, {}, { one: { command: "npx" } }); // a valid file exists first
+      chmodSync(dir, 0o500); // read+execute only — the temp write inside it must now fail (EACCES)
+      try {
+        expect(() => writeRawProjectMcpConfig(dir, {}, { two: { command: "bun" } })).toThrow();
+      } finally {
+        chmodSync(dir, 0o700); // restore before afterEach's rmSync cleans the temp dir up
+      }
+      expect(readdirSync(dir)).toEqual([".mcp.json"]); // no leftover .tmp file, original untouched
     });
   });
 });
