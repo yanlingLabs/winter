@@ -59,7 +59,7 @@ import { renderNoCredentialHint } from "./handoff";
 import { neutralSelectionRefusal, refusalDetailCategoryFor } from "./refusal-copy";
 import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
 import { attachOfficialSession, attachWinterSession } from "./messaging";
-import { buildWinterOptions, permissionModeFor } from "./mode-options";
+import { buildWinterOptions, bypassAllowedAtSpawn, permissionModeFor } from "./mode-options";
 import { providerFor, rowForTag, testProviderNameFor } from "./provider-selection";
 import { splitTag, UNSTATED_TAG, isModelTag, WINTER_TEST_PREFIX, type ModelTag } from "./model-tag";
 import { winterSessions } from "./sessions";
@@ -411,10 +411,10 @@ export function sessionPermissionClassFor(deps: {
       if (record === undefined) return "unknown";
       const policy = deps.store.meta(record.winterSessionId).approvalPolicy;
       // `bypassAvailable` is the SDK's "was `allowDangerouslySkipPermissions` granted" predicate,
-      // and `mode-options.ts` grants it under the `bypass` policy only — so the two ARE one
+      // and `mode-options.ts` grants it exactly when `bypassAllowedAtSpawn` says so — so the two ARE one
       // predicate. (The SDK consults it for `plan` alone; `bypassPermissions` classifies
       // `bypasses` unconditionally, everything else `prompts`.)
-      return classifyPermissionMode(permissionModeFor(policy), { bypassAvailable: policy === "bypass" });
+      return classifyPermissionMode(permissionModeFor(policy), { bypassAvailable: bypassAllowedAtSpawn(policy) });
     } catch {
       return "unknown";
     }
