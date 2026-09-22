@@ -221,6 +221,9 @@ export class SessionCleaner {
     if (!this.deps.enabled()) return result;
 
     const nowMs = this.now();
+    // Expired cooldown entries go first, so a session removed by another path (the reaper, a user
+    // delete) never leaves a permanent entry behind.
+    for (const [id, at] of this.lastFailureAt) if (nowMs - at >= CLEANER_RETRY_BACKOFF_MS) this.lastFailureAt.delete(id);
     let candidates: string[];
     try {
       candidates = this.deps.store.cleanerCandidateIds(nowMs - CLEANER_MIN_IDLE_MS);
