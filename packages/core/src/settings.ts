@@ -2137,10 +2137,14 @@ export function roleCarriesEffort(role: ModelRole): boolean {
  *     through `implicitEffortFor` to dodge that would hit exactly the miss-to-`defaultEffort` trap this
  *     case exists to avoid (measured: `"none"` on `codex-oauth/gpt-5.6-terra` came back `"medium"`). So
  *     `internalWireEffortFor` (providers/internal-provider.ts) drops it, and the honest consequence is
- *     that the request carries NO effort and the PROVIDER's own default applies: **Winter cannot express
- *     `"none"` on this path yet.** SDK CARRY — the catalog omits `"none"` from the vocabularies whose
- *     endpoints demonstrably accept it (`openai/gpt-5.6-terra`'s own live-probe `sourceRef` records that
- *     it is), so either the catalog lists it or `mapEffort` grows a sanctioned "send no reasoning block".
+ *     that the request carries NO effort and the PROVIDER's own default applies — which escalated past the
+ *     user's intent (measured 2026-09-22: `"medium"` on `codex-oauth/gpt-5.6-luna`, timing out the
+ *     cleaner). So since 2026-09-22 `internalWireEffortFor` sends a reasoning row that lacks a `"none"`
+ *     tier its LOWEST declared effort instead; a row with no vocabulary still sends nothing, and a row
+ *     that lists `"none"` still has it dropped (unmeasured). SDK CARRY — the catalog omits `"none"` from
+ *     vocabularies whose endpoints demonstrably accept it (`openai/gpt-5.6-terra`'s own live-probe
+ *     `sourceRef` records that it is), so either the catalog lists it or `mapEffort` grows a sanctioned
+ *     "send no reasoning block".
  *
  *  3. ANY OTHER LEVEL -> `implicitEffortFor(model, stored)`: sent when the row lists it, else the row's
  *     own default, else omitted. NEVER a refusal and never a throw — the write door validated the
