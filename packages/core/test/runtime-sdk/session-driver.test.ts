@@ -622,6 +622,41 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
     } finally { t.close(); }
   });
 
+  // B2 (2026-09-22): `session.setPolicy` across the bypass boundary replaces the child through THIS
+  // table's `evict` (ipc/server.ts's `replaceChildForPolicy`). The table half of that claim: the next
+  // incarnation re-reads the stored policy, so both spawn-time bypass facts follow it — in, and back out.
+  test("B2: after an evict, the next incarnation spawns with the STORED policy's bypass clamp — both ways", async () => {
+    const t = table();
+    try {
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", approvalPolicy: "ask" });
+      const first = await t.drivers.create(sid);
+      expect(t.q().options.permissionMode).toBe("default");
+      expect(t.q().options.permissions?.disableBypassPermissionsMode).toBe(true);
+      expect(t.q().options.allowDangerouslySkipPermissions).toBeUndefined();
+
+      t.store.setApprovalPolicy(sid, "bypass");
+      await t.drivers.evict(sid);
+      const second = (await t.drivers.ensure(sid))!;
+      expect(second).not.toBe(first);
+      await second.open();
+      expect(t.queries).toHaveLength(2);
+      expect(t.q().options.permissionMode).toBe("bypassPermissions");
+      expect(t.q().options.permissions?.disableBypassPermissionsMode).toBe(false);
+      expect(t.q().options.allowDangerouslySkipPermissions).toBe(true);
+      // Resumed, not restarted: the same backend transcript.
+      expect(t.q().options.resume ?? t.q().options.sessionId).toBe(first.backendSessionId);
+
+      t.store.setApprovalPolicy(sid, "accept-edits");
+      await t.drivers.evict(sid);
+      const third = (await t.drivers.ensure(sid))!;
+      await third.open();
+      expect(t.q().options.permissionMode).toBe("acceptEdits");
+      expect(t.q().options.permissions?.disableBypassPermissionsMode).toBe(true);
+      expect(t.q().options.allowDangerouslySkipPermissions).toBeUndefined();
+      await third.end();
+    } finally { t.close(); }
+  });
+
   test("an `exa` change leaves an OFFICIAL-leg session alone — that leg is sent no `web` block at all", async () => {
     const t = table({});
     try {
