@@ -75,6 +75,7 @@ import { computeLineDiff } from "../diffs/myers";
 import { DIFF_PATCH_MAX_BYTES, mintDiffId, writeDiff } from "../diffs/store";
 import type { HookResult } from "../plugins/hook-runner";
 import { attachFileDiff } from "./diff-attach";
+import { REVIEWER_ESCALATION_REASON } from "./bridge-common";
 
 /** The subset of `plugins/hook-registry.ts`'s `HookFacade` this module depends on — injected
  *  rather than imported concretely so a fake can stand in for tests with no real plugin process
@@ -312,8 +313,10 @@ function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
       // answered when such a home had no `BashReviewer` at all. The reviewer has already logged the
       // state change once; nothing is logged per call here.
       if (err instanceof ReviewerNoRunnableModel) return allow();
-      // carry: measure `ask` end-to-end against a real child before trusting it as the sole net.
-      return ask("reviewer unavailable — escalating for manual approval");
+      // C3 (2026-09-22) — traced in the SDK source, not yet measured on a live child: the child hands
+      // this `ask` to `canUseTool` with the reason verbatim, and the approval bridge now cards it
+      // (`reviewerCouldNotJudge`); before, the gate's `auto` allow answered it, i.e. silently ran it.
+      return ask(REVIEWER_ESCALATION_REASON);
     }
   };
 }

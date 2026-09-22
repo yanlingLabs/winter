@@ -11,7 +11,7 @@ import { gateClassFor, gateToolNameFor, WINTER_OWN_TOOL_NAMES } from "./tool-nam
 import { controlPlaneTargetForCall, controlPlaneDenialMessage } from "./control-plane";
 import { outdirPath } from "../sessions/outdir";
 import { askUserQuestionBridge, ASK_USER_QUESTION_TOOL } from "./question-bridge";
-import { consoleBridgeLogger, NO_PARK_TIMEOUT_MS, type BridgeLogger } from "./bridge-common";
+import { consoleBridgeLogger, NO_PARK_TIMEOUT_MS, REVIEWER_ESCALATION_REASON, type BridgeLogger } from "./bridge-common";
 import type { BridgedPlanRequest } from "./plan-bridge";
 
 export { NO_PARK_TIMEOUT_MS, type BridgeLogger } from "./bridge-common";
@@ -202,13 +202,12 @@ export function isBlessedOutputPath(deps: { home?: string; sessionId: string }, 
   return p === prefix || p.startsWith(prefix + sep);
 }
 
-/** A `bash` call asking for a full sandbox escape (`dangerouslyDisableSandbox: true`). Takes the
- *  WINTER tool name — the escape arg is Winter's own, and the Winter built-in that carries it arrives
- *  as `Bash`. Exported so the matrix test can pin the predicate as well as the verdict. */
-export function isUnsandboxedBashEscape(gateToolName: string, input: unknown): boolean {
-  if (gateToolName !== "bash") return false;
-  if (typeof input !== "object" || input === null) return false;
-  return (input as Record<string, unknown>).dangerouslyDisableSandbox === true;
+/** Did the bash safety reviewer escalate this call because it could reach NO verdict? The child
+ *  passes a PreToolUse hook's reason through as `decisionReason` verbatim (and joins several hooks'
+ *  reasons into one), so this is a containment test on the daemon's OWN string — never a read of the
+ *  runtime's private vocabulary, which (5c) below still refuses to act on. */
+export function reviewerCouldNotJudge(decisionReason: string | undefined): boolean {
+  return typeof decisionReason === "string" && decisionReason.includes(REVIEWER_ESCALATION_REASON);
 }
 
 /** Splits a Winter/CC rule string (`Bash(git push:*)`, `Edit(/foo)`, bare `WebFetch`) back into the
@@ -318,7 +317,8 @@ export function approvalOptionsFromSuggestions(suggestions: readonly PermissionU
  * task report: the in-project write/edit silencing under `ask`; `controlPlaneFileTarget` and the
  * `~/.winter` grant denylist; the out-of-root `dirGrant` card; the web class's and `browser`'s
  * dangerous-domain floors (which move with the capability tools, P8b-12); bash's always-card
- * escalation args; and the safety reviewer. It also performs no rules-store READ, so a standing
+ * escalation args (P8b-31 re-asserted the sandbox-escape one here until C3 retired it for claude
+ * parity — see (5b)); and the safety reviewer. It also performs no rules-store READ, so a standing
  * rule that silences a card today does not silence it here — Winter's own rule stages do that.
  */
 
@@ -476,23 +476,41 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     // (5) engine.ts:4341 — dont-ask declines everything it would otherwise card, with no prompt.
     if (decision === "ask" && policy === "dont-ask") decision = "deny";
 
-    // (5b) P8b-31 — THE SANDBOX-ESCAPE FLOOR. `engine.ts:4518`'s branch condition is
-    //   `call.name === "bash" && bashEscalation.dangerouslyDisableSandbox
-    //    && !unsandboxedRuleAllowed && meta.approvalPolicy !== "bypass"`
-    // and its own comment enumerates the disposition: plan denied it (the deny branch), dont-ask
-    // denied it (the ask→deny flip above), bypass ran it silently (the branch guard), and
-    // auto/ask/accept-edits all CARD. The gate cannot see arguments, so it returns a flat `allow`
-    // for `bash` under `auto` — which on the Winter leg would run a FULL SANDBOX ESCAPE with no
-    // human in the loop, in code and dispatch alike. Re-asserted here because the bridge is the
-    // only place left that can: Winter surfaces exactly this call at `canUseTool` in every mode.
+    // (5b) C3 (lane C, 2026-09-22) — AN UNSANDBOXED ESCAPE TAKES THE ORDINARY BASH VERDICT (claude
+    // parity). This line used to be P8b-31's ALWAYS-CARD, re-asserting the retired engine's own
+    // `engine.ts:4518` branch: `auto` carded every `dangerouslyDisableSandbox: true` call, and so did
+    // dispatch (as a typed deny), whatever rule or mode stood behind it. Claude does no such thing
+    // (reference source, cited in full in the lane report and in `mode-matrix.test.ts`): the flag
+    // makes `shouldUseSandbox` false (`tools/BashTool/shouldUseSandbox.ts:136-141`), which removes ONLY
+    // the sandbox AUTO-ALLOW (`bashPermissions.ts:1829-1842`); an allow rule then allows it
+    // (`bashPermissions.ts:1132-1142`), bypass allows it (`utils/permissions/permissions.ts:1255-1269`),
+    // auto hands it to its classifier with no prompt (`permissions.ts:519-…`), default and acceptEdits
+    // prompt, dontAsk denies. Nothing in claude produces its `sandboxOverride` decision reason at all.
     //
-    // Placed AFTER the dont-ask flip so plan/dont-ask keep their denies, and gated on
-    // `decision === "allow"` + `policy !== "bypass"` so it reproduces the engine's condition
-    // exactly — `ask`/`accept-edits` already resolve to `"ask"` and are untouched, and `bypass`
-    // keeps running it silently. `!unsandboxedRuleAllowed` has no analogue here: the bridge performs
-    // no rules-store read at all, so a standing `BashUnsandboxed(...)` rule does NOT pre-clear an
-    // escape on this leg — strictly more conservative than today, and recorded as such.
-    if (decision === "allow" && policy !== "bypass" && isUnsandboxedBashEscape(classificationName, input)) {
+    // So the gate's `bash` verdict now stands: plan → deny, dont-ask → deny (the flip above), ask and
+    // accept-edits → a card, bypass → allow, and `auto` → allow AFTER Winter's classifier — the bash
+    // safety reviewer, a PreToolUse hook that has already run before this bridge was called and denies
+    // what it judges unsafe. Every floor claude keeps is still here: deny rules (the child's stage 2,
+    // before `canUseTool`), the control-plane fence (2), the private-address floor (5d), the
+    // dangerous-domain floor (the shared hooks), and the reviewer's own "could not judge" escalation
+    // just below — claude's auto never silently allows what its classifier could not judge
+    // (`permissions.ts:845-875`: fail closed, or fall back to a prompt).
+    //
+    // The card's own text is unchanged — an escape still reads `bash (UNSANDBOXED): …` on it.
+    // WHAT STILL CARDS AN ESCAPE UNDER A MATCHING ALLOW RULE is outside this file (lane report): the
+    // agent SDK's RULING P3-J makes the flag "mandatory interaction" ahead of its allow-rule stage
+    // (0.0.17 `permissions/evaluator.ts:1852-1869`), and the daemon never hands the child the user's
+    // persisted allow rules (`mode-options.ts`'s `permissions.allow` carries only Winter's own reads).
+    //
+    // (5b') THE REVIEWER'S NO-VERDICT. The reviewer answers a PreToolUse `ask` when it could reach no
+    // verdict (`hooks.ts`'s `REVIEWER_ESCALATION_REASON`), and the child hands that text back here
+    // verbatim as `decisionReason` — the only hook-forced ask that arrives looking like a plain call.
+    // Under `auto` the gate says `allow` for `bash`, so without this the escalation meant to reach a
+    // human ran the command silently (it did, for every bash call, before this line existed). Narrows
+    // only: a gate `deny` stays a deny, and a never-prompting session turns the card into its typed
+    // deny below.
+    if (decision === "allow" && reviewerCouldNotJudge(ctx.decisionReason)) {
+      log.info(`canUseTool: escalate session=${deps.sessionId} tool=${toolName} reason=reviewer-no-verdict`);
       decision = "ask";
     }
 
@@ -542,8 +560,8 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     // (5d) THE PRIVATE-ADDRESS FLOOR (whole-branch review B1/M2). See `privateWebFetchTarget` for
     // what went wrong without it and why the judgement is the daemon's own.
     //
-    // Under EVERY policy, `bypass` included — unlike (5b)'s sandbox-escape floor, which excludes
-    // bypass to reproduce the engine's own condition exactly. The condition being reproduced here is
+    // Under EVERY policy, `bypass` included — unlike the retired P8b-31 sandbox-escape floor (see
+    // (5b)), which excluded bypass to reproduce the engine's own condition. The condition being reproduced here is
     // the SDK's, and the SDK's is "ask even in `bypassPermissions`, even under a broad allow rule,
     // even after a hook pre-approved it": only an allow rule naming that exact host, or
     // `privateAddressPolicy: "allow"`, is consent, and neither of those is a session policy. A
