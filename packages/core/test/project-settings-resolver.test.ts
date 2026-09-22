@@ -15,8 +15,8 @@ function tmpDir(prefix: string): string {
 /** Minimal valid Settings — mirrors project-settings-merge.test.ts's own helper. */
 function minimalBase(overrides: Record<string, unknown> = {}): Settings {
   return Settings.parse({
-    schemaVersion: 2,
-    provider: { type: "codex-oauth", model: "x" },
+    schemaVersion: 3,
+    provider: { model: "codex-oauth/x" },
     ...overrides,
   });
 }

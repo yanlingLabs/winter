@@ -3091,23 +3091,26 @@ describe("provider.configure RPC (BYOK T1)", () => {
     c.close(); srv.stop();
   });
 
-  // WS-20 (review round 2, M6): `settings.provider.model` binds the daemon's own internal
-  // Provider, which can only ever serve codex-oauth/openai — a tag naming any other provider is
-  // refused INVALID_PARAMS here, not silently written (and not left to `saveSettings`'s own schema
-  // refinement to throw a raw parse failure instead).
-  test("M6: a model naming a provider the daemon's internal Provider cannot serve is refused INVALID_PARAMS, nothing written", async () => {
+  // WS-20 (review round 4, `e7bd312b`): round 2's M6 gated this RPC to INTERNAL_PROVIDER_IDS
+  // (codex-oauth/openai); round 4 REVERTED that — `provider.model` is also a session's own
+  // default-model fallback (session-driver.ts's `create()`), which has always been unconstrained,
+  // and the round-2 gate broke a real "my default chat model is Claude" scenario (confirmed against
+  // the real winter binary). The constraint now lives only in `createProvider`
+  // (`providers/manager.ts`), which answers `null` for a provider outside `INTERNAL_PROVIDER_IDS`
+  // rather than refusing the write — see `settings.test.ts`'s own "R4" tests for that seam.
+  test("R4: a model naming a provider the daemon's internal Provider cannot serve is ACCEPTED here — the constraint lives in createProvider, not this RPC", async () => {
     const srv = await bootProviderConfigServer();
-    const before = readFileSync(srv.settingsPath, "utf8");
     const c = await TestClient.connect(srv.socketPath);
     await c.hello(srv.harnessToken, "cli-provider-configure-wrong-provider");
 
     const res = await c.request(METHODS.providerConfigure, {
       type: "openai-compatible", baseUrl: "https://api.openai.com/v1", apiKey: "sk-test-321", model: "anthropic/claude-sonnet-5",
     });
-    expect(res.error?.code).toBe(ERR.INVALID_PARAMS);
-    expect(res.error?.message).toContain("codex-oauth or openai");
-    expect(readFileSync(srv.settingsPath, "utf8")).toBe(before);
-    expect(await srv.secrets.get(OPENAI_API_KEY_SECRET)).toBeNull();
+    expect(res.result).toEqual({ ok: true });
+
+    const settings = JSON.parse(readFileSync(srv.settingsPath, "utf8"));
+    expect(settings.provider).toEqual({ model: "anthropic/claude-sonnet-5" });
+    expect(await readOpenAiApiKey(srv.secrets)).toBe("sk-test-321");
 
     c.close(); srv.stop();
   });
