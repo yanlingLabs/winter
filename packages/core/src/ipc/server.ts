@@ -2062,12 +2062,15 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // so the two can never drift onto different strings for the same skill.
         const denySet = new Set(liveSettingsFor(opts)?.permissions?.deny ?? []);
         const store = opts.skills;
+        // One live read of which plugins a session may load skills from (enabled + `exec` consent).
+        const eligible = store.sessionEligiblePlugins();
         const skills = store.list({ cwd: p.cwd ?? null }).map((s) => {
           const denied = denySet.has(skillDenyRule(s.name));
           // Lane B (2026-09-22): whether a session can load it at all — the SAME rule the runtime child
           // is handed its skills by (`SkillStore.sessionAvailability`), so a client never shows a skill
-          // as usable that no session can load (today: only plugin skills reach a child).
-          const withAvailability = { ...s, ...store.sessionAvailability(s) };
+          // as usable that no session can load (today: only an enabled, consented plugin's skills, in a
+          // Code session on either leg).
+          const withAvailability = { ...s, ...store.sessionAvailability(s, eligible) };
           return denied ? { ...withAvailability, denied: true, deniedBy: "settings" as const } : withAvailability;
         });
         return { ok: true, skills };

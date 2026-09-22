@@ -1,5 +1,5 @@
 import { readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync, existsSync, mkdirSync, writeFileSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
-import { join, dirname, sep } from "node:path";
+import { basename, join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SdkPluginConfig } from "@yanlinglabs/winter-agent-sdk";
 import type { TrustStore } from "./trust";
@@ -264,18 +264,34 @@ export class SkillStore {
   private readonly trust: TrustStore;
   private readonly bodyBytes: number;
   private readonly disabledPlugins: () => readonly string[];
+  private readonly sessionEligible: (() => ReadonlySet<string>) | undefined;
 
   /**
    * `plugins.disabled` may be a LIVE getter (production: `settings.plugins.disabled` over the daemon's
    * reassignable settings holder), so disabling a plugin reaches the skill list — and the next child's
    * `Options.plugins` — with no daemon restart. A bare array (every older caller) is a fixed list.
+   *
+   * `plugins.sessionEligible` (lane B, 2026-09-23): the LIVE set of plugins whose skills a session may
+   * load — production wires `pluginSkillsEligible` (explicitly enabled, not disabled, `exec` consent on
+   * record: a skill can run shell commands). ABSENT means "every listed plugin", which only a unit test
+   * that is not about consent relies on; `daemon.ts` always wires it.
    */
-  constructor(deps: { winterHome: string; trust: TrustStore; caps?: { bodyBytes?: number }; plugins?: { disabled?: readonly string[] | (() => readonly string[]) } }) {
+  constructor(deps: {
+    winterHome: string; trust: TrustStore; caps?: { bodyBytes?: number };
+    plugins?: { disabled?: readonly string[] | (() => readonly string[]); sessionEligible?: () => ReadonlySet<string> };
+  }) {
     this.winterHome = deps.winterHome;
     this.trust = deps.trust;
     this.bodyBytes = deps.caps?.bodyBytes ?? 32768;
     const disabled = deps.plugins?.disabled;
     this.disabledPlugins = typeof disabled === "function" ? disabled : () => disabled ?? [];
+    this.sessionEligible = deps.plugins?.sessionEligible;
+  }
+
+  /** The plugins whose skills a session may load right now (one live read), or `null` = ungated. Read
+   *  it ONCE and pass it to `sessionAvailability` when asking about many skills. */
+  sessionEligiblePlugins(): ReadonlySet<string> | null {
+    return this.sessionEligible === undefined ? null : this.sessionEligible();
   }
 
   /** All discovered skills (parsed, unfiltered by name), in precedence order: project, user, self, plugin, builtin. */
@@ -357,18 +373,23 @@ export class SkillStore {
    * both options off entirely. The views are (re)built here — and the views of plugins that no longer
    * contribute (removed, disabled, emptied) are deleted — which is the one side effect.
    */
-  childSkillSurface(input: { cwd: string | null; deny?: readonly string[] }): { plugins: SdkPluginConfig[]; skills: string[] } {
+  childSkillSurface(input: { cwd: string | null; deny?: readonly string[] }): { plugins: SdkPluginConfig[]; skills: string[]; officialDeny: string[] } {
     const denied = new Set(input.deny ?? []);
     const plugins: SdkPluginConfig[] = [];
     const skills: string[] = [];
-    const pluginMetas = this.list({ cwd: input.cwd }).filter((m) => m.source === "plugin");
+    const officialDeny: string[] = [];
+    // Only plugins the user enabled AND consented to (`exec`: a skill can run shell commands) — the
+    // one live read, shared by every skill below.
+    const eligible = this.sessionEligiblePlugins();
+    const pluginMetas = this.list({ cwd: input.cwd })
+      .filter((m) => m.source === "plugin" && (eligible === null || eligible.has(m.name.slice(0, m.name.indexOf(":")))));
     // No plugin skill and no views left over from an earlier spawn: nothing to build or prune, and
     // nothing is created on disk.
     let leftovers = false;
     try { lstatSync(skillPluginViewsRoot(this.winterHome)); leftovers = true; } catch { /* none */ }
-    if (pluginMetas.length === 0 && !leftovers) return { plugins, skills };
+    if (pluginMetas.length === 0 && !leftovers) return { plugins, skills, officialDeny };
     const viewsRoot = safeSkillPluginViewsRoot(this.winterHome);
-    if (viewsRoot === null) return { plugins, skills };
+    if (viewsRoot === null) return { plugins, skills, officialDeny };
     const viewed = new Map<string, boolean>();
     for (const meta of pluginMetas) {
       const plugin = meta.name.slice(0, meta.name.indexOf(":"));
@@ -378,15 +399,22 @@ export class SkillStore {
         if (root !== null) plugins.push({ type: "local", path: root, skipMcpDiscovery: true });
       }
       if (!viewed.get(plugin)) continue;
+      if (denied.has(skillDenyRule(meta.name))) {
+        // claude names a plugin skill by its DIRECTORY (`<plugin>:<dir>` — a frontmatter `name:` does
+        // not rename it, measured by the router), where Winter uses the frontmatter name. When the two
+        // differ, the official leg needs the deny rule under claude's spelling too, or it binds nothing.
+        const dir = basename(dirname(meta.path));
+        if (`${plugin}:${dir}` !== meta.name) officialDeny.push(skillDenyRule(`${plugin}:${dir}`));
+        continue;
+      }
       // A name either SDK jail refuses is still handed over inside its plugin (the child then says on
       // its stderr why it did not load) but never named here: the SDK drops an unknown `skills` name
       // with a warning, and the list should name only what the child can index.
-      if (!this.sessionAvailability(meta).loadsInSessions) continue;
-      if (denied.has(skillDenyRule(meta.name))) continue;
+      if (!this.sessionAvailability(meta, eligible).loadsInSessions) continue;
       skills.push(meta.name);
     }
     pruneSkillPluginViews(viewsRoot, new Set(viewed.keys()));
-    return { plugins, skills };
+    return { plugins, skills, officialDeny };
   }
 
   /**
@@ -400,12 +428,19 @@ export class SkillStore {
    * says, truthfully, that no session can load it yet (neither the agent SDK nor claude's has a door
    * for bare-named host skills: discovery is settings-source-gated, which the daemon must keep off).
    */
-  sessionAvailability(meta: Pick<SkillMeta, "name" | "source">): { loadsInSessions: boolean; sessionNote?: string } {
+  sessionAvailability(
+    meta: Pick<SkillMeta, "name" | "source">,
+    eligible: ReadonlySet<string> | null = this.sessionEligiblePlugins(),
+  ): { loadsInSessions: boolean; sessionNote?: string } {
     if (meta.source !== "plugin") {
       return { loadsInSessions: false, sessionNote: `${UNDELIVERABLE_TIER_LABEL[meta.source]} skills can't be loaded by a session yet — only plugin skills reach the agent runtime.` };
     }
     const colon = meta.name.indexOf(":");
-    if (!SDK_PLUGIN_NAME_PATTERN.test(meta.name.slice(0, colon)) || !SDK_SKILL_NAME_PATTERN.test(meta.name.slice(colon + 1))) {
+    const plugin = meta.name.slice(0, colon);
+    if (eligible !== null && !eligible.has(plugin)) {
+      return { loadsInSessions: false, sessionNote: `Enable the ${plugin} plugin and grant its "exec" consent to use its skills in Code sessions — a skill can run shell commands.` };
+    }
+    if (!SDK_PLUGIN_NAME_PATTERN.test(plugin) || !SDK_SKILL_NAME_PATTERN.test(meta.name.slice(colon + 1))) {
       return { loadsInSessions: false, sessionNote: "The agent runtime refuses this name — plugin and skill names must be lowercase letters, digits and dashes." };
     }
     return { loadsInSessions: true };

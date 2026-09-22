@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { execPayloadLines, loadManifest, requiredConsentClasses, type WinterManifest } from "./plugin-manifest";
+import { execPayloadLines, loadManifest, requiredConsentClasses, skillsPayloadLines, type WinterManifest } from "./plugin-manifest";
 import type { HookRegistryPlugin } from "../plugins/hook-registry";
 
 export const PluginManifest = z.object({
@@ -101,13 +101,13 @@ export class PluginStore {
           description: manifest.description,
           version: manifest.version,
           tier: manifest.tier,
-          requiredConsents: requiredConsentClasses(manifest),
+          requiredConsents: requiredConsentClasses(manifest, { shipsSkills: skills.length > 0 }),
           consented,
           legacy: false,
           hasManifestMcp: Boolean(manifest.contributes?.mcpServers?.length),
           manifestServers: manifest.contributes?.mcpServers,
           manifestHooks: manifest.contributes?.hooks,
-          execPayload: execPayloadLines(manifest),
+          execPayload: execPayloadLines(manifest, { skills }),
           tccPermissions: manifest.permissions?.tcc ?? [],
           hardwarePermissions: manifest.permissions?.hardware ?? [],
           entry: manifest.entry,
@@ -121,11 +121,14 @@ export class PluginStore {
         ...shared,
         description: meta.description,
         version: meta.version,
-        requiredConsents: [],
+        // 2026-09-23 (lane B, review): a legacy plugin that SHIPS SKILLS requires the `exec` class too
+        // — a session's runtime can run a skill's shell (see `requiredConsentClasses`). A legacy plugin
+        // with no skills keeps the old `[]`, so its behaviour is unchanged.
+        requiredConsents: skills.length > 0 ? ["exec"] : [],
         consented,
         legacy: true,
         hasManifestMcp: false,
-        execPayload: [],
+        execPayload: skillsPayloadLines(skills),
         tccPermissions: [],
         hardwarePermissions: [],
       };
@@ -135,9 +138,9 @@ export class PluginStore {
 
 /**
  * True when every consent class a plugin's manifest requires (`requiredConsents`) has a matching
- * record in `consented`. Legacy plugins have `requiredConsents === []`, so this is vacuously true
- * for them — consent never gates legacy plugin content (spec: "everything above keeps working
- * unchanged").
+ * record in `consented`. A legacy plugin WITHOUT skills has `requiredConsents === []`, so this is
+ * vacuously true for it; one that ships skills requires `exec` since 2026-09-23 (a session's runtime
+ * can run a skill's shell — see `requiredConsentClasses`).
  */
 export function consentComplete(p: PluginInfo): boolean {
   return p.requiredConsents.every((c) => p.consented.includes(c));
@@ -167,6 +170,19 @@ export function pluginMcpEligible(p: PluginInfo): boolean {
  */
 export function pluginHooksEligible(p: PluginInfo): boolean {
   return p.mcpEnabled && !p.disabled && Boolean(p.manifestHooks?.length) && consentComplete(p);
+}
+
+/**
+ * Lane B (2026-09-23, review): may a SESSION load this plugin's skills? The SAME enabled/disabled/
+ * consent shape as `pluginHooksEligible`, because a skill is code on a session's runtime — claude runs
+ * a skill's inline `` !`cmd` `` and honours its `allowed-tools` pre-approval without asking the host
+ * (router 0.0.11's `OptionsTemplatePolicy.plugins` doc records the measurement), so exposing a plugin's
+ * skills is the same trust decision as running its hooks. Shipped skills count as the `exec` consent
+ * class (`requiredConsentClasses`, and `PluginStore.list` for a legacy plugin), so `consentComplete`
+ * is what carries the user's consent. Applied on BOTH legs (`SkillStore.childSkillSurface`).
+ */
+export function pluginSkillsEligible(p: PluginInfo): boolean {
+  return p.mcpEnabled && !p.disabled && p.skills.length > 0 && consentComplete(p);
 }
 
 /**

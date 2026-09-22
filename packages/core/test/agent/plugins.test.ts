@@ -48,11 +48,12 @@ describe("PluginStore", () => {
     // Phase 4a additions — no winter-plugin.json present, so this is the legacy path.
     expect(p.legacy).toBe(true);
     expect(p.tier).toBeUndefined();
-    expect(p.requiredConsents).toEqual([]);
+    // 2026-09-23 (lane B, review): a plugin that SHIPS SKILLS requires `exec` consent — a session's
+    // runtime can run a skill's shell — and says so in its consent block, legacy or not.
+    expect(p.requiredConsents).toEqual(["exec"]);
     expect(p.consented).toEqual([]);
     expect(p.hasManifestMcp).toBe(false);
-    // Task 3 additions — legacy plugins carry no consent-block display data.
-    expect(p.execPayload).toEqual([]);
+    expect(p.execPayload).toEqual([expect.stringMatching(/^skills: (greet, bye|bye, greet) — a skill can run shell commands/)]);
     expect(p.tccPermissions).toEqual([]);
     expect(p.hardwarePermissions).toEqual([]);
   });
@@ -63,7 +64,7 @@ describe("PluginStore", () => {
     for (const p of list) {
       expect(p.legacy).toBe(true);
       expect(p.tier).toBeUndefined();
-      expect(p.requiredConsents).toEqual([]);
+      expect(p.requiredConsents).toEqual(["exec"]); // ships a skill (lane B, 2026-09-23)
       expect(p.consented).toEqual([]);
       expect(p.hasManifestMcp).toBe(false);
     }
@@ -98,7 +99,8 @@ describe("PluginStore + winter-plugin.json", () => {
     expect(p.hasManifestMcp).toBe(true);
     expect(p.skills).toEqual(["greet"]); // skill discovery stays directory-based regardless of manifest
     // Task 3 additions — consent-block display data, filled from the manifest.
-    expect(p.execPayload).toEqual(["mcp: node server.js", "entry: node index.js"]);
+    // …plus, last, the shipped-skills line (lane B, 2026-09-23).
+    expect(p.execPayload).toEqual(["mcp: node server.js", "entry: node index.js", "skills: greet — a skill can run shell commands when a session uses it"]);
     expect(p.tccPermissions).toEqual(["accessibility"]);
     expect(p.hardwarePermissions).toEqual([]);
     // manifestServers is filled from the SAME loadManifest call — daemon.ts reads this directly
