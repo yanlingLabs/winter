@@ -7,6 +7,7 @@ import type {
 import { RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
 import { skillPluginViewsRoot } from "../agent/paths";
+import { parseRule } from "../agent/permission-rules";
 import { keychainService } from "../profile";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import type { Settings } from "../settings";
@@ -394,6 +395,14 @@ export interface WinterOptionsInput {
    */
   plugins?: readonly SdkPluginConfig[];
   skills?: readonly string[];
+  /**
+   * The user's SAVED allow rules for this session's project, in Winter's own grammar —
+   * `persistedAllowRulesFor`'s answer, read live by the caller (`session-driver.ts`'s `optionsFor`).
+   * Translated here by `sdkAllowRulesFor` and appended to `permissions.allow` AFTER Winter's fixed
+   * rules, in CODE mode only (see the allow assembly in `buildWinterOptions`). Absent or empty ⇒
+   * byte-identical to a session before this field existed.
+   */
+  persistedAllow?: readonly string[];
 }
 
 /**
@@ -591,6 +600,113 @@ export function permissionDenyRulesFor(home: string, settings: Settings | null |
  */
 export const GLOBAL_READ_ALLOW_RULES: readonly string[] = ["Read", "Glob", "Grep"];
 
+/**
+ * **The user's SAVED allow rules, as the runtimes read them** (lane B, 2026-09-22, lane C's finding).
+ *
+ * A card's "Allow … everywhere" / "in this project" answer is written by `approval.respond`'s
+ * `PermissionRules.append` in Winter's own rule grammar (`agent/permission-rules.ts`'s `parseRule`).
+ * Both runtimes' permission evaluators read claude's grammar, which is the same for the common shapes
+ * and different for a few Winter-only ones — this is the ONE translation, used by both legs:
+ *
+ *   `Bash` / `Bash(x)` / `Bash(x:*)`   unchanged (claude's exact and prefix forms).
+ *   `BashUnsandboxed(…)`               → `Bash(…)`. claude has no separate rule: `dangerouslyDisableSandbox`
+ *                                       only removes the sandbox's auto-allow, and rules then decide
+ *                                       (lane C's parity ruling — see `sandboxConfigFor`'s last note).
+ *   `Edit`                             → `Edit` + `Write` (Winter's rule covered both; the agent SDK
+ *                                       matches a bare rule's tool name literally).
+ *   `Edit(<abs dir>)`                  → `Edit(//<abs dir>/**)` + `Write(//<abs dir>/**)` — Winter's
+ *                                       writable-DIRECTORY declaration, in the root-anchored form that
+ *                                       actually binds (`fsRootAnchored`'s own note).
+ *   `Computer`                         → `mcp__winter__computer__computer` (the capability's wire name).
+ *   `Worktree`                         → `EnterWorktree` + `ExitWorktree`.
+ *   `WebFetch(domain:h)`               unchanged.
+ *
+ * NEVER WIDER THAN WHAT WAS SAVED:
+ *  - a value containing `*` is dropped. Winter compares it literally; the runtimes read `*` as a glob
+ *    (`Tool(*)` is even the bare tool), so forwarding it would allow more than the user approved.
+ *  - a string whose TOOL Winter's grammar knows but which Winter's own parser REFUSES (bare `WebFetch`,
+ *    `Computer(x)`, a relative `Edit(…)`, an empty value) stays refused — those refusals are deliberate
+ *    (`parseRule`'s own doc), and the runtimes would accept several of them as broad rules.
+ *  - any OTHER string is not Winter's grammar at all — a rule the user wrote in claude's (`WebSearch`,
+ *    `mcp__server__tool`, `Write(//dir/**)`, …) — and is forwarded VERBATIM, which is claude's own
+ *    behaviour for its settings files' `permissions.allow`. The runtime validates it; a malformed one
+ *    is its warning to give.
+ *
+ * Deny-before-allow still holds in both runtimes (`GLOBAL_READ_ALLOW_RULES`' doc has the order), so no
+ * saved rule can open the control-plane fence, a `Skill(<name>)` deny or the dangerous-domain hooks.
+ */
+export function sdkAllowRulesFor(winterRules: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const raw of winterRules) {
+    if (typeof raw !== "string") continue;
+    const parsed = parseRule(raw);
+    if (parsed === null) {
+      if (!WINTER_RULE_HEAD.test(raw)) out.push(raw);   // foreign grammar: verbatim (claude parity)
+      continue;                                          // Winter's grammar, refused by Winter: stays refused
+    }
+    if (parsed.value?.includes("*")) continue;           // a literal `*` would become a glob
+    switch (parsed.tool) {
+      case "bash":
+      case "bash_unsandboxed":
+        out.push(parsed.kind === "any" ? "Bash" : parsed.kind === "prefix" ? `Bash(${parsed.value}:*)` : `Bash(${parsed.value})`);
+        break;
+      case "edit": {
+        // BOTH tools: Winter's `Edit` rule has always covered `write` and `edit` alike
+        // (`permission-rules.ts`'s `toolForCallName`), while the agent SDK matches a rule's tool name
+        // literally — measured on the 0.0.17 binary, a saved `Edit` alone still sent a `Write` to
+        // `canUseTool` (`persisted-allow-measure.e2e.test.ts`).
+        const spec = parsed.kind === "path" ? `(${fsRootAnchored(`${parsed.value!.replace(/\/+$/, "")}/**`)})` : "";
+        out.push(`Edit${spec}`, `Write${spec}`);
+        break;
+      }
+      case "computer":
+        out.push("mcp__winter__computer__computer");
+        break;
+      case "worktree":
+        out.push("EnterWorktree", "ExitWorktree");
+        break;
+      case "web_fetch":
+        out.push(`WebFetch(domain:${parsed.value})`);
+        break;
+    }
+  }
+  return [...new Set(out)];
+}
+
+/** A string whose head is one of Winter's own rule tools (`agent/permission-rules.ts`'s `KNOWN_TOOLS`),
+ *  i.e. one `parseRule` had the say over. */
+const WINTER_RULE_HEAD = /^(?:BashUnsandboxed|Bash|Edit|Computer|Worktree|WebFetch)(?:\(|$)/;
+
+/**
+ * **Which saved allow rules apply to a session at `cwd`** — Winter's raw rule strings, for
+ * `sdkAllowRulesFor`. Read LIVE per incarnation (every input is a live getter), so a rule saved from
+ * a card reaches the next child with no restart.
+ *
+ *  - `settings.json`'s `permissions.allow` — always (the "everywhere" scope).
+ *  - a project's `.winter/settings.json` `permissions.allow` — only when the project is TRUSTED:
+ *    `effectiveSettings` is `ProjectSettingsResolver.effective`, which unions the overlay in for a
+ *    trusted root and returns the base verbatim otherwise.
+ *  - the project's `.winter/permissions.local.json` (the "in this project" scope) — only when
+ *    TRUSTED too. The rules store itself never gated this file on trust (the retired engine consulted
+ *    it card-by-card); a child that acts on it without asking needs the same gate as the overlay,
+ *    because a cloned repository can ship one (`git add -f`, the fix-wave A1 finding for
+ *    `settings.local.json`).
+ *
+ * The engine-era `["Computer"]` fallback the rules store's own getter applies is deliberately NOT here
+ * — it is a default, not a saved rule, and the approval bridge already answers computer calls.
+ */
+export function persistedAllowRulesFor(cwd: string, deps: {
+  projectRootOf: (cwd: string) => string | null;
+  effectiveSettings: (projectRoot: string | null) => Settings | null;
+  projectRules?: (projectRoot: string) => readonly string[];
+  isTrusted: (dir: string) => boolean;
+}): string[] {
+  const root = deps.projectRootOf(cwd);
+  const settingsAllow = deps.effectiveSettings(root)?.permissions?.allow ?? [];
+  const projectAllow = root !== null && deps.projectRules !== undefined && deps.isTrusted(root) ? deps.projectRules(root) : [];
+  return [...new Set([...settingsAllow, ...projectAllow])];
+}
+
 export function sandboxConfigFor(home: string): SandboxSettingsConfig {
   return {
     enabled: true,
@@ -760,7 +876,11 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
       // and `WEB_BUILTIN_ALLOW_RULES`' own doc for why the two web built-ins need a bare allow rule
       // on THIS leg (under `dontAsk` the runtime denies an unresolved call without ever calling
       // `canUseTool`, and Winter's gate has always answered `allow` for the web class).
-      ...(input.mode === "code" ? { allow: [...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES] } : {}),
+      //
+      // …then the user's SAVED rules (`persistedAllowRulesFor` → `sdkAllowRulesFor`), code mode only:
+      // they are answers to code-mode cards, chat's policy is fixed and dispatch never cards. Deny
+      // still comes first in the runtime, so none of them can open the fence stated just below.
+      ...(input.mode === "code" ? { allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES, ...sdkAllowRulesFor(input.persistedAllow ?? [])])] } : {}),
       deny: permissionDenyRulesFor(input.home, input.settings),
       disableBypassPermissionsMode: !bypassAllowedAtSpawn(input.policy),
     },
