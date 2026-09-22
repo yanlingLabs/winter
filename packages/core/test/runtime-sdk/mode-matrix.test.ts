@@ -869,6 +869,22 @@ test("C3-1: under auto an escape runs ONLY with the reviewer's clearance for tha
   expect(takeReviewerCleared("s-other", other.toolUseID, "x")).toBe(true);
 });
 
+test("C3 round 3: an escape under auto with NO call id cards — a clearance can never be found for it", async () => {
+  const h = harness({ mode: "code", policy: "auto" });
+  const c = { ...escapeCtx(), toolUseID: undefined } as unknown as Parameters<CanUseTool>[2];
+  // even a clearance recorded against an empty id is unreachable: `noteReviewerCleared` refuses it
+  noteReviewerCleared("s1", undefined, "gh repo view x");
+  const p = h.canUse("Bash", { command: "gh repo view x", dangerouslyDisableSandbox: true }, c);
+  expect(h.events).toHaveLength(1);
+  expect((h.events[0] as { type: string }).type).toBe("approval_requested");
+  h.approvals.resolve("s1", (h.events[0] as { callId: string }).callId, false, "user");
+  await expect(p).resolves.toMatchObject({ behavior: "deny" });
+  // …and where nobody can answer it, the typed deny
+  const d = harness({ mode: "dispatch", policy: "auto" });
+  expect((await d.canUse("Bash", { command: "gh repo view x", dangerouslyDisableSandbox: true }, c))!.behavior).toBe("deny");
+  expect(d.events).toEqual([]);
+});
+
 test("C3 round 3: a clearance is bound to the command the reviewer judged — a different command on the same call id cards", async () => {
   const h = harness({ mode: "code", policy: "auto" });
   const c = escapeCtx();
