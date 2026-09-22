@@ -19,8 +19,11 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { query } from "@yanlinglabs/winter-agent-sdk";
+import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { SkillStore } from "../../src/agent/skills";
 import { TrustStore } from "../../src/agent/trust";
+import { buildWinterOptions } from "../../src/runtime-sdk/mode-options";
+import type { ModelTag } from "../../src/runtime-sdk/model-tag";
 import { createHostPromptQueue } from "../../src/runtime-sdk/prompt-queue";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
 
@@ -53,19 +56,24 @@ describeWithWinterBinary("B1 measurement — the daemon's plugin skills inside a
 
       const queue = createHostPromptQueue();
       const messages: Array<Record<string, unknown>> = [];
-      const q = query({
-        prompt: queue,
-        options: {
-          pathToClaudeCodeExecutable: bin,
-          model: "winter-test/reflect",
-          cwd,
-          settingSources: [],
-          systemPrompt: "You are a measurement.",
-          plugins: surface.plugins,
-          skills: surface.skills,
-          env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, TMPDIR: home, WINTER_HOME: home, WINTER_PROFILE: "test", WINTER_TEST_PROVIDER: "reflect" },
-        },
+      // THE DAEMON'S OWN OPTIONS, not a hand-built subset: `buildWinterOptions` is what production
+      // spawns with, so the measurement runs under the same `settingSources: []`, the same Bash sandbox
+      // (`denyRead`/`denyWrite` on `<home>/runtimes`, where the views live) and the same
+      // `Read/Glob/Grep(<home>/runtimes/**)` deny rules — the fence a view under that tree must not trip.
+      const options = buildWinterOptions({
+        mode: "code", policy: "auto", sessionId: "00000000-0000-4000-8000-0000000000b1", home, cwd,
+        model: "winter-test/reflect" as ModelTag, credentials: { byProvider: {} } as unknown as CredentialPresence,
+        systemPrompt: "You are a measurement.", exaKeyPresent: false,
+        spawn: { pathToClaudeCodeExecutable: bin },
+        canUseTool: async (_name, input) => ({ behavior: "allow", updatedInput: input }),
+        abort: new AbortController(),
+        baseEnv: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, TMPDIR: home },
+        plugins: surface.plugins, skills: surface.skills,
       });
+      expect(options.settingSources).toEqual([]);
+      expect(options.sandbox?.filesystem?.denyRead).toContain(join(home, "runtimes"));
+      expect(options.permissions?.deny?.some((r) => r.startsWith("Read(") && r.includes(join(home, "runtimes")))).toBe(true);
+      const q = query({ prompt: queue, options });
       queue.push("list your skills");
       try {
         for await (const m of q) {
