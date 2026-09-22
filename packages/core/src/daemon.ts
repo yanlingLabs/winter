@@ -1600,9 +1600,11 @@ export async function startDaemon(opts: {
     onSupportedAgents: (sid, agents) => supportedAgentsCache.observe(sid, agents),
     ...(titler === undefined ? {} : { titler }),
     // Fix wave (review row 7): the user's `settings.mcpServers` and a TRUSTED project's `.mcp.json`
-    // reach the child as stdio configs under the registry's own keys (`mcp__<key>__<tool>`). Read
-    // LIVE per incarnation from the same holder and the same `TrustStore` the McpManager consults.
-    extraMcpServers: (session) => configuredMcpServersFor({ settings, cwd: session.cwd, trusted: (dir) => trustStore.isTrusted(dir) }),
+    // reach the child under the registry's own keys (`mcp__<key>__<tool>`), any transport
+    // (stdio/http/sse). Read LIVE per incarnation from the same holder and the same `TrustStore`
+    // the McpManager consults. `log`: the SAME one-stderr-line-per-name convention `McpManager`'s
+    // own `log` dep already uses (below), for a project-scope entry that didn't validate.
+    extraMcpServers: (session) => configuredMcpServersFor({ settings, cwd: session.cwd, trusted: (dir) => trustStore.isTrusted(dir), log: (m) => console.error(m) }),
     // Daemon settings surface batch 3 (item 1): the SAME trust gate `extraMcpServers` above and
     // `agents.list`'s own handler (ipc/server.ts) both use — an untrusted `cwd` gets the empty scan
     // shape outright, never even reaching the filesystem read `loadProjectAgentDefinitions` would do.

@@ -97,6 +97,61 @@ describe.if(isMac)("McpManager.ensureProject", () => {
     mgr.stopAll();
   });
 
+  // PARITY FIX (controller-directed): `doEnsureProject` used to validate the WHOLE `mcpServers` map
+  // in one `.parse()` call (stdio-only) — a single http/sse (or otherwise malformed) entry anywhere
+  // failed the whole parse and silently dropped every OTHER configured project server, including
+  // sibling STDIO ones that would otherwise have started fine. Per-entry validation
+  // (`parseProjectMcpServers`) fixes that: the stdio entry below still starts despite its siblings.
+  test("mixed .mcp.json (stdio + http + sse + one malformed entry): the stdio entry still starts; http/sse are recognized but not tracked by this manager (no in-daemon client); the malformed one is skipped — one log line each, no thrown error", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "mcp-mixed-")));
+    writeFileSync(join(dir, ".mcp.json"), JSON.stringify({
+      mcpServers: {
+        proj: { command: "bun", args: ["run", FIXTURE] },
+        httpOne: { type: "http", url: "https://example.com/mcp" },
+        sseOne: { type: "sse", url: "https://example.com/sse" },
+        broken: { type: "stdio" }, // missing `command` — invalid
+      },
+    }));
+    const registry = new ToolRegistry();
+    const trust = new TrustStore(join(realDir(), "trust.json")); trust.trust(dir);
+    const logs: string[] = [];
+    const mgr = new McpManager({ registry, trust, log: (m) => logs.push(m) });
+    await mgr.ensureProject(dir);
+    // The stdio sibling survives despite the other three entries in the same file.
+    expect(registry.has("mcp__proj__echo")).toBe(true);
+    expect(mgr.list(dir).find((s) => s.name === "proj")?.status).toBe("connected");
+    // http/sse entries validated (no error) but not tracked by the manager's own registry — no
+    // in-daemon client for those transports; the session's own child connects to them directly
+    // (`configuredMcpServersFor`, exercised separately in `external-mcp.test.ts`).
+    expect(mgr.list(dir).find((s) => s.name === "httpOne")).toBeUndefined();
+    expect(mgr.list(dir).find((s) => s.name === "sseOne")).toBeUndefined();
+    expect(mgr.list(dir).find((s) => s.name === "broken")).toBeUndefined();
+    // Exactly ONE line per name (never a batch, never a re-log on top of the entry's own line).
+    expect(logs.filter((m) => m.includes("httpOne")).length).toBe(1);
+    expect(logs.filter((m) => m.includes("sseOne")).length).toBe(1);
+    expect(logs.filter((m) => m.includes("broken")).length).toBe(1);
+    mgr.stopAll();
+  });
+
+  test("the SAME mixed .mcp.json, untrusted, still starts/registers nothing at all — the trust gate is unchanged by the per-entry fix", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "mcp-mixed-untrusted-")));
+    writeFileSync(join(dir, ".mcp.json"), JSON.stringify({
+      mcpServers: {
+        proj: { command: "bun", args: ["run", FIXTURE] },
+        httpOne: { type: "http", url: "https://example.com/mcp" },
+        sseOne: { type: "sse", url: "https://example.com/sse" },
+        broken: { type: "stdio" },
+      },
+    }));
+    const registry = new ToolRegistry();
+    const trust = new TrustStore(join(realDir(), "trust.json")); // never trusted
+    const mgr = new McpManager({ registry, trust });
+    await mgr.ensureProject(dir);
+    expect(registry.has("mcp__proj__echo")).toBe(false);
+    expect(mgr.list(dir)).toEqual([]);
+    mgr.stopAll();
+  });
+
   test("concurrent ensureProject for the same dir shares one in-flight run (no double-spawn)", async () => {
     const dir = projDir();
     const registry = new ToolRegistry();
@@ -125,6 +180,26 @@ describe.if(isMac)("McpManager.ensureProject", () => {
     // never started, so never "connected".
     const row = mgr.list(dir).find((s) => s.name === "proj");
     expect(row?.status).not.toBe("connected");
+    mgr.stopAll();
+  });
+
+  test("mcp.disabled on an http/sse project entry changes nothing — it was never trackable by this manager either way (no placeholder row, disabled or not)", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "mcp-disabled-http-")));
+    writeFileSync(join(dir, ".mcp.json"), JSON.stringify({
+      mcpServers: { httpDisabled: { type: "http", url: "https://example.com/mcp" }, httpEnabled: { type: "http", url: "https://example.com/mcp2" } },
+    }));
+    const registry = new ToolRegistry();
+    const trust = new TrustStore(join(realDir(), "trust.json")); trust.trust(dir);
+    const logs: string[] = [];
+    const mgr = new McpManager({ registry, trust, log: (m) => logs.push(m), disabled: () => new Set(["httpDisabled"]) });
+    await mgr.ensureProject(dir);
+    // Neither gets a tracked row — same "not trackable by this reader" treatment regardless of
+    // mcp.disabled (the asymmetry a review caught: checking `disabled` before the transport would
+    // have given the disabled one a `status: "failed"` placeholder while the enabled one got none).
+    expect(mgr.list(dir).find((s) => s.name === "httpDisabled")).toBeUndefined();
+    expect(mgr.list(dir).find((s) => s.name === "httpEnabled")).toBeUndefined();
+    expect(logs.filter((m) => m.includes("httpDisabled")).length).toBe(1);
+    expect(logs.filter((m) => m.includes("httpEnabled")).length).toBe(1);
     mgr.stopAll();
   });
 

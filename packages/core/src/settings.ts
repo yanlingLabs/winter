@@ -360,7 +360,14 @@ const McpSSEServerSettings = refuseCredentialShapedHeaders(z.object({
  *  union runs, so an existing home's settings.json keeps parsing byte-for-byte with no migration.
  *  A malformed entry (missing `command` on a stdio-shaped one, a non-URL `url`, an unrecognized
  *  `type`, …) fails with the discriminated union's own per-branch message — a useful "which shape
- *  did you mean" error rather than a plain-union's aggregated wall of text. */
+ *  did you mean" error rather than a plain-union's aggregated wall of text.
+ *
+ *  NEVER reuse this schema (including its `refuseCredentialShapedHeaders` refinement) for a
+ *  project's `<cwd>/.mcp.json` — a review round briefly did, which silently dropped a git-shared
+ *  http/sse entry the moment it carried an `Authorization` header (claude's own reader accepts and
+ *  forwards such headers verbatim). `agent/mcp/project-file.ts`'s `ProjectMcpEntrySchema` is the
+ *  project-scope equivalent, defined fresh there without that refinement — see its own header for
+ *  the ruling. This one stays private to `settings.ts` (not exported as a value) again. */
 const McpServerSettingsEntry = z.preprocess(
   (v) => (v && typeof v === "object" && !Array.isArray(v) && !("type" in v) ? { ...(v as object), type: "stdio" } : v),
   z.discriminatedUnion("type", [McpStdioServerSettings, McpHttpServerSettings, McpSSEServerSettings]),
@@ -925,6 +932,30 @@ export function setMcpServerDisabled(settings: Settings, name: string, disabled:
     ? (current.includes(name) ? current : [...current, name])
     : current.filter((n) => n !== name);
   return { ...settings, mcp: { ...settings.mcp, disabled: next } };
+}
+
+/**
+ * `winter mcp add`/`mcp.add`'s USER-scope write door: a pure `Settings -> Settings` transform that
+ * sets (adds or replaces) one `mcpServers` entry by name. Mirrors `setMcpServerDisabled`'s own
+ * posture exactly — never validates `name` against a reserved/existing-name rule; that is a HIGHER
+ * door's job (`agent/mcp/mcp-write.ts`'s `addUserMcpServer`, the one function both `ipc/server.ts`'s
+ * `mcp.add` handler and the CLI's no-daemon fallback call, so the two write paths can never drift on
+ * what counts as a valid add). The caller still owes `saveSettings` a call afterward — THAT is where
+ * the real enforcement lives (the full `Settings` schema, including the credential-shaped-header
+ * refusal on an http/sse entry); this function only shapes the record.
+ */
+export function setMcpServerEntry(settings: Settings, name: string, entry: McpServerSettingsEntry): Settings {
+  return { ...settings, mcpServers: { ...(settings.mcpServers ?? {}), [name]: entry } };
+}
+
+/** The remove-side mirror of `setMcpServerEntry` — deletes one `mcpServers` entry by name.
+ *  A no-op (returns `settings` unchanged) when the name isn't present, same "idempotent, never
+ *  throws on its own input" posture `setMcpServerDisabled` already has. */
+export function removeMcpServerEntry(settings: Settings, name: string): Settings {
+  if (!settings.mcpServers || !(name in settings.mcpServers)) return settings;
+  const rest = { ...settings.mcpServers };
+  delete rest[name];
+  return { ...settings, mcpServers: rest };
 }
 
 /**
