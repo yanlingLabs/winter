@@ -1,380 +1,191 @@
 <h1 align="center">Winter</h1>
 
 <p align="center">
-  <b>An AI that actually lives on your Mac.</b><br>
-  A native replacement for the ChatGPT/Claude ecosystem — chat, a full coding agent, and an
-  orchestrator that runs work for you — in one app, on your machine, with your own account.
+  <b>An AI assistant that lives on your Mac.</b><br>
+  Talk to it, let it write your code, or hand it a job and walk away,
+  using the AI you already pay for.
 </p>
 
 <p align="center">
-  <a href="https://github.com/yanlingLabs/winter/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/yanlingLabs/winter/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <a href="https://github.com/yanlingLabs/winter/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/yanlingLabs/winter?label=release&color=2E9484"></a>
+  <img alt="macOS 26+ on Apple silicon" src="https://img.shields.io/badge/macOS-26%2B%20·%20Apple%20silicon-lightgrey.svg">
   <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-blue.svg"></a>
-  <img alt="Platform: macOS 26+" src="https://img.shields.io/badge/platform-macOS%2026%2B-lightgrey.svg">
-  <a href="https://github.com/yanlingLabs/winter/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/yanlingLabs/winter/total?color=555"></a>
-  <a href="https://github.com/yanlingLabs/winter/discussions"><img alt="Discussions" src="https://img.shields.io/github/discussions/yanlingLabs/winter"></a>
 </p>
 
 ---
 
-Most AI tools are one of two things: a chat window in a browser tab, or a coding agent in a
-terminal. Winter is meant to be the whole thing — the assistant you talk to, the agent that writes
-your code, and the orchestrator that goes and does multi-step work while you get on with your day —
-as one native macOS product that runs on your own machine, under your own subscription or API key.
+Winter sits in your menu bar. You can chat with it, point it at a project and let it code, or
+give it an errand like *"find out why the build got slow and fix it"* and get on with your day
+while it works. It's one native Mac app. There's no account to create and no Winter server in
+the middle, and it runs on whichever model you want: your ChatGPT plan, Claude, DeepSeek, Gemini,
+or any of a hundred-odd others.
 
-She sits in your menu bar and follows your cursor as a small orb. She has her own window with a
-real Chromium browser, a real code editor, and (soon) real documents inside it. She can see your
-screen, drive your Mac, remember things about you as plain files you can read, and keep herself
-updated without ever interrupting you. When you leave your desk, your iPhone picks up the same
-sessions over an encrypted direct link — no cloud in the middle.
-
-## Install
+## Quick start
 
 ```sh
-brew tap yanlingLabs/winter
-brew install --cask winter
+brew install --cask yanlingLabs/winter/winter
+winter login          # sign in with your ChatGPT account
 ```
 
-Or grab the latest `.dmg` from [Releases](https://github.com/yanlingLabs/winter/releases/latest),
-open it, and drag Winter to your Applications folder.
+That's all. Open Winter from Applications and it moves into your menu bar. The `winter` command
+works in any terminal too.
 
-Requires **macOS 26 or later** on Apple silicon. Then point her at the model you already pay for:
+Want a different model? Skip `winter login`, open **Settings › Providers** in the app and paste
+an API key for Anthropic, OpenAI, DeepSeek, Google, OpenRouter or anyone else on the list.
+
+Winter needs **macOS 26 or later on Apple silicon**. If you'd rather not use Homebrew, grab the
+`.dmg` from [Releases](https://github.com/yanlingLabs/winter/releases/latest) and drag Winter
+into Applications. (Newer Homebrew may ask you to trust the tap once:
+`brew trust yanlingLabs/winter`.)
+
+## Three ways to work
+
+**Chat** is for asking things. It searches the web, reads what it finds and remembers what
+matters about you from one conversation to the next. It has no access to your files and can't
+run anything, so it never has to stop and ask your permission.
+
+**Code** is a full coding agent. Point it at a folder and it reads and writes code, runs your
+build and tests, uses git and fixes whatever the language server complains about. Big jobs get
+split across helper agents, each working in its own copy of the repo so they don't step on each
+other. You decide how much it does without asking, from "only make a plan" to "don't ask me at
+all," and it remembers the answers you've already given.
+
+**Dispatch** is the assistant that's always there. Give it a job and it starts as many Code
+sessions as the job needs, keeps an eye on them and comes back when it's done. You can pull any
+of those sessions into its own window to watch, or step in and take over.
+
+The walls between modes are real. A Chat session can't touch your disk, whatever a web page or
+anyone else tells it to do, because Winter never gives Chat those tools in the first place.
+
+## It works on your Mac, with you
+
+Tap the trackpad with four fingers anywhere, in any app, and a small orb gives you a text field.
+Whatever you type goes straight to Dispatch.
+
+The main window has a panel next to the conversation where Winter does its work in the open.
+There's a real Chromium browser, a real code editor, diffs you can review, and Word documents,
+spreadsheets and slide decks that it edits while you watch (and ⌘Z undoes its edits like your
+own). You and Winter use the same tabs at the same time.
+
+It can see your screen and use your Mac, clicking and typing like you would, and it reads PDFs,
+images and notebooks you hand it. Work doesn't stop when you close the window either: sessions
+keep running in the background, and when you open one again you're right where it is, even
+mid-reply. If you live in the terminal, `winter` opens the same sessions as a full terminal UI,
+and `winter -p "…"` gives you one-shot answers for scripts.
+
+## Any model, switched any time
+
+Winter runs on your own account: a ChatGPT sign-in, an OpenAI or Anthropic API key, an Anthropic
+Console login, or a key from any of the 100+ providers it knows (DeepSeek, Z.ai, Google, xAI,
+Mistral, Groq, OpenRouter and many more). Claude models in Code mode run on Anthropic's own agent
+runtime, so they behave the way they were built to.
+
+You can also change models in the middle of a conversation, even from Claude to GPT to DeepSeek
+and back, and the conversation comes with you. If a switch would leave something behind (such as
+a model's private reasoning), Winter tells you before it happens.
 
 ```sh
-winter login              # sign in with your ChatGPT account
-winter login --api-key    # or paste an OpenAI API key
+winter model                          # see what you can use
+winter credentials set deepseek       # add a key (asked for privately, never on the command line)
 ```
 
-That's the whole setup. She's in your menu bar, and `winter` works in any terminal. Details on
-[models, reasoning effort and search keys](#bringing-your-own-ai) are further down. (Newer Homebrew
-may ask you to trust the tap once: `brew trust yanlingLabs/winter`.)
+## It remembers, and it forgets
 
-## Coming from Norma?
+In Code mode, memory is plain markdown files on your Mac, written by the agent. You can open,
+edit or delete them in any editor. Nothing is hidden in a database you can't read.
 
-Winter is the project formerly called Norma — same app, same daemon, nothing about your setup
-needs redoing. If you already have Norma installed, its next update *is* the handoff release: it
-carries Winter.app inside it, installs and registers Winter as your menu-bar app, and retires
-itself, with no separate download. The first time Winter boots, it migrates your existing
-`~/.norma` home into `~/.winter` on its own — sessions, settings, memory, and Keychain items are
-copied over, never deleted from the old home and never overwritten in the new one. You can check on
-it any time with `winter migrate --status`. Once Winter is running the way you expect, the old
-Norma.app can be deleted — nothing in `~/.norma` is needed for Winter to work, and you can remove
-that directory too once you have verified the migration. `winter doctor` tells you whether a legacy home is still sitting there and how many legacy Keychain items remain. If a project still has an old `NORMA.md` file or `.norma/` directory, run `winter migrate-project` inside it to rename them to `WINTER.md`/`.winter/`; until you do, Winter reads the old ones read-only and reminds you once per session.
+In Chat and Dispatch, memory looks after itself. Every so often Winter looks back over your
+conversations, keeps what mattered, and retires things that stopped being true instead of piling
+them up forever.
 
-If you installed via Homebrew, `brew install --cask norma` is deprecated in favor of `winter`. The
-handoff release already installed Winter.app into `/Applications` by hand — not through Homebrew —
-before Norma retired itself, so hand the cask back to Homebrew rather than reinstalling from
-scratch:
+## On your iPhone
 
-```sh
-brew uninstall --cask norma && brew install --cask winter --adopt
-```
-
-## Table of contents
-
-- [Coming from Norma?](#coming-from-norma)
-- [The three modes](#the-three-modes) · [Surfaces](#surfaces-where-you-talk-to-her)
-- [What she can actually do](#what-she-can-actually-do) · [Memory](#memory-that-you-can-read)
-- [Background sessions](#background-sessions-and-multiple-harnesses) · [Extending Winter](#extending-winter)
-- [Privacy & security](#your-mac-your-data) · [Bring your own AI](#bringing-your-own-ai)
-- [For developers](#for-developers) · [Roadmap](#roadmap) · [FAQ](#faq)
-
-## The three modes
-
-Winter isn't one agent with a system prompt swap. Each mode is a genuinely different product with its
-own toolset, its own permission posture, and its own surface — enforced in the daemon, not suggested
-in a prompt.
-
-| Mode | What you get | Status |
-| --- | --- | --- |
-| **Chat** | Ask her anything. She searches the web, reads the pages she finds, and remembers what matters about you from one conversation to the next. She can't reach your files or run anything — which is why she never stops to ask your permission. | **Shipped** |
-| **Code** | Point her at a project and she works in it: reads and writes code, runs your build and your tests, uses git, cleans up what the language server complains about, and splits big jobs across parallel agents in isolated worktrees. You decide how much rope she gets — six settings from *plan only* to *don't ask* — and she remembers the answers you've already given. | **Shipped** |
-| **Dispatch** | Your standing assistant: one session that's always there and never forgets. Hand it something — *find out why the build got slow and fix it*, *tidy my downloads every night* — and it goes away, spins up as many Code sessions as the job needs, keeps an eye on them, and comes back when it's done. Pull any of them out into its own window to watch, or to take over. | **Shipped** |
-| **Cowork** | Working alongside you on a shared surface, rather than for you in a transcript. | Planned |
-| **Build** | One prompt to a finished, running thing — built end to end and optionally published to a share URL we host, or your own. | Planned |
-
-These aren't prompt presets. The daemon enforces the boundary: a Chat session *physically cannot*
-call something that touches your disk, no matter what it or you or a web page tells it to. The same
-goes for where each mode lives — the terminal is Code's, the orb is Dispatch's.
-
-## Surfaces: where you talk to her
-
-The daemon is the product; everything below is a window onto the same live sessions.
-
-**The Mac app.** Menu bar resident, with a full chat window: sidebar of sessions, per-mode
-composers, inline tool cards, diffs rendered like a real review tool. On the right is a **panel**
-with tabs — a real Chromium browser (CEF), a real code editor (Monaco), file trees, diff views, and
-documents. The agent drives them and so do you, in the same tabs, at the same time.
-
-**The orb.** A small liquid orb that follows your cursor across every space and every app.
-Four-finger tap the trackpad anywhere and a text field appears — type anything and it goes straight
-to Dispatch. Sessions Dispatch spawns can be detached into their own floating windows, so you can
-watch a task work, or jump in and talk to it.
-
-**The terminal.** `winter` gives you a full Ink/React TUI for Code mode — streaming transcript,
-scrollback, task blocks, approvals inline. `winter -p "…"` is a one-shot for scripts. Every CLI
-command talks to the same daemon the app does.
-
-**Your iPhone.** A companion iOS app (closed source, built on the open kits in this repo) connects
-**directly** to your Mac over an encrypted QUIC link established through [iroh](https://iroh.computer)
-— not the same Wi-Fi, not a relay you have to trust with plaintext, no account. Run code sessions,
-drive Dispatch, read transcripts, approve things. Chat runs **on the phone itself**, so it works
-with your Mac asleep and syncs back when the two next see each other.
-
-**And your own app.** `WinterProtocol`, `WinterSessionKit` and `WinterChatKit` are published as Swift
-Package products from this repo — the exact same kits Winter's own iOS app is built on. If you want
-to build your own client, you get the whole capability surface, not a subset.
-
-## What she can actually do
-
-**She sees your screen and drives your Mac.** Screenshots, accessibility-tree reads, real clicks
-and keystrokes — leased through a broker so only one thing holds the input device at a time.
-
-**She has her own browser.** Chromium, embedded in the app, driven over CDP. Full control in Code
-and Dispatch; read-only by default in Chat. Sensitive domains are hard-blocked and can't be talked
-around. Web *fetching* is entirely local — no third-party reader API sees your URLs.
-
-**She reads what you give her.** PDFs, images, Jupyter notebooks, spreadsheets-as-exports — read
-properly, images and all, straight into the model's context.
-
-**She works in parallel.** Big jobs get split across helper agents, each in its own isolated copy of
-your repo so they can't tread on each other. For the really large ones she writes her own
-orchestration script — fan out fifty ways, check every answer against a skeptic, keep only what
-survives — and runs it in a sandbox.
-
-**She edits code like an IDE.** Monaco tabs with syntax highlighting and completions, real saves
-that preserve your BOM and line endings, file watchers with conflict banners, dirty-buffer gates on
-close and on quit — and automatic LSP diagnostics after every edit she makes.
-
-**She runs on a schedule.** Routines: check something every morning, tidy a folder nightly, report
-every Monday. Unattended, on the daemon's clock.
-
-## Memory that you can read
-
-Two kinds, deliberately.
-
-**In Code mode**, memory is project-scoped and *written by the agent, by hand* — plain markdown
-files in a folder on your Mac. No hidden database, no embeddings you can't inspect. Open them in any
-editor, correct them, delete them. `winter memory list` and `winter memory show` if you'd rather stay
-in the terminal.
-
-**In Chat and Dispatch**, memory is automatic: a background "dreaming" pass distills what mattered
-from your conversations, and — just as importantly — *forgets*. Facts that stopped being true get
-retired instead of accumulating forever.
-
-Sessions themselves are append-only event logs. Nothing is ever silently deleted: the only automatic
-deletions are empty sessions and a once-per-lifetime cleanup pass, and anything you've kept is
-permanently immune.
-
-## Background sessions and multiple harnesses
-
-A Code session can be **promoted to the background** — it keeps running with no window attached, no
-terminal open, nobody watching. Dispatch runs that way permanently by default.
-
-The inverse also holds: a single session can have **many harnesses attached at once** — the Mac
-window, a detached orb window, a TUI, and your phone — and every one of them streams the same tokens
-in real time. Close them all and the work continues; open one tomorrow and you rejoin mid-turn.
-
-## Extending Winter
-
-- **MCP servers** — connect any Model Context Protocol server; tools show up in the agent's hands,
-  with resources readable too. Tool schemas load on demand, so a hundred MCP tools cost you nothing
-  until one is actually used.
-- **Skills** — drop-in markdown capability packs. Popular open-source skill packs already run on
-  Winter unmodified, and the agent can write its own.
-- **Plugins → Add-ons** — separate processes granted narrow, user-consented capabilities. They
-  contribute tools, UI tiles and skills back to the agent, and can also be *whole small apps* living
-  inside Winter's window (think fan control, window management, a dynamic island). `examples/battery-limiter`
-  is a complete working reference. *(The `plugin-sdk` package is being renamed to the Add-ons SDK —
-  see the [roadmap](#roadmap).)*
-- **Output styles** and **hooks** — reshape how she writes, and run your own code at lifecycle points.
+The iPhone app connects straight to your Mac, encrypted end to end, with no account and no cloud
+service holding your conversations. You can pick up any session, approve what Code wants to do,
+or send Dispatch a job while you're away from your desk. Chat runs on the phone itself, so it
+works even while your Mac sleeps and syncs up later. The app is opening on TestFlight; the link
+will be here.
 
 ## Your Mac, your data
 
-This part matters more than anything else here, so we'll say it plainly:
+- **Your keys stay in the Keychain.** Every API key and sign-in lives in the macOS Keychain,
+  never in a config file.
+- **Everything else is a file you own.** Memory, settings and session history are plain files in
+  `~/.winter` that you can read, back up or delete.
+- **There's no Winter account, backend or telemetry.** Your messages go to the model provider you
+  chose, and web searches go to [Exa](https://exa.ai). Pages are fetched straight from your Mac.
+  If your phone can't reach your Mac directly, the connection goes through a relay that only ever
+  sees encrypted data.
+- **The shell is sandboxed.** Commands run inside a macOS sandbox, writes outside your project
+  need your OK, and known-dangerous websites are blocked in every mode.
+- **Updates stay out of your way.** Every build is signed and notarized by Apple. Winter updates
+  itself in the background and waits for a quiet moment before installing, so it never cuts you
+  off mid-task.
+- **It's open source.** The app, the engine, the command line and the protocol are all in this
+  repository under Apache 2.0. (The iPhone app is closed source, but the Swift packages it's built
+  on live here.)
 
-- **No credentials ever touch disk.** Every API key, OAuth token and secret lives in the macOS
-  Keychain — never in a config file, never in plain text, never in a fixture.
-- **Everything she remembers is a file you own.** Memory, settings, session logs — all plain files
-  under `~/.winter`. Move them, back them up, read them, delete them.
-- **Nothing leaves your machine except model calls.** Web fetching is local, and there is no Winter
-  account, backend or telemetry. Your phone connects to your Mac directly, end-to-end encrypted; if
-  the two can't hole-punch to each other, the connection falls back to relaying through an
-  [iroh](https://iroh.computer) relay we run — which forwards ciphertext it cannot read, and never
-  sees a session.
-- **The shell is sandboxed.** Commands run under a macOS seatbelt profile with an explicit writable
-  set; writes outside your project need your consent, and Winter's own credential directory is
-  denied to the agent unconditionally.
-- **Every build is signed and notarized by Apple**, and updates are Sparkle EdDSA-signed. Winter
-  updates herself in the background and only installs when she's *not* in the middle of helping you
-  — she waits for a natural pause, then picks up exactly where she left off.
-- **The engine is fully open.** The daemon, the CLI, the Mac app, the protocol and the client kits
-  are all in this repository under Apache-2.0. (The iOS app itself is closed source; the kits it is
-  built on are not.)
+## Make it yours
 
-## Bringing your own AI
+Connect any **MCP server** and its tools show up in the agent's hands. Tools load only when
+they're needed, so a big collection costs nothing until something is used. Drop in **skills**
+(popular open-source skill packs work unmodified, and Winter can write its own). **Plugins** run
+as separate processes with only the permissions you grant them; there's a working example in
+[`examples/battery-limiter`](examples/battery-limiter). **Routines** run jobs on a schedule, like
+a morning check-in or a nightly folder tidy, and **hooks** let your own scripts run at key
+moments.
 
-Winter is the assistant; the intelligence behind her is your own — either your existing ChatGPT
-subscription or an OpenAI API key, whichever you signed in with during [install](#install).
+## A note on accounts
 
-Available models are the GPT-5.6 family — `sol`, `terra` and `luna` — selectable per session, with a
-reasoning-effort setting from `none` through `max`, plus Winter's own `ultra` tier:
-
-```sh
-winter model              # list what's available
-winter model sol          # set the default
-```
-
-Code mode can also run on Claude models — `fable`, `opus`, `sonnet`, `haiku` — with your own
-Anthropic API key:
-
-```sh
-winter login --anthropic-key    # paste an Anthropic API key
-```
-
-Signing in with a claude.ai subscription instead of a key isn't supported yet — that door stays
-shut by default until it's had more scrutiny.
-
-An optional search key:
-
-```sh
-winter login --exa-key           # Exa — powers Search in Chat and Dispatch
-```
-
-> Brave is gone: the Winter-built `web_search` it backed was retired in favour of the runtime's own
-> claude-shaped `WebSearch`, so nothing needs a Brave key any more (`winter credentials remove
-> web-search` clears one you stored earlier). Exa is optional too — with no Exa key, Chat and Dispatch
-> get `WebSearch` instead of `Search`. **On the Mac and the CLI**: the iPhone app runs its own chat
-> engine (`apple/WinterChatKit`), which still needs an Exa key for search and still has its own page
-> reader — it follows the daemon in a later kit tag.
-
-**A note in plain language: Winter is an independent project and is not affiliated with, endorsed by,
-or sponsored by OpenAI.** Signing in with a ChatGPT account uses that account under OpenAI's own
-terms, which don't specifically bless third-party apps — so, as with any tool that isn't OpenAI's
-own, there's some risk to that account, and it's yours to weigh. If you'd rather not, the API-key
-option is the straightforward, officially-supported path. Either way, your credentials live only in
-your Mac's Keychain and Winter keeps no copy.
-
-## For developers
-
-### Architecture
-
-Winter is a **TypeScript/Bun daemon** (`winter-core`) that runs the agent loop — providers, tools,
-sessions, plugins, scheduling — and a **native Swift app** that gives it a face. They speak JSON-RPC
-2.0 over NDJSON on a Unix socket at `~/.winter/run/core.sock`.
-
-The daemon is the single source of truth. Every client — the CLI, the Mac app, the orb, your phone —
-is a *view over its event stream*. Sessions are append-only JSONL logs of typed events; clients
-reconstruct state by replaying them and then follow live. That one decision is what makes background
-sessions, multi-harness streaming, instant reopen and phone sync all the same mechanism instead of
-four features.
-
-```
-packages/
-  protocol/     the contract: zod schemas for every RPC method and session event
-  core/         winter-core: agent loop, tools, providers, sessions, plugins, workflows, routines
-  cli/          the `winter` command — Ink/React TUI, headless mode, daemon lifecycle
-  plugin-sdk/   what third-party plugins (→ add-ons) build against
-apple/
-  WinterProtocol/  Swift mirror of the protocol; round-trips every TS-generated fixture in tests
-  WinterKit/       Swift daemon client + the iroh transport (WinterSessionKit)
-  WinterChatKit/   the standalone on-device chat engine
-  Winter/          the macOS app — menu bar, chat window, orb, CEF browser, Monaco editor
-examples/       reference plugins (battery-limiter is a real, complete one)
-```
-
-### The tool surface
-
-Tools declare which modes they belong to at registration; a tool with no declaration is code-only,
-so widening one is always a deliberate edit. `mode-toolset-census.test.ts` boots the real daemon and
-reads its registry, so these three sets can't drift from what ships. They are the DAEMON's sets — what
-a session gets on the Mac and from the CLI, and on the iPhone for a session the Mac is driving; chat
-started on the phone itself runs the phone's own engine and its own smaller set.
-
-**Chat** — `Search` (or `WebSearch` with no Exa key) · `WebFetch` · `browser` (read verbs only) ·
-`AskQuestion`
-
-**Dispatch** — `session_spawn` · `list_sessions` · `manage_session` · `send_message` ·
-`task_stop` · `bash` · `computer` · `browser` · `read` · `ls` · `glob` · `grep` ·
-`Search` (or `WebSearch` with no Exa key) · `WebFetch` · `AskQuestion` · `push_notification` ·
-`ToolSearch`
-
-**Code** — `read` · `ls` · `glob` · `grep` · `write` · `edit` · `notebook_edit` · `bash` ·
-`bash_output` · `lsp` · `computer` · `browser` · `WebFetch` · `WebSearch` · `spawn_agent` ·
-`send_message` · `agent_list` · `agent_output` · `task_stop` · `enter_worktree` · `exit_worktree` ·
-`Workflow` · `Skill` · `skill_write` · `schedule` · `ask_user` · `enter_plan_mode` ·
-`exit_plan_mode` · `task_create` · `task_update` · `task_list` · `task_get` · `push_notification` ·
-`list_mcp_resources` · `read_mcp_resource` · `ToolSearch`
-
-Plus whatever your MCP servers and add-ons contribute — those are discovered at runtime rather than
-declared. Several tools are *deferred*: eligible for their mode, but their schemas load through
-`ToolSearch` on first use, so a large tool surface costs no context until something reaches for it.
-
-### Quickstart
-
-```sh
-bun install
-
-cd packages/cli
-bun src/main.ts daemon run        # headless daemon
-bun src/main.ts -p "hello"        # one-shot, in another terminal
-bun src/main.ts                   # interactive TUI
-```
-
-Building the Mac app, running the test suites, the protocol change checklist, and the dev/dist
-profile split are all in **[CONTRIBUTING.md](CONTRIBUTING.md)** — read it before your first build,
-because the app depends on three large vendored artifacts that are fetched, not committed.
-
-## Roadmap
-
-**Being built now**
-
-- Documents, spreadsheets and slides in the panel, backed by headless LibreOffice — created and
-  edited by the agent directly, not through an export dance
-- Depth for the code editor beyond editing, highlighting and completions
-- Per-child detached windows for the orb (today the detached window carries the Dispatch session
-  itself)
-- Renaming `plugin-sdk` → the Add-ons SDK, and hardening add-ons for real third-party use
-- Browser stability, and proving out fully headless background browsing
-
-**Next**
-
-- **Cowork mode** and **Build mode** (see [the table above](#the-three-modes))
-- A web UI, so Winter isn't Mac-only for people who just want the chat
-- More providers beyond Codex OAuth and OpenAI-compatible
-- Deep research, an advisor tool, and image generation (API *and* local — as a tool and as its own
-  mode)
-- An explicit compaction tool for Dispatch, so long-running orchestration compacts on purpose rather
-  than whenever the context happens to overflow
-
-Ideas and disagreement welcome in [Discussions](https://github.com/yanlingLabs/winter/discussions).
+Winter is an independent project, not affiliated with or endorsed by OpenAI or Anthropic. Signing
+in with a ChatGPT account uses that account under OpenAI's terms, which don't specifically cover
+third-party apps, so there's some risk there and it's your call. An API key is the by-the-book
+route. Either way your credentials stay in your Mac's Keychain and Winter keeps no copy.
 
 ## FAQ
 
-**Is this another Claude Code / Codex CLI?** No. Code mode covers that ground and takes real
-inspiration from Claude Code's permission model and tool shape — but a coding agent is one of
-Winter's three modes, not the product. The product is the whole assistant.
+**Is it free?** Winter is free and open source. You pay your model provider as usual, or use the
+ChatGPT plan you already have.
 
-**Does it need a subscription?** It needs *a* model. Either your existing ChatGPT account or an
-OpenAI API key, with an Anthropic API key as an option for Claude models in Code mode. Winter
-itself is free and open source.
+**Is this just another coding agent?** Coding is one of three things it does. The point is having
+one assistant for everything, living on your Mac.
 
-**Does my data go through your servers?** There is no Winter backend, no account and no telemetry.
-Model calls go to your provider. Your phone connects to your Mac directly; when a direct connection
-isn't possible it falls back to relaying through an iroh relay we run, which only ever forwards
-ciphertext — it can't read a session, and holds nothing.
+**Can I use it only from the terminal?** Yes. `winter` gives you the whole Code mode experience
+in the terminal.
 
-**Windows or Linux?** Not today — Winter is deeply native macOS. A web UI is on the roadmap for the
-chat surface.
+**Windows or Linux?** No. Winter is built for the Mac from the ground up.
 
-**Can I use it without the app?** Yes. `winter daemon run` plus the TUI is a complete Code-mode
-experience with no app installed.
+## For developers
+
+Winter is a TypeScript/Bun background service (`winter-core`) plus a native Swift app, talking
+JSON-RPC over a local socket. The service is the single source of truth: every session is an
+append-only log of events, and the Mac app, the terminal UI and the phone are all live views of
+that log. That one design choice is why background sessions, several windows on one session, and
+phone sync all come for free.
+
+```
+packages/protocol   the contract: schemas for every RPC method and session event
+packages/core       the service: sessions, tools, models, memory, plugins, routines
+packages/cli        the `winter` command and its terminal UI
+packages/plugin-sdk what plugins build against
+apple/              the Mac app and the Swift client packages (also used by the iPhone app)
+```
+
+```sh
+bun install
+cd packages/cli
+bun src/main.ts daemon run     # run the service
+bun src/main.ts                # open the terminal UI (in another terminal)
+```
+
+Building the Mac app, running the tests and keeping a dev copy separate from your everyday one are
+covered in **[CONTRIBUTING.md](CONTRIBUTING.md)**. Read it before your first build.
 
 ## Contributing
 
-Issues and pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) first, and open
-an issue to discuss anything nontrivial before sending a PR. Security reports go through
-[SECURITY.md](SECURITY.md) — please don't file them as public issues.
+Issues and pull requests are welcome. Open an issue first for anything big, and send security
+reports through [SECURITY.md](SECURITY.md) rather than a public issue. Ideas and questions go in
+[Discussions](https://github.com/yanlingLabs/winter/discussions).
 
 ## License
 
