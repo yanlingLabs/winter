@@ -11,7 +11,7 @@ import { gateClassFor, gateToolNameFor, WINTER_OWN_TOOL_NAMES } from "./tool-nam
 import { controlPlaneTargetForCall, controlPlaneDenialMessage } from "./control-plane";
 import { outdirPath } from "../sessions/outdir";
 import { askUserQuestionBridge, ASK_USER_QUESTION_TOOL } from "./question-bridge";
-import { consoleBridgeLogger, NO_PARK_TIMEOUT_MS, REVIEWER_ESCALATION_REASON, takeReviewerNoVerdict, type BridgeLogger } from "./bridge-common";
+import { consoleBridgeLogger, NO_PARK_TIMEOUT_MS, REVIEWER_ESCALATION_REASON, takeReviewerCleared, type BridgeLogger } from "./bridge-common";
 import type { BridgedPlanRequest } from "./plan-bridge";
 
 export { NO_PARK_TIMEOUT_MS, type BridgeLogger } from "./bridge-common";
@@ -495,44 +495,49 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     // (5) engine.ts:4341 — dont-ask declines everything it would otherwise card, with no prompt.
     if (decision === "ask" && policy === "dont-ask") decision = "deny";
 
-    // (5b) C3 (lane C, 2026-09-22) — AN UNSANDBOXED ESCAPE TAKES THE ORDINARY BASH VERDICT (claude
-    // parity). This line used to be P8b-31's ALWAYS-CARD, re-asserting the retired engine's own
-    // `engine.ts:4518` branch: `auto` carded every `dangerouslyDisableSandbox: true` call, and so did
-    // dispatch (as a typed deny), whatever rule or mode stood behind it. Claude does no such thing
-    // (reference source, cited in full in the lane report and in `mode-matrix.test.ts`): the flag
-    // makes `shouldUseSandbox` false (`tools/BashTool/shouldUseSandbox.ts:136-141`), which removes ONLY
-    // the sandbox AUTO-ALLOW (`bashPermissions.ts:1829-1842`); an allow rule then allows it
-    // (`bashPermissions.ts:1132-1142`), bypass allows it (`utils/permissions/permissions.ts:1255-1269`),
-    // auto hands it to its classifier with no prompt (`permissions.ts:519-…`), default and acceptEdits
-    // prompt, dontAsk denies. Nothing in claude produces its `sandboxOverride` decision reason at all.
+    // (5b) C3 (lane C, 2026-09-22) — AN UNSANDBOXED ESCAPE TAKES CLAUDE'S VERDICT, NOT AN ALWAYS-CARD.
+    // This line used to be P8b-31's ALWAYS-CARD, re-asserting the retired engine's own
+    // `engine.ts:4518` branch: every `dangerouslyDisableSandbox: true` call carded under `auto`, and
+    // was a typed deny in dispatch, whatever rule or mode stood behind it. Claude (reference source,
+    // cited in full in `mode-matrix.test.ts`): the flag makes `shouldUseSandbox` false
+    // (`tools/BashTool/shouldUseSandbox.ts:136-141`), which removes ONLY the sandbox AUTO-ALLOW
+    // (`bashPermissions.ts:1829-1842`); an allow rule then allows it (`bashPermissions.ts:1132-1142`),
+    // bypass allows it (`utils/permissions/permissions.ts:1255-1269`), default and acceptEdits prompt,
+    // dontAsk denies, and auto hands it to its classifier — which runs it ONLY on a positive verdict and
+    // otherwise fails closed or prompts (`permissions.ts:845-875`).
     //
-    // So the gate's `bash` verdict now stands: plan → deny, dont-ask → deny (the flip above), ask and
-    // accept-edits → a card, bypass → allow, and `auto` → allow AFTER Winter's classifier — the bash
-    // safety reviewer, a PreToolUse hook that has already run before this bridge was called and denies
-    // what it judges unsafe. Every floor claude keeps is still here: deny rules (the child's stage 2,
-    // before `canUseTool`), the control-plane fence (2), the private-address floor (5d), the
-    // dangerous-domain floor (the shared hooks), and the reviewer's own "could not judge" escalation
-    // just below — claude's auto never silently allows what its classifier could not judge
-    // (`permissions.ts:845-875`: fail closed, or fall back to a prompt).
+    // So: plan → deny, dont-ask → deny (the flip above), ask/accept-edits → a card, bypass → allow —
+    // the gate's own `bash` verdicts — and under `auto` (C3-1) the escape runs ONLY with the bash
+    // safety reviewer's CLEARANCE for this very call: a `safe` verdict under the unsandboxed
+    // instruction, recorded by the PreToolUse hook (`bridge-common.ts`'s `noteReviewerCleared`). No
+    // clearance — no reviewer wired, the reviewer disabled, no runnable model, a transient failure, a
+    // missing call id, an evicted note — is a card in code and a typed deny wherever nobody can answer
+    // one (dispatch, a dispatch child, a stale chat row). Chat never runs an escape at all. The sandbox
+    // WAS the bash floor for the control-plane files and `<home>/runtimes` (the fence at (2) covers the
+    // write-class tools only), which is why nothing weaker than a positive verdict may stand in for it.
     //
-    // The card's own text is unchanged — an escape still reads `bash (UNSANDBOXED): …` on it.
-    // WHAT STILL CARDS AN ESCAPE UNDER A MATCHING ALLOW RULE is outside this file (lane report): the
-    // agent SDK's RULING P3-J makes the flag "mandatory interaction" ahead of its allow-rule stage
-    // (0.0.17 `permissions/evaluator.ts:1852-1869`), and the daemon never hands the child the user's
-    // persisted allow rules (`mode-options.ts`'s `permissions.allow` carries only Winter's own reads).
-    //
-    // (5b') THE REVIEWER'S NO-VERDICT. The reviewer answers a PreToolUse `ask` when it could reach no
-    // verdict, and that ask arrives here looking like a plain call. Recognised two ways: the NOTE the
-    // hook leaves (`bridge-common.ts`'s `noteReviewerNoVerdict`, keyed by this call's id) — the ONLY
-    // channel that survives a sandbox escape, whose `decisionReason` the child replaces with its own
-    // mandatory-interaction text — and the reviewer's own reason string, which the child passes
-    // through verbatim for an ordinary bash call. Under `auto` the gate says `allow` for `bash`, so
-    // without this the escalation meant to reach a human ran the command silently (it did, for every
-    // plain bash call, before this line existed). Narrows only: a gate `deny` stays a deny, and a
-    // never-prompting session turns the card into its typed deny below. The note is consumed on
-    // every call that gets this far, whatever the verdict, so none lingers.
-    const reviewerNoted = takeReviewerNoVerdict(deps.sessionId, ctx.toolUseID);
-    if (decision === "allow" && (reviewerNoted || reviewerCouldNotJudge(ctx.decisionReason))) {
+    // The card's text is unchanged — an escape still reads `bash (UNSANDBOXED): …`. WHAT STILL CARDS
+    // AN ESCAPE UNDER A MATCHING ALLOW RULE is outside this file: the agent SDK's RULING P3-J makes the
+    // flag "mandatory interaction" ahead of its allow-rule stage (0.0.17
+    // `permissions/evaluator.ts:1852-1869`), and the daemon never hands the child the user's persisted
+    // allow rules (`mode-options.ts`'s `permissions.allow` carries only Winter's own reads).
+    const escape = classificationName === "bash" && typeof input === "object" && input !== null
+      && (input as Record<string, unknown>).dangerouslyDisableSandbox === true;
+    // Consumed on every escape that gets this far, whatever the verdict, so none lingers.
+    const cleared = escape && takeReviewerCleared(deps.sessionId, ctx.toolUseID);
+    if (decision === "allow" && escape && policy === "auto" && (!cleared || deps.mode === "chat")) {
+      log.info(`canUseTool: escalate session=${deps.sessionId} tool=${toolName} reason=${cleared ? "escape-in-chat" : "escape-not-cleared"}`);
+      decision = "ask";
+    }
+
+    // (5b') THE REVIEWER'S NO-VERDICT on a PLAIN bash call. The reviewer answers a PreToolUse `ask`
+    // when it could reach no verdict, and for an ordinary call the child passes its reason through
+    // verbatim as `decisionReason` (an escape's is replaced by P3-J's, which is why (5b) needs the
+    // positive clearance instead). Under `auto` the gate says `allow` for `bash`, so without this the
+    // escalation meant to reach a human ran the command silently — it did, for every plain bash call,
+    // before this line existed. Narrows only: a gate `deny` stays a deny, and a never-prompting
+    // session turns the card into its typed deny below.
+    if (decision === "allow" && reviewerCouldNotJudge(ctx.decisionReason)) {
       log.info(`canUseTool: escalate session=${deps.sessionId} tool=${toolName} reason=reviewer-no-verdict`);
       decision = "ask";
     }

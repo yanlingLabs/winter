@@ -75,7 +75,7 @@ import { computeLineDiff } from "../diffs/myers";
 import { DIFF_PATCH_MAX_BYTES, mintDiffId, writeDiff } from "../diffs/store";
 import type { HookResult } from "../plugins/hook-runner";
 import { attachFileDiff } from "./diff-attach";
-import { REVIEWER_ESCALATION_REASON, noteReviewerNoVerdict } from "./bridge-common";
+import { REVIEWER_ESCALATION_REASON, noteReviewerCleared } from "./bridge-common";
 
 /** The subset of `plugins/hook-registry.ts`'s `HookFacade` this module depends on — injected
  *  rather than imported concretely so a fake can stand in for tests with no real plugin process
@@ -301,10 +301,19 @@ function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
       ? (pre.tool_input as { command: string }).command
       : "";
     if (!command) return allow();
-    if (bashLooksSafe(command, deps.reviewerAllow?.() ?? [])) return allow();
+    // C3-1 (lane C, 2026-09-22): a SANDBOX ESCAPE is never waved through on its first word or an
+    // allow-list entry — `bashLooksSafe` assumes the sandbox (a read-only `cat` is harmless inside it
+    // and reads `~/.ssh` outside it) — and the reviewer is told the command runs WITHOUT the sandbox.
+    // Only a `safe` verdict records the CLEARANCE the approval bridge requires before it runs an escape
+    // under `auto`; every early `allow()` above (no reviewer, not `auto`, disabled, no command) and
+    // every failure below records none, so the bridge cards it (`bridge-common.ts`'s
+    // `noteReviewerCleared` — fail closed by construction).
+    const escape = (pre.tool_input as { dangerouslyDisableSandbox?: unknown } | null | undefined)?.dangerouslyDisableSandbox === true;
+    if (!escape && bashLooksSafe(command, deps.reviewerAllow?.() ?? [])) return allow();
     try {
-      const verdict = await deps.reviewer.review({ class: "bash", command }, signal);
+      const verdict = await deps.reviewer.review({ class: "bash", command, ...(escape ? { unsandboxed: true } : {}) }, signal);
       if (verdict.verdict === "unsafe") return deny(verdict.reason || "the safety reviewer judged this command unsafe");
+      if (escape) noteReviewerCleared(deps.sessionId, toolUseID ?? (typeof (pre as { tool_use_id?: unknown }).tool_use_id === "string" ? (pre as { tool_use_id: string }).tool_use_id : undefined));
       return allow();
     } catch (err) {
       // 2026-09-19 (review): STRUCTURAL vs TRANSIENT — see `ReviewerNoRunnableModel`'s own doc for the
@@ -315,9 +324,9 @@ function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
       if (err instanceof ReviewerNoRunnableModel) return allow();
       // C3 (2026-09-22) — traced in the SDK source, not yet measured on a live child: this `ask`
       // reaches `canUseTool`, where the gate's `auto` allow used to answer it, i.e. silently ran it.
-      // The bridge now cards it, and recognises it by this NOTE — for a sandbox escape the child
-      // replaces this hook's reason with its own (`bridge-common.ts`'s `noteReviewerNoVerdict`).
-      noteReviewerNoVerdict(deps.sessionId, toolUseID ?? (typeof (pre as { tool_use_id?: unknown }).tool_use_id === "string" ? (pre as { tool_use_id: string }).tool_use_id : undefined));
+      // For a PLAIN bash call the child keeps this reason and the bridge cards on it
+      // (`reviewerCouldNotJudge`); for an escape the child replaces it, and the bridge cards because
+      // no clearance was recorded above.
       return ask(REVIEWER_ESCALATION_REASON);
     }
   };

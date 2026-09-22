@@ -42,38 +42,46 @@ export const NO_PARK_TIMEOUT_MS = 2 ** 31 - 1;
 export const REVIEWER_ESCALATION_REASON = "reviewer unavailable — escalating for manual approval";
 
 /**
- * WHICH calls the reviewer escalated with no verdict — keyed `sessionId` + the call's `toolUseID`,
- * the same identity the approval broker keys on (C3 follow-up, lane C, 2026-09-22).
+ * WHICH sandbox escapes the reviewer POSITIVELY CLEARED — keyed `sessionId` + the call's `toolUseID`,
+ * the same identity the approval broker keys on (C3-1, lane C, 2026-09-22).
  *
- * The reason string above is NOT enough on its own, and exactly where it matters most: for a
- * `dangerouslyDisableSandbox: true` call the agent SDK's stage 3 names its OWN mandatory-interaction
- * reason and drops the hook's (0.0.17 `permissions/evaluator.ts` ~1976-1985: `askEntry` >
- * AskUserQuestion > the P3-J sandbox override > … > `hookAskMessage`), and a hook `allow` is only
- * resolved AFTER stage 3 — so every escape reaches `canUseTool` with the same P3-J text whether the
- * reviewer passed it or could not judge it. The hook and the bridge are built in different places
- * (`daemon.ts`'s `hooksFor`, `session-driver.ts`'s `canUseToolFor`) and meet only here, in-process,
- * so the hook NOTES the call and the bridge TAKES it.
+ * Under `auto` an escape (`dangerouslyDisableSandbox: true`) runs without a card ONLY when the reviewer
+ * judged THAT call `safe` under `UNSANDBOXED_REVIEW_INSTRUCTION` (`agent/reviewer.ts`). The hook records
+ * a clearance here and the approval bridge requires one — so every other outcome FAILS CLOSED to a card
+ * (a typed deny where nobody can answer one): no reviewer wired, the reviewer disabled, no runnable
+ * model, a transient failure, an `unsafe` verdict that somehow reached the bridge, a missing call id,
+ * an evicted note. That is claude's own shape: its auto mode runs nothing its classifier did not clear
+ * (`utils/permissions/permissions.ts` ~845-875 fails closed or prompts). A NEGATIVE note ("the reviewer
+ * could not judge this one") was the first cut and was fail-OPEN — every path that never wrote it
+ * (no reviewer, disabled, structural no-model) ran the escape unreviewed.
  *
- * Bounded: an entry the bridge never takes (the turn was interrupted between the hook and the
- * permission request) is evicted oldest-first past the cap, and a stale id can only ever narrow a
- * verdict — a `toolUseID` is unique per call.
+ * Why a note at all: for an escape the agent SDK's stage 3 names its OWN mandatory-interaction reason
+ * and drops a hook's (0.0.17 `permissions/evaluator.ts` ~1976-1985), and a hook `allow` resolves only
+ * after stage 3 — so every escape reaches `canUseTool` with the same P3-J text whatever the reviewer
+ * said. The hook and the bridge are built in different places (`daemon.ts`'s `hooksFor`,
+ * `session-driver.ts`'s `canUseToolFor`) and meet only here, in-process.
+ *
+ * Bounded: a clearance the bridge never takes (the child allowed the call itself, or the turn was
+ * interrupted before the permission request) is evicted oldest-first past the cap — and eviction can
+ * only cost a card, never grant a run. A `toolUseID` is unique per call, so a lingering clearance can
+ * never apply to a different command.
  */
-const reviewerNoVerdict = new Set<string>();
-const REVIEWER_NO_VERDICT_CAP = 512;
-const noVerdictKey = (sessionId: string, toolUseID: string): string => `${sessionId}\u0000${toolUseID}`;
+const reviewerCleared = new Set<string>();
+const REVIEWER_CLEARED_CAP = 512;
+const clearedKey = (sessionId: string, toolUseID: string): string => `${sessionId}\u0000${toolUseID}`;
 
-export function noteReviewerNoVerdict(sessionId: string, toolUseID: string | undefined): void {
+export function noteReviewerCleared(sessionId: string, toolUseID: string | undefined): void {
   if (toolUseID === undefined || toolUseID.length === 0) return;
-  reviewerNoVerdict.add(noVerdictKey(sessionId, toolUseID));
-  while (reviewerNoVerdict.size > REVIEWER_NO_VERDICT_CAP) {
-    const oldest = reviewerNoVerdict.values().next().value;
+  reviewerCleared.add(clearedKey(sessionId, toolUseID));
+  while (reviewerCleared.size > REVIEWER_CLEARED_CAP) {
+    const oldest = reviewerCleared.values().next().value;
     if (oldest === undefined) break;
-    reviewerNoVerdict.delete(oldest);
+    reviewerCleared.delete(oldest);
   }
 }
 
-/** Consumes the note: `true` at most once per call. */
-export function takeReviewerNoVerdict(sessionId: string, toolUseID: string | undefined): boolean {
+/** Consumes the clearance: `true` at most once per call. */
+export function takeReviewerCleared(sessionId: string, toolUseID: string | undefined): boolean {
   if (toolUseID === undefined || toolUseID.length === 0) return false;
-  return reviewerNoVerdict.delete(noVerdictKey(sessionId, toolUseID));
+  return reviewerCleared.delete(clearedKey(sessionId, toolUseID));
 }
