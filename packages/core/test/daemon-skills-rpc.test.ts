@@ -152,6 +152,14 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
     writeFileSync(join(home, "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nhi\n");
     mkdirSync(join(home, "plugins", "superpowers", "skills", "brainstorming"), { recursive: true });
     writeFileSync(join(home, "plugins", "superpowers", "skills", "brainstorming", "SKILL.md"), "---\nname: brainstorming\ndescription: Explore\n---\nx\n");
+    mkdirSync(join(home, "plugins", "untrusted", "skills", "risky"), { recursive: true });
+    writeFileSync(join(home, "plugins", "untrusted", "skills", "risky", "SKILL.md"), "---\nname: risky\ndescription: Risky\n---\nx\n");
+    // Only a plugin the user ENABLED and granted `exec` consent to reaches a session (a skill can run
+    // shell commands) — `superpowers` is; `untrusted` is installed but never consented.
+    writeFileSync(join(home, "settings.json"), JSON.stringify({
+      schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
+      plugins: { enabled: ["superpowers"], consents: { superpowers: { exec: 1 } } },
+    }));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     daemon = await startDaemon({ home, secrets, agentProvider: null });
     harnessToken = daemon.tokens.harness;
@@ -165,6 +173,8 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
     expect(byName.get("superpowers:brainstorming")!.sessionNote).toBeUndefined();
     expect(byName.get("greet")).toMatchObject({ loadsInSessions: false });
     expect(byName.get("greet")!.sessionNote).toContain("only plugin skills");
+    expect(byName.get("untrusted:risky")).toMatchObject({ loadsInSessions: false });
+    expect(byName.get("untrusted:risky")!.sessionNote).toContain('"exec" consent');
 
     const read = await c.request(METHODS.skillsRead, { name: "greet" });
     expect(read.result.skill).toMatchObject({ name: "greet", loadsInSessions: false });
