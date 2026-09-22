@@ -18,9 +18,12 @@
 //                  RPC-routed: this file isn't daemon state (no watcher, no settings-schema
 //                  validation — `configuredMcpServersFor`/`McpManager.doEnsureProject` just read it
 //                  live off disk per session spawn), so the CLI reads/writes it directly, with or
-//                  without a live daemon. Stdio-only, matching every existing reader — `--transport
-//                  http`/`sse` is refused at THIS door before an entry shaped that way could ever
-//                  reach a reader that would silently drop it.
+//                  without a live daemon. The READERS accept stdio/http/sse per entry (parity fix,
+//                  `agent/mcp/project-file.ts`'s `parseProjectMcpServers`, shared with the daemon's
+//                  own readers) — but `winter mcp add --scope project` still writes ONLY a stdio
+//                  entry, a narrower, deliberate choice of THIS write door (not a limitation of what
+//                  the file format or the readers accept): `--transport http`/`sse` is refused here
+//                  rather than silently writing a shape this command has not been asked to grow.
 //   - "local"   -> REFUSED with a one-line explanation. claude's "local" scope is a project-private
 //                  overlay Winter has no equivalent source for today (no per-project-private MCP
 //                  config the daemon reads) — inventing one silently would be a false parity claim.
@@ -35,7 +38,7 @@ import { join } from "node:path";
 import {
   loadSettings, saveSettings, addUserMcpServer, removeUserMcpServer,
   addProjectMcpServer, removeProjectMcpServer, readRawProjectMcpConfig, writeRawProjectMcpConfig,
-  projectMcpConfigPath, TrustStore,
+  parseProjectMcpServers, projectMcpConfigPath, TrustStore,
   type McpServerSettingsEntry, type ProjectMcpServerEntry,
 } from "@yanlinglabs/winter-core";
 import { McpAddEntrySchema } from "@yanlinglabs/winter-protocol";
@@ -234,8 +237,9 @@ export type McpEntryBuildResult = { kind: "ok"; entry: McpServerSettingsEntry } 
 
 /** Builds the entry `winter mcp add`'s flags describe, validating just enough to give a specific
  *  error (a URL required for http/sse, `-e`/`-H` used on the wrong transport) — mirrors
- *  `addCommand.ts`'s own per-transport branching. Does NOT check the project-scope stdio-only rule;
- *  that's the route's job (it knows the scope, this function doesn't need to). */
+ *  `addCommand.ts`'s own per-transport branching. Does NOT check project scope's stdio-only WRITE
+ *  rule (a narrower choice of the write door, not of what the file format accepts — see this file's
+ *  own header); that's the route's job (it knows the scope, this function doesn't need to). */
 export function buildMcpEntry(parsed: McpAddParsed, transport: McpTransport): McpEntryBuildResult {
   if (transport === "http" || transport === "sse") {
     const headersR = parseMcpHeaders(parsed.headerArgs);
@@ -316,9 +320,10 @@ function addProjectScope(deps: McpRouteDeps, name: string, entry: ProjectMcpServ
   return { ok: true, scope: "project", name, transport: "stdio", cwd: deps.cwd, trusted: isTrustedDir(deps.winterHome, deps.cwd) };
 }
 
-/** `winter mcp add` — the full route. Refuses `--transport http|sse` at PROJECT scope before ever
- *  building an entry (that file's reader is stdio-only; see this file's own header) rather than
- *  writing a shape `.mcp.json`'s reader would just silently drop. */
+/** `winter mcp add` — the full route. Refuses `--transport http|sse` at PROJECT scope: not because
+ *  the reader can't handle it any more (it now can, per-entry — this file's own header), but
+ *  because THIS write door hasn't been asked to grow a new transport; use `-s user`, or hand-edit
+ *  `.mcp.json` directly for a project-scope http/sse entry. */
 export async function runMcpAddRoute(args: string[], deps: McpRouteDeps): Promise<McpAddOutcome> {
   const parseResult = parseMcpAddArgs(args);
   if (parseResult.kind === "usageError") return { ok: false, message: parseResult.message };
@@ -332,7 +337,7 @@ export async function runMcpAddRoute(args: string[], deps: McpRouteDeps): Promis
   const { transport } = transportResult;
 
   if (scopeResult.scope === "project" && transport !== "stdio") {
-    return { ok: false, message: "project-scope MCP servers are stdio-only (Winter's .mcp.json reader, matching claude's own file format) — use \"-s user\" for an http/sse server" };
+    return { ok: false, message: "winter mcp add --scope project only writes a stdio entry today (Winter's .mcp.json reader itself now accepts http/sse too, same as claude's — see project-file.ts's own header) — use \"-s user\" to add an http/sse server, or edit .mcp.json directly for one at project scope" };
   }
 
   const entryResult = buildMcpEntry(parsed, transport);
@@ -387,7 +392,7 @@ export async function runMcpAddJsonRoute(args: string[], deps: McpRouteDeps): Pr
   }
 
   if (scopeResult.scope === "project" && shaped.data.type !== "stdio") {
-    return { ok: false, message: "project-scope MCP servers are stdio-only (Winter's .mcp.json reader, matching claude's own file format) — use \"-s user\" for an http/sse server" };
+    return { ok: false, message: "winter mcp add --scope project only writes a stdio entry today (Winter's .mcp.json reader itself now accepts http/sse too, same as claude's — see project-file.ts's own header) — use \"-s user\" to add an http/sse server, or edit .mcp.json directly for one at project scope" };
   }
   if (scopeResult.scope === "project") {
     const e = shaped.data as Extract<McpServerSettingsEntry, { type: "stdio" }>;
@@ -475,24 +480,26 @@ export async function runMcpRemoveRoute(args: string[], deps: McpRouteDeps): Pro
 export type McpGetOutcome =
   | { ok: true; found: false; name: string }
   | {
-      // NOTE: for `scope: "project"`, `transport: "stdio"` asserts the SCHEME (Winter's project
-      // scope is stdio-only by design), not that this particular entry parsed as one — an entry
-      // present in the file but not shaped like `{command, args?, env?}` (an http/sse entry a human
-      // or claude wrote there) still reports `transport: "stdio"` with `command` left `undefined`;
-      // that absence is the actual "not recognized" signal (`renderMcpGetOutcome` checks it, and
-      // `asStdioProjectEntry`'s own doc explains why the CLI can't tell this apart from the wire
-      // side without the runtime schema, which the core package deliberately does not export).
       ok: true; found: true; name: string; scope: McpScope; transport: McpTransport;
       command?: string; args?: string[]; env?: Record<string, string>;
       url?: string; headers?: Record<string, string>; disabled?: boolean; strippedHeaders?: string[];
       cwd?: string;
+      /** Set ONLY for a project-scope entry that is PRESENT in `.mcp.json` but does not validate
+       *  against any recognized shape (`parseProjectMcpServers`' own skip reason, the SAME per-
+       *  branch message `settings.mcpServers` itself would raise for the identical malformed
+       *  entry). When set, `transport`/`command`/`url`/etc. above carry no information (there was
+       *  no valid entry to read them from) — `renderMcpGetOutcome` checks this FIRST. */
+      unrecognized?: string;
     }
   | { ok: false; message: string };
 
 /** `winter mcp get <name>` — no `-s` flag (claude's own `get` has none either): checks USER scope
  *  first, then PROJECT — the same precedence `external-mcp.ts`'s own header documents ("a user
  *  server shadows a same-keyed project server"), so `get` shows whichever one a real session would
- *  actually run. */
+ *  actually run. Project-scope reads go through the SAME per-entry parser
+ *  (`parseProjectMcpServers`) the daemon's own readers use (`manager.ts`/`external-mcp.ts`) — a
+ *  present-but-invalid entry is reported as `found: true` with `unrecognized` set, never silently
+ *  treated as absent, and never crashes the lookup of any OTHER name in the same file. */
 export async function runMcpGetRoute(args: string[], deps: McpRouteDeps): Promise<McpGetOutcome> {
   const parseResult = parseMcpGetArgs(args);
   if (parseResult.kind === "usageError") return { ok: false, message: parseResult.message };
@@ -523,29 +530,21 @@ export async function runMcpGetRoute(args: string[], deps: McpRouteDeps): Promis
 
   const read = readRawProjectMcpConfig(deps.cwd);
   if (read.kind === "malformed") return { ok: false, message: malformedProjectFileMessage(deps.cwd, `reading "${name}"`) };
-  const projectEntryUnknown = read.kind === "ok" ? read.servers[name] : undefined;
-  if (projectEntryUnknown && typeof projectEntryUnknown === "object") {
-    const stdio = asStdioProjectEntry(projectEntryUnknown);
-    if (stdio) return { ok: true, found: true, name, scope: "project", transport: "stdio", command: stdio.command, args: stdio.args, env: stdio.env, cwd: deps.cwd };
-    // Present, but not stdio-shaped (an http/sse entry, or something this reader doesn't
-    // recognize) — reported as found rather than silently treated as absent; no `command` field.
-    return { ok: true, found: true, name, scope: "project", transport: "stdio", cwd: deps.cwd };
+  if (read.kind === "ok") {
+    const { servers, skipped } = parseProjectMcpServers(read.servers);
+    const entry = servers[name];
+    if (entry) {
+      return {
+        ok: true, found: true, name, scope: "project", transport: entry.type, cwd: deps.cwd,
+        ...(entry.type === "stdio" ? { command: entry.command, args: entry.args, env: entry.env } : { url: entry.url, headers: entry.headers }),
+      };
+    }
+    const skippedEntry = skipped.find((s) => s.name === name);
+    if (skippedEntry) {
+      return { ok: true, found: true, name, scope: "project", transport: "stdio", cwd: deps.cwd, unrecognized: skippedEntry.reason };
+    }
   }
   return { ok: true, found: false, name };
-}
-
-/** Duck-types a raw (untyped) project-scope entry as `{command, args?, env?}` — deliberately NOT
- *  the zod schema (`ProjectMcpServerEntry` is exported from `@yanlinglabs/winter-core` as a TYPE
- *  only, same posture as `Settings`; the CLI package never gets the runtime schema object). Used
- *  only for DISPLAY (`mcp get`) — the write door (`addProjectMcpServer`) still gets its `entry`
- *  built from an already-validated `McpServerSettingsEntry`/`McpAddEntrySchema` result, never from
- *  this best-effort reader. */
-function asStdioProjectEntry(value: object): ProjectMcpServerEntry | undefined {
-  const v = value as Record<string, unknown>;
-  if (typeof v.command !== "string") return undefined;
-  const args = Array.isArray(v.args) && v.args.every((a) => typeof a === "string") ? (v.args as string[]) : undefined;
-  const env = v.env && typeof v.env === "object" && !Array.isArray(v.env) ? (v.env as Record<string, string>) : undefined;
-  return { command: v.command, ...(args ? { args } : {}), ...(env ? { env } : {}) };
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -592,13 +591,20 @@ export function renderMcpRemoveOutcome(outcome: McpRemoveOutcome): string {
 export function renderMcpGetOutcome(outcome: McpGetOutcome): string {
   if (!outcome.ok) return outcome.message;
   if (!outcome.found) return `No MCP server found with name: "${outcome.name}"`;
+  if (outcome.unrecognized) {
+    // Present in the file, but failed EVERY recognized shape (stdio/http/sse) —
+    // `parseProjectMcpServers`' own reason, the same per-branch message `settings.mcpServers`
+    // itself would raise for the identical malformed entry.
+    return [
+      `${outcome.name}:`,
+      `  Scope: ${scopeLabel(outcome.scope, outcome.cwd)}`,
+      `  (not recognized: ${outcome.unrecognized})`,
+      "",
+      `To remove this server, run: winter mcp remove "${outcome.name}" -s ${outcome.scope}`,
+    ].join("\n");
+  }
   const lines = [`${outcome.name}:`, `  Scope: ${scopeLabel(outcome.scope, outcome.cwd)}`, `  Type: ${outcome.transport}`];
-  if (outcome.transport === "stdio" && outcome.command === undefined && outcome.scope === "project") {
-    // Present in the file, but not shaped like a stdio entry `{command, args?, env?}` — an http/sse
-    // entry (or anything else) claude or a human put there; Winter's project-scope reader only ever
-    // understands stdio, so it can't show more detail than "it's there" (`runMcpGetRoute`'s own doc).
-    lines.push("  (this entry's shape isn't recognized by Winter's project-scope reader — expected {command, args?, env?}; edit .mcp.json directly to inspect it)");
-  } else if (outcome.transport === "stdio") {
+  if (outcome.transport === "stdio") {
     lines.push(`  Command: ${outcome.command}`);
     if (outcome.args?.length) lines.push(`  Args: ${outcome.args.join(" ")}`);
     if (outcome.env && Object.keys(outcome.env).length > 0) {

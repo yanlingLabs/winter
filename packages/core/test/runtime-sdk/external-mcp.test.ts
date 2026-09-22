@@ -49,6 +49,50 @@ test("a missing or malformed .mcp.json contributes nothing and never throws; a u
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// PARITY FIX (controller-directed): a project's `.mcp.json` used to be validated in ONE `.parse()`
+// call over the whole `mcpServers` map (`ProjectMcpConfig`, stdio-only) — a single entry that
+// didn't fit (an http/sse one, most commonly, or a genuinely malformed one) failed the WHOLE parse
+// and silently dropped every OTHER configured project server too. `parseProjectMcpServers`
+// (`agent/mcp/project-file.ts`) validates PER ENTRY instead, matching claude's own accepted `.mcp.
+// json` transports (stdio/http/sse) via the SAME shape `settings.mcpServers` already accepts.
+test("a mixed project .mcp.json (stdio + http + sse + one malformed entry) yields the three valid servers; the malformed one is skipped and logged, never taking its siblings down", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "winter-ext-mcp-mixed-")));
+  try {
+    writeFileSync(join(dir, ".mcp.json"), JSON.stringify({
+      mcpServers: {
+        stdioOne: { command: "bun", args: ["run", "p.ts"] },
+        httpOne: { type: "http", url: "https://example.com/mcp", headers: { "X-Request-Id": "abc123" } },
+        sseOne: { type: "sse", url: "https://example.com/sse" },
+        broken: { type: "stdio" }, // missing `command` — invalid, fails every recognized shape
+      },
+    }));
+    const logs: string[] = [];
+    const out = configuredMcpServersFor({ settings: null, cwd: dir, trusted: () => true, log: (m) => logs.push(m) });
+    expect(out).toEqual({
+      stdioOne: { type: "stdio", command: "bun", args: ["run", "p.ts"] },
+      httpOne: { type: "http", url: "https://example.com/mcp", headers: { "X-Request-Id": "abc123" } },
+      sseOne: { type: "sse", url: "https://example.com/sse" },
+    });
+    expect(out.broken).toBeUndefined();
+    expect(logs.filter((m) => m.includes("broken")).length).toBe(1); // exactly one line, naming it
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("the SAME mixed .mcp.json, untrusted, still contributes nothing — the trust gate is unchanged by the per-entry fix", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "winter-ext-mcp-mixed-untrusted-")));
+  try {
+    writeFileSync(join(dir, ".mcp.json"), JSON.stringify({
+      mcpServers: {
+        stdioOne: { command: "bun", args: ["run", "p.ts"] },
+        httpOne: { type: "http", url: "https://example.com/mcp" },
+        sseOne: { type: "sse", url: "https://example.com/sse" },
+        broken: { type: "stdio" },
+      },
+    }));
+    expect(configuredMcpServersFor({ settings: null, cwd: dir, trusted: () => false })).toEqual({});
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("no settings, no cwd → nothing (a bare daemon forwards no servers)", () => {
   expect(configuredMcpServersFor({ settings: undefined, cwd: undefined, trusted: () => true })).toEqual({});
   expect(configuredMcpServersFor({ settings: null, cwd: "", trusted: () => true })).toEqual({});
