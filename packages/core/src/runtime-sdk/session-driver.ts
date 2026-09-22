@@ -671,19 +671,29 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       const rawAdvisorModel = winterOptionsFromSettings(settings).advisorModel;
       const pinnedAdvisor = rawAdvisorModel !== undefined && isModelTag(rawAdvisorModel) ? rawAdvisorModel : undefined;
       let advisorModel = pinnedAdvisor ?? d30DefaultModel(model);
-      // D3 (2026-09-22): a pin on ANOTHER provider now runs there, on that provider's own credential
-      // (`buildWinterOptions` sends the full tag + its `authRef`). The `pins.research` rule below
-      // applies to it for the same reason: a stated advisor whose Keychain slot is EMPTY makes every
-      // `advisor` call a typed refusal, while the family default keeps the tool working — so such a pin
-      // is not stated, and the D30 default is, with one line naming the setting. Only a Keychain-backed
-      // slot is probed: a provider with no locator (a `console/*` Claude login lives in an `ant`
-      // profile) resolves its own credential in the child, exactly as it did before this change.
+      // D3 (2026-09-22) + review M2: a pin on ANOTHER provider now runs there, on that provider's own
+      // credential (`buildWinterOptions` sends the full tag + its `authRef`), so the `pins.research`
+      // digest rule below applies to it IN FULL, for the same reason — a stated advisor that cannot run
+      // makes every `advisor` call a typed refusal, while the family default keeps the tool working.
+      // The pin is therefore not stated, and the D30 default is (one line naming the setting), when:
+      //   - it names no catalog row (`rowForTag`: a hand-edited settings file can hold any tag shape);
+      //   - it is cross-provider and that provider has NO Keychain locator (a `console/*` login lives
+      //     in an `ant` profile the advisor route never sees — stating it would send no `authRef` and
+      //     let the child fall back to the brand's own Keychain lookup, the M7 hazard);
+      //   - it is cross-provider and that provider's slot is EMPTY.
+      // A same-provider pin needs no probe: the session's own turn cannot run without that credential.
       if (pinnedAdvisor !== undefined && pinnedAdvisor !== UNSTATED_TAG && !pinnedAdvisor.startsWith(WINTER_TEST_PREFIX)) {
         const advisorProviderId = splitTag(pinnedAdvisor).providerId;
-        const advisorRef = advisorProviderId === selection?.providerId ? undefined : credentialRefFor(advisorProviderId, deps.home);
-        if (advisorRef !== undefined && !(await refMaterialPresent(deps.secrets, advisorRef))) {
+        const crossProvider = advisorProviderId !== selection?.providerId;
+        const advisorRef = crossProvider ? credentialRefFor(advisorProviderId, deps.home) : undefined;
+        const why = rowForTag(pinnedAdvisor) === undefined ? `names ${JSON.stringify(pinnedAdvisor)}, which no model in the pinned catalog carries`
+          : !crossProvider ? undefined
+            : advisorRef === undefined ? `names ${advisorProviderId}, whose credential this door cannot name (a console login lives in an \`ant\` profile)`
+              : !(await refMaterialPresent(deps.secrets, advisorRef)) ? `names ${advisorProviderId}, whose credential slot is empty`
+                : undefined;
+        if (why !== undefined) {
           advisorModel = d30DefaultModel(model);
-          log(`runtimes.advisorModel: names ${advisorProviderId}, whose credential slot is empty — the advisor runs on this session's family default${advisorModel === undefined ? " (the child's own)" : ` (${advisorModel})`} instead`);
+          log(`runtimes.advisorModel: ${why} — the advisor runs on this session's family default${advisorModel === undefined ? " (the child's own)" : ` (${advisorModel})`} instead`);
         }
       }
       // 2026-09-18 (user ruling): `pins.research` is `WebFetch`'s PAGE-DIGEST model. Read LIVE here
