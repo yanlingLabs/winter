@@ -252,6 +252,28 @@ export class WinterClient {
     const r = await this.request(METHODS.mcpList, { cwd });
     return r.servers;
   }
+  /** `winter mcp add`/`add-json` — USER scope only (project scope, `<cwd>/.mcp.json`, is never
+   *  RPC-routed; see `mcp-cli.ts`'s own header). A rejection (reserved/duplicate name, or the
+   *  credential-shaped-header refusal on an http/sse entry) surfaces as an ordinary thrown `Error`
+   *  — the daemon's own message, same posture every other RPC method on this client already has. */
+  async mcpAdd(name: string, entry: { type: "stdio"; command: string; args?: string[]; env?: Record<string, string> } | { type: "http" | "sse"; url: string; headers?: Record<string, string> }): Promise<{ ok: true; name: string; transport: "stdio" | "http" | "sse"; started: boolean }> {
+    return this.request(METHODS.mcpAdd, { name, entry });
+  }
+  /** `winter mcp remove` — USER scope only. `removed: false` (never a thrown error) when the name
+   *  wasn't present, mirroring `mcp.enable`/`mcp.disable`'s own idempotent posture. */
+  async mcpRemove(name: string): Promise<{ ok: true; name: string; removed: boolean }> {
+    return this.request(METHODS.mcpRemove, { name });
+  }
+  /** `winter mcp get <name>` — USER scope only; `found: false` (never a thrown error) when the
+   *  name isn't configured there (the CLI itself checks project scope separately, by reading
+   *  `<cwd>/.mcp.json` directly — that scope is never RPC-routed). */
+  async mcpGet(name: string): Promise<{
+    ok: true; name: string; found: boolean; transport?: "stdio" | "http" | "sse";
+    command?: string; args?: string[]; env?: Record<string, string>;
+    url?: string; headers?: Record<string, string>; disabled?: boolean; strippedHeaders?: string[];
+  }> {
+    return this.request(METHODS.mcpGet, { name });
+  }
   async pluginsList(): Promise<{
     ok: true;
     plugins: Array<{

@@ -546,6 +546,58 @@ export const McpDisableParams = z.object({ name: z.string().min(1) });
 export const McpDisableResult = z.object({ ok: z.literal(true), name: z.string(), enabled: z.literal(false) });
 
 /**
+ * `winter mcp add`/`add-json` (CLI parity with `claude mcp add`) — USER scope only. Winter's
+ * project scope (`<cwd>/.mcp.json`) is never RPC-routed: that file isn't daemon state (no watcher,
+ * no settings-schema validation, read live per session spawn by `configuredMcpServersFor`), so the
+ * CLI writes it directly, with or without a daemon (see `packages/cli/src/mcp-cli.ts`'s own header).
+ * `entry` hand-mirrors `settings.ts`'s `McpServerSettingsEntry` discriminated union field-for-field
+ * — protocol never imports from core (same cross-package literal-mirroring precedent as this file's
+ * other core-shaped params) — so the REAL enforcement (including the credential-shaped-header
+ * refusal on an http/sse entry) still happens once, in `saveSettings`, on the daemon side; this
+ * schema only bounds the wire shape. LOCAL role only (never added to `REMOTE_ALLOWED_METHODS`),
+ * same posture as `mcp.enable`/`mcp.disable`.
+ */
+export const McpAddEntrySchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("stdio"), command: z.string().min(1), args: z.array(z.string()).optional(), env: z.record(z.string(), z.string()).optional() }),
+  z.object({ type: z.literal("http"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional() }),
+  z.object({ type: z.literal("sse"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional() }),
+]);
+export const McpAddParams = z.object({ name: z.string().min(1), entry: McpAddEntrySchema });
+/** `started`: true only when this call ALSO brought a stdio user server up right now
+ *  (`McpManager.startOneUserServer`, mirroring `mcp.enable`'s own restart) — false for an http/sse
+ *  entry (no in-daemon client for those transports) or a name also listed in `mcp.disabled`. */
+export const McpAddResult = z.object({ ok: z.literal(true), name: z.string(), transport: z.enum(["stdio", "http", "sse"]), started: z.boolean() });
+
+export const McpRemoveParams = z.object({ name: z.string().min(1) });
+/** `removed`: false when the name was not present in `settings.mcpServers` at all — an idempotent
+ *  no-op, same posture `mcp.enable`/`mcp.disable` already take on an absent/never-disabled name. */
+export const McpRemoveResult = z.object({ ok: z.literal(true), name: z.string(), removed: z.boolean() });
+
+/**
+ * `winter mcp get <name>` (USER scope; project scope is read directly off `<cwd>/.mcp.json` by the
+ * CLI, same "never RPC-routed" posture as `mcp.add`/`mcp.remove` above). Read-only — LOCAL role
+ * only, but never refuses on a missing `winterHome` the way the write doors do (a read degrades to
+ * `found: false` instead, same "typed absence, never a crash" posture `mcp.list` already has).
+ * Carries the full configured shape `mcp.list` deliberately does NOT (that RPC is a live-status
+ * listing, not a config reader) — `strippedHeaders` mirrors `McpServerStatusSchema`'s own field,
+ * same read-door correction (names only, never a header value).
+ */
+export const McpGetParams = z.object({ name: z.string().min(1) });
+export const McpGetResult = z.object({
+  ok: z.literal(true),
+  name: z.string(),
+  found: z.boolean(),
+  transport: z.enum(["stdio", "http", "sse"]).optional(),
+  command: z.string().optional(),
+  args: z.array(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
+  url: z.string().optional(),
+  headers: z.record(z.string(), z.string()).optional(),
+  disabled: z.boolean().optional(),
+  strippedHeaders: z.array(z.string()).optional(),
+});
+
+/**
  * Daemon settings surface (2026-09-17 plan, item 2): `capabilities.list` — the daemon's OWN
  * in-process `winter__<key>` capability servers (`capabilities/names.ts`'s `CAPABILITY_SERVER_KEYS`
  * — sessions/computer/browser/office/research/web/lsp/external), read-only, LOCAL role only (never
@@ -2514,6 +2566,9 @@ export const METHODS = {
   mcpList: "mcp.list",
   mcpEnable: "mcp.enable",
   mcpDisable: "mcp.disable",
+  mcpAdd: "mcp.add",
+  mcpRemove: "mcp.remove",
+  mcpGet: "mcp.get",
   pluginsList: "plugins.list",
   askUserRespond: "ask_user.respond",
   taskList: "task.list",

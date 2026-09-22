@@ -2,19 +2,16 @@ import { z } from "zod";
 import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { McpStdioClient } from "./client";
+import { ProjectMcpConfig, readRawProjectMcpConfig, parseProjectMcpServers } from "./project-file";
 import type { ToolRegistry } from "../tools/registry";
 import type { TrustStore } from "../trust";
 
 export interface McpServerStatus { name: string; status: "connected" | "failed"; toolNames: string[]; source: "user" | "project" | "plugin" }
 export interface McpServerConfig { command: string; args?: string[]; env?: Record<string, string> }
 
-const ProjectMcpConfig = z.object({
-  mcpServers: z.record(z.string(), z.object({
-    command: z.string().min(1),
-    args: z.array(z.string()).optional(),
-    env: z.record(z.string(), z.string()).optional(),
-  })).optional(),
-});
+// `ProjectMcpConfig` (the `.mcp.json` schema) now lives in `./project-file` — shared with
+// `runtime-sdk/external-mcp.ts` and the CLI's `mcp add/remove --scope project` (`mcp-cli.ts`),
+// which previously would have been a THIRD hand-copied duplicate of this exact shape.
 type ProjectState = { kind: "none" } | { kind: "started"; servers: McpServerStatus[]; clients: Array<{ name: string; client: McpStdioClient }>; toolNames: string[] };
 type StartOneResult = { status: "connected" | "failed"; toolNames: string[]; client?: McpStdioClient };
 
@@ -169,17 +166,25 @@ export class McpManager {
   private async doEnsureProject(dir: string): Promise<void> {
     if (!this.deps.trust.isTrusted(dir)) return; // untrusted → not recorded (retry after trust)
 
-    let cfg: z.infer<typeof ProjectMcpConfig>;
-    try {
-      cfg = ProjectMcpConfig.parse(JSON.parse(readFileSync(join(dir, ".mcp.json"), "utf8")));
-    } catch {
-      this.projects.set(dir, { kind: "none" }); // missing/malformed → record none
+    const read = readRawProjectMcpConfig(dir);
+    if (read.kind !== "ok") {
+      this.projects.set(dir, { kind: "none" }); // missing/malformed whole file → record none, unchanged
       return;
     }
-    const servers = cfg.mcpServers ?? {};
-    if (Object.keys(servers).length === 0) {
+    if (Object.keys(read.servers).length === 0) {
       this.projects.set(dir, { kind: "none" });
       return;
+    }
+
+    // PARITY FIX (controller-directed): PER-ENTRY validation (`parseProjectMcpServers`, shared with
+    // `runtime-sdk/external-mcp.ts` and `mcp-cli.ts`'s `mcp get`) — an entry that doesn't fit ANY
+    // recognized shape (stdio/http/sse) is skipped and logged BY NAME, never taking its siblings
+    // down with it. Before this fix, `ProjectMcpConfig.parse(...)` validated the WHOLE map in one
+    // call, so a single http/sse (or otherwise malformed) entry anywhere in the file silently
+    // dropped every OTHER configured project server too.
+    const { servers: validated, skipped } = parseProjectMcpServers(read.servers);
+    for (const { name, reason } of skipped) {
+      this.deps.log?.(`mcp: project server '${name}' (${dir}) skipped — ${reason}`);
     }
 
     // MEDIUM (fix wave, pre-merge review, finding 3): a name in `settings.mcp.disabled` is never
@@ -191,12 +196,31 @@ export class McpManager {
     // — the same "reported, not silently absent" posture disabling gets everywhere else.
     const disabled = this.deps.disabled?.() ?? new Set<string>();
     const state: ProjectState = { kind: "started", servers: [], clients: [], toolNames: [] };
-    await Promise.all(Object.entries(servers).map(async ([name, sc]) => {
+    await Promise.all(Object.entries(validated).map(async ([name, entry]) => {
+      // Transport checked BEFORE `disabled` (deliberately): an http/sse entry was NEVER trackable
+      // by this manager at all, disabled or not (no in-daemon client for those transports — same
+      // limitation `settings.mcpServers`' own http/sse rows have here, `daemon.ts` filters those
+      // out before `McpManager.startAll` too). Checking `disabled` first would give a DISABLED
+      // http/sse entry a `status: "failed"` placeholder row while an ENABLED one gets none at all
+      // — an asymmetry with no purpose (mcp.disabled's own contract, "the trust gate and
+      // mcp.disabled stay exactly as they are", is about what STARTS, and this manager was never
+      // going to start either one). This order means mcp.disabled's placeholder-row behavior below
+      // is completely unchanged for the ONE case it ever meaningfully applied to before this fix:
+      // a stdio entry (the only shape that could reach a `disabled` check at all before per-entry
+      // validation existed).
+      if (entry.type !== "stdio") {
+        // The session's own CHILD connects to it directly (`configuredMcpServersFor`); this
+        // manager's shared registry has never tracked these, so it is reported (not silently
+        // absent) and left alone, exactly as it always was before an http/sse entry could even
+        // reach this point.
+        this.deps.log?.(`mcp: project server '${name}' (${dir}) is ${entry.type} — no in-daemon client, not tracked in this daemon's own registry (the session's child connects to it directly)`);
+        return;
+      }
       if (disabled.has(name)) {
         state.servers.push({ name, status: "failed", toolNames: [], source: "project" });
         return;
       }
-      const { status, toolNames, client } = await this.startOne(name, sc, {
+      const { status, toolNames, client } = await this.startOne(name, { command: entry.command, args: entry.args, env: entry.env }, {
         scope: dir,
         onCollision: "skip",
         label: "project server",
