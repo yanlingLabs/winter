@@ -6,7 +6,14 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
 export const REQUIRED_WINTER_AGENT_SDK = "0.0.17";
-/** Bumped to 0.0.10 (the official leg's LIVE permission-mode change): the router's `OfficialQuery`
+/** Bumped to 0.0.11 (lane B, 2026-09-23): the router no longer names `<cwd>/.winter` as a local plugin
+ *  on the official leg — measured by its own tests, a cloned repository's `hooks/hooks.json` ran on a
+ *  Code session's first prompt through it, with no trust decision anywhere — and gained
+ *  `OptionsTemplatePolicy.plugins`, through which the daemon hands the SAME skills-only plugin views the
+ *  Winter leg gets (`official-options.ts`'s `skillPlugins`). A router below this still names the
+ *  project dir itself, so this pin is also the floor.
+ *
+ *  0.0.10 (the official leg's LIVE permission-mode change): the router's `OfficialQuery`
  *  gained `setPermissionMode(mode)`, so `OfficialSession.setPolicy` can tell a RUNNING claude child
  *  about an approval-mode change instead of waiting for its next incarnation. No floor constant of
  *  the `CONSOLE_AUTH_ROUTER_MIN` kind is needed for it: that pattern exists for a feature whose floor
@@ -16,7 +23,7 @@ export const REQUIRED_WINTER_AGENT_SDK = "0.0.17";
  *  Readonly<Record<string, unknown>>` — the router-package wall `official-options.ts`'s own comment
  *  on `OfficialInputDeps.agents` used to name (a router version this low has no field to forward the
  *  daemon's merged subagent definitions through) is CLOSED as of that pin. */
-export const REQUIRED_WINTER_RUNTIME_SDK = "0.0.10";
+export const REQUIRED_WINTER_RUNTIME_SDK = "0.0.11";
 /** P8c-3/versions: the official peer is pinned EXACT (`"0.3.250"` in package.json, no `^`) — the
  *  ladder's package door and the router's own `assertVersionMatrix` both key off this string
  *  matching the installed wrapper's manifest, never a range. */

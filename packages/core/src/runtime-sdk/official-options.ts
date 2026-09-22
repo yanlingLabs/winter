@@ -15,7 +15,7 @@
 import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { isVendorCompliantProjectKey, transcriptProjectKey, type CredentialRef, type McpServerConfig, type PermissionResult, type ProviderSelection } from "@yanlinglabs/winter-agent-sdk";
+import { isVendorCompliantProjectKey, transcriptProjectKey, type CredentialRef, type McpServerConfig, type PermissionResult, type ProviderSelection, type SdkPluginConfig } from "@yanlinglabs/winter-agent-sdk";
 import { createApprovalBridge, officialConnectionEnv, officialCredentialPlan, type ApprovalRequest, type OfficialPermissionMode as RouterOfficialPermissionMode, type RouterOfficialInput, type RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import type { ContextAssembler } from "../agent/context";
 import type { SessionApprovalPolicy } from "../agent/gate";
@@ -420,6 +420,16 @@ export interface OfficialInputDeps {
    *  by the SAME `sdkAllowRulesFor` (`mode-options.ts`) onto the flag-settings `permissions.allow`.
    *  Absent/empty ⇒ byte-identical to a session before this field existed. */
   persistedAllow?: readonly string[];
+  /** Lane B (router 0.0.11): the skills-only plugin views `SkillStore.childSkillSurface` builds — the
+   *  SAME ones the Winter leg's child gets, so enabled + `exec`-consented plugins only — forwarded to
+   *  the router's `plugins` policy (`local`, absolute, `skipMcpDiscovery: true`; the router refuses the
+   *  session's cwd and its `.winter`/`.claude` dirs, which a view under `<home>/cache` never is).
+   *  Absent/empty ⇒ no `plugins` key: since 0.0.11 the official leg then loads no plugin at all. */
+  skillPlugins?: readonly SdkPluginConfig[];
+  /** `Skill(<plugin>:<dir>)` deny rules for denied plugin skills whose DIRECTORY differs from their
+   *  frontmatter name — claude names a plugin skill by its directory, so the settings rule alone
+   *  would bind nothing on this leg. */
+  skillDenyAliases?: readonly string[];
   /** Everything `officialBrokerFor`/`canUseToolFor` needs, MINUS the three fields this function
    *  fills from `OfficialSessionInput` itself (never let a caller's stale `sessionId`/`mode`/`cwd`
    *  silently win over the session actually being opened). */
@@ -756,7 +766,8 @@ export function officialInputFor(
             // (`sdkAllowRulesFor`) — claude applies its own settings files' `permissions.allow`
             // natively; `settingSources: []` means this flag layer is the only way ours reach it.
             ...(input.mode === "code" ? { allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...sdkAllowRulesFor(deps.persistedAllow ?? [])])] } : {}),
-            deny: permissionDenyRulesFor(deps.home, deps.settings),
+            // …plus the claude-spelling aliases of any denied plugin skill (`skillDenyAliases`).
+            deny: [...permissionDenyRulesFor(deps.home, deps.settings), ...(deps.skillDenyAliases ?? [])],
             ...(deps.policy === "bypass" ? {} : { disableBypassPermissionsMode: "disable" as const }),
           },
           sandbox: sandboxConfigFor(deps.home),
@@ -794,6 +805,12 @@ export function officialInputFor(
         // for `Options.agents` (an explicit `{}` would tell the runtime "zero subagents are
         // defined" rather than "the host declared none").
         ...(deps.agents !== undefined && Object.keys(deps.agents).length > 0 ? { agents: deps.agents } : {}),
+        // Lane B (router 0.0.11): the enabled + consented plugins' skills-only views — the router's
+        // `plugins` policy is the only way a plugin reaches this leg since 0.0.11 (it no longer names
+        // `<cwd>/.winter` itself). Absent when there are none.
+        ...(deps.skillPlugins !== undefined && deps.skillPlugins.length > 0
+          ? { plugins: deps.skillPlugins.map((p) => ({ type: "local" as const, path: p.path, skipMcpDiscovery: true as const })) }
+          : {}),
       } as RouterOfficialInput["options"],
     },
   };
