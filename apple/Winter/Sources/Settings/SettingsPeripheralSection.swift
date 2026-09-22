@@ -9,7 +9,7 @@ import SwiftUI
 //
 //  - the lease list is `PeripheralProvider.activeLeases` (an already-decoupled published
 //    view-model, observed directly — never a `WinterClient`), rendered through the pure
-//    `holderDisplay` / `peripheralLeaseAgeText` helpers that `DashboardSurfaceTests` pins;
+//    `holderDisplay` / `peripheralLeaseStateText` helpers that `DashboardSurfaceTests` pins;
 //  - Panic calls the SAME `PeripheralProvider.panic()` the menu item and the hotkey use;
 //  - the helper-approval line is the pure `helperStatusDisplay(_:)` from `App/HelperClient.swift`,
 //    read directly rather than through that file's `HelperApprovalRow` view — the row here has to
@@ -75,10 +75,10 @@ struct SettingsPeripheralSection: View {
                 .foregroundStyle(Theme.textMuted)
                 .textSelection(.enabled)
         } control: {
-            // `PeripheralLeaseInfo` carries no "granted at", so time-to-expiry is this surface's
-            // age signal — the pane's own reasoning, and the same pure helper.
-            Text(peripheralLeaseAgeText(expiresAt: lease.expiresAt,
-                                        nowMs: Int(Date().timeIntervalSince1970 * 1000)))
+            // `PeripheralLeaseInfo.expiresAt` is a grant-time value the broker's own renewals
+            // never update (F1) — not a live signal, so this surface says the same thing the
+            // Dashboard pane does ("active") rather than doing time arithmetic on it.
+            Text(peripheralLeaseStateText())
                 .font(Typography.caption())
                 .foregroundStyle(Theme.textMuted)
         }
