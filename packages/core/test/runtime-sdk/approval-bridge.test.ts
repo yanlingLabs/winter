@@ -13,6 +13,7 @@ import {
   NO_PARK_TIMEOUT_MS, type ApprovalBridge, type BridgeLogger, type BridgedApprovalRequest, type CanUseToolDeps,
 } from "../../src/runtime-sdk/approval-bridge";
 import { gateToolNameFor } from "../../src/runtime-sdk/tool-names";
+import { planBridgeFor } from "../../src/runtime-sdk/plan-bridge";
 
 const SESSION = "sess-1";
 const FIXED_NOW = 1_700_000_000_000;
@@ -397,6 +398,21 @@ test("withdrawPending also settles a pending AskUserQuestion: question_resolved{
   const res = (await pending)!;
   expect(res.behavior).toBe("deny");
   expect(h.events).toHaveLength(2);
+});
+
+test("withdrawPending also closes a pending PLAN card: plan_resolved{approved:false, by:aborted}, and the plan is not approved", async () => {
+  const events: NewSessionEvent[] = [];
+  const policies: string[] = [];
+  const planBridge = planBridgeFor({ emit: (e) => { events.push(e); }, setPolicy: (_s, p) => { policies.push(p); }, log: silent });
+  const h = harness({ policy: "plan", planBridge, emit: (e) => { events.push(e); } });
+  const pending = h.canUse("ExitPlanMode", { plan: "do the thing" }, requestCtx());
+  expect(events.map((e) => (e as { type: string }).type)).toEqual(["plan_presented"]);
+  expect(h.canUse.withdrawPending("tu1")).toBe(true);
+  const res = (await pending)!;
+  expect(res.behavior).toBe("deny");
+  expect(events[1]).toMatchObject({ type: "plan_resolved", callId: "tu1", approved: false, by: "aborted" });
+  expect(policies).toEqual([]);   // an abandoned plan never leaves plan mode
+  expect(h.canUse.withdrawPending("tu1")).toBe(false);
 });
 
 // -------------------------------------------------------------------------------------------

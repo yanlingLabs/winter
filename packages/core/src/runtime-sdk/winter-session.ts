@@ -226,7 +226,10 @@ const REAL_TIMERS: WinterTimers = {
  * a text the host owes the child; every main-thread `turn_started` is one it has pushed (the
  * projector's `beginTurn` is the ONLY producer, and the driver calls it exactly once per push, at
  * the push — `beginAndPush` appends the `turn_started` RIGHT AFTER the message it runs, except for
- * a held send released later, whose `turn_started` lands after younger messages).
+ * a held send released later, whose `turn_started` lands after younger messages, and — since C2 —
+ * a push made while a turn runs, whose `turn_started` the projector holds until that turn's
+ * `turn_completed`; `appendUser` announces any still held before the next message lands, so no
+ * younger message ever separates a pushed text from its `turn_started`).
  *
  * PAIRING IS BY ADJACENCY, NEVER FIFO (P8b-40): a `turn_started` pairs with the NEAREST PRECEDING
  * unpaired `user_message`. A steer or a delivery pushes immediately while an older send is still

@@ -249,30 +249,20 @@ class ProjectorImpl implements Projector {
    * `turn_started`, and the host appends THAT event rather than one of its own — see
    * `PROJECTED_EVENT_COVERAGE.turn_started` for what two producers would cost.
    *
-   * ── A MID-TURN STEER IS NOT A NEW BEGUN TURN ────────────────────────────────────────────────
+   * ── A MID-TURN PUSH IS ITS OWN TURN, AND IT STARTS WHEN THE RUNNING ONE ENDS ────────────────
    *
-   * `session.send` and `session.steer` are both pushes into the same host-owned queue (P8b-5), but
-   * they differ in exactly the way this door cares about: `send` starts a turn, while `steer` joins
-   * the turn already running (the child drains it at its next round top). So the rule stays "ONE
-   * `result` per begun turn", and **a steer must not call `beginTurn`** — under the current
-   * understanding it produces no terminal of its own, and an extra `beginTurn` would leave
-   * `openTurns` permanently ≥ 1, silently weakening the guard so a stray or duplicate `result` is
-   * projected instead of dropped. It would also put a mid-turn `turn_started` in the log, which the
-   * engine never emits.
-   *
-   * **THIS IS NOT MEASURED, AND IT IS A TASK 16 MEASUREMENT OBLIGATION.** Task 10's recording
-   * deliberately gated its second envelope on the first `result` "so the turns stay separable", so
-   * it says nothing about a mid-turn push. Drive a `steer` against the built binary and COUNT the
-   * `result`s: if a steered-in message terminates on its own, the driver must call `beginTurn` for
-   * the steer too — otherwise that terminal is dropped by the `openTurns === 0 && !sawFrame` guard
-   * whenever the steer produced no frames first, which is the same defect this door was added to
-   * fix, on the steer path.
+   * MEASURED (P8b-38 — `test/projector/real-child.test.ts` counts the `result`s against the built
+   * binary): a push made while a turn runs (a `steer`, a messaging delivery) yields its OWN `result`,
+   * because the child queues it as its next envelope. So the driver calls `beginTurn` for every push
+   * and the rule stays "ONE `result` per begun turn". See `Projector.beginTurn` (`types.ts`) for the
+   * C2 hold below and the one assumption it rests on.
    */
   beginTurn(input: { text: string; at?: string }): ProjectedBatch {
     this.commitPending();
-    // C2 (2026-09-22): P8b-38 settled the measurement above — on the Winter wire a mid-turn push IS
-    // its own turn, and the child runs it AFTER the running one ends. So its `turn_started` is held
-    // and announced right after the running turn's terminal (see `announceQueuedTurns`).
+    // C2 (2026-09-22): on the Winter wire a mid-turn push is the child's NEXT turn, so its
+    // `turn_started` is held and announced right after the running turn's terminal (or earlier,
+    // through `announceQueuedTurns`). "Running" is this projector's own push count — see the
+    // interface doc for what that rests on.
     const running = this.openTurns > 0;
     this.openTurns++;
     this.echo.pushed(input.text);
