@@ -322,7 +322,7 @@ test("the control-plane deny rules cover the four write tools × the control-pla
   for (const tool of ["Edit", "Write", "MultiEdit", "NotebookEdit", "Read", "Glob", "Grep"]) {
     expect(deny).toContain(`${tool}(${claudeResumeTarget})`);
   }
-  expect(deny).toHaveLength(4 * 13 + 3 * 3);
+  expect(deny).toHaveLength(4 * 14 + 3 * 3);
 });
 
 // Daemon settings surface batch 3 (item 2): `settings.permissions.deny` (Skill(<name>) toggles,
@@ -336,14 +336,14 @@ test("item 2: settings.permissions.deny is appended after the fixed control-plan
   const deny = buildWinterOptions(optionsInput({ home: "/h", settings })).permissions!.deny!;
   expect(deny.slice(-2)).toEqual(["Skill(writing-skills)", "Agent(fork)"]);
   // The fixed fence is untouched (same count this file's other test pins).
-  expect(deny).toHaveLength(4 * 13 + 3 * 3 + 2);
+  expect(deny).toHaveLength(4 * 14 + 3 * 3 + 2);
 });
 
 test("item 2: an absent settings.permissions.deny changes nothing — byte-identical to before item 2", () => {
   const withNull = buildWinterOptions(optionsInput({ home: "/h", settings: null })).permissions!.deny!;
   const withUndefined = buildWinterOptions(optionsInput({ home: "/h" })).permissions!.deny!;
-  expect(withNull).toHaveLength(4 * 13 + 3 * 3);
-  expect(withUndefined).toHaveLength(4 * 13 + 3 * 3);
+  expect(withNull).toHaveLength(4 * 14 + 3 * 3);
+  expect(withUndefined).toHaveLength(4 * 14 + 3 * 3);
 });
 
 // Winter Phase 10b (D1-3, W18-9): a read of a `claude-resume-*` staging root is denied — proved
@@ -411,7 +411,8 @@ test("every deny rule is //-anchored, and resolves to the fence target it names"
   expect(specs.has(`//**/.winter/agents/**`)).toBe(true);          // finding 2c: any project's, any depth
   expect(specs.has(`/${join(home, "cache", "skill-plugins")}/**`)).toBe(true); // B1: the skills-only plugin views
   expect(specs.has(`/${join(home, "plugins")}/**`)).toBe(true);    // M6: installed plugins
-  expect(specs.size).toBe(13);                                       // (runtimes/** was already a READ target)
+  expect(specs.has(`/${join(home, "permissions")}/**`)).toBe(true); // I2: the approved-project-rules record
+  expect(specs.size).toBe(14);                                       // (runtimes/** was already a READ target)
   // The two inert forms must never reappear.
   for (const s of specs) {
     expect({ s, singleSlashAbsolute: /^\/[^/]/.test(s) }).toEqual({ s, singleSlashAbsolute: false });
@@ -441,7 +442,7 @@ test("the Bash sandbox names real DIRECTORIES, because its consumer renders seat
   // redirect — so `<home>/runtimes/bin/winter`, rung 4 of `resolveWinterExecutable`'s ladder, was
   // writable there. If either list loses it, that is the regression this line exists to catch.
   // B1 follow-up: + the skills-only plugin views (write only — see `controlPlaneDenyRules`).
-  expect(sb.filesystem!.denyWrite).toEqual(["/h/run", "/h/runtimes", "/h/cache/skill-plugins", "/h/plugins"]);
+  expect(sb.filesystem!.denyWrite).toEqual(["/h/run", "/h/runtimes", "/h/cache/skill-plugins", "/h/plugins", "/h/permissions"]);
   // CLAUDE.md: "the sole read denial is ~/.winter/run" — reads are otherwise unrestricted.
   expect(sb.filesystem!.denyRead).toEqual(["/h/run", "/h/runtimes"]);   // Task 17: runtimes/ is model-denied (8a)
   for (const p of [...sb.filesystem!.denyWrite!, ...sb.filesystem!.denyRead!]) {

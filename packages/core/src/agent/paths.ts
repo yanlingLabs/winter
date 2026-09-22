@@ -16,6 +16,15 @@ export function skillPluginViewsRoot(winterHome: string): string {
   return join(winterHome, "cache", "skill-plugins");
 }
 
+/**
+ * The directory holding the daemon's OWN record of per-project rules the user approved from a card
+ * (`agent/approved-project-rules.ts`) — `<home>/permissions`. A leaf helper for the same reason as
+ * `skillPluginViewsRoot`: the store writes it and `runtime-sdk/mode-options.ts` write-fences it.
+ */
+export function approvedProjectRulesDir(winterHome: string): string {
+  return join(winterHome, "permissions");
+}
+
 // Symlink chains longer than this are rejected outright (mirrors the kernel's own ELOOP guard,
 // just tighter). Also breaks link CYCLES (a→b→a never terminates otherwise): lstat on a cycle
 // member succeeds every hop (lstat never follows the final link), so only this cap stops it.

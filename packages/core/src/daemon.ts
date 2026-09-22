@@ -39,6 +39,7 @@ import { notifyHeadless } from "./agent/notify-fallback";
 import { LspManager } from "./agent/lsp/manager";
 import { PermissionGate, type SessionApprovalPolicy } from "./agent/gate";
 import { PermissionRules } from "./agent/permission-rules";
+import { ApprovedProjectRules } from "./agent/approved-project-rules";
 import { ApprovalBroker } from "./agent/approvals";
 import { QuestionBroker } from "./agent/questions";
 import { createPersistedChildren, type AgentRegistry } from "./agent/bg-agent-registry";
@@ -543,6 +544,10 @@ export async function startDaemon(opts: {
   // down; later tasks convert more getters against this SAME instance, never a second one, so
   // there is exactly one mtime cache per project cwd for the whole daemon).
   const projectSettings = new ProjectSettingsResolver({ base: () => settings, trust: trustStore });
+  // Review I2 (lane B): the daemon's own record of rules the user approved "in this project" from a
+  // card (`<home>/permissions/projects.json`) — written by `approval.respond`, applied to children
+  // regardless of trust. Provider-independent, so built unconditionally.
+  const approvedProjectRules = new ApprovedProjectRules({ winterHome });
   // fix-wave B (I1): every per-project getter below resolves at the REPO ROOT, matching
   // `globalAllow`'s own `projectRoot` (engine.ts's `repoRootFor(cwd)`) — NOT the raw session cwd.
   // Before this, a SUBDIRECTORY session read a DIFFERENT `.winter/settings.json` than
@@ -1581,6 +1586,7 @@ export async function startDaemon(opts: {
     persistedAllowRules: (cwd) => persistedAllowRulesFor(cwd, {
       projectRootOf: (c) => projectRootOf(c),
       effectiveSettings: (root) => projectSettings.effective(root),
+      approvedProjectRules: (root) => approvedProjectRules.rulesFor(root),
       ...(permissionRules === undefined ? {} : { projectRules: (root: string) => permissionRules!.rulesFor(root).project }),
       isTrusted: (dir) => trustStore.isTrusted(dir),
     }),
@@ -2343,6 +2349,9 @@ export async function startDaemon(opts: {
     // so no approval flow could ever produce a rule-bearing optionId to persist in the first
     // place) — same typed-no-op precedent as `registry`/`mcp` elsewhere in this options object.
     permissionRules,
+    // Review I2 (lane B): the daemon's own record of "in this project" approvals — the SAME instance
+    // the session drivers' saved-rules reader applies.
+    approvedProjectRules,
     dirs: sessionDirs,
     trust: trustStore,
     bg: bgRegistry,
