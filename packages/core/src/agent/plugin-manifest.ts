@@ -83,14 +83,29 @@ export function loadManifest(dir: string, dirName: string, log?: (m: string) => 
 }
 
 /**
+ * The consent block's line for a plugin's SHIPPED SKILLS (lane B, 2026-09-23) — shared by manifest and
+ * legacy plugins (`PluginStore.list`), so both say the same thing: a skill can run shell commands
+ * when a session uses it. Empty when the plugin ships none.
+ */
+export function skillsPayloadLines(skills: readonly string[] | undefined): string[] {
+  if (skills === undefined || skills.length === 0) return [];
+  return [`skills: ${skills.join(", ")} — a skill can run shell commands when a session uses it`];
+}
+
+/**
  * Consent classes a manifest requires, in the order the spec/consent block lists them:
  * exec (any code execution — mcpServers, hooks, a Tier-2 entry point, or an explicit
  * permissions.exec), tcc (accessibility/screen-recording/input-monitoring), hardware (battery
  * etc, routed through the XPC helper).
  */
-export function requiredConsentClasses(m: WinterManifest): Array<"exec" | "tcc" | "hardware"> {
+export function requiredConsentClasses(m: WinterManifest, opts: { shipsSkills?: boolean } = {}): Array<"exec" | "tcc" | "hardware"> {
   const classes: Array<"exec" | "tcc" | "hardware"> = [];
-  const execNeeded = Boolean(m.entry) || Boolean(m.contributes?.mcpServers?.length) || Boolean(m.contributes?.hooks?.length) || Boolean(m.permissions?.exec);
+  // 2026-09-23 (lane B, review): SHIPPED SKILLS are exec too. A session's runtime can run a skill's
+  // shell: claude executes a skill's inline `` !`cmd` `` and honours its `allowed-tools` pre-approval
+  // without asking the host (measured by the router, 0.0.11's `OptionsTemplatePolicy.plugins` doc;
+  // claude's `loadSkillsDir.ts`/`loadPluginCommands.ts`), so handing a plugin's skills to a session is
+  // the same trust decision as running its hooks.
+  const execNeeded = Boolean(m.entry) || Boolean(m.contributes?.mcpServers?.length) || Boolean(m.contributes?.hooks?.length) || Boolean(m.permissions?.exec) || opts.shipsSkills === true;
   if (execNeeded) classes.push("exec");
   if (m.permissions?.tcc?.length) classes.push("tcc");
   if (m.permissions?.hardware?.length) classes.push("hardware");
@@ -102,7 +117,7 @@ export function requiredConsentClasses(m: WinterManifest): Array<"exec" | "tcc" 
  * text always shows the exec payload (commands to be run), never just a summary."). One line per
  * mcpServer, then one line per hook, then the entry command (at most one) — in manifest order.
  */
-export function execPayloadLines(m: WinterManifest): string[] {
+export function execPayloadLines(m: WinterManifest, opts: { skills?: readonly string[] } = {}): string[] {
   const lines: string[] = [];
   for (const server of m.contributes?.mcpServers ?? []) {
     lines.push(`mcp: ${[server.command, ...(server.args ?? [])].join(" ")}`);
@@ -113,5 +128,6 @@ export function execPayloadLines(m: WinterManifest): string[] {
   if (m.entry) {
     lines.push(`entry: ${[m.entry.command, ...(m.entry.args ?? [])].join(" ")}`);
   }
+  lines.push(...skillsPayloadLines(opts.skills));   // last, so every pre-skills payload keeps its order
   return lines;
 }

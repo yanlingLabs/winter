@@ -61,7 +61,7 @@ import { loadUserAgentDefinitions, loadProjectAgentDefinitions } from "./agent/a
 import { SupportedAgentsCache } from "./agent/supported-agents-cache";
 import { BackgroundTaskRegistry } from "./agent/bg-registry";
 import { sessionTmpDir } from "./agent/session-tmp";
-import { PluginStore, pluginMcpEligible, pluginSpawnEligible, hookRegistryPlugins } from "./agent/plugins";
+import { PluginStore, pluginMcpEligible, pluginSkillsEligible, pluginSpawnEligible, hookRegistryPlugins } from "./agent/plugins";
 import { PluginSupervisor } from "./plugins/supervisor";
 import { PluginContribRegistry } from "./plugins/contrib";
 import { HookRegistry, HookFacade } from "./plugins/hook-registry";
@@ -612,7 +612,20 @@ export async function startDaemon(opts: {
   const hookRegistry = new HookRegistry();
   // B1 (lane B): `disabled` is a LIVE getter over the reassignable `settings` holder, not a boot
   // snapshot — the store now also decides which plugin skills a runtime child loads, per incarnation.
-  const skillStore = new SkillStore({ winterHome, trust: trustStore, plugins: { disabled: () => settings?.plugins?.disabled ?? [] } });
+  const skillStore = new SkillStore({
+    winterHome, trust: trustStore,
+    plugins: {
+      disabled: () => settings?.plugins?.disabled ?? [],
+      // Lane B (review, 2026-09-23): a plugin's skills reach a session (either leg) only when the user
+      // ENABLED it and granted its `exec` consent — a skill can run shell commands. Read LIVE from the
+      // settings holder (a fresh `PluginStore` over it, as `ipc/server.ts`'s own live plugin list does),
+      // so enabling/consenting reaches the next spawn with no restart.
+      sessionEligible: () => new Set(
+        new PluginStore({ winterHome, plugins: settings?.plugins, consents: settings?.plugins?.consents }).list()
+          .filter(pluginSkillsEligible).map((p) => p.name),
+      ),
+    },
+  });
   // File-based memory (MEMDIR, T1 — design doc `2026-07-15-file-based-memory-design.md`): a live
   // getter over the `settings` holder (assigned above; reassigned in place by the hot-settings
   // watcher below), read fresh by BOTH the write-root join (`sessionDirs`, just below) and the

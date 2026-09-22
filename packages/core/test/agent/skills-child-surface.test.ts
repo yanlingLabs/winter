@@ -114,8 +114,38 @@ describe("SkillStore.childSkillSurface — the plugin skills a Winter child can 
     const { home, trust } = world();
     writeSkill(join(home, "skills"), "greet", "greet", "Say hi");
     const s = new SkillStore({ winterHome: home, trust });
-    expect(s.childSkillSurface({ cwd: null })).toEqual({ plugins: [], skills: [] });
+    expect(s.childSkillSurface({ cwd: null })).toEqual({ plugins: [], skills: [], officialDeny: [] });
     expect(existsSync(join(home, "cache", "skill-plugins"))).toBe(false);
+  });
+
+  // Review (2026-09-23): a skill is CODE on a session's runtime — claude runs a skill's inline
+  // `!`cmd`` and honours its `allowed-tools` without asking the host — so only a plugin the user
+  // ENABLED and granted `exec` consent to hands its skills to a session, on either leg.
+  test("consent gate: only plugins in the live eligible set are handed over, and the rest say why", () => {
+    const { home, trust } = world();
+    writeSkill(join(home, "plugins", "ok", "skills"), "alpha", "alpha", "A");
+    writeSkill(join(home, "plugins", "unconsented", "skills"), "beta", "beta", "B");
+    let eligible = new Set(["ok"]);
+    const s = new SkillStore({ winterHome: home, trust, plugins: { sessionEligible: () => eligible } });
+    const surface = s.childSkillSurface({ cwd: null });
+    expect(surface.skills).toEqual(["ok:alpha"]);
+    expect(surface.plugins.map((p) => p.path)).toEqual([join(home, "cache", "skill-plugins", "ok")]);
+    const beta = s.list({ cwd: null }).find((m) => m.name === "unconsented:beta")!;
+    expect(s.sessionAvailability(beta)).toEqual({ loadsInSessions: false, sessionNote: expect.stringContaining('"exec" consent') });
+    // Live: consenting later reaches the next spawn; withdrawing prunes the view.
+    eligible = new Set(["unconsented"]);
+    expect(s.childSkillSurface({ cwd: null }).skills).toEqual(["unconsented:beta"]);
+    expect(readdirSync(skillPluginViewsRoot(home))).toEqual(["unconsented"]);
+  });
+
+  test("a denied skill whose DIRECTORY differs from its frontmatter name gets a claude-spelling deny alias", () => {
+    const { home, trust } = world();
+    writeSkill(join(home, "plugins", "p", "skills"), "dir-name", "front-name", "F");
+    writeSkill(join(home, "plugins", "p", "skills"), "same", "same", "S");
+    const s = new SkillStore({ winterHome: home, trust });
+    const surface = s.childSkillSurface({ cwd: null, deny: ["Skill(p:front-name)", "Skill(p:same)"] });
+    expect(surface.skills).toEqual([]);
+    expect(surface.officialDeny).toEqual(["Skill(p:dir-name)"]);
   });
 
   test("names the SDK's own jails would refuse are never put in `skills` (the plugin still loads, so the child says why)", () => {

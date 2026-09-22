@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PluginStore, pluginMcpEligible, type PluginConsentRecord } from "../../src/agent/plugins";
+import { PluginStore, pluginMcpEligible, pluginSkillsEligible, type PluginConsentRecord } from "../../src/agent/plugins";
 
 /**
  * Phase 4a gate (design spec §9): "legacy plugin untouched; a manifest plugin with exec consents
@@ -68,14 +68,23 @@ describe("4a gate (spec §9): legacy plugin untouched; manifest plugin consent l
       expect(wouldStartPlugins(h, [p])).toEqual([]);
     });
 
-    test("enable -> mcpEnabled + pluginMcpEligible true, ZERO consents involved", () => {
+    // 2026-09-23 (lane B, review) — CONTRACT CHANGE, deliberately: a plugin that SHIPS SKILLS now
+    // requires the `exec` consent class, legacy or not (a session's runtime can run a skill's shell;
+    // claude runs a skill's inline command and honours its `allowed-tools` without asking the host).
+    // Consent is per CLASS, so this fixture's legacy `.mcp.json` now needs that same consent too.
+    test("enable alone no longer suffices for a legacy plugin that ships skills — exec consent does", () => {
       const [p] = new PluginStore({ winterHome: h, plugins: { enabled: [name] } }).list();
       if (!p) throw new Error("expected one plugin");
       expect(p.mcpEnabled).toBe(true);
-      expect(p.requiredConsents).toEqual([]); // legacy: nothing is ever required
-      expect(p.consented).toEqual([]); // no consents dep supplied at all — still fine
-      expect(pluginMcpEligible(p)).toBe(true); // enable alone suffices, exactly pre-4a
-      expect(wouldStartPlugins(h, [p])).toEqual([{ name, manifestServers: undefined }]);
+      expect(p.requiredConsents).toEqual(["exec"]);
+      expect(p.consented).toEqual([]);
+      expect(pluginMcpEligible(p)).toBe(false);
+      expect(pluginSkillsEligible(p)).toBe(false);
+      const [c] = new PluginStore({ winterHome: h, plugins: { enabled: [name] }, consents: { [name]: { exec: 1 } } }).list();
+      if (!c) throw new Error("expected one plugin");
+      expect(pluginMcpEligible(c)).toBe(true);
+      expect(pluginSkillsEligible(c)).toBe(true);
+      expect(wouldStartPlugins(h, [c])).toEqual([{ name, manifestServers: undefined }]);
     });
 
     test("PluginInfo shared fields equal the pre-4a shape (name/skills/hasMcp/mcpEnabled/disabled)", () => {
@@ -93,7 +102,7 @@ describe("4a gate (spec §9): legacy plugin untouched; manifest plugin consent l
       expect(p.legacy).toBe(true);
       expect(p.tier).toBeUndefined();
       expect(p.hasManifestMcp).toBe(false);
-      expect(p.execPayload).toEqual([]);
+      expect(p.execPayload).toEqual(["skills: greet — a skill can run shell commands when a session uses it"]);
       expect(p.tccPermissions).toEqual([]);
       expect(p.hardwarePermissions).toEqual([]);
     });
@@ -176,7 +185,7 @@ describe("4a gate (spec §9): legacy plugin untouched; manifest plugin consent l
       expect(p.name).toBe(name);
       expect(p.skills).toEqual(["hi"]); // plugin still loads — skills live
       expect(p.tier).toBeUndefined();
-      expect(p.requiredConsents).toEqual([]);
+      expect(p.requiredConsents).toEqual(["exec"]); // it ships a skill (lane B, 2026-09-23)
       expect(logs.some((m) => m.includes(name))).toBe(true); // warning logged
     });
   });
