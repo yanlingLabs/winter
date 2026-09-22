@@ -40,6 +40,22 @@ import { WINTER_ADVERTISED_TOOLS_0_0_4, RUNTIME_HOST_TOOL_PAIRS, WINTER_OWN_TOOL
  * is where it already lives, rather than from a permission mode that would also take the questions
  * away. **Flagged for a controller ruling in the task report.**
  */
+/**
+ * **May a child spawned for `policy` ever be in `bypassPermissions`?** The ONE rule behind both of the
+ * Winter leg's spawn-time bypass facts (`buildWinterOptions`): `allowDangerouslySkipPermissions` is set
+ * iff this is true, and `permissions.disableBypassPermissionsMode` (the clamp against an agent
+ * DEFINITION minting its own bypass) is set iff it is false.
+ *
+ * Both are fixed when the child is SPAWNED, and the runtime refuses a live `setPermissionMode(
+ * "bypassPermissions")` on a clamped child. So a live policy change whose two ends disagree here
+ * cannot be told to the running child — it needs a new one. `session.setPolicy` (`ipc/server.ts`)
+ * reads this same function to decide that, so the rule that sets the clamp and the rule that decides
+ * a replacement can never drift apart.
+ */
+export function bypassAllowedAtSpawn(policy: SessionApprovalPolicy): boolean {
+  return policy === "bypass";
+}
+
 export function permissionModeFor(policy: SessionApprovalPolicy): PermissionMode {
   switch (policy) {
     case "plan": return "plan";
@@ -708,6 +724,11 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     // `allowDangerouslySkipPermissions`/`permissionMode: "bypassPermissions"` is this session's own,
     // legitimate, daemon-decided top-level mode (set two lines below), and disabling the runtime's
     // ability to enter it would break that mode for the session itself, not just for a definition.
+    //
+    // A SPAWN-TIME fact, which is why a live switch across the bypass boundary replaces the child
+    // (`session.setPolicy`, keyed on `bypassAllowedAtSpawn` — the same function used here) instead of
+    // asking it: a clamped child refuses `setPermissionMode("bypassPermissions")`, and an unclamped one
+    // would keep its `allowDangerouslySkipPermissions` after the user switched bypass off.
     permissions: {
       // Code mode only — see `GLOBAL_READ_ALLOW_RULES`' own doc (the tools do not exist elsewhere),
       // and `WEB_BUILTIN_ALLOW_RULES`' own doc for why the two web built-ins need a bare allow rule
@@ -715,7 +736,7 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
       // `canUseTool`, and Winter's gate has always answered `allow` for the web class).
       ...(input.mode === "code" ? { allow: [...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES] } : {}),
       deny: permissionDenyRulesFor(input.home, input.settings),
-      disableBypassPermissionsMode: input.policy !== "bypass",
+      disableBypassPermissionsMode: !bypassAllowedAtSpawn(input.policy),
     },
     sandbox: sandboxConfigFor(input.home),
     // Agent SDK 0.0.16 defaults a spawn to BACKGROUND (claude's own default), which means a finished
@@ -758,7 +779,7 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
   if (input.effort !== undefined) options.effort = input.effort;
   if (input.systemPrompt !== undefined) options.systemPrompt = input.systemPrompt;
   if (input.outputStyle !== undefined) options.outputStyle = input.outputStyle;
-  if (input.policy === "bypass") options.allowDangerouslySkipPermissions = true;
+  if (bypassAllowedAtSpawn(input.policy)) options.allowDangerouslySkipPermissions = true;
   if (input.hooks !== undefined) options.hooks = input.hooks;
   const provider = input.model !== undefined ? providerFor(input.model, input.home) : undefined;
   if (input.advisorModel !== undefined) {

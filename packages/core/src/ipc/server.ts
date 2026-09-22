@@ -111,7 +111,7 @@ import { withProblemsForRoles, type RoleHealthRegistry } from "../providers/role
 import type { InternalRouter } from "../providers/internal-router";
 import { internalRoleProblemsFor } from "../providers/internal-role-problems";
 import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, readRawSettings } from "../settings";
-import { disallowedToolsFor } from "../runtime-sdk/mode-options";
+import { bypassAllowedAtSpawn, disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
 import { diagnoseRuntimes } from "../runtime-sdk/runtimes-doctor";
 import { loadUserAgentDefinitions, loadProjectAgentDefinitions, mergeAgentDefinitionTiers } from "../agent/agent-definitions";
@@ -913,6 +913,69 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
    * failure because the daemon's own bookkeeping had a bad day. (A test stub that throws proved the
    * earlier uncaught version turned a stored credential into an RPC error.)
    */
+  /**
+   * `session.setPolicy` across the BYPASS BOUNDARY on a live Winter-leg child: the policy the child
+   * was SPAWNED under, per session, while a replacement is waiting for its idle boundary.
+   *
+   * Needed because the stored policy stops being the child's once a crossing is deferred: a user who
+   * goes `ask` → `bypass` → `auto` inside one turn has a child still spawned under `ask`, whose clamp
+   * is already right for `auto`. Keyed to the exact `LegSession` object, so an entry left by a child
+   * that was replaced for another reason (a credential write, a handoff) is never read for its
+   * successor.
+   */
+  const pendingPolicyReplacements = new Map<string, { live: LegSession; spawnPolicy: SessionApprovalPolicy }>();
+
+  /**
+   * Replace a live Winter child whose SPAWN-TIME bypass facts disagree with the policy the user just
+   * chose — `mode-options.ts`'s `bypassAllowedAtSpawn` decides both, and the runtime refuses a live
+   * switch into `bypassPermissions` on a child spawned clamped ("bypassPermissions is disabled by
+   * managed configuration"), which is how this RPC used to fail and revert.
+   *
+   * THE CREDENTIAL WRITE'S MACHINERY (`evictSessionsForCredential`): the table's `evict` ends the child
+   * RESUMABLY and forgets the driver, and the next send re-assembles from the record and the transcript
+   * — `optionsFor` reads the stored policy at every incarnation, so the clamp and the mode follow it.
+   * A running turn is never cut: the replacement waits for its idle boundary, and is re-checked there
+   * (the user may have crossed back, and a child replaced meanwhile for another reason is not touched).
+   *
+   * LEAVING bypass also tells the live child NOW. It can take that switch (nothing clamps a move out of
+   * bypass), and it must: in `bypassPermissions` the runtime never consults `canUseTool`, so a turn
+   * left running until the boundary would keep auto-approving after the user switched bypass off. A
+   * refusal there is logged, not fatal — the replacement still lands at the boundary.
+   */
+  async function replaceChildForPolicy(sessionId: string, live: LegSession, spawnPolicy: SessionApprovalPolicy, next: SessionApprovalPolicy): Promise<void> {
+    const winter = opts.winter!;
+    if (bypassAllowedAtSpawn(spawnPolicy)) {
+      try {
+        await live.setPolicy(next);
+      } catch (err) {
+        console.error(`session.setPolicy for ${sessionId}: the running child did not leave bypass at once (${err instanceof Error ? err.message : "unknown"}) — it is replaced at its idle boundary regardless`);
+      }
+    }
+    const clampChanges = (): boolean => {
+      let stored: SessionApprovalPolicy;
+      try { stored = opts.store.meta(sessionId).approvalPolicy; } catch { return false; }   // the session went away
+      return bypassAllowedAtSpawn(stored) !== bypassAllowedAtSpawn(spawnPolicy);
+    };
+    if (!live.turnRunning) {
+      pendingPolicyReplacements.delete(sessionId);
+      console.error(`session.setPolicy for ${sessionId} crosses the bypass boundary (${spawnPolicy} → ${next}) — replacing its child so it spawns with the matching permission clamp`);
+      await winter.evict(sessionId);
+      return;
+    }
+    if (pendingPolicyReplacements.get(sessionId)?.live === live) return;   // already scheduled for this child
+    pendingPolicyReplacements.set(sessionId, { live, spawnPolicy });
+    console.error(`session.setPolicy for ${sessionId} crosses the bypass boundary (${spawnPolicy} → ${next}) mid-turn — its child is replaced at the next idle boundary`);
+    void live.idle().then(
+      async () => {
+        if (pendingPolicyReplacements.get(sessionId)?.live === live) pendingPolicyReplacements.delete(sessionId);
+        if (winter.get(sessionId) !== live) return;   // replaced meanwhile — the successor read the store when it spawned
+        if (!clampChanges()) return;                  // crossed back before the boundary: this child is already right
+        await winter.evict(sessionId);
+      },
+      () => { if (pendingPolicyReplacements.get(sessionId)?.live === live) pendingPolicyReplacements.delete(sessionId); },
+    );
+  }
+
   async function refreshInternalProvidersAfterCredentialChange(): Promise<void> {
     try {
       await opts.internalRouter?.view.refresh();
@@ -2541,6 +2604,21 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // switch failed by a surface whose next read says it succeeded, and this session's own gate
         // would start denying calls the child never asks about.
         const live = opts.winter?.get(p.sessionId);
+        // ACROSS THE BYPASS BOUNDARY on the Winter leg the child cannot be told — its clamp and its
+        // `allowDangerouslySkipPermissions` are spawn-time facts — so it is REPLACED, resumably, the way
+        // a credential write replaces one (`replaceChildForPolicy`). The policy it was spawned under is
+        // the stored one, unless an earlier crossing is still waiting for this child's idle boundary.
+        // The official leg never needs this: its `bypass` is `acceptEdits` (`officialPermissionModeFor`),
+        // a mode its live child accepts, and its clamp only fences `Options.agents`, whose
+        // `permissionMode` the daemon strips at parse time.
+        if (live !== undefined && live.state === "live" && opts.winter!.legOf(p.sessionId) === "winter") {
+          const pending = pendingPolicyReplacements.get(p.sessionId);
+          const spawnPolicy = pending !== undefined && pending.live === live ? pending.spawnPolicy : previous;
+          if (spawnPolicy !== undefined && bypassAllowedAtSpawn(spawnPolicy) !== bypassAllowedAtSpawn(p.policy)) {
+            await replaceChildForPolicy(p.sessionId, live, spawnPolicy, p.policy);
+            return { ok: true };
+          }
+        }
         if (live !== undefined) {
           try {
             await live.setPolicy(p.policy);
