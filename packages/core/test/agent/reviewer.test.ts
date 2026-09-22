@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bashLooksSafe, BashReviewer, ReviewerNoRunnableModel, REVIEW_INSTRUCTION, FS_REVIEW_INSTRUCTION, EXTERNAL_REVIEW_INSTRUCTION } from "../../src/agent/reviewer";
+import { bashLooksSafe, BashReviewer, ReviewerNoRunnableModel, REVIEW_INSTRUCTION, UNSANDBOXED_REVIEW_INSTRUCTION, FS_REVIEW_INSTRUCTION, EXTERNAL_REVIEW_INSTRUCTION } from "../../src/agent/reviewer";
 import { FakeProvider } from "../../src/agent/fake-provider";
 import type { ProviderEvent } from "../../src/providers/types";
 import { internalRoleEffortFor } from "../../src/providers/manager";
@@ -135,6 +135,14 @@ describe("BashReviewer", () => {
     const p2 = new FakeProvider(verdict("safe", "ok"));
     await new BashReviewer({ provider: { provider: p2, model: "fake" } } as any).review({ class: "bash", command: "ls" } as any);
     expect(p2.requests[0]!.instructions).toBe(REVIEW_INSTRUCTION);
+  });
+
+  test("C3-1: an unsandboxed bash command is reviewed under UNSANDBOXED_REVIEW_INSTRUCTION, never the sandboxed premise", async () => {
+    const p = new FakeProvider(verdict("safe", "ok"));
+    await new BashReviewer({ provider: { provider: p, model: "fake" } } as any).review({ class: "bash", command: "cat ~/.ssh/id_ed25519", unsandboxed: true });
+    expect(p.requests[0]!.instructions).toBe(UNSANDBOXED_REVIEW_INSTRUCTION);
+    expect(UNSANDBOXED_REVIEW_INSTRUCTION).not.toContain("network is denied");
+    expect(REVIEW_INSTRUCTION).toContain("network is denied");
   });
 
   test("class:\"fs\" sends FS_REVIEW_INSTRUCTION + the précis only — no COMMAND/JUSTIFICATION framing", async () => {
