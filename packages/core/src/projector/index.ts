@@ -200,6 +200,13 @@ class ProjectorImpl implements Projector {
   /** True once this turn's terminal has been emitted, so an "error-result-then-throw" ResultError
    *  is recognised as the pair of a result already projected rather than projected twice. */
   private terminalEmitted = false;
+  /**
+   * C2 (2026-09-22): pushes the host made while one of its turns was still open, in PUSH order —
+   * each is a turn the child will run after the ones ahead of it. `announced` is set once its
+   * `turn_started` is out (early, through `announceQueuedTurns`), so its own start does not announce
+   * it again. One entry is shifted per projected terminal: the turn that starts next.
+   */
+  private readonly queuedStarts: Array<{ announced: boolean }> = [];
 
   /** Seed the to-do map from the session's persisted rows, once — see `ProjectorDeps.priorTodos`.
    *  Never throws: a failed read leaves the map empty, which is today's behaviour. */
@@ -263,10 +270,42 @@ class ProjectorImpl implements Projector {
    */
   beginTurn(input: { text: string; at?: string }): ProjectedBatch {
     this.commitPending();
+    // C2 (2026-09-22): P8b-38 settled the measurement above — on the Winter wire a mid-turn push IS
+    // its own turn, and the child runs it AFTER the running one ends. So its `turn_started` is held
+    // and announced right after the running turn's terminal (see `announceQueuedTurns`).
+    const running = this.openTurns > 0;
     this.openTurns++;
     this.echo.pushed(input.text);
-    return this.stampBatch([{ type: "turn_started", sessionId: this.deps.sessionId, threadId: MAIN_THREAD }]);
+    if (running && this.holdsTurnStarts) {
+      this.queuedStarts.push({ announced: false });
+      return EMPTY_BATCH();
+    }
+    return this.stampBatch([this.turnStarted()]);
   }
+
+  announceQueuedTurns(): ProjectedBatch {
+    const out: ProjectedEvent[] = [];
+    for (const q of this.queuedStarts) {
+      if (q.announced) continue;
+      q.announced = true;
+      out.push(this.turnStarted());
+    }
+    return out.length === 0 ? EMPTY_BATCH() : this.stampBatch(out);
+  }
+
+  private turnStarted(): ProjectedEvent {
+    return { type: "turn_started", sessionId: this.deps.sessionId, threadId: MAIN_THREAD };
+  }
+
+  /**
+   * Only the Winter leg holds a mid-turn push's `turn_started` (C2). The OFFICIAL leg's child is
+   * claude, which folds a message that arrives mid-turn INTO the running turn (a `queued_command`
+   * attachment at the next tool round — no terminal of its own), so a held announcement there would
+   * be released by a terminal that is not its own and leave a `turn_started` no `turn_completed`
+   * ever follows. That leg keeps the push-time announcement (its steer accounting is its own carry,
+   * `official-session.ts`'s "UNMEASURED" note).
+   */
+  private get holdsTurnStarts(): boolean { return (this.deps.runtimeKind ?? "winter-agent") === "winter-agent"; }
   get lastResultAt(): string | undefined { return this.resultAt; }
 
   accept(msg: ProtocolSdkMessage): ProjectedBatch {
@@ -390,6 +429,11 @@ class ProjectorImpl implements Projector {
       this.roundIndex++;
       const threadId = threadIdOf(userFrame);
       if (hasToolResults(userFrame)) {
+        // C2 (2026-09-22): the child is done with these calls, so no human can still be owed an
+        // answer for them — settled BEFORE this frame is stamped (see `ProjectorDeps.onToolResults`).
+        this.settleCalls(userFrame.message.content
+          .filter((b) => b.type === "tool_result" && typeof b.tool_use_id === "string" && b.tool_use_id.length > 0)
+          .map((b) => b.tool_use_id as string));
         const firstResult = userFrame.message.content.find((b) => b.type === "tool_result" && typeof b.tool_use_id === "string");
         const sourceId = `tr:${(firstResult?.tool_use_id as string | undefined) ?? `${this.turnIndex}:${this.roundIndex}`}`;
         return claim(sourceId, () => {
@@ -510,6 +554,14 @@ class ProjectorImpl implements Projector {
       if (this.openTurns > 0) this.openTurns--;
       this.terminalEmitted = true;
       this.resultAt = this.deps.now();
+      // C2: the turn queued next starts NOW — its `turn_started` follows this `turn_completed`, in
+      // the same batch, unless `announceQueuedTurns` already put it out. Stamped outside the claim,
+      // exactly like `beginTurn`'s own: a `turn_started` is the host's push, not a projected source.
+      const next = this.queuedStarts.shift();
+      if (next !== undefined && !next.announced) {
+        const started = this.stampBatch([this.turnStarted()]);
+        return { ...events, persist: [...events.persist, ...started.persist] };
+      }
       return events;
     }
 
@@ -586,6 +638,16 @@ class ProjectorImpl implements Projector {
 
   flush(): void { this.commitPending(); }
 
+  /** `deps.onToolResults`, never allowed to break the fold (a driver's own bookkeeping). */
+  private settleCalls(callIds: string[]): void {
+    if (callIds.length === 0 || this.deps.onToolResults === undefined) return;
+    try {
+      this.deps.onToolResults(callIds);
+    } catch (err) {
+      this.deps.log.warn?.("[projector] onToolResults threw — ignored", { sessionId: this.deps.sessionId, error: err instanceof Error ? err.name : "unknown" });
+    }
+  }
+
   get refusals(): readonly ProjectorRefusal[] { return this.refused; }
 
   /**
@@ -618,6 +680,10 @@ class ProjectorImpl implements Projector {
     this.running = false;
     this.sawFrame = false;
     if (this.openTurns > 0) this.openTurns--;
+    // C2: the stream is gone, and every push still queued behind the failed turn died with the child.
+    // Nothing is announced for them — a push with no `turn_started` after its `user_message` is
+    // exactly what the next incarnation's `unconsumed` scan re-pushes.
+    this.queuedStarts.length = 0;
     this.resultAt = this.deps.now();
     this.turnIndex++;
     this.roundIndex = 0;

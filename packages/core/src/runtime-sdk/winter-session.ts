@@ -703,6 +703,11 @@ class WinterSessionImpl implements WinterSession {
   }
 
   private appendUser(text: string, clientName: string): number {
+    // C2 (lane C, 2026-09-22): a turn pushed while another ran has its `turn_started` held by the
+    // projector until that turn ends (turn boundaries in order). Any still held is announced HERE,
+    // before this message lands, so a `turn_started` is never separated from its own message by a
+    // younger one — the adjacency pairing `unconsumedUserMessages` rests on.
+    if (this.inc !== undefined) this.emit(this.inc.projector.announceQueuedTurns());
     return this.deps.append({ type: "user_message", sessionId: this.sessionId, threadId: MAIN_THREAD, text, clientName }).seq;
   }
 

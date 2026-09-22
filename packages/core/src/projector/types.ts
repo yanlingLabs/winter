@@ -128,6 +128,22 @@ export interface ProjectorDeps {
    * swap, resume) would find no tracked row and be dropped. Absent → start empty.
    */
   priorTodos?: () => readonly { id: string; subject: string; status: string; activeForm?: string }[];
+  /**
+   * 2026-09-22 (C2): the child has produced a `tool_result` for these call ids (any thread), so
+   * nothing may still be waiting on a HUMAN for them — an approval card or a question for such a call
+   * is moot. Called BEFORE the frame's events are stamped, so whatever the driver appends here (the
+   * bridge's `approval_resolved`/`question_resolved` withdrawal) lands ahead of the `tool_result`
+   * and the stamped seqs stay exact.
+   *
+   * WHY IT EXISTS: an interrupt abandons a pending permission request inside the Winter child (agent
+   * SDK 0.0.17 `engine.ts`'s `raceInterrupt` around `evaluateWithFreshPolicy`) WITHOUT cancelling the
+   * host's `canUseTool` — the SDK has no `control_cancel_request` (claude's CLI sends one and the
+   * claude SDK aborts the callback's signal) — so the card stayed pending forever. The child's own
+   * padded `[interrupted]` result is the one fact on the wire that says it gave up.
+   *
+   * Called on a replayed prefix too (harmless: nothing is pending then). A throw is swallowed.
+   */
+  onToolResults?: (callIds: readonly string[]) => void;
 }
 
 /**
@@ -204,6 +220,22 @@ export interface Projector {
    * fix, on the steer path.
    */
   beginTurn(input: { text: string; at?: string }): ProjectedBatch;
+  /**
+   * 2026-09-22 (C2): announce NOW every push whose `turn_started` `beginTurn` is still holding.
+   *
+   * On the Winter leg a push made while one of the host's turns is still open (a steer, a delivery,
+   * a held send released at a `result` while a steer runs) returns NO `turn_started` from `beginTurn`:
+   * the child queues it as its own later turn, so it is announced right after the running turn's
+   * `turn_completed`, one per terminal — the log's turn boundaries in the order they happen.
+   *
+   * The durable queue's adjacency pairing (`winter-session.ts`'s `unconsumedUserMessages`: a
+   * `turn_started` pairs with the NEAREST PRECEDING unpaired `user_message`) needs a pushed message
+   * and its `turn_started` never to be separated by a YOUNGER `user_message`. So the driver calls this
+   * before it appends any `user_message`: a push still unannounced at that moment is announced there
+   * (the order then degrades to the pre-C2 shape for that one push, and the pairing stays exact).
+   * Idempotent; empty when nothing is held.
+   */
+  announceQueuedTurns(): ProjectedBatch;
   /** Fold one wire message into zero or more `SessionEvent`s, in emission order. */
   accept(msg: ProtocolSdkMessage): ProjectedBatch;
   /** True between the first frame of a turn and its `result`. */
