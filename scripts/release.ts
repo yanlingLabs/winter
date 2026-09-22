@@ -849,12 +849,21 @@ const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
   { path: app, label: "Winter.app", expect: [] },
   { path: join(app, "Contents", "MacOS", "WinterHelper"), label: "WinterHelper", expect: [] },
   // A2 (2026-09-22): winter-core is a bun (JavaScriptCore) binary and carries exactly `allow-jit`
-  // (`scripts/bun-jit.entitlements`), the same single relaxation Chrome gives its JIT helpers and
-  // Anthropic's own bun-compiled `claude` ships with. Without it, under the hardened runtime, JSC runs
-  // JIT-less with no `SharedArrayBuffer`: `@anthropic-ai/claude-agent-sdk`'s top-level
-  // `new SharedArrayBuffer(4)` threw `ReferenceError` in every shipped daemon (the official leg never
-  // loaded), and the daemon ran ~5x slower (measured 228 ms -> 1179 ms; 206 ms with the entitlement).
-  // Nothing else: no `disable-library-validation`, no `allow-unsigned-executable-memory`.
+  // (`scripts/bun-jit.entitlements`). Without it, under the hardened runtime, JSC runs JIT-less with
+  // no `SharedArrayBuffer`: `@anthropic-ai/claude-agent-sdk`'s top-level `new SharedArrayBuffer(4)`
+  // threw `ReferenceError` in every shipped daemon (the official leg never loaded), and the daemon ran
+  // ~5x slower (measured 228 ms -> 1179 ms; 206 ms with the entitlement).
+  // WHY ONLY THIS ONE. It is the MINIMAL set, measured sufficient (the SDK import, a full daemon boot
+  // under `verify:runtime-state`, the seatbelted workflow worker) — not a copy of anyone else's list.
+  // Bun's own guide recommends five (allow-jit, allow-unsigned-executable-memory,
+  // disable-executable-page-protection, allow-dyld-environment-variables, disable-library-validation:
+  // `bun-types/docs/guides/runtime/codesign-macos-executable.mdx:36-45`), and the pinned `claude`
+  // binary carries allow-jit, allow-unsigned-executable-memory, disable-library-validation plus the
+  // apple-events and audio-input keys. The extra two `cs.*` memory/library relaxations exist for
+  // `bun:ffi` and native `.node` addons; nothing bundled into winter-core (core, cli, protocol, the
+  // agent/runtime SDK wrappers, the claude SDK, provider-runtime, unpdf) or into the agent SDK's own
+  // sources imports `bun:ffi` or loads a `.node` addon, so they would widen the surface for nothing.
+  // A future FFI/addon dependency must revisit this pin with evidence, not by widening it blind.
   { path: join(app, "Contents", "Resources", "winter-core"), label: "winter-core", expect: [JIT] },
   // office-plumbing wave — Winter's own compiled binary, same posture as WinterHelper above (no
   // hardened-runtime relaxation of any kind; it is not a JS engine). The vendored LibreOffice product-set is
