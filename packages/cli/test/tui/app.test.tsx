@@ -1831,3 +1831,61 @@ describe("App — T5 status chrome end-to-end (live sources, zero daemon changes
     expect((frame.split("\n").length)).toBeLessThanOrEqual(23);
   });
 });
+
+// Lane B (2026-09-23): crossing the BYPASS boundary on a live session replaces its runtime child
+// (resumably) — at once when idle, at the running turn's end otherwise — and a running turn that
+// could not leave bypass keeps bypassing until it ends. `session.setPolicy` says so (`replaced`,
+// `warning`), and the TUI's shift+tab switch prints one line for each instead of implying the new
+// mode is already in force.
+describe("App — shift+tab policy switch reports a bypass crossing", () => {
+  const SHIFT_TAB = "\x1b[Z";
+
+  test("a crossing replaced at the turn's end, with a warning → one note line each", async () => {
+    const bridge = makeEventBridge();
+    const base = fakeClient();
+    const warning = "the running turn is still bypassing approvals — it could not leave bypass mid-turn, and the session switches when this turn ends";
+    const client = {
+      ...base,
+      setPolicy: (...args: unknown[]) => {
+        base.calls.push({ method: "setPolicy", args });
+        return Promise.resolve({ ok: true, replaced: "at-idle", warning });
+      },
+    };
+    const { lastFrame, stdin } = render(<App client={client} bridge={bridge} {...baseProps} initialPolicy="bypass" />);
+    await wait();
+    stdin.write(SHIFT_TAB);
+    await wait(60);
+
+    expect(base.calls).toEqual([{ method: "setPolicy", args: ["s1", "plan"] }]);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("plan mode applies when the running turn ends");
+    expect(frame).toContain("warning: the running turn is still bypassing approvals");
+  });
+
+  test("a crossing replaced at once → one line; an ordinary switch → no line at all", async () => {
+    const bridge = makeEventBridge();
+    const base = fakeClient();
+    const results: unknown[] = [{ ok: true, replaced: "now" }, { ok: true }];
+    const client = {
+      ...base,
+      setPolicy: (...args: unknown[]) => {
+        base.calls.push({ method: "setPolicy", args });
+        return Promise.resolve(results.shift());
+      },
+    };
+    const { lastFrame, stdin } = render(<App client={client} bridge={bridge} {...baseProps} initialPolicy="auto" />);
+    await wait();
+    stdin.write(SHIFT_TAB);
+    await wait(60);
+    let frame = lastFrame() ?? "";
+    expect(frame).toContain("bypass mode is in force — the session's runtime restarted to apply it");
+    expect(frame).not.toContain("warning:");
+
+    stdin.write(SHIFT_TAB);
+    await wait(60);
+    frame = lastFrame() ?? "";
+    expect(base.calls.map((c) => c.args[1])).toEqual(["bypass", "plan"]);
+    expect(count(frame, "mode is in force")).toBe(1);
+    expect(frame).not.toContain("plan mode applies");
+  });
+});

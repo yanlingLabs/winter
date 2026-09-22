@@ -5,6 +5,7 @@ import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadS
 import type { CredentialRow, SecretStore, Settings } from "@yanlinglabs/winter-core";
 import { METHODS, type ApprovalPolicy, type Task } from "@yanlinglabs/winter-protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
+import { policySwitchNotes } from "./tui/policy-switch-notes";
 import { WinterClient } from "./client";
 import { checkCodeSession, filterCodeSessions, sessionModeMarker, sessionRuntimeMarker } from "./session-mode";
 import { applyEvent, isStalled, type WatchdogState } from "./watchdog";
@@ -562,9 +563,11 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
     const order = POLICY_ORDER;
     const next = order[(order.indexOf(policy) + 1) % order.length]!;
     try {
-      await c.setPolicy(sessionId, next);
+      const result = await c.setPolicy(sessionId, next);
       policy = next;
       refreshBlock();
+      // A bypass crossing says when it lands, and a turn still bypassing says so (lane B).
+      for (const line of policySwitchNotes(next, result)) emit(`${DIM}${line}${RESET}\n`);
     } catch {
       emit(`${DIM}couldn't switch to ${next} mode${RESET}\n`);
     } finally {
