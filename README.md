@@ -23,7 +23,8 @@ or any of a hundred-odd others.
 ## Quick start
 
 ```sh
-brew install --cask yanlingLabs/winter/winter
+brew tap yanlingLabs/winter
+brew install --cask winter
 winter login          # sign in with your ChatGPT account
 ```
 
@@ -103,27 +104,27 @@ them up forever.
 The iPhone app connects straight to your Mac, encrypted end to end, with no account and no cloud
 service holding your conversations. You can pick up any session, approve what Code wants to do,
 or send Dispatch a job while you're away from your desk. Chat runs on the phone itself, so it
-works even while your Mac sleeps and syncs up later. The app is opening on TestFlight; the link
-will be here.
+works even while your Mac sleeps and syncs up later. A TestFlight build is on its way; the link
+will land here.
 
 ## Your Mac, your data
 
-- **Your keys stay in the Keychain.** Every API key and sign-in lives in the macOS Keychain,
-  never in a config file.
-- **Everything else is a file you own.** Memory, settings and session history are plain files in
-  `~/.winter` that you can read, back up or delete.
-- **There's no Winter account, backend or telemetry.** Your messages go to the model provider you
-  chose, and web searches go to [Exa](https://exa.ai). Pages are fetched straight from your Mac.
-  If your phone can't reach your Mac directly, the connection goes through a relay that only ever
-  sees encrypted data.
-- **The shell is sandboxed.** Commands run inside a macOS sandbox, writes outside your project
-  need your OK, and known-dangerous websites are blocked in every mode.
-- **Updates stay out of your way.** Every build is signed and notarized by Apple. Winter updates
-  itself in the background and waits for a quiet moment before installing, so it never cuts you
-  off mid-task.
-- **It's open source.** The app, the engine, the command line and the protocol are all in this
-  repository under Apache 2.0. (The iPhone app is closed source, but the Swift packages it's built
-  on live here.)
+Your API keys and sign-ins live in the macOS Keychain, never in a config file. Everything else
+Winter keeps (memory, settings, every conversation) is a plain file in `~/.winter` that you can
+read, back up or delete.
+
+There's no Winter account, no Winter backend and no telemetry. Your messages go to the model
+provider you picked. Web searches go to [Exa](https://exa.ai), or to Anthropic when a Claude model
+in Code mode does the searching, and pages are fetched straight from your Mac. When your phone
+can't reach your Mac directly, the connection passes through a relay that only ever sees
+encrypted data.
+
+Shell commands run inside a macOS sandbox, writing outside your project needs your OK, and
+known-dangerous websites are blocked in every mode. Every build is signed and notarized by Apple.
+Winter updates itself in the background and waits for a quiet moment to install, so it never
+cuts you off mid-task. And you don't have to take any of this on trust: the app, the engine, the
+command line and the protocol are all open source in this repository under Apache 2.0. (The
+iPhone app is closed source, but the Swift packages it's built on live here.)
 
 ## Make it yours
 
