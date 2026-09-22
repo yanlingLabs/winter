@@ -104,26 +104,21 @@ final class DashboardTests: XCTestCase {
         XCTAssertEqual(sortedTrustPaths([]), [])
     }
 
-    // MARK: - holderDisplay / peripheralLeaseAgeText (PURE, PeripheralPane.swift)
+    // MARK: - holderDisplay / peripheralLeaseStateText (PURE, PeripheralPane.swift)
 
     func testHolderDisplay() {
         XCTAssertEqual(holderDisplay(kind: "session", id: "s_1"), "session:s_1")
         XCTAssertEqual(holderDisplay(kind: "plugin", id: "p_7"), "plugin:p_7")
     }
 
-    func testPeripheralLeaseAgeTextStillActive() {
-        // 90s remaining → formatElapsed(90_000) == "1m 30s"
-        XCTAssertEqual(peripheralLeaseAgeText(expiresAt: 100_000, nowMs: 10_000), "expires in 1m 30s")
-    }
-
-    func testPeripheralLeaseAgeTextExpired() {
-        XCTAssertEqual(peripheralLeaseAgeText(expiresAt: 5_000, nowMs: 10_000), "expired")
-    }
-
-    /// The exact boundary (`nowMs == expiresAt`) reads as expired — matches core's own
-    /// `expiredLeases`/`shouldServe`'s inclusive-expired convention (`nowMs < lease.expiresAt`).
-    func testPeripheralLeaseAgeTextExactlyAtExpiryReadsExpired() {
-        XCTAssertEqual(peripheralLeaseAgeText(expiresAt: 10_000, nowMs: 10_000), "expired")
+    /// F1 fix: `PeripheralLeaseInfo.expiresAt` is a grant-time value the broker's own heartbeat
+    /// renewals never update, so it is no longer read as a live countdown at all (that read is
+    /// what made a still-held, actively-renewed lease read "expired" the moment its ORIGINAL 15s
+    /// grant window passed). Every lease this pane shows came from `activeLeases`, which by
+    /// construction only holds leases the broker still considers live (see `shouldServe`'s comment
+    /// in `PeripheralProvider.swift`) — "active" is the whole, honest answer, unconditionally.
+    func testPeripheralLeaseStateTextIsAlwaysActive() {
+        XCTAssertEqual(peripheralLeaseStateText(), "active")
     }
 
     // MARK: - memoryTypeBadge (PURE, MemoryPane.swift)

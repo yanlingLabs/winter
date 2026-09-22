@@ -75,13 +75,13 @@ final class PeripheralProviderTests: XCTestCase {
         // exactly the lease's tokenHash.
         let lease = PeripheralLeaseInfo(leaseId: "lease_1", class: "noop", holder: holder(), expiresAt: 1000, tokenHash: Self.defaultTokenHash)
         let call = PeripheralCallRequest(requestId: "req_1", leaseId: "lease_1", token: "tok_1", class: "noop", payloadJson: "{}")
-        XCTAssertEqual(shouldServe(call, leases: [lease], nowMs: 500), .serve)
+        XCTAssertEqual(shouldServe(call, leases: [lease]), .serve)
     }
 
     func testShouldServeDeniesUnknownLease() {
         let lease = PeripheralLeaseInfo(leaseId: "lease_1", class: "noop", holder: holder(), expiresAt: 1000, tokenHash: Self.defaultTokenHash)
         let call = PeripheralCallRequest(requestId: "req_1", leaseId: "lease_ghost", token: "tok_1", class: "noop", payloadJson: "{}")
-        XCTAssertEqual(shouldServe(call, leases: [lease], nowMs: 500), .deny("lease_not_found"))
+        XCTAssertEqual(shouldServe(call, leases: [lease]), .deny("lease_not_found"))
     }
 
     func testShouldServeDeniesTokenMismatchWithAGarbageToken() {
@@ -89,7 +89,7 @@ final class PeripheralProviderTests: XCTestCase {
         // — a right leaseId alone is not enough, per "no token, no service."
         let lease = PeripheralLeaseInfo(leaseId: "lease_1", class: "noop", holder: holder(), expiresAt: 1000, tokenHash: Self.defaultTokenHash)
         let call = PeripheralCallRequest(requestId: "req_1", leaseId: "lease_1", token: "tok_garbage_totally_wrong", class: "noop", payloadJson: "{}")
-        XCTAssertEqual(shouldServe(call, leases: [lease], nowMs: 500), .deny("token_mismatch"))
+        XCTAssertEqual(shouldServe(call, leases: [lease]), .deny("token_mismatch"))
     }
 
     func testShouldServeDeniesEmptyToken() {
@@ -98,7 +98,7 @@ final class PeripheralProviderTests: XCTestCase {
         // tokenHash).
         let lease = PeripheralLeaseInfo(leaseId: "lease_1", class: "noop", holder: holder(), expiresAt: 1000, tokenHash: Self.defaultTokenHash)
         let call = PeripheralCallRequest(requestId: "req_1", leaseId: "lease_1", token: "", class: "noop", payloadJson: "{}")
-        XCTAssertEqual(shouldServe(call, leases: [lease], nowMs: 500), .deny("token_mismatch"))
+        XCTAssertEqual(shouldServe(call, leases: [lease]), .deny("token_mismatch"))
     }
 
     func testShouldServeDeniesClassMismatchAgainstTheGrantedLease() {
@@ -106,15 +106,20 @@ final class PeripheralProviderTests: XCTestCase {
         // matches the lease so this exercises class_mismatch specifically, not token_mismatch.
         let lease = PeripheralLeaseInfo(leaseId: "lease_1", class: "noop", holder: holder(), expiresAt: 1000, tokenHash: Self.defaultTokenHash)
         let call = PeripheralCallRequest(requestId: "req_1", leaseId: "lease_1", token: "tok_1", class: "screenshot", payloadJson: "{}")
-        XCTAssertEqual(shouldServe(call, leases: [lease], nowMs: 500), .deny("class_mismatch"))
+        XCTAssertEqual(shouldServe(call, leases: [lease]), .deny("class_mismatch"))
     }
 
-    func testShouldServeDeniesExpiredLeaseInclusiveBoundary() {
-        // nowMs == expiresAt counts as expired (matches core's expiredLeases inclusive boundary).
-        // Token matches so this exercises the expiry check specifically.
+    func testShouldServeServesAStaleGrantTimeExpiryOnAStillHeldLease() {
+        // F1: the broker renews a lease's `expiresAt` server-side every heartbeat (5s) without
+        // emitting an event, so the app's cached `expiresAt` (captured once at lease_granted) goes
+        // stale well before the lease is actually gone. The broker itself gates expiry before it
+        // ever pushes a call (`PeripheralBroker.call()`), and a REAL expiry reaches the app as
+        // `lease_lost` (removing the entry from `activeLeases` — see the wire test below), so
+        // `shouldServe` must never deny on its own stale copy of `expiresAt`. This lease's
+        // `expiresAt` is set to a timestamp long in the past — it must still serve.
         let lease = PeripheralLeaseInfo(leaseId: "lease_1", class: "noop", holder: holder(), expiresAt: 500, tokenHash: Self.defaultTokenHash)
         let call = PeripheralCallRequest(requestId: "req_1", leaseId: "lease_1", token: "tok_1", class: "noop", payloadJson: "{}")
-        XCTAssertEqual(shouldServe(call, leases: [lease], nowMs: 500), .deny("expired"))
+        XCTAssertEqual(shouldServe(call, leases: [lease]), .serve)
     }
 
     func testShouldServeDeniesGenuinelyUnsupportedClass() {
@@ -123,7 +128,7 @@ final class PeripheralProviderTests: XCTestCase {
         // denied unsupported_class.
         let lease = PeripheralLeaseInfo(leaseId: "lease_1", class: "bogus", holder: holder(), expiresAt: 1000, tokenHash: Self.defaultTokenHash)
         let call = PeripheralCallRequest(requestId: "req_1", leaseId: "lease_1", token: "tok_1", class: "bogus", payloadJson: "{}")
-        XCTAssertEqual(shouldServe(call, leases: [lease], nowMs: 500), .deny("unsupported_class"))
+        XCTAssertEqual(shouldServe(call, leases: [lease]), .deny("unsupported_class"))
     }
 
     func testShouldServeNowServesTheThreeRealClasses() {
@@ -131,7 +136,7 @@ final class PeripheralProviderTests: XCTestCase {
         for cls in ["screenshot", "ax-read", "input-drive"] {
             let lease = PeripheralLeaseInfo(leaseId: "lease_1", class: cls, holder: holder(), expiresAt: 1000, tokenHash: Self.defaultTokenHash)
             let call = PeripheralCallRequest(requestId: "req_1", leaseId: "lease_1", token: "tok_1", class: cls, payloadJson: "{}")
-            XCTAssertEqual(shouldServe(call, leases: [lease], nowMs: 500), .serve, "\(cls) should now serve")
+            XCTAssertEqual(shouldServe(call, leases: [lease]), .serve, "\(cls) should now serve")
         }
     }
 
@@ -215,6 +220,30 @@ final class PeripheralProviderTests: XCTestCase {
         await feedWaitUntil { t.sent.count >= 2 }
         let respond = feedLineJSON(t.sent[1])
         XCTAssertEqual(respond["method"] as? String, "peripheral.respond")
+        let params = respond["params"] as? [String: Any]
+        XCTAssertEqual(params?["error"] as? String, "lease_not_found")
+        XCTAssertNil(params?["resultJson"])
+
+        ackLastSent(t, index: 1)
+        await handled
+    }
+
+    /// F1's other half: a lease the app *did* hold but has since genuinely lost (a real
+    /// `lease_lost` — revoke/release/actual sweep-expiry) must still be denied, even though the
+    /// removed fix means `shouldServe` no longer checks wall-clock expiry itself. The denial comes
+    /// from `leaseId` simply no longer being in `activeLeases` after `handle(leaseLostEvent())` —
+    /// distinct from `testPeripheralCallRequestedDeniesWhenNoMatchingLocalLease` above, which never
+    /// held the lease at all.
+    func testPeripheralCallRequestedDeniesAfterARealLeaseLost() async throws {
+        let (provider, t) = try await connectedProvider()
+        await provider.handle(leaseGrantedEvent())
+        await provider.handle(leaseLostEvent(reason: "expired"))
+        XCTAssertTrue(provider.activeLeases.isEmpty)
+
+        async let handled: Void = provider.handle(callRequestedEvent())
+
+        await feedWaitUntil { t.sent.count >= 2 }
+        let respond = feedLineJSON(t.sent[1])
         let params = respond["params"] as? [String: Any]
         XCTAssertEqual(params?["error"] as? String, "lease_not_found")
         XCTAssertNil(params?["resultJson"])
