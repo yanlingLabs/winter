@@ -5,6 +5,7 @@ import {
   LOGIN_SHELL_PATH_END,
   applyLoginShellPath,
   describeLoginShellPath,
+  loginShellPathDisabled,
   mergePathLists,
   parseMarkedPath,
   spawnShellRunner,
@@ -127,16 +128,28 @@ describe("applyLoginShellPath", () => {
     const calls: Array<{ shell: string; args: string[]; timeoutMs: number }> = [];
     await applyLoginShellPath({ env: { PATH: "/usr/bin", SHELL: "/opt/homebrew/bin/fish" }, run: fakeRunner(marked("/usr/bin"), calls) });
     expect(calls[0]!.shell).toBe("/opt/homebrew/bin/fish");
-    expect(calls[0]!.args.join(" ")).toContain("string join");
+    // `string join` prints a trailing newline, which `parseMarkedPath` refuses — it must go through
+    // `printf '%s'` so the END marker follows the PATH directly.
+    expect(calls[0]!.args.join(" ")).toContain("printf '%s' (string join : $PATH)");
+    expect(parseMarkedPath(`${LOGIN_SHELL_PATH_START}/usr/bin:/bin\n${LOGIN_SHELL_PATH_END}`)).toBeUndefined();
   });
 
-  test(`${LOGIN_SHELL_PATH_ENV}=off disables resolution entirely — the runner is never called`, async () => {
-    const env: Record<string, string | undefined> = { PATH: "/usr/bin", SHELL: "/bin/zsh", [LOGIN_SHELL_PATH_ENV]: "off" };
-    let called = false;
-    const outcome = await applyLoginShellPath({ env, run: async () => { called = true; return { kind: "ok", stdout: "" }; } });
-    expect(called).toBe(false);
-    expect(outcome.source).toBe("disabled");
-    expect(env.PATH).toBe("/usr/bin");
+  for (const value of ["off", "OFF", "Off", "0", "false", "FALSE", " off "]) {
+    test(`${LOGIN_SHELL_PATH_ENV}=${JSON.stringify(value)} disables resolution entirely — the runner is never called`, async () => {
+      const env: Record<string, string | undefined> = { PATH: "/usr/bin", SHELL: "/bin/zsh", [LOGIN_SHELL_PATH_ENV]: value };
+      let called = false;
+      const outcome = await applyLoginShellPath({ env, run: async () => { called = true; return { kind: "ok", stdout: "" }; } });
+      expect(called).toBe(false);
+      expect(outcome.source).toBe("disabled");
+      expect(env.PATH).toBe("/usr/bin");
+    });
+  }
+
+  test(`any other ${LOGIN_SHELL_PATH_ENV} value leaves resolution on`, async () => {
+    for (const value of ["on", "1", "true", ""]) {
+      expect(loginShellPathDisabled({ [LOGIN_SHELL_PATH_ENV]: value })).toBe(false);
+    }
+    expect(loginShellPathDisabled({})).toBe(false);
   });
 });
 

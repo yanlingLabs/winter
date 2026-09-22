@@ -9,20 +9,33 @@
 //
 // WHAT. `$SHELL -l -c <script>` — a login shell, which reads `/etc/zprofile` (macOS's `path_helper`)
 // and the user's `.zprofile`/`.zshenv` (where `brew shellenv` conventionally lives) — with the user's
-// interactive rc file sourced explicitly, stdin from /dev/null and its output discarded. That is the
-// shape Claude Code's own shell snapshot uses (`ShellSnapshot.ts`: `[shell, '-c', '-l', script]`,
-// `source "<rc>" < /dev/null`, a bounded timeout). The PATH is printed between two markers, so
-// whatever an rc file prints to stdout (a banner, nvm, an update prompt) can never be mistaken for
-// it. The result is MERGED into `process.env.PATH` — login-shell entries first, then the inherited
-// ones, de-duplicated — so every later spawn, whichever launch path started the daemon, sees it.
+// interactive rc file sourced explicitly, stdin from /dev/null and its output discarded. Only that
+// INVOCATION SHAPE comes from Claude Code's shell snapshot (`ShellSnapshot.ts:458`,
+// `[shell, '-c', '-l', script]`; `source "<rc>" < /dev/null`; a bounded timeout). Claude Code itself
+// keeps its OWN process PATH (`ShellSnapshot.ts:271,336` writes `process.env.PATH` into the
+// snapshot) — it is terminal-launched and already has the user's PATH. Taking PATH FROM the login
+// shell is Winter's own policy, because an app-launched daemon does not. The PATH is printed between
+// two markers, so whatever an rc file prints to stdout (a banner, nvm, an update prompt) can never be
+// mistaken for it. The result is MERGED into `process.env.PATH` — login-shell entries first, then the
+// inherited ones, de-duplicated.
+//
+// WHO SEES IT — THE RULE. Under Bun, updating `process.env.PATH` does NOT reach a spawn that passes
+// no `env`: `Bun.spawn`/`Bun.spawnSync`/`child_process.spawnSync`/`execFileSync` without an `env`
+// option keep the process's ORIGINAL environment (measured, Bun 1.3.14); only async
+// `child_process.spawn` re-reads it. So: A SPAWN THAT NEEDS THE USER'S TOOLS MUST PASS AN `env`
+// DERIVED FROM `process.env` AT SPAWN TIME. Every spawn that matters does today — `buildChildEnv`
+// (the Winter child, its Bash tool and its stdio MCP servers), the official leg's environment
+// (`official-options.ts`), `agent/mcp/client.ts`, the hook runner, the plugin supervisor, the
+// background-task registry; the router and SDK wrappers spawn with `env: options.env`.
 //
 // NEVER HANGS BOOT. Bounded (`LOGIN_SHELL_TIMEOUT_MS`), the shell runs in its own process group and
 // the whole group is SIGKILLed on the deadline, and ANY failure (timeout, non-zero exit, no markers,
 // a spawn error) falls back to the inherited PATH plus the standard Homebrew directories that exist.
-// Never throws.
+// Never throws. `daemon.ts` runs it after the daemon's tokens are minted and before anything spawns.
 //
-// TESTS NEVER SPAWN THE REAL SHELL. `run` is injectable, and `WINTER_LOGIN_SHELL_PATH=off` (set by
-// both test preloads, and inherited by any daemon subprocess a test spawns) turns resolution off.
+// TESTS NEVER SPAWN THE REAL SHELL. `run` is injectable, and `WINTER_LOGIN_SHELL_PATH=off` (also
+// `0`/`false`, any case; set by both test preloads, the WinterKit real-daemon fixture and
+// `verify:runtime-state`, and inherited by any daemon subprocess a test spawns) turns it off.
 //
 // LOGGING. One line, from `describeLoginShellPath`: the source, the shell, and the directories it
 // ADDED. PATH entries are directory names; no other environment value and none of the shell's own
@@ -31,8 +44,14 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { basename, isAbsolute } from "node:path";
 
-/** The env seam: `off` disables resolution (the test preloads set it). */
+/** The env seam: `off` / `0` / `false` (any case) disables resolution (the test preloads set it). */
 export const LOGIN_SHELL_PATH_ENV = "WINTER_LOGIN_SHELL_PATH";
+
+/** Whether the env seam turns resolution off. */
+export function loginShellPathDisabled(env: Record<string, string | undefined>): boolean {
+  const v = env[LOGIN_SHELL_PATH_ENV]?.trim().toLowerCase();
+  return v === "off" || v === "0" || v === "false";
+}
 /** Plenty for a login shell (tens to hundreds of ms in practice); short enough that a broken rc
  *  file costs boot a bounded, one-off delay. */
 export const LOGIN_SHELL_TIMEOUT_MS = 5_000;
@@ -106,7 +125,9 @@ function shellInvocation(env: Record<string, string | undefined>): { shell: stri
   if (name === "fish") {
     return {
       shell: declared!,
-      args: ["-l", "-c", `printf '%s' '${LOGIN_SHELL_PATH_START}'; string join : $PATH; printf '%s' '${LOGIN_SHELL_PATH_END}'`],
+      // `string join` ends with a newline, which `parseMarkedPath` rightly refuses — so its output
+      // goes through `printf '%s'`, the same as the POSIX branch.
+      args: ["-l", "-c", `printf '%s' '${LOGIN_SHELL_PATH_START}'; printf '%s' (string join : $PATH); printf '%s' '${LOGIN_SHELL_PATH_END}'`],
     };
   }
   const shell = name !== undefined && POSIX_SHELLS.has(name) ? declared! : DEFAULT_SHELL;
@@ -166,7 +187,7 @@ export const spawnShellRunner: ShellRunner = (shell, args, timeoutMs, env) =>
 export async function applyLoginShellPath(deps: LoginShellPathDeps = {}): Promise<LoginShellPathOutcome> {
   const env = deps.env ?? process.env;
   const startedAt = Date.now();
-  if (env[LOGIN_SHELL_PATH_ENV] === "off") return { source: "disabled", added: [], changed: false, ms: 0 };
+  if (loginShellPathDisabled(env)) return { source: "disabled", added: [], changed: false, ms: 0 };
   const before = env.PATH ?? "";
   const inherited = before.split(":");
   const { shell, args } = shellInvocation(env);
@@ -207,7 +228,7 @@ export async function applyLoginShellPath(deps: LoginShellPathDeps = {}): Promis
 
 /** The ONE boot log line. Directory names only. */
 export function describeLoginShellPath(o: LoginShellPathOutcome): string {
-  if (o.source === "disabled") return `env: login-shell PATH resolution is off (${LOGIN_SHELL_PATH_ENV}=off) — PATH unchanged`;
+  if (o.source === "disabled") return `env: login-shell PATH resolution is turned off by ${LOGIN_SHELL_PATH_ENV} — PATH unchanged`;
   const effect = o.changed ? `added ${o.added.join(", ")}` : "PATH unchanged";
   if (o.source === "login-shell") return `env: PATH from the login shell (${o.shell}, ${o.ms}ms) — ${effect}`;
   return `env: the login shell (${o.shell}) ${o.reason ?? "failed"} — fell back to the inherited PATH plus the Homebrew dirs present; ${effect}`;
