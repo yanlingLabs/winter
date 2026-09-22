@@ -239,15 +239,15 @@ const REAL_TIMERS: WinterTimers = {
  *
  * A push whose `turn_started` never got appended (a crash between the push and the append) is
  * therefore RE-PUSHED on resume: the persisted contract is the pair, and a push without its half
- * never reached it.
+ * never reached it. The projector's own pass-through `user_message` (`clientName: "winter"`, a
+ * `user` frame the host never pushed) is not a debt.
  *
  * AT-LEAST-ONCE, documented (C2 review): since C2 a push made while a turn runs keeps its
  * `turn_started` unannounced until that turn ends, so a daemon crash in that window re-pushes the
  * text on resume. That is right when the text never started (it died with the child — before C2 its
  * early `turn_started` made the scan skip it, i.e. LOST it), and a duplicate when the child had in
  * fact begun it in the instant before the crash. Delivery is therefore at-least-once across a crash,
- * never at-most-once; the log alone cannot tell "pushed and begun" from "pushed and not yet begun". The projector's own pass-through `user_message` (`clientName: "winter"`, a
- * `user` frame the host never pushed) is not a debt.
+ * never at-most-once; the log alone cannot tell "pushed and begun" from "pushed and not yet begun".
  */
 export function unconsumedUserMessages(events: readonly SessionEvent[]): string[] {
   const owed: string[] = [];
