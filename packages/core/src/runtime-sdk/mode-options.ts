@@ -557,9 +557,8 @@ export function permissionDenyRulesFor(home: string, settings: Settings | null |
  * (`agent/sandbox.ts`: deny-by-default, read anywhere, write only under the given roots, plus an
  * explicit per-root and any-depth deny for the three control-plane filenames).
  *
- * `allowUnsandboxedCommands: false` is the load-bearing one: with it true a command can opt out of
- * the fence entirely, which is `dangerouslyDisableSandbox` without the approval card the engine
- * puts in front of it.
+ * (`allowUnsandboxedCommands` is NOT set — see the note at the end of `sandboxConfigFor` for why it
+ * would be a no-op, and for what a `dangerouslyDisableSandbox` call goes through instead.)
  *
  * **What is NOT verifiable from here:** the d.ts declares the shape, and the runtime that enforces
  * it is the private `winter-agent-runtime` package. Whether `denyWrite` actually fences a `bash`
@@ -636,8 +635,11 @@ export function sandboxConfigFor(home: string): SandboxSettingsConfig {
     // `allowUnsandboxedCommands` is deliberately NOT set. It is consulted only together with
     // `excludedCommands` (`sandbox/spawn.ts:109,122`), which this config does not set, so `false`
     // would be a no-op — and the earlier comment calling it "the load-bearing one" was wrong:
-    // `dangerouslyDisableSandbox` wins over `excludedCommands` regardless. Winter's own floor for
-    // that is P8b-31's always-card in the bridge, which does bind.
+    // `dangerouslyDisableSandbox` wins over `excludedCommands` regardless. What a
+    // `dangerouslyDisableSandbox` call gets is claude's own rule (lane C, 2026-09-22, retiring
+    // P8b-31's always-card): the flag only removes the SANDBOX'S auto-allow, so the call goes through
+    // the ordinary pipeline — deny/ask rules, the permission mode, allow rules (the persisted ones
+    // included, `persistedAllowRulesFor`), then the approval bridge — exactly like any other command.
   };
 }
 
