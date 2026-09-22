@@ -154,7 +154,9 @@ describe("WinterClient", () => {
     await boot();
     const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "sk", onEvent: () => {} });
     const skills = await client.listSkills(process.cwd()); // throws if any element fails schema validation
-    expect(skills).toEqual([{ name: "writing-skills", description: expect.any(String), source: "builtin", path: expect.any(String) }]);
+    // Lane B (2026-09-22): + the truthful session-availability pair (a built-in skill cannot reach a
+    // session's runtime child yet) — and it must pass the VALIDATED path, which is this test's point.
+    expect(skills).toEqual([{ name: "writing-skills", description: expect.any(String), source: "builtin", path: expect.any(String), loadsInSessions: false, sessionNote: expect.any(String) }]);
     client.close();
   });
 

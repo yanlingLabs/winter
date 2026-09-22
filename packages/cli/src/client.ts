@@ -245,7 +245,7 @@ export class WinterClient {
     const r = this.validated(SessionCompactResult, await this.request(METHODS.sessionCompact, { sessionId }), METHODS.sessionCompact);
     return { compacted: r.compacted, uptoSeq: r.uptoSeq, summaryChars: r.summaryChars };
   }
-  async listSkills(cwd?: string): Promise<Array<{ name: string; description: string; source: string; path: string }>> {
+  async listSkills(cwd?: string): Promise<Array<{ name: string; description: string; source: string; path: string; loadsInSessions?: boolean; sessionNote?: string }>> {
     return this.validated(SkillsListResult, await this.request(METHODS.skillsList, { cwd }), METHODS.skillsList).skills;
   }
   async listMcp(cwd?: string): Promise<Array<{ name: string; status: string; toolNames: string[]; source: string }>> {

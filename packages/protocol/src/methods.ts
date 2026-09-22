@@ -432,6 +432,14 @@ export const SkillMetaSchema = z.object({
    *  present; the field exists so the wire shape does not need to change if a second source (e.g. a
    *  project-scoped deny) is ever added later. */
   deniedBy: z.enum(["settings"]).optional(),
+  /** 2026-09-22 (lane B): can a SESSION's runtime child actually load this skill? `false` for every
+   *  tier the agent runtime has no door for yet (user, self, project, built-in — only plugin skills
+   *  reach a child) and for a name the runtime's own jail refuses; `sessionNote` then says why, in a
+   *  sentence a client can show as-is. Independent of `denied` (a deny rule is its own field). The
+   *  daemon's `SkillStore.sessionAvailability` is the one rule, shared with what the child is handed.
+   *  Additive/optional: absent means an older daemon that never said — NOT "loads". */
+  loadsInSessions: z.boolean().optional(),
+  sessionNote: z.string().optional(),
 });
 export const SkillsListParams = z.object({ cwd: z.string().optional() });
 export const SkillsListResult = z.object({ ok: z.literal(true), skills: z.array(SkillMetaSchema) });

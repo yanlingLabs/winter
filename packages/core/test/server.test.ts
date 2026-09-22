@@ -709,7 +709,9 @@ describe("daemon IPC", () => {
     expect(result.ok).toBe(true);
     // The writing-skills builtin (phase 5c) is always discovered, regardless of home — it ships
     // in-repo and is resolved relative to the module, not winterHome.
-    expect(result.skills).toEqual([{ name: "writing-skills", description: expect.any(String), source: "builtin", path: expect.any(String) }]);
+    // Lane B (2026-09-22): + the truthful session-availability pair — a built-in skill cannot reach a
+    // session's runtime child yet (only plugin skills do), and says so.
+    expect(result.skills).toEqual([{ name: "writing-skills", description: expect.any(String), source: "builtin", path: expect.any(String), loadsInSessions: false, sessionNote: expect.stringContaining("only plugin skills") }]);
     c.close();
   });
 
