@@ -1792,7 +1792,11 @@ if (import.meta.main) {
     const c = await connect("cli-skills");
     const rows = await c.listSkills(process.cwd());
     if (!rows.length) console.log("no skills installed");
-    for (const s of rows) console.log(`${AQUA}${s.name}${RESET}  ${DIM}(${s.source})${RESET}  — ${s.description}`);
+    for (const s of rows) {
+      console.log(`${AQUA}${s.name}${RESET}  ${DIM}(${s.source})${RESET}  — ${s.description}`);
+      // Lane B (2026-09-22): a skill no session can load says so, in the daemon's own words.
+      if (s.loadsInSessions === false) console.log(`  ${DIM}not in sessions: ${s.sessionNote ?? "a session can't load this skill"}${RESET}`);
+    }
     c.close();
     process.exit(0);
   }

@@ -2056,9 +2056,14 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // `Skill(<name>)` string is spelled, shared with the writer (`setSkillDenied`, settings.ts)
         // so the two can never drift onto different strings for the same skill.
         const denySet = new Set(liveSettingsFor(opts)?.permissions?.deny ?? []);
-        const skills = opts.skills.list({ cwd: p.cwd ?? null }).map((s) => {
+        const store = opts.skills;
+        const skills = store.list({ cwd: p.cwd ?? null }).map((s) => {
           const denied = denySet.has(skillDenyRule(s.name));
-          return denied ? { ...s, denied: true, deniedBy: "settings" as const } : s;
+          // Lane B (2026-09-22): whether a session can load it at all — the SAME rule the runtime child
+          // is handed its skills by (`SkillStore.sessionAvailability`), so a client never shows a skill
+          // as usable that no session can load (today: only plugin skills reach a child).
+          const withAvailability = { ...s, ...store.sessionAvailability(s) };
+          return denied ? { ...withAvailability, denied: true, deniedBy: "settings" as const } : withAvailability;
         });
         return { ok: true, skills };
       }
@@ -2079,7 +2084,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const meta = opts.skills.list({ cwd }).find((s) => s.name === p.name);
         const loaded = meta ? opts.skills.load(p.name, { cwd }) : null;
         if (!meta || !loaded) throw new RpcFailure(ERR.NOT_FOUND, `skill not found: "${p.name}"`);
-        return { skill: { ...meta, body: loaded.body } };
+        return { skill: { ...meta, ...opts.skills.sessionAvailability(meta), body: loaded.body } };
       }
       case METHODS.skillsWrite: {
         const p = parseParams(SkillsWriteParams, params);

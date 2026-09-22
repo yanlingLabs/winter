@@ -447,7 +447,8 @@ async function runDirs(ctx: CommandCtx, argText: string): Promise<void> {
 async function runSkills(ctx: CommandCtx): Promise<void> {
   const rows = await ctx.client.listSkills(ctx.cwd);
   if (rows.length === 0) { ctx.appendNote("no skills installed"); return; }
-  ctx.appendNote(rows.map((s) => `${s.name} (${s.source}) — ${s.description}`).join("\n"));
+  // Lane B (2026-09-22): a skill no session can load says so, in the daemon's own words.
+  ctx.appendNote(rows.map((s) => `${s.name} (${s.source}) — ${s.description}${s.loadsInSessions === false ? `\n  not in sessions: ${s.sessionNote ?? "a session can't load this skill"}` : ""}`).join("\n"));
 }
 
 /** Mirrors main.ts `case "mcp"` (~:1056): `client.listMcp(cwd)` (same ctx.cwd substitution as

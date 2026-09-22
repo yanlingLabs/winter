@@ -312,6 +312,20 @@ describe("runners — mirror main.ts's routes", () => {
     expect(notes).toEqual(["brainstorm (user) — Explore ideas"]);
   });
 
+  // Lane B (2026-09-22): a skill no session can load says so — the daemon's `loadsInSessions`/
+  // `sessionNote`; an older daemon that sends neither keeps the old line exactly.
+  test("/skills — a skill sessions cannot load carries the daemon's own note", async () => {
+    const { client } = makeClient({ listSkills: () => [
+      { name: "greet", description: "Say hi", source: "user", path: "/x", loadsInSessions: false, sessionNote: "Your own skills can't be loaded by a session yet — only plugin skills reach the agent runtime." },
+      { name: "p:alpha", description: "A", source: "plugin", path: "/y", loadsInSessions: true },
+    ] });
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/skills");
+    expect(notes).toEqual([
+      "greet (user) — Say hi\n  not in sessions: Your own skills can't be loaded by a session yet — only plugin skills reach the agent runtime.\np:alpha (plugin) — A",
+    ]);
+  });
+
   test("/skills — none installed", async () => {
     const { client } = makeClient({ listSkills: () => [] });
     const { ctx, notes } = makeCtx(client);
