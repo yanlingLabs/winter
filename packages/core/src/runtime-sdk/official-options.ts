@@ -25,7 +25,7 @@ import type { CapabilityServerRecord } from "../capabilities";
 import { officialSubscriptionAuthEnabled, type Settings } from "../settings";
 import { canUseToolFor, type CanUseToolDeps } from "./approval-bridge";
 import { CORE_BRAND } from "./brand";
-import { GLOBAL_READ_ALLOW_RULES, permissionDenyRulesFor, disallowedToolsFor, sandboxConfigFor } from "./mode-options";
+import { GLOBAL_READ_ALLOW_RULES, permissionDenyRulesFor, disallowedToolsFor, sandboxConfigFor, sdkAllowRulesFor } from "./mode-options";
 import { officialCapabilityServersFor, type OfficialMcpModule } from "./official-capabilities";
 import { winterSystemPromptFor } from "./system-prompt";
 import { ClaudeExecutableUnavailable } from "./official-executable";
@@ -415,6 +415,11 @@ export interface OfficialInputDeps {
    *  no `options.agents` key at all (see the construction site's own "empty is treated the same as
    *  absent" note), byte-identical to a session before this field existed. */
   agents?: Readonly<Record<string, unknown>>;
+  /** Lane B (2026-09-22): the user's SAVED allow rules for this session's project, in Winter's own
+   *  grammar — the SAME `persistedAllowRulesFor` read the Winter leg's `optionsFor` makes, translated
+   *  by the SAME `sdkAllowRulesFor` (`mode-options.ts`) onto the flag-settings `permissions.allow`.
+   *  Absent/empty ⇒ byte-identical to a session before this field existed. */
+  persistedAllow?: readonly string[];
   /** Everything `officialBrokerFor`/`canUseToolFor` needs, MINUS the three fields this function
    *  fills from `OfficialSessionInput` itself (never let a caller's stale `sessionId`/`mode`/`cwd`
    *  silently win over the session actually being opened). */
@@ -747,7 +752,10 @@ export function officialInputFor(
             // whose doc carries the ruling and the deny-before-allow argument) — one list, two legs,
             // never a second copy that could drift. This leg only ever runs code-mode sessions, but
             // the guard is kept so the two call sites read identically.
-            ...(input.mode === "code" ? { allow: [...GLOBAL_READ_ALLOW_RULES] } : {}),
+            // …then the user's SAVED rules, translated by the ONE translation the Winter leg uses
+            // (`sdkAllowRulesFor`) — claude applies its own settings files' `permissions.allow`
+            // natively; `settingSources: []` means this flag layer is the only way ours reach it.
+            ...(input.mode === "code" ? { allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...sdkAllowRulesFor(deps.persistedAllow ?? [])])] } : {}),
             deny: permissionDenyRulesFor(deps.home, deps.settings),
             ...(deps.policy === "bypass" ? {} : { disableBypassPermissionsMode: "disable" as const }),
           },

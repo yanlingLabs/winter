@@ -690,6 +690,25 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
     } finally { t.close(); }
   });
 
+  // Lane B (2026-09-22): the user's SAVED allow rules reach the child — read through the dep at every
+  // incarnation (so a rule saved mid-session lands at the next one), translated onto `permissions.allow`.
+  test("saved allow rules ride a CODE child's Options.permissions.allow, read live per incarnation", async () => {
+    let saved: string[] = ["Bash(gh repo:*)"];
+    const seenCwds: string[] = [];
+    const t = table({ persistedAllowRules: (cwd) => { seenCwds.push(cwd); return saved; } });
+    try {
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", approvalPolicy: "ask" });
+      await t.drivers.create(sid);
+      expect(t.q().options.permissions?.allow).toContain("Bash(gh repo:*)");
+      saved = ["Bash(gh repo:*)", "BashUnsandboxed(curl:*)"];
+      await t.drivers.evict(sid);
+      await (await t.drivers.ensure(sid))!.open();
+      expect(t.q().options.permissions?.allow).toEqual(expect.arrayContaining(["Bash(gh repo:*)", "Bash(curl:*)"]));
+      expect(seenCwds.length).toBeGreaterThanOrEqual(2);
+      await t.drivers.evict(sid);
+    } finally { t.close(); }
+  });
+
   // B2 (2026-09-22): `session.setPolicy` across the bypass boundary replaces the child through THIS
   // table's `evict` (ipc/server.ts's `replaceChildForPolicy`). The table half of that claim: the next
   // incarnation re-reads the stored policy, so both spawn-time bypass facts follow it — in, and back out.

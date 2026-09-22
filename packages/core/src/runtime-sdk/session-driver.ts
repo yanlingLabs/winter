@@ -262,6 +262,14 @@ export interface WinterLegDeps {
    * exactly as before, and the child indexes no skill at all (`settingSources: []`).
    */
   skills?: Pick<SkillStore, "childSkillSurface">;
+  /**
+   * Lane B (2026-09-22): the user's SAVED allow rules for a session at `cwd` — Winter's raw rule
+   * strings, trust-gated (`mode-options.ts`'s `persistedAllowRulesFor`, wired by `daemon.ts` over the
+   * live settings, the project-settings resolver, the rules store and the trust store). Read at EVERY
+   * incarnation on BOTH legs, so a rule saved from a card reaches the next child with no restart.
+   * Absent (a harness without one) ⇒ no saved rules in `Options`, exactly as before.
+   */
+  persistedAllowRules?: (cwd: string) => readonly string[];
   /** Task 17 (P8b-15): the persisted child roster (`createPersistedChildren` over 8a's
    *  `runtime_children`). A Winter child is registered under the spawning `tool_use.id` with NO
    *  local abort (its process is the session's), fed `progress()` on every frame of its thread, and
@@ -787,6 +795,8 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // identical merged map from one owner.
         agents: mergedAgentDefinitions(home, cwd, deps.projectAgentDefinitions),
         ...(skillSurface === undefined ? {} : { plugins: skillSurface.plugins, skills: skillSurface.skills }),
+        // Lane B: the user's SAVED allow rules, live and trust-gated (`WinterLegDeps.persistedAllowRules`).
+        ...(deps.persistedAllowRules === undefined ? {} : { persistedAllow: deps.persistedAllowRules(cwd) }),
       });
     };
 
@@ -1057,6 +1067,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // Router 0.0.9: threaded onto `officialInputFor` regardless of whether it's empty —
         // `officialInputFor` itself omits the `options.agents` key entirely when empty.
         agents,
+        // Lane B: the SAME saved-rule read the Winter leg's `optionsFor` makes, for this leg's
+        // flag-settings `permissions.allow` (translated there by the same `sdkAllowRulesFor`).
+        ...(deps.persistedAllowRules === undefined ? {} : { persistedAllow: deps.persistedAllowRules(capSession.cwd) }),
         // Phase 9c (P9c-1): the LIVE settings snapshot (`deps.settings()` — the same hot holder
         // `create()`/`legForNew` already read above; never a boot snapshot) — `official-options.ts`'s
         // `officialInputFor` reads it ONLY through `officialSubscriptionAuthEnabled`, and

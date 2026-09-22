@@ -86,6 +86,7 @@ import { resolveAntExecutable } from "./runtime-sdk/bundle-layout";
 import { advisorReviewerFor, familyOfModel, officialLegDefaultSessionModel } from "./runtime-sdk/advisor-reviewer";
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
 import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
+import { persistedAllowRulesFor } from "./runtime-sdk/mode-options";
 import { configuredMcpServersFor } from "./runtime-sdk/external-mcp";
 import { planBridgeFor, type PlanBridge } from "./runtime-sdk/plan-bridge";
 import { importEngineEraSession } from "./runtime-sdk/import-legacy";
@@ -1573,6 +1574,16 @@ export async function startDaemon(opts: {
     // B1 (lane B): the SAME SkillStore the assembler and `skills.*` read — the plugin skills a code
     // child loads ride `Options.plugins`/`skills` from it (`SkillStore.childSkillSurface`).
     skills: skillStore,
+    // Lane B: the user's SAVED allow rules reach both legs' children — `settings.json`, a TRUSTED
+    // project's overlay (the SAME `projectSettings` resolver, at the SAME repo root) and its
+    // `permissions.local.json` (the SAME `permissionRules` store `approval.respond` writes, read only
+    // when trusted). All live getters: a saved rule reaches the next incarnation, no restart.
+    persistedAllowRules: (cwd) => persistedAllowRulesFor(cwd, {
+      projectRootOf: (c) => projectRootOf(c),
+      effectiveSettings: (root) => projectSettings.effective(root),
+      ...(permissionRules === undefined ? {} : { projectRules: (root: string) => permissionRules!.rulesFor(root).project }),
+      isTrusted: (dir) => trustStore.isTrusted(dir),
+    }),
     // Task 17 (P8b-15): Winter children land in the persisted roster (absent when the spine is offline).
     ...(bgAgents === undefined ? {} : { children: bgAgents }),
     onTurnSettled: (sid) => { signals.onTurnSettled?.(sid); },
