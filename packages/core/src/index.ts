@@ -178,6 +178,7 @@ export {
   type MigrationPlanFileEntry,
 } from "./migration/migrate-b";
 export { LegacyKeychainSecretStore, legacyKeychainServiceFor } from "./migration/legacy-keychain-store";
+export { DEAD_LEGACY_TOP_LEVEL_FILES, findDeadLegacyFiles, describeDeadLegacyFiles, type DeadLegacyFile } from "./migration/dead-legacy-files";
 export { rekeySettings, type RekeyChange, type RekeyResult } from "./migration/rekey-settings";
 export {
   ProjectMigrationRefused,

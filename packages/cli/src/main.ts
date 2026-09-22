@@ -1574,6 +1574,13 @@ if (import.meta.main) {
       } catch (err) {
         console.log(`${AQUA}migration:${RESET} ${DIM}unavailable (${err instanceof Error ? err.message : "unknown error"})${RESET}`);
       }
+      // A3: legacy top-level files an earlier migration copied that nothing reads — the same one line
+      // the daemon logs at boot. Named, never touched.
+      try {
+        const { findDeadLegacyFiles, describeDeadLegacyFiles } = await import("@yanlinglabs/winter-core");
+        const line = describeDeadLegacyFiles(findDeadLegacyFiles(home), home);
+        if (line !== undefined) console.log(`${AQUA}${line}${RESET}`);
+      } catch { /* doctor never crashes on a diagnostic */ }
     };
     // Winter Phase 10a (O7, P10a-2): IN-PROCESS like the two sections above — a plain filesystem
     // presence check (`anthropicConsoleProfileExists`'s own daemon-side equivalent, without

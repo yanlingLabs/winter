@@ -99,6 +99,7 @@ import { makeRoutineScheduler } from "./routines/scheduler";
 import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import { CORE_VERSION } from "./version";
 import { applyLoginShellPath, describeLoginShellPath, type LoginShellPathDeps } from "./login-shell-path";
+import { describeDeadLegacyFiles, findDeadLegacyFiles } from "./migration/dead-legacy-files";
 
 export { CORE_VERSION } from "./version";
 
@@ -461,6 +462,11 @@ export async function startDaemon(opts: {
     const outcome = await applyLoginShellPath(opts.loginShellPath ?? {});
     if (outcome.source !== "disabled") console.error(describeLoginShellPath(outcome));
   }
+
+  // A3: legacy top-level files an earlier Migration B copied but nothing reads (`mcp.json`,
+  // `tools.json`, …). One line when any exist — never touched, only named (`winter doctor` repeats it).
+  const deadLegacyLine = describeDeadLegacyFiles(findDeadLegacyFiles(home), home);
+  if (deadLegacyLine !== undefined) console.error(deadLegacyLine);
 
   const authority = new TokenAuthority(secrets);
   const tokens = await authority.ensureTokens();
