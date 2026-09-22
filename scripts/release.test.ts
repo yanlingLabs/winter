@@ -157,4 +157,22 @@ describe("A2: winter-core is signed with the bun JIT entitlement, and the releas
   test("release.ts's HARDENING_PINS expects exactly allow-jit on winter-core", () => {
     expect(source).toContain('{ path: join(app, "Contents", "Resources", "winter-core"), label: "winter-core", expect: [JIT] }');
   });
+
+  // The embedded `winter` runtime is a bun binary too (measured: `Bun v1.4.2` in the shipped
+  // `runtimes/winter`, flags=0x10000(runtime), no entitlements) — the same JIT-less posture. `ant` is
+  // Go and needs nothing, so it stays at none.
+  const embedScript = readFileSync(join(REPO_ROOT, "scripts", "embed-runtimes.sh"), "utf8");
+  test("embed-runtimes.sh re-signs winter (and only winter, not ant) with the same entitlements file", () => {
+    const winterSign = embedScript.split("\n").find((l) => l.startsWith("codesign --force") && l.includes('"${WINTER}"'));
+    const antSign = embedScript.split("\n").find((l) => l.startsWith("codesign --force") && l.includes('"${ANT}"'));
+    expect(winterSign).toContain('--entitlements "${SCRIPT_DIR}/bun-jit.entitlements"');
+    expect(winterSign).toContain("--identifier com.winter.runtime");
+    expect(antSign).toBeDefined();
+    expect(antSign).not.toContain("--entitlements");
+  });
+
+  test("release.ts's HARDENING_PINS expects exactly allow-jit on the embedded winter runtime, and none on ant", () => {
+    expect(source).toContain('{ path: embeddedWinterPath, label: "winter (embedded runtime)", expect: [JIT] }');
+    expect(source).toContain('{ path: embeddedAntPath, label: "ant (embedded runtime)", expect: [] }');
+  });
 });
