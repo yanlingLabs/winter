@@ -2,7 +2,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
   AgentDefinition, CanUseTool, CredentialRef, EffortLevel, McpServerConfig, Options, PermissionMode, ProviderConnectionConfig,
-  SandboxSettingsConfig, SpawnClaudeCodeProcess, WebFetchConfig, WebToolsConfig,
+  SandboxSettingsConfig, SdkPluginConfig, SpawnClaudeCodeProcess, WebFetchConfig, WebToolsConfig,
 } from "@yanlinglabs/winter-agent-sdk";
 import { RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
@@ -380,6 +380,19 @@ export interface WinterOptionsInput {
    * and a tool that cannot work is worse than one that costs a little more).
    */
   digestModel?: ModelTag;
+  /**
+   * B1 (2026-09-22): the skills THIS session's child may load — `SkillStore.childSkillSurface`'s
+   * answer, computed by the caller (`session-driver.ts`'s `optionsFor`, live at every incarnation, code
+   * mode only) because building it touches the filesystem and this builder stays pure.
+   *
+   * `plugins` are skills-only local-plugin views (see `childSkillSurface` for why never a plugin's own
+   * directory); `skills` is the invocable subset (the daemon's plugin-tier names minus `Skill(<name>)`
+   * deny rules). BOTH ARE OMITTED FROM `Options` WHEN `plugins` IS EMPTY — byte-identical to every
+   * session before this field existed, and a filter over an empty index would only add a warning.
+   * With plugins present, `skills` is always stated, `[]` included (the SDK reads `[]` as "none").
+   */
+  plugins?: readonly SdkPluginConfig[];
+  skills?: readonly string[];
 }
 
 /**
@@ -767,6 +780,14 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     // Winter ships no slash-command surface at all, so `.winter/commands` has no daemon counterpart to
     // lose. The daemon's `Options` are the single source of a session's configuration on BOTH legs; this
     // is what makes that true rather than aspirational, and it keeps holding when that cascade is wired.
+    //
+    // B1 (2026-09-22) — AT 0.0.17 THAT CASCADE IS WIRED: `production-wiring.ts` now calls
+    // `resolveSettingsDetailed` for every session, so a `"user"` source would make the child parse
+    // `<home>/settings.json` — the DAEMON's own file, a different schema — as a settings tier and
+    // enforce its `permissions`, connect its `mcpServers` and run its `hooks` a second time, beside
+    // the daemon doing the same. So this stays `[]`, and the skills the old discovery would have found
+    // reach the child through the one door `[]` leaves open instead: `plugins`/`skills` below
+    // (`SkillStore.childSkillSurface`), which the SDK's index does not source-gate.
     settingSources: [],
   };
   if (input.spawn.spawnClaudeCodeProcess) options.spawnClaudeCodeProcess = input.spawn.spawnClaudeCodeProcess;
@@ -832,6 +853,11 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
   // byte-identically to a session before this field existed the way `undefined` is, so both are
   // normalized to "no key at all" here rather than leaving that distinction to every caller.
   if (input.agents !== undefined && Object.keys(input.agents).length > 0) options.agents = { ...input.agents };
+  // B1: the daemon's resolved plugin skills — see `WinterOptionsInput.plugins` for the omission rule.
+  if (input.plugins !== undefined && input.plugins.length > 0) {
+    options.plugins = input.plugins.map((p) => ({ ...p }));
+    options.skills = [...(input.skills ?? [])];
+  }
   options.web = webOptionsFor(input);
   return options;
 }

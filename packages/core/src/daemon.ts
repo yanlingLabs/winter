@@ -604,7 +604,9 @@ export async function startDaemon(opts: {
   // but ALSO hot-rebuilt on lifecycle changes (unlike MCP servers today), matching Tier-2's
   // hotApplyStart/hotApplyStop precedent for "no restart needed" plugin changes.
   const hookRegistry = new HookRegistry();
-  const skillStore = new SkillStore({ winterHome, trust: trustStore, plugins: { disabled: settings?.plugins?.disabled ?? [] } });
+  // B1 (lane B): `disabled` is a LIVE getter over the reassignable `settings` holder, not a boot
+  // snapshot — the store now also decides which plugin skills a runtime child loads, per incarnation.
+  const skillStore = new SkillStore({ winterHome, trust: trustStore, plugins: { disabled: () => settings?.plugins?.disabled ?? [] } });
   // File-based memory (MEMDIR, T1 — design doc `2026-07-15-file-based-memory-design.md`): a live
   // getter over the `settings` holder (assigned above; reassigned in place by the hot-settings
   // watcher below), read fresh by BOTH the write-root join (`sessionDirs`, just below) and the
@@ -1568,6 +1570,9 @@ export async function startDaemon(opts: {
     // Winter's persona per mode, the `_assistant` bucket, the output style — so a Winter-leg session
     // speaks as Winter.
     assembler,
+    // B1 (lane B): the SAME SkillStore the assembler and `skills.*` read — the plugin skills a code
+    // child loads ride `Options.plugins`/`skills` from it (`SkillStore.childSkillSurface`).
+    skills: skillStore,
     // Task 17 (P8b-15): Winter children land in the persisted roster (absent when the spine is offline).
     ...(bgAgents === undefined ? {} : { children: bgAgents }),
     onTurnSettled: (sid) => { signals.onTurnSettled?.(sid); },

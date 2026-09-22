@@ -1,7 +1,9 @@
-import { readFileSync, readdirSync, statSync, existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { readFileSync, readdirSync, readlinkSync, lstatSync, statSync, existsSync, mkdirSync, writeFileSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
 import { join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { SdkPluginConfig } from "@yanlinglabs/winter-agent-sdk";
 import type { TrustStore } from "./trust";
+import { skillDenyRule } from "../settings";
 
 // Phase 5c Task 3: `author?` mirrors T1's `author: winter` frontmatter stamp (writeSelf below) back
 // out through list()/load() — additive on every interface (undefined for any skill written before
@@ -115,6 +117,69 @@ function scanRoot(root: string, source: SkillMeta["source"], exclude?: Set<strin
 const USER_ROOT_EXCLUDE = new Set(["self"]); // the self/ subdir is scanned separately, as source "self"
 
 /**
+ * The agent SDK's own name jails (`runtime/src/skills/frontmatter.ts`, pinned 0.0.17): a skill's
+ * resolved name, and a plugin name. A name failing either is REFUSED by the child's index (with a
+ * warning on its stderr), so it is never put in `Options.skills` — naming an unindexed skill there
+ * fails the option's validation for the whole list.
+ */
+const SDK_SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const SDK_PLUGIN_NAME_PATTERN = /^\.?[a-z0-9][a-z0-9-]{0,63}$/;
+
+/** Where the daemon keeps the skills-only plugin views it hands a child (`childSkillSurface`). */
+export function skillPluginViewsRoot(winterHome: string): string {
+  return join(winterHome, "runtimes", "skill-plugins");
+}
+
+/**
+ * Build (or repair) the skills-only view of ONE plugin: `<views>/<plugin>/` holding exactly one
+ * entry, `skills` — a symlink to `<home>/plugins/<plugin>/skills`. Returns the view root.
+ *
+ * WHY A VIEW AND NOT THE PLUGIN'S OWN DIRECTORY. The SDK's `loadPlugins` takes a plugin whole: its
+ * manifest's `hooks` (command hooks run by the child, outside the Bash sandbox), `agents/*.md`,
+ * `commands/*.md` and — unless `skipMcpDiscovery` — its MCP config, and it NAMES the plugin by the
+ * manifest's `name` when there is one. The daemon's plugin model grants none of that without the
+ * user's consent (`winter-plugin.json`'s exec class) and qualifies skills by DIRECTORY name. A view
+ * with no manifest and nothing but `skills` gives the child exactly the daemon's skills, under
+ * exactly the daemon's names, and nothing else.
+ *
+ * UNDER `<home>/runtimes`, deliberately: that tree is fenced from every tool on both legs (the
+ * `Write`/`Edit` deny rules and the Bash sandbox's `denyWrite`, `mode-options.ts`), so a session
+ * cannot plant a manifest in a view and have the NEXT incarnation's child run its hooks. The child
+ * itself reads the files, not a tool, so the matching read fence does not get in the Skill tool's way.
+ * Rebuilt on every call anyway — anything but the one `skills` link is removed and a re-pointed
+ * link is replaced — so the view is a function of `<home>/plugins`, never of what was left in it.
+ * Removal never follows a link (measured on Bun: `rmSync(…, { recursive: true })` unlinks a symlink,
+ * nested or not, and leaves its target alone; the `skills` link itself is `unlinkSync`ed).
+ *
+ * Synchronous from first line to last: the daemon is the only writer and a single JS thread, so two
+ * incarnations opening together can never interleave inside it. `null` when the filesystem refuses.
+ */
+function ensureSkillPluginView(winterHome: string, plugin: string): string | null {
+  const root = join(skillPluginViewsRoot(winterHome), plugin);
+  const link = join(root, "skills");
+  const target = join(winterHome, "plugins", plugin, "skills");
+  try {
+    mkdirSync(root, { recursive: true });
+    for (const entry of readdirSync(root)) {
+      if (entry !== "skills") rmSync(join(root, entry), { recursive: true, force: true });
+    }
+    let current: string | undefined;
+    try { current = readlinkSync(link); } catch { /* absent, or not a symlink */ }
+    if (current === target) return root;
+    // A stale LINK is unlinked (never followed — the directory it points at is the user's own
+    // plugin); anything else under that name is not the daemon's and is removed outright.
+    let stale: ReturnType<typeof lstatSync> | undefined;
+    try { stale = lstatSync(link); } catch { /* absent */ }
+    if (stale?.isSymbolicLink()) unlinkSync(link);
+    else if (stale !== undefined) rmSync(link, { recursive: true, force: true });
+    symlinkSync(target, link);
+    return root;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Discovers SKILL.md skills from five sources, in precedence order (first occurrence of a name wins):
  *  - project: `<cwd>/.winter/skills/*`   — TRUST-GATED (only when `trust.isTrusted(cwd)`)
  *  - user:    `~/.winter/skills/*`       — always (excludes the reserved `self/` subdir)
@@ -128,13 +193,19 @@ export class SkillStore {
   private readonly winterHome: string;
   private readonly trust: TrustStore;
   private readonly bodyBytes: number;
-  private readonly disabledPlugins: string[];
+  private readonly disabledPlugins: () => readonly string[];
 
-  constructor(deps: { winterHome: string; trust: TrustStore; caps?: { bodyBytes?: number }; plugins?: { disabled?: string[] } }) {
+  /**
+   * `plugins.disabled` may be a LIVE getter (production: `settings.plugins.disabled` over the daemon's
+   * reassignable settings holder), so disabling a plugin reaches the skill list — and the next child's
+   * `Options.plugins` — with no daemon restart. A bare array (every older caller) is a fixed list.
+   */
+  constructor(deps: { winterHome: string; trust: TrustStore; caps?: { bodyBytes?: number }; plugins?: { disabled?: readonly string[] | (() => readonly string[]) } }) {
     this.winterHome = deps.winterHome;
     this.trust = deps.trust;
     this.bodyBytes = deps.caps?.bodyBytes ?? 32768;
-    this.disabledPlugins = deps.plugins?.disabled ?? [];
+    const disabled = deps.plugins?.disabled;
+    this.disabledPlugins = typeof disabled === "function" ? disabled : () => disabled ?? [];
   }
 
   /** All discovered skills (parsed, unfiltered by name), in precedence order: project, user, self, plugin, builtin. */
@@ -152,8 +223,9 @@ export class SkillStore {
     try {
       plugins = readdirSync(join(this.winterHome, "plugins"), { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
     } catch { /* no plugins dir */ }
+    const disabledPlugins = this.disabledPlugins();
     for (const plugin of plugins) {
-      if (this.disabledPlugins.includes(plugin)) continue;
+      if (disabledPlugins.includes(plugin)) continue;
       const claudeFormat = existsSync(join(this.winterHome, "plugins", plugin, ".claude-plugin", "plugin.json")) || undefined;
       for (const s of scanRoot(join(this.winterHome, "plugins", plugin, "skills"), "plugin")) {
         all.push({ ...s, name: `${plugin}:${s.name}`, ...(claudeFormat ? { claudeFormat } : {}) }); // the one place plugin names get namespaced
@@ -190,6 +262,53 @@ export class SkillStore {
       }
     }
     return null;
+  }
+
+  /**
+   * **The skills a Winter-leg CHILD can load, as the agent SDK's own two doors** — `Options.plugins`
+   * (where the skills come from) and `Options.skills` (which of them the session may invoke).
+   *
+   * The child runs with `settingSources: []` (`mode-options.ts`, and it must: at SDK 0.0.17 a
+   * `"user"` source would also make the child parse `<home>/settings.json` — the daemon's own file —
+   * as a settings tier). That switches the SDK's user/project skill discovery off, and a local plugin
+   * is the one skill source it does not gate. So every plugin whose skills THIS store resolves is
+   * handed over as a skills-only view (`ensureSkillPluginView`), which the SDK indexes as
+   * `<directory>:<skill>` — exactly the names `list()` gives them — and `skills` is this store's own
+   * plugin-tier list minus every `Skill(<name>)` deny rule, so a denied skill is neither listed to the
+   * model nor invocable (claude's documented meaning of the option). The deny rule itself still rides
+   * `permissions.deny` as well; this only keeps the listing from naming a skill that will be refused.
+   *
+   * WHAT IS NOT HERE, and why: the user, self, trusted-project and builtin tiers. The SDK exposes no
+   * door for bare-named skills from a host (its builtin tier is internal, and a local plugin always
+   * qualifies its skills), so they cannot reach the child without an SDK change — see the lane report.
+   * They are therefore also absent from `skills`, which may name only what the child can index.
+   *
+   * Empty (`{ plugins: [], skills: [] }`) when no plugin contributes a skill, so a caller can leave
+   * both options off entirely. The views are (re)built here, which is the one side effect.
+   */
+  childSkillSurface(input: { cwd: string | null; deny?: readonly string[] }): { plugins: SdkPluginConfig[]; skills: string[] } {
+    const denied = new Set(input.deny ?? []);
+    const plugins: SdkPluginConfig[] = [];
+    const skills: string[] = [];
+    const viewed = new Map<string, boolean>();
+    for (const meta of this.list({ cwd: input.cwd })) {
+      if (meta.source !== "plugin") continue;
+      const colon = meta.name.indexOf(":");
+      const plugin = meta.name.slice(0, colon);
+      const skill = meta.name.slice(colon + 1);
+      if (!viewed.has(plugin)) {
+        const root = ensureSkillPluginView(this.winterHome, plugin);
+        viewed.set(plugin, root !== null);
+        if (root !== null) plugins.push({ type: "local", path: root, skipMcpDiscovery: true });
+      }
+      if (!viewed.get(plugin)) continue;
+      // A name either SDK jail refuses is still handed over inside its plugin (the child then says on
+      // its stderr why it did not load) but never named here, where one unknown name fails the list.
+      if (!SDK_PLUGIN_NAME_PATTERN.test(plugin) || !SDK_SKILL_NAME_PATTERN.test(skill)) continue;
+      if (denied.has(skillDenyRule(meta.name))) continue;
+      skills.push(meta.name);
+    }
+    return { plugins, skills };
   }
 
   /** Root of the self-authored scope: `~/.winter/skills/self` — the same path `discover` scans as source "self". */

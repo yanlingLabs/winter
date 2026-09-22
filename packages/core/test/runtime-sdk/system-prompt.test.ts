@@ -62,6 +62,12 @@ function engineAssemble(assembler: ContextAssembler, meta: { mode?: "code" | "di
     skipOutputStyle: meta.origin === "dispatch-child",
     ultraDelegation: ultra,
     skillToolOffered,
+    // B1 (2026-09-22): the ONE deliberate departure from the retired engine's call. The engine ran its
+    // own `Skill` tool over this same SkillStore, so listing the store here was listing what the model
+    // could load. A runtime child loads only what its Options hand it and lists THAT itself (claude's
+    // `skill_listing` attachment), so the daemon's copy would be a second listing — and, for every
+    // tier the child cannot reach yet, a list of skills that answer "unknown skill".
+    skillListing: false,
     outDir: undefined,
     workdirLess: primary === undefined,
     extraDirs: primary === undefined ? [] : [],
@@ -132,6 +138,27 @@ describe("winterSystemPromptFor — the engine's composed instructions, per mode
     expect(code).not.toBe(winterSystemPromptFor(w.assembler, { mode: "code", primary: w.cwd, cwd: w.cwd }));
     const chat = await engineInstructions(w, { mode: "chat", cwd: w.cwd, effort: "ultra" });
     expect(winterSystemPromptFor(w.assembler, { mode: "chat", primary: w.cwd, cwd: w.cwd, effort: "ultra" })).toBe(chat);
+  });
+
+  // B1 (2026-09-22): the dist session was told about skills in the SYSTEM PROMPT that its child could
+  // not load ("unknown skill … Available: (none)"). The child lists what it CAN load as claude's
+  // `skill_listing` attachment, so the daemon's own listing is gone from every mode — one listing.
+  test("B1: no skill listing in any mode — the child's own `skill_listing` is the one the model sees", () => {
+    const w = world();
+    mkdirSync(join(w.home, "skills", "greet"), { recursive: true });
+    writeFileSync(join(w.home, "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: GREET_SKILL_SENTINEL\n---\nhi\n");
+    mkdirSync(join(w.home, "plugins", "superpowers", "skills", "brainstorming"), { recursive: true });
+    writeFileSync(join(w.home, "plugins", "superpowers", "skills", "brainstorming", "SKILL.md"), "---\nname: brainstorming\ndescription: PLUGIN_SKILL_SENTINEL\n---\nx\n");
+    for (const mode of ["chat", "dispatch", "code"] as const) {
+      const text = winterSystemPromptFor(w.assembler, { mode, primary: w.cwd, cwd: w.cwd });
+      expect(text).not.toContain("### Skills");
+      expect(text).not.toContain("GREET_SKILL_SENTINEL");
+      expect(text).not.toContain("PLUGIN_SKILL_SENTINEL");
+      expect(text).not.toContain("No skills are installed.");
+      expect(text).not.toContain("## Available capabilities");
+    }
+    // The assembler itself still renders it for a caller that owns the Skill tool (byte-identical default).
+    expect(w.assembler.assemble({ cwd: w.cwd })).toContain("PLUGIN_SKILL_SENTINEL");
   });
 
   test("output styles: UNSET is byte-identical (no resolver ≡ a resolver answering null), and Options.outputStyle stays unset", () => {

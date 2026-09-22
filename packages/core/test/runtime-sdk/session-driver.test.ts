@@ -17,6 +17,8 @@ import { createInMemoryRuntimeDirectoryStore, createRuntimeSdk } from "@yanlingl
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { FakeProvider } from "../../src/agent/fake-provider";
 import { SessionTitler, TITLE_INSTRUCTION } from "../../src/agent/titles";
+import { SkillStore } from "../../src/agent/skills";
+import { TrustStore } from "../../src/agent/trust";
 import { PermissionGate } from "../../src/agent/gate";
 import { QuestionBroker } from "../../src/agent/questions";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -618,6 +620,47 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
       expect(await evictSessionsForCredential(deps, "exa")).toEqual([sid]);
       // …and the legacy Brave row still evicts nothing: no child's `Options` names it.
       expect(await evictSessionsForCredential(deps, "web-search")).toEqual([]);
+      await session.end();
+    } finally { t.close(); }
+  });
+
+  // B1 (2026-09-22): the dist session whose first `Skill` call answered `Available: (none)` with a
+  // `superpowers` plugin installed. The child's index is built from its Options alone
+  // (`settingSources: []`), so an installed plugin skill that is not in `Options.plugins` does not
+  // exist for it — this is the table half: `optionsFor` asks the daemon's SkillStore, LIVE, per
+  // incarnation, and only for a code session (chat/dispatch never had the Skill tool).
+  test("B1: an installed plugin skill reaches a CODE child's Options.plugins/skills; deny rules and chat/dispatch are honoured", async () => {
+    let skillStore: SkillStore | undefined;
+    let settings = { permissions: { deny: ["Skill(superpowers:brainstorming)"] }, runtimes: { winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } } as unknown as Settings;
+    const t = table({ settings: () => settings, skills: { childSkillSurface: (input) => skillStore!.childSkillSurface(input) } });
+    try {
+      skillStore = new SkillStore({ winterHome: t.home, trust: new TrustStore(join(t.home, "trust.json")) });
+      for (const name of ["using-superpowers", "brainstorming"]) {
+        mkdirSync(join(t.home, "plugins", "superpowers", "skills", name), { recursive: true });
+        writeFileSync(join(t.home, "plugins", "superpowers", "skills", name, "SKILL.md"), `---\nname: ${name}\ndescription: ${name} skill\n---\nbody\n`);
+      }
+      const view = join(t.home, "runtimes", "skill-plugins", "superpowers");
+
+      const code = t.store.createSession("t", { mode: "code", model: "winter-test/echo", approvalPolicy: "ask" });
+      const session = await t.drivers.create(code);
+      expect(t.q().options.plugins).toEqual([{ type: "local", path: view, skipMcpDiscovery: true }]);
+      expect(t.q().options.skills).toEqual(["superpowers:using-superpowers"]);
+      expect(t.q().options.settingSources).toEqual([]);
+
+      // LIVE: lifting the deny rule reaches the next incarnation with no restart.
+      settings = { ...settings, permissions: { deny: [] } } as unknown as Settings;
+      await t.drivers.evict(code);
+      await (await t.drivers.ensure(code))!.open();
+      expect([...(t.q().options.skills ?? [])].sort()).toEqual(["superpowers:brainstorming", "superpowers:using-superpowers"]);
+      await t.drivers.evict(code);
+
+      for (const mode of ["chat", "dispatch"] as const) {
+        const sid = t.store.createSession("t", { mode, model: "winter-test/echo" });
+        const s = await t.drivers.create(sid);
+        expect("plugins" in t.q().options).toBe(false);
+        expect("skills" in t.q().options).toBe(false);
+        await s.end();
+      }
       await session.end();
     } finally { t.close(); }
   });

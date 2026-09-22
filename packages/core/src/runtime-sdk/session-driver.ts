@@ -86,6 +86,7 @@ function mergedAgentDefinitions(
 }
 import type { AgentRegistry } from "../agent/bg-agent-registry";
 import type { ContextAssembler } from "../agent/context";
+import type { SkillStore } from "../agent/skills";
 import { startWinterSession, unconsumedUserMessages, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import { startOfficialSession, type OfficialSession } from "./official-session";
@@ -253,6 +254,14 @@ export interface WinterLegDeps {
    *  forwarded to that leg below, so the official leg's `autoMemoryDirectory` reads the identical
    *  MEMDIR decision this assembler's `assemble()` just used to build the system prompt. */
   assembler?: Pick<ContextAssembler, "assemble" | "memoryDirFor">;
+  /**
+   * B1 (2026-09-22): the daemon's ONE `SkillStore` — the same instance the assembler and the
+   * `skills.*` RPCs read — asked, per incarnation, which of its skills a CODE child can load
+   * (`childSkillSurface`: skills-only plugin views + the invocable names, `Skill(<name>)` deny rules
+   * applied from the LIVE settings). Absent (a harness without one) ⇒ no `Options.plugins`/`skills`,
+   * exactly as before, and the child indexes no skill at all (`settingSources: []`).
+   */
+  skills?: Pick<SkillStore, "childSkillSurface">;
   /** Task 17 (P8b-15): the persisted child roster (`createPersistedChildren` over 8a's
    *  `runtime_children`). A Winter child is registered under the spawning `tool_use.id` with NO
    *  local abort (its process is the session's), fed `progress()` on every frame of its thread, and
@@ -615,6 +624,15 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         primary ??= rows[0];
         extraDirs = primary === undefined ? [] : rows.filter((d) => d !== primary);
       } catch { /* a session with no dirs row: workdir-less */ }
+      // B1: the skills this child may load, from the SAME SkillStore (and the same cwd) the daemon's
+      // `skills.list` answers from — CODE only, as the engine's registry always had it (chat and
+      // dispatch never offered `Skill`). Re-read here at every incarnation, so an installed/removed/
+      // disabled plugin or a toggled `Skill(<name>)` deny rule reaches the next child, no restart.
+      // The model sees ONE listing: the child's own `skill_listing` attachment, built from exactly
+      // this set (`winterSystemPromptFor` no longer renders the daemon's).
+      const skillSurface = mode === "code" && deps.skills !== undefined
+        ? deps.skills.childSkillSurface({ cwd: primary ?? deps.tmpDirOf(sessionId), deny: settings?.permissions?.deny ?? [] })
+        : undefined;
       const systemPrompt = deps.assembler === undefined ? undefined : winterSystemPromptFor(deps.assembler, {
         mode, origin: live.origin, primary, cwd: primary ?? deps.tmpDirOf(sessionId),
         outDir: deps.outDirOf(sessionId), extraDirs, effort: live.effort,
@@ -752,6 +770,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // is the SAME helper the official leg's `inputDeps()` calls below, so both legs see the
         // identical merged map from one owner.
         agents: mergedAgentDefinitions(home, cwd, deps.projectAgentDefinitions),
+        ...(skillSurface === undefined ? {} : { plugins: skillSurface.plugins, skills: skillSurface.skills }),
       });
     };
 
