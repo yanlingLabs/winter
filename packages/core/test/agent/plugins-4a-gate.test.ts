@@ -9,9 +9,10 @@ import { PluginStore, pluginMcpEligible, pluginSkillsEligible, type PluginConsen
  * installs/enables with the full consent block." ONE chained flow, tmp-home fixtures, three parts:
  *
  *   (1) a legacy plugin.json-only plugin (skills + .mcp.json, no winter-plugin.json) — skills
- *       listed, MCP inert until enabled, enabling flips mcpEnabled/pluginMcpEligible true with
- *       ZERO consents involved anywhere in the chain; the shared PluginInfo fields match the
- *       exact pre-4a shape (see git show 9f941eb^:packages/core/src/agent/plugins.ts).
+ *       listed, MCP inert until enabled; the shared PluginInfo fields match the exact pre-4a shape
+ *       (see git show 9f941eb^:packages/core/src/agent/plugins.ts). AMENDED 2026-09-23 (lane B,
+ *       review): it ships a skill, so it requires the `exec` consent class — enabling alone no
+ *       longer makes it MCP- or skills-eligible; the exec consent does (consent is per class).
  *   (2) a winter-plugin.json manifest plugin (tier capability, contributes.mcpServers, a tcc
  *       permission) — requiredConsents derives to ["exec","tcc"]; enabled-without-consent is
  *       excluded from MCP eligibility; writing both consent records flips it eligible AND
