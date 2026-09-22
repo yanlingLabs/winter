@@ -1078,7 +1078,9 @@ describe("daemon IPC", () => {
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 3,
       provider: { model: "codex-oauth/gpt-5.4" },
-      plugins: { enabled: ["demo"] },
+      // Lane B (2026-09-23, review): this legacy plugin SHIPS A SKILL, so it requires the `exec`
+      // consent class — and consent is per class, so its legacy .mcp.json needs it too.
+      plugins: { enabled: ["demo"], consents: { demo: { exec: 1 } } },
     }));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     const fake = new FakeProvider([[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]]);
@@ -1179,7 +1181,8 @@ describe("daemon IPC", () => {
       // — no transform strips these; the protocol schema round-trip itself is covered by
       // packages/protocol/test/methods.test.ts).
       tier: "capability", legacy: false,
-      execPayload: [`mcp: bun run ${fixture}`], tccPermissions: [], hardwarePermissions: [],
+      // + the shipped-skills line (lane B, 2026-09-23): a skill can run shell commands.
+      execPayload: [`mcp: bun run ${fixture}`, "skills: greet — a skill can run shell commands when a session uses it"], tccPermissions: [], hardwarePermissions: [],
     });
     expect(captured.some((m) => m.includes("demo") && m.includes("exec"))).toBe(true); // the "why" log line
     c.close();
