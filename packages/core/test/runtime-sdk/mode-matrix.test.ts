@@ -846,12 +846,12 @@ test("C3-1: under auto an escape runs ONLY with the reviewer's clearance for tha
   // Cleared: the reviewer judged THIS call safe under the unsandboxed instruction (hooks.ts notes it).
   const ok = harness({ mode: "code", policy: "auto" });
   const c = escapeCtx();
-  noteReviewerCleared("s1", c.toolUseID);
+  noteReviewerCleared("s1", c.toolUseID, "gh repo view x");
   const res = (await ok.canUse("Bash", { command: "gh repo view x", dangerouslyDisableSandbox: true }, c))!;
   expect(res.behavior).toBe("allow");
   expect(ok.events).toEqual([]);
   // the clearance is consumed — it can never be spent twice
-  expect(takeReviewerCleared("s1", c.toolUseID)).toBe(false);
+  expect(takeReviewerCleared("s1", c.toolUseID, "gh repo view x")).toBe(false);
   // NOT cleared — no reviewer wired, reviewer disabled, no runnable model, a transient failure, an
   // evicted note: the same card for all of them, because none of them recorded a clearance
   const h = harness({ mode: "code", policy: "auto" });
@@ -862,11 +862,22 @@ test("C3-1: under auto an escape runs ONLY with the reviewer's clearance for tha
   await expect(p).resolves.toMatchObject({ behavior: "deny" });
   // a clearance for ANOTHER session, or another call, never applies here
   const other = escapeCtx();
-  noteReviewerCleared("s-other", other.toolUseID);
+  noteReviewerCleared("s-other", other.toolUseID, "x");
   const h2 = harness({ mode: "code", policy: "auto" });
   void h2.canUse("Bash", { command: "x", dangerouslyDisableSandbox: true }, other);
   expect(h2.events).toHaveLength(1);
-  expect(takeReviewerCleared("s-other", other.toolUseID)).toBe(true);
+  expect(takeReviewerCleared("s-other", other.toolUseID, "x")).toBe(true);
+});
+
+test("C3 round 3: a clearance is bound to the command the reviewer judged — a different command on the same call id cards", async () => {
+  const h = harness({ mode: "code", policy: "auto" });
+  const c = escapeCtx();
+  noteReviewerCleared("s1", c.toolUseID, "gh repo view x");
+  void h.canUse("Bash", { command: "gh repo delete x --yes", dangerouslyDisableSandbox: true }, c);
+  expect(h.events).toHaveLength(1);
+  expect((h.events[0] as { type: string }).type).toBe("approval_requested");
+  // …and the mismatched take consumed it: the original command cannot spend it afterwards either
+  expect(takeReviewerCleared("s1", c.toolUseID, "gh repo view x")).toBe(false);
 });
 
 test("C3-1: where nobody can answer a card (dispatch, a dispatch child) an uncleared escape is the typed never-prompts deny; a cleared one runs", async () => {
@@ -876,7 +887,7 @@ test("C3-1: where nobody can answer a card (dispatch, a dispatch child) an uncle
     expect(res.behavior).toBe("deny");
     expect(h.events).toEqual([]);
     const c = escapeCtx();
-    noteReviewerCleared("s1", c.toolUseID);
+    noteReviewerCleared("s1", c.toolUseID, "x");
     const ok = (await make().canUse("Bash", { command: "x", dangerouslyDisableSandbox: true }, c))!;
     expect(ok.behavior).toBe("allow");
   }
@@ -886,7 +897,7 @@ test("C3-1: chat never runs an escape — a stale chat row still on `auto` is de
   const bare = harness({ mode: "chat", policy: "auto" });
   expect((await bare.canUse("Bash", { command: "x", dangerouslyDisableSandbox: true }, escapeCtx()))!.behavior).toBe("deny");
   const c = escapeCtx();
-  noteReviewerCleared("s1", c.toolUseID);
+  noteReviewerCleared("s1", c.toolUseID, "x");
   const cleared = harness({ mode: "chat", policy: "auto" });
   expect((await cleared.canUse("Bash", { command: "x", dangerouslyDisableSandbox: true }, c))!.behavior).toBe("deny");
   expect(cleared.events).toEqual([]);

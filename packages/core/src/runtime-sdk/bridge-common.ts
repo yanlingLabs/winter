@@ -66,22 +66,30 @@ export const REVIEWER_ESCALATION_REASON = "reviewer unavailable — escalating f
  * only cost a card, never grant a run. A `toolUseID` is unique per call, so a lingering clearance can
  * never apply to a different command.
  */
-const reviewerCleared = new Set<string>();
+/** key → the exact command the reviewer cleared (C3 round 3: a clearance is bound to what was
+ *  reviewed, so an input a later stage rewrote — a hook transform, a `canUseTool` retry with new
+ *  args — can never ride a verdict about something else). */
+const reviewerCleared = new Map<string, string>();
 const REVIEWER_CLEARED_CAP = 512;
 const clearedKey = (sessionId: string, toolUseID: string): string => `${sessionId}\u0000${toolUseID}`;
 
-export function noteReviewerCleared(sessionId: string, toolUseID: string | undefined): void {
+export function noteReviewerCleared(sessionId: string, toolUseID: string | undefined, command: string): void {
   if (toolUseID === undefined || toolUseID.length === 0) return;
-  reviewerCleared.add(clearedKey(sessionId, toolUseID));
+  const key = clearedKey(sessionId, toolUseID);
+  reviewerCleared.delete(key);   // re-insert at the young end
+  reviewerCleared.set(key, command);
   while (reviewerCleared.size > REVIEWER_CLEARED_CAP) {
-    const oldest = reviewerCleared.values().next().value;
+    const oldest = reviewerCleared.keys().next().value;
     if (oldest === undefined) break;
     reviewerCleared.delete(oldest);
   }
 }
 
-/** Consumes the clearance: `true` at most once per call. */
-export function takeReviewerCleared(sessionId: string, toolUseID: string | undefined): boolean {
+/** Consumes the clearance: `true` at most once per call, and only for the very command reviewed. */
+export function takeReviewerCleared(sessionId: string, toolUseID: string | undefined, command: unknown): boolean {
   if (toolUseID === undefined || toolUseID.length === 0) return false;
-  return reviewerCleared.delete(clearedKey(sessionId, toolUseID));
+  const key = clearedKey(sessionId, toolUseID);
+  const cleared = reviewerCleared.get(key);
+  reviewerCleared.delete(key);
+  return cleared !== undefined && typeof command === "string" && cleared === command;
 }
