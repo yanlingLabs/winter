@@ -947,13 +947,21 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
    * left running until the boundary would keep auto-approving after the user switched bypass off. A
    * refusal there is logged, not fatal — the replacement still lands at the boundary.
    */
-  async function replaceChildForPolicy(sessionId: string, live: LegSession, spawnPolicy: SessionApprovalPolicy, next: SessionApprovalPolicy): Promise<void> {
+  async function replaceChildForPolicy(
+    sessionId: string, live: LegSession, spawnPolicy: SessionApprovalPolicy, next: SessionApprovalPolicy,
+  ): Promise<{ replaced: "now" | "at-idle"; warning?: string }> {
     const winter = opts.winter!;
+    let warning: string | undefined;
     if (bypassAllowedAtSpawn(spawnPolicy)) {
       try {
         await live.setPolicy(next);
       } catch (err) {
         console.error(`session.setPolicy for ${sessionId}: the running child did not leave bypass at once (${err instanceof Error ? err.message : "unknown"}) — it is replaced at its idle boundary regardless`);
+        // Review M4: only mid-turn does this matter to the user — an idle child is replaced right
+        // below, before it runs anything else.
+        if (live.turnRunning) {
+          warning = "the running turn is still bypassing approvals — it could not leave bypass mid-turn, and the session switches when this turn ends";
+        }
       }
     }
     const clampChanges = (): boolean => {
@@ -961,24 +969,32 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       try { stored = opts.store.meta(sessionId).approvalPolicy; } catch { return false; }   // the session went away
       return bypassAllowedAtSpawn(stored) !== bypassAllowedAtSpawn(spawnPolicy);
     };
+    const withWarning = (replaced: "now" | "at-idle") => (warning === undefined ? { replaced } : { replaced, warning });
     if (!live.turnRunning) {
       pendingPolicyReplacements.delete(sessionId);
       console.error(`session.setPolicy for ${sessionId} crosses the bypass boundary (${spawnPolicy} → ${next}) — replacing its child so it spawns with the matching permission clamp`);
       await winter.evict(sessionId);
-      return;
+      return withWarning("now");
     }
-    if (pendingPolicyReplacements.get(sessionId)?.live === live) return;   // already scheduled for this child
+    if (pendingPolicyReplacements.get(sessionId)?.live === live) return withWarning("at-idle");   // already scheduled for this child
     pendingPolicyReplacements.set(sessionId, { live, spawnPolicy });
     console.error(`session.setPolicy for ${sessionId} crosses the bypass boundary (${spawnPolicy} → ${next}) mid-turn — its child is replaced at the next idle boundary`);
+    const forget = () => { if (pendingPolicyReplacements.get(sessionId)?.live === live) pendingPolicyReplacements.delete(sessionId); };
     void live.idle().then(
       async () => {
-        if (pendingPolicyReplacements.get(sessionId)?.live === live) pendingPolicyReplacements.delete(sessionId);
+        forget();
         if (winter.get(sessionId) !== live) return;   // replaced meanwhile — the successor read the store when it spawned
         if (!clampChanges()) return;                  // crossed back before the boundary: this child is already right
         await winter.evict(sessionId);
       },
-      () => { if (pendingPolicyReplacements.get(sessionId)?.live === live) pendingPolicyReplacements.delete(sessionId); },
+      forget,
     );
+    // Review M4: a child whose incarnation ENDS without ever reaching an idle boundary (a crash, an
+    // abort) leaves nothing to replace — its successor reads the stored policy when it spawns — so the
+    // entry is dropped then too, and a later change is judged against the store again. Cleanup only:
+    // this never evicts.
+    void live.done.then(forget, forget);
+    return withWarning("at-idle");
   }
 
   async function refreshInternalProvidersAfterCredentialChange(): Promise<void> {
@@ -2642,8 +2658,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           const pending = pendingPolicyReplacements.get(p.sessionId);
           const spawnPolicy = pending !== undefined && pending.live === live ? pending.spawnPolicy : previous;
           if (spawnPolicy !== undefined && bypassAllowedAtSpawn(spawnPolicy) !== bypassAllowedAtSpawn(p.policy)) {
-            await replaceChildForPolicy(p.sessionId, live, spawnPolicy, p.policy);
-            return { ok: true };
+            // `replaced` says when the new clamp lands ("now" | "at-idle"); `warning` (review M4) that a
+            // running turn could not leave bypass at once and keeps bypassing until it ends.
+            return { ok: true, ...(await replaceChildForPolicy(p.sessionId, live, spawnPolicy, p.policy)) };
           }
         }
         if (live !== undefined) {

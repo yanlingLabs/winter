@@ -73,6 +73,8 @@ interface Harness {
   evicted: string[];
   /** Resolve the running turn's idle boundary (a no-op when no turn is running). */
   finishTurn(): void;
+  /** End the child's incarnation WITHOUT an idle boundary (a crash; `idle()` never settles). */
+  endIncarnation(): void;
 }
 
 /**
@@ -80,22 +82,26 @@ interface Harness {
  * child REFUSES a live switch into `bypass` exactly as the Winter runtime does when its spawn-time
  * clamp is on (`refuseBypass`, default true), and `evict` forgets the driver, as the real table does.
  */
-function harness(opts: { leg?: SessionLeg; turnRunning?: boolean; refuseBypass?: boolean } = {}): Harness {
+function harness(opts: { leg?: SessionLeg; turnRunning?: boolean; refuseBypass?: boolean; refuseLeavingBypass?: boolean } = {}): Harness {
   const never = (): never => { throw new Error("not reached by this test"); };
   const told: SessionApprovalPolicy[] = [];
   const evicted: string[] = [];
   let release: () => void = () => {};
   const idle = opts.turnRunning === true ? new Promise<void>((r) => { release = r; }) : Promise.resolve();
+  // A LIVE child's incarnation has not ended: `done` stays pending until `endIncarnation()`.
+  let endInc: () => void = () => {};
+  const done = new Promise<void>((r) => { endInc = r; });
   let present = true;
   const session: LegSession = {
     sessionId: "s1", backendSessionId: "be-1", mode: "code", state: "live", generation: 1, resumed: false,
-    init: undefined, turnRunning: opts.turnRunning === true, turnStartedAt: undefined, done: Promise.resolve(),
+    init: undefined, turnRunning: opts.turnRunning === true, turnStartedAt: undefined, done,
     pendingSends: [], heldDeliveries: [],
     send: never, steer: never, interrupt: never, compact: never, setModel: never,
     setPolicy: async (policy) => {
       if (policy === "bypass" && (opts.leg ?? "winter") === "winter" && opts.refuseBypass !== false) {
         throw new Error("bypassPermissions is disabled by managed configuration (permissions.disableBypassPermissionsMode)");
       }
+      if (policy !== "bypass" && opts.refuseLeavingBypass === true) throw new Error("the control request was refused");
       told.push(policy);
     },
     end: async () => {}, deliver: never, open: async () => {}, idle: () => idle,
@@ -112,7 +118,7 @@ function harness(opts: { leg?: SessionLeg; turnRunning?: boolean; refuseBypass?:
     list: () => (present ? [session] : []),
     endAll: async () => {},
   };
-  return { table, told, evicted, finishTurn: () => release() };
+  return { table, told, evicted, finishTurn: () => release(), endIncarnation: () => { endInc(); present = false; } };
 }
 
 async function boot(winter: WinterSessionDrivers): Promise<{ store: SessionStore; client: TestClient; stop: () => void }> {
@@ -138,7 +144,7 @@ describe("session.setPolicy across the bypass boundary — the Winter child is r
       const sessionId = store.createSession("global", { mode: "code", approvalPolicy: "auto" });
       const res = await client.request(METHODS.sessionSetPolicy, { sessionId, policy: "bypass" });
       expect(res.error).toBeUndefined();
-      expect(res.result).toEqual({ ok: true });
+      expect(res.result).toEqual({ ok: true, replaced: "now" });
       expect(store.meta(sessionId).approvalPolicy).toBe("bypass");
       // Replaced NOW (idle), so the very next send spawns a child whose clamp is off.
       expect(h.evicted).toEqual([sessionId]);
@@ -156,7 +162,7 @@ describe("session.setPolicy across the bypass boundary — the Winter child is r
       const sessionId = store.createSession("global", { mode: "code", approvalPolicy: "bypass" });
       const res = await client.request(METHODS.sessionSetPolicy, { sessionId, policy: "ask" });
       expect(res.error).toBeUndefined();
-      expect(res.result).toEqual({ ok: true });
+      expect(res.result).toEqual({ ok: true, replaced: "now" });
       expect(store.meta(sessionId).approvalPolicy).toBe("ask");
       expect(h.told).toEqual(["ask"]);
       expect(h.evicted).toEqual([sessionId]);
@@ -171,7 +177,7 @@ describe("session.setPolicy across the bypass boundary — the Winter child is r
     try {
       const sessionId = store.createSession("global", { mode: "code", approvalPolicy: "ask" });
       const res = await client.request(METHODS.sessionSetPolicy, { sessionId, policy: "bypass" });
-      expect(res.result).toEqual({ ok: true });
+      expect(res.result).toEqual({ ok: true, replaced: "at-idle" });
       expect(store.meta(sessionId).approvalPolicy).toBe("bypass");
       // A running turn is never cut.
       await settle();
@@ -191,7 +197,7 @@ describe("session.setPolicy across the bypass boundary — the Winter child is r
     try {
       const sessionId = store.createSession("global", { mode: "code", approvalPolicy: "bypass" });
       const res = await client.request(METHODS.sessionSetPolicy, { sessionId, policy: "accept-edits" });
-      expect(res.result).toEqual({ ok: true });
+      expect(res.result).toEqual({ ok: true, replaced: "at-idle" });
       expect(h.told).toEqual(["accept-edits"]);
       await settle();
       expect(h.evicted).toEqual([]);
@@ -208,7 +214,7 @@ describe("session.setPolicy across the bypass boundary — the Winter child is r
     const { store, client, stop } = await boot(h.table);
     try {
       const sessionId = store.createSession("global", { mode: "code", approvalPolicy: "ask" });
-      expect((await client.request(METHODS.sessionSetPolicy, { sessionId, policy: "bypass" })).result).toEqual({ ok: true });
+      expect((await client.request(METHODS.sessionSetPolicy, { sessionId, policy: "bypass" })).result).toEqual({ ok: true, replaced: "at-idle" });
       // Back across before the turn ends: the child was spawned under `ask`, so its clamp is already
       // the right one — this is an ordinary live change, and the boundary finds nothing to do.
       expect((await client.request(METHODS.sessionSetPolicy, { sessionId, policy: "auto" })).result).toEqual({ ok: true });
@@ -217,6 +223,41 @@ describe("session.setPolicy across the bypass boundary — the Winter child is r
       await settle();
       expect(h.evicted).toEqual([]);
       expect(store.meta(sessionId).approvalPolicy).toBe("auto");
+    } finally {
+      stop();
+    }
+  });
+
+  // Review M4 (2026-09-23): a running child that refuses to LEAVE bypass keeps auto-approving until the
+  // boundary — the user is told so in the result, not just the log.
+  test("M4: a mid-turn refusal to leave bypass is surfaced in the result; the store and the boundary replacement still apply", async () => {
+    const h = harness({ turnRunning: true, refuseLeavingBypass: true });
+    const { store, client, stop } = await boot(h.table);
+    try {
+      const sessionId = store.createSession("global", { mode: "code", approvalPolicy: "bypass" });
+      const res = await client.request(METHODS.sessionSetPolicy, { sessionId, policy: "ask" });
+      expect(res.result).toMatchObject({ ok: true, replaced: "at-idle" });
+      expect(String(res.result.warning)).toContain("still bypassing");
+      expect(store.meta(sessionId).approvalPolicy).toBe("ask");
+      h.finishTurn();
+      await settle();
+      expect(h.evicted).toEqual([sessionId]);
+    } finally {
+      stop();
+    }
+  });
+
+  test("M4: a child whose incarnation ends without an idle boundary drops the pending replacement (nothing left to replace)", async () => {
+    const h = harness({ turnRunning: true });
+    const { store, client, stop } = await boot(h.table);
+    try {
+      const sessionId = store.createSession("global", { mode: "code", approvalPolicy: "ask" });
+      expect((await client.request(METHODS.sessionSetPolicy, { sessionId, policy: "bypass" })).result).toEqual({ ok: true, replaced: "at-idle" });
+      h.endIncarnation();
+      await settle();
+      expect(h.evicted).toEqual([]);
+      // A later change is judged against the stored policy again, not the dead child's spawn policy.
+      expect((await client.request(METHODS.sessionSetPolicy, { sessionId, policy: "auto" })).result).toEqual({ ok: true });
     } finally {
       stop();
     }
