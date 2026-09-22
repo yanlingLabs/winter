@@ -43,7 +43,8 @@
  *  - CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO is REQUIRED — without it Xcode injects
  *    get-task-allow=true and notarization silently auto-rejects.
  *  - The "Embed winter-core" postCompileScript now signs with --options runtime --timestamp
- *    (apple/Winter/project.yml, committed) so the nested binary carries hardened runtime too.
+ *    (apple/Winter/project.yml, committed) so the nested binary carries hardened runtime too —
+ *    plus scripts/bun-jit.entitlements (exactly allow-jit; A2, see HARDENING_PINS below).
  *  - WinterHelper's embedded codesign identifier becomes "WinterHelper" (not "com.winter.helper")
  *    under this override set — confirmed harmless (Label-based launchd matching, team-based
  *    peer trust) — not fixed here, out of scope.
