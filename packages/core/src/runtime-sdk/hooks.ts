@@ -448,26 +448,138 @@ function writeContextStart(c: string): number {
 /**
  * Fix round 2 (controller ruling on SPEC CONCERN D): the protected item directories and agent definitions
  * of ANY project, at ANY depth and whatever its trust — `.winter/{skills,commands,rules,output-styles,
- * agents}` — named in a WRITE-SHAPED position of a Bash command (after a redirect, as the target of a write
- * verb, an in-place `sed -i`/`perl -i`, or relative words after a `cd` into such a directory), sandboxed or
- * not. The seatbelt cannot fence these off this session's walk (it takes real subpaths only, and a later
- * session in a sibling package loads them). Returns the segment named, or `undefined`.
+ * agents}` — as the TARGET of a write in a Bash command, sandboxed or not. The seatbelt cannot fence these
+ * off this session's walk (it takes real subpaths only, and a later session in a sibling package loads
+ * them). Returns the segment named, or `undefined`.
  *
- * THE LIMITATION, the escape floor's own: a static match on the normalised command text (case folded,
- * quotes stripped, `//`/`/./`/`..` collapsed, `cd` tracked) — a path the command ASSEMBLES at run time
- * (`$(…)`, variables of its own, a script it writes and then runs) is beyond its reach.
+ * Round 3, minor 10 — JUDGED PER SHELL SEGMENT (split on `;`, `&&`, `||`, `|`, `&` and newlines on the RAW
+ * text, never inside quotes; a `cd`/`pushd` carried across segments), so a read after a redirect or a write
+ * elsewhere in the line is no longer taken for a write. In a segment, a write target is:
+ *   * the target of an output redirect (`>`, `>>`, `>|`, `&>`; never an fd dup like `2>&1`);
+ *   * for `cp`/`mv`/`ln`/`install`/`rsync`, ONLY the destination — the last operand, or the `-t`/
+ *     `--target-directory` value (a copy's SOURCE is read; `mv`'s removal of it loads nothing new);
+ *   * for `git`, nothing when the subcommand only reads (status, log, diff, show, blame, ls-files, grep),
+ *     every later word otherwise;
+ *   * for an in-place editor (`sed -i`, `perl -i`) and every other write verb, every later word.
+ *
+ * THE LIMITATION, the escape floor's own: a static match on the normalised text (case folded, quotes
+ * stripped, `//`/`/./`/`..` collapsed, `cd` tracked). A path the command ASSEMBLES at run time (`$(…)`,
+ * its own variables, a script it writes and then runs) is beyond its reach, and so is a write whose path is
+ * not in the command at all — `git apply x.patch`, `patch < x.diff`.
  */
 export function bashProtectedWriteHit(command: string): string | undefined {
-  const c = expandAfterCd(normaliseEscapeCommand(command));
-  const writeStart = writeContextStart(c);
-  if (writeStart === Infinity) return undefined;
-  for (const m of c.matchAll(PROTECTED_BASH_SEGMENT)) {
-    if (m.index !== undefined && m.index > writeStart) return m[0];
+  let cwd: string | undefined;
+  for (const raw of shellSegments(command)) {
+    const seg = normaliseEscapeCommand(quotedOperatorsAsText(raw)).replace(/^[\s({]+/, "").replace(/[\s)}]+$/, "");
+    if (seg.length === 0) continue;
+    const words = seg.split(/\s+/);
+    if (words[0] === "cd" || words[0] === "pushd") {
+      const arg = words[1]?.replace(/\/+$/, "");
+      cwd = arg === undefined || arg === "" ? "~" : arg === "-" ? undefined : /^[/~$]/.test(arg) || cwd === undefined ? arg : `${cwd}/${arg.replace(/^\.\//, "")}`;
+      continue;
+    }
+    for (const target of segmentWriteTargets(seg)) {
+      const path = cwd === undefined || /^[/~$]/.test(target) ? target : `${cwd}/${target.replace(/^\.\//, "")}`;
+      const m = PROTECTED_BASH_TARGET.exec(path);
+      if (m !== null) return m[0];
+    }
   }
   return undefined;
 }
 
-const PROTECTED_BASH_SEGMENT = /\.winter\/(?:skills|commands|rules|output-styles|agents)(?=\/|[\s;&|()<>]|$)/g;
+/** A protected segment inside ONE write target (a single word). */
+const PROTECTED_BASH_TARGET = /\.winter\/(?:skills|commands|rules|output-styles|agents)(?=\/|$)/;
+
+/** Round 3, minor 10: a command's shell segments — split on `;`, `&&`, `||`, `|`, `|&`, a background `&` and
+ *  newlines, on the RAW text: a separator inside single or double quotes (or escaped) is text. */
+export function shellSegments(command: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let quote: "'" | "\"" | undefined;
+  const cut = (): void => { out.push(cur); cur = ""; };
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i]!;
+    if (quote !== undefined) {
+      cur += ch;
+      if (ch === quote) quote = undefined;
+      else if (ch === "\\" && quote === "\"" && i + 1 < command.length) cur += command[++i];
+      continue;
+    }
+    if (ch === "\\" && i + 1 < command.length) { cur += ch + command[++i]; continue; }
+    if (ch === "'" || ch === "\"") { quote = ch; cur += ch; continue; }
+    if (ch === "\n" || ch === ";") { cut(); continue; }
+    if (ch === "|") { if (command[i + 1] === "|" || command[i + 1] === "&") i += 1; cut(); continue; }
+    if (ch === "&") {
+      if (command[i + 1] === "&") { i += 1; cut(); continue; }
+      if (command[i - 1] === ">" || command[i - 1] === "<" || command[i + 1] === ">") { cur += ch; continue; } // a redirect
+      cut();
+      continue;
+    }
+    cur += ch;
+  }
+  cut();
+  return out.map((s) => s.trim()).filter((s) => s.length > 0);
+}
+
+/** A redirect or separator character INSIDE quotes is text: it becomes a space before the quotes are
+ *  stripped, so `echo 'a > .winter/rules/x'` names no write target (a quoted PATH is kept as it is). */
+function quotedOperatorsAsText(raw: string): string {
+  let out = "";
+  let quote: "'" | "\"" | undefined;
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i]!;
+    if (quote === undefined) {
+      if (ch === "\\" && i + 1 < raw.length) { out += ch + raw[++i]; continue; }
+      if (ch === "'" || ch === "\"") quote = ch;
+      out += ch;
+      continue;
+    }
+    if (ch === quote) { quote = undefined; out += ch; continue; }
+    out += /[<>|;&()]/.test(ch) ? " " : ch;
+  }
+  return out;
+}
+
+/** git's subcommands that only read (round 3, minor 10). */
+const GIT_READ_SUBCOMMANDS: ReadonlySet<string> = new Set(["status", "log", "diff", "show", "blame", "ls-files", "grep"]);
+/** Verbs whose only write target is the destination (round 3, minor 10). */
+const DESTINATION_VERBS: ReadonlySet<string> = new Set(["cp", "mv", "ln", "install", "rsync"]);
+
+/** One normalised segment's write targets (words), per `bashProtectedWriteHit`'s rules. */
+function segmentWriteTargets(seg: string): string[] {
+  const targets: string[] = [];
+  // Output redirects: the word after the operator; an fd dup (`>&1`, `>&-`) names no file.
+  const redirect = /(?:\d*|&)>{1,2}\|?(&?)\s*([^\s<>&|;()]*)/g;
+  for (const m of seg.matchAll(redirect)) {
+    if (m[1] === "&" && /^(\d+|-)?$/.test(m[2] ?? "")) continue;
+    if (m[2] !== undefined && m[2].length > 0) targets.push(m[2]);
+  }
+  const words = seg.replace(redirect, " ").replace(/<\s*[^\s<>&|;()]*/g, " ").split(/\s+/).filter((w) => w.length > 0);
+  for (let i = 0; i < words.length; i += 1) {
+    const verb = words[i]!.slice(words[i]!.lastIndexOf("/") + 1);
+    const rest = words.slice(i + 1);
+    if (verb === "git") {
+      let j = 0;
+      while (j < rest.length && rest[j]!.startsWith("-")) j += /^-[cC]$/.test(rest[j]!) ? 2 : 1;   // `-C dir`, `-c k=v`
+      if (GIT_READ_SUBCOMMANDS.has(rest[j] ?? "")) return targets;
+      return [...targets, ...rest];
+    }
+    if (DESTINATION_VERBS.has(verb)) {
+      for (let j = 0; j < rest.length; j += 1) {
+        if (rest[j] === "-t" && rest[j + 1] !== undefined) return [...targets, rest[j + 1]!];
+        if (rest[j]!.startsWith("--target-directory=")) return [...targets, rest[j]!.slice("--target-directory=".length)];
+      }
+      const operands = rest.filter((w) => !w.startsWith("-"));
+      return operands.length === 0 ? targets : [...targets, operands[operands.length - 1]!];
+    }
+    if (verb === "sed" || verb === "perl") {
+      if (rest.some((w) => /^(?:-[a-z]*i\S*|--in-place\S*)$/.test(w))) return [...targets, ...rest];
+      continue;
+    }
+    if (ESCAPE_WRITE_VERBS.has(verb)) return [...targets, ...rest];
+  }
+  return targets;
+}
 
 /** The ASK a protected-path Bash write gets (fix round 2) — a card in code; the bridge turns it into the
  *  typed deny wherever nobody can answer (dispatch, chat, a dispatch child). Every policy, both legs. */

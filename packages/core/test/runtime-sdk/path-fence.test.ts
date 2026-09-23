@@ -171,6 +171,41 @@ describe("fix round 2: Bash writes under .winter/<kind>", () => {
     for (const cmd of [...reads, ...outside]) expect({ cmd, hit: bashProtectedWriteHit(cmd) }).toEqual({ cmd, hit: undefined });
   });
 
+  // Round 3, minor 10: reads that wrongly got a card. Each shell segment (split on `;`, `&&`, `||`, `|`,
+  // newlines — never inside quotes) is judged on its own, a `cd` carried across them; git's read
+  // subcommands are no write; for cp/mv/ln/install/rsync only the destination (the last operand, or `-t`)
+  // is the write target. Every write case above still gets its card.
+  test("round 3, minor 10: each segment judged alone; git reads and a copy's source get no card", () => {
+    const noCard = [
+      "git status && ls .winter/rules",
+      "cat a 2>/dev/null; cat .winter/commands/x.md",
+      "mkdir -p build && grep -r foo .winter/rules",
+      "git log -- .winter/skills",
+      "cp .winter/skills/a/ref.md /tmp/",
+      "cd .winter/skills && git status",
+      "git diff HEAD~1 -- .winter/rules/r.md | cat",
+      "echo 'a; b > .winter/rules/x' && ls",          // a separator and a redirect INSIDE quotes are text
+      "cat .winter/agents/a.md 2>&1 | grep name",
+    ];
+    for (const cmd of noCard) expect({ cmd, hit: bashProtectedWriteHit(cmd) }).toEqual({ cmd, hit: undefined });
+    const stillWrites = [
+      ...writes,
+      "cp -t .winter/rules a.md b.md",
+      "cp --target-directory=.winter/commands a.md",
+      "git status; echo x > .winter/rules/r.md",
+      "ls\ntouch .winter/rules/r.md",
+      "cd .winter/skills && touch new/SKILL.md",
+      "cd pkg && cd .winter && mkdir commands",
+      "rsync -a src/ .winter/agents/",
+      "ln -s /tmp/x .winter/commands/x.md",
+      "git checkout -- .winter/rules",
+      "cat a >> .winter/rules/r.md",
+      "echo x >.winter/rules/r.md",
+      "true && (cd pkg/.winter/skills && touch x)",
+    ];
+    for (const cmd of stillWrites) expect({ cmd, hit: bashProtectedWriteHit(cmd) !== undefined }).toEqual({ cmd, hit: true });
+  });
+
   test("the hook asks (both legs, sandboxed or not); a read gets no answer from it", async () => {
     const built = sessionHooksFor({ sessionId: "s_1", roots: ["/r"], home: "/Users/x/.winter", mode: "code" });
     const groups = (built.winter?.PreToolUse ?? []).filter((g: HookCallbackMatcher) => g.matcher === "Bash");
