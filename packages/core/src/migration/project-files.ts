@@ -11,7 +11,7 @@ import { rekeySettings, type RekeyChange } from "./rekey-settings";
 import { ApprovedProjectRules } from "../agent/approved-project-rules";
 import { repoRootFor } from "../agent/memory-dir";
 import { SavedAnswerRefused, saveAnswerInProject } from "../agent/saved-answers";
-import { gitRootFor } from "../runtime-sdk/run-home-input";
+import { localScopeKeyFor } from "../runtime-sdk/run-home-input";
 
 export const WINTER_INSTRUCTIONS_FILE = "WINTER.md";
 export const WINTER_PROJECT_DIR = ".winter";
@@ -155,7 +155,7 @@ export function planProjectMigration(dir: string, opts: { winterHome?: string } 
   }
 
   // WS-21 (spec §4.3): saved "in this project" answers into the tier the runtimes read.
-  const rulesRoot = gitRootFor(dir) ?? repoRootFor(dir);
+  const rulesRoot = localScopeKeyFor(dir); // review I5: the local tier's one key
   const settingsLocal = join(rulesRoot, WINTER_PROJECT_DIR, "settings.local.json");
   if (opts.winterHome !== undefined) {
     const approved = approvedRulesFor(opts.winterHome, repoRootFor(dir));

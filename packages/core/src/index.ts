@@ -227,6 +227,8 @@ export {
 export { splitSettingsToSdk, settingsSplitMarkerPath, SPLIT_KEYS, type SettingsSplitReport } from "./migration/settings-split";
 export { sdkHomeDoctorLines } from "./migration/sdk-home-doctor";
 export { downgradeRuntimeStateToV6, openRuntimeStateDb } from "./runtime-state/db";
+// Review I5: THE local MCP/settings scope key — the CLI's `winter mcp` uses it too (lane L4).
+export { localScopeKeyFor } from "./runtime-sdk/run-home-input";
 export {
   ProjectMigrationRefused,
   planProjectMigration,

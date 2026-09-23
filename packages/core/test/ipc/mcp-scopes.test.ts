@@ -16,6 +16,7 @@ import { McpManager } from "../../src/agent/mcp/manager";
 import { ToolRegistry } from "../../src/agent/tools/registry";
 import { TrustStore } from "../../src/agent/trust";
 import { configuredMcpServersFor } from "../../src/runtime-sdk/external-mcp";
+import { localScopeKeyFor, runHomeInputFor } from "../../src/runtime-sdk/run-home-input";
 
 const tmp = (p: string): string => realpathSync(mkdtempSync(join(tmpdir(), p)));
 
@@ -154,5 +155,57 @@ describe("configuredMcpServersFor (WS-21 scopes)", () => {
     expect(out.b).toEqual({ type: "stdio", command: "project-b" });
     expect(out.c).toEqual({ type: "stdio", command: "user-c" });
     expect(out.gone).toBeUndefined();
+  });
+});
+
+// Review I5 (controller ruling): ONE key for the local scope — `localScopeKeyFor(cwd)`, exactly the
+// `RunHomeInput.gitRoot` the daemon hands the router (a worktree's OWN top, realpathed), else the realpathed
+// cwd. `repoRootFor` follows a linked worktree to its MAIN checkout, so a server added from a worktree used
+// to be written under a key the run home never reads.
+describe("review I5: localScopeKeyFor", () => {
+  function repoWithWorktree(): { main: string; wt: string } {
+    const main = tmp("winter-i5-main-");
+    const git = (...args: string[]) => expect(Bun.spawnSync(["git", "-C", main, ...args]).exitCode).toBe(0);
+    git("init", "-q");
+    writeFileSync(join(main, "f"), "x");
+    git("add", "f");
+    git("commit", "-q", "-m", "init");
+    const wt = join(tmp("winter-i5-wtparent-"), "wt");
+    git("worktree", "add", "-q", "-b", "side", wt);
+    return { main, wt: realpathSync(wt) };
+  }
+
+  test("a linked worktree keys by its own top-level, exactly the run home's gitRoot", () => {
+    const { main, wt } = repoWithWorktree();
+    const sub = join(wt, "pkg");
+    mkdirSync(sub, { recursive: true });
+    expect(localScopeKeyFor(sub)).toBe(wt);
+    expect(localScopeKeyFor(sub)).not.toBe(main);
+    const input = runHomeInputFor({ home: "/h", trust: { isTrusted: () => false }, settings: () => null, reservedMcpServerNames: [] }, { mode: "code", dispatchChild: false, leg: "winter", cwd: sub });
+    expect(localScopeKeyFor(sub)).toBe(input.gitRoot ?? realpathSync(input.cwd));
+  });
+
+  test("outside a repository: the realpathed cwd (the router's fallback)", () => {
+    const dir = tmp("winter-i5-norepo-");
+    expect(localScopeKeyFor(dir)).toBe(dir);
+  });
+
+  test("mcp.add local from a worktree writes under that key; the child reading it is configuredMcpServersFor's local tier", async () => {
+    const { wt } = repoWithWorktree();
+    const home = tmp("winter-i5-home-");
+    saveSettings(join(home, "settings.json"), Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } }));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets")));
+    const tokens = await authority.ensureTokens();
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets: new FileSecretStore(join(home, "s2")), mcp: new McpManager({ registry: new ToolRegistry(), trust: new TrustStore(join(home, "trust.json")) }) });
+    try {
+      const c = await TestClient.connect(socketPath);
+      await c.request(METHODS.hello, { protocolVersion: PROTOCOL_VERSION, role: "harness", token: tokens.harness, clientName: "cli" });
+      const add = await c.request(METHODS.mcpAdd, { name: "wtsrv", entry: { type: "stdio", command: "node" }, cwd: wt });
+      expect(add.result?.ok).toBe(true);
+      expect(Object.keys(sdkLocalMcpServers(home, localScopeKeyFor(wt)))).toEqual(["wtsrv"]);
+      c.close();
+    } finally { server.stop(); store.close(); }
   });
 });

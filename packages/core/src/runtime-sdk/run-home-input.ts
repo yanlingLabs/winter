@@ -57,6 +57,8 @@ export function runHomeInputFor(deps: RunHomeInputDeps, s: RunHomeSessionFacts):
     leg: s.leg,
     cwd: s.cwd,
     trustedProjectRoot: deps.trust.isTrusted(s.cwd) ? repoRootFor(s.cwd) : null,
+    // The local tier's anchor — and, with `cwd`, the local MCP scope's key (`localScopeKeyFor` below is
+    // the SAME rule, for every daemon-side reader and writer of that scope).
     gitRoot: (deps.gitRootFor ?? gitRootFor)(s.cwd),
     mcpDisabled: [...(deps.settings()?.mcp?.disabled ?? [])],
     reservedMcpServerNames: [...deps.reservedMcpServerNames],
@@ -86,6 +88,20 @@ export function gitRootFor(cwd: string): string | null {
   } catch { root = null; }
   gitRoots.set(key, root);
   return root;
+}
+
+/**
+ * Review I5 (controller ruling) — THE key of claude's LOCAL scope for a project: `sdk/.winter.json`'s
+ * `projects[<key>]` (MCP servers) and the local settings tier's directory. Exactly what the run home reads:
+ * `RunHomeInput.gitRoot` (`gitRootFor`, a linked worktree's OWN realpathed top-level — never `repoRootFor`,
+ * which follows a worktree to its main checkout), else the realpathed cwd (the router's `gitRoot ?? cwd`
+ * fallback; a session's recorded cwd is the physical path in practice — see the lane report). Every
+ * daemon-side read and write of the local scope goes through this one function; exported for the CLI.
+ */
+export function localScopeKeyFor(cwd: string): string {
+  const root = gitRootFor(cwd);
+  if (root !== null) return root;
+  try { return realpathSync(cwd); } catch { return cwd; }
 }
 
 /** Test only: forget cached git roots. */
