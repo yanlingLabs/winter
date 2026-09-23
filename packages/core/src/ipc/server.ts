@@ -144,6 +144,7 @@ import {
   type PluginManagerOptions, type PluginScope as AdapterPluginScope,
 } from "../plugins/sdk-plugin-api";
 import { loadManifest, requiredConsentClasses } from "../agent/plugin-manifest";
+import { pluginSkillsFor } from "../plugins/plugin-skills";
 import { sdkPluginsRoot, sdkSettingsPath } from "../agent/paths";
 
 interface ConnState {
@@ -2209,16 +2210,17 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // so the two can never drift onto different strings for the same skill.
         // WS-21: the deny list moved to `sdk/settings.json` (`sdkDenyRules`, read live).
         const denySet = new Set(opts.winterHome ? sdkDenyRules(opts.winterHome) : []);
-        // Merge note (post-merge round): L3's `agent/skills.ts` rewrite now reads plugin skills
-        // itself, through the shared run folder (spec §5.3/§5.5's "Supersedes" list) — the
-        // filter-and-rebuild this lane's fix-round-1 work did here (dropping SkillStore's own
-        // `source:"plugin"` output and re-deriving it from Contract B via `pluginSkillsFor`) is now
-        // redundant: `store.list()` already returns the correct, deduplicated plugin skills. Taking
-        // L3's simpler form; `opts.skills` stays optional, so the early guard from before this
-        // lane's own rewrite is restored.
+        // Post-merge fix round, finding 3 (Opus review): the merge's own resolution of this handler
+        // assumed L3's `agent/skills.ts` rewrite now reads plugin skills itself — wrong. L3 DELETED
+        // `SkillStore`'s own plugin tier outright (it used to scan the retired `<home>/plugins`
+        // layout); `store.list()` returns no plugin-sourced entries at all any more, in either
+        // direction. `plugins/plugin-skills.ts#pluginSkillsFor` (its own header already said this)
+        // is still the ONE place the plugin half comes from, straight off Contract B's
+        // installed+enabled set — appended here, never filtered, since there is nothing left for
+        // `store.list()` to produce that would need filtering out.
         if (!opts.skills) return { ok: true, skills: [] };
         const store = opts.skills;
-        const skills = store.list({ cwd: p.cwd ?? null }).map((s) => {
+        const nonPluginSkills = store.list({ cwd: p.cwd ?? null }).map((s) => {
           const denied = denySet.has(skillDenyRule(s.name));
           // Lane B (2026-09-22): whether a session can load it at all — the SAME rule the runtime child
           // is handed its skills by (`SkillStore.sessionAvailability`), so a client never shows a skill
@@ -2227,7 +2229,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           const withAvailability = { ...s, ...store.sessionAvailability(s) };
           return denied ? { ...withAvailability, denied: true, deniedBy: "settings" as const } : withAvailability;
         });
-        return { ok: true, skills };
+        const pluginSkills = opts.winterHome
+          ? (await pluginSkillsFor(pluginManagerOptionsFor(opts.winterHome, p.cwd))).map((s) => {
+              const denied = denySet.has(skillDenyRule(s.name));
+              return denied ? { ...s, denied: true, deniedBy: "settings" as const } : s;
+            })
+          : [];
+        return { ok: true, skills: [...nonPluginSkills, ...pluginSkills] };
       }
 
       // -----------------------------------------------------------------------------------------
