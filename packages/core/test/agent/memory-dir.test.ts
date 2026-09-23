@@ -74,9 +74,28 @@ describe("memory-dir: repoRootFor", () => {
     writeFileSync(join(evil, ".git"), `gitdir: ${join(other, ".git")}\n`);
     expect(git(["rev-parse", "--git-common-dir"], evil).stdout.trim()).toBe(join(other, ".git")); // git itself follows it
     expect(repoRootFor(evil)).toBe(evil);
+    // From inside it, the root is the forged checkout's OWN top (`--show-toplevel`, which a `.git`
+    // file can only point at the directory holding it) — never the other project.
     const nested = join(evil, "sub");
     mkdirSync(nested);
-    expect(repoRootFor(nested)).toBe(nested);
+    expect(repoRootFor(nested)).toBe(evil);
+    expect(repoRootFor(nested)).not.toBe(other);
+  });
+
+  // Re-review N3: a `--separate-git-dir` checkout keeps its git dir elsewhere with no `core.worktree`,
+  // so neither the git dir's parent nor its worktree list names the checkout — without the
+  // `--show-toplevel` rung every subdirectory session became its own project (own MEMDIR, own
+  // approvals). The checkout's top is accepted only because it CONTAINS the cwd.
+  test("a --separate-git-dir checkout resolves to its checkout root, from the root and from a subdirectory", () => {
+    const store = realDir();
+    const checkout = join(realDir(), "work");
+    const init = Bun.spawnSync(["git", "init", "-q", `--separate-git-dir=${join(store, "repo.git")}`, checkout]);
+    expect(init.exitCode).toBe(0);
+    expect(git(["config", "--get", "core.worktree"], checkout).code).not.toBe(0); // no core.worktree: the case N3 names
+    const nested = join(checkout, "src", "deep");
+    mkdirSync(nested, { recursive: true });
+    expect(repoRootFor(checkout)).toBe(checkout);
+    expect(repoRootFor(nested)).toBe(checkout);
   });
 
   test("…nor one pointing at a REGISTERED worktree's git dir of another project", () => {
