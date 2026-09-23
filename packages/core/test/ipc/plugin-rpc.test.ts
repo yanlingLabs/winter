@@ -153,7 +153,7 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
     });
     await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
     await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
-    await c.request(METHODS.pluginSetConsent, { name: "p", classes: ["exec", "tcc"] });
+    await c.request(METHODS.pluginSetConsent, { spec: "p@m", classes: ["exec", "tcc"] });
 
     const listRes = await c.request(METHODS.pluginList, {});
     expect(listRes.result.plugins[0].extras).toEqual({
@@ -310,7 +310,7 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
     // Not consented for the entry process yet — install/enable alone never hot-spawns it.
     await c.request(METHODS.pluginEnable, { spec: "p@m", scope: "user" });
 
-    const setConsent = await c.request(METHODS.pluginSetConsent, { name: "p", classes: ["exec"] });
+    const setConsent = await c.request(METHODS.pluginSetConsent, { spec: "p@m", classes: ["exec"] });
     expect(setConsent.result).toEqual({ ok: true });
 
     const enableRes = await c.request(METHODS.pluginEnable, { spec: "p@m", scope: "user" });
@@ -328,7 +328,7 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
     writeMarketplace(mktDir);
     await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
     await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
-    await c.request(METHODS.pluginSetConsent, { name: "p", classes: ["exec"] });
+    await c.request(METHODS.pluginSetConsent, { spec: "p@m", classes: ["exec"] });
     await c.request(METHODS.pluginEnable, { spec: "p@m", scope: "user" }); // hot-spawns via the real supervisor
 
     const projectDir = mkdtempSync(join(tmpdir(), "winter-plugin-uninstall-project-"));
@@ -352,7 +352,7 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
     await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "project", cwd: projectDir });
     // Consent is scope-independent (Winter's own <home>/settings.json store, spec §5.4) -- one call
     // covers both scopes' installs of the same spec.
-    await c.request(METHODS.pluginSetConsent, { name: "p", classes: ["exec"] });
+    await c.request(METHODS.pluginSetConsent, { spec: "p@m", classes: ["exec"] });
     await c.request(METHODS.pluginEnable, { spec: "p@m", scope: "user" }); // hot-spawns (livePlugins() is user-scope)
     await c.request(METHODS.pluginEnable, { spec: "p@m", scope: "project", cwd: projectDir });
 
@@ -468,7 +468,7 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
       [METHODS.pluginMarketplaceRemove, { name: "m" }],
       [METHODS.pluginMarketplaceList, {}],
       [METHODS.pluginMarketplaceUpdate, {}],
-      [METHODS.pluginSetConsent, { name: "p", classes: ["exec"] }],
+      [METHODS.pluginSetConsent, { spec: "p@m", classes: ["exec"] }],
     ];
     for (const [method, params] of calls) {
       const res = await plugin.request(method, params);

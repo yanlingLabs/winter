@@ -125,7 +125,7 @@ describe("4d-ii gate: over-the-wire plugin lifecycle (marketplace.add -> install
       expect(inst.supervisor.status(pluginId)).toBe("stopped"); // still not spawn-eligible
 
       // --- plugin.setConsent grants the Tier-2 entry process's own extra (spec §5.4) ---
-      const setConsentRes = await harness.request(METHODS.pluginSetConsent, { name: pluginId, classes: ["exec"] });
+      const setConsentRes = await harness.request(METHODS.pluginSetConsent, { spec, classes: ["exec"] });
       expect(setConsentRes.result).toEqual({ ok: true });
 
       // --- plugin.enable (again) is now spawn-eligible -> hot-SPAWNS the real child ---

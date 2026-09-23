@@ -133,7 +133,7 @@ import { dispatchPinMessage } from "../agent/dispatch-config";
 // `<home>/settings.json` `plugins.consents` — the one pre-WS-21 lifecycle export this block still
 // needs. Every other pre-WS-21 lifecycle export (installPluginFromDir, setPluginEnabled(Settings),
 // …) is retired here in favor of the Contract B adapter below.
-import { grantPluginConsents, stripPluginConsents } from "../plugins/lifecycle";
+import { stripPluginConsents } from "../plugins/lifecycle";
 import { consentedClassesFor, pluginConsentFingerprint } from "../plugins/consent-fingerprint";
 import {
   addMarketplace, installPlugin, listMarketplaces, listPlugins, PluginManagerError, removeMarketplace,
@@ -4097,28 +4097,32 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
 
       // -----------------------------------------------------------------------------------------
-      // plugin.setConsent (spec §5.4: "the extras keep their own consents") — the ONE pre-WS-21
-      // plugin-lifecycle RPC that survives unchanged in SHAPE: a Winter-only extra (the Tier-2
-      // entry process, tcc, hardware) still needs the daemon's own consent record, separate from
-      // "installed+enabled" (which is the consent for a plugin's claude-native content, spec §5.4).
-      // `install`/`uninstall`/`enable`/`disable`/`update`/`list`/`marketplace.*` moved to the
-      // Contract B block above (`pluginManagerOptionsFor`); this is the one survivor, harness-role,
-      // same precedent (not a plugin-role verb).
+      // plugin.setConsent (spec §5.4: "the extras keep their own consents") — a Winter-only extra
+      // (the Tier-2 entry process, tcc, hardware) still needs the daemon's own consent record,
+      // separate from "installed+enabled" (which is the consent for a plugin's claude-native
+      // content, spec §5.4). `install`/`uninstall`/`enable`/`disable`/`update`/`list`/`marketplace.*`
+      // moved to the Contract B block above (`pluginManagerOptionsFor`); this is the one survivor,
+      // harness-role, same precedent (not a plugin-role verb).
       //
-      // KEYING: `livePlugins()`'s consent lookup (`PluginStore#consentedClasses`) is keyed by the
-      // QUALIFIED `"<name>@<marketplace>"` spec (installed_plugins.json's own compound key, F15) —
-      // `<home>/settings.json`'s `plugins.consents` is written under that SAME key here, resolved
-      // from `p.name` via `livePlugins()` (this RPC's own param is still the bare name, unchanged
-      // wire shape) so a caller never has to know which marketplace a plugin came from.
+      // C2 fix round 2 (Opus review of L5): looked up by bare `p.name` before, so consent granted
+      // for `foo@B` could be recorded for a DIFFERENT `foo@A` that happened to resolve first out of
+      // `livePlugins()` — the param is now `spec` (the qualified `"<name>@<marketplace>"` compound
+      // key, `PluginSetConsentParams`), matched EXACTLY against `livePlugins()`'s own `"<name>@
+      // <marketplace>"` — no ambiguity possible. The daemon also computes and stores the C1
+      // fingerprint here (`plugins/consent-fingerprint.ts`), off `info.installPath` + `info.entry` —
+      // exactly what the user saw disclosed for THIS spec, right now.
       // -----------------------------------------------------------------------------------------
       case METHODS.pluginSetConsent: {
         const p = parseParams(PluginSetConsentParams, params);
-        const info = livePlugins().find((pl) => pl.name === p.name);
+        const info = livePlugins().find((pl) => `${pl.name}@${pl.marketplace}` === p.spec);
         if (!info) return { code: "unknown_plugin" };
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.setConsent is not available on this server (no winterHome configured)");
         const settingsPath = join(opts.winterHome, "settings.json");
-        const key = `${info.name}@${info.marketplace}`;
-        saveSettings(settingsPath, grantPluginConsents(loadSettings(settingsPath), key, p.classes, Date.now()));
+        const classes = p.classes.filter((c): c is "exec" | "tcc" | "hardware" => c === "exec" || c === "tcc" || c === "hardware");
+        const fingerprint = pluginConsentFingerprint(info.installPath, info.entry);
+        const settings = loadSettings(settingsPath);
+        const consents = { ...(settings.plugins?.consents ?? {}), [p.spec]: { classes, fingerprint } };
+        saveSettings(settingsPath, { ...settings, plugins: { ...settings.plugins, consents } });
         invalidateLivePluginsCache();
         rebuildHookRegistry();
         return { ok: true };

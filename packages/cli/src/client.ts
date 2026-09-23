@@ -313,10 +313,11 @@ export class WinterClient {
   async pluginMarketplaceUpdate(name?: string): Promise<{ ok: true }> {
     return this.validated(PluginMarketplaceUpdateResult, await this.request(METHODS.pluginMarketplaceUpdate, { name }), METHODS.pluginMarketplaceUpdate);
   }
-  /** `plugin.setConsent` — the Winter-only extras' own consent (spec §5.4), keyed by bare plugin
-   *  name (the daemon resolves the qualified spec itself, `ipc/server.ts`'s own doc). */
-  async pluginSetConsent(name: string, classes: Array<"exec" | "tcc" | "hardware">): Promise<{ ok: true } | { code: "unknown_plugin" }> {
-    return this.request(METHODS.pluginSetConsent, { name, classes });
+  /** `plugin.setConsent` — the Winter-only extras' own consent (spec §5.4), keyed by the qualified
+   *  `"<name>@<marketplace>"` spec (WS-21 fix round 2, C2: a bare name was ambiguous across
+   *  marketplaces — `ipc/server.ts`'s own doc on the case this closed). */
+  async pluginSetConsent(spec: string, classes: Array<"exec" | "tcc" | "hardware">): Promise<{ ok: true } | { code: "unknown_plugin" }> {
+    return this.request(METHODS.pluginSetConsent, { spec, classes });
   }
   async askUserRespond(params: { sessionId: string; callId: string; answers: Record<string, string>; notes?: Record<string, string> }): Promise<{ ok: true; alreadyResolved: boolean }> {
     return this.validated(AskUserRespondResult, await this.request(METHODS.askUserRespond, params), METHODS.askUserRespond);
