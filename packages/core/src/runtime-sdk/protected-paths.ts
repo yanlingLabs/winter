@@ -177,10 +177,12 @@ const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 
 /**
  * Spec §7.1's read row, hook half: `sdk/.winter.json`, and `.winter.json`/`.claude.json`/`.credentials.json`
- * in any run folder (`<home>/cache/runs/<id>/`) or claude staging root (`<tmp>/claude-resume-*`). A Grep
- * ROOTED inside a run folder or staging root, or at `<home>/sdk` itself, is refused too — it would read
- * them; a search rooted higher (the user's home, `/`) is not, which is the documented residual (the deny
- * RULES cover the file targets on both legs; claude's own Grep also honours them).
+ * and (round 6) anything under `backups/` in any run folder (`<home>/cache/runs/<id>/`) or claude staging
+ * root (`<tmp>/claude-resume-*`). A Grep ROOTED at a run folder or staging root itself, or at `<home>/sdk`
+ * itself, is refused too — it would read them — and so is a Grep or Glob rooted in `backups/`; a search rooted
+ * higher (the user's home, `/`) is not, which is the documented residual (the deny RULES cover the file
+ * targets on both legs; claude's own Grep also honours them). Round 6: everything else in a staging root —
+ * the model's own large tool outputs (`projects/<key>/<sid>/tool-results/`) above all — is readable.
  */
 export function protectedReadDenial(toolName: string, input: unknown, ctx: { home: string; cwd?: string }): string | undefined {
   if (!READ_CLASS_TOOL_NAMES.has(toolName)) return undefined;
@@ -196,12 +198,13 @@ export function protectedReadDenial(toolName: string, input: unknown, ctx: { hom
     ...runsRoots.map((r) => new RegExp(`^${escapeRe(r)}/[^/]+`)),
     ...tmpRoots.map((r) => new RegExp(`^${escapeRe(r)}/${escapeRe(RESUME_STAGING_PREFIX.toLowerCase())}[^/]*`)),
   ];
-  const isGrep = toolName.toLowerCase() === "grep";
+  const tool = toolName.toLowerCase();
+  const isGrep = tool === "grep";
   for (const p of targets) {
     for (const t of targetSpellings(p, ctx.cwd ?? "")) {
       const denied = sdkHomes.some((s) => t === `${s}/.winter.json`)
-        || containers.some((c) => new RegExp(`${c.source}/(${files})$`).test(t))
-        || (isGrep && (sdkHomes.includes(t) || containers.some((c) => new RegExp(`${c.source}(/|$)`).test(t))));
+        || containers.some((c) => new RegExp(`${c.source}/((${files})$|backups(/|$))`).test(t))
+        || (isGrep && (sdkHomes.includes(t) || containers.some((c) => new RegExp(`${c.source}/?$`).test(t))));
       if (denied) {
         return `${toolName} was not run — ${p} holds a runtime's generated configuration (MCP servers and their environment, account state), which no tool reads. ${basename(p) === ".winter.json" ? "Use `winter mcp list` to see the configured servers." : ""}`.trim();
       }

@@ -140,15 +140,32 @@ export class SettingsWatcher<T = Settings> {
 }
 
 /**
+ * Does a parent-directory event name the watched file? Its own name, a TEMP spelling of it (its name plus
+ * any suffix — `settings.json.tmp`, `settings.json.<pid>.<hex>.tmp`, an editor's `settings.json~`), or no
+ * name at all (a platform event without one).
+ *
+ * Round 6 (measured on macOS, in a busy process): after an atomic replace — a temp file renamed over the
+ * target, which is how `updateSdkSettings` and most editors save — the directory event carried the TEMP
+ * file's name only (`rename settings.json.tmp`), never the target's. Filtering on the exact name alone
+ * missed every such save; a stale event from an earlier write sometimes hid that. A spurious reload costs a
+ * JSON parse: the watcher keeps the last good value and applies only what loads.
+ */
+export function namesWatchedFile(filename: string | Buffer | null | undefined, name: string): boolean {
+  if (filename === null || filename === undefined) return true;
+  const f = String(filename);
+  return f === name || f.startsWith(`${name}.`) || f.startsWith(`${name}~`);
+}
+
+/**
  * WS-21: a `watch` seam for a file that may not exist yet and is replaced by atomic rename (both are
  * true of `sdk/settings.json` and `sdk/.winter.json`): watch its PARENT directory and fire on events
- * naming the file (or on a platform event with no name). A file watch would fail on a missing file
- * and, on some platforms, go deaf after the first rename replaces the inode it holds.
+ * naming the file or a temp spelling of it (`namesWatchedFile`). A file watch would fail on a missing
+ * file and, on some platforms, go deaf after the first rename replaces the inode it holds.
  */
 export function watchViaParentDir(path: string, cb: () => void): { close(): void } {
   const name = basename(path);
   const w = fs.watch(dirname(path), (_event, filename) => {
-    if (filename === null || filename === undefined || String(filename) === name) cb();
+    if (namesWatchedFile(filename, name)) cb();
   });
   return { close: () => w.close() };
 }
