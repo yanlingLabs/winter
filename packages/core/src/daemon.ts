@@ -90,7 +90,7 @@ import { advisorReviewerFor, familyOfModel, officialLegDefaultSessionModel } fro
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
 import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
 import { linkedRouterSupportsRunHome, linkedRunHomeBuilder, runHomeHandleOf, runHomeReportSummary } from "./runtime-sdk/run-home-support";
-import { recoverRunRoots, rootRecoveryDetail } from "./runtime-state/root-recovery";
+import { recoverRunRoots, rootRecoveryDetail, type RootReconcile } from "./runtime-state/root-recovery";
 import { splitSettingsToSdk } from "./migration/settings-split";
 import { MigrationCRefused, finishMigrationC, isOldLayout, migrationCManifestPath, migrationCState, runMigrationC } from "./migration/migrate-c";
 import { localScopeKeyFor, runHomeInputFor } from "./runtime-sdk/run-home-input";
@@ -347,6 +347,10 @@ export async function startDaemon(opts: {
    *  unless `WINTER_LOGIN_SHELL_PATH=off` (both test preloads set it). `false`: skipped. An object:
    *  the test seam (a fake runner and/or env to update). */
   loginShellPath?: LoginShellPathDeps | false;
+  /** TEST ONLY (WS-21 ordering contract): the router's `reconcileRootForRecovery`, for a test whose linked
+   *  router (0.0.11) has none — used only when the router handle lacks the door. A production caller never
+   *  sets it. */
+  runRootReconcileForTests?: RootReconcile;
 } = {}): Promise<RunningDaemon> {
   const startedAt = Date.now();
   const home = opts.home ?? resolveWinterHome();
@@ -1409,7 +1413,9 @@ export async function startDaemon(opts: {
   // Still before `startIpcServer` and before any driver exists, so no incarnation — and no run folder of
   // this process — can exist yet (review M8: the old "skip the folders this process built" set was always
   // empty here); bounded — a failure costs the sweep.
-  const routerRecovery = runtimeSdk === undefined ? undefined : runHomeHandleOf(runtimeSdk.sdk);
+  const linkedRecovery = runtimeSdk === undefined ? undefined : runHomeHandleOf(runtimeSdk.sdk);
+  const routerRecovery: { reconcileRootForRecovery: RootReconcile } | undefined = linkedRecovery
+    ?? (opts.runRootReconcileForTests === undefined ? undefined : { reconcileRootForRecovery: opts.runRootReconcileForTests });
   // Migration C, phase 2 (spec §8 steps 2, 8, 9): the official working copies reconciled through the
   // router's own door, then the archive and the done marker — BEFORE any driver or the socket exists. A
   // home left `phase1-complete` must never open a session (its un-reconciled working copies would be

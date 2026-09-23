@@ -7,16 +7,23 @@
 // THREE SOURCES, ONE RULE — nothing is deleted until the router has reconciled it:
 //   1. recorded roots  `runtime_sessions.active_local_write_root` (§13 step 6's seam)
 //   2. run folders     every real directory under `<home>/cache/runs/` — at boot none is live, so each is
-//                      a crashed (or `pending`) incarnation's; a folder this process built is skipped
+//                      a crashed (or `pending`) incarnation's (a Winter-leg one, whose `projects/` is a link
+//                      to the store, has no working copy and is just removed — review M1)
 //   3. staging roots   stale, unclaimed `claude-resume-*` directories (step 8's narrow sweep, deferred
 //                      here on a run-home build so it runs only after the reconcile — spec §3.8)
 //
 //   clean | appended → deleted (`rm -rf`: links inside are removed, their targets untouched)
-//   quarantined      → KEPT, recorded in `run_root_quarantine` (never reconciled or swept again — the
-//                      router already copied its `projects/` under `<home>/cache/quarantine/`), the
-//                      session marked `repair-required`, and reported by `winter doctor`
-//   a throw          → kept and counted (the router rethrows its own refusals, e.g. a linked
-//                      quarantine dir); recovery stays bounded — one root never stops the others
+//   quarantined      → the ROOT is left in place, KEPT and recorded in `run_root_quarantine` (never
+//                      reconciled or swept again); the router copied only the UNPROVABLE transcripts under
+//                      `<home>/cache/quarantine/<ts>-<basename(root)>` and reconciled the rest; the sessions
+//                      owning those transcripts are marked `repair-required` (review I6, per transcript);
+//                      reported by `winter doctor`
+//   a throw          → the root is left in place, kept and counted (the router rethrows its own refusals,
+//                      e.g. a linked quarantine dir); recovery stays bounded — one root never stops the others
+//
+// ORDERING CONTRACT (router review of I6): a `canonical-ahead` verdict is only safe while no live session
+// with that key exists, so this pass — like Migration C's phase 2 — completes before ANY session opens
+// (`daemon.ts` awaits it before the driver table and the socket exist; pinned by a boot test).
 //
 // NEVER THROUGH A LINK: a `cache`, `cache/runs` or run-folder entry that is a symbolic link is never
 // reconciled (the router would scan `<target>/projects/*.jsonl` and could append a planted transcript to
