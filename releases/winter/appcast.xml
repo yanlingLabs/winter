@@ -151,5 +151,47 @@
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
       <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.115.1/Winter-0.115.1.zip" sparkle:edSignature="PZuscKPgxzdYW7MRJi2wSTS15Y6w48OTXkcD8C/4Ez2bXtYqCxtxNCdnkIZUf9vfHKKlCBoGWH60RMBLC3S7BQ==" length="508616423" type="application/octet-stream"/>
     </item>
+      <item>
+      <title>0.116.0</title>
+      <description><![CDATA[<p>Winter agent SDK 0.0.20 · Claude Agent SDK 0.3.250</p>
+<h2>Code sessions behave like Claude Code</h2>
+<ul>
+  <li><strong>Your tools are found.</strong> Sessions now see Homebrew and everything else on your shell's PATH (<code>node</code>, <code>npx</code>, <code>gh</code>, <code>ffmpeg</code>…) even when Winter was opened from the Dock or restarted by an update. Before, those sessions only saw the system's bare PATH.</li>
+  <li><strong>Claude models work in Code mode again.</strong> The installed app never loaded Anthropic's runtime: the daemon ran without JavaScript JIT, which also made it several times slower. Both are fixed.</li>
+  <li><strong>Computer use keeps working.</strong> Every action more than 15 seconds after the first one was refused as "expired"; it no longer is.</li>
+  <li><strong>Plugin skills can be used.</strong> A session can now invoke an installed plugin's skills, on Winter and Claude models alike. Skills can run shell commands, so a plugin's skills load only once you enable the plugin (and grant its <code>exec</code> consent if it asks for one); <code>winter skills</code> and the Library say why a skill is not available yet. Your own and project-level skills do not reach sessions yet.</li>
+  <li><strong>Bypass can be switched on and off in a running session</strong> instead of being refused.</li>
+  <li><strong>"Allow … everywhere" and "Allow … in this project" stick.</strong> Saved rules now reach every new session on both runtimes, and "in this project" works in any folder, not only trusted ones.</li>
+  <li><strong>Commands that leave the sandbox follow Claude Code's rules.</strong> A saved rule that matches allows them, bypass runs them, and anything else asks. Writes to Winter's own settings, permissions, plugins and runtime files are refused however the command is spelled, even in bypass, and under Auto a command that leaves the sandbox runs only when the command reviewer has looked at it knowing it runs unsandboxed.</li>
+  <li><strong>Sending a message while an approval is waiting</strong> closes that approval instead of leaving it on screen, and the transcript shows the turns in order.</li>
+  <li><strong>Token counts are back</strong> for every model, including subscription and unpriced ones.</li>
+  <li><strong>The advisor works</strong> when it is on a different provider than the session.</li>
+</ul>
+<h2>MCP servers</h2>
+<ul>
+  <li>New <code>winter mcp add</code>, <code>add-json</code>, <code>remove</code>, <code>get</code> and <code>list</code>, with the same arguments and flags as <code>claude mcp</code> (<code>-s user|project</code>, <code>-t stdio|http|sse</code>, <code>-e KEY=value</code>, <code>-H "Name: value"</code>).</li>
+  <li>A project's <code>.mcp.json</code> no longer loses all of its servers when one entry is an http or sse server or is malformed; every valid server is used and the bad one is named in the log.</li>
+  <li><code>~/.winter/mcp.json</code> has never been read. <code>winter doctor</code> now says so if you have one, and where the servers belong (<code>settings.json</code> → <code>mcpServers</code>).</li>
+</ul>
+<h2>Models</h2>
+<ul>
+  <li>DeepSeek and other reasoning models no longer show their own reasoning as text in a reply.</li>
+  <li>A model is always checked against its own provider's details; some DeepSeek chats were refused because another provider's entry was consulted.</li>
+  <li>Sessions are told that sandboxed commands have no network, and when to ask to run outside it.</li>
+</ul>
+<h2>Background jobs</h2>
+<ul>
+  <li>Chat titles and the purge no longer time out when their effort is set to "none": that now uses the model's lowest effort instead of the provider's default. A failed purge judgment waits 30 minutes before trying again.</li>
+</ul>
+<h2>Security</h2>
+<ul>
+  <li>A cloned repository's <code>.winter</code> folder can no longer run hooks or load skills in Claude sessions without your say.</li>
+  <li>New write fences for Winter's own state, a symlink-safe store for "in this project" approvals, and a forged <code>.git</code> file can no longer borrow another project's approvals.</li>
+</ul>]]></description>
+      <sparkle:version>0.116.0</sparkle:version>
+      <sparkle:shortVersionString>0.116.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.116.0/Winter-0.116.0.zip" sparkle:edSignature="fmSNktWwW6qKVrR4dBoKONgugC++XmqjOPcdUrmDpXuiEW5aBOSrxy82M9EmI+Q7PJdC3bF+3cdMjGL8NSp4CQ==" length="508649998" type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>
