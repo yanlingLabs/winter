@@ -16,6 +16,7 @@ import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node
 import { dirname, join } from "node:path";
 import type { ResumeContext } from "../agent/bg-agent-registry";
 import type { RuntimeStateDb } from "./db";
+import { canonicalModelTag } from "../runtime-sdk/model-tag";
 
 export type ChildStatus = "running" | "interrupted" | "completed" | "failed" | "stopped" | "timeout";
 
@@ -128,7 +129,8 @@ function fromRow(row: ChildDbRow): PersistedWinterChild {
     name: opt(row.name),
     agentType: row.agent_type,
     providerId: row.provider_id,
-    modelRef: row.model_ref,
+    // WS-21 review M3 (F23): stored tags canonicalize on read; the row keeps what was written.
+    modelRef: canonicalModelTag(row.model_ref),
     connectionRef: opt(row.connection_ref),
     providerCatalogVersion: row.provider_catalog_version,
     providerAdapterVersion: row.provider_adapter_version,
@@ -139,8 +141,8 @@ function fromRow(row: ChildDbRow): PersistedWinterChild {
     startedAt: row.started_at,
     completedAt: opt(row.completed_at),
     generation: row.generation,
-    requestedModel: opt(row.requested_model),
-    effectiveModel: opt(row.effective_model),
+    requestedModel: row.requested_model == null ? undefined : canonicalModelTag(row.requested_model),
+    effectiveModel: row.effective_model == null ? undefined : canonicalModelTag(row.effective_model),
     effectiveProvider: opt(row.effective_provider),
     slot: optJson<NonNullable<PersistedWinterChild["slot"]>>(row.slot_json),
     permission: optJson<NonNullable<PersistedWinterChild["permission"]>>(row.permission_json),

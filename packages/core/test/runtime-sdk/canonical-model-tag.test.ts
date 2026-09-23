@@ -10,7 +10,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { METHODS, ModelTagSchema, SyncPushParams, SessionSetModelParams } from "@yanlinglabs/winter-protocol";
+import { ConnWriter, LineDecoder, METHODS, ModelTagSchema, PROTOCOL_VERSION, SessionSetModelParams, SyncPushParams, encodeLine, type WritableSocket } from "@yanlinglabs/winter-protocol";
+import { RuntimeChildren } from "../../src/runtime-state/children";
+import { buildLiveModelResolver } from "../../src/providers/manager";
+import { startIpcServer } from "../../src/ipc/server";
+import { FileSecretStore } from "../../src/auth/secret-store";
+import { TokenAuthority } from "../../src/auth/tokens";
 import {
   CATALOG_TAG_RENAMES_LOCAL, canonicalModelTag, canonicalModelTagWith, setCatalogKeysForTests,
 } from "../../src/runtime-sdk/model-tag";
@@ -124,3 +129,75 @@ describe("layer 3 — the protocol request parse", () => {
   });
 });
 
+
+// Review M3: the remaining raw-settings readers and the children rows canonicalize too.
+describe("review M3: the remaining read paths", () => {
+  test("runtime_children's model_ref / requested / effective models read canonical; the row keeps what was written", () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-canon-children-"));
+    const rs = openRuntimeStateDb(home);
+    new RuntimeChildren(rs).upsert({
+      parentWinterSessionId: "s_p", childId: "c1", agentType: "general", providerId: "deepseek", modelRef: OLD,
+      providerCatalogVersion: "x", providerAdapterVersion: "y", status: "running", transcriptRef: "t", startedAt: "t", generation: 1,
+      requestedModel: OLD, effectiveModel: OLD,
+    });
+    setCatalogKeysForTests(REFRESHED);
+    const child = new RuntimeChildren(rs).get("s_p", "c1")!;
+    expect([child.modelRef, child.requestedModel, child.effectiveModel]).toEqual([NEW, NEW, NEW]);
+    expect(rs.db.query<{ m: string }, []>("SELECT model_ref AS m FROM runtime_children").get()!.m).toBe(OLD);
+    rs.close();
+  });
+
+  test("the provider's live model re-read goes through the live settings view", () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-canon-manager-"));
+    const path = join(home, "settings.json");
+    saveSettings(path, Settings.parse({ schemaVersion: 3, provider: { model: OLD } }));
+    setCatalogKeysForTests(REFRESHED);
+    const resolve = buildLiveModelResolver(loadSettings(path), path, "deepseek");
+    expect(resolve().model).toBe("deepseek-flash");
+  });
+
+  test("settings.modelRoles and settings.setModelRole answer canonical tags", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-canon-roles-"));
+    saveSettings(join(home, "settings.json"), Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" }, pins: { dream: OLD } }));
+    setCatalogKeysForTests([...REFRESHED, "codex-oauth/gpt-5.6-sol", "codex-oauth/gpt-5.6-luna", "codex-oauth/gpt-5.6-terra"]);
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets")));
+    const tokens = await authority.ensureTokens();
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home });
+    try {
+      const c = await rpcClient(socketPath);
+      await c.request(METHODS.hello, { protocolVersion: PROTOCOL_VERSION, role: "harness", token: tokens.harness, clientName: "cli" });
+      const roles = await c.request(METHODS.settingsModelRoles, {});
+      expect(roles.result.roles["pins.dream"].model).toBe(NEW);
+      const set = await c.request(METHODS.settingsSetModelRole, { role: "pins.cleaner", model: "codex-oauth/gpt-5.6-luna" });
+      expect(set.result?.roles?.["pins.dream"]?.model).toBe(NEW);
+      // …and the file still holds the stored tag
+      expect(JSON.parse(readFileSync(join(home, "settings.json"), "utf8")).pins.dream).toBe(OLD);
+      c.close();
+    } finally { server.stop(); store.close(); }
+  });
+});
+
+async function rpcClient(socketPath: string) {
+  const decoder = new LineDecoder();
+  const pending = new Map<number, (m: any) => void>();
+  let next = 1;
+  let writer!: ConnWriter;
+  const socket = await Bun.connect({
+    unix: socketPath,
+    socket: {
+      data(_s, chunk) { for (const line of decoder.push(chunk)) { const msg = JSON.parse(line); pending.get(msg.id)?.(msg); pending.delete(msg.id); } },
+      drain() { writer.onDrain(); },
+    },
+  });
+  writer = new ConnWriter(socket as unknown as WritableSocket);
+  return {
+    request(method: string, params?: unknown): Promise<any> {
+      const id = next++;
+      writer.enqueue(encodeLine({ jsonrpc: "2.0", id, method, params }));
+      return new Promise((resolve) => pending.set(id, resolve));
+    },
+    close() { socket.end(); },
+  };
+}
