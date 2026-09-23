@@ -42,6 +42,7 @@
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sdkPluginsRoot, sdkHomeFor } from "../agent/paths";
+import { writeJsonAtomic } from "../sdk-files";
 import { addMarketplace, installPlugin, setPluginEnabled, type PluginManagerOptions } from "./sdk-plugin-api";
 
 const LEGACY_MARKETPLACE_NAME = "winter-legacy";
@@ -184,11 +185,22 @@ function readLegacyPluginSettings(home: string): { enabled: Set<string>; disable
   };
 }
 
+/** Consent classes carried forward verbatim from a legacy record — `exec` is deliberately excluded
+ *  (I3 fix round 1, ruling): before WS-21 it was granted because a plugin shipped skills, and
+ *  enabling a plugin now covers that (native content, spec §5.4) — the ONLY thing an `exec` record
+ *  still gates post-conversion is the Tier-2 entry process, which never had this specific consent
+ *  evaluated against it before, so carrying it forward would grant something nobody actually
+ *  consented to. The plugin's first entry-process run prompts fresh instead. */
+const CARRIED_LEGACY_CONSENT_CLASSES = ["tcc", "hardware"] as const;
+
 /** Re-keys `<home>/settings.json`'s `plugins.consents` from bare legacy ids to the qualified
- *  `"<id>@winter-legacy"` spec (see this module's header) — a plain read-modify-write of the ONE
+ *  `"<id>@winter-legacy"` spec (see this module's header), DROPPING `exec` from each record on the
+ *  way (see `CARRIED_LEGACY_CONSENT_CLASSES`'s own doc) — a plain read-modify-write of the ONE
  *  `plugins.consents` field; every other top-level key is preserved verbatim, never re-serialized
  *  through the `Settings` schema (which could drop a field this converter doesn't know about). A
- *  no-op (never even opens the file for a write) when there is nothing to re-key. */
+ *  no-op (never even opens the file for a write) when there is nothing to re-key. M5: atomic
+ *  temp-then-rename (`writeJsonAtomic`, Contract C), the same write discipline every other file this
+ *  module produces already uses — never a plain `writeFileSync`. */
 function rekeyConsents(home: string, idToKey: Map<string, string>): void {
   const path = join(home, "settings.json");
   const raw = readJsonIfPresent<Record<string, unknown>>(path);
@@ -200,10 +212,18 @@ function rekeyConsents(home: string, idToKey: Map<string, string>): void {
   let changed = false;
   for (const [id, record] of Object.entries(consents as Record<string, unknown>)) {
     const key = idToKey.get(id);
-    if (key !== undefined) { rekeyed[key] = record; changed = true; } else { rekeyed[id] = record; }
+    if (key === undefined) { rekeyed[id] = record; continue; }
+    changed = true;
+    const carried: Record<string, unknown> = {};
+    if (record && typeof record === "object") {
+      for (const cls of CARRIED_LEGACY_CONSENT_CLASSES) {
+        if ((record as Record<string, unknown>)[cls] !== undefined) carried[cls] = (record as Record<string, unknown>)[cls];
+      }
+    }
+    rekeyed[key] = carried;
   }
   if (!changed) return;
-  writeFileSync(path, `${JSON.stringify({ ...raw, plugins: { ...plugins, consents: rekeyed } }, null, 2)}\n`);
+  writeJsonAtomic(path, { ...raw, plugins: { ...plugins, consents: rekeyed } });
 }
 
 /**
