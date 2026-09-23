@@ -9,6 +9,7 @@ import type { Mode as SessionMode } from "../agent/tools/registry";
 import { privateAddressRefusal } from "../agent/tools/web";
 import { gateClassFor, gateToolNameFor, WINTER_OWN_TOOL_NAMES } from "./tool-names";
 import { controlPlaneTargetForCall, controlPlaneDenialMessage } from "./control-plane";
+import { homeFenceFor } from "./home-fence";
 import { outdirPath } from "../sessions/outdir";
 import { askUserQuestionBridge, ASK_USER_QUESTION_TOOL } from "./question-bridge";
 import { consoleBridgeLogger, NO_PARK_TIMEOUT_MS, REVIEWER_ESCALATION_REASON, takeReviewerCleared, type BridgeLogger } from "./bridge-common";
@@ -459,10 +460,12 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     // continuing to mean what it means today (the anchor semantics that made 16 of those 28 rules
     // inert are exactly the kind of thing that can move under an SDK bump). Two independent layers
     // over one invariant, which is the right number for a self-grant.
-    const fenced = controlPlaneTargetForCall(toolName, input, deps.cwd ?? "");
+    // Whole-branch review (2026-09-23): the home half too — the SAME targets the Bash sandbox's
+    // `denyWrite` names (`home-fence.ts`), so a write TOOL cannot reach what a sandboxed Bash cannot.
+    const fenced = controlPlaneTargetForCall(toolName, input, deps.cwd ?? "", deps.home ? homeFenceFor(deps.home) : undefined);
     if (fenced) {
       log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} reason=control-plane`);
-      return { behavior: "deny", message: controlPlaneDenialMessage(toolName, fenced.path) };
+      return { behavior: "deny", message: controlPlaneDenialMessage(toolName, fenced.path, fenced.home) };
     }
 
     // (3) Winter's OWN four default tools are allowed silently in every mode (P8b-28). Checked
