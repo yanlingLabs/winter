@@ -102,7 +102,7 @@ import type { BackgroundTaskRegistry } from "../agent/bg-registry";
 import type { SkillStore, SkillErrorKind } from "../agent/skills";
 import type { McpManager } from "../agent/mcp/manager";
 import { PluginStore, type PluginInfo } from "../agent/plugins";
-import { pluginSpawnEligible, hookRegistryPlugins } from "../agent/plugins";
+import { pluginSpawnEligible } from "../agent/plugins";
 import type { ToolRegistry } from "../agent/tools/registry";
 import type { PluginSupervisor, PluginConn, InvokeError, EligiblePlugin, SupervisorStatus } from "../plugins/supervisor";
 import type { PluginContribRegistry } from "../plugins/contrib";
@@ -1516,15 +1516,15 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     throw err;
   }
 
-  /** Rebuilds `opts.hooks` (Phase 4f Task 2) off a FRESH `livePlugins()` read — called at every
-   *  point a plugin-lifecycle RPC below already calls `invalidateLivePluginsCache()`, so the two
-   *  never drift: whatever `livePlugins()` would now return, the hook registry reflects. A safe
-   *  no-op when `opts.hooks` or `opts.winterHome` is unset (most existing tests) — same "typed
-   *  no-op" precedent `hotApplyStart`/`hotApplyStop` already follow for a no-provider daemon. */
-  function rebuildHookRegistry(): void {
-    if (!opts.hooks || !opts.winterHome) return;
-    opts.hooks.rebuild(hookRegistryPlugins(livePlugins(), opts.winterHome));
-  }
+  // Post-merge round (DECISION 22): `rebuildHookRegistry()` -- which fed the daemon's OWN
+  // HookRegistry (`opts.hooks`) with plugin-contributed hooks off `hookRegistryPlugins` -- and its
+  // three call sites in the plugin lifecycle RPCs below are retired. Plugin hooks reach a session's
+  // runtime child through the shared run folder and both SDKs natively now (spec §5.1/§5.3); the
+  // daemon's own `HookRegistry` never executed plugin hooks again after `pluginHooksEligible` was
+  // hardcoded `false` (WS-21) -- these calls were already dead (see the removed inline comments),
+  // and nothing else in the codebase ever calls `HookRegistry#rebuild()` (daemon.ts constructs
+  // `opts.hooks` but never rebuilds it), so the registry now holds no plugin hooks for the whole
+  // daemon lifetime, not just around these three RPCs.
 
   /** A fresh, settings-current view of installed plugins — unlike `opts.plugins` (its
    *  `enabled`/`disabled`/`consents` deps are a snapshot captured once at daemon boot and never
@@ -2763,7 +2763,6 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           throwPluginManagerFailure(err);
         }
         invalidateLivePluginsCache();
-        rebuildHookRegistry(); // dead (pluginHooksEligible is always false now, WS-21) — kept so this never drifts from the other lifecycle sites
         // Tier-2 (platform, entry) hot-spawn — install+enable is itself the consent for a plugin's
         // claude-native content (spec §5.4); it does not gate the entry process's own hot-start.
         const info = livePlugins().find((pl) => `${pl.name}@${pl.marketplace}` === p.spec);
@@ -2779,7 +2778,6 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           throwPluginManagerFailure(err);
         }
         invalidateLivePluginsCache();
-        rebuildHookRegistry();
         hotApplyStop(pluginNameOfSpec(p.spec));
         return { ok: true, spec: p.spec, scope: p.scope, enabled: false };
       }
@@ -4152,7 +4150,6 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const consents = { ...(settings.plugins?.consents ?? {}), [p.spec]: { classes, fingerprint } };
         saveSettings(settingsPath, { ...settings, plugins: { ...settings.plugins, consents } });
         invalidateLivePluginsCache();
-        rebuildHookRegistry();
         return { ok: true };
       }
 

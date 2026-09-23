@@ -2,7 +2,6 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { execPayloadLines, loadManifest, requiredConsentClasses, type WinterManifest } from "./plugin-manifest";
-import type { HookRegistryPlugin } from "../plugins/hook-registry";
 import { sdkPluginsRoot } from "./paths";
 import { sdkEnabledPlugins } from "../settings";
 import { consentedClassesFor, pluginConsentFingerprint, type PluginConsentRecordV2 } from "../plugins/consent-fingerprint";
@@ -225,15 +224,6 @@ export function pluginMcpEligible(_p: PluginInfo): boolean {
 }
 
 /**
- * WS-21: always false — the daemon's own `HookRegistry` no longer executes plugin-contributed
- * hooks; a plugin's hooks are claude-native `hooks/hooks.json` content, loaded by both runtimes
- * themselves (spec §5.1/§5.3). Kept only for the same reason as `pluginMcpEligible` above.
- */
-export function pluginHooksEligible(_p: PluginInfo): boolean {
-  return false;
-}
-
-/**
  * WS-21: always false — a plugin's skills are claude-native content now (its `skills/` dir), loaded
  * by both runtimes themselves in code mode (spec §5.3, "Skills appear as `plugin:skill`"); the
  * daemon's own `SkillStore.childSkillSurface`/`<home>/cache/skill-plugins/` handover is retired
@@ -246,16 +236,12 @@ export function pluginSkillsEligible(_p: PluginInfo): boolean {
   return false;
 }
 
-/**
- * Projects a plugin list into `HookRegistry.rebuild()`'s input shape. WS-21: `pluginHooksEligible`
- * always answers false now (see its own doc), so this always returns `[]` — kept only for the
- * `daemon.ts`/`ipc/server.ts` call sites' compile-compat.
- */
-export function hookRegistryPlugins(plugins: PluginInfo[], _winterHome: string): HookRegistryPlugin[] {
-  return plugins
-    .filter(pluginHooksEligible)
-    .map((p) => ({ id: p.name, dir: p.installPath, hooks: [] }));
-}
+// Post-merge round (DECISION 22): `pluginHooksEligible`/`hookRegistryPlugins` retired — the daemon's
+// own `HookRegistry` is never fed plugin hooks any more (ipc/server.ts's plugin.enable/disable/
+// setConsent handlers no longer rebuild it; nothing else in the codebase calls
+// `HookRegistry#rebuild()` at all), and these two functions had no caller left besides that dead
+// feed. A plugin's hooks reach a session's runtime child through the shared run folder and both
+// SDKs natively now (spec §5.1/§5.3).
 
 /**
  * The daemon's Tier-2 process-supervision eligibility filter: a platform-tier manifest plugin with a
