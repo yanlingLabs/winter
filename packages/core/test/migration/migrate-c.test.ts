@@ -97,8 +97,9 @@ describe("preflight", () => {
   test("without a reconcile door, an official working copy with content refuses the whole migration", async () => {
     const { home } = fixture();
     await expect(runMigrationC(home, deps({ reconcileAvailable: false }))).rejects.toMatchObject({ code: "sdk_home_migration_refused" });
+    // nothing for a router to reconcile: phase 2 needs no door, and the migration completes at once
     const empty = fixture({ officialExtra: false });
-    expect((await runMigrationC(empty.home, deps({ reconcileAvailable: false }))).status).toBe("phase1-complete");
+    expect((await runMigrationC(empty.home, deps({ reconcileAvailable: false }))).status).toBe("complete");
   });
 
   test("plugins without a converter refuse; sdk/ with unexpected content refuses", async () => {
@@ -181,6 +182,9 @@ describe("both phases", () => {
     expect(m1.status).toBe("phase1-complete");
     expect(migrationCState(home)).toMatchObject({ kind: "parsed", manifest: { status: "phase1-complete" } });
     expect(existsSync(join(home, "runtimes", "claude-config"))).toBe(true); // not archived before its reconcile
+    // no door yet, and a working copy with content: refused, never archived unreconciled
+    await expect(finishMigrationC(home, { log: () => {} })).rejects.toMatchObject({ code: "sdk_home_migration_refused" });
+    expect(existsSync(join(home, "runtimes", "claude-config"))).toBe(true);
     const m2 = await finishMigrationC(home, { log: () => {}, reconcile: stubReconcile().reconcile });
     expect(m2.status).toBe("complete");
   });
@@ -195,10 +199,13 @@ describe("both phases", () => {
 });
 
 describe("rollback", () => {
-  test("restores everything except the step-2 appends; a rolled-back home is the old layout again", async () => {
+  test("restores the layout except the step-2 appends, and never reverts what the user did after the upgrade (DECISION 15)", async () => {
     const { home, key } = fixture();
     const settingsBefore = readFileSync(join(home, "settings.json"), "utf8");
     await runMigrationC(home, deps({ reconcile: stubReconcile().reconcile }));
+    // after the upgrade: the user edits settings.json, and a new generation is recorded
+    writeFileSync(join(home, "settings.json"), settingsBefore.replace('"terse"', '"explanatory"'));
+    { const rs = openRuntimeStateDb(home); rs.db.run("INSERT INTO runtime_generations (winter_session_id, generation, runtime_kind, started_at) VALUES ('s_1', 7, 'winter-agent', 't')"); rs.close(); }
     // the router's append landed in the canonical transcript (now under sdk/)
     writeFileSync(join(home, "sdk", "projects", key, "s-official.jsonl"), '{"type":"user","uuid":"o1"}\n{"type":"assistant","uuid":"o2"}\n');
     const m = await rollbackMigrationC(home, { log: () => {} });
@@ -212,12 +219,15 @@ describe("rollback", () => {
     expect(existsSync(join(home, "mcp.json"))).toBe(true);
     expect(existsSync(join(home, "runtimes", "claude-config", "projects", key, "s-official.jsonl"))).toBe(true);
     expect(existsSync(join(home, "sdk", "WINTER.md"))).toBe(false);
-    expect(existsSync(join(home, "sdk", "settings.json"))).toBe(false);
+    expect(existsSync(join(m.archiveDir, "rolled-back", "sdk", "WINTER.md"))).toBe(true); // moved aside, never deleted
+    // the split's sdk files stay (an older build never reads them; they may hold post-upgrade answers)
+    expect(existsSync(join(home, "sdk", "settings.json"))).toBe(true);
     expect(existsSync(join(home, "sdk", "projects"))).toBe(true); // bootstrap's placeholder
-    expect(readFileSync(join(home, "settings.json"), "utf8")).toBe(settingsBefore);
-    // runtime-state restored from the preflight backup
+    expect(readFileSync(join(home, "settings.json"), "utf8")).toContain('"explanatory"'); // the user's edit is kept
+    // runtime-state: the one rewrite reversed; a row written after the upgrade survives the rollback
     const rs = openRuntimeStateDb(home);
     expect(rs.db.query<{ b: string }, []>("SELECT backend_root AS b FROM runtime_sessions WHERE winter_session_id='s_1'").get()!.b).toBe(join(home, "projects", key));
+    expect(rs.db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM runtime_generations WHERE generation = 7").get()!.n).toBe(1);
     rs.close();
     expect(isOldLayout(home)).toBe(true);
     expect(existsSync(migrationCManifestPath(home))).toBe(false);

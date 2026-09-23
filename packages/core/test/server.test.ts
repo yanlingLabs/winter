@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { storeHomeFor } from "../src/agent/paths";
 import { mkdtempSync, readFileSync, realpathSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -717,8 +718,10 @@ describe("daemon IPC", () => {
 
   test("skills.list discovers a user skill over the socket (the daemon wires its one skillStore into the server)", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-daemon-"));
-    mkdirSync(join(home, "skills", "greet"), { recursive: true });
-    writeFileSync(join(home, "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nSay hello warmly.\n");
+    // WS-21: the user tier lives in the store home (`<home>/sdk` on a run-home build) — seeding the old
+    // `<home>/skills` there would make a temp home the old layout (Migration C refuses it at boot).
+    mkdirSync(join(storeHomeFor(home), "skills", "greet"), { recursive: true });
+    writeFileSync(join(storeHomeFor(home), "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nSay hello warmly.\n");
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     daemon = await startDaemon({ home, secrets, agentProvider: null });
     harnessToken = daemon.tokens.harness;

@@ -405,9 +405,10 @@ export async function runMigrationC(home: string, deps: MigrationCDeps): Promise
   if (m.status === "in-progress") {
     m.status = "phase1-complete";
     writeManifest(home, m);
-    deps.log(`migration C: phase 1 complete — ${m.moved.length} director(ies) moved into ${sdkHomeFor(home)}; the official working copies are reconciled at the next router start`);
+    deps.log(`migration C: phase 1 complete — ${m.moved.length} director(ies) moved into ${sdkHomeFor(home)}`);
   }
-  if (deps.reconcile !== undefined) return finishMigrationC(home, { ...deps, reconcile: deps.reconcile });
+  // Phase 2 right away when a router door is here, or when there is nothing for one to reconcile.
+  if (deps.reconcile !== undefined || !officialRoots(home).some((r) => existsSync(r) && !isSymlink(r) && hasFiles(r))) return finishMigrationC(home, deps);
   return m;
 }
 
@@ -416,7 +417,7 @@ export async function runMigrationC(home: string, deps: MigrationCDeps): Promise
  * the new layout no longer reads, and mark the migration done. Idempotent; a root the router cannot
  * reconcile is recorded `failed` and still archived (a move — nothing is lost).
  */
-export async function finishMigrationC(home: string, deps: Pick<MigrationCDeps, "log" | "now"> & { reconcile: NonNullable<MigrationCDeps["reconcile"]> }): Promise<MigrationCManifest> {
+export async function finishMigrationC(home: string, deps: Pick<MigrationCDeps, "log" | "now" | "reconcile">): Promise<MigrationCManifest> {
   const now = deps.now ?? (() => new Date());
   const state = migrationCState(home);
   if (state.kind !== "parsed" || state.manifest.status !== "phase1-complete") {
@@ -434,6 +435,12 @@ export async function finishMigrationC(home: string, deps: Pick<MigrationCDeps, 
     for (const root of officialRoots(home)) {
       if (m.reconciled.some((r) => r.root === root)) continue;
       if (!existsSync(root) || isSymlink(root) || !hasFiles(root)) continue;
+      // No door (a build whose router cannot reconcile, or the CLI, which has no router): phase 1's
+      // preflight already proved the working copies empty then; content now means refuse, never archive
+      // an unreconciled transcript tail.
+      if (deps.reconcile === undefined) {
+        throw new MigrationCRefused("sdk_home_migration_refused", `${root} holds an official working copy and no router can reconcile it here — the next daemon boot on the integrated build finishes Migration C`);
+      }
       let outcome: MigrationCManifest["reconciled"][number]["outcome"];
       try { outcome = await deps.reconcile(root); } catch { outcome = "failed"; }
       m.reconciled.push({ root, outcome });
@@ -475,10 +482,15 @@ export async function finishMigrationC(home: string, deps: Pick<MigrationCDeps, 
 
 /**
  * Put the home back in the old layout: everything Migration C did, undone — EXCEPT the step-2 reconcile
- * appends, which stay in the canonical transcripts (lines that were already the session's own). The
- * daemon must be stopped (the CLI checks the lock); the runtime-state db is restored from its preflight
- * backup, so a session record created after the migration is dropped (the next boot's backfill
- * re-creates one for every session in the log).
+ * appends, which stay in the canonical transcripts (lines that were already the session's own).
+ *
+ * DECISION 15 — never revert what the USER did after the migration. The migration never writes
+ * `settings.json` and only ever rewrote `backend_root` in runtime-state, so rollback reverses exactly
+ * that one rewrite instead of restoring the preflight backups over the live files (which would drop every
+ * post-upgrade settings edit, generation, handoff and quarantine row). The sdk files the split filled are
+ * left (an older build never reads them, and they hold the user's post-upgrade answers); the copies
+ * `copy-files` made are moved into the archive, never deleted. The preflight backups stay under
+ * `archiveDir` for an operator. The daemon must be stopped (the CLI checks the lock).
  */
 export async function rollbackMigrationC(home: string, deps: Pick<MigrationCDeps, "log" | "now">): Promise<MigrationCManifest> {
   const now = deps.now ?? (() => new Date());
@@ -494,27 +506,23 @@ export async function rollbackMigrationC(home: string, deps: Pick<MigrationCDeps
     const to = join(home, a.from);
     if (existsSync(from) && !existsSync(to)) { mkdirSync(dirname(to), { recursive: true }); renameSync(from, to); }
   }
-  // runtime-state → the preflight backup
-  if (m.backups.runtimeState !== null && existsSync(m.backups.runtimeState)) {
-    const db = join(home, "runtimes", "runtime-state.db");
-    for (const suffix of ["-wal", "-shm"]) rmSync(`${db}${suffix}`, { force: true });
-    copyFileSync(m.backups.runtimeState, db);
+  // runtime-state → the one rewrite reversed (`backend_root` back under <home>/projects)
+  if (m.steps.some((st) => st.step === "runtime-state") && existsSync(join(home, "runtimes", "runtime-state.db"))) {
+    const rs = openRuntimeStateDb(home);
+    try {
+      const sdkPrefix = `${join(sdkHomeFor(home), "projects")}/`;
+      const oldPrefix = `${join(home, "projects")}/`;
+      rs.db.run("UPDATE runtime_sessions SET backend_root = ? || substr(backend_root, ?) WHERE substr(backend_root, 1, ?) = ?", [oldPrefix, sdkPrefix.length + 1, sdkPrefix.length, sdkPrefix]);
+    } finally { rs.close(); }
   }
-  // split-settings / sdk files → their preflight state (removed when they did not exist)
-  const restore = (backup: string | null, target: string): void => {
-    if (backup !== null && existsSync(backup)) copyFileSync(backup, target);
-    else rmSync(target, { force: true });
-  };
-  // Only when the preflight backups were actually taken: a run interrupted before them changed nothing
-  // these files hold, and "no backup" must never read as "the file did not exist".
-  if (m.steps.some((st) => st.step === "preflight")) {
-    restore(m.backups.sdkSettings, join(sdkHomeFor(home), "settings.json"));
-    restore(m.backups.sdkGlobal, join(sdkHomeFor(home), ".winter.json"));
-    restore(m.backups.splitMarker, settingsSplitMarkerPath(home));
-    if (m.backups.settings !== null && existsSync(m.backups.settings)) copyFileSync(m.backups.settings, join(home, "settings.json"));
+  // copy-files → the copies moved aside (a user edit to one after the upgrade is kept, not lost)
+  for (const rel of m.copied) {
+    const src = join(home, rel);
+    if (!existsSync(src)) continue;
+    const dest = join(m.archiveDir, "rolled-back", rel);
+    mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
+    renameSync(src, dest);
   }
-  // copy-files → the copies removed
-  for (const rel of m.copied) rmSync(join(home, rel), { force: true });
   // move-dirs → links removed, directories renamed back, bootstrap's empty placeholders restored
   for (const mv of [...m.moved].reverse()) {
     const oldPath = join(home, mv.from);
@@ -533,6 +541,6 @@ export async function rollbackMigrationC(home: string, deps: Pick<MigrationCDeps
   m.finishedAt = now().toISOString();
   writeFileSync(migrationCRolledBackPath(home), `${JSON.stringify(m, null, 2)}\n`, { mode: 0o600 });
   rmSync(migrationCManifestPath(home), { force: true });
-  deps.log(`migration C: rolled back — ${m.moved.length} director(ies) moved back; the reconcile appends stay in the canonical transcripts`);
+  deps.log(`migration C: rolled back — ${m.moved.length} director(ies) moved back; the reconcile appends stay in the canonical transcripts; backups kept under ${m.archiveDir}`);
   return m;
 }

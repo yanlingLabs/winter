@@ -91,6 +91,8 @@ import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging
 import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
 import { linkedRouterSupportsRunHome, linkedRunHomeBuilder, runHomeHandleOf, runHomeReportSummary } from "./runtime-sdk/run-home-support";
 import { recoverRunRoots, rootRecoveryDetail } from "./runtime-state/root-recovery";
+import { splitSettingsToSdk } from "./migration/settings-split";
+import { MigrationCRefused, finishMigrationC, isOldLayout, migrationCManifestPath, migrationCState, runMigrationC } from "./migration/migrate-c";
 import { runHomeInputFor } from "./runtime-sdk/run-home-input";
 import { reservedMcpServerNames } from "./capabilities/names";
 import { persistedAllowRulesFor, winterGateRulesFromSdk } from "./runtime-sdk/mode-options";
@@ -377,6 +379,13 @@ export async function startDaemon(opts: {
   if (manifestState.kind === "parsed" && manifestState.manifest.status === "in-progress") {
     throw new MigrationRefused("home_half_migrated", "migration: half-migrated home — run `winter migrate --resume` or `winter migrate --rollback`");
   }
+  // WS-21 (spec §8): the same rule for Migration C — a phase 1 caught half-way (or a manifest that will not
+  // parse) refuses boot on every build until `winter migrate --sdk-home --resume` or `--rollback` runs.
+  // `phase1-complete` is NOT half-migrated: phase 2 finishes at this boot's late site.
+  const migrationC = migrationCState(home);
+  if (migrationC.kind === "unreadable" || (migrationC.kind === "parsed" && migrationC.manifest.status === "in-progress")) {
+    throw new MigrationCRefused("sdk_home_half_migrated", `migration C: half-migrated home (${migrationCManifestPath(home)}) — run \`winter migrate --sdk-home --resume\` or \`winter migrate --sdk-home --rollback\``);
+  }
 
   const secrets = opts.secrets ?? new KeychainSecretStore();
 
@@ -466,6 +475,7 @@ export async function startDaemon(opts: {
   const deadLegacyLine = describeDeadLegacyFiles(findDeadLegacyFiles(home), home);
   if (deadLegacyLine !== undefined) console.error(deadLegacyLine);
 
+
   const authority = new TokenAuthority(secrets);
   const tokens = await authority.ensureTokens();
 
@@ -530,6 +540,33 @@ export async function startDaemon(opts: {
     console.error(`settings unavailable, agent disabled: ${(err as Error).message}`);
     settings = null;
   }
+
+  // ── WS-21 (spec §8): Migration C, phase 1 ──────────────────────────────────────────────────────
+  // Only on a build whose router applies run homes (on router 0.0.11 the old layout IS the layout).
+  // ORDER, four ways: after the lock (an idle live daemon holds no transcript lease — only the lock stops
+  // a second daemon renaming `projects/` under it); after the settings load (its v2→v3 persist is what
+  // the split reads); before the boot split below (so preflight's backups capture the pre-split state
+  // and the migration's own split step is the one that copies); before the runtime spine (backfill and
+  // recovery read the store and `backend_root`). The profile's default home migrates by itself; any
+  // other home in the old layout refuses boot until `winter migrate --sdk-home --home <dir>` runs. A
+  // preflight refusal refuses BOOT — the supported build must never start writing `sdk/projects` while
+  // `<home>/projects` still holds the store. Phase 2 runs at the late site, once the router exists.
+  if (linkedRouterSupportsRunHome() && isOldLayout(home)) {
+    try {
+      if (!isDefaultWinterHome(home, profile, opts.migration?.homedirOverride)) {
+        throw new MigrationCRefused("sdk_home_migration_required", `migration C: ${home} is in the old layout and is not the profile's default home — stop, then run \`winter migrate --sdk-home --home ${home}\``);
+      }
+      await runMigrationC(home, { log: (line) => console.error(line), reconcileAvailable: true });
+    } catch (err) {
+      lock.release();
+      throw err;
+    }
+  }
+
+  // WS-21 (spec §4.1, §8): the settings split — every boot, every home, every build (the runtime-facing
+  // keys are read from `sdk/` only since L3.2). Under the lock, before anything reads them. Once per key;
+  // never throws; `settings.json` itself is never written.
+  splitSettingsToSdk(home, { log: (line) => console.error(line) });
 
   // ── The runtime spine (P8a, WS-16) ────────────────────────────────────────────────────────────
   // Open `runtimes/runtime-state.db`, run §13's twelve recovery steps, catch the §17 backfill up,
@@ -1388,6 +1425,22 @@ export async function startDaemon(opts: {
   // Only on a router that has the door (0.0.11 has not: step 6 stays skipped and step 8 sweeps as before).
   // Still before `startIpcServer`, so no incarnation exists yet; bounded — a failure costs the sweep.
   const routerRecovery = runtimeSdk === undefined ? undefined : runHomeHandleOf(runtimeSdk.sdk);
+  // Migration C, phase 2 (spec §8 steps 2, 8, 9): the official working copies reconciled through the
+  // router's own door, then the archive and the done marker. Without a door it finishes only when there
+  // is nothing to reconcile; otherwise it waits (logged) for a boot that has one. Bounded: never fatal.
+  {
+    const cState = migrationCState(home);
+    if (cState.kind === "parsed" && cState.manifest.status === "phase1-complete") {
+      try {
+        await finishMigrationC(home, {
+          log: (line) => console.error(line),
+          ...(routerRecovery === undefined ? {} : { reconcile: (root: string) => routerRecovery.reconcileRootForRecovery(root) }),
+        });
+      } catch (err) {
+        console.error(`migration C: phase 2 not finished (${(err as Error).message}) — retried at the next boot`);
+      }
+    }
+  }
   if (routerRecovery !== undefined && runtime !== undefined) {
     try {
       const recovered = await recoverRunRoots({
