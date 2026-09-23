@@ -263,6 +263,31 @@ describe("fix round 2: Bash writes under .winter/<kind>", () => {
     for (const cmd of stillNoCard) expect({ cmd, hit: bashProtectedWriteHit(cmd) }).toEqual({ cmd, hit: undefined });
   });
 
+  // Round 5 (regression since round 3): a shell's `-c` string and `eval`'s argument are COMMANDS, not text —
+  // `quotedOperatorsAsText` blanked the redirect inside their quotes, so none of these asked. The string is
+  // judged as a command of its own, like an interpreter one-liner.
+  test("round 5: a shell -c string and eval's argument are judged as commands", () => {
+    const writes5 = [
+      `bash -c "echo x > .winter/rules/a"`,
+      `sh -c 'cat > .winter/skills/x/SKILL.md'`,
+      `zsh -c "printf x >> .winter/commands/c.md"`,
+      `eval "echo x > .winter/rules/a"`,
+      `find . -exec sh -c 'cp "$0" .winter/skills/' {} \;`,
+      `bash -lc 'mkdir -p .winter/agents'`,
+      `cd pkg && dash -c "touch .winter/output-styles/o.md"`,
+      `sudo ksh -c "tee .winter/rules/r.md < x"`,
+    ];
+    for (const cmd of writes5) expect({ cmd, hit: bashProtectedWriteHit(cmd) !== undefined }).toEqual({ cmd, hit: true });
+    for (const cmd of [
+      `bash -c "cat .winter/rules/a"`,
+      `sh -c 'ls .winter/skills && git status'`,
+      `eval "cat .winter/rules/a"`,
+      `find . -exec sh -c 'cat "$0"' {} \;`,
+      `bash script.sh .winter/rules`,
+      `echo 'a; b > .winter/rules/x' && ls`,
+    ]) expect({ cmd, hit: bashProtectedWriteHit(cmd) }).toEqual({ cmd, hit: undefined });
+  });
+
   test("the hook asks (both legs, sandboxed or not); a read gets no answer from it", async () => {
     const built = sessionHooksFor({ sessionId: "s_1", roots: ["/r"], home: "/Users/x/.winter", mode: "code" });
     const groups = (built.winter?.PreToolUse ?? []).filter((g: HookCallbackMatcher) => g.matcher === "Bash");

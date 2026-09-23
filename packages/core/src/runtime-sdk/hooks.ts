@@ -480,9 +480,17 @@ function writeContextStart(c: string): number {
  * that joins the path from pieces) is beyond its reach, and so is a write whose path is not in the command
  * at all — `git apply x.patch`, `patch < x.diff`.
  */
-export function bashProtectedWriteHit(command: string): string | undefined {
+export function bashProtectedWriteHit(command: string, depth = 0): string | undefined {
   let cwd: string | undefined;
   for (const raw of shellSegments(command)) {
+    // Round 5: a shell's `-c` string, `eval`'s argument and the same inside `find -exec` are COMMANDS — each
+    // judged as one of its own (from the cwd carried so far), before its quotes are blanked as text below.
+    if (depth < 4) {
+      for (const nested of nestedCommandStrings(shellWords(raw))) {
+        const hit = bashProtectedWriteHit(cwd === undefined ? nested : `cd ${cwd}; ${nested}`, depth + 1);
+        if (hit !== undefined) return hit;
+      }
+    }
     const seg = normaliseEscapeCommand(quotedOperatorsAsText(raw)).replace(/^[\s({]+/, "").replace(/[\s)}]+$/, "");
     if (seg.length === 0) continue;
     const words = seg.split(/\s+/);
@@ -500,7 +508,66 @@ export function bashProtectedWriteHit(command: string): string | undefined {
   return undefined;
 }
 
-/** A protected segment inside ONE write target (a single word). */
+/** Round 5: the shells whose `-c` string is a command. */
+const SHELLS: ReadonlySet<string> = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
+/** Words a command may be prefixed with and still be that command. */
+const COMMAND_PREFIXES: ReadonlySet<string> = new Set(["sudo", "env", "exec", "command", "nohup", "time", "nice"]);
+
+/** Round 5: one raw segment's words as the shell hands them to the program — split on unquoted whitespace,
+ *  quotes removed, a backslash escaping the next character. */
+function shellWords(raw: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let started = false;
+  let quote: "'" | "\"" | undefined;
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i]!;
+    if (quote === "'") { if (ch === "'") quote = undefined; else cur += ch; continue; }
+    if (quote === "\"") {
+      if (ch === "\"") quote = undefined;
+      else if (ch === "\\" && i + 1 < raw.length && /["\\$`]/.test(raw[i + 1]!)) cur += raw[++i];
+      else cur += ch;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < raw.length) { cur += raw[++i]; started = true; continue; }
+    if (ch === "'" || ch === "\"") { quote = ch; started = true; continue; }
+    if (/\s/.test(ch)) { if (started) out.push(cur); cur = ""; started = false; continue; }
+    cur += ch;
+    started = true;
+  }
+  if (started) out.push(cur);
+  return out;
+}
+
+/** Round 5: the command strings a command line runs — a shell's `-c` string (`-c` alone or in a cluster such
+ *  as `-lc`), `eval`'s arguments joined, and the same for a command `find -exec`/`-execdir`/`-ok`/`-okdir`
+ *  runs. Words as `shellWords` gives them. */
+function nestedCommandStrings(words: readonly string[]): string[] {
+  let i = 0;
+  while (i < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i]!) || COMMAND_PREFIXES.has(baseName(words[i]!)))) i += 1;
+  const verb = baseName(words[i] ?? "");
+  const rest = words.slice(i + 1);
+  if (SHELLS.has(verb)) {
+    const at = rest.findIndex((w) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(w));
+    return at >= 0 && rest[at + 1] !== undefined ? [rest[at + 1]!] : [];
+  }
+  if (verb === "eval") return rest.length === 0 ? [] : [rest.join(" ")];
+  if (verb === "find") {
+    const out: string[] = [];
+    for (let j = 0; j < rest.length; j += 1) {
+      if (!["-exec", "-execdir", "-ok", "-okdir"].includes(rest[j]!)) continue;
+      const sub: string[] = [];
+      for (j += 1; j < rest.length && rest[j] !== "+" && rest[j] !== ";"; j += 1) sub.push(rest[j]!);
+      out.push(...nestedCommandStrings(sub));
+    }
+    return out;
+  }
+  return [];
+}
+
+const baseName = (w: string): string => w.slice(w.lastIndexOf("/") + 1).toLowerCase();
+
+/** A protected segment inside ONE write target (a single word). *//** A protected segment inside ONE write target (a single word). */
 const PROTECTED_BASH_TARGET = /\.winter\/(?:skills|commands|rules|output-styles|agents)(?=\/|$)/;
 
 /** Round 3, minor 10: a command's shell segments — split on `;`, `&&`, `||`, `|`, `|&`, a background `&` and
