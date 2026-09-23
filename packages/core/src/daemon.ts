@@ -1044,9 +1044,14 @@ export async function startDaemon(opts: {
     onLog: (m) => console.error(m),
     onCircuitOpen: (id) => sharedRegistry?.unregisterByPrefix(`plugin__${id}__`),
   });
+  // L3's REQUEST #1: a Tier-2 plugin's spawn `dir` is its REAL install path (PluginInfo.installPath,
+  // straight off installed_plugins.json's own record) — WS-21's Contract B can install a plugin
+  // anywhere a directory marketplace's manifest names, so the old `<home>/plugins/<name>` convention
+  // no longer holds (it never matched a converted-legacy or freshly-installed plugin's actual
+  // location; only ever worked by coincidence for a hand-seeded fixture at that exact path).
   const spawnablePlugins = allPlugins
     .filter(pluginSpawnEligible)
-    .map((p) => ({ id: p.name, dir: join(winterHome, "plugins", p.name), entry: p.entry! }));
+    .map((p) => ({ id: p.name, dir: p.installPath, entry: p.entry! }));
   // Phase 4d-i Task 4: boot-time orphan-PID sweep, BEFORE startAll spawns the current set — a
   // plugin disabled or removed since the last run may have left its process running under a
   // stale <runDir>/plugins/<id>.pid; startAll/reclaimOrphans would never find it (they only look
