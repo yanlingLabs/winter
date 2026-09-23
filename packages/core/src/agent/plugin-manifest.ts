@@ -83,8 +83,9 @@ export function loadManifest(dir: string, dirName: string, log?: (m: string) => 
 }
 
 /**
- * The consent block's line for a plugin's SHIPPED SKILLS (lane B, 2026-09-23) — shared by manifest and
- * legacy plugins (`PluginStore.list`), so both say the same thing: a skill can run shell commands
+ * The disclosure line for a plugin's SHIPPED SKILLS (lane B, 2026-09-23) — shared by a manifest
+ * plugin's consent block (`execPayloadLines`) and a legacy plugin's no-consent enable notice
+ * (`plugins/lifecycle.ts#enableNotice`), so both say the same thing: a skill can run shell commands
  * when a session uses it. Empty when the plugin ships none.
  */
 export function skillsPayloadLines(skills: readonly string[] | undefined): string[] {
@@ -104,7 +105,8 @@ export function requiredConsentClasses(m: WinterManifest, opts: { shipsSkills?: 
   // shell: claude executes a skill's inline `` !`cmd` `` and honours its `allowed-tools` pre-approval
   // without asking the host (measured by the router, 0.0.11's `OptionsTemplatePolicy.plugins` doc;
   // claude's `loadSkillsDir.ts`/`loadPluginCommands.ts`), so handing a plugin's skills to a session is
-  // the same trust decision as running its hooks.
+  // the same trust decision as running its hooks. MANIFEST plugins only: a legacy plugin requires no
+  // class (enabling it is the trust decision — controller ruling, 2026-09-23; see `enableNotice`).
   const execNeeded = Boolean(m.entry) || Boolean(m.contributes?.mcpServers?.length) || Boolean(m.contributes?.hooks?.length) || Boolean(m.permissions?.exec) || opts.shipsSkills === true;
   if (execNeeded) classes.push("exec");
   if (m.permissions?.tcc?.length) classes.push("tcc");

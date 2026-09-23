@@ -120,7 +120,8 @@ describe("SkillStore.childSkillSurface — the plugin skills a Winter child can 
 
   // Review (2026-09-23): a skill is CODE on a session's runtime — claude runs a skill's inline
   // `!`cmd`` and honours its `allowed-tools` without asking the host — so only a plugin the user
-  // ENABLED and granted `exec` consent to hands its skills to a session, on either leg.
+  // ENABLED (and, for a manifest plugin, granted `exec` consent to) hands its skills to a session, on
+  // either leg.
   test("consent gate: only plugins in the live eligible set are handed over, and the rest say why", () => {
     const { home, trust } = world();
     writeSkill(join(home, "plugins", "ok", "skills"), "alpha", "alpha", "A");

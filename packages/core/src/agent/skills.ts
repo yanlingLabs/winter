@@ -272,8 +272,9 @@ export class SkillStore {
    * `Options.plugins` — with no daemon restart. A bare array (every older caller) is a fixed list.
    *
    * `plugins.sessionEligible` (lane B, 2026-09-23): the LIVE set of plugins whose skills a session may
-   * load — production wires `pluginSkillsEligible` (explicitly enabled, not disabled, `exec` consent on
-   * record: a skill can run shell commands). ABSENT means "every listed plugin", which only a unit test
+   * load — production wires `pluginSkillsEligible` (explicitly enabled, not disabled, every required
+   * consent class on record: `exec` for a manifest plugin that ships skills — a skill can run shell
+   * commands — and none for a legacy plugin, whose enable is the trust decision). ABSENT means "every listed plugin", which only a unit test
    * that is not about consent relies on; `daemon.ts` always wires it.
    */
   constructor(deps: {
