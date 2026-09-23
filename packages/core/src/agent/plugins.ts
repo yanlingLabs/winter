@@ -20,6 +20,10 @@ export interface PluginInfo {
    *  than reconstructing a path themselves — see the lane report's REQUEST FOR L3 for the one L3
    *  call site (`daemon.ts`'s `spawnablePlugins` builder) still hardcoding the old convention. */
   installPath: string;
+  /** WS-21: the marketplace this plugin installed from (`installed_plugins.json`'s own compound key
+   *  is `"<name>@<marketplace>"`, F15) — callers that need to write a qualified spec back (consent
+   *  records, `setPluginEnabled`) use `${name}@${marketplace}` rather than re-deriving it. */
+  marketplace: string;
   /** winter-plugin.json tier, when a valid manifest was found. undefined for legacy (plugin.json-only) plugins. */
   tier?: "capability" | "platform";
   /** Consent classes ("exec"|"tcc"|"hardware") the manifest requires, per plugin-manifest.ts#requiredConsentClasses. [] for legacy plugins. */
@@ -135,13 +139,14 @@ export class PluginStore {
       if (!userRecord) continue; // this store reports user scope only — see the class doc above
       const at = key.lastIndexOf("@");
       const name = at > 0 ? key.slice(0, at) : key;
+      const marketplace = at > 0 ? key.slice(at + 1) : "";
       const dir = userRecord.installPath;
 
       const enabled = enabledPlugins[key] === true;
       const isDisabled = !enabled;
       let skills: string[] = [];
       try { skills = readdirSync(join(dir, "skills"), { withFileTypes: true }).filter((e) => e.isDirectory() && existsSync(join(dir, "skills", e.name, "SKILL.md"))).map((e) => e.name); } catch { /* no skills dir */ }
-      const shared = { name, skills, hasMcp: false, mcpEnabled: enabled, disabled: isDisabled, installPath: dir };
+      const shared = { name, skills, hasMcp: false, mcpEnabled: enabled, disabled: isDisabled, installPath: dir, marketplace };
       const consented = this.consentedClasses(key);
 
       const { manifest } = loadManifest(dir, name, this.deps.log);
