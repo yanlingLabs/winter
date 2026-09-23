@@ -409,23 +409,30 @@ export async function runMigrationC(home: string, deps: MigrationCDeps): Promise
     // home behind, only a typed refusal. Review I2: the store is opened READ-ONLY and copied with
     // `VACUUM INTO`, so the backup is the pre-migration schema (a read-write open would run the v7
     // rebuild first, and the "pre-migration" copy would already be v7).
+    // Round 3, minor 8: EVERY backup failure is the same typed refusal, and it takes its own empty
+    // `c-<ts>` directory with it — no half-made archive is left behind for an operator to wonder about.
+    const refuseBackup = (what: string, err: unknown): never => {
+      try { rmSync(archiveDir, { recursive: true, force: true }); } catch { /* best effort */ }
+      throw new MigrationCRefused("sdk_home_migration_refused", `Migration C refused: ${what} could not be backed up (${(err as { code?: string }).code ?? (err as Error).name}) — nothing was moved`);
+    };
     let runtimeState: string | null = null;
     if (existsSync(join(home, "runtimes", "runtime-state.db"))) {
       try {
         const rs = openRuntimeStateDb(home, { readonly: true });
         try { runtimeState = rs.backup(archiveDir); } finally { rs.close(); }
-      } catch (err) {
-        throw new MigrationCRefused("sdk_home_migration_refused", `Migration C refused: runtime-state.db could not be backed up (${(err as Error).name}) — nothing was moved`);
-      }
+      } catch (err) { refuseBackup("runtime-state.db", err); }
     }
+    const backup = (src: string, name: string): string | null => {
+      try { return backupFile(src, archiveDir, name); } catch (err) { return refuseBackup(src, err); }
+    };
     m = {
       schemaVersion: 1, home, startedAt: at.toISOString(), status: "in-progress", archiveDir, steps: [],
       backups: {
-        settings: backupFile(join(home, "settings.json"), archiveDir, "settings.json.bak"),
+        settings: backup(join(home, "settings.json"), "settings.json.bak"),
         runtimeState,
-        sdkSettings: backupFile(join(sdkHomeFor(home), "settings.json"), archiveDir, "sdk-settings.json.bak"),
-        sdkGlobal: backupFile(join(sdkHomeFor(home), ".winter.json"), archiveDir, "sdk-winter.json.bak"),
-        splitMarker: backupFile(settingsSplitMarkerPath(home), archiveDir, "settings-split.json.bak"),
+        sdkSettings: backup(join(sdkHomeFor(home), "settings.json"), "sdk-settings.json.bak"),
+        sdkGlobal: backup(join(sdkHomeFor(home), ".winter.json"), "sdk-winter.json.bak"),
+        splitMarker: backup(settingsSplitMarkerPath(home), "settings-split.json.bak"),
       },
       moved: [], links: [], copied: [], archived: [], reconciled: [],
     };

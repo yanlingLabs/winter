@@ -4,7 +4,7 @@
 // selection_json. The router's reconcile is a stub here (its real outcomes are L2's, proven at R.2).
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 import { SessionStore } from "../../src/sessions/store";
 import { tmpdir } from "node:os";
@@ -186,6 +186,21 @@ describe("review I2: the pre-migration backup is the pre-migration schema", () =
     const m = await runMigrationC(home, deps({ reconcile: stubReconcile().reconcile }));
     expect(m.backups.runtimeState).not.toBeNull();
     expect(userVersion(m.backups.runtimeState!)).toBe(6);
+  });
+});
+
+describe("round 3, minor 8: a preflight backup that fails is a typed refusal", () => {
+  test("an unreadable file to back up refuses typed — no manifest, no archive dir, nothing moved", async () => {
+    const { home, key } = fixture();
+    writeFileSync(join(home, "sdk", "settings.json"), "{}");
+    chmodSync(join(home, "sdk", "settings.json"), 0o000);
+    try {
+      await expect(runMigrationC(home, deps({ reconcile: stubReconcile().reconcile }))).rejects.toMatchObject({ name: "MigrationCRefused", code: "sdk_home_migration_refused" });
+    } finally { chmodSync(join(home, "sdk", "settings.json"), 0o600); }
+    expect(migrationCState(home)).toEqual({ kind: "absent" });
+    expect(readdirSync(join(home, "migration")).filter((n) => n.startsWith("c-"))).toEqual([]);
+    expect(lstatSync(join(home, "projects", key)).isDirectory()).toBe(true);
+    expect(isOldLayout(home)).toBe(true);
   });
 });
 
