@@ -56,9 +56,11 @@ func libraryPluginTile(_ tiles: [TilesStripModel.PluginTile],
 
 /// PURE: the status dot's colour, or none for a disabled row — WS-21 dropped the Tier-2 runtime
 /// status vocabulary (running/starting/stopped/backoff/circuit-open) entirely; enabled/disabled is
-/// all `plugin.list` reports now.
-func libraryPluginStatusDot(enabled: Bool) -> Color? {
-    enabled ? .green : nil
+/// all `plugin.list` reports now. Fix round 1 (M6): a row with a pending consent class gets no dot
+/// either, even though `enabled` is separately true (a fresh install lands enabled regardless of
+/// consent) — a green dot there would read as "fully working" when a Tier-2 process never spawned.
+func libraryPluginStatusDot(enabled: Bool, needsConsent: Bool) -> Color? {
+    enabled && !needsConsent ? .green : nil
 }
 
 // MARK: - The list
@@ -121,7 +123,7 @@ struct LibraryPluginStatusMark: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            if let dot = libraryPluginStatusDot(enabled: row.enabled) {
+            if let dot = libraryPluginStatusDot(enabled: row.enabled, needsConsent: row.needsConsent) {
                 Circle().fill(dot).frame(width: 6, height: 6)
             }
             Text(row.enabled ? "Enabled" : "Disabled")
@@ -164,6 +166,8 @@ struct LibraryPluginDetail: View {
                 tileSection
                 Divider()
                 shortcutsSection
+                Divider()
+                hooksSection(row)
             } else {
                 LibraryStateLine(text: "Loading…")
             }
@@ -286,6 +290,22 @@ struct LibraryPluginDetail: View {
             }
         }
     }
+
+    // MARK: Its hooks (fix round 1, I3 item 4 — shown here too, not only on the Hooks tab)
+
+    @ViewBuilder
+    private func hooksSection(_ row: PluginRowDisplay) -> some View {
+        LibraryGroupHeader(title: "Hooks", detail: row.hooks.map { $0.isEmpty ? "" : "\($0.count)" } ?? "")
+        if let empty = libraryHooksEmptyText(row.hooks) {
+            LibraryStateLine(text: empty)
+        } else if let hooks = row.hooks {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(Array(hooks.enumerated()), id: \.offset) { _, hook in
+                    libraryHookRow(hook)
+                }
+            }
+        }
+    }
 }
 
 // MARK: - The consent sheet
@@ -303,7 +323,7 @@ struct LibraryPluginConsentSheetHost: View {
                     state: sheet,
                     busy: model.busySpec == sheet.spec,
                     onConfirm: { Task { await model.confirmConsent() } },
-                    onCancel: { model.cancelConsent() }
+                    onCancel: { Task { await model.cancelConsent() } }
                 )
             }
     }
@@ -321,7 +341,11 @@ func presentLibraryPluginInstallPanel(model: PluginManagerModel) {
     panel.canChooseDirectories = true
     panel.canChooseFiles = false
     panel.allowsMultipleSelection = false
-    panel.message = "Choose a plugin marketplace folder (containing .claude-plugin/marketplace.json)"
+    // M4: the folder is read IN PLACE, forever (F15) — moving or deleting it later breaks the
+    // plugin; a .zip is not a valid pick any more (see `PluginManagerView.swift`'s own header).
+    panel.message = "Choose a plugin marketplace folder (containing .claude-plugin/marketplace.json). "
+        + "It's used in place — moving or deleting it later breaks the plugin. A .zip must be "
+        + "unzipped to a permanent folder first."
     guard panel.runModal() == .OK, let url = panel.url else { return }
     Task { await model.installFromFolder(url) }
 }
