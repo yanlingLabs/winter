@@ -22,9 +22,22 @@
 //
 // Used from THREE call sites, all producing/consuming the SAME shape: `agent/plugins.ts#PluginStore`
 // (the boot-time / `livePlugins()` read, which gates `pluginSpawnEligible`), `ipc/server.ts`'s
-// `plugin.list` (`extras.consented`) and `plugin.setConsent` (writes a fresh, correctly-fingerprinted
-// record), and `plugins/convert-legacy.ts#rekeyConsents` (writes a fingerprinted record for each
+// `plugin.list` (`extras.consented` + the disclosed `extras.fingerprint` itself) and
+// `plugin.setConsent` (writes a fresh, correctly-fingerprinted record, and refuses a STALE one — see
+// below), and `plugins/convert-legacy.ts#rekeyConsents` (writes a fingerprinted record for each
 // migrated plugin, at conversion time, when it already knows the plugin's converted install path).
+//
+// L5 re-review (TOCTOU + full-disclosure): the fingerprint originally covered only install path +
+// entry, so a manifest edit that grew `permissions.tcc`/`permissions.hardware` under a CLASS the user
+// had already consented to (e.g. tcc going from `["accessibility"]` to `["accessibility",
+// "screen-recording"]`, `requiredConsents` staying `["tcc"]` either way) started running the newly
+// added permission WITHOUT it ever having been shown. The fingerprint now covers the plugin's WHOLE
+// disclosure: install path, entry, the manifest's `permissions.tcc`/`permissions.hardware` lists
+// (contents, not just class membership), and `requiredConsents` itself. `plugin.setConsent` also now
+// takes the fingerprint the CALLER saw in the listing it displayed and refuses (`stale_disclosure`,
+// writing nothing) when it no longer matches what the daemon recomputes right now — closing the
+// window between "the user opened the consent sheet" and "the user clicked consent" during which the
+// plugin's files could change out from under them.
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 
@@ -34,6 +47,22 @@ import { realpathSync } from "node:fs";
 export interface PluginFingerprintEntry {
   command: string;
   args?: string[];
+}
+
+/** Everything the consent sheet shows for one plugin, beyond the install path itself -- the full
+ *  input to `pluginConsentFingerprint`. Every field is optional so a legacy (manifest-less) plugin,
+ *  which discloses nothing beyond its install path, still hashes to a stable value. */
+export interface PluginDisclosure {
+  entry?: PluginFingerprintEntry;
+  /** `winter-plugin.json`'s `permissions.tcc` verbatim (e.g. `["accessibility"]`) -- the LIST
+   *  CONTENTS, not just whether the "tcc" class is required, so a permission added under an
+   *  already-consented class still invalidates. */
+  tcc?: string[];
+  /** `winter-plugin.json`'s `permissions.hardware` verbatim, same reasoning as `tcc`. */
+  hardware?: string[];
+  /** `requiredConsentClasses(manifest)`'s own result -- belt-and-suspenders coverage for
+   *  `permissions.exec`/`entry`'s contribution and any future required-consent-class addition. */
+  requiredConsents?: string[];
 }
 
 /** The new, fingerprinted consent record shape -- `plugins.consents[spec]`. */
@@ -46,12 +75,16 @@ const KNOWN_CONSENT_CLASSES = ["exec", "tcc", "hardware"] as const;
 type KnownConsentClass = (typeof KNOWN_CONSENT_CLASSES)[number];
 
 /**
- * sha256 over the plugin's REAL (symlink-resolved) install path plus its entry command/args -- what
- * the user actually saw disclosed when they granted consent. Falls back to the given path unresolved
+ * sha256 over the plugin's REAL (symlink-resolved) install path plus its WHOLE disclosure -- entry
+ * command/args, the manifest's declared `tcc`/`hardware` permission lists, and its
+ * `requiredConsents` -- everything the consent sheet shows. Falls back to the given path unresolved
  * if `realpath` fails (a moved/deleted directory mid-check); the hash still changes deterministically
- * for a genuinely different path either way, which is all invalidation needs.
+ * for a genuinely different path either way, which is all invalidation needs. List fields are sorted
+ * before hashing so the fingerprint is stable under a harmless reordering (a manifest
+ * re-serialization, a different code path building the same set in a different order) rather than
+ * invalidating consent for no disclosed reason.
  */
-export function pluginConsentFingerprint(installPath: string, entry: PluginFingerprintEntry | undefined): string {
+export function pluginConsentFingerprint(installPath: string, disclosure: PluginDisclosure): string {
   let real = installPath;
   try {
     real = realpathSync(installPath);
@@ -60,7 +93,10 @@ export function pluginConsentFingerprint(installPath: string, entry: PluginFinge
   }
   const payload = JSON.stringify({
     installPath: real,
-    entry: entry ? { command: entry.command, args: entry.args ?? [] } : null,
+    entry: disclosure.entry ? { command: disclosure.entry.command, args: disclosure.entry.args ?? [] } : null,
+    tcc: [...(disclosure.tcc ?? [])].sort(),
+    hardware: [...(disclosure.hardware ?? [])].sort(),
+    requiredConsents: [...(disclosure.requiredConsents ?? [])].sort(),
   });
   return createHash("sha256").update(payload).digest("hex");
 }

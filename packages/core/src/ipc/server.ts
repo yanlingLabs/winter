@@ -1469,26 +1469,37 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
    *  project/local-scope listing as it does for user scope.
    *
    *  C1 fix round 2: `consented` is gated on the stored record's fingerprint matching a FRESH one
-   *  computed off `installPath` + the manifest's OWN entry right now — the SAME gate
-   *  `agent/plugins.ts#PluginStore` applies at boot/enable time (`plugins/consent-fingerprint.ts`),
-   *  so a folder swap under the same spec, or an edited entry, reads as unconsented here too. */
+   *  computed off `installPath` + the plugin's WHOLE disclosure (entry, permissions.tcc/hardware,
+   *  requiredConsents) right now — the SAME gate `agent/plugins.ts#PluginStore` applies at
+   *  boot/enable time (`plugins/consent-fingerprint.ts`), so a folder swap under the same spec, an
+   *  edited entry, or a widened permission set under an already-consented class all read as
+   *  unconsented here too.
+   *
+   *  L5 re-review (TOCTOU): `fingerprint` itself is now ALSO returned over the wire — the disclosure
+   *  the caller is looking at, right now, which `plugin.setConsent` must echo back for the daemon to
+   *  confirm nothing changed between "the sheet was shown" and "the user clicked consent". */
   function pluginExtrasFor(installPath: string, id: string, consentRecord: unknown): {
     tier: "capability" | "platform";
     permissions?: { exec?: boolean; tcc?: string[]; hardware?: string[] };
     requiredConsents: Array<"exec" | "tcc" | "hardware">;
     consented: Array<"exec" | "tcc" | "hardware">;
     entry?: { command: string; args?: string[] };
+    fingerprint: string;
   } | undefined {
     const { manifest } = loadManifest(installPath, id);
     if (!manifest) return undefined;
-    const fingerprint = pluginConsentFingerprint(installPath, manifest.entry);
+    const requiredConsents = requiredConsentClasses(manifest);
+    const fingerprint = pluginConsentFingerprint(installPath, {
+      entry: manifest.entry, tcc: manifest.permissions?.tcc, hardware: manifest.permissions?.hardware, requiredConsents,
+    });
     const consented = consentedClassesFor(consentRecord, fingerprint);
     return {
       tier: manifest.tier,
       ...(manifest.permissions ? { permissions: manifest.permissions } : {}),
-      requiredConsents: requiredConsentClasses(manifest),
+      requiredConsents,
       consented,
       ...(manifest.entry ? { entry: { command: manifest.entry.command, ...(manifest.entry.args ? { args: manifest.entry.args } : {}) } } : {}),
+      fingerprint,
     };
   }
 
@@ -4113,18 +4124,27 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // for `foo@B` could be recorded for a DIFFERENT `foo@A` that happened to resolve first out of
       // `livePlugins()` — the param is now `spec` (the qualified `"<name>@<marketplace>"` compound
       // key, `PluginSetConsentParams`), matched EXACTLY against `livePlugins()`'s own `"<name>@
-      // <marketplace>"` — no ambiguity possible. The daemon also computes and stores the C1
-      // fingerprint here (`plugins/consent-fingerprint.ts`), off `info.installPath` + `info.entry` —
-      // exactly what the user saw disclosed for THIS spec, right now.
+      // <marketplace>"` — no ambiguity possible.
+      //
+      // L5 re-review (TOCTOU): the caller now MUST echo back the `fingerprint` it saw in the
+      // `plugin.list` listing it displayed (`extras.fingerprint`) — the daemon recomputes the SAME
+      // fingerprint (`plugins/consent-fingerprint.ts`, off `info.installPath` + `info.entry`/
+      // `tccPermissions`/`hardwarePermissions`/`requiredConsents`, the plugin's WHOLE disclosure)
+      // right now and refuses `stale_disclosure`, writing nothing, when it no longer matches — the
+      // window between "the consent sheet was shown" and "the user clicked consent" is exactly where
+      // a plugin's files could change out from under the disclosure the user actually saw.
       // -----------------------------------------------------------------------------------------
       case METHODS.pluginSetConsent: {
         const p = parseParams(PluginSetConsentParams, params);
         const info = livePlugins().find((pl) => `${pl.name}@${pl.marketplace}` === p.spec);
         if (!info) return { code: "unknown_plugin" };
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.setConsent is not available on this server (no winterHome configured)");
+        const fingerprint = pluginConsentFingerprint(info.installPath, {
+          entry: info.entry, tcc: info.tccPermissions, hardware: info.hardwarePermissions, requiredConsents: info.requiredConsents,
+        });
+        if (fingerprint !== p.fingerprint) return { code: "stale_disclosure" };
         const settingsPath = join(opts.winterHome, "settings.json");
         const classes = p.classes.filter((c): c is "exec" | "tcc" | "hardware" => c === "exec" || c === "tcc" || c === "hardware");
-        const fingerprint = pluginConsentFingerprint(info.installPath, info.entry);
         const settings = loadSettings(settingsPath);
         const consents = { ...(settings.plugins?.consents ?? {}), [p.spec]: { classes, fingerprint } };
         saveSettings(settingsPath, { ...settings, plugins: { ...settings.plugins, consents } });

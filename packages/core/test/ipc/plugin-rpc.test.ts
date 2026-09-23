@@ -113,11 +113,19 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
     // requiredConsents/consented/entry) — the Mac app's consent UI (lane L5) needs them over RPC.
     // `writeMarketplace`'s default fixture declares tier:"platform" + an entry point (no
     // permissions), so requiredConsents derives ["exec"] and consented is [] (never consented here).
+    // L5 re-review: extras also carries the disclosure's own `fingerprint` now.
+    const expectedFingerprint = pluginConsentFingerprint(mktDir, {
+      entry: { command: "bun", args: ["--version"] }, requiredConsents: ["exec"],
+    });
     expect(listRes.result).toEqual({
       ok: true,
       plugins: [{
         id: "p", installPath: mktDir, scope: "user", enabled: true, marketplace: "m",
-        extras: { tier: "platform", requiredConsents: ["exec"], consented: [], entry: { command: "bun", args: ["--version"] } },
+        extras: {
+          tier: "platform", requiredConsents: ["exec"], consented: [],
+          entry: { command: "bun", args: ["--version"] }, fingerprint: expectedFingerprint,
+        },
+        hooks: [], // no hooks/hooks.json, no .claude-plugin/plugin.json — declares none (L5 re-review item 3)
       }],
     });
 
@@ -140,7 +148,7 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
     await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
 
     const listRes = await c.request(METHODS.pluginList, {});
-    expect(listRes.result.plugins).toEqual([{ id: "p", installPath: mktDir, scope: "user", enabled: true, marketplace: "m" }]);
+    expect(listRes.result.plugins).toEqual([{ id: "p", installPath: mktDir, scope: "user", enabled: true, marketplace: "m", hooks: [] }]);
     expect(listRes.result.plugins[0]).not.toHaveProperty("extras");
   });
 
@@ -153,7 +161,11 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
     });
     await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
     await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
-    await c.request(METHODS.pluginSetConsent, { spec: "p@m", classes: ["exec", "tcc"] });
+    // L5 re-review (TOCTOU): setConsent needs the disclosure fingerprint the caller saw — fetched
+    // from a listing first, exactly like a real consent UI would.
+    const preConsentList = await c.request(METHODS.pluginList, {});
+    const preConsentFingerprint = preConsentList.result.plugins[0].extras.fingerprint;
+    await c.request(METHODS.pluginSetConsent, { spec: "p@m", classes: ["exec", "tcc"], fingerprint: preConsentFingerprint });
 
     const listRes = await c.request(METHODS.pluginList, {});
     expect(listRes.result.plugins[0].extras).toEqual({
@@ -161,6 +173,7 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
       permissions: { exec: true, tcc: ["accessibility"], hardware: ["battery"] },
       requiredConsents: ["exec", "tcc", "hardware"],
       consented: ["exec", "tcc"],
+      fingerprint: preConsentFingerprint,
     });
   });
 
@@ -186,7 +199,7 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
 
       writeConsent(home, "p@m", {
         classes: ["exec"],
-        fingerprint: pluginConsentFingerprint(mktDir, { command: "bun", args: ["--version"] }),
+        fingerprint: pluginConsentFingerprint(mktDir, { entry: { command: "bun", args: ["--version"] }, requiredConsents: ["exec"] }),
       });
 
       const listRes = await c.request(METHODS.pluginList, {});
@@ -201,7 +214,7 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
       await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
       writeConsent(home, "p@m", {
         classes: ["exec"],
-        fingerprint: pluginConsentFingerprint(mktDirA, { command: "bun", args: ["--version"] }),
+        fingerprint: pluginConsentFingerprint(mktDirA, { entry: { command: "bun", args: ["--version"] }, requiredConsents: ["exec"] }),
       });
       expect((await c.request(METHODS.pluginList, {})).result.plugins[0].extras.consented).toEqual(["exec"]);
 
@@ -226,7 +239,7 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
       await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
       writeConsent(home, "p@m", {
         classes: ["exec"],
-        fingerprint: pluginConsentFingerprint(mktDir, { command: "bun", args: ["--version"] }),
+        fingerprint: pluginConsentFingerprint(mktDir, { entry: { command: "bun", args: ["--version"] }, requiredConsents: ["exec"] }),
       });
       expect((await c.request(METHODS.pluginList, {})).result.plugins[0].extras.consented).toEqual(["exec"]);
 
@@ -251,6 +264,33 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
       expect(listRes.result.plugins[0].extras.consented).toEqual([]);
     });
 
+    // L5 re-review, item 1: the fingerprint must cover the WHOLE disclosure, including the
+    // permissions LIST CONTENTS, not just which classes are required -- otherwise a new tcc/hardware
+    // permission added under an already-consented CLASS starts running unseen (requiredConsents
+    // stays ["tcc"] whether the list is ["accessibility"] or ["accessibility","screen-recording"]).
+    test("adding a permission under an already-consented class invalidates the old consent", async () => {
+      const { home, c } = await boot();
+      const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-c1-newperm-"));
+      writeMarketplace(mktDir, { id: "p", tier: "capability", permissions: { tcc: ["accessibility"] } });
+      await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+      await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+      writeConsent(home, "p@m", {
+        classes: ["tcc"],
+        fingerprint: pluginConsentFingerprint(mktDir, { tcc: ["accessibility"], requiredConsents: ["tcc"] }),
+      });
+      expect((await c.request(METHODS.pluginList, {})).result.plugins[0].extras.consented).toEqual(["tcc"]);
+
+      // Same install path, same required CLASS ("tcc") -- but the tcc LIST grew a new permission the
+      // user never saw disclosed.
+      writeFileSync(join(mktDir, "winter-plugin.json"), JSON.stringify({
+        id: "p", tier: "capability", permissions: { tcc: ["accessibility", "screen-recording"] },
+      }));
+
+      const listRes = await c.request(METHODS.pluginList, {});
+      expect(listRes.result.plugins[0].extras.requiredConsents).toEqual(["tcc"]); // unchanged at the class level
+      expect(listRes.result.plugins[0].extras.consented).toEqual([]); // yet no longer consented
+    });
+
     test("uninstalling the last scope clears the stored consent", async () => {
       const { home, c } = await boot();
       const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-c1-uninstall-"));
@@ -259,7 +299,7 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
       await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
       writeConsent(home, "p@m", {
         classes: ["exec"],
-        fingerprint: pluginConsentFingerprint(mktDir, { command: "bun", args: ["--version"] }),
+        fingerprint: pluginConsentFingerprint(mktDir, { entry: { command: "bun", args: ["--version"] }, requiredConsents: ["exec"] }),
       });
       expect((await c.request(METHODS.pluginList, {})).result.plugins[0].extras.consented).toEqual(["exec"]);
 
@@ -267,6 +307,45 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
 
       const settings = JSON.parse(readFileSync(join(home, "settings.json"), "utf8"));
       expect(settings.plugins?.consents?.["p@m"]).toBeUndefined();
+    });
+  });
+
+  // L5 re-review, item 2 (TOCTOU): `plugin.setConsent` must refuse a STALE disclosure -- the
+  // fingerprint the caller sends is the one it saw in the `plugin.list` listing it displayed; if the
+  // plugin's files changed between that listing and this call, the daemon recomputes a DIFFERENT
+  // fingerprint and refuses `stale_disclosure`, writing nothing.
+  describe("C2: plugin.setConsent is TOCTOU-safe", () => {
+    test("a changed entry between list and setConsent gives stale_disclosure and no write", async () => {
+      const { home, c } = await boot();
+      const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-c2-toctou-"));
+      writeMarketplace(mktDir); // tier "platform", entry {command:"bun", args:["--version"]}
+      await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+      await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+
+      const listRes = await c.request(METHODS.pluginList, {});
+      const staleFingerprint = listRes.result.plugins[0].extras.fingerprint;
+
+      // The sheet was shown with `staleFingerprint`'s disclosure -- now the entry changes underneath
+      // it, BEFORE the user's click reaches the daemon.
+      writeFileSync(join(mktDir, "winter-plugin.json"), JSON.stringify({
+        id: "p", tier: "platform", entry: { command: "sh", args: ["payload.sh"] },
+      }));
+
+      const setConsentRes = await c.request(METHODS.pluginSetConsent, {
+        spec: "p@m", classes: ["exec"], fingerprint: staleFingerprint,
+      });
+      expect(setConsentRes.result).toEqual({ code: "stale_disclosure" });
+
+      // Nothing was written -- plugins.consents has no record for this spec at all.
+      const settings = JSON.parse(readFileSync(join(home, "settings.json"), "utf8"));
+      expect(settings.plugins?.consents?.["p@m"]).toBeUndefined();
+
+      // A fresh listing's OWN fingerprint, echoed back, succeeds.
+      const freshFingerprint = (await c.request(METHODS.pluginList, {})).result.plugins[0].extras.fingerprint;
+      const retryRes = await c.request(METHODS.pluginSetConsent, {
+        spec: "p@m", classes: ["exec"], fingerprint: freshFingerprint,
+      });
+      expect(retryRes.result).toEqual({ ok: true });
     });
   });
 
@@ -334,6 +413,21 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
         { event: "PreToolUse", type: "command", command: "echo pre" },
         { event: "Stop", type: "command", command: "echo stop" },
       ]);
+    });
+
+    // L5 re-review, item 3: "no hooks declared" is a KNOWN state (`[]`), distinct from "couldn't
+    // read/parse" (absent) -- a plugin with neither hooks/hooks.json nor a claude manifest at all
+    // still gets a wire-visible `hooks: []`, never an omitted key.
+    test("declares no hooks at all -> an explicit empty array, not an absent field", async () => {
+      const { c } = await boot();
+      const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-hooks-none-"));
+      writeMarketplace(mktDir, { id: "p", tier: "capability" }); // no hooks/hooks.json, no .claude-plugin/plugin.json
+      await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+      await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+
+      const listRes = await c.request(METHODS.pluginList, {});
+      expect(listRes.result.plugins[0]).toHaveProperty("hooks");
+      expect(listRes.result.plugins[0].hooks).toEqual([]);
     });
 
     test("a malformed hooks.json degrades to an absent hooks field, never throws", async () => {
@@ -409,7 +503,8 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
     // Not consented for the entry process yet — install/enable alone never hot-spawns it.
     await c.request(METHODS.pluginEnable, { spec: "p@m", scope: "user" });
 
-    const setConsent = await c.request(METHODS.pluginSetConsent, { spec: "p@m", classes: ["exec"] });
+    const fingerprint = pluginConsentFingerprint(mktDir, { entry: { command: "bun", args: ["--version"] }, requiredConsents: ["exec"] });
+    const setConsent = await c.request(METHODS.pluginSetConsent, { spec: "p@m", classes: ["exec"], fingerprint });
     expect(setConsent.result).toEqual({ ok: true });
 
     const enableRes = await c.request(METHODS.pluginEnable, { spec: "p@m", scope: "user" });
@@ -427,7 +522,10 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
     writeMarketplace(mktDir);
     await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
     await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
-    await c.request(METHODS.pluginSetConsent, { spec: "p@m", classes: ["exec"] });
+    await c.request(METHODS.pluginSetConsent, {
+      spec: "p@m", classes: ["exec"],
+      fingerprint: pluginConsentFingerprint(mktDir, { entry: { command: "bun", args: ["--version"] }, requiredConsents: ["exec"] }),
+    });
     await c.request(METHODS.pluginEnable, { spec: "p@m", scope: "user" }); // hot-spawns via the real supervisor
 
     const projectDir = mkdtempSync(join(tmpdir(), "winter-plugin-uninstall-project-"));
@@ -451,7 +549,10 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
     await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "project", cwd: projectDir });
     // Consent is scope-independent (Winter's own <home>/settings.json store, spec §5.4) -- one call
     // covers both scopes' installs of the same spec.
-    await c.request(METHODS.pluginSetConsent, { spec: "p@m", classes: ["exec"] });
+    await c.request(METHODS.pluginSetConsent, {
+      spec: "p@m", classes: ["exec"],
+      fingerprint: pluginConsentFingerprint(mktDir, { entry: { command: "bun", args: ["--version"] }, requiredConsents: ["exec"] }),
+    });
     await c.request(METHODS.pluginEnable, { spec: "p@m", scope: "user" }); // hot-spawns (livePlugins() is user-scope)
     await c.request(METHODS.pluginEnable, { spec: "p@m", scope: "project", cwd: projectDir });
 
@@ -537,7 +638,11 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
     // of which sdk file the enabled flag is in) — a project-scope listing carries it too.
     expect(listRes.result.plugins).toEqual([{
       id: "p", installPath: mktDir, scope: "project", enabled: true, marketplace: "m",
-      extras: { tier: "platform", requiredConsents: ["exec"], consented: [], entry: { command: "bun", args: ["--version"] } },
+      extras: {
+        tier: "platform", requiredConsents: ["exec"], consented: [], entry: { command: "bun", args: ["--version"] },
+        fingerprint: pluginConsentFingerprint(mktDir, { entry: { command: "bun", args: ["--version"] }, requiredConsents: ["exec"] }),
+      },
+      hooks: [],
     }]);
   });
 
@@ -567,7 +672,7 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
       [METHODS.pluginMarketplaceRemove, { name: "m" }],
       [METHODS.pluginMarketplaceList, {}],
       [METHODS.pluginMarketplaceUpdate, {}],
-      [METHODS.pluginSetConsent, { spec: "p@m", classes: ["exec"] }],
+      [METHODS.pluginSetConsent, { spec: "p@m", classes: ["exec"], fingerprint: "deadbeef" }],
     ];
     for (const [method, params] of calls) {
       const res = await plugin.request(method, params);

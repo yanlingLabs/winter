@@ -103,7 +103,10 @@ describe("convertLegacyPlugins: maps fields and hook events; the original stays 
     // converted install path + the SAME entry the narrowed winter-plugin.json ended up with — so it
     // reads as consented from the start, never forcing a needless re-consent right after migration.
     const settings = JSON.parse(readFileSync(join(h, "settings.json"), "utf8"));
-    const demoFingerprint = pluginConsentFingerprint(targetDir, { command: "bun", args: ["index.ts"] });
+    const demoFingerprint = pluginConsentFingerprint(targetDir, {
+      entry: { command: "bun", args: ["index.ts"] },
+      tcc: ["accessibility"], hardware: ["battery"], requiredConsents: ["exec", "tcc", "hardware"],
+    });
     expect(settings.plugins.consents).toEqual({ "demo@winter-legacy": { classes: ["tcc", "hardware"], fingerprint: demoFingerprint } });
 
     // PluginStore (the daemon's own sync reader) sees the converted, enabled plugin with its
@@ -132,7 +135,10 @@ describe("convertLegacyPlugins: maps fields and hook events; the original stays 
     const targetDir = result.converted[0]!.installPath;
 
     const settings = JSON.parse(readFileSync(join(h, "settings.json"), "utf8"));
-    const soloFingerprint = pluginConsentFingerprint(targetDir, { command: "bun" });
+    const soloFingerprint = pluginConsentFingerprint(targetDir, {
+      entry: { command: "bun" },
+      tcc: ["accessibility"], hardware: ["battery"], requiredConsents: ["exec", "tcc", "hardware"],
+    });
     expect(settings.plugins.consents).toEqual({ "solo@winter-legacy": { classes: ["tcc", "hardware"], fingerprint: soloFingerprint } });
     expect(settings.plugins.consents["solo@winter-legacy"].classes).not.toContain("exec");
   });
@@ -154,7 +160,7 @@ describe("convertLegacyPlugins: maps fields and hook events; the original stays 
     const targetDir = result.converted[0]!.installPath;
 
     const settings = JSON.parse(readFileSync(join(h, "settings.json"), "utf8"));
-    const onlyExecFingerprint = pluginConsentFingerprint(targetDir, { command: "bun" });
+    const onlyExecFingerprint = pluginConsentFingerprint(targetDir, { entry: { command: "bun" }, requiredConsents: ["exec"] });
     expect(settings.plugins.consents).toEqual({ "onlyexec@winter-legacy": { classes: [], fingerprint: onlyExecFingerprint } });
   });
 

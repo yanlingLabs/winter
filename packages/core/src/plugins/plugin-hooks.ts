@@ -13,6 +13,13 @@
 //
 // This is a TOP-LEVEL `plugin.list` field (protocol/methods.ts's `PluginListingSchema.hooks`), a
 // SIBLING of `extras`, not nested in it.
+//
+// L5 re-review, item 3 (semantics): `hooks: []` means "the daemon successfully checked and this
+// plugin declares no hooks" -- a MISSING file (the common case; most plugins have neither) is a
+// legitimate, readable "nothing from this source", not a failure. The field is OMITTED only when the
+// daemon genuinely couldn't determine the true state -- a file that exists but fails to parse as
+// JSON, isn't a JSON object, or whose own `hooks` field isn't a plain object either. A caller must be
+// able to tell "this plugin has no hooks" (`[]`) apart from "the daemon couldn't read them" (absent).
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -32,14 +39,23 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-function readJsonObjectIfPresent(path: string): Record<string, unknown> | undefined {
+/** One source's read outcome: `ok: true` covers BOTH "the file is absent" and "the file parsed and
+ *  its `hooks` field is a valid (possibly empty) event map" -- both are legitimate, known states.
+ *  `ok: false` is reserved for a genuine failure: the file exists but isn't valid JSON, isn't a JSON
+ *  object, or its own `hooks` field is present but isn't a plain object either. */
+function readHookSource(path: string): { ok: boolean; hooks: PluginHookEntry[] } {
+  if (!existsSync(path)) return { ok: true, hooks: [] };
+  let raw: unknown;
   try {
-    if (!existsSync(path)) return undefined;
-    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-    return isPlainObject(parsed) ? parsed : undefined;
+    raw = JSON.parse(readFileSync(path, "utf8"));
   } catch {
-    return undefined; // absent OR malformed both degrade to "nothing from this source" -- never throw
+    return { ok: false, hooks: [] };
   }
+  if (!isPlainObject(raw)) return { ok: false, hooks: [] };
+  const hooksField = raw.hooks;
+  if (hooksField === undefined) return { ok: true, hooks: [] }; // no hooks declared at all -- fine
+  if (!isPlainObject(hooksField)) return { ok: false, hooks: [] }; // declared, but garbled
+  return { ok: true, hooks: flattenHookEventMap(hooksField) };
 }
 
 /**
@@ -77,18 +93,17 @@ function flattenHookEventMap(eventMap: unknown): PluginHookEntry[] {
  * `plugin.list`'s `hooks` field for one installed plugin: the UNION of `hooks/hooks.json` and the
  * claude manifest's (`.claude-plugin/plugin.json`) own inline `hooks` field -- "load both, as claude
  * does" (fix round 2 ruling). Capped at `MAX_HOOKS_PER_PLUGIN` entries total (file's entries first,
- * then the manifest's) and `MAX_HOOK_COMMAND_CHARS` per command. `undefined` when neither source
- * yields anything -- an absent field, never an empty array, matching `extras`'s own "nothing to say"
- * convention -- and NEVER throws: a missing or malformed file at either path silently contributes
- * nothing from that source rather than failing the whole `plugin.list` call.
+ * then the manifest's) and `MAX_HOOK_COMMAND_CHARS` per command.
+ *
+ * Returns `[]` when both sources were readable (present-and-valid OR simply absent) but declare no
+ * hooks -- "this plugin has no hooks" is a known, positive fact. Returns `undefined` ONLY when EITHER
+ * source exists but fails to parse/validate -- the daemon genuinely doesn't know the true state, so
+ * it says nothing rather than claiming an empty list it can't back up (L5 re-review, item 3). NEVER
+ * throws.
  */
 export function pluginHooksFor(installPath: string): PluginHookEntry[] | undefined {
-  const fileRaw = readJsonObjectIfPresent(join(installPath, "hooks", "hooks.json"));
-  const fromFile = fileRaw ? flattenHookEventMap(fileRaw.hooks) : [];
-
-  const manifestRaw = readJsonObjectIfPresent(join(installPath, ".claude-plugin", "plugin.json"));
-  const fromManifest = manifestRaw ? flattenHookEventMap(manifestRaw.hooks) : [];
-
-  const combined = [...fromFile, ...fromManifest].slice(0, MAX_HOOKS_PER_PLUGIN);
-  return combined.length > 0 ? combined : undefined;
+  const file = readHookSource(join(installPath, "hooks", "hooks.json"));
+  const manifest = readHookSource(join(installPath, ".claude-plugin", "plugin.json"));
+  if (!file.ok || !manifest.ok) return undefined;
+  return [...file.hooks, ...manifest.hooks].slice(0, MAX_HOOKS_PER_PLUGIN);
 }

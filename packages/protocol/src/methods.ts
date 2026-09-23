@@ -1397,12 +1397,18 @@ export const PluginRemoveResult = z.union([
  *  WS-21 fix round 2 (C2): `spec` (the qualified `"<name>@<marketplace>"` compound key), not a bare
  *  `name` — the pre-fix param looked a plugin up by bare name (`livePlugins().find(pl => pl.name ===
  *  p.name)`), so consent granted for `foo@B` was recorded against whichever `foo@*` happened to be
- *  installed, including `foo@A`. The daemon computes and stores the fingerprint
- *  (`plugins/consent-fingerprint.ts`, C1) when it records consent under this exact spec. */
-export const PluginSetConsentParams = z.object({ spec: z.string().min(1), classes: z.array(z.string()) });
+ *  installed, including `foo@A`.
+ *
+ *  L5 re-review (TOCTOU): `fingerprint` is the disclosure fingerprint the caller saw in the
+ *  `plugin.list` listing it displayed (`PluginListingExtrasSchema.fingerprint`,
+ *  `plugins/consent-fingerprint.ts`) — the daemon recomputes it fresh and refuses `stale_disclosure`
+ *  (writing nothing) when it no longer matches, so a plugin's files changing between "the sheet was
+ *  shown" and "the user clicked consent" can never grant consent for something the user never saw. */
+export const PluginSetConsentParams = z.object({ spec: z.string().min(1), classes: z.array(z.string()), fingerprint: z.string().min(1) });
 export const PluginSetConsentResult = z.union([
   z.object({ ok: z.literal(true) }),
   z.object({ code: z.literal("unknown_plugin") }),
+  z.object({ code: z.literal("stale_disclosure") }),
 ]);
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1446,6 +1452,11 @@ export const PluginListingExtrasSchema = z.object({
   requiredConsents: z.array(z.enum(["exec", "tcc", "hardware"])),
   consented: z.array(z.enum(["exec", "tcc", "hardware"])),
   entry: z.object({ command: z.string(), args: z.array(z.string()).optional() }).optional(),
+  /** L5 re-review (TOCTOU): the fingerprint of THIS disclosure (install path + entry +
+   *  permissions.tcc/hardware + requiredConsents, `plugins/consent-fingerprint.ts`) — a consent UI
+   *  echoes this back verbatim as `plugin.setConsent`'s own `fingerprint` param; the daemon refuses
+   *  `stale_disclosure` when it no longer matches what it recomputes at consent time. */
+  fingerprint: z.string(),
 });
 /** WS-21 fix round 2: `plugin.list`'s `hooks` — TOP-LEVEL (a sibling of `extras`, not nested in it),
  *  because a claude-format plugin with no `winter-plugin.json` at all still carries hooks (they're

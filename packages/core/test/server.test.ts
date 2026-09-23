@@ -1349,6 +1349,9 @@ describe("daemon IPC", () => {
       // fixed `join(home, "test-mkt", id)` install path and its always-entry-less manifest (every
       // seeded plugin here is tier "capability", never "platform"/entry).
       consents?: Record<string, Array<"exec" | "tcc" | "hardware">>;
+      /** L5 re-review: the manifest's `permissions.hardware` list `seedBatteryPlugin`'s CALLER is
+       *  about to write — default `["battery"]` matches `seedBatteryPlugin`'s own default. */
+      hardwarePermission?: string[];
       timeoutMs?: number;
     } = {}): Promise<{
       store: SessionStore; socketPath: string; harnessToken: string; home: string; stop: () => void;
@@ -1381,18 +1384,26 @@ describe("daemon IPC", () => {
       // id (the pre-WS-21 convention), so re-key here, once, against `seedBatteryPlugin`'s OWN fixed
       // marketplace name ("test-mkt") rather than touch every call site. C1 fix round 2: the record
       // is fingerprinted here too, off the SAME `join(home, "test-mkt", id)` path `seedBatteryPlugin`
-      // installs to and an undefined entry (these fixtures never declare a Tier-2 entry point). The
-      // dir is pre-created (mkdirSync, `seedBatteryPlugin`'s own recursive:true tolerates it existing
-      // already) so `pluginConsentFingerprint`'s `realpathSync` resolves the SAME canonical path here
-      // and later inside `PluginStore#list()` — computing it against a not-yet-existing directory
-      // would fall back to the UNRESOLVED path here while `list()` resolves the REAL one once
-      // `seedBatteryPlugin` has actually created it, a spurious mismatch that is a test-fixture
-      // ordering artifact, not anything the production code itself can hit (a plugin is always on
-      // disk before the daemon ever computes its fingerprint).
+      // installs to. The dir is pre-created (mkdirSync, `seedBatteryPlugin`'s own recursive:true
+      // tolerates it existing already) so `pluginConsentFingerprint`'s `realpathSync` resolves the
+      // SAME canonical path here and later inside `PluginStore#list()` — computing it against a
+      // not-yet-existing directory would fall back to the UNRESOLVED path here while `list()`
+      // resolves the REAL one once `seedBatteryPlugin` has actually created it, a spurious mismatch
+      // that is a test-fixture ordering artifact, not anything the production code itself can hit (a
+      // plugin is always on disk before the daemon ever computes its fingerprint).
+      //
+      // L5 re-review (full disclosure): the fingerprint now also covers the manifest's declared
+      // `permissions.hardware` + `requiredConsents` — `opts.hardwarePermission` mirrors what the
+      // CALLER is about to pass `seedBatteryPlugin` (default `["battery"]`, matching that function's
+      // own default); the one test that seeds EMPTY permissions passes `hardwarePermission: []` here
+      // to keep the two in agreement.
+      const hardwarePermission = opts.hardwarePermission ?? ["battery"];
+      const requiredConsents = hardwarePermission.length > 0 ? ["hardware"] : [];
       const consents = Object.fromEntries(
         Object.entries(opts.consents ?? {}).map(([id, classes]) => {
           mkdirSync(join(home, "test-mkt", id), { recursive: true });
-          return [`${id}@test-mkt`, { classes, fingerprint: pluginConsentFingerprint(join(home, "test-mkt", id), undefined) }];
+          const fingerprint = pluginConsentFingerprint(join(home, "test-mkt", id), { hardware: hardwarePermission, requiredConsents });
+          return [`${id}@test-mkt`, { classes, fingerprint }];
         }),
       );
       const plugins = new PluginStore({ winterHome: home, consents });
@@ -1510,7 +1521,12 @@ describe("daemon IPC", () => {
 
       const harness = await TestClient.connect(srv.socketPath);
       await harness.hello(srv.harnessToken, "cli-setconsent-hw");
-      const setConsent = await harness.request(METHODS.pluginSetConsent, { spec: "battery-limiter@test-mkt", classes: ["hardware"] });
+      // L5 re-review (TOCTOU): fingerprint must match seedBatteryPlugin's own default manifest
+      // (permissions.hardware: ["battery"], no entry -- tier "capability").
+      const fingerprint = pluginConsentFingerprint(join(srv.home, "test-mkt", "battery-limiter"), {
+        hardware: ["battery"], requiredConsents: ["hardware"],
+      });
+      const setConsent = await harness.request(METHODS.pluginSetConsent, { spec: "battery-limiter@test-mkt", classes: ["hardware"], fingerprint });
       expect(setConsent.result).toEqual({ ok: true });
 
       const provider = await connectProvider(srv.socketPath, srv.harnessToken, "hw-provider-2");
@@ -1524,7 +1540,7 @@ describe("daemon IPC", () => {
     });
 
     test("unconsented plugin (consented, but manifest doesn't declare the battery permission) → typed consent_denied naming the missing permission class", async () => {
-      const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] } });
+      const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] }, hardwarePermission: [] });
       seedBatteryPlugin(srv.home, "battery-limiter", {}); // permissions.hardware omitted entirely
       const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
 
