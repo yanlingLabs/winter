@@ -185,8 +185,10 @@ export function refusalMayBeCredentialShaped(reason: string): boolean {
  * verbatim — see `WinterOptionsInput.userAllow`). `userAllow` is omitted when the key is absent, so an
  * untouched home's `Options` are byte-identical to before.
  */
-function userRulesFrom(home: string): { userAllow?: readonly string[]; userDeny: readonly string[] } {
-  const allow = sdkAllowRules(home);
+function userRulesFrom(home: string, runHomeApplied: boolean): { userAllow?: readonly string[]; userDeny: readonly string[] } {
+  // WS-21 (L3.4): on a run-home incarnation the user's allow rules ride the run folder's settings; the
+  // deny rules stay stated here too (a redundant deny is harmless; the floor is never thinned).
+  const allow = runHomeApplied ? undefined : sdkAllowRules(home);
   return { ...(allow === undefined ? {} : { userAllow: allow }), userDeny: sdkDenyRules(home) };
 }
 
@@ -559,6 +561,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
 
     const optionsFor = async (inc: WinterIncarnationShape) => {
       const live = deps.store.meta(sessionId);
+      // WS-21 (spec §3.1, §6.1): the ONE place that knows whether this incarnation runs on a run home —
+      // the builders below stop building what the run folder carries when it does.
+      const runHomeApplied = deps.runHome !== undefined;
       const settings = deps.settings();
       const hook = runtime.spawnHookFor(mode);
       if (hook instanceof Error) throw new WinterLegRefusal("winter_executable_unavailable", hook.message);
@@ -672,7 +677,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // disabled plugin or a toggled `Skill(<name>)` deny rule reaches the next child, no restart.
       // The model sees ONE listing: the child's own `skill_listing` attachment, built from exactly
       // this set (`winterSystemPromptFor` no longer renders the daemon's).
-      const skillSurface = mode === "code" && deps.skills !== undefined
+      // WS-21 (L3.4): on a run-home incarnation the run folder carries the skills (and plugins load natively
+      // from `enabledPlugins`), so no daemon-built surface is handed over.
+      const skillSurface = !runHomeApplied && mode === "code" && deps.skills !== undefined
         ? deps.skills.childSkillSurface({ cwd: primary ?? deps.tmpDirOf(sessionId), deny: sdkDenyRules(home) })
         : undefined;
       const systemPrompt = deps.assembler === undefined ? undefined : winterSystemPromptFor(deps.assembler, {
@@ -682,13 +689,17 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // chat's and dispatch's base prompts NAME their search tool, and the prompt must name the one
         // `disallowedTools` and the capability server actually gave this incarnation.
         exaKeyPresent: exaPresent,
+        // WS-21 (L3.4): the run folder carries the instructions, the output style and the code memory.
+        ...(runHomeApplied ? { runHomeApplied: true } : {}),
       });
       // P8b-36 obligation: any other server merged into the same record must not shadow a
       // daemon-owned one. Since the fix wave the configured user/project MCP servers ARE merged
       // here, so the guard is live: a `settings.mcpServers` key spelled `winter__browser` refuses
       // this session TYPED (the message names the server) rather than handing the model a
       // `browser` that is not Winter's under Winter's name. The user fixes the key; settings are hot.
-      const extra = deps.extraMcpServers?.(capSession) ?? {};
+      // WS-21 (L3.4): on a run-home incarnation the configured servers (user, local, trusted project) are
+      // the run folder's `.winter.json`; only the daemon's capability servers ride `Options.mcpServers`.
+      const extra = runHomeApplied ? {} : (deps.extraMcpServers?.(capSession) ?? {});
       try { assertNoCapabilityCollision(extra, capabilities); } catch (err) {
         throw new WinterLegRefusal("winter_leg_unavailable", err instanceof Error ? err.message : String(err));
       }
@@ -843,12 +854,14 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // over user, by name) instead of the user tier alone winning outright. `mergedAgentDefinitions`
         // is the SAME helper the official leg's `inputDeps()` calls below, so both legs see the
         // identical merged map from one owner.
-        agents: mergedAgentDefinitions(home, cwd, deps.projectAgentDefinitions),
+        // WS-21 (L3.4): on a run-home incarnation the agents are the run folder's (copies, spec §3.3).
+        ...(runHomeApplied ? {} : { agents: mergedAgentDefinitions(home, cwd, deps.projectAgentDefinitions) }),
         ...(skillSurface === undefined ? {} : { plugins: skillSurface.plugins, skills: skillSurface.skills }),
         // Lane B: the user's SAVED allow rules, live and trust-gated (`WinterLegDeps.persistedAllowRules`).
-        ...(deps.persistedAllowRules === undefined ? {} : { persistedAllow: deps.persistedAllowRules(cwd) }),
+        ...(runHomeApplied || deps.persistedAllowRules === undefined ? {} : { persistedAllow: deps.persistedAllowRules(cwd) }),
         // WS-21: the user tier's allow and deny rules, read live from `sdk/settings.json` (claude grammar).
-        ...userRulesFrom(home),
+        ...userRulesFrom(home, runHomeApplied),
+        ...(runHomeApplied ? { runHomeApplied: true } : {}),
       });
       // WS-21 (spec §3.1): LAST, so a refusal above never leaves a run folder behind. The router's Winter
       // overload reads `options.runtime.runHome` and applies it synchronously; `WinterSession` disposes it
@@ -1046,6 +1059,8 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
 
     const inputDeps = async (): Promise<OfficialInputDeps> => {
       const live = deps.store.meta(sessionId);
+      // WS-21 (L3.4): the same single fact as the Winter leg's `optionsFor`.
+      const runHomeApplied = deps.runHome !== undefined;
       const capSession = capSessionFor();
       const capabilities = deps.buildSessionCapabilities(capSession);
       const hooks = deps.hooksFor?.(capSession).official;
@@ -1055,13 +1070,13 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // The collision guard is identical to the Winter leg's own (`assertNoCapabilityCollision`,
       // P8b-36 obligation): a configured server named exactly like a daemon-owned `winter__<key>`
       // server refuses the SESSION typed, here just as much as there.
-      const configuredMcpServers = deps.extraMcpServers?.(capSession) ?? {};
+      const configuredMcpServers = runHomeApplied ? {} : (deps.extraMcpServers?.(capSession) ?? {});
       try { assertNoCapabilityCollision(configuredMcpServers, capabilities); } catch (err) {
         throw new WinterLegRefusal("winter_leg_unavailable", err instanceof Error ? err.message : String(err));
       }
       // Router 0.0.9: the SAME merged (project-over-user) subagent map the Winter leg's `optionsFor`
       // carries — one owner, one merge, both legs (`mergedAgentDefinitions`, above).
-      const agents = mergedAgentDefinitions(deps.home, capSession.cwd, deps.projectAgentDefinitions);
+      const agents = runHomeApplied ? {} : mergedAgentDefinitions(deps.home, capSession.cwd, deps.projectAgentDefinitions);
       // The SAME credential read `optionsFor` (the Winter incarnation builder, above) makes per
       // incarnation — `officialCredentialPlan`'s auto-derivation (`official-options.ts`) needs this
       // provider's `authRef` to inject `ANTHROPIC_API_KEY` at spawn.
@@ -1133,14 +1148,15 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         agents,
         // Lane B: the SAME saved-rule read the Winter leg's `optionsFor` makes, for this leg's
         // flag-settings `permissions.allow` (translated there by the same `sdkAllowRulesFor`).
-        ...(deps.persistedAllowRules === undefined ? {} : { persistedAllow: deps.persistedAllowRules(capSession.cwd) }),
+        ...(runHomeApplied || deps.persistedAllowRules === undefined ? {} : { persistedAllow: deps.persistedAllowRules(capSession.cwd) }),
         // WS-21: the SAME live `sdk/settings.json` read the Winter leg's `optionsFor` makes.
-        ...userRulesFrom(deps.home),
+        ...userRulesFrom(deps.home, runHomeApplied),
+        ...(runHomeApplied ? { runHomeApplied: true } : {}),
         // Lane B (router 0.0.11): the SAME skills-only plugin views the Winter leg's child gets —
         // enabled + `exec`-consented plugins only (`SkillStore.childSkillSurface`) — handed to claude
         // through the router's `plugins` policy, plus the deny rules under claude's own skill spelling.
         ...(() => {
-          if (mode !== "code" || deps.skills === undefined) return {};
+          if (runHomeApplied || mode !== "code" || deps.skills === undefined) return {};
           const surface = deps.skills.childSkillSurface({ cwd: capSession.cwd, deny: sdkDenyRules(deps.home) });
           return { skillPlugins: surface.plugins, skillDenyAliases: surface.officialDeny };
         })(),

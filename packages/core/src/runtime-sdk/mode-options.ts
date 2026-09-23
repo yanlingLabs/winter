@@ -331,6 +331,16 @@ export interface WinterOptionsInput {
    *  so the deny rules now arrive as `userDeny` below, never off this object.) Still just an input the
    *  caller passes in — `buildWinterOptions` never reads a file itself. */
   settings?: Settings | null;
+  /**
+   * WS-21 (spec §6.1, L3.4): the router APPLIES a run home to this incarnation (`options.runtime.runHome`,
+   * set by `session-driver.ts` when the linked router builds them). Then the child reads its inputs from
+   * the per-run folder, and this builder stops building them: no `agents`, no `plugins`/`skills`, no saved
+   * allow rules (`userAllow`/`persistedAllow` — Winter's FIXED allow rules stay), no `WINTER_HOME` (the
+   * router sets it to the run folder) and `settingSources: ["user"]` (the one value the router accepts
+   * beside a run home, and never the SDK's absent-means-every-tier default). Deny rules, the sandbox, the
+   * capability servers and the hooks are the daemon's floor and stay. Absent/false: exactly as before.
+   */
+  runHomeApplied?: boolean;
   /** WS-21: the user's `sdk/settings.json` `permissions.deny` (`sdkDenyRules`), claude grammar,
    *  verbatim — read live by the caller and layered onto the fixed control-plane fence
    *  (`permissionDenyRulesFor`). Absent ⇒ none. */
@@ -446,7 +456,12 @@ export function buildChildEnv(input: WinterOptionsInput): Record<string, string>
   // which let a caller-supplied `input.env.WINTER_HOME` silently override the one value CLAUDE.md's
   // hard rule depends on — a test session would then have written a real transcript under
   // `~/.winter`. `input.env` is for extras; the home and profile are not negotiable.
-  env.WINTER_HOME = input.home;
+  //
+  // WS-21: on a run-home incarnation the ROUTER pins the home — `WINTER_HOME = runHome.dir` (and the
+  // store, plugin-cache, provider-managed and cron variables), laid over this env — so none may come
+  // from here, a caller's `input.env` included (the env allowlist refuses them anyway).
+  if (input.runHomeApplied === true) delete env.WINTER_HOME;
+  else env.WINTER_HOME = input.home;
   env.WINTER_PROFILE = input.profile ?? "";
   // The scripted in-process double (Winter map §11.6): selection is BY NAME, because a spawned or
   // compiled child shares no module state with the test process. Set ONLY for a `winter-test/*`
@@ -992,7 +1007,9 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
       //    writes back in plan whatever the allow list says;
       //  - a DISPATCH session's children run in CODE mode, so they receive the saved rules too — the
       //    same as claude's headless mode applying its settings files' `permissions.allow`.
-      ...(input.mode === "code" ? { allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES, ...(input.userAllow ?? []), ...sdkAllowRulesFor(input.persistedAllow ?? [])])] } : {}),
+      // WS-21: on a run-home incarnation the SAVED rules reach the child through the run folder's own
+      // settings tiers (user, trusted project, local), so only Winter's fixed rules are stated here.
+      ...(input.mode === "code" ? { allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES, ...(input.runHomeApplied === true ? [] : [...(input.userAllow ?? []), ...sdkAllowRulesFor(input.persistedAllow ?? [])])])] } : {}),
       deny: permissionDenyRulesFor(input.home, input.userDeny),
       disableBypassPermissionsMode: !bypassAllowedAtSpawn(input.policy),
     },
@@ -1033,7 +1050,11 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     // the daemon doing the same. So this stays `[]`, and the skills the old discovery would have found
     // reach the child through the one door `[]` leaves open instead: `plugins`/`skills` below
     // (`SkillStore.childSkillSurface`), which the SDK's index does not source-gate.
-    settingSources: [],
+    //
+    // WS-21 (spec §3.5): on a run-home incarnation the child reads the router-built folder as its user
+    // tier — `["user"]`, the one value the router accepts beside a run home (it refuses `project` and
+    // `local`, and `"user"` without a run folder). Stated, never left absent: absent means all three.
+    settingSources: input.runHomeApplied === true ? ["user"] : [],
   };
   if (input.spawn.spawnClaudeCodeProcess) options.spawnClaudeCodeProcess = input.spawn.spawnClaudeCodeProcess;
   // WS-20 (§0.1 Spawn boundary): the Winter leg's `Options.model` is the BARE modelId, split from
@@ -1109,9 +1130,10 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
   // Item 3: empty is treated the same as absent — an EMPTY `agents: {}` is not "no agents"
   // byte-identically to a session before this field existed the way `undefined` is, so both are
   // normalized to "no key at all" here rather than leaving that distinction to every caller.
-  if (input.agents !== undefined && Object.keys(input.agents).length > 0) options.agents = { ...input.agents };
+  // WS-21: on a run-home incarnation the agents, plugins and skills are the run folder's (`runHomeApplied`).
+  if (input.runHomeApplied !== true && input.agents !== undefined && Object.keys(input.agents).length > 0) options.agents = { ...input.agents };
   // B1: the daemon's resolved plugin skills — see `WinterOptionsInput.plugins` for the omission rule.
-  if (input.plugins !== undefined && input.plugins.length > 0) {
+  if (input.runHomeApplied !== true && input.plugins !== undefined && input.plugins.length > 0) {
     options.plugins = input.plugins.map((p) => ({ ...p }));
     options.skills = [...(input.skills ?? [])];
   }
