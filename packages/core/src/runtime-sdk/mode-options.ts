@@ -933,6 +933,14 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
       // …then the user's SAVED rules (`persistedAllowRulesFor` → `sdkAllowRulesFor`), code mode only:
       // they are answers to code-mode cards, chat's policy is fixed and dispatch never cards. Deny
       // still comes first in the runtime, so none of them can open the fence stated just below.
+      //
+      // Two consequences, DOCUMENTED rather than changed (whole-branch review minors a/b — the official
+      // leg IS claude, and claude parity is the ruling):
+      //  - under `plan`, the two legs differ: claude applies saved allow rules in plan mode (its own
+      //    behaviour, and the official leg sends it the same list), while the Winter SDK still holds
+      //    writes back in plan whatever the allow list says;
+      //  - a DISPATCH session's children run in CODE mode, so they receive the saved rules too — the
+      //    same as claude's headless mode applying its settings files' `permissions.allow`.
       ...(input.mode === "code" ? { allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES, ...sdkAllowRulesFor(input.persistedAllow ?? [])])] } : {}),
       deny: permissionDenyRulesFor(input.home, input.settings),
       disableBypassPermissionsMode: !bypassAllowedAtSpawn(input.policy),
