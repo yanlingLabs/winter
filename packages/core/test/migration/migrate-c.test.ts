@@ -402,6 +402,34 @@ describe("both phases", () => {
     expect((await planMigrationC(home)).needed).toBe(false);
   });
 
+  // Round 4: phase 2 runs right away only when NOTHING is left for a door to reconcile — no official working
+  // copy, and no claude staging root the daemon's boot sweep may still reconcile (it must run first: phase 2
+  // re-keys transcripts, and a staging copy swept after that would be appended into an orphan).
+  test("round 4: a claude staging root in the scan root leaves phase 2 to the daemon's late site", async () => {
+    const { home } = fixture({ officialExtra: false });
+    const scan = realpathSync(mkdtempSync(join(tmpdir(), "winter-migc-scan-")));
+    mkdirSync(join(scan, "claude-resume-x", "projects"), { recursive: true });
+    expect((await runMigrationC(home, deps({ claudeResumeScanRoot: scan }))).status).toBe("phase1-complete");
+    const { home: other } = fixture({ officialExtra: false });
+    expect((await runMigrationC(other, deps({ claudeResumeScanRoot: realpathSync(mkdtempSync(join(tmpdir(), "winter-migc-scan-"))) }))).status).toBe("complete");
+  });
+
+  // Round 5: with no router door (the runtime spine offline, the router failed) the late site cannot sweep, so
+  // phase 2 must not re-key while a claude staging root exists — the next healthy boot would sweep that root
+  // at the OLD key and recreate the orphan. Refused typed, like an official working copy with no door.
+  test("round 5: no door + a claude staging root: phase 2 refuses typed and re-keys nothing; with a door it finishes", async () => {
+    const { home } = fixture({ officialExtra: false });
+    const scan = realpathSync(mkdtempSync(join(tmpdir(), "winter-migc-scan5-")));
+    mkdirSync(join(scan, "claude-resume-y", "projects"), { recursive: true });
+    expect((await runMigrationC(home, deps({ claudeResumeScanRoot: scan }))).status).toBe("phase1-complete");
+    await expect(finishMigrationC(home, { log: () => {}, claudeResumeScanRoot: scan })).rejects.toMatchObject({ name: "MigrationCRefused", code: "sdk_home_migration_refused" });
+    const state = migrationCState(home);
+    if (state.kind !== "parsed") throw new Error("unreachable");
+    expect(state.manifest.status).toBe("phase1-complete");
+    expect(state.manifest.steps.map((st) => st.step)).not.toContain("rekey-transcripts");
+    expect((await finishMigrationC(home, { log: () => {}, claudeResumeScanRoot: scan, reconcile: stubReconcile().reconcile })).status).toBe("complete");
+  });
+
   test("phase 1 alone is a booting state; phase 2 finishes it later", async () => {
     const { home } = fixture();
     const m1 = await runMigrationC(home, deps());

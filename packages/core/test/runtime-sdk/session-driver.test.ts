@@ -11,6 +11,9 @@ import { describe, expect, test } from "bun:test";
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { storeHomeFor, storeProjectsDir } from "../../src/agent/paths";
+import { Database } from "bun:sqlite";
+import { migrationCManifestPath, migrationCState, rollbackMigrationC } from "../../src/migration/migrate-c";
+import { setRunHomeSupportForTests } from "../../src/runtime-sdk/run-home-support";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Options, Query } from "@yanlinglabs/winter-agent-sdk";
@@ -27,7 +30,7 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { CREDENTIAL_MATERIAL_NAMES, writeCredentialMaterial } from "../../src/auth/credential-material";
 import { CORE_BRAND } from "../../src/runtime-sdk/brand";
 import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
-import { createWinterSessionDrivers, refusalMayBeCredentialShaped, type WinterLegDeps } from "../../src/runtime-sdk/session-driver";
+import { coldResumeRunHomeFor, createWinterSessionDrivers, refusalMayBeCredentialShaped, type WinterLegDeps } from "../../src/runtime-sdk/session-driver";
 import { updateSdkSettings } from "../../src/sdk-files";
 import { evictSessionsForCredential } from "../../src/runtime-sdk/credentials";
 import { unconsumedUserMessages } from "../../src/runtime-sdk/winter-session";
@@ -1269,6 +1272,63 @@ describe("WS-21 round 3: the lazy canonical-cwd re-key at resume (Winter leg)", 
       expect(again.logs.some((l) => l.includes("re-keyed") && l.includes(sid))).toBe(true);
       await resumed.end();
     } finally { again.close(); t.close(); }
+  });
+
+  // Round 4, minor 1: a lazy re-key on a MIGRATED home joins Migration C's manifest (`rekeyed`), so a rollback
+  // reverses it like the bulk step's moves — the older build finds the transcript under the raw key again.
+  test("round 4: on a migrated home the lazy move is recorded in the Migration C manifest, and rollback reverses it", async () => {
+    setRunHomeSupportForTests(true);   // the store at <home>/sdk/projects, as on every build that migrates
+    try {
+      const { t, sid, id, rawKey, canonKey } = await oldLayoutSession();
+      const archiveDir = join(t.home, "migration", "c-test");
+      mkdirSync(join(t.home, "migration", "c"), { recursive: true });
+      mkdirSync(archiveDir, { recursive: true });
+      writeFileSync(migrationCManifestPath(t.home), JSON.stringify({
+        schemaVersion: 1, home: t.home, startedAt: new Date(0).toISOString(), finishedAt: new Date(0).toISOString(), status: "complete", archiveDir,
+        steps: [{ step: "preflight", status: "done", at: new Date(0).toISOString() }],
+        backups: { settings: null, runtimeState: null, sdkSettings: null, sdkGlobal: null, splitMarker: null },
+        moved: [], links: [], copied: [], archived: [], reconciled: [],
+      }));
+      const again = table({ records: t.records, store: t.store, hub: t.hub, home: t.home });
+      try {
+        await (await again.drivers.ensure(sid))!.end();
+        const state = migrationCState(t.home);
+        if (state.kind !== "parsed") throw new Error("the manifest must still parse");
+        expect(state.manifest.rekeyed).toEqual([expect.objectContaining({ sessionId: sid, backendId: id, from: rawKey, to: canonKey, outcome: "moved" })]);
+        await rollbackMigrationC(t.home, { log: () => {} });
+        const projects = join(t.home, "sdk", "projects");
+        expect(existsSync(join(projects, rawKey, `${id}.jsonl`))).toBe(true);
+        expect(existsSync(join(projects, rawKey, id, "subagents", "agent-a.jsonl"))).toBe(true);
+        expect(existsSync(join(projects, canonKey, `${id}.jsonl`))).toBe(false);
+        const db = new Database(join(t.home, "runtimes", "runtime-state.db"), { readonly: true });
+        try { expect(db.query<{ k: string }, [string]>("SELECT transcript_project_key AS k FROM runtime_sessions WHERE winter_session_id = ?").get(sid)!.k).toBe(rawKey); } finally { db.close(); }
+      } finally { again.close(); t.close(); }
+    } finally { setRunHomeSupportForTests(undefined); }
+  });
+
+  // Round 4, minor 3: the ROUTER's own cold resume (a message delivered to an exited Winter session) builds
+  // its run home through the daemon's `runHomeFor` — never through `resume()`. It canonicalizes the cwd and
+  // runs the same lazy re-key, so that path finds the history too.
+  test("round 4: the router's cold-resume runHomeFor canonicalizes the cwd and re-keys the transcript first", async () => {
+    const { t, sid, id, real, projects, rawKey, canonKey } = await oldLayoutSession();
+    try {
+      const built: import("../../src/runtime-sdk/run-home-contract").RunHomeInput[] = [];
+      const facts: import("../../src/runtime-sdk/run-home-input").RunHomeSessionFacts[] = [];
+      const runHome: NonNullable<WinterLegDeps["runHome"]> = {
+        inputFor: (f) => { facts.push(f); return { home: t.home, mode: f.mode, dispatchChild: f.dispatchChild, leg: f.leg, cwd: f.cwd, trustedProjectRoot: null, gitRoot: null, mcpDisabled: [], reservedMcpServerNames: [], memoryDir: "/m" }; },
+        build: async (input) => { built.push(input); return { runId: "cold-1", dir: "/h/cache/runs/cold-1", sdkHome: "/h/sdk", input, effectiveSettings: {}, report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [] }, dispose: async () => {} }; },
+      };
+      const logs: string[] = [];
+      const runHomeFor = coldResumeRunHomeFor({ home: t.home, store: t.store, records: t.records, runHome, log: (l) => logs.push(l) });
+      const link = t.store.meta(sid).cwd!;
+      await runHomeFor({ sessionId: sid, leg: "winter", cwd: link, mode: "code" });
+      expect(built[0]!.cwd).toBe(real);
+      expect(facts[0]).toMatchObject({ mode: "code", dispatchChild: false, leg: "winter", cwd: real, workdirLess: false });
+      expect(existsSync(join(projects, canonKey, `${id}.jsonl`))).toBe(true);
+      expect(existsSync(join(projects, rawKey, `${id}.jsonl`))).toBe(false);
+      expect(t.records.get(sid)!.transcriptProjectKey).toBe(canonKey);
+      expect(logs.some((l) => l.includes("re-keyed") && l.includes(sid))).toBe(true);
+    } finally { t.close(); }
   });
 
   test("a collision (the canonical key already holds the transcript) moves nothing and marks the session repair-required", async () => {

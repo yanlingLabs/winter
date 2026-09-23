@@ -463,7 +463,10 @@ function writeContextStart(c: string): number {
  * elsewhere in the line is no longer taken for a write. In a segment, a write target is:
  *   * the target of an output redirect (`>`, `>>`, `>|`, `&>`; never an fd dup like `2>&1`);
  *   * for `cp`/`mv`/`ln`/`install`/`rsync`, ONLY the destination — the last operand, or the `-t`/
- *     `--target-directory` value (a copy's SOURCE is read; `mv`'s removal of it loads nothing new);
+ *     `--target-directory` value (a copy's SOURCE is read; `mv`'s removal of it loads nothing new); round 4:
+ *     `-t` inside a short-flag cluster and `--target-directory <dir>` too, and every operand after the first
+ *     once an option follows an operand;
+ *   * round 4: the command a `find -exec`/`-execdir` runs, as a segment of its own;
  *   * for `git`, nothing when the subcommand only reads (status, log, diff, show, blame, ls-files, grep),
  *     every later word otherwise;
  *   * for an in-place editor (`sed -i`, `perl -i`, gawk's `-i inplace`) and every other write verb, every
@@ -477,9 +480,17 @@ function writeContextStart(c: string): number {
  * that joins the path from pieces) is beyond its reach, and so is a write whose path is not in the command
  * at all — `git apply x.patch`, `patch < x.diff`.
  */
-export function bashProtectedWriteHit(command: string): string | undefined {
+export function bashProtectedWriteHit(command: string, depth = 0): string | undefined {
   let cwd: string | undefined;
   for (const raw of shellSegments(command)) {
+    // Round 5: a shell's `-c` string, `eval`'s argument and the same inside `find -exec` are COMMANDS — each
+    // judged as one of its own (from the cwd carried so far), before its quotes are blanked as text below.
+    if (depth < 4) {
+      for (const nested of nestedCommandStrings(shellWords(raw))) {
+        const hit = bashProtectedWriteHit(cwd === undefined ? nested : `cd ${cwd}; ${nested}`, depth + 1);
+        if (hit !== undefined) return hit;
+      }
+    }
     const seg = normaliseEscapeCommand(quotedOperatorsAsText(raw)).replace(/^[\s({]+/, "").replace(/[\s)}]+$/, "");
     if (seg.length === 0) continue;
     const words = seg.split(/\s+/);
@@ -497,26 +508,91 @@ export function bashProtectedWriteHit(command: string): string | undefined {
   return undefined;
 }
 
-/** A protected segment inside ONE write target (a single word). */
+/** Round 5: the shells whose `-c` string is a command. */
+const SHELLS: ReadonlySet<string> = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
+/** Words a command may be prefixed with and still be that command. */
+const COMMAND_PREFIXES: ReadonlySet<string> = new Set(["sudo", "env", "exec", "command", "nohup", "time", "nice"]);
+
+/** Round 5: one raw segment's words as the shell hands them to the program — split on unquoted whitespace,
+ *  quotes removed, a backslash escaping the next character. */
+function shellWords(raw: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let started = false;
+  let quote: "'" | "\"" | undefined;
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i]!;
+    if (quote === "'") { if (ch === "'") quote = undefined; else cur += ch; continue; }
+    if (quote === "\"") {
+      if (ch === "\"") quote = undefined;
+      else if (ch === "\\" && i + 1 < raw.length && /["\\$`]/.test(raw[i + 1]!)) cur += raw[++i];
+      else cur += ch;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < raw.length) { cur += raw[++i]; started = true; continue; }
+    if (ch === "'" || ch === "\"") { quote = ch; started = true; continue; }
+    if (/\s/.test(ch)) { if (started) out.push(cur); cur = ""; started = false; continue; }
+    cur += ch;
+    started = true;
+  }
+  if (started) out.push(cur);
+  return out;
+}
+
+/** Round 5: the command strings a command line runs — a shell's `-c` string (`-c` alone or in a cluster such
+ *  as `-lc`), `eval`'s arguments joined, and the same for a command `find -exec`/`-execdir`/`-ok`/`-okdir`
+ *  runs. Words as `shellWords` gives them. */
+function nestedCommandStrings(words: readonly string[]): string[] {
+  let i = 0;
+  while (i < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i]!) || COMMAND_PREFIXES.has(baseName(words[i]!)))) i += 1;
+  const verb = baseName(words[i] ?? "");
+  const rest = words.slice(i + 1);
+  if (SHELLS.has(verb)) {
+    const at = rest.findIndex((w) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(w));
+    return at >= 0 && rest[at + 1] !== undefined ? [rest[at + 1]!] : [];
+  }
+  if (verb === "eval") return rest.length === 0 ? [] : [rest.join(" ")];
+  if (verb === "find") {
+    const out: string[] = [];
+    for (let j = 0; j < rest.length; j += 1) {
+      if (!["-exec", "-execdir", "-ok", "-okdir"].includes(rest[j]!)) continue;
+      const sub: string[] = [];
+      for (j += 1; j < rest.length && rest[j] !== "+" && rest[j] !== ";"; j += 1) sub.push(rest[j]!);
+      out.push(...nestedCommandStrings(sub));
+    }
+    return out;
+  }
+  return [];
+}
+
+const baseName = (w: string): string => w.slice(w.lastIndexOf("/") + 1).toLowerCase();
+
+/** A protected segment inside ONE write target (a single word). *//** A protected segment inside ONE write target (a single word). */
 const PROTECTED_BASH_TARGET = /\.winter\/(?:skills|commands|rules|output-styles|agents)(?=\/|$)/;
 
 /** Round 3, minor 10: a command's shell segments — split on `;`, `&&`, `||`, `|`, `|&`, a background `&` and
- *  newlines, on the RAW text: a separator inside single or double quotes (or escaped) is text. */
+ *  newlines, on the RAW text: a separator inside single or double quotes (or escaped) is text. Round 4: a
+ *  command substitution's opening and closing (`$(`/`)`, a backtick) are boundaries too. */
 export function shellSegments(command: string): string[] {
   const out: string[] = [];
   let cur = "";
-  let quote: "'" | "\"" | undefined;
+  // Round 4, minor 2: a COMMAND SUBSTITUTION (`$(…)`, `` `…` ``) is a segment of its own — outside quotes
+  // and inside double quotes alike — so a `cd` inside one is seen and carried to what follows it.
+  const stack: Array<"sq" | "dq" | "sub" | "paren" | "bt"> = [];
   const cut = (): void => { out.push(cur); cur = ""; };
   for (let i = 0; i < command.length; i += 1) {
     const ch = command[i]!;
-    if (quote !== undefined) {
-      cur += ch;
-      if (ch === quote) quote = undefined;
-      else if (ch === "\\" && quote === "\"" && i + 1 < command.length) cur += command[++i];
-      continue;
-    }
+    const ctx = stack[stack.length - 1];
+    if (ctx === "sq") { cur += ch; if (ch === "'") stack.pop(); continue; }
     if (ch === "\\" && i + 1 < command.length) { cur += ch + command[++i]; continue; }
-    if (ch === "'" || ch === "\"") { quote = ch; cur += ch; continue; }
+    if (ch === "$" && command[i + 1] === "(" && command[i + 2] !== "(") { cut(); stack.push("sub"); i += 1; continue; }
+    if (ch === "`") { cut(); if (ctx === "bt") stack.pop(); else stack.push("bt"); continue; }
+    if (ctx === "dq") { cur += ch; if (ch === "\"") stack.pop(); continue; }
+    if (ch === "'") { stack.push("sq"); cur += ch; continue; }
+    if (ch === "\"") { stack.push("dq"); cur += ch; continue; }
+    if (ch === "(" && (ctx === "sub" || ctx === "paren")) { stack.push("paren"); cur += ch; continue; }
+    if (ch === ")" && ctx === "sub") { stack.pop(); cut(); continue; }
+    if (ch === ")" && ctx === "paren") { stack.pop(); cur += ch; continue; }
     if (ch === "\n" || ch === ";") { cut(); continue; }
     if (ch === "|") { if (command[i + 1] === "|" || command[i + 1] === "&") i += 1; cut(); continue; }
     if (ch === "&") {
@@ -591,12 +667,37 @@ function segmentWriteTargets(seg: string): string[] {
       return [...targets, ...rest];
     }
     if (DESTINATION_VERBS.has(verb)) {
-      for (let j = 0; j < rest.length; j += 1) {
-        if (rest[j] === "-t" && rest[j + 1] !== undefined) return [...targets, rest[j + 1]!];
-        if (rest[j]!.startsWith("--target-directory=")) return [...targets, rest[j]!.slice("--target-directory=".length)];
+      const operands: string[] = [];
+      let optionAfterOperand = false;
+      for (const w of rest) {
+        if (w.startsWith("-")) { if (operands.length > 0) optionAfterOperand = true; } else operands.push(w);
       }
-      const operands = rest.filter((w) => !w.startsWith("-"));
-      return operands.length === 0 ? targets : [...targets, operands[operands.length - 1]!];
+      const last = operands.length === 0 ? [] : [operands[operands.length - 1]!];
+      for (let j = 0; j < rest.length; j += 1) {
+        const w = rest[j]!;
+        // Round 4, minor 2: `-t` inside a short-flag cluster (`-rt dir`) and the space-separated
+        // `--target-directory dir` name the target as the NEXT word. (rsync has no `-t` target: its `-t`
+        // keeps times.) The text is case-folded, so `-T` reads as `-t` too — hence the last operand as well.
+        if (verb !== "rsync" && /^-[a-z]*t[a-z]*$/.test(w) && rest[j + 1] !== undefined) return [...targets, rest[j + 1]!, ...last];
+        if (w === "--target-directory" && rest[j + 1] !== undefined) return [...targets, rest[j + 1]!];
+        if (w.startsWith("--target-directory=")) return [...targets, w.slice("--target-directory=".length)];
+      }
+      // …and once an option follows an operand (an option's VALUE may then sit after the destination —
+      // `rsync -a src/ dst/ --exclude tmp`), every operand after the first is a possible target.
+      return optionAfterOperand ? [...targets, ...operands.slice(1)] : [...targets, ...last];
+    }
+    // Round 4, minor 2: `find … -exec CMD … +` (or `\;`) runs CMD — judged as a segment of its own; and
+    // `-fprint`/`-fprintf`/`-fls` write the file they name.
+    if (verb === "find") {
+      for (let j = 0; j < rest.length; j += 1) {
+        const w = rest[j]!;
+        if (w === "-fprint" || w === "-fprintf" || w === "-fls") { if (rest[j + 1] !== undefined) targets.push(rest[j + 1]!); continue; }
+        if (w !== "-exec" && w !== "-execdir" && w !== "-ok" && w !== "-okdir") continue;
+        const sub: string[] = [];
+        for (j += 1; j < rest.length && rest[j] !== "+" && rest[j] !== "\\;" && rest[j] !== ";"; j += 1) sub.push(rest[j]!);
+        targets.push(...segmentWriteTargets(sub.join(" ")));
+      }
+      return targets;
     }
     if (verb === "sed" || verb === "perl") {
       if (rest.some((w) => /^(?:-[a-z]*i\S*|--in-place\S*)$/.test(w))) return [...targets, ...rest];
