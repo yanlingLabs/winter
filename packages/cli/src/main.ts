@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
-import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeStateProbe, runRuntimesProbe, resolveWinterProfile, splitTag } from "@yanlinglabs/winter-core";
+import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeStateProbe, runRuntimesProbe, resolveWinterProfile, splitTag, sdkLocalMcpServers } from "@yanlinglabs/winter-core";
 import type { CredentialRow, SecretStore, Settings } from "@yanlinglabs/winter-core";
 import { METHODS, type ApprovalPolicy, type Task } from "@yanlinglabs/winter-protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
@@ -33,17 +33,14 @@ import {
   type FooterSelection,
 } from "./task-block";
 import {
-  applyFreshPluginConsent,
-  buildConsentBlock,
-  enableNotice,
-  installNeedsConsentHint,
-  installPlugin,
-  missingConsents,
-  removePluginDir,
-  removePluginFromSettings,
   revokePluginTokenBestEffort,
-  setPluginEnabled,
-  stripPluginConsents,
+  runPluginInstallRoute, runPluginUninstallRoute, runPluginSetEnabledRoute, runPluginUpdateRoute,
+  runPluginListRoute, runPluginMarketplaceAddRoute, runPluginMarketplaceRemoveRoute,
+  runPluginMarketplaceListRoute, runPluginMarketplaceUpdateRoute,
+  renderPluginInstallOutcome, renderPluginUninstallOutcome, renderPluginSetEnabledOutcome,
+  renderPluginUpdateOutcome, renderPluginListOutcome, renderPluginMarketplaceAddOutcome,
+  renderPluginMarketplaceRemoveOutcome, renderPluginMarketplaceListOutcome, renderPluginMarketplaceUpdateOutcome,
+  type PluginDoor,
 } from "./plugin-cli";
 import { parseModelArgs, validateEffort, validateModelTag, internalProviderNote, validateAdvisorSlug, renderModelListing, modelDisplayWithHint, type ModelListingRow } from "./model-cli";
 import {
@@ -301,6 +298,25 @@ async function openCredentialDaemonDoor(): Promise<CredentialRpcDoor | undefined
   } catch {
     // A stale socket file, a daemon mid-shutdown, a Keychain that will not answer — all the same
     // answer: there is no daemon to tell, so do it in-process.
+    return undefined;
+  }
+}
+
+/**
+ * WS-21: the daemon door `winter plugin`'s write verbs use when one is already listening — same
+ * no-auto-launch posture as `openCredentialDaemonDoor` just above (a plugin install/enable/etc.
+ * must not launch Winter.app as a side effect), but returns the FULL `WinterClient` rather than
+ * `CredentialRpcDoor`'s narrow `request`/`close` shape: `WinterClient` already declares every
+ * `PluginDoor` method (`client.ts`'s own `plugin*` methods), so it satisfies `plugin-cli.ts`'s
+ * `PluginDoor` interface structurally, with no adapter shim.
+ */
+async function openPluginDaemonDoor(): Promise<WinterClient | undefined> {
+  if (!existsSync(socketPath())) return undefined;
+  try {
+    const token = await new KeychainSecretStore().get(TOKEN_NAMES.harness);
+    if (!token) return undefined;
+    return await WinterClient.connect({ socketPath: socketPath(), token, clientName: "cli-plugin", onEvent: () => {} });
+  } catch {
     return undefined;
   }
 }
@@ -1817,12 +1833,21 @@ if (import.meta.main) {
     const sub = process.argv[3];
     const rest = process.argv.slice(4);
 
-    // Bare `winter mcp` / `winter mcp list` — unchanged: the live-status listing, over a real
-    // daemon connection (autolaunch is fine here, same as every other read verb — `connect()`).
+    // Bare `winter mcp` / `winter mcp list` — the live-status listing, over a real daemon
+    // connection (autolaunch is fine here, same as every other read verb — `connect()`), PLUS the
+    // LOCAL-scope entries (WS-21 spec §4.4): those are never a live in-daemon connection — folded
+    // into a run folder's `.winter.json` at spawn time by the router (§3.4.5), not started/tracked
+    // by `mcp.list`'s own `McpManager` — so this reads `sdk/.winter.json`'s `projects[cwd]` directly,
+    // no daemon required, and shows the scope of every server either way ("list shows the scope of
+    // each server", this task's own brief).
     if (sub === undefined || sub === "list") {
       const c = await connect("cli-mcp");
       const servers = await c.listMcp(process.cwd());
-      if (!servers.length) console.log("no MCP servers configured");
+      const local = sdkLocalMcpServers(resolveWinterHome(), process.cwd());
+      if (!servers.length && Object.keys(local).length === 0) console.log("no MCP servers configured");
+      for (const [name, entry] of Object.entries(local)) {
+        console.log(`${AQUA}${name}${RESET}  ${DIM}(local, ${entry.type})${RESET}`);
+      }
       for (const s of servers) {
         console.log(`${AQUA}${s.name}${RESET}  ${DIM}(${s.source}, ${s.status})${RESET}  ${s.toolNames.map((t) => `mcp__${s.name}__${t}`).join(", ")}`);
       }
@@ -1882,131 +1907,130 @@ if (import.meta.main) {
     // `add-from-claude-desktop` (an Ink dialog over Claude Desktop's OWN config format — not
     // trivially mappable), `reset-project-choices` (Winter has no per-project approve/reject ledger
     // for `.mcp.json` servers — `winter trust`'s directory-level TrustStore is the only gate).
-    console.error("usage: winter mcp [list] | get <name> | add [-s user|project] [-t stdio|sse|http] [-e KEY=value...] [-H \"Name: value\"...] <name> <commandOrUrl> [-- args...] | add-json [-s user|project] <name> <json> | remove <name> [-s user|project]");
+    console.error("usage: winter mcp [list] | get <name> | add [-s local|user|project] [-t stdio|sse|http] [-e KEY=value...] [-H \"Name: value\"...] <name> <commandOrUrl> [-- args...] | add-json [-s local|user|project] <name> <json> | remove <name> [-s local|user|project]");
     process.exit(1);
   }
   case "plugin": {
+    // WS-21 (spec §5.2): `winter plugin` mirrors `claude plugin` — install/uninstall/enable/
+    // disable/update/list/marketplace{add,remove,list,update}, over Contract B. Goes through the
+    // daemon when it's live (a real socket + a harness token — `openPluginDaemonDoor`, never
+    // `connect()`'s auto-launch: a plugin write must not launch Winter.app as a side effect,
+    // exactly the `openCredentialDaemonDoor` precedent), and the SDK adapter directly otherwise.
     const sub = process.argv[3];
     const home = resolveWinterHome();
-    const settingsPath = join(home, "settings.json");
-    const pluginsRoot = join(home, "plugins");
+    const rest = process.argv.slice(4);
+
+    // `-s`/`--scope <user|project|local>`, may appear anywhere — same convention as mcp-cli.ts's
+    // own flag parsing.
+    function extractScope(args: string[]): { positionals: string[]; scopeRaw?: string } {
+      const positionals: string[] = [];
+      let scopeRaw: string | undefined;
+      for (let i = 0; i < args.length; i++) {
+        const tok = args[i]!;
+        if (tok === "-s" || tok === "--scope") { scopeRaw = args[++i]; continue; }
+        positionals.push(tok);
+      }
+      return { positionals, scopeRaw };
+    }
+
+    if (sub === "marketplace") {
+      const mktSub = process.argv[4];
+      const mktRest = process.argv.slice(5);
+      const door = await openPluginDaemonDoor();
+      const deps = { cwd: process.cwd(), winterHome: home, door };
+      if (mktSub === "add") {
+        const source = mktRest[0];
+        if (!source) { console.error("usage: winter plugin marketplace add <source>"); process.exit(1); }
+        const outcome = await runPluginMarketplaceAddRoute(deps, source);
+        console.log(renderPluginMarketplaceAddOutcome(outcome));
+        door?.close();
+        process.exit(outcome.ok ? 0 : 1);
+      }
+      if (mktSub === "remove") {
+        const name = mktRest[0];
+        if (!name) { console.error("usage: winter plugin marketplace remove <name>"); process.exit(1); }
+        const outcome = await runPluginMarketplaceRemoveRoute(deps, name);
+        console.log(renderPluginMarketplaceRemoveOutcome(outcome));
+        door?.close();
+        process.exit(outcome.ok ? 0 : 1);
+      }
+      if (mktSub === "list" || mktSub === undefined) {
+        const outcome = await runPluginMarketplaceListRoute(deps);
+        console.log(renderPluginMarketplaceListOutcome(outcome));
+        door?.close();
+        process.exit(outcome.ok ? 0 : 1);
+      }
+      if (mktSub === "update") {
+        const outcome = await runPluginMarketplaceUpdateRoute(deps, mktRest[0]);
+        console.log(renderPluginMarketplaceUpdateOutcome(outcome));
+        door?.close();
+        process.exit(outcome.ok ? 0 : 1);
+      }
+      console.error("usage: winter plugin marketplace add <source> | remove <name> | list | update [name]");
+      door?.close();
+      process.exit(1);
+    }
 
     if (sub === "list") {
-      const c = await connect("cli-plugin-list");
-      const res = await c.pluginsList();
-      for (const p of res.plugins) {
-        const mcp = !p.hasMcp ? "no mcp" : p.mcpEnabled ? "mcp: enabled" : `mcp: DISABLED (winter plugin enable ${p.name} to allow — code execution)`;
-        const flags = p.disabled ? " [disabled]" : "";
-        const tierTag = p.tier ? ` ${DIM}[${p.tier}]${RESET}` : "";
-        // Task 3: tier + consent state — "consented" (every required class recorded), "needs
-        // consent: exec,tcc" (fixed exec/tcc/hardware order, only the classes still missing), or
-        // nothing at all for legacy plugins / manifest plugins that require no consent.
-        const missing = missingConsents(p.requiredConsents ?? [], p.consented ?? []);
-        const consentState = (p.requiredConsents?.length ?? 0) === 0 ? "" : missing.length > 0 ? `  ${DIM}needs consent: ${missing.join(",")}${RESET}` : `  ${DIM}consented${RESET}`;
-        console.log(`${AQUA}${p.name}${RESET}${p.version ? ` ${DIM}v${p.version}${RESET}` : ""}${tierTag}${flags}  skills: ${p.skills.join(", ") || "(none)"}  ${DIM}${mcp}${RESET}${consentState}`);
-      }
-      if (res.plugins.length === 0) console.log("no plugins installed");
-      c.close();
-      process.exit(0);
+      const door = await openPluginDaemonDoor();
+      const outcome = await runPluginListRoute({ cwd: process.cwd(), winterHome: home, door }, process.cwd());
+      console.log(renderPluginListOutcome(outcome));
+      door?.close();
+      process.exit(outcome.ok ? 0 : 1);
     }
 
     if (sub === "install") {
-      const url = process.argv[4];
-      if (!url) { console.error("usage: winter plugin install <git-url> [name]"); process.exit(1); }
-      let installed: { name: string; target: string };
-      try {
-        installed = installPlugin({ url, name: process.argv[5], pluginsRoot });
-      } catch (err) {
-        console.error((err as Error).message);
-        process.exit(1);
-      }
-      const { PluginStore } = await import("@yanlinglabs/winter-core");
-      const info = new PluginStore({ winterHome: home }).list().find((p) => p.name === installed.name);
-      console.log(`${AQUA}installed ${installed.name}${RESET}  skills: ${info?.skills.join(", ") || "(none)"}`);
-      // hasMcp alone misses a manifest-only plugin (contributes.mcpServers, no .mcp.json) — that
-      // installs with hasMcp:false, so also check requiredConsents (installNeedsConsentHint).
-      if (info && installNeedsConsentHint(info)) console.log(`this plugin requests exec/etc — run ${AQUA}winter plugin enable ${installed.name}${RESET} to review and consent`);
-      break; // NEVER touches settings
+      const { positionals, scopeRaw } = extractScope(rest);
+      const specOrPath = positionals[0];
+      if (!specOrPath) { console.error("usage: winter plugin install <plugin>[@<marketplace>] [--scope user|project|local]"); process.exit(1); }
+      const door = await openPluginDaemonDoor();
+      const outcome = await runPluginInstallRoute({ cwd: process.cwd(), winterHome: home, door }, specOrPath, scopeRaw, process.cwd());
+      console.log(renderPluginInstallOutcome(outcome));
+      door?.close();
+      process.exit(outcome.ok ? 0 : 1);
     }
 
-    if (sub === "enable") {
-      const name = process.argv[4];
-      if (!name) { console.error("usage: winter plugin enable <name>"); process.exit(1); }
-      if (!existsSync(join(pluginsRoot, name))) { console.error(`no such plugin: ${name}`); process.exit(1); }
-
-      // Direct PluginStore read (not the daemon RPC) — mirrors `install` above and keeps `enable`
-      // usable without a running daemon, exactly like it was pre-4a. `consents` comes straight
-      // from the settings file we're about to (maybe) write back to.
-      const { loadSettings, saveSettings, PluginStore } = await import("@yanlinglabs/winter-core");
-      const settings = loadSettings(settingsPath);
-      const info = new PluginStore({ winterHome: home, consents: settings.plugins?.consents }).list().find((p) => p.name === name);
-      if (!info) { console.error(`no such plugin: ${name}`); process.exit(1); }
-
-      const missing = missingConsents(info.requiredConsents, info.consented);
-      if (missing.length > 0) {
-        // No silent consent in scripts (design spec §1) — an unattended `enable` of a plugin with
-        // outstanding exec/tcc/hardware consent refuses rather than guessing.
-        if (!isTTY) {
-          console.error(`exec consent requires an interactive terminal — run: winter plugin enable ${name}`);
-          process.exit(1);
-        }
-        for (const line of buildConsentBlock(info)) console.log(line);
-        const answer = await readLine('type "yes" to consent: ');
-        if (answer !== "yes") {
-          console.log("aborted — no changes made");
-          process.exit(1);
-        }
-        // Full re-disclosure means a fresh consent covers every required class, not just the
-        // ones that were missing — matches the block just printed above. `settings` above was
-        // read BEFORE the `readLine` prompt; writing it back here would clobber any settings.json
-        // edit made during that human-scale wait, so re-read fresh at write time instead
-        // (applyFreshPluginConsent — final-review fix).
-        saveSettings(settingsPath, applyFreshPluginConsent(() => loadSettings(settingsPath), name, info.requiredConsents, Date.now()));
-        console.log(`${AQUA}${name} enabled${RESET} — restart the daemon to apply`);
-        process.exit(0);
+    if (sub === "uninstall" || sub === "remove") {
+      const { positionals, scopeRaw } = extractScope(rest);
+      const spec = positionals[0];
+      if (!spec) { console.error(`usage: winter plugin ${sub} <plugin>[@<marketplace>] [--scope user|project|local]`); process.exit(1); }
+      const door = await openPluginDaemonDoor();
+      const outcome = await runPluginUninstallRoute({ cwd: process.cwd(), winterHome: home, door }, spec, scopeRaw, process.cwd());
+      console.log(renderPluginUninstallOutcome(outcome));
+      // Phase 4b Task 2 (kept): best-effort revoke of the plugin's daemon-side token — a Tier-2
+      // platform plugin's own, harmless no-op for a Tier-1/legacy one (the daemon just deletes a
+      // row that never existed). A down daemon is tolerated, never blocks the uninstall.
+      if (outcome.ok) {
+        const revoked = await revokePluginTokenBestEffort((id) => revokePluginTokenViaDaemon(id), spec.split("@")[0]!);
+        if (!revoked.ok) console.log(`${DIM}${revoked.note}${RESET}`);
       }
-
-      // Lane B (2026-09-23): a plugin that needs no consent (a legacy one) but ships skills says so —
-      // its skills now reach a session, and a skill can run shell commands.
-      for (const line of enableNotice(info)) console.log(line);
-      saveSettings(settingsPath, setPluginEnabled(settings, name, true));
-      console.log(`${AQUA}${name} enabled${RESET} — restart the daemon to apply`);
-      process.exit(0);
+      door?.close();
+      process.exit(outcome.ok ? 0 : 1);
     }
 
-    if (sub === "disable") {
-      const name = process.argv[4];
-      if (!name) { console.error("usage: winter plugin disable <name>"); process.exit(1); }
-      if (!existsSync(join(pluginsRoot, name))) { console.error(`no such plugin: ${name}`); process.exit(1); }
-      const { loadSettings, saveSettings } = await import("@yanlinglabs/winter-core");
-      const settings = stripPluginConsents(setPluginEnabled(loadSettings(settingsPath), name, false), name);
-      saveSettings(settingsPath, settings);
-      // Phase 4b Task 2: best-effort revoke of the plugin's daemon-side token (Tier-2 platform
-      // plugins only have one, but revoking is harmless/no-op for Tier-1 — the daemon just deletes
-      // a row that never existed). A down daemon is tolerated, never blocks the disable.
-      const revoked = await revokePluginTokenBestEffort(revokePluginTokenViaDaemon, name);
-      if (!revoked.ok) console.log(`${DIM}${revoked.note}${RESET}`);
-      console.log(`${AQUA}${name} disabled${RESET} — restart the daemon to apply`);
-      break;
+    if (sub === "enable" || sub === "disable") {
+      const { positionals, scopeRaw } = extractScope(rest);
+      const spec = positionals[0];
+      if (!spec) { console.error(`usage: winter plugin ${sub} <plugin>[@<marketplace>] [--scope user|project|local]`); process.exit(1); }
+      const door = await openPluginDaemonDoor();
+      const outcome = await runPluginSetEnabledRoute({ cwd: process.cwd(), winterHome: home, door }, spec, scopeRaw, sub === "enable", process.cwd());
+      console.log(renderPluginSetEnabledOutcome(outcome));
+      if (sub === "disable" && outcome.ok) {
+        const revoked = await revokePluginTokenBestEffort((id) => revokePluginTokenViaDaemon(id), spec.split("@")[0]!);
+        if (!revoked.ok) console.log(`${DIM}${revoked.note}${RESET}`);
+      }
+      door?.close();
+      process.exit(outcome.ok ? 0 : 1);
     }
 
-    if (sub === "remove") {
-      const name = process.argv[4];
-      if (!name) { console.error("usage: winter plugin remove <name>"); process.exit(1); }
-      try {
-        removePluginDir(pluginsRoot, name);
-      } catch (err) {
-        console.error((err as Error).message);
-        process.exit(1);
-      }
-      const { loadSettings, saveSettings } = await import("@yanlinglabs/winter-core");
-      saveSettings(settingsPath, removePluginFromSettings(loadSettings(settingsPath), name));
-      // Phase 4b Task 2: same best-effort token revoke as disable (see comment there) — removing
-      // the plugin dir must not silently leave a stale, still-valid token in the daemon's sqlite.
-      const revoked = await revokePluginTokenBestEffort(revokePluginTokenViaDaemon, name);
-      if (!revoked.ok) console.log(`${DIM}${revoked.note}${RESET}`);
-      console.log(`${AQUA}removed ${name}${RESET}`);
-      break;
+    if (sub === "update") {
+      const spec = rest[0];
+      if (!spec) { console.error("usage: winter plugin update <plugin>[@<marketplace>]"); process.exit(1); }
+      const door = await openPluginDaemonDoor();
+      const outcome = await runPluginUpdateRoute({ cwd: process.cwd(), winterHome: home, door }, spec);
+      console.log(renderPluginUpdateOutcome(outcome));
+      door?.close();
+      process.exit(outcome.ok ? 0 : 1);
     }
 
     if (sub === "restart") {
@@ -2025,7 +2049,7 @@ if (import.meta.main) {
       process.exit(0);
     }
 
-    console.error("usage: winter plugin list | install <git-url> [name] | enable <name> | disable <name> | remove <name> | restart <name>");
+    console.error("usage: winter plugin list | install <plugin>[@<marketplace>] [-s user|project|local] | uninstall <plugin>[@<marketplace>] [-s ...] | enable <plugin>[@<marketplace>] [-s ...] | disable <plugin>[@<marketplace>] [-s ...] | update <plugin>[@<marketplace>] | marketplace add|remove|list|update | restart <name>");
     process.exit(1);
   }
   case "bg": {

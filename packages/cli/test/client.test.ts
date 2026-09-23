@@ -160,10 +160,10 @@ describe("WinterClient", () => {
     client.close();
   });
 
-  test("pluginsList client method round-trip (no plugins installed)", async () => {
+  test("pluginList client method round-trip (no plugins installed)", async () => {
     await boot();
     const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "pl", onEvent: () => {} });
-    expect(await client.pluginsList()).toEqual({ ok: true, plugins: [] });
+    expect(await client.pluginList()).toEqual({ ok: true, plugins: [] });
     client.close();
   });
 
