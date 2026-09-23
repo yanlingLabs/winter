@@ -211,7 +211,13 @@ export function removePluginDir(pluginsRoot: string, name: string): string {
  *  its plugin names (F15's own shape, `sdk-plugin-api.ts`'s header). Not exported: this is only
  *  `installPluginFromDirectory`'s own "how many plugins does this folder offer" check — a fuller
  *  manifest read has no other caller in this lane. */
-function directoryMarketplacePluginNames(dir: string): string[] {
+/** Exported (unlike every other helper in this section) because the CLI's own daemon-path
+ *  "install from a folder" convenience (`plugin-cli.ts`) needs the SAME "how many plugins does
+ *  this folder offer" check `installPluginFromDirectory` uses below — it runs locally, on the
+ *  directory's OWN filesystem, whether or not a live daemon answers the `plugin.install` RPC that
+ *  finishes the job (the daemon has no "read this marketplace's manifest before it's registered"
+ *  RPC, and does not need one: the CLI is already on the same machine as the folder). */
+export function directoryMarketplacePluginNames(dir: string): string[] {
   const manifestPath = join(dir, ".claude-plugin", "marketplace.json");
   let raw: string;
   try {
