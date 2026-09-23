@@ -76,7 +76,10 @@ struct ConsentSheetState: Equatable, Identifiable {
 /// fields), not fabricated. Table-tested in `ConsentSheetStateTests`.
 func pluginConsentDisclosureLines(pluginId: String, extras: PluginExtras) -> [String] {
     var lines = ["\(pluginId) is asking for the following, on this Mac:"]
-    if extras.execPermission {
+    // `execPermission` alone can be absent/false while `requiredConsents` still lists `"exec"`
+    // (or an `entry` is declared without the daemon echoing `permissions.exec` back) — check all
+    // three so a genuine exec request never renders as a bare, contentless header line.
+    if extras.execPermission || extras.requiredConsents.contains("exec") || extras.entry != nil {
         if let entry = extras.entry {
             let command = ([entry.command] + entry.args).joined(separator: " ")
             lines.append("- run its own background process: \(command)")

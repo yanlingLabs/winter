@@ -55,6 +55,46 @@ final class PluginManagerModelTests: XCTestCase {
         XCTAssertFalse(r.actions.contains(.enable))
     }
 
+    // MARK: - Action rule: needsConsent OVERRIDES both enabled and tier — the consent-trap fix.
+    //
+    // `installPlugin` (Contract B) writes `enabled: true` on every fresh install, Tier-2 or not,
+    // so a freshly-installed-but-unconsented Tier-2 plugin is `enabled == true` with
+    // `needsConsent == true` SIMULTANEOUSLY. Checking `enabled`/`tier` before `needsConsent` would
+    // read that row as "enabled Tier-2" and offer [.restart, .disable, .uninstall] — a dead end:
+    // .restart throws (the supervisor never tracked a process that was never spawned, since only
+    // plugin.enable's handler calls hotApplyStart, and it needs consent complete first) and there
+    // is no .enable button left to reach the consent sheet from.
+
+    func testEnabledTier2WithPendingConsentOffersGrantConsentNotRestart() {
+        let r = row(tier: "platform", requiredConsents: ["exec"], consented: [], enabled: true)
+        XCTAssertTrue(r.enabled, "installPlugin lands every fresh install enabled, consent or not")
+        XCTAssertEqual(r.actions, [.grantConsent, .disable, .uninstall])
+        XCTAssertFalse(r.actions.contains(.restart))
+        XCTAssertFalse(r.actions.contains(.enable))
+    }
+
+    /// The same trap reachable from the OTHER direction: a Tier-2 plugin the user manually
+    /// disabled before ever granting consent (disable doesn't strip a pending/absent consent —
+    /// DECISION 5, L4's report) must still offer a way back to the sheet, not a dead `.enable`
+    /// that would spawn-fail silently.
+    func testDisabledTier2WithPendingConsentOffersGrantConsentNotEnable() {
+        let r = row(tier: "platform", requiredConsents: ["exec"], consented: [], enabled: false)
+        XCTAssertEqual(r.actions, [.grantConsent, .uninstall])
+        XCTAssertFalse(r.actions.contains(.enable))
+    }
+
+    func testPartiallyConsentedEnabledTier2StillOffersGrantConsent() {
+        let r = row(tier: "platform", requiredConsents: ["exec", "tcc"], consented: ["exec"], enabled: true)
+        XCTAssertEqual(r.actions, [.grantConsent, .disable, .uninstall])
+    }
+
+    /// Once every required class is consented, the row falls through to the ordinary enabled-
+    /// Tier-2 rule — `.grantConsent` disappears, `.restart` reappears.
+    func testFullyConsentedEnabledTier2FallsBackToRestartDisableUninstall() {
+        let r = row(tier: "platform", requiredConsents: ["exec"], consented: ["exec"], enabled: true)
+        XCTAssertEqual(r.actions, [.restart, .disable, .uninstall])
+    }
+
     // MARK: - Action rule: DISABLED (any tier) → [.enable, .uninstall]
 
     func testDisabledTier2GetsEnableUninstall() {
@@ -250,5 +290,26 @@ final class PluginManagerModelAsyncTests: XCTestCase {
         await refresh
 
         XCTAssertEqual(fireCount, 1)
+    }
+
+    /// `refresh()` filters to `.user` scope only — `plugin.list` emits one row per scope record
+    /// (`plugins/sdk-plugin-api.ts`'s `listPlugins`), so a plugin installed at BOTH `user` and
+    /// `project` scope would otherwise produce two rows sharing the identical `spec`, colliding on
+    /// `PluginRowDisplay`'s `Identifiable` id (this pane has no `cwd`, so it can't tell those
+    /// scopes' rows apart or manage them anyway).
+    func testRefreshFiltersOutNonUserScopeRows() async throws {
+        let (client, t) = try await connectedClient()
+        let model = PluginManagerModel(client: client)
+
+        async let refresh: Void = model.refresh()
+
+        await feedWaitUntil { t.sent.count >= 2 }
+        let listReq = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"plugins":[{"id":"demo","installPath":"/a","scope":"user","enabled":true,"marketplace":"winter-examples"},{"id":"demo","installPath":"/b","scope":"project","enabled":false,"marketplace":"winter-examples"}]}}"#)
+
+        await refresh
+
+        XCTAssertEqual(model.rows.count, 1)
+        XCTAssertEqual(model.rows.first?.scope, .user)
     }
 }

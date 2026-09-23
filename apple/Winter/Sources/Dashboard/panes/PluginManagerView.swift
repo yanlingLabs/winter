@@ -26,7 +26,7 @@ import UniformTypeIdentifiers
 /// One action button a plugin row can offer — pure data (no closures); the view maps this to a
 /// title/style and the `PluginManagerModel` method to call.
 enum PluginAction: String, Equatable, Hashable, CaseIterable {
-    case enable, disable, uninstall, restart
+    case enable, disable, uninstall, restart, grantConsent
 
     var title: String {
         switch self {
@@ -34,6 +34,7 @@ enum PluginAction: String, Equatable, Hashable, CaseIterable {
         case .disable: return "Disable"
         case .uninstall: return "Uninstall"
         case .restart: return "Restart"
+        case .grantConsent: return "Grant consent"
         }
     }
 }
@@ -57,12 +58,27 @@ struct PluginRowDisplay: Equatable, Identifiable {
 
 /// PURE: `plugin.list` entry → row display + the action-availability rule.
 ///
-/// Action rule:
-///   - `!enabled` (any tier) → `[.enable, .uninstall]`.
+/// Action rule — consent is checked FIRST, ahead of `enabled`:
+///   - `extras.needsConsent` (any tier, any `enabled` state) → `[.grantConsent, ...]`, `.disable`
+///     only when currently enabled, always `.uninstall`. `.grantConsent` routes to the SAME
+///     `PluginManagerModel.enable(_:)` an `.enable` button would — it opens the consent sheet
+///     without calling `plugin.enable` (see that method's own doc). This is load-bearing, not
+///     cosmetic: `installPlugin` (Contract B) writes `enabled: true` on every fresh install,
+///     Tier-2 or not (`agent-sdk-wt-ws21-plugins/packages/sdk/src/plugins/manage.ts`), so a
+///     freshly-installed-but-not-yet-consented Tier-2 plugin is `enabled == true` with
+///     `needsConsent == true` at the same time — without this branch first, the OLD rule below
+///     would read that row as "enabled Tier-2" and offer `[.restart, .disable, .uninstall]`, a
+///     dead end: `.restart` throws NOT_FOUND (the supervisor never tracked a process that was
+///     never spawned, since `plugin.enable` is the only handler that calls `hotApplyStart`, and
+///     it was never called), and there is no `.enable` button to reach the sheet from. Reachable
+///     from BOTH a Mac-app install (this pane's own `installFromFolder` opens the sheet
+///     immediately, but a cancel leaves the row in exactly this state) and a `winter plugin
+///     install`/`enable` done from the CLI, which never opens a sheet at all.
+///   - `!enabled` (consent already satisfied) → `[.enable, .uninstall]`.
 ///   - enabled AND extras declare a Tier-2 (`platform`) entry → `[.restart, .disable, .uninstall]`
-///     — `.restart` is offered for every enabled Tier-2 row (there is no live status to further
-///     gate it on any more; `plugin.restart` itself still refuses typed for an id the supervisor
-///     has never tracked).
+///     — `.restart` is offered for every enabled, consented Tier-2 row (there is no live status
+///     to further gate it on any more; `plugin.restart` itself still refuses typed for an id the
+///     supervisor has never tracked).
 ///   - everything else enabled (no extras, `capability` tier) → `[.disable, .uninstall]`.
 func pluginRowDisplay(_ p: PluginListing) -> PluginRowDisplay {
     let tierBadge: String
@@ -73,9 +89,10 @@ func pluginRowDisplay(_ p: PluginListing) -> PluginRowDisplay {
     case nil: tierBadge = "Plugin"
     }
 
+    let needsConsent = p.extras?.needsConsent ?? false
     let consentText: String
     if let extras = p.extras, !extras.requiredConsents.isEmpty {
-        consentText = extras.needsConsent
+        consentText = needsConsent
             ? "Needs consent: \(extras.pendingConsents.joined(separator: ", "))"
             : "Consented: \(extras.requiredConsents.joined(separator: ", "))"
     } else {
@@ -83,7 +100,9 @@ func pluginRowDisplay(_ p: PluginListing) -> PluginRowDisplay {
     }
 
     let actions: [PluginAction]
-    if !p.enabled {
+    if needsConsent {
+        actions = p.enabled ? [.grantConsent, .disable, .uninstall] : [.grantConsent, .uninstall]
+    } else if !p.enabled {
         actions = [.enable, .uninstall]
     } else if p.extras?.tier == "platform" {
         actions = [.restart, .disable, .uninstall]
@@ -179,7 +198,18 @@ final class PluginManagerModel: ObservableObject {
 
     func refresh() async {
         do {
-            let listings = try await client.pluginList()
+            // `.user`-scope only: this pane never has a `cwd` (`pluginList()` is called with none),
+            // so `plugin.list` cannot resolve a project/local-scope record's `enabled` state
+            // (`readEnabledFromSettings`'s no-cwd fallback reports it `false` regardless of the
+            // real value — TEMP hardening noted in the L4 lane report). Worse, `listPlugins` emits
+            // ONE ROW PER SCOPE RECORD (`plugins/sdk-plugin-api.ts`'s `listPlugins`) — the SAME
+            // plugin installed at both `user` and a project/local scope would otherwise produce two
+            // rows sharing the identical `spec`, colliding on `PluginRowDisplay`'s `Identifiable`
+            // id in `ForEach` (silently dropping one, SwiftUI's usual behavior for a duplicate id).
+            // Filtering to `.user` here is the honest scope for a global, no-project-context pane;
+            // managing a project/local-scope install is CLI-only for now (`winter plugin
+            // list/enable/disable --scope project|local`, inside that project).
+            let listings = try await client.pluginList().filter { $0.scope == .user }
             listingsBySpec = Dictionary(listings.map { ($0.spec, $0) }, uniquingKeysWith: { _, last in last })
             rows = listings.map(pluginRowDisplay)
             errorText = nil
@@ -501,7 +531,7 @@ struct PluginManagerView: View {
 
     private func perform(_ action: PluginAction, on spec: String) async {
         switch action {
-        case .enable: await model.enable(spec)
+        case .enable, .grantConsent: await model.enable(spec)
         case .disable: await model.disable(spec)
         case .uninstall: await model.uninstall(spec)
         case .restart: await model.restart(spec)

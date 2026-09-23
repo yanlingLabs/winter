@@ -192,7 +192,7 @@ struct LibraryPluginDetail: View {
 
     private func perform(_ action: PluginAction) async {
         switch action {
-        case .enable: await model.enable(spec)
+        case .enable, .grantConsent: await model.enable(spec)
         case .disable: await model.disable(spec)
         case .uninstall: await model.uninstall(spec)
         case .restart: await model.restart(spec)

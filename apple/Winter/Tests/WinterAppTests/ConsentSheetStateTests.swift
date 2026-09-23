@@ -99,6 +99,23 @@ final class PluginConsentDisclosureLinesTests: XCTestCase {
         let lines = pluginConsentDisclosureLines(pluginId: "demo", extras: e)
         XCTAssertFalse(lines.contains { $0.contains("background process") })
     }
+
+    /// `execPermission` alone can be absent/false while `requiredConsents` still lists `"exec"` —
+    /// the exec line must still show, not render as a bare, contentless header.
+    func testListsTheExecLineWhenRequiredConsentsSaysExecEvenIfPermissionFlagIsAbsent() {
+        let e = PluginExtras(tier: "platform", execPermission: false, tccPermissions: [], hardwarePermissions: [],
+                             requiredConsents: ["exec"], consented: [], entry: nil)
+        let lines = pluginConsentDisclosureLines(pluginId: "demo", extras: e)
+        XCTAssertTrue(lines.contains { $0.contains("background process") })
+    }
+
+    /// Same for a declared `entry` with no `execPermission`/`requiredConsents` echo.
+    func testListsTheExecLineWhenEntryIsDeclaredEvenIfPermissionFlagIsAbsent() {
+        let e = PluginExtras(tier: "platform", execPermission: false, tccPermissions: [], hardwarePermissions: [],
+                             requiredConsents: [], consented: [], entry: PluginEntryInfo(command: "node", args: []))
+        let lines = pluginConsentDisclosureLines(pluginId: "demo", extras: e)
+        XCTAssertTrue(lines.contains("- run its own background process: node"))
+    }
 }
 
 // -----------------------------------------------------------------------------------------------
