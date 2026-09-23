@@ -388,6 +388,13 @@ export interface CredentialEvictionDeps {
    * sent no `web` block at all, because claude owns its own web tools).
    */
   legOf?(sessionId: string): "engine" | "winter" | "official" | undefined;
+  /**
+   * Whole-branch review (minor d): the provider a live child's cross-provider ADVISOR pin names
+   * (`WinterSessionDrivers.advisorProviderOf`). The advisor's `authRef` is fixed at spawn like the
+   * session's own, and a pin that fell back because that provider's slot was empty is waiting for
+   * exactly this key — so a write for that provider replaces the child too.
+   */
+  advisorProviderOf?(sessionId: string): string | undefined;
   /** End the child resumably and forget the driver — `WinterSessionDrivers.evict`, which never throws. */
   evict(sessionId: string): Promise<void>;
   log?: (line: string) => void;
@@ -413,8 +420,9 @@ export interface CredentialEvictionDeps {
  * boundary, fire-and-forget, so `credential.set` never delays its reply. The turn in flight
  * legitimately finishes on the credential it was issued with.
  *
- * WHICH SESSIONS: exactly those whose durable record names this provider — EXCEPT for the `exa` tool
- * row, which is every WINTER-leg session (see below).
+ * WHICH SESSIONS: exactly those whose durable record names this provider, plus those whose live child's
+ * cross-provider ADVISOR pin names it (`advisorProviderOf`, whole-branch review minor d) — EXCEPT for
+ * the `exa` tool row, which is every WINTER-leg session (see below).
  *
  * **THE `exa` ROW IS NOT LIKE THE OTHERS** (2026-09-18, agent SDK 0.0.17). It used to evict nothing,
  * correctly: the daemon's own `Search` reads that key per call, so a live child's `Options`
@@ -438,7 +446,7 @@ export async function evictSessionsForCredential(deps: CredentialEvictionDeps, p
   // including a cross-leg handoff whose own eviction already replaced this child.
   const affected = providerId === "exa"
     ? (sessionId: string) => deps.legOf?.(sessionId) === "winter"
-    : (sessionId: string) => deps.providerOf(sessionId) === providerId;
+    : (sessionId: string) => deps.providerOf(sessionId) === providerId || deps.advisorProviderOf?.(sessionId) === providerId;
   const acted: string[] = [];
   for (const session of deps.list()) {
     if (!affected(session.sessionId)) continue;
