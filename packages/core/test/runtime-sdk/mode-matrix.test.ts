@@ -298,7 +298,9 @@ test("the control-plane deny rules cover the four write tools × the control-pla
     expect(deny).toContain(`${tool}(//**/.winter/agents/**)`);
     // B1 follow-up: the skills-only plugin views — a planted manifest there becomes the next child's
     // plugin hooks. Write-fenced; deliberately NOT read-fenced (a skill reads its own files).
-    expect(deny).toContain(`${tool}(//h/cache/skill-plugins/**)`);
+    // Re-review M-a: ALL of `<home>/cache` (only the views use it), so the directories above the views
+    // cannot be swapped for links by a write tool either.
+    expect(deny).toContain(`${tool}(//h/cache/**)`);
     // Review M6 (2026-09-23): the runtime store was read-denied but NOT write-denied to the write
     // TOOLS — with a saved `Edit` (→ `Edit` + `Write` in the child) a Write could drop a file into
     // `<home>/runtimes/bin/winter`, rung 4 of the executable ladder. And an installed plugin must not
@@ -409,7 +411,7 @@ test("every deny rule is //-anchored, and resolves to the fence target it names"
   expect(specs.has(`/${join(tmpdir(), "claude-resume-*", "**")}`)).toBe(true); // P8d-12's staging root
   expect(specs.has(`/${join(home, "agents")}/**`)).toBe(true);     // finding 2c: the user's own agent definitions
   expect(specs.has(`//**/.winter/agents/**`)).toBe(true);          // finding 2c: any project's, any depth
-  expect(specs.has(`/${join(home, "cache", "skill-plugins")}/**`)).toBe(true); // B1: the skills-only plugin views
+  expect(specs.has(`/${join(home, "cache")}/**`)).toBe(true);      // B1 + M-a: the cache holding the skills-only plugin views
   expect(specs.has(`/${join(home, "plugins")}/**`)).toBe(true);    // M6: installed plugins
   expect(specs.has(`/${join(home, "permissions")}/**`)).toBe(true); // I2: the approved-project-rules record
   expect(specs.size).toBe(14);                                       // (runtimes/** was already a READ target)
@@ -441,8 +443,9 @@ test("the Bash sandbox names real DIRECTORIES, because its consumer renders seat
   // in official-leg.e2e.test.ts), and a per-tool `Write(path)` deny rule does not constrain a Bash
   // redirect — so `<home>/runtimes/bin/winter`, rung 4 of `resolveWinterExecutable`'s ladder, was
   // writable there. If either list loses it, that is the regression this line exists to catch.
-  // B1 follow-up: + the skills-only plugin views (write only — see `controlPlaneDenyRules`).
-  expect(sb.filesystem!.denyWrite).toEqual(["/h/run", "/h/runtimes", "/h/cache/skill-plugins", "/h/plugins", "/h/permissions"]);
+  // B1 follow-up: + the skills-only plugin views (write only — see `controlPlaneDenyRules`); since
+  // re-review M-a the whole `<home>/cache` that holds them.
+  expect(sb.filesystem!.denyWrite).toEqual(["/h/run", "/h/runtimes", "/h/cache", "/h/plugins", "/h/permissions"]);
   // CLAUDE.md: "the sole read denial is ~/.winter/run" — reads are otherwise unrestricted.
   expect(sb.filesystem!.denyRead).toEqual(["/h/run", "/h/runtimes"]);   // Task 17: runtimes/ is model-denied (8a)
   for (const p of [...sb.filesystem!.denyWrite!, ...sb.filesystem!.denyRead!]) {
