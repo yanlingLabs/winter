@@ -11,6 +11,7 @@ import { listPlugins } from "../../src/plugins/sdk-plugin-api";
 import { sdkHomeFor, sdkPluginsRoot } from "../../src/agent/paths";
 import { PluginStore } from "../../src/agent/plugins";
 import { pluginConsentFingerprint } from "../../src/plugins/consent-fingerprint";
+import { pluginHooksFor } from "../../src/plugins/plugin-hooks";
 
 function home(): string {
   return mkdtempSync(join(tmpdir(), "winter-convert-legacy-"));
@@ -71,12 +72,22 @@ describe("convertLegacyPlugins: maps fields and hook events; the original stays 
     // .mcp.json built from contributes.mcpServers.
     const mcp = JSON.parse(readFileSync(join(targetDir, ".mcp.json"), "utf8"));
     expect(mcp).toEqual({ mcpServers: { srv: { command: "true", args: ["--flag"], env: { X: "1" } } } });
-    // hooks/hooks.json: events renamed, timeoutMs -> timeout in SECONDS.
+    // hooks/hooks.json: events renamed, timeoutMs -> timeout in SECONDS, WRAPPED in claude's own
+    // top-level "hooks" key (post-merge round fix — plugin-hooks.ts's own reader expects
+    // {hooks: {<Event>: [...]}}, not the bare event map; the converter was writing the bare shape).
     const hooks = JSON.parse(readFileSync(join(targetDir, "hooks", "hooks.json"), "utf8"));
     expect(hooks).toEqual({
-      SessionStart: [{ hooks: [{ type: "command", command: "echo hi", timeout: 5 }] }],
-      PreToolUse: [{ hooks: [{ type: "command", command: "echo pre" }] }],
+      hooks: {
+        SessionStart: [{ hooks: [{ type: "command", command: "echo hi", timeout: 5 }] }],
+        PreToolUse: [{ hooks: [{ type: "command", command: "echo pre" }] }],
+      },
     });
+    // Round-trip: the daemon's own reader (plugin.list's `hooks` field) actually sees these —
+    // proving the shapes agree end to end, not just that the file LOOKS right on disk.
+    expect(pluginHooksFor(targetDir)).toEqual([
+      { event: "SessionStart", type: "command", command: "echo hi" },
+      { event: "PreToolUse", type: "command", command: "echo pre" },
+    ]);
     // The narrowed winter-plugin.json keeps only tier/permissions/contributes.{tools,tile}/entry.
     const narrowed = JSON.parse(readFileSync(join(targetDir, "winter-plugin.json"), "utf8"));
     expect(narrowed).toEqual({
