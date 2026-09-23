@@ -258,6 +258,10 @@ export interface WinterOptionsInput {
   home: string;
   profile?: string;
   cwd: string;
+  /** The session's `$OUTDIR` (`<home>/outputs/<sessionId>`, already created). Sent as
+   *  `Options.outputsDir`, which the agent SDK makes writable for the Bash sandbox and carves out of
+   *  its protected winter-home floor; absent ⇒ no outputs directory is named. */
+  outputsDir?: string;
   /** WS-20: always a provider-qualified tag (or a `winter-test/<name>` double). */
   model?: ModelTag;
   /** WS-20: NOT consumed by this file any more — `providerFor` names a provider's credential
@@ -883,6 +887,7 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     // the id the child's transcript will be written under. Never both.
     ...(input.resume ? { resume: input.sessionId } : { sessionId: input.sessionId }),
     cwd: input.cwd,
+    ...(input.outputsDir === undefined ? {} : { outputsDir: input.outputsDir }),
     permissionMode: permissionModeFor(input.policy),
     canUseTool: input.canUseTool,
     abortController: input.abort,

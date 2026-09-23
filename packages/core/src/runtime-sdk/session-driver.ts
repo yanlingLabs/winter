@@ -775,6 +775,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         home,
         profile: deps.profile,
         cwd,
+        outputsDir: deps.outDirOf(sessionId),
         model,
         credentials,
         settings,

@@ -154,6 +154,15 @@ test("every cell discovers no settings tier of its own and keeps the foreground 
   }
 });
 
+// The session's $OUTDIR rides `Options.outputsDir`, which the agent SDK makes writable for the Bash
+// sandbox and carves out of its protected winter-home floor; without it a sandboxed `echo > $OUTDIR/x`
+// is refused though the system prompt names the directory.
+test("the session's $OUTDIR rides Options.outputsDir; absent ⇒ no key", () => {
+  const o = buildWinterOptions(optionsInput({ mode: "code", outputsDir: "/tmp/winter-home/outputs/s_abc" }));
+  expect(o.outputsDir).toBe("/tmp/winter-home/outputs/s_abc");
+  expect("outputsDir" in buildWinterOptions(optionsInput({ mode: "code" }))).toBe(false);
+});
+
 // B1 (2026-09-22): with `settingSources: []` a local plugin is the ONE skill source the child still
 // indexes, so the daemon's resolved plugin skills ride `Options.plugins` (skills-only views, built by
 // `SkillStore.childSkillSurface`) and `Options.skills` names which of them the session may invoke.
