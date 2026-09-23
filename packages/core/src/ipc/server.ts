@@ -2694,14 +2694,27 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.pluginUninstall: {
         const p = parseParams(PluginUninstallParams, params);
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.uninstall is not available on this server (no winterHome configured)");
-        hotApplyStop(pluginNameOfSpec(p.spec)); // stop a running Tier-2 process BEFORE it's unregistered
+        const options = pluginManagerOptionsFor(opts.winterHome, p.cwd);
+        // I2 fix round 1: resolve BEFORE touching the supervisor — an uninstall of a scope this
+        // spec isn't installed in must refuse typed with NOTHING stopped (the old code called
+        // hotApplyStop unconditionally, before uninstallPlugin's own "is it installed there" check
+        // ever ran). `others` is every OTHER scope's current record for this exact spec, read
+        // before this call's own mutation — stopping the Tier-2 process is correct only when NONE
+        // of them still has it installed and enabled (a plugin's runtime is one process per bare
+        // name, spec's own F15 compound-key convention notwithstanding — see the lane report's own
+        // concerns note on this).
+        let stillLive = false;
         try {
-          await uninstallPlugin(pluginManagerOptionsFor(opts.winterHome, p.cwd), p.spec, p.scope);
-          invalidateLivePluginsCache();
-          return { ok: true, spec: p.spec, scope: p.scope };
+          stillLive = (await listPlugins(options)).some((e) => e.enabled && e.scope !== p.scope && `${e.id}@${e.marketplace}` === p.spec);
+        } catch { /* best effort — an unreadable OTHER scope never blocks this uninstall */ }
+        try {
+          await uninstallPlugin(options, p.spec, p.scope);
         } catch (err) {
           throwPluginManagerFailure(err);
         }
+        invalidateLivePluginsCache();
+        if (!stillLive) hotApplyStop(pluginNameOfSpec(p.spec));
+        return { ok: true, spec: p.spec, scope: p.scope };
       }
       case METHODS.pluginEnable: {
         const p = parseParams(PluginEnableScopedParams, params);

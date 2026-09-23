@@ -93,7 +93,7 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
     stop = () => { supervisor?.stopAll(); server.stop(); store.close(); };
     const c = await TestClient.connect(socketPath);
     await c.hello(tokens.harness, "plugin-rpc");
-    return { home, socketPath, c, store };
+    return { home, socketPath, c, store, supervisor };
   }
 
   test("plugin.marketplace.add + plugin.install + plugin.list: a directory marketplace installs and lists, enabled by default", async () => {
@@ -211,6 +211,66 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
 
     const disableRes = await c.request(METHODS.pluginDisable, { spec: "p@m", scope: "user" });
     expect(disableRes.result).toEqual({ ok: true, spec: "p@m", scope: "user", enabled: false });
+  });
+
+  // I2 fix round 1: plugin.uninstall must resolve the install record for that spec+scope BEFORE
+  // touching the supervisor -- an uninstall of a scope the plugin isn't in must stop nothing.
+  test("plugin.uninstall on a scope the plugin isn't installed in refuses typed, with the OTHER scope's record untouched and nothing stopped", async () => {
+    const { c, supervisor } = await boot({ withSupervisor: true });
+    const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-mkt-"));
+    writeMarketplace(mktDir);
+    await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+    await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+    await c.request(METHODS.pluginSetConsent, { name: "p", classes: ["exec"] });
+    await c.request(METHODS.pluginEnable, { spec: "p@m", scope: "user" }); // hot-spawns via the real supervisor
+
+    const projectDir = mkdtempSync(join(tmpdir(), "winter-plugin-uninstall-project-"));
+    const res = await c.request(METHODS.pluginUninstall, { spec: "p@m", scope: "project", cwd: projectDir });
+    expect(res.error?.code).toBe(ERR.INVALID_PARAMS);
+
+    // The user-scope record survives, and the running Tier-2 process was never touched.
+    const listRes = await c.request(METHODS.pluginList, {});
+    expect(listRes.result.plugins.find((pl: any) => pl.scope === "user")).toBeDefined();
+    expect(["starting", "running"]).toContain(supervisor!.status("p"));
+  });
+
+  test("a plugin installed at two scopes: uninstalling one leaves the Tier-2 process running; uninstalling the last stops it", async () => {
+    const { c, supervisor } = await boot({ withSupervisor: true });
+    const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-mkt-"));
+    writeMarketplace(mktDir);
+    await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+
+    const projectDir = mkdtempSync(join(tmpdir(), "winter-plugin-two-scopes-"));
+    await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+    await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "project", cwd: projectDir });
+    // Consent is scope-independent (Winter's own <home>/settings.json store, spec §5.4) -- one call
+    // covers both scopes' installs of the same spec.
+    await c.request(METHODS.pluginSetConsent, { name: "p", classes: ["exec"] });
+    await c.request(METHODS.pluginEnable, { spec: "p@m", scope: "user" }); // hot-spawns (livePlugins() is user-scope)
+    await c.request(METHODS.pluginEnable, { spec: "p@m", scope: "project", cwd: projectDir });
+
+    expect(["starting", "running"]).toContain(supervisor!.status("p"));
+
+    // Uninstall the USER-scope record first — the PROJECT-scope one is still installed+enabled, so
+    // the running process must NOT be stopped. `cwd` is passed even for this user-scope call,
+    // matching real usage (the CLI always sends `process.cwd()`, main.ts's `case "plugin"`) — it's
+    // what lets the daemon resolve whether the OTHER scope (project, keyed by this exact cwd)
+    // still has the spec installed+enabled; `installed_plugins.json` itself carries no cwd per
+    // project-scope record, so a caller that never sends one leaves that scope unresolvable.
+    const firstUninstall = await c.request(METHODS.pluginUninstall, { spec: "p@m", scope: "user", cwd: projectDir });
+    expect(firstUninstall.result).toEqual({ ok: true, spec: "p@m", scope: "user" });
+    expect(["starting", "running"]).toContain(supervisor!.status("p"));
+    const afterFirst = await c.request(METHODS.pluginList, { cwd: projectDir });
+    expect(afterFirst.result.plugins).toHaveLength(1);
+    expect(afterFirst.result.plugins[0]).toMatchObject({ scope: "project", enabled: true });
+
+    // Uninstall the LAST remaining scope — nothing else has it installed+enabled, so this one DOES
+    // hot-stop the process.
+    const secondUninstall = await c.request(METHODS.pluginUninstall, { spec: "p@m", scope: "project", cwd: projectDir });
+    expect(secondUninstall.result).toEqual({ ok: true, spec: "p@m", scope: "project" });
+    expect(supervisor!.status("p")).toBe("stopped");
+    const afterSecond = await c.request(METHODS.pluginList, { cwd: projectDir });
+    expect(afterSecond.result.plugins).toEqual([]);
   });
 
   test("plugin.update re-resolves the install path and bumps the version", async () => {
