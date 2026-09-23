@@ -1,20 +1,33 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { appendHistory, loadHistory, makeHistoryNav } from "../../src/tui/history-store";
+import { appendHistory, historyPathFor, loadHistory, makeHistoryNav } from "../../src/tui/history-store";
 
 const tmpFile = (name = "history.jsonl"): string => join(mkdtempSync(join(tmpdir(), "winter-history-")), name);
 
 describe("history-store", () => {
-  describe("appendHistory + loadHistory round-trip", () => {
+  describe("historyPathFor (WS-21 spec §2.2: claude's own location)", () => {
+    test("<home>/sdk/history.jsonl", () => {
+      expect(historyPathFor("/Users/x/.winter")).toBe("/Users/x/.winter/sdk/history.jsonl");
+    });
+  });
+
+  describe("appendHistory + loadHistory round-trip (WS-21: claude's own entry shape)", () => {
     test("appended entries load back newest-first", () => {
       const path = tmpFile();
-      appendHistory(path, { display: "first", ts: 1, sessionId: "s1" });
-      appendHistory(path, { display: "second", ts: 2, sessionId: "s1" });
-      appendHistory(path, { display: "third", ts: 3, sessionId: "s1" });
+      appendHistory(path, { display: "first", pastedContents: {}, timestamp: 1, project: "/p", sessionId: "s1" });
+      appendHistory(path, { display: "second", pastedContents: {}, timestamp: 2, project: "/p", sessionId: "s1" });
+      appendHistory(path, { display: "third", pastedContents: {}, timestamp: 3, project: "/p", sessionId: "s1" });
 
       expect(loadHistory(path, "s1")).toEqual(["third", "second", "first"]);
+    });
+
+    test("appendHistory writes claude's own on-disk shape verbatim", () => {
+      const path = tmpFile();
+      appendHistory(path, { display: "hi", pastedContents: {}, timestamp: 42, project: "/proj", sessionId: "s1" });
+      const written = JSON.parse(readFileSync(path, "utf8").trim());
+      expect(written).toEqual({ display: "hi", pastedContents: {}, timestamp: 42, project: "/proj", sessionId: "s1" });
     });
 
     test("missing file loads as empty, never throws", () => {
@@ -24,12 +37,12 @@ describe("history-store", () => {
 
     test("appendHistory never throws even against an unwritable path", () => {
       const path = join(tmpdir(), "winter-history-missing-dir", "nested", "history.jsonl");
-      expect(() => appendHistory(path, { display: "x", ts: 1, sessionId: "s1" })).not.toThrow();
+      expect(() => appendHistory(path, { display: "x", pastedContents: {}, timestamp: 1, project: "/p", sessionId: "s1" })).not.toThrow();
     });
 
     test("max caps the returned count", () => {
       const path = tmpFile();
-      for (let i = 0; i < 10; i++) appendHistory(path, { display: `entry-${i}`, ts: i, sessionId: "s1" });
+      for (let i = 0; i < 10; i++) appendHistory(path, { display: `entry-${i}`, pastedContents: {}, timestamp: i, project: "/p", sessionId: "s1" });
       expect(loadHistory(path, "s1", 3)).toEqual(["entry-9", "entry-8", "entry-7"]);
     });
   });
@@ -37,10 +50,10 @@ describe("history-store", () => {
   describe("session priority", () => {
     test("this session's entries come before other sessions', each group newest-first", () => {
       const path = tmpFile();
-      appendHistory(path, { display: "other-1", ts: 1, sessionId: "other" });
-      appendHistory(path, { display: "mine-1", ts: 2, sessionId: "mine" });
-      appendHistory(path, { display: "other-2", ts: 3, sessionId: "other" });
-      appendHistory(path, { display: "mine-2", ts: 4, sessionId: "mine" });
+      appendHistory(path, { display: "other-1", pastedContents: {}, timestamp: 1, project: "/p", sessionId: "other" });
+      appendHistory(path, { display: "mine-1", pastedContents: {}, timestamp: 2, project: "/p", sessionId: "mine" });
+      appendHistory(path, { display: "other-2", pastedContents: {}, timestamp: 3, project: "/p", sessionId: "other" });
+      appendHistory(path, { display: "mine-2", pastedContents: {}, timestamp: 4, project: "/p", sessionId: "mine" });
 
       expect(loadHistory(path, "mine")).toEqual(["mine-2", "mine-1", "other-2", "other-1"]);
     });
@@ -50,18 +63,42 @@ describe("history-store", () => {
     test("skips garbled JSON, blank lines, and wrong-shape entries without throwing", () => {
       const path = tmpFile();
       const lines = [
-        JSON.stringify({ display: "ok-1", ts: 1, sessionId: "s1" }),
+        JSON.stringify({ display: "ok-1", pastedContents: {}, timestamp: 1, project: "/p", sessionId: "s1" }),
         "not json at all {{{",
         "",
         "   ",
-        JSON.stringify({ ts: 2, sessionId: "s1" }), // missing `display`
+        JSON.stringify({ timestamp: 2, sessionId: "s1" }), // missing `display`
         JSON.stringify(42), // not an object
-        JSON.stringify({ display: "ok-2", ts: 3, sessionId: "s1" }),
+        JSON.stringify({ display: "ok-2", pastedContents: {}, timestamp: 3, project: "/p", sessionId: "s1" }),
       ];
       writeFileSync(path, lines.join("\n"));
 
       expect(() => loadHistory(path, "s1")).not.toThrow();
       expect(loadHistory(path, "s1")).toEqual(["ok-2", "ok-1"]);
+    });
+  });
+
+  // WS-21: a file that pre-dates this change may hold the OLD shape (`{display, ts, sessionId}`,
+  // no `pastedContents`/`project`/`timestamp`) — `loadHistory` must read those lines exactly as
+  // readily as new ones (spec's own instruction: "it reads both the old and the new shape").
+  describe("backward compatibility: reads a pre-WS-21 file mixed with new entries", () => {
+    test("old-shape lines ({display, ts, sessionId}) load back fine, interleaved with new-shape ones", () => {
+      const path = tmpFile();
+      const lines = [
+        JSON.stringify({ display: "old-1", ts: 1, sessionId: "s1" }), // pre-WS-21 shape
+        JSON.stringify({ display: "new-1", pastedContents: {}, timestamp: 2, project: "/p", sessionId: "s1" }), // WS-21 shape
+        JSON.stringify({ display: "old-2", ts: 3, sessionId: "s1" }),
+      ];
+      writeFileSync(path, lines.join("\n"));
+
+      expect(loadHistory(path, "s1")).toEqual(["old-2", "new-1", "old-1"]);
+    });
+
+    test("a real Winter build can append NEW-shape entries onto an OLD-shape file with no special handling", () => {
+      const path = tmpFile();
+      writeFileSync(path, `${JSON.stringify({ display: "legacy", ts: 1, sessionId: "s1" })}\n`);
+      appendHistory(path, { display: "fresh", pastedContents: {}, timestamp: 2, project: "/p", sessionId: "s1" });
+      expect(loadHistory(path, "s1")).toEqual(["fresh", "legacy"]);
     });
   });
 
