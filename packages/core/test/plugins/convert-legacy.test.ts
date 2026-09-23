@@ -7,7 +7,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { convertLegacyPlugins } from "../../src/plugins/convert-legacy";
-import { listPlugins } from "../../src/plugins/sdk-plugin-api";
+import { listPlugins, setPluginEnabled } from "../../src/plugins/sdk-plugin-api";
 import { sdkHomeFor, sdkPluginsRoot } from "../../src/agent/paths";
 import { PluginStore } from "../../src/agent/plugins";
 import { pluginConsentFingerprint } from "../../src/plugins/consent-fingerprint";
@@ -460,5 +460,125 @@ describe("minor 2: a re-run never overwrites an already-converted plugin", () =>
     expect(second.skipped).toEqual([]);
     expect(second.converted).toHaveLength(1);
     expect(existsSync(join(targetDir, ".claude-plugin", "plugin.json"))).toBe(true);
+  });
+});
+
+// Reviewer round, item 1 (Opus review): installPlugin (in the fresh-conversion path) defaults a
+// brand-new install to enabled:true; the disable that corrects an UNCONSENTED plugin back to false
+// is a SEPARATE call right after it. A crash between the two -- or anywhere later in the
+// registration loop, since rekeyConsents runs only ONCE, at the very end -- leaves the install
+// record + folder in place with the plugin still enabled and its qualified consent record never
+// written. Minor 2's own "don't overwrite" skip path must still finish that interrupted work on
+// every resume, not silently accept the half-finished state as done.
+describe("reviewer round, item 1: a crash between install and disable doesn't leave an unconsented plugin enabled forever", () => {
+  function pluginOptionsFor(h: string) {
+    return { pluginsRoot: sdkPluginsRoot(h), settingsPathFor: () => join(sdkHomeFor(h), "settings.json") };
+  }
+
+  test("simulating a crash after install (enabled:true) and before the disable: re-running fixes the enabled state AND writes the qualified consent record", async () => {
+    const h = home();
+    // Requires BOTH tcc and hardware consent, but the legacy record only ever covered tcc --
+    // partially consented, so wasFullyConsented is false and the plugin must convert disabled.
+    legacyPlugin(h, "partial", { id: "partial", tier: "capability", permissions: { tcc: ["accessibility"], hardware: ["battery"] } });
+    writeFileSync(join(h, "settings.json"), JSON.stringify({
+      schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
+      plugins: { enabled: ["partial"], consents: { partial: { tcc: Date.now() } } },
+    }));
+
+    // A normal, uninterrupted first run: converts, installs DISABLED (unconsented), writes the
+    // qualified consent record (carrying forward tcc, not hardware) via rekeyConsents.
+    const first = await convertLegacyPlugins(h);
+    expect(first.converted).toHaveLength(1);
+    expect(first.converted[0]?.enabled).toBe(false);
+    const settingsPath = join(h, "settings.json");
+    const beforeCrashSim = JSON.parse(readFileSync(settingsPath, "utf8"));
+    expect(beforeCrashSim.plugins.consents["partial@winter-legacy"]).toEqual({ classes: ["tcc"], fingerprint: expect.any(String) });
+
+    // Reconstruct the EXACT state a crash between installPlugin (default enabled:true) and the
+    // disable call would leave: enabled flipped back to true, and the qualified consent record --
+    // which only rekeyConsents, at the very END of the run, ever writes -- deleted as if it never
+    // landed.
+    const pluginOptions = pluginOptionsFor(h);
+    await setPluginEnabled(pluginOptions, "partial@winter-legacy", "user", true);
+    const corrupted = JSON.parse(readFileSync(settingsPath, "utf8"));
+    delete corrupted.plugins.consents["partial@winter-legacy"];
+    writeFileSync(settingsPath, JSON.stringify(corrupted));
+
+    // Confirm the simulated crash state actually represents "enabled, unconsented" before resuming.
+    const beforeResume = await listPlugins(pluginOptions);
+    expect(beforeResume.find((p) => p.id === "partial" && p.marketplace === "winter-legacy")?.enabled).toBe(true);
+    const beforeResumeSettings = JSON.parse(readFileSync(settingsPath, "utf8"));
+    expect(beforeResumeSettings.plugins.consents["partial@winter-legacy"]).toBeUndefined();
+
+    // The "resumed" run: this id is already installed (minor 2's skip path) -- must still finish
+    // the interrupted disable + consent-record write.
+    const second = await convertLegacyPlugins(h);
+    expect(second.converted).toEqual([]);
+    expect(second.skipped.map((s) => s.id)).toContain("partial");
+
+    const afterResume = await listPlugins(pluginOptions);
+    expect(afterResume.find((p) => p.id === "partial" && p.marketplace === "winter-legacy")?.enabled).toBe(false);
+
+    const settingsAfter = JSON.parse(readFileSync(settingsPath, "utf8"));
+    expect(settingsAfter.plugins.consents["partial@winter-legacy"]).toEqual({ classes: ["tcc"], fingerprint: expect.any(String) });
+    // The bare legacy record is still there too -- this fix only ADDS, never touches it (finding 2).
+    expect(settingsAfter.plugins.consents.partial).toEqual({ tcc: expect.any(Number) });
+  });
+
+  test("a crash-resumed FULLY CONSENTED plugin is left enabled -- the disable only applies when consent didn't cover everything", async () => {
+    const h = home();
+    legacyPlugin(h, "trusted", { id: "trusted", tier: "capability", permissions: { tcc: ["accessibility"] } });
+    writeFileSync(join(h, "settings.json"), JSON.stringify({
+      schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
+      plugins: { enabled: ["trusted"], consents: { trusted: { tcc: Date.now() } } },
+    }));
+
+    const first = await convertLegacyPlugins(h);
+    expect(first.converted[0]?.enabled).toBe(true); // fully consented -- converts enabled, no disable call made
+
+    // Simulate a crash strictly BEFORE rekeyConsents ran (the only thing left to finish for an
+    // already-correctly-enabled plugin): delete the qualified consent record it would have written.
+    const settingsPath = join(h, "settings.json");
+    const corrupted = JSON.parse(readFileSync(settingsPath, "utf8"));
+    delete corrupted.plugins.consents["trusted@winter-legacy"];
+    writeFileSync(settingsPath, JSON.stringify(corrupted));
+
+    const pluginOptions = pluginOptionsFor(h);
+    const second = await convertLegacyPlugins(h);
+    expect(second.skipped.map((s) => s.id)).toContain("trusted");
+
+    // Never force-disabled: wasFullyConsented was true, so the disable branch never applies.
+    const afterResume = await listPlugins(pluginOptions);
+    expect(afterResume.find((p) => p.id === "trusted" && p.marketplace === "winter-legacy")?.enabled).toBe(true);
+
+    // The qualified consent record is still completed on resume.
+    const settingsAfter = JSON.parse(readFileSync(settingsPath, "utf8"));
+    expect(settingsAfter.plugins.consents["trusted@winter-legacy"]).toEqual({ classes: ["tcc"], fingerprint: expect.any(String) });
+  });
+});
+
+// Reviewer round, item 2: legacyShipsSkills now follows symlinks (statSync-based isDirectory, not
+// Dirent.isDirectory(), which reports a symlink entry's OWN type -- "symbolic link" -- never the
+// target's). A shipped skill that is itself a symlinked directory (a shared skill package linked
+// in, for instance) was silently missed, under-reporting the pre-WS-21 exec requirement.
+describe("reviewer round, item 2: legacyShipsSkills follows symlinks", () => {
+  test("a plugin whose ONLY skill is a SYMLINKED directory under skills/ still requires (and lacks) exec consent -- converts disabled", async () => {
+    const h = home();
+    // No entry, no permissions.exec, no mcpServers/hooks -- shipsSkills is the ONLY thing that can
+    // make execNeeded true here.
+    const legacyDir = legacyPlugin(h, "skilled", { id: "skilled", tier: "capability" });
+    mkdirSync(join(legacyDir, "real-skill-storage", "greet"), { recursive: true });
+    writeFileSync(join(legacyDir, "real-skill-storage", "greet", "SKILL.md"), "---\nname: greet\n---\nhi");
+    mkdirSync(join(legacyDir, "skills"), { recursive: true });
+    // An INTERNAL symlink (stays inside the plugin's own folder, so finding 4's escaping-symlink
+    // guard does not refuse the conversion) -- but still a symlink, which is the point.
+    symlinkSync(join(legacyDir, "real-skill-storage", "greet"), join(legacyDir, "skills", "greet"));
+    writeFileSync(join(h, "settings.json"), JSON.stringify({
+      schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, plugins: { enabled: ["skilled"] }, // no consent record at all
+    }));
+
+    const result = await convertLegacyPlugins(h);
+    expect(result.converted).toHaveLength(1);
+    expect(result.converted[0]?.enabled).toBe(false);
   });
 });
