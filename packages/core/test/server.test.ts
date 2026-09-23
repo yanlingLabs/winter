@@ -1510,7 +1510,7 @@ describe("daemon IPC", () => {
 
       const harness = await TestClient.connect(srv.socketPath);
       await harness.hello(srv.harnessToken, "cli-setconsent-hw");
-      const setConsent = await harness.request(METHODS.pluginSetConsent, { name: "battery-limiter", classes: ["hardware"] });
+      const setConsent = await harness.request(METHODS.pluginSetConsent, { spec: "battery-limiter@test-mkt", classes: ["hardware"] });
       expect(setConsent.result).toEqual({ ok: true });
 
       const provider = await connectProvider(srv.socketPath, srv.harnessToken, "hw-provider-2");

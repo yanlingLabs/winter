@@ -1393,8 +1393,13 @@ export const PluginRemoveResult = z.union([
 ]);
 
 /** Records consent separately from enabling, for a UI that wants to disclose/collect consent as
- *  its own step rather than folding it into `plugin.enable {consent:true}` (the common path). */
-export const PluginSetConsentParams = z.object({ name: z.string().min(1), classes: z.array(z.string()) });
+ *  its own step rather than folding it into `plugin.enable {consent:true}` (the common path).
+ *  WS-21 fix round 2 (C2): `spec` (the qualified `"<name>@<marketplace>"` compound key), not a bare
+ *  `name` — the pre-fix param looked a plugin up by bare name (`livePlugins().find(pl => pl.name ===
+ *  p.name)`), so consent granted for `foo@B` was recorded against whichever `foo@*` happened to be
+ *  installed, including `foo@A`. The daemon computes and stores the fingerprint
+ *  (`plugins/consent-fingerprint.ts`, C1) when it records consent under this exact spec. */
+export const PluginSetConsentParams = z.object({ spec: z.string().min(1), classes: z.array(z.string()) });
 export const PluginSetConsentResult = z.union([
   z.object({ ok: z.literal(true) }),
   z.object({ code: z.literal("unknown_plugin") }),
