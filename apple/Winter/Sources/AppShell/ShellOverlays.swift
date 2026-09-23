@@ -738,7 +738,7 @@ struct LibraryPanel: View {
                 LibraryPluginDetail(model: wiring.pluginManager,
                                     tilesModel: wiring.tilesModel,
                                     shortcutsModel: wiring.shortcutsModel,
-                                    name: name,
+                                    spec: name,
                                     onBack: back, onVanished: { vanished(item) })
             case let .hooks(pluginName):
                 LibraryHooksDetail(model: wiring.pluginManager, pluginName: pluginName,

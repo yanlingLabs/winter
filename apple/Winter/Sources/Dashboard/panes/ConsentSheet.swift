@@ -2,26 +2,28 @@ import WinterKit
 import SwiftUI
 
 // -----------------------------------------------------------------------------------------------
-// ConsentSheetState — Task 3 (4d-iii): a PURE state machine backing the plugin install/enable
-// consent sheet. No `WinterClient`, no SwiftUI — table-tested directly in `ConsentSheetStateTests`,
-// same "pure model, table-tested next to its View" posture as `pluginRowDisplay` in
-// `PluginManagerView.swift`.
+// ConsentSheetState — WS-21 rewrite: a PURE state machine backing the plugin install/enable
+// consent sheet, now seeded from a `plugin.list` row's `PluginExtras` rather than a wire outcome's
+// `consentBlock` string array (the pre-WS-21 two-step `plugin.enable{consent:true}` flow, and the
+// server-computed disclosure text it carried, are both retired — see `PluginManagerModel.enable`/
+// `installFromFolder`'s own doc comments for the new consent-then-enable order). No `WinterClient`,
+// no SwiftUI — table-tested directly in `ConsentSheetStateTests`, same "pure model, table-tested
+// next to its View" posture as `pluginRowDisplay` in `PluginManagerView.swift`.
 // -----------------------------------------------------------------------------------------------
 
-/// Built from EITHER of the two triggers the brief calls out: `plugin.enable`'s
-/// `.needsConsent(...)` outcome (an existing installed-but-unconsented plugin whose Enable button
-/// just came back needing consent) or a fresh `plugins.install`'s `.ok(...)` outcome (a plugin the
-/// user just picked via the folder/zip panel). Both wire results carry the SAME
-/// `requiredConsents`/`consentBlock` shape server-side (`buildConsentBlock`,
-/// `packages/core/src/plugins/lifecycle.ts`), so one state type covers both.
+/// Built from EITHER of the two triggers the brief calls out: `PluginManagerModel.enable(_:)` when
+/// the row's extras still have a pending consent class, or a successful `installFromFolder(_:)`
+/// whose freshly-installed row does. `spec`/`scope` are what `confirmConsent()` calls
+/// `pluginEnable` with; `pluginId` is the bare id `pluginSetConsent(name:)` takes.
 ///
-/// `consentBlock` is carried byte-for-byte from the wire result into `ConsentSheet`'s monospaced
-/// body — the design-spec §1 "exec payload, never a summary" discipline the CLI's own
-/// `buildConsentBlock` + `type "yes" to consent:` prompt already enforce (`packages/cli/src/
-/// main.ts`'s `plugin enable`). This type must never reformat/truncate/reorder those lines.
+/// `extras` is carried verbatim from the daemon's `plugin.list` row (`winter-plugin.json`'s own
+/// declared permissions, not a client-fabricated summary) — `ConsentSheet`'s body lists each
+/// `tccPermissions`/`hardwarePermissions`/`entry` field individually rather than folding them into
+/// prose, the same "never just a summary" discipline the old server-computed `consentBlock` text
+/// enforced.
 ///
 /// `decision` is a pure record of user intent, NOT a completed action — `PluginManagerModel` is
-/// the one that actually calls `pluginEnable(name:consent:true)` on `.confirmed`
+/// the one that actually calls `pluginSetConsent`/`pluginEnable` on `.confirmed`
 /// (`PluginManagerModel.confirmConsent()`); this type has no `WinterClient` of its own to call it
 /// with.
 struct ConsentSheetState: Equatable, Identifiable {
@@ -31,39 +33,30 @@ struct ConsentSheetState: Equatable, Identifiable {
         case cancelled
     }
 
-    var id: String { pluginName }
-    let pluginName: String
-    let consentBlock: [String]
-    let requiredConsents: [String]
+    var id: String { spec }
+    let pluginId: String
+    let spec: String
+    let scope: PluginScope
+    let extras: PluginExtras
     private(set) var decision: Decision = .pending
 
-    init(pluginName: String, consentBlock: [String], requiredConsents: [String]) {
-        self.pluginName = pluginName
-        self.consentBlock = consentBlock
-        self.requiredConsents = requiredConsents
+    init(pluginId: String, spec: String, scope: PluginScope, extras: PluginExtras) {
+        self.pluginId = pluginId
+        self.spec = spec
+        self.scope = scope
+        self.extras = extras
     }
 
-    /// From `plugin.enable`'s `.needsConsent(requiredConsents, consentBlock)` outcome — `nil` for
-    /// every other case (`.ok`/`.unknownPlugin` have nothing to show a consent sheet for).
-    init?(pluginName: String, needsConsent outcome: PluginEnableOutcome) {
-        guard case .needsConsent(let requiredConsents, let consentBlock) = outcome else { return nil }
-        self.init(pluginName: pluginName, consentBlock: consentBlock, requiredConsents: requiredConsents)
-    }
-
-    /// From a fresh `plugins.install`'s `.ok(...)` outcome — `nil` for `.invalidSource`/
-    /// `.alreadyInstalled` (those surface via `PluginManagerModel.errorText` instead, never a
-    /// sheet).
-    init?(installOutcome outcome: PluginsInstallOutcome) {
-        guard case .ok(let name, let requiredConsents, _, let consentBlock) = outcome else { return nil }
-        self.init(pluginName: name, consentBlock: consentBlock, requiredConsents: requiredConsents)
-    }
+    /// The classes `confirmConsent()` grants — required-but-not-yet-consented, verbatim from the
+    /// wire (`PluginExtras.pendingConsents`).
+    var pendingConsents: [String] { extras.pendingConsents }
 
     /// User clicked "Grant consent & enable" — records the decision; `PluginManagerModel` reads
-    /// this transition as its cue to call `pluginEnable(name:consent:true)`.
+    /// this transition as its cue to call `pluginSetConsent` then `pluginEnable`.
     mutating func confirm() { decision = .confirmed }
 
     /// User clicked "Cancel" — records the decision; the plugin stays exactly as it was (no
-    /// `pluginEnable` call at all).
+    /// `pluginSetConsent`/`pluginEnable` call at all).
     mutating func cancel() { decision = .cancelled }
 }
 
@@ -76,19 +69,47 @@ struct ConsentSheetState: Equatable, Identifiable {
 // `.quaternary` only — no `.ultraThinMaterial`/glass blend; this window is opaque).
 // -----------------------------------------------------------------------------------------------
 
+/// PURE: the disclosure lines the consent sheet renders — every one of `extras`' declared Winter
+/// permissions, individually and verbatim (never folded into prose or summarized), the same
+/// "never just a summary" discipline the pre-WS-21 server-computed `consentBlock` text enforced.
+/// Sourced straight from the daemon's `plugin.list` row (`winter-plugin.json`'s own declared
+/// fields), not fabricated. Table-tested in `ConsentSheetStateTests`.
+func pluginConsentDisclosureLines(pluginId: String, extras: PluginExtras) -> [String] {
+    var lines = ["\(pluginId) is asking for the following, on this Mac:"]
+    if extras.execPermission {
+        if let entry = extras.entry {
+            let command = ([entry.command] + entry.args).joined(separator: " ")
+            lines.append("- run its own background process: \(command)")
+        } else {
+            lines.append("- run its own background process")
+        }
+    }
+    for permission in extras.tccPermissions {
+        lines.append("- will request macOS permission: \(permission)")
+    }
+    for permission in extras.hardwarePermissions {
+        lines.append("- hardware access via Winter.app's helper: \(permission)")
+    }
+    return lines
+}
+
 struct ConsentSheet: View {
     let state: ConsentSheetState
     /// Fix wave (Task 2 review, consent double-submit guard): true while `confirmConsent()` is
-    /// in flight (`model.busyName == state.pluginName`, threaded in by `PluginManagerView`) —
-    /// disables BOTH buttons (Cancel too, so the sheet can't be torn down mid-RPC) and shows a
-    /// small progress indicator on the grant button, so a second click can't fire a second RPC.
+    /// in flight (`model.busySpec == state.spec`, threaded in by `PluginManagerView`) — disables
+    /// BOTH buttons (Cancel too, so the sheet can't be torn down mid-RPC) and shows a small
+    /// progress indicator on the grant button, so a second click can't fire a second RPC.
     let busy: Bool
     let onConfirm: () -> Void
     let onCancel: () -> Void
 
+    private var disclosureLines: [String] {
+        pluginConsentDisclosureLines(pluginId: state.pluginId, extras: state.extras)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("\(state.pluginName) requests consent")
+            Text("\(state.pluginId) requests consent")
                 .font(Typography.paneTitle)
             Text("Granting consent lets this plugin run the following, verbatim, on this Mac. Review it before continuing.")
                 .font(Typography.label())
@@ -97,7 +118,7 @@ struct ConsentSheet: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
-                    ForEach(Array(state.consentBlock.enumerated()), id: \.offset) { _, line in
+                    ForEach(Array(disclosureLines.enumerated()), id: \.offset) { _, line in
                         Text(line)
                             .font(Typography.labelMono())
                             .textSelection(.enabled)
