@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach } from "bun:test";
-import { mkdtempSync, mkdirSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -52,6 +52,62 @@ describe("memory-dir: repoRootFor", () => {
     expect(add.code).toBe(0);
     expect(repoRootFor(wtDir)).toBe(root);
     expect(repoRootFor(wtDir)).toBe(repoRootFor(root)); // same key for both checkouts
+  });
+
+  test("a nested subdirectory of a linked worktree also resolves to the MAIN repo root", () => {
+    const root = initRepo();
+    const wtDir = join(realDir(), "wt");
+    expect(git(["worktree", "add", "-q", "-b", "wt-nested", wtDir], root).code).toBe(0);
+    const nested = join(wtDir, "src", "deep");
+    mkdirSync(nested, { recursive: true });
+    expect(repoRootFor(nested)).toBe(root);
+  });
+
+  // Re-review M-b (2026-09-23): the project root decides which approved rules, trust and project
+  // overlay a session inherits, and `--git-common-dir` is whatever the cwd's `.git` FILE says. A
+  // directory whose `.git` file points at ANOTHER project's git dir would inherit that project's
+  // approvals. The resolved root is kept only when it contains the cwd or the cwd is inside one of the
+  // worktrees that git dir actually registers; otherwise the cwd is its own root.
+  test("a .git FILE pointing at another project's git dir does not make that project the root", () => {
+    const other = initRepo();
+    const evil = realDir();
+    writeFileSync(join(evil, ".git"), `gitdir: ${join(other, ".git")}\n`);
+    expect(git(["rev-parse", "--git-common-dir"], evil).stdout.trim()).toBe(join(other, ".git")); // git itself follows it
+    expect(repoRootFor(evil)).toBe(evil);
+    const nested = join(evil, "sub");
+    mkdirSync(nested);
+    expect(repoRootFor(nested)).toBe(nested);
+  });
+
+  test("…nor one pointing at a REGISTERED worktree's git dir of another project", () => {
+    const other = initRepo();
+    const wtDir = join(realDir(), "wt");
+    expect(git(["worktree", "add", "-q", "-b", "wt-real", wtDir], other).code).toBe(0);
+    const wtGitDir = readFileSync(join(wtDir, ".git"), "utf8").replace(/^gitdir:\s*/, "").trim();
+    const evil = realDir();
+    writeFileSync(join(evil, ".git"), `gitdir: ${wtGitDir}\n`);
+    expect(repoRootFor(evil)).toBe(evil);
+    expect(repoRootFor(wtDir)).toBe(other); // the real worktree is still the other project's
+  });
+
+  // A submodule's common dir is `<outer>/.git/modules/<name>`, whose parent contains nothing of the
+  // checkout; its own `core.worktree` (in that common dir's config — not something the cwd's `.git`
+  // file can set) names the checkout, which is the submodule's one root from any depth.
+  test("a submodule resolves to its own checkout, from the checkout and from inside it", () => {
+    const inner = initRepo();
+    const outer = initRepo();
+    const add = Bun.spawnSync(["git", "-C", outer, "-c", "protocol.file.allow=always", "submodule", "add", "-q", inner, "sub"]);
+    expect(add.exitCode).toBe(0);
+    const sub = join(outer, "sub");
+    const nested = join(sub, "deep");
+    mkdirSync(nested);
+    expect(repoRootFor(sub)).toBe(sub);
+    expect(repoRootFor(nested)).toBe(sub);
+    expect(repoRootFor(outer)).toBe(outer);
+    // …and a forged `.git` file pointing at that submodule's git dir still gets nothing of it.
+    const evil = realDir();
+    writeFileSync(join(evil, ".git"), `gitdir: ${join(outer, ".git", "modules", "sub")}\n`);
+    expect(repoRootFor(evil)).toBe(evil);
   });
 
   test("result is memoized (repeat calls for the same cwd don't require repeated git spawns to agree)", () => {

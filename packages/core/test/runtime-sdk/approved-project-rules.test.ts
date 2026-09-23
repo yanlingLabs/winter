@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { ApprovedProjectRules } from "../../src/agent/approved-project-rules";
+import { repoRootFor } from "../../src/agent/memory-dir";
 import { PermissionRules } from "../../src/agent/permission-rules";
 import { TrustStore } from "../../src/agent/trust";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -158,6 +159,24 @@ describe("ApprovedProjectRules — never through a link (re-review R1)", () => {
     expect(lstatSync(join(home, "permissions")).isSymbolicLink()).toBe(true);
     expect(store.rulesFor(repo)).toEqual([]);
     expect(logs).toHaveLength(1);
+  });
+
+  // Re-review M-b: the root those rules are looked up by is `repoRootFor(cwd)`, and a `.git` FILE
+  // pointing at another project's git dir used to make THAT project the root.
+  test("M-b: a directory whose .git file points at another project's git dir does not inherit its approvals", () => {
+    const home = realDir("winter-approved-mb-home-");
+    const other = realDir("winter-approved-mb-other-");
+    expect(Bun.spawnSync(["git", "-C", other, "init", "-q"]).exitCode).toBe(0);
+    const evil = realDir("winter-approved-mb-evil-");
+    writeFileSync(join(evil, ".git"), `gitdir: ${join(other, ".git")}\n`);
+    const store = new ApprovedProjectRules({ winterHome: home, log: () => {} });
+    store.record(other, "Bash");
+    const savedRulesFor = (cwd: string) => persistedAllowRulesFor(cwd, {
+      projectRootOf: (c) => repoRootFor(c), effectiveSettings: () => null,
+      approvedProjectRules: (root) => store.rulesFor(root), isTrusted: () => false,
+    });
+    expect(savedRulesFor(other)).toEqual(["Bash"]);
+    expect(savedRulesFor(evil)).toEqual([]);
   });
 
   test("the daemon creates <home>/permissions at boot", async () => {
