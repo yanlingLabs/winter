@@ -148,7 +148,7 @@ final class LibraryNavigationTests: XCTestCase {
 final class LibraryDisplayHelperTests: XCTestCase {
     private func plugin(_ id: String, enabled: Bool = true, tier: String = "platform") -> PluginRowDisplay {
         let extras = PluginExtras(tier: tier, execPermission: true, tccPermissions: [], hardwarePermissions: [],
-                                  requiredConsents: [], consented: [], entry: nil)
+                                  requiredConsents: [], consented: [], entry: nil, fingerprint: "fp-1")
         let listing = PluginListing(id: id, installPath: "/p/\(id)", scope: .user, enabled: enabled,
                                     marketplace: "winter-examples", version: "1.0.0", extras: extras)
         return pluginRowDisplay(listing)

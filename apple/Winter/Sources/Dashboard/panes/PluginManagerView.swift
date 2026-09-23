@@ -14,8 +14,10 @@ import UniformTypeIdentifiers
 //
 // IDENTITY: a row's `id`/`spec` is the QUALIFIED `"<plugin>@<marketplace>"` Contract B and claude
 // both use to name an install (`PluginListing.spec`) — NOT the bare plugin id, which is not unique
-// across marketplaces. `plugin.restart{pluginId}` and `plugin.setConsent{name}` are the two calls
-// that still take the bare id (`PluginRowDisplay.pluginId`).
+// across marketplaces. `plugin.restart{pluginId}` is the one call that still takes the bare id
+// (`PluginRowDisplay.pluginId`); `plugin.setConsent` takes the qualified `spec` (fix round 1) plus
+// a `fingerprint` (fix round 3) — see `hasAmbiguousBareId`'s own doc for what's left that still
+// cares about a bare-id collision.
 //
 // STATUS: WS-21 retired the daemon's own supervisor-status merge into `plugin.list` — there is no
 // live "starting"/"backoff"/"circuit-open" signal on the wire any more, only `enabled`. The
@@ -210,8 +212,9 @@ final class PluginManagerModel: ObservableObject {
     /// still have a pending class, or a successful `installFromFolder(_:)`. `PluginManagerView`
     /// presents this via `.sheet(item:onDismiss:)`; setting it to `nil` (a click on the sheet's own
     /// Cancel button, Esc, or a swipe-down) closes it and — via `onDismiss`, wired once at the
-    /// `.sheet` call site — always runs `consentSheetDismissed()` (fix round 2, I2), EXCEPT when
-    /// `confirmConsent()`'s own success path nils this (see `dismissHandledByConfirm` below).
+    /// `.sheet` call site — runs `consentSheetDismissed()` (fix round 2, I2) for every dismissal
+    /// except a successful confirm, which clears `lastConsentSheet` itself first (see that
+    /// property's own doc — fix round 3, N1).
     @Published var consentSheet: ConsentSheetState? {
         didSet {
             // Fix round 2 (I2): keeps `lastConsentSheet` in sync with every non-nil assignment —
@@ -222,14 +225,21 @@ final class PluginManagerModel: ObservableObject {
             if let consentSheet { lastConsentSheet = consentSheet }
         }
     }
-    /// See `consentSheet`'s own `didSet`. Cleared by `consentSheetDismissed()` once consumed.
+    /// Fix round 3 (N1): the shadow copy `consentSheetDismissed()` reads once `consentSheet` itself
+    /// has already gone back to `nil` (see that property's `didSet`). A successful `confirmConsent()`
+    /// clears THIS to `nil` itself, immediately before it nils `consentSheet` — not via a separate
+    /// "already handled" flag, which is what the round 2 design used and which is exactly what broke:
+    /// a flag consumed by the FIRST `consentSheetDismissed()` call left this shadow copy stale for
+    /// any SECOND call (this model is shared by two mounted `.sheet` hosts — the Dashboard pane and
+    /// the Library panel, `DashboardSurface.swift`/`ShellOverlays.swift` — each with its OWN
+    /// `onDismiss`, so a successful confirm fired `onDismiss` TWICE; the second call read the flag
+    /// already reset by the first and used the stale, just-confirmed sheet to disable the very
+    /// plugin the user just enabled). Clearing this proactively means `consentSheetDismissed()`'s
+    /// own `guard let` is the ONLY gate needed — idempotent by construction, safe for any number of
+    /// hosts or calls, and correct even if a confirm's own network calls land after the sheet
+    /// closed some other way (Esc while busy) — see `ConsentSheet`'s `.interactiveDismissDisabled`
+    /// for why that race is prevented at the UI layer too, not just tolerated here.
     private var lastConsentSheet: ConsentSheetState?
-    /// Set by `confirmConsent()`'s OWN success path, immediately before it nils `consentSheet` —
-    /// tells `consentSheetDismissed()` that THIS particular dismissal was a successful confirm,
-    /// already fully handled, and needs no follow-up. Every OTHER dismissal route (the sheet's
-    /// Cancel button, Esc, a swipe-down) leaves this `false`, so they all converge on the same
-    /// "treat as declined" behavior in `consentSheetDismissed()`.
-    private var dismissHandledByConfirm = false
     /// The plugin spec an in-flight action is currently running against — lets the view disable
     /// that row's buttons mid-action, same `revokingPath`-style single-flight posture as
     /// `TrustPane`.
@@ -268,12 +278,19 @@ final class PluginManagerModel: ObservableObject {
         (error as? RpcError)?.message ?? "\(error)"
     }
 
-    /// Fix round 1 (C2 defence in depth): true when more than one LISTED (`.user`-scope) plugin
-    /// shares `id` — e.g. the same plugin installed from two different marketplaces.
-    /// `plugin.restart{pluginId}` and `plugin.setConsent{spec}`'s OWN daemon-side lookup
-    /// (`livePlugins().find`, `ipc/server.ts`) are both keyed by the bare id/first-match, so acting
-    /// on one when two exist is ambiguous — refused rather than guessed at, mirroring the existing
-    /// "this folder lists N plugins" refusal `installFromFolder` already gives.
+    /// Fix round 1 (C2 defence in depth), doc corrected round 3: true when more than one LISTED
+    /// (`.user`-scope) plugin shares `id` — e.g. the same plugin installed from two different
+    /// marketplaces. `plugin.setConsent` is no longer ambiguous by itself (it takes the qualified
+    /// `spec` — since round 1 — plus a `fingerprint` the daemon checks against the exact install,
+    /// since round 3), so this guard's remaining reason to exist is `plugin.restart{pluginId}`,
+    /// which IS still keyed by the bare id/first-match daemon-side (`PluginSupervisor`,
+    /// `agent/plugins.ts`'s own doc on the collision this implies) — acting on a `restart` when two
+    /// installs share a bare id is genuinely ambiguous, refused rather than guessed at, mirroring
+    /// the existing "this folder lists N plugins" refusal `installFromFolder` already gives.
+    /// `enable(_:)` keeps this guard too even though ITS own downstream calls are all spec-keyed
+    /// now — a plugin it enables may later need `restart`, and refusing the ambiguity up front, at
+    /// the one place a user is most likely to first encounter it, reads better than only surfacing
+    /// it later from a Restart button that mysteriously does nothing.
     private func hasAmbiguousBareId(_ id: String) -> Bool {
         listingsBySpec.values.filter { $0.id == id }.count > 1
     }
@@ -316,9 +333,13 @@ final class PluginManagerModel: ObservableObject {
         // whenever this pane last refreshed (another client, or this plugin's own consent
         // fingerprint, could have changed since).
         await refresh()
+        // Minor (round 3): a FAILED refresh must not fall through to acting on stale `listingsBySpec`
+        // data — `refresh()` already set `errorText` itself; this just stops here rather than
+        // silently proceeding as if nothing went wrong.
+        guard errorText == nil else { return }
         guard let listing = listingsBySpec[spec] else { return }
         guard !hasAmbiguousBareId(listing.id) else {
-            errorText = "\(listing.id) is installed from more than one marketplace — this pane can't tell them apart for consent yet"
+            errorText = "\(listing.id) is installed from more than one marketplace — this pane can't tell them apart for its background process yet"
             return
         }
         if let extras = listing.extras, extras.needsConsent {
@@ -360,9 +381,9 @@ final class PluginManagerModel: ObservableObject {
     /// Contract B's own name (replaces the pre-WS-21 `.remove`) — unregisters the install record +
     /// `enabledPlugins` entry ONLY; a directory marketplace is read in place (F15), so this never
     /// deletes anything on disk. Fix round 1 (M8): when this pane's OWN `installFromFolder(_:)`
-    /// registered `spec`'s marketplace and nothing else `.user`-scope still uses it, also removes
-    /// the marketplace registration — best-effort, never turns an otherwise-successful uninstall
-    /// into a reported failure.
+    /// registered `spec`'s marketplace and nothing else still uses it, also removes the marketplace
+    /// registration — best-effort, never turns an otherwise-successful uninstall into a reported
+    /// failure.
     func uninstall(_ spec: String) async {
         noticeText = nil
         guard let listing = listingsBySpec[spec] else { return }
@@ -372,10 +393,22 @@ final class PluginManagerModel: ObservableObject {
         do {
             _ = try await client.pluginUninstall(spec: spec, scope: listing.scope)
             if marketplacesAddedThisSession.contains(listing.marketplace) {
-                let stillUsed = listingsBySpec.values.contains { $0.spec != spec && $0.marketplace == listing.marketplace }
-                if !stillUsed {
-                    try? await client.pluginMarketplaceRemove(name: listing.marketplace)
-                    marketplacesAddedThisSession.remove(listing.marketplace)
+                // N2 (round 3): checked across EVERY scope via a fresh, UNFILTERED `plugin.list` —
+                // this pane's own cached `listingsBySpec` only ever holds `.user`-scope rows
+                // (`refresh()`'s own filter, see that method's doc), so a project/local-scope
+                // plugin installed from the SAME marketplace would otherwise be invisible to this
+                // check, and the marketplace could be pulled out from under it.
+                do {
+                    let everyListing = try await client.pluginList()
+                    let stillUsed = everyListing.contains { $0.spec != spec && $0.marketplace == listing.marketplace }
+                    if !stillUsed {
+                        try? await client.pluginMarketplaceRemove(name: listing.marketplace)
+                        marketplacesAddedThisSession.remove(listing.marketplace)
+                    }
+                } catch {
+                    // Best-effort, and fails SAFE: a failed "is it still used" check must leave the
+                    // marketplace registered, never remove one a check couldn't actually confirm
+                    // was unused.
                 }
             }
         } catch {
@@ -440,15 +473,42 @@ final class PluginManagerModel: ObservableObject {
         }
         let pluginName = manifest.pluginNames[0]
 
+        // Ordering (round 3 minor): the bare-id ambiguity check now runs BEFORE
+        // `plugin.marketplace.add` — using the manifest's OWN plugin name, read locally, since
+        // nothing is installed yet to look a listing up by — rather than after the plugin is
+        // already live. Refusing before anything is registered means there is nothing left over to
+        // clean up on the common path. This can't close the race completely by itself (another
+        // client could install a colliding plugin in the window between this check and the actual
+        // install below), so the POST-install check further down stays too, as defense in depth —
+        // its own refusal branch now disables the plugin it just found ambiguous, rather than
+        // leaving an enabled-but-unmanageable install behind.
+        do {
+            let existing = try await client.pluginList()
+            if existing.contains(where: { $0.id == pluginName && $0.scope == .user && $0.marketplace != manifest.name }) {
+                errorText = "\(pluginName) is already installed from another marketplace — this pane can't tell them apart yet"
+                return
+            }
+        } catch {
+            errorText = "couldn't check existing plugins: \(daemonMessage(error))"
+            return
+        }
+
         // C1: refuse a marketplace NAME collision with a DIFFERENT path before registering
         // anything — `plugin.marketplace.add` would otherwise silently repoint every plugin
         // already installed from the old path (a directory marketplace is read in place, F15).
+        let marketplaceAlreadyKnown: Bool
         do {
             let known = try await client.pluginMarketplaceList()
             if let existing = known.first(where: { $0.name == manifest.name }), existing.path != dir.path {
                 errorText = "a marketplace named \"\(manifest.name)\" already points at \(existing.path) — rename this folder's marketplace.json, or remove the old marketplace first"
                 return
             }
+            // N2 (round 3): only a marketplace THIS call actually CREATES is tracked as
+            // "app-added" — one that already existed under this name (even at the identical path,
+            // an idempotent re-add) predates this session's own action, so a later `uninstall(_:)`
+            // must never auto-remove it — this pane didn't create it and has no way to know who
+            // else might depend on it staying registered.
+            marketplaceAlreadyKnown = known.contains { $0.name == manifest.name }
         } catch {
             errorText = "couldn't check existing marketplaces: \(daemonMessage(error))"
             return
@@ -456,15 +516,30 @@ final class PluginManagerModel: ObservableObject {
 
         do {
             let marketplace = try await client.pluginMarketplaceAdd(source: dir.path)
-            marketplacesAddedThisSession.insert(marketplace.name)
+            if !marketplaceAlreadyKnown {
+                marketplacesAddedThisSession.insert(marketplace.name)
+            }
             let spec = "\(pluginName)@\(marketplace.name)"
             _ = try await client.pluginInstall(spec: spec, scope: .user)
             await refresh()
             // M3: a failed post-install refresh must not fall through to opening a sheet or
             // enabling off a stale/absent listing — the error `refresh()` already set stands.
-            guard errorText == nil, let listing = listingsBySpec[spec] else { return }
+            guard errorText == nil else { return }
+            guard let listing = listingsBySpec[spec] else {
+                // Minor (round 3): a SUCCESSFUL refresh that simply doesn't contain the spec just
+                // installed must not return silently — something is wrong (another client removed
+                // it already, say), and the user just watched this pane say nothing about it.
+                errorText = "installed \(spec) but couldn't find it in the list afterward — try Refresh"
+                return
+            }
             guard !hasAmbiguousBareId(listing.id) else {
+                // Ordering minor: reachable only via the race the pre-install check above can't
+                // close by itself. The plugin IS live and enabled at this point, so refuse AND
+                // disable it — leaving it silently enabled-but-unmanageable would be worse than
+                // the error alone.
                 errorText = "\(listing.id) is already installed from another marketplace — this pane can't tell them apart yet"
+                _ = try? await client.pluginDisable(spec: spec, scope: .user)
+                await refresh()
                 return
             }
             // C1: a plugin with ANY required consent class ALWAYS shows the sheet on a fresh
@@ -508,16 +583,36 @@ final class PluginManagerModel: ObservableObject {
             // uninstalled, or its spec no longer resolves, between the sheet opening and this
             // click) must not silently fall through to `pluginEnable`. The sheet stays open
             // (never nil'd on this branch) and the enable call is skipped entirely.
-            let consentResult = try await client.pluginSetConsent(spec: spec, classes: sheet.extras.requiredConsents)
-            if consentResult == .unknownPlugin {
+            //
+            // Contract update (fix round 3, TOCTOU fix): `fingerprint` names the exact install
+            // this disclosure was built from — `.staleDisclosure` means the plugin changed (a
+            // reinstall, an entry edit) between the sheet opening and now. Refresh, rebuild the
+            // sheet from the plugin's CURRENT `plugin.list` row, keep it open, and never enable.
+            let consentResult = try await client.pluginSetConsent(spec: spec, classes: sheet.extras.requiredConsents,
+                                                                   fingerprint: sheet.extras.fingerprint)
+            switch consentResult {
+            case .unknownPlugin:
                 actionError = "\(sheet.pluginId) is no longer installed — couldn't record consent"
-            } else {
+            case .staleDisclosure:
+                await refresh()
+                if let listing = listingsBySpec[spec], let extras = listing.extras {
+                    consentSheet = ConsentSheetState(pluginId: listing.id, spec: spec, scope: listing.scope,
+                                                     extras: extras, openedByInstall: sheet.openedByInstall)
+                } else {
+                    lastConsentSheet = nil
+                    consentSheet = nil
+                }
+                errorText = "This plugin changed while you were reviewing it — please review again."
+                return
+            case .ok:
                 _ = try await client.pluginEnable(spec: spec, scope: sheet.scope)
-                // Fix round 2 (I2): flagged BEFORE nil'ing — `onDismiss` (which this nil triggers,
-                // same as every other dismissal route) checks this first and no-ops for exactly
-                // this one case, so a successful confirm is never followed by the "declined"
-                // disable-and-notice `consentSheetDismissed()` runs for every other dismissal.
-                dismissHandledByConfirm = true
+                // Fix round 3 (N1): cleared BEFORE `consentSheet` itself, not via a separate
+                // "already handled" flag (round 2's design, which broke with two `.sheet` hosts
+                // mounted on the same model — see `lastConsentSheet`'s own doc for the full story).
+                // `consentSheetDismissed()`'s `guard let` then makes every subsequent call — from
+                // either host's `onDismiss`, or a confirm whose network calls outlive the sheet
+                // some other way — a safe no-op on its own, with no flag to go stale.
+                lastConsentSheet = nil
                 consentSheet = nil
             }
         } catch {
@@ -527,13 +622,14 @@ final class PluginManagerModel: ObservableObject {
         if let actionError { errorText = actionError }
     }
 
-    /// Fix round 2 (I2): the SINGLE exit point for every sheet dismissal EXCEPT a successful
-    /// confirm — wired to `.sheet(item:onDismiss:)`'s `onDismiss`, which SwiftUI calls whenever
-    /// `consentSheet` goes back to `nil`, however that happened: a click on the sheet's own Cancel
-    /// button, Esc, or a swipe-down all converge here identically, because all three are, to
-    /// SwiftUI, the same "the item became nil" transition — there is no way (and no need) to tell
-    /// them apart. Only `confirmConsent()`'s own success path is different, and it opts out by
-    /// setting `dismissHandledByConfirm` before it nils `consentSheet`.
+    /// The SINGLE exit point for every sheet dismissal EXCEPT a successful confirm — wired to
+    /// `.sheet(item:onDismiss:)`'s `onDismiss`, which SwiftUI calls whenever `consentSheet` goes
+    /// back to `nil`, however that happened: a click on the sheet's own Cancel button, Esc, or a
+    /// swipe-down all converge here identically, because all three are, to SwiftUI, the same "the
+    /// item became nil" transition — there is no way (and no need) to tell them apart.
+    /// `confirmConsent()`'s own success path clears `lastConsentSheet` itself before it nils
+    /// `consentSheet`, so THIS method's own `guard let` is the only gate it needs — see
+    /// `lastConsentSheet`'s doc for why that beat a shared "already handled" flag.
     ///
     /// When the sheet was raised by an INSTALL (`installFromFolder`'s own trigger,
     /// `openedByInstall`), the plugin landed ENABLED already (Contract B's `installPlugin`) — its
@@ -543,10 +639,6 @@ final class PluginManagerModel: ObservableObject {
     /// already-disabled row needs no such follow-up — dismissing it just leaves that row exactly
     /// as it was.
     func consentSheetDismissed() async {
-        guard !dismissHandledByConfirm else {
-            dismissHandledByConfirm = false
-            return
-        }
         guard let sheet = lastConsentSheet else { return }
         lastConsentSheet = nil
         guard sheet.openedByInstall else { return }
