@@ -558,6 +558,7 @@ export async function startDaemon(opts: {
       }
       await runMigrationC(home, { log: (line) => console.error(line), reconcileAvailable: true });
     } catch (err) {
+      try { store.close(); } catch { /* already closed: nothing to release */ }
       lock.release();
       throw err;
     }
