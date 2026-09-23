@@ -9,7 +9,7 @@ import { ApprovalBroker } from "../../src/agent/approvals";
 import { QuestionBroker } from "../../src/agent/questions";
 import { PermissionGate, type SessionApprovalPolicy } from "../../src/agent/gate";
 import { canUseToolFor, type BridgeLogger } from "../../src/runtime-sdk/approval-bridge";
-import { sessionHooksFor, type SessionHooksDeps } from "../../src/runtime-sdk/hooks";
+import { bashProtectedWriteHit, sessionHooksFor, type SessionHooksDeps } from "../../src/runtime-sdk/hooks";
 
 const real = (p: string): string => realpathSync(mkdtempSync(join(tmpdir(), p)));
 const silent: BridgeLogger = { info: () => {}, error: () => {} };
@@ -141,5 +141,68 @@ describe("the bridge never auto-allows a protected write (spec §7.2, layer 3)",
     expect(listed).toHaveLength(1);
     approvals.resolve("s_1", listed[0]!.callId, true, "test");
     expect((await pending)?.behavior).toBe("allow");
+  });
+});
+
+// Fix round 2 (controller ruling on SPEC CONCERN D): the sandbox cannot fence `.winter/<kind>` off the
+// walk (real subpaths only), so ANY Bash command — sandboxed or not — that WRITES under a
+// `.winter/{skills,commands,rules,output-styles,agents}` segment, at any depth and whatever the trust, is
+// asked about: a card in code, a typed deny where nobody can answer. Read-only mentions pass.
+describe("fix round 2: Bash writes under .winter/<kind>", () => {
+  const writes = [
+    "mkdir -p pkg/a/.winter/skills/x",
+    "echo evil > pkg/.winter/rules/r.md",
+    "cp evil.md sub/.winter/commands/",
+    "cd sub/.winter/agents && tee x.md < /dev/null",
+    "sed -i 's/a/b/' .winter/output-styles/terse.md",
+    "echo x | tee /elsewhere/proj/.WINTER/Skills/a/SKILL.md",
+  ];
+  const reads = [
+    "cat .winter/skills/x/SKILL.md",
+    "ls pkg/.winter/rules",
+    "grep -r foo .winter/commands",
+    "cat .winter/agents/a.md > /tmp/copy.md",
+    "sed 's/a/b/' .winter/rules/r.md",
+  ];
+  const outside = ["mkdir -p pkg/winter/skills/x", "echo x > notes/.winter-skills.md", "cp a.md .winter/other/b.md"];
+
+  test("the detector: writes hit, reads and paths outside the protected kinds do not", () => {
+    for (const cmd of writes) expect({ cmd, hit: bashProtectedWriteHit(cmd) !== undefined }).toEqual({ cmd, hit: true });
+    for (const cmd of [...reads, ...outside]) expect({ cmd, hit: bashProtectedWriteHit(cmd) }).toEqual({ cmd, hit: undefined });
+  });
+
+  test("the hook asks (both legs, sandboxed or not); a read gets no answer from it", async () => {
+    const built = sessionHooksFor({ sessionId: "s_1", roots: ["/r"], home: "/Users/x/.winter", mode: "code" });
+    const groups = (built.winter?.PreToolUse ?? []).filter((g: HookCallbackMatcher) => g.matcher === "Bash");
+    const run = async (command: string, escape = false) => {
+      const answers: string[] = [];
+      for (const g of groups) for (const h of g.hooks) {
+        const r = await call(h, "Bash", { command, ...(escape ? { dangerouslyDisableSandbox: true } : {}) });
+        answers.push(decisionOf(r));
+      }
+      return answers;
+    };
+    for (const cmd of writes) expect(await run(cmd)).toContain("ask");
+    for (const cmd of [...reads, ...outside]) expect(await run(cmd)).not.toContain("ask");
+    expect(built.official).toBe(built.winter);
+  });
+
+  test("the bridge never auto-allows one: bypass → card, dont-ask/dispatch → deny; a read runs", async () => {
+    const home = real("winter-fr2-home-");
+    const root = real("winter-fr2-root-");
+    const ctx = (): Parameters<CanUseTool>[2] => ({ signal: new AbortController().signal, toolUseID: `tu-${Math.random()}`, requestId: "r" } as Parameters<CanUseTool>[2]);
+    const mk = (policy: SessionApprovalPolicy, mode: "code" | "dispatch" = "code") => {
+      const approvals = new ApprovalBroker();
+      return { approvals, canUse: canUseToolFor({ sessionId: "s_1", mode, policy, approvals, questions: new QuestionBroker(), gate: new PermissionGate(), emit: () => {}, log: silent, home, cwd: root }) };
+    };
+    const b = mk("bypass");
+    const pending = b.canUse("Bash", { command: "mkdir -p pkg/a/.winter/skills/x" }, ctx());
+    await new Promise((r) => setTimeout(r, 10));
+    expect(b.approvals.list("s_1")).toHaveLength(1);
+    b.approvals.resolve("s_1", b.approvals.list("s_1")[0]!.callId, false, "test");
+    expect((await pending)?.behavior).toBe("deny");
+    expect((await mk("dont-ask").canUse("Bash", { command: "cp a.md sub/.winter/commands/" }, ctx()))?.behavior).toBe("deny");
+    expect((await mk("auto", "dispatch").canUse("Bash", { command: "echo x > .winter/rules/r.md" }, ctx()))?.behavior).toBe("deny");
+    expect((await mk("bypass").canUse("Bash", { command: "cat .winter/skills/x/SKILL.md" }, ctx()))?.behavior).toBe("allow");
   });
 });

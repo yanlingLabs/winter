@@ -427,8 +427,50 @@ function writeContextStart(c: string): number {
     if (m.index >= start) break;
     const word = m[0].slice(m[0].lastIndexOf("/") + 1);
     if (ESCAPE_WRITE_VERBS.has(word)) { start = m.index; break; }
+    // Fix round 2: an IN-PLACE editor writes the file it names — `sed -i`/`sed --in-place`, `perl -i`/`-pi`
+    // — judged within this command segment (up to the next `;`, `&` or `|`) only.
+    if (word === "sed" || word === "perl") {
+      const rest = c.slice(m.index + m[0].length).split(/[;&|]/, 1)[0] ?? "";
+      if (/(?:^|\s)(?:-[a-z]*i[^\s]*|--in-place\S*)(?=\s|$)/.test(rest)) { start = m.index; break; }
+    }
   }
   return start;
+}
+
+/**
+ * Fix round 2 (controller ruling on SPEC CONCERN D): the protected item directories and agent definitions
+ * of ANY project, at ANY depth and whatever its trust — `.winter/{skills,commands,rules,output-styles,
+ * agents}` — named in a WRITE-SHAPED position of a Bash command (after a redirect, as the target of a write
+ * verb, an in-place `sed -i`/`perl -i`, or relative words after a `cd` into such a directory), sandboxed or
+ * not. The seatbelt cannot fence these off this session's walk (it takes real subpaths only, and a later
+ * session in a sibling package loads them). Returns the segment named, or `undefined`.
+ *
+ * THE LIMITATION, the escape floor's own: a static match on the normalised command text (case folded,
+ * quotes stripped, `//`/`/./`/`..` collapsed, `cd` tracked) — a path the command ASSEMBLES at run time
+ * (`$(…)`, variables of its own, a script it writes and then runs) is beyond its reach.
+ */
+export function bashProtectedWriteHit(command: string): string | undefined {
+  const c = expandAfterCd(normaliseEscapeCommand(command));
+  const writeStart = writeContextStart(c);
+  if (writeStart === Infinity) return undefined;
+  for (const m of c.matchAll(PROTECTED_BASH_SEGMENT)) {
+    if (m.index !== undefined && m.index > writeStart) return m[0];
+  }
+  return undefined;
+}
+
+const PROTECTED_BASH_SEGMENT = /\.winter\/(?:skills|commands|rules|output-styles|agents)(?=\/|[\s;&|()<>]|$)/g;
+
+/** The ASK a protected-path Bash write gets (fix round 2) — a card in code; the bridge turns it into the
+ *  typed deny wherever nobody can answer (dispatch, chat, a dispatch child). Every policy, both legs. */
+function bashProtectedWriteHook(): HookCallback {
+  return async (input) => {
+    const { command } = bashEscapeInput(input);
+    const hit = bashProtectedWriteHit(command);
+    return hit === undefined
+      ? allow()
+      : ask(`Bash writes under ${hit} — skills, commands, rules, output styles and agent definitions load into every future session; the user decides.`);
+  };
 }
 
 /**
@@ -992,7 +1034,9 @@ export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hook
   // C3 round 3: the escape floor runs under EVERY policy, reviewer or none — see §2a. Its position
   // does not matter: a deny outranks every other hook answer, and the reviewer skips (never reviews,
   // never clears) a command this floor denies, whichever of the two runs first.
-  preToolUse.push({ matcher: "Bash", hooks: [escapeFloorHook(deps)] });
+  // Fix round 2: in the escape floor's own group, a Bash write under any `.winter/<kind>` is asked about,
+  // sandboxed or not (see `bashProtectedWriteHit`). An `ask` — the floor's deny, when both apply, outranks it.
+  preToolUse.push({ matcher: "Bash", hooks: [escapeFloorHook(deps), bashProtectedWriteHook()] });
   // WS-21 (spec §7.1, §7.2): the path fence — every policy, both legs. Unmatched (one callback per tool
   // call) because the write and read tools carry two vocabularies; anything else is an immediate allow.
   if (deps.home) preToolUse.push({ hooks: [pathFenceHook(deps)] });
