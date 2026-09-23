@@ -28,6 +28,7 @@ import { SDK_COMPAT_LINKS, SDK_PERSISTENT_ENTRIES, sdkHomeFor } from "../agent/p
 import { openRuntimeStateDb } from "../runtime-state/db";
 import { RuntimeLeases, type LeaseProbe } from "../runtime-state/leases";
 import { DEAD_LEGACY_TOP_LEVEL_FILES } from "./dead-legacy-files";
+import { LEGACY_INSTRUCTIONS_FILE } from "../legacy-names";
 import { settingsSplitMarkerPath, splitSettingsToSdk } from "./settings-split";
 
 export type MigrationCStep = "preflight" | "reconcile-official-roots" | "move-dirs" | "copy-files"
@@ -345,10 +346,10 @@ export async function runMigrationC(home: string, deps: MigrationCDeps): Promise
     record("move-dirs", "done", { moved: m.moved.length });
   }
 
-  // ── 4. copy-files: WINTER.md (or the legacy NORMA.md) and history.jsonl, into sdk/ ───────────────
+  // ── 4. copy-files: WINTER.md (or the legacy instructions file) and history.jsonl, into sdk/ ──────
   if (!done("copy-files")) {
     const sdk = sdkHomeFor(home);
-    const instructions = [join(home, "WINTER.md"), join(home, "NORMA.md")].find((p) => existsSync(p) && !isSymlink(p));
+    const instructions = [join(home, "WINTER.md"), join(home, LEGACY_INSTRUCTIONS_FILE)].find((p) => existsSync(p) && !isSymlink(p));
     if (instructions !== undefined && !existsSync(join(sdk, "WINTER.md"))) {
       copyFileSync(instructions, join(sdk, "WINTER.md"));
       m.copied.push("sdk/WINTER.md");
