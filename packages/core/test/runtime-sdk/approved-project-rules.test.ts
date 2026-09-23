@@ -73,6 +73,21 @@ describe("ApprovedProjectRules — the daemon's own record", () => {
     expect(JSON.parse(readFileSync(store.file(), "utf8")).projects[repo]).toEqual(["Bash(npm test)", "Bash(make:*)"]);
   });
 
+  // Whole-branch review (minor c): the same control-plane guard `PermissionRules.append` enforces — a
+  // "project" that is the home itself or lies inside it (a session whose cwd is the MEMDIR, an outputs
+  // dir, …) is Winter's own state, not a project; approving "in this project" there records nothing.
+  test("refuses a root that is the home itself or inside it, however it is spelled", () => {
+    const home = realDir("winter-approved-inhome-");
+    const alias = join(realDir("winter-approved-inhome-alias-"), "link");
+    symlinkSync(home, alias);
+    mkdirSync(join(home, "outputs", "s1"), { recursive: true });
+    const store = new ApprovedProjectRules({ winterHome: home, log: () => {} });
+    expect(() => store.record(home, "Bash")).toThrow(/home/);
+    expect(() => store.record(join(home, "outputs", "s1"), "Bash")).toThrow(/home/);
+    expect(() => store.record(join(alias, "outputs", "s1"), "Bash")).toThrow(/home/);
+    expect(existsSync(store.file())).toBe(false);
+  });
+
   test("a malformed record reads as nothing and is never overwritten by a new approval", () => {
     const home = realDir("winter-approved-bad-");
     mkdirSync(join(home, "permissions"), { recursive: true });

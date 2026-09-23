@@ -1,5 +1,5 @@
 import { chmodSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { approvedProjectRulesDir } from "./paths";
 
 /**
@@ -75,8 +75,15 @@ export class ApprovedProjectRules {
    * and when the directory or the file is not the daemon's own (R1).
    */
   record(projectRoot: string, rule: string): void {
-    const current = this.readForWrite();
     const key = canonical(projectRoot);
+    // The control-plane guard `PermissionRules.append` enforces (whole-branch review, minor c): the
+    // home itself, or anything inside it (the MEMDIR, an outputs dir, …), is Winter's own state, never
+    // a project a rule can be approved "in".
+    const home = canonical(this.deps.winterHome);
+    if (key === home || key.startsWith(home.endsWith(sep) ? home : home + sep)) {
+      throw new Error(`refusing to record a project rule for ${key} — it is the Winter home itself or inside it (${home})`);
+    }
+    const current = this.readForWrite();
     const rules = current.projects[key] ?? [];
     if (rules.includes(rule)) return;
     const next = { version: 1, projects: { ...current.projects, [key]: [...rules, rule] } };
