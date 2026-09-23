@@ -1,0 +1,8 @@
+{
+  "name": "winter-examples",
+  "owner": { "name": "winter" },
+  "plugins": [
+    { "name": "battery-limiter", "source": "./battery-limiter", "version": "0.0.1" },
+    { "name": "sample-echo", "source": "./sample-echo", "version": "0.0.1" }
+  ]
+}
