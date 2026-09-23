@@ -23,7 +23,7 @@
 // see `test/ipc/session-send-import.test.ts` for that door's own logic, proved with a fake driver
 // table.
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { query, transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
@@ -39,7 +39,9 @@ interface ProtocolSdkMessage { type?: string; [k: string]: unknown }
 describeWithWinterBinary("engine-era import — the REAL winter binary resumes the converted transcript", (bin) => {
   test("import then resume: no refusal, and the imported turns lead the new one on disk", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-import-e2e-home-"));
-    const cwd = mkdtempSync(join(tmpdir(), "winter-import-e2e-cwd-"));
+    // WS-21 (L2 O-1): the daemon hands the child — and keys the imported transcript by — the CANONICAL cwd
+    // (`canonicalCwd`); this test drives the child directly, so it spawns it the same way.
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-import-e2e-cwd-")));
     try {
       // ── Build an engine-era session exactly the way a pre-8b daemon would have left one ──────
       const store = new SessionStore(home);

@@ -148,6 +148,30 @@ describe("Migration C at boot (run-home router)", () => {
     expect(migrationCState(home)).toMatchObject({ kind: "parsed", manifest: { status: "phase1-complete" } });
   });
 
+  // Router review of I6 — the ORDERING CONTRACT: a `canonical-ahead` verdict clears a session's repair flag,
+  // which is only safe while no live session with that key exists, so the ordinary boot sweep of
+  // `cache/runs/*` must finish before the first session can open (no socket before it is done).
+  test("the boot sweep of cache/runs/* completes before the socket exists (no session can open during it)", async () => {
+    const parent = parentDir();
+    const home = join(parent, "sweep");
+    mkdirSync(join(home, "cache", "runs", "r1", "projects", "k"), { recursive: true });
+    writeFileSync(join(home, "cache", "runs", "r1", "projects", "k", "s.jsonl"), '{"type":"user"}\n');
+    const calls: Array<{ root: string; socketExisted: boolean }> = [];
+    daemon = await startDaemon({
+      home, secrets: new FileSecretStore(join(parent, "secrets")), agentProvider: null,
+      migration: { legacyHome: join(parent, "no-legacy-home"), homedirOverride: () => parent },
+      runRootReconcileForTests: async (root) => {
+        calls.push({ root, socketExisted: existsSync(join(home, "run", "core.sock")) });
+        await Bun.sleep(50); // a slow reconcile: boot still waits for it
+        return { outcome: "clean", transcripts: [{ projectKey: "k", sessionId: "be", outcome: "canonical-ahead", appended: 0 }] };
+      },
+    });
+    expect(calls.map((c) => c.root)).toEqual([join(home, "cache", "runs", "r1")]);
+    expect(calls.every((c) => !c.socketExisted)).toBe(true);
+    expect(existsSync(join(home, "cache", "runs", "r1"))).toBe(false); // finished before startDaemon resolved
+    expect(existsSync(join(home, "run", "core.sock"))).toBe(true);
+  });
+
   test("router 0.0.11 (no run homes): the old layout is left exactly as it is", async () => {
     setRunHomeSupportForTests(false);
     const parent = parentDir();
