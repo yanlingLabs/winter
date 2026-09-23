@@ -1,6 +1,6 @@
 {
   "name": "@yanlinglabs/winter-plugin-sdk",
-  "version": "0.115.1",
+  "version": "0.116.0",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
