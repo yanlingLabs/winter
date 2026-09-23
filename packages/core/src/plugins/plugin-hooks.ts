@@ -20,8 +20,16 @@
 // daemon genuinely couldn't determine the true state -- a file that exists but fails to parse as
 // JSON, isn't a JSON object, or whose own `hooks` field isn't a plain object either. A caller must be
 // able to tell "this plugin has no hooks" (`[]`) apart from "the daemon couldn't read them" (absent).
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+//
+// L5 re-review round 2, item 2 (hardening): a hooks source is refused -- treated exactly like an
+// unreadable/malformed file (`ok: false`, which makes the WHOLE field absent) -- when it resolves,
+// through any symlink at any point in the path (the leaf file itself, `hooks/`, `.claude-plugin/`),
+// to somewhere OUTSIDE `realpath(installPath)`. A directory marketplace is read in place from
+// wherever its manifest points, so a plugin author (or a compromised/updated marketplace) could
+// otherwise point `hooks/hooks.json` at an arbitrary file on disk and have its contents disclosed
+// over `plugin.list` as though they belonged to the plugin.
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { isAbsolute, join, relative } from "node:path";
 
 export interface PluginHookEntry {
   event: string;
@@ -39,12 +47,29 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/** `true` when `target` (already `realpath`-resolved) is `base` itself or somewhere under it —
+ *  `relative` naturally handles drive/root differences; a `..`-leading or absolute result means
+ *  `target` fell outside `base`. */
+function isWithin(base: string, target: string): boolean {
+  if (target === base) return true;
+  const rel = relative(base, target);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
 /** One source's read outcome: `ok: true` covers BOTH "the file is absent" and "the file parsed and
  *  its `hooks` field is a valid (possibly empty) event map" -- both are legitimate, known states.
  *  `ok: false` is reserved for a genuine failure: the file exists but isn't valid JSON, isn't a JSON
- *  object, or its own `hooks` field is present but isn't a plain object either. */
-function readHookSource(path: string): { ok: boolean; hooks: PluginHookEntry[] } {
+ *  object, its own `hooks` field is present but isn't a plain object either, or it resolves (through
+ *  any symlink) outside the plugin's own `installPathReal` (see this module's header). */
+function readHookSource(path: string, installPathReal: string): { ok: boolean; hooks: PluginHookEntry[] } {
   if (!existsSync(path)) return { ok: true, hooks: [] };
+  let real: string;
+  try {
+    real = realpathSync(path);
+  } catch {
+    return { ok: false, hooks: [] }; // existsSync said yes but realpath failed (race, broken link) — unreadable
+  }
+  if (!isWithin(installPathReal, real)) return { ok: false, hooks: [] }; // symlink escape — refused, treated as unreadable
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(path, "utf8"));
@@ -102,8 +127,14 @@ function flattenHookEventMap(eventMap: unknown): PluginHookEntry[] {
  * throws.
  */
 export function pluginHooksFor(installPath: string): PluginHookEntry[] | undefined {
-  const file = readHookSource(join(installPath, "hooks", "hooks.json"));
-  const manifest = readHookSource(join(installPath, ".claude-plugin", "plugin.json"));
+  let installPathReal = installPath;
+  try {
+    installPathReal = realpathSync(installPath);
+  } catch {
+    /* keep the given path -- a moved/deleted install dir mid-check still fences deterministically */
+  }
+  const file = readHookSource(join(installPath, "hooks", "hooks.json"), installPathReal);
+  const manifest = readHookSource(join(installPath, ".claude-plugin", "plugin.json"), installPathReal);
   if (!file.ok || !manifest.ok) return undefined;
   return [...file.hooks, ...manifest.hooks].slice(0, MAX_HOOKS_PER_PLUGIN);
 }

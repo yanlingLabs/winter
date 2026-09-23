@@ -1461,8 +1461,13 @@ export const PluginListingExtrasSchema = z.object({
 /** WS-21 fix round 2: `plugin.list`'s `hooks` — TOP-LEVEL (a sibling of `extras`, not nested in it),
  *  because a claude-format plugin with no `winter-plugin.json` at all still carries hooks (they're
  *  claude-native content, read from `hooks/hooks.json` and/or the claude manifest's own inline
- *  `hooks` field — `plugins/plugin-hooks.ts`'s own header has the full ruling). Absent when the
- *  plugin declares none, or when both sources are missing/malformed — never a thrown error. */
+ *  `hooks` field — `plugins/plugin-hooks.ts`'s own header has the full ruling). `[]` means the
+ *  daemon successfully checked and this plugin declares NONE — including when both sources are
+ *  simply missing (the common case); that is a known, positive fact, not a failure. The key is
+ *  ABSENT only when a hooks source EXISTS but couldn't be read or parsed (invalid JSON, the wrong
+ *  shape, or a symlink resolving outside the plugin's own install path) — the daemon genuinely
+ *  doesn't know the true state, so it says nothing rather than claiming an empty list it can't back
+ *  up. Never a thrown error either way. */
 export const PluginHookEntrySchema = z.object({
   event: z.string(),
   matcher: z.string().optional(),

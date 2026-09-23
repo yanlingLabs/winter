@@ -7,7 +7,7 @@
 // enable/disable/update/list/marketplace.*), role-rejection, and scope resolution, with a FAKE
 // supervisor spawn (no real OS process) — same split precedent server.test.ts's own header notes.
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@yanlinglabs/winter-protocol";
@@ -436,6 +436,30 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
       writeMarketplace(mktDir, { id: "p", tier: "capability" });
       mkdirSync(join(mktDir, "hooks"), { recursive: true });
       writeFileSync(join(mktDir, "hooks", "hooks.json"), "{ not valid json");
+      await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+      await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+
+      const listRes = await c.request(METHODS.pluginList, {});
+      expect(listRes.result.plugins[0]).not.toHaveProperty("hooks");
+    });
+
+    // L5 re-review round 2, item 2 (hardening): a hooks/hooks.json that resolves OUTSIDE the
+    // plugin's own install path via a symlink must never have its contents disclosed -- refused,
+    // treated exactly like an unreadable file (an absent `hooks` key), never the escaped content.
+    test("a hooks.json that symlinks outside the install path is refused -- absent, never the escaped content", async () => {
+      const { c } = await boot();
+      const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-hooks-symlink-"));
+      writeMarketplace(mktDir, { id: "p", tier: "capability" });
+
+      // Real hook content living OUTSIDE the plugin's install path.
+      const outsideDir = mkdtempSync(join(tmpdir(), "winter-plugin-hooks-outside-"));
+      writeFileSync(join(outsideDir, "hooks.json"), JSON.stringify({
+        hooks: { PreToolUse: [{ hooks: [{ type: "command", command: "echo escaped" }] }] },
+      }));
+
+      mkdirSync(join(mktDir, "hooks"), { recursive: true });
+      symlinkSync(join(outsideDir, "hooks.json"), join(mktDir, "hooks", "hooks.json"));
+
       await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
       await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
 
