@@ -50,7 +50,7 @@ import { sdkPluginsRoot, sdkHomeFor } from "../agent/paths";
 import { loadManifest, requiredConsentClasses } from "../agent/plugin-manifest";
 import { writeJsonAtomic } from "../sdk-files";
 import { pluginConsentFingerprint } from "./consent-fingerprint";
-import { addMarketplace, installPlugin, setPluginEnabled, type PluginManagerOptions } from "./sdk-plugin-api";
+import { addMarketplace, installPlugin, listPlugins, setPluginEnabled, type PluginManagerOptions } from "./sdk-plugin-api";
 
 const LEGACY_MARKETPLACE_NAME = "winter-legacy";
 
@@ -346,9 +346,16 @@ function rekeyConsents(home: string, idToKey: Map<string, string>, idToFingerpri
 /**
  * Converts every plugin at `<home>/plugins/<id>` (COPY, never move — see this module's header) into
  * a claude-shaped install under one directory marketplace, `winter-legacy`, registered through the
- * Contract B adapter. Idempotent in the sense that a re-run overwrites the SAME converted target
- * dirs and re-registers the SAME marketplace/install records — it does not detect "already
- * converted" itself (Migration C's own manifest tracks step completion, spec §8).
+ * Contract B adapter. Post-merge fix round, minor 2 (promoted, Opus review): a re-run SKIPS any id
+ * that `sdk/plugins`'s own `installed_plugins.json` already carries an `"<id>@winter-legacy"` record
+ * for, PROVIDED that record's `installPath` still exists on disk — never re-copying, re-registering
+ * or touching that plugin's enabled/consent state a second time. Migration C's rollback restores
+ * everything EXCEPT this lane's own SDK-side writes and `settings.json` (DECISION 15, this lane's
+ * own rollback doc), so without this guard a re-migration after a rollback would silently blow away
+ * and rebuild an already-converted copy, along with whatever the user changed on it since. Anything
+ * NOT already installed converts the same as ever; Migration C's own manifest still tracks step
+ * completion at the STEP level (spec §8) — this is the per-PLUGIN idempotency a re-run of the step
+ * itself needs underneath that.
  */
 export async function convertLegacyPlugins(home: string): Promise<ConvertLegacyPluginsResult> {
   const legacyRoot = join(home, "plugins");
@@ -373,12 +380,39 @@ export async function convertLegacyPlugins(home: string): Promise<ConvertLegacyP
   mkdirSync(join(marketplaceDir, "plugins"), { recursive: true });
   mkdirSync(join(marketplaceDir, ".claude-plugin"), { recursive: true });
 
+  const options: PluginManagerOptions = {
+    pluginsRoot: sdkPluginsRoot(home),
+    settingsPathFor: () => join(sdkHomeFor(home), "settings.json"),
+  };
+
+  // Post-merge fix round, minor 2 (promoted, Opus review): read the SAME `installed_plugins.json`
+  // the registration loop below writes to, ONCE, before either loop — an id already installed under
+  // THIS marketplace, whose install folder still exists, is left alone below (no copy, no
+  // re-registration). A missing/fresh `installed_plugins.json` reads back as no records at all
+  // (`listPlugins`'s own ENOENT degrade), so a first-ever run is unaffected.
+  const alreadyInstalled = new Set(
+    (await listPlugins(options))
+      .filter((p) => p.marketplace === LEGACY_MARKETPLACE_NAME && isDirectory(p.installPath))
+      .map((p) => p.id),
+  );
+
   const manifestEntries: Array<{ name: string; source: string }> = [];
   const okIds: string[] = [];
   for (const id of ids) {
     const legacyDir = join(legacyRoot, id);
     if (!isDirectory(legacyDir)) continue;
     const targetDir = join(marketplaceDir, "plugins", id);
+    if (alreadyInstalled.has(id)) {
+      // Don't overwrite: the folder from a PRIOR conversion is still there (a re-migration after a
+      // rollback, most commonly) — the marketplace manifest still lists it (the folder is real and
+      // unchanged), but nothing under it is touched and it never re-enters the registration loop.
+      result.skipped.push({
+        id,
+        reason: `${id}@${LEGACY_MARKETPLACE_NAME} is already installed and its converted folder still exists — re-migrating never overwrites an existing winter-legacy copy, leaving it exactly as it is`,
+      });
+      manifestEntries.push({ name: id, source: `./plugins/${id}` });
+      continue;
+    }
     try {
       convertOnePlugin(legacyDir, targetDir, id);
       manifestEntries.push({ name: id, source: `./plugins/${id}` });
@@ -394,10 +428,6 @@ export async function convertLegacyPlugins(home: string): Promise<ConvertLegacyP
     name: LEGACY_MARKETPLACE_NAME, owner: { name: "winter" }, plugins: manifestEntries,
   }, null, 2)}\n`);
 
-  const options: PluginManagerOptions = {
-    pluginsRoot: sdkPluginsRoot(home),
-    settingsPathFor: () => join(sdkHomeFor(home), "settings.json"),
-  };
   await addMarketplace(options, marketplaceDir);
 
   const legacySettings = readLegacyPluginSettings(home);
