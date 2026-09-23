@@ -45,6 +45,7 @@ import { WINTER_CAPABILITY_TOOLS, assertNoCapabilityCollision, type CapabilitySe
 import { createProjector, type Projector } from "../projector";
 import type { RuntimeSessionRecord, RuntimeSessionRecords } from "../runtime-state/records";
 import type { ProjectionCheckpoints } from "../runtime-state/checkpoints";
+import { moveTranscriptFiles } from "../runtime-state/transcript-rekey";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
 import { DEFAULT_PROVIDER, effortRefusalFor, effortToSpendForRole, officialSubscriptionAuthEnabled, ownProviderFor, pinsFor, providerBaseUrlFor, sdkAllowRules, sdkDenyRules, winterOptionsFromSettings, type Settings } from "../settings";
@@ -513,6 +514,56 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
   // WS-21 (L2 O-1): the CANONICAL path — the Winter child keys its transcript by realpath(cwd), the router
   // by the cwd it is given; every Options.cwd, run-home input and recorded transcript key derives from this.
   const winterCwdOf = (sessionId: string, cwd: string | null | undefined): string => canonicalCwd(cwd ?? deps.tmpDirOf(sessionId));
+
+  /**
+   * The cwd each leg keys a session's transcript by — the Winter leg `winterCwdOf`, the official leg its
+   * `sessionInput().cwd` (the primary: the `cwd` column, else `dirs[0]`, canonical; else the same fallback).
+   * `assembleOfficial`'s `sessionInput` reads THIS, so the lazy re-key below can never pick another key.
+   */
+  const transcriptCwdOf = (sessionId: string, leg: "winter" | "official"): string => {
+    const meta = deps.store.meta(sessionId);
+    if (leg === "winter") return winterCwdOf(sessionId, meta.cwd);
+    let primary: string | undefined = meta.cwd ?? undefined;
+    try { primary ??= deps.store.dirs(sessionId)[0]?.path; } catch { /* a session with no dirs row: workdir-less */ }
+    return primary === undefined ? winterCwdOf(sessionId, meta.cwd) : canonicalCwd(primary);
+  };
+
+  /**
+   * WS-21 round 3 (Important): THE LAZY CANONICAL-CWD RE-KEY, at every resume, before either leg opens. A
+   * session whose record still names another key than the one its leg now looks under (a 0.116 session in
+   * a symlinked cwd; a symlink made later; anything Migration C's bulk step never saw) has its files moved
+   * there (`moveTranscriptFiles`: never overwriting, the transcript last) and its record re-pointed. A
+   * collision (both keys hold the session) or a refusal moves NOTHING: the session is marked
+   * `repair-required` and logged, and the leg opens on whatever the canonical key holds. SYNCHRONOUS (the
+   * n7 invariant: no `await` between `ensure()`'s map miss and `drivers.set`). Returns the record to open
+   * with — re-read when it changed.
+   */
+  const rekeyForCanonicalCwd = (sessionId: string, record: RuntimeSessionRecord, leg: "winter" | "official"): RuntimeSessionRecord => {
+    const records = deps.records;
+    const backendId = record.backendSessionId;
+    if (records === undefined || backendId === undefined) return record;
+    let toKey: string;
+    try { toKey = transcriptProjectKey(transcriptCwdOf(sessionId, leg)); } catch { return record; }
+    if (toKey === record.transcriptProjectKey) return record;
+    const projects = storeProjectsDir(deps.home);
+    const moved = moveTranscriptFiles(projects, backendId, record.transcriptProjectKey, toKey);
+    if (moved.kind === "not-needed") return record;
+    if (moved.kind === "moved") {
+      try {
+        records.rekeyTranscript(sessionId, record.transcriptProjectKey, toKey, join(projects, toKey));
+      } catch (err) {
+        log(`transcript re-key for ${sessionId}: the files moved but the record could not be re-pointed (${err instanceof Error ? err.name : "unknown"})`);
+        return record;
+      }
+      log(`transcript re-keyed for ${sessionId} to the canonical cwd's key (${moved.entries.length} entr${moved.entries.length === 1 ? "y" : "ies"} moved)`);
+      return recordOf(sessionId) ?? record;
+    }
+    try { records.setTranscriptHealth(sessionId, "repair-required"); } catch { /* bounded */ }
+    log(moved.kind === "collision"
+      ? `transcript re-key collision for ${sessionId}: both the recorded key and the canonical cwd's key hold its transcript — nothing moved, marked repair-required`
+      : `transcript re-key for ${sessionId} refused (${moved.reason}) — nothing moved, marked repair-required`);
+    return record;
+  };
 
   /** The facts every incarnation of a session needs, assembled once per driver. */
   const assemble = (sessionId: string, backendSessionId: string): WinterSession => {
@@ -1031,7 +1082,8 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       } catch { /* a session with no dirs row: workdir-less */ }
       return {
         sessionId, mode,
-        cwd: primary === undefined ? cwd : canonicalCwd(primary), // WS-21 (L2 O-1): canonical, like the Winter leg
+        // WS-21 (L2 O-1): canonical, like the Winter leg — and the ONE rule the lazy re-key keys by (round 3).
+        cwd: transcriptCwdOf(sessionId, "official"),
         outDir: deps.outDirOf(sessionId),
         extraDirs,
         ...(live.effort === undefined ? {} : { effort: live.effort }),
@@ -1343,7 +1395,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       throw new WinterLegRefusal("claude_executable_unavailable", executable.message);
     }
     const backendSessionId = randomUUID();
-    const transcriptKey = transcriptProjectKey(cwd);
+    // Round 3: the key THIS leg writes under (`sessionInput().cwd`), which differs from `cwd` only for a
+    // cwd-less session whose `dirs[0]` is set.
+    const transcriptKey = transcriptProjectKey(transcriptCwdOf(sessionId, "official"));
     // m5: the same locator-only rule the Winter path follows (records.ts's own rule: never
     // material, just where to find it) — `credentialRefFor` is this leg's OWN source of truth for
     // "is this provider one of Winter's keychain-backed slots", the identical function the Winter
@@ -1523,8 +1577,10 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
   };
 
   const resume = async (sessionId: string): Promise<LegSession> => {
-    const record = recordOf(sessionId);
-    const leg = sessionLegOf(record);
+    const recorded = recordOf(sessionId);
+    const leg = sessionLegOf(recorded);
+    // Round 3: the transcript is where the leg will look BEFORE it opens (synchronous — n7).
+    const record = recorded !== undefined && (leg === "winter" || leg === "official") ? rekeyForCanonicalCwd(sessionId, recorded, leg) : recorded;
     if (leg === "official" && record !== undefined) {
       return resumeOfficial(sessionId, record);
     }

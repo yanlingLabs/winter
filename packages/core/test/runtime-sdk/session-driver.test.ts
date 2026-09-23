@@ -9,7 +9,8 @@
 //   R1  the store's own log is what a resume re-pushes (`unconsumed` over `store.read`).
 import { describe, expect, test } from "bun:test";
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { storeHomeFor, storeProjectsDir } from "../../src/agent/paths";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Options, Query } from "@yanlinglabs/winter-agent-sdk";
@@ -1221,4 +1222,68 @@ describe("WS-21: the driver stops building run-home inputs once a run home is ap
       } finally { t.close(); }
     });
   }
+});
+
+// WS-21 round 3 (Important): both legs key a transcript by the canonical cwd now, but a 0.116 session
+// made in a symlinked cwd has its files under the RAW cwd's key. `resume()` moves them — before the leg
+// opens, synchronously (n7) — so the child finds its history; a collision moves nothing and is marked.
+describe("WS-21 round 3: the lazy canonical-cwd re-key at resume (Winter leg)", () => {
+  const ENTRY = '{"type":"user","uuid":"u-old","message":{"role":"user","content":"before the upgrade"}}\n';
+  async function oldLayoutSession() {
+    const t = table();
+    const real = realpathSync(mkdtempSync(join(tmpdir(), "winter-rekey-real-")));
+    const link = join(realpathSync(mkdtempSync(join(tmpdir(), "winter-rekey-link-"))), "proj");
+    symlinkSync(real, link);
+    const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd: link });
+    const created = await t.drivers.create(sid);
+    await created.end();
+    const id = created.backendSessionId;
+    const projects = storeProjectsDir(t.home);
+    const rawKey = transcriptProjectKey(link);
+    const canonKey = transcriptProjectKey(real);
+    expect(rawKey).not.toBe(canonKey);
+    // the 0.116 state: the record and the files under the RAW key
+    expect(t.records.rekeyTranscript(sid, canonKey, rawKey, join(projects, rawKey))).toBe(true);
+    mkdirSync(join(projects, rawKey, id, "subagents"), { recursive: true });
+    writeFileSync(join(projects, rawKey, `${id}.jsonl`), ENTRY);
+    writeFileSync(join(projects, rawKey, `${id}.provider-state.jsonl`), "{}\n");
+    writeFileSync(join(projects, rawKey, id, "subagents", "agent-a.jsonl"), "{}\n");
+    return { t, sid, id, real, projects, rawKey, canonKey };
+  }
+
+  test("a symlinked-cwd session from the old layout resumes WITH its history: files moved, record re-pointed, the child looks where they are", async () => {
+    const { t, sid, id, real, projects, rawKey, canonKey } = await oldLayoutSession();
+    const again = table({ records: t.records, store: t.store, hub: t.hub, home: t.home });
+    try {
+      const resumed = (await again.drivers.ensure(sid))!;
+      expect(existsSync(join(projects, rawKey, `${id}.jsonl`))).toBe(false);
+      expect(existsSync(join(projects, canonKey, id, "subagents", "agent-a.jsonl"))).toBe(true);
+      const record = t.records.get(sid)!;
+      expect([record.transcriptProjectKey, record.backendRoot]).toEqual([canonKey, join(projects, canonKey)]);
+      const opts = again.q().options;
+      expect(opts.cwd).toBe(real);
+      expect(opts.resume).toBe(id);   // hasTranscript found it: a RESUME, not a fresh start
+      // the child's own lookup — the SDK store at the key of the cwd it is handed — returns the history
+      const loaded = await new winter.WinterCompatibilitySessionStore({ winterHome: storeHomeFor(t.home) }).load({ projectKey: transcriptProjectKey(opts.cwd!), sessionId: id });
+      expect(loaded?.map((e) => e.uuid)).toEqual(["u-old"]);
+      expect(again.logs.some((l) => l.includes("re-keyed") && l.includes(sid))).toBe(true);
+      await resumed.end();
+    } finally { again.close(); t.close(); }
+  });
+
+  test("a collision (the canonical key already holds the transcript) moves nothing and marks the session repair-required", async () => {
+    const { t, sid, id, projects, rawKey, canonKey } = await oldLayoutSession();
+    mkdirSync(join(projects, canonKey), { recursive: true });
+    writeFileSync(join(projects, canonKey, `${id}.jsonl`), '{"type":"user","uuid":"u-new"}\n');
+    const again = table({ records: t.records, store: t.store, hub: t.hub, home: t.home });
+    try {
+      const resumed = (await again.drivers.ensure(sid))!;
+      expect(existsSync(join(projects, rawKey, `${id}.jsonl`))).toBe(true);
+      expect(readFileSync(join(projects, canonKey, `${id}.jsonl`), "utf8")).toContain("u-new");
+      expect(t.records.get(sid)!.transcriptHealth).toBe("repair-required");
+      expect(t.records.get(sid)!.transcriptProjectKey).toBe(rawKey);
+      expect(again.logs.some((l) => l.includes("collision") && l.includes(sid))).toBe(true);
+      await resumed.end();
+    } finally { again.close(); t.close(); }
+  });
 });
