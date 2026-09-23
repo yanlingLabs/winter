@@ -35,6 +35,15 @@ export function approvedProjectRulesDir(winterHome: string): string {
   return join(winterHome, "permissions");
 }
 
+/**
+ * The trust record (`TrustStore`) — `<home>/trust.json`. A leaf helper for the same reason: the
+ * daemon builds the store on it and `runtime-sdk/mode-options.ts` write-fences it (writing it trusts
+ * any project).
+ */
+export function trustRecordFile(winterHome: string): string {
+  return join(winterHome, "trust.json");
+}
+
 // Symlink chains longer than this are rejected outright (mirrors the kernel's own ELOOP guard,
 // just tighter). Also breaks link CYCLES (a→b→a never terminates otherwise): lstat on a cycle
 // member succeeds every hop (lstat never follows the final link), so only this cap stops it.
