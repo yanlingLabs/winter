@@ -298,3 +298,44 @@ describe("recoverRuntimeState — step 8 defers the staging sweep when the route
     expect(f?.repairable).toEqual([]);
   });
 });
+
+// Round 3 (investigation: `noteRunFolder` on an official RESUME). A resume runs on the wrapper's staging
+// root `<tmp>/claude-resume-<uuid>` — the run folder's other entries linked in, its `projects/` the real
+// working copy — while the run folder's own `projects/` stays empty (router `test/run-home/resume.test.ts`).
+// The daemon records the RUN FOLDER, and clears it correctly on `safe` (the router's exit reconcile judged
+// the staging root). But after a CRASH the boot sweep reconciled only that empty run folder and left the
+// staging root to the 24 h stale sweep, while the session could already resume without its unmirrored
+// tail. The router records the root the child OBSERVED on this home's own directory row (`configDir`,
+// WS-14 §6 rule 2: cleared only after a verified cleanup), so a staging root named there is a crashed
+// generation of THIS home — nothing of it can be live at boot — and is reconciled at once, whatever its age.
+describe("round 3: a crashed official resume's staging root", () => {
+  test("named by this home's directory row: reconciled at boot at once; an unnamed young one still waits for the stale sweep", async () => {
+    const w = world();
+    const named = w.staging("claude-resume-aaaa", 0.1);
+    const unnamed = w.staging("claude-resume-bbbb", 0.1);
+    w.rs.db.run("INSERT INTO directory_entries (address, entry_json, updated_at) VALUES (?, ?, 't')",
+      ["winter://session/s_1", JSON.stringify({ address: "winter://session/s_1", objectKind: "session", configDir: named, processIdentity: { pid: 1, startedAt: "x" } })]);
+    const { reconcile, seen } = stub({});
+    const report = await recoverRunRoots({ home: w.home, rs: w.rs, reconcile, claudeResumeScanRoot: w.scan });
+    expect(seen).toContain(named);
+    expect(seen).not.toContain(unnamed);
+    expect(existsSync(named)).toBe(false);          // clean → removed
+    expect(existsSync(unnamed)).toBe(true);         // someone else's, maybe live: the 24 h rule stands
+    expect(report.staging.removed).toBe(1);
+  });
+
+  test("a named staging root the router quarantines is kept, recorded, and its transcript's session marked", async () => {
+    const w = world();
+    const named = w.staging("claude-resume-cccc", 0.1);
+    recordRoot(w.rs, "s_9", join(w.runs, "gone"), "run-folder");
+    w.rs.db.run("UPDATE runtime_sessions SET backend_session_id = 'be-9' WHERE winter_session_id = 's_9'");
+    w.rs.db.run("INSERT INTO directory_entries (address, entry_json, updated_at) VALUES (?, ?, 't')", ["winter://session/s_9", JSON.stringify({ configDir: named })]);
+    await recoverRunRoots({
+      home: w.home, rs: w.rs, claudeResumeScanRoot: w.scan,
+      reconcile: async () => ({ outcome: "quarantined" as const, transcripts: [{ projectKey: "k", sessionId: "be-9", outcome: "quarantined" as const, appended: 0, reason: "diverged" }] }),
+    });
+    expect(existsSync(named)).toBe(true);
+    expect(quarantinedRunRoots(w.rs).map((q) => q.root)).toContain(named);
+    expect(new RuntimeSessionRecords(w.rs).get("s_9")!.transcriptHealth).toBe("repair-required");
+  });
+});
