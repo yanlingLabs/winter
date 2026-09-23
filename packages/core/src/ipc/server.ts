@@ -139,6 +139,7 @@ import {
   setPluginEnabled as setPluginEnabledOnAdapter, uninstallPlugin, updateMarketplace, updatePlugin,
   type PluginManagerOptions, type PluginScope as AdapterPluginScope,
 } from "../plugins/sdk-plugin-api";
+import { pluginSkillsFor } from "../plugins/plugin-skills";
 import { sdkPluginsRoot, sdkSettingsPath } from "../agent/paths";
 
 interface ConnState {
@@ -2147,7 +2148,6 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.skillsList: {
         const p = parseParams(SkillsListParams, params);
-        if (!opts.skills) return { ok: true, skills: [] };
         // Batch 3 (item 2): overlay `denied`/`deniedBy` from the GLOBAL `settings.permissions.deny`
         // list — `liveSettingsFor` is the same "typed absence, never a crash" reader every other
         // opts.winterHome-gated path in this file uses. `skillDenyRule` is the ONE place the exact
@@ -2155,19 +2155,31 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // so the two can never drift onto different strings for the same skill.
         // WS-21: the deny list moved to `sdk/settings.json` (`sdkDenyRules`, read live).
         const denySet = new Set(opts.winterHome ? sdkDenyRules(opts.winterHome) : []);
-        const store = opts.skills;
-        // One live read of which plugins a session may load skills from (enabled + `exec` consent).
-        const eligible = store.sessionEligiblePlugins();
-        const skills = store.list({ cwd: p.cwd ?? null }).map((s) => {
-          const denied = denySet.has(skillDenyRule(s.name));
-          // Lane B (2026-09-22): whether a session can load it at all — the SAME rule the runtime child
-          // is handed its skills by (`SkillStore.sessionAvailability`), so a client never shows a skill
-          // as usable that no session can load (today: only an enabled, consented plugin's skills, in a
-          // Code session on either leg).
-          const withAvailability = { ...s, ...store.sessionAvailability(s, eligible) };
-          return denied ? { ...withAvailability, denied: true, deniedBy: "settings" as const } : withAvailability;
-        });
-        return { ok: true, skills };
+        const nonPluginSkills = opts.skills
+          ? opts.skills.list({ cwd: p.cwd ?? null })
+              // WS-21 (spec §5.3/§5.5): SkillStore's OWN plugin tier still scans the retired
+              // `<home>/plugins` layout (L3-owned, agent/skills.ts — see the lane report's REQUEST
+              // FOR L3 to delete it) — drop whatever it still finds there and rebuild the plugin
+              // half below, off Contract B's installed+enabled set, so a stale/duplicate scan can
+              // never reach a client.
+              .filter((s) => s.source !== "plugin")
+              .map((s) => {
+                const denied = denySet.has(skillDenyRule(s.name));
+                const withAvailability = { ...s, ...opts.skills!.sessionAvailability(s) };
+                return denied ? { ...withAvailability, denied: true, deniedBy: "settings" as const } : withAvailability;
+              })
+          : [];
+        // WS-21: the plugin half — every ENABLED plugin's skills (Contract B), named `plugin:skill`
+        // (spec §5.3). Install+enable is itself the consent for a plugin's claude-native content
+        // (spec §5.4), so every listed entry already loads in a session — see plugin-skills.ts's
+        // own header for why there is no separate exec-consent gate here any more.
+        const pluginSkills = opts.winterHome
+          ? (await pluginSkillsFor(pluginManagerOptionsFor(opts.winterHome, p.cwd))).map((s) => {
+              const denied = denySet.has(skillDenyRule(s.name));
+              return denied ? { ...s, denied: true, deniedBy: "settings" as const } : s;
+            })
+          : [];
+        return { ok: true, skills: [...nonPluginSkills, ...pluginSkills] };
       }
 
       // -----------------------------------------------------------------------------------------
