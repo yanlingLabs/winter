@@ -91,7 +91,7 @@ import type { AgentRegistry } from "../agent/bg-agent-registry";
 import type { ContextAssembler } from "../agent/context";
 import type { SkillStore } from "../agent/skills";
 import { startWinterSession, unconsumedUserMessages, withRunHome, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
-import { isRunHomeError, type RunHome, type RunHomeErrorCode, type RunHomeInput } from "./run-home-contract";
+import { isRunHomeError, type RunHome, type RunHomeErrorCode, type RunHomeFor, type RunHomeInput } from "./run-home-contract";
 import type { RunHomeSessionFacts } from "./run-home-input";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import { startOfficialSession, type OfficialSession } from "./official-session";
@@ -471,6 +471,86 @@ export function childrenSinkFor(registry: AgentRegistry, sessionId: string, log:
   };
 }
 
+/**
+ * WS-21 round 3 (Important): THE LAZY CANONICAL-CWD RE-KEY, before a session's child opens — at every
+ * `resume()` and (round 4, minor 3) the router's own cold resume. A session whose record still names another
+ * key than the one `cwd` (canonicalized here) keys it under — a 0.116 session in a symlinked cwd, a symlink
+ * made later, anything Migration C's bulk step never saw — has its files moved there (`moveTranscriptFiles`:
+ * never overwriting, the transcript last) and its record re-pointed; on a migrated home the move joins
+ * Migration C's manifest, intent first (round 4, minor 1), so a rollback reverses it. A collision (both keys
+ * hold the session) or a refusal moves NOTHING: the session is marked `repair-required` and logged, and the
+ * child opens on whatever the canonical key holds. SYNCHRONOUS (the n7 invariant). Returns the record to
+ * open with — re-read when it changed.
+ */
+export function rekeyTranscriptToCwd(
+  deps: { home: string; records: RuntimeSessionRecords; log: (line: string) => void },
+  sessionId: string, record: RuntimeSessionRecord, cwd: string,
+): RuntimeSessionRecord {
+  const { records, log } = deps;
+  const backendId = record.backendSessionId;
+  if (backendId === undefined) return record;
+  let toKey: string;
+  try { toKey = transcriptProjectKey(canonicalCwd(cwd)); } catch { return record; }
+  if (toKey === record.transcriptProjectKey) return record;
+  const projects = storeProjectsDir(deps.home);
+  const fromKey = record.transcriptProjectKey;
+  const intent = { sessionId, backendId, from: fromKey, to: toKey, entries: transcriptEntriesOf(join(projects, fromKey), backendId) };
+  recordLazyRekey(deps.home, { ...intent, outcome: "pending" });
+  const moved = moveTranscriptFiles(projects, backendId, fromKey, toKey);
+  recordLazyRekey(deps.home, moved.kind === "moved" || moved.kind === "not-needed"
+    ? { ...intent, ...(moved.kind === "moved" ? { entries: moved.entries } : {}), outcome: "moved" }
+    : { ...intent, outcome: moved.kind, ...(moved.kind === "refused" ? { reason: moved.reason } : {}) });
+  if (moved.kind === "not-needed") return record;
+  if (moved.kind === "moved") {
+    try {
+      records.rekeyTranscript(sessionId, fromKey, toKey, join(projects, toKey));
+    } catch (err) {
+      log(`transcript re-key for ${sessionId}: the files moved but the record could not be re-pointed (${err instanceof Error ? err.name : "unknown"})`);
+      return record;
+    }
+    log(`transcript re-keyed for ${sessionId} to the canonical cwd's key (${moved.entries.length} entr${moved.entries.length === 1 ? "y" : "ies"} moved)`);
+    try { return records.get(sessionId) ?? record; } catch { return record; }
+  }
+  try { records.setTranscriptHealth(sessionId, "repair-required"); } catch { /* bounded */ }
+  log(moved.kind === "collision"
+    ? `transcript re-key collision for ${sessionId}: both the recorded key and the canonical cwd's key hold its transcript — nothing moved, marked repair-required`
+    : `transcript re-key for ${sessionId} refused (${moved.reason}) — nothing moved, marked repair-required`);
+  return record;
+}
+
+/**
+ * Round 4, minor 3: the `runHomeFor` a run-home router calls for ITS OWN cold resume (a message delivered to
+ * an exited Winter session) — the one incarnation that never passes through `resume()`. The cwd is
+ * canonicalized, like every other run-home input (L2 O-1), and the same lazy re-key runs first, so that path
+ * finds the history too. (The router's run home check compares this cwd with the one it resumes on: that one
+ * is the directory row's, written from an incarnation's own `Options.cwd`, canonical since L2 O-1 — for a
+ * row still spelled otherwise, the router refuses the cold resume typed, `run_home_cwd_mismatch`, and the
+ * session resumes through its driver instead.)
+ */
+export function coldResumeRunHomeFor(deps: {
+  home: string;
+  store: Pick<SessionStore, "meta" | "dirs">;
+  records: RuntimeSessionRecords | undefined;
+  runHome: NonNullable<WinterLegDeps["runHome"]>;
+  log: (line: string) => void;
+}): RunHomeFor {
+  return async (ctx) => {
+    const cwd = canonicalCwd(ctx.cwd);
+    let origin: string | undefined;
+    let workdirLess = false;
+    try {
+      const meta = deps.store.meta(ctx.sessionId);
+      origin = meta.origin;
+      workdirLess = (meta.cwd ?? deps.store.dirs(ctx.sessionId)[0]?.path) === undefined;
+    } catch { /* an unknown session: the router refuses it on its own */ }
+    try {
+      const record = deps.records?.get(ctx.sessionId);
+      if (record !== undefined && deps.records !== undefined) rekeyTranscriptToCwd({ home: deps.home, records: deps.records, log: deps.log }, ctx.sessionId, record, cwd);
+    } catch { /* a records store that will not answer: the child opens on whatever the canonical key holds */ }
+    return deps.runHome.build(deps.runHome.inputFor({ mode: ctx.mode, dispatchChild: origin === "dispatch-child", leg: ctx.leg, cwd, workdirLess }));
+  };
+}
+
 export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDrivers {
   const drivers = new Map<string, LegSession>();
   /** Per live Winter-leg child: the provider its `runtimes.advisorModel` pin names when that is ANOTHER
@@ -529,49 +609,12 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     return primary === undefined ? winterCwdOf(sessionId, meta.cwd) : canonicalCwd(primary);
   };
 
-  /**
-   * WS-21 round 3 (Important): THE LAZY CANONICAL-CWD RE-KEY, at every resume, before either leg opens. A
-   * session whose record still names another key than the one its leg now looks under (a 0.116 session in
-   * a symlinked cwd; a symlink made later; anything Migration C's bulk step never saw) has its files moved
-   * there (`moveTranscriptFiles`: never overwriting, the transcript last) and its record re-pointed. A
-   * collision (both keys hold the session) or a refusal moves NOTHING: the session is marked
-   * `repair-required` and logged, and the leg opens on whatever the canonical key holds. SYNCHRONOUS (the
-   * n7 invariant: no `await` between `ensure()`'s map miss and `drivers.set`). Returns the record to open
-   * with — re-read when it changed.
-   */
+  /** Round 3/4: the lazy canonical-cwd re-key (`rekeyTranscriptToCwd`), keyed by the cwd THIS leg uses. */
   const rekeyForCanonicalCwd = (sessionId: string, record: RuntimeSessionRecord, leg: "winter" | "official"): RuntimeSessionRecord => {
-    const records = deps.records;
-    const backendId = record.backendSessionId;
-    if (records === undefined || backendId === undefined) return record;
-    let toKey: string;
-    try { toKey = transcriptProjectKey(transcriptCwdOf(sessionId, leg)); } catch { return record; }
-    if (toKey === record.transcriptProjectKey) return record;
-    const projects = storeProjectsDir(deps.home);
-    // Round 4, minor 1: on a migrated home the move joins Migration C's manifest (intent first), so a
-    // rollback reverses it like the bulk step's.
-    const fromKey = record.transcriptProjectKey;
-    const intent = { sessionId, backendId, from: fromKey, to: toKey, entries: transcriptEntriesOf(join(projects, fromKey), backendId) };
-    recordLazyRekey(deps.home, { ...intent, outcome: "pending" });
-    const moved = moveTranscriptFiles(projects, backendId, fromKey, toKey);
-    recordLazyRekey(deps.home, moved.kind === "moved" || moved.kind === "not-needed"
-      ? { ...intent, ...(moved.kind === "moved" ? { entries: moved.entries } : {}), outcome: "moved" }
-      : { ...intent, outcome: moved.kind, ...(moved.kind === "refused" ? { reason: moved.reason } : {}) });
-    if (moved.kind === "not-needed") return record;
-    if (moved.kind === "moved") {
-      try {
-        records.rekeyTranscript(sessionId, record.transcriptProjectKey, toKey, join(projects, toKey));
-      } catch (err) {
-        log(`transcript re-key for ${sessionId}: the files moved but the record could not be re-pointed (${err instanceof Error ? err.name : "unknown"})`);
-        return record;
-      }
-      log(`transcript re-keyed for ${sessionId} to the canonical cwd's key (${moved.entries.length} entr${moved.entries.length === 1 ? "y" : "ies"} moved)`);
-      return recordOf(sessionId) ?? record;
-    }
-    try { records.setTranscriptHealth(sessionId, "repair-required"); } catch { /* bounded */ }
-    log(moved.kind === "collision"
-      ? `transcript re-key collision for ${sessionId}: both the recorded key and the canonical cwd's key hold its transcript — nothing moved, marked repair-required`
-      : `transcript re-key for ${sessionId} refused (${moved.reason}) — nothing moved, marked repair-required`);
-    return record;
+    if (deps.records === undefined) return record;
+    let cwd: string;
+    try { cwd = transcriptCwdOf(sessionId, leg); } catch { return record; }
+    return rekeyTranscriptToCwd({ home: deps.home, records: deps.records, log }, sessionId, record, cwd);
   };
 
   /** The facts every incarnation of a session needs, assembled once per driver. */

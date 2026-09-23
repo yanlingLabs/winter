@@ -30,7 +30,7 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { CREDENTIAL_MATERIAL_NAMES, writeCredentialMaterial } from "../../src/auth/credential-material";
 import { CORE_BRAND } from "../../src/runtime-sdk/brand";
 import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
-import { createWinterSessionDrivers, refusalMayBeCredentialShaped, type WinterLegDeps } from "../../src/runtime-sdk/session-driver";
+import { coldResumeRunHomeFor, createWinterSessionDrivers, refusalMayBeCredentialShaped, type WinterLegDeps } from "../../src/runtime-sdk/session-driver";
 import { updateSdkSettings } from "../../src/sdk-files";
 import { evictSessionsForCredential } from "../../src/runtime-sdk/credentials";
 import { unconsumedUserMessages } from "../../src/runtime-sdk/winter-session";
@@ -1304,6 +1304,31 @@ describe("WS-21 round 3: the lazy canonical-cwd re-key at resume (Winter leg)", 
         try { expect(db.query<{ k: string }, [string]>("SELECT transcript_project_key AS k FROM runtime_sessions WHERE winter_session_id = ?").get(sid)!.k).toBe(rawKey); } finally { db.close(); }
       } finally { again.close(); t.close(); }
     } finally { setRunHomeSupportForTests(undefined); }
+  });
+
+  // Round 4, minor 3: the ROUTER's own cold resume (a message delivered to an exited Winter session) builds
+  // its run home through the daemon's `runHomeFor` — never through `resume()`. It canonicalizes the cwd and
+  // runs the same lazy re-key, so that path finds the history too.
+  test("round 4: the router's cold-resume runHomeFor canonicalizes the cwd and re-keys the transcript first", async () => {
+    const { t, sid, id, real, projects, rawKey, canonKey } = await oldLayoutSession();
+    try {
+      const built: import("../../src/runtime-sdk/run-home-contract").RunHomeInput[] = [];
+      const facts: import("../../src/runtime-sdk/run-home-input").RunHomeSessionFacts[] = [];
+      const runHome: NonNullable<WinterLegDeps["runHome"]> = {
+        inputFor: (f) => { facts.push(f); return { home: t.home, mode: f.mode, dispatchChild: f.dispatchChild, leg: f.leg, cwd: f.cwd, trustedProjectRoot: null, gitRoot: null, mcpDisabled: [], reservedMcpServerNames: [], memoryDir: "/m" }; },
+        build: async (input) => { built.push(input); return { runId: "cold-1", dir: "/h/cache/runs/cold-1", sdkHome: "/h/sdk", input, effectiveSettings: {}, report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [] }, dispose: async () => {} }; },
+      };
+      const logs: string[] = [];
+      const runHomeFor = coldResumeRunHomeFor({ home: t.home, store: t.store, records: t.records, runHome, log: (l) => logs.push(l) });
+      const link = t.store.meta(sid).cwd!;
+      await runHomeFor({ sessionId: sid, leg: "winter", cwd: link, mode: "code" });
+      expect(built[0]!.cwd).toBe(real);
+      expect(facts[0]).toMatchObject({ mode: "code", dispatchChild: false, leg: "winter", cwd: real, workdirLess: false });
+      expect(existsSync(join(projects, canonKey, `${id}.jsonl`))).toBe(true);
+      expect(existsSync(join(projects, rawKey, `${id}.jsonl`))).toBe(false);
+      expect(t.records.get(sid)!.transcriptProjectKey).toBe(canonKey);
+      expect(logs.some((l) => l.includes("re-keyed") && l.includes(sid))).toBe(true);
+    } finally { t.close(); }
   });
 
   test("a collision (the canonical key already holds the transcript) moves nothing and marks the session repair-required", async () => {

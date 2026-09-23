@@ -88,7 +88,7 @@ import { createConsoleProfileBroker } from "./auth/console-profile-broker";
 import { resolveAntExecutable } from "./runtime-sdk/bundle-layout";
 import { advisorReviewerFor, familyOfModel, officialLegDefaultSessionModel } from "./runtime-sdk/advisor-reviewer";
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
-import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
+import { coldResumeRunHomeFor, createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
 import { linkedRouterSupportsRunHome, linkedRunHomeBuilder, runHomeHandleOf, runHomeReportSummary } from "./runtime-sdk/run-home-support";
 import { recoverRunRoots, rootRecoveryDetail, type RootReconcile } from "./runtime-state/root-recovery";
 import { splitSettingsToSdk } from "./migration/settings-split";
@@ -1278,16 +1278,8 @@ export async function startDaemon(opts: {
       // WS-21 (spec §3.1): a run-home router is created with `requireRunHome: true` and this builder
       // for its OWN cold-resume path. Absent (router 0.0.11) — the router is created as before.
       ...(runHomeDeps === undefined ? {} : {
-        runHomeFor: async (ctx) => {
-          let origin: string | undefined;
-          let workdirLess = false;
-          try {
-            const meta = store.meta(ctx.sessionId);
-            origin = meta.origin;
-            workdirLess = (meta.cwd ?? store.dirs(ctx.sessionId)[0]?.path) === undefined;
-          } catch { /* an unknown session: the router refuses it on its own */ }
-          return runHomeDeps.build(runHomeDeps.inputFor({ mode: ctx.mode, dispatchChild: origin === "dispatch-child", leg: ctx.leg, cwd: ctx.cwd, workdirLess }));
-        },
+        // Round 4, minor 3: the cwd canonicalized and the lazy transcript re-key run, as at every `resume()`.
+        runHomeFor: coldResumeRunHomeFor({ home: winterHome, store, records: runtime?.records, runHome: runHomeDeps, log: (line) => console.error(`runtime-sdk: ${line}`) }),
       }),
       secrets,
       directoryStore: runtime?.directory,
