@@ -206,6 +206,33 @@ describe("fix round 2: Bash writes under .winter/<kind>", () => {
     for (const cmd of stillWrites) expect({ cmd, hit: bashProtectedWriteHit(cmd) !== undefined }).toEqual({ cmd, hit: true });
   });
 
+  // Round 3, minor 9: write shapes the check missed — an interpreter one-liner (`python`/`python3`/`node`/
+  // `bun`/`ruby`/`perl`/`deno` with `-c`, `-e` or `--eval`) that names a protected segment anywhere in its
+  // code, and gawk's `-i inplace`. (A path built from variables, `git apply` and `patch <` stay beyond a
+  // static check — the code comment says so.)
+  test("round 3, minor 9: interpreter one-liners and awk -i inplace naming a protected segment are writes", () => {
+    const writes9 = [
+      `python3 -c "import os; open('.winter/rules/x.md','w').write('y')"`,
+      `python -c "import os; os.makedirs('pkg/.winter/skills', exist_ok=True)"`,
+      `python3.12 -c "open('.winter/agents/a.md','w')"`,
+      `node -e "require('fs').writeFileSync('.winter/commands/c.md','x')"`,
+      `node --eval "require('fs').mkdirSync('.winter/output-styles')"`,
+      `bun -e "await Bun.write('.winter/rules/r.md', 'x')"`,
+      `ruby -e "File.write('.winter/rules/r.md', 'x')"`,
+      `perl -e 'open(my $f, ">", ".winter/rules/r.md")'`,
+      `deno eval "Deno.writeTextFileSync('.winter/skills/s/SKILL.md', 'x')"`,
+      `cd pkg && python3 -c "open('.winter/rules/r.md','w')"`,
+      "awk -i inplace '{print}' .winter/rules/r.md",
+    ];
+    for (const cmd of writes9) expect({ cmd, hit: bashProtectedWriteHit(cmd) !== undefined }).toEqual({ cmd, hit: true });
+    for (const cmd of [
+      `python3 -c "print(1)" && cat .winter/rules/r.md`,
+      "awk '{print}' .winter/rules/r.md",
+      `node -e "console.log(1)"`,
+      `python3 -c "open('.winter/rulesets.md','w')"`,
+    ]) expect({ cmd, hit: bashProtectedWriteHit(cmd) }).toEqual({ cmd, hit: undefined });
+  });
+
   test("the hook asks (both legs, sandboxed or not); a read gets no answer from it", async () => {
     const built = sessionHooksFor({ sessionId: "s_1", roots: ["/r"], home: "/Users/x/.winter", mode: "code" });
     const groups = (built.winter?.PreToolUse ?? []).filter((g: HookCallbackMatcher) => g.matcher === "Bash");
