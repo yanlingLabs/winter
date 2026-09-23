@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { storeHomeFor } from "../src/agent/paths";
 import { mkdtempSync, readFileSync, realpathSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,7 +13,6 @@ import { PluginStore } from "../src/agent/plugins";
 import { pluginConsentFingerprint } from "../src/plugins/consent-fingerprint";
 import { ToolRegistry } from "../src/agent/tools/registry";
 import { ApprovalBroker } from "../src/agent/approvals";
-import { PermissionRules } from "../src/agent/permission-rules";
 import { PluginSupervisor } from "../src/plugins/supervisor";
 import { PluginContribRegistry } from "../src/plugins/contrib";
 import type { Provider, ProviderEvent } from "../src/providers/types";
@@ -367,23 +367,22 @@ describe("daemon IPC", () => {
   // for the duration (save/restore) so web_fetch never hits the real network.
 
   // Edge case called out explicitly by the brief: a rule-bearing optionId with NO usable project
-  // root (a null session cwd) must never hang or crash the respond — PermissionRules.append()
-  // throws RuleAppendError for scope "project" with no root, and the handler's try/catch must
-  // swallow it (log + still resolve). Unreachable through a REAL engine turn (a null-cwd session's
+  // root (a null session cwd) must never hang or crash the respond — WS-21: the handler refuses the
+  // save itself (`SavedAnswerRefused`, "no project directory") and its try/catch must swallow it
+  // (log + still resolve), writing nothing anywhere. Unreachable through a REAL engine turn (a null-cwd session's
   // turn() bails before any tool call — engine.ts's `if (!meta.cwd)` guard — so no approval_requested
   // with options ever fires for one in practice); exercised here at the bare-server level instead,
   // fabricating the pending entry directly against the broker to drive the server-side code path in
   // isolation, same "own SessionStore + TokenAuthority, no AgentEngine" shape as
   // remote-role.test.ts's bootPluginTestServer sibling below.
-  test("approval.respond: a rule-bearing optionId with no session cwd — RuleAppendError is caught, logged, and the approval still resolves", async () => {
+  test("approval.respond: a rule-bearing optionId with no session cwd — the refused save is logged, nothing is written, and the approval still resolves (WS-21)", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-approve-nocwd-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
     const tokens = await authority.ensureTokens();
     const broker = new ApprovalBroker();
-    const permissionRules = new PermissionRules({ globalAllow: () => undefined, winterHome: home });
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, broker, permissionRules });
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, broker, winterHome: home });
     try {
       const sessionId = store.createSession("global", { approvalPolicy: "ask" }); // no cwd at all
       const options = [{ id: "allow_project", label: 'Allow "Bash(git push:*)" in this project', rule: "Bash(git push:*)", scope: "project" as const }];
@@ -396,7 +395,9 @@ describe("daemon IPC", () => {
         const res = await c.request(METHODS.approvalRespond, { sessionId, callId: "c1", approved: true, optionId: "allow_project" });
         expect(res.result).toEqual({ ok: true, alreadyResolved: false });
         expect(errSpy).toHaveBeenCalled();
-        expect(errSpy.mock.calls.some((call) => String(call[0]).includes("failed to persist permission rule"))).toBe(true);
+        expect(errSpy.mock.calls.some((call) => String(call[0]).includes("was not saved") && String(call[0]).includes("no project directory"))).toBe(true);
+        expect(existsSync(join(home, "sdk", "settings.json"))).toBe(false);
+        expect(existsSync(join(home, "permissions"))).toBe(false);
       } finally {
         errSpy.mockRestore();
       }
@@ -609,8 +610,9 @@ describe("daemon IPC", () => {
 
     test("workflow.list surfaces saved workflows from WorkflowStore alongside running runs", async () => {
       const srv = await bootWorkflowServer();
-      mkdirSync(join(srv.winterHome, "workflows"), { recursive: true });
-      writeFileSync(join(srv.winterHome, "workflows", "nightly.js"),
+      // WS-21: the user workflow tier lives in the store home (`<home>/sdk` on a run-home build).
+      mkdirSync(join(storeHomeFor(srv.winterHome), "workflows"), { recursive: true });
+      writeFileSync(join(storeHomeFor(srv.winterHome), "workflows", "nightly.js"),
         `export const meta = {name:"nightly", description:"nightly sweep"}; return "ok";`);
 
       const c = await TestClient.connect(srv.socketPath);
@@ -710,16 +712,18 @@ describe("daemon IPC", () => {
     expect(result.ok).toBe(true);
     // The writing-skills builtin (phase 5c) is always discovered, regardless of home — it ships
     // in-repo and is resolved relative to the module, not winterHome.
-    // Lane B (2026-09-22): + the truthful session-availability pair — a built-in skill cannot reach a
-    // session's runtime child yet (only plugin skills do), and says so.
-    expect(result.skills).toEqual([{ name: "writing-skills", description: expect.any(String), source: "builtin", path: expect.any(String), loadsInSessions: false, sessionNote: expect.stringContaining("only plugin skills") }]);
+    // Lane B (2026-09-22): + the truthful session-availability pair. WS-21 (L4 request 2): on router
+    // 0.0.11 no tier reaches a child any more (the plugin-view handover is retired), and it says so.
+    expect(result.skills).toEqual([{ name: "writing-skills", description: expect.any(String), source: "builtin", path: expect.any(String), loadsInSessions: false, sessionNote: expect.stringContaining("no door") }]);
     c.close();
   });
 
   test("skills.list discovers a user skill over the socket (the daemon wires its one skillStore into the server)", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-daemon-"));
-    mkdirSync(join(home, "skills", "greet"), { recursive: true });
-    writeFileSync(join(home, "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nSay hello warmly.\n");
+    // WS-21: the user tier lives in the store home (`<home>/sdk` on a run-home build) — seeding the old
+    // `<home>/skills` there would make a temp home the old layout (Migration C refuses it at boot).
+    mkdirSync(join(storeHomeFor(home), "skills", "greet"), { recursive: true });
+    writeFileSync(join(storeHomeFor(home), "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nSay hello warmly.\n");
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     daemon = await startDaemon({ home, secrets, agentProvider: null });
     harnessToken = daemon.tokens.harness;
@@ -777,7 +781,9 @@ describe("daemon IPC", () => {
     harnessToken = daemon.tokens.harness;
 
     const projectDir = realpathSync(mkdtempSync(join(tmpdir(), "winter-mcp-project-")));
-    writeFileSync(join(projectDir, ".mcp.json"), JSON.stringify({ mcpServers: { proj: { command: "bun", args: ["run", fixture] } } }));
+    // WS-21: the project MCP file is `<root>/.winter/mcp.json`.
+    mkdirSync(join(projectDir, ".winter"), { recursive: true });
+    writeFileSync(join(projectDir, ".winter", "mcp.json"), JSON.stringify({ mcpServers: { proj: { command: "bun", args: ["run", fixture] } } }));
 
     const c = await TestClient.connect(daemon.socketPath);
     await c.hello(harnessToken, "mcp-lister-project");
@@ -885,6 +891,14 @@ describe("daemon IPC", () => {
   // Replacement coverage for plugin.list (incl. supervisor status) lives in
   // test/ipc/plugin-rpc.test.ts.
 
+  // Merge note (post-merge round): ws21/core still had the pre-WS-21 `plugins.list` (plural, the
+  // RETIRED method) bare tests + the "plugins.list supervisor status" describe here — this lane's own
+  // fix rounds already replaced that coverage with `test/ipc/plugin-rpc.test.ts` (singular
+  // `plugin.list`, Contract B) and documented the removal in the comment just above. Kept removed;
+  // `METHODS.pluginsList` and its params/result schemas are the post-merge round's own item (L3
+  // request #5: retire the old plugin schemas) — this is that retirement's test-side half, landing
+  // here at merge time since the conflict made the choice unavoidable now rather than in that later
+  // commit.
 
   // -----------------------------------------------------------------------------------------
   // Phase 4d-cleanup Task 2: PluginSupervisor construction + the boot-time orphan-PID sweep are

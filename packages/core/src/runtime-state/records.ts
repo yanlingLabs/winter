@@ -13,6 +13,7 @@
 // of the previous producer") and therefore has no update or delete door at all.
 import type { RuntimeKind, RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import type { RuntimeStateDb } from "./db";
+import { canonicalModelTag } from "../runtime-sdk/model-tag";
 
 /** WS-16 §4's lifecycle. `unavailable` is the honest "we cannot revalidate this right now" state
  *  startup recovery parks live sessions in; `archived` is a user-visible retirement, never a delete. */
@@ -47,7 +48,7 @@ export interface RuntimeSessionRecord {
   authRef?: string;
   backendRoot: string;
   activeLocalWriteRoot?: string;
-  activeLocalWriteRootKind?: "official-spool" | "sdk-resume-staging";
+  activeLocalWriteRootKind?: "official-spool" | "sdk-resume-staging" | "run-folder";
   effectiveTempDir?: string;
   transcriptProjectKey: string;
   memoryProjectKey: string;
@@ -136,7 +137,7 @@ export interface GenerationInput {
   runtimeKind: RuntimeKind;
   backendSessionId?: string;
   localWriteRoot?: string;
-  localWriteRootKind?: "official-spool" | "sdk-resume-staging";
+  localWriteRootKind?: "official-spool" | "sdk-resume-staging" | "run-folder";
   configDir?: string;
   startedAt?: string;
 }
@@ -150,7 +151,7 @@ export interface GenerationRow {
   endedAt?: string;
   endReason?: string;
   localWriteRoot?: string;
-  localWriteRootKind?: "official-spool" | "sdk-resume-staging";
+  localWriteRootKind?: "official-spool" | "sdk-resume-staging" | "run-folder";
   configDir?: string;
 }
 
@@ -335,13 +336,22 @@ const DUPLICATE_BACKEND_ID = /UNIQUE constraint failed: runtime_sessions\.backen
  *  `undefined` clears it exactly as it does for `activeLocalWriteRoot`. */
 const NON_NULLABLE_PATCH_KEYS: ReadonlySet<keyof RuntimeSessionPatch> = new Set<keyof RuntimeSessionPatch>(["transcriptHealth", "capabilities", "compatibilityLevel", "runtimeKind", "selection", "providerId", "modelRef"]);
 
+/** A stored selection with its `modelRef` canonicalized on read (layer 2); the same object when unchanged. */
+function canonicalSelection(selection: RuntimeSelection): RuntimeSelection {
+  const ref = (selection as { modelRef?: unknown }).modelRef;
+  if (typeof ref !== "string") return selection;
+  const canonical = canonicalModelTag(ref);
+  return canonical === ref ? selection : { ...selection, modelRef: canonical } as RuntimeSelection;
+}
+
 function fromRow(row: SessionRow): RuntimeSessionRecord {
   return {
     winterSessionId: row.winter_session_id,
     runtimeKind: row.runtime_kind as RuntimeKind,
     backendSessionId: opt(row.backend_session_id),
     providerId: row.provider_id,
-    modelRef: row.model_ref,
+    // WS-21 (spec §8 step 5, layer 2): stored tags canonicalize ON READ; the row keeps what was written.
+    modelRef: canonicalModelTag(row.model_ref),
     connectionRef: opt(row.connection_ref),
     authRef: opt(row.auth_ref),
     backendRoot: row.backend_root,
@@ -369,7 +379,7 @@ function fromRow(row: SessionRow): RuntimeSessionRecord {
     capabilities: JSON.parse(row.capabilities_json) as string[],
     state: row.state as RuntimeSessionState,
     generation: row.generation,
-    selection: JSON.parse(row.selection_json) as RuntimeSelection,
+    selection: canonicalSelection(JSON.parse(row.selection_json) as RuntimeSelection),
     importedFrom: opt(row.imported_from) as RuntimeSessionRecord["importedFrom"],
   };
 }
@@ -699,6 +709,48 @@ export class RuntimeSessionRecords {
           .run(memoryProjectKey, this.now(), ...winterSessionIds).changes,
       { mode: "immediate" },
     );
+  }
+
+  /**
+   * WS-21 (spec §3.8): a run folder the router QUARANTINED at an incarnation's exit — kept on disk, and
+   * recorded so boot recovery never re-reconciles (and re-copies) it and `winter doctor` reports it.
+   * Idempotent; a pre-v7 store (no table) is a no-op.
+   */
+  /**
+   * WS-21 review M6: the run folder an incarnation of this session is running in, recorded as the session's
+   * local-write root (`run-folder`) for as long as it may hold a working copy — so boot recovery knows WHOSE
+   * folder it reconciles and can mark THAT session `repair-required` on a quarantine. `dir` undefined clears
+   * it, but only while it still names `current` (a later incarnation's record is never cleared by an
+   * earlier one's settle). Bounded: never throws.
+   */
+  noteRunFolder(winterSessionId: string, dir: string | undefined, current?: string): void {
+    try {
+      if (dir !== undefined) {
+        this.rs.db.run("UPDATE runtime_sessions SET active_local_write_root = ?, active_local_write_root_kind = 'run-folder', updated_at = ? WHERE winter_session_id = ?", [dir, this.now(), winterSessionId]);
+      } else if (current !== undefined) {
+        this.rs.db.run("UPDATE runtime_sessions SET active_local_write_root = NULL, active_local_write_root_kind = NULL, updated_at = ? WHERE winter_session_id = ? AND active_local_write_root = ?", [this.now(), winterSessionId, current]);
+      }
+    } catch { /* bounded: evidence, never a dependency */ }
+  }
+
+  /**
+   * WS-21 round 3 (Important): re-point a session's transcript at the canonical cwd's key once its files
+   * moved there (`transcript-rekey.ts`) — `transcript_project_key` and `backend_root` together, guarded by
+   * the key the caller expects (a record another writer already moved is left alone). `true` when it wrote.
+   * The one writer of these two columns after `create`: Migration C's bulk step and the driver's lazy check
+   * both come here. `temp_project_key` is left as recorded (no reader).
+   */
+  rekeyTranscript(winterSessionId: string, fromKey: string, toKey: string, backendRoot: string): boolean {
+    return this.rs.db.run(
+      "UPDATE runtime_sessions SET transcript_project_key = ?, backend_root = ?, updated_at = ? WHERE winter_session_id = ? AND transcript_project_key = ?",
+      [toKey, backendRoot, this.now(), winterSessionId, fromKey],
+    ).changes > 0;
+  }
+
+  noteQuarantinedRoot(root: string): void {
+    try {
+      this.rs.db.run("INSERT OR IGNORE INTO run_root_quarantine (root, recorded_at, detail_json) VALUES (?, ?, '{\"at\":\"exit\"}')", [root, this.now()]);
+    } catch { /* bounded: evidence, never a dependency */ }
   }
 
   setTranscriptHealth(winterSessionId: string, health: RuntimeSessionRecord["transcriptHealth"]): void {

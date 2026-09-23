@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { storeHomeFor } from "../src/agent/paths";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -148,29 +149,15 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
   // session can load it and why not, so no client presents an unloadable skill as usable.
   test("skills.list and skills.read say truthfully which skills a session can load, and why not", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-daemon-skills-"));
-    mkdirSync(join(home, "skills", "greet"), { recursive: true });
-    writeFileSync(join(home, "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nhi\n");
-
-    // WS-21: plugin skills are claude-native content now, read off Contract B's installed+enabled
-    // set (`plugins/plugin-skills.ts`), never the retired `<home>/plugins` scan — register both
-    // plugins under `sdk/plugins/installed_plugins.json`, one enabled, one installed-but-disabled
-    // (no more "exec consent" gate for shipped skills, spec §5.4 — enable alone is the consent).
-    const superpowersDir = join(home, "test-mkt", "superpowers");
-    mkdirSync(join(superpowersDir, "skills", "brainstorming"), { recursive: true });
-    writeFileSync(join(superpowersDir, "skills", "brainstorming", "SKILL.md"), "---\nname: brainstorming\ndescription: Explore\n---\nx\n");
-    const untrustedDir = join(home, "test-mkt", "untrusted");
-    mkdirSync(join(untrustedDir, "skills", "risky"), { recursive: true });
-    writeFileSync(join(untrustedDir, "skills", "risky", "SKILL.md"), "---\nname: risky\ndescription: Risky\n---\nx\n");
-    mkdirSync(join(home, "sdk", "plugins"), { recursive: true });
-    writeFileSync(join(home, "sdk", "plugins", "installed_plugins.json"), JSON.stringify({
-      version: 2,
-      plugins: {
-        "superpowers@test-mkt": [{ scope: "user", installPath: superpowersDir, installedAt: new Date().toISOString() }],
-        "untrusted@test-mkt": [{ scope: "user", installPath: untrustedDir, installedAt: new Date().toISOString() }],
-      },
-    }));
-    mkdirSync(join(home, "sdk"), { recursive: true });
-    writeFileSync(join(home, "sdk", "settings.json"), JSON.stringify({ enabledPlugins: { "superpowers@test-mkt": true } }));
+    mkdirSync(join(storeHomeFor(home), "skills", "greet"), { recursive: true });
+    writeFileSync(join(storeHomeFor(home), "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nhi\n");
+    mkdirSync(join(home, "plugins", "superpowers", "skills", "brainstorming"), { recursive: true });
+    writeFileSync(join(home, "plugins", "superpowers", "skills", "brainstorming", "SKILL.md"), "---\nname: brainstorming\ndescription: Explore\n---\nx\n");
+    mkdirSync(join(home, "plugins", "untrusted", "skills", "risky"), { recursive: true });
+    writeFileSync(join(home, "plugins", "untrusted", "skills", "risky", "SKILL.md"), "---\nname: risky\ndescription: Risky\n---\nx\n");
+    // Only a plugin the user ENABLED (with every consent class it requires — none for these legacy
+    // plugins, so the exec record below is inert) reaches a session (a skill can run shell commands)
+    // — `superpowers` is; `untrusted` is installed but never enabled.
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
     }));
@@ -183,12 +170,13 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
     const listed = await c.request(METHODS.skillsList, {});
     expect(SkillsListResult.safeParse(listed.result).success).toBe(true);
     const byName = new Map<string, { loadsInSessions?: boolean; sessionNote?: string }>(listed.result.skills.map((s: { name: string }) => [s.name, s]));
-    expect(byName.get("superpowers:brainstorming")).toMatchObject({ loadsInSessions: true });
-    expect(byName.get("superpowers:brainstorming")!.sessionNote).toBeUndefined();
+    // WS-21 (L4 request 2): the legacy `<home>/plugins/*/skills` scan is gone (the plugin half of this
+    // list is lane L4's plugin manager), and on router 0.0.11 no tier reaches a child any more — on a
+    // run-home build the run folder carries the user/self/project tiers (`skills-ws21.test.ts`).
+    expect(byName.has("superpowers:brainstorming")).toBe(false);
+    expect(byName.has("untrusted:risky")).toBe(false);
     expect(byName.get("greet")).toMatchObject({ loadsInSessions: false });
-    expect(byName.get("greet")!.sessionNote).toContain("only plugin skills");
-    expect(byName.get("untrusted:risky")).toMatchObject({ loadsInSessions: false });
-    expect(byName.get("untrusted:risky")!.sessionNote).toContain("Enable the untrusted plugin");
+    expect(byName.get("greet")!.sessionNote).toContain("no door");
 
     const read = await c.request(METHODS.skillsRead, { name: "greet" });
     expect(read.result.skill).toMatchObject({ name: "greet", loadsInSessions: false });
@@ -197,8 +185,8 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
 
   test("deleting a name that resolves to a non-self source (user root) -> INVALID_PARAMS, refused before touching self/", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-daemon-skills-"));
-    mkdirSync(join(home, "skills", "greet"), { recursive: true });
-    writeFileSync(join(home, "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nSay hello warmly.\n");
+    mkdirSync(join(storeHomeFor(home), "skills", "greet"), { recursive: true });
+    writeFileSync(join(storeHomeFor(home), "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nSay hello warmly.\n");
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     daemon = await startDaemon({ home, secrets, agentProvider: null });
     harnessToken = daemon.tokens.harness;

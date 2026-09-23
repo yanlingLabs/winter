@@ -72,7 +72,11 @@ export interface DaemonRuntimeStateDeps {
    *  REAL path on the developer's machine (`canonicalTempScanRoot()` / `os.tmpdir()`), so every
    *  caller of `startRuntimeState` that does not name one sweeps the real thing (whole-branch
    *  review, Major 1). */
-  recovery?: { hooks?: RecoveryHooks; probe?: LeaseProbe; tempScanRoot?: string; claudeResumeScanRoot?: string };
+  recovery?: {
+    hooks?: RecoveryHooks; probe?: LeaseProbe; tempScanRoot?: string; claudeResumeScanRoot?: string;
+    /** WS-21: leave step 8's staging sweep to the router's late reconcile-then-delete (see `RecoveryDeps`). */
+    deferClaudeResumeSweep?: boolean;
+  };
   /** §17 phase 5's filesystem seam (`MemoryKeyFs`). Injectable for ONE reason: the two failures this
    *  wiring has to survive — a repair that throws, and an apply that throws after a committed move —
    *  are both mid-`rename` failures, and a test cannot produce either by arranging files. */
@@ -213,6 +217,7 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
       // `withTempHome`) sets it for the test's lifetime, which is what keeps every `startDaemon`-style
       // test from sweeping the developer's real tmpdir.
       claudeResumeScanRoot: deps.recovery?.claudeResumeScanRoot ?? (process.env.WINTER_CLAUDE_RESUME_SCAN_ROOT?.trim() || undefined),
+      ...(deps.recovery?.deferClaudeResumeSweep === true ? { deferClaudeResumeSweep: true } : {}),
     });
     for (const step of lastRecovery.steps) {
       if (step.outcome === "ok" || step.outcome === "skipped") continue;

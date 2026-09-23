@@ -2,10 +2,16 @@ import { describe, expect, test } from "bun:test";
 import { z } from "zod";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { mkdtempSync, writeFileSync, realpathSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, realpathSync } from "node:fs";
 import { McpManager } from "../../../src/agent/mcp/manager";
 import { ToolRegistry, type ToolContext } from "../../../src/agent/tools/registry";
 import { TrustStore } from "../../../src/agent/trust";
+
+// WS-21: the project MCP file is `<root>/.winter/mcp.json` (the repo-root `.mcp.json` is never read).
+const writeProjectMcp = (root: string, body: string): void => {
+  mkdirSync(join(root, ".winter"), { recursive: true });
+  writeFileSync(join(root, ".winter", "mcp.json"), body);
+};
 
 const FIXTURE = join(import.meta.dir, "fake-mcp-server.ts");
 const ctx = (): ToolContext => ({ cwd: "/tmp", roots: ["/tmp"], sessionId: "s1" });
@@ -52,7 +58,7 @@ describe.if(isMac)("McpManager", () => {
 
 function projDir(withServer = true): string {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "mcp-proj-")));
-  if (withServer) writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { proj: { command: "bun", args: ["run", FIXTURE] } } }));
+  if (withServer) writeProjectMcp(dir, JSON.stringify({ mcpServers: { proj: { command: "bun", args: ["run", FIXTURE] } } }));
   return dir;
 }
 
@@ -88,7 +94,7 @@ describe.if(isMac)("McpManager.ensureProject", () => {
 
   test("malformed .mcp.json → skip, no throw; idempotent 2nd call", async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "mcp-bad-")));
-    writeFileSync(join(dir, ".mcp.json"), "{ not json");
+    writeProjectMcp(dir, "{ not json");
     const registry = new ToolRegistry();
     const trust = new TrustStore(join(realDir(), "trust.json")); trust.trust(dir);
     const mgr = new McpManager({ registry, trust });
@@ -104,7 +110,7 @@ describe.if(isMac)("McpManager.ensureProject", () => {
   // (`parseProjectMcpServers`) fixes that: the stdio entry below still starts despite its siblings.
   test("mixed .mcp.json (stdio + http + sse + one malformed entry): the stdio entry still starts; http/sse are recognized but not tracked by this manager (no in-daemon client); the malformed one is skipped — one log line each, no thrown error", async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "mcp-mixed-")));
-    writeFileSync(join(dir, ".mcp.json"), JSON.stringify({
+    writeProjectMcp(dir, JSON.stringify({
       mcpServers: {
         proj: { command: "bun", args: ["run", FIXTURE] },
         httpOne: { type: "http", url: "https://example.com/mcp" },
@@ -135,7 +141,7 @@ describe.if(isMac)("McpManager.ensureProject", () => {
 
   test("the SAME mixed .mcp.json, untrusted, still starts/registers nothing at all — the trust gate is unchanged by the per-entry fix", async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "mcp-mixed-untrusted-")));
-    writeFileSync(join(dir, ".mcp.json"), JSON.stringify({
+    writeProjectMcp(dir, JSON.stringify({
       mcpServers: {
         proj: { command: "bun", args: ["run", FIXTURE] },
         httpOne: { type: "http", url: "https://example.com/mcp" },
@@ -185,7 +191,7 @@ describe.if(isMac)("McpManager.ensureProject", () => {
 
   test("mcp.disabled on an http/sse project entry changes nothing — it was never trackable by this manager either way (no placeholder row, disabled or not)", async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "mcp-disabled-http-")));
-    writeFileSync(join(dir, ".mcp.json"), JSON.stringify({
+    writeProjectMcp(dir, JSON.stringify({
       mcpServers: { httpDisabled: { type: "http", url: "https://example.com/mcp" }, httpEnabled: { type: "http", url: "https://example.com/mcp2" } },
     }));
     const registry = new ToolRegistry();

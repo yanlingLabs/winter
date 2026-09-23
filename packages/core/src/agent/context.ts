@@ -337,8 +337,17 @@ export class ContextAssembler {
     // Absent/empty (every pre-existing caller, and every single-dir session) omits the line
     // entirely — byte-identical.
     extraDirs?: string[];
+    // WS-21 (spec §6.1, §3.7): the incarnation runs on a router-built run folder, which carries the
+    // user and trusted-project instructions (`WINTER.md` + rules, generated per spec §3.4.3), the output
+    // style, and — for a code session — the runtime's own auto-memory. So this builder STOPS composing
+    // those: no user or project `WINTER.md`, no `.winter/rules`, no output-style fold, and no project
+    // memory text (protocol + index). It KEEPS the base prompt, the workspace block, the ultra paragraph,
+    // the date and the `_assistant` memory injection for chat and dispatch, exactly as today (their
+    // runtime auto-memory is off, r3). Absent/false (router 0.0.11, every existing caller): byte-identical.
+    runHomeApplied?: boolean;
   }): string {
     const cwd = input.cwd;
+    const runHome = input.runHomeApplied === true;
     const trusted = cwd ? this.trust.isTrusted(cwd) : false;
     // Review M1 (P9c-4): the ONE combined legacy-deprecation-notice accumulator — declared here, at
     // the top, so every reader below (style resolution included, which runs before the
@@ -356,7 +365,7 @@ export class ContextAssembler {
     // false replaces the base. An empty body or a null resolver → base unchanged (byte-identical).
     let baseSlot = input.basePromptOverride ?? this.basePrompt;
     const styleAppend: string[] = [];
-    if (input.basePromptOverride === undefined && !input.skipOutputStyle) {
+    if (!runHome && input.basePromptOverride === undefined && !input.skipOutputStyle) {
       const style = this.styleResolver?.(cwd) ?? null;
       if (style && style.body) {
         if (style.keepCodingInstructions) styleAppend.push(style.body);
@@ -414,12 +423,15 @@ export class ContextAssembler {
     const resolveRulesDir = (winterDir: string, legacyDir: string) =>
       legacyFallbackEnabled ? resolveLegacyProjectDir(winterDir, legacyDir, legacySettingsValue) : { dir: winterDir, usedLegacy: false };
 
-    const userInstrResolved = resolveInstr(join(this.winterHome, "WINTER.md"), join(this.winterHome, LEGACY_INSTRUCTIONS_FILE));
-    if (userInstrResolved.usedLegacy) legacyNoticePaths.push(userInstrResolved.path);
-    const userInstr = readCapped(userInstrResolved.path, this.caps.instructionsBytes);
-    if (userInstr) sections.push(`## User instructions (~/.winter/WINTER.md)\n${userInstr}`);
+    // WS-21: the run folder's generated `WINTER.md` carries both tiers (spec §3.4.3) — not composed here.
+    if (!runHome) {
+      const userInstrResolved = resolveInstr(join(this.winterHome, "WINTER.md"), join(this.winterHome, LEGACY_INSTRUCTIONS_FILE));
+      if (userInstrResolved.usedLegacy) legacyNoticePaths.push(userInstrResolved.path);
+      const userInstr = readCapped(userInstrResolved.path, this.caps.instructionsBytes);
+      if (userInstr) sections.push(`## User instructions (~/.winter/WINTER.md)\n${userInstr}`);
+    }
 
-    if (cwd && trusted) {
+    if (!runHome && cwd && trusted) {
       const projInstrResolved = resolveInstr(join(cwd, "WINTER.md"), join(cwd, LEGACY_INSTRUCTIONS_FILE));
       if (projInstrResolved.usedLegacy) legacyNoticePaths.push(projInstrResolved.path);
       const projInstr = readCapped(projInstrResolved.path, this.caps.instructionsBytes);
@@ -432,7 +444,7 @@ export class ContextAssembler {
     // cap — rather than per-file, so a directory of many small rule files can't add up to an
     // unbounded prompt; `readCapped` truncates each file to whatever of that budget remains, and
     // files are read in sorted filename order for determinism.
-    if (cwd && trusted) {
+    if (!runHome && cwd && trusted) {
       const rulesResolved = resolveRulesDir(join(cwd, ".winter", "rules"), join(cwd, LEGACY_PROJECT_DIR, "rules"));
       if (rulesResolved.usedLegacy) legacyNoticePaths.push(rulesResolved.dir);
       const rulesDir = rulesResolved.dir;
@@ -489,7 +501,11 @@ export class ContextAssembler {
     // this section is about to disclose to the model. This block only decides which SECTION SHAPE
     // to render once a directory is known; the directory computation itself lives in one place.
     const resolvedMemDir = this.memoryDirFor({ cwd, memoryBucket: input.memoryBucket, workdirLess: input.workdirLess });
-    if (resolvedMemDir !== undefined && input.memoryBucket === "assistant") {
+    if (runHome && input.memoryBucket !== "assistant") {
+      // WS-21 (spec §3.7): ONE memory mechanism per mode. A code session's memory — the project MEMDIR,
+      // or `_assistant` for a workdir-less one — is the runtime's own auto-memory, pinned by the router
+      // to the same directory; composing its text here too would load it twice (F22).
+    } else if (resolvedMemDir !== undefined && input.memoryBucket === "assistant") {
       // Dreaming (Phase 7b): assistant-mode sessions load the shared dream bucket INSTEAD of the
       // cwd MEMDIR, and get NO memory-protocol block — they have no write tools; memories come
       // from dream cycles, and their base prompt already says so.

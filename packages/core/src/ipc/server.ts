@@ -64,6 +64,7 @@ import {
 import { createActivityEnforcement } from "../sessions/activity-enforcement";
 import { setSessionActivity, type SetActivityDeps } from "../sessions/set-activity";
 import { setSessionDirs, type SetDirsDeps } from "../sessions/set-dirs";
+import { canonicalSessionCwd } from "../sessions/dirs";
 import { reapEmptySessions } from "../sessions/reaper";
 import { filterRemoteStreamEvent } from "../sessions/remote-stream";
 import { foldPanelTabs } from "../panel/store";
@@ -87,7 +88,6 @@ import { parseModelTag, canonicalizeModelTag, splitTag, UNSTATED_TAG, type Model
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import type { ApprovalBroker } from "../agent/approvals";
 import type { PermissionRules } from "../agent/permission-rules";
-import type { ApprovedProjectRules } from "../agent/approved-project-rules";
 import { repoRootFor } from "../agent/memory-dir";
 import type { QuestionBroker } from "../agent/questions";
 import type { TaskStore } from "../agent/task-store";
@@ -116,8 +116,10 @@ import { modelCatalogWire } from "../providers/model-catalog-wire";
 import { withProblemsForRoles, type RoleHealthRegistry } from "../providers/role-health";
 import type { InternalRouter } from "../providers/internal-router";
 import { internalRoleProblemsFor } from "../providers/internal-role-problems";
-import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, withoutMovedKeys } from "../settings";
-import { addSdkUserMcpServer, removeSdkUserMcpServer } from "../agent/mcp/mcp-write";
+import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, type McpServerSettingsEntry } from "../settings";
+import { addMcpServerInScope, mcpServerInScope, removeMcpServerInScope, type McpScope, type McpScopeTarget } from "../agent/mcp/mcp-write";
+import { saveAnswerEverywhere, saveAnswerInProject, SavedAnswerRefused } from "../agent/saved-answers";
+import { localScopeKeyFor } from "../runtime-sdk/run-home-input";
 import { readSdkGlobalConfig, SdkFileUnreadable, updateSdkSettings } from "../sdk-files";
 import { bypassAllowedAtSpawn, disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
@@ -141,7 +143,6 @@ import {
   setPluginEnabled as setPluginEnabledOnAdapter, uninstallPlugin, updateMarketplace, updatePlugin,
   type PluginManagerOptions, type PluginScope as AdapterPluginScope,
 } from "../plugins/sdk-plugin-api";
-import { pluginSkillsFor } from "../plugins/plugin-skills";
 import { loadManifest, requiredConsentClasses } from "../agent/plugin-manifest";
 import { sdkPluginsRoot, sdkSettingsPath } from "../agent/paths";
 
@@ -308,11 +309,10 @@ export interface IpcServerOptions {
   // tests, and any daemon with no agentProvider) makes a rule-bearing optionId a silent no-op —
   // same "typed no-op, never a crash" precedent as `broker`/`dirs`/etc below — since without an
   // engine there is no approval flow that could ever produce a rule-bearing optionId to persist.
+  //
+  // WS-21: `approval.respond` no longer writes through it (a card's saved answers go to claude's own
+  // locations, `agent/saved-answers.ts`); kept for the IPC paths that READ it.
   permissionRules?: PermissionRules;
-  /** Review I2 (lane B): the daemon's own record of rules approved "in this project"
-   *  (`agent/approved-project-rules.ts`), written alongside `permissionRules`' in-repo copy by
-   *  `approval.respond` — the one writer. Absent (a bare test server) = not recorded. */
-  approvedProjectRules?: ApprovedProjectRules;
   dirs?: SessionDirectories; // live allowed-roots per session; addDir/setCwd need it
   trust?: TrustStore;        // per-directory trust; session.create result + daemon.trustDir
   bg?: BackgroundTaskRegistry; // background bash tasks; bg.list/peek/kill/killAll
@@ -867,26 +867,31 @@ function liveSettingsFor(opts: { winterHome?: string }): Settings | undefined {
   if (!opts.winterHome) return undefined;
   try {
     // WS-21: never the moved keys (`withoutMovedKeys`) — their only doors are the `sdk…` readers.
-    return withoutMovedKeys(loadSettings(join(opts.winterHome, "settings.json")));
+    return liveSettingsView(loadSettings(join(opts.winterHome, "settings.json")));
   } catch {
     return undefined;
   }
 }
 
-/** WS-21: which credential-shaped headers the read door dropped from `sdk/.winter.json`'s USER-scope
- *  servers, per server — computed off the RAW file (the parsed readers, by construction, can no longer
- *  say what they removed). Names only, never a value. */
-function strippedUserMcpHeaders(winterHome: string | undefined): Record<string, string[]> {
-  if (!winterHome) return {};
-  return stripCredentialShapedMcpHeaders(structuredClone(readSdkGlobalConfig(winterHome)));
+/** WS-21 (spec §4.4): the MCP doors speak claude's three scopes. `local` and `project` name a project,
+ *  so they need the caller's `cwd`. The local entry in `sdk/.winter.json` is keyed by `localScopeKeyFor`
+ *  (review I5 — exactly the run home's key); the project file lives at the trusted project root the run
+ *  home reads it from (`repoRootFor`). Refused typed without a cwd. */
+function mcpScopeTarget(method: string, winterHome: string, p: { scope: McpScope; cwd?: string | undefined }): McpScopeTarget {
+  if (p.scope === "user") return { home: winterHome, scope: "user" };
+  if (p.cwd === undefined || p.cwd === "") {
+    throw new RpcFailure(ERR.INVALID_PARAMS, `${method}: the "${p.scope}" scope names a project — pass the project's cwd`, { code: "mcp_scope_needs_cwd" });
+  }
+  return { home: winterHome, scope: p.scope, root: p.scope === "local" ? localScopeKeyFor(p.cwd) : repoRootFor(p.cwd) };
 }
 
-/** WS-21 (L3.2): the MCP doors speak the three scopes (`McpScopeSchema`); the user scope moved to
- *  `sdk/.winter.json`. `local`/`project` arrive with L3.5 — refused typed until then. */
-function assertUserMcpScope(method: string, scope: string): void {
-  if (scope !== "user") {
-    throw new RpcFailure(ERR.INVALID_PARAMS, `${method}: the "${scope}" scope is not available on this build yet — pass scope "user"`, { code: "mcp_scope_unsupported" });
-  }
+/** Which credential-shaped headers the read door dropped from ONE scope's servers in `sdk/.winter.json`
+ *  (names only). The project file forwards headers verbatim (claude parity), so it has none. */
+function strippedMcpHeaders(t: McpScopeTarget): Record<string, string[]> {
+  if (t.scope === "project") return {};
+  const config = structuredClone(readSdkGlobalConfig(t.home));
+  const servers = t.scope === "user" ? config.mcpServers : (t.root !== undefined ? config.projects?.[t.root]?.mcpServers : undefined);
+  return stripCredentialShapedMcpHeaders({ mcpServers: servers ?? {} });
 }
 
 /** An `SdkFileUnreadable` (the user's `sdk/` file does not parse) is reported as what it is, typed. */
@@ -1772,7 +1777,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // SP3.4: a remote (phone) caller can't browse this Mac's filesystem to pick a cwd — its
         // sessions default to the home directory (the same value session.dispatch uses). Scoped to
         // the remote role so local/harness callers keep today's semantics (omitted cwd stays unset).
-        const cwd = p.cwd ?? (socket.data.authedRole === "remote" ? homedir() : undefined);
+        // WS-21 round 3: stored CANONICAL — the cwd is the transcript key both legs use (`canonicalSessionCwd`).
+        const givenCwd = p.cwd ?? (socket.data.authedRole === "remote" ? homedir() : undefined);
+        const cwd = givenCwd === undefined ? undefined : canonicalSessionCwd(givenCwd);
         // Plan-immunity (2026-07-28, USER-REVISED design): a chat session's approvalPolicy is
         // ALWAYS the fixed internal "chat" policy (gate.ts's SessionApprovalPolicy) — COERCED here,
         // not rejected, regardless of whatever the caller sent (or omitted; `p.approvalPolicy`'s
@@ -1999,7 +2006,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // request that never named a model). `modelRef` stays unset (the dispatch singleton always
         // uses the live/boot default model).
         const sessionId = opts.store.createSession("global", {
-          cwd: homedir(), approvalPolicy: "auto", origin: "dispatch", mode: "dispatch",
+          cwd: canonicalSessionCwd(homedir()), approvalPolicy: "auto", origin: "dispatch", mode: "dispatch",
           ...(opts.winter !== undefined ? { runtimeKind: "winter-agent" as const } : {}),
         });
         if (opts.winter !== undefined) {
@@ -2202,31 +2209,25 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // so the two can never drift onto different strings for the same skill.
         // WS-21: the deny list moved to `sdk/settings.json` (`sdkDenyRules`, read live).
         const denySet = new Set(opts.winterHome ? sdkDenyRules(opts.winterHome) : []);
-        const nonPluginSkills = opts.skills
-          ? opts.skills.list({ cwd: p.cwd ?? null })
-              // WS-21 (spec §5.3/§5.5): SkillStore's OWN plugin tier still scans the retired
-              // `<home>/plugins` layout (L3-owned, agent/skills.ts — see the lane report's REQUEST
-              // FOR L3 to delete it) — drop whatever it still finds there and rebuild the plugin
-              // half below, off Contract B's installed+enabled set, so a stale/duplicate scan can
-              // never reach a client.
-              .filter((s) => s.source !== "plugin")
-              .map((s) => {
-                const denied = denySet.has(skillDenyRule(s.name));
-                const withAvailability = { ...s, ...opts.skills!.sessionAvailability(s) };
-                return denied ? { ...withAvailability, denied: true, deniedBy: "settings" as const } : withAvailability;
-              })
-          : [];
-        // WS-21: the plugin half — every ENABLED plugin's skills (Contract B), named `plugin:skill`
-        // (spec §5.3). Install+enable is itself the consent for a plugin's claude-native content
-        // (spec §5.4), so every listed entry already loads in a session — see plugin-skills.ts's
-        // own header for why there is no separate exec-consent gate here any more.
-        const pluginSkills = opts.winterHome
-          ? (await pluginSkillsFor(pluginManagerOptionsFor(opts.winterHome, p.cwd))).map((s) => {
-              const denied = denySet.has(skillDenyRule(s.name));
-              return denied ? { ...s, denied: true, deniedBy: "settings" as const } : s;
-            })
-          : [];
-        return { ok: true, skills: [...nonPluginSkills, ...pluginSkills] };
+        // Merge note (post-merge round): L3's `agent/skills.ts` rewrite now reads plugin skills
+        // itself, through the shared run folder (spec §5.3/§5.5's "Supersedes" list) — the
+        // filter-and-rebuild this lane's fix-round-1 work did here (dropping SkillStore's own
+        // `source:"plugin"` output and re-deriving it from Contract B via `pluginSkillsFor`) is now
+        // redundant: `store.list()` already returns the correct, deduplicated plugin skills. Taking
+        // L3's simpler form; `opts.skills` stays optional, so the early guard from before this
+        // lane's own rewrite is restored.
+        if (!opts.skills) return { ok: true, skills: [] };
+        const store = opts.skills;
+        const skills = store.list({ cwd: p.cwd ?? null }).map((s) => {
+          const denied = denySet.has(skillDenyRule(s.name));
+          // Lane B (2026-09-22): whether a session can load it at all — the SAME rule the runtime child
+          // is handed its skills by (`SkillStore.sessionAvailability`), so a client never shows a skill
+          // as usable that no session can load (today: only an enabled, consented plugin's skills, in a
+          // Code session on either leg).
+          const withAvailability = { ...s, ...store.sessionAvailability(s) };
+          return denied ? { ...withAvailability, denied: true, deniedBy: "settings" as const } : withAvailability;
+        });
+        return { ok: true, skills };
       }
 
       // -----------------------------------------------------------------------------------------
@@ -2306,7 +2307,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // which by construction can no longer say what it removed) so a hand-edited header shows up
         // HERE even though `configuredMcpServersFor` never forwards it to either leg. NEVER the
         // header value, only its name — same posture as the boot-time log line this mirrors.
-        const strippedHeaders = strippedUserMcpHeaders(opts.winterHome);
+        const strippedHeaders = opts.winterHome ? strippedMcpHeaders({ home: opts.winterHome, scope: "user" }) : {};
         const withStripped = <T extends { name: string }>(row: T): T | (T & { strippedHeaders: string[] }) => {
           const headers = strippedHeaders[row.name];
           return headers && headers.length > 0 ? { ...row, strippedHeaders: headers } : row;
@@ -2376,23 +2377,24 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.mcpAdd: {
         const p = parseParams(McpAddParams, params);
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "mcp.add is not available on this server (no winterHome configured)");
-        assertUserMcpScope("mcp.add", p.scope);
-        // WS-21: the user scope is `sdk/.winter.json` `mcpServers` (claude's `.claude.json`). The name
-        // rule, the no-silent-overwrite rule and the entry schema (credential-shaped headers refused)
-        // all run BEFORE anything is written (`addSdkUserMcpServer`).
-        let entry: ReturnType<typeof addSdkUserMcpServer>;
+        const target = mcpScopeTarget("mcp.add", opts.winterHome, p);
+        // WS-21 (spec §4.4): `user` → `sdk/.winter.json` `mcpServers`; `local` (the default) → its
+        // `projects[<root>].mcpServers`; `project` → `<root>/.winter/mcp.json`. The name rule, the
+        // no-silent-overwrite rule and the entry schema (credential-shaped headers refused in the user's
+        // own file) all run BEFORE anything is written (`addMcpServerInScope`).
+        let entry: { type: "stdio" | "http" | "sse" };
         try {
-          entry = addSdkUserMcpServer(opts.winterHome, p.name, p.entry);
+          entry = addMcpServerInScope(target, p.name, p.entry);
         } catch (err) {
           throw sdkWriteFailure(err);
         }
-        // Mirrors `mcp.enable`'s own restart (symmetry, same rationale): a newly-added stdio user
-        // server must be usable on THIS incarnation's next turn, not just after a daemon restart —
-        // an http/sse entry has no in-daemon client (never started here either way), and a name
-        // ALSO listed in `mcp.disabled` is correctly excluded by `stdioMcpServersFor` (added, but
-        // stays stopped until enabled — `started: false` says so honestly).
+        // Mirrors `mcp.enable`'s own restart (symmetry, same rationale): a newly-added stdio USER server
+        // must be usable on THIS incarnation's next turn, not just after a daemon restart — the daemon's
+        // own registry runs user stdio servers only (a local or project server reaches each session's
+        // child through its own configuration), an http/sse entry has no in-daemon client, and a name
+        // ALSO listed in `mcp.disabled` stays stopped until enabled — `started: false` says so honestly.
         let started = false;
-        if (entry.type === "stdio") {
+        if (target.scope === "user" && entry.type === "stdio") {
           const cfg = stdioMcpServersFor(sdkUserMcpServers(opts.winterHome), liveSettingsFor(opts)?.mcp?.disabled)[p.name];
           if (cfg) { await opts.mcp?.startOneUserServer(p.name, cfg); started = true; }
         }
@@ -2401,16 +2403,16 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.mcpRemove: {
         const p = parseParams(McpRemoveParams, params);
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "mcp.remove is not available on this server (no winterHome configured)");
-        assertUserMcpScope("mcp.remove", p.scope);
+        const target = mcpScopeTarget("mcp.remove", opts.winterHome, p);
         let removed: boolean;
         try {
-          removed = removeSdkUserMcpServer(opts.winterHome, p.name);
+          removed = removeMcpServerInScope(target, p.name);
         } catch (err) {
           throw sdkWriteFailure(err);
         }
-        // Stop a live tracked instance now, same as `mcp.disable` — a removed server must not go on
+        // Stop a live tracked user instance now, same as `mcp.disable` — a removed server must not go on
         // answering tool calls until the next daemon restart.
-        if (removed) opts.mcp?.stopServer(p.name);
+        if (removed && target.scope === "user") opts.mcp?.stopServer(p.name);
         return { ok: true, name: p.name, removed, scope: p.scope };
       }
       // -----------------------------------------------------------------------------------------
@@ -2424,11 +2426,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // -----------------------------------------------------------------------------------------
       case METHODS.mcpGet: {
         const p = parseParams(McpGetParams, params);
-        assertUserMcpScope("mcp.get", p.scope);
-        const entry = opts.winterHome ? sdkUserMcpServers(opts.winterHome)[p.name] : undefined;
+        if (!opts.winterHome) return { ok: true, name: p.name, found: false, scope: p.scope };
+        const target = mcpScopeTarget("mcp.get", opts.winterHome, p);
+        const entry = mcpServerInScope(target, p.name) as McpServerSettingsEntry | undefined;
         if (!entry) return { ok: true, name: p.name, found: false, scope: p.scope };
         const disabled = new Set(liveSettingsFor(opts)?.mcp?.disabled ?? []);
-        const strippedHeaders = strippedUserMcpHeaders(opts.winterHome)[p.name];
+        const strippedHeaders = strippedMcpHeaders(target)[p.name];
         const base = {
           ok: true as const,
           name: p.name,
@@ -2457,7 +2460,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // read their absent-block defaults (off / on respectively) when settings can't be loaded.
         let settings: Settings | null = null;
         if (opts.winterHome) {
-          try { settings = loadSettings(join(opts.winterHome, "settings.json")); } catch { settings = null; }
+          try { settings = liveSettingsView(loadSettings(join(opts.winterHome, "settings.json"))); } catch { settings = null; }
         }
         // The SAME table `session-driver.ts` passes every real session's `Options.disallowedTools`
         // through (`capabilityTools: WINTER_CAPABILITY_TOOLS`) — computed once per mode, not
@@ -2529,7 +2532,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         parseParams(VersionsGetParams, params);
         let settings: Settings | undefined;
         if (opts.winterHome) {
-          try { settings = loadSettings(join(opts.winterHome, "settings.json")); } catch { settings = undefined; }
+          try { settings = liveSettingsView(loadSettings(join(opts.winterHome, "settings.json"))); } catch { settings = undefined; }
         }
         const report = await diagnoseRuntimes({ execPath: process.execPath, home: opts.winterHome ?? homedir(), env: process.env, settings });
         return {
@@ -2593,7 +2596,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         parseParams(SettingsModelRolesParams, params);
         let settings: Settings | null = null;
         if (opts.winterHome) {
-          try { settings = loadSettings(join(opts.winterHome, "settings.json")); } catch { settings = null; }
+          try { settings = liveSettingsView(loadSettings(join(opts.winterHome, "settings.json"))); } catch { settings = null; }
         }
         // 2026-09-18: `problem` is merged in HERE, not inside `modelRolesFor`/`modelRoleInfo`
         // (settings.ts) — those stay pure `Settings -> …` readers with no fs/registry dependency;
@@ -2628,7 +2631,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           throw new RpcFailure(ERR.INVALID_PARAMS, err instanceof Error ? err.message : String(err));
         }
         saveSettings(settingsPath, next);
-        const roles = internalRoleProblemsFor(withProblemsForRoles(modelRolesFor(next, opts.boundProviderId?.(), opts.internalRouter?.view.snapshot()), opts.roleHealth), next, opts.internalRouter);
+        // WS-21 review M3: the file is written as stored; the answer reads it the way every live view does.
+        const nextView = liveSettingsView(next);
+        const roles = internalRoleProblemsFor(withProblemsForRoles(modelRolesFor(nextView, opts.boundProviderId?.(), opts.internalRouter?.view.snapshot()), opts.roleHealth), nextView, opts.internalRouter);
         return { ok: true, model: roles[p.role].model, roles };
       }
       // -----------------------------------------------------------------------------------------
@@ -2842,33 +2847,30 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             // client bug or protocol drift, not a crash: log once and fall through to the normal
             // resolve below (approved per p.approved, exactly as if optionId had been omitted).
             console.error(`approval.respond: unknown optionId ${JSON.stringify(p.optionId)} for session ${p.sessionId} call ${p.callId} — resolving with no rule persisted`);
-          } else if (option?.rule && p.approved && opts.permissionRules) {
-            // Persist the chosen rule. `approved:false` on a rule-bearing option must NEVER
-            // append — enforced by `p.approved` being part of THIS same condition, not a separate
-            // branch, so there is no path that persists a rule for a denied call. Wrapped in
-            // try/catch: `append()` throws RuleAppendError for scope "project" when there's no
-            // usable project root (a null session cwd, or one nested inside/equal to winterHome) —
-            // the approval outcome must never hang or fail on a persistence problem, so a failure
-            // here only logs; `resolve()` below still runs unconditionally either way.
-            const cwd = opts.store.meta(p.sessionId).cwd;
-            const projectRoot = cwd ? repoRootFor(cwd) : null;
-            // Review I2 (lane B): a PROJECT-scoped answer is ALSO recorded in the daemon's own
-            // `<home>/permissions/projects.json` — the copy a child applies whether or not the project
-            // is trusted, because only this path writes it (a repository cannot forge it). The in-repo
-            // `.winter/permissions.local.json` below is still written, and still applies only when the
-            // project is trusted. Recorded FIRST and separately, so a read-only repository or a
-            // refused in-repo write never loses the user's answer.
-            if ((option.scope ?? "project") === "project" && projectRoot !== null && opts.approvedProjectRules) {
-              try {
-                opts.approvedProjectRules.record(projectRoot, option.rule);
-              } catch (err) {
-                console.error(`approval.respond: failed to record the approved project rule ${JSON.stringify(option.rule)} for session ${p.sessionId}: ${(err as Error).message}`);
-              }
-            }
+          } else if (option?.rule && p.approved && opts.winterHome) {
+            // Persist the chosen rule. `approved:false` on a rule-bearing option must NEVER be saved —
+            // enforced by `p.approved` being part of THIS same condition, not a separate branch, so
+            // there is no path that persists a rule for a denied call. A refused save (an untrusted
+            // project, a planted link, a hand-edited file that does not parse, the Winter home itself)
+            // only logs: the approval outcome never hangs or fails on a persistence problem, and
+            // `resolve()` below still runs unconditionally either way.
+            //
+            // WS-21 (spec §4.3): claude's own locations, in claude's grammar — "everywhere" is
+            // `sdk/settings.json`, "in this project" is the TRUSTED project's `.winter/settings.local.json`
+            // at its canonical git root (then the global git exclude). The retired stores
+            // (`<home>/permissions/projects.json`, `.winter/permissions.local.json`) are not written.
+            const winterHome = opts.winterHome;
             try {
-              opts.permissionRules.append(option.rule, option.scope ?? "project", projectRoot);
+              if ((option.scope ?? "project") === "global") {
+                saveAnswerEverywhere(winterHome, option.rule);
+              } else {
+                const cwd = opts.store.meta(p.sessionId).cwd;
+                if (!cwd) throw new SavedAnswerRefused("the session has no project directory to save an \"in this project\" answer in");
+                const root = localScopeKeyFor(cwd); // review I5: the local tier's one key
+                saveAnswerInProject({ root, winterHome, trusted: opts.trust?.isTrusted(cwd) ?? false }, option.rule);
+              }
             } catch (err) {
-              console.error(`approval.respond: failed to persist permission rule ${JSON.stringify(option.rule)} for session ${p.sessionId}: ${(err as Error).message}`);
+              console.error(`approval.respond: the rule ${JSON.stringify(option.rule)} for session ${p.sessionId} was not saved: ${(err as Error).message}`);
             }
           }
         }
@@ -3605,8 +3607,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionSetCwd: {
         const p = parseParams(SessionSetCwdParams, params);
-        opts.store.setCwd(p.sessionId, p.cwd);
-        return { ok: true, cwd: p.cwd };
+        const cwd = canonicalSessionCwd(p.cwd); // WS-21 round 3: stored canonical, like session.create
+        opts.store.setCwd(p.sessionId, cwd);
+        return { ok: true, cwd };
       }
       case METHODS.trustDir: {
         const p = parseParams(TrustDirParams, params);

@@ -1,4 +1,10 @@
-// The `<cwd>/.mcp.json` project file's schema and read/write helpers — Claude Code's own file
+// WS-21 (spec §4.4, Q1): Winter's project MCP file is `<project root>/.winter/mcp.json` — claude's own
+// `.mcp.json` FORMAT, in Winter's project directory. The repo-root `.mcp.json` is no longer read by
+// anything in Winter (claude never reads a repo's `.claude/`, `CLAUDE.md` or `.mcp.json` either, Q1).
+// `dir` below is always the PROJECT ROOT (`repoRootFor(cwd)`), the same root the run home's builder
+// reads it at. The file is write-denied to the model (spec §7.1) — only `winter mcp` writes it.
+//
+// The project MCP file's schema and read/write helpers — Claude Code's own file
 // format (git-shared), previously duplicated verbatim in TWO places (`agent/mcp/manager.ts`'s own
 // `ProjectMcpConfig`, `runtime-sdk/external-mcp.ts`'s own copy) with nothing keeping the two in sync
 // beyond "nobody has changed one without the other yet". Both now import the schema from here.
@@ -68,7 +74,7 @@
 //     OTHER server in the file. `extractRawMcpServers` is the shape-recognition half this shares
 //     with `external-mcp.ts`, which has its own injectable `readFile` test seam and so cannot call
 //     `readRawProjectMcpConfig` itself (that function does its own `readFileSync`).
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, chmodSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync, chmodSync, statSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
@@ -121,10 +127,21 @@ export const ProjectMcpConfig = z.object({
 });
 export type ProjectMcpConfig = z.infer<typeof ProjectMcpConfig>;
 
-const PROJECT_MCP_FILENAME = ".mcp.json";
+const PROJECT_MCP_FILENAME = "mcp.json";
 
+/** `<root>/.winter/mcp.json` (WS-21). */
 export function projectMcpConfigPath(dir: string): string {
-  return join(dir, PROJECT_MCP_FILENAME);
+  return join(dir, ".winter", PROJECT_MCP_FILENAME);
+}
+
+/** Refuse a write THROUGH a planted link: `<root>/.winter` and the file itself must be real. */
+function assertNoLinkOnWritePath(dir: string): void {
+  const dotWinter = join(dir, ".winter");
+  for (const p of [dotWinter, projectMcpConfigPath(dir)]) {
+    let isLink = false;
+    try { isLink = lstatSync(p).isSymbolicLink(); } catch { /* absent: fine */ }
+    if (isLink) throw new Error(`refusing to write the project MCP config — ${p} is a symbolic link`);
+  }
 }
 
 /**
@@ -188,7 +205,8 @@ export function projectMcpConfigExists(dir: string): boolean {
  *  directory to be trusted (trust only gates whether the DAEMON ever spawns what the file names,
  *  `TrustStore.isTrusted`); a caller reports trust status separately. */
 export function writeProjectMcpConfig(dir: string, config: ProjectMcpConfig): void {
-  mkdirSync(dir, { recursive: true });
+  assertNoLinkOnWritePath(dir);
+  mkdirSync(join(dir, ".winter"), { recursive: true });
   atomicWriteFile(projectMcpConfigPath(dir), `${JSON.stringify(config, null, 2)}\n`);
 }
 
@@ -259,7 +277,8 @@ export function readRawProjectMcpConfig(dir: string): { kind: "absent" } | { kin
  *  in, is still exactly what it was). ATOMIC (`atomicWriteFile`) — a crash or kill mid-write can
  *  never leave a team's git-shared `.mcp.json` truncated. */
 export function writeRawProjectMcpConfig(dir: string, raw: Record<string, unknown>, servers: Record<string, unknown>): void {
-  mkdirSync(dir, { recursive: true });
+  assertNoLinkOnWritePath(dir);
+  mkdirSync(join(dir, ".winter"), { recursive: true });
   const next = { ...raw, mcpServers: servers };
   atomicWriteFile(projectMcpConfigPath(dir), `${JSON.stringify(next, null, 2)}\n`);
 }

@@ -8,7 +8,7 @@ import { hasOpenPanelTabs } from "../panel/store";
 import type { SessionDirs } from "./dirs";
 import { outdirPath } from "./outdir";
 import { removeSessionDiffs } from "../diffs/store";
-import { isModelTag, UNSTATED_TAG } from "../runtime-sdk/model-tag";
+import { canonicalModelTag, isModelTag, UNSTATED_TAG } from "../runtime-sdk/model-tag";
 import { migrateBareModelId } from "../settings";
 
 // Keep in sync with SessionCreateParams scope regex (packages/protocol/src/methods.ts).
@@ -540,7 +540,8 @@ export class SessionStore {
         origin: r.origin ?? undefined,
         mode: r.mode ?? undefined,
         parentSessionId: r.parent_session_id ?? undefined,
-        model: r.model ?? undefined,
+        // WS-21 (layer 2): a stored tag canonicalizes on read, never rewritten in the column.
+        model: r.model == null ? undefined : canonicalModelTag(r.model),
         effort: r.effort ?? undefined,
         // Both columns are written together (applySyncMeta) — but read defensively as a PAIR so a
         // half-written row (hand-edited db, an interrupted future migration) reports "not a fork"
@@ -751,7 +752,7 @@ export class SessionStore {
     return {
       sessionId, scope: row.scope, cwd: row.cwd, approvalPolicy,
       origin: row.origin ?? undefined, mode: row.mode ?? undefined, parentSessionId: row.parent_session_id ?? undefined,
-      model: row.model ?? undefined,
+      model: row.model == null ? undefined : canonicalModelTag(row.model),
       effort: row.effort ?? undefined,
       // session-activity-hygiene T3: the two activity flags, mapped `1 → true` / `NULL → undefined`
       // EXACTLY as `list()` maps them — a cleared flag must stay indistinguishable from one never

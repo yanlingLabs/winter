@@ -1,0 +1,341 @@
+// WS-21 L3.6 (spec §3.8, recovery): every recorded local-write root, every leftover run folder under
+// `<home>/cache/runs/`, and every stale unclaimed claude staging root is reconciled through the ROUTER's
+// `reconcileRootForRecovery` before anything is deleted:
+//
+//   clean       → deleted
+//   appended    → deleted (the router appended the tail to the canonical store first)
+//   quarantined → KEPT, recorded in `run_root_quarantine` (never reconciled or swept again) and reported
+//
+// The real outcomes are the router's (L2.7b, and R.2 on a real binary); here a stub handle answers each.
+import { describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
+import { quarantinedRunRoots, recoverRunRoots } from "../../src/runtime-state/root-recovery";
+import { recoverRuntimeState } from "../../src/runtime-state/recovery";
+import { SessionStore } from "../../src/sessions/store";
+import { RuntimeSessionRecords } from "../../src/runtime-state/records";
+import { diagnoseRuntimeState } from "../../src/runtime-state/doctor";
+
+type Outcome = "clean" | "appended" | "quarantined";
+
+function world() {
+  const home = mkdtempSync(join(tmpdir(), "winter-rrr-home-"));
+  const scan = mkdtempSync(join(tmpdir(), "winter-rrr-tmp-"));
+  const rs = openRuntimeStateDb(home);
+  const runs = join(home, "cache", "runs");
+  mkdirSync(runs, { recursive: true });
+  const runFolder = (id: string): string => {
+    const dir = join(runs, id);
+    mkdirSync(join(dir, "projects", "k"), { recursive: true });
+    writeFileSync(join(dir, "projects", "k", "s.jsonl"), "{}\n");
+    return dir;
+  };
+  const staging = (name: string, ageHours: number): string => {
+    const dir = join(scan, name);
+    mkdirSync(join(dir, "projects"), { recursive: true });
+    const t = (Date.now() - ageHours * 3600_000) / 1000;
+    utimesSync(dir, t, t);
+    return dir;
+  };
+  return { home, scan, rs, runs, runFolder, staging };
+}
+
+function stub(outcomes: Record<string, Outcome | "throw">) {
+  const seen: string[] = [];
+  const reconcile = async (root: string): Promise<Outcome> => {
+    seen.push(root);
+    const o = outcomes[root] ?? "clean";
+    if (o === "throw") throw Object.assign(new Error("link refused"), { code: "run_home_link_refused" });
+    return o;
+  };
+  return { reconcile, seen };
+}
+
+function recordRoot(rs: RuntimeStateDb, id: string, root: string, kind: string): void {
+  rs.db.run(`INSERT INTO runtime_sessions (winter_session_id, runtime_kind, provider_id, model_ref, backend_root, transcript_project_key, memory_project_key, temp_project_key,
+    transcript_health, compatibility_level, conformance_corpus_version, version_provenance, created_at, updated_at, state, selection_json, active_local_write_root, active_local_write_root_kind)
+    VALUES (?, 'claude-agent', 'anthropic', 'anthropic/claude', '/b', 'k', 'k', 'k', 'clean', 'conversation', 'c1', 'recorded', 't', 't', 'idle', '{}', ?, ?)`, [id, root, kind]);
+}
+
+describe("recoverRunRoots — the boot sweep of cache/runs/*", () => {
+  test("clean → deleted; appended → deleted; quarantined → kept, recorded and reported", async () => {
+    const w = world();
+    const a = w.runFolder("aaa"), b = w.runFolder("bbb"), c = w.runFolder("ccc");
+    const { reconcile, seen } = stub({ [a]: "clean", [b]: "appended", [c]: "quarantined" });
+    const report = await recoverRunRoots({ home: w.home, rs: w.rs, reconcile, claudeResumeScanRoot: w.scan });
+    expect(seen.sort()).toEqual([a, b, c].sort());
+    expect(existsSync(a)).toBe(false);
+    expect(existsSync(b)).toBe(false);
+    expect(existsSync(c)).toBe(true);
+    expect(report.runFolders).toMatchObject({ clean: 1, appended: 1, quarantined: 1, failed: 0 });
+    expect(report.quarantinedRoots).toEqual([c]);
+    expect(quarantinedRunRoots(w.rs).map((q) => q.root)).toEqual([c]);
+  });
+
+  test("a quarantined root is kept OUT of every later sweep (never re-reconciled, never re-copied)", async () => {
+    const w = world();
+    const c = w.runFolder("ccc");
+    await recoverRunRoots({ home: w.home, rs: w.rs, reconcile: stub({ [c]: "quarantined" }).reconcile, claudeResumeScanRoot: w.scan });
+    const second = stub({});
+    const report = await recoverRunRoots({ home: w.home, rs: w.rs, reconcile: second.reconcile, claudeResumeScanRoot: w.scan });
+    expect(second.seen).toEqual([]);
+    expect(existsSync(c)).toBe(true);
+    expect(report.runFolders.skipped).toBe(1);
+  });
+
+  test("a reconcile that throws keeps the root and counts it — recovery stays bounded", async () => {
+    const w = world();
+    const a = w.runFolder("aaa"), b = w.runFolder("bbb");
+    const report = await recoverRunRoots({ home: w.home, rs: w.rs, reconcile: stub({ [a]: "throw", [b]: "clean" }).reconcile, claudeResumeScanRoot: w.scan });
+    expect(existsSync(a)).toBe(true);
+    expect(existsSync(b)).toBe(false);
+    expect(report.runFolders).toMatchObject({ failed: 1, clean: 1 });
+  });
+
+  test("a planted LINK under cache/runs is never reconciled nor followed (it could point at any projects/ tree)", async () => {
+    const w = world();
+    const elsewhere = mkdtempSync(join(tmpdir(), "winter-rrr-elsewhere-"));
+    mkdirSync(join(elsewhere, "projects"), { recursive: true });
+    symlinkSync(elsewhere, join(w.runs, "evil"));
+    writeFileSync(join(w.runs, "stray.txt"), "x");
+    const { reconcile, seen } = stub({});
+    const report = await recoverRunRoots({ home: w.home, rs: w.rs, reconcile, claudeResumeScanRoot: w.scan });
+    expect(seen).toEqual([]);
+    expect(existsSync(join(elsewhere, "projects"))).toBe(true);
+    expect(report.runFolders.skipped).toBe(2);
+  });
+
+  test("a linked cache (or cache/runs) refuses the whole sweep", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-rrr-linked-"));
+    const rs = openRuntimeStateDb(home);
+    const elsewhere = mkdtempSync(join(tmpdir(), "winter-rrr-target-"));
+    mkdirSync(join(elsewhere, "runs", "x", "projects"), { recursive: true });
+    symlinkSync(elsewhere, join(home, "cache"));
+    const { reconcile, seen } = stub({});
+    const report = await recoverRunRoots({ home, rs, reconcile, claudeResumeScanRoot: mkdtempSync(join(tmpdir(), "winter-rrr-s-")) });
+    expect(seen).toEqual([]);
+    expect(report.runFolders.refused).toBe(1);
+    expect(existsSync(join(elsewhere, "runs", "x"))).toBe(true);
+  });
+
+  test("review M1: a Winter-leg run folder (projects/ is a link to the store) has no working copy — removed, never reconciled", async () => {
+    const w = world();
+    const store = mkdtempSync(join(tmpdir(), "winter-rrr-store-"));
+    mkdirSync(join(store, "k"), { recursive: true });
+    writeFileSync(join(store, "k", "s.jsonl"), "{}\n");
+    const dir = join(w.runs, "winterleg");
+    mkdirSync(dir, { recursive: true });
+    symlinkSync(store, join(dir, "projects"));
+    const { reconcile, seen } = stub({});
+    const report = await recoverRunRoots({ home: w.home, rs: w.rs, reconcile, claudeResumeScanRoot: w.scan });
+    expect(seen).toEqual([]);
+    expect(existsSync(dir)).toBe(false);
+    expect(existsSync(join(store, "k", "s.jsonl"))).toBe(true); // the link removed, its target untouched
+    expect(report.runFolders.noWorkingCopy).toBe(1);
+  });
+
+  test("a run folder this process built (live) is left alone", async () => {
+    const w = world();
+    const a = w.runFolder("live");
+    const { reconcile, seen } = stub({});
+    await recoverRunRoots({ home: w.home, rs: w.rs, reconcile, isLive: (d) => d === a, claudeResumeScanRoot: w.scan });
+    expect(seen).toEqual([]);
+    expect(existsSync(a)).toBe(true);
+  });
+});
+
+describe("an exit-time quarantine (L2 fix round 1: kept, not disposed)", () => {
+  test("recorded by the session's records, then skipped by the boot sweep and reported", async () => {
+    const w = world();
+    const q = w.runFolder("exitq");
+    new RuntimeSessionRecords(w.rs).noteQuarantinedRoot(q);
+    new RuntimeSessionRecords(w.rs).noteQuarantinedRoot(q); // idempotent
+    const { reconcile, seen } = stub({});
+    await recoverRunRoots({ home: w.home, rs: w.rs, reconcile, claudeResumeScanRoot: w.scan });
+    expect(seen).toEqual([]);
+    expect(existsSync(q)).toBe(true);
+    expect(quarantinedRunRoots(w.rs).map((r) => r.root)).toEqual([q]);
+  });
+});
+
+// Review I6 (`ws21/router`@7c57f9a): the router answers per TRANSCRIPT. A session is marked repair-required
+// when ANY of its transcripts (a subagent's included) is quarantined; `canonical-ahead` needs nothing.
+describe("review I6: per-transcript recovery outcomes", () => {
+  test("only the sessions whose transcripts were quarantined are marked; the root outcome decides the folder", async () => {
+    const w = world();
+    recordRoot(w.rs, "s_a", null as never, null as never);
+    recordRoot(w.rs, "s_b", null as never, null as never);
+    recordRoot(w.rs, "s_c", null as never, null as never);
+    for (const [id, be] of [["s_a", "be-a"], ["s_b", "be-b"], ["s_c", "be-c"]]) w.rs.db.run("UPDATE runtime_sessions SET backend_session_id = ? WHERE winter_session_id = ?", [be!, id!]);
+    const dir = w.runFolder("multi");
+    const report = await recoverRunRoots({
+      home: w.home, rs: w.rs, claudeResumeScanRoot: w.scan,
+      reconcile: async () => ({
+        outcome: "quarantined" as const,
+        transcripts: [
+          { projectKey: "k", sessionId: "be-a", outcome: "appended" as const, appended: 2 },
+          { projectKey: "k", sessionId: "be-b", subpath: "subagents/agent-1", outcome: "quarantined" as const, appended: 0, reason: "diverged" },
+          { projectKey: "k", sessionId: "be-c", outcome: "canonical-ahead" as const, appended: 0 },
+        ],
+        quarantine: join(w.home, "cache", "quarantine", "x-multi"),
+      }),
+    });
+    const health = (id: string) => w.rs.db.query<{ h: string }, [string]>("SELECT transcript_health AS h FROM runtime_sessions WHERE winter_session_id = ?").get(id)!.h;
+    expect([health("s_a"), health("s_b"), health("s_c")]).toEqual(["clean", "repair-required", "clean"]);
+    expect(existsSync(dir)).toBe(true); // a quarantined root is kept
+    expect(report.sessionsMarked).toEqual(["s_b"]);
+  });
+
+  test("a bare root outcome (an earlier router) still works", async () => {
+    const w = world();
+    const dir = w.runFolder("bare");
+    await recoverRunRoots({ home: w.home, rs: w.rs, claudeResumeScanRoot: w.scan, reconcile: async () => "clean" as const });
+    expect(existsSync(dir)).toBe(false);
+  });
+});
+
+describe("review M6: a run folder is recorded against its session", () => {
+  test("noteRunFolder records the folder; clearing only clears the folder it names", () => {
+    const w = world();
+    recordRoot(w.rs, "s_1", null as never, null as never);
+    const records = new RuntimeSessionRecords(w.rs);
+    records.noteRunFolder("s_1", "/h/cache/runs/a");
+    records.noteRunFolder("s_1", "/h/cache/runs/b");          // a later incarnation
+    records.noteRunFolder("s_1", undefined, "/h/cache/runs/a"); // the earlier one's settle: no-op
+    const row = () => w.rs.db.query<{ r: string | null; k: string | null }, []>("SELECT active_local_write_root AS r, active_local_write_root_kind AS k FROM runtime_sessions").get()!;
+    expect(row()).toEqual({ r: "/h/cache/runs/b", k: "run-folder" });
+    records.noteRunFolder("s_1", undefined, "/h/cache/runs/b");
+    expect(row()).toEqual({ r: null, k: null });
+  });
+
+  test("a recorded run folder the router quarantines at boot marks ITS session repair-required", async () => {
+    const w = world();
+    const dir = w.runFolder("q1");
+    recordRoot(w.rs, "s_9", dir, "run-folder");
+    await recoverRunRoots({ home: w.home, rs: w.rs, reconcile: stub({ [dir]: "quarantined" }).reconcile, claudeResumeScanRoot: w.scan });
+    expect(w.rs.db.query<{ h: string }, []>("SELECT transcript_health AS h FROM runtime_sessions WHERE winter_session_id = 's_9'").get()!.h).toBe("repair-required");
+    expect(existsSync(dir)).toBe(true);
+  });
+});
+
+describe("recoverRunRoots — recorded local-write roots (step 6)", () => {
+  test("a recorded run-folder root: reconciled first; clean → deleted and the column cleared", async () => {
+    const w = world();
+    const r = w.runFolder("rec");
+    recordRoot(w.rs, "s_1", r, "run-folder");
+    const { reconcile, seen } = stub({ [r]: "clean" });
+    const report = await recoverRunRoots({ home: w.home, rs: w.rs, reconcile, claudeResumeScanRoot: w.scan });
+    expect(seen).toEqual([r]); // once — the cache/runs sweep does not see it twice
+    expect(existsSync(r)).toBe(false);
+    expect(report.recorded).toMatchObject({ clean: 1 });
+    expect(w.rs.db.query<{ r: string | null }, []>("SELECT active_local_write_root AS r FROM runtime_sessions").get()!.r).toBeNull();
+  });
+
+  test("a recorded root that quarantines marks the session repair-required and is kept", async () => {
+    const w = world();
+    const r = w.runFolder("rec");
+    recordRoot(w.rs, "s_1", r, "run-folder");
+    await recoverRunRoots({ home: w.home, rs: w.rs, reconcile: stub({ [r]: "quarantined" }).reconcile, claudeResumeScanRoot: w.scan });
+    expect(existsSync(r)).toBe(true);
+    expect(w.rs.db.query<{ h: string }, []>("SELECT transcript_health AS h FROM runtime_sessions").get()!.h).toBe("repair-required");
+  });
+
+  test("a recorded official-spool root is reconciled but never deleted (not a run folder)", async () => {
+    const w = world();
+    const spool = mkdtempSync(join(tmpdir(), "winter-rrr-spool-"));
+    recordRoot(w.rs, "s_1", spool, "official-spool");
+    const { reconcile, seen } = stub({ [spool]: "clean" });
+    await recoverRunRoots({ home: w.home, rs: w.rs, reconcile, claudeResumeScanRoot: w.scan });
+    expect(seen).toEqual([spool]);
+    expect(existsSync(spool)).toBe(true);
+  });
+});
+
+describe("recoverRunRoots — the claude staging sweep runs only after the reconcile", () => {
+  test("stale + unclaimed: clean → deleted, quarantined → kept; fresh ones are never touched", async () => {
+    const w = world();
+    const oldClean = w.staging("claude-resume-old1", 30);
+    const oldQ = w.staging("claude-resume-old2", 30);
+    const fresh = w.staging("claude-resume-new", 1);
+    const other = w.staging("not-ours", 30);
+    const { reconcile, seen } = stub({ [oldClean]: "clean", [oldQ]: "quarantined" });
+    const report = await recoverRunRoots({ home: w.home, rs: w.rs, reconcile, claudeResumeScanRoot: w.scan });
+    expect(seen.sort()).toEqual([oldClean, oldQ].sort());
+    expect(existsSync(oldClean)).toBe(false);
+    expect(existsSync(oldQ)).toBe(true);
+    expect(existsSync(fresh)).toBe(true);
+    expect(existsSync(other)).toBe(true);
+    expect(report.staging).toMatchObject({ removed: 1, quarantined: 1 });
+  });
+});
+
+describe("recoverRuntimeState — step 8 defers the staging sweep when the router reconciles", () => {
+  test("deferClaudeResumeSweep: step 8 deletes nothing and says so; otherwise today's sweep", async () => {
+    const w = world();
+    const old = w.staging("claude-resume-x", 30);
+    const store = new SessionStore(w.home);
+    const self = { pid: process.pid, startedAt: new Date().toISOString() };
+    const r1 = await recoverRuntimeState({ home: w.home, rs: w.rs, store, self: self as never, tempScanRoot: w.scan, claudeResumeScanRoot: w.scan, deferClaudeResumeSweep: true });
+    expect(existsSync(old)).toBe(true);
+    expect(r1.steps.find((s) => s.step === 8)!.detail.claudeResumeSweep).toBe("deferred");
+    expect(r1.step6AttemptId).toBeDefined();
+    const r2 = await recoverRuntimeState({ home: w.home, rs: w.rs, store, self: self as never, tempScanRoot: w.scan, claudeResumeScanRoot: w.scan });
+    expect(existsSync(old)).toBe(false);
+    expect(r2.steps.find((s) => s.step === 8)!.detail.claudeResumeRemoved).toBe(1);
+    store.close();
+  });
+
+  test("doctor reads the quarantined roots", async () => {
+    const w = world();
+    const c = w.runFolder("q");
+    await recoverRunRoots({ home: w.home, rs: w.rs, reconcile: stub({ [c]: "quarantined" }).reconcile, claudeResumeScanRoot: w.scan });
+    expect(quarantinedRunRoots(w.rs)).toEqual([expect.objectContaining({ root: c })]);
+    const findings = await diagnoseRuntimeState(w.home);
+    const f = findings.find((x) => x.kind === "run-roots-quarantined");
+    expect(f?.detail).toContain(c);
+    expect(f?.repairable).toEqual([]);
+  });
+});
+
+// Round 3 (investigation: `noteRunFolder` on an official RESUME). A resume runs on the wrapper's staging
+// root `<tmp>/claude-resume-<uuid>` — the run folder's other entries linked in, its `projects/` the real
+// working copy — while the run folder's own `projects/` stays empty (router `test/run-home/resume.test.ts`).
+// The daemon records the RUN FOLDER, and clears it correctly on `safe` (the router's exit reconcile judged
+// the staging root). But after a CRASH the boot sweep reconciled only that empty run folder and left the
+// staging root to the 24 h stale sweep, while the session could already resume without its unmirrored
+// tail. The router records the root the child OBSERVED on this home's own directory row (`configDir`,
+// WS-14 §6 rule 2: cleared only after a verified cleanup), so a staging root named there is a crashed
+// generation of THIS home — nothing of it can be live at boot — and is reconciled at once, whatever its age.
+describe("round 3: a crashed official resume's staging root", () => {
+  test("named by this home's directory row: reconciled at boot at once; an unnamed young one still waits for the stale sweep", async () => {
+    const w = world();
+    const named = w.staging("claude-resume-aaaa", 0.1);
+    const unnamed = w.staging("claude-resume-bbbb", 0.1);
+    w.rs.db.run("INSERT INTO directory_entries (address, entry_json, updated_at) VALUES (?, ?, 't')",
+      ["winter://session/s_1", JSON.stringify({ address: "winter://session/s_1", objectKind: "session", configDir: named, processIdentity: { pid: 1, startedAt: "x" } })]);
+    const { reconcile, seen } = stub({});
+    const report = await recoverRunRoots({ home: w.home, rs: w.rs, reconcile, claudeResumeScanRoot: w.scan });
+    expect(seen).toContain(named);
+    expect(seen).not.toContain(unnamed);
+    expect(existsSync(named)).toBe(false);          // clean → removed
+    expect(existsSync(unnamed)).toBe(true);         // someone else's, maybe live: the 24 h rule stands
+    expect(report.staging.removed).toBe(1);
+  });
+
+  test("a named staging root the router quarantines is kept, recorded, and its transcript's session marked", async () => {
+    const w = world();
+    const named = w.staging("claude-resume-cccc", 0.1);
+    recordRoot(w.rs, "s_9", join(w.runs, "gone"), "run-folder");
+    w.rs.db.run("UPDATE runtime_sessions SET backend_session_id = 'be-9' WHERE winter_session_id = 's_9'");
+    w.rs.db.run("INSERT INTO directory_entries (address, entry_json, updated_at) VALUES (?, ?, 't')", ["winter://session/s_9", JSON.stringify({ configDir: named })]);
+    await recoverRunRoots({
+      home: w.home, rs: w.rs, claudeResumeScanRoot: w.scan,
+      reconcile: async () => ({ outcome: "quarantined" as const, transcripts: [{ projectKey: "k", sessionId: "be-9", outcome: "quarantined" as const, appended: 0, reason: "diverged" }] }),
+    });
+    expect(existsSync(named)).toBe(true);
+    expect(quarantinedRunRoots(w.rs).map((q) => q.root)).toContain(named);
+    expect(new RuntimeSessionRecords(w.rs).get("s_9")!.transcriptHealth).toBe("repair-required");
+  });
+});

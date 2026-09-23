@@ -29,6 +29,8 @@ import { attachOfficialSession, type OfficialSessionAttachHandle, type OfficialS
 // the two legs' "does the process actually die on end()" behaviour is one tuned constant, not two.
 import { WINTER_SESSION_END_GRACE_MS } from "./winter-session";
 import { splitTag } from "./model-tag";
+import type { RunHome } from "./run-home-contract";
+import { disposeFailedRunHome, settleRunHome } from "./run-home-support";
 
 /** Mirrors `winter-session.ts`'s own private `sleep` exactly (including the `unref` so a pending
  *  grace timer never keeps the process alive on its own) — kept local rather than exported from
@@ -53,6 +55,11 @@ export interface OfficialInitFacts {
  *  Optional as a whole (a unit test hands in a counting fake or nothing). */
 export interface OfficialSessionRecords {
   setTranscriptHealth(winterSessionId: string, health: "repair-required"): void;
+  /** WS-21: a run folder the router quarantined at exit (kept; recorded for recovery and doctor). Optional:
+   *  a test double need not implement it. */
+  noteQuarantinedRoot?(root: string): void;
+  /** WS-21 review M6: the run folder this session runs in (`RuntimeSessionRecords.noteRunFolder`). */
+  noteRunFolder?(winterSessionId: string, dir: string | undefined, current?: string): void;
   /**
    * Fix round 2 (Defect 2, controller ruling): the SAME durable, monotonically-increasing
    * generation counter `WinterSession.open()` uses (`RuntimeSessionRecords.bumpGeneration`).
@@ -127,6 +134,13 @@ export interface OfficialSessionDeps {
    *  exactly, so a test that wants `end()`'s abort fallback to fire without waiting out the
    *  production grace twice over can shorten it. Never set by production `daemon.ts` wiring. */
   endGraceMs?: number;
+  /**
+   * WS-21 (spec §3.1): present ONLY when the linked router applies run homes. Every `open()` awaits it
+   * for THIS incarnation's per-run folder and passes the result as `runtime.runHome`; the router then
+   * owns the config dir (the Winter-owned `claude-config` spool is not named beside it — the router
+   * refuses that pairing). Absent (router 0.0.11, every test double): `open()` is exactly as before.
+   */
+  runHome?: () => Promise<RunHome>;
 }
 
 export interface OfficialSession {
@@ -295,6 +309,8 @@ interface Incarnation {
   sawInit: boolean;
   /** M6b: the messaging door's own handle, when `deps.messaging` is configured. */
   attachment?: OfficialSessionAttachHandle;
+  /** WS-21: the run home this incarnation runs on (settled when it ends), when the router applies them. */
+  runHome?: RunHome;
   /** Phase 9c (P9c-1): `officialSubscriptionAuthEnabled` at THIS incarnation's own `open()` —
    *  captured once, from the SAME `inputDeps().settings` `officialInputFor` itself read for this
    *  generation, so the init-message assertion in `run()` agrees with whatever `officialInputFor`
@@ -487,80 +503,124 @@ class OfficialSessionImpl implements OfficialSession {
       const inputDeps = await this.deps.inputDeps();
       const built = officialInputFor(this.deps.sessionInput(), inputDeps);
       if (built instanceof ClaudeExecutableUnavailable || built instanceof OfficialProjectKeyTooDeep || built instanceof OfficialCredentialPlanRefused || built instanceof OfficialConsoleRouterUnsupported || built instanceof OfficialConsoleProfileMissing) throw built;
-      // Phase 9c (P9c-1): create/harden the Winter-owned config dir NOW — the one point in this
-      // leg's whole lifecycle that is an actual spawn against a real `WINTER_HOME`, as opposed to
-      // `officialInputFor`'s own pure path computation (see `ensureOfficialConfigDir`'s own doc for
-      // why the mkdir does not live there).
-      if (built.input.spool !== undefined) ensureOfficialConfigDir(built.input.spool);
-      // Winter Phase 10a (fix round 2): same "not created until an actual spawn" posture as the
-      // spool dir above — `officialInputFor` only computes this path (console arm only); hardening
-      // it 0700 happens here, the one real spawn point.
-      if (built.anthropicConfigDirToEnsure !== undefined) ensureOfficialConfigDir(built.anthropicConfigDirToEnsure);
-      const stream = createOfficialInputStream();
-      // Fix round 2 (Defect 2, controller ruling): draw from the SAME durable counter
-      // `WinterSession.open()` uses (`OfficialSessionRecords.bumpGeneration`'s own doc above) —
-      // never a private, per-instance counter that starts at 0 regardless of what the OTHER leg
-      // already used. Falls back to the old local counter when `records`/`bumpGeneration` is
-      // absent (every unit/e2e test double in this file's own test suites), byte-identical to
-      // pre-fix behavior there.
-      const generation = this.deps.records?.bumpGeneration?.(this.sessionId, { runtimeKind: "claude-agent", backendSessionId: this.backendSessionId }).generation ?? this.gen + 1;
-      const projector = this.deps.projector(generation);
-      // Fix round 1 (M1): ONE `AbortController` per incarnation, the SAME one Winter sessions
-      // carry — `runtime.trackQuery` is what makes G-14's "every live Query ends BEFORE the
-      // router disposes" true for this leg too; without it a daemon `stop()` never learns this
-      // child exists and a live official turn outlives the daemon.
-      const abort = new AbortController();
-      this.deps.onIncarnationStart?.(abort); // P8d-18: test-only crash seam, see this field's own doc
-      const routerQuery = this.deps.runtime.sdk.query({
-        prompt: stream,
-        options: {
-          cwd: this.deps.sessionInput().cwd,
-          // WS-20: `selection.modelRef` is a TAG — the official leg's own wire model is the BARE
-          // modelId half, split at this boundary (explicit; see L3.5's measurement note).
-          model: splitTag(this.deps.selection.modelRef).modelId,
-          pathToClaudeCodeExecutable: built.pathToClaudeCodeExecutable,
-          // The session's effort, as a TOP-LEVEL option — the only place the official runtime reads
-          // one (`Options.effort`, the pinned sdk.d.ts), and one the router forwards untouched. Until
-          // 2026-09-18 this leg set none, so `session.setEffort` was a no-op on every Claude model;
-          // see `session-driver.ts`'s `spendEffortFor`, which both legs now share. Absent = the
-          // runtime's own default, exactly as before.
-          ...(this.deps.sessionInput().spendEffort === undefined ? {} : { effort: this.deps.sessionInput().spendEffort }),
-          // WS-16 §6: force the vendor to use OUR pre-allocated backend uuid on a fresh start —
-          // `Options.sessionId` (must be a valid UUID; carried, never checked, for a RESUME, which
-          // is a Task 1.2 carry: multi-incarnation resume is unmeasured against this runtime).
-          sessionId: this.backendSessionId,
-          abortController: abort,
-          ...(inputDeps.provider === undefined ? {} : { provider: inputDeps.provider }),
-          runtime: { selection: this.deps.selection, sessionId: this.sessionId, official: built.input },
-        },
-      });
-      if (!isOfficialQuery(routerQuery)) throw new Error(`the router opened ${this.sessionId} on the wrong leg (expected the official leg)`);
-      // Phase 9c (P9c-1): the SAME settings `officialInputFor` just read (via this `inputDeps`
-      // object's own `settings` field) — read once, here, so `run()`'s own assertion never
-      // re-fetches settings independently and can never disagree with what THIS spawn was actually
-      // built against.
-      const subscriptionAuthEnabled = officialSubscriptionAuthEnabled(inputDeps.settings, inputDeps.officialSubscriptionAuthApproved);
-      const inc: Incarnation = { stream, projector, query: routerQuery, abort, sawInit: false, done: Promise.resolve(), subscriptionAuthEnabled };
-      this.inc = inc;
-      // m7: `resumed` is honest about THIS instance's own history — generation 1 is a fresh start,
-      // every later one (a prior incarnation ended `resumable`, e.g. an unexpected crash rather than
-      // a deliberate `end()`, which is now terminal) is a resume.
-      this.resumedValue = this.gen > 0;
-      this.gen = generation;
-      this.ending = false;
-      this.inFlight = 0;
-      this.stateValue = "live";
-      // Tracked BEFORE the iteration starts (`winter-session.ts`'s own precedent) — a shutdown
-      // landing between the spawn and the first frame must still end this child.
-      this.deps.runtime.trackQuery(this.sessionId, abort, () => this.end());
-      this.armControlReadySignal(inc);
-      // M6b: attach BEFORE the loop starts — `open()` is the door's own call site, not gated on the
-      // child's `system/init` the way Winter's messaging attach is (this leg's simpler design).
-      this.attachMessaging(inc, generation);
-      inc.done = this.run(inc);
-      this.lastDone = inc.done;
+      // WS-21 (spec §3.1): the run home for THIS incarnation — built after every refusal above, so a
+      // refused session never leaves a folder behind; an open that fails from here to the iteration's
+      // start disposes it at once (nothing ran on it, spec §3.8 r3).
+      const runHome = this.deps.runHome === undefined ? undefined : await this.deps.runHome();
+      if (runHome !== undefined) this.deps.records?.noteRunFolder?.(this.sessionId, runHome.dir);
+      let queryIssued: AbortController | undefined;
+      try {
+        // With a run home the router owns the child's config dir (its run folder, or the linked staging
+        // dir on a resume) and REFUSES `runtime.official.spool` beside it — so the Winter-owned
+        // `claude-config` spool is neither named nor created. Without one: exactly as before.
+        const officialInput: RouterOfficialInput = runHome === undefined ? built.input : withoutSpool(built.input);
+        // Phase 9c (P9c-1): create/harden the Winter-owned config dir NOW — the one point in this
+        // leg's whole lifecycle that is an actual spawn against a real `WINTER_HOME`, as opposed to
+        // `officialInputFor`'s own pure path computation (see `ensureOfficialConfigDir`'s own doc for
+        // why the mkdir does not live there).
+        if (officialInput.spool !== undefined) ensureOfficialConfigDir(officialInput.spool);
+        // Winter Phase 10a (fix round 2): same "not created until an actual spawn" posture as the
+        // spool dir above — `officialInputFor` only computes this path (console arm only); hardening
+        // it 0700 happens here, the one real spawn point.
+        if (built.anthropicConfigDirToEnsure !== undefined) ensureOfficialConfigDir(built.anthropicConfigDirToEnsure);
+        const stream = createOfficialInputStream();
+        // Fix round 2 (Defect 2, controller ruling): draw from the SAME durable counter
+        // `WinterSession.open()` uses (`OfficialSessionRecords.bumpGeneration`'s own doc above) —
+        // never a private, per-instance counter that starts at 0 regardless of what the OTHER leg
+        // already used. Falls back to the old local counter when `records`/`bumpGeneration` is
+        // absent (every unit/e2e test double in this file's own test suites), byte-identical to
+        // pre-fix behavior there.
+        const generation = this.deps.records?.bumpGeneration?.(this.sessionId, { runtimeKind: "claude-agent", backendSessionId: this.backendSessionId }).generation ?? this.gen + 1;
+        const projector = this.deps.projector(generation);
+        // Fix round 1 (M1): ONE `AbortController` per incarnation, the SAME one Winter sessions
+        // carry — `runtime.trackQuery` is what makes G-14's "every live Query ends BEFORE the
+        // router disposes" true for this leg too; without it a daemon `stop()` never learns this
+        // child exists and a live official turn outlives the daemon.
+        const abort = new AbortController();
+        this.deps.onIncarnationStart?.(abort); // P8d-18: test-only crash seam, see this field's own doc
+        const routerQuery = this.deps.runtime.sdk.query({
+          prompt: stream,
+          options: {
+            // WS-21: the router refuses a run home built for another cwd (`options.cwd` must equal
+            // `runHome.input.cwd`), so beside one the cwd is the run home's own — never a second read.
+            cwd: runHome?.input.cwd ?? this.deps.sessionInput().cwd,
+            // WS-20: `selection.modelRef` is a TAG — the official leg's own wire model is the BARE
+            // modelId half, split at this boundary (explicit; see L3.5's measurement note).
+            model: splitTag(this.deps.selection.modelRef).modelId,
+            pathToClaudeCodeExecutable: built.pathToClaudeCodeExecutable,
+            // The session's effort, as a TOP-LEVEL option — the only place the official runtime reads
+            // one (`Options.effort`, the pinned sdk.d.ts), and one the router forwards untouched. Until
+            // 2026-09-18 this leg set none, so `session.setEffort` was a no-op on every Claude model;
+            // see `session-driver.ts`'s `spendEffortFor`, which both legs now share. Absent = the
+            // runtime's own default, exactly as before.
+            ...(this.deps.sessionInput().spendEffort === undefined ? {} : { effort: this.deps.sessionInput().spendEffort }),
+            // WS-16 §6: force the vendor to use OUR pre-allocated backend uuid on a fresh start —
+            // `Options.sessionId` (must be a valid UUID; carried, never checked, for a RESUME, which
+            // is a Task 1.2 carry: multi-incarnation resume is unmeasured against this runtime).
+            sessionId: this.backendSessionId,
+            abortController: abort,
+            ...(inputDeps.provider === undefined ? {} : { provider: inputDeps.provider }),
+            runtime: { selection: this.deps.selection, sessionId: this.sessionId, official: officialInput, ...(runHome === undefined ? {} : { runHome }) },
+          },
+        });
+        // Review M5: once `query()` has RETURNED, the router has taken the run home (it records the
+        // outcome by run id), so a failure after this point may no longer dispose it unconditionally.
+        queryIssued = abort;
+        if (!isOfficialQuery(routerQuery)) throw new Error(`the router opened ${this.sessionId} on the wrong leg (expected the official leg)`);
+        // Phase 9c (P9c-1): the SAME settings `officialInputFor` just read (via this `inputDeps`
+        // object's own `settings` field) — read once, here, so `run()`'s own assertion never
+        // re-fetches settings independently and can never disagree with what THIS spawn was actually
+        // built against.
+        const subscriptionAuthEnabled = officialSubscriptionAuthEnabled(inputDeps.settings, inputDeps.officialSubscriptionAuthApproved);
+        const inc: Incarnation = { stream, projector, query: routerQuery, abort, sawInit: false, done: Promise.resolve(), subscriptionAuthEnabled, ...(runHome === undefined ? {} : { runHome }) };
+        this.inc = inc;
+        // m7: `resumed` is honest about THIS instance's own history — generation 1 is a fresh start,
+        // every later one (a prior incarnation ended `resumable`, e.g. an unexpected crash rather than
+        // a deliberate `end()`, which is now terminal) is a resume.
+        this.resumedValue = this.gen > 0;
+        this.gen = generation;
+        this.ending = false;
+        this.inFlight = 0;
+        this.stateValue = "live";
+        // Tracked BEFORE the iteration starts (`winter-session.ts`'s own precedent) — a shutdown
+        // landing between the spawn and the first frame must still end this child.
+        this.deps.runtime.trackQuery(this.sessionId, abort, () => this.end());
+        this.armControlReadySignal(inc);
+        // M6b: attach BEFORE the loop starts — `open()` is the door's own call site, not gated on the
+        // child's `system/init` the way Winter's messaging attach is (this leg's simpler design).
+        this.attachMessaging(inc, generation);
+        inc.done = this.run(inc);
+        this.lastDone = inc.done;
+      } catch (err) {
+        if (queryIssued === undefined) {
+          await disposeFailedRunHome(runHome, (line) => this.log(line));
+          if (runHome !== undefined) this.deps.records?.noteRunFolder?.(this.sessionId, undefined, runHome.dir);
+        } else {
+          // Review M5: the query exists — end it, then dispose only on the router's `safe`; anything else
+          // is left for boot recovery's reconcile (never a delete of a folder the router may still use).
+          try { queryIssued.abort(); } catch { /* already aborted */ }
+          if (runHome !== undefined) await this.settleRunHomeOf(runHome);
+        }
+        throw err;
+      }
     })().finally(() => { this.opening = undefined; });
     return this.opening;
+  }
+
+  /**
+   * WS-21 (spec §3.8; reviews M5, M6): settle this session's run home by the router's outcome — disposed
+   * (and its record cleared) only on `safe`; a quarantined folder is kept, recorded, and its session marked
+   * `repair-required`; a pending one stays recorded for boot recovery.
+   */
+  private async settleRunHomeOf(runHome: RunHome): Promise<void> {
+    const settled = await settleRunHome(runHome, this.deps.runtime.runHomeOutcome?.(runHome.runId), {
+      log: (line) => this.log(line),
+      onQuarantined: (dir) => {
+        this.deps.records?.noteQuarantinedRoot?.(dir);
+        try { this.deps.records?.setTranscriptHealth(this.sessionId, "repair-required"); } catch { /* bounded */ }
+      },
+    });
+    if (settled === "disposed") this.deps.records?.noteRunFolder?.(this.sessionId, undefined, runHome.dir);
   }
 
   /**
@@ -709,6 +769,12 @@ class OfficialSessionImpl implements OfficialSession {
       // header), so only an end nobody asked for (a crash, `this.ending` still false here) leaves
       // the door open for the next `send()` to spawn a fresh incarnation.
       this.stateValue = this.ending ? "ended" : "resumable";
+      // WS-21 (spec §3.8): dispose this incarnation's run home only once the router says it is safe —
+      // its exit reconcile (inside the router's spawn-proxy hook, with its own store) has run, or the
+      // working copy was quarantined. `pending` (or no answer) keeps it for recovery.
+      if (inc.runHome !== undefined) {
+        await this.settleRunHomeOf(inc.runHome);
+      }
     }
   }
 
@@ -779,3 +845,10 @@ function isResultFrame(msg: ProtocolSdkMessage): boolean {
 }
 
 export type { CheckpointStore };
+
+/** `input` without `spool`: a run home replaces the Winter-owned spool (the router refuses both). */
+function withoutSpool(input: RouterOfficialInput): RouterOfficialInput {
+  if (input.spool === undefined) return input;
+  const { spool: _spool, ...rest } = input;
+  return rest as RouterOfficialInput;
+}

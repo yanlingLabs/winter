@@ -158,7 +158,9 @@ describe("winterSystemPromptFor — the engine's composed instructions, per mode
       expect(text).not.toContain("## Available capabilities");
     }
     // The assembler itself still renders it for a caller that owns the Skill tool (byte-identical default).
-    expect(w.assembler.assemble({ cwd: w.cwd })).toContain("PLUGIN_SKILL_SENTINEL");
+    // WS-21 (L4 request 2): the legacy `<home>/plugins` tier is gone from the store, so only the user skill.
+    expect(w.assembler.assemble({ cwd: w.cwd })).toContain("GREET_SKILL_SENTINEL");
+    expect(w.assembler.assemble({ cwd: w.cwd })).not.toContain("PLUGIN_SKILL_SENTINEL");
   });
 
   test("output styles: UNSET is byte-identical (no resolver ≡ a resolver answering null), and Options.outputStyle stays unset", () => {

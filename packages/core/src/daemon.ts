@@ -17,7 +17,7 @@ import { ensureOutdir } from "./sessions/outdir";
 import { writeDiff, type DiffHeader } from "./diffs/store";
 import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
-import { loadSettings, loadPermissionDirs, effortRefusalFor, hooksEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, pinsFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, sdkAllowRules, sdkAutoMemory, sdkOutputStyle, sdkUserMcpServers, withoutMovedKeys, type Settings } from "./settings";
+import { loadSettings, loadPermissionDirs, effortRefusalFor, hooksEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, pinsFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, sdkAllowRules, sdkAutoMemory, sdkLocalMcpServers, sdkOutputStyle, sdkUserMcpServers, liveSettingsView, type Settings } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
@@ -63,7 +63,7 @@ import { loadUserAgentDefinitions, loadProjectAgentDefinitions } from "./agent/a
 import { SupportedAgentsCache } from "./agent/supported-agents-cache";
 import { BackgroundTaskRegistry } from "./agent/bg-registry";
 import { sessionTmpDir } from "./agent/session-tmp";
-import { PluginStore, pluginMcpEligible, pluginSkillsEligible, pluginSpawnEligible, hookRegistryPlugins } from "./agent/plugins";
+import { PluginStore, pluginSpawnEligible } from "./agent/plugins";
 import { PluginSupervisor } from "./plugins/supervisor";
 import { PluginContribRegistry } from "./plugins/contrib";
 import { HookRegistry, HookFacade } from "./plugins/hook-registry";
@@ -89,6 +89,12 @@ import { resolveAntExecutable } from "./runtime-sdk/bundle-layout";
 import { advisorReviewerFor, familyOfModel, officialLegDefaultSessionModel } from "./runtime-sdk/advisor-reviewer";
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
 import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
+import { linkedRouterSupportsRunHome, linkedRunHomeBuilder, runHomeHandleOf, runHomeReportSummary } from "./runtime-sdk/run-home-support";
+import { recoverRunRoots, rootRecoveryDetail, type RootReconcile } from "./runtime-state/root-recovery";
+import { splitSettingsToSdk } from "./migration/settings-split";
+import { MigrationCRefused, finishMigrationC, isOldLayout, migrationCManifestPath, migrationCState, runMigrationC } from "./migration/migrate-c";
+import { localScopeKeyFor, runHomeInputFor } from "./runtime-sdk/run-home-input";
+import { reservedMcpServerNames } from "./capabilities/names";
 import { persistedAllowRulesFor, winterGateRulesFromSdk } from "./runtime-sdk/mode-options";
 import { configuredMcpServersFor } from "./runtime-sdk/external-mcp";
 import { planBridgeFor, type PlanBridge } from "./runtime-sdk/plan-bridge";
@@ -341,6 +347,10 @@ export async function startDaemon(opts: {
    *  unless `WINTER_LOGIN_SHELL_PATH=off` (both test preloads set it). `false`: skipped. An object:
    *  the test seam (a fake runner and/or env to update). */
   loginShellPath?: LoginShellPathDeps | false;
+  /** TEST ONLY (WS-21 ordering contract): the router's `reconcileRootForRecovery`, for a test whose linked
+   *  router (0.0.11) has none — used only when the router handle lacks the door. A production caller never
+   *  sets it. */
+  runRootReconcileForTests?: RootReconcile;
 } = {}): Promise<RunningDaemon> {
   const startedAt = Date.now();
   const home = opts.home ?? resolveWinterHome();
@@ -372,6 +382,13 @@ export async function startDaemon(opts: {
   }
   if (manifestState.kind === "parsed" && manifestState.manifest.status === "in-progress") {
     throw new MigrationRefused("home_half_migrated", "migration: half-migrated home — run `winter migrate --resume` or `winter migrate --rollback`");
+  }
+  // WS-21 (spec §8): the same rule for Migration C — a phase 1 caught half-way (or a manifest that will not
+  // parse) refuses boot on every build until `winter migrate --sdk-home --resume` or `--rollback` runs.
+  // `phase1-complete` is NOT half-migrated: phase 2 finishes at this boot's late site.
+  const migrationC = migrationCState(home);
+  if (migrationC.kind === "unreadable" || (migrationC.kind === "parsed" && migrationC.manifest.status === "in-progress")) {
+    throw new MigrationCRefused("sdk_home_half_migrated", `migration C: half-migrated home (${migrationCManifestPath(home)}) — run \`winter migrate --sdk-home --resume\` or \`winter migrate --sdk-home --rollback\``);
   }
 
   const secrets = opts.secrets ?? new KeychainSecretStore();
@@ -462,6 +479,7 @@ export async function startDaemon(opts: {
   const deadLegacyLine = describeDeadLegacyFiles(findDeadLegacyFiles(home), home);
   if (deadLegacyLine !== undefined) console.error(deadLegacyLine);
 
+
   const authority = new TokenAuthority(secrets);
   const tokens = await authority.ensureTokens();
 
@@ -514,7 +532,7 @@ export async function startDaemon(opts: {
     // hand, is the ONLY writer of a migrated v3 settings file (see `loadSettings`'s own doc).
     // WS-21: the live holder never carries the keys that moved to `sdk/` (`withoutMovedKeys`) — their
     // only doors are the `sdk…` readers, so no reader here can see a stale copy kept for a downgrade.
-    settings = withoutMovedKeys(loadSettings(dirs.settingsPath, { presentProviders, persistMigration: true }));
+    settings = liveSettingsView(loadSettings(dirs.settingsPath, { presentProviders, persistMigration: true }));
     // Task 17: the engine leg no longer exists — a `winterLeg.<mode>: false` is accepted for one
     // release, reported here (and by settings-apply on a hot edit), never obeyed.
     for (const key of winterLegDisabledKeys(settings)) console.error(`settings: runtimes.winterLeg.${key} = false — the engine leg no longer exists; ignored`);
@@ -526,6 +544,34 @@ export async function startDaemon(opts: {
     console.error(`settings unavailable, agent disabled: ${(err as Error).message}`);
     settings = null;
   }
+
+  // ── WS-21 (spec §8): Migration C, phase 1 ──────────────────────────────────────────────────────
+  // Only on a build whose router applies run homes (on router 0.0.11 the old layout IS the layout).
+  // ORDER, four ways: after the lock (an idle live daemon holds no transcript lease — only the lock stops
+  // a second daemon renaming `projects/` under it); after the settings load (its v2→v3 persist is what
+  // the split reads); before the boot split below (so preflight's backups capture the pre-split state
+  // and the migration's own split step is the one that copies); before the runtime spine (backfill and
+  // recovery read the store and `backend_root`). The profile's default home migrates by itself; any
+  // other home in the old layout refuses boot until `winter migrate --sdk-home --home <dir>` runs. A
+  // preflight refusal refuses BOOT — the supported build must never start writing `sdk/projects` while
+  // `<home>/projects` still holds the store. Phase 2 runs at the late site, once the router exists.
+  if (linkedRouterSupportsRunHome() && isOldLayout(home)) {
+    try {
+      if (!isDefaultWinterHome(home, profile, opts.migration?.homedirOverride)) {
+        throw new MigrationCRefused("sdk_home_migration_required", `migration C: ${home} is in the old layout and is not the profile's default home — stop, then run \`winter migrate --sdk-home --home ${home}\``);
+      }
+      await runMigrationC(home, { log: (line) => console.error(line), reconcileAvailable: true });
+    } catch (err) {
+      try { store.close(); } catch { /* already closed: nothing to release */ }
+      lock.release();
+      throw err;
+    }
+  }
+
+  // WS-21 (spec §4.1, §8): the settings split — every boot, every home, every build (the runtime-facing
+  // keys are read from `sdk/` only since L3.2). Under the lock, before anything reads them. Once per key;
+  // never throws; `settings.json` itself is never written.
+  splitSettingsToSdk(home, { log: (line) => console.error(line) });
 
   // ── The runtime spine (P8a, WS-16) ────────────────────────────────────────────────────────────
   // Open `runtimes/runtime-state.db`, run §13's twelve recovery steps, catch the §17 backfill up,
@@ -542,6 +588,9 @@ export async function startDaemon(opts: {
     // WS-20 (review round 2, M5): threaded through to `migrateModelRefsToTags`'s own rule-5
     // tie-break — same presence this boot hook already computed for the settings migration above.
     presentProviders,
+    // WS-21 (spec §3.8): on a run-home router the claude staging sweep waits for the router's own
+    // reconcile (the late pass after `createWinterRuntimeSdk`, below) — nothing is deleted unreconciled.
+    ...(linkedRouterSupportsRunHome() ? { recovery: { deferClaudeResumeSweep: true } } : {}),
   });
   const runtime = runtimeStateOnline(runtimeState);
 
@@ -574,12 +623,11 @@ export async function startDaemon(opts: {
   // there is exactly one mtime cache per project cwd for the whole daemon).
   const projectSettings = new ProjectSettingsResolver({ base: () => settings, trust: trustStore });
   // Review I2 (lane B): the daemon's own record of rules the user approved "in this project" from a
-  // card (`<home>/permissions/projects.json`) — written by `approval.respond`, applied to children
-  // regardless of trust. Provider-independent, so built unconditionally.
+  // card (`<home>/permissions/projects.json`). WS-21: RETIRED as a store — nothing writes it any more (a
+  // card's "in this project" answer goes to the trusted project's `.winter/settings.local.json`,
+  // `agent/saved-answers.ts`); what an older build recorded is still READ (on a build whose router does
+  // not apply run homes), reported by `winter doctor` and moved by `winter migrate-project`.
   const approvedProjectRules = new ApprovedProjectRules({ winterHome });
-  // Re-review R1: its directory exists (0700, real) before any session runs, so a link cannot be
-  // planted there first; something already there that is not is refused, with one log line.
-  approvedProjectRules.prepare();
   // fix-wave B (I1): every per-project getter below resolves at the REPO ROOT, matching
   // `globalAllow`'s own `projectRoot` (engine.ts's `repoRootFor(cwd)`) — NOT the raw session cwd.
   // Before this, a SUBDIRECTORY session read a DIFFERENT `.winter/settings.json` than
@@ -645,22 +693,9 @@ export async function startDaemon(opts: {
   // but ALSO hot-rebuilt on lifecycle changes (unlike MCP servers today), matching Tier-2's
   // hotApplyStart/hotApplyStop precedent for "no restart needed" plugin changes.
   const hookRegistry = new HookRegistry();
-  // B1 (lane B): `disabled` is a LIVE getter over the reassignable `settings` holder, not a boot
-  // snapshot — the store now also decides which plugin skills a runtime child loads, per incarnation.
-  const skillStore = new SkillStore({
-    winterHome, trust: trustStore,
-    plugins: {
-      disabled: () => settings?.plugins?.disabled ?? [],
-      // Lane B (review, 2026-09-23): a plugin's skills reach a session (either leg) only when the user
-      // ENABLED it and granted its `exec` consent — a skill can run shell commands. Read LIVE from the
-      // settings holder (a fresh `PluginStore` over it, as `ipc/server.ts`'s own live plugin list does),
-      // so enabling/consenting reaches the next spawn with no restart.
-      sessionEligible: () => new Set(
-        new PluginStore({ winterHome, plugins: settings?.plugins, consents: settings?.plugins?.consents }).list()
-          .filter(pluginSkillsEligible).map((p) => p.name),
-      ),
-    },
-  });
+  // WS-21 (L4 request 2): the store lists the user, self, project and builtin tiers; a plugin's skills are
+  // claude-native content now (the runtimes load them, and `skills.list`'s plugin half is lane L4's).
+  const skillStore = new SkillStore({ winterHome, trust: trustStore });
   // File-based memory (MEMDIR, T1 — design doc `2026-07-15-file-based-memory-design.md`): a live
   // getter over the `settings` holder (assigned above; reassigned in place by the hot-settings
   // watcher below), read fresh by BOTH the write-root join (`sessionDirs`, just below) and the
@@ -998,10 +1033,8 @@ export async function startDaemon(opts: {
   // `registry` const, which isn't in scope here) so it keeps behaving correctly either way — a safe
   // no-op via optional chaining while `sharedRegistry` is still null (no provider).
   const allPlugins = pluginStore.list();
-  // Boot-time hook-registry build (Phase 4f Task 2) — the SAME eligible-plugin projection
-  // (`hookRegistryPlugins`, agent/plugins.ts) ipc/server.ts's lifecycle RPCs use to rebuild this
-  // SAME `hookRegistry` instance hot, later, off a fresh `livePlugins()` read.
-  hookRegistry.rebuild(hookRegistryPlugins(allPlugins, winterHome));
+  // WS-21 (L4 request 2): no boot-time plugin hook build — a plugin's hooks are claude-native
+  // `hooks/hooks.json` content the runtimes load themselves (spec §5.1/§5.3).
   const pluginSupervisor = new PluginSupervisor({
     runDir: dirs.runDir,
     socketPath: dirs.socketPath,
@@ -1214,10 +1247,48 @@ export async function startDaemon(opts: {
    *  that key, so the keying must not be the driver's to get wrong). */
   const buildSessionCapabilities = (session: CapabilitySession): CapabilityServerRecord =>
     buildCapabilitiesFor(session, capabilityDeps);
+  // WS-21 (spec §3.1, Contract A): the per-run folder every incarnation awaits — ONLY when the linked
+  // router exports `buildRunHome` (feature detection; router 0.0.11 does not, and then nothing here is
+  // wired and every child launches exactly as before). The inputs are live: trust, `mcp.disabled`, the
+  // capability-server names and the relocation-aware MEMDIR are re-read for every incarnation.
+  const runHomeBuilder = linkedRunHomeBuilder();
+  // The run home itself is returned untouched — the router refuses one `buildRunHome` did not build.
+  const runHomeDeps: WinterLegDeps["runHome"] = runHomeBuilder === undefined ? undefined : {
+    build: async (input) => {
+      const built = await runHomeBuilder(input);
+      // Spec §8: what the builder did NOT do (skipped links, dropped MCP servers and imports,
+      // unconditional rules, agents not copied — L2 fix round 1's `skippedAgents`) is never silent.
+      const summary = runHomeReportSummary(built);
+      if (summary !== undefined) console.error(`runtime-sdk: ${summary}`);
+      return built;
+    },
+    inputFor: (facts) => runHomeInputFor({
+      home: winterHome,
+      trust: trustStore,
+      settings: () => settings,
+      reservedMcpServerNames: [...reservedMcpServerNames()],
+      memoryDirFor: (cwd) => memoryDirOf(cwd),
+    }, facts),
+  };
+
   try {
     runtimeSdk = await createWinterRuntimeSdk({
       home: winterHome,
       settings: () => settings, // LIVE holder, never a boot snapshot
+      // WS-21 (spec §3.1): a run-home router is created with `requireRunHome: true` and this builder
+      // for its OWN cold-resume path. Absent (router 0.0.11) — the router is created as before.
+      ...(runHomeDeps === undefined ? {} : {
+        runHomeFor: async (ctx) => {
+          let origin: string | undefined;
+          let workdirLess = false;
+          try {
+            const meta = store.meta(ctx.sessionId);
+            origin = meta.origin;
+            workdirLess = (meta.cwd ?? store.dirs(ctx.sessionId)[0]?.path) === undefined;
+          } catch { /* an unknown session: the router refuses it on its own */ }
+          return runHomeDeps.build(runHomeDeps.inputFor({ mode: ctx.mode, dispatchChild: origin === "dispatch-child", leg: ctx.leg, cwd: ctx.cwd, workdirLess }));
+        },
+      }),
       secrets,
       directoryStore: runtime?.directory,
       // EMPTY ON PURPOSE (P8b-36) — this list is handle-wide and construction-time, which is
@@ -1330,6 +1401,63 @@ export async function startDaemon(opts: {
       console.error(`runtime-sdk: directory recovery failed (${(err as Error)?.name ?? "unknown"}) — messaging starts without it`);
       if (runtime?.lastRecovery.step10AttemptId !== undefined) {
         restampStep(runtime.db.db, runtime.lastRecovery.step10AttemptId, 10, "failed", { errorName: (err as Error)?.name ?? "unknown" });
+      }
+    }
+  }
+
+  // ── WS-21 (spec §3.8): §13 step 6 and the run-folder/staging sweeps, run late for the same reason ──
+  // `reconcileRootForRecovery` needs the router's own live store, so recorded local-write roots, leftover
+  // `<home>/cache/runs/*` folders and stale claude staging roots are reconciled HERE, before anything is
+  // deleted — clean/appended ones removed, quarantined ones kept, recorded and reported (`root-recovery.ts`).
+  // Only on a router that has the door (0.0.11 has not: step 6 stays skipped and step 8 sweeps as before).
+  // Still before `startIpcServer` and before any driver exists, so no incarnation — and no run folder of
+  // this process — can exist yet (review M8: the old "skip the folders this process built" set was always
+  // empty here); bounded — a failure costs the sweep.
+  const linkedRecovery = runtimeSdk === undefined ? undefined : runHomeHandleOf(runtimeSdk.sdk);
+  const routerRecovery: { reconcileRootForRecovery: RootReconcile } | undefined = linkedRecovery
+    ?? (opts.runRootReconcileForTests === undefined ? undefined : { reconcileRootForRecovery: opts.runRootReconcileForTests });
+  // Migration C, phase 2 (spec §8 steps 2, 8, 9): the official working copies reconciled through the
+  // router's own door, then the archive and the done marker — BEFORE any driver or the socket exists. A
+  // home left `phase1-complete` must never open a session (its un-reconciled working copies would be
+  // resumed from a canonical store missing their tail), so a phase 2 that cannot finish REFUSES BOOT,
+  // typed, after closing what this boot opened; the next boot retries it.
+  {
+    const cState = migrationCState(home);
+    if (cState.kind === "parsed" && cState.manifest.status === "phase1-complete") {
+      try {
+        await finishMigrationC(home, {
+          log: (line) => console.error(line),
+          ...(routerRecovery === undefined ? {} : { reconcile: (root: string) => routerRecovery.reconcileRootForRecovery(root) }),
+        });
+      } catch (err) {
+        try { consoleBroker.stopRefresher(); consoleBroker.stopWatcher(); } catch { /* best effort */ }
+        try { await runtimeSdk?.dispose(); } catch { /* best effort */ }
+        try { await runtime?.close(); } catch { /* best effort */ }
+        try { store.close(); } catch { /* best effort */ }
+        lock.release();
+        throw new MigrationCRefused("sdk_home_migration_refused", `migration C: phase 2 could not finish (${(err as Error).message}) — no session opens until it does; the next boot retries it`);
+      }
+    }
+  }
+  if (routerRecovery !== undefined && runtime !== undefined) {
+    try {
+      const recovered = await recoverRunRoots({
+        home: winterHome,
+        rs: runtime.db,
+        reconcile: (root) => routerRecovery.reconcileRootForRecovery(root),
+        claudeResumeScanRoot: process.env.WINTER_CLAUDE_RESUME_SCAN_ROOT?.trim() || undefined,
+        log: (line) => console.error(`runtime-sdk: ${line}`),
+      });
+      const quarantined = recovered.quarantinedRoots.length;
+      if (quarantined > 0) console.error(`runtime-sdk: run-root recovery kept ${quarantined} quarantined root(s) — see \`winter doctor\``);
+      if (runtime.lastRecovery.step6AttemptId !== undefined) {
+        const failed = recovered.recorded.failed + recovered.runFolders.failed + recovered.staging.failed;
+        restampStep(runtime.db.db, runtime.lastRecovery.step6AttemptId, 6, failed === 0 ? "ok" : "partial", rootRecoveryDetail(recovered));
+      }
+    } catch (err) {
+      console.error(`runtime-sdk: run-root recovery failed (${(err as Error)?.name ?? "unknown"}) — the roots are left for the next boot`);
+      if (runtime.lastRecovery.step6AttemptId !== undefined) {
+        restampStep(runtime.db.db, runtime.lastRecovery.step6AttemptId, 6, "failed", { errorName: (err as Error)?.name ?? "unknown" });
       }
     }
   }
@@ -1549,6 +1677,11 @@ export async function startDaemon(opts: {
       // so the host-side floor hook, a Winter child's `Options.web.blockedDomains` and the daemon's
       // own `Search` are provably reading one list. `hooks.ts` unions the shipped half itself.
       dangerousDomainsAdded: () => dangerousDomainsAdded(session.cwd),
+      // WS-21 (spec §7.1/§7.2): the path fence — the mode decides card vs typed deny, and the project
+      // tier is protected only while the project is trusted (read live, like every trust decision).
+      mode: session.mode,
+      cwd: session.cwd,
+      trustedProjectRoot: () => (trustStore.isTrusted(session.cwd) ? repoRootFor(session.cwd) : null),
     });
   // ── P8c integration Wiring 2: the notification/schedule sinks (lane 2's `sinks.ts`, P8c-11) ────
   // `hub.addObserver` (Dispatch/Phase 7's existing fan-out of every appended event of EVERY
@@ -1614,6 +1747,10 @@ export async function startDaemon(opts: {
   const supportedAgentsCache = new SupportedAgentsCache();
   const winterDrivers: WinterSessionDrivers = createWinterSessionDrivers({
     home: winterHome,
+    // WS-21: every incarnation's run home, when the linked router applies them (see `runHomeDeps`).
+    ...(runHomeDeps === undefined ? {} : { runHome: runHomeDeps }),
+    // WS-21 (spec §4.3): a card offers "in this project" only for a trusted project.
+    isTrusted: (dir) => trustStore.isTrusted(dir),
     profile: process.env.WINTER_PROFILE,
     settings: () => settings, // LIVE holder
     runtime: runtimeSdk,
@@ -1634,9 +1771,6 @@ export async function startDaemon(opts: {
     // Winter's persona per mode, the `_assistant` bucket, the output style — so a Winter-leg session
     // speaks as Winter.
     assembler,
-    // B1 (lane B): the SAME SkillStore the assembler and `skills.*` read — the plugin skills a code
-    // child loads ride `Options.plugins`/`skills` from it (`SkillStore.childSkillSurface`).
-    skills: skillStore,
     // Lane B: the user's SAVED allow rules reach both legs' children — `settings.json`, a TRUSTED
     // project's overlay (the SAME `projectSettings` resolver, at the SAME repo root) and its
     // `permissions.local.json` (the SAME `permissionRules` store `approval.respond` writes, read only
@@ -1653,13 +1787,21 @@ export async function startDaemon(opts: {
     onTurnSettled: (sid) => { signals.onTurnSettled?.(sid); },
     onSupportedAgents: (sid, agents) => supportedAgentsCache.observe(sid, agents),
     ...(titler === undefined ? {} : { titler }),
-    // Fix wave (review row 7): the user's `settings.mcpServers` and a TRUSTED project's `.mcp.json`
-    // reach the child under the registry's own keys (`mcp__<key>__<tool>`), any transport
+    // Fix wave (review row 7): the user's servers and a TRUSTED project's MCP file (WS-21: its
+    // `.winter/mcp.json`; the repo-root `.mcp.json` is no longer read) reach the child under the
+    // registry's own keys (`mcp__<key>__<tool>`), any transport
     // (stdio/http/sse). Read LIVE per incarnation from the same holder and the same `TrustStore`
     // the McpManager consults. `log`: the SAME one-stderr-line-per-name convention `McpManager`'s
     // own `log` dep already uses (below), for a project-scope entry that didn't validate.
-    // WS-21: the user-scope servers moved to `sdk/.winter.json` (`sdkUserMcpServers`, read live).
-    extraMcpServers: (session) => configuredMcpServersFor({ settings, userMcpServers: sdkUserMcpServers(winterHome), cwd: session.cwd, trusted: (dir) => trustStore.isTrusted(dir), log: (m) => console.error(m) }),
+    // WS-21: the user and local scopes live in `sdk/.winter.json` (`sdkUserMcpServers`/`sdkLocalMcpServers`,
+    // the local one keyed by `localScopeKeyFor`), read live; precedence local > project > user.
+    extraMcpServers: (session) => configuredMcpServersFor({
+      settings,
+      userMcpServers: sdkUserMcpServers(winterHome),
+      // WS-21 (spec §4.4): the local scope, keyed by the session's canonical project root.
+      localMcpServers: session.cwd ? sdkLocalMcpServers(winterHome, localScopeKeyFor(session.cwd)) : {},
+      cwd: session.cwd, trusted: (dir) => trustStore.isTrusted(dir), log: (m) => console.error(m),
+    }),
     // Daemon settings surface batch 3 (item 1): the SAME trust gate `extraMcpServers` above and
     // `agents.list`'s own handler (ipc/server.ts) both use — an untrusted `cwd` gets the empty scan
     // shape outright, never even reaching the filesystem read `loadProjectAgentDefinitions` would do.
@@ -2012,34 +2154,9 @@ export async function startDaemon(opts: {
     // disabled (`settings.mcp.disabled`) — `stdioMcpServersFor` is the one filter both facts go
     // through (settings.ts).
     await mcp.startAll(stdioMcpServersFor(sdkUserMcpServers(winterHome), settings?.mcp?.disabled));
-    // Plugin MCP servers start only with explicit settings consent (mcpEnabled = enabled &&
-    // !disabled); a plugin's skills are always live (SkillStore above), but its MCP/manifest
-    // content is the seam that needs the user opting in via settings.plugins.enabled AND,
-    // per-exec-class, a settings.plugins.consents record (pluginMcpEligible in agent/plugins.ts —
-    // legacy plugins have requiredConsents [] so this is unchanged for them; a manifest plugin
-    // with exec content that's enabled but unconsented is excluded here, logged below). The
-    // `!pluginMcpEligible(p)` on the right is the SAME eligibility predicate the enabledPlugins
-    // filter below uses — deriving it inline (e.g. hand-rolling !consentComplete(p)) would let the
-    // why-log drift out of sync with what actually gates MCP start; the left-hand guard just
-    // narrows the log to the "would be eligible if not for consent" case so we don't log for
-    // plugins that were never enabled or never carried MCP content in the first place.
-    for (const p of allPlugins) {
-      if (p.mcpEnabled && !p.disabled && (p.hasMcp || p.hasManifestMcp) && !pluginMcpEligible(p)) {
-        const missing = p.requiredConsents.filter((c) => !p.consented.includes(c));
-        console.error(`plugin ${p.name}: enabled but missing consent for ${missing.join(", ")} — MCP not started`);
-      }
-    }
-    // manifestServers (Task 4, spec §2: "mcpServers may now come from the manifest instead of
-    // .mcp.json ... manifest wins on conflict") comes straight off PluginInfo — PluginStore.list()
-    // already ran loadManifest once per plugin and carried contributes.mcpServers through as
-    // p.manifestServers (undefined for legacy plugins and manifest plugins with no mcpServers
-    // declared). Re-reading winter-plugin.json here would risk a manifest that read fine moments
-    // ago (hasManifestMcp true, gating eligibility) but fails to reparse on a second read —
-    // silently falling back to the legacy .mcp.json path without ever disclosing that switch.
-    const enabledPlugins = allPlugins
-      .filter(pluginMcpEligible)
-      .map((p) => ({ name: p.name, dir: join(winterHome, "plugins", p.name), manifestServers: p.manifestServers }));
-    await mcp.startPlugins(enabledPlugins);
+    // WS-21 (L4 request 2): a plugin's MCP servers are claude-native content now (its `.mcp.json`, or a
+    // claude manifest's own `mcpServers`), loaded by both runtimes themselves (spec §5.3) — the daemon no
+    // longer starts one.
 
     // Tier-2 platform plugins (Phase 4b Task 3, spec §3): PluginSupervisor owns process lifecycle
     // (spawn/registration timeout/crash backoff/circuit breaker/PID-file orphan reclaim) for every
@@ -2213,7 +2330,7 @@ export async function startDaemon(opts: {
     // engine to hot-apply against (same "agent disabled" boundary the rest of this gate follows).
     const apply = makeApply({
       // THE atomic swap — a single synchronous assignment, first thing every apply does (T4).
-      setLiveSettings: (s) => { settings = withoutMovedKeys(s); },
+      setLiveSettings: (s) => { settings = liveSettingsView(s); },
       registry,
       buildComputerService: (s) => new ComputerUseService({ broker: peripheral, heartbeatMs: s?.peripheral?.heartbeatMs }),
       registerComputer: (svc, s) => {
@@ -2477,7 +2594,6 @@ export async function startDaemon(opts: {
     permissionRules,
     // Review I2 (lane B): the daemon's own record of "in this project" approvals — the SAME instance
     // the session drivers' saved-rules reader applies.
-    approvedProjectRules,
     dirs: sessionDirs,
     trust: trustStore,
     bg: bgRegistry,
