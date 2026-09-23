@@ -110,13 +110,20 @@ function hasFiles(dir: string, budget = { left: 20_000 }): boolean {
 }
 
 /**
- * Spec §8's OLD LAYOUT, exactly (r3): `<home>/projects` or `<home>/skills` is a real directory (not a
- * compatibility link) WITH CONTENT (a file somewhere below it), and Migration C is not done. Moved keys
- * in `settings.json` never count. A fresh home — bootstrap creates neither — never matches.
+ * Spec §8's OLD LAYOUT (r3, widened by review M7): any directory Migration C moves (`SDK_COMPAT_LINKS`:
+ * projects, backups, skills, agents, workflows, output-styles) is a real directory (not a compatibility
+ * link) WITH CONTENT (a file somewhere below it), or the home holds an instructions file (`WINTER.md`, or
+ * the legacy one) that `sdk/` does not — and Migration C is not done. A run-home build reads none of those
+ * from the old place, so a home holding only one of them would otherwise have it silently unread. Moved
+ * keys in `settings.json` never count. A fresh home — bootstrap creates none of them — never matches.
  */
 export function isOldLayout(home: string): boolean {
   if (existsSync(migrationCCompletePath(home))) return false;
-  return ["projects", "skills"].some((name) => hasFiles(join(home, name)));
+  if (SDK_COMPAT_LINKS.some(([name]) => hasFiles(join(home, name)))) return true;
+  if (existsSync(join(sdkHomeFor(home), "WINTER.md"))) return false;
+  return [join(home, "WINTER.md"), join(home, LEGACY_INSTRUCTIONS_FILE)].some((p) => {
+    try { return lstatSync(p).isFile(); } catch { return false; }
+  });
 }
 
 export interface MigrationCDeps {
