@@ -482,10 +482,18 @@ export async function finishMigrationC(home: string, deps: Pick<MigrationCDeps, 
       join(home, "permissions"),
     ];
     for (const src of candidates) {
-      if (!existsSync(src) && !isSymlink(src)) continue;
       const rel = relative(home, src);
       if (m.archived.some((a) => a.from === rel)) continue;
       const dest = join(archive, rel);
+      if (!existsSync(src) && !isSymlink(src)) {
+        // Review M4: renamed, then a crash before the manifest said so — the destination is this move's
+        // (nothing else writes under this migration's own archive), so record it and rollback restores it.
+        if (existsSync(dest) || isSymlink(dest)) {
+          m.archived.push({ from: rel, to: relative(home, dest) });
+          writeManifest(home, m);
+        }
+        continue;
+      }
       mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
       renameSync(src, dest);
       m.archived.push({ from: rel, to: relative(home, dest) });

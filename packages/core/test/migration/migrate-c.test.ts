@@ -4,7 +4,7 @@
 // selection_json. The router's reconcile is a stub here (its real outcomes are L2's, proven at R.2).
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -277,6 +277,22 @@ describe("both phases", () => {
     const m = await runMigrationC(home, deps({ reconcile: async () => { throw new Error("run_home_link_refused"); } }));
     expect(m.reconciled).toEqual([{ root, outcome: "failed" }]);
     expect(existsSync(join(m.archiveDir, "archive", "runtimes", "claude-config", "projects"))).toBe(true);
+  });
+});
+
+describe("review M4: the archive's crash window", () => {
+  test("an item renamed into the archive before the manifest recorded it is found, recorded, and restored by rollback", async () => {
+    const { home } = fixture();
+    const m1 = await runMigrationC(home, deps());
+    expect(m1.status).toBe("phase1-complete");
+    // a crash right after the rename of `permissions/`, before the manifest write
+    const dest = join(m1.archiveDir, "archive", "permissions");
+    mkdirSync(join(m1.archiveDir, "archive"), { recursive: true });
+    renameSync(join(home, "permissions"), dest);
+    const m2 = await finishMigrationC(home, { log: () => {}, reconcile: stubReconcile().reconcile });
+    expect(m2.archived.map((a) => a.from)).toContain("permissions");
+    await rollbackMigrationC(home, { log: () => {} });
+    expect(existsSync(join(home, "permissions", "projects.json"))).toBe(true);
   });
 });
 
