@@ -1449,9 +1449,11 @@ if (import.meta.main) {
     try {
       daemon = await startDaemon();
     } catch (err) {
-      const { MigrationRefused } = await import("@yanlinglabs/winter-core");
-      if (err instanceof MigrationRefused) {
-        console.error(err.message);
+      // Migration B's `MigrationRefused` and (WS-21) Migration C's `MigrationCRefused`: a message and exit 1.
+      const { migrationRefusalMessage } = await import("./daemon-boot-refusal");
+      const refusal = migrationRefusalMessage(err);
+      if (refusal !== undefined) {
+        console.error(refusal);
         process.exit(1);
       }
       throw err;
