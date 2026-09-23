@@ -8,7 +8,12 @@
 //       and `ensure` undefined, never a throw (the IPC layer then refuses typed, fix wave F2);
 //   R1  the store's own log is what a resume re-pushes (`unconsumed` over `store.read`).
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { storeHomeFor, storeProjectsDir } from "../../src/agent/paths";
+import { Database } from "bun:sqlite";
+import { migrationCManifestPath, migrationCState, rollbackMigrationC } from "../../src/migration/migrate-c";
+import { setRunHomeSupportForTests } from "../../src/runtime-sdk/run-home-support";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Options, Query } from "@yanlinglabs/winter-agent-sdk";
@@ -25,7 +30,8 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { CREDENTIAL_MATERIAL_NAMES, writeCredentialMaterial } from "../../src/auth/credential-material";
 import { CORE_BRAND } from "../../src/runtime-sdk/brand";
 import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
-import { createWinterSessionDrivers, refusalMayBeCredentialShaped, type WinterLegDeps } from "../../src/runtime-sdk/session-driver";
+import { coldResumeRunHomeFor, createWinterSessionDrivers, refusalMayBeCredentialShaped, type WinterLegDeps } from "../../src/runtime-sdk/session-driver";
+import { updateSdkSettings } from "../../src/sdk-files";
 import { evictSessionsForCredential } from "../../src/runtime-sdk/credentials";
 import { unconsumedUserMessages } from "../../src/runtime-sdk/winter-session";
 import { WINTER_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
@@ -83,7 +89,7 @@ class FakeQuery {
 
 const result = (): Frame => ({ type: "result", subtype: "success", is_error: false, permission_denials: [], result: "" });
 
-function table(overrides: Partial<WinterLegDeps> = {}, runtimeExtra: Record<string, unknown> = {}) {
+function table(overrides: Partial<WinterLegDeps> = {}, runtimeExtra: Record<string, unknown> = {}, wrapSdk?: (sdk: ReturnType<typeof createRuntimeSdk>) => ReturnType<typeof createRuntimeSdk>) {
   const home = mkdtempSync(join(tmpdir(), "winter-table-"));
   const store = new SessionStore(home);
   const hub = new SessionHub(store);
@@ -101,7 +107,7 @@ function table(overrides: Partial<WinterLegDeps> = {}, runtimeExtra: Record<stri
   });
   const tracked: string[] = [];
   const runtime = {
-    sdk,
+    sdk: wrapSdk === undefined ? sdk : wrapSdk(sdk),
     spawnHookFor: () => ({ pathToClaudeCodeExecutable: join(home, "winter-fake") }),
     trackQuery: (sid: string) => { tracked.push(sid); },
     untrack: () => {},
@@ -668,43 +674,18 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
     } finally { t.close(); }
   });
 
-  // B1 (2026-09-22): the dist session whose first `Skill` call answered `Available: (none)` with a
-  // `superpowers` plugin installed. The child's index is built from its Options alone
-  // (`settingSources: []`), so an installed plugin skill that is not in `Options.plugins` does not
-  // exist for it — this is the table half: `optionsFor` asks the daemon's SkillStore, LIVE, per
-  // incarnation, and only for a code session (chat/dispatch never had the Skill tool).
-  test("B1: an installed plugin skill reaches a CODE child's Options.plugins/skills; deny rules and chat/dispatch are honoured", async () => {
-    let skillStore: SkillStore | undefined;
-    let settings = { permissions: { deny: ["Skill(superpowers:brainstorming)"] }, runtimes: { winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } } as unknown as Settings;
-    const t = table({ settings: () => settings, skills: { childSkillSurface: (input) => skillStore!.childSkillSurface(input) } });
+  // WS-21 (L4 request 2): the skills-only plugin-view handover (B1) is retired — the daemon hands a child
+  // no `Options.plugins`/`skills` on any build (the run folder carries skills; plugins load natively).
+  test("L4 request 2: an installed legacy plugin's skills are never handed to a child by the daemon", async () => {
+    const t = table({});
     try {
-      skillStore = new SkillStore({ winterHome: t.home, trust: new TrustStore(join(t.home, "trust.json")) });
-      for (const name of ["using-superpowers", "brainstorming"]) {
-        mkdirSync(join(t.home, "plugins", "superpowers", "skills", name), { recursive: true });
-        writeFileSync(join(t.home, "plugins", "superpowers", "skills", name, "SKILL.md"), `---\nname: ${name}\ndescription: ${name} skill\n---\nbody\n`);
-      }
-      const view = join(t.home, "cache", "skill-plugins", "superpowers");
-
-      const code = t.store.createSession("t", { mode: "code", model: "winter-test/echo", approvalPolicy: "ask" });
-      const session = await t.drivers.create(code);
-      expect(t.q().options.plugins).toEqual([{ type: "local", path: view, skipMcpDiscovery: true }]);
-      expect(t.q().options.skills).toEqual(["superpowers:using-superpowers"]);
-      expect(t.q().options.settingSources).toEqual([]);
-
-      // LIVE: lifting the deny rule reaches the next incarnation with no restart.
-      settings = { ...settings, permissions: { deny: [] } } as unknown as Settings;
-      await t.drivers.evict(code);
-      await (await t.drivers.ensure(code))!.open();
-      expect([...(t.q().options.skills ?? [])].sort()).toEqual(["superpowers:brainstorming", "superpowers:using-superpowers"]);
-      await t.drivers.evict(code);
-
-      for (const mode of ["chat", "dispatch"] as const) {
-        const sid = t.store.createSession("t", { mode, model: "winter-test/echo" });
-        const s = await t.drivers.create(sid);
-        expect("plugins" in t.q().options).toBe(false);
-        expect("skills" in t.q().options).toBe(false);
-        await s.end();
-      }
+      mkdirSync(join(t.home, "plugins", "superpowers", "skills", "brainstorming"), { recursive: true });
+      writeFileSync(join(t.home, "plugins", "superpowers", "skills", "brainstorming", "SKILL.md"), "---\nname: brainstorming\ndescription: d\n---\nbody\n");
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", approvalPolicy: "ask" });
+      const session = await t.drivers.create(sid);
+      expect("plugins" in t.q().options).toBe(false);
+      expect("skills" in t.q().options).toBe(false);
+      expect(existsSync(join(t.home, "cache", "skill-plugins"))).toBe(false);
       await session.end();
     } finally { t.close(); }
   });
@@ -1006,5 +987,363 @@ describe("role efforts on the runtime leg (pins.dispatch, and provider.model's d
         await second?.end();
       } finally { t.close(); }
     });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// WS-21 L3.3 (spec §3.1, Contract A): every incarnation awaits a run home — when the linked router
+// applies them. The router here is the published 0.0.11 (no `buildRunHome`), so the builder is a stub
+// injected through `WinterLegDeps.runHome`, and `sdk.query` is observed directly (0.0.11 strips
+// `runtime` before the peer, as a run-home router applies it).
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describe("WS-21: run homes on the Winter leg (stubbed router builder)", () => {
+  function stubRunHomes() {
+    const built: import("../../src/runtime-sdk/run-home-contract").RunHomeInput[] = [];
+    const disposed: string[] = [];
+    const facts: import("../../src/runtime-sdk/run-home-input").RunHomeSessionFacts[] = [];
+    const runHome: NonNullable<WinterLegDeps["runHome"]> = {
+      inputFor: (f) => {
+        facts.push(f);
+        return { home: "/h", mode: f.mode, dispatchChild: f.dispatchChild, leg: f.leg, cwd: f.cwd, trustedProjectRoot: null, gitRoot: null, mcpDisabled: [], reservedMcpServerNames: [], memoryDir: "/m" };
+      },
+      build: async (input) => {
+        built.push(input);
+        const runId = `run-${built.length}`;
+        return {
+          runId, dir: `/h/cache/runs/${runId}`, sdkHome: "/h/sdk", input, effectiveSettings: {},
+          report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [] },
+          dispose: async () => { disposed.push(runId); },
+        };
+      },
+    };
+    return { built, disposed, facts, runHome };
+  }
+  const querySpy = () => {
+    const calls: Array<{ options: Options & { runtime?: { runHome?: { runId: string } } } }> = [];
+    let failNext = false;
+    const wrap = (sdk: ReturnType<typeof createRuntimeSdk>) => new Proxy(sdk, {
+      get(target, prop, receiver) {
+        if (prop !== "query") return Reflect.get(target, prop, receiver);
+        return (args: { prompt: AsyncIterable<string>; options: Options }) => {
+          calls.push(args as never);
+          if (failNext) { failNext = false; throw Object.assign(new Error("every generation must carry a run home (simulated)"), { name: "RunHomeError", code: "run_home_required" }); }
+          return target.query(args as never);
+        };
+      },
+    });
+    return { calls, wrap, failOnce: () => { failNext = true; } };
+  };
+  const settle = async (disposed: string[], n: number): Promise<void> => {
+    const until = Date.now() + 2000;
+    while (disposed.length < n && Date.now() < until) await Bun.sleep(5);
+  };
+
+  // WS-21 (L2 O-1): the Winter child keys its transcript by realpath(cwd) while the router keys by the cwd
+  // it is given — a symlinked cwd (`/var/…` → `/private/var/…`) made a handoff's step 5 look for a
+  // transcript under a key the child never wrote. The daemon hands BOTH the canonical path: RunHomeInput.cwd,
+  // Options.cwd and the recorded transcript key / backend root.
+  test("L2 O-1: a symlinked cwd reaches the run home, Options.cwd and the record as its realpath", async () => {
+    const rh = stubRunHomes();
+    const spy = querySpy();
+    const t = table({ runHome: rh.runHome }, {}, spy.wrap);
+    try {
+      const real = realpathSync(mkdtempSync(join(tmpdir(), "winter-o1-real-")));
+      const link = join(realpathSync(mkdtempSync(join(tmpdir(), "winter-o1-link-"))), "proj");
+      symlinkSync(real, link);
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd: link });
+      await t.drivers.create(sid);
+      expect(rh.built[0]!.cwd).toBe(real);
+      expect(spy.calls[0]!.options.cwd).toBe(real);
+      const record = t.records.get(sid)!;
+      expect(record.transcriptProjectKey).toBe(transcriptProjectKey(real));
+      expect(record.backendRoot.endsWith(transcriptProjectKey(real))).toBe(true);
+    } finally { t.close(); }
+  });
+
+  test("optionsFor awaits buildRunHome and passes the result as options.runtime.runHome", async () => {
+    const rh = stubRunHomes();
+    const spy = querySpy();
+    const t = table({ runHome: rh.runHome }, {}, spy.wrap);
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const session = await t.drivers.create(sid);
+      expect(rh.built).toHaveLength(1);
+      expect(spy.calls).toHaveLength(1);
+      expect(spy.calls[0]!.options.runtime?.runHome?.runId).toBe("run-1");
+      expect(rh.built[0]!.leg).toBe("winter");
+      expect(rh.built[0]!.cwd).toBe(spy.calls[0]!.options.cwd!); // the router refuses a run home for another cwd
+      // L3.4: the router applies the run home, so it — not the daemon — pins the home and the sources.
+      expect("WINTER_HOME" in (spy.calls[0]!.options.env ?? {})).toBe(false);
+      expect(spy.calls[0]!.options.settingSources).toEqual(["user"]);
+      await session.end();
+    } finally { t.close(); }
+  });
+
+  test("a router without buildRunHome (no runHome dep) builds nothing and keeps WINTER_HOME and settingSources: []", async () => {
+    const spy = querySpy();
+    const t = table({}, {}, spy.wrap);
+    try {
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", approvalPolicy: "ask" });
+      const session = await t.drivers.create(sid);
+      expect("runtime" in spy.calls[0]!.options).toBe(false);
+      expect(spy.calls[0]!.options.env?.WINTER_HOME).toBe(t.home);
+      expect(spy.calls[0]!.options.settingSources).toEqual([]);
+      await session.end();
+    } finally { t.close(); }
+  });
+
+  test("the session facts: mode, dispatchChild (origin dispatch-child), workdir-less", async () => {
+    const rh = stubRunHomes();
+    const t = table({ runHome: rh.runHome });
+    try {
+      const chat = await t.drivers.create(t.store.createSession("t", { mode: "chat", model: "winter-test/echo" }));
+      const child = await t.drivers.create(t.store.createSession("t", { mode: "code", model: "winter-test/echo", approvalPolicy: "ask", origin: "dispatch-child" }));
+      expect(rh.facts.map((f) => [f.mode, f.dispatchChild, f.leg])).toEqual([["chat", false, "winter"], ["code", true, "winter"]]);
+      expect(rh.facts[1]!.workdirLess).toBe(true); // no cwd, no dirs: the session tmp dir
+      await chat.end();
+      await child.end();
+    } finally { t.close(); }
+  });
+
+  test("EVERY incarnation path builds a fresh run home: create, resume after an idle end, eviction and replacement", async () => {
+    const rh = stubRunHomes();
+    const spy = querySpy();
+    const t = table({ runHome: rh.runHome }, {}, spy.wrap);
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const session = await t.drivers.create(sid);                       // create
+      expect(rh.built).toHaveLength(1);
+      await session.end();                                               // the incarnation ends (resumable)…
+      await (await t.drivers.ensure(sid))!.open();                        // …resume
+      expect(rh.built).toHaveLength(2);
+      await t.drivers.evict(sid);                                         // eviction (a credential write, a
+      await (await t.drivers.ensure(sid))!.open();                        //  policy switch across bypass,
+      expect(rh.built).toHaveLength(3);                                   //  a cross-family model switch)
+      t.store.setModel(sid, "winter-test/tooluse");                       // a model change while parked…
+      await t.drivers.evict(sid);
+      await (await t.drivers.ensure(sid))!.open();                        // …reaches the next incarnation
+      expect(rh.built).toHaveLength(4);
+      expect(new Set(spy.calls.map((c) => c.options.runtime?.runHome?.runId)).size).toBe(4); // never reused
+      await t.drivers.evict(sid);
+    } finally { t.close(); }
+  });
+
+  test("an ended incarnation's run home is disposed once the router says safe (after the query drained or closed)", async () => {
+    const rh = stubRunHomes();
+    let ended = false;
+    // L2 fix round 1 (M6): the router reports a Winter run home `pending` while the child runs and `safe`
+    // once the query finished, was closed or failed — the stub answers the same way.
+    const t = table({ runHome: rh.runHome }, { runHomeOutcome: () => (ended ? "safe" : "pending") });
+    try {
+      const session = await t.drivers.create(t.store.createSession("t", { mode: "chat", model: "winter-test/echo" }));
+      expect(rh.disposed).toEqual([]);
+      ended = true;
+      await session.end();
+      await settle(rh.disposed, 1);
+      expect(rh.disposed).toEqual(["run-1"]);
+    } finally { t.close(); }
+  });
+
+  test("pending, quarantined and no answer all KEEP the folder — dispose only on safe (L2 fix round 1)", async () => {
+    for (const [outcome, expected] of [["pending", []], ["quarantined", []], [undefined, []]] as const) {
+      const rh = stubRunHomes();
+      const t = table({ runHome: rh.runHome }, { runHomeOutcome: () => outcome });
+      try {
+        const session = await t.drivers.create(t.store.createSession("t", { mode: "chat", model: "winter-test/echo" }));
+        await session.end();
+        await settle(rh.disposed, expected.length);
+        await Bun.sleep(20);
+        expect(rh.disposed).toEqual([...expected]);
+      } finally { t.close(); }
+    }
+  });
+
+  test("a run home built for an open that then FAILS is disposed immediately", async () => {
+    const rh = stubRunHomes();
+    const spy = querySpy();
+    const t = table({ runHome: rh.runHome }, {}, spy.wrap);
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      spy.failOnce();
+      // The router's typed refusal is forwarded verbatim as the refusal's code (→ `data.code`).
+      const err = await t.drivers.create(sid).then(() => undefined, (e: unknown) => e as { code?: string });
+      expect(err?.code).toBe("run_home_required");
+      expect(rh.built).toHaveLength(1);
+      expect(rh.disposed).toEqual(["run-1"]);
+    } finally { t.close(); }
+  });
+});
+
+// WS-21 L3.4 (spec §6.1): with a run home applied, the driver hands the child none of the inputs the run
+// folder carries — the same planted world, with and without a (stubbed) run-home router.
+describe("WS-21: the driver stops building run-home inputs once a run home is applied", () => {
+  const stubBuilder: NonNullable<WinterLegDeps["runHome"]> = {
+    inputFor: (f) => ({ home: "/h", mode: f.mode, dispatchChild: f.dispatchChild, leg: f.leg, cwd: f.cwd, trustedProjectRoot: null, gitRoot: null, mcpDisabled: [], reservedMcpServerNames: [], memoryDir: "/m" }),
+    build: async (input) => ({
+      runId: "r", dir: "/h/cache/runs/r", sdkHome: "/h/sdk", input, effectiveSettings: {},
+      report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [] },
+      dispose: async () => {},
+    }),
+  };
+  // The inputs a daemon wires, and the files it reads them from (the user agent, the sdk allow rule).
+  const inputs: Partial<WinterLegDeps> = {
+    extraMcpServers: () => ({ user_srv: { type: "stdio", command: "node" } }),
+    persistedAllowRules: () => ["Bash(git status)"],
+  };
+  const plantFiles = (home: string): void => {
+    mkdirSync(join(home, "agents"), { recursive: true });
+    writeFileSync(join(home, "agents", "reviewer.md"), ["---", "name: code-reviewer", "description: Reviews code", "---", "", "You review code."].join("\n"));
+    updateSdkSettings(home, () => ({ permissions: { allow: ["Bash(npm test:*)"] } }));
+  };
+
+  for (const applied of [false, true]) {
+    test(`run home ${applied ? "APPLIED: none of them" : "not applied: all of them, as today"}`, async () => {
+      const t = table({ ...inputs, ...(applied ? { runHome: stubBuilder } : {}) });
+      try {
+        plantFiles(t.home);
+        const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", approvalPolicy: "ask" });
+        const session = await t.drivers.create(sid);
+        const o = t.q().options;
+        const allow = o.permissions?.allow ?? [];
+        if (applied) {
+          expect("agents" in o).toBe(false);
+          expect("plugins" in o).toBe(false);
+          expect("skills" in o).toBe(false);
+          expect(Object.keys(o.mcpServers ?? {})).not.toContain("user_srv");
+          expect(allow).not.toContain("Bash(git status)");
+          expect(allow).not.toContain("Bash(npm test:*)");
+          expect(allow).toEqual(expect.arrayContaining(["Read", "Glob", "Grep"]));
+        } else {
+          expect(o.agents).toBeDefined();
+          // L4 request 2: no plugin views or skill names from the daemon on any build
+          expect("plugins" in o).toBe(false);
+          expect("skills" in o).toBe(false);
+          expect(Object.keys(o.mcpServers ?? {})).toContain("user_srv");
+          expect(allow).toEqual(expect.arrayContaining(["Bash(git status)", "Bash(npm test:*)"]));
+        }
+        await session.end();
+      } finally { t.close(); }
+    });
+  }
+});
+
+// WS-21 round 3 (Important): both legs key a transcript by the canonical cwd now, but a 0.116 session
+// made in a symlinked cwd has its files under the RAW cwd's key. `resume()` moves them — before the leg
+// opens, synchronously (n7) — so the child finds its history; a collision moves nothing and is marked.
+describe("WS-21 round 3: the lazy canonical-cwd re-key at resume (Winter leg)", () => {
+  const ENTRY = '{"type":"user","uuid":"u-old","message":{"role":"user","content":"before the upgrade"}}\n';
+  async function oldLayoutSession() {
+    const t = table();
+    const real = realpathSync(mkdtempSync(join(tmpdir(), "winter-rekey-real-")));
+    const link = join(realpathSync(mkdtempSync(join(tmpdir(), "winter-rekey-link-"))), "proj");
+    symlinkSync(real, link);
+    const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd: link });
+    const created = await t.drivers.create(sid);
+    await created.end();
+    const id = created.backendSessionId;
+    const projects = storeProjectsDir(t.home);
+    const rawKey = transcriptProjectKey(link);
+    const canonKey = transcriptProjectKey(real);
+    expect(rawKey).not.toBe(canonKey);
+    // the 0.116 state: the record and the files under the RAW key
+    expect(t.records.rekeyTranscript(sid, canonKey, rawKey, join(projects, rawKey))).toBe(true);
+    mkdirSync(join(projects, rawKey, id, "subagents"), { recursive: true });
+    writeFileSync(join(projects, rawKey, `${id}.jsonl`), ENTRY);
+    writeFileSync(join(projects, rawKey, `${id}.provider-state.jsonl`), "{}\n");
+    writeFileSync(join(projects, rawKey, id, "subagents", "agent-a.jsonl"), "{}\n");
+    return { t, sid, id, real, projects, rawKey, canonKey };
+  }
+
+  test("a symlinked-cwd session from the old layout resumes WITH its history: files moved, record re-pointed, the child looks where they are", async () => {
+    const { t, sid, id, real, projects, rawKey, canonKey } = await oldLayoutSession();
+    const again = table({ records: t.records, store: t.store, hub: t.hub, home: t.home });
+    try {
+      const resumed = (await again.drivers.ensure(sid))!;
+      expect(existsSync(join(projects, rawKey, `${id}.jsonl`))).toBe(false);
+      expect(existsSync(join(projects, canonKey, id, "subagents", "agent-a.jsonl"))).toBe(true);
+      const record = t.records.get(sid)!;
+      expect([record.transcriptProjectKey, record.backendRoot]).toEqual([canonKey, join(projects, canonKey)]);
+      const opts = again.q().options;
+      expect(opts.cwd).toBe(real);
+      expect(opts.resume).toBe(id);   // hasTranscript found it: a RESUME, not a fresh start
+      // the child's own lookup — the SDK store at the key of the cwd it is handed — returns the history
+      const loaded = await new winter.WinterCompatibilitySessionStore({ winterHome: storeHomeFor(t.home) }).load({ projectKey: transcriptProjectKey(opts.cwd!), sessionId: id });
+      expect(loaded?.map((e) => e.uuid)).toEqual(["u-old"]);
+      expect(again.logs.some((l) => l.includes("re-keyed") && l.includes(sid))).toBe(true);
+      await resumed.end();
+    } finally { again.close(); t.close(); }
+  });
+
+  // Round 4, minor 1: a lazy re-key on a MIGRATED home joins Migration C's manifest (`rekeyed`), so a rollback
+  // reverses it like the bulk step's moves — the older build finds the transcript under the raw key again.
+  test("round 4: on a migrated home the lazy move is recorded in the Migration C manifest, and rollback reverses it", async () => {
+    setRunHomeSupportForTests(true);   // the store at <home>/sdk/projects, as on every build that migrates
+    try {
+      const { t, sid, id, rawKey, canonKey } = await oldLayoutSession();
+      const archiveDir = join(t.home, "migration", "c-test");
+      mkdirSync(join(t.home, "migration", "c"), { recursive: true });
+      mkdirSync(archiveDir, { recursive: true });
+      writeFileSync(migrationCManifestPath(t.home), JSON.stringify({
+        schemaVersion: 1, home: t.home, startedAt: new Date(0).toISOString(), finishedAt: new Date(0).toISOString(), status: "complete", archiveDir,
+        steps: [{ step: "preflight", status: "done", at: new Date(0).toISOString() }],
+        backups: { settings: null, runtimeState: null, sdkSettings: null, sdkGlobal: null, splitMarker: null },
+        moved: [], links: [], copied: [], archived: [], reconciled: [],
+      }));
+      const again = table({ records: t.records, store: t.store, hub: t.hub, home: t.home });
+      try {
+        await (await again.drivers.ensure(sid))!.end();
+        const state = migrationCState(t.home);
+        if (state.kind !== "parsed") throw new Error("the manifest must still parse");
+        expect(state.manifest.rekeyed).toEqual([expect.objectContaining({ sessionId: sid, backendId: id, from: rawKey, to: canonKey, outcome: "moved" })]);
+        await rollbackMigrationC(t.home, { log: () => {} });
+        const projects = join(t.home, "sdk", "projects");
+        expect(existsSync(join(projects, rawKey, `${id}.jsonl`))).toBe(true);
+        expect(existsSync(join(projects, rawKey, id, "subagents", "agent-a.jsonl"))).toBe(true);
+        expect(existsSync(join(projects, canonKey, `${id}.jsonl`))).toBe(false);
+        const db = new Database(join(t.home, "runtimes", "runtime-state.db"), { readonly: true });
+        try { expect(db.query<{ k: string }, [string]>("SELECT transcript_project_key AS k FROM runtime_sessions WHERE winter_session_id = ?").get(sid)!.k).toBe(rawKey); } finally { db.close(); }
+      } finally { again.close(); t.close(); }
+    } finally { setRunHomeSupportForTests(undefined); }
+  });
+
+  // Round 4, minor 3: the ROUTER's own cold resume (a message delivered to an exited Winter session) builds
+  // its run home through the daemon's `runHomeFor` — never through `resume()`. It canonicalizes the cwd and
+  // runs the same lazy re-key, so that path finds the history too.
+  test("round 4: the router's cold-resume runHomeFor canonicalizes the cwd and re-keys the transcript first", async () => {
+    const { t, sid, id, real, projects, rawKey, canonKey } = await oldLayoutSession();
+    try {
+      const built: import("../../src/runtime-sdk/run-home-contract").RunHomeInput[] = [];
+      const facts: import("../../src/runtime-sdk/run-home-input").RunHomeSessionFacts[] = [];
+      const runHome: NonNullable<WinterLegDeps["runHome"]> = {
+        inputFor: (f) => { facts.push(f); return { home: t.home, mode: f.mode, dispatchChild: f.dispatchChild, leg: f.leg, cwd: f.cwd, trustedProjectRoot: null, gitRoot: null, mcpDisabled: [], reservedMcpServerNames: [], memoryDir: "/m" }; },
+        build: async (input) => { built.push(input); return { runId: "cold-1", dir: "/h/cache/runs/cold-1", sdkHome: "/h/sdk", input, effectiveSettings: {}, report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [] }, dispose: async () => {} }; },
+      };
+      const logs: string[] = [];
+      const runHomeFor = coldResumeRunHomeFor({ home: t.home, store: t.store, records: t.records, runHome, log: (l) => logs.push(l) });
+      const link = t.store.meta(sid).cwd!;
+      await runHomeFor({ sessionId: sid, leg: "winter", cwd: link, mode: "code" });
+      expect(built[0]!.cwd).toBe(real);
+      expect(facts[0]).toMatchObject({ mode: "code", dispatchChild: false, leg: "winter", cwd: real, workdirLess: false });
+      expect(existsSync(join(projects, canonKey, `${id}.jsonl`))).toBe(true);
+      expect(existsSync(join(projects, rawKey, `${id}.jsonl`))).toBe(false);
+      expect(t.records.get(sid)!.transcriptProjectKey).toBe(canonKey);
+      expect(logs.some((l) => l.includes("re-keyed") && l.includes(sid))).toBe(true);
+    } finally { t.close(); }
+  });
+
+  test("a collision (the canonical key already holds the transcript) moves nothing and marks the session repair-required", async () => {
+    const { t, sid, id, projects, rawKey, canonKey } = await oldLayoutSession();
+    mkdirSync(join(projects, canonKey), { recursive: true });
+    writeFileSync(join(projects, canonKey, `${id}.jsonl`), '{"type":"user","uuid":"u-new"}\n');
+    const again = table({ records: t.records, store: t.store, hub: t.hub, home: t.home });
+    try {
+      const resumed = (await again.drivers.ensure(sid))!;
+      expect(existsSync(join(projects, rawKey, `${id}.jsonl`))).toBe(true);
+      expect(readFileSync(join(projects, canonKey, `${id}.jsonl`), "utf8")).toContain("u-new");
+      expect(t.records.get(sid)!.transcriptHealth).toBe("repair-required");
+      expect(t.records.get(sid)!.transcriptProjectKey).toBe(rawKey);
+      expect(again.logs.some((l) => l.includes("collision") && l.includes(sid))).toBe(true);
+      await resumed.end();
+    } finally { again.close(); t.close(); }
   });
 });

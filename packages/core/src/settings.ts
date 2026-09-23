@@ -6,7 +6,7 @@ import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { ensureGlobalGitignore, WINTER_PERSONAL_IGNORES } from "./global-gitignore";
 import { OFFICIAL_SUBSCRIPTION_AUTH_APPROVED } from "./runtime-sdk/versions";
 import { consoleProfileCredentialFile } from "./runtime-sdk/anthropic-paths";
-import { facingNameToTag, isModelTag, splitTag, UNSTATED_TAG, WINTER_TEST_PREFIX, type ModelTag } from "./runtime-sdk/model-tag";
+import { canonicalModelTag, facingNameToTag, isModelTag, splitTag, UNSTATED_TAG, WINTER_TEST_PREFIX, type ModelTag } from "./runtime-sdk/model-tag";
 // The ONE catalog-row-by-tag lookup (WS-20) — imported rather than re-written here so a role write
 // and a session's own model resolution agree on what "this model exists" means, by construction.
 // `effortVocabularyFor`: the ONE interpretation of a catalog row's `reasoning?.efforts`, shared with
@@ -23,6 +23,8 @@ import { effortVocabularyFor, implicitEffortFor, rowForTag } from "./runtime-sdk
 // are static imports rather than a lazy hop.
 import { credentialInventory } from "./runtime-sdk/keychain";
 import { internalDrivableAdapterIds } from "./providers/internal-adapters";
+import { liveSdkGlobalConfig, liveSdkSettings } from "./sdk-files";
+import { sdkSettingsPath } from "./agent/paths";
 
 /** Reasoning-effort slugs valid on the wire — measured LIVE against the Codex OAuth endpoint
  *  (2026-07-30), one model at a time, NOT read off the /models catalogue text. That distinction
@@ -417,16 +419,15 @@ export const Settings = z.object({
   plugins: z.object({
     enabled: z.array(z.string()).optional(),
     disabled: z.array(z.string()).optional(),
-    /** Per-plugin per-permission-class consent records (design spec §1): { [pluginId]: { exec?:
-     *  ts, tcc?: ts, hardware?: ts } }, timestamp = Date.now() at grant time. A class's presence
-     *  (not its value) is what counts as consented — see plugins.ts#consentComplete. `disable`
-     *  deletes a plugin's whole record (fresh-consent semantics, generalized from today's
-     *  enabled-strip). */
-    consents: z.record(z.string(), z.object({
-      exec: z.number().optional(),
-      tcc: z.number().optional(),
-      hardware: z.number().optional(),
-    })).optional(),
+    /** Per-plugin consent records, keyed by the qualified `"<name>@<marketplace>"` spec. WS-21 fix
+     *  round 2 (C1): `{classes: string[], fingerprint: string}`, bound to the plugin's install path
+     *  + entry at grant time (`plugins/consent-fingerprint.ts` has the full ruling) — superseding
+     *  the pre-fix `{exec?: ts, tcc?: ts, hardware?: ts}` per-class-timestamp shape. Typed
+     *  `z.unknown()` here, DELIBERATELY not validated against either shape: a pre-fix record must
+     *  still parse successfully (it is the CONSUMER, `consentedClassesFor`, that treats anything but
+     *  the new fingerprinted shape as "not consented" — never a zod rejection, which would rollback
+     *  the WHOLE settings file to keep-last-good over one stale plugin's consent record). */
+    consents: z.record(z.string(), z.unknown()).optional(),
     /** PluginSupervisor lifecycle overrides (Phase 4b Task 3, spec §3 — all four values are
      *  spec-defaulted when omitted: registration timeout 10s, backoff cap 60s, circuit 5
      *  failures/10min). The invoke timeout (default 60s) and the SIGTERM→SIGKILL kill grace (5s)
@@ -906,14 +907,214 @@ export function providerBaseUrlFor(settings: Settings | null | undefined, provid
  * user disabled any more than a session's `Options.mcpServers` should. Shape matches
  * `agent/mcp/manager.ts`'s own `McpServerConfig` (`{command, args?, env?}`) field-for-field.
  */
-export function stdioMcpServersFor(settings: Settings | null | undefined): Record<string, { command: string; args?: string[]; env?: Record<string, string> }> {
+export function stdioMcpServersFor(
+  servers: Readonly<Record<string, McpServerSettingsEntry>> | undefined,
+  disabledNames: readonly string[] | undefined,
+): Record<string, { command: string; args?: string[]; env?: Record<string, string> }> {
   const out: Record<string, { command: string; args?: string[]; env?: Record<string, string> }> = {};
-  const disabled = new Set(settings?.mcp?.disabled ?? []);
-  for (const [name, entry] of Object.entries(settings?.mcpServers ?? {})) {
+  const disabled = new Set(disabledNames ?? []);
+  for (const [name, entry] of Object.entries(servers ?? {})) {
     if (entry.type !== "stdio" || disabled.has(name)) continue;
     out[name] = { command: entry.command, ...(entry.args === undefined ? {} : { args: entry.args }), ...(entry.env === undefined ? {} : { env: entry.env }) };
   }
   return out;
+}
+
+// ── WS-21: the runtime-facing keys live in `<home>/sdk` (spec §4.1) ──────────────────────────────
+//
+// These keys MOVED to the shared runtime home's claude-format files. They stay in the `Settings`
+// schema so an older build (a downgrade) still parses a home that carries them, but THIS daemon never
+// reads them from `settings.json` again: `withoutMovedKeys` strips them from every live holder, and
+// the readers below are the only doors to their values. The one-time copy (`settings.json` →
+// `sdk/`) is Migration C's automatic settings split.
+//
+//   settings.json                         →  sdk/settings.json (claude `Settings`)
+//   permissions.allow                         permissions.allow (claude grammar, translated once)
+//   permissions.deny / additionalDirectories  same keys
+//   outputStyle                               outputStyle
+//   memory.enabled / memory.directory         autoMemoryEnabled / autoMemoryDirectory
+//   plugins.enabled / plugins.disabled        enabledPlugins  (read by the plugin surface — lane L4)
+//   mcpServers                            →  sdk/.winter.json `mcpServers` (claude's `.claude.json`)
+//
+// `permissions.dangerousDomains`, `mcp.disabled`, `plugins.consents` and everything else stay.
+
+/**
+ * The moved keys, dotted. `plugins.enabled`/`plugins.disabled` are listed (they moved) but NOT stripped
+ * by `withoutMovedKeys`: the plugin surface that reads them switches to `sdkEnabledPlugins` with its
+ * own lane (L4), and stripping them first would silently disable every plugin in between.
+ */
+export const MOVED_SETTINGS_KEYS = [
+  "permissions.allow",
+  "permissions.deny",
+  "permissions.additionalDirectories",
+  "outputStyle",
+  "memory.enabled",
+  "memory.directory",
+  "plugins.enabled",
+  "plugins.disabled",
+  "mcpServers",
+] as const;
+
+/**
+ * `settings` without the moved keys (except the plugin pair — see `MOVED_SETTINGS_KEYS`). Applied to
+ * every live settings holder, so no reader of `settings.json` can see a stale copy, and a trusted
+ * project's overlay (`ProjectSettingsResolver`) merges onto a base that no longer carries them. Never
+ * mutates its argument; the file on disk is untouched (the keys stay there for a downgrade).
+ */
+export function withoutMovedKeys(settings: Settings): Settings {
+  const out: Settings = { ...settings };
+  if (out.permissions !== undefined) {
+    const { allow: _a, deny: _d, additionalDirectories: _ad, ...rest } = out.permissions;
+    if (Object.keys(rest).length > 0) out.permissions = rest; else delete out.permissions;
+  }
+  if (out.memory !== undefined) {
+    const { enabled: _e, directory: _dir, ...rest } = out.memory as Record<string, unknown>;
+    if (Object.keys(rest).length > 0) out.memory = rest as Settings["memory"]; else delete out.memory;
+  }
+  delete out.outputStyle;
+  delete out.mcpServers;
+  return out;
+}
+
+/**
+ * WS-21 (spec §8 step 5, layer 1 of 3): the settings' model tags, canonicalized ON READ through the
+ * catalog's renames (`canonicalModelTag`) — `provider.model`, every `pins` role, `reviewer.model`,
+ * `titles.model` and `runtimes.advisorModel` (`roleEfforts` holds efforts, not tags). Applied to the LIVE
+ * view only (`liveSettingsView`), never inside `loadSettings`: the writers load, patch and save whole
+ * objects, and a canonicalizing parse there would rewrite every stored tag on the next unrelated write —
+ * the downgrade hazard (r2 I5) the no-rewrite rule exists for. Returns its argument when nothing changes.
+ */
+export function canonicalSettingsModelTags(settings: Settings): Settings {
+  let out = settings;
+  const patch = <K extends keyof Settings>(key: K, value: Settings[K]): void => { if (out === settings) out = { ...settings }; out[key] = value; };
+  const provider = settings.provider;
+  if (provider?.model !== undefined && canonicalModelTag(provider.model) !== provider.model) {
+    patch("provider", { ...provider, model: canonicalModelTag(provider.model) as ModelTag });
+  }
+  const pins = settings.pins;
+  if (pins !== undefined) {
+    const next: Record<string, unknown> = { ...pins };
+    let changed = false;
+    for (const [role, tag] of Object.entries(pins)) {
+      if (typeof tag === "string" && canonicalModelTag(tag) !== tag) { next[role] = canonicalModelTag(tag); changed = true; }
+    }
+    if (changed) patch("pins", next as Settings["pins"]);
+  }
+  for (const key of ["reviewer", "titles"] as const) {
+    const block = settings[key] as { model?: string } | undefined;
+    if (block?.model !== undefined && canonicalModelTag(block.model) !== block.model) {
+      patch(key, { ...block, model: canonicalModelTag(block.model) } as Settings[typeof key]);
+    }
+  }
+  const advisor = settings.runtimes?.advisorModel;
+  if (typeof advisor === "string" && canonicalModelTag(advisor) !== advisor) {
+    patch("runtimes", { ...settings.runtimes, advisorModel: canonicalModelTag(advisor) } as Settings["runtimes"]);
+  }
+  return out;
+}
+
+/** The daemon's LIVE settings holder, from a parsed `settings.json`: the moved keys stripped
+ *  (`withoutMovedKeys`) and the model tags canonicalized on read (`canonicalSettingsModelTags`). Every
+ *  live holder is built through this one function. */
+export function liveSettingsView(settings: Settings): Settings {
+  return canonicalSettingsModelTags(withoutMovedKeys(settings));
+}
+
+const stringList = (v: unknown): string[] | undefined =>
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : undefined;
+
+/** `sdk/settings.json` `permissions.allow` — claude grammar, verbatim — or `undefined` when the key is
+ *  absent (which is distinct from `[]`: an explicit empty list opts out of every default). */
+export function sdkAllowRules(home: string): string[] | undefined {
+  return stringList(liveSdkSettings(home).permissions?.allow);
+}
+
+/** `sdk/settings.json` `permissions.deny`, verbatim (claude grammar; `Skill(<name>)` toggles included). */
+export function sdkDenyRules(home: string): string[] {
+  return stringList(liveSdkSettings(home).permissions?.deny) ?? [];
+}
+
+/** `sdk/settings.json` `permissions.additionalDirectories`, verbatim (`~/` expanded by the caller). */
+export function sdkAdditionalDirectories(home: string): string[] {
+  return stringList(liveSdkSettings(home).permissions?.additionalDirectories) ?? [];
+}
+
+/** `sdk/settings.json` `outputStyle` — the user tier's style NAME, or `undefined`. */
+export function sdkOutputStyle(home: string): string | undefined {
+  const v = liveSdkSettings(home).outputStyle;
+  return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+/**
+ * `sdk/settings.json` `autoMemoryEnabled` / `autoMemoryDirectory` (spec §3.7) — claude's own keys and
+ * defaults: memory is ON unless explicitly `false`; the directory override is absent unless a
+ * non-blank string.
+ */
+export function sdkAutoMemory(home: string): { enabled: boolean; directory: string | undefined } {
+  const s = liveSdkSettings(home);
+  const directory = typeof s.autoMemoryDirectory === "string" && s.autoMemoryDirectory.trim() !== "" ? s.autoMemoryDirectory : undefined;
+  return { enabled: s.autoMemoryEnabled !== false, directory };
+}
+
+/** `sdk/settings.json` `enabledPlugins` (`"<plugin>@<marketplace>" → boolean`, claude's shape). */
+export function sdkEnabledPlugins(home: string): Record<string, boolean> {
+  const v = liveSdkSettings(home).enabledPlugins;
+  const out: Record<string, boolean> = {};
+  if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+    for (const [k, on] of Object.entries(v)) if (typeof on === "boolean") out[k] = on;
+  }
+  return out;
+}
+
+const reportedMcpEntries = new Set<string>();
+
+/** One `.winter.json` `mcpServers` map, parsed the way `settings.mcpServers` always was: a
+ *  credential-shaped header is DROPPED (read door, reported once), and an entry that does not
+ *  validate is skipped (reported once) rather than taking its siblings down. */
+function parseMcpServerMap(raw: unknown, where: string): Record<string, McpServerSettingsEntry> {
+  const out: Record<string, McpServerSettingsEntry> = {};
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return out;
+  const copy = structuredClone(raw) as Record<string, unknown>;
+  const stripped = stripCredentialShapedMcpHeaders({ mcpServers: copy });
+  for (const [name, headers] of Object.entries(stripped)) {
+    const key = `${where}\u0000${name}\u0000strip:${headers.join(",")}`;
+    if (!reportedMcpEntries.has(key)) {
+      reportedMcpEntries.add(key);
+      console.error(`settings: ${where} mcpServers.${name}: dropped credential-shaped header(s) ${headers.join(", ")} — never a literal secret in this file`);
+    }
+  }
+  for (const [name, entry] of Object.entries(copy)) {
+    const parsed = McpServerSettingsEntry.safeParse(entry);
+    if (parsed.success) { out[name] = parsed.data; continue; }
+    const key = `${where}\u0000${name}\u0000invalid`;
+    if (!reportedMcpEntries.has(key)) {
+      reportedMcpEntries.add(key);
+      console.error(`settings: ${where} mcpServers.${name} skipped — ${parsed.error.issues[0]?.message ?? "invalid entry"}`);
+    }
+  }
+  return out;
+}
+
+/** `sdk/.winter.json` `mcpServers` — the USER-scope MCP servers (spec §4.4), validated per entry. */
+export function sdkUserMcpServers(home: string): Record<string, McpServerSettingsEntry> {
+  return parseMcpServerMap(liveSdkGlobalConfig(home).mcpServers, "sdk/.winter.json");
+}
+
+/** `sdk/.winter.json` `projects[<root>].mcpServers` — the LOCAL-scope MCP servers for one project
+ *  root (spec §4.4), validated per entry. `root` must be the absolute canonical project root. */
+export function sdkLocalMcpServers(home: string, root: string): Record<string, McpServerSettingsEntry> {
+  const projects = liveSdkGlobalConfig(home).projects;
+  const entry = projects !== null && typeof projects === "object" && !Array.isArray(projects) ? projects[root] : undefined;
+  return parseMcpServerMap(entry?.mcpServers, `sdk/.winter.json projects[${root}]`);
+}
+
+/** Validate one MCP entry for a WRITE into `sdk/.winter.json`: the same schema — and the same
+ *  credential-shaped-header REFUSAL — `settings.mcpServers` always enforced at its write door. Throws a
+ *  plain `Error` naming the problem (never a header value). */
+export function validateMcpServerEntryForWrite(entry: unknown): McpServerSettingsEntry {
+  const parsed = McpServerSettingsEntry.safeParse(entry);
+  if (!parsed.success) throw new Error(parsed.error.issues.map((i) => i.message).join("; "));
+  return parsed.data;
 }
 
 /**
@@ -1611,7 +1812,9 @@ export function setProviderModel(settings: Settings, model: ModelTag): Settings 
 
 /** Pure Settings→Settings: set the active output style (or clear it for undefined/"default").
  *  Preserves every other field — mirrors setProviderModel. */
-export function setOutputStyle(settings: Settings, name: string | undefined): Settings {
+export function setOutputStyle<T extends { outputStyle?: string }>(settings: T, name: string | undefined): T {
+  // WS-21: applied to `sdk/settings.json` (claude `Settings`) through `updateSdkSettings` — generic so
+  // it transforms either shape.
   const next = { ...settings };
   if (!name || name === "default") delete next.outputStyle;
   else next.outputStyle = name;
@@ -1687,12 +1890,14 @@ export function skillDenyRule(skillName: string): string {
  * different shape (`"Agent(fork)"`, a malformed string, …) — this function only ever adds/removes
  * its OWN exact `Skill(<name>)` string, never rewrites or validates the rest of the array.
  */
-export function setSkillDenied(settings: Settings, skillName: string, denied: boolean): Settings {
+export function setSkillDenied<T extends { permissions?: { deny?: string[] } }>(settings: T, skillName: string, denied: boolean): T {
   const rule = skillDenyRule(skillName);
   const current = settings.permissions?.deny ?? [];
   const next = denied
     ? (current.includes(rule) ? current : [...current, rule])
     : current.filter((r) => r !== rule);
+  // WS-21: the one writer is `settings.setSkillDenied`, which applies this to `sdk/settings.json`
+  // (claude `Settings`) through `updateSdkSettings` — generic so it transforms either shape.
   return { ...settings, permissions: { ...settings.permissions, deny: next } };
 }
 
@@ -2719,11 +2924,13 @@ function readDirs(path: string): string[] {
  * `projectTrusted` — a repo can't silently widen the fence until the user trusts the folder.
  * fix-wave A2: settings.local.json used to be honored unconditionally ("gitignored, always"), but
  * gitignore is advisory, not a trust boundary — a repo can `git add -f` one, so it needs the same
- * gate the committed file gets (matches CC). Only the user's OWN ~/.winter/settings.json is always
+ * gate the committed file gets (matches CC). Only the user's OWN ~/.winter/sdk/settings.json is always
  * honored, trust-independent.
  */
 export function loadPermissionDirs(homeDir: string, projectDir?: string, projectTrusted = false): string[] {
-  const sources = [join(homeDir, "settings.json")]; // user global — always
+  // WS-21: the user tier is `sdk/settings.json` (claude `Settings`), where `additionalDirectories` moved;
+  // a stale copy left in `<home>/settings.json` for a downgrade is never read.
+  const sources = [sdkSettingsPath(homeDir)]; // user global — always
   if (projectDir && projectTrusted) {
     sources.push(join(projectDir, ".winter", "settings.json"));      // committed — trust-gated
     sources.push(join(projectDir, ".winter", "settings.local.json")); // local: a repo can force-commit one → also trust-gated (matches CC)

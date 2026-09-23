@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, existsSync, writeFileSync, readFileSync, renameSync } from "node:fs";
+import { mkdirSync, mkdtempSync, existsSync, writeFileSync, readFileSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@yanlinglabs/winter-protocol";
@@ -81,7 +81,9 @@ describe("memory.* RPCs (Phase 5b Task 3) — legacy store (memory.enabled: fals
     // T2: memory.enabled defaults ON (T1), which would route these RPCs onto MEMDIR files instead
     // — every test below asserts the LEGACY store's own behavior (trust-gating, the exact
     // `<cwd>/.winter/memory` path, its central audit.jsonl), so it's disabled here explicitly.
-    writeFileSync(join(home, "settings.json"), JSON.stringify({ memory: { enabled: false } }));
+    // WS-21: `memory.enabled` moved to `sdk/settings.json` as claude's `autoMemoryEnabled`.
+    mkdirSync(join(home, "sdk"), { recursive: true });
+    writeFileSync(join(home, "sdk", "settings.json"), JSON.stringify({ autoMemoryEnabled: false }));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     daemon = await startDaemon({ home, secrets, agentProvider: null });
     harnessToken = daemon.tokens.harness;
@@ -485,7 +487,7 @@ describe("memory.* RPCs (T2) — file-backed (memory.enabled: true, default)", (
   // a settings.json edit actually reaches the running daemon's `settings` holder; the other tests
   // in this block pass `agentProvider: null` (no turns driven, so the boot-time snapshot never
   // needs to change) and rely on `boot()`'s own default. This test overrides that.
-  test("hot toggle: flipping memory.enabled true -> false (no restart) makes the NEXT call read the legacy store instead", async () => {
+  test("hot toggle: flipping sdk/settings.json autoMemoryEnabled true -> false (no restart) makes the NEXT call read the legacy store instead", async () => {
     home = mkdtempSync(join(tmpdir(), "winter-daemon-memory-files-hot-"));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     daemon = await startDaemon({ home, secrets, agentProvider: { provider: new FakeProvider([]), model: "fake-1" } });
@@ -505,9 +507,10 @@ describe("memory.* RPCs (T2) — file-backed (memory.enabled: true, default)", (
     // either the old or the fully-written new file, never a torn one (this is exactly how the
     // production daemon writes settings). This was the true flake trigger, confirmed in the failing
     // run's log ("settings reload failed, keeping previous: JSON Parse error: Expected '}'").
-    const settingsPath = join(home, "settings.json");
+    // WS-21: the switch is `sdk/settings.json` `autoMemoryEnabled` (claude's key), read live.
+    const settingsPath = join(home, "sdk", "settings.json");
     const flipToLegacy = () => {
-      writeFileSync(`${settingsPath}.tmp`, JSON.stringify({ memory: { enabled: false } }));
+      writeFileSync(`${settingsPath}.tmp`, JSON.stringify({ autoMemoryEnabled: false }));
       renameSync(`${settingsPath}.tmp`, settingsPath);
     };
     flipToLegacy();

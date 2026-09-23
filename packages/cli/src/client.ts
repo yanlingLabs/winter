@@ -5,12 +5,16 @@ import {
   BgListResult, BgPeekResult, BgKillResult, BgKillAllResult,
   SessionSteerResult, SessionInterruptResult, SessionCompactResult, SkillsListResult,
   ThreadSendResult, AgentStopResult,
-  PluginsListResult, AskUserRespondResult, TaskListResult, ThreadListResult,
+  AskUserRespondResult, TaskListResult, ThreadListResult,
   PlanRespondResult, SessionSetPolicyResult, type ApprovalPolicy,
   SessionSetActivityResult, type SessionActivity,
   SessionSetDirsResult,
   DaemonStatusResult, QuotaStateResult, TrustListResult, TrustRemoveResult,
   PluginRevokeTokenResult, PluginRestartResult,
+  // WS-21 (spec §5.2): `winter plugin` = `claude plugin`, over Contract B.
+  PluginListResult, PluginInstallResult, PluginUninstallResult, PluginSetEnabledResult,
+  PluginUpdateResult, PluginMarketplaceAddResult, PluginMarketplaceRemoveResult,
+  PluginMarketplaceListResult, PluginMarketplaceUpdateResult, type PluginScope,
   RoutinesCreateResult, RoutinesListResult, RoutinesUpdateResult, RoutinesDeleteResult,
   MemoryListResult, MemoryReadResult, MemoryDeleteResult,
   WorkflowListResult, WorkflowRunResult, WorkflowStopResult, WorkflowGetResult,
@@ -274,16 +278,53 @@ export class WinterClient {
   }> {
     return this.request(METHODS.mcpGet, { name });
   }
-  async pluginsList(): Promise<{
+  // WS-21 (spec §5.2): `winter plugin` = `claude plugin`, over Contract B
+  // (`plugins/sdk-plugin-api.ts`). Every result mirrors the adapter's own shape field-for-field
+  // (protocol/methods.ts's own header) — retires the pre-WS-21 `pluginsList()`, whose wire method
+  // (`plugins.list`) the daemon no longer handles (ipc/server.ts, this lane).
+  async pluginList(cwd?: string): Promise<{
     ok: true;
-    plugins: Array<{
-      name: string; description?: string; version?: string; skills: string[]; hasMcp: boolean; mcpEnabled: boolean; disabled: boolean;
-      // Phase 4a Task 3 — consent-flow display data (all optional: older servers may omit them).
-      tier?: "capability" | "platform"; requiredConsents?: string[]; consented?: string[]; legacy?: boolean;
-      execPayload?: string[]; tccPermissions?: string[]; hardwarePermissions?: string[];
-    }>;
+    plugins: Array<{ id: string; version?: string; installPath: string; scope: PluginScope; enabled: boolean; marketplace: string }>;
   }> {
-    return this.validated(PluginsListResult, await this.request(METHODS.pluginsList, {}), METHODS.pluginsList);
+    return this.validated(PluginListResult, await this.request(METHODS.pluginList, { cwd }), METHODS.pluginList);
+  }
+  async pluginInstall(spec: string, scope: PluginScope, cwd?: string): Promise<{ ok: true; plugin: { id: string; version?: string; installPath: string; scope: PluginScope } }> {
+    return this.validated(PluginInstallResult, await this.request(METHODS.pluginInstall, { spec, scope, cwd }), METHODS.pluginInstall);
+  }
+  async pluginUninstall(spec: string, scope: PluginScope, cwd?: string): Promise<{ ok: true; spec: string; scope: PluginScope }> {
+    return this.validated(PluginUninstallResult, await this.request(METHODS.pluginUninstall, { spec, scope, cwd }), METHODS.pluginUninstall);
+  }
+  async pluginSetEnabled(spec: string, scope: PluginScope, enabled: boolean, cwd?: string): Promise<{ ok: true; spec: string; scope: PluginScope; enabled: boolean }> {
+    const method = enabled ? METHODS.pluginEnable : METHODS.pluginDisable;
+    return this.validated(PluginSetEnabledResult, await this.request(method, { spec, scope, cwd }), method);
+  }
+  async pluginUpdate(spec: string): Promise<{ ok: true; plugin: { id: string; version?: string; installPath: string; scope: PluginScope } }> {
+    return this.validated(PluginUpdateResult, await this.request(METHODS.pluginUpdate, { spec }), METHODS.pluginUpdate);
+  }
+  async pluginMarketplaceAdd(source: string): Promise<{ ok: true; marketplace: { name: string; source: string; kind: "directory" | "git" | "github" | "url"; path: string } }> {
+    return this.validated(PluginMarketplaceAddResult, await this.request(METHODS.pluginMarketplaceAdd, { source }), METHODS.pluginMarketplaceAdd);
+  }
+  async pluginMarketplaceRemove(name: string): Promise<{ ok: true; name: string }> {
+    return this.validated(PluginMarketplaceRemoveResult, await this.request(METHODS.pluginMarketplaceRemove, { name }), METHODS.pluginMarketplaceRemove);
+  }
+  async pluginMarketplaceList(): Promise<{ ok: true; marketplaces: Array<{ name: string; source: string; kind: "directory" | "git" | "github" | "url"; path: string }> }> {
+    return this.validated(PluginMarketplaceListResult, await this.request(METHODS.pluginMarketplaceList, {}), METHODS.pluginMarketplaceList);
+  }
+  async pluginMarketplaceUpdate(name?: string): Promise<{ ok: true }> {
+    return this.validated(PluginMarketplaceUpdateResult, await this.request(METHODS.pluginMarketplaceUpdate, { name }), METHODS.pluginMarketplaceUpdate);
+  }
+  /** `plugin.setConsent` — the Winter-only extras' own consent (spec §5.4), keyed by the qualified
+   *  `"<name>@<marketplace>"` spec (WS-21 fix round 2, C2: a bare name was ambiguous across
+   *  marketplaces — `ipc/server.ts`'s own doc on the case this closed). `fingerprint` is the
+   *  disclosure fingerprint the caller saw in the `plugin.list` listing it displayed
+   *  (`extras.fingerprint`) — a TOCTOU check (L5 re-review): the daemon refuses `stale_disclosure`
+   *  when it no longer matches a fresh recompute. */
+  async pluginSetConsent(
+    spec: string,
+    classes: Array<"exec" | "tcc" | "hardware">,
+    fingerprint: string,
+  ): Promise<{ ok: true } | { code: "unknown_plugin" } | { code: "stale_disclosure" }> {
+    return this.request(METHODS.pluginSetConsent, { spec, classes, fingerprint });
   }
   async askUserRespond(params: { sessionId: string; callId: string; answers: Record<string, string>; notes?: Record<string, string> }): Promise<{ ok: true; alreadyResolved: boolean }> {
     return this.validated(AskUserRespondResult, await this.request(METHODS.askUserRespond, params), METHODS.askUserRespond);

@@ -1,0 +1,5 @@
+{
+  "name": "sample-echo",
+  "description": "Reference Tier-2 (platform) plugin for @yanlinglabs/winter-plugin-sdk — echoes text back through a real supervised child process and offers a delay tool for kill/restart testing.",
+  "version": "0.0.1"
+}

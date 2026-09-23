@@ -1120,14 +1120,15 @@ describe("B2 — /output-style (no args) opens the style picker when openChoice 
     expect(byValue.get("proactive")!.hint).toBeTruthy(); // the description rides as the hint
   });
 
-  test("onPick takes the SAME write path as `/output-style <name>`: settings.outputStyle set + the identical note", async () => {
+  test("onPick takes the SAME write path as `/output-style <name>`: sdk/settings.json outputStyle set + the identical note", async () => {
     const { client } = makeClient({});
     const requests: ChoiceRequest[] = [];
     const { ctx, notes } = makeCtx(client, { openChoice: (r) => requests.push(r) });
     await runCommand(ctx, "/output-style");
     await requests[0]!.onPick("explanatory");
     expect(notes).toEqual(["Output style set to: explanatory"]);
-    const settings = JSON.parse(readFileSync(join(home, "settings.json"), "utf8")) as { outputStyle?: string };
+    // WS-21: `outputStyle` moved to the shared runtime home's claude-format settings file.
+    const settings = JSON.parse(readFileSync(join(home, "sdk", "settings.json"), "utf8")) as { outputStyle?: string };
     expect(settings.outputStyle).toBe("explanatory");
   });
 

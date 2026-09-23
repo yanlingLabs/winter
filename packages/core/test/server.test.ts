@@ -1,17 +1,18 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { storeHomeFor } from "../src/agent/paths";
 import { mkdtempSync, readFileSync, realpathSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, PluginEnableResult, type WritableSocket } from "@yanlinglabs/winter-protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startDaemon, type RunningDaemon, CORE_VERSION } from "../src/daemon";
 import { startIpcServer } from "../src/ipc/server";
 import { SessionStore } from "../src/sessions/store";
 import { FileSecretStore } from "../src/auth/secret-store";
 import { TokenAuthority } from "../src/auth/tokens";
 import { PluginStore } from "../src/agent/plugins";
+import { pluginConsentFingerprint } from "../src/plugins/consent-fingerprint";
 import { ToolRegistry } from "../src/agent/tools/registry";
 import { ApprovalBroker } from "../src/agent/approvals";
-import { PermissionRules } from "../src/agent/permission-rules";
 import { PluginSupervisor } from "../src/plugins/supervisor";
 import { PluginContribRegistry } from "../src/plugins/contrib";
 import type { Provider, ProviderEvent } from "../src/providers/types";
@@ -366,23 +367,22 @@ describe("daemon IPC", () => {
   // for the duration (save/restore) so web_fetch never hits the real network.
 
   // Edge case called out explicitly by the brief: a rule-bearing optionId with NO usable project
-  // root (a null session cwd) must never hang or crash the respond — PermissionRules.append()
-  // throws RuleAppendError for scope "project" with no root, and the handler's try/catch must
-  // swallow it (log + still resolve). Unreachable through a REAL engine turn (a null-cwd session's
+  // root (a null session cwd) must never hang or crash the respond — WS-21: the handler refuses the
+  // save itself (`SavedAnswerRefused`, "no project directory") and its try/catch must swallow it
+  // (log + still resolve), writing nothing anywhere. Unreachable through a REAL engine turn (a null-cwd session's
   // turn() bails before any tool call — engine.ts's `if (!meta.cwd)` guard — so no approval_requested
   // with options ever fires for one in practice); exercised here at the bare-server level instead,
   // fabricating the pending entry directly against the broker to drive the server-side code path in
   // isolation, same "own SessionStore + TokenAuthority, no AgentEngine" shape as
   // remote-role.test.ts's bootPluginTestServer sibling below.
-  test("approval.respond: a rule-bearing optionId with no session cwd — RuleAppendError is caught, logged, and the approval still resolves", async () => {
+  test("approval.respond: a rule-bearing optionId with no session cwd — the refused save is logged, nothing is written, and the approval still resolves (WS-21)", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-approve-nocwd-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
     const tokens = await authority.ensureTokens();
     const broker = new ApprovalBroker();
-    const permissionRules = new PermissionRules({ globalAllow: () => undefined, winterHome: home });
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, broker, permissionRules });
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, broker, winterHome: home });
     try {
       const sessionId = store.createSession("global", { approvalPolicy: "ask" }); // no cwd at all
       const options = [{ id: "allow_project", label: 'Allow "Bash(git push:*)" in this project', rule: "Bash(git push:*)", scope: "project" as const }];
@@ -395,7 +395,9 @@ describe("daemon IPC", () => {
         const res = await c.request(METHODS.approvalRespond, { sessionId, callId: "c1", approved: true, optionId: "allow_project" });
         expect(res.result).toEqual({ ok: true, alreadyResolved: false });
         expect(errSpy).toHaveBeenCalled();
-        expect(errSpy.mock.calls.some((call) => String(call[0]).includes("failed to persist permission rule"))).toBe(true);
+        expect(errSpy.mock.calls.some((call) => String(call[0]).includes("was not saved") && String(call[0]).includes("no project directory"))).toBe(true);
+        expect(existsSync(join(home, "sdk", "settings.json"))).toBe(false);
+        expect(existsSync(join(home, "permissions"))).toBe(false);
       } finally {
         errSpy.mockRestore();
       }
@@ -608,8 +610,9 @@ describe("daemon IPC", () => {
 
     test("workflow.list surfaces saved workflows from WorkflowStore alongside running runs", async () => {
       const srv = await bootWorkflowServer();
-      mkdirSync(join(srv.winterHome, "workflows"), { recursive: true });
-      writeFileSync(join(srv.winterHome, "workflows", "nightly.js"),
+      // WS-21: the user workflow tier lives in the store home (`<home>/sdk` on a run-home build).
+      mkdirSync(join(storeHomeFor(srv.winterHome), "workflows"), { recursive: true });
+      writeFileSync(join(storeHomeFor(srv.winterHome), "workflows", "nightly.js"),
         `export const meta = {name:"nightly", description:"nightly sweep"}; return "ok";`);
 
       const c = await TestClient.connect(srv.socketPath);
@@ -709,16 +712,18 @@ describe("daemon IPC", () => {
     expect(result.ok).toBe(true);
     // The writing-skills builtin (phase 5c) is always discovered, regardless of home — it ships
     // in-repo and is resolved relative to the module, not winterHome.
-    // Lane B (2026-09-22): + the truthful session-availability pair — a built-in skill cannot reach a
-    // session's runtime child yet (only plugin skills do), and says so.
-    expect(result.skills).toEqual([{ name: "writing-skills", description: expect.any(String), source: "builtin", path: expect.any(String), loadsInSessions: false, sessionNote: expect.stringContaining("only plugin skills") }]);
+    // Lane B (2026-09-22): + the truthful session-availability pair. WS-21 (L4 request 2): on router
+    // 0.0.11 no tier reaches a child any more (the plugin-view handover is retired), and it says so.
+    expect(result.skills).toEqual([{ name: "writing-skills", description: expect.any(String), source: "builtin", path: expect.any(String), loadsInSessions: false, sessionNote: expect.stringContaining("no door") }]);
     c.close();
   });
 
   test("skills.list discovers a user skill over the socket (the daemon wires its one skillStore into the server)", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-daemon-"));
-    mkdirSync(join(home, "skills", "greet"), { recursive: true });
-    writeFileSync(join(home, "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nSay hello warmly.\n");
+    // WS-21: the user tier lives in the store home (`<home>/sdk` on a run-home build) — seeding the old
+    // `<home>/skills` there would make a temp home the old layout (Migration C refuses it at boot).
+    mkdirSync(join(storeHomeFor(home), "skills", "greet"), { recursive: true });
+    writeFileSync(join(storeHomeFor(home), "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nSay hello warmly.\n");
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     daemon = await startDaemon({ home, secrets, agentProvider: null });
     harnessToken = daemon.tokens.harness;
@@ -742,8 +747,10 @@ describe("daemon IPC", () => {
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 3,
       provider: { model: "codex-oauth/gpt-5.4" },
-      mcpServers: { fake: { command: "bun", args: ["run", fixture] } },
     }, null, 2));
+    // WS-21: the user-scope MCP servers live in `sdk/.winter.json` (claude's `.claude.json` shape).
+    mkdirSync(join(home, "sdk"), { recursive: true });
+    writeFileSync(join(home, "sdk", ".winter.json"), JSON.stringify({ mcpServers: { fake: { command: "bun", args: ["run", fixture] } } }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     const fake = new FakeProvider([[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]]);
     daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
@@ -764,15 +771,19 @@ describe("daemon IPC", () => {
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 3,
       provider: { model: "codex-oauth/gpt-5.4" },
-      mcpServers: { fake: { command: "bun", args: ["run", fixture] } },
     }, null, 2));
+    // WS-21: the user-scope MCP servers live in `sdk/.winter.json` (claude's `.claude.json` shape).
+    mkdirSync(join(home, "sdk"), { recursive: true });
+    writeFileSync(join(home, "sdk", ".winter.json"), JSON.stringify({ mcpServers: { fake: { command: "bun", args: ["run", fixture] } } }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     const fake = new FakeProvider([[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]]);
     daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
     harnessToken = daemon.tokens.harness;
 
     const projectDir = realpathSync(mkdtempSync(join(tmpdir(), "winter-mcp-project-")));
-    writeFileSync(join(projectDir, ".mcp.json"), JSON.stringify({ mcpServers: { proj: { command: "bun", args: ["run", fixture] } } }));
+    // WS-21: the project MCP file is `<root>/.winter/mcp.json`.
+    mkdirSync(join(projectDir, ".winter"), { recursive: true });
+    writeFileSync(join(projectDir, ".winter", "mcp.json"), JSON.stringify({ mcpServers: { proj: { command: "bun", args: ["run", fixture] } } }));
 
     const c = await TestClient.connect(daemon.socketPath);
     await c.hello(harnessToken, "mcp-lister-project");
@@ -804,8 +815,10 @@ describe("daemon IPC", () => {
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 3,
       provider: { model: "codex-oauth/gpt-5.4" },
-      mcpServers: { fake: { command: "bun", args: ["run", fixture] } },
     }, null, 2));
+    // WS-21: the user-scope MCP servers live in `sdk/.winter.json` (claude's `.claude.json` shape).
+    mkdirSync(join(home, "sdk"), { recursive: true });
+    writeFileSync(join(home, "sdk", ".winter.json"), JSON.stringify({ mcpServers: { fake: { command: "bun", args: ["run", fixture] } } }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     const fake = new FakeProvider([[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]]);
     daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
@@ -851,8 +864,10 @@ describe("daemon IPC", () => {
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 3,
       provider: { model: "codex-oauth/gpt-5.4" },
-      mcpServers: { fake: { command: "bun", args: ["run", fixture] } },
     }, null, 2));
+    // WS-21: the user-scope MCP servers live in `sdk/.winter.json` (claude's `.claude.json` shape).
+    mkdirSync(join(home, "sdk"), { recursive: true });
+    writeFileSync(join(home, "sdk", ".winter.json"), JSON.stringify({ mcpServers: { fake: { command: "bun", args: ["run", fixture] } } }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     const fake = new FakeProvider([[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]]);
     daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
@@ -869,428 +884,21 @@ describe("daemon IPC", () => {
     c.close();
   });
 
-  test("plugins.list returns [] when no PluginStore is wired into the server", async () => {
-    await boot(); // no `plugins` opt passed by the daemon in this test's boot() helper
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "no-plugins");
-    const { result } = await c.request(METHODS.pluginsList, {});
-    expect(result).toEqual({ ok: true, plugins: [] });
-    c.close();
-  });
+  // WS-21: the pre-WS-21 plugins.list bare tests, the supervisor-status describe, and the
+  // CONSENT/Task2/Task4 daemon-boot MCP-plugin-eligibility tests were removed here — they tested
+  // the retired legacy plugins.list wire method and the retired daemon-side plugin MCP server
+  // start (both runtimes now load a plugin's .mcp.json/manifest natively, spec §5.3).
+  // Replacement coverage for plugin.list (incl. supervisor status) lives in
+  // test/ipc/plugin-rpc.test.ts.
 
-  test("plugins.list returns a PluginStore's plugins over the socket", async () => {
-    const home = mkdtempSync(join(tmpdir(), "winter-plugins-ipc-"));
-    mkdirSync(join(home, "plugins", "demo", "skills", "greet"), { recursive: true });
-    writeFileSync(join(home, "plugins", "demo", "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: hi\n---\nbody");
-    writeFileSync(join(home, "plugins", "demo", ".mcp.json"), JSON.stringify({ mcpServers: { fake: { command: "true" } } }));
-    const plugins = new PluginStore({ winterHome: home, plugins: { enabled: ["demo"] } });
-
-    const secrets = new FileSecretStore(join(home, "test-secrets"));
-    const authority = new TokenAuthority(secrets);
-    const tokens = await authority.ensureTokens();
-    const store = new SessionStore(home);
-    const socketPath = join(home, "core.sock");
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, plugins });
-    try {
-      const c = await TestClient.connect(socketPath);
-      await c.hello(tokens.harness, "plugin-lister");
-      const { result } = await c.request(METHODS.pluginsList, {});
-      expect(result.ok).toBe(true);
-      expect(result.plugins).toHaveLength(1);
-      expect(result.plugins[0]).toMatchObject({
-        name: "demo", skills: ["greet"], hasMcp: true, mcpEnabled: true, disabled: false,
-        status: "na", // legacy plugin (no winter-plugin.json) — never tier "platform", never spawn-eligible
-      });
-      c.close();
-    } finally {
-      server.stop();
-    }
-  });
-
-  // ---------------------------------------------------------------------------------------------
-  // Phase 4d-i Task 4: plugins.list enriches each entry with live PluginSupervisor runtime status
-  // — a dashboard can't otherwise tell a Tier-2 plugin's actual running/crashed/circuit-open state
-  // apart from static manifest/consent data. Tier-2 (`platform` + `entry`, pluginSpawnEligible) get
-  // the real SupervisorStatus; Tier-1 (`capability`) never runs a process, so always "na".
-  // ---------------------------------------------------------------------------------------------
-  describe("plugins.list supervisor status (Phase 4d-i Task 4)", () => {
-    test("Tier-2 plugin the supervisor reports \"running\" includes status:\"running\"; Tier-1 plugin includes status:\"na\"", async () => {
-      const home = mkdtempSync(join(tmpdir(), "winter-plugins-status-"));
-      // Tier-2 (platform) plugin — spawn-eligible: tier platform + entry + enabled + exec-consented.
-      mkdirSync(join(home, "plugins", "runner"), { recursive: true });
-      writeFileSync(join(home, "plugins", "runner", "winter-plugin.json"), JSON.stringify({
-        id: "runner", tier: "platform", entry: { command: "bun", args: ["index.ts"] },
-      }));
-      // Tier-1 (capability) plugin — never spawn-eligible, no process ever runs for it.
-      mkdirSync(join(home, "plugins", "toolbox"), { recursive: true });
-      writeFileSync(join(home, "plugins", "toolbox", "winter-plugin.json"), JSON.stringify({ id: "toolbox", tier: "capability" }));
-
-      const plugins = new PluginStore({
-        winterHome: home,
-        plugins: { enabled: ["runner", "toolbox"] },
-        consents: { runner: { exec: Date.now() } },
-      });
-
-      const secrets = new FileSecretStore(join(home, "test-secrets"));
-      const authority = new TokenAuthority(secrets);
-      const tokens = await authority.ensureTokens();
-      const store = new SessionStore(home);
-      const socketPath = join(home, "core.sock");
-      // Real PluginSupervisor, fake spawn/isAlivePid/signalPid — same injection precedent as
-      // "plugin.restart"'s bootRestartServer below.
-      const supervisor = new PluginSupervisor({
-        runDir: join(home, "run"),
-        socketPath,
-        mintToken: (id) => store.mintPluginToken(id),
-        spawn: () => ({ pid: 12345, kill: () => {}, exited: new Promise<number>(() => {}) }),
-        isAlivePid: () => false,
-        signalPid: () => {},
-      });
-      // Bring "runner" to "running" exactly like a real plugin process would over the wire:
-      // startAll spawns it (fake), notifyRegistered (a fake connection) flips it to "running".
-      supervisor.startAll([{ id: "runner", dir: join(home, "plugins", "runner"), entry: { command: "bun", args: ["index.ts"] } }]);
-      expect(supervisor.notifyRegistered("runner", { push: () => true })).toBe(true);
-      expect(supervisor.status("runner")).toBe("running");
-
-      const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, plugins, supervisor });
-      try {
-        const c = await TestClient.connect(socketPath);
-        await c.hello(tokens.harness, "plugin-status-lister");
-        const { result } = await c.request(METHODS.pluginsList, {});
-        expect(result.ok).toBe(true);
-        const byName = Object.fromEntries(result.plugins.map((p: any) => [p.name, p]));
-        expect(byName.runner).toMatchObject({ tier: "platform", status: "running" });
-        expect(byName.toolbox).toMatchObject({ tier: "capability", status: "na" });
-        c.close();
-      } finally {
-        supervisor.stopAll();
-        server.stop();
-      }
-    });
-
-    test("a spawn-eligible plugin the supervisor has never tracked reports status \"stopped\" (never \"na\")", async () => {
-      const home = mkdtempSync(join(tmpdir(), "winter-plugins-status-untracked-"));
-      mkdirSync(join(home, "plugins", "runner"), { recursive: true });
-      writeFileSync(join(home, "plugins", "runner", "winter-plugin.json"), JSON.stringify({
-        id: "runner", tier: "platform", entry: { command: "bun", args: ["index.ts"] },
-      }));
-      const plugins = new PluginStore({
-        winterHome: home, plugins: { enabled: ["runner"] }, consents: { runner: { exec: Date.now() } },
-      });
-      const secrets = new FileSecretStore(join(home, "test-secrets"));
-      const authority = new TokenAuthority(secrets);
-      const tokens = await authority.ensureTokens();
-      const store = new SessionStore(home);
-      const socketPath = join(home, "core.sock");
-      // A real supervisor IS wired, but startAll/reclaimOrphans was never called for "runner" — it
-      // has no runtime tracked at all (never spawned this process lifetime).
-      const supervisor = new PluginSupervisor({
-        runDir: join(home, "run"), socketPath, mintToken: (id) => store.mintPluginToken(id),
-        spawn: () => ({ pid: 1, kill: () => {}, exited: new Promise<number>(() => {}) }),
-        isAlivePid: () => false, signalPid: () => {},
-      });
-      const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, plugins, supervisor });
-      try {
-        const c = await TestClient.connect(socketPath);
-        await c.hello(tokens.harness, "plugin-status-untracked");
-        const { result } = await c.request(METHODS.pluginsList, {});
-        expect(result.plugins[0]).toMatchObject({ name: "runner", status: "stopped" });
-        c.close();
-      } finally {
-        server.stop();
-      }
-    });
-
-    test("no supervisor wired at all: Tier-1 plugin still \"na\"; a spawn-eligible (Tier-2-shaped) plugin falls back to \"stopped\"", async () => {
-      const home = mkdtempSync(join(tmpdir(), "winter-plugins-status-nosupervisor-"));
-      mkdirSync(join(home, "plugins", "toolbox"), { recursive: true });
-      writeFileSync(join(home, "plugins", "toolbox", "winter-plugin.json"), JSON.stringify({ id: "toolbox", tier: "capability" }));
-      mkdirSync(join(home, "plugins", "runner"), { recursive: true });
-      writeFileSync(join(home, "plugins", "runner", "winter-plugin.json"), JSON.stringify({
-        id: "runner", tier: "platform", entry: { command: "bun", args: ["index.ts"] },
-      }));
-      const plugins = new PluginStore({
-        winterHome: home, plugins: { enabled: ["toolbox", "runner"] }, consents: { runner: { exec: Date.now() } },
-      });
-      const secrets = new FileSecretStore(join(home, "test-secrets"));
-      const authority = new TokenAuthority(secrets);
-      const tokens = await authority.ensureTokens();
-      const store = new SessionStore(home);
-      const socketPath = join(home, "core.sock");
-      // No `supervisor` option passed at all — mirrors "plugins.list returns [] when no PluginStore
-      // is wired" above, but for the supervisor seam instead.
-      const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, plugins });
-      try {
-        const c = await TestClient.connect(socketPath);
-        await c.hello(tokens.harness, "plugin-status-nosup");
-        const { result } = await c.request(METHODS.pluginsList, {});
-        const byName = Object.fromEntries(result.plugins.map((p: any) => [p.name, p]));
-        expect(byName.toolbox).toMatchObject({ status: "na" });
-        expect(byName.runner).toMatchObject({ status: "stopped" });
-        c.close();
-      } finally {
-        server.stop();
-      }
-    });
-  });
-
-  // THE CONSENT SEAM: a plugin's skills are always live (SkillStore has no consent gate), but a
-  // plugin's MCP servers only start when the user has opted in via settings.plugins.enabled —
-  // and settings.plugins.disabled always wins over enabled (fully off: no skills, no MCP).
-  function seedDemoPlugin(home: string, fixture: string): void {
-    mkdirSync(join(home, "plugins", "demo", "skills", "greet"), { recursive: true });
-    writeFileSync(join(home, "plugins", "demo", "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: hi\n---\nbody");
-    writeFileSync(join(home, "plugins", "demo", ".mcp.json"), JSON.stringify({ mcpServers: { fake: { command: "bun", args: ["run", fixture] } } }));
-  }
-
-  test("CONSENT: a not-enabled plugin's skills are live but its MCP servers are NOT started", async () => {
-    if (process.platform !== "darwin") return; // spawns a child process
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const fixture = join(import.meta.dir, "agent", "mcp", "fake-mcp-server.ts");
-    const home = mkdtempSync(join(tmpdir(), "winter-plugin-consent-"));
-    seedDemoPlugin(home, fixture);
-    writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 3,
-      provider: { model: "codex-oauth/gpt-5.4" },
-    }));
-    const secrets = new FileSecretStore(join(home, "test-secrets"));
-    const fake = new FakeProvider([[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]]);
-    daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
-    harnessToken = daemon.tokens.harness;
-
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "consent-off");
-    const skills = (await c.request(METHODS.skillsList, {})).result;
-    expect(skills.skills.map((s: any) => s.name)).toContain("demo:greet"); // skills always live
-    const mcp = (await c.request(METHODS.mcpList, {})).result;
-    expect(mcp.servers.find((s: any) => s.name === "demo:fake")).toBeUndefined(); // no consent → no server
-    const plugins = (await c.request(METHODS.pluginsList, {})).result;
-    expect(plugins.plugins[0]).toMatchObject({ name: "demo", hasMcp: true, mcpEnabled: false, disabled: false });
-    c.close();
-  });
-
-  test("enabled in settings → the plugin's MCP server starts at boot (source plugin)", async () => {
-    if (process.platform !== "darwin") return; // spawns a child process
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const fixture = join(import.meta.dir, "agent", "mcp", "fake-mcp-server.ts");
-    const home = mkdtempSync(join(tmpdir(), "winter-plugin-consent-"));
-    seedDemoPlugin(home, fixture);
-    writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 3,
-      provider: { model: "codex-oauth/gpt-5.4" },
-      plugins: { enabled: ["demo"] },
-    }));
-    const secrets = new FileSecretStore(join(home, "test-secrets"));
-    const fake = new FakeProvider([[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]]);
-    daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
-    harnessToken = daemon.tokens.harness;
-
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "consent-on");
-    const mcp = (await c.request(METHODS.mcpList, {})).result;
-    const st = mcp.servers.find((s: any) => s.name === "demo:fake");
-    expect(st?.source).toBe("plugin");
-    expect(st?.status).toBe("connected");
-    expect(st?.toolNames).toEqual(["echo"]); // tool registered + reachable through the registry
-    const plugins = (await c.request(METHODS.pluginsList, {})).result;
-    expect(plugins.plugins[0]).toMatchObject({ name: "demo", hasMcp: true, mcpEnabled: true, disabled: false });
-    c.close();
-  });
-
-  test("disabled beats enabled → plugin fully off (skills gone, MCP not started)", async () => {
-    if (process.platform !== "darwin") return; // spawns a child process
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const fixture = join(import.meta.dir, "agent", "mcp", "fake-mcp-server.ts");
-    const home = mkdtempSync(join(tmpdir(), "winter-plugin-consent-"));
-    seedDemoPlugin(home, fixture);
-    writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 3,
-      provider: { model: "codex-oauth/gpt-5.4" },
-      plugins: { enabled: ["demo"], disabled: ["demo"] },
-    }));
-    const secrets = new FileSecretStore(join(home, "test-secrets"));
-    const fake = new FakeProvider([[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]]);
-    daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
-    harnessToken = daemon.tokens.harness;
-
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "consent-disabled");
-    const skills = (await c.request(METHODS.skillsList, {})).result;
-    expect(skills.skills.map((s: any) => s.name)).not.toContain("demo:greet");
-    const mcp = (await c.request(METHODS.mcpList, {})).result;
-    expect(mcp.servers.find((s: any) => s.name === "demo:fake")).toBeUndefined();
-    const plugins = (await c.request(METHODS.pluginsList, {})).result;
-    expect(plugins.plugins[0]).toMatchObject({ name: "demo", hasMcp: true, mcpEnabled: false, disabled: true });
-    c.close();
-  });
-
-  // -----------------------------------------------------------------------------------------
-  // Task 2: per-class consent records enforce exec-gated plugin content, end-to-end through the
-  // REAL daemon wiring (startDaemon → PluginStore(consents) → pluginMcpEligible filter →
-  // McpManager.startPlugins). A manifest plugin declaring contributes.mcpServers requires "exec"
-  // consent (plugin-manifest.ts#requiredConsentClasses); the legacy CONSENT tests above already
-  // pin that a plugin.json-only plugin needs no consent record at all — this is the new gate.
-  // -----------------------------------------------------------------------------------------
-  function seedManifestPlugin(home: string, fixture: string): void {
-    mkdirSync(join(home, "plugins", "demo", "skills", "greet"), { recursive: true });
-    writeFileSync(join(home, "plugins", "demo", "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: hi\n---\nbody");
-    writeFileSync(join(home, "plugins", "demo", ".mcp.json"), JSON.stringify({ mcpServers: { fake: { command: "bun", args: ["run", fixture] } } }));
-    writeFileSync(join(home, "plugins", "demo", "winter-plugin.json"), JSON.stringify({
-      id: "demo", tier: "capability",
-      contributes: { mcpServers: [{ name: "fake", command: "bun", args: ["run", fixture] }] },
-    }));
-  }
-
-  test("CONSENT (Task 2): manifest plugin enabled but unconsented — MCP not started + a log line names the missing class", async () => {
-    if (process.platform !== "darwin") return; // spawns a child process
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const fixture = join(import.meta.dir, "agent", "mcp", "fake-mcp-server.ts");
-    const home = mkdtempSync(join(tmpdir(), "winter-plugin-consent-"));
-    seedManifestPlugin(home, fixture);
-    writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 3,
-      provider: { model: "codex-oauth/gpt-5.4" },
-      plugins: { enabled: ["demo"] }, // enabled, but no consents record at all
-    }));
-    const secrets = new FileSecretStore(join(home, "test-secrets"));
-    const fake = new FakeProvider([[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]]);
-
-    const origError = console.error;
-    const captured: string[] = [];
-    console.error = (...args: unknown[]) => { captured.push(String(args[0])); };
-    try {
-      daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
-    } finally {
-      console.error = origError;
-    }
-    harnessToken = daemon.tokens.harness;
-
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "consent-unconsented");
-    const skills = (await c.request(METHODS.skillsList, {})).result;
-    expect(skills.skills.map((s: any) => s.name)).toContain("demo:greet"); // skills stay always-live
-    const mcp = (await c.request(METHODS.mcpList, {})).result;
-    expect(mcp.servers.find((s: any) => s.name === "demo:fake")).toBeUndefined(); // exec unconsented → no server
-    const plugins = (await c.request(METHODS.pluginsList, {})).result;
-    expect(plugins.plugins[0]).toMatchObject({
-      name: "demo", hasMcp: true, mcpEnabled: true, disabled: false,
-      requiredConsents: ["exec"], consented: [],
-      // Task 3: the CLI consent flow's display data reaches the wire too (core → ipc passthrough
-      // — no transform strips these; the protocol schema round-trip itself is covered by
-      // packages/protocol/test/methods.test.ts).
-      tier: "capability", legacy: false,
-      // + the shipped-skills line (lane B, 2026-09-23): a skill can run shell commands.
-      execPayload: [`mcp: bun run ${fixture}`, "skills: greet — a skill can run shell commands when a session uses it"], tccPermissions: [], hardwarePermissions: [],
-    });
-    expect(captured.some((m) => m.includes("demo") && m.includes("exec"))).toBe(true); // the "why" log line
-    c.close();
-  });
-
-  test("CONSENT (Task 2): manifest plugin enabled + exec consent recorded — MCP starts (source plugin)", async () => {
-    if (process.platform !== "darwin") return; // spawns a child process
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const fixture = join(import.meta.dir, "agent", "mcp", "fake-mcp-server.ts");
-    const home = mkdtempSync(join(tmpdir(), "winter-plugin-consent-"));
-    seedManifestPlugin(home, fixture);
-    writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 3,
-      provider: { model: "codex-oauth/gpt-5.4" },
-      plugins: { enabled: ["demo"], consents: { demo: { exec: Date.now() } } },
-    }));
-    const secrets = new FileSecretStore(join(home, "test-secrets"));
-    const fake = new FakeProvider([[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]]);
-    daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
-    harnessToken = daemon.tokens.harness;
-
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "consent-granted");
-    const mcp = (await c.request(METHODS.mcpList, {})).result;
-    const st = mcp.servers.find((s: any) => s.name === "demo:fake");
-    expect(st?.source).toBe("plugin");
-    expect(st?.status).toBe("connected");
-    expect(st?.toolNames).toEqual(["echo"]);
-    const plugins = (await c.request(METHODS.pluginsList, {})).result;
-    expect(plugins.plugins[0]).toMatchObject({
-      name: "demo", mcpEnabled: true, requiredConsents: ["exec"], consented: ["exec"],
-    });
-    c.close();
-  });
-
-  // -----------------------------------------------------------------------------------------
-  // Task 4: manifest-declared mcpServers through the REAL daemon wiring (startDaemon →
-  // PluginStore → pluginMcpEligible → loadManifest → McpManager.startPlugins(manifestServers)).
-  // The first test below is the T2 interim gap this task closes: T2/T3 could already GATE a
-  // manifest-only plugin's eligibility, but nothing actually started its servers because
-  // McpManager.startPlugins only ever read .mcp.json — a manifest-only plugin (no .mcp.json) was
-  // eligible yet inert. Task 4 wires the manifest's contributes.mcpServers through so eligible
-  // manifest-only plugins actually start.
-  // -----------------------------------------------------------------------------------------
-  function seedManifestOnlyPlugin(home: string, fixture: string): void {
-    // Deliberately NO .mcp.json anywhere in this plugin dir.
-    mkdirSync(join(home, "plugins", "demo"), { recursive: true });
-    writeFileSync(join(home, "plugins", "demo", "winter-plugin.json"), JSON.stringify({
-      id: "demo", tier: "capability",
-      contributes: { mcpServers: [{ name: "fake", command: "bun", args: ["run", fixture] }] },
-    }));
-  }
-
-  test("Task 4: manifest-only plugin (no .mcp.json) enabled + consented — MCP starts from the manifest (closes T2 interim gap)", async () => {
-    if (process.platform !== "darwin") return; // spawns a child process
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const fixture = join(import.meta.dir, "agent", "mcp", "fake-mcp-server.ts");
-    const home = mkdtempSync(join(tmpdir(), "winter-plugin-consent-"));
-    seedManifestOnlyPlugin(home, fixture);
-    writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 3,
-      provider: { model: "codex-oauth/gpt-5.4" },
-      plugins: { enabled: ["demo"], consents: { demo: { exec: Date.now() } } },
-    }));
-    const secrets = new FileSecretStore(join(home, "test-secrets"));
-    const fake = new FakeProvider([[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]]);
-    daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
-    harnessToken = daemon.tokens.harness;
-
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "manifest-only-mcp");
-    const mcp = (await c.request(METHODS.mcpList, {})).result;
-    const st = mcp.servers.find((s: any) => s.name === "demo:fake");
-    expect(st?.source).toBe("plugin");
-    expect(st?.status).toBe("connected");
-    expect(st?.toolNames).toEqual(["echo"]);
-    c.close();
-  });
-
-  test("Task 4: manifest + .mcp.json both present — manifest wins, .mcp.json server is NOT started", async () => {
-    if (process.platform !== "darwin") return; // spawns a child process
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const fixture = join(import.meta.dir, "agent", "mcp", "fake-mcp-server.ts");
-    const home = mkdtempSync(join(tmpdir(), "winter-plugin-consent-"));
-    mkdirSync(join(home, "plugins", "demo"), { recursive: true });
-    // .mcp.json declares a DIFFERENT server name than the manifest, so precedence is unambiguous.
-    writeFileSync(join(home, "plugins", "demo", ".mcp.json"), JSON.stringify({
-      mcpServers: { legacy: { command: "/nonexistent-legacy-server" } },
-    }));
-    writeFileSync(join(home, "plugins", "demo", "winter-plugin.json"), JSON.stringify({
-      id: "demo", tier: "capability",
-      contributes: { mcpServers: [{ name: "fake", command: "bun", args: ["run", fixture] }] },
-    }));
-    writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 3,
-      provider: { model: "codex-oauth/gpt-5.4" },
-      plugins: { enabled: ["demo"], consents: { demo: { exec: Date.now() } } },
-    }));
-    const secrets = new FileSecretStore(join(home, "test-secrets"));
-    const fake = new FakeProvider([[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]]);
-    daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
-    harnessToken = daemon.tokens.harness;
-
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "manifest-wins-mcp");
-    const mcp = (await c.request(METHODS.mcpList, {})).result;
-    expect(mcp.servers.find((s: any) => s.name === "demo:fake")?.status).toBe("connected");
-    expect(mcp.servers.find((s: any) => s.name === "demo:legacy")).toBeUndefined(); // .mcp.json ignored entirely
-    c.close();
-  });
+  // Merge note (post-merge round): ws21/core still had the pre-WS-21 `plugins.list` (plural, the
+  // RETIRED method) bare tests + the "plugins.list supervisor status" describe here — this lane's own
+  // fix rounds already replaced that coverage with `test/ipc/plugin-rpc.test.ts` (singular
+  // `plugin.list`, Contract B) and documented the removal in the comment just above. Kept removed;
+  // `METHODS.pluginsList` and its params/result schemas are the post-merge round's own item (L3
+  // request #5: retire the old plugin schemas) — this is that retirement's test-side half, landing
+  // here at merge time since the conflict made the choice unavoidable now rather than in that later
+  // commit.
 
   // -----------------------------------------------------------------------------------------
   // Phase 4d-cleanup Task 2: PluginSupervisor construction + the boot-time orphan-PID sweep are
@@ -1340,11 +948,17 @@ describe("daemon IPC", () => {
       schemaVersion: 3,
       provider: { model: "codex-oauth/gpt-5.4" }, // unused — agentProvider: null below forces no-provider
     }));
-    // A Tier-2 (platform) plugin with an `entry` — spawn-eligible once enabled+consented, exactly
-    // the shape `plugin.enable{consent:true}` would hot-spawn on a provider-configured daemon.
-    mkdirSync(join(home, "plugins", "runner"), { recursive: true });
-    writeFileSync(join(home, "plugins", "runner", "winter-plugin.json"), JSON.stringify({
+    // A Tier-2 (platform) plugin with an `entry`, already INSTALLED (Contract B's
+    // installed_plugins.json) — spawn-eligible once enabled, exactly the shape `plugin.enable`
+    // would hot-spawn on a provider-configured daemon.
+    const dir = join(home, "test-mkt", "runner");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "winter-plugin.json"), JSON.stringify({
       id: "runner", tier: "platform", entry: { command: "bun", args: ["--version"] },
+    }));
+    mkdirSync(join(home, "sdk", "plugins"), { recursive: true });
+    writeFileSync(join(home, "sdk", "plugins", "installed_plugins.json"), JSON.stringify({
+      version: 2, plugins: { "runner@test-mkt": [{ scope: "user", installPath: dir, installedAt: new Date().toISOString() }] },
     }));
 
     const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -1353,17 +967,17 @@ describe("daemon IPC", () => {
 
     const c = await TestClient.connect(daemon.socketPath);
     await c.hello(harnessToken, "no-provider-enabler");
-    const res = await c.request(METHODS.pluginEnable, { name: "runner", consent: true });
-    expect(res.result).toEqual({ ok: true, status: "stopped" }); // recorded, never hot-spawned
+    const res = await c.request(METHODS.pluginEnable, { spec: "runner@test-mkt", scope: "user" });
+    expect(res.result).toEqual({ ok: true, spec: "runner@test-mkt", scope: "user", enabled: true }); // recorded, never hot-spawned
 
     // The strongest available proof of "never spawned": PluginSupervisor.writePidFile runs
     // SYNCHRONOUSLY inside spawnFresh, before restart() returns — so if hotApplyStart had reached
     // supervisor.restart() at all, this file would already exist by the time the RPC responded.
     expect(existsSync(join(home, "run", "plugins", "runner.pid"))).toBe(false);
 
-    const list = await c.request(METHODS.pluginsList, {});
-    const runner = list.result.plugins.find((p: any) => p.name === "runner");
-    expect(runner).toMatchObject({ disabled: false, mcpEnabled: true, status: "stopped" }); // enabled, never running
+    const list = await c.request(METHODS.pluginList, {});
+    const runner = list.result.plugins.find((p: any) => p.id === "runner");
+    expect(runner).toMatchObject({ enabled: true }); // enabled, per installed_plugins.json + enabledPlugins
 
     c.close();
   });
@@ -1592,10 +1206,17 @@ describe("daemon IPC", () => {
 
   test("daemon.status pluginsCount reflects the real installed-plugin count (Phase 4d-i Task 4 — was hardcoded 0)", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-daemon-status-plugins-"));
+    // WS-21: PluginStore now reads the installed set from `sdk/plugins/installed_plugins.json`
+    // (Contract B), never a `<home>/plugins` scan — see `agent/plugins.ts`'s own header.
+    const pluginsRoot = join(home, "sdk", "plugins");
+    mkdirSync(pluginsRoot, { recursive: true });
+    const installed: Record<string, unknown> = {};
     for (const name of ["alpha", "beta", "gamma"]) {
-      mkdirSync(join(home, "plugins", name), { recursive: true });
-      writeFileSync(join(home, "plugins", name, "plugin.json"), JSON.stringify({ description: name }));
+      const dir = join(home, "status-mkt", name);
+      mkdirSync(dir, { recursive: true });
+      installed[`${name}@status-mkt`] = [{ scope: "user", installPath: dir, installedAt: new Date().toISOString() }];
     }
+    writeFileSync(join(pluginsRoot, "installed_plugins.json"), JSON.stringify({ version: 2, plugins: installed }));
     const plugins = new PluginStore({ winterHome: home });
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     const authority = new TokenAuthority(secrets);
@@ -1692,7 +1313,7 @@ describe("daemon IPC", () => {
         [METHODS.daemonStatus, {}],
         [METHODS.trustList, {}],
         [METHODS.trustRemove, { path: "/tmp" }],
-        [METHODS.pluginsList, {}],
+        [METHODS.pluginList, {}],
         // CC-parity phase 3 (Workflows, Track C Task C2): local-only in v1 (Global Constraints) —
         // never added to PLUGIN_ALLOWED_METHODS.
         [METHODS.workflowList, { sessionId: "s_x" }],
@@ -1736,7 +1357,15 @@ describe("daemon IPC", () => {
   // -----------------------------------------------------------------------------------------
   describe("hardware.request / hardware.respond (Phase 4c Task 2, spec §5)", () => {
     async function bootHardwareServer(opts: {
-      consents?: Record<string, { exec?: number; tcc?: number; hardware?: number }>;
+      // C1 fix round 2: consent is now fingerprinted (`{classes, fingerprint}`), bound to the
+      // plugin's install path + entry — this fixture's callers only ever seed CLASSES (a bare array
+      // of what to grant); the fingerprint itself is computed below, off `seedBatteryPlugin`'s own
+      // fixed `join(home, "test-mkt", id)` install path and its always-entry-less manifest (every
+      // seeded plugin here is tier "capability", never "platform"/entry).
+      consents?: Record<string, Array<"exec" | "tcc" | "hardware">>;
+      /** L5 re-review: the manifest's `permissions.hardware` list `seedBatteryPlugin`'s CALLER is
+       *  about to write — default `["battery"]` matches `seedBatteryPlugin`'s own default. */
+      hardwarePermission?: string[];
       timeoutMs?: number;
     } = {}): Promise<{
       store: SessionStore; socketPath: string; harnessToken: string; home: string; stop: () => void;
@@ -1764,7 +1393,34 @@ describe("daemon IPC", () => {
       const hardware = new HardwareBroker({
         audit, pushToProvider: (e) => providerLink.push(e), timeoutMs: opts.timeoutMs ?? 500,
       });
-      const plugins = new PluginStore({ winterHome: home, consents: opts.consents });
+      // WS-21: PluginStore's consent lookup is keyed by the qualified "<id>@<marketplace>" spec
+      // (installed_plugins.json's own key, F15) — every call site below still passes a bare plugin
+      // id (the pre-WS-21 convention), so re-key here, once, against `seedBatteryPlugin`'s OWN fixed
+      // marketplace name ("test-mkt") rather than touch every call site. C1 fix round 2: the record
+      // is fingerprinted here too, off the SAME `join(home, "test-mkt", id)` path `seedBatteryPlugin`
+      // installs to. The dir is pre-created (mkdirSync, `seedBatteryPlugin`'s own recursive:true
+      // tolerates it existing already) so `pluginConsentFingerprint`'s `realpathSync` resolves the
+      // SAME canonical path here and later inside `PluginStore#list()` — computing it against a
+      // not-yet-existing directory would fall back to the UNRESOLVED path here while `list()`
+      // resolves the REAL one once `seedBatteryPlugin` has actually created it, a spurious mismatch
+      // that is a test-fixture ordering artifact, not anything the production code itself can hit (a
+      // plugin is always on disk before the daemon ever computes its fingerprint).
+      //
+      // L5 re-review (full disclosure): the fingerprint now also covers the manifest's declared
+      // `permissions.hardware` + `requiredConsents` — `opts.hardwarePermission` mirrors what the
+      // CALLER is about to pass `seedBatteryPlugin` (default `["battery"]`, matching that function's
+      // own default); the one test that seeds EMPTY permissions passes `hardwarePermission: []` here
+      // to keep the two in agreement.
+      const hardwarePermission = opts.hardwarePermission ?? ["battery"];
+      const requiredConsents = hardwarePermission.length > 0 ? ["hardware"] : [];
+      const consents = Object.fromEntries(
+        Object.entries(opts.consents ?? {}).map(([id, classes]) => {
+          mkdirSync(join(home, "test-mkt", id), { recursive: true });
+          const fingerprint = pluginConsentFingerprint(join(home, "test-mkt", id), { hardware: hardwarePermission, requiredConsents });
+          return [`${id}@test-mkt`, { classes, fingerprint }];
+        }),
+      );
+      const plugins = new PluginStore({ winterHome: home, consents });
 
       // Phase 4d-ii Task 2: `winterHome` wired (harmless for every EXISTING test here — no
       // settings.json exists at `home` unless a test writes one, so `livePlugins()`'s
@@ -1781,11 +1437,26 @@ describe("daemon IPC", () => {
       };
     }
 
+    /** WS-21: registers `pluginId` INSTALLED + ENABLED under a fixed "test-mkt" marketplace
+     *  (Contract B's installed_plugins.json + sdk/settings.json's enabledPlugins) — PluginStore no
+     *  longer scans `<home>/plugins`, see agent/plugins.ts's own header. `bootHardwareServer`'s
+     *  `consents` option is re-keyed against this SAME marketplace name. */
     function seedBatteryPlugin(home: string, pluginId: string, permissions: { hardware?: string[] } = { hardware: ["battery"] }): void {
-      mkdirSync(join(home, "plugins", pluginId), { recursive: true });
-      writeFileSync(join(home, "plugins", pluginId, "winter-plugin.json"), JSON.stringify({
-        id: pluginId, tier: "capability", permissions,
-      }));
+      const dir = join(home, "test-mkt", pluginId);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "winter-plugin.json"), JSON.stringify({ id: pluginId, tier: "capability", permissions }));
+
+      const pluginsRoot = join(home, "sdk", "plugins");
+      mkdirSync(pluginsRoot, { recursive: true });
+      const installedPath = join(pluginsRoot, "installed_plugins.json");
+      const file = existsSync(installedPath) ? JSON.parse(readFileSync(installedPath, "utf8")) : { version: 2, plugins: {} };
+      file.plugins[`${pluginId}@test-mkt`] = [{ scope: "user", installPath: dir, installedAt: new Date().toISOString() }];
+      writeFileSync(installedPath, JSON.stringify(file, null, 2));
+
+      const settingsPath = join(home, "sdk", "settings.json");
+      const settings = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
+      settings.enabledPlugins = { ...(settings.enabledPlugins ?? {}), [`${pluginId}@test-mkt`]: true };
+      writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
     }
 
     async function connectPlugin(store: SessionStore, socketPath: string, pluginId: string): Promise<TestClient> {
@@ -1808,7 +1479,7 @@ describe("daemon IPC", () => {
     }
 
     test("no provider connected → typed no_provider (plugin caller, fully consented)", async () => {
-      const srv = await bootHardwareServer({ consents: { "battery-limiter": { hardware: Date.now() } } });
+      const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] } });
       seedBatteryPlugin(srv.home, "battery-limiter");
       const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
 
@@ -1819,7 +1490,7 @@ describe("daemon IPC", () => {
     });
 
     test("consented plugin round-trip: scripted provider answers hardware.request via hardware_requested/hardware.respond", async () => {
-      const srv = await bootHardwareServer({ consents: { "battery-limiter": { hardware: Date.now() } } });
+      const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] } });
       seedBatteryPlugin(srv.home, "battery-limiter");
       const provider = await connectProvider(srv.socketPath, srv.harnessToken);
       const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
@@ -1864,7 +1535,12 @@ describe("daemon IPC", () => {
 
       const harness = await TestClient.connect(srv.socketPath);
       await harness.hello(srv.harnessToken, "cli-setconsent-hw");
-      const setConsent = await harness.request(METHODS.pluginSetConsent, { name: "battery-limiter", classes: ["hardware"] });
+      // L5 re-review (TOCTOU): fingerprint must match seedBatteryPlugin's own default manifest
+      // (permissions.hardware: ["battery"], no entry -- tier "capability").
+      const fingerprint = pluginConsentFingerprint(join(srv.home, "test-mkt", "battery-limiter"), {
+        hardware: ["battery"], requiredConsents: ["hardware"],
+      });
+      const setConsent = await harness.request(METHODS.pluginSetConsent, { spec: "battery-limiter@test-mkt", classes: ["hardware"], fingerprint });
       expect(setConsent.result).toEqual({ ok: true });
 
       const provider = await connectProvider(srv.socketPath, srv.harnessToken, "hw-provider-2");
@@ -1878,7 +1554,7 @@ describe("daemon IPC", () => {
     });
 
     test("unconsented plugin (consented, but manifest doesn't declare the battery permission) → typed consent_denied naming the missing permission class", async () => {
-      const srv = await bootHardwareServer({ consents: { "battery-limiter": { hardware: Date.now() } } });
+      const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] }, hardwarePermission: [] });
       seedBatteryPlugin(srv.home, "battery-limiter", {}); // permissions.hardware omitted entirely
       const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
 
@@ -1897,7 +1573,7 @@ describe("daemon IPC", () => {
     });
 
     test("unknown verb from a fully consented plugin → typed unknown_verb, bypassing consent entirely", async () => {
-      const srv = await bootHardwareServer({ consents: { "battery-limiter": { hardware: Date.now() } } });
+      const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] } });
       seedBatteryPlugin(srv.home, "battery-limiter");
       const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
 
@@ -1908,7 +1584,7 @@ describe("daemon IPC", () => {
     });
 
     test("timeout: the provider is connected but never answers → typed timeout after the configured budget", async () => {
-      const srv = await bootHardwareServer({ consents: { "battery-limiter": { hardware: Date.now() } }, timeoutMs: 50 });
+      const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] }, timeoutMs: 50 });
       seedBatteryPlugin(srv.home, "battery-limiter");
       const provider = await connectProvider(srv.socketPath, srv.harnessToken);
       const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
@@ -1920,7 +1596,7 @@ describe("daemon IPC", () => {
     });
 
     test("hardware.respond from a non-provider connection is rejected; the real provider connection can respond", async () => {
-      const srv = await bootHardwareServer({ consents: { "battery-limiter": { hardware: Date.now() } } });
+      const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] } });
       seedBatteryPlugin(srv.home, "battery-limiter");
       const provider = await connectProvider(srv.socketPath, srv.harnessToken, "real-provider");
       const impostor = await TestClient.connect(srv.socketPath);
@@ -1962,7 +1638,7 @@ describe("daemon IPC", () => {
     });
 
     test("audit trail: a consented plugin's round-trip is audited with a {kind:'plugin'} requester naming the pluginId", async () => {
-      const srv = await bootHardwareServer({ consents: { "battery-limiter": { hardware: Date.now() } } });
+      const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] } });
       seedBatteryPlugin(srv.home, "battery-limiter");
       const provider = await connectProvider(srv.socketPath, srv.harnessToken);
       const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
@@ -2002,7 +1678,7 @@ describe("daemon IPC", () => {
     });
 
     test("audit trail: unknown_verb from a plugin lands an audit line with unknown_verb outcome", async () => {
-      const srv = await bootHardwareServer({ consents: { "battery-limiter": { hardware: Date.now() } } });
+      const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] } });
       seedBatteryPlugin(srv.home, "battery-limiter");
       const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
 
@@ -2160,331 +1836,13 @@ describe("daemon IPC", () => {
     });
   });
 
-  // -----------------------------------------------------------------------------------------
-  // Plugin lifecycle RPCs (Phase 4d-ii Task 2): plugins.install/plugin.enable/disable/remove/
-  // setConsent applied HOT to the running daemon — no restart, unlike the CLI's file-based flow.
-  // A real PluginSupervisor (fake spawn/isAlivePid/signalPid, same injection precedent as
-  // "plugin.restart"/"plugins.list supervisor status" above) + `winterHome` wired so the RPC
-  // handlers can read/write settings.json and the plugins directory directly.
-  // -----------------------------------------------------------------------------------------
-  describe("plugin lifecycle RPCs (Task 2)", () => {
-    async function bootLifecycleServer(): Promise<{
-      home: string; settingsPath: string; pluginsRoot: string;
-      store: SessionStore; socketPath: string; harnessToken: string;
-      supervisor: PluginSupervisor; stop: () => void;
-    }> {
-      const home = mkdtempSync(join(tmpdir(), "winter-plugin-lifecycle-"));
-      writeFileSync(join(home, "settings.json"), JSON.stringify({
-        schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
-      }));
-      // A Tier-2 (platform) plugin with an `entry` — requiredConsentClasses derives "exec" for
-      // any manifest with an entry point (plugin-manifest.ts), so this plugin always starts out
-      // needing consent, exercising the two-step enable flow below.
-      mkdirSync(join(home, "plugins", "runner"), { recursive: true });
-      writeFileSync(join(home, "plugins", "runner", "winter-plugin.json"), JSON.stringify({
-        id: "runner", tier: "platform", entry: { command: "bun", args: ["index.ts"] },
-      }));
-      const store = new SessionStore(home);
-      const socketPath = join(home, "core.sock");
-      const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
-      const tokens = await authority.ensureTokens();
-      const plugins = new PluginStore({ winterHome: home });
-      const supervisor = new PluginSupervisor({
-        runDir: join(home, "run"),
-        socketPath,
-        mintToken: (id) => store.mintPluginToken(id),
-        spawn: () => ({ pid: 9001, kill: () => {}, exited: new Promise<number>(() => {}) }),
-        isAlivePid: () => false,
-        signalPid: () => {},
-      });
-      // A ToolRegistry represents "this daemon has an agent runtime configured" (daemon.ts only
-      // builds one inside `if (agentProvider)`) — hotApplyStart (ipc/server.ts) now gates the real
-      // hot-spawn on `opts.registry`, not just `opts.supervisor` (which Phase 4d-cleanup Task 2
-      // made always-present for the orphan sweep). This suite's tests (b)/(c)/(e) exercise a
-      // provider-configured daemon's hot-start/hot-stop lifecycle, so a registry is wired here to
-      // match — the dedicated no-provider case (registry omitted) is covered separately above.
-      const registry = new ToolRegistry();
-      const server = startIpcServer({
-        socketPath, serverVersion: "test", tokens: authority, store, plugins, supervisor, registry, winterHome: home,
-      });
-      return {
-        home, settingsPath: join(home, "settings.json"), pluginsRoot: join(home, "plugins"),
-        store, socketPath, harnessToken: tokens.harness, supervisor,
-        stop: () => { supervisor.stopAll(); server.stop(); store.close(); },
-      };
-    }
+  // WS-21: the plugin lifecycle RPCs (Task 2) describe block, testing the retired
+  // plugins.install/plugin.enable(old)/plugin.disable(old)/plugin.remove wire surface, was removed
+  // here. Replacement coverage for plugin.install/uninstall/enable/disable/update/list/
+  // marketplace.* -- incl. the hot-spawn/hot-stop supervisor lifecycle and role-rejection -- lives
+  // in test/ipc/plugin-rpc.test.ts. plugin.setConsent (the one survivor, spec section 5.4) keeps its
+  // own coverage in the hardware.request describe block below (it is exercised there already).
 
-    test("(a) plugin.enable with outstanding consents and no `consent` flag -> needs_consent, settings UNCHANGED", async () => {
-      const srv = await bootLifecycleServer();
-      const before = readFileSync(srv.settingsPath, "utf8");
-      const c = await TestClient.connect(srv.socketPath);
-      await c.hello(srv.harnessToken, "cli-enable");
-
-      const res = await c.request(METHODS.pluginEnable, { name: "runner" });
-      expect(res.result.code).toBe("needs_consent");
-      expect(res.result.requiredConsents).toEqual(["exec"]);
-      expect(res.result.consentBlock[0]).toBe("plugin runner requests:");
-      expect(res.result.consentBlock).toContain("entry: bun index.ts");
-      expect(readFileSync(srv.settingsPath, "utf8")).toBe(before); // no mutation
-
-      c.close(); srv.stop();
-    });
-
-    // Lane B (2026-09-23, controller ruling): a LEGACY plugin needs no consent record — enabling it is
-    // the user's trust decision — but it ships skills that will now reach a session, so the enable
-    // answers with the disclosure a client shows ("a skill can run shell commands when a session uses it").
-    test("(a2) plugin.enable on a legacy plugin that ships skills: enabled with NO consent record, and the result carries the skills notice", async () => {
-      const srv = await bootLifecycleServer();
-      mkdirSync(join(srv.pluginsRoot, "oldie", "skills", "greet"), { recursive: true });
-      writeFileSync(join(srv.pluginsRoot, "oldie", "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: hi\n---\nbody");
-      writeFileSync(join(srv.pluginsRoot, "oldie", "plugin.json"), JSON.stringify({ description: "legacy" }));
-      const c = await TestClient.connect(srv.socketPath);
-      await c.hello(srv.harnessToken, "cli-enable-legacy");
-
-      const res = await c.request(METHODS.pluginEnable, { name: "oldie" });
-      expect(res.result.ok).toBe(true);
-      expect(res.result.notice).toEqual(["plugin oldie:", "skills: greet — a skill can run shell commands when a session uses it"]);
-      expect(PluginEnableResult.safeParse(res.result).success).toBe(true);
-      const settings = JSON.parse(readFileSync(srv.settingsPath, "utf8"));
-      expect(settings.plugins.enabled).toEqual(["oldie"]);
-      expect(settings.plugins.consents?.oldie).toBeUndefined();
-
-      // A plugin with nothing to disclose answers exactly as before — no `notice` key at all.
-      const runner = await c.request(METHODS.pluginEnable, { name: "runner", consent: true });
-      expect("notice" in runner.result).toBe(false);
-
-      c.close(); srv.stop();
-    });
-
-    test("(b) plugin.enable {consent:true} grants consent, enables, hot-starts via the supervisor, and plugins.list reflects it", async () => {
-      const srv = await bootLifecycleServer();
-      const c = await TestClient.connect(srv.socketPath);
-      await c.hello(srv.harnessToken, "cli-enable-consent");
-
-      const res = await c.request(METHODS.pluginEnable, { name: "runner", consent: true });
-      expect(res.result.ok).toBe(true);
-      expect(res.result.status).toBe("starting"); // hot-spawned NOW, awaiting registration
-      expect(srv.supervisor.status("runner")).toBe("starting"); // same supervisor instance — proves the RPC actually reached it
-
-      const settings = JSON.parse(readFileSync(srv.settingsPath, "utf8"));
-      expect(settings.plugins.enabled).toEqual(["runner"]);
-      expect(settings.plugins.consents.runner.exec).toBeGreaterThan(0);
-
-      const list = await c.request(METHODS.pluginsList, {});
-      const runner = list.result.plugins.find((p: any) => p.name === "runner");
-      expect(runner).toMatchObject({ disabled: false, mcpEnabled: true, status: "starting" });
-      expect(runner.consented).toEqual(["exec"]);
-
-      c.close(); srv.stop();
-    });
-
-    test("(c) plugin.disable strips `enabled`, strips consent, and hot-stops the running process", async () => {
-      const srv = await bootLifecycleServer();
-      const c = await TestClient.connect(srv.socketPath);
-      await c.hello(srv.harnessToken, "cli-disable");
-      await c.request(METHODS.pluginEnable, { name: "runner", consent: true });
-      expect(srv.supervisor.status("runner")).toBe("starting");
-
-      const res = await c.request(METHODS.pluginDisable, { name: "runner" });
-      expect(res.result).toEqual({ ok: true });
-      expect(srv.supervisor.status("runner")).toBe("stopped"); // hot-stop reached the running supervisor
-
-      const settings = JSON.parse(readFileSync(srv.settingsPath, "utf8"));
-      expect(settings.plugins.enabled).toEqual([]);
-      expect(settings.plugins.disabled).toEqual(["runner"]);
-      // Matches the CLI's `winter plugin disable` (main.ts, which composes
-      // stripPluginConsents(setPluginEnabled(...))) and the design spec's fresh-consent semantics
-      // (lifecycle.ts's stripPluginConsents doc, settings.ts:38-40): disable deletes the plugin's
-      // whole consent record, so re-`plugin.enable` after a disable requires consenting again.
-      expect(settings.plugins.consents?.runner).toBeUndefined();
-
-      const list = await c.request(METHODS.pluginsList, {});
-      expect(list.result.plugins.find((p: any) => p.name === "runner")).toMatchObject({ disabled: true, mcpEnabled: false });
-
-      c.close(); srv.stop();
-    });
-
-    test("plugin.disable on an unknown plugin -> unknown_plugin", async () => {
-      const srv = await bootLifecycleServer();
-      const c = await TestClient.connect(srv.socketPath);
-      await c.hello(srv.harnessToken, "cli-disable-unknown");
-      const res = await c.request(METHODS.pluginDisable, { name: "ghost" });
-      expect(res.result).toEqual({ code: "unknown_plugin" });
-      c.close(); srv.stop();
-    });
-
-    test("(d) plugins.install copies a fixture dir and returns requiredConsents/hasMcp/consentBlock, never touching settings", async () => {
-      const srv = await bootLifecycleServer();
-      const src = mkdtempSync(join(tmpdir(), "winter-plugin-src-"));
-      writeFileSync(join(src, "winter-plugin.json"), JSON.stringify({ id: "fresh", tier: "platform", entry: { command: "bun" } }));
-      const c = await TestClient.connect(srv.socketPath);
-      await c.hello(srv.harnessToken, "cli-install");
-
-      const before = readFileSync(srv.settingsPath, "utf8");
-      const res = await c.request(METHODS.pluginsInstall, { source: src, name: "fresh" });
-      expect(res.result.ok).toBe(true);
-      expect(res.result.name).toBe("fresh");
-      expect(res.result.requiredConsents).toEqual(["exec"]);
-      expect(res.result.hasMcp).toBe(false);
-      expect(res.result.consentBlock[0]).toBe("plugin fresh requests:");
-      expect(existsSync(join(srv.pluginsRoot, "fresh", "winter-plugin.json"))).toBe(true);
-      expect(readFileSync(srv.settingsPath, "utf8")).toBe(before); // installed disabled+unconsented — settings untouched
-
-      c.close(); srv.stop();
-    });
-
-    test("plugins.install derives the name from `source`'s basename when `name` is omitted", async () => {
-      const srv = await bootLifecycleServer();
-      const src = mkdtempSync(join(tmpdir(), "winter-plugin-derived-"));
-      writeFileSync(join(src, "plugin.json"), JSON.stringify({ name: "derived" }));
-      const c = await TestClient.connect(srv.socketPath);
-      await c.hello(srv.harnessToken, "cli-install-derived");
-      const derivedName = src.split("/").pop()!;
-
-      const res = await c.request(METHODS.pluginsInstall, { source: src });
-      expect(res.result.ok).toBe(true);
-      expect(res.result.name).toBe(derivedName);
-      expect(existsSync(join(srv.pluginsRoot, derivedName, "plugin.json"))).toBe(true);
-
-      c.close(); srv.stop();
-    });
-
-    test("plugins.install on an already-installed name -> already_installed, no double copy", async () => {
-      const srv = await bootLifecycleServer();
-      const src = mkdtempSync(join(tmpdir(), "winter-plugin-src2-"));
-      writeFileSync(join(src, "winter-plugin.json"), JSON.stringify({ id: "runner", tier: "capability" }));
-      const c = await TestClient.connect(srv.socketPath);
-      await c.hello(srv.harnessToken, "cli-install-dup");
-
-      const res = await c.request(METHODS.pluginsInstall, { source: src, name: "runner" });
-      expect(res.result).toEqual({ code: "already_installed", name: "runner" });
-      // the pre-existing fixture (tier: platform) was never clobbered by the capability-tier source
-      expect(JSON.parse(readFileSync(join(srv.pluginsRoot, "runner", "winter-plugin.json"), "utf8")).tier).toBe("platform");
-
-      c.close(); srv.stop();
-    });
-
-    test("plugins.install on a source with no manifest -> invalid_source, nothing copied", async () => {
-      const srv = await bootLifecycleServer();
-      const src = mkdtempSync(join(tmpdir(), "winter-plugin-empty-"));
-      const c = await TestClient.connect(srv.socketPath);
-      await c.hello(srv.harnessToken, "cli-install-invalid");
-
-      const res = await c.request(METHODS.pluginsInstall, { source: src, name: "nope" });
-      expect(res.result).toEqual({ code: "invalid_source" });
-      expect(existsSync(join(srv.pluginsRoot, "nope"))).toBe(false);
-
-      c.close(); srv.stop();
-    });
-
-    test("(e) plugin.remove hot-stops, strips settings+consents, and deletes the plugin dir", async () => {
-      const srv = await bootLifecycleServer();
-      const c = await TestClient.connect(srv.socketPath);
-      await c.hello(srv.harnessToken, "cli-remove");
-      await c.request(METHODS.pluginEnable, { name: "runner", consent: true });
-      expect(srv.supervisor.status("runner")).toBe("starting");
-
-      const res = await c.request(METHODS.pluginRemove, { name: "runner" });
-      expect(res.result).toEqual({ ok: true });
-      expect(srv.supervisor.status("runner")).toBe("stopped"); // hot-stop reached the supervisor before the dir was deleted
-      expect(existsSync(join(srv.pluginsRoot, "runner"))).toBe(false);
-
-      const settings = JSON.parse(readFileSync(srv.settingsPath, "utf8"));
-      expect(settings.plugins.enabled).toEqual([]);
-      expect(settings.plugins.disabled).toEqual([]);
-      expect(settings.plugins.consents).toEqual({});
-
-      c.close(); srv.stop();
-    });
-
-    test("plugin.remove on an unknown plugin -> unknown_plugin, no crash", async () => {
-      const srv = await bootLifecycleServer();
-      const c = await TestClient.connect(srv.socketPath);
-      await c.hello(srv.harnessToken, "cli-remove-unknown");
-      const res = await c.request(METHODS.pluginRemove, { name: "ghost" });
-      expect(res.result).toEqual({ code: "unknown_plugin" });
-      c.close(); srv.stop();
-    });
-
-    test("plugin.setConsent grants a consent class without enabling", async () => {
-      const srv = await bootLifecycleServer();
-      const c = await TestClient.connect(srv.socketPath);
-      await c.hello(srv.harnessToken, "cli-setconsent");
-
-      const res = await c.request(METHODS.pluginSetConsent, { name: "runner", classes: ["exec"] });
-      expect(res.result).toEqual({ ok: true });
-      const settings = JSON.parse(readFileSync(srv.settingsPath, "utf8"));
-      expect(settings.plugins.consents.runner.exec).toBeGreaterThan(0);
-      expect(settings.plugins.enabled ?? []).not.toContain("runner");
-
-      c.close(); srv.stop();
-    });
-
-    test("plugin.setConsent on an unknown plugin -> unknown_plugin", async () => {
-      const srv = await bootLifecycleServer();
-      const c = await TestClient.connect(srv.socketPath);
-      await c.hello(srv.harnessToken, "cli-setconsent-unknown");
-      const res = await c.request(METHODS.pluginSetConsent, { name: "ghost", classes: ["exec"] });
-      expect(res.result).toEqual({ code: "unknown_plugin" });
-      c.close(); srv.stop();
-    });
-
-    // -----------------------------------------------------------------------------------------
-    // Phase 4d-cleanup Task 1: livePlugins() now caches the derived PluginInfo[] keyed on
-    // settings.json's + the plugins dir's mtime, instead of re-deriving a fresh PluginStore().list()
-    // (readdirSync + per-plugin loadManifest) on EVERY call — a hot path for `hardware.request`.
-    // This proves the cache-HIT path: two `plugins.list` calls with no settings/plugin-dir write in
-    // between only derive once. Not tautological — it spies on `node:fs`'s `readdirSync`, the REAL
-    // I/O `PluginStore.list()` performs (agent/plugins.ts:79), and counts calls against the
-    // PLUGINS ROOT specifically (list() also readdirSync's each plugin's own skills/ subdir, so a
-    // raw total call count would over-count per plugin fixture) — if the cache were a no-op (always
-    // re-deriving), this would see 2 root-dir listings, not 1.
-    // -----------------------------------------------------------------------------------------
-    test("livePlugins() cache-hit: two plugins.list calls with no settings/plugin-dir write between them only derive (readdirSync the plugins root) ONCE", async () => {
-      const srv = await bootLifecycleServer();
-      const c = await TestClient.connect(srv.socketPath);
-      await c.hello(srv.harnessToken, "cache-hit-check");
-
-      const fs = await import("node:fs");
-      const spy = spyOn(fs, "readdirSync");
-      try {
-        const first = await c.request(METHODS.pluginsList, {});
-        expect(first.result.plugins).toHaveLength(1); // the "runner" fixture bootLifecycleServer seeds
-        const second = await c.request(METHODS.pluginsList, {});
-        expect(second.result).toEqual(first.result); // same settings-current view either way
-
-        const rootListings = spy.mock.calls.filter((args) => args[0] === srv.pluginsRoot);
-        expect(rootListings).toHaveLength(1); // the second call was served from cache — no re-derive
-      } finally {
-        spy.mockRestore();
-      }
-
-      c.close(); srv.stop();
-    });
-
-    test("(f) all five lifecycle RPCs are role-rejected for a plugin connection", async () => {
-      const srv = await bootLifecycleServer();
-      const raw = srv.store.mintPluginToken("runner");
-      const c = await TestClient.connect(srv.socketPath);
-      await c.request(METHODS.hello, {
-        protocolVersion: PROTOCOL_VERSION, role: "plugin", token: raw, clientName: "runner", pluginId: "runner",
-      });
-
-      const calls: Array<[string, unknown]> = [
-        [METHODS.pluginsInstall, { source: "/tmp/does-not-matter" }],
-        [METHODS.pluginEnable, { name: "runner" }],
-        [METHODS.pluginDisable, { name: "runner" }],
-        [METHODS.pluginRemove, { name: "runner" }],
-        [METHODS.pluginSetConsent, { name: "runner", classes: ["exec"] }],
-      ];
-      for (const [method, params] of calls) {
-        const res = await c.request(method, params);
-        expect(res.error?.code).toBe(ERR.UNAUTHORIZED);
-      }
-
-      c.close(); srv.stop();
-    });
-  });
 
   // -----------------------------------------------------------------------------------------
   // Plugin tool bridge (Phase 4b Task 4, spec §3): plugin.register/tool.register/

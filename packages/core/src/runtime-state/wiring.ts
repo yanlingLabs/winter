@@ -19,7 +19,7 @@
 // see the §17 phase 5 block below).
 import type { RuntimeDirectoryStore } from "@yanlinglabs/winter-runtime-sdk";
 import type { SessionStore } from "../sessions/store";
-import type { Settings } from "../settings";
+import { sdkAutoMemory, type Settings } from "../settings";
 import { ProjectionCheckpoints } from "./checkpoints";
 import { ChildProfiles, RuntimeChildren } from "./children";
 import { openRuntimeStateDb, type RuntimeStateDb } from "./db";
@@ -72,7 +72,11 @@ export interface DaemonRuntimeStateDeps {
    *  REAL path on the developer's machine (`canonicalTempScanRoot()` / `os.tmpdir()`), so every
    *  caller of `startRuntimeState` that does not name one sweeps the real thing (whole-branch
    *  review, Major 1). */
-  recovery?: { hooks?: RecoveryHooks; probe?: LeaseProbe; tempScanRoot?: string; claudeResumeScanRoot?: string };
+  recovery?: {
+    hooks?: RecoveryHooks; probe?: LeaseProbe; tempScanRoot?: string; claudeResumeScanRoot?: string;
+    /** WS-21: leave step 8's staging sweep to the router's late reconcile-then-delete (see `RecoveryDeps`). */
+    deferClaudeResumeSweep?: boolean;
+  };
   /** §17 phase 5's filesystem seam (`MemoryKeyFs`). Injectable for ONE reason: the two failures this
    *  wiring has to survive — a repair that throws, and an apply that throws after a committed move —
    *  are both mid-`rename` failures, and a test cannot produce either by arranging files. */
@@ -213,6 +217,7 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
       // `withTempHome`) sets it for the test's lifetime, which is what keeps every `startDaemon`-style
       // test from sweeping the developer's real tmpdir.
       claudeResumeScanRoot: deps.recovery?.claudeResumeScanRoot ?? (process.env.WINTER_CLAUDE_RESUME_SCAN_ROOT?.trim() || undefined),
+      ...(deps.recovery?.deferClaudeResumeSweep === true ? { deferClaudeResumeSweep: true } : {}),
     });
     for (const step of lastRecovery.steps) {
       if (step.outcome === "ok" || step.outcome === "skipped") continue;
@@ -324,14 +329,15 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
         // which closes the handle and costs the WHOLE runtime spine for a migration that had nothing
         // to migrate. The contract in the docstring is only a contract if nothing is outside this.
         if (markerIsSet()) return; // a home that DID migrate must not start narrating about it again
-        const plan = planMemoryKeyMigration({ rs, home, records, store, memoryDirectory: settings?.memory?.directory, fs: deps.memoryKeyFs });
+        // WS-21: the MEMDIR override moved to `sdk/settings.json` (`autoMemoryDirectory`, read live).
+        const plan = planMemoryKeyMigration({ rs, home, records, store, memoryDirectory: sdkAutoMemory(home).directory, fs: deps.memoryKeyFs });
         // Declined, NOT done: no marker, so clearing `memory.directory` on THIS running daemon still
         // gets a migration. The decline refuses before the plan touches the disk or spawns git, so
         // re-entering it on every settings change is free.
         if (plan.declined === "memory-directory-override") {
           if (!declineLogged) {
             declineLogged = true;
-            log("memory-key migration declined: settings.memory.directory pins this home's MEMDIR, so the project key decides nothing (clear it to migrate)");
+            log("memory-key migration declined: sdk/settings.json autoMemoryDirectory pins this home's MEMDIR, so the project key decides nothing (clear it to migrate)");
           }
           return;
         }

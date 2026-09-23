@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { TrustStore } from "./trust";
+import { storeHomeFor } from "./paths";
 import { neutralizeReminderTags } from "./context";
 import { LEGACY_PROJECT_DIR, resolveLegacyProjectDir, resolveLegacyProjectPath } from "./legacy-project-files";
 import type { Settings } from "../settings";
@@ -93,7 +94,8 @@ function parseStyleFile(path: string, fallbackName: string, cap: number): Resolv
 
 /**
  * Resolves an output style by name from three sources, closest-wins: a trusted project's
- * `<cwd>/.winter/output-styles/<name>.md`, then `<winterHome>/output-styles/<name>.md`, then the
+ * `<cwd>/.winter/output-styles/<name>.md`, then `<store home>/output-styles/<name>.md` (WS-21:
+ * `storeHomeFor(winterHome)`), then the
  * built-ins. Mirrors SkillStore's trust-gated project-dir discovery. Never throws.
  */
 export class OutputStyleStore {
@@ -133,7 +135,7 @@ export class OutputStyleStore {
         return p;
       }
     }
-    const u = parseStyleFile(join(this.deps.winterHome, "output-styles", `${name}.md`), name, this.cap);
+    const u = parseStyleFile(join(storeHomeFor(this.deps.winterHome), "output-styles", `${name}.md`), name, this.cap);
     if (u) return u;
     return BUILTIN_OUTPUT_STYLES.find((s) => s.name === name) ?? null;
   }
@@ -163,7 +165,7 @@ export class OutputStyleStore {
         if (p) out.set(p.name, p.description);
       }
     };
-    scan(join(this.deps.winterHome, "output-styles"));           // user overrides built-in
+    scan(join(storeHomeFor(this.deps.winterHome), "output-styles")); // user overrides built-in (WS-21: the store home)
     if (cwd && this.deps.trust.isTrusted(cwd)) {
       const winterDir = join(cwd, ".winter", "output-styles");
       const legacyDir = join(cwd, LEGACY_PROJECT_DIR, "output-styles");

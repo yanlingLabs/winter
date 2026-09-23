@@ -1081,15 +1081,17 @@ describe("effectiveOfficialAuthFor (O6, provider.status; WS-20: presence alone)"
 // `options.settings.permissions.deny` too — `permissionDenyRulesFor` is the ONE function both
 // `buildWinterOptions` (mode-options.ts) and this leg's construction site call, so a divergence here
 // would mean the two legs enforce DIFFERENT deny lists for the identical settings.json.
-describe("officialInputFor — item 2: settings.permissions.deny reaches this leg too", () => {
+describe("officialInputFor — item 2: the user's deny rules reach this leg too", () => {
   test("a Skill(<name>) deny rule (or any hand-written rule) rides alongside the fixed control-plane fence", () => {
     const home = "/Users/x/.winter-test-home";
+    // WS-21: the user tier's deny rules are `sdk/settings.json` `permissions.deny` (`userDeny`); a stale
+    // copy on `settings` is never read.
     const settings = Settings.parse({
       schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
-      permissions: { deny: ["Skill(writing-skills)", "Agent(fork)"] },
+      permissions: { deny: ["Skill(stale)"] },
     });
     const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
-    const result = officialInputFor(input, minimalDeps({ home, settings }));
+    const result = officialInputFor(input, minimalDeps({ home, settings, userDeny: ["Skill(writing-skills)", "Agent(fork)"] }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
     const deny = (result.input.options as { settings?: { permissions?: { deny?: string[] } } }).settings?.permissions?.deny ?? [];
     expect(deny).toEqual([...controlPlaneDenyRules(home), "Skill(writing-skills)", "Agent(fork)"]);

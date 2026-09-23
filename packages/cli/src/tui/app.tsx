@@ -1074,6 +1074,7 @@ export function App({
             onCyclePolicy={onCyclePolicy}
             nowMs={nowMs}
             sessionId={sessionId}
+            project={cwdRef.current}
             onStateChange={onComposerStateChange}
             onScrollTop={onComposerScrollTop}
             onScrollBottom={onComposerScrollBottom}

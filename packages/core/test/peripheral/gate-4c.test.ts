@@ -261,9 +261,13 @@ describe("4c gate: hardware broker paths (spec §5, plan Task 6)", () => {
       // server.test.ts's seedBatteryPlugin({}) variant.
       const pluginId = "no-hw-permission-plugin";
       const home = mkdtempSync(join(tmpdir(), "winter-gate4c-scripted-"));
-      const { mkdirSync, writeFileSync } = await import("node:fs");
-      mkdirSync(join(home, "plugins", pluginId), { recursive: true });
-      writeFileSync(join(home, "plugins", pluginId, "winter-plugin.json"), JSON.stringify({
+      // WS-21: registers the plugin through Contract B (installed_plugins.json + sdk/settings.json)
+      // the same way every other test in this file does (`installBatteryLimiter`), then overwrites
+      // the COPIED manifest at its real install path to drop `permissions.hardware` — this test's
+      // whole point is a manifest that lacks it, unlike battery-limiter's own fixture.
+      const dir = installBatteryLimiter(home, pluginId);
+      const { writeFileSync } = await import("node:fs");
+      writeFileSync(join(dir, "winter-plugin.json"), JSON.stringify({
         id: pluginId, tier: "capability", permissions: { exec: true }, // no permissions.hardware at all
       }));
       writeAndLoadSettings(home, pluginId, { hardwareConsent: true });

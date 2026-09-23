@@ -1,11 +1,17 @@
 // Fix wave (review row 7): Winter's configured MCP servers → the SDK's stdio configs, keyed as the
 // daemon's registry keys them, trust-gated for the project half.
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { configuredMcpServersFor } from "../../src/runtime-sdk/external-mcp";
-import { Settings, loadSettings } from "../../src/settings";
+import { Settings, sdkUserMcpServers } from "../../src/settings";
+
+// WS-21: the project MCP file is `<root>/.winter/mcp.json` (the repo-root `.mcp.json` is never read).
+const writeProjectMcp = (root: string, body: string): void => {
+  mkdirSync(join(root, ".winter"), { recursive: true });
+  writeFileSync(join(root, ".winter", "mcp.json"), body);
+};
 
 // Daemon settings surface batch 3 (item 3b): a real `Settings.parse` always normalizes a `type`-less
 // entry to `{ type: "stdio", ... }` (settings.ts's own preprocess step), so this helper stamps the
@@ -14,21 +20,23 @@ import { Settings, loadSettings } from "../../src/settings";
 const settingsWith = (servers: Record<string, { command: string; args?: string[]; env?: Record<string, string> }>): Settings =>
   ({ mcpServers: Object.fromEntries(Object.entries(servers).map(([k, v]) => [k, { type: "stdio" as const, ...v }])) } as unknown as Settings);
 
-test("user servers from settings.mcpServers become stdio configs under their own keys (mcp__<key>__<tool> on the child)", () => {
-  const out = configuredMcpServersFor({
-    settings: settingsWith({ fake: { command: "bun", args: ["run", "fake.ts"], env: { A: "1" } }, bare: { command: "npx" } }),
-    cwd: undefined, trusted: () => false,
-  });
+// WS-21: the user-scope servers moved to `sdk/.winter.json` and arrive as `userMcpServers`
+// (`sdkUserMcpServers`, read live by the daemon); `settings` is read for `mcp.disabled` only.
+const userServers = (settings: Settings) => ({ userMcpServers: settings.mcpServers ?? {} });
+
+test("user servers (sdk/.winter.json) become stdio configs under their own keys (mcp__<key>__<tool> on the child)", () => {
+  const settings = settingsWith({ fake: { command: "bun", args: ["run", "fake.ts"], env: { A: "1" } }, bare: { command: "npx" } });
+  const out = configuredMcpServersFor({ settings, ...userServers(settings), cwd: undefined, trusted: () => false });
   expect(out).toEqual({
     fake: { type: "stdio", command: "bun", args: ["run", "fake.ts"], env: { A: "1" } },
     bare: { type: "stdio", command: "npx" },
   });
 });
 
-test("a TRUSTED project's <cwd>/.mcp.json contributes its servers; an UNTRUSTED one contributes nothing and is never read", () => {
+test("a TRUSTED project's <root>/.winter/mcp.json contributes its servers; an UNTRUSTED one contributes nothing and is never read", () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "winter-ext-mcp-")));
   try {
-    writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { proj: { command: "bun", args: ["run", "p.ts"] } } }));
+    writeProjectMcp(dir, JSON.stringify({ mcpServers: { proj: { command: "bun", args: ["run", "p.ts"] } } }));
     expect(configuredMcpServersFor({ settings: null, cwd: dir, trusted: () => true })).toEqual({ proj: { type: "stdio", command: "bun", args: ["run", "p.ts"] } });
     const reads: string[] = [];
     expect(configuredMcpServersFor({ settings: null, cwd: dir, trusted: () => false, readFile: (p) => { reads.push(p); return "{}"; } })).toEqual({});
@@ -36,15 +44,18 @@ test("a TRUSTED project's <cwd>/.mcp.json contributes its servers; an UNTRUSTED 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("a missing or malformed .mcp.json contributes nothing and never throws; a user server shadows a same-keyed project server", () => {
+// WS-21 (spec §3.4.5): claude's precedence, local > project > user — a trusted PROJECT server now shadows
+// a same-keyed USER server (the pre-WS-21 registry order had it the other way round).
+test("a missing or malformed project MCP file contributes nothing and never throws; a project server shadows a same-keyed user server", () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "winter-ext-mcp-bad-")));
   try {
     expect(configuredMcpServersFor({ settings: null, cwd: dir, trusted: () => true })).toEqual({});
-    writeFileSync(join(dir, ".mcp.json"), "{ not json");
+    writeProjectMcp(dir, "{ not json");
     expect(configuredMcpServersFor({ settings: null, cwd: dir, trusted: () => true })).toEqual({});
-    writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { shared: { command: "project-cmd" }, only: { command: "p" } } }));
-    const out = configuredMcpServersFor({ settings: settingsWith({ shared: { command: "user-cmd" } }), cwd: dir, trusted: () => true });
-    expect(out.shared).toEqual({ type: "stdio", command: "user-cmd" });
+    writeProjectMcp(dir, JSON.stringify({ mcpServers: { shared: { command: "project-cmd" }, only: { command: "p" } } }));
+    const withShared = settingsWith({ shared: { command: "user-cmd" } });
+    const out = configuredMcpServersFor({ settings: withShared, ...userServers(withShared), cwd: dir, trusted: () => true });
+    expect(out.shared).toEqual({ type: "stdio", command: "project-cmd" });
     expect(out.only).toEqual({ type: "stdio", command: "p" });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -58,7 +69,7 @@ test("a missing or malformed .mcp.json contributes nothing and never throws; a u
 test("a mixed project .mcp.json (stdio + http + sse + one malformed entry) yields the three valid servers; the malformed one is skipped and logged, never taking its siblings down", () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "winter-ext-mcp-mixed-")));
   try {
-    writeFileSync(join(dir, ".mcp.json"), JSON.stringify({
+    writeProjectMcp(dir, JSON.stringify({
       mcpServers: {
         stdioOne: { command: "bun", args: ["run", "p.ts"] },
         httpOne: { type: "http", url: "https://example.com/mcp", headers: { "X-Request-Id": "abc123" } },
@@ -81,7 +92,7 @@ test("a mixed project .mcp.json (stdio + http + sse + one malformed entry) yield
 test("the SAME mixed .mcp.json, untrusted, still contributes nothing — the trust gate is unchanged by the per-entry fix", () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "winter-ext-mcp-mixed-untrusted-")));
   try {
-    writeFileSync(join(dir, ".mcp.json"), JSON.stringify({
+    writeProjectMcp(dir, JSON.stringify({
       mcpServers: {
         stdioOne: { command: "bun", args: ["run", "p.ts"] },
         httpOne: { type: "http", url: "https://example.com/mcp" },
@@ -102,7 +113,7 @@ test("the SAME mixed .mcp.json, untrusted, still contributes nothing — the tru
 test("a project-scope http entry with a credential-shaped header (Authorization) reaches the child VERBATIM — never refused, never stripped (parity with claude, not settings.json's own posture)", () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "winter-ext-mcp-project-cred-header-")));
   try {
-    writeFileSync(join(dir, ".mcp.json"), JSON.stringify({
+    writeProjectMcp(dir, JSON.stringify({
       mcpServers: { credhttp: { type: "http", url: "https://example.com/mcp", headers: { Authorization: "Bearer sk-team-shared" } } },
     }));
     const out = configuredMcpServersFor({ settings: null, cwd: dir, trusted: () => true });
@@ -132,7 +143,7 @@ test("an HTTP server and an SSE server pass through with their own shape (url, h
       sseOne: { type: "sse", url: "https://example.com/sse" },
     },
   });
-  const out = configuredMcpServersFor({ settings, cwd: undefined, trusted: () => false });
+  const out = configuredMcpServersFor({ settings, ...userServers(settings), cwd: undefined, trusted: () => false });
   expect(out).toEqual({
     httpOne: { type: "http", url: "https://example.com/mcp", headers: { "X-Request-Id": "abc123" } },
     sseOne: { type: "sse", url: "https://example.com/sse" },
@@ -145,11 +156,10 @@ test("an HTTP server and an SSE server pass through with their own shape (url, h
 // EITHER leg's `Options` — `configuredMcpServersFor` is the one function both `mode-options.ts`'s
 // `buildWinterOptions` and `official-options.ts`'s `officialInputFor` consume verbatim, so proving
 // it is absent from THIS function's output proves it is absent from both legs.
-test("a credential-shaped header a user hand-edited into settings.json is stripped by loadSettings and never reaches configuredMcpServersFor's output", () => {
-  const dir = mkdtempSync(join(tmpdir(), "winter-ext-mcp-cred-header-"));
-  const path = join(dir, "settings.json");
-  writeFileSync(path, JSON.stringify({
-    schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
+test("a credential-shaped header a user hand-edited into sdk/.winter.json is stripped by sdkUserMcpServers and never reaches configuredMcpServersFor's output", () => {
+  const home = mkdtempSync(join(tmpdir(), "winter-ext-mcp-cred-header-"));
+  mkdirSync(join(home, "sdk"), { recursive: true });
+  writeFileSync(join(home, "sdk", ".winter.json"), JSON.stringify({
     mcpServers: {
       httpOne: {
         type: "http", url: "https://example.com/mcp",
@@ -157,10 +167,9 @@ test("a credential-shaped header a user hand-edited into settings.json is stripp
       },
     },
   }));
-  // Load through the real daemon-facing door (not Settings.parse, which would itself refuse this
-  // shape) — this IS the read door under test.
-  const settings = loadSettings(path);
-  const out = configuredMcpServersFor({ settings, cwd: undefined, trusted: () => false });
+  // Read through the real daemon-facing door (WS-21: the user scope is `sdk/.winter.json`) — this IS
+  // the read door under test.
+  const out = configuredMcpServersFor({ settings: null, userMcpServers: sdkUserMcpServers(home), cwd: undefined, trusted: () => false });
   expect(out).toEqual({ httpOne: { type: "http", url: "https://example.com/mcp", headers: { "X-Request-Id": "abc123" } } });
   expect(JSON.stringify(out)).not.toContain("sk-SENTINEL");
   expect(JSON.stringify(out)).not.toContain("Authorization");
@@ -171,13 +180,13 @@ test("a credential-shaped header a user hand-edited into settings.json is stripp
 test("a disabled server is withheld entirely — neither a user nor a project entry of that name survives", () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "winter-ext-mcp-disabled-")));
   try {
-    writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { blocked: { command: "project-cmd" }, allowed: { command: "p" } } }));
+    writeProjectMcp(dir, JSON.stringify({ mcpServers: { blocked: { command: "project-cmd" }, allowed: { command: "p" } } }));
     const settings = Settings.parse({
       schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
       mcpServers: { blocked: { type: "stdio", command: "user-cmd" }, kept: { type: "stdio", command: "keep" } },
       mcp: { disabled: ["blocked"] },
     });
-    const out = configuredMcpServersFor({ settings, cwd: dir, trusted: () => true });
+    const out = configuredMcpServersFor({ settings, ...userServers(settings), cwd: dir, trusted: () => true });
     expect(out.blocked).toBeUndefined();
     expect(out.kept).toEqual({ type: "stdio", command: "keep" });
     expect(out.allowed).toEqual({ type: "stdio", command: "p" });

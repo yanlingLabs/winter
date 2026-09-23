@@ -3,7 +3,7 @@
 // `winter mcp add/remove --scope project` (`mcp-cli.ts`). Uses a real temp dir (this is
 // deliberately I/O, not a pure function) — never touches `~/.winter*`.
 import { describe, expect, test, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync, chmodSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync, chmodSync, statSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -14,9 +14,11 @@ import {
 describe("project-file", () => {
   const dirs: string[] = [];
   afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+  // WS-21: the project MCP file is `<root>/.winter/mcp.json`; `.winter` exists in each temp project.
   function tempDir(): string {
     const d = mkdtempSync(join(tmpdir(), "winter-mcp-project-file-"));
     dirs.push(d);
+    mkdirSync(join(d, ".winter"));
     return d;
   }
 
@@ -164,15 +166,15 @@ describe("project-file", () => {
     test("writeRawProjectMcpConfig leaves no stray temp file behind, and the final content is correct", () => {
       const dir = tempDir();
       writeRawProjectMcpConfig(dir, {}, { "my-server": { command: "npx" } });
-      const entries = readdirSync(dir);
-      expect(entries).toEqual([".mcp.json"]); // no leftover .tmp file
+      const entries = readdirSync(join(dir, ".winter"));
+      expect(entries).toEqual(["mcp.json"]); // no leftover .tmp file
       expect(readRawProjectMcpConfig(dir)).toEqual({ kind: "ok", raw: { mcpServers: { "my-server": { command: "npx" } } }, servers: { "my-server": { command: "npx" } } });
     });
 
     test("writeProjectMcpConfig leaves no stray temp file behind", () => {
       const dir = tempDir();
       writeProjectMcpConfig(dir, { mcpServers: { "my-server": { command: "npx" } } });
-      expect(readdirSync(dir)).toEqual([".mcp.json"]);
+      expect(readdirSync(join(dir, ".winter"))).toEqual(["mcp.json"]);
     });
 
     test("writeRawProjectMcpConfig preserves the existing file's mode across a rewrite", () => {
@@ -197,13 +199,13 @@ describe("project-file", () => {
       if (process.getuid && process.getuid() === 0) return; // root bypasses the permission check this test relies on
       const dir = tempDir();
       writeRawProjectMcpConfig(dir, {}, { one: { command: "npx" } }); // a valid file exists first
-      chmodSync(dir, 0o500); // read+execute only — the temp write inside it must now fail (EACCES)
+      chmodSync(join(dir, ".winter"), 0o500); // read+execute only — the temp write inside it must now fail (EACCES)
       try {
         expect(() => writeRawProjectMcpConfig(dir, {}, { two: { command: "bun" } })).toThrow();
       } finally {
-        chmodSync(dir, 0o700); // restore before afterEach's rmSync cleans the temp dir up
+        chmodSync(join(dir, ".winter"), 0o700); // restore before afterEach's rmSync cleans the temp dir up
       }
-      expect(readdirSync(dir)).toEqual([".mcp.json"]); // no leftover .tmp file, original untouched
+      expect(readdirSync(join(dir, ".winter"))).toEqual(["mcp.json"]); // no leftover .tmp file, original untouched
     });
   });
 });

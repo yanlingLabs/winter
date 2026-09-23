@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { realpathSync } from "node:fs";
+import { storeHomeFor } from "./paths";
 
 /**
  * File-based memory (MEMDIR, T1) — project-key derivation + the per-project memory directory
@@ -143,6 +144,9 @@ export function sanitizeProjectKey(absPath: string): string {
 }
 
 export interface MemoryDirOptions {
+  /** The DAEMON home (`<home>`, never `<home>/sdk`). The store lives in `storeHomeFor(winterHome)`
+   *  (WS-21: `<home>/sdk` on a run-home build, `<home>` before it) and every function here applies
+   *  that itself. */
   winterHome: string;
   /** `settings.memory.directory` — an absolute or `~/`-relative override that REPLACES the
    *  computed `~/.winter/projects/<key>/memory` path entirely (CC's own "relocatable directory"
@@ -186,7 +190,7 @@ function resolveOverride(opts: MemoryDirOptions): string | null {
 export function memoryDirFor(cwd: string, opts: MemoryDirOptions): string {
   const override = resolveOverride(opts);
   if (override) return override;
-  return join(opts.winterHome, "projects", memoryProjectKeyFor(cwd, opts), "memory");
+  return join(storeHomeFor(opts.winterHome), "projects", memoryProjectKeyFor(cwd, opts), "memory");
 }
 
 /**
@@ -220,7 +224,7 @@ export function memoryProjectKeyFor(cwd: string, opts: MemoryDirOptions): string
 export function memoryDirForRecord(record: { memoryProjectKey: string }, opts: MemoryDirOptions): string {
   const override = resolveOverride(opts);
   if (override) return override;
-  return join(opts.winterHome, "projects", record.memoryProjectKey, "memory");
+  return join(storeHomeFor(opts.winterHome), "projects", record.memoryProjectKey, "memory");
 }
 
 /**
@@ -237,7 +241,7 @@ export function memoryDirForRecord(record: { memoryProjectKey: string }, opts: M
 export function globalMemoryDirFor(opts: MemoryDirOptions): string {
   const override = resolveOverride(opts);
   if (override) return override;
-  return join(opts.winterHome, "projects", "_global", "memory");
+  return join(storeHomeFor(opts.winterHome), "projects", "_global", "memory");
 }
 
 /** Dreaming (Phase 7b): the shared assistant-memory bucket — `~/.winter/projects/_assistant/memory`.
@@ -247,5 +251,5 @@ export function globalMemoryDirFor(opts: MemoryDirOptions): string {
  *  DELIBERATELY ignores the `memory.directory` relocation override: honoring it would collapse
  *  this bucket into the project bucket and leak dream memories into code sessions. */
 export function assistantMemoryDirFor(opts: { winterHome: string }): string {
-  return join(opts.winterHome, "projects", "_assistant", "memory");
+  return join(storeHomeFor(opts.winterHome), "projects", "_assistant", "memory");
 }

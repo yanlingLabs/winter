@@ -1403,7 +1403,10 @@ describe("loadPermissionDirs trust gating", () => {
     const home = mkdtempSync(join(tmpdir(), "winter-tg-home-"));
     const project = mkdtempSync(join(tmpdir(), "winter-tg-proj-"));
     mkdirSync(join(project, ".winter"), { recursive: true });
-    wf(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, permissions: { additionalDirectories: ["/opt/user-dir"] } }));
+    // WS-21: the user tier is `sdk/settings.json`; a stale copy left in `settings.json` is never read.
+    wf(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, permissions: { additionalDirectories: ["/opt/stale-dir"] } }));
+    mkdirSync(join(home, "sdk"), { recursive: true });
+    wf(join(home, "sdk", "settings.json"), JSON.stringify({ permissions: { additionalDirectories: ["/opt/user-dir"] } }));
     wf(join(project, ".winter", "settings.json"), JSON.stringify({ permissions: { additionalDirectories: ["/opt/committed-dir"] } }));       // committed → trust-gated
     wf(join(project, ".winter", "settings.local.json"), JSON.stringify({ permissions: { additionalDirectories: ["/opt/local-dir"] } }));    // fix-wave A2: local is ALSO trust-gated now (a repo can force-commit one)
     return { home, project };
@@ -1412,7 +1415,8 @@ describe("loadPermissionDirs trust gating", () => {
   test("UNtrusted project: BOTH committed settings.json and settings.local.json are IGNORED; only user-global still applies (fix-wave A2: gitignore is not a trust boundary)", () => {
     const { home, project } = scaffold();
     const dirs = loadPermissionDirs(home, project, false);
-    expect(dirs).toContain("/opt/user-dir");    // user global — always
+    expect(dirs).toContain("/opt/user-dir");    // user global (sdk/settings.json) — always
+    expect(dirs).not.toContain("/opt/stale-dir"); // WS-21: the moved key's stale copy is ignored
     expect(dirs).not.toContain("/opt/local-dir");     // local — gated out when untrusted too
     expect(dirs).not.toContain("/opt/committed-dir"); // committed — gated out when untrusted
   });

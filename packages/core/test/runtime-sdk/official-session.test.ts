@@ -16,7 +16,9 @@
 // this works regardless of import order and needs no dynamic `import()` gymnastics. It is undone in
 // `afterAll` so no other test file sharing this process sees a fake treated as real.
 import { afterAll, describe, expect, mock, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { transcriptProjectKey, WinterCompatibilitySessionStore } from "@yanlinglabs/winter-agent-sdk";
+import { storeHomeFor, storeProjectsDir } from "../../src/agent/paths";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installMockModuleTripwire } from "../mock-module-tripwire";
@@ -168,7 +170,7 @@ interface Harness {
   types(): string[];
 }
 
-function harness(overrides: Partial<OfficialSessionDeps> = {}): Harness {
+function harness(overrides: Partial<OfficialSessionDeps> = {}, runtimeExtra: Record<string, unknown> = {}): Harness {
   const queries: FakeOfficialQuery[] = [];
   const capturedOptions: Array<Record<string, unknown>> = [];
   const events: SessionEvent[] = [];
@@ -198,6 +200,7 @@ function harness(overrides: Partial<OfficialSessionDeps> = {}): Harness {
     },
     trackQuery: (_sid: string, abort: AbortController, end: () => Promise<void>) => { tracked.push({ abort, end }); },
     untrack: () => { h.untracked++; },
+    ...runtimeExtra,
   } as unknown as WinterRuntimeSdk;
 
   const selection: RuntimeSelection = {
@@ -1125,6 +1128,55 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
     }
   });
 
+  // WS-21 round 3 (Important): the official store key derives from the CANONICAL cwd (official-options.ts), so
+  // a 0.116 official session made in a symlinked cwd has its canonical transcript under the RAW key — the
+  // router's resume-vs-fresh check (`store.load` at the canonical key) would find nothing and start FRESH
+  // under the same backend id. `resume()` moves the files first; the restart's first generation is then
+  // handed the canonical cwd, and the store at that key holds the history.
+  test("round 3: a symlinked-cwd official session from the old layout resumes with its history (files moved, record re-pointed)", async () => {
+    const w = driverWorld();
+    try {
+      await writeCredentialMaterial(w.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
+      const real = realpathSync(mkdtempSync(join(tmpdir(), "winter-rekey-off-real-")));
+      const link = join(realpathSync(mkdtempSync(join(tmpdir(), "winter-rekey-off-link-"))), "proj");
+      symlinkSync(real, link);
+      const sid = w.store.createSession("t", { mode: "code", model: MODEL, cwd: link });
+      const session = await w.drivers.create(sid);
+      w.q().emit(init(session.backendSessionId, { apiKeySource: "ANTHROPIC_API_KEY" }));
+      w.q().emit(result());
+      await Bun.sleep(10);
+      w.q().end();
+      await Bun.sleep(10);
+      const id = session.backendSessionId;
+      const projects = storeProjectsDir(w.home);
+      const rawKey = transcriptProjectKey(link);
+      const canonKey = transcriptProjectKey(real);
+      expect(w.records.get(sid)!.transcriptProjectKey).toBe(canonKey);
+      // the 0.116 state: the record and the canonical transcript under the RAW key
+      expect(w.records.rekeyTranscript(sid, canonKey, rawKey, join(projects, rawKey))).toBe(true);
+      mkdirSync(join(projects, rawKey), { recursive: true });
+      writeFileSync(join(projects, rawKey, `${id}.jsonl`), '{"type":"user","uuid":"o-old","message":{"role":"user","content":"before"}}\n');
+
+      const w2 = driverWorld({ home: w.home, store: w.store, hub: w.hub, records: w.records, checkpoints: w.checkpoints, secrets: w.secrets });
+      const resumed = await w2.drivers.ensure(sid);
+      expect(resumed).toBeDefined();
+      expect(existsSync(join(projects, rawKey, `${id}.jsonl`))).toBe(false);
+      const record = w.records.get(sid)!;
+      expect([record.transcriptProjectKey, record.backendRoot]).toEqual([canonKey, join(projects, canonKey)]);
+      const opts = w2.capturedOptions[0] as unknown as { cwd: string; sessionId: string };
+      expect(opts.cwd).toBe(real);
+      expect(opts.sessionId).toBe(id);
+      const loaded = await new WinterCompatibilitySessionStore({ winterHome: storeHomeFor(w.home) }).load({ projectKey: transcriptProjectKey(opts.cwd), sessionId: id });
+      expect(loaded?.map((e) => e.uuid)).toEqual(["o-old"]);
+      w2.q().emit(init(id, { apiKeySource: "ANTHROPIC_API_KEY" }));
+      w2.q().emit(result());
+      await Bun.sleep(10);
+      await resumed!.end();
+    } finally {
+      w.close();
+    }
+  });
+
   // Winter Phase 10b (D1-8, I-4): "the child env NAMES after GPT -> Claude contain no codex/openai
   // names." `driverWorld()`'s own daemon `settings` is ALREADY `provider.type: "codex-oauth"` (its
   // definition above) while the session it creates is assembled on the Claude selection — exactly
@@ -1309,4 +1361,118 @@ describe("D1-8 — the P9c-1/P10a assertions on a RESUMED official init", () => 
       expect(hasSessionId).toBe(true); // the daemon's own half of the contract: always sessionId
     }
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// WS-21 L3.3 (spec §3.1, §3.8): the official leg awaits its run home inside `open()`, passes it as
+// `runtime.runHome` beside the selection, drops the Winter-owned spool (the router refuses the pair),
+// and disposes it only when the router says `safe` — never on a bare exit, a quarantine or no answer.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describe("WS-21: the official leg's run home", () => {
+  const stubRunHome = () => {
+    const disposed: string[] = [];
+    let n = 0;
+    const build = async () => {
+      const runId = `orun-${++n}`;
+      return {
+        runId, dir: `/h/cache/runs/${runId}`, sdkHome: "/h/sdk",
+        input: { home: "/h", mode: "code" as const, dispatchChild: false, leg: "official" as const, cwd: "/repo", trustedProjectRoot: null, gitRoot: null, mcpDisabled: [], reservedMcpServerNames: [], memoryDir: "/m" },
+        effectiveSettings: {},
+        report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [] },
+        dispose: async () => { disposed.push(runId); },
+      };
+    };
+    return { disposed, build, count: () => n };
+  };
+  const runtimeOf = (options: Record<string, unknown>) => options["runtime"] as { runHome?: { runId: string }; official?: { spool?: string } } | undefined;
+
+  test("open() passes runtime.runHome and names no spool beside it", async () => {
+    const rh = stubRunHome();
+    const h = harness({ runHome: rh.build });
+    await h.session.open();
+    expect(rh.count()).toBe(1);
+    expect(runtimeOf(h.capturedOptions[0]!)?.runHome?.runId).toBe("orun-1");
+    expect(runtimeOf(h.capturedOptions[0]!)?.official?.spool).toBeUndefined();
+    // L2: the router refuses a run home built for another cwd — `options.cwd` IS the run home's own.
+    expect(h.capturedOptions[0]!["cwd"]).toBe("/repo");
+    await h.session.end();
+  });
+
+  test("options.cwd is taken from the run home's input, never from a second read of the session", async () => {
+    const rh = stubRunHome();
+    const moved = async () => ({ ...(await rh.build()), input: { ...(await rh.build()).input, cwd: "/moved" } });
+    const h = harness({ runHome: moved });
+    await h.session.open();
+    expect(h.capturedOptions[0]!["cwd"]).toBe("/moved");
+    await h.session.end();
+  });
+
+  test("without a run home (router 0.0.11) the spool is named exactly as before and no runHome is sent", async () => {
+    const h = harness();
+    await h.session.open();
+    expect(runtimeOf(h.capturedOptions[0]!)?.runHome).toBeUndefined();
+    expect(runtimeOf(h.capturedOptions[0]!)?.official?.spool).toMatch(/runtimes\/claude-config$/);
+    await h.session.end();
+  });
+
+  // L2 fix round 1: dispose ONLY on `safe`. A quarantined folder is kept (the router copied its working
+  // copy; the daemon records it so recovery never re-reconciles it).
+  for (const [outcome, expected] of [["safe", ["orun-1"]], ["quarantined", []], ["pending", []], [undefined, []]] as const) {
+    test(`an ended incarnation's run home is ${expected.length ? "disposed" : "KEPT"} when the router says ${String(outcome)}`, async () => {
+      const rh = stubRunHome();
+      const h = harness({ runHome: rh.build }, { runHomeOutcome: () => outcome });
+      await h.session.open();
+      await h.session.end();
+      await Bun.sleep(30);
+      expect(rh.disposed).toEqual([...expected]);
+    });
+  }
+
+  // Review M6: a session whose run folder the router quarantined is `repair-required`, and a folder kept
+  // for recovery is RECORDED as the session's local-write root, so boot recovery knows whose it is.
+  test("a run folder is recorded against its session while it lives; a quarantined one marks repair-required", async () => {
+    for (const [outcome, disposed, recorded, repair] of [["safe", true, false, false], ["quarantined", false, true, true], ["pending", false, true, false]] as const) {
+      const rh = stubRunHome();
+      const notes: Array<string | undefined> = [];
+      const health: string[] = [];
+      const h = harness({
+        runHome: rh.build,
+        records: {
+          setTranscriptHealth: (_sid: string, v: string) => { health.push(v); },
+          noteRunFolder: (_sid: string, dir: string | undefined) => { notes.push(dir); },
+        } as never,
+      }, { runHomeOutcome: () => outcome });
+      await h.session.open();
+      expect(notes).toEqual(["/h/cache/runs/orun-1"]);
+      await h.session.end();
+      await Bun.sleep(30);
+      expect({ outcome, disposed: rh.disposed.length === 1 }).toEqual({ outcome, disposed });
+      expect({ outcome, recorded: notes[notes.length - 1] === "/h/cache/runs/orun-1" }).toEqual({ outcome, recorded });
+      expect({ outcome, repair: health.includes("repair-required") }).toEqual({ outcome, repair });
+    }
+  });
+
+  test("a run home built for an open that then fails is disposed immediately", async () => {
+    const rh = stubRunHome();
+    const h = harness({ runHome: rh.build }, { sdk: { query: () => { throw new Error("run_home_required (simulated router refusal)"); } } });
+    await expect(h.session.open()).rejects.toThrow(/run_home_required/);
+    expect(rh.disposed).toEqual(["orun-1"]);
+  });
+
+  // Review M5: once `sdk.query()` has RETURNED, the router has taken the run home — a failure after that
+  // point aborts the query and disposes only on the router's `safe`, never unconditionally.
+  for (const [outcome, expected] of [["pending", []], [undefined, []], ["safe", ["orun-1"]]] as const) {
+    test(`a failure AFTER the query was created: aborted, and the folder ${expected.length ? "disposed (safe)" : `kept (${String(outcome)})`}`, async () => {
+      const rh = stubRunHome();
+      const aborted: boolean[] = [];
+      const h = harness({ runHome: rh.build }, {
+        // the query is created normally; the failure comes right after it (tracking the query throws)
+        trackQuery: (_sid: string, abort: AbortController) => { abort.signal.addEventListener("abort", () => aborted.push(true)); throw new Error("simulated failure after the query was created"); },
+        runHomeOutcome: () => outcome,
+      });
+      await expect(h.session.open()).rejects.toThrow(/after the query was created/);
+      expect(aborted).toEqual([true]);
+      expect(rh.disposed).toEqual([...expected]);
+    });
+  }
 });

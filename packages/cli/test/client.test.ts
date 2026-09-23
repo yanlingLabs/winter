@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startDaemon, FileSecretStore, FakeProvider, MemoryStore, type RunningDaemon } from "@yanlinglabs/winter-core";
@@ -160,10 +160,10 @@ describe("WinterClient", () => {
     client.close();
   });
 
-  test("pluginsList client method round-trip (no plugins installed)", async () => {
+  test("pluginList client method round-trip (no plugins installed)", async () => {
     await boot();
     const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "pl", onEvent: () => {} });
-    expect(await client.pluginsList()).toEqual({ ok: true, plugins: [] });
+    expect(await client.pluginList()).toEqual({ ok: true, plugins: [] });
     client.close();
   });
 
@@ -334,7 +334,10 @@ describe("WinterClient", () => {
   // store directly, it explicitly disables the new backend so the RPCs still read from where it
   // wrote. Files-backed RPC coverage lives in core's own daemon-memory-rpc.test.ts.
   test("memoryList/memoryRead/memoryDelete round-trip against a real daemon", async () => {
-    const home = await boot(null, { memory: { enabled: false } });
+    const home = await boot(null);
+    // WS-21: `memory.enabled` moved to `sdk/settings.json` as claude's `autoMemoryEnabled` (read live).
+    mkdirSync(join(home, "sdk"), { recursive: true });
+    writeFileSync(join(home, "sdk", "settings.json"), JSON.stringify({ autoMemoryEnabled: false }));
     const seed = new MemoryStore({ winterHome: home, trust: { isTrusted: () => true } });
     const wrote = await seed.write("user", { name: "captain", description: "prefers concise replies", type: "user", body: "Sam prefers short answers." }, { source: "rpc" });
     expect(wrote.ok).toBe(true);

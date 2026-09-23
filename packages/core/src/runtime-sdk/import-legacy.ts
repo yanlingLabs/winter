@@ -65,6 +65,7 @@ import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 import { MAIN_THREAD } from "../projector";
 import { RuntimeSessionRecords, type RuntimeSessionState } from "../runtime-state/records";
 import { sessionLegOf } from "./leg";
+import { canonicalCwd, storeHomeFor, storeProjectsDir } from "../agent/paths";
 
 export interface ConvertEngineEraLogOpts {
   /** The Winter session id — becomes the dialect entries' OWN `sessionId` field is the BACKEND id
@@ -286,12 +287,13 @@ async function doImport(deps: ImportLegacyDeps, sessionId: string): Promise<{ ba
   // the identical function `session-driver.ts` uses, rather than trusting `record.transcriptProjectKey`
   // (the key at the ORIGINAL 8a backfill time, which a later `session.setDirs` could have moved on
   // from).
-  const projectKey = transcriptProjectKey(cwd);
+  const projectKey = transcriptProjectKey(canonicalCwd(cwd)); // WS-21 (L2 O-1): the child's own key
   const backendSessionId = randomUUID();
   const events = deps.store.read(sessionId);
   const entries = convertEngineEraLog(events, { sessionId, backendSessionId, cwd, version: deps.version ?? "unknown" });
   const usingRealStore = deps.compatStore === undefined;
-  const compat = deps.compatStore ?? new WinterCompatibilitySessionStore({ winterHome: deps.home });
+  // WS-21: the store lives where this build's child reads it (`storeHomeFor`).
+  const compat = deps.compatStore ?? new WinterCompatibilitySessionStore({ winterHome: storeHomeFor(deps.home) });
   if (entries.length > 0) {
     await compat.append({ projectKey, sessionId: backendSessionId }, entries);
     // See this file's header ("THE WRITER-LEASE DISCOVERY"): `append()` on the REAL store just took
@@ -300,7 +302,7 @@ async function doImport(deps: ImportLegacyDeps, sessionId: string): Promise<{ ba
     // no lease at all (the store's own doc), which is why this is gated on `entries.length > 0` too.
     if (usingRealStore) {
       try {
-        unlinkSync(join(deps.home, "projects", projectKey, `${backendSessionId}.lock`));
+        unlinkSync(join(storeProjectsDir(deps.home), projectKey, `${backendSessionId}.lock`));
       } catch {
         // Missing, unremovable, or a store whose lock layout has moved on — degrade to the
         // pre-fix behaviour (a typed refusal on the child's own resume) rather than lose the
