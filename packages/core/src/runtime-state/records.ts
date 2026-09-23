@@ -13,6 +13,7 @@
 // of the previous producer") and therefore has no update or delete door at all.
 import type { RuntimeKind, RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import type { RuntimeStateDb } from "./db";
+import { canonicalModelTag } from "../runtime-sdk/model-tag";
 
 /** WS-16 §4's lifecycle. `unavailable` is the honest "we cannot revalidate this right now" state
  *  startup recovery parks live sessions in; `archived` is a user-visible retirement, never a delete. */
@@ -335,13 +336,22 @@ const DUPLICATE_BACKEND_ID = /UNIQUE constraint failed: runtime_sessions\.backen
  *  `undefined` clears it exactly as it does for `activeLocalWriteRoot`. */
 const NON_NULLABLE_PATCH_KEYS: ReadonlySet<keyof RuntimeSessionPatch> = new Set<keyof RuntimeSessionPatch>(["transcriptHealth", "capabilities", "compatibilityLevel", "runtimeKind", "selection", "providerId", "modelRef"]);
 
+/** A stored selection with its `modelRef` canonicalized on read (layer 2); the same object when unchanged. */
+function canonicalSelection(selection: RuntimeSelection): RuntimeSelection {
+  const ref = (selection as { modelRef?: unknown }).modelRef;
+  if (typeof ref !== "string") return selection;
+  const canonical = canonicalModelTag(ref);
+  return canonical === ref ? selection : { ...selection, modelRef: canonical } as RuntimeSelection;
+}
+
 function fromRow(row: SessionRow): RuntimeSessionRecord {
   return {
     winterSessionId: row.winter_session_id,
     runtimeKind: row.runtime_kind as RuntimeKind,
     backendSessionId: opt(row.backend_session_id),
     providerId: row.provider_id,
-    modelRef: row.model_ref,
+    // WS-21 (spec §8 step 5, layer 2): stored tags canonicalize ON READ; the row keeps what was written.
+    modelRef: canonicalModelTag(row.model_ref),
     connectionRef: opt(row.connection_ref),
     authRef: opt(row.auth_ref),
     backendRoot: row.backend_root,
@@ -369,7 +379,7 @@ function fromRow(row: SessionRow): RuntimeSessionRecord {
     capabilities: JSON.parse(row.capabilities_json) as string[],
     state: row.state as RuntimeSessionState,
     generation: row.generation,
-    selection: JSON.parse(row.selection_json) as RuntimeSelection,
+    selection: canonicalSelection(JSON.parse(row.selection_json) as RuntimeSelection),
     importedFrom: opt(row.imported_from) as RuntimeSessionRecord["importedFrom"],
   };
 }
