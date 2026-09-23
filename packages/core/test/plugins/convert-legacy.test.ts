@@ -3,7 +3,7 @@
 // marketplace, mapping fields and hook events (spec §8 step 6). Migration C (L3-owned) calls this
 // as its own step 6; this file tests the function directly.
 import { describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { convertLegacyPlugins } from "../../src/plugins/convert-legacy";
@@ -400,5 +400,65 @@ describe("finding 4: a symlinked legacy plugin directory is dereferenced, never 
     // Nothing was ever written into the outside folder the escaping symlink pointed to.
     expect(readFileSync(join(outsideDir, "secret.txt"), "utf8")).toBe("do not touch");
     expect(existsSync(join(sdkPluginsRoot(h), "marketplaces", "winter-legacy", "plugins", "escapee"))).toBe(false);
+  });
+});
+
+// Post-merge fix round, minor 2 (promoted, Opus review): re-migrating after a rollback (which never
+// undoes this lane's own SDK-side writes -- only `settings.json` is untouched, DECISION 15) must not
+// blow away and rebuild an already-converted `winter-legacy` copy. A re-run SKIPS any id whose
+// "<id>@winter-legacy" install record already exists AND whose install folder still exists on disk.
+describe("minor 2: a re-run never overwrites an already-converted plugin", () => {
+  test("re-running convertLegacyPlugins on an already-installed plugin skips it, and its converted folder is byte-unchanged", async () => {
+    const h = home();
+    legacyPlugin(h, "demo", { id: "demo", tier: "capability", contributes: { tools: true } });
+    writeFileSync(join(h, "settings.json"), JSON.stringify({
+      schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, plugins: { enabled: ["demo"] },
+    }));
+
+    const first = await convertLegacyPlugins(h);
+    expect(first.converted).toHaveLength(1);
+    const targetDir = first.converted[0]!.installPath;
+
+    // Simulate something the user (or a later daemon run) changed in the converted copy since the
+    // first run -- a re-run must never touch it.
+    writeFileSync(join(targetDir, "marker.txt"), "left alone");
+
+    const second = await convertLegacyPlugins(h);
+    expect(second.converted).toEqual([]);
+    expect(second.skipped).toHaveLength(1);
+    expect(second.skipped[0]?.id).toBe("demo");
+    expect(second.skipped[0]?.reason).toContain("already installed");
+
+    // The converted folder is exactly as the first run (plus the test's own marker) left it.
+    expect(existsSync(join(targetDir, "marker.txt"))).toBe(true);
+    expect(existsSync(join(targetDir, ".claude-plugin", "plugin.json"))).toBe(true);
+
+    // Still listed in the marketplace manifest -- resolvePluginSourcePath needs it there for any
+    // FUTURE fresh install of the same id, since the folder genuinely is still there.
+    const marketplaceJson = JSON.parse(readFileSync(
+      join(sdkPluginsRoot(h), "marketplaces", "winter-legacy", ".claude-plugin", "marketplace.json"), "utf8",
+    )) as { plugins: Array<{ name: string }> };
+    expect(marketplaceJson.plugins.map((p) => p.name)).toContain("demo");
+
+    // Still exactly one install record for it -- the registration loop never re-ran installPlugin.
+    const listing = await listPlugins({ pluginsRoot: sdkPluginsRoot(h), settingsPathFor: () => join(sdkHomeFor(h), "settings.json") });
+    expect(listing.filter((p) => p.id === "demo" && p.marketplace === "winter-legacy")).toHaveLength(1);
+  });
+
+  test("if the previously-converted folder was removed, a re-run converts the plugin again (only the FOLDER's existence gates the skip)", async () => {
+    const h = home();
+    legacyPlugin(h, "demo", { id: "demo", tier: "capability", contributes: { tools: true } });
+    writeFileSync(join(h, "settings.json"), JSON.stringify({
+      schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, plugins: { enabled: ["demo"] },
+    }));
+
+    const first = await convertLegacyPlugins(h);
+    const targetDir = first.converted[0]!.installPath;
+    rmSync(targetDir, { recursive: true, force: true });
+
+    const second = await convertLegacyPlugins(h);
+    expect(second.skipped).toEqual([]);
+    expect(second.converted).toHaveLength(1);
+    expect(existsSync(join(targetDir, ".claude-plugin", "plugin.json"))).toBe(true);
   });
 });
