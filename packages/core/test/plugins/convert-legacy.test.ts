@@ -116,18 +116,25 @@ describe("convertLegacyPlugins: maps fields and hook events; the original stays 
       installLocation: join(sdkPluginsRoot(h), "marketplaces", "winter-legacy"),
     });
 
-    // Consent record re-keyed to the qualified spec, same file, same field — I3 fix round 1: `exec`
-    // is DROPPED (pre-WS-21 it was granted because the plugin shipped skills, which enabling a
-    // plugin now covers, spec §5.4); `tcc`/`hardware` carry forward unchanged. C1 fix round 2: the
-    // carried-forward record is now FINGERPRINTED (`{classes, fingerprint}`), computed off the
-    // converted install path + the SAME entry the narrowed winter-plugin.json ended up with — so it
-    // reads as consented from the start, never forcing a needless re-consent right after migration.
+    // Consent record ADDED at the qualified spec, same file, same field — finding 2 (post-merge fix
+    // round, Opus review): the bare "demo" record stays EXACTLY as it was (byte-identical — a 0.116
+    // downgrade after a rollback still reads it; Migration C's rollback never touches settings.json,
+    // DECISION 15), the qualified "demo@winter-legacy" record is ADDED beside it, never replacing it.
+    // I3 fix round 1: the QUALIFIED record's own `exec` is DROPPED (pre-WS-21 it was granted because
+    // the plugin shipped skills, which enabling a plugin now covers, spec §5.4) — the BARE record's
+    // `exec` is untouched, since the bare record isn't touched at all. C1 fix round 2: the added
+    // record is FINGERPRINTED (`{classes, fingerprint}`), computed off the converted install path +
+    // the SAME entry the narrowed winter-plugin.json ended up with — so it reads as consented from
+    // the start, never forcing a needless re-consent right after migration.
     const settings = JSON.parse(readFileSync(join(h, "settings.json"), "utf8"));
     const demoFingerprint = pluginConsentFingerprint(targetDir, {
       entry: { command: "bun", args: ["index.ts"] },
       tcc: ["accessibility"], hardware: ["battery"], requiredConsents: ["exec", "tcc", "hardware"],
     });
-    expect(settings.plugins.consents).toEqual({ "demo@winter-legacy": { classes: ["tcc", "hardware"], fingerprint: demoFingerprint } });
+    expect(settings.plugins.consents).toEqual({
+      demo: { exec: 111, tcc: 222, hardware: 333 }, // byte-identical to the legacy record
+      "demo@winter-legacy": { classes: ["tcc", "hardware"], fingerprint: demoFingerprint },
+    });
 
     // PluginStore (the daemon's own sync reader) sees the converted, enabled plugin with its
     // extras — `consented` no longer includes "exec", so the entry process prompts fresh.
@@ -159,7 +166,10 @@ describe("convertLegacyPlugins: maps fields and hook events; the original stays 
       entry: { command: "bun" },
       tcc: ["accessibility"], hardware: ["battery"], requiredConsents: ["exec", "tcc", "hardware"],
     });
-    expect(settings.plugins.consents).toEqual({ "solo@winter-legacy": { classes: ["tcc", "hardware"], fingerprint: soloFingerprint } });
+    expect(settings.plugins.consents).toEqual({
+      solo: { exec: 999, tcc: 111, hardware: 222 }, // finding 2: the bare record is untouched
+      "solo@winter-legacy": { classes: ["tcc", "hardware"], fingerprint: soloFingerprint },
+    });
     expect(settings.plugins.consents["solo@winter-legacy"].classes).not.toContain("exec");
   });
 
@@ -181,7 +191,37 @@ describe("convertLegacyPlugins: maps fields and hook events; the original stays 
 
     const settings = JSON.parse(readFileSync(join(h, "settings.json"), "utf8"));
     const onlyExecFingerprint = pluginConsentFingerprint(targetDir, { entry: { command: "bun" }, requiredConsents: ["exec"] });
-    expect(settings.plugins.consents).toEqual({ "onlyexec@winter-legacy": { classes: [], fingerprint: onlyExecFingerprint } });
+    expect(settings.plugins.consents).toEqual({
+      onlyexec: { exec: 1 }, // finding 2: the bare record is untouched
+      "onlyexec@winter-legacy": { classes: [], fingerprint: onlyExecFingerprint },
+    });
+  });
+
+  // Post-merge fix round, finding 2 (Opus review): rekeyConsents used to REPLACE the bare-id record
+  // with its qualified rewrite -- after a rollback (which never touches settings.json, DECISION 15)
+  // and a downgrade to 0.116, the plugin's own consent had silently vanished, since 0.116 only ever
+  // read the bare key. This is the dedicated, minimal regression test for that ruling: additive,
+  // never destructive.
+  test("finding 2: rekeyConsents is additive -- the bare-id record survives byte-identical, the qualified record is added beside it", async () => {
+    const h = home();
+    legacyPlugin(h, "carry", { id: "carry", tier: "capability", permissions: { hardware: ["battery"] } });
+    const legacyRecord = { hardware: 555 };
+    writeFileSync(join(h, "settings.json"), JSON.stringify({
+      schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
+      plugins: { enabled: ["carry"], consents: { carry: legacyRecord } },
+    }));
+
+    await convertLegacyPlugins(h);
+
+    const settings = JSON.parse(readFileSync(join(h, "settings.json"), "utf8"));
+    // Byte-identical: the exact same value, not just a structurally-equal copy.
+    expect(settings.plugins.consents.carry).toEqual(legacyRecord);
+    // The qualified record is present too, both coexisting in the same file.
+    expect(settings.plugins.consents["carry@winter-legacy"]).toBeDefined();
+    expect(Object.keys(settings.plugins.consents).sort()).toEqual(["carry", "carry@winter-legacy"]);
+
+    // A downgrade to 0.116 (reading only the bare key, the pre-WS-21 shape) still sees its consent.
+    expect(settings.plugins.consents.carry.hardware).toBe(555);
   });
 
   test("a plugin NOT in the legacy enabled list converts but stays disabled", async () => {

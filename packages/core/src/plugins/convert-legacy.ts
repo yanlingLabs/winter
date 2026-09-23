@@ -31,14 +31,19 @@
 //
 // Enabled state (spec §4.1's `plugins.enabled/disabled → enabledPlugins` row, deferred to this
 // lane — see `settings.ts`'s `MOVED_SETTINGS_KEYS` doc comment): a legacy plugin's enabled state was
-// `settings.plugins.enabled.includes(id) && !settings.plugins.disabled.includes(id)`; the converted
-// plugin's `enabledPlugins["<id>@winter-legacy"]` is set to the SAME boolean, through the adapter's
-// own `setPluginEnabled`/`installPlugin` (install's own default `enabled:true`, corrected to `false`
-// when the legacy state was off). Consent records (`settings.json`'s `plugins.consents`, which
-// itself STAYS — spec §4.1's "plugins.consents | stays (extras only)") are RE-KEYED in place, same
-// file, same top-level field, from the bare legacy id to the qualified `"<id>@winter-legacy"` spec —
-// required because `PluginStore#list()` (agent/plugins.ts) looks consent records up by the
-// qualified key; leaving them bare would silently strip every Tier-2 plugin's consent on upgrade.
+// `settings.plugins.enabled.includes(id) && !settings.plugins.disabled.includes(id)`, AND — post-merge
+// fix round, finding 1 — its OWN legacy consent record must have covered every class the pre-WS-21
+// rule required (a manifest with nothing to consent to, or none at all, needs no record); the
+// converted plugin's `enabledPlugins["<id>@winter-legacy"]` is set to that AND'd boolean, through the
+// adapter's own `setPluginEnabled`/`installPlugin` (install's own default `enabled:true`, corrected to
+// `false` otherwise). Consent records (`settings.json`'s `plugins.consents`, which itself STAYS —
+// spec §4.1's "plugins.consents | stays (extras only)") get the qualified `"<id>@winter-legacy"`
+// spec's OWN record ADDED beside the bare legacy id — post-merge fix round, finding 2: NEVER
+// replacing or removing the bare-id record, which Migration C's own rollback does not restore
+// (DECISION 15: rollback never touches `settings.json`) — an in-place re-key would silently strip a
+// downgraded, pre-WS-21 build's ability to read its own consent back after a rollback. The new build
+// reads only the qualified key (`PluginStore#list()`, `agent/plugins.ts`); an older, downgraded build
+// reads only the bare one — both coexist in the same file, neither ever reads the other's key.
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sdkPluginsRoot, sdkHomeFor } from "../agent/paths";
@@ -236,16 +241,24 @@ function legacyConsentCovers(record: unknown, required: readonly string[]): bool
  *  consented to. The plugin's first entry-process run prompts fresh instead. */
 const CARRIED_LEGACY_CONSENT_CLASSES = ["tcc", "hardware"] as const;
 
-/** Re-keys `<home>/settings.json`'s `plugins.consents` from bare legacy ids to the qualified
- *  `"<id>@winter-legacy"` spec (see this module's header), DROPPING `exec` from each record on the
- *  way (see `CARRIED_LEGACY_CONSENT_CLASSES`'s own doc) — a plain read-modify-write of the ONE
- *  `plugins.consents` field; every other top-level key is preserved verbatim, never re-serialized
- *  through the `Settings` schema (which could drop a field this converter doesn't know about). A
- *  no-op (never even opens the file for a write) when there is nothing to re-key. M5: atomic
- *  temp-then-rename (`writeJsonAtomic`, Contract C), the same write discipline every other file this
- *  module produces already uses — never a plain `writeFileSync`.
+/** ADDS `<home>/settings.json`'s `plugins.consents` qualified `"<id>@winter-legacy"` records
+ *  ALONGSIDE the bare legacy ids (see this module's header) — post-merge fix round, finding 2 (Opus
+ *  review): this used to REPLACE each bare-id record with its qualified rewrite, so a rollback (which
+ *  restores every OTHER file byte-for-byte, but never touches `settings.json` — DECISION 15,
+ *  `migration/migrate-c.ts`'s own rollback doc) left a downgraded 0.116 build reading `plugins.consents`
+ *  by bare id and finding NOTHING: the plugin's tcc/hardware consent had silently vanished. Now purely
+ *  ADDITIVE: every bare-id record is left exactly as it was (a 0.116 downgrade after a rollback still
+ *  reads it), and the qualified record is written BESIDE it (the new build reads only qualified keys —
+ *  `PluginStore#list()`, `agent/plugins.ts` — so the two coexist without either ever reading the
+ *  other's key). DROPS `exec` from each qualified record on the way (see
+ *  `CARRIED_LEGACY_CONSENT_CLASSES`'s own doc) — the bare-id record itself is untouched, `exec`
+ *  included; only the NEW qualified record excludes it. Every other top-level key is preserved
+ *  verbatim, never re-serialized through the `Settings` schema (which could drop a field this
+ *  converter doesn't know about). A no-op (never even opens the file for a write) when there is
+ *  nothing to add. M5: atomic temp-then-rename (`writeJsonAtomic`, Contract C), the same write
+ *  discipline every other file this module produces already uses — never a plain `writeFileSync`.
  *
- *  C1 fix round 2: a carried-forward record is now written FINGERPRINTED, `{classes, fingerprint}}`
+ *  C1 fix round 2: the added qualified record is FINGERPRINTED, `{classes, fingerprint}}`
  *  (`plugins/consent-fingerprint.ts`) — the bare per-class-timestamp shape this converter used to
  *  write would read back as NOT consented under the new gate (a deliberate rule for every OTHER
  *  pre-fix record, but this converter runs AT conversion time, when it already knows exactly which
@@ -259,11 +272,13 @@ function rekeyConsents(home: string, idToKey: Map<string, string>, idToFingerpri
   const plugins = raw.plugins as Record<string, unknown>;
   const consents = plugins.consents;
   if (typeof consents !== "object" || consents === null) return;
-  const rekeyed: Record<string, unknown> = {};
+  // Every bare-id record starts here, untouched — the qualified records are ADDED below, never
+  // replacing what's already here.
+  const additive: Record<string, unknown> = { ...(consents as Record<string, unknown>) };
   let changed = false;
   for (const [id, record] of Object.entries(consents as Record<string, unknown>)) {
     const key = idToKey.get(id);
-    if (key === undefined) { rekeyed[id] = record; continue; }
+    if (key === undefined) continue;
     changed = true;
     const classes: string[] = [];
     if (record && typeof record === "object") {
@@ -272,10 +287,10 @@ function rekeyConsents(home: string, idToKey: Map<string, string>, idToFingerpri
       }
     }
     const fingerprint = idToFingerprint.get(id) ?? "";
-    rekeyed[key] = { classes, fingerprint };
+    additive[key] = { classes, fingerprint };
   }
   if (!changed) return;
-  writeJsonAtomic(path, { ...raw, plugins: { ...plugins, consents: rekeyed } });
+  writeJsonAtomic(path, { ...raw, plugins: { ...plugins, consents: additive } });
 }
 
 /**
