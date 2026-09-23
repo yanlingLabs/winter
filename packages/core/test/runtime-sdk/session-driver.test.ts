@@ -26,6 +26,7 @@ import { CREDENTIAL_MATERIAL_NAMES, writeCredentialMaterial } from "../../src/au
 import { CORE_BRAND } from "../../src/runtime-sdk/brand";
 import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import { createWinterSessionDrivers, refusalMayBeCredentialShaped, type WinterLegDeps } from "../../src/runtime-sdk/session-driver";
+import { updateSdkSettings } from "../../src/sdk-files";
 import { evictSessionsForCredential } from "../../src/runtime-sdk/credentials";
 import { unconsumedUserMessages } from "../../src/runtime-sdk/winter-session";
 import { WINTER_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
@@ -675,9 +676,11 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
   // incarnation, and only for a code session (chat/dispatch never had the Skill tool).
   test("B1: an installed plugin skill reaches a CODE child's Options.plugins/skills; deny rules and chat/dispatch are honoured", async () => {
     let skillStore: SkillStore | undefined;
-    let settings = { permissions: { deny: ["Skill(superpowers:brainstorming)"] }, runtimes: { winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } } as unknown as Settings;
+    const settings = { runtimes: { winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } } as unknown as Settings;
     const t = table({ settings: () => settings, skills: { childSkillSurface: (input) => skillStore!.childSkillSurface(input) } });
     try {
+      // WS-21: the deny rules live in `sdk/settings.json` (claude `Settings`), read live per incarnation.
+      updateSdkSettings(t.home, () => ({ permissions: { deny: ["Skill(superpowers:brainstorming)"] } }));
       skillStore = new SkillStore({ winterHome: t.home, trust: new TrustStore(join(t.home, "trust.json")) });
       for (const name of ["using-superpowers", "brainstorming"]) {
         mkdirSync(join(t.home, "plugins", "superpowers", "skills", name), { recursive: true });
@@ -692,7 +695,7 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
       expect(t.q().options.settingSources).toEqual([]);
 
       // LIVE: lifting the deny rule reaches the next incarnation with no restart.
-      settings = { ...settings, permissions: { deny: [] } } as unknown as Settings;
+      updateSdkSettings(t.home, (s) => ({ ...s, permissions: { deny: [] } }));
       await t.drivers.evict(code);
       await (await t.drivers.ensure(code))!.open();
       expect([...(t.q().options.skills ?? [])].sort()).toEqual(["superpowers:brainstorming", "superpowers:using-superpowers"]);

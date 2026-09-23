@@ -18,14 +18,29 @@ export {
   // headers `loadSettings` silently stripped from a USER-scope entry, read fresh off the raw file
   // (never off the already-stripped `Settings` value, which can no longer say what it removed).
   stripCredentialShapedMcpHeaders, readRawSettings,
+  // WS-21: the runtime-facing keys live in `sdk/` now — these are their only doors (spec §4.1).
+  MOVED_SETTINGS_KEYS, withoutMovedKeys, sdkAllowRules, sdkDenyRules, sdkAdditionalDirectories, sdkOutputStyle,
+  sdkAutoMemory, sdkEnabledPlugins, sdkUserMcpServers, sdkLocalMcpServers, validateMcpServerEntryForWrite,
   type Settings, type McpServerSettingsEntry,
 } from "./settings";
+// WS-21 (Contract C): the shared runtime home's paths and its two claude-format files.
+export {
+  sdkHomeFor, sdkSettingsPath, sdkGlobalConfigPath, sdkPluginsRoot, storeHomeFor, storeProjectsDir,
+  SDK_PERSISTENT_ENTRIES, SDK_COMPAT_LINKS,
+} from "./agent/paths";
+export {
+  readSdkSettings, readSdkSettingsDetailed, updateSdkSettings, readSdkGlobalConfig, readSdkGlobalConfigDetailed,
+  updateSdkGlobalConfig, liveSdkSettings, liveSdkGlobalConfig, SdkFileUnreadable,
+  type SdkSettingsFile, type SdkGlobalConfigFile, type SdkFileRead,
+} from "./sdk-files";
+export { linkedRouterSupportsRunHome, routerSupportsRunHome } from "./runtime-sdk/run-home-support";
 // `winter mcp add/remove` (CLI parity with `claude mcp add/remove`): the ONE validated write door
 // for either scope (`agent/mcp/mcp-write.ts`'s own header explains the reuse), plus the project
 // (`.mcp.json`) file helpers that scope needs directly — that file is never daemon state / never
 // RPC-routed, so the CLI reads and writes it itself with or without a daemon running.
 export {
   validateMcpServerName, addUserMcpServer, removeUserMcpServer, addProjectMcpServer, removeProjectMcpServer,
+  addSdkUserMcpServer, removeSdkUserMcpServer,
 } from "./agent/mcp/mcp-write";
 export {
   readProjectMcpConfig, writeProjectMcpConfig, projectMcpConfigPath, projectMcpConfigExists,

@@ -1538,3 +1538,64 @@ describe("SettingsSetSkillDeniedParams.name (Minor 5d)", () => {
     }
   });
 });
+
+// WS-21 (spec §4.4, §5.2): the MCP scopes and the `winter plugin` = `claude plugin` method schemas.
+describe("WS-21 method schemas", () => {
+  test("mcp.add/remove/get gain scope (default local) and an optional cwd", async () => {
+    const m = await import("../src/methods");
+    const entry = { type: "stdio" as const, command: "node" };
+    expect(m.McpAddParams.parse({ name: "x", entry }).scope).toBe("local");
+    expect(m.McpAddParams.parse({ name: "x", entry, scope: "user" }).scope).toBe("user");
+    expect(m.McpAddParams.parse({ name: "x", entry, scope: "project", cwd: "/r" }).cwd).toBe("/r");
+    expect(() => m.McpAddParams.parse({ name: "x", entry, scope: "global" })).toThrow();
+    expect(m.McpRemoveParams.parse({ name: "x" }).scope).toBe("local");
+    expect(m.McpGetParams.parse({ name: "x", scope: "project", cwd: "/r" }).scope).toBe("project");
+    expect(m.McpAddResult.parse({ ok: true, name: "x", transport: "stdio", started: false, scope: "local" }).scope).toBe("local");
+    expect(m.McpGetResult.parse({ ok: true, name: "x", found: false }).scope).toBeUndefined();
+  });
+
+  test("the plugin methods are named like claude's CLI verbs, and plugin.enable/disable keep their keys", async () => {
+    const { METHODS } = await import("../src/methods");
+    expect(METHODS.pluginInstall).toBe("plugin.install");
+    expect(METHODS.pluginUninstall).toBe("plugin.uninstall");
+    expect(METHODS.pluginEnable).toBe("plugin.enable");
+    expect(METHODS.pluginDisable).toBe("plugin.disable");
+    expect(METHODS.pluginUpdate).toBe("plugin.update");
+    expect(METHODS.pluginList).toBe("plugin.list");
+    expect(METHODS.pluginMarketplaceAdd).toBe("plugin.marketplace.add");
+    expect(METHODS.pluginMarketplaceRemove).toBe("plugin.marketplace.remove");
+    expect(METHODS.pluginMarketplaceList).toBe("plugin.marketplace.list");
+    expect(METHODS.pluginMarketplaceUpdate).toBe("plugin.marketplace.update");
+  });
+
+  test("plugin params mirror Contract B (spec + scope, default user)", async () => {
+    const m = await import("../src/methods");
+    expect(m.PluginInstallParams.parse({ spec: "fmt@local" })).toEqual({ spec: "fmt@local", scope: "user" });
+    expect(m.PluginUninstallParams.parse({ spec: "fmt@local", scope: "project", cwd: "/r" }).scope).toBe("project");
+    expect(m.PluginEnableScopedParams.parse({ spec: "fmt@local", scope: "local", cwd: "/r" }).scope).toBe("local");
+    expect(m.PluginDisableScopedParams.parse({ spec: "fmt@local" }).scope).toBe("user");
+    expect(() => m.PluginInstallParams.parse({ spec: "" })).toThrow();
+    expect(() => m.PluginInstallParams.parse({ spec: "x", scope: "managed" })).toThrow();
+    expect(m.PluginUpdateParams.parse({ spec: "fmt@local" }).spec).toBe("fmt@local");
+    expect(m.PluginListParams.parse({})).toEqual({});
+    expect(m.PluginMarketplaceAddParams.parse({ source: "/abs/dir" }).source).toBe("/abs/dir");
+    expect(m.PluginMarketplaceRemoveParams.parse({ name: "local" }).name).toBe("local");
+    expect(m.PluginMarketplaceListParams.parse({})).toEqual({});
+    expect(m.PluginMarketplaceUpdateParams.parse({})).toEqual({});
+  });
+
+  test("plugin results mirror Contract B's InstalledPlugin / PluginListing / MarketplaceInfo", async () => {
+    const m = await import("../src/methods");
+    const installed = { id: "fmt@local", version: "1.0.0", installPath: "/h/sdk/plugins/cache/local/fmt/1.0.0", scope: "user" as const };
+    expect(m.PluginInstallResult.parse({ ok: true, plugin: installed }).plugin).toEqual(installed);
+    expect(m.PluginUpdateResult.parse({ ok: true, plugin: { ...installed, version: undefined } }).plugin.id).toBe("fmt@local");
+    expect(m.PluginListResult.parse({ ok: true, plugins: [{ ...installed, enabled: true, marketplace: "local" }] }).plugins[0]!.enabled).toBe(true);
+    expect(() => m.PluginListResult.parse({ ok: true, plugins: [installed] })).toThrow(); // enabled/marketplace required
+    const market = { name: "local", source: "/abs/dir", kind: "directory" as const, path: "/abs/dir" };
+    expect(m.PluginMarketplaceAddResult.parse({ ok: true, marketplace: market }).marketplace).toEqual(market);
+    expect(m.PluginMarketplaceListResult.parse({ ok: true, marketplaces: [market] }).marketplaces).toHaveLength(1);
+    expect(() => m.MarketplaceInfoSchema.parse({ ...market, kind: "npm" })).toThrow();
+    expect(m.PluginSetEnabledResult.parse({ ok: true, spec: "fmt@local", scope: "user", enabled: false }).enabled).toBe(false);
+    expect(m.PluginUninstallResult.parse({ ok: true, spec: "fmt@local", scope: "user" }).scope).toBe("user");
+  });
+});

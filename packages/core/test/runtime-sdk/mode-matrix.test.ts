@@ -342,16 +342,31 @@ test("the control-plane deny rules cover the four write tools × the control-pla
 
 // Daemon settings surface batch 3 (item 2): `settings.permissions.deny` (Skill(<name>) toggles,
 // or any hand-written rule) rides ALONGSIDE the fixed control-plane fence, never in place of it.
-test("item 2: settings.permissions.deny is appended after the fixed control-plane fence, verbatim", () => {
-  const settings = Settings.parse({
-    schemaVersion: 3 as const,
-    provider: { model: "codex-oauth/gpt-5.6-sol" },
-    permissions: { deny: ["Skill(writing-skills)", "Agent(fork)"] },
-  });
-  const deny = buildWinterOptions(optionsInput({ home: "/h", settings })).permissions!.deny!;
+test("item 2 (WS-21): the user's sdk/settings.json deny rules (userDeny) are appended after the fixed control-plane fence, verbatim", () => {
+  const deny = buildWinterOptions(optionsInput({ home: "/h", userDeny: ["Skill(writing-skills)", "Agent(fork)"] })).permissions!.deny!;
   expect(deny.slice(-2)).toEqual(["Skill(writing-skills)", "Agent(fork)"]);
   // The fixed fence is untouched (same count this file's other test pins).
   expect(deny).toHaveLength(4 * 15 + 3 * 3 + 2);
+});
+
+test("WS-21: a STALE settings.permissions.deny (a moved key) never reaches the child's deny list", () => {
+  const settings = Settings.parse({
+    schemaVersion: 3 as const,
+    provider: { model: "codex-oauth/gpt-5.6-sol" },
+    permissions: { deny: ["Skill(stale)"] },
+  });
+  const deny = buildWinterOptions(optionsInput({ home: "/h", settings })).permissions!.deny!;
+  expect(deny).not.toContain("Skill(stale)");
+  expect(deny).toHaveLength(4 * 15 + 3 * 3);
+});
+
+test("WS-21: the user's sdk/settings.json allow rules (userAllow) reach a code child verbatim — never re-translated", () => {
+  const allow = buildWinterOptions(optionsInput({ home: "/h", mode: "code", userAllow: ["Edit", "Bash(npm test:*)", "mcp__srv__tool"] })).permissions!.allow!;
+  expect(allow).toContain("Edit");
+  expect(allow).not.toContain("Write"); // a claude `Edit` alone is NOT widened to Edit + Write
+  expect(allow).toContain("Bash(npm test:*)");
+  expect(allow).toContain("mcp__srv__tool");
+  expect(buildWinterOptions(optionsInput({ home: "/h", mode: "chat", userAllow: ["Edit"] })).permissions!.allow).toBeUndefined();
 });
 
 test("item 2: an absent settings.permissions.deny changes nothing — byte-identical to before item 2", () => {

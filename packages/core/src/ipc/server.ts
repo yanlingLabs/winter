@@ -112,8 +112,9 @@ import { modelCatalogWire } from "../providers/model-catalog-wire";
 import { withProblemsForRoles, type RoleHealthRegistry } from "../providers/role-health";
 import type { InternalRouter } from "../providers/internal-router";
 import { internalRoleProblemsFor } from "../providers/internal-role-problems";
-import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, readRawSettings } from "../settings";
-import { addUserMcpServer, removeUserMcpServer } from "../agent/mcp/mcp-write";
+import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, withoutMovedKeys } from "../settings";
+import { addSdkUserMcpServer, removeSdkUserMcpServer } from "../agent/mcp/mcp-write";
+import { readSdkGlobalConfig, SdkFileUnreadable, updateSdkSettings } from "../sdk-files";
 import { bypassAllowedAtSpawn, disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
 import { diagnoseRuntimes } from "../runtime-sdk/runtimes-doctor";
@@ -851,10 +852,33 @@ function resolveModelSelection(model: string, settings?: Settings): string {
 function liveSettingsFor(opts: { winterHome?: string }): Settings | undefined {
   if (!opts.winterHome) return undefined;
   try {
-    return loadSettings(join(opts.winterHome, "settings.json"));
+    // WS-21: never the moved keys (`withoutMovedKeys`) — their only doors are the `sdk…` readers.
+    return withoutMovedKeys(loadSettings(join(opts.winterHome, "settings.json")));
   } catch {
     return undefined;
   }
+}
+
+/** WS-21: which credential-shaped headers the read door dropped from `sdk/.winter.json`'s USER-scope
+ *  servers, per server — computed off the RAW file (the parsed readers, by construction, can no longer
+ *  say what they removed). Names only, never a value. */
+function strippedUserMcpHeaders(winterHome: string | undefined): Record<string, string[]> {
+  if (!winterHome) return {};
+  return stripCredentialShapedMcpHeaders(structuredClone(readSdkGlobalConfig(winterHome)));
+}
+
+/** WS-21 (L3.2): the MCP doors speak the three scopes (`McpScopeSchema`); the user scope moved to
+ *  `sdk/.winter.json`. `local`/`project` arrive with L3.5 — refused typed until then. */
+function assertUserMcpScope(method: string, scope: string): void {
+  if (scope !== "user") {
+    throw new RpcFailure(ERR.INVALID_PARAMS, `${method}: the "${scope}" scope is not available on this build yet — pass scope "user"`, { code: "mcp_scope_unsupported" });
+  }
+}
+
+/** An `SdkFileUnreadable` (the user's `sdk/` file does not parse) is reported as what it is, typed. */
+function sdkWriteFailure(err: unknown): RpcFailure {
+  if (err instanceof SdkFileUnreadable) return new RpcFailure(ERR.INVALID_PARAMS, err.message, { code: err.code });
+  return new RpcFailure(ERR.INVALID_PARAMS, (err as Error).message);
 }
 
 /** Maps a failed `PluginSupervisor.invoke()` result to the message a `throw new Error(...)` in
@@ -2080,7 +2104,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // opts.winterHome-gated path in this file uses. `skillDenyRule` is the ONE place the exact
         // `Skill(<name>)` string is spelled, shared with the writer (`setSkillDenied`, settings.ts)
         // so the two can never drift onto different strings for the same skill.
-        const denySet = new Set(liveSettingsFor(opts)?.permissions?.deny ?? []);
+        // WS-21: the deny list moved to `sdk/settings.json` (`sdkDenyRules`, read live).
+        const denySet = new Set(opts.winterHome ? sdkDenyRules(opts.winterHome) : []);
         const store = opts.skills;
         // One live read of which plugins a session may load skills from (enabled + `exec` consent).
         const eligible = store.sessionEligiblePlugins();
@@ -2173,9 +2198,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // which by construction can no longer say what it removed) so a hand-edited header shows up
         // HERE even though `configuredMcpServersFor` never forwards it to either leg. NEVER the
         // header value, only its name — same posture as the boot-time log line this mirrors.
-        const strippedHeaders = opts.winterHome
-          ? stripCredentialShapedMcpHeaders(readRawSettings(join(opts.winterHome, "settings.json")) ?? {})
-          : {};
+        const strippedHeaders = strippedUserMcpHeaders(opts.winterHome);
         const withStripped = <T extends { name: string }>(row: T): T | (T & { strippedHeaders: string[] }) => {
           const headers = strippedHeaders[row.name];
           return headers && headers.length > 0 ? { ...row, strippedHeaders: headers } : row;
@@ -2189,7 +2212,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // `tracked` at all and would otherwise vanish from this report entirely rather than reading
         // "disabled" — the same "reported, not silently absent" posture every other disabled entry
         // in this list already has.
-        const unmanaged = Object.entries(settings?.mcpServers ?? {})
+        const unmanaged = Object.entries(opts.winterHome ? sdkUserMcpServers(opts.winterHome) : {})
           .filter(([name, entry]) => (entry.type !== "stdio" || disabled.has(name)) && !trackedNames.has(name))
           .map(([name, entry]) => withStripped({
             name,
@@ -2229,37 +2252,31 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // CONFIGURED stdio user-tier shape is restartable this way (`stdioMcpServersFor`'s own
         // narrowing — the one shape `McpManager` can run at all); an HTTP/SSE or project `.mcp.json`
         // name is a no-op here, same as it always was for `mcp.enable`.
-        const cfg = stdioMcpServersFor(next)[p.name];
+        const cfg = stdioMcpServersFor(sdkUserMcpServers(opts.winterHome), next.mcp?.disabled)[p.name];
         if (cfg) await opts.mcp?.startOneUserServer(p.name, cfg);
         return { ok: true, name: p.name, enabled: true };
       }
       // -----------------------------------------------------------------------------------------
-      // `winter mcp add`/`add-json`/`remove` (CLI parity with `claude mcp add`/`remove`) — USER
-      // scope only; `mcp-cli.ts`'s own header explains why project scope (`<cwd>/.mcp.json`) is
-      // never RPC-routed at all. Both handlers delegate the actual "is this a valid write" decision
-      // to `agent/mcp/mcp-write.ts` (`addUserMcpServer`/`removeUserMcpServer`) — the SAME functions
-      // the CLI's no-daemon fallback calls, so the two write paths (daemon live vs. not) can never
-      // silently diverge on what they accept. Two DISTINCT failure shapes on add: a name-rule
-      // refusal (reserved namespace, already-exists) throws from `addUserMcpServer` itself; a
-      // schema refusal (the credential-shaped-header door, `refuseCredentialShapedHeaders`) throws
-      // from `saveSettings` one line later — both are caught here and reported as
-      // `ERR.INVALID_PARAMS`, never `ERR.INTERNAL`, since either one is the CALLER's input being
-      // wrong, not a server fault.
+      // `winter mcp add`/`add-json`/`remove` (CLI parity with `claude mcp add`/`remove`), over claude's
+      // three scopes (WS-21, `McpScopeSchema`). Both handlers delegate the actual "is this a valid
+      // write" decision to `agent/mcp/mcp-write.ts` — the name rule (reserved namespace, already-
+      // exists) and the entry schema (the credential-shaped-header refusal) both run before anything
+      // is written, and either is reported as `ERR.INVALID_PARAMS`, never `ERR.INTERNAL`: it is the
+      // CALLER's input being wrong, not a server fault. An unparseable `sdk/.winter.json` is refused
+      // typed (`sdk_file_unreadable`) and left untouched.
       // -----------------------------------------------------------------------------------------
       case METHODS.mcpAdd: {
         const p = parseParams(McpAddParams, params);
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "mcp.add is not available on this server (no winterHome configured)");
-        const settingsPath = join(opts.winterHome, "settings.json");
-        let next: Settings;
+        assertUserMcpScope("mcp.add", p.scope);
+        // WS-21: the user scope is `sdk/.winter.json` `mcpServers` (claude's `.claude.json`). The name
+        // rule, the no-silent-overwrite rule and the entry schema (credential-shaped headers refused)
+        // all run BEFORE anything is written (`addSdkUserMcpServer`).
+        let entry: ReturnType<typeof addSdkUserMcpServer>;
         try {
-          next = addUserMcpServer(loadSettings(settingsPath), p.name, p.entry);
+          entry = addSdkUserMcpServer(opts.winterHome, p.name, p.entry);
         } catch (err) {
-          throw new RpcFailure(ERR.INVALID_PARAMS, (err as Error).message);
-        }
-        try {
-          saveSettings(settingsPath, next);
-        } catch (err) {
-          throw new RpcFailure(ERR.INVALID_PARAMS, (err as Error).message);
+          throw sdkWriteFailure(err);
         }
         // Mirrors `mcp.enable`'s own restart (symmetry, same rationale): a newly-added stdio user
         // server must be usable on THIS incarnation's next turn, not just after a daemon restart —
@@ -2267,24 +2284,26 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // ALSO listed in `mcp.disabled` is correctly excluded by `stdioMcpServersFor` (added, but
         // stays stopped until enabled — `started: false` says so honestly).
         let started = false;
-        if (p.entry.type === "stdio") {
-          const cfg = stdioMcpServersFor(next)[p.name];
+        if (entry.type === "stdio") {
+          const cfg = stdioMcpServersFor(sdkUserMcpServers(opts.winterHome), liveSettingsFor(opts)?.mcp?.disabled)[p.name];
           if (cfg) { await opts.mcp?.startOneUserServer(p.name, cfg); started = true; }
         }
-        return { ok: true, name: p.name, transport: p.entry.type, started };
+        return { ok: true, name: p.name, transport: entry.type, started, scope: p.scope };
       }
       case METHODS.mcpRemove: {
         const p = parseParams(McpRemoveParams, params);
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "mcp.remove is not available on this server (no winterHome configured)");
-        const settingsPath = join(opts.winterHome, "settings.json");
-        const { settings: next, removed } = removeUserMcpServer(loadSettings(settingsPath), p.name);
-        if (removed) {
-          saveSettings(settingsPath, next);
-          // Stop a live tracked instance now, same as `mcp.disable` — a removed server must not go
-          // on answering tool calls until the next daemon restart.
-          opts.mcp?.stopServer(p.name);
+        assertUserMcpScope("mcp.remove", p.scope);
+        let removed: boolean;
+        try {
+          removed = removeSdkUserMcpServer(opts.winterHome, p.name);
+        } catch (err) {
+          throw sdkWriteFailure(err);
         }
-        return { ok: true, name: p.name, removed };
+        // Stop a live tracked instance now, same as `mcp.disable` — a removed server must not go on
+        // answering tool calls until the next daemon restart.
+        if (removed) opts.mcp?.stopServer(p.name);
+        return { ok: true, name: p.name, removed, scope: p.scope };
       }
       // -----------------------------------------------------------------------------------------
       // `winter mcp get <name>` — read-only, degrades to `found: false` rather than throwing on a
@@ -2292,22 +2311,21 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // posture `mcp.list` already has). Reports the FULL configured shape (`mcp.list` deliberately
       // does not — that RPC is a live-status listing, not a config reader) plus the same
       // `strippedHeaders` read-door correction `mcp.list` reports, computed the identical way (off
-      // the RAW file, never off the already-stripped `settings` value, which by construction can no
-      // longer say what it removed).
+      // the RAW file, never off the already-stripped parse, which by construction can no longer say
+      // what it removed).
       // -----------------------------------------------------------------------------------------
       case METHODS.mcpGet: {
         const p = parseParams(McpGetParams, params);
-        const settings = liveSettingsFor(opts);
-        const entry = settings?.mcpServers?.[p.name];
-        if (!entry) return { ok: true, name: p.name, found: false };
-        const disabled = new Set(settings?.mcp?.disabled ?? []);
-        const strippedHeaders = opts.winterHome
-          ? stripCredentialShapedMcpHeaders(readRawSettings(join(opts.winterHome, "settings.json")) ?? {})[p.name]
-          : undefined;
+        assertUserMcpScope("mcp.get", p.scope);
+        const entry = opts.winterHome ? sdkUserMcpServers(opts.winterHome)[p.name] : undefined;
+        if (!entry) return { ok: true, name: p.name, found: false, scope: p.scope };
+        const disabled = new Set(liveSettingsFor(opts)?.mcp?.disabled ?? []);
+        const strippedHeaders = strippedUserMcpHeaders(opts.winterHome)[p.name];
         const base = {
           ok: true as const,
           name: p.name,
           found: true as const,
+          scope: p.scope,
           transport: entry.type,
           disabled: disabled.has(p.name),
           ...(strippedHeaders && strippedHeaders.length > 0 ? { strippedHeaders } : {}),
@@ -2535,10 +2553,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.settingsSetSkillDenied: {
         const p = parseParams(SettingsSetSkillDeniedParams, params);
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "settings.setSkillDenied is not available on this server (no winterHome configured)");
-        const settingsPath = join(opts.winterHome, "settings.json");
-        const settings = loadSettings(settingsPath);
-        const next = setSkillDenied(settings, p.name, p.denied);
-        saveSettings(settingsPath, next);
+        // WS-21: `permissions.deny` lives in `sdk/settings.json` (claude `Settings`) — the same file both
+        // runtimes read; `updateSdkSettings` is atomic and preserves every other key.
+        try {
+          updateSdkSettings(opts.winterHome, (s) => setSkillDenied(s, p.name, p.denied));
+        } catch (err) {
+          throw sdkWriteFailure(err);
+        }
         return { ok: true, name: p.name, denied: p.denied, rule: skillDenyRule(p.name) };
       }
       case METHODS.pluginsList: {

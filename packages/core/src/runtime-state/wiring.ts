@@ -19,7 +19,7 @@
 // see the §17 phase 5 block below).
 import type { RuntimeDirectoryStore } from "@yanlinglabs/winter-runtime-sdk";
 import type { SessionStore } from "../sessions/store";
-import type { Settings } from "../settings";
+import { sdkAutoMemory, type Settings } from "../settings";
 import { ProjectionCheckpoints } from "./checkpoints";
 import { ChildProfiles, RuntimeChildren } from "./children";
 import { openRuntimeStateDb, type RuntimeStateDb } from "./db";
@@ -324,14 +324,15 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
         // which closes the handle and costs the WHOLE runtime spine for a migration that had nothing
         // to migrate. The contract in the docstring is only a contract if nothing is outside this.
         if (markerIsSet()) return; // a home that DID migrate must not start narrating about it again
-        const plan = planMemoryKeyMigration({ rs, home, records, store, memoryDirectory: settings?.memory?.directory, fs: deps.memoryKeyFs });
+        // WS-21: the MEMDIR override moved to `sdk/settings.json` (`autoMemoryDirectory`, read live).
+        const plan = planMemoryKeyMigration({ rs, home, records, store, memoryDirectory: sdkAutoMemory(home).directory, fs: deps.memoryKeyFs });
         // Declined, NOT done: no marker, so clearing `memory.directory` on THIS running daemon still
         // gets a migration. The decline refuses before the plan touches the disk or spawns git, so
         // re-entering it on every settings change is free.
         if (plan.declined === "memory-directory-override") {
           if (!declineLogged) {
             declineLogged = true;
-            log("memory-key migration declined: settings.memory.directory pins this home's MEMDIR, so the project key decides nothing (clear it to migrate)");
+            log("memory-key migration declined: sdk/settings.json autoMemoryDirectory pins this home's MEMDIR, so the project key decides nothing (clear it to migrate)");
           }
           return;
         }

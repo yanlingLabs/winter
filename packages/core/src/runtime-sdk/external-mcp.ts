@@ -42,8 +42,11 @@ import { extractRawMcpServers, parseProjectMcpServers } from "../agent/mcp/proje
 // session) the moment any single entry — an http/sse one, most commonly — didn't fit.
 
 export interface ConfiguredMcpInput {
-  /** THE LIVE settings (a getter's answer, never a boot snapshot). */
+  /** THE LIVE settings (a getter's answer, never a boot snapshot) — read for `mcp.disabled` only. */
   settings: Settings | null | undefined;
+  /** WS-21: the USER-scope servers — `sdk/.winter.json` `mcpServers` (`sdkUserMcpServers`), read live
+   *  by the caller. They moved out of `settings.json`; absent ⇒ none. */
+  userMcpServers?: Readonly<Record<string, McpServerSettingsEntry>>;
   /** The session's cwd — where `.mcp.json` is looked for (the manager's own rule: `<cwd>/.mcp.json`,
    *  not the repo root). */
   cwd: string | undefined;
@@ -113,7 +116,7 @@ export function configuredMcpServersFor(input: ConfiguredMcpInput): Record<strin
     }
   }
   // User servers LAST so they shadow a same-keyed project server (the registry's precedence).
-  for (const [name, sc] of Object.entries(input.settings?.mcpServers ?? {})) {
+  for (const [name, sc] of Object.entries(input.userMcpServers ?? {})) {
     if (disabled.has(name)) continue;
     out[name] = toMcpServerConfig(sc);
   }

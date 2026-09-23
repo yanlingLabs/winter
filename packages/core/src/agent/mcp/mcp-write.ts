@@ -24,7 +24,8 @@
 // "refuse a silent overwrite" (mirrors claude's own `addMcpConfig`, `services/mcp/config.ts` in the
 // reference clone — it throws "already exists in <scope> config" rather than replace).
 import type { Settings, McpServerSettingsEntry } from "../../settings";
-import { setMcpServerEntry, removeMcpServerEntry } from "../../settings";
+import { setMcpServerEntry, removeMcpServerEntry, validateMcpServerEntryForWrite } from "../../settings";
+import { readSdkGlobalConfigDetailed, updateSdkGlobalConfig, type SdkGlobalConfigFile } from "../../sdk-files";
 import { reservedMcpServerNames } from "../../capabilities/names";
 import type { ProjectMcpServerEntry } from "./project-file";
 
@@ -100,4 +101,48 @@ export function removeProjectMcpServer(servers: Record<string, unknown>, name: s
   const rest = { ...servers };
   delete rest[name];
   return { servers: rest, removed: true };
+}
+
+// ── WS-21: the user scope lives in `sdk/.winter.json` (claude's `.claude.json` shape) ─────────────
+//
+// `mcpServers` moved out of `settings.json` (spec §4.1). These are the daemon's user-scope doors
+// now; the `Settings`-shaped pair above stays only for a caller that has not moved yet (the CLI's
+// no-daemon fallback, lane L4). Same rules: the name is validated first (claude's shape + Winter's
+// reserved capability namespace), a present name is never silently overwritten, and the entry is
+// validated with the SAME schema — including the credential-shaped-header REFUSAL — that guarded
+// `settings.mcpServers`, before anything is written. Every other key of the file is preserved.
+
+const isRecord = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
+
+/** Add one USER-scope server to `sdk/.winter.json` `mcpServers`. Throws a plain `Error` (bad name,
+ *  already present, invalid or credential-shaped entry) or `SdkFileUnreadable`; writes nothing then. */
+export function addSdkUserMcpServer(home: string, name: string, entry: unknown): McpServerSettingsEntry {
+  const nameErr = validateMcpServerName(name);
+  if (nameErr) throw new Error(nameErr);
+  const valid = validateMcpServerEntryForWrite(entry);
+  updateSdkGlobalConfig(home, (config) => {
+    const servers = isRecord(config.mcpServers) ? config.mcpServers : {};
+    if (Object.hasOwn(servers, name)) {
+      throw new Error(`MCP server "${name}" already exists in user config — remove it first ("winter mcp remove ${name} --scope user") or edit sdk/.winter.json directly`);
+    }
+    return { ...config, mcpServers: { ...servers, [name]: valid } };
+  });
+  return valid;
+}
+
+/** Remove one USER-scope server from `sdk/.winter.json`. Idempotent: `false` when it was not there
+ *  (and then the file is not rewritten at all). */
+export function removeSdkUserMcpServer(home: string, name: string): boolean {
+  const present = (config: SdkGlobalConfigFile): boolean => isRecord(config.mcpServers) && Object.hasOwn(config.mcpServers, name);
+  const current = readSdkGlobalConfigDetailed(home);
+  if (current.state === "missing" || (current.state === "ok" && !present(current.value))) return false;
+  let removed = false;
+  updateSdkGlobalConfig(home, (config) => {  // throws SdkFileUnreadable on an unparseable file
+    if (!present(config)) return config;
+    removed = true;
+    const rest = { ...(config.mcpServers as Record<string, unknown>) };
+    delete rest[name];
+    return { ...config, mcpServers: rest };
+  });
+  return removed;
 }
