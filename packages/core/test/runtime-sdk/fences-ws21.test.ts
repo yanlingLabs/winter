@@ -169,3 +169,35 @@ describe("reads: run/, runtimes/ — unchanged", () => {
     expect(sandboxConfigFor(H).filesystem!.denyRead).toEqual(expect.arrayContaining([`${H}/run`, `${H}/runtimes`]));
   });
 });
+
+// Review I7: Bash could write the protected paths with no card — `sdk/{skills,commands,rules,output-styles}`
+// and `sdk/WINTER.md` were in neither the sandbox nor the escape floor, and a project's `.winter/<kind>`
+// only in the sandbox. A SEPARATE list feeds only the sandbox's denyWrite and a write-shaped floor, so the
+// write TOOLS keep the spec's card (the shared list feeds `controlPlaneTargetForCall`'s hard deny).
+describe("review I7: protected paths vs Bash", () => {
+  const kinds = ["skills", "commands", "rules", "output-styles"];
+  test("the sandbox denies them (a sandboxed Bash whose cwd is $HOME included)", () => {
+    const w = sandboxConfigFor(H, "/Users/x").filesystem!.denyWrite!;
+    for (const k of kinds) expect(w).toContain(`${H}/sdk/${k}`);
+    expect(w).toContain(`${H}/sdk/WINTER.md`);
+  });
+  test("…but NOT through the shared self-grant list: the write tools still get a card, not a hard deny", () => {
+    for (const k of kinds) expect(homeFencedDirs(H)).not.toContain(`${H}/sdk/${k}`);
+    expect(homeFencedDirs(H)).not.toContain(`${H}/sdk/WINTER.md`);
+    expect(controlPlaneTargetForCall("Write", { file_path: `${H}/sdk/skills/x/SKILL.md` }, "/", homeFenceFor(H))).toBeNull();
+    expect(controlPlaneTargetForCall("Write", { file_path: `${H}/sdk/WINTER.md` }, "/", homeFenceFor(H))).toBeNull();
+  });
+  test("the escape floor refuses a write-shaped use; reads and skill scripts still run", () => {
+    for (const cmd of [
+      `echo x > ${H}/sdk/skills/evil/SKILL.md`,
+      `cp r.md ~/.winter/sdk/rules/r.md`,
+      `echo hi >> ${H}/sdk/WINTER.md`,
+      "mkdir -p packages/app/.winter/skills/x && echo y > packages/app/.winter/skills/x/SKILL.md",
+      "tee /elsewhere/proj/.winter/commands/deploy.md < x",
+      `cp s.md ${H}/skills/self/s/SKILL.md`, // the old path (a compat link on a migrated home)
+    ]) expect({ cmd, hit: escapeFloorHit(cmd, H) !== undefined }).toEqual({ cmd, hit: true });
+    for (const cmd of [`cat ${H}/sdk/skills/a/SKILL.md`, `bash ${H}/sdk/skills/a/run.sh`, "ls packages/app/.winter/rules", `cat ${H}/sdk/WINTER.md`]) {
+      expect({ cmd, hit: escapeFloorHit(cmd, H) }).toEqual({ cmd, hit: undefined });
+    }
+  });
+});

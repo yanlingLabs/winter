@@ -6,7 +6,7 @@ import type {
 } from "@yanlinglabs/winter-agent-sdk";
 import { RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
-import { approvedProjectRulesDir, homeCacheDir, sdkHomeFor, trustRecordFile } from "../agent/paths";
+import { approvedProjectRulesDir, homeCacheDir, sdkHomeFor, storeHomeFor, trustRecordFile } from "../agent/paths";
 import { repoRootFor } from "../agent/memory-dir";
 import { PROTECTED_ITEM_DIRS } from "./run-home-contract";
 import { projectWalk } from "./project-walk";
@@ -830,6 +830,37 @@ export function persistedAllowRulesFor(cwd: string, deps: {
   return [...new Set([...settingsAllow, ...approved, ...projectAllow])];
 }
 
+/**
+ * The SELF-GRANT paths under the home (every write-fence derives from this one list — the sandbox's
+ * `denyWrite`, the escape floor and the write-tool fence through `home-fence.ts`'s `homeFencedDirs`): the
+ * daemon's control plane, the runtime store, the cache, installed plugins, the approved-rules record, the
+ * trust record, agent definitions, the user's three control-plane files and the shared runtime home's
+ * settings, MCP servers, agents and plugins.
+ */
+export function selfGrantDenyWrite(home: string): string[] {
+  return [
+    join(home, "run"), join(home, "runtimes"), homeCacheDir(home), join(home, "plugins"), approvedProjectRulesDir(home),
+    trustRecordFile(home), join(home, "agents"),
+    join(sdkHomeFor(home), "settings.json"), join(sdkHomeFor(home), ".winter.json"),
+    join(sdkHomeFor(home), "agents"), join(sdkHomeFor(home), "plugins"),
+    ...[...CONTROL_PLANE_FILENAMES].sort().map((f) => join(home, f)),
+  ];
+}
+
+/**
+ * Review I7: the user tier's PROTECTED item directories and instructions file (spec §7.2) — for the shared
+ * runtime home and, when it differs (router 0.0.11), the store home the build actually loads them from.
+ * The sandbox's `denyWrite` only: a write TOOL gets the card (`protected-paths.ts`), never a hard deny.
+ */
+export function protectedHomeDenyWrite(home: string): string[] {
+  const out: string[] = [];
+  for (const base of new Set([sdkHomeFor(home), storeHomeFor(home)])) {
+    for (const kind of PROTECTED_ITEM_DIRS) out.push(join(base, kind));
+    out.push(join(base, "WINTER.md"));
+  }
+  return out;
+}
+
 /** The project half of the sandbox's `denyWrite` (WS-21 §7.1/§7.2): for the cwd and — when it differs —
  *  its project root (`repoRootFor`, the root every project-tier reader uses), the `.winter/` MCP list,
  *  claude's two settings tiers, the agent definitions and the four protected item directories. */
@@ -904,11 +935,11 @@ export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSett
       // `sdk/projects` is deliberately absent: a subpath deny there would take the memory directories
       // (which stay allowlisted) with it — its fence is the escape floor's and the path fence hook's.
       denyWrite: [...new Set([
-        join(home, "run"), join(home, "runtimes"), homeCacheDir(home), join(home, "plugins"), approvedProjectRulesDir(home),
-        trustRecordFile(home), join(home, "agents"),
-        join(sdkHomeFor(home), "settings.json"), join(sdkHomeFor(home), ".winter.json"),
-        join(sdkHomeFor(home), "agents"), join(sdkHomeFor(home), "plugins"),
-        ...[...CONTROL_PLANE_FILENAMES].sort().map((f) => join(home, f)),
+        ...selfGrantDenyWrite(home),
+        // Review I7: the PROTECTED paths (spec §7.2) — a write has to go through a tool and its card, so
+        // Bash may not write them at all. A separate list, never part of `selfGrantDenyWrite`: that one
+        // feeds the write-tool fence's HARD deny (`homeFencedDirs`), which would swallow the card.
+        ...protectedHomeDenyWrite(home),
         ...(cwd ? projectSandboxDenyWrite(cwd) : []),
       ])],
       // The sole read denial Winter has ever had (CLAUDE.md: "the sole read denial is

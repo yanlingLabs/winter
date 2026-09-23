@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { CONTROL_PLANE_FILENAMES, type HomeFence } from "./control-plane";
-import { sandboxConfigFor } from "./mode-options";
+import { selfGrantDenyWrite } from "./mode-options";
 
 /**
  * **What no agent may write under Winter's home — ONE list, three fences** (whole-branch review,
@@ -30,7 +30,9 @@ import { sandboxConfigFor } from "./mode-options";
  *    loaded as local plugins by the next child, and nothing legitimate writes the cache through a tool.
  */
 export function homeFencedDirs(home: string): string[] {
-  const fromSandbox = sandboxConfigFor(home).filesystem?.denyWrite ?? [];
+  // The sandbox's SELF-GRANT list — never its protected-path entries (review I7: those are a card for a
+  // write tool, and this list is the write-tool fence's hard deny).
+  const fromSandbox = selfGrantDenyWrite(home);
   return [...new Set([...fromSandbox, join(home, "agents"), join(home, "cache")])];
 }
 
