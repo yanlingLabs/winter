@@ -8,7 +8,8 @@
 //       and `ensure` undefined, never a throw (the IPC layer then refuses typed, fix wave F2);
 //   R1  the store's own log is what a resume re-pushes (`unconsumed` over `store.read`).
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Options, Query } from "@yanlinglabs/winter-agent-sdk";
@@ -1059,6 +1060,28 @@ describe("WS-21: run homes on the Winter leg (stubbed router builder)", () => {
     const until = Date.now() + 2000;
     while (disposed.length < n && Date.now() < until) await Bun.sleep(5);
   };
+
+  // WS-21 (L2 O-1): the Winter child keys its transcript by realpath(cwd) while the router keys by the cwd
+  // it is given — a symlinked cwd (`/var/…` → `/private/var/…`) made a handoff's step 5 look for a
+  // transcript under a key the child never wrote. The daemon hands BOTH the canonical path: RunHomeInput.cwd,
+  // Options.cwd and the recorded transcript key / backend root.
+  test("L2 O-1: a symlinked cwd reaches the run home, Options.cwd and the record as its realpath", async () => {
+    const rh = stubRunHomes();
+    const spy = querySpy();
+    const t = table({ runHome: rh.runHome }, {}, spy.wrap);
+    try {
+      const real = realpathSync(mkdtempSync(join(tmpdir(), "winter-o1-real-")));
+      const link = join(realpathSync(mkdtempSync(join(tmpdir(), "winter-o1-link-"))), "proj");
+      symlinkSync(real, link);
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd: link });
+      await t.drivers.create(sid);
+      expect(rh.built[0]!.cwd).toBe(real);
+      expect(spy.calls[0]!.options.cwd).toBe(real);
+      const record = t.records.get(sid)!;
+      expect(record.transcriptProjectKey).toBe(transcriptProjectKey(real));
+      expect(record.backendRoot.endsWith(transcriptProjectKey(real))).toBe(true);
+    } finally { t.close(); }
+  });
 
   test("optionsFor awaits buildRunHome and passes the result as options.runtime.runHome", async () => {
     const rh = stubRunHomes();
