@@ -14,7 +14,7 @@
 // .ts's own `requiredConsentClasses` no longer derives "exec" from shipped skills either).
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { listPlugins, type PluginManagerOptions } from "./sdk-plugin-api";
+import { listPlugins, type PluginManagerOptions } from "./plugin-manager";
 
 export interface PluginSkillMeta {
   name: string;

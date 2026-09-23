@@ -1,5 +1,5 @@
 // WS-21 lane L4.1 (spec §5.2): `winter plugin` = `claude plugin`, over Contract B
-// (`plugins/sdk-plugin-api.ts`). Replacement RPC-level coverage for the pre-WS-21
+// (`plugins/plugin-manager.ts`). Replacement RPC-level coverage for the pre-WS-21
 // "plugin lifecycle RPCs (Task 2)" describe block in server.test.ts, which tested the retired
 // plugins.list/plugins.install/plugin.enable(unscoped)/plugin.disable(unscoped)/plugin.remove wire
 // surface — see that file's own removal note. The real hot-spawn/hot-stop, real-child-process proof
@@ -63,7 +63,7 @@ class TestClient {
 }
 
 /** A local directory marketplace with ONE plugin, `p`, `source: "."` (its own manifest lives at
- *  the marketplace root, mirroring `sdk-plugin-api.test.ts`'s own fixture shape). */
+ *  the marketplace root, mirroring `ws21-plugins.test.ts`'s own fixture shape). */
 function writeMarketplace(dir: string, pluginJson: unknown = { id: "p", tier: "platform", entry: { command: "bun", args: ["--version"] } }): void {
   mkdirSync(join(dir, ".claude-plugin"), { recursive: true });
   writeFileSync(join(dir, ".claude-plugin", "marketplace.json"), JSON.stringify({

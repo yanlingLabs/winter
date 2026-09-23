@@ -3,8 +3,8 @@
 // qualified spec name. Before this fix, `plugins.consents[spec]` survived a change of what the spec
 // pointed at:
 //   - `plugin.uninstall` never called `removePluginFromSettings` (consent outlives the uninstall);
-//   - `addMarketplace` re-points an EXISTING marketplace name at a NEW folder (`sdk-plugin-api.ts`'s
-//     Contract-B adapter, mirroring `manage.ts:424`'s own re-point behavior);
+//   - `addMarketplace` re-points an EXISTING marketplace name at a NEW folder (the agent SDK's
+//     `manage.ts` re-point behavior);
 //   - `installPlugin` overwrites the user-scope install path for a spec that's already installed
 //     (mirroring `manage.ts:499`).
 // Scenario the ruling names: the user installs `helper` from folder A and consents to `node a.js`,

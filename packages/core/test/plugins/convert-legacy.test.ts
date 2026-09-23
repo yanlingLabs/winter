@@ -7,7 +7,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { convertLegacyPlugins } from "../../src/plugins/convert-legacy";
-import { listPlugins, setPluginEnabled } from "../../src/plugins/sdk-plugin-api";
+import { listPlugins, setPluginEnabled } from "../../src/plugins/plugin-manager";
 import { sdkHomeFor, sdkPluginsRoot } from "../../src/agent/paths";
 import { PluginStore } from "../../src/agent/plugins";
 import { pluginConsentFingerprint } from "../../src/plugins/consent-fingerprint";
@@ -108,7 +108,7 @@ describe("convertLegacyPlugins: maps fields and hook events; the original stays 
     expect(listing).toEqual([{ id: "demo", installPath: targetDir, scope: "user", enabled: true, marketplace: "winter-legacy" }]);
 
     // Post-merge round ("keep writing known_marketplaces.json"): the conversion registers the
-    // "winter-legacy" marketplace through addMarketplace's own locked writer (sdk-plugin-api.ts),
+    // "winter-legacy" marketplace through addMarketplace's own locked writer (the agent SDK's `manage.ts`),
     // never a hand-rolled write that could drift from what `plugin.marketplace.list` reads.
     const knownMarketplaces = JSON.parse(readFileSync(join(sdkPluginsRoot(h), "known_marketplaces.json"), "utf8"));
     expect(knownMarketplaces["winter-legacy"]).toMatchObject({

@@ -15,7 +15,7 @@
 // delete this whole pre-WS-21 section and its `index.ts` export line.
 //
 // The LIVE plugin-lifecycle surface is below, past that marker: Contract B's own adapter
-// (`plugins/sdk-plugin-api.ts`) plus `installPluginFromDirectory`, the "install means addMarketplace
+// (the agent SDK's plugin API, through `plugins/plugin-manager.ts`) plus `installPluginFromDirectory`, the "install means addMarketplace
 // + installPlugin" convenience this task's brief names.
 import { cpSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
@@ -28,7 +28,7 @@ import {
   type InstalledPlugin,
   type PluginManagerOptions,
   type PluginScope,
-} from "./sdk-plugin-api";
+} from "./plugin-manager";
 
 /** git-url basename minus a trailing `.git`, unless an explicit override is given. */
 export function deriveInstallName(url: string, override?: string): string {
@@ -209,11 +209,11 @@ export function removePluginDir(pluginsRoot: string, name: string): string {
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// WS-21 (spec §5, L4.1): the LIVE plugin-lifecycle surface, over Contract B (`sdk-plugin-api.ts`).
+// WS-21 (spec §5, L4.1): the LIVE plugin-lifecycle surface, over Contract B (`plugin-manager.ts`).
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
 /** A directory marketplace's `.claude-plugin/marketplace.json`, read just far enough to enumerate
- *  its plugin names (F15's own shape, `sdk-plugin-api.ts`'s header). Not exported: this is only
+ *  its plugin names (F15's own shape, the agent SDK `manage.ts`'s header). Not exported: this is only
  *  `installPluginFromDirectory`'s own "how many plugins does this folder offer" check — a fuller
  *  manifest read has no other caller in this lane. */
 /** Exported (unlike every other helper in this section) because the CLI's own daemon-path

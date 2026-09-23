@@ -198,7 +198,7 @@ export {
   setPluginEnabled as setPluginEnabledScoped, uninstallPlugin, updateMarketplace, updatePlugin,
   type PluginManagerOptions, type PluginScope as PluginManagerScope,
   type MarketplaceInfo, type InstalledPlugin, type PluginListing,
-} from "./plugins/sdk-plugin-api";
+} from "./plugins/plugin-manager";
 export { installPluginFromDirectory, directoryMarketplacePluginNames } from "./plugins/lifecycle";
 export { convertLegacyPlugins, convertLegacyPluginsForMigration, type ConvertLegacyPluginsResult } from "./plugins/convert-legacy";
 export { BackgroundTaskRegistry, type BgDeps } from "./agent/bg-registry";

@@ -1,7 +1,7 @@
 // WS-21 lane L4, Task L4.1: the plugin surface rewritten over Contract B (spec §5).
 //
 // Three layers, one file:
-//  - the adapter (`plugins/sdk-plugin-api.ts`) mirrors L1b's `manage.ts` write discipline (F15) —
+//  - the agent SDK's plugin API (`manage.ts`, through `plugins/plugin-manager.ts`) and its write discipline (F15) —
 //    install from a directory marketplace, enable/disable writes `enabledPlugins`, list shows the
 //    installed set;
 //  - the narrowed manifest (`agent/plugin-manifest.ts`) parses winter-plugin.json's EXTRAS ONLY
@@ -24,7 +24,7 @@ import {
   setPluginEnabled,
   uninstallPlugin,
   type PluginManagerOptions,
-} from "../../src/plugins/sdk-plugin-api";
+} from "../../src/plugins/plugin-manager";
 import { installPluginFromDirectory } from "../../src/plugins/lifecycle";
 import { pluginSkillsFor } from "../../src/plugins/plugin-skills";
 import { loadManifest } from "../../src/agent/plugin-manifest";

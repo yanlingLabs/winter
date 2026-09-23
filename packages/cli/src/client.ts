@@ -279,7 +279,7 @@ export class WinterClient {
     return this.request(METHODS.mcpGet, { name });
   }
   // WS-21 (spec §5.2): `winter plugin` = `claude plugin`, over Contract B
-  // (`plugins/sdk-plugin-api.ts`). Every result mirrors the adapter's own shape field-for-field
+  // (`plugins/plugin-manager.ts`). Every result mirrors the SDK's own shape field-for-field
   // (protocol/methods.ts's own header) — retires the pre-WS-21 `pluginsList()`, whose wire method
   // (`plugins.list`) the daemon no longer handles (ipc/server.ts, this lane).
   async pluginList(cwd?: string): Promise<{

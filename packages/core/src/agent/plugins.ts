@@ -70,7 +70,7 @@ export interface PluginInfo {
 export type PluginConsentRecord = PluginConsentRecordV2;
 
 // WS-21 (spec §5): claude's own `installed_plugins.json` V2 shape (F15) — the SAME shape
-// `plugins/sdk-plugin-api.ts` writes. Read here with `readFileSync` rather than that module's own
+// the agent SDK's `manage.ts` writes. Read here with `readFileSync` rather than that module's own
 // (async) `listPlugins`, because `PluginStore.list()` must stay SYNCHRONOUS: `daemon.ts` and
 // `ipc/server.ts` (both L3-owned) call `new PluginStore({...}).list()` synchronously at several
 // sites (boot-time skill/hook/supervisor wiring, the live-plugins RPC cache), and this lane cannot
@@ -95,7 +95,7 @@ function readInstalledPluginsFileSync(pluginsRoot: string): InstalledPluginsFile
 /**
  * WS-21 (spec §5): reads the shared runtime home's claude-format plugin store —
  * `<home>/sdk/plugins/installed_plugins.json` (Contract B's V2 shape, the SAME file
- * `plugins/sdk-plugin-api.ts`/`winter plugin` write) plus `<home>/sdk/settings.json`'s
+ * `plugins/plugin-manager.ts`/`winter plugin` write) plus `<home>/sdk/settings.json`'s
  * `enabledPlugins` — restricted to USER scope (daemon.ts's own call sites have no project cwd to
  * scope by; the `plugin.list` RPC combines scopes itself, through the async adapter, when a cwd is
  * given). For each installed, user-scope plugin, `winter-plugin.json` is read from the install path

@@ -8,7 +8,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { addMarketplace, installPlugin, listPlugins, type PluginManagerOptions } from "../../src/plugins/sdk-plugin-api";
+import { addMarketplace, installPlugin, listPlugins, type PluginManagerOptions } from "../../src/plugins/plugin-manager";
 import { loadManifest } from "../../src/agent/plugin-manifest";
 
 const EXAMPLES_DIR = join(import.meta.dir, "../../../..", "examples");
