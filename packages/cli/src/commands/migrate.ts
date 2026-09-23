@@ -42,6 +42,9 @@ export interface MigrateCommandDeps {
   error: (line: string) => void;
   /** Skipped entirely when `--yes` is present. */
   confirm: (prompt: string) => Promise<boolean>;
+  /** WS-21 review I8: whether this build's router applies run homes (`linkedRouterSupportsRunHome`, the
+   *  boot hook's own condition). Injectable for tests; absent reads the linked router. */
+  routerSupportsRunHome?: () => boolean;
 }
 
 function statusLine(name: string, statuses: readonly string[]): string {
@@ -96,7 +99,14 @@ async function runMigrateSdkHome(deps: MigrateCommandDeps, yes: boolean): Promis
     deps.error("winter migrate --sdk-home: the daemon is running; stop it first");
     return 1;
   }
-  const migrationDeps = { log: deps.log, reconcileAvailable: linkedRouterSupportsRunHome() };
+  const supported = (deps.routerSupportsRunHome ?? linkedRouterSupportsRunHome)();
+  // Review I8: only a build that can RUN a migrated home may make one — the boot hook's own condition.
+  // `--status` (above) and `--rollback` (the way back to an older build) are always allowed.
+  if (!supported && !deps.argv.includes("--rollback")) {
+    deps.error("winter migrate --sdk-home: this build cannot run a migrated home (its router applies no run homes) — nothing was changed; use a build that does");
+    return 1;
+  }
+  const migrationDeps = { log: deps.log, reconcileAvailable: supported };
   try {
     if (deps.argv.includes("--rollback")) {
       if (migrationCState(home).kind === "absent") {

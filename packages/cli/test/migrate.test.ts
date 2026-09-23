@@ -218,6 +218,20 @@ describe("winter migrate --sdk-home (Migration C)", () => {
     return home;
   }
 
+  test("review I8: on a build whose router does not apply run homes, only --status and --rollback run", async () => {
+    const home = oldLayoutHome();
+    const run = baseDeps({ argv: ["--sdk-home", "--home", home, "--yes"], routerSupportsRunHome: () => false });
+    expect(await runMigrateCommand(run.deps)).toBe(1);
+    expect(run.errLines.join("\n")).toContain("cannot run a migrated home");
+    expect(lstatSync(join(home, "projects")).isSymbolicLink()).toBe(false);
+    const resume = baseDeps({ argv: ["--sdk-home", "--resume", "--home", home, "--yes"], routerSupportsRunHome: () => false });
+    expect(await runMigrateCommand(resume.deps)).toBe(1);
+    const status = baseDeps({ argv: ["--sdk-home", "--status", "--home", home], routerSupportsRunHome: () => false });
+    expect(await runMigrateCommand(status.deps)).toBe(0);
+    const rollback = baseDeps({ argv: ["--sdk-home", "--rollback", "--home", home, "--yes"], routerSupportsRunHome: () => false });
+    expect(await runMigrateCommand(rollback.deps)).toBe(0);
+  });
+
   test("--status names a home that needs it, and never needs the daemon stopped", async () => {
     const home = oldLayoutHome();
     const { deps, lines } = baseDeps({ argv: ["--sdk-home", "--status", "--home", home], isDaemonLockHeld: () => true });
@@ -234,12 +248,12 @@ describe("winter migrate --sdk-home (Migration C)", () => {
 
   test("migrates --home <dir> (nothing to reconcile: both phases), then --rollback puts it back", async () => {
     const home = oldLayoutHome();
-    const run = baseDeps({ argv: ["--sdk-home", "--home", home, "--yes"] });
+    const run = baseDeps({ argv: ["--sdk-home", "--home", home, "--yes"], routerSupportsRunHome: () => true });
     expect(await runMigrateCommand(run.deps)).toBe(0);
     expect(run.lines.join("\n")).toContain("migration C: complete");
     expect(lstatSync(join(home, "projects")).isSymbolicLink()).toBe(true);
     expect(existsSync(join(home, "sdk", "projects", "-Users-x-app", "memory", "MEMORY.md"))).toBe(true);
-    const again = baseDeps({ argv: ["--sdk-home", "--home", home, "--yes"] });
+    const again = baseDeps({ argv: ["--sdk-home", "--home", home, "--yes"], routerSupportsRunHome: () => true });
     expect(await runMigrateCommand(again.deps)).toBe(0);
     expect(again.lines.join("\n")).toContain("nothing to migrate");
     const back = baseDeps({ argv: ["--sdk-home", "--rollback", "--home", home, "--yes"] });
@@ -251,7 +265,7 @@ describe("winter migrate --sdk-home (Migration C)", () => {
   test("a preflight refusal is printed and moves nothing", async () => {
     const home = oldLayoutHome();
     writeFileSync(join(home, "sdk", "projects", "stray.jsonl"), "x");
-    const { deps, errLines } = baseDeps({ argv: ["--sdk-home", "--home", home, "--yes"] });
+    const { deps, errLines } = baseDeps({ argv: ["--sdk-home", "--home", home, "--yes"], routerSupportsRunHome: () => true });
     expect(await runMigrateCommand(deps)).toBe(1);
     expect(errLines.join("\n")).toContain("refused");
     expect(lstatSync(join(home, "projects")).isSymbolicLink()).toBe(false);
@@ -271,7 +285,7 @@ describe("winter migrate --sdk-home (Migration C)", () => {
 
   test("--resume with nothing in flight refuses", async () => {
     const home = oldLayoutHome();
-    const { deps, errLines } = baseDeps({ argv: ["--sdk-home", "--resume", "--home", home, "--yes"] });
+    const { deps, errLines } = baseDeps({ argv: ["--sdk-home", "--resume", "--home", home, "--yes"], routerSupportsRunHome: () => true });
     expect(await runMigrateCommand(deps)).toBe(1);
     expect(errLines.join("\n")).toContain("nothing to resume");
   });
