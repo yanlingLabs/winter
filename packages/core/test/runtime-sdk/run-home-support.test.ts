@@ -19,7 +19,7 @@ describe("feature detection", () => {
   });
 
   test("runHomeHandleOf needs BOTH run-home members of a router handle", () => {
-    const h = { runHomeOutcome: () => "safe" as const, reconcileRootForRecovery: async () => "clean" as const };
+    const h = { runHomeOutcome: () => "safe" as const, reconcileRootForRecovery: async () => ({ outcome: "clean" as const, transcripts: [] }) };
     expect(runHomeHandleOf(h)).toBe(h);
     expect(runHomeHandleOf({ runHomeOutcome: () => "safe" })).toBeUndefined();
     expect(runHomeHandleOf(undefined)).toBeUndefined();

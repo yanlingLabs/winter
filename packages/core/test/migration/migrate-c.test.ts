@@ -308,6 +308,44 @@ describe("both phases", () => {
   });
 });
 
+// Review I6 (`ws21/router`@7c57f9a): phase 2 acts on each transcript's own outcome — `canonical-ahead`
+// (the normal state for a resumed or cross-leg official session) needs nothing; a session is marked
+// repair-required only when one of ITS transcripts was quarantined; the root is never one unit.
+describe("review I6: phase 2 per transcript", () => {
+  test("only the quarantined transcript's session is marked; canonical-ahead and appended are fine; the root is archived", async () => {
+    const { home } = fixture();
+    const rs0 = openRuntimeStateDb(home);
+    rs0.db.run("UPDATE runtime_sessions SET backend_session_id = 'be-2' WHERE winter_session_id = 's_2'");
+    rs0.db.run("UPDATE runtime_sessions SET backend_session_id = 'be-1' WHERE winter_session_id = 's_1'");
+    rs0.close();
+    const m = await runMigrationC(home, deps({
+      reconcile: async () => ({
+        outcome: "quarantined" as const,
+        transcripts: [
+          { projectKey: "k", sessionId: "be-1", outcome: "canonical-ahead" as const, appended: 0 },
+          { projectKey: "k", sessionId: "be-2", outcome: "quarantined" as const, appended: 0, reason: "diverged" },
+        ],
+      }),
+    }));
+    expect(m.status).toBe("complete");
+    expect(m.reconciled[0]!.transcripts?.map((t) => [t.sessionId, t.outcome])).toEqual([["be-1", "canonical-ahead"], ["be-2", "quarantined"]]);
+    const rs = openRuntimeStateDb(home);
+    const health = (id: string) => rs.db.query<{ h: string }, [string]>("SELECT transcript_health AS h FROM runtime_sessions WHERE winter_session_id = ?").get(id)!.h;
+    expect([health("s_1"), health("s_2")]).toEqual(["clean", "repair-required"]);
+    rs.close();
+    expect(existsSync(join(home, "runtimes", "claude-config"))).toBe(false); // archived as a whole directory, never "quarantined as a unit"
+  });
+
+  test("canonical-ahead everywhere: nothing marked", async () => {
+    const { home } = fixture();
+    const m = await runMigrationC(home, deps({ reconcile: async () => ({ outcome: "clean" as const, transcripts: [{ projectKey: "k", sessionId: "be-x", outcome: "canonical-ahead" as const, appended: 0 }] }) }));
+    const rs = openRuntimeStateDb(home);
+    expect(rs.db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM runtime_sessions WHERE transcript_health = 'repair-required'").get()!.n).toBe(0);
+    rs.close();
+    expect(m.reconciled[0]!.outcome).toBe("clean");
+  });
+});
+
 describe("review M4: the archive's crash window", () => {
   test("an item renamed into the archive before the manifest recorded it is found, recorded, and restored by rollback", async () => {
     const { home } = fixture();

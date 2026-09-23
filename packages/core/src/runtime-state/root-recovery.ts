@@ -27,8 +27,12 @@ import { join } from "node:path";
 import type { RuntimeStateDb } from "./db";
 import { RuntimeSessionRecords } from "./records";
 import { CLAUDE_RESUME_PREFIX, CLAUDE_RESUME_STALE_MS } from "./recovery";
+import type { RecoveryReport } from "../runtime-sdk/run-home-contract";
+import { normalizeRecoveryReport, quarantinedBackendSessions } from "../runtime-sdk/run-home-support";
 
-export type RootReconcile = (root: string) => Promise<"clean" | "appended" | "quarantined">;
+/** The router's `reconcileRootForRecovery`: a per-transcript `RecoveryReport` (review I6), or — from an
+ *  earlier router — a bare root outcome. */
+export type RootReconcile = (root: string) => Promise<RecoveryReport | "clean" | "appended" | "quarantined">;
 
 export interface RootRecoveryDeps {
   home: string;
@@ -49,6 +53,9 @@ export interface RootRecoveryReport {
   staging: { removed: number; quarantined: number; failed: number };
   /** Every root quarantined by THIS pass. */
   quarantinedRoots: string[];
+  /** Review I6: the Winter sessions marked `repair-required` because one of their transcripts (a
+   *  subagent's included) was quarantined. */
+  sessionsMarked: string[];
 }
 
 /** The rows `winter doctor` reports. */
@@ -79,6 +86,7 @@ export async function recoverRunRoots(deps: RootRecoveryDeps): Promise<RootRecov
     runFolders: { clean: 0, appended: 0, quarantined: 0, failed: 0, skipped: 0, refused: 0, noWorkingCopy: 0 },
     staging: { removed: 0, quarantined: 0, failed: 0 },
     quarantinedRoots: [],
+    sessionsMarked: [],
   };
   const known = new Set(quarantinedRunRoots(deps.rs).map((q) => q.root));
   const handled = new Set<string>();
@@ -86,6 +94,23 @@ export async function recoverRunRoots(deps: RootRecoveryDeps): Promise<RootRecov
   const isRunFolder = (p: string): boolean => p.startsWith(`${runsDir}/`) && !p.slice(runsDir.length + 1).includes("/");
   const scanRoot = deps.claudeResumeScanRoot ?? tmpdir();
   const isStagingRoot = (p: string): boolean => p.startsWith(`${scanRoot.replace(/\/+$/, "")}/${CLAUDE_RESUME_PREFIX}`) && !p.slice(scanRoot.replace(/\/+$/, "").length + 1).includes("/");
+
+  const records = new RuntimeSessionRecords(deps.rs);
+  // Review I6: every reconcile answer is normalized, and each session whose transcript (main or subagent)
+  // the router quarantined is marked `repair-required` — found by its BACKEND session id, the store key's
+  // `sessionId`. `canonical-ahead` needs nothing (a prefix copy holds nothing the canonical file lacks).
+  const reconcileRoot = async (root: string): Promise<"clean" | "appended" | "quarantined"> => {
+    const answer = normalizeRecoveryReport(await deps.reconcile(root));
+    for (const backendId of quarantinedBackendSessions(answer)) {
+      try {
+        const owner = records.byBackendSessionId(backendId);
+        if (owner === undefined) { log(`run-root recovery: a quarantined transcript names no known session (${backendId})`); continue; }
+        records.setTranscriptHealth(owner.winterSessionId, "repair-required");
+        if (!report.sessionsMarked.includes(owner.winterSessionId)) report.sessionsMarked.push(owner.winterSessionId);
+      } catch { /* bounded */ }
+    }
+    return answer.outcome;
+  };
 
   const quarantine = (root: string): void => {
     known.add(root);
@@ -106,7 +131,6 @@ export async function recoverRunRoots(deps: RootRecoveryDeps): Promise<RootRecov
   }
 
   // ── 1. recorded roots ───────────────────────────────────────────────────────────────────────
-  const records = new RuntimeSessionRecords(deps.rs);
   let recorded: { id: string; root: string; kind: string | null }[] = [];
   try {
     recorded = deps.rs.db.query<{ id: string; root: string; kind: string | null }, []>(
@@ -131,7 +155,7 @@ export async function recoverRunRoots(deps: RootRecoveryDeps): Promise<RootRecov
       continue;
     }
     try {
-      const outcome = await deps.reconcile(row.root);
+      const outcome = await reconcileRoot(row.root);
       if (outcome === "quarantined") {
         report.recorded.quarantined++;
         quarantine(row.root);
@@ -167,7 +191,7 @@ export async function recoverRunRoots(deps: RootRecoveryDeps): Promise<RootRecov
         continue;
       }
       try {
-        const outcome = await deps.reconcile(dir);
+        const outcome = await reconcileRoot(dir);
         if (outcome === "quarantined") { report.runFolders.quarantined++; quarantine(dir); continue; }
         report.runFolders[outcome]++;
         remove(dir);
@@ -199,7 +223,7 @@ export async function recoverRunRoots(deps: RootRecoveryDeps): Promise<RootRecov
     try { ageMs = Date.now() - statSync(dir).mtimeMs; } catch { continue; }
     if (ageMs < CLAUDE_RESUME_STALE_MS) continue;
     try {
-      const outcome = await deps.reconcile(dir);
+      const outcome = await reconcileRoot(dir);
       if (outcome === "quarantined") { report.staging.quarantined++; quarantine(dir); continue; }
       if (remove(dir)) report.staging.removed++;
     } catch {

@@ -160,6 +160,42 @@ describe("an exit-time quarantine (L2 fix round 1: kept, not disposed)", () => {
   });
 });
 
+// Review I6 (`ws21/router`@7c57f9a): the router answers per TRANSCRIPT. A session is marked repair-required
+// when ANY of its transcripts (a subagent's included) is quarantined; `canonical-ahead` needs nothing.
+describe("review I6: per-transcript recovery outcomes", () => {
+  test("only the sessions whose transcripts were quarantined are marked; the root outcome decides the folder", async () => {
+    const w = world();
+    recordRoot(w.rs, "s_a", null as never, null as never);
+    recordRoot(w.rs, "s_b", null as never, null as never);
+    recordRoot(w.rs, "s_c", null as never, null as never);
+    for (const [id, be] of [["s_a", "be-a"], ["s_b", "be-b"], ["s_c", "be-c"]]) w.rs.db.run("UPDATE runtime_sessions SET backend_session_id = ? WHERE winter_session_id = ?", [be!, id!]);
+    const dir = w.runFolder("multi");
+    const report = await recoverRunRoots({
+      home: w.home, rs: w.rs, claudeResumeScanRoot: w.scan,
+      reconcile: async () => ({
+        outcome: "quarantined" as const,
+        transcripts: [
+          { projectKey: "k", sessionId: "be-a", outcome: "appended" as const, appended: 2 },
+          { projectKey: "k", sessionId: "be-b", subpath: "subagents/agent-1", outcome: "quarantined" as const, appended: 0, reason: "diverged" },
+          { projectKey: "k", sessionId: "be-c", outcome: "canonical-ahead" as const, appended: 0 },
+        ],
+        quarantine: join(w.home, "cache", "quarantine", "x-multi"),
+      }),
+    });
+    const health = (id: string) => w.rs.db.query<{ h: string }, [string]>("SELECT transcript_health AS h FROM runtime_sessions WHERE winter_session_id = ?").get(id)!.h;
+    expect([health("s_a"), health("s_b"), health("s_c")]).toEqual(["clean", "repair-required", "clean"]);
+    expect(existsSync(dir)).toBe(true); // a quarantined root is kept
+    expect(report.sessionsMarked).toEqual(["s_b"]);
+  });
+
+  test("a bare root outcome (an earlier router) still works", async () => {
+    const w = world();
+    const dir = w.runFolder("bare");
+    await recoverRunRoots({ home: w.home, rs: w.rs, claudeResumeScanRoot: w.scan, reconcile: async () => "clean" as const });
+    expect(existsSync(dir)).toBe(false);
+  });
+});
+
 describe("review M6: a run folder is recorded against its session", () => {
   test("noteRunFolder records the folder; clearing only clears the folder it names", () => {
     const w = world();

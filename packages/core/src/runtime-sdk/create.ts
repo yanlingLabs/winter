@@ -40,7 +40,7 @@ import { splitTag, WINTER_TEST_PREFIX } from "./model-tag";
 import { releaseAllHeld } from "./messaging";
 import { daemonResolveEndpoint } from "../providers/registry";
 import { WINTER_PEER_VERSIONS, REQUIRED_CLAUDE_AGENT_SDK } from "./versions";
-import type { RunHomeFor, RunHomeOutcome } from "./run-home-contract";
+import type { RecoveryReport, RunHomeFor, RunHomeOutcome } from "./run-home-contract";
 import { runHomeHandleOf } from "./run-home-support";
 
 /**
@@ -320,7 +320,7 @@ export interface WinterRuntimeSdk {
    * live store (it recomputes the claude-ready decorations first). `undefined` when the linked router
    * has no such door (0.0.11) — recovery then keeps its pre-WS-21 behaviour. Optional for test doubles.
    */
-  reconcileRootForRecovery?(root: string): Promise<"clean" | "appended" | "quarantined"> | undefined;
+  reconcileRootForRecovery?(root: string): Promise<RecoveryReport> | undefined;
 }
 
 /**
@@ -657,7 +657,7 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
     runHomeOutcome(runId: string): RunHomeOutcome | undefined {
       return runHomeHandleOf(sdk)?.runHomeOutcome(runId);
     },
-    reconcileRootForRecovery(root: string): Promise<"clean" | "appended" | "quarantined"> | undefined {
+    reconcileRootForRecovery(root: string): Promise<RecoveryReport> | undefined {
       return runHomeHandleOf(sdk)?.reconcileRootForRecovery(root);
     },
     dispose(): Promise<void> {

@@ -27,6 +27,9 @@ import { randomBytes } from "node:crypto";
 import { SDK_COMPAT_LINKS, SDK_PERSISTENT_ENTRIES, sdkHomeFor } from "../agent/paths";
 import { downgradeRuntimeStateToV6, openRuntimeStateDb } from "../runtime-state/db";
 import { RuntimeLeases, type LeaseProbe } from "../runtime-state/leases";
+import { RuntimeSessionRecords } from "../runtime-state/records";
+import type { RecoveryReport, RecoveryTranscriptOutcome } from "../runtime-sdk/run-home-contract";
+import { normalizeRecoveryReport, quarantinedBackendSessions } from "../runtime-sdk/run-home-support";
 import { DEAD_LEGACY_TOP_LEVEL_FILES } from "./dead-legacy-files";
 import { LEGACY_INSTRUCTIONS_FILE } from "../legacy-names";
 import { settingsSplitMarkerPath, splitSettingsToSdk } from "./settings-split";
@@ -64,7 +67,9 @@ export interface MigrationCManifest {
   links: string[];
   copied: string[];
   archived: { from: string; to: string }[];
-  reconciled: { root: string; outcome: "clean" | "appended" | "quarantined" | "failed" }[];
+  /** Review I6: per root, the router's overall outcome and — from a per-transcript router — each
+   *  transcript's own (`canonical-ahead` needs nothing; a `quarantined` one marks ITS session). */
+  reconciled: { root: string; outcome: "clean" | "appended" | "quarantined" | "failed"; transcripts?: RecoveryTranscriptOutcome[] }[];
 }
 
 export function migrationCDir(home: string): string { return join(home, "migration", "c"); }
@@ -130,7 +135,7 @@ export interface MigrationCDeps {
   log: (line: string) => void;
   now?: () => Date;
   /** Phase 2's door: the router handle's `reconcileRootForRecovery`. */
-  reconcile?: (root: string) => Promise<"clean" | "appended" | "quarantined">;
+  reconcile?: (root: string) => Promise<RecoveryReport | "clean" | "appended" | "quarantined">;
   /** Whether phase 2 will have that door (the linked router applies run homes). Preflight refuses an
    *  official working copy with content when it will not. */
   reconcileAvailable: boolean;
@@ -442,6 +447,24 @@ export async function runMigrationC(home: string, deps: MigrationCDeps): Promise
   return m;
 }
 
+/** Mark the Winter sessions owning these BACKEND session ids `repair-required`; returns the ones marked.
+ *  Bounded: a store that will not open marks nothing (the manifest still records every transcript). */
+function markQuarantinedSessions(home: string, backendIds: readonly string[]): string[] {
+  if (backendIds.length === 0 || !existsSync(join(home, "runtimes", "runtime-state.db"))) return [];
+  const marked: string[] = [];
+  let rs;
+  try { rs = openRuntimeStateDb(home); } catch { return []; }
+  try {
+    const records = new RuntimeSessionRecords(rs);
+    for (const id of backendIds) {
+      const owner = records.byBackendSessionId(id);
+      if (owner === undefined) continue;
+      try { records.setTranscriptHealth(owner.winterSessionId, "repair-required"); marked.push(owner.winterSessionId); } catch { /* bounded */ }
+    }
+  } finally { rs.close(); }
+  return marked;
+}
+
 /**
  * Phase 2 (the late site): reconcile the official working copies through the router, archive what
  * the new layout no longer reads, and mark the migration done. Idempotent; a root the router cannot
@@ -471,11 +494,21 @@ export async function finishMigrationC(home: string, deps: Pick<MigrationCDeps, 
       if (deps.reconcile === undefined) {
         throw new MigrationCRefused("sdk_home_migration_refused", `${root} holds an official working copy and no router can reconcile it here — the next daemon boot on the integrated build finishes Migration C`);
       }
-      let outcome: MigrationCManifest["reconciled"][number]["outcome"];
-      try { outcome = await deps.reconcile(root); } catch { outcome = "failed"; }
-      m.reconciled.push({ root, outcome });
+      let entry: MigrationCManifest["reconciled"][number];
+      try {
+        const report = normalizeRecoveryReport(await deps.reconcile(root));
+        entry = { root, outcome: report.outcome, ...(report.transcripts.length > 0 ? { transcripts: report.transcripts } : {}) };
+        // Review I6: the root is never one unit — only a session one of whose transcripts the router
+        // quarantined needs repair; `canonical-ahead` (a resumed or cross-leg official session's normal
+        // state) and `appended` need nothing more.
+        const marked = markQuarantinedSessions(home, quarantinedBackendSessions(report));
+        if (marked.length > 0) deps.log(`migration C: ${marked.length} session(s) marked repair-required (a quarantined transcript): ${marked.join(", ")}`);
+      } catch {
+        entry = { root, outcome: "failed" };
+      }
+      m.reconciled.push(entry);
       writeManifest(home, m);
-      deps.log(`migration C: ${root} reconciled — ${outcome}`);
+      deps.log(`migration C: ${root} reconciled — ${entry.outcome}${entry.transcripts ? ` (${entry.transcripts.length} transcript(s))` : ""}`);
     }
     record("reconcile-official-roots", m.reconciled.length === 0 ? "skipped" : "done", { roots: m.reconciled.length });
   }
