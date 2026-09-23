@@ -315,9 +315,16 @@ export class WinterClient {
   }
   /** `plugin.setConsent` — the Winter-only extras' own consent (spec §5.4), keyed by the qualified
    *  `"<name>@<marketplace>"` spec (WS-21 fix round 2, C2: a bare name was ambiguous across
-   *  marketplaces — `ipc/server.ts`'s own doc on the case this closed). */
-  async pluginSetConsent(spec: string, classes: Array<"exec" | "tcc" | "hardware">): Promise<{ ok: true } | { code: "unknown_plugin" }> {
-    return this.request(METHODS.pluginSetConsent, { spec, classes });
+   *  marketplaces — `ipc/server.ts`'s own doc on the case this closed). `fingerprint` is the
+   *  disclosure fingerprint the caller saw in the `plugin.list` listing it displayed
+   *  (`extras.fingerprint`) — a TOCTOU check (L5 re-review): the daemon refuses `stale_disclosure`
+   *  when it no longer matches a fresh recompute. */
+  async pluginSetConsent(
+    spec: string,
+    classes: Array<"exec" | "tcc" | "hardware">,
+    fingerprint: string,
+  ): Promise<{ ok: true } | { code: "unknown_plugin" } | { code: "stale_disclosure" }> {
+    return this.request(METHODS.pluginSetConsent, { spec, classes, fingerprint });
   }
   async askUserRespond(params: { sessionId: string; callId: string; answers: Record<string, string>; notes?: Record<string, string> }): Promise<{ ok: true; alreadyResolved: boolean }> {
     return this.validated(AskUserRespondResult, await this.request(METHODS.askUserRespond, params), METHODS.askUserRespond);

@@ -42,7 +42,7 @@
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sdkPluginsRoot, sdkHomeFor } from "../agent/paths";
-import { loadManifest } from "../agent/plugin-manifest";
+import { loadManifest, requiredConsentClasses } from "../agent/plugin-manifest";
 import { writeJsonAtomic } from "../sdk-files";
 import { pluginConsentFingerprint } from "./consent-fingerprint";
 import { addMarketplace, installPlugin, setPluginEnabled, type PluginManagerOptions } from "./sdk-plugin-api";
@@ -301,7 +301,12 @@ export async function convertLegacyPlugins(home: string): Promise<ConvertLegacyP
       const installed = await installPlugin(options, spec, "user");
       if (!enabled) await setPluginEnabled(options, spec, "user", false);
       const { manifest } = loadManifest(installed.installPath, id);
-      idToFingerprint.set(id, pluginConsentFingerprint(installed.installPath, manifest?.entry));
+      idToFingerprint.set(id, pluginConsentFingerprint(installed.installPath, {
+        entry: manifest?.entry,
+        tcc: manifest?.permissions?.tcc,
+        hardware: manifest?.permissions?.hardware,
+        requiredConsents: manifest ? requiredConsentClasses(manifest) : [],
+      }));
       result.converted.push({ id, installPath: installed.installPath, enabled });
     } catch (err) {
       result.skipped.push({ id, reason: (err as Error).message });

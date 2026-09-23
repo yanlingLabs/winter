@@ -18,6 +18,7 @@ import {
 } from "../../src/plugins/supervisor";
 import { PluginContribRegistry } from "../../src/plugins/contrib";
 import { pluginConsentFingerprint } from "../../src/plugins/consent-fingerprint";
+import { loadManifest, requiredConsentClasses } from "../../src/agent/plugin-manifest";
 import { AuditLog } from "../../src/peripheral/audit";
 import { PeripheralBroker } from "../../src/peripheral/broker";
 import { ProviderLink } from "../../src/peripheral/provider-link";
@@ -152,11 +153,23 @@ export function writeAndLoadSettings(home: string, pluginId: string, opts?: { ha
   // C1 fix round 2: the record is now fingerprinted (`{classes, fingerprint}`), bound to the
   // plugin's real install path — re-derived here off the SAME `EXAMPLE_MARKETPLACE_PREFIX`
   // convention `installExample` uses for `dest` (this function's own doc: must run AFTER
-  // installSampleEcho/installBatteryLimiter, so that directory already exists) — plus its entry;
-  // every example plugin these fixtures install is tier "platform" with the identical
-  // `{command:"bun", args:["index.ts"]}` entry (examples/sample-echo, examples/battery-limiter).
+  // installSampleEcho/installBatteryLimiter, so that directory already exists).
+  //
+  // L5 re-review (full disclosure): the fingerprint now also covers the manifest's declared
+  // `permissions.tcc`/`permissions.hardware` + `requiredConsents` — sample-echo and battery-limiter
+  // declare DIFFERENT permissions (exec only vs exec+hardware:["battery"]), so this reads the REAL
+  // installed manifest (`loadManifest`, the SAME reader `agent/plugins.ts#PluginStore` uses) rather
+  // than assuming — the only way to stay correct for whichever example is actually installed here,
+  // independent of `opts.hardwareConsent` (which grants a CLASS; it never changes what the manifest
+  // itself declares as required).
   const installPath = join(home, `${EXAMPLE_MARKETPLACE_PREFIX}${pluginId}`);
-  const fingerprint = pluginConsentFingerprint(installPath, { command: "bun", args: ["index.ts"] });
+  const { manifest } = loadManifest(installPath, pluginId);
+  const fingerprint = pluginConsentFingerprint(installPath, {
+    entry: manifest?.entry,
+    tcc: manifest?.permissions?.tcc,
+    hardware: manifest?.permissions?.hardware,
+    requiredConsents: manifest ? requiredConsentClasses(manifest) : [],
+  });
   writeFileSync(join(home, "settings.json"), JSON.stringify({
     schemaVersion: 3,
     provider: { model: "codex-oauth/gpt-5.4" }, // unused (nothing here constructs a real provider) but required by the settings schema

@@ -125,7 +125,11 @@ describe("4d-ii gate: over-the-wire plugin lifecycle (marketplace.add -> install
       expect(inst.supervisor.status(pluginId)).toBe("stopped"); // still not spawn-eligible
 
       // --- plugin.setConsent grants the Tier-2 entry process's own extra (spec §5.4) ---
-      const setConsentRes = await harness.request(METHODS.pluginSetConsent, { spec, classes: ["exec"] });
+      // L5 re-review (TOCTOU): the fingerprint comes from the listing already fetched above --
+      // exactly how a real consent UI gets it (`extras.fingerprint`), never recomputed by hand.
+      const setConsentRes = await harness.request(METHODS.pluginSetConsent, {
+        spec, classes: ["exec"], fingerprint: afterInstallEntry.extras.fingerprint,
+      });
       expect(setConsentRes.result).toEqual({ ok: true });
 
       // --- plugin.enable (again) is now spawn-eligible -> hot-SPAWNS the real child ---

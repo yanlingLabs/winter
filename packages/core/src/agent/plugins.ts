@@ -155,13 +155,19 @@ export class PluginStore {
 
       const { manifest } = loadManifest(dir, name, this.deps.log);
       if (manifest) {
-        const fingerprint = pluginConsentFingerprint(dir, manifest.entry);
+        const requiredConsents = requiredConsentClasses(manifest);
+        const fingerprint = pluginConsentFingerprint(dir, {
+          entry: manifest.entry,
+          tcc: manifest.permissions?.tcc,
+          hardware: manifest.permissions?.hardware,
+          requiredConsents,
+        });
         out.push({
           ...shared,
           description: manifest.description,
           version: manifest.version ?? userRecord.version,
           tier: manifest.tier,
-          requiredConsents: requiredConsentClasses(manifest),
+          requiredConsents,
           consented: this.consentedClasses(key, fingerprint),
           legacy: false,
           hasManifestMcp: false,
@@ -185,7 +191,7 @@ export class PluginStore {
         // A LEGACY (extras-less) plugin requires no consent class — enabling it (Contract B's
         // install+enable) is already the user's trust decision for its native content (spec §5.4).
         requiredConsents: [],
-        consented: this.consentedClasses(key, pluginConsentFingerprint(dir, undefined)),
+        consented: this.consentedClasses(key, pluginConsentFingerprint(dir, {})),
         legacy: true,
         hasManifestMcp: false,
         execPayload: [],
