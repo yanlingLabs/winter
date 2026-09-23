@@ -11,7 +11,7 @@ import claudeAgentSdkManifest from "@anthropic-ai/claude-agent-sdk/package.json"
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.17";
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.20";
 /** Bumped to 0.0.11 (lane B, 2026-09-23): the router no longer names `<cwd>/.winter` as a local plugin
  *  on the official leg — measured by its own tests, a cloned repository's `hooks/hooks.json` ran on a
  *  Code session's first prompt through it, with no trust decision anywhere — and gained

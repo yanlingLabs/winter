@@ -366,13 +366,11 @@ function planRequestFor(
  *
  * `withdrawPending(callId)`: the child produced a `tool_result` for this call (the driver learns it
  * from the projector's `onToolResults`), so an approval card or a question still pending for it can
- * never be answered usefully. On the Winter leg this is the ONLY way such a card closes after an
- * interrupt — agent SDK 0.0.17 abandons the pending permission request inside the child
- * (`engine.ts`'s `raceInterrupt` around `evaluateWithFreshPolicy`) and never cancels this callback:
- * it has no `control_cancel_request`, which is what claude's CLI sends on an abort
- * (`cli/structuredIO.ts`) and what makes the claude SDK abort the callback's `signal`, i.e. what
- * makes `onAbort` below fire on the official leg. Without it the card stayed pending for ~24.8 days
- * and every client kept it on screen (s_5d314c81045e seq 24-30).
+ * never be answered usefully. Agent SDK 0.0.17 abandoned the pending permission request inside the
+ * child on an interrupt and never cancelled this callback, so the card stayed pending for ~24.8 days
+ * (s_5d314c81045e seq 24-30). Since 0.0.20 the Winter runtime sends claude's `control_cancel_request`
+ * and the SDK aborts the callback's `signal` (what makes `onAbort` below fire, on both legs); this
+ * door stays as the second one — it also closes a card whose child died without sending the cancel.
  *
  * The withdrawal is `approval_resolved{approved:false, by:"aborted"}` / `question_resolved{answers:{},
  * by:"aborted"}` — the very shapes `onAbort` already emits for the same fact, no new field, no new
@@ -530,10 +528,8 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     //
     // The card's text is unchanged — an escape still reads `bash (UNSANDBOXED): …`. The user's saved
     // allow rules DO reach the child now, on both legs (`mode-options.ts`'s `persistedAllowRulesFor`),
-    // so on the official leg a matching `Bash(...)` rule allows an escape before it ever gets here, as
-    // claude does. WHAT STILL CARDS ONE ON THE WINTER LEG is the agent SDK's RULING P3-J, which makes
-    // the flag "mandatory interaction" ahead of its own allow-rule stage (0.0.17
-    // `permissions/evaluator.ts:1852-1869`) — an SDK carry, not something this bridge can answer.
+    // so on both legs a matching `Bash(...)` rule allows an escape before it ever gets here, as claude
+    // does (the Winter leg since agent SDK 0.0.20, which retired RULING P3-J's mandatory interaction).
     const escape = classificationName === "bash" && typeof input === "object" && input !== null
       && (input as Record<string, unknown>).dangerouslyDisableSandbox === true;
     // Consumed on every escape that gets this far, whatever the verdict, so none lingers.
