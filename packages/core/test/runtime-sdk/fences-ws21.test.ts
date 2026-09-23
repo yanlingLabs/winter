@@ -80,6 +80,12 @@ describe("writes: sdk/projects/** except */memory/** — no rule, not allowliste
     expect(escapeFloorHit(`echo note >> ${H}/sdk/projects/-Users-x-app/memory/MEMORY.md`, H)).toBeUndefined();
     expect(escapeFloorHit(`cat ${H}/sdk/projects/-Users-x-app/abc.jsonl`, H)).toBeUndefined();
   });
+  test("review M2: the compat-link spelling <home>/projects is the same store", () => {
+    expect(escapeFloorHit("echo x >> ~/.winter/projects/-Users-x-app/abc.jsonl", H)).toBeDefined();
+    expect(escapeFloorHit(`rm -rf ${H}/projects`, H)).toBeDefined();
+    expect(escapeFloorHit("echo note >> ~/.winter/projects/-Users-x-app/memory/MEMORY.md", H)).toBeUndefined();
+    expect(escapeFloorHit("cat ~/.winter/projects/-Users-x-app/abc.jsonl", H)).toBeUndefined();
+  });
   test("hook", () => {
     expect(storeWriteDenial("Write", { file_path: `${H}/sdk/projects/k/a.jsonl` }, { home: H })).toBeDefined();
     expect(storeWriteDenial("Write", { file_path: `${H}/sdk/projects/k/memory/a.md` }, { home: H })).toBeUndefined();
