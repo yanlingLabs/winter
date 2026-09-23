@@ -59,7 +59,7 @@ import { renderNoCredentialHint } from "./handoff";
 import { neutralSelectionRefusal, refusalDetailCategoryFor } from "./refusal-copy";
 import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
 import { attachOfficialSession, attachWinterSession } from "./messaging";
-import { buildWinterOptions, permissionModeFor } from "./mode-options";
+import { buildWinterOptions, bypassAllowedAtSpawn, permissionModeFor } from "./mode-options";
 import { providerFor, rowForTag, testProviderNameFor } from "./provider-selection";
 import { splitTag, UNSTATED_TAG, isModelTag, WINTER_TEST_PREFIX, type ModelTag } from "./model-tag";
 import { winterSessions } from "./sessions";
@@ -86,6 +86,7 @@ function mergedAgentDefinitions(
 }
 import type { AgentRegistry } from "../agent/bg-agent-registry";
 import type { ContextAssembler } from "../agent/context";
+import type { SkillStore } from "../agent/skills";
 import { startWinterSession, unconsumedUserMessages, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import { startOfficialSession, type OfficialSession } from "./official-session";
@@ -253,6 +254,22 @@ export interface WinterLegDeps {
    *  forwarded to that leg below, so the official leg's `autoMemoryDirectory` reads the identical
    *  MEMDIR decision this assembler's `assemble()` just used to build the system prompt. */
   assembler?: Pick<ContextAssembler, "assemble" | "memoryDirFor">;
+  /**
+   * B1 (2026-09-22): the daemon's ONE `SkillStore` — the same instance the assembler and the
+   * `skills.*` RPCs read — asked, per incarnation, which of its skills a CODE child can load
+   * (`childSkillSurface`: skills-only plugin views + the invocable names, `Skill(<name>)` deny rules
+   * applied from the LIVE settings). Absent (a harness without one) ⇒ no `Options.plugins`/`skills`,
+   * exactly as before, and the child indexes no skill at all (`settingSources: []`).
+   */
+  skills?: Pick<SkillStore, "childSkillSurface">;
+  /**
+   * Lane B (2026-09-22): the user's SAVED allow rules for a session at `cwd` — Winter's raw rule
+   * strings, trust-gated (`mode-options.ts`'s `persistedAllowRulesFor`, wired by `daemon.ts` over the
+   * live settings, the project-settings resolver, the rules store and the trust store). Read at EVERY
+   * incarnation on BOTH legs, so a rule saved from a card reaches the next child with no restart.
+   * Absent (a harness without one) ⇒ no saved rules in `Options`, exactly as before.
+   */
+  persistedAllowRules?: (cwd: string) => readonly string[];
   /** Task 17 (P8b-15): the persisted child roster (`createPersistedChildren` over 8a's
    *  `runtime_children`). A Winter child is registered under the spawning `tool_use.id` with NO
    *  local abort (its process is the session's), fed `progress()` on every frame of its thread, and
@@ -394,10 +411,10 @@ export function sessionPermissionClassFor(deps: {
       if (record === undefined) return "unknown";
       const policy = deps.store.meta(record.winterSessionId).approvalPolicy;
       // `bypassAvailable` is the SDK's "was `allowDangerouslySkipPermissions` granted" predicate,
-      // and `mode-options.ts` grants it under the `bypass` policy only — so the two ARE one
+      // and `mode-options.ts` grants it exactly when `bypassAllowedAtSpawn` says so — so the two ARE one
       // predicate. (The SDK consults it for `plan` alone; `bypassPermissions` classifies
       // `bypasses` unconditionally, everything else `prompts`.)
-      return classifyPermissionMode(permissionModeFor(policy), { bypassAvailable: policy === "bypass" });
+      return classifyPermissionMode(permissionModeFor(policy), { bypassAvailable: bypassAllowedAtSpawn(policy) });
     } catch {
       return "unknown";
     }
@@ -615,6 +632,15 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         primary ??= rows[0];
         extraDirs = primary === undefined ? [] : rows.filter((d) => d !== primary);
       } catch { /* a session with no dirs row: workdir-less */ }
+      // B1: the skills this child may load, from the SAME SkillStore (and the same cwd) the daemon's
+      // `skills.list` answers from — CODE only, as the engine's registry always had it (chat and
+      // dispatch never offered `Skill`). Re-read here at every incarnation, so an installed/removed/
+      // disabled plugin or a toggled `Skill(<name>)` deny rule reaches the next child, no restart.
+      // The model sees ONE listing: the child's own `skill_listing` attachment, built from exactly
+      // this set (`winterSystemPromptFor` no longer renders the daemon's).
+      const skillSurface = mode === "code" && deps.skills !== undefined
+        ? deps.skills.childSkillSurface({ cwd: primary ?? deps.tmpDirOf(sessionId), deny: settings?.permissions?.deny ?? [] })
+        : undefined;
       const systemPrompt = deps.assembler === undefined ? undefined : winterSystemPromptFor(deps.assembler, {
         mode, origin: live.origin, primary, cwd: primary ?? deps.tmpDirOf(sessionId),
         outDir: deps.outDirOf(sessionId), extraDirs, effort: live.effort,
@@ -643,7 +669,33 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // invalid stored value to "unset", falling through to the same D30 default an absent value
       // already gets, rather than handing a malformed string to the spawn boundary.
       const rawAdvisorModel = winterOptionsFromSettings(settings).advisorModel;
-      const advisorModel = rawAdvisorModel !== undefined && isModelTag(rawAdvisorModel) ? rawAdvisorModel : d30DefaultModel(model);
+      const pinnedAdvisor = rawAdvisorModel !== undefined && isModelTag(rawAdvisorModel) ? rawAdvisorModel : undefined;
+      let advisorModel = pinnedAdvisor ?? d30DefaultModel(model);
+      // D3 (2026-09-22) + review M2: a pin on ANOTHER provider now runs there, on that provider's own
+      // credential (`buildWinterOptions` sends the full tag + its `authRef`), so the `pins.research`
+      // digest rule below applies to it IN FULL, for the same reason — a stated advisor that cannot run
+      // makes every `advisor` call a typed refusal, while the family default keeps the tool working.
+      // The pin is therefore not stated, and the D30 default is (one line naming the setting), when:
+      //   - it names no catalog row (`rowForTag`: a hand-edited settings file can hold any tag shape);
+      //   - it is cross-provider and that provider has NO Keychain locator (a `console/*` login lives
+      //     in an `ant` profile the advisor route never sees — stating it would send no `authRef` and
+      //     let the child fall back to the brand's own Keychain lookup, the M7 hazard);
+      //   - it is cross-provider and that provider's slot is EMPTY.
+      // A same-provider pin needs no probe: the session's own turn cannot run without that credential.
+      if (pinnedAdvisor !== undefined && pinnedAdvisor !== UNSTATED_TAG && !pinnedAdvisor.startsWith(WINTER_TEST_PREFIX)) {
+        const advisorProviderId = splitTag(pinnedAdvisor).providerId;
+        const crossProvider = advisorProviderId !== selection?.providerId;
+        const advisorRef = crossProvider ? credentialRefFor(advisorProviderId, deps.home) : undefined;
+        const why = rowForTag(pinnedAdvisor) === undefined ? `names ${JSON.stringify(pinnedAdvisor)}, which no model in the pinned catalog carries`
+          : !crossProvider ? undefined
+            : advisorRef === undefined ? `names ${advisorProviderId}, whose credential this door cannot name (a console login lives in an \`ant\` profile)`
+              : !(await refMaterialPresent(deps.secrets, advisorRef)) ? `names ${advisorProviderId}, whose credential slot is empty`
+                : undefined;
+        if (why !== undefined) {
+          advisorModel = d30DefaultModel(model);
+          log(`runtimes.advisorModel: ${why} — the advisor runs on this session's family default${advisorModel === undefined ? " (the child's own)" : ` (${advisorModel})`} instead`);
+        }
+      }
       // 2026-09-18 (user ruling): `pins.research` is `WebFetch`'s PAGE-DIGEST model. Read LIVE here
       // like every other per-incarnation value, and DROPPED — rather than stated — in the three cases
       // where stating it would make every `WebFetch` call in the session a typed refusal (the SDK
@@ -752,6 +804,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // is the SAME helper the official leg's `inputDeps()` calls below, so both legs see the
         // identical merged map from one owner.
         agents: mergedAgentDefinitions(home, cwd, deps.projectAgentDefinitions),
+        ...(skillSurface === undefined ? {} : { plugins: skillSurface.plugins, skills: skillSurface.skills }),
+        // Lane B: the user's SAVED allow rules, live and trust-gated (`WinterLegDeps.persistedAllowRules`).
+        ...(deps.persistedAllowRules === undefined ? {} : { persistedAllow: deps.persistedAllowRules(cwd) }),
       });
     };
 
@@ -1025,6 +1080,17 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // Router 0.0.9: threaded onto `officialInputFor` regardless of whether it's empty —
         // `officialInputFor` itself omits the `options.agents` key entirely when empty.
         agents,
+        // Lane B: the SAME saved-rule read the Winter leg's `optionsFor` makes, for this leg's
+        // flag-settings `permissions.allow` (translated there by the same `sdkAllowRulesFor`).
+        ...(deps.persistedAllowRules === undefined ? {} : { persistedAllow: deps.persistedAllowRules(capSession.cwd) }),
+        // Lane B (router 0.0.11): the SAME skills-only plugin views the Winter leg's child gets —
+        // enabled + `exec`-consented plugins only (`SkillStore.childSkillSurface`) — handed to claude
+        // through the router's `plugins` policy, plus the deny rules under claude's own skill spelling.
+        ...(() => {
+          if (mode !== "code" || deps.skills === undefined) return {};
+          const surface = deps.skills.childSkillSurface({ cwd: capSession.cwd, deny: deps.settings()?.permissions?.deny ?? [] });
+          return { skillPlugins: surface.plugins, skillDenyAliases: surface.officialDeny };
+        })(),
         // Phase 9c (P9c-1): the LIVE settings snapshot (`deps.settings()` — the same hot holder
         // `create()`/`legForNew` already read above; never a boot snapshot) — `official-options.ts`'s
         // `officialInputFor` reads it ONLY through `officialSubscriptionAuthEnabled`, and

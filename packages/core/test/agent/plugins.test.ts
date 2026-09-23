@@ -98,7 +98,8 @@ describe("PluginStore + winter-plugin.json", () => {
     expect(p.hasManifestMcp).toBe(true);
     expect(p.skills).toEqual(["greet"]); // skill discovery stays directory-based regardless of manifest
     // Task 3 additions — consent-block display data, filled from the manifest.
-    expect(p.execPayload).toEqual(["mcp: node server.js", "entry: node index.js"]);
+    // …plus, last, the shipped-skills line (lane B, 2026-09-23).
+    expect(p.execPayload).toEqual(["mcp: node server.js", "entry: node index.js", "skills: greet — a skill can run shell commands when a session uses it"]);
     expect(p.tccPermissions).toEqual(["accessibility"]);
     expect(p.hardwarePermissions).toEqual([]);
     // manifestServers is filled from the SAME loadManifest call — daemon.ts reads this directly

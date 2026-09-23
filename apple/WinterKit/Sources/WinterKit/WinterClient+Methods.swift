@@ -1051,18 +1051,33 @@ public struct SkillMeta: Equatable, Sendable, Identifiable {
     /// Set for a self-authored skill (`SkillStore.writeSelf` always stamps `author: winter`);
     /// `nil` for every other source. The Dashboard pane's "author: winter" row marker.
     public let author: String?
+    /// 2026-09-22: can a SESSION's runtime child load this skill? `false` for every tier the agent
+    /// runtime has no door for yet (today only plugin skills reach a child); `nil` from an older daemon
+    /// that never said — which is NOT "loads". `sessionNote` is the daemon's own sentence saying why not.
+    public let loadsInSessions: Bool?
+    public let sessionNote: String?
 
     /// Explicit memberwise init: a `public` struct's SYNTHESIZED memberwise init is only
     /// `internal` — the Dashboard-side pure helper tests (`DashboardTests.swift`, cross-module)
     /// construct `SkillMeta` values directly (no `WinterClient` round-trip needed for pure display
-    /// helpers), so this needs to be public explicitly.
-    public init(name: String, description: String, source: String, path: String, claudeFormat: Bool?, author: String?) {
+    /// helpers), so this needs to be public explicitly. The two session fields default to `nil`, so
+    /// every existing call site is unchanged.
+    public init(name: String, description: String, source: String, path: String, claudeFormat: Bool?, author: String?, loadsInSessions: Bool? = nil, sessionNote: String? = nil) {
         self.name = name
         self.description = description
         self.source = source
         self.path = path
         self.claudeFormat = claudeFormat
         self.author = author
+        self.loadsInSessions = loadsInSessions
+        self.sessionNote = sessionNote
+    }
+
+    /// The line a UI shows under a skill no session can load — `nil` when it loads (or when an older
+    /// daemon did not say). One spelling for every surface.
+    public var notInSessionsNote: String? {
+        guard loadsInSessions == false else { return nil }
+        return sessionNote ?? "A session can't load this skill."
     }
 }
 
@@ -1094,7 +1109,8 @@ extension WinterClient {
     private func decodeSkillMeta(_ s: JSONValue) -> SkillMeta? {
         guard let n = s["name"]?.stringValue, let d = s["description"]?.stringValue,
               let src = s["source"]?.stringValue, let p = s["path"]?.stringValue else { return nil }
-        return SkillMeta(name: n, description: d, source: src, path: p, claudeFormat: s["claudeFormat"]?.boolValue, author: s["author"]?.stringValue)
+        return SkillMeta(name: n, description: d, source: src, path: p, claudeFormat: s["claudeFormat"]?.boolValue, author: s["author"]?.stringValue,
+                         loadsInSessions: s["loadsInSessions"]?.boolValue, sessionNote: s["sessionNote"]?.stringValue)
     }
 
     /// `skills.list {cwd?}` — skill metadata only (no body).

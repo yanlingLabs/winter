@@ -73,6 +73,12 @@ struct LibrarySkillsList: View {
             if let author = skill.author {
                 LibraryRowBadge(text: "author: \(author)")
             }
+            // 2026-09-22 (lane B): a skill no session can load is badged, with the daemon's reason as
+            // the tooltip — listed bare it would read as "available to the agent", which it is not.
+            if let note = skill.notInSessionsNote {
+                LibraryRowBadge(text: "Not in sessions")
+                    .help(note)
+            }
         }
     }
 }

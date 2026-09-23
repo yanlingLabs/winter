@@ -69,6 +69,13 @@ export function winterSystemPromptFor(assembler: Pick<ContextAssembler, "assembl
     // chat's and dispatch's derived toolsets never list `Skill` (engine.ts: `registry.namesForMode`
     // — nothing declares `modes` including "Skill" for either); code never excludes it.
     skillToolOffered: !(isDispatch || isChat),
+    // B1 (2026-09-22): NO daemon-side skill listing, in any mode, on either leg. The engine listed
+    // this store because its own `Skill` tool loaded from it; a runtime child loads only what its
+    // Options carry (`SkillStore.childSkillSurface` → `Options.plugins`/`skills` on the Winter leg;
+    // the router's own plugin on the official leg) and announces exactly that set itself — claude's
+    // `skill_listing` attachment, which the agent SDK mirrors. Two listings would disagree, and did:
+    // the dist prompt named skills whose invocation answered "unknown skill … Available: (none)".
+    skillListing: false,
     ...(input.outDir === undefined ? {} : { outDir: input.outDir }),
     workdirLess: input.primary === undefined,
     extraDirs: input.primary === undefined ? [] : (input.extraDirs ?? []),

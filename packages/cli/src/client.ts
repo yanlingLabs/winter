@@ -245,7 +245,7 @@ export class WinterClient {
     const r = this.validated(SessionCompactResult, await this.request(METHODS.sessionCompact, { sessionId }), METHODS.sessionCompact);
     return { compacted: r.compacted, uptoSeq: r.uptoSeq, summaryChars: r.summaryChars };
   }
-  async listSkills(cwd?: string): Promise<Array<{ name: string; description: string; source: string; path: string }>> {
+  async listSkills(cwd?: string): Promise<Array<{ name: string; description: string; source: string; path: string; loadsInSessions?: boolean; sessionNote?: string }>> {
     return this.validated(SkillsListResult, await this.request(METHODS.skillsList, { cwd }), METHODS.skillsList).skills;
   }
   async listMcp(cwd?: string): Promise<Array<{ name: string; status: string; toolNames: string[]; source: string }>> {
@@ -297,13 +297,16 @@ export class WinterClient {
   async planRespond(params: { sessionId: string; callId: string; approved: boolean; autoAccept?: boolean; feedback?: string }): Promise<{ ok: true; alreadyResolved: boolean }> {
     return this.validated(PlanRespondResult, await this.request(METHODS.planRespond, params), METHODS.planRespond);
   }
-  async sessionSetPolicy(params: { sessionId: string; policy: ApprovalPolicy }): Promise<{ ok: true }> {
+  /** `replaced`/`warning` (lane B, 2026-09-23): a bypass crossing on a live session — see
+   *  `SessionSetPolicyResult` and `tui/policy-switch-notes.ts`, which turns them into lines. */
+  async sessionSetPolicy(params: { sessionId: string; policy: ApprovalPolicy }): Promise<{ ok: true; replaced?: "now" | "at-idle"; warning?: string }> {
     return this.validated(SessionSetPolicyResult, await this.request(METHODS.sessionSetPolicy, params), METHODS.sessionSetPolicy);
   }
   /** Interactive-chrome convenience wrapper (2e-iii-b Task 6): the mode bar's shift+tab cycle
-   *  calls this. Thin positional-arg alias over `sessionSetPolicy` (same `session.setPolicy` RPC). */
-  async setPolicy(sessionId: string, policy: ApprovalPolicy): Promise<void> {
-    await this.sessionSetPolicy({ sessionId, policy });
+   *  calls this. Thin positional-arg alias over `sessionSetPolicy` (same `session.setPolicy` RPC);
+   *  returns its result so the cycle can report a bypass crossing. */
+  async setPolicy(sessionId: string, policy: ApprovalPolicy): Promise<{ ok: true; replaced?: "now" | "at-idle"; warning?: string }> {
+    return this.sessionSetPolicy({ sessionId, policy });
   }
   /** session-activity-hygiene T3: `session.setActivity` — the lifecycle write verb behind the TUI's
    *  `/background` and `/archive` and the `winter agents` roster's verbs.

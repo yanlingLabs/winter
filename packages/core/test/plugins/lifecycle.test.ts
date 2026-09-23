@@ -7,6 +7,7 @@ import {
   applyFreshPluginConsent,
   buildConsentBlock,
   deriveInstallName,
+  enableNotice,
   grantPluginConsents,
   installPluginFromDir,
   missingConsents,
@@ -244,6 +245,31 @@ describe("buildConsentBlock (exact strings — spec §1: full exec-payload discl
   test("a required class with no display entries contributes no lines (defensive — shouldn't happen in practice)", () => {
     expect(buildConsentBlock(mkInfo({ requiredConsents: ["exec", "tcc"], execPayload: [], tccPermissions: [] })))
       .toEqual(["plugin demo requests:"]);
+  });
+});
+
+// Lane B (2026-09-23, controller ruling): a plugin that needs no consent (a legacy one) but ships
+// skills still has to say what enabling it means — its skills reach a session, and a skill can run
+// shell commands. A plugin that requires a consent class says it in its consent block instead.
+describe("enableNotice (the no-consent enable's disclosure)", () => {
+  function mkInfo(overrides: Partial<ConsentBlockPlugin & { skills: string[] }> = {}) {
+    return { name: "demo", requiredConsents: [], execPayload: [], tccPermissions: [], hardwarePermissions: [], ...overrides };
+  }
+
+  test("no consent required + skills shipped → the plugin's skills and what a skill can do", () => {
+    expect(enableNotice(mkInfo({ skills: ["greet", "bye"] }))).toEqual([
+      "plugin demo:",
+      "skills: greet, bye — a skill can run shell commands when a session uses it",
+    ]);
+  });
+
+  test("no skills → nothing to say", () => {
+    expect(enableNotice(mkInfo())).toEqual([]);
+    expect(enableNotice(mkInfo({ skills: [] }))).toEqual([]);
+  });
+
+  test("a consent class required → nothing here (the consent block carries the disclosure)", () => {
+    expect(enableNotice(mkInfo({ requiredConsents: ["exec"], skills: ["greet"] }))).toEqual([]);
   });
 });
 

@@ -1,6 +1,30 @@
 import { realpathSync, lstatSync, readlinkSync } from "node:fs";
 import { isAbsolute, resolve, sep, dirname, basename, join } from "node:path";
 
+/**
+ * Where the daemon keeps the SKILLS-ONLY plugin views it hands a Winter child
+ * (`SkillStore.childSkillSurface`): `<home>/cache/skill-plugins/<plugin>/skills` → the plugin's own
+ * skills directory. Here, in this leaf module, because two owners must agree on it without importing
+ * each other: `agent/skills.ts` builds the views and `runtime-sdk/mode-options.ts` write-fences them.
+ *
+ * `cache/` because the location has to be READABLE by the session — a skill points at its own
+ * supporting files by path, and `<home>/run`/`<home>/runtimes` are denied to Read/Glob/Grep and to the
+ * Bash sandbox on both legs — and DISPOSABLE: the views are rebuilt before every spawn, and Migration B
+ * skips `cache/**` (`migration/migrate-b.ts`).
+ */
+export function skillPluginViewsRoot(winterHome: string): string {
+  return join(winterHome, "cache", "skill-plugins");
+}
+
+/**
+ * The directory holding the daemon's OWN record of per-project rules the user approved from a card
+ * (`agent/approved-project-rules.ts`) — `<home>/permissions`. A leaf helper for the same reason as
+ * `skillPluginViewsRoot`: the store writes it and `runtime-sdk/mode-options.ts` write-fences it.
+ */
+export function approvedProjectRulesDir(winterHome: string): string {
+  return join(winterHome, "permissions");
+}
+
 // Symlink chains longer than this are rejected outright (mirrors the kernel's own ELOOP guard,
 // just tighter). Also breaks link CYCLES (a→b→a never terminates otherwise): lstat on a cycle
 // member succeeds every hop (lstat never follows the final link), so only this cap stops it.

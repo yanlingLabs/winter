@@ -2,10 +2,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
   AgentDefinition, CanUseTool, CredentialRef, EffortLevel, McpServerConfig, Options, PermissionMode, ProviderConnectionConfig,
-  SandboxSettingsConfig, SpawnClaudeCodeProcess, WebFetchConfig, WebToolsConfig,
+  SandboxSettingsConfig, SdkPluginConfig, SpawnClaudeCodeProcess, WebFetchConfig, WebToolsConfig,
 } from "@yanlinglabs/winter-agent-sdk";
 import { RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
+import { approvedProjectRulesDir, skillPluginViewsRoot } from "../agent/paths";
+import { parseRule } from "../agent/permission-rules";
 import { keychainService } from "../profile";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import type { Settings } from "../settings";
@@ -40,6 +42,22 @@ import { WINTER_ADVERTISED_TOOLS_0_0_4, RUNTIME_HOST_TOOL_PAIRS, WINTER_OWN_TOOL
  * is where it already lives, rather than from a permission mode that would also take the questions
  * away. **Flagged for a controller ruling in the task report.**
  */
+/**
+ * **May a child spawned for `policy` ever be in `bypassPermissions`?** The ONE rule behind both of the
+ * Winter leg's spawn-time bypass facts (`buildWinterOptions`): `allowDangerouslySkipPermissions` is set
+ * iff this is true, and `permissions.disableBypassPermissionsMode` (the clamp against an agent
+ * DEFINITION minting its own bypass) is set iff it is false.
+ *
+ * Both are fixed when the child is SPAWNED, and the runtime refuses a live `setPermissionMode(
+ * "bypassPermissions")` on a clamped child. So a live policy change whose two ends disagree here
+ * cannot be told to the running child — it needs a new one. `session.setPolicy` (`ipc/server.ts`)
+ * reads this same function to decide that, so the rule that sets the clamp and the rule that decides
+ * a replacement can never drift apart.
+ */
+export function bypassAllowedAtSpawn(policy: SessionApprovalPolicy): boolean {
+  return policy === "bypass";
+}
+
 export function permissionModeFor(policy: SessionApprovalPolicy): PermissionMode {
   switch (policy) {
     case "plan": return "plan";
@@ -364,6 +382,27 @@ export interface WinterOptionsInput {
    * and a tool that cannot work is worse than one that costs a little more).
    */
   digestModel?: ModelTag;
+  /**
+   * B1 (2026-09-22): the skills THIS session's child may load — `SkillStore.childSkillSurface`'s
+   * answer, computed by the caller (`session-driver.ts`'s `optionsFor`, live at every incarnation, code
+   * mode only) because building it touches the filesystem and this builder stays pure.
+   *
+   * `plugins` are skills-only local-plugin views (see `childSkillSurface` for why never a plugin's own
+   * directory); `skills` is the invocable subset (the daemon's plugin-tier names minus `Skill(<name>)`
+   * deny rules). BOTH ARE OMITTED FROM `Options` WHEN `plugins` IS EMPTY — byte-identical to every
+   * session before this field existed, and a filter over an empty index would only add a warning.
+   * With plugins present, `skills` is always stated, `[]` included (the SDK reads `[]` as "none").
+   */
+  plugins?: readonly SdkPluginConfig[];
+  skills?: readonly string[];
+  /**
+   * The user's SAVED allow rules for this session's project, in Winter's own grammar —
+   * `persistedAllowRulesFor`'s answer, read live by the caller (`session-driver.ts`'s `optionsFor`).
+   * Translated here by `sdkAllowRulesFor` and appended to `permissions.allow` AFTER Winter's fixed
+   * rules, in CODE mode only (see the allow assembly in `buildWinterOptions`). Absent or empty ⇒
+   * byte-identical to a session before this field existed.
+   */
+  persistedAllow?: readonly string[];
 }
 
 /**
@@ -486,6 +525,24 @@ export function controlPlaneDenyRules(home: string): string[] {
     // own doc states for the host-side fence vs. the deny-rule fence.
     fsRootAnchored([join(home, "agents"), "**"].join("/")),
     fsRootAnchored(["**", ".winter", "agents", "**"].join("/")),
+    // B1 follow-up (2026-09-22): the skills-only plugin VIEWS (`SkillStore.childSkillSurface`,
+    // `agent/paths.ts`'s `skillPluginViewsRoot`). The next child loads each view as a local plugin,
+    // and a local plugin's manifest may declare COMMAND HOOKS the child runs outside the Bash sandbox —
+    // so a file written here is a self-grant of the same class as the definitions above. Write-fenced
+    // only: the views are deliberately READABLE, because a skill points the model at its own files.
+    // The daemon also rebuilds each view before every spawn; this closes the window in between.
+    fsRootAnchored([skillPluginViewsRoot(home), "**"].join("/")),
+    // Review M6 (2026-09-23): the runtime store, write-denied to the write TOOLS too. It was read-denied
+    // (below) and in the Bash sandbox's `denyWrite`, but `Write(<home>/runtimes/bin/winter)` — rung 4
+    // of `resolveWinterExecutable`'s ladder, code the NEXT spawn runs — had no rule against it, and a
+    // saved `Edit` (→ `Edit` + `Write` in the child, `sdkAllowRulesFor`) would allow it natively.
+    fsRootAnchored([join(home, "runtimes"), "**"].join("/")),
+    // …and every INSTALLED plugin: a session must not plant a SKILL.md, a hook or a manifest into one.
+    // Plugins are installed by the daemon's own lifecycle verbs, never by a tool.
+    fsRootAnchored([join(home, "plugins"), "**"].join("/")),
+    // Review I2: the daemon's own record of rules approved "in this project" — applied to a child
+    // WITHOUT a trust check (it cannot come from a repository), so writing it would be a self-grant.
+    fsRootAnchored([approvedProjectRulesDir(home), "**"].join("/")),
   ];
   // Task 17: the engine's read tool denied `<home>/run` and `<home>/runtimes` (the runtime store,
   // 8a's model-denied directory); the Winter leg's read-class tools carry the same two denials.
@@ -520,9 +577,8 @@ export function permissionDenyRulesFor(home: string, settings: Settings | null |
  * (`agent/sandbox.ts`: deny-by-default, read anywhere, write only under the given roots, plus an
  * explicit per-root and any-depth deny for the three control-plane filenames).
  *
- * `allowUnsandboxedCommands: false` is the load-bearing one: with it true a command can opt out of
- * the fence entirely, which is `dangerouslyDisableSandbox` without the approval card the engine
- * puts in front of it.
+ * (`allowUnsandboxedCommands` is NOT set — see the note at the end of `sandboxConfigFor` for why it
+ * would be a no-op, and for what a `dangerouslyDisableSandbox` call goes through instead.)
  *
  * **What is NOT verifiable from here:** the d.ts declares the shape, and the runtime that enforces
  * it is the private `winter-agent-runtime` package. Whether `denyWrite` actually fences a `bash`
@@ -555,6 +611,124 @@ export function permissionDenyRulesFor(home: string, settings: Settings | null |
  */
 export const GLOBAL_READ_ALLOW_RULES: readonly string[] = ["Read", "Glob", "Grep"];
 
+/**
+ * **The user's SAVED allow rules, as the runtimes read them** (lane B, 2026-09-22, lane C's finding).
+ *
+ * A card's "Allow … everywhere" / "in this project" answer is written by `approval.respond`'s
+ * `PermissionRules.append` in Winter's own rule grammar (`agent/permission-rules.ts`'s `parseRule`).
+ * Both runtimes' permission evaluators read claude's grammar, which is the same for the common shapes
+ * and different for a few Winter-only ones — this is the ONE translation, used by both legs:
+ *
+ *   `Bash` / `Bash(x)` / `Bash(x:*)`   unchanged (claude's exact and prefix forms).
+ *   `BashUnsandboxed(…)`               → `Bash(…)`. claude has no separate rule: `dangerouslyDisableSandbox`
+ *                                       only removes the sandbox's auto-allow, and rules then decide
+ *                                       (lane C's parity ruling — see `sandboxConfigFor`'s last note).
+ *   `Edit`                             → `Edit` + `Write` (Winter's rule covered both; the agent SDK
+ *                                       matches a bare rule's tool name literally).
+ *   `Edit(<abs dir>)`                  NOT forwarded: Winter's writable-DIRECTORY declaration, which never
+ *                                       silenced a card — as an allow rule it would. (Its runtime
+ *                                       counterpart is `additionalDirectories`, a separate door.)
+ *   `Computer`                         → `mcp__winter__computer__computer` (the capability's wire name).
+ *   `Worktree`                         → `EnterWorktree` + `ExitWorktree`.
+ *   `WebFetch(domain:h)`               unchanged.
+ *
+ * NEVER WIDER THAN WHAT WAS SAVED:
+ *  - a value containing `*` is dropped. Winter compares it literally; the runtimes read `*` as a glob
+ *    (`Tool(*)` is even the bare tool), so forwarding it would allow more than the user approved.
+ *  - a string whose TOOL Winter's grammar knows but which Winter's own parser REFUSES (bare `WebFetch`,
+ *    `Computer(x)`, a relative `Edit(…)`, an empty value) stays refused — those refusals are deliberate
+ *    (`parseRule`'s own doc), and the runtimes would accept several of them as broad rules.
+ *  - any OTHER string is not Winter's grammar at all — a rule the user wrote in claude's (`WebSearch`,
+ *    `mcp__server__tool`, `Write(//dir/**)`, …) — and is forwarded VERBATIM, which is claude's own
+ *    behaviour for its settings files' `permissions.allow`. The runtime validates it; a malformed one
+ *    is its warning to give.
+ *
+ * Deny-before-allow still holds in both runtimes (`GLOBAL_READ_ALLOW_RULES`' doc has the order), so no
+ * saved rule can open the control-plane fence, a `Skill(<name>)` deny or the dangerous-domain hooks.
+ */
+export function sdkAllowRulesFor(winterRules: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const raw of winterRules) {
+    if (typeof raw !== "string") continue;
+    const parsed = parseRule(raw);
+    if (parsed === null) {
+      if (!WINTER_RULE_HEAD.test(raw)) out.push(raw);   // foreign grammar: verbatim (claude parity)
+      continue;                                          // Winter's grammar, refused by Winter: stays refused
+    }
+    if (parsed.value?.includes("*")) continue;           // a literal `*` would become a glob
+    switch (parsed.tool) {
+      case "bash":
+      case "bash_unsandboxed":
+        out.push(parsed.kind === "any" ? "Bash" : parsed.kind === "prefix" ? `Bash(${parsed.value}:*)` : `Bash(${parsed.value})`);
+        break;
+      case "edit":
+        // `Edit(<abs dir>)` is NOT an allow rule in Winter's grammar: it declares a WRITABLE DIRECTORY
+        // and never silences a card (`ruleMatches` returns false for kind "path"). Turning it into
+        // `Edit(//dir/**)` would let every write there land card-free — wider than what was saved.
+        // Its runtime equivalent is `additionalDirectories`, a separate door; nothing is forwarded here.
+        if (parsed.kind === "path") break;
+        // BOTH tools: Winter's `Edit` rule has always covered `write` and `edit` alike
+        // (`permission-rules.ts`'s `toolForCallName`), while the agent SDK matches a rule's tool name
+        // literally — measured on the 0.0.17 binary, a saved `Edit` alone still sent a `Write` to
+        // `canUseTool` (`persisted-allow-measure.e2e.test.ts`).
+        out.push("Edit", "Write");
+        break;
+      case "computer":
+        out.push("mcp__winter__computer__computer");
+        break;
+      case "worktree":
+        out.push("EnterWorktree", "ExitWorktree");
+        break;
+      case "web_fetch":
+        out.push(`WebFetch(domain:${parsed.value})`);
+        break;
+    }
+  }
+  return [...new Set(out)];
+}
+
+/** A string whose head is one of Winter's own rule tools (`agent/permission-rules.ts`'s `KNOWN_TOOLS`),
+ *  i.e. one `parseRule` had the say over. */
+const WINTER_RULE_HEAD = /^(?:BashUnsandboxed|Bash|Edit|Computer|Worktree|WebFetch)(?:\(|$)/;
+
+/**
+ * **Which saved allow rules apply to a session at `cwd`** — Winter's raw rule strings, for
+ * `sdkAllowRulesFor`. Read LIVE per incarnation (every input is a live getter), so a rule saved from
+ * a card reaches the next child with no restart.
+ *
+ *  - `settings.json`'s `permissions.allow` — always (the "everywhere" scope).
+ *  - a project's `.winter/settings.json` `permissions.allow` — only when the project is TRUSTED:
+ *    `effectiveSettings` is `ProjectSettingsResolver.effective`, which unions the overlay in for a
+ *    trusted root and returns the base verbatim otherwise.
+ *  - the daemon's own record of rules approved "in this project" (`approvedProjectRules`) — always:
+ *    it lives under `<home>`, write-fenced, and only `approval.respond` writes it.
+ *  - the project's `.winter/permissions.local.json` (the in-repo copy of that scope) — only when
+ *    TRUSTED too. The rules store itself never gated this file on trust (the retired engine consulted
+ *    it card-by-card); a child that acts on it without asking needs the same gate as the overlay,
+ *    because a cloned repository can ship one (`git add -f`, the fix-wave A1 finding for
+ *    `settings.local.json`).
+ *
+ * The engine-era `["Computer"]` fallback the rules store's own getter applies is deliberately NOT here
+ * — it is a default, not a saved rule, and the approval bridge already answers computer calls.
+ */
+export function persistedAllowRulesFor(cwd: string, deps: {
+  projectRootOf: (cwd: string) => string | null;
+  effectiveSettings: (projectRoot: string | null) => Settings | null;
+  projectRules?: (projectRoot: string) => readonly string[];
+  /** The daemon's OWN record of rules the user approved "in this project" from a card
+   *  (`agent/approved-project-rules.ts`, under `<home>`, written only by `approval.respond`). Applied
+   *  REGARDLESS of trust (review I2): a repository cannot forge it, and the Mac app never marks a
+   *  project trusted, so gating it would make every Mac project's "in this project" answer a no-op. */
+  approvedProjectRules?: (projectRoot: string) => readonly string[];
+  isTrusted: (dir: string) => boolean;
+}): string[] {
+  const root = deps.projectRootOf(cwd);
+  const settingsAllow = deps.effectiveSettings(root)?.permissions?.allow ?? [];
+  const approved = root !== null && deps.approvedProjectRules !== undefined ? deps.approvedProjectRules(root) : [];
+  const projectAllow = root !== null && deps.projectRules !== undefined && deps.isTrusted(root) ? deps.projectRules(root) : [];
+  return [...new Set([...settingsAllow, ...approved, ...projectAllow])];
+}
+
 export function sandboxConfigFor(home: string): SandboxSettingsConfig {
   return {
     enabled: true,
@@ -586,7 +760,12 @@ export function sandboxConfigFor(home: string): SandboxSettingsConfig {
       // Nothing legitimate writes here through a TOOL: the runtime store is the daemon's own, and a
       // child's internal writes (the official transcript store under `claude-config`) are the binary's,
       // never its Bash sandbox's.
-      denyWrite: [join(home, "run"), join(home, "runtimes")],
+      // …and the skills-only plugin views (B1 follow-up): a Bash redirect planting a manifest with
+      // command hooks there would be run by the next child — see `controlPlaneDenyRules`' matching
+      // entry. Write only; the views stay readable (a skill reads its own supporting files).
+      // …and every installed plugin (review M6) — same reason as the write-tool rule.
+      // …and the daemon's approved-project-rules record (review I2) — a self-grant if writable.
+      denyWrite: [join(home, "run"), join(home, "runtimes"), skillPluginViewsRoot(home), join(home, "plugins"), approvedProjectRulesDir(home)],
       // The sole read denial Winter has ever had (CLAUDE.md: "the sole read denial is
       // `~/.winter/run`") — reads are otherwise deliberately unrestricted.
       // …plus `runtimes/` (8a: the runtime store is never model-readable — the engine's read tool
@@ -596,8 +775,11 @@ export function sandboxConfigFor(home: string): SandboxSettingsConfig {
     // `allowUnsandboxedCommands` is deliberately NOT set. It is consulted only together with
     // `excludedCommands` (`sandbox/spawn.ts:109,122`), which this config does not set, so `false`
     // would be a no-op — and the earlier comment calling it "the load-bearing one" was wrong:
-    // `dangerouslyDisableSandbox` wins over `excludedCommands` regardless. Winter's own floor for
-    // that is P8b-31's always-card in the bridge, which does bind.
+    // `dangerouslyDisableSandbox` wins over `excludedCommands` regardless. What a
+    // `dangerouslyDisableSandbox` call gets is claude's own rule (lane C, 2026-09-22, retiring
+    // P8b-31's always-card): the flag only removes the SANDBOX'S auto-allow, so the call goes through
+    // the ordinary pipeline — deny/ask rules, the permission mode, allow rules (the persisted ones
+    // included, `persistedAllowRulesFor`), then the approval bridge — exactly like any other command.
   };
 }
 
@@ -708,14 +890,23 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     // `allowDangerouslySkipPermissions`/`permissionMode: "bypassPermissions"` is this session's own,
     // legitimate, daemon-decided top-level mode (set two lines below), and disabling the runtime's
     // ability to enter it would break that mode for the session itself, not just for a definition.
+    //
+    // A SPAWN-TIME fact, which is why a live switch across the bypass boundary replaces the child
+    // (`session.setPolicy`, keyed on `bypassAllowedAtSpawn` — the same function used here) instead of
+    // asking it: a clamped child refuses `setPermissionMode("bypassPermissions")`, and an unclamped one
+    // would keep its `allowDangerouslySkipPermissions` after the user switched bypass off.
     permissions: {
       // Code mode only — see `GLOBAL_READ_ALLOW_RULES`' own doc (the tools do not exist elsewhere),
       // and `WEB_BUILTIN_ALLOW_RULES`' own doc for why the two web built-ins need a bare allow rule
       // on THIS leg (under `dontAsk` the runtime denies an unresolved call without ever calling
       // `canUseTool`, and Winter's gate has always answered `allow` for the web class).
-      ...(input.mode === "code" ? { allow: [...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES] } : {}),
+      //
+      // …then the user's SAVED rules (`persistedAllowRulesFor` → `sdkAllowRulesFor`), code mode only:
+      // they are answers to code-mode cards, chat's policy is fixed and dispatch never cards. Deny
+      // still comes first in the runtime, so none of them can open the fence stated just below.
+      ...(input.mode === "code" ? { allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES, ...sdkAllowRulesFor(input.persistedAllow ?? [])])] } : {}),
       deny: permissionDenyRulesFor(input.home, input.settings),
-      disableBypassPermissionsMode: input.policy !== "bypass",
+      disableBypassPermissionsMode: !bypassAllowedAtSpawn(input.policy),
     },
     sandbox: sandboxConfigFor(input.home),
     // Agent SDK 0.0.16 defaults a spawn to BACKGROUND (claude's own default), which means a finished
@@ -746,6 +937,14 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     // Winter ships no slash-command surface at all, so `.winter/commands` has no daemon counterpart to
     // lose. The daemon's `Options` are the single source of a session's configuration on BOTH legs; this
     // is what makes that true rather than aspirational, and it keeps holding when that cascade is wired.
+    //
+    // B1 (2026-09-22) — AT 0.0.17 THAT CASCADE IS WIRED: `production-wiring.ts` now calls
+    // `resolveSettingsDetailed` for every session, so a `"user"` source would make the child parse
+    // `<home>/settings.json` — the DAEMON's own file, a different schema — as a settings tier and
+    // enforce its `permissions`, connect its `mcpServers` and run its `hooks` a second time, beside
+    // the daemon doing the same. So this stays `[]`, and the skills the old discovery would have found
+    // reach the child through the one door `[]` leaves open instead: `plugins`/`skills` below
+    // (`SkillStore.childSkillSurface`), which the SDK's index does not source-gate.
     settingSources: [],
   };
   if (input.spawn.spawnClaudeCodeProcess) options.spawnClaudeCodeProcess = input.spawn.spawnClaudeCodeProcess;
@@ -758,7 +957,7 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
   if (input.effort !== undefined) options.effort = input.effort;
   if (input.systemPrompt !== undefined) options.systemPrompt = input.systemPrompt;
   if (input.outputStyle !== undefined) options.outputStyle = input.outputStyle;
-  if (input.policy === "bypass") options.allowDangerouslySkipPermissions = true;
+  if (bypassAllowedAtSpawn(input.policy)) options.allowDangerouslySkipPermissions = true;
   if (input.hooks !== undefined) options.hooks = input.hooks;
   const provider = input.model !== undefined ? providerFor(input.model, input.home) : undefined;
   if (input.advisorModel !== undefined) {
@@ -781,24 +980,36 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     // is the same credential (and therefore the same already-configured provider connection) the
     // session's own turn already resolved — never an independent, uninstructed lookup.
     //
-    // WS-20 (review round 2, nit a): a CROSS-provider advisor is DROPPED, not guessed at. The pinned
-    // SDK's `AdvisorConfig` shape (`protocol/config.d.ts`) has NO `providerId` field — only
-    // `model`/`authRef` — so this door has no way to PIN the advisor to its own provider identity;
-    // the only safe lever is "same provider as the session's own model, or nothing at all". Threading
-    // `advisorProvider`'s own authRef for a genuinely cross-provider advisor (the OLD behavior) risked
-    // a credential/provider mismatch this shape cannot express or verify. Logged once, naming the
-    // setting, so a misconfigured `runtimes.advisorModel` is visible rather than silently inert.
-    const advisorProvider = providerFor(input.advisorModel, input.home);
-    const sameProvider = provider !== undefined && advisorProvider !== undefined && provider.providerId === advisorProvider.providerId;
-    if (sameProvider) {
-      options.advisor = {
-        model: input.advisorModel.startsWith(WINTER_TEST_PREFIX) ? input.advisorModel : splitTag(input.advisorModel).modelId,
-        ...(provider!.authRef === undefined ? {} : { authRef: provider!.authRef }),
-      };
+    // D3 (2026-09-22) — THE PROVIDER IDENTITY IS THE TAG ITSELF. `advisor.model` is the FULL qualified
+    // tag, never `splitTag(...).modelId`: the pinned SDK 0.0.17 resolves a `<providerId>/<model>`
+    // advisor key to ITS OWN provider (`provider/slots.ts`'s qualified-key door — a full catalog key
+    // passes unfiltered with its own providerId — then `session-provider.ts` builds the reviewer on
+    // `config.advisor.authRef`, "the advisor's OWN authRef, never the session's"). That is exactly how
+    // `WebFetch`'s digest model already runs cross-provider (`digestOptionsFor`, below). The BARE id
+    // this door used to send is what made the SDK read the advisor under the SESSION's provider, which
+    // is why WS-20 had to drop every cross-provider advisor — on every spawn, in the dist log, for a
+    // session on deepseek with `runtimes.advisorModel: codex-oauth/gpt-5.6-sol`.
+    //
+    // `authRef` is the advisor's OWN provider's Keychain locator, stated explicitly for the M7 reason
+    // above (the child's own fallback would resolve the BRAND's Keychain service, which is the dist
+    // service even for a dev-profile daemon). A same-provider advisor gets the identical locator the
+    // session's own provider carries, so that case is unchanged apart from the full tag.
+    //
+    // The reserved `winter-test/*` double travels whole and names no credential. Only a genuinely
+    // UNROUTABLE tag — `providerFor` answers nothing for the `unstated/unstated` sentinel a hand-edited
+    // settings file can carry — is dropped, logged once per spawn naming the setting.
+    if (input.advisorModel.startsWith(WINTER_TEST_PREFIX)) {
+      options.advisor = { model: input.advisorModel };
     } else {
-      console.error(
-        `runtimes.advisorModel: names a different provider than the session's own model (or one side is unroutable) — dropping the advisor rather than guessing which credential it should use`,
-      );
+      const advisorProvider = providerFor(input.advisorModel, input.home);
+      if (advisorProvider !== undefined) {
+        options.advisor = {
+          model: input.advisorModel,
+          ...(advisorProvider.authRef === undefined ? {} : { authRef: advisorProvider.authRef }),
+        };
+      } else {
+        console.error(`runtimes.advisorModel: ${JSON.stringify(input.advisorModel)} names no provider — dropping the advisor rather than guessing which one it means`);
+      }
     }
   }
   if (provider) options.provider = input.connection === undefined ? provider : { ...provider, connection: input.connection };
@@ -811,6 +1022,11 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
   // byte-identically to a session before this field existed the way `undefined` is, so both are
   // normalized to "no key at all" here rather than leaving that distinction to every caller.
   if (input.agents !== undefined && Object.keys(input.agents).length > 0) options.agents = { ...input.agents };
+  // B1: the daemon's resolved plugin skills — see `WinterOptionsInput.plugins` for the omission rule.
+  if (input.plugins !== undefined && input.plugins.length > 0) {
+    options.plugins = input.plugins.map((p) => ({ ...p }));
+    options.skills = [...(input.skills ?? [])];
+  }
   options.web = webOptionsFor(input);
   return options;
 }

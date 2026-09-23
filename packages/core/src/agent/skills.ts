@@ -1,7 +1,10 @@
-import { readFileSync, readdirSync, statSync, existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { join, dirname, sep } from "node:path";
+import { readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync, existsSync, mkdirSync, writeFileSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
+import { basename, join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { SdkPluginConfig } from "@yanlinglabs/winter-agent-sdk";
 import type { TrustStore } from "./trust";
+import { skillPluginViewsRoot } from "./paths";
+import { skillDenyRule } from "../settings";
 
 // Phase 5c Task 3: `author?` mirrors T1's `author: winter` frontmatter stamp (writeSelf below) back
 // out through list()/load() — additive on every interface (undefined for any skill written before
@@ -115,6 +118,138 @@ function scanRoot(root: string, source: SkillMeta["source"], exclude?: Set<strin
 const USER_ROOT_EXCLUDE = new Set(["self"]); // the self/ subdir is scanned separately, as source "self"
 
 /**
+ * The agent SDK's own name jails (`runtime/src/skills/frontmatter.ts`, pinned 0.0.17): a skill's
+ * resolved name, and a plugin name. A name failing either is REFUSED by the child's index (with a
+ * warning on its stderr), so it is never put in `Options.skills`: the SDK answers an unknown name
+ * there with a warning and drops only that name (`validateSkillsOption`), which would be noise for a
+ * skill the daemon already knows the child cannot index.
+ */
+const SDK_SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const SDK_PLUGIN_NAME_PATTERN = /^\.?[a-z0-9][a-z0-9-]{0,63}$/;
+
+/**
+ * Human names for the tiers the agent runtime cannot load yet — the subject of `sessionNote`.
+ * `builtin` is the Winter-shipped tier (`packages/core/skills`).
+ */
+const UNDELIVERABLE_TIER_LABEL: Readonly<Record<Exclude<SkillMeta["source"], "plugin">, string>> = {
+  project: "Project",
+  user: "Your own",
+  self: "Self-authored",
+  builtin: "Built-in",
+};
+
+/**
+ * Build (or repair) the skills-only view of ONE plugin: `<views>/<plugin>/` holding exactly one
+ * entry, `skills` — a symlink to `<home>/plugins/<plugin>/skills`. Returns the view root.
+ *
+ * WHY A VIEW AND NOT THE PLUGIN'S OWN DIRECTORY. The SDK's `loadPlugins` takes a plugin whole: its
+ * manifest's `hooks` (command hooks run by the child, outside the Bash sandbox), `agents/*.md`,
+ * `commands/*.md` and — unless `skipMcpDiscovery` — its MCP config, and it NAMES the plugin by the
+ * manifest's `name` when there is one. The daemon's plugin model grants none of that without the
+ * user's consent (`winter-plugin.json`'s exec class) and qualifies skills by DIRECTORY name. A view
+ * with no manifest and nothing but `skills` gives the child exactly the daemon's skills, under
+ * exactly the daemon's names, and nothing else.
+ *
+ * UNDER `<home>/cache/skill-plugins` (`skillPluginViewsRoot`, `agent/paths.ts`): READABLE, because a
+ * skill points the model at its own supporting files by path and a view under `<home>/runtimes` was
+ * denied to Read/Glob/Grep and to the Bash sandbox; DISPOSABLE, because it is rebuilt before every
+ * spawn and Migration B skips `cache/**`; and WRITE-FENCED — `mode-options.ts` denies the write tools
+ * and the Bash sandbox that subtree on both legs, so a session cannot plant a manifest in a view and
+ * have the NEXT incarnation's child run its hooks as a plugin's. Rebuilt on every call anyway —
+ * anything but the one `skills` link is removed and a re-pointed link is replaced — so the view is a
+ * function of `<home>/plugins`, never of what was left in it.
+ * Removal never follows a link (measured on Bun: `rmSync(…, { recursive: true })` unlinks a symlink,
+ * nested or not, and leaves its target alone; the `skills` link itself is `unlinkSync`ed).
+ *
+ * Synchronous from first line to last: the daemon is the only writer and a single JS thread, so two
+ * incarnations opening together can never interleave inside it. `null` when the filesystem refuses.
+ */
+function ensureSkillPluginView(viewsRoot: string, winterHome: string, plugin: string): string | null {
+  const root = join(viewsRoot, plugin);
+  const link = join(root, "skills");
+  const target = join(winterHome, "plugins", plugin, "skills");
+  try {
+    // The view DIRECTORY must be a real directory the daemon made — never a planted link: every
+    // readdir/rm below goes THROUGH it, so a `<views>/<plugin>` -> `victim/` link would otherwise have
+    // the victim's contents removed (review I1, reproduced by a probe).
+    ensureRealDirectory(root);
+    for (const entry of readdirSync(root)) {
+      if (entry !== "skills") removeEntryNoFollow(join(root, entry));
+    }
+    let current: string | undefined;
+    try { current = readlinkSync(link); } catch { /* absent, or not a symlink */ }
+    if (current === target) return root;
+    removeEntryNoFollow(link);
+    symlinkSync(target, link);
+    return root;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Make `path` a REAL directory: a symlink there is unlinked (never followed), any other non-directory
+ * is removed, and the directory is created if absent — non-recursively, so its PARENT must already be
+ * one the caller made real. Throws when the filesystem refuses.
+ */
+function ensureRealDirectory(path: string): void {
+  let st: ReturnType<typeof lstatSync> | undefined;
+  try { st = lstatSync(path); } catch { /* absent */ }
+  if (st?.isDirectory()) return;
+  if (st !== undefined) removeEntryNoFollow(path);
+  mkdirSync(path);
+}
+
+/** Remove one directory entry WITHOUT following it: a symlink is unlinked; a real directory is removed
+ *  recursively (measured on Bun: nested links inside are unlinked, their targets untouched). */
+function removeEntryNoFollow(path: string): void {
+  let st: ReturnType<typeof lstatSync> | undefined;
+  try { st = lstatSync(path); } catch { return; }   // already gone
+  if (st.isSymbolicLink() || !st.isDirectory()) unlinkSync(path);
+  else rmSync(path, { recursive: true, force: true });
+}
+
+/**
+ * The views root, made safe to work under — or `null` (with ONE log line) when it cannot be.
+ *
+ * `<home>/cache` is not write-fenced (only the views' own subtree is), so a session whose writable
+ * roots include `<home>` could swap `cache` — or `cache/skill-plugins` — for a symlink to anywhere,
+ * and every rebuild and prune would then run inside the target (review I1). Each level is made a
+ * real directory first, and the result is then checked by REALPATH against the home's own: anything
+ * other than `<realpath(home)>/cache/skill-plugins` means something moved underneath us, and this
+ * spawn simply gets no plugin skills rather than a daemon that deletes through a link.
+ */
+function safeSkillPluginViewsRoot(winterHome: string): string | null {
+  const root = skillPluginViewsRoot(winterHome);
+  try {
+    ensureRealDirectory(join(winterHome, "cache"));
+    ensureRealDirectory(root);
+    const expected = join(realpathSync(winterHome), "cache", "skill-plugins");
+    if (realpathSync(root) !== expected) throw new Error(`${root} resolves to ${realpathSync(root)}, not ${expected}`);
+    return root;
+  } catch (err) {
+    console.error(`skills: not handing plugin skills to this session — the views directory is not the daemon's own (${err instanceof Error ? err.message : String(err)})`);
+    return null;
+  }
+}
+
+/**
+ * Delete every view whose plugin no longer contributes a skill (removed, disabled, or emptied) — the
+ * views are the daemon's own disposable state, so nothing is left dangling after a plugin goes. A child
+ * already running keeps what it indexed at startup; a later `Skill` call for a pruned plugin answers
+ * "could not be read", which is the honest answer for a plugin the user just turned off. Runs only
+ * under a root `safeSkillPluginViewsRoot` vouched for, and never follows an entry. Never throws.
+ */
+function pruneSkillPluginViews(viewsRoot: string, keep: ReadonlySet<string>): void {
+  let entries: string[];
+  try { entries = readdirSync(viewsRoot); } catch { return; }
+  for (const entry of entries) {
+    if (keep.has(entry)) continue;
+    try { removeEntryNoFollow(join(viewsRoot, entry)); } catch { /* best effort */ }
+  }
+}
+
+/**
  * Discovers SKILL.md skills from five sources, in precedence order (first occurrence of a name wins):
  *  - project: `<cwd>/.winter/skills/*`   — TRUST-GATED (only when `trust.isTrusted(cwd)`)
  *  - user:    `~/.winter/skills/*`       — always (excludes the reserved `self/` subdir)
@@ -128,13 +263,36 @@ export class SkillStore {
   private readonly winterHome: string;
   private readonly trust: TrustStore;
   private readonly bodyBytes: number;
-  private readonly disabledPlugins: string[];
+  private readonly disabledPlugins: () => readonly string[];
+  private readonly sessionEligible: (() => ReadonlySet<string>) | undefined;
 
-  constructor(deps: { winterHome: string; trust: TrustStore; caps?: { bodyBytes?: number }; plugins?: { disabled?: string[] } }) {
+  /**
+   * `plugins.disabled` may be a LIVE getter (production: `settings.plugins.disabled` over the daemon's
+   * reassignable settings holder), so disabling a plugin reaches the skill list — and the next child's
+   * `Options.plugins` — with no daemon restart. A bare array (every older caller) is a fixed list.
+   *
+   * `plugins.sessionEligible` (lane B, 2026-09-23): the LIVE set of plugins whose skills a session may
+   * load — production wires `pluginSkillsEligible` (explicitly enabled, not disabled, every required
+   * consent class on record: `exec` for a manifest plugin that ships skills — a skill can run shell
+   * commands — and none for a legacy plugin, whose enable is the trust decision). ABSENT means "every listed plugin", which only a unit test
+   * that is not about consent relies on; `daemon.ts` always wires it.
+   */
+  constructor(deps: {
+    winterHome: string; trust: TrustStore; caps?: { bodyBytes?: number };
+    plugins?: { disabled?: readonly string[] | (() => readonly string[]); sessionEligible?: () => ReadonlySet<string> };
+  }) {
     this.winterHome = deps.winterHome;
     this.trust = deps.trust;
     this.bodyBytes = deps.caps?.bodyBytes ?? 32768;
-    this.disabledPlugins = deps.plugins?.disabled ?? [];
+    const disabled = deps.plugins?.disabled;
+    this.disabledPlugins = typeof disabled === "function" ? disabled : () => disabled ?? [];
+    this.sessionEligible = deps.plugins?.sessionEligible;
+  }
+
+  /** The plugins whose skills a session may load right now (one live read), or `null` = ungated. Read
+   *  it ONCE and pass it to `sessionAvailability` when asking about many skills. */
+  sessionEligiblePlugins(): ReadonlySet<string> | null {
+    return this.sessionEligible === undefined ? null : this.sessionEligible();
   }
 
   /** All discovered skills (parsed, unfiltered by name), in precedence order: project, user, self, plugin, builtin. */
@@ -152,8 +310,9 @@ export class SkillStore {
     try {
       plugins = readdirSync(join(this.winterHome, "plugins"), { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
     } catch { /* no plugins dir */ }
+    const disabledPlugins = this.disabledPlugins();
     for (const plugin of plugins) {
-      if (this.disabledPlugins.includes(plugin)) continue;
+      if (disabledPlugins.includes(plugin)) continue;
       const claudeFormat = existsSync(join(this.winterHome, "plugins", plugin, ".claude-plugin", "plugin.json")) || undefined;
       for (const s of scanRoot(join(this.winterHome, "plugins", plugin, "skills"), "plugin")) {
         all.push({ ...s, name: `${plugin}:${s.name}`, ...(claudeFormat ? { claudeFormat } : {}) }); // the one place plugin names get namespaced
@@ -190,6 +349,104 @@ export class SkillStore {
       }
     }
     return null;
+  }
+
+  /**
+   * **The skills a Winter-leg CHILD can load, as the agent SDK's own two doors** — `Options.plugins`
+   * (where the skills come from) and `Options.skills` (which of them the session may invoke).
+   *
+   * The child runs with `settingSources: []` (`mode-options.ts`, and it must: at SDK 0.0.17 a
+   * `"user"` source would also make the child parse `<home>/settings.json` — the daemon's own file —
+   * as a settings tier). That switches the SDK's user/project skill discovery off, and a local plugin
+   * is the one skill source it does not gate. So every plugin whose skills THIS store resolves is
+   * handed over as a skills-only view (`ensureSkillPluginView`), which the SDK indexes as
+   * `<directory>:<skill>` — exactly the names `list()` gives them — and `skills` is this store's own
+   * plugin-tier list minus every `Skill(<name>)` deny rule, so a denied skill is neither listed to the
+   * model nor invocable (claude's documented meaning of the option). The deny rule itself still rides
+   * `permissions.deny` as well; this only keeps the listing from naming a skill that will be refused.
+   *
+   * WHAT IS NOT HERE, and why: the user, self, trusted-project and builtin tiers. The SDK exposes no
+   * door for bare-named skills from a host (its builtin tier is internal, and a local plugin always
+   * qualifies its skills), so they cannot reach the child without an SDK change — see the lane report.
+   * They are therefore also absent from `skills`, which may name only what the child can index.
+   *
+   * Empty (`{ plugins: [], skills: [] }`) when no plugin contributes a skill, so a caller can leave
+   * both options off entirely. The views are (re)built here — and the views of plugins that no longer
+   * contribute (removed, disabled, emptied) are deleted — which is the one side effect.
+   */
+  childSkillSurface(input: { cwd: string | null; deny?: readonly string[] }): { plugins: SdkPluginConfig[]; skills: string[]; officialDeny: string[] } {
+    const denied = new Set(input.deny ?? []);
+    const plugins: SdkPluginConfig[] = [];
+    const skills: string[] = [];
+    const officialDeny: string[] = [];
+    // Only plugins the user enabled AND consented to (`exec`: a skill can run shell commands) — the
+    // one live read, shared by every skill below.
+    const eligible = this.sessionEligiblePlugins();
+    const pluginMetas = this.list({ cwd: input.cwd })
+      .filter((m) => m.source === "plugin" && (eligible === null || eligible.has(m.name.slice(0, m.name.indexOf(":")))));
+    // No plugin skill and no views left over from an earlier spawn: nothing to build or prune, and
+    // nothing is created on disk.
+    let leftovers = false;
+    try { lstatSync(skillPluginViewsRoot(this.winterHome)); leftovers = true; } catch { /* none */ }
+    if (pluginMetas.length === 0 && !leftovers) return { plugins, skills, officialDeny };
+    const viewsRoot = safeSkillPluginViewsRoot(this.winterHome);
+    if (viewsRoot === null) return { plugins, skills, officialDeny };
+    const viewed = new Map<string, boolean>();
+    for (const meta of pluginMetas) {
+      const plugin = meta.name.slice(0, meta.name.indexOf(":"));
+      if (!viewed.has(plugin)) {
+        const root = ensureSkillPluginView(viewsRoot, this.winterHome, plugin);
+        viewed.set(plugin, root !== null);
+        if (root !== null) plugins.push({ type: "local", path: root, skipMcpDiscovery: true });
+      }
+      if (!viewed.get(plugin)) continue;
+      if (denied.has(skillDenyRule(meta.name))) {
+        // claude names a plugin skill by its DIRECTORY (`<plugin>:<dir>` — a frontmatter `name:` does
+        // not rename it, measured by the router), where Winter uses the frontmatter name. When the two
+        // differ, the official leg needs the deny rule under claude's spelling too, or it binds nothing.
+        const dir = basename(dirname(meta.path));
+        if (`${plugin}:${dir}` !== meta.name) officialDeny.push(skillDenyRule(`${plugin}:${dir}`));
+        continue;
+      }
+      // A name either SDK jail refuses is still handed over inside its plugin (the child then says on
+      // its stderr why it did not load) but never named here: the SDK drops an unknown `skills` name
+      // with a warning, and the list should name only what the child can index.
+      if (!this.sessionAvailability(meta, eligible).loadsInSessions) continue;
+      skills.push(meta.name);
+    }
+    pruneSkillPluginViews(viewsRoot, new Set(viewed.keys()));
+    return { plugins, skills, officialDeny };
+  }
+
+  /**
+   * **Can a session actually load this skill?** — the ONE rule `childSkillSurface` filters by and
+   * `skills.list` reports per skill (`loadsInSessions`/`sessionNote`), so no surface can call a skill
+   * usable that a session's runtime child cannot load. Independent of `Skill(<name>)` deny rules,
+   * which `skills.list` reports on their own (`denied`).
+   *
+   * Only the PLUGIN tier reaches a child (see `childSkillSurface`), and only under names the agent
+   * SDK's own jails accept. Every other tier is listed — it exists and `skills.read` serves it — but
+   * says, truthfully, that no session can load it yet (neither the agent SDK nor claude's has a door
+   * for bare-named host skills: discovery is settings-source-gated, which the daemon must keep off).
+   */
+  sessionAvailability(
+    meta: Pick<SkillMeta, "name" | "source">,
+    eligible: ReadonlySet<string> | null = this.sessionEligiblePlugins(),
+  ): { loadsInSessions: boolean; sessionNote?: string } {
+    if (meta.source !== "plugin") {
+      return { loadsInSessions: false, sessionNote: `${UNDELIVERABLE_TIER_LABEL[meta.source]} skills can't be loaded by a session yet — only plugin skills reach the agent runtime.` };
+    }
+    const colon = meta.name.indexOf(":");
+    const plugin = meta.name.slice(0, colon);
+    if (eligible !== null && !eligible.has(plugin)) {
+      // A legacy plugin needs no consent record (enabling it is the trust decision); a manifest plugin
+      // that ships skills needs `exec` — hence "if it asks for one".
+      return { loadsInSessions: false, sessionNote: `Enable the ${plugin} plugin (and grant its "exec" consent if it asks for one) to use its skills in Code sessions — a skill can run shell commands.` };
+    }
+    if (!SDK_PLUGIN_NAME_PATTERN.test(plugin) || !SDK_SKILL_NAME_PATTERN.test(meta.name.slice(colon + 1))) {
+      return { loadsInSessions: false, sessionNote: "The agent runtime refuses this name — plugin and skill names must be lowercase letters, digits and dashes." };
+    }
+    return { loadsInSessions: true };
   }
 
   /** Root of the self-authored scope: `~/.winter/skills/self` — the same path `discover` scans as source "self". */

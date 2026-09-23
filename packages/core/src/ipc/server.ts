@@ -83,6 +83,7 @@ import { parseModelTag, canonicalizeModelTag, splitTag, UNSTATED_TAG, type Model
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import type { ApprovalBroker } from "../agent/approvals";
 import type { PermissionRules } from "../agent/permission-rules";
+import type { ApprovedProjectRules } from "../agent/approved-project-rules";
 import { repoRootFor } from "../agent/memory-dir";
 import type { QuestionBroker } from "../agent/questions";
 import type { TaskStore } from "../agent/task-store";
@@ -113,7 +114,7 @@ import type { InternalRouter } from "../providers/internal-router";
 import { internalRoleProblemsFor } from "../providers/internal-role-problems";
 import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, readRawSettings } from "../settings";
 import { addUserMcpServer, removeUserMcpServer } from "../agent/mcp/mcp-write";
-import { disallowedToolsFor } from "../runtime-sdk/mode-options";
+import { bypassAllowedAtSpawn, disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
 import { diagnoseRuntimes } from "../runtime-sdk/runtimes-doctor";
 import { loadUserAgentDefinitions, loadProjectAgentDefinitions, mergeAgentDefinitionTiers } from "../agent/agent-definitions";
@@ -124,7 +125,7 @@ import {
 } from "../runtime-sdk/versions";
 import { dispatchPinMessage } from "../agent/dispatch-config";
 import {
-  deriveInstallName, installPluginFromDir, missingConsents, buildConsentBlock, applyFreshPluginConsent,
+  deriveInstallName, installPluginFromDir, missingConsents, buildConsentBlock, enableNotice, applyFreshPluginConsent,
   setPluginEnabled, grantPluginConsents, removePluginFromSettings, removePluginDir, stripPluginConsents,
   type InstallPluginResult,
 } from "../plugins/lifecycle";
@@ -293,6 +294,10 @@ export interface IpcServerOptions {
   // same "typed no-op, never a crash" precedent as `broker`/`dirs`/etc below — since without an
   // engine there is no approval flow that could ever produce a rule-bearing optionId to persist.
   permissionRules?: PermissionRules;
+  /** Review I2 (lane B): the daemon's own record of rules approved "in this project"
+   *  (`agent/approved-project-rules.ts`), written alongside `permissionRules`' in-repo copy by
+   *  `approval.respond` — the one writer. Absent (a bare test server) = not recorded. */
+  approvedProjectRules?: ApprovedProjectRules;
   dirs?: SessionDirectories; // live allowed-roots per session; addDir/setCwd need it
   trust?: TrustStore;        // per-directory trust; session.create result + daemon.trustDir
   bg?: BackgroundTaskRegistry; // background bash tasks; bg.list/peek/kill/killAll
@@ -915,6 +920,85 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
    * failure because the daemon's own bookkeeping had a bad day. (A test stub that throws proved the
    * earlier uncaught version turned a stored credential into an RPC error.)
    */
+  /**
+   * `session.setPolicy` across the BYPASS BOUNDARY on a live Winter-leg child: the policy the child
+   * was SPAWNED under, per session, while a replacement is waiting for its idle boundary.
+   *
+   * Needed because the stored policy stops being the child's once a crossing is deferred: a user who
+   * goes `ask` → `bypass` → `auto` inside one turn has a child still spawned under `ask`, whose clamp
+   * is already right for `auto`. Keyed to the exact `LegSession` object, so an entry left by a child
+   * that was replaced for another reason (a credential write, a handoff) is never read for its
+   * successor.
+   */
+  const pendingPolicyReplacements = new Map<string, { live: LegSession; spawnPolicy: SessionApprovalPolicy }>();
+
+  /**
+   * Replace a live Winter child whose SPAWN-TIME bypass facts disagree with the policy the user just
+   * chose — `mode-options.ts`'s `bypassAllowedAtSpawn` decides both, and the runtime refuses a live
+   * switch into `bypassPermissions` on a child spawned clamped ("bypassPermissions is disabled by
+   * managed configuration"), which is how this RPC used to fail and revert.
+   *
+   * THE CREDENTIAL WRITE'S MACHINERY (`evictSessionsForCredential`): the table's `evict` ends the child
+   * RESUMABLY and forgets the driver, and the next send re-assembles from the record and the transcript
+   * — `optionsFor` reads the stored policy at every incarnation, so the clamp and the mode follow it.
+   * A running turn is never cut: the replacement waits for its idle boundary, and is re-checked there
+   * (the user may have crossed back, and a child replaced meanwhile for another reason is not touched).
+   *
+   * LEAVING bypass also tells the live child NOW. It can take that switch (nothing clamps a move out of
+   * bypass), and it must: in `bypassPermissions` the runtime never consults `canUseTool`, so a turn
+   * left running until the boundary would keep auto-approving after the user switched bypass off. A
+   * refusal there is logged, not fatal — the replacement still lands at the boundary.
+   */
+  async function replaceChildForPolicy(
+    sessionId: string, live: LegSession, spawnPolicy: SessionApprovalPolicy, next: SessionApprovalPolicy,
+  ): Promise<{ replaced: "now" | "at-idle"; warning?: string }> {
+    const winter = opts.winter!;
+    let warning: string | undefined;
+    if (bypassAllowedAtSpawn(spawnPolicy)) {
+      try {
+        await live.setPolicy(next);
+      } catch (err) {
+        console.error(`session.setPolicy for ${sessionId}: the running child did not leave bypass at once (${err instanceof Error ? err.message : "unknown"}) — it is replaced at its idle boundary regardless`);
+        // Review M4: only mid-turn does this matter to the user — an idle child is replaced right
+        // below, before it runs anything else.
+        if (live.turnRunning) {
+          warning = "the running turn is still bypassing approvals — it could not leave bypass mid-turn, and the session switches when this turn ends";
+        }
+      }
+    }
+    const clampChanges = (): boolean => {
+      let stored: SessionApprovalPolicy;
+      try { stored = opts.store.meta(sessionId).approvalPolicy; } catch { return false; }   // the session went away
+      return bypassAllowedAtSpawn(stored) !== bypassAllowedAtSpawn(spawnPolicy);
+    };
+    const withWarning = (replaced: "now" | "at-idle") => (warning === undefined ? { replaced } : { replaced, warning });
+    if (!live.turnRunning) {
+      pendingPolicyReplacements.delete(sessionId);
+      console.error(`session.setPolicy for ${sessionId} crosses the bypass boundary (${spawnPolicy} → ${next}) — replacing its child so it spawns with the matching permission clamp`);
+      await winter.evict(sessionId);
+      return withWarning("now");
+    }
+    if (pendingPolicyReplacements.get(sessionId)?.live === live) return withWarning("at-idle");   // already scheduled for this child
+    pendingPolicyReplacements.set(sessionId, { live, spawnPolicy });
+    console.error(`session.setPolicy for ${sessionId} crosses the bypass boundary (${spawnPolicy} → ${next}) mid-turn — its child is replaced at the next idle boundary`);
+    const forget = () => { if (pendingPolicyReplacements.get(sessionId)?.live === live) pendingPolicyReplacements.delete(sessionId); };
+    void live.idle().then(
+      async () => {
+        forget();
+        if (winter.get(sessionId) !== live) return;   // replaced meanwhile — the successor read the store when it spawned
+        if (!clampChanges()) return;                  // crossed back before the boundary: this child is already right
+        await winter.evict(sessionId);
+      },
+      forget,
+    );
+    // Review M4: a child whose incarnation ENDS without ever reaching an idle boundary (a crash, an
+    // abort) leaves nothing to replace — its successor reads the stored policy when it spawns — so the
+    // entry is dropped then too, and a later change is judged against the store again. Cleanup only:
+    // this never evicts.
+    void live.done.then(forget, forget);
+    return withWarning("at-idle");
+  }
+
   async function refreshInternalProvidersAfterCredentialChange(): Promise<void> {
     try {
       await opts.internalRouter?.view.refresh();
@@ -1995,9 +2079,17 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // `Skill(<name>)` string is spelled, shared with the writer (`setSkillDenied`, settings.ts)
         // so the two can never drift onto different strings for the same skill.
         const denySet = new Set(liveSettingsFor(opts)?.permissions?.deny ?? []);
-        const skills = opts.skills.list({ cwd: p.cwd ?? null }).map((s) => {
+        const store = opts.skills;
+        // One live read of which plugins a session may load skills from (enabled + `exec` consent).
+        const eligible = store.sessionEligiblePlugins();
+        const skills = store.list({ cwd: p.cwd ?? null }).map((s) => {
           const denied = denySet.has(skillDenyRule(s.name));
-          return denied ? { ...s, denied: true, deniedBy: "settings" as const } : s;
+          // Lane B (2026-09-22): whether a session can load it at all — the SAME rule the runtime child
+          // is handed its skills by (`SkillStore.sessionAvailability`), so a client never shows a skill
+          // as usable that no session can load (today: only an enabled, consented plugin's skills, in a
+          // Code session on either leg).
+          const withAvailability = { ...s, ...store.sessionAvailability(s, eligible) };
+          return denied ? { ...withAvailability, denied: true, deniedBy: "settings" as const } : withAvailability;
         });
         return { ok: true, skills };
       }
@@ -2018,7 +2110,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const meta = opts.skills.list({ cwd }).find((s) => s.name === p.name);
         const loaded = meta ? opts.skills.load(p.name, { cwd }) : null;
         if (!meta || !loaded) throw new RpcFailure(ERR.NOT_FOUND, `skill not found: "${p.name}"`);
-        return { skill: { ...meta, body: loaded.body } };
+        return { skill: { ...meta, ...opts.skills.sessionAvailability(meta), body: loaded.body } };
       }
       case METHODS.skillsWrite: {
         const p = parseParams(SkillsWriteParams, params);
@@ -2490,9 +2582,23 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             // usable project root (a null session cwd, or one nested inside/equal to winterHome) —
             // the approval outcome must never hang or fail on a persistence problem, so a failure
             // here only logs; `resolve()` below still runs unconditionally either way.
+            const cwd = opts.store.meta(p.sessionId).cwd;
+            const projectRoot = cwd ? repoRootFor(cwd) : null;
+            // Review I2 (lane B): a PROJECT-scoped answer is ALSO recorded in the daemon's own
+            // `<home>/permissions/projects.json` — the copy a child applies whether or not the project
+            // is trusted, because only this path writes it (a repository cannot forge it). The in-repo
+            // `.winter/permissions.local.json` below is still written, and still applies only when the
+            // project is trusted. Recorded FIRST and separately, so a read-only repository or a
+            // refused in-repo write never loses the user's answer.
+            if ((option.scope ?? "project") === "project" && projectRoot !== null && opts.approvedProjectRules) {
+              try {
+                opts.approvedProjectRules.record(projectRoot, option.rule);
+              } catch (err) {
+                console.error(`approval.respond: failed to record the approved project rule ${JSON.stringify(option.rule)} for session ${p.sessionId}: ${(err as Error).message}`);
+              }
+            }
             try {
-              const cwd = opts.store.meta(p.sessionId).cwd;
-              opts.permissionRules.append(option.rule, option.scope ?? "project", cwd ? repoRootFor(cwd) : null);
+              opts.permissionRules.append(option.rule, option.scope ?? "project", projectRoot);
             } catch (err) {
               console.error(`approval.respond: failed to persist permission rule ${JSON.stringify(option.rule)} for session ${p.sessionId}: ${(err as Error).message}`);
             }
@@ -2627,6 +2733,22 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // switch failed by a surface whose next read says it succeeded, and this session's own gate
         // would start denying calls the child never asks about.
         const live = opts.winter?.get(p.sessionId);
+        // ACROSS THE BYPASS BOUNDARY on the Winter leg the child cannot be told — its clamp and its
+        // `allowDangerouslySkipPermissions` are spawn-time facts — so it is REPLACED, resumably, the way
+        // a credential write replaces one (`replaceChildForPolicy`). The policy it was spawned under is
+        // the stored one, unless an earlier crossing is still waiting for this child's idle boundary.
+        // The official leg never needs this: its `bypass` is `acceptEdits` (`officialPermissionModeFor`),
+        // a mode its live child accepts, and its clamp only fences `Options.agents`, whose
+        // `permissionMode` the daemon strips at parse time.
+        if (live !== undefined && live.state === "live" && opts.winter!.legOf(p.sessionId) === "winter") {
+          const pending = pendingPolicyReplacements.get(p.sessionId);
+          const spawnPolicy = pending !== undefined && pending.live === live ? pending.spawnPolicy : previous;
+          if (spawnPolicy !== undefined && bypassAllowedAtSpawn(spawnPolicy) !== bypassAllowedAtSpawn(p.policy)) {
+            // `replaced` says when the new clamp lands ("now" | "at-idle"); `warning` (review M4) that a
+            // running turn could not leave bypass at once and keeps bypassing until it ends.
+            return { ok: true, ...(await replaceChildForPolicy(p.sessionId, live, spawnPolicy, p.policy)) };
+          }
+        }
         if (live !== undefined) {
           try {
             await live.setPolicy(p.policy);
@@ -3786,7 +3908,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         invalidateLivePluginsCache();
         rebuildHookRegistry();
         const updated = livePlugins().find((pl) => pl.name === p.name) ?? info;
-        return { ok: true, status: hotApplyStart(updated) };
+        // Lane B (2026-09-23): the no-consent disclosure (a legacy plugin that ships skills — a skill
+        // can run shell commands), for a client to show; absent when there is nothing to say.
+        const notice = enableNotice(info);
+        return { ok: true, status: hotApplyStart(updated), ...(notice.length > 0 ? { notice } : {}) };
       }
       case METHODS.pluginDisable: {
         const p = parseParams(PluginDisableParams, params);

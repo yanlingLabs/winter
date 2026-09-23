@@ -296,6 +296,14 @@ export class ContextAssembler {
     // call a tool it doesn't have is exactly the kind of machine-touching-capability leak this
     // review found in the DEFERRED-tools text (buildInstructionsFull), just for the skills list.
     skillToolOffered?: boolean;
+    // B1 (2026-09-22): whether THIS prompt lists skills at all. Absent/true (every pre-existing
+    // caller) is byte-identical. `false` drops the whole skills block — the "### Skills" list AND the
+    // "No skills are installed." line — for a caller whose runtime child lists skills ITSELF: the
+    // agent SDK (and claude) announce exactly the skills the child can load as a `skill_listing`
+    // attachment, so a second listing here would duplicate it at best and, for any skill the child's
+    // Options do not carry, advertise one that answers "unknown skill". `winterSystemPromptFor` is
+    // the one caller that sets it (both legs); `loadedSkills` is unaffected.
+    skillListing?: boolean;
     // provider-correctness T5: the `ultra` tier's prompt half. Absent/false (every pre-T5 caller) is
     // BYTE-IDENTICAL to before this input existed. `true` is set by exactly one call site —
     // `turn()`'s `sel.ultra`, which `resolveSel` already gated on `clientEffortEligible(meta.mode)`
@@ -520,7 +528,9 @@ export class ContextAssembler {
       if (mem.length) sections.push(`## Memory\n${mem.join("\n\n")}`);
     }
 
-    const metas = this.skills.list({ cwd });
+    // B1: `skillListing: false` skips the store scan entirely — the child lists its own skills.
+    const listSkills = input.skillListing !== false;
+    const metas = listSkills ? this.skills.list({ cwd }) : [];
     // CM branch review (Important 1 follow-on): only advertise "call the `Skill` tool" when it's
     // actually offered — `skillToolOffered !== false` keeps every pre-existing caller (which never
     // passes this field) byte-identical. When it's explicitly false AND there are skills to have
@@ -531,7 +541,7 @@ export class ContextAssembler {
     if (metas.length && skillToolOffered) {
       capLines.push("### Skills — call the `Skill` tool with a skill name to load its full instructions before using it");
       for (const m of metas) capLines.push(`- **${m.name}** — ${m.description}`);
-    } else if (!metas.length) {
+    } else if (!metas.length && listSkills) {
       capLines.push("No skills are installed.");
     }
     const loaded = (input.loadedSkills ?? [])
