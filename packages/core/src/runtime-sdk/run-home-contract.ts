@@ -4,7 +4,7 @@
 // names, every import of this file switches to `@yanlinglabs/winter-runtime-sdk`.
 //
 // Types and constants only, mirrored field for field from L2's final Contract A (`ws21/router` at
-// aa5201e, fix round 1: `src/run-home/{types,errors}.ts`, the lane-L2 report's "final signatures"). The functions —
+// aa5201e, fix round 1, and the per-transcript recovery report of 7c57f9a: `src/run-home/{types,errors}.ts`, the lane-L2 report's "final signatures"). The functions —
 // `buildRunHome`, `sdkHomeOf`, `fsRootAnchored`, `protectedPathRules` — are the router's; the daemon
 // reaches `buildRunHome` only through feature detection (`run-home-support.ts`), and uses its own
 // `fsRootAnchored` (`mode-options.ts`, ledger ruling 2).
@@ -135,6 +135,29 @@ export interface RouterRunHomeModule {
   buildRunHome(input: RunHomeInput): Promise<RunHome>;
 }
 
+/**
+ * Review I6 / `ws21/router`@7c57f9a: what `reconcileRootForRecovery` answers — per TRANSCRIPT, not per root.
+ * `sessionId` is the store key's session id (the transcript's `.jsonl` name — the BACKEND session id);
+ * `subpath` names a subagent transcript (`subagents/agent-<id>`). `canonical-ahead` needs nothing done (a
+ * prefix copy holds nothing the canonical file lacks); only a `quarantined` transcript's file is copied to
+ * the quarantine dir, and ITS session is the one that needs repair.
+ */
+export interface RecoveryTranscriptOutcome {
+  projectKey: string;
+  sessionId: string;
+  subpath?: string;
+  outcome: "clean" | "appended" | "canonical-ahead" | "quarantined";
+  appended: number;
+  reason?: string;
+}
+export interface RecoveryReport {
+  /** `quarantined` if any transcript is, else `appended` if any is, else `clean`. */
+  outcome: "clean" | "appended" | "quarantined";
+  transcripts: RecoveryTranscriptOutcome[];
+  /** `<home>/cache/quarantine/<ts>-<basename(root)>`, when anything was quarantined. */
+  quarantine?: string;
+}
+
 /** The router HANDLE's run-home members (`createRuntimeSdk(...)`'s result) on a run-home router. */
 export interface RouterRunHomeHandle {
   /** `safe` → the host may dispose; `quarantined` → the working copy was preserved under
@@ -142,7 +165,7 @@ export interface RouterRunHomeHandle {
   runHomeOutcome(runId: string): RunHomeOutcome;
   /** The crash-recovery door for a recorded root (spec §3.8): recomputes the claude-ready decorations,
    *  reconciles through the router's own store, and answers what it did. */
-  reconcileRootForRecovery(root: string): Promise<"clean" | "appended" | "quarantined">;
+  reconcileRootForRecovery(root: string): Promise<RecoveryReport>;
 }
 
 /** The `createRuntimeSdk` options a run-home router adds. */

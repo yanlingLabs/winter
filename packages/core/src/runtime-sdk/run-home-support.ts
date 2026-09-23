@@ -18,7 +18,7 @@
 // is read from the module namespace once and cached. Tests pin either answer with the seam below and
 // must restore it.
 import * as routerModule from "@yanlinglabs/winter-runtime-sdk";
-import type { RouterRunHomeHandle, RunHome, RunHomeInput, RunHomeOutcome } from "./run-home-contract";
+import type { RecoveryReport, RouterRunHomeHandle, RunHome, RunHomeInput, RunHomeOutcome } from "./run-home-contract";
 
 /** True when `router` (a module namespace or any object) exports a callable `buildRunHome`. */
 export function routerSupportsRunHome(router: unknown): router is { buildRunHome: (i: RunHomeInput) => Promise<RunHome> } {
@@ -40,6 +40,23 @@ export function runHomeHandleOf(sdk: unknown): RouterRunHomeHandle | undefined {
   if (typeof sdk !== "object" || sdk === null) return undefined;
   const h = sdk as Partial<RouterRunHomeHandle>;
   return typeof h.runHomeOutcome === "function" && typeof h.reconcileRootForRecovery === "function" ? (h as RouterRunHomeHandle) : undefined;
+}
+
+/**
+ * Review I6: the router's recovery answer, whichever shape this build links — the per-transcript
+ * `RecoveryReport` (`ws21/router`@7c57f9a), or the earlier bare root outcome (kept so a router between the
+ * two still works: a bare answer carries no transcripts, so no session can be singled out).
+ */
+export function normalizeRecoveryReport(answer: RecoveryReport | "clean" | "appended" | "quarantined"): RecoveryReport {
+  if (typeof answer === "string") return { outcome: answer, transcripts: [] };
+  const transcripts = Array.isArray(answer.transcripts) ? answer.transcripts : [];
+  return { outcome: answer.outcome, transcripts, ...(answer.quarantine === undefined ? {} : { quarantine: answer.quarantine }) };
+}
+
+/** The BACKEND session ids whose transcript (main or subagent) the router quarantined — each names a
+ *  session that needs repair. */
+export function quarantinedBackendSessions(report: RecoveryReport): string[] {
+  return [...new Set(report.transcripts.filter((t) => t.outcome === "quarantined").map((t) => t.sessionId))];
 }
 
 /**
