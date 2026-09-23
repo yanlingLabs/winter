@@ -184,6 +184,23 @@ export {
   type MemoryDirOptions,
 } from "./agent/memory-dir";
 export { PluginStore, PluginManifest, type PluginInfo } from "./agent/plugins";
+// WS-21 lane L4 DECISION (spec §5.2): `packages/core/src/index.ts` is nominally L3-owned
+// (file-ownership table, WS-21 lane brief), but the CLI's `winter plugin`/`winter mcp` surface can
+// only reach `packages/core/src/plugins/` through this one barrel — `package.json`'s own `exports`
+// map is `{".": "./src/index.ts"}`, no subpath. This block is purely ADDITIVE (no existing line
+// touched) and mirrors the exact pattern every other "WS-21 (Contract C):" block in this file
+// already uses for the same reason. `setPluginEnabled` collides by NAME with the pre-WS-21
+// `plugins/lifecycle.ts` export two lines above (a different signature, `Settings -> Settings`) —
+// aliased here to keep both importable. Flagged in the lane report for L3/controller awareness.
+export {
+  PluginManagerError,
+  addMarketplace, installPlugin, listMarketplaces, listPlugins, removeMarketplace,
+  setPluginEnabled as setPluginEnabledScoped, uninstallPlugin, updateMarketplace, updatePlugin,
+  type PluginManagerOptions, type PluginScope as PluginManagerScope,
+  type MarketplaceInfo, type InstalledPlugin, type PluginListing,
+} from "./plugins/sdk-plugin-api";
+export { installPluginFromDirectory, directoryMarketplacePluginNames } from "./plugins/lifecycle";
+export { convertLegacyPlugins, type ConvertLegacyPluginsResult } from "./plugins/convert-legacy";
 export { BackgroundTaskRegistry, type BgDeps } from "./agent/bg-registry";
 export { Compactor, SUMMARIZE_INSTRUCTION } from "./agent/compactor";
 export { bashLooksSafe, BashReviewer, REVIEW_INSTRUCTION, type ReviewVerdict } from "./agent/reviewer";
