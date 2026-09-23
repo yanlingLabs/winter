@@ -1072,9 +1072,9 @@ describe("WS-21: run homes on the Winter leg (stubbed router builder)", () => {
       expect(spy.calls[0]!.options.runtime?.runHome?.runId).toBe("run-1");
       expect(rh.built[0]!.leg).toBe("winter");
       expect(rh.built[0]!.cwd).toBe(spy.calls[0]!.options.cwd!); // the router refuses a run home for another cwd
-      // L3.3 leaves the old defaults in place (L3.4 drops them only when the router applies run homes).
-      expect(spy.calls[0]!.options.env?.WINTER_HOME).toBe(t.home);
-      expect(spy.calls[0]!.options.settingSources).toEqual([]);
+      // L3.4: the router applies the run home, so it — not the daemon — pins the home and the sources.
+      expect("WINTER_HOME" in (spy.calls[0]!.options.env ?? {})).toBe(false);
+      expect(spy.calls[0]!.options.settingSources).toEqual(["user"]);
       await session.end();
     } finally { t.close(); }
   });
@@ -1166,4 +1166,57 @@ describe("WS-21: run homes on the Winter leg (stubbed router builder)", () => {
       expect(rh.disposed).toEqual(["run-1"]);
     } finally { t.close(); }
   });
+});
+
+// WS-21 L3.4 (spec §6.1): with a run home applied, the driver hands the child none of the inputs the run
+// folder carries — the same planted world, with and without a (stubbed) run-home router.
+describe("WS-21: the driver stops building run-home inputs once a run home is applied", () => {
+  const stubBuilder: NonNullable<WinterLegDeps["runHome"]> = {
+    inputFor: (f) => ({ home: "/h", mode: f.mode, dispatchChild: f.dispatchChild, leg: f.leg, cwd: f.cwd, trustedProjectRoot: null, gitRoot: null, mcpDisabled: [], reservedMcpServerNames: [], memoryDir: "/m" }),
+    build: async (input) => ({
+      runId: "r", dir: "/h/cache/runs/r", sdkHome: "/h/sdk", input, effectiveSettings: {},
+      report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [] },
+      dispose: async () => {},
+    }),
+  };
+  // The inputs a daemon wires, and the files it reads them from (the user agent, the sdk allow rule).
+  const inputs: Partial<WinterLegDeps> = {
+    extraMcpServers: () => ({ user_srv: { type: "stdio", command: "node" } }),
+    persistedAllowRules: () => ["Bash(git status)"],
+    skills: { childSkillSurface: () => ({ plugins: [{ type: "local", path: "/v/sp" }], skills: ["sp:one"], officialDeny: [] }) },
+  };
+  const plantFiles = (home: string): void => {
+    mkdirSync(join(home, "agents"), { recursive: true });
+    writeFileSync(join(home, "agents", "reviewer.md"), ["---", "name: code-reviewer", "description: Reviews code", "---", "", "You review code."].join("\n"));
+    updateSdkSettings(home, () => ({ permissions: { allow: ["Bash(npm test:*)"] } }));
+  };
+
+  for (const applied of [false, true]) {
+    test(`run home ${applied ? "APPLIED: none of them" : "not applied: all of them, as today"}`, async () => {
+      const t = table({ ...inputs, ...(applied ? { runHome: stubBuilder } : {}) });
+      try {
+        plantFiles(t.home);
+        const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", approvalPolicy: "ask" });
+        const session = await t.drivers.create(sid);
+        const o = t.q().options;
+        const allow = o.permissions?.allow ?? [];
+        if (applied) {
+          expect("agents" in o).toBe(false);
+          expect("plugins" in o).toBe(false);
+          expect("skills" in o).toBe(false);
+          expect(Object.keys(o.mcpServers ?? {})).not.toContain("user_srv");
+          expect(allow).not.toContain("Bash(git status)");
+          expect(allow).not.toContain("Bash(npm test:*)");
+          expect(allow).toEqual(expect.arrayContaining(["Read", "Glob", "Grep"]));
+        } else {
+          expect(o.agents).toBeDefined();
+          expect(o.plugins).toEqual([{ type: "local", path: "/v/sp" }]);
+          expect(o.skills).toEqual(["sp:one"]);
+          expect(Object.keys(o.mcpServers ?? {})).toContain("user_srv");
+          expect(allow).toEqual(expect.arrayContaining(["Bash(git status)", "Bash(npm test:*)"]));
+        }
+        await session.end();
+      } finally { t.close(); }
+    });
+  }
 });

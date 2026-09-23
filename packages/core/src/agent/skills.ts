@@ -4,6 +4,32 @@ import { fileURLToPath } from "node:url";
 import type { SdkPluginConfig } from "@yanlinglabs/winter-agent-sdk";
 import type { TrustStore } from "./trust";
 import { homeCacheDir, skillPluginViewsRoot, storeHomeFor } from "./paths";
+import { repoRootFor } from "./memory-dir";
+import { linkedRouterSupportsRunHome } from "../runtime-sdk/run-home-support";
+import { homedir } from "node:os";
+
+/**
+ * WS-21 (spec §3.4.2): the trusted project's `.winter/skills` dirs from `cwd` up to the repo root
+ * (`repoRootFor`), NEAREST first, never above `$HOME` — the walk the router's run-home builder makes,
+ * so `skills.list` names the same winners the run folder links.
+ */
+function projectSkillDirsNearestFirst(cwd: string): string[] {
+  let dir: string;
+  try { dir = realpathSync(cwd); } catch { dir = cwd; }
+  let root: string;
+  try { root = repoRootFor(dir); } catch { root = dir; }
+  let home: string;
+  try { home = realpathSync(homedir()); } catch { home = homedir(); }
+  const out: string[] = [];
+  for (let i = 0; i < 64; i++) {
+    out.push(join(dir, ".winter", "skills"));
+    if (dir === root || dir === home) break;
+    const parent = dirname(dir);
+    if (parent === dir || !(dir + sep).startsWith(root + sep)) break;
+    dir = parent;
+  }
+  return out;
+}
 import { skillDenyRule } from "../settings";
 
 // Phase 5c Task 3: `author?` mirrors T1's `author: winter` frontmatter stamp (writeSelf below) back
@@ -303,18 +329,31 @@ export class SkillStore {
     return this.sessionEligible === undefined ? null : this.sessionEligible();
   }
 
-  /** All discovered skills (parsed, unfiltered by name), in precedence order: project, user, self, plugin, builtin. */
+  /**
+   * All discovered skills (parsed, unfiltered by name), in precedence order.
+   *
+   * WS-21 (spec §3.4.1, F8): on a run-home build `skills.list` reports what a run folder carries, with
+   * claude's clash rules — user, then self, then the trusted project's skill dirs walked from the cwd up
+   * to the repo root (stopping at `$HOME`), NEAREST first; then plugin, then builtin. Before that build
+   * (router 0.0.11) the daemon's own order stands: project, user, self, plugin, builtin.
+   */
   private discover(cwd: string | null): ScannedSkill[] {
     const all: ScannedSkill[] = [];
-
-    if (cwd && this.trust.isTrusted(cwd)) {
-      all.push(...scanRoot(join(cwd, ".winter", "skills"), "project"));
-    }
-
+    const trustedProject = cwd !== null && this.trust.isTrusted(cwd);
     // WS-21: user and self skills live in the store home (`storeHomeFor`: `<home>/sdk/skills` on a
     // run-home build, `<home>/skills` before it).
-    all.push(...scanRoot(join(storeHomeFor(this.winterHome), "skills"), "user", USER_ROOT_EXCLUDE));
-    all.push(...scanRoot(this.selfRoot(), "self"));
+    const userAndSelf = (): void => {
+      all.push(...scanRoot(join(storeHomeFor(this.winterHome), "skills"), "user", USER_ROOT_EXCLUDE));
+      all.push(...scanRoot(this.selfRoot(), "self"));
+    };
+
+    if (linkedRouterSupportsRunHome()) {
+      userAndSelf();
+      if (trustedProject) for (const dir of projectSkillDirsNearestFirst(cwd)) all.push(...scanRoot(dir, "project"));
+    } else {
+      if (trustedProject) all.push(...scanRoot(join(cwd, ".winter", "skills"), "project"));
+      userAndSelf();
+    }
 
     let plugins: string[] = [];
     try {
@@ -383,6 +422,12 @@ export class SkillStore {
    * Empty (`{ plugins: [], skills: [] }`) when no plugin contributes a skill, so a caller can leave
    * both options off entirely. The views are (re)built here — and the views of plugins that no longer
    * contribute (removed, disabled, emptied) are deleted — which is the one side effect.
+   *
+   * WS-21: RETIRED ON A RUN-HOME BUILD, deleted on integration. When the linked router applies run
+   * homes, both runtimes load plugins natively (from `enabledPlugins`, spec §5.3) and the run folder
+   * carries the user/self/project skills, so `session-driver.ts` never calls this (`runHomeApplied`).
+   * It stays for a build whose router does not (0.0.11), where it is still the ONLY door a plugin skill
+   * reaches either child through — deleting it there would drop every plugin skill from every session.
    */
   childSkillSurface(input: { cwd: string | null; deny?: readonly string[] }): { plugins: SdkPluginConfig[]; skills: string[]; officialDeny: string[] } {
     const denied = new Set(input.deny ?? []);
