@@ -118,7 +118,8 @@ describe("protectedWriteDecision", () => {
   test("a nested project dir on the walk is protected like the root's", () => {
     const walkSet = protectedPathsFor(home, root, { cwd: `${root}/packages/web`, userHome: "/Users/x" });
     expect(protectedWriteDecision("Write", { file_path: `${root}/packages/web/.winter/skills/a/SKILL.md` }, { mode: "code", protected: walkSet, cwd: root })).toEqual({ decision: "ask" });
-    expect(protectedWriteDecision("Write", { file_path: `${root}/packages/api/.winter/skills/a/SKILL.md` }, { mode: "code", protected: walkSet, cwd: root })).toBeNull(); // not on the walk
+    // Review C1: a sibling subtree off the walk is protected too — a later session there loads it.
+    expect(protectedWriteDecision("Write", { file_path: `${root}/packages/api/.winter/skills/a/SKILL.md` }, { mode: "code", protected: walkSet, cwd: root })).toEqual({ decision: "ask" });
   });
 
   test("a relative target resolves against the cwd", () => {
@@ -129,10 +130,23 @@ describe("protectedWriteDecision", () => {
     expect(protectedWriteDecision("Write", { file_path: `${root}/.WINTER/Skills/a.md` }, { mode: "code", protected: set, cwd: root })).toEqual({ decision: "ask" });
   });
 
-  test("not protected: <root>/WINTER.md, an untrusted project's .winter/skills, reads, the memory dir", () => {
+  test("review C1: ANY .winter/{skills,commands,rules,output-styles} at any depth, trusted or not", () => {
     const untrusted = protectedPathsFor(home, null);
+    for (const p of [
+      `${root}/.winter/skills/a.md`,                               // an untrusted project: it loads once trusted
+      `${root}/packages/app/.winter/commands/deploy.md`,           // below the cwd
+      `/elsewhere/other/.winter/rules/r.md`,                       // another project entirely
+      `${root}/a/b/c/.winter/output-styles/terse.md`,
+      `${root}/packages/app/.winter/skills`,                       // the directory itself
+    ]) {
+      expect({ p, d: protectedWriteDecision("Write", { file_path: p }, { mode: "code", protected: untrusted, cwd: root }) }).toEqual({ p, d: { decision: "ask" } });
+    }
+    expect(protectedWriteDecision("Write", { file_path: `${root}/.winter/skillset/a.md` }, { mode: "code", protected: untrusted, cwd: root })).toBeNull();
+    expect(protectedWriteDecision("Write", { file_path: `${root}/.winter/agents-notes.md` }, { mode: "code", protected: untrusted, cwd: root })).toBeNull();
+  });
+
+  test("not protected: <root>/WINTER.md, reads, the memory dir", () => {
     expect(protectedWriteDecision("Write", { file_path: `${root}/WINTER.md` }, { mode: "code", protected: set, cwd: root })).toBeNull();
-    expect(protectedWriteDecision("Write", { file_path: `${root}/.winter/skills/a.md` }, { mode: "code", protected: untrusted, cwd: root })).toBeNull();
     expect(protectedWriteDecision("Read", { file_path: `${root}/.winter/skills/a.md` }, { mode: "code", protected: set, cwd: root })).toBeNull();
     expect(protectedWriteDecision("Write", { file_path: `${home}/sdk/projects/k/memory/MEMORY.md` }, { mode: "code", protected: set, cwd: root })).toBeNull();
     expect(protectedWriteDecision("Write", { file_path: `${home}/sdk/skillset/a.md` }, { mode: "code", protected: set, cwd: root })).toBeNull();
