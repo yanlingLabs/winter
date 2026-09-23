@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { CONTROL_PLANE_FILENAMES } from "./control-plane";
+import { CONTROL_PLANE_FILENAMES, type HomeFence } from "./control-plane";
 import { sandboxConfigFor } from "./mode-options";
 
 /**
@@ -48,13 +48,6 @@ export const PROJECT_FENCED_SEGMENTS: readonly string[] = [".winter/agents/"];
  *  the three control-plane files plus `trust.json`. The write-tool fence is precise instead
  *  (`controlPlaneFileTarget` + `homeFencedFiles`). */
 export const ESCAPE_FENCED_FILENAMES: readonly string[] = [...CONTROL_PLANE_FILENAMES, "trust.json"];
-
-/** The shape `controlPlaneTargetForCall` takes for its home half. */
-export interface HomeFence {
-  dirs: readonly string[];
-  files: readonly string[];
-  segments: readonly string[];
-}
 
 export function homeFenceFor(home: string): HomeFence {
   return { dirs: homeFencedDirs(home), files: homeFencedFiles(home), segments: PROJECT_FENCED_SEGMENTS };

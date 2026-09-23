@@ -511,6 +511,36 @@ test("the control plane is refused independently, BEFORE any escalation can soft
   expect(h.events).toEqual([]);
 });
 
+test("whole-branch review: the write-tool fence covers what the Bash sandbox's denyWrite covers — under bypass, both spellings, MultiEdit too", async () => {
+  const home = mkdtempSync(join(tmpdir(), "winter-bridge-home-fence-"));
+  try {
+    const h = harness({ policy: "bypass", cwd: "/repo", home });
+    const denied = [
+      join(home, "permissions", "projects.json"),
+      join(home, "plugins", "p", "skills", "evil", "SKILL.md"),
+      join(home, "runtimes", "bin", "winter"),
+      join(home, "cache", "skill-plugins", "p", "x"),
+      join(home, "cache", "other"),
+      join(home, "agents", "a.md"),
+      join(home, "trust.json"),
+      join(home, "RUNTIMES", "x"),                 // case-folded, as the volume is
+      "/some/project/.winter/agents/helper.md",
+    ];
+    for (const target of denied) {
+      const res = (await h.canUse("Write", { file_path: target, content: "x" }, requestCtx()))!;
+      expect({ target, behavior: res.behavior }).toEqual({ target, behavior: "deny" });
+    }
+    const via = (await h.canUse("MultiEdit", { file_path: "/repo/ok.ts", edits: [{ file_path: join(home, "permissions", "projects.json") }] }, requestCtx()))!;
+    expect(via.behavior).toBe("deny");
+    expect((via as { message: string }).message).toContain("Winter's own state");
+    // …while the deliberately agent-writable places under the home stay writable: $OUTDIR and the MEMDIR
+    for (const ok of [join(home, "outputs", "sess-1", "report.md"), join(home, "projects", "k", "memory", "m.md")]) {
+      expect({ ok, behavior: (await h.canUse("Write", { file_path: ok, content: "x" }, requestCtx()))!.behavior }).toEqual({ ok, behavior: "allow" });
+    }
+    expect(h.events).toEqual([]);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
 test("interrupt: true only on a HUMAN denial — a machine outcome must not end the turn", async () => {
   // `engine.ts:5876-5882`: an explicit human "no" ends the turn, to stop the model re-submitting
   // the same command for the reviewer to re-approve in-turn ("a real gate bypass").
