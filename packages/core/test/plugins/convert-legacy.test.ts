@@ -107,6 +107,15 @@ describe("convertLegacyPlugins: maps fields and hook events; the original stays 
     const listing = await listPlugins(options);
     expect(listing).toEqual([{ id: "demo", installPath: targetDir, scope: "user", enabled: true, marketplace: "winter-legacy" }]);
 
+    // Post-merge round ("keep writing known_marketplaces.json"): the conversion registers the
+    // "winter-legacy" marketplace through addMarketplace's own locked writer (sdk-plugin-api.ts),
+    // never a hand-rolled write that could drift from what `plugin.marketplace.list` reads.
+    const knownMarketplaces = JSON.parse(readFileSync(join(sdkPluginsRoot(h), "known_marketplaces.json"), "utf8"));
+    expect(knownMarketplaces["winter-legacy"]).toMatchObject({
+      source: { source: "directory", path: join(sdkPluginsRoot(h), "marketplaces", "winter-legacy") },
+      installLocation: join(sdkPluginsRoot(h), "marketplaces", "winter-legacy"),
+    });
+
     // Consent record re-keyed to the qualified spec, same file, same field — I3 fix round 1: `exec`
     // is DROPPED (pre-WS-21 it was granted because the plugin shipped skills, which enabling a
     // plugin now covers, spec §5.4); `tcc`/`hardware` carry forward unchanged. C1 fix round 2: the
