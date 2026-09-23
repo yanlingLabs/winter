@@ -13,7 +13,7 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION } from "../../src/runtime-state/db";
+import { downgradeRuntimeStateToV6, openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION } from "../../src/runtime-state/db";
 
 const home = () => mkdtempSync(join(tmpdir(), "winter-rs-v7-"));
 const dbPath = (h: string) => join(h, "runtimes", "runtime-state.db");
@@ -114,5 +114,43 @@ describe("runtime-state schema v7 (WS-21)", () => {
     const rs = openRuntimeStateDb(h);
     expect(rs.db.query<{ foreign_keys: number }, []>("PRAGMA foreign_keys").get()!.foreign_keys).toBe(1);
     rs.close();
+  });
+});
+
+// Review I3 (controller ruling): an older build (0.116.0) opens a v7 store as `newer-schema` and runs with
+// its runtime spine OFFLINE — so `winter migrate --sdk-home --rollback` steps the store back to v6.
+describe("downgradeRuntimeStateToV6", () => {
+  test("v7 → v6: run-folder kinds cleared, the v6 CHECK back, the quarantine table gone, rows and FKs intact", () => {
+    const h = home();
+    const rs = openRuntimeStateDb(h);
+    insertSession(rs.db, "s_rf", "run-folder", "/h/cache/runs/r1");
+    insertSession(rs.db, "s_sp", "official-spool", "/h/spool");
+    insertGeneration(rs.db, "s_rf", 1);
+    rs.db.run("INSERT INTO run_root_quarantine (root, recorded_at) VALUES ('/h/cache/runs/q', 't')");
+    rs.close();
+    expect(downgradeRuntimeStateToV6(h)).toEqual({ from: 7, to: 6 });
+    const raw = new Database(dbPath(h));
+    try {
+      expect(raw.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version).toBe(6);
+      const rows = raw.query<{ id: string; r: string | null; k: string | null }, []>("SELECT winter_session_id AS id, active_local_write_root AS r, active_local_write_root_kind AS k FROM runtime_sessions ORDER BY id").all();
+      expect(rows).toEqual([{ id: "s_rf", r: null, k: null }, { id: "s_sp", r: "/h/spool", k: "official-spool" }]);
+      expect(() => insertSession(raw, "s_x", "run-folder")).toThrow(); // the v6 CHECK
+      expect(raw.query("SELECT name FROM sqlite_master WHERE name='run_root_quarantine'").all()).toEqual([]);
+      expect(raw.query("PRAGMA foreign_key_check").all()).toEqual([]);
+      expect(raw.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM runtime_generations").get()!.n).toBe(1);
+      expect(raw.query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE name='runtime_generations'").get()!.sql).toContain("REFERENCES runtime_sessions(");
+    } finally { raw.close(); }
+    // this build re-upgrades it on its next open
+    const again = openRuntimeStateDb(h);
+    expect(again.schemaVersion()).toBe(7);
+    again.close();
+  });
+
+  test("already v6, or no store: nothing to do", () => {
+    const h = home();
+    expect(downgradeRuntimeStateToV6(h)).toBe("not-needed");
+    openRuntimeStateDb(h).close();
+    rewindToV6(h);
+    expect(downgradeRuntimeStateToV6(h)).toBe("not-needed");
   });
 });

@@ -226,6 +226,7 @@ export {
 } from "./migration/migrate-c";
 export { splitSettingsToSdk, settingsSplitMarkerPath, SPLIT_KEYS, type SettingsSplitReport } from "./migration/settings-split";
 export { sdkHomeDoctorLines } from "./migration/sdk-home-doctor";
+export { downgradeRuntimeStateToV6, openRuntimeStateDb } from "./runtime-state/db";
 export {
   ProjectMigrationRefused,
   planProjectMigration,

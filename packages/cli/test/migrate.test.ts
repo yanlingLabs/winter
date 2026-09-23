@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FileSecretStore, readMigrationManifest, type SecretStore } from "@yanlinglabs/winter-core";
+import { FileSecretStore, openRuntimeStateDb, readMigrationManifest, type SecretStore } from "@yanlinglabs/winter-core";
 import { runMigrateCommand, type MigrateCommandDeps } from "../src/commands/migrate";
 
 const dirs: string[] = [];
@@ -255,6 +255,18 @@ describe("winter migrate --sdk-home (Migration C)", () => {
     expect(await runMigrateCommand(deps)).toBe(1);
     expect(errLines.join("\n")).toContain("refused");
     expect(lstatSync(join(home, "projects")).isSymbolicLink()).toBe(false);
+  });
+
+  test("review I3: --rollback on a home with no Migration C still steps a v7 store back to v6", async () => {
+    const home = join(tempDir(), "fresh");
+    mkdirSync(home, { recursive: true });
+    openRuntimeStateDb(home).close();
+    const { deps, lines } = baseDeps({ argv: ["--sdk-home", "--rollback", "--home", home, "--yes"] });
+    expect(await runMigrateCommand(deps)).toBe(0);
+    expect(lines.join("\n")).toContain("schema v6");
+    const again = baseDeps({ argv: ["--sdk-home", "--rollback", "--home", home, "--yes"] });
+    expect(await runMigrateCommand(again.deps)).toBe(0);
+    expect(again.lines.join("\n")).toContain("nothing to roll back");
   });
 
   test("--resume with nothing in flight refuses", async () => {
