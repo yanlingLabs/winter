@@ -609,8 +609,9 @@ describe("daemon IPC", () => {
 
     test("workflow.list surfaces saved workflows from WorkflowStore alongside running runs", async () => {
       const srv = await bootWorkflowServer();
-      mkdirSync(join(srv.winterHome, "workflows"), { recursive: true });
-      writeFileSync(join(srv.winterHome, "workflows", "nightly.js"),
+      // WS-21: the user workflow tier lives in the store home (`<home>/sdk` on a run-home build).
+      mkdirSync(join(storeHomeFor(srv.winterHome), "workflows"), { recursive: true });
+      writeFileSync(join(storeHomeFor(srv.winterHome), "workflows", "nightly.js"),
         `export const meta = {name:"nightly", description:"nightly sweep"}; return "ok";`);
 
       const c = await TestClient.connect(srv.socketPath);

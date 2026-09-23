@@ -80,6 +80,34 @@ describe("the old-layout definition (spec §8, r3)", () => {
   });
 });
 
+describe("review M7: every moved directory and the instructions file count", () => {
+  for (const [what, seed, check] of [
+    ["agents/", (h: string) => { mkdirSync(join(h, "agents"), { recursive: true }); writeFileSync(join(h, "agents", "a.md"), "x"); }, (h: string) => existsSync(join(h, "sdk", "agents", "a.md"))],
+    ["workflows/", (h: string) => { mkdirSync(join(h, "workflows"), { recursive: true }); writeFileSync(join(h, "workflows", "w.js"), "x"); }, (h: string) => existsSync(join(h, "sdk", "workflows", "w.js"))],
+    ["output-styles/", (h: string) => { mkdirSync(join(h, "output-styles"), { recursive: true }); writeFileSync(join(h, "output-styles", "o.md"), "x"); }, (h: string) => existsSync(join(h, "sdk", "output-styles", "o.md"))],
+    ["backups/", (h: string) => { mkdirSync(join(h, "backups", "s"), { recursive: true }); writeFileSync(join(h, "backups", "s", "b"), "x"); }, (h: string) => existsSync(join(h, "sdk", "file-history", "s", "b"))],
+    ["WINTER.md", (h: string) => { writeFileSync(join(h, "WINTER.md"), "# mine\n"); }, (h: string) => readFileSync(join(h, "sdk", "WINTER.md"), "utf8") === "# mine\n"],
+  ] as const) {
+    test(`a home with only ${what} is in the old layout, and migrates it`, async () => {
+      const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-m7-")));
+      mkdirSync(join(home, "sdk", "projects"), { recursive: true });
+      seed(home);
+      expect(isOldLayout(home)).toBe(true);
+      expect((await runMigrationC(home, deps())).status).toBe("complete");
+      expect(check(home)).toBe(true);
+      expect(isOldLayout(home)).toBe(false);
+    });
+  }
+
+  test("WINTER.md beside an existing sdk/WINTER.md is no old layout (nothing unread)", () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-m7b-")));
+    mkdirSync(join(home, "sdk"), { recursive: true });
+    writeFileSync(join(home, "WINTER.md"), "a");
+    writeFileSync(join(home, "sdk", "WINTER.md"), "b");
+    expect(isOldLayout(home)).toBe(false);
+  });
+});
+
 describe("preflight", () => {
   test("a LIVE lease refuses (pid running AND start time matching); a recycled pid does not", async () => {
     const { home } = fixture();
