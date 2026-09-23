@@ -235,7 +235,7 @@ describe("daemon wiring — the runtime store is not readable by the model", () 
     });
   });
 
-  test("P8d-12 (WS-16 §10); Winter Phase 10b (D1-3, W18-9): the official leg's SDK-parent staging root (<tmpdir>/claude-resume-*) is denied to read AND write tools", async () => {
+  test("P8d-12 (WS-16 §10); Winter Phase 10b (D1-3, W18-9); round 6: the official leg's SDK-parent staging root (<tmpdir>/claude-resume-*) is denied to the write tools whole, and to the read tools its config files and backups/", async () => {
     await withTempHome(async (home) => {
       const { controlPlaneDenyRules } = await import("../../src/runtime-sdk/mode-options");
       const { tmpdir } = await import("node:os");
@@ -246,8 +246,12 @@ describe("daemon wiring — the runtime store is not readable by the model", () 
       // dir, never under `home` — a resume payload never lands under `~/.winter*`. Built from the
       // router's own `RESUME_STAGING_PREFIX`, not a hand-typed duplicate (D1-3).
       const wantSuffix = `/${join(tmpdir(), `${RESUME_STAGING_PREFIX}*`, "**")}`;
-      for (const tool of ["Read", "Glob", "Grep", "Edit", "Write", "MultiEdit", "NotebookEdit"]) {
+      for (const tool of ["Edit", "Write", "MultiEdit", "NotebookEdit"]) {
         expect(deny).toContain(`${tool}(${wantSuffix})`);
+      }
+      for (const tool of ["Read", "Glob", "Grep"]) {
+        expect(deny).not.toContain(`${tool}(${wantSuffix})`);
+        for (const f of [".claude.json", ".credentials.json", ".winter.json", "backups/**"]) expect(deny).toContain(`${tool}(/${join(tmpdir(), `${RESUME_STAGING_PREFIX}*`)}/${f})`);
       }
     });
   });
