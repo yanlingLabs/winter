@@ -898,6 +898,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // 0.0.17: the `exa` row is keyed by LEG, not by the record's provider — the Exa key reaches a
         // child only through the Winter leg's `Options.web`, and it decides that leg's tool surface.
         legOf: (sessionId) => winter.legOf(sessionId),
+        // Minor d: a child whose cross-provider advisor pin names this provider is replaced too.
+        advisorProviderOf: (sessionId) => winter.advisorProviderOf?.(sessionId),
         evict: (sessionId) => winter.evict(sessionId),
         log: (line) => console.error(line),
       }, providerId);

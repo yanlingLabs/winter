@@ -364,6 +364,11 @@ export interface WinterSessionDrivers {
   legForNewSession(mode: SessionMode): SessionLeg;
   /** The leg an EXISTING session runs on, from its record; undefined when it has no record. */
   legOf(sessionId: string): SessionLeg | undefined;
+  /** Whole-branch review (minor d): the provider a LIVE child's cross-provider advisor pin names —
+   *  running there, or fallen back because that provider's slot was empty — so a credential write for
+   *  it replaces the child too. Undefined without a live driver or a cross-provider pin. Optional so a
+   *  test double need not implement it. */
+  advisorProviderOf?(sessionId: string): string | undefined;
   /** Refuse (typed) unless a Winter-leg session of this mode could be created right now. Runs
    *  BEFORE the product row is minted, so a refusal costs nothing. */
   assertAvailable(mode: SessionMode): void;
@@ -439,6 +444,10 @@ export function childrenSinkFor(registry: AgentRegistry, sessionId: string, log:
 
 export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDrivers {
   const drivers = new Map<string, LegSession>();
+  /** Per live Winter-leg child: the provider its `runtimes.advisorModel` pin names when that is ANOTHER
+   *  provider (set at every incarnation's options build) — `advisorProviderOf`, read by
+   *  `evictSessionsForCredential`. */
+  const advisorProviders = new Map<string, string>();
   const log = deps.log ?? ((): void => {});
   const sdkVersion = WINTER_PEER_VERSIONS.winterAgentSdk;
 
@@ -682,9 +691,14 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       //     let the child fall back to the brand's own Keychain lookup, the M7 hazard);
       //   - it is cross-provider and that provider's slot is EMPTY.
       // A same-provider pin needs no probe: the session's own turn cannot run without that credential.
+      advisorProviders.delete(sessionId);
       if (pinnedAdvisor !== undefined && pinnedAdvisor !== UNSTATED_TAG && !pinnedAdvisor.startsWith(WINTER_TEST_PREFIX)) {
         const advisorProviderId = splitTag(pinnedAdvisor).providerId;
         const crossProvider = advisorProviderId !== selection?.providerId;
+        // Whole-branch review (minor d): the provider a CREDENTIAL write must also reach this child for
+        // — whether the pin runs there (its `authRef` names that slot) or fell back because the slot was
+        // empty (the key is what it waits for). An off-catalog pin is not recorded: no key fixes it.
+        if (crossProvider && rowForTag(pinnedAdvisor) !== undefined) advisorProviders.set(sessionId, advisorProviderId);
         const advisorRef = crossProvider ? credentialRefFor(advisorProviderId, deps.home) : undefined;
         const why = rowForTag(pinnedAdvisor) === undefined ? `names ${JSON.stringify(pinnedAdvisor)}, which no model in the pinned catalog carries`
           : !crossProvider ? undefined
@@ -1480,6 +1494,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
   return {
     legForNewSession: legForNew,
     legOf: (sessionId) => sessionLegOf(recordOf(sessionId)),
+    advisorProviderOf: (sessionId) => (drivers.has(sessionId) ? advisorProviders.get(sessionId) : undefined),
     assertAvailable,
     create,
     get: (sessionId) => drivers.get(sessionId),
@@ -1497,6 +1512,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     async evict(sessionId) {
       const session = drivers.get(sessionId);
       drivers.delete(sessionId);
+      advisorProviders.delete(sessionId);   // the next incarnation records its own
       // M5 (whole-branch review): `diff-attach.ts`'s pending map is per-session and in-memory —
       // an evicted session's own PostToolUse attachments (a call whose matching `tool_result`
       // never made it into the log before eviction) must not linger forever under a dead id.

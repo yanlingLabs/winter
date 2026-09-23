@@ -733,6 +733,47 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
     } finally { t.close(); }
   });
 
+  // Whole-branch review (minor d): a credential write for a cross-provider ADVISOR's provider reaches the
+  // children that use it — both the one whose pin RUNS there (its advisor authRef names that slot) and
+  // the one whose pin FELL BACK because that slot was empty (the new key is what it was waiting for).
+  // A session whose advisor is not on that provider is left alone.
+  test("minor d: a credential write for the advisor's provider evicts the children whose advisor pin names it", async () => {
+    const secrets = new FileSecretStore(join(mkdtempSync(join(tmpdir(), "winter-advisor-evict-")), "secrets.json"));
+    let pin = "codex-oauth/gpt-5.6-sol";
+    const settings = () => ({ runtimes: { advisorModel: pin, winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } }) as unknown as Settings;
+    const t = table({ settings, secrets });
+    const evictFor = (providerId: string) => evictSessionsForCredential({
+      list: () => t.drivers.list(),
+      providerOf: (sessionId) => t.records.get(sessionId)?.providerId,
+      advisorProviderOf: (sessionId) => t.drivers.advisorProviderOf?.(sessionId),
+      evict: (sessionId) => t.drivers.evict(sessionId),
+    }, providerId);
+    try {
+      const fellBack = t.store.createSession("t", { mode: "code", model: "openai/gpt-5.6-sol", approvalPolicy: "ask" });
+      await t.drivers.create(fellBack);
+      expect(t.q().options.advisor).toEqual({ model: "openai/gpt-6-astra", authRef: expect.objectContaining({ account: "openai:default" }) });
+      expect(t.drivers.advisorProviderOf?.(fellBack)).toBe("codex-oauth");
+
+      // The key arrives: the fell-back child is replaced, and its next incarnation states the pin.
+      await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "api-key", key: "sk-test-not-real" });
+      expect(await evictFor("codex-oauth")).toEqual([fellBack]);
+      expect(t.drivers.get(fellBack)).toBeUndefined();
+      await (await t.drivers.ensure(fellBack))!.open();
+      expect(t.q().options.advisor).toEqual({ model: "codex-oauth/gpt-5.6-sol", authRef: expect.objectContaining({ account: "codex-oauth:default" }) });
+
+      // Rotating it again reaches the child whose advisor now RUNS there.
+      expect(await evictFor("codex-oauth")).toEqual([fellBack]);
+
+      // A session whose advisor is not cross-provider is left alone.
+      pin = "openai/gpt-6-astra";
+      const plain = t.store.createSession("t", { mode: "code", model: "openai/gpt-5.6-sol", approvalPolicy: "ask" });
+      await t.drivers.create(plain);
+      expect(t.drivers.advisorProviderOf?.(plain)).toBeUndefined();
+      expect(await evictFor("codex-oauth")).toEqual([]);
+      await t.drivers.evict(plain);
+    } finally { t.close(); }
+  });
+
   // Lane B (2026-09-22): the user's SAVED allow rules reach the child — read through the dep at every
   // incarnation (so a rule saved mid-session lands at the next one), translated onto `permissions.allow`.
   test("saved allow rules ride a CODE child's Options.permissions.allow, read live per incarnation", async () => {

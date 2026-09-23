@@ -53,6 +53,15 @@ export function _clearRepoRootCacheForTests(): void {
  * `dirname()` is correct either way, no special-casing needed). A non-repo `cwd` (git exits
  * nonzero, or the binary itself is unavailable) falls back to the cwd itself, matching the
  * design doc's "non-repo cwd → the cwd itself" bullet.
+ *
+ * **The resolved root must actually own the cwd** (re-review M-b, 2026-09-23). The project root
+ * decides which approved rules, trust and project overlay a session inherits, and `--git-common-dir`
+ * is whatever the cwd's `.git` FILE says — a directory whose `.git` file reads `gitdir:
+ * /other/.git` would otherwise inherit `/other`'s approvals. So the resolved root is kept only when
+ * it CONTAINS the cwd (the ordinary checkout, any subdirectory) or the cwd lies inside one of the
+ * worktrees that common dir itself registers (`git worktree list`, read through `--git-dir`, so the
+ * cwd's own `.git` file has no say in the listing). Anything else falls back to the cwd, with one log
+ * line (memoized with the answer).
  */
 export function repoRootFor(cwd: string): string {
   const key = canon(cwd);
@@ -66,7 +75,14 @@ export function repoRootFor(cwd: string): string {
       const raw = p.stdout.toString("utf8").trim();
       if (raw) {
         const commonDir = canon(isAbsolute(raw) ? raw : resolve(key, raw));
-        root = dirname(commonDir);
+        const candidate = dirname(commonDir);
+        // Each extra git spawn only when the rung before it failed — an ordinary checkout pays none.
+        let configured: string | null = null;
+        if (within(key, candidate) || registeredWorktrees(commonDir).some((wt) => within(key, wt))) root = candidate;
+        // A submodule: its common dir is `<outer>/.git/modules/<name>`, and its own `core.worktree`
+        // names the checkout — the submodule's one root from any depth inside it.
+        else if ((configured = configuredWorktree(commonDir)) !== null && within(key, configured)) root = configured;
+        else console.error(`memory-dir: ${key}'s git dir resolves to ${commonDir}, which neither contains it nor registers it as a worktree — using the directory itself as its project root`);
       }
     }
   } catch {
@@ -74,6 +90,29 @@ export function repoRootFor(cwd: string): string {
   }
   repoRootCache.set(key, root);
   return root;
+}
+
+/** `path` is `dir` or lies beneath it (both canonical). */
+function within(path: string, dir: string): boolean {
+  return path === dir || path.startsWith(dir.endsWith(sep) ? dir : dir + sep);
+}
+
+/** `core.worktree` from `commonDir`'s OWN config (a submodule's checkout), canonical — relative
+ *  values resolve against the git dir, as git resolves them; `null` when unset. */
+function configuredWorktree(commonDir: string): string | null {
+  const p = Bun.spawnSync(["git", "--git-dir", commonDir, "config", "--get", "core.worktree"]);
+  if (p.exitCode !== 0) return null;
+  const raw = p.stdout.toString("utf8").trim();
+  return raw ? canon(isAbsolute(raw) ? raw : resolve(commonDir, raw)) : null;
+}
+
+/** The worktrees `commonDir` registers (the main one included), canonical; `[]` when git refuses. */
+function registeredWorktrees(commonDir: string): string[] {
+  const p = Bun.spawnSync(["git", "--git-dir", commonDir, "worktree", "list", "--porcelain"]);
+  if (p.exitCode !== 0) return [];
+  return p.stdout.toString("utf8").split("\n")
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => canon(line.slice("worktree ".length)));
 }
 
 /** Turns an absolute path into a single filesystem-safe directory-name segment: strip the

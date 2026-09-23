@@ -40,6 +40,7 @@ import { LspManager } from "./agent/lsp/manager";
 import { PermissionGate, type SessionApprovalPolicy } from "./agent/gate";
 import { PermissionRules } from "./agent/permission-rules";
 import { ApprovedProjectRules } from "./agent/approved-project-rules";
+import { trustRecordFile } from "./agent/paths";
 import { ApprovalBroker } from "./agent/approvals";
 import { QuestionBroker } from "./agent/questions";
 import { createPersistedChildren, type AgentRegistry } from "./agent/bg-agent-registry";
@@ -557,7 +558,8 @@ export async function startDaemon(opts: {
     console.error(`empty-session boot sweep failed: ${(err as Error).message}`);
   }
 
-  const trustStore = new TrustStore(join(winterHome, "trust.json"));
+  // `trustRecordFile`: the same path the write fences name (`controlPlaneDenyRules`/`sandboxConfigFor`).
+  const trustStore = new TrustStore(trustRecordFile(winterHome));
   // Task 7 (CC project-folder-mechanics): the ONE cwd-keyed "effective settings" resolver for the
   // whole daemon — `base` reads the reassignable `settings` holder above LIVE (same hot-settings
   // shape as memoryEnabledHot/hooksEnabledHot below: a watcher-driven reload swaps in a NEW object
@@ -572,6 +574,9 @@ export async function startDaemon(opts: {
   // card (`<home>/permissions/projects.json`) — written by `approval.respond`, applied to children
   // regardless of trust. Provider-independent, so built unconditionally.
   const approvedProjectRules = new ApprovedProjectRules({ winterHome });
+  // Re-review R1: its directory exists (0700, real) before any session runs, so a link cannot be
+  // planted there first; something already there that is not is refused, with one log line.
+  approvedProjectRules.prepare();
   // fix-wave B (I1): every per-project getter below resolves at the REPO ROOT, matching
   // `globalAllow`'s own `projectRoot` (engine.ts's `repoRootFor(cwd)`) — NOT the raw session cwd.
   // Before this, a SUBDIRECTORY session read a DIFFERENT `.winter/settings.json` than
@@ -1652,12 +1657,10 @@ export async function startDaemon(opts: {
     log: (line) => console.error(`winter-leg: ${line}`),
     ...(opts.officialConnectionOverride === undefined ? {} : { officialConnectionOverride: opts.officialConnectionOverride }),
     // P8c integration Wirings 1 & 3 (P8c-14): lane 2's plan bridge and lane 3's hooks facade,
-    // built above. `hooksFor` reaches the official leg's `Options.hooks` today (session-driver.ts's
-    // `assembleOfficial`); the Winter-leg side of `planBridge`/`hooksFor.winter` has no consumer yet
-    // in this spine (`approval-bridge.ts` never reads `WinterLegDeps.planBridge`, and this file's
-    // own `optionsFor` never threads `hooksFor(...).winter` into `buildWinterOptions` at all) — both
-    // fields are still wired here because `WinterLegDeps` already declares the seam and the brief's
-    // wiring is this daemon.ts assignment, not the still-open lane-1 consumption (see report).
+    // built above. BOTH legs consume both: `hooksFor(...).official` becomes the official child's
+    // `Options.hooks` (session-driver.ts's `assembleOfficial`) and `hooksFor(...).winter` the Winter
+    // child's (its `optionsFor` → `buildWinterOptions`); `planBridge` answers `ExitPlanMode` through
+    // each leg's `CanUseToolDeps.planBridge` (the Winter leg's approval-bridge deps in `assemble`).
     planBridge,
     hooksFor,
   });
