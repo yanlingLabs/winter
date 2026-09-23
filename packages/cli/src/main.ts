@@ -2844,9 +2844,12 @@ if (import.meta.main) {
   }
   case "migrate-project": {
     const { runMigrateProjectCommand } = await import("./commands/migrate-project");
+    const { resolveWinterHome: winterHomeOf } = await import("@yanlinglabs/winter-core");
     const code = await runMigrateProjectCommand({
       argv: process.argv.slice(3),
       cwd: process.cwd(),
+      home: winterHomeOf(), // WS-21: the approved-rules record read for this project
+
       log: (l) => console.log(l),
       error: (l) => console.error(l),
       confirm: (p) => askYesNo(p),
