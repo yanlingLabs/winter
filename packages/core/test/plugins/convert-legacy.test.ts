@@ -3,7 +3,7 @@
 // marketplace, mapping fields and hook events (spec §8 step 6). Migration C (L3-owned) calls this
 // as its own step 6; this file tests the function directly.
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { convertLegacyPlugins } from "../../src/plugins/convert-legacy";
@@ -330,5 +330,75 @@ describe("convertLegacyPlugins: maps fields and hook events; the original stays 
     expect(existsSync(join(targetDir, "winter-plugin.json"))).toBe(false); // no extras to narrow
     const claudeManifest = JSON.parse(readFileSync(join(targetDir, ".claude-plugin", "plugin.json"), "utf8"));
     expect(claudeManifest).toEqual({ name: "Legacy Meta", version: "0.0.1" });
+  });
+});
+
+// Post-merge fix round, finding 4 (Opus review, data safety): when `<home>/plugins/<id>` is a
+// SYMLINK (a dev checkout linked in, for instance), the OLD converter copied the LINK itself
+// (cpSync's own default, dereference:false) -- so every write convertOnePlugin makes (deleting the
+// stale manifests, writing the narrowed ones) landed THROUGH it, modifying the user's own folder in
+// place. Fixed: the top-level link is dereferenced before copying, a NESTED symlink pointing outside
+// the resolved plugin folder refuses the whole plugin (never even attempting to write anything), and
+// the copy itself is fully dereferenced so the converted output is plain files, never links.
+describe("finding 4: a symlinked legacy plugin directory is dereferenced, never written through", () => {
+  test("a top-level symlink to a real plugin folder converts successfully, and the REAL folder is byte-unchanged", async () => {
+    const h = home();
+    // The REAL plugin content lives OUTSIDE <home>/plugins entirely -- e.g. a dev checkout.
+    const realDir = mkdtempSync(join(tmpdir(), "winter-convert-legacy-devcheckout-"));
+    const manifestJson = JSON.stringify({ id: "linked", tier: "capability", permissions: { hardware: ["battery"] } });
+    writeFileSync(join(realDir, "winter-plugin.json"), manifestJson);
+    mkdirSync(join(realDir, "skills", "greet"), { recursive: true });
+    writeFileSync(join(realDir, "skills", "greet", "SKILL.md"), "---\nname: greet\n---\nhi");
+
+    mkdirSync(join(h, "plugins"), { recursive: true });
+    symlinkSync(realDir, join(h, "plugins", "linked"));
+    writeFileSync(join(h, "settings.json"), JSON.stringify({
+      schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, plugins: { enabled: ["linked"] },
+    }));
+
+    const result = await convertLegacyPlugins(h);
+    expect(result.skipped).toEqual([]);
+    expect(result.converted).toHaveLength(1);
+    const targetDir = result.converted[0]!.installPath;
+
+    // The converted OUTPUT is a plain, symlink-free real directory with its own written manifests.
+    expect(lstatSync(targetDir).isSymbolicLink()).toBe(false);
+    expect(existsSync(join(targetDir, ".claude-plugin", "plugin.json"))).toBe(true);
+
+    // <home>/plugins/linked is STILL a symlink -- copy, never move, never converted in place.
+    expect(lstatSync(join(h, "plugins", "linked")).isSymbolicLink()).toBe(true);
+
+    // The REAL folder the symlink points to is BYTE-UNCHANGED -- the converter never deleted its
+    // original winter-plugin.json or wrote anything new into it.
+    expect(readFileSync(join(realDir, "winter-plugin.json"), "utf8")).toBe(manifestJson);
+    expect(existsSync(join(realDir, ".claude-plugin"))).toBe(false); // no claude-plugin dir was ever added here
+    expect(existsSync(join(realDir, "skills", "greet", "SKILL.md"))).toBe(true); // untouched
+  });
+
+  test("a NESTED symlink escaping the plugin folder makes it unconvertible, with a clear reason, and the original is untouched", async () => {
+    const h = home();
+    const outsideDir = mkdtempSync(join(tmpdir(), "winter-convert-legacy-outside-"));
+    writeFileSync(join(outsideDir, "secret.txt"), "do not touch");
+
+    const legacyDir = legacyPlugin(h, "escapee", { id: "escapee", tier: "capability" });
+    symlinkSync(outsideDir, join(legacyDir, "escape-hatch"));
+
+    writeFileSync(join(h, "settings.json"), JSON.stringify({
+      schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, plugins: { enabled: ["escapee"] },
+    }));
+
+    const result = await convertLegacyPlugins(h);
+    expect(result.converted).toEqual([]);
+    expect(result.skipped).toHaveLength(1);
+    expect(result.skipped[0]?.id).toBe("escapee");
+    expect(result.skipped[0]?.reason).toContain("nested symlink");
+    expect(result.skipped[0]?.reason).toContain("outside");
+
+    // The original legacy plugin folder (and the nested symlink itself) are completely untouched.
+    expect(existsSync(join(legacyDir, "winter-plugin.json"))).toBe(true);
+    expect(realpathSync(join(legacyDir, "escape-hatch"))).toBe(realpathSync(outsideDir));
+    // Nothing was ever written into the outside folder the escaping symlink pointed to.
+    expect(readFileSync(join(outsideDir, "secret.txt"), "utf8")).toBe("do not touch");
+    expect(existsSync(join(sdkPluginsRoot(h), "marketplaces", "winter-legacy", "plugins", "escapee"))).toBe(false);
   });
 });
