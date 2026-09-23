@@ -6,7 +6,7 @@ import type {
 } from "@yanlinglabs/winter-agent-sdk";
 import { RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
-import { approvedProjectRulesDir, homeCacheDir, trustRecordFile } from "../agent/paths";
+import { approvedProjectRulesDir, homeCacheDir, storeHomeFor, trustRecordFile } from "../agent/paths";
 import { parseRule } from "../agent/permission-rules";
 import { keychainService } from "../profile";
 import type { SessionApprovalPolicy } from "../agent/gate";
@@ -528,6 +528,9 @@ export function controlPlaneDenyRules(home: string): string[] {
     // the same invariant, the same "two layers over one self-grant" posture `controlPlaneFileTarget`'s
     // own doc states for the host-side fence vs. the deny-rule fence.
     fsRootAnchored([join(home, "agents"), "**"].join("/")),
+    // WS-21: on a run-home build the user tier lives in the store home (`userAgentsDir`); the old path
+    // above stays fenced too (Migration C leaves a link there). Before that build the two are one path.
+    ...(storeHomeFor(home) === home ? [] : [fsRootAnchored([join(storeHomeFor(home), "agents"), "**"].join("/"))]),
     fsRootAnchored(["**", ".winter", "agents", "**"].join("/")),
     // B1 follow-up (2026-09-22): the skills-only plugin VIEWS (`SkillStore.childSkillSurface`,
     // `agent/paths.ts`'s `skillPluginViewsRoot`). The next child loads each view as a local plugin,
@@ -791,7 +794,7 @@ export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSett
       // expressible here (subpaths only), and only this one path is ever loaded.
       denyWrite: [
         join(home, "run"), join(home, "runtimes"), homeCacheDir(home), join(home, "plugins"), approvedProjectRulesDir(home),
-        trustRecordFile(home), join(home, "agents"),
+        trustRecordFile(home), join(home, "agents"), ...(storeHomeFor(home) === home ? [] : [join(storeHomeFor(home), "agents")]),
         ...[...CONTROL_PLANE_FILENAMES].sort().map((f) => join(home, f)),
         ...(cwd ? [join(cwd, ".winter", "agents")] : []),
       ],

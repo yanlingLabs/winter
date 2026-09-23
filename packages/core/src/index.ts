@@ -57,7 +57,7 @@ export { runRuntimesProbe, type RuntimesProbeResult } from "./runtime-sdk/runtim
 export { diagnoseRuntimes, type RuntimesReport } from "./runtime-sdk/runtimes-doctor";
 export { RUNTIME_BUNDLE_LAYOUT, bundleRuntimePath, parseVersionsJson, type VersionsJson, type RuntimeBundleEntry } from "./runtime-sdk/bundle-layout";
 export { WorkflowRuntime, type WorkflowRuntimeDeps, type WorkflowRuntimeEvent, type WorkflowLaunch } from "./workflows/runtime";
-export { WorkflowStore, type ResolvedWorkflow } from "./workflows/store";
+export { WorkflowStore, userWorkflowsDir, type ResolvedWorkflow } from "./workflows/store";
 export {
   deriveInstallName,
   resolvePluginTarget,

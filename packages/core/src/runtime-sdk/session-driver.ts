@@ -63,6 +63,7 @@ import { buildWinterOptions, bypassAllowedAtSpawn, permissionModeFor } from "./m
 import { providerFor, rowForTag, testProviderNameFor } from "./provider-selection";
 import { splitTag, UNSTATED_TAG, isModelTag, WINTER_TEST_PREFIX, type ModelTag } from "./model-tag";
 import { winterSessions } from "./sessions";
+import { storeProjectsDir } from "../agent/paths";
 import { WINTER_PEER_VERSIONS } from "./versions";
 import { winterSystemPromptFor } from "./system-prompt";
 import { dispatchEffortFor } from "../agent/dispatch-config";
@@ -843,6 +844,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         },
       });
 
+    // WS-21: `winterSessions` reads this build's store home (`storeHomeFor`) — see `sessions.ts`.
     const hasTranscript = async (): Promise<boolean> => {
       try { await winterSessions(home).getSessionInfo(backendSessionId); return true; } catch { return false; }
     };
@@ -1305,7 +1307,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         providerId: selection.providerId,
         modelRef: selection.modelRef,
         ...(authRef?.kind === "keychain" ? { authRef: `keychain:${authRef.account}` } : {}),
-        backendRoot: join(deps.home, "projects", transcriptKey),
+        backendRoot: join(storeProjectsDir(deps.home), transcriptKey),
         effectiveTempDir: deps.tmpDirOf(sessionId),
         transcriptProjectKey: transcriptKey,
         memoryProjectKey: deps.memoryKeyOf(cwd),
@@ -1400,7 +1402,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         modelRef: effectiveTag,
         // The LOCATOR only (`keychain:<account>`) — never material (records.ts's own rule).
         ...(selection?.authRef?.kind === "keychain" ? { authRef: `keychain:${selection.authRef.account}` } : {}),
-        backendRoot: join(deps.home, "projects", transcriptKey),
+        backendRoot: join(storeProjectsDir(deps.home), transcriptKey),
         effectiveTempDir: deps.tmpDirOf(sessionId),
         transcriptProjectKey: transcriptKey,
         memoryProjectKey: deps.memoryKeyOf(cwd),

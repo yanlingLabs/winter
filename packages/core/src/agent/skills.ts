@@ -3,7 +3,7 @@ import { basename, join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SdkPluginConfig } from "@yanlinglabs/winter-agent-sdk";
 import type { TrustStore } from "./trust";
-import { homeCacheDir, skillPluginViewsRoot } from "./paths";
+import { homeCacheDir, skillPluginViewsRoot, storeHomeFor } from "./paths";
 import { skillDenyRule } from "../settings";
 
 // Phase 5c Task 3: `author?` mirrors T1's `author: winter` frontmatter stamp (writeSelf below) back
@@ -259,8 +259,9 @@ function pruneSkillPluginViews(viewsRoot: string, keep: ReadonlySet<string>): vo
 /**
  * Discovers SKILL.md skills from five sources, in precedence order (first occurrence of a name wins):
  *  - project: `<cwd>/.winter/skills/*`   — TRUST-GATED (only when `trust.isTrusted(cwd)`)
- *  - user:    `~/.winter/skills/*`       — always (excludes the reserved `self/` subdir)
- *  - self:    `~/.winter/skills/self/*`  — always; written by `writeSelf`/`deleteSelf` below
+ *  - user:    `<store home>/skills/*`      — always (excludes the reserved `self/` subdir)
+ *  - self:    `<store home>/skills/self/*` — always; written by `writeSelf`/`deleteSelf` below
+ *    (the store home is `storeHomeFor(winterHome)`: `~/.winter/sdk` on a run-home build, WS-21)
  *  - plugin:  `~/.winter/plugins/<plugin>/skills/<skill>` — always, namespaced `<plugin>:<skill>`
  *  - builtin: `<repo>/packages/core/skills/*` — always, shipped in-repo; LAST, so any of the
  *    above can shadow a builtin of the same name (e.g. a user override of `writing-skills`)
@@ -310,8 +311,10 @@ export class SkillStore {
       all.push(...scanRoot(join(cwd, ".winter", "skills"), "project"));
     }
 
-    all.push(...scanRoot(join(this.winterHome, "skills"), "user", USER_ROOT_EXCLUDE));
-    all.push(...scanRoot(join(this.winterHome, "skills", "self"), "self"));
+    // WS-21: user and self skills live in the store home (`storeHomeFor`: `<home>/sdk/skills` on a
+    // run-home build, `<home>/skills` before it).
+    all.push(...scanRoot(join(storeHomeFor(this.winterHome), "skills"), "user", USER_ROOT_EXCLUDE));
+    all.push(...scanRoot(this.selfRoot(), "self"));
 
     let plugins: string[] = [];
     try {
@@ -458,7 +461,7 @@ export class SkillStore {
 
   /** Root of the self-authored scope: `~/.winter/skills/self` — the same path `discover` scans as source "self". */
   private selfRoot(): string {
-    return join(this.winterHome, "skills", "self");
+    return join(storeHomeFor(this.winterHome), "skills", "self");
   }
 
   /**

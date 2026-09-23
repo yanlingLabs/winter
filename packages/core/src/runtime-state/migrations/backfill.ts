@@ -24,6 +24,7 @@ import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { join } from "node:path";
 import { repoRootFor, sanitizeProjectKey } from "../../agent/memory-dir";
+import { storeProjectsDir } from "../../agent/paths";
 import { SYNCED_SESSION_ID_RE, type SessionStore } from "../../sessions/store";
 import type { RuntimeStateDb } from "../db";
 import { RuntimeSessionRecords, type RuntimeSessionState } from "../records";
@@ -171,7 +172,7 @@ function backfillOne(deps: BackfillDeps, records: RuntimeSessionRecords, now: ()
         modelRef: selection.modelRef,
         // Where this session's compatibility tree WOULD live. Nothing is written there by this
         // migration; it is the root a later import would read from.
-        backendRoot: join(home, "projects", transcriptKey),
+        backendRoot: join(storeProjectsDir(home), transcriptKey),
         transcriptProjectKey: transcriptKey,
         memoryProjectKey: memoryKey,
         tempProjectKey: transcriptKey,

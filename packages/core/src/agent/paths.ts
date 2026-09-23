@@ -1,5 +1,6 @@
 import { realpathSync, lstatSync, readlinkSync } from "node:fs";
 import { isAbsolute, resolve, sep, dirname, basename, join } from "node:path";
+import { linkedRouterSupportsRunHome } from "../runtime-sdk/run-home-support";
 
 /**
  * Where the daemon keeps the SKILLS-ONLY plugin views it hands a Winter child
@@ -43,6 +44,83 @@ export function approvedProjectRulesDir(winterHome: string): string {
 export function trustRecordFile(winterHome: string): string {
   return join(winterHome, "trust.json");
 }
+
+// ── WS-21: the shared runtime home (`<home>/sdk`) ─────────────────────────────────────────────────
+//
+// `<home>` stays the daemon's own home (Winter's settings, event log, trust, runtime-state). The
+// runtime-facing files — the transcript store, skills, agents, plugins, the claude-format settings and
+// global config — live one level down, in `<home>/sdk`, in claude's formats, and BOTH runtimes read
+// them there (through the router's per-run folder once the router applies run homes).
+//
+// CONVENTION: every helper below, and every path function that reaches a runtime-facing directory
+// (`memoryDirFor`, `winterSessions`, `loadUserAgentDefinitions`, …), takes the DAEMON home and applies
+// `sdkHomeFor`/`storeHomeFor` itself. No caller computes either home by hand, so there is exactly one
+// spelling of each.
+
+/** `<home>/sdk` — the shared runtime home. Mirrors the router's own `sdkHomeOf(home)` (Contract A). */
+export function sdkHomeFor(home: string): string {
+  return join(home, "sdk");
+}
+
+/** `<home>/sdk/settings.json` — claude `Settings` (claude keys only; spec §2.2). */
+export function sdkSettingsPath(home: string): string {
+  return join(sdkHomeFor(home), "settings.json");
+}
+
+/** `<home>/sdk/.winter.json` — claude's `.claude.json` shape: user `mcpServers` and
+ *  `projects[<abs root>].mcpServers` (local scope). Spec §2.2. */
+export function sdkGlobalConfigPath(home: string): string {
+  return join(sdkHomeFor(home), ".winter.json");
+}
+
+/** `<home>/sdk/plugins` — claude's plugins root (install records, marketplaces, `cache/`, …; F15). */
+export function sdkPluginsRoot(home: string): string {
+  return join(sdkHomeFor(home), "plugins");
+}
+
+/**
+ * **Where this build's runtime-facing directories live** — the transcript store and its per-project
+ * memory (`projects/`), and the user tiers of `skills/`, `agents/` and `workflows/`:
+ *
+ *  - `<home>/sdk` once the linked router applies run homes (the integrated WS-21 build);
+ *  - `<home>` itself otherwise — exactly today's layout, because an agent SDK 0.0.20 child and router
+ *    0.0.11 write and scan there, and their stores refuse a symlinked `projects/` level
+ *    (`runtime-sdk/run-home-support.ts` has the full reasoning).
+ *
+ * Every path helper that reaches one of those directories takes the DAEMON home and applies this
+ * itself, so no call site can pick the wrong layout. Migration C moves the directories only on a
+ * build where this answers `sdk/`, so the reads and the data always agree.
+ */
+export function storeHomeFor(home: string): string {
+  return linkedRouterSupportsRunHome() ? sdkHomeFor(home) : home;
+}
+
+/** `<store home>/projects` — the canonical transcript store (and per-project memory). */
+export function storeProjectsDir(home: string): string {
+  return join(storeHomeFor(home), "projects");
+}
+
+/**
+ * claude's persistent config-dir set (F18), pre-created in `sdk/` so every run folder can link it.
+ * The same list, in the same order, as the router's `RUN_HOME_PERSISTENT_ENTRIES` (Contract A).
+ */
+export const SDK_PERSISTENT_ENTRIES = ["file-history", "tasks", "teams", "agent-memory", "workflows"] as const;
+
+/**
+ * The directories Migration C moves into `sdk/` and the compatibility links it leaves at their OLD
+ * top-level paths (spec §2.1, §8 step 3), as `[old top-level name, link text relative to <home>]`.
+ * RELATIVE link text on purpose: the home can be moved or copied as a unit.
+ *
+ * NEVER planted by `bootstrapWinterDir`: the agent SDK's store refuses a symlink at `<store>/projects`
+ * on every append (`ensureSecureDir`), so a link there is only safe once nothing writes the old path.
+ */
+export const SDK_COMPAT_LINKS: ReadonlyArray<readonly [name: string, target: string]> = [
+  ["projects", "sdk/projects"],
+  ["backups", "sdk/file-history"],
+  ["skills", "sdk/skills"],
+  ["agents", "sdk/agents"],
+  ["workflows", "sdk/workflows"],
+];
 
 // Symlink chains longer than this are rejected outright (mirrors the kernel's own ELOOP guard,
 // just tighter). Also breaks link CYCLES (a→b→a never terminates otherwise): lstat on a cycle
