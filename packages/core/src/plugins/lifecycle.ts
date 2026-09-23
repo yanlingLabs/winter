@@ -2,10 +2,33 @@
 // (packages/cli/src/plugin-cli.ts, which re-exports these) and, from Phase 4d-ii on, the
 // over-the-wire plugin RPCs — both need this without the CLI's network-touching `installPlugin`
 // (git clone), which stays CLI-only. Phase 4d-ii Task 1: pure refactor, no behavior change.
-import { cpSync, existsSync, rmSync } from "node:fs";
-import { resolve, sep } from "node:path";
+//
+// WS-21 (spec §5, L4.1): everything below this point is the PRE-WS-21 `<home>/plugins`-scan model
+// (settings.plugins.enabled/disabled arrays, git-clone install, the exec/tcc/hardware consent
+// block). It is dead code from the live daemon's perspective now — `agent/plugins.ts`'s
+// `PluginStore` no longer scans `<home>/plugins`, and the ipc/server.ts plugin RPC block runs on
+// Contract B instead — but every name below is kept EXPORTED, unchanged, because
+// `packages/core/src/index.ts` (L3-owned; this lane may not edit it) re-exports every one of them
+// BY NAME, and `plugin-cli.ts` still re-exports several for `test/plugin-cli.test.ts`'s existing
+// coverage of `revokePluginTokenBestEffort`/`installNeedsConsentHint`. REQUEST FOR L3 in the lane
+// report: once `packages/core/src/index.ts`'s own plugin-related export block is free to edit,
+// delete this whole pre-WS-21 section and its `index.ts` export line.
+//
+// The LIVE plugin-lifecycle surface is below, past that marker: Contract B's own adapter
+// (`plugins/sdk-plugin-api.ts`) plus `installPluginFromDirectory`, the "install means addMarketplace
+// + installPlugin" convenience this task's brief names.
+import { cpSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import type { Settings } from "../settings";
 import { skillsPayloadLines } from "../agent/plugin-manifest";
+import {
+  addMarketplace,
+  installPlugin,
+  PluginManagerError,
+  type InstalledPlugin,
+  type PluginManagerOptions,
+  type PluginScope,
+} from "./sdk-plugin-api";
 
 /** git-url basename minus a trailing `.git`, unless an explicit override is given. */
 export function deriveInstallName(url: string, override?: string): string {
@@ -178,4 +201,43 @@ export function removePluginDir(pluginsRoot: string, name: string): string {
   if (!existsSync(target)) throw new Error(`no such plugin: ${name}`);
   rmSync(target, { recursive: true, force: true });
   return target;
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// WS-21 (spec §5, L4.1): the LIVE plugin-lifecycle surface, over Contract B (`sdk-plugin-api.ts`).
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+/** A directory marketplace's `.claude-plugin/marketplace.json`, read just far enough to enumerate
+ *  its plugin names (F15's own shape, `sdk-plugin-api.ts`'s header). Not exported: this is only
+ *  `installPluginFromDirectory`'s own "how many plugins does this folder offer" check — a fuller
+ *  manifest read has no other caller in this lane. */
+function directoryMarketplacePluginNames(dir: string): string[] {
+  const manifestPath = join(dir, ".claude-plugin", "marketplace.json");
+  let raw: string;
+  try {
+    raw = readFileSync(manifestPath, "utf8");
+  } catch {
+    throw new PluginManagerError(`${manifestPath}: no marketplace manifest there (expected .claude-plugin/marketplace.json under ${dir})`);
+  }
+  const parsed = JSON.parse(raw) as { plugins?: Array<{ name?: string }> };
+  return (parsed.plugins ?? []).map((p) => p.name).filter((n): n is string => typeof n === "string" && n.length > 0);
+}
+
+/**
+ * WS-21 (spec §5.2, this task's own brief: "install means addMarketplace + installPlugin"): the
+ * `winter plugin install <path>` convenience for a plain local directory (no `@marketplace`
+ * qualifier) — registers `dir` as a directory marketplace (Contract B's `addMarketplace`) and
+ * installs the ONE plugin its manifest lists (Contract B's `installPlugin`), mirroring claude's own
+ * "a local directory installs directly" shape. Refused typed, before anything is written, when the
+ * directory's marketplace manifest lists anything other than exactly one plugin — a multi-plugin
+ * directory needs an explicit `<name>@<marketplace>` spec, added once via `addMarketplace` +
+ * `plugin marketplace list`.
+ */
+export async function installPluginFromDirectory(o: PluginManagerOptions, dir: string, scope: PluginScope): Promise<InstalledPlugin> {
+  const marketplace = await addMarketplace(o, dir);
+  const names = directoryMarketplacePluginNames(marketplace.path);
+  if (names.length !== 1) {
+    throw new PluginManagerError(`${dir}: marketplace "${marketplace.name}" lists ${names.length} plugin(s) — pass "<plugin>@${marketplace.name}" explicitly (run "winter plugin marketplace list" to see it)`);
+  }
+  return installPlugin(o, `${names[0]}@${marketplace.name}`, scope);
 }

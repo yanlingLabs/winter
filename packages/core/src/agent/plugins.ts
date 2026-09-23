@@ -3,6 +3,8 @@ import { join } from "node:path";
 import { z } from "zod";
 import { execPayloadLines, loadManifest, requiredConsentClasses, type WinterManifest } from "./plugin-manifest";
 import type { HookRegistryPlugin } from "../plugins/hook-registry";
+import { sdkPluginsRoot } from "./paths";
+import { sdkEnabledPlugins } from "../settings";
 
 export const PluginManifest = z.object({
   name: z.string().optional(), description: z.string().optional(),
@@ -11,6 +13,13 @@ export const PluginManifest = z.object({
 
 export interface PluginInfo {
   name: string; description?: string; version?: string; skills: string[]; hasMcp: boolean; mcpEnabled: boolean; disabled: boolean;
+  /** WS-21: the plugin's real install path, straight off `installed_plugins.json`'s own record
+   *  (Contract B) — NOT a `<home>/plugins/<name>` convention, which no longer holds (a plugin can
+   *  install anywhere a directory marketplace's manifest names). Callers that need the plugin's
+   *  on-disk root (the Tier-2 supervisor's spawn `cwd`, a manifest re-read) use this field rather
+   *  than reconstructing a path themselves — see the lane report's REQUEST FOR L3 for the one L3
+   *  call site (`daemon.ts`'s `spawnablePlugins` builder) still hardcoding the old convention. */
+  installPath: string;
   /** winter-plugin.json tier, when a valid manifest was found. undefined for legacy (plugin.json-only) plugins. */
   tier?: "capability" | "platform";
   /** Consent classes ("exec"|"tcc"|"hardware") the manifest requires, per plugin-manifest.ts#requiredConsentClasses. [] for legacy plugins. */
@@ -21,32 +30,31 @@ export interface PluginInfo {
   consented: string[];
   /** true when no valid winter-plugin.json was found (missing OR present-but-malformed) and the plugin loaded via the legacy plugin.json path. */
   legacy: boolean;
-  /** true when winter-plugin.json declares contributes.mcpServers. Distinct from hasMcp, which reflects the legacy .mcp.json file. */
+  /** WS-21: always false. A plugin's `.mcp.json`/`contributes.mcpServers` is claude-native content
+   *  now — both runtimes load it themselves (spec §5.3), so the daemon no longer starts an MCP
+   *  server for a plugin, and this field (and `pluginMcpEligible` below) is kept ONLY because
+   *  `daemon.ts`/`ipc/server.ts` (L3-owned) still read it; see this file's own header note on why
+   *  those call sites are left compiling-but-inert rather than edited. REQUEST FOR L3 in the lane
+   *  report: delete the dead consumers at daemon.ts:2018-2047/1002-1004 and ipc/server.ts:1426. */
   hasManifestMcp: boolean;
-  /** winter-plugin.json's contributes.mcpServers verbatim, filled from the SINGLE loadManifest
-   *  call this store's list() already makes — callers (daemon.ts) read this instead of re-parsing
-   *  winter-plugin.json a second time. undefined for legacy plugins and for manifest plugins with
-   *  no mcpServers declared (hasManifestMcp false). */
-  manifestServers?: NonNullable<WinterManifest["contributes"]>["mcpServers"];
-  /** winter-plugin.json's `contributes.hooks` verbatim (Phase 4f Task 2), filled from the SAME
-   *  single loadManifest call list() already makes — same precedent as manifestServers above.
-   *  undefined for legacy plugins and manifest plugins with no hooks declared. daemon.ts/
-   *  ipc/server.ts feed this straight into HookRegistry.rebuild() (dir/hooks per eligible plugin)
-   *  rather than re-parsing winter-plugin.json a second time. */
-  manifestHooks?: NonNullable<WinterManifest["contributes"]>["hooks"];
-  /** Display data for the CLI consent block (Task 3, spec §1: "Consent text always shows the
-   *  exec payload ... never just a summary."). execPayload = plugin-manifest.ts#execPayloadLines
-   *  verbatim (one line per mcpServer/hook/entry). [] for legacy plugins or manifests with no
-   *  exec-class content. */
+  /** Always undefined — see `hasManifestMcp`'s own doc. Typed to match the shape
+   *  `agent/mcp/manager.ts`'s (L3-owned) plugin-MCP starter still declares for its own input. */
+  manifestServers?: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string> }>;
+  /** Always undefined — WS-21: a plugin's hooks are claude-native `hooks/hooks.json` content, loaded
+   *  by both runtimes themselves (spec §5.1/§5.3); the daemon's own HookRegistry no longer executes
+   *  plugin-contributed hooks. Kept only because `hookRegistryPlugins` below still has to typecheck
+   *  against `daemon.ts`'s/`ipc/server.ts`'s (L3-owned) existing call sites — see this file's header. */
+  manifestHooks?: Array<{ event: string; command: string; timeoutMs?: number }>;
+  /** Display data for the CLI consent block — `plugin-manifest.ts#execPayloadLines` verbatim (WS-21:
+   *  at most one line, the Tier-2 entry command; mcpServer/hook lines are gone, see that module's
+   *  own doc). [] for legacy plugins or manifests with no entry point. */
   execPayload: string[];
   /** manifest.permissions.tcc verbatim (e.g. "accessibility") — one consent-block line per entry. [] when tcc isn't required. */
   tccPermissions: string[];
   /** manifest.permissions.hardware verbatim (e.g. "battery") — one consent-block line per entry. [] when hardware isn't required. */
   hardwarePermissions: string[];
-  /** winter-plugin.json's `entry` verbatim (Phase 4b Task 3, spec §3: what the PluginSupervisor
-   *  spawns for a Tier-2 platform plugin) — filled from the SAME single loadManifest call list()
-   *  already makes, same precedent as manifestServers above. undefined for legacy plugins and for
-   *  manifest plugins that declare no entry point (e.g. capability-tier / skills-only plugins). */
+  /** winter-plugin.json's `entry` verbatim — what the PluginSupervisor spawns for a Tier-2 platform
+   *  plugin. undefined for legacy plugins and manifest plugins that declare no entry point. */
   entry?: NonNullable<WinterManifest["entry"]>;
 }
 
@@ -55,78 +63,117 @@ export type PluginConsentRecord = { exec?: number; tcc?: number; hardware?: numb
 
 const CONSENT_CLASSES = ["exec", "tcc", "hardware"] as const;
 
+// WS-21 (spec §5): claude's own `installed_plugins.json` V2 shape (F15) — the SAME shape
+// `plugins/sdk-plugin-api.ts` writes. Read here with `readFileSync` rather than that module's own
+// (async) `listPlugins`, because `PluginStore.list()` must stay SYNCHRONOUS: `daemon.ts` and
+// `ipc/server.ts` (both L3-owned) call `new PluginStore({...}).list()` synchronously at several
+// sites (boot-time skill/hook/supervisor wiring, the live-plugins RPC cache), and this lane cannot
+// edit those files to thread an `await` through them. The async adapter is used directly by the new
+// plugin RPC handlers and by the CLI's no-daemon fallback, which already await everything else on
+// their path; this reimplements the SAME read, synchronously, for the pre-existing sync call sites.
+// DECISION, recorded in the lane report.
+interface InstalledPluginRecordV2 { scope: "user" | "project" | "local"; installPath: string; version?: string; installedAt?: string; lastUpdated?: string }
+interface InstalledPluginsFileV2 { version: 2; plugins: Record<string, InstalledPluginRecordV2[]> }
+
+function readInstalledPluginsFileSync(pluginsRoot: string): InstalledPluginsFileV2 {
+  try {
+    const raw = readFileSync(join(pluginsRoot, "installed_plugins.json"), "utf8");
+    const parsed = JSON.parse(raw) as Partial<InstalledPluginsFileV2> | null;
+    const plugins = parsed !== null && typeof parsed === "object" && typeof parsed.plugins === "object" && parsed.plugins !== null ? (parsed.plugins as Record<string, InstalledPluginRecordV2[]>) : {};
+    return { version: 2, plugins };
+  } catch {
+    return { version: 2, plugins: {} };
+  }
+}
+
 /**
- * Reads ~/.winter/plugins/<name>/. The DIRECTORY NAME is the canonical plugin name.
- * winter-plugin.json (the Phase 4 superset manifest — see plugin-manifest.ts) is read first and,
- * when present and valid, is the source of truth for description/version/tier/consent classes.
- * Otherwise the plugin loads via the legacy path: plugin.json is metadata only (malformed →
- * ignored, the plugin still loads).
+ * WS-21 (spec §5): reads the shared runtime home's claude-format plugin store —
+ * `<home>/sdk/plugins/installed_plugins.json` (Contract B's V2 shape, the SAME file
+ * `plugins/sdk-plugin-api.ts`/`winter plugin` write) plus `<home>/sdk/settings.json`'s
+ * `enabledPlugins` — restricted to USER scope (daemon.ts's own call sites have no project cwd to
+ * scope by; the `plugin.list` RPC combines scopes itself, through the async adapter, when a cwd is
+ * given). For each installed, user-scope plugin, `winter-plugin.json` is read from the install path
+ * for the Winter-only extras (tier/permissions/contributes.{tools,shortcuts,tile,provider}/entry) —
+ * `agent/plugin-manifest.ts#loadManifest`, unchanged. A plugin with no winter-plugin.json (or an
+ * unparseable one) still lists, as a `legacy: true` entry with no extras — mirroring claude's own
+ * "the manifest is optional" rule (F15) so an ordinary claude plugin with no Winter extras at all is
+ * never hidden.
  */
 export class PluginStore {
   constructor(
     private readonly deps: {
       winterHome: string;
+      /** Unused — WS-21 retires the old `<home>/plugins` on/off arrays (`enabledPlugins` in
+       *  `sdk/settings.json` is now the single source of truth). Kept only so existing callers that
+       *  still pass `plugins: settings?.plugins` (L3-owned call sites) keep compiling. */
       plugins?: { enabled?: string[]; disabled?: string[] };
-      /** settings.plugins.consents — per-plugin-id consent records. Kept as a sibling dep (not
-       *  nested under `plugins`) so callers/tests can wire it independently of enabled/disabled. */
+      /** settings.plugins.consents — per-plugin-id consent records (Winter-only extras' consent,
+       *  spec §5.4: "the extras keep their own consents"). Keyed by the SAME `"<name>@<marketplace>"`
+       *  spec `installed_plugins.json` uses. */
       consents?: Record<string, PluginConsentRecord>;
       log?: (m: string) => void;
     },
   ) {}
 
-  private consentedClasses(name: string): string[] {
-    const record = this.deps.consents?.[name];
+  private consentedClasses(key: string): string[] {
+    const record = this.deps.consents?.[key];
     if (!record) return [];
     return CONSENT_CLASSES.filter((c) => record[c] !== undefined);
   }
 
   list(): PluginInfo[] {
-    const root = join(this.deps.winterHome, "plugins");
-    let dirs: string[] = [];
-    try { dirs = readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name); } catch { return []; }
-    const enabled = this.deps.plugins?.enabled ?? [];
-    const disabled = this.deps.plugins?.disabled ?? [];
-    return dirs.map((name) => {
-      const dir = join(root, name);
+    const pluginsRoot = sdkPluginsRoot(this.deps.winterHome);
+    const installedFile = readInstalledPluginsFileSync(pluginsRoot);
+    // `sdk/settings.json`'s `enabledPlugins`, through Contract C's own live/keep-last-good reader
+    // (`settings.ts#sdkEnabledPlugins`) — the "one door" that module's own header names for this
+    // exact key (`MOVED_SETTINGS_KEYS`'s doc comment: "read by the plugin surface — lane L4").
+    const enabledPlugins = sdkEnabledPlugins(this.deps.winterHome);
+
+    const out: PluginInfo[] = [];
+    for (const [key, records] of Object.entries(installedFile.plugins)) {
+      const userRecord = records.find((r) => r.scope === "user");
+      if (!userRecord) continue; // this store reports user scope only — see the class doc above
+      const at = key.lastIndexOf("@");
+      const name = at > 0 ? key.slice(0, at) : key;
+      const dir = userRecord.installPath;
+
+      const enabled = enabledPlugins[key] === true;
+      const isDisabled = !enabled;
       let skills: string[] = [];
       try { skills = readdirSync(join(dir, "skills"), { withFileTypes: true }).filter((e) => e.isDirectory() && existsSync(join(dir, "skills", e.name, "SKILL.md"))).map((e) => e.name); } catch { /* no skills dir */ }
-      const isDisabled = disabled.includes(name);
-      const shared = { name, skills, hasMcp: existsSync(join(dir, ".mcp.json")), mcpEnabled: enabled.includes(name) && !isDisabled, disabled: isDisabled };
-      const consented = this.consentedClasses(name);
+      const shared = { name, skills, hasMcp: false, mcpEnabled: enabled, disabled: isDisabled, installPath: dir };
+      const consented = this.consentedClasses(key);
 
       const { manifest } = loadManifest(dir, name, this.deps.log);
       if (manifest) {
-        return {
+        out.push({
           ...shared,
           description: manifest.description,
-          version: manifest.version,
+          version: manifest.version ?? userRecord.version,
           tier: manifest.tier,
-          requiredConsents: requiredConsentClasses(manifest, { shipsSkills: skills.length > 0 }),
+          requiredConsents: requiredConsentClasses(manifest),
           consented,
           legacy: false,
-          hasManifestMcp: Boolean(manifest.contributes?.mcpServers?.length),
-          manifestServers: manifest.contributes?.mcpServers,
-          manifestHooks: manifest.contributes?.hooks,
-          execPayload: execPayloadLines(manifest, { skills }),
+          hasManifestMcp: false,
+          execPayload: execPayloadLines(manifest),
           tccPermissions: manifest.permissions?.tcc ?? [],
           hardwarePermissions: manifest.permissions?.hardware ?? [],
           entry: manifest.entry,
-        };
+        });
+        continue;
       }
 
       let meta: z.infer<typeof PluginManifest> = {};
-      try { meta = PluginManifest.parse(JSON.parse(readFileSync(join(dir, "plugin.json"), "utf8"))); }
-      catch { this.deps.log?.(`plugin ${name}: no/invalid plugin.json (loading anyway)`); }
-      return {
+      try {
+        const claudeManifestPath = join(dir, ".claude-plugin", "plugin.json");
+        meta = PluginManifest.parse(JSON.parse(readFileSync(existsSync(claudeManifestPath) ? claudeManifestPath : join(dir, "plugin.json"), "utf8")));
+      } catch { this.deps.log?.(`plugin ${name}: no/invalid manifest (loading anyway)`); }
+      out.push({
         ...shared,
         description: meta.description,
-        version: meta.version,
-        // A LEGACY plugin requires no consent class — enabling it has always been the user's trust
-        // decision for its code (its `.mcp.json` server), and that must not regress (controller ruling,
-        // 2026-09-23). Its skills therefore reach a session on `enabled && !disabled` alone
-        // (`pluginSkillsEligible`, `consentComplete` vacuous as before), and this whole shape stays
-        // exactly what it was. The enable flow discloses the skills itself (`enableNotice`, from
-        // `skills`), so the user is told a skill can run shell commands before it reaches a session.
+        version: meta.version ?? userRecord.version,
+        // A LEGACY (extras-less) plugin requires no consent class — enabling it (Contract B's
+        // install+enable) is already the user's trust decision for its native content (spec §5.4).
         requiredConsents: [],
         consented,
         legacy: true,
@@ -134,8 +181,9 @@ export class PluginStore {
         execPayload: [],
         tccPermissions: [],
         hardwarePermissions: [],
-      };
-    });
+      });
+    }
+    return out;
   }
 }
 
@@ -143,78 +191,61 @@ export class PluginStore {
  * True when every consent class a plugin's manifest requires (`requiredConsents`) has a matching
  * record in `consented`. Legacy plugins have `requiredConsents === []`, so this is vacuously true
  * for them — consent never gates legacy plugin content (spec: "everything above keeps working
- * unchanged"). A MANIFEST plugin that ships skills requires `exec` since 2026-09-23 (a session's
- * runtime can run a skill's shell — see `requiredConsentClasses`).
+ * unchanged").
  */
 export function consentComplete(p: PluginInfo): boolean {
   return p.requiredConsents.every((c) => p.consented.includes(c));
 }
 
 /**
- * The daemon's plugin-MCP eligibility filter (design spec §9(4a) enforcement), extracted as a
- * pure predicate so it's unit-testable without booting a daemon: explicitly enabled, not
- * disabled, some MCP content declared (legacy `.mcp.json` OR manifest `contributes.mcpServers`),
- * AND every required consent class is on record. For legacy plugins `requiredConsents` is always
- * [] so `consentComplete` is vacuously true and behavior is byte-identical to pre-4a (enable
- * alone suffices). For a manifest plugin with exec content, enabling WITHOUT a consent record
- * leaves this false — the caller (daemon.ts) is expected to log why when that happens.
+ * WS-21: always false. A plugin's MCP servers are claude-native content now (its `.mcp.json`, or a
+ * claude manifest's own `mcpServers`), loaded by both runtimes themselves (spec §5.3) — the daemon
+ * no longer starts one. Kept only so the L3-owned call sites that still read it
+ * (`daemon.ts:2018-2047`) keep compiling; see `PluginInfo.hasManifestMcp`'s own doc and the lane
+ * report's REQUEST FOR L3 to delete those dead call sites.
  */
-export function pluginMcpEligible(p: PluginInfo): boolean {
-  return p.mcpEnabled && !p.disabled && (p.hasMcp || p.hasManifestMcp) && consentComplete(p);
+export function pluginMcpEligible(_p: PluginInfo): boolean {
+  return false;
 }
 
 /**
- * The daemon's plugin-hooks eligibility filter (Phase 4f Task 2) — the SAME enabled/disabled/
- * consent shape as `pluginMcpEligible` above (a plugin declaring `contributes.hooks` requires the
- * "exec" consent class too, per plugin-manifest.ts#requiredConsentClasses, so `consentComplete`
- * gates it identically), swapping the MCP-content check (`hasMcp || hasManifestMcp`) for "has at
- * least one manifest hook declared". Legacy plugins have `manifestHooks` undefined, so this is
- * always false for them — hooks are a manifest-only concept, unlike MCP eligibility which legacy
- * plugins can satisfy via the old `.mcp.json` path.
+ * WS-21: always false — the daemon's own `HookRegistry` no longer executes plugin-contributed
+ * hooks; a plugin's hooks are claude-native `hooks/hooks.json` content, loaded by both runtimes
+ * themselves (spec §5.1/§5.3). Kept only for the same reason as `pluginMcpEligible` above.
  */
-export function pluginHooksEligible(p: PluginInfo): boolean {
-  return p.mcpEnabled && !p.disabled && Boolean(p.manifestHooks?.length) && consentComplete(p);
+export function pluginHooksEligible(_p: PluginInfo): boolean {
+  return false;
 }
 
 /**
- * Lane B (2026-09-23, review): may a SESSION load this plugin's skills? The SAME enabled/disabled/
- * consent shape as `pluginHooksEligible`, because a skill is code on a session's runtime — claude runs
- * a skill's inline `` !`cmd` `` and honours its `allowed-tools` pre-approval without asking the host
- * (router 0.0.11's `OptionsTemplatePolicy.plugins` doc records the measurement), so exposing a plugin's
- * skills is the same trust decision as running its hooks. For a MANIFEST plugin, shipped skills count
- * as the `exec` consent class (`requiredConsentClasses`), so `consentComplete` carries the user's
- * consent. For a LEGACY plugin `consentComplete` stays vacuous (controller ruling, 2026-09-23):
- * enabling it was already the user's trust decision for its code, so enabled + not disabled suffices,
- * and the enable flow discloses that its skills can run shell commands (`enableNotice`). Applied on
- * BOTH legs (`SkillStore.childSkillSurface`).
+ * WS-21: always false — a plugin's skills are claude-native content now (its `skills/` dir), loaded
+ * by both runtimes themselves in code mode (spec §5.3, "Skills appear as `plugin:skill`"); the
+ * daemon's own `SkillStore.childSkillSurface`/`<home>/cache/skill-plugins/` handover is retired
+ * (spec's "Supersedes" list, top of file). Kept only so `daemon.ts`'s own call site
+ * (`.filter(pluginSkillsEligible)`, feeding that retired handover) keeps compiling; see the lane
+ * report's REQUEST FOR L3 to delete it. `skills.list`'s OWN plugin-skill reporting (this lane's
+ * `ipc/server.ts` block) does not use this predicate — it reads the installed+enabled set directly.
  */
-export function pluginSkillsEligible(p: PluginInfo): boolean {
-  return p.mcpEnabled && !p.disabled && p.skills.length > 0 && consentComplete(p);
+export function pluginSkillsEligible(_p: PluginInfo): boolean {
+  return false;
 }
 
 /**
- * Projects a plugin list into `HookRegistry.rebuild()`'s input shape — `pluginHooksEligible`
- * filter + `{id, dir, hooks}` mapping in ONE place, shared by daemon.ts (boot-time scan) and
- * ipc/server.ts (plugin.enable/disable/remove/setConsent hot-rebuild, mirroring how those RPCs
- * already hot-apply Tier-2 spawn via `hotApplyStart`/`hotApplyStop`) so the two call sites can
- * never drift out of sync on what counts as an eligible hook-contributing plugin.
+ * Projects a plugin list into `HookRegistry.rebuild()`'s input shape. WS-21: `pluginHooksEligible`
+ * always answers false now (see its own doc), so this always returns `[]` — kept only for the
+ * `daemon.ts`/`ipc/server.ts` call sites' compile-compat.
  */
-export function hookRegistryPlugins(plugins: PluginInfo[], winterHome: string): HookRegistryPlugin[] {
+export function hookRegistryPlugins(plugins: PluginInfo[], _winterHome: string): HookRegistryPlugin[] {
   return plugins
     .filter(pluginHooksEligible)
-    .map((p) => ({ id: p.name, dir: join(winterHome, "plugins", p.name), hooks: p.manifestHooks ?? [] }));
+    .map((p) => ({ id: p.name, dir: p.installPath, hooks: [] }));
 }
 
 /**
- * The daemon's Tier-2 process-supervision eligibility filter (Phase 4b Task 3, spec §3): a
- * platform-tier manifest plugin with a declared `entry` point, explicitly enabled, not disabled,
- * and fully consented — the SAME enabled/disabled/consent shape as `pluginMcpEligible` above
- * (mcpEnabled already encodes "explicitly enabled AND not disabled" — see PluginStore#list), plus
- * the two checks that are specific to spawning a process rather than starting an MCP server:
- * `tier === "platform"` (capability-tier plugins are never spawned, regardless of what else they
- * declare) and `entry` present (nothing to spawn without one). Legacy plugins have no `tier`, so
- * this is always false for them — Tier-2 supervision is a manifest-only concept, unlike MCP
- * eligibility which legacy plugins can satisfy via the old `.mcp.json` path.
+ * The daemon's Tier-2 process-supervision eligibility filter: a platform-tier manifest plugin with a
+ * declared `entry` point, explicitly enabled, not disabled, and fully consented. UNLIKE the three
+ * predicates above, this one stays LIVE under WS-21 — a Tier-2 entry process has no claude-native
+ * equivalent; Winter's own `PluginSupervisor` is still what spawns it.
  */
 export function pluginSpawnEligible(p: PluginInfo): boolean {
   return p.tier === "platform" && p.entry !== undefined && p.mcpEnabled && !p.disabled && consentComplete(p);
