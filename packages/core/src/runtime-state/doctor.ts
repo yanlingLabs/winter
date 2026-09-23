@@ -31,6 +31,7 @@ import { describeHomePristineness } from "../migration/migrate-b";
 import { MIGRATION_B_SECRET_NAMES } from "../auth/legacy-secret-names";
 import type { SecretStore } from "../auth/secret-store";
 import { storeProjectsDir } from "../agent/paths";
+import { quarantinedRunRoots } from "./root-recovery";
 
 export type FindingKind =
   | "db-missing"
@@ -52,7 +53,11 @@ export type FindingKind =
   /** P8d-11 (the 8b M-4 obligations): §17 phase 5's memory-key manifest has `moved` rows a
    *  `memory-keys-rollback` repair could put back, or an `undoing` row a crash left mid-flight
    *  (settled by the next daemon boot, never by this tool — diagnosis never repairs by itself). */
-  | "memory-keys-migration";
+  | "memory-keys-migration"
+  /** WS-21 (spec §3.8): run folders (or staging roots) boot recovery could not prove clean — the router
+   *  copied each working transcript under `<home>/cache/quarantine/`; the root is kept and never swept
+   *  again. Nothing to repair automatically: the operator compares the copy with the session. */
+  | "run-roots-quarantined";
 
 export interface Finding {
   kind: FindingKind;
@@ -456,6 +461,17 @@ export async function diagnoseRuntimeState(home: string): Promise<Finding[]> {
           `memory-key manifest: ${moved} moved, ${planned} planned, ${rolledBack} rolled back` +
           (undoing > 0 ? `, ${undoing} mid-undo (settled by the next daemon boot, not by this tool)` : ""),
         repairable: moved > 0 ? ["memory-keys-rollback"] : [],
+      });
+    }
+
+    // WS-21 (spec §3.8): the roots boot recovery quarantined and kept. Paths only (§17: diagnostics
+    // carry counts, ids and paths).
+    const quarantined = quarantinedRunRoots(rs);
+    if (quarantined.length > 0) {
+      findings.push({
+        kind: "run-roots-quarantined",
+        detail: `${quarantined.length} run root(s) quarantined by boot recovery and kept (a copy of each working transcript is under ${join(home, "cache", "quarantine")}): ${quarantined.map((q) => q.root).join(", ")}`,
+        repairable: [],
       });
     }
 

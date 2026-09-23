@@ -89,7 +89,8 @@ import { resolveAntExecutable } from "./runtime-sdk/bundle-layout";
 import { advisorReviewerFor, familyOfModel, officialLegDefaultSessionModel } from "./runtime-sdk/advisor-reviewer";
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
 import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
-import { linkedRunHomeBuilder } from "./runtime-sdk/run-home-support";
+import { linkedRouterSupportsRunHome, linkedRunHomeBuilder, runHomeHandleOf } from "./runtime-sdk/run-home-support";
+import { recoverRunRoots, rootRecoveryDetail } from "./runtime-state/root-recovery";
 import { runHomeInputFor } from "./runtime-sdk/run-home-input";
 import { reservedMcpServerNames } from "./capabilities/names";
 import { persistedAllowRulesFor, winterGateRulesFromSdk } from "./runtime-sdk/mode-options";
@@ -545,6 +546,9 @@ export async function startDaemon(opts: {
     // WS-20 (review round 2, M5): threaded through to `migrateModelRefsToTags`'s own rule-5
     // tie-break — same presence this boot hook already computed for the settings migration above.
     presentProviders,
+    // WS-21 (spec §3.8): on a run-home router the claude staging sweep waits for the router's own
+    // reconcile (the late pass after `createWinterRuntimeSdk`, below) — nothing is deleted unreconciled.
+    ...(linkedRouterSupportsRunHome() ? { recovery: { deferClaudeResumeSweep: true } } : {}),
   });
   const runtime = runtimeStateOnline(runtimeState);
 
@@ -1221,8 +1225,15 @@ export async function startDaemon(opts: {
   // wired and every child launches exactly as before). The inputs are live: trust, `mcp.disabled`, the
   // capability-server names and the relocation-aware MEMDIR are re-read for every incarnation.
   const runHomeBuilder = linkedRunHomeBuilder();
+  // Every run folder THIS process built (the late boot sweep below never touches one). The run home
+  // itself is returned untouched — the router refuses one `buildRunHome` did not build.
+  const builtRunDirs = new Set<string>();
   const runHomeDeps: WinterLegDeps["runHome"] = runHomeBuilder === undefined ? undefined : {
-    build: runHomeBuilder,
+    build: async (input) => {
+      const built = await runHomeBuilder(input);
+      builtRunDirs.add(built.dir);
+      return built;
+    },
     inputFor: (facts) => runHomeInputFor({
       home: winterHome,
       trust: trustStore,
@@ -1362,6 +1373,37 @@ export async function startDaemon(opts: {
       console.error(`runtime-sdk: directory recovery failed (${(err as Error)?.name ?? "unknown"}) — messaging starts without it`);
       if (runtime?.lastRecovery.step10AttemptId !== undefined) {
         restampStep(runtime.db.db, runtime.lastRecovery.step10AttemptId, 10, "failed", { errorName: (err as Error)?.name ?? "unknown" });
+      }
+    }
+  }
+
+  // ── WS-21 (spec §3.8): §13 step 6 and the run-folder/staging sweeps, run late for the same reason ──
+  // `reconcileRootForRecovery` needs the router's own live store, so recorded local-write roots, leftover
+  // `<home>/cache/runs/*` folders and stale claude staging roots are reconciled HERE, before anything is
+  // deleted — clean/appended ones removed, quarantined ones kept, recorded and reported (`root-recovery.ts`).
+  // Only on a router that has the door (0.0.11 has not: step 6 stays skipped and step 8 sweeps as before).
+  // Still before `startIpcServer`, so no incarnation exists yet; bounded — a failure costs the sweep.
+  const routerRecovery = runtimeSdk === undefined ? undefined : runHomeHandleOf(runtimeSdk.sdk);
+  if (routerRecovery !== undefined && runtime !== undefined) {
+    try {
+      const recovered = await recoverRunRoots({
+        home: winterHome,
+        rs: runtime.db,
+        reconcile: (root) => routerRecovery.reconcileRootForRecovery(root),
+        isLive: (dir) => builtRunDirs.has(dir),
+        claudeResumeScanRoot: process.env.WINTER_CLAUDE_RESUME_SCAN_ROOT?.trim() || undefined,
+        log: (line) => console.error(`runtime-sdk: ${line}`),
+      });
+      const quarantined = recovered.quarantinedRoots.length;
+      if (quarantined > 0) console.error(`runtime-sdk: run-root recovery kept ${quarantined} quarantined root(s) — see \`winter doctor\``);
+      if (runtime.lastRecovery.step6AttemptId !== undefined) {
+        const failed = recovered.recorded.failed + recovered.runFolders.failed + recovered.staging.failed;
+        restampStep(runtime.db.db, runtime.lastRecovery.step6AttemptId, 6, failed === 0 ? "ok" : "partial", rootRecoveryDetail(recovered));
+      }
+    } catch (err) {
+      console.error(`runtime-sdk: run-root recovery failed (${(err as Error)?.name ?? "unknown"}) — the roots are left for the next boot`);
+      if (runtime.lastRecovery.step6AttemptId !== undefined) {
+        restampStep(runtime.db.db, runtime.lastRecovery.step6AttemptId, 6, "failed", { errorName: (err as Error)?.name ?? "unknown" });
       }
     }
   }
