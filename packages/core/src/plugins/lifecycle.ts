@@ -146,7 +146,12 @@ export function enableNotice(info: ConsentBlockPlugin & { skills?: readonly stri
  *  (defensive — `classes` normally comes straight from a plugin's own `requiredConsents`). */
 export function grantPluginConsents(settings: Settings, name: string, classes: string[], ts: number): Settings {
   const consents = { ...(settings.plugins?.consents ?? {}) };
-  const record = { ...(consents[name] ?? {}) };
+  // C1 fix round 2 widened `Settings.plugins.consents`'s value type to `unknown` (a stored record
+  // may now be the NEW `{classes,fingerprint}` shape) — this pre-WS-21 function is kept operating on
+  // its OWN original per-class-timestamp shape unchanged (see this file's header: dead from the live
+  // daemon's perspective, kept only for `index.ts`'s re-export compat), so the cast is scoped here,
+  // not a widening of what this function actually does.
+  const record: Record<string, number> = { ...(consents[name] as Record<string, number> | undefined ?? {}) };
   for (const c of classes) {
     if (c === "exec" || c === "tcc" || c === "hardware") record[c] = ts;
   }

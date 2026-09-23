@@ -9,6 +9,7 @@ import { SessionStore } from "../src/sessions/store";
 import { FileSecretStore } from "../src/auth/secret-store";
 import { TokenAuthority } from "../src/auth/tokens";
 import { PluginStore } from "../src/agent/plugins";
+import { pluginConsentFingerprint } from "../src/plugins/consent-fingerprint";
 import { ToolRegistry } from "../src/agent/tools/registry";
 import { ApprovalBroker } from "../src/agent/approvals";
 import { PermissionRules } from "../src/agent/permission-rules";
@@ -1342,7 +1343,12 @@ describe("daemon IPC", () => {
   // -----------------------------------------------------------------------------------------
   describe("hardware.request / hardware.respond (Phase 4c Task 2, spec §5)", () => {
     async function bootHardwareServer(opts: {
-      consents?: Record<string, { exec?: number; tcc?: number; hardware?: number }>;
+      // C1 fix round 2: consent is now fingerprinted (`{classes, fingerprint}`), bound to the
+      // plugin's install path + entry — this fixture's callers only ever seed CLASSES (a bare array
+      // of what to grant); the fingerprint itself is computed below, off `seedBatteryPlugin`'s own
+      // fixed `join(home, "test-mkt", id)` install path and its always-entry-less manifest (every
+      // seeded plugin here is tier "capability", never "platform"/entry).
+      consents?: Record<string, Array<"exec" | "tcc" | "hardware">>;
       timeoutMs?: number;
     } = {}): Promise<{
       store: SessionStore; socketPath: string; harnessToken: string; home: string; stop: () => void;
@@ -1373,8 +1379,22 @@ describe("daemon IPC", () => {
       // WS-21: PluginStore's consent lookup is keyed by the qualified "<id>@<marketplace>" spec
       // (installed_plugins.json's own key, F15) — every call site below still passes a bare plugin
       // id (the pre-WS-21 convention), so re-key here, once, against `seedBatteryPlugin`'s OWN fixed
-      // marketplace name ("test-mkt") rather than touch every call site.
-      const consents = Object.fromEntries(Object.entries(opts.consents ?? {}).map(([id, rec]) => [`${id}@test-mkt`, rec]));
+      // marketplace name ("test-mkt") rather than touch every call site. C1 fix round 2: the record
+      // is fingerprinted here too, off the SAME `join(home, "test-mkt", id)` path `seedBatteryPlugin`
+      // installs to and an undefined entry (these fixtures never declare a Tier-2 entry point). The
+      // dir is pre-created (mkdirSync, `seedBatteryPlugin`'s own recursive:true tolerates it existing
+      // already) so `pluginConsentFingerprint`'s `realpathSync` resolves the SAME canonical path here
+      // and later inside `PluginStore#list()` — computing it against a not-yet-existing directory
+      // would fall back to the UNRESOLVED path here while `list()` resolves the REAL one once
+      // `seedBatteryPlugin` has actually created it, a spurious mismatch that is a test-fixture
+      // ordering artifact, not anything the production code itself can hit (a plugin is always on
+      // disk before the daemon ever computes its fingerprint).
+      const consents = Object.fromEntries(
+        Object.entries(opts.consents ?? {}).map(([id, classes]) => {
+          mkdirSync(join(home, "test-mkt", id), { recursive: true });
+          return [`${id}@test-mkt`, { classes, fingerprint: pluginConsentFingerprint(join(home, "test-mkt", id), undefined) }];
+        }),
+      );
       const plugins = new PluginStore({ winterHome: home, consents });
 
       // Phase 4d-ii Task 2: `winterHome` wired (harmless for every EXISTING test here — no
@@ -1434,7 +1454,7 @@ describe("daemon IPC", () => {
     }
 
     test("no provider connected → typed no_provider (plugin caller, fully consented)", async () => {
-      const srv = await bootHardwareServer({ consents: { "battery-limiter": { hardware: Date.now() } } });
+      const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] } });
       seedBatteryPlugin(srv.home, "battery-limiter");
       const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
 
@@ -1445,7 +1465,7 @@ describe("daemon IPC", () => {
     });
 
     test("consented plugin round-trip: scripted provider answers hardware.request via hardware_requested/hardware.respond", async () => {
-      const srv = await bootHardwareServer({ consents: { "battery-limiter": { hardware: Date.now() } } });
+      const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] } });
       seedBatteryPlugin(srv.home, "battery-limiter");
       const provider = await connectProvider(srv.socketPath, srv.harnessToken);
       const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
@@ -1504,7 +1524,7 @@ describe("daemon IPC", () => {
     });
 
     test("unconsented plugin (consented, but manifest doesn't declare the battery permission) → typed consent_denied naming the missing permission class", async () => {
-      const srv = await bootHardwareServer({ consents: { "battery-limiter": { hardware: Date.now() } } });
+      const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] } });
       seedBatteryPlugin(srv.home, "battery-limiter", {}); // permissions.hardware omitted entirely
       const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
 
@@ -1523,7 +1543,7 @@ describe("daemon IPC", () => {
     });
 
     test("unknown verb from a fully consented plugin → typed unknown_verb, bypassing consent entirely", async () => {
-      const srv = await bootHardwareServer({ consents: { "battery-limiter": { hardware: Date.now() } } });
+      const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] } });
       seedBatteryPlugin(srv.home, "battery-limiter");
       const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
 
@@ -1534,7 +1554,7 @@ describe("daemon IPC", () => {
     });
 
     test("timeout: the provider is connected but never answers → typed timeout after the configured budget", async () => {
-      const srv = await bootHardwareServer({ consents: { "battery-limiter": { hardware: Date.now() } }, timeoutMs: 50 });
+      const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] }, timeoutMs: 50 });
       seedBatteryPlugin(srv.home, "battery-limiter");
       const provider = await connectProvider(srv.socketPath, srv.harnessToken);
       const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
@@ -1546,7 +1566,7 @@ describe("daemon IPC", () => {
     });
 
     test("hardware.respond from a non-provider connection is rejected; the real provider connection can respond", async () => {
-      const srv = await bootHardwareServer({ consents: { "battery-limiter": { hardware: Date.now() } } });
+      const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] } });
       seedBatteryPlugin(srv.home, "battery-limiter");
       const provider = await connectProvider(srv.socketPath, srv.harnessToken, "real-provider");
       const impostor = await TestClient.connect(srv.socketPath);
@@ -1588,7 +1608,7 @@ describe("daemon IPC", () => {
     });
 
     test("audit trail: a consented plugin's round-trip is audited with a {kind:'plugin'} requester naming the pluginId", async () => {
-      const srv = await bootHardwareServer({ consents: { "battery-limiter": { hardware: Date.now() } } });
+      const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] } });
       seedBatteryPlugin(srv.home, "battery-limiter");
       const provider = await connectProvider(srv.socketPath, srv.harnessToken);
       const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
@@ -1628,7 +1648,7 @@ describe("daemon IPC", () => {
     });
 
     test("audit trail: unknown_verb from a plugin lands an audit line with unknown_verb outcome", async () => {
-      const srv = await bootHardwareServer({ consents: { "battery-limiter": { hardware: Date.now() } } });
+      const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] } });
       seedBatteryPlugin(srv.home, "battery-limiter");
       const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
 

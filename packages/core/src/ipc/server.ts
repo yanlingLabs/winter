@@ -101,7 +101,7 @@ import type { TrustStore } from "../agent/trust";
 import type { BackgroundTaskRegistry } from "../agent/bg-registry";
 import type { SkillStore, SkillErrorKind } from "../agent/skills";
 import type { McpManager } from "../agent/mcp/manager";
-import { PluginStore, type PluginInfo, type PluginConsentRecord } from "../agent/plugins";
+import { PluginStore, type PluginInfo } from "../agent/plugins";
 import { pluginSpawnEligible, hookRegistryPlugins } from "../agent/plugins";
 import type { ToolRegistry } from "../agent/tools/registry";
 import type { PluginSupervisor, PluginConn, InvokeError, EligiblePlugin, SupervisorStatus } from "../plugins/supervisor";
@@ -133,7 +133,8 @@ import { dispatchPinMessage } from "../agent/dispatch-config";
 // `<home>/settings.json` `plugins.consents` — the one pre-WS-21 lifecycle export this block still
 // needs. Every other pre-WS-21 lifecycle export (installPluginFromDir, setPluginEnabled(Settings),
 // …) is retired here in favor of the Contract B adapter below.
-import { grantPluginConsents } from "../plugins/lifecycle";
+import { grantPluginConsents, stripPluginConsents } from "../plugins/lifecycle";
+import { consentedClassesFor, pluginConsentFingerprint } from "../plugins/consent-fingerprint";
 import {
   addMarketplace, installPlugin, listMarketplaces, listPlugins, PluginManagerError, removeMarketplace,
   setPluginEnabled as setPluginEnabledOnAdapter, uninstallPlugin, updateMarketplace, updatePlugin,
@@ -1457,8 +1458,6 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     return at > 0 ? spec.slice(0, at) : spec;
   }
 
-  const PLUGIN_CONSENT_CLASSES = ["exec", "tcc", "hardware"] as const;
-
   /** I1 fix round 1: `plugin.list`'s `extras` — winter-plugin.json's tier/permissions/entry plus
    *  the SAME consent-completeness pair `agent/plugins.ts#PluginStore` computes (requiredConsents
    *  from the manifest, consented from `<home>/settings.json`'s `plugins.consents`, keyed by the
@@ -1466,8 +1465,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
    *  when the plugin has no winter-plugin.json (matches `PluginInfo.legacy`'s own "no manifest"
    *  case). Scope-independent: `plugins.consents` is Winter's own daemon-level store (spec §4.1,
    *  "stays"), not tied to which sdk file the enabled flag lives in, so this works the same for a
-   *  project/local-scope listing as it does for user scope. */
-  function pluginExtrasFor(installPath: string, id: string, consentRecord: PluginConsentRecord | undefined): {
+   *  project/local-scope listing as it does for user scope.
+   *
+   *  C1 fix round 2: `consented` is gated on the stored record's fingerprint matching a FRESH one
+   *  computed off `installPath` + the manifest's OWN entry right now — the SAME gate
+   *  `agent/plugins.ts#PluginStore` applies at boot/enable time (`plugins/consent-fingerprint.ts`),
+   *  so a folder swap under the same spec, or an edited entry, reads as unconsented here too. */
+  function pluginExtrasFor(installPath: string, id: string, consentRecord: unknown): {
     tier: "capability" | "platform";
     permissions?: { exec?: boolean; tcc?: string[]; hardware?: string[] };
     requiredConsents: Array<"exec" | "tcc" | "hardware">;
@@ -1476,7 +1480,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   } | undefined {
     const { manifest } = loadManifest(installPath, id);
     if (!manifest) return undefined;
-    const consented = PLUGIN_CONSENT_CLASSES.filter((c) => consentRecord?.[c] !== undefined);
+    const fingerprint = pluginConsentFingerprint(installPath, manifest.entry);
+    const consented = consentedClassesFor(consentRecord, fingerprint);
     return {
       tier: manifest.tier,
       ...(manifest.permissions ? { permissions: manifest.permissions } : {}),
@@ -2670,7 +2675,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const listed = await listPlugins(pluginManagerOptionsFor(opts.winterHome, p.cwd));
         // I1 fix round 1: `extras` over the wire — lane L5's Mac app consent UI needs
         // tier/permissions/requiredConsents/consented/entry, not just Contract B's bare listing.
-        let consents: Record<string, PluginConsentRecord> = {};
+        let consents: Record<string, unknown> = {};
         try {
           consents = loadSettings(join(opts.winterHome, "settings.json")).plugins?.consents ?? {};
         } catch { /* degrade to "nothing consented" rather than fail the whole list */ }
@@ -2713,7 +2718,19 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           throwPluginManagerFailure(err);
         }
         invalidateLivePluginsCache();
-        if (!stillLive) hotApplyStop(pluginNameOfSpec(p.spec));
+        if (!stillLive) {
+          hotApplyStop(pluginNameOfSpec(p.spec));
+          // C1 fix round 2: the last scope of this spec is gone — its consent record must go too,
+          // or a later reinstall under the SAME spec (a different folder, spec's own scenario)
+          // would find a stale record whose fingerprint just happens to still be checked against
+          // fresh install-path/entry data. Fingerprint gating alone already covers a folder swap
+          // that keeps the OLD scope's record around; this covers the "nothing installed under this
+          // spec at all" case, where there is no install left to fingerprint against.
+          try {
+            const settingsPath = join(opts.winterHome, "settings.json");
+            saveSettings(settingsPath, stripPluginConsents(loadSettings(settingsPath), p.spec));
+          } catch { /* best effort — a consent-clear failure never unwinds the already-committed uninstall */ }
+        }
         return { ok: true, spec: p.spec, scope: p.scope };
       }
       case METHODS.pluginEnable: {

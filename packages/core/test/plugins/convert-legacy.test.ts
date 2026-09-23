@@ -10,6 +10,7 @@ import { convertLegacyPlugins } from "../../src/plugins/convert-legacy";
 import { listPlugins } from "../../src/plugins/sdk-plugin-api";
 import { sdkHomeFor, sdkPluginsRoot } from "../../src/agent/paths";
 import { PluginStore } from "../../src/agent/plugins";
+import { pluginConsentFingerprint } from "../../src/plugins/consent-fingerprint";
 
 function home(): string {
   return mkdtempSync(join(tmpdir(), "winter-convert-legacy-"));
@@ -97,9 +98,13 @@ describe("convertLegacyPlugins: maps fields and hook events; the original stays 
 
     // Consent record re-keyed to the qualified spec, same file, same field — I3 fix round 1: `exec`
     // is DROPPED (pre-WS-21 it was granted because the plugin shipped skills, which enabling a
-    // plugin now covers, spec §5.4); `tcc`/`hardware` carry forward unchanged.
+    // plugin now covers, spec §5.4); `tcc`/`hardware` carry forward unchanged. C1 fix round 2: the
+    // carried-forward record is now FINGERPRINTED (`{classes, fingerprint}`), computed off the
+    // converted install path + the SAME entry the narrowed winter-plugin.json ended up with — so it
+    // reads as consented from the start, never forcing a needless re-consent right after migration.
     const settings = JSON.parse(readFileSync(join(h, "settings.json"), "utf8"));
-    expect(settings.plugins.consents).toEqual({ "demo@winter-legacy": { tcc: 222, hardware: 333 } });
+    const demoFingerprint = pluginConsentFingerprint(targetDir, { command: "bun", args: ["index.ts"] });
+    expect(settings.plugins.consents).toEqual({ "demo@winter-legacy": { classes: ["tcc", "hardware"], fingerprint: demoFingerprint } });
 
     // PluginStore (the daemon's own sync reader) sees the converted, enabled plugin with its
     // extras — `consented` no longer includes "exec", so the entry process prompts fresh.
@@ -123,18 +128,21 @@ describe("convertLegacyPlugins: maps fields and hook events; the original stays 
       plugins: { enabled: ["solo"], consents: { solo: { exec: 999, tcc: 111, hardware: 222 } } },
     }));
 
-    await convertLegacyPlugins(h);
+    const result = await convertLegacyPlugins(h);
+    const targetDir = result.converted[0]!.installPath;
 
     const settings = JSON.parse(readFileSync(join(h, "settings.json"), "utf8"));
-    expect(settings.plugins.consents).toEqual({ "solo@winter-legacy": { tcc: 111, hardware: 222 } });
-    expect(settings.plugins.consents["solo@winter-legacy"]).not.toHaveProperty("exec");
+    const soloFingerprint = pluginConsentFingerprint(targetDir, { command: "bun" });
+    expect(settings.plugins.consents).toEqual({ "solo@winter-legacy": { classes: ["tcc", "hardware"], fingerprint: soloFingerprint } });
+    expect(settings.plugins.consents["solo@winter-legacy"].classes).not.toContain("exec");
   });
 
-  // I3 / M5: a consent record with ONLY `exec` (no tcc/hardware) converts to an EMPTY record, never
-  // dropped from the map entirely (a present-but-empty record is still "no exec consent on file",
-  // distinct from "never consented at all" — PluginStore#consentedClasses reads either the same way,
-  // but keeping the key means a future re-grant of tcc/hardware finds a record to merge onto).
-  test("a consent record with only exec becomes an empty record for the qualified spec", async () => {
+  // I3 / M5: a consent record with ONLY `exec` (no tcc/hardware) converts to an EMPTY classes array,
+  // never dropped from the map entirely (a present-but-empty record is still "no exec consent on
+  // file", distinct from "never consented at all" — PluginStore#consentedClasses reads either the
+  // same way, but keeping the key means a future re-grant of tcc/hardware finds a record to merge
+  // onto). C1 fix round 2: still carries a fingerprint even with `classes: []`.
+  test("a consent record with only exec becomes an empty classes array for the qualified spec", async () => {
     const h = home();
     legacyPlugin(h, "onlyexec", { id: "onlyexec", tier: "platform", entry: { command: "bun" }, permissions: { exec: true } });
     writeFileSync(join(h, "settings.json"), JSON.stringify({
@@ -142,10 +150,12 @@ describe("convertLegacyPlugins: maps fields and hook events; the original stays 
       plugins: { enabled: ["onlyexec"], consents: { onlyexec: { exec: 1 } } },
     }));
 
-    await convertLegacyPlugins(h);
+    const result = await convertLegacyPlugins(h);
+    const targetDir = result.converted[0]!.installPath;
 
     const settings = JSON.parse(readFileSync(join(h, "settings.json"), "utf8"));
-    expect(settings.plugins.consents).toEqual({ "onlyexec@winter-legacy": {} });
+    const onlyExecFingerprint = pluginConsentFingerprint(targetDir, { command: "bun" });
+    expect(settings.plugins.consents).toEqual({ "onlyexec@winter-legacy": { classes: [], fingerprint: onlyExecFingerprint } });
   });
 
   test("a plugin NOT in the legacy enabled list converts but stays disabled", async () => {

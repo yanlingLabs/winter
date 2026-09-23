@@ -7,7 +7,7 @@
 // enable/disable/update/list/marketplace.*), role-rejection, and scope resolution, with a FAKE
 // supervisor spawn (no real OS process) — same split precedent server.test.ts's own header notes.
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@yanlinglabs/winter-protocol";
@@ -18,6 +18,7 @@ import { TokenAuthority } from "../../src/auth/tokens";
 import { ToolRegistry } from "../../src/agent/tools/registry";
 import { PluginSupervisor } from "../../src/plugins/supervisor";
 import { sdkPluginsRoot, sdkSettingsPath } from "../../src/agent/paths";
+import { pluginConsentFingerprint } from "../../src/plugins/consent-fingerprint";
 
 class TestClient {
   private decoder = new LineDecoder();
@@ -160,6 +161,112 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
       permissions: { exec: true, tcc: ["accessibility"], hardware: ["battery"] },
       requiredConsents: ["exec", "tcc", "hardware"],
       consented: ["exec", "tcc"],
+    });
+  });
+
+  // C1 fix round 2 (Opus review of L5, two Critical consent holes): consent must be bound to WHAT
+  // WAS DISCLOSED -- the plugin's real install path plus its entry command/args -- never just the
+  // qualified spec name. These tests write `plugins.consents[spec]` directly (`plugin.setConsent`'s
+  // own RPC still writes the OLD, pre-C2 shape until the next commit lands) so the fingerprint gate
+  // in `agent/plugins.ts`/`ipc/server.ts#pluginExtrasFor` is exercised in isolation.
+  describe("C1: consent is bound to the fingerprint of what was disclosed", () => {
+    function writeConsent(home: string, spec: string, record: unknown): void {
+      const settingsPath = join(home, "settings.json");
+      const settings = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : { schemaVersion: 3 };
+      settings.plugins = { ...(settings.plugins ?? {}), consents: { ...(settings.plugins?.consents ?? {}), [spec]: record } };
+      writeFileSync(settingsPath, JSON.stringify(settings));
+    }
+
+    test("a matching fingerprint reads as consented", async () => {
+      const { home, c } = await boot();
+      const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-c1-match-"));
+      writeMarketplace(mktDir);
+      await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+      await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+
+      writeConsent(home, "p@m", {
+        classes: ["exec"],
+        fingerprint: pluginConsentFingerprint(mktDir, { command: "bun", args: ["--version"] }),
+      });
+
+      const listRes = await c.request(METHODS.pluginList, {});
+      expect(listRes.result.plugins[0].extras.consented).toEqual(["exec"]);
+    });
+
+    test("reinstalling the same spec from a different folder invalidates the old consent", async () => {
+      const { home, c } = await boot();
+      const mktDirA = mkdtempSync(join(tmpdir(), "winter-plugin-c1-reinstall-a-"));
+      writeMarketplace(mktDirA);
+      await c.request(METHODS.pluginMarketplaceAdd, { source: mktDirA });
+      await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+      writeConsent(home, "p@m", {
+        classes: ["exec"],
+        fingerprint: pluginConsentFingerprint(mktDirA, { command: "bun", args: ["--version"] }),
+      });
+      expect((await c.request(METHODS.pluginList, {})).result.plugins[0].extras.consented).toEqual(["exec"]);
+
+      // Same marketplace NAME ("m"), a DIFFERENT folder -- addMarketplace re-points "m" at mktDirB,
+      // exactly the ruling's own scenario (folder A's "node a.js" consent must not cover folder B's
+      // "sh payload.sh").
+      const mktDirB = mkdtempSync(join(tmpdir(), "winter-plugin-c1-reinstall-b-"));
+      writeMarketplace(mktDirB, { id: "p", tier: "platform", entry: { command: "sh", args: ["payload.sh"] } });
+      await c.request(METHODS.pluginMarketplaceAdd, { source: mktDirB });
+      await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+
+      const listRes = await c.request(METHODS.pluginList, {});
+      expect(listRes.result.plugins[0].installPath).toBe(mktDirB);
+      expect(listRes.result.plugins[0].extras.consented).toEqual([]);
+    });
+
+    test("editing the entry in place invalidates the old consent", async () => {
+      const { home, c } = await boot();
+      const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-c1-edit-"));
+      writeMarketplace(mktDir);
+      await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+      await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+      writeConsent(home, "p@m", {
+        classes: ["exec"],
+        fingerprint: pluginConsentFingerprint(mktDir, { command: "bun", args: ["--version"] }),
+      });
+      expect((await c.request(METHODS.pluginList, {})).result.plugins[0].extras.consented).toEqual(["exec"]);
+
+      // Same install path, EDITED entry command -- a directory marketplace is read live, in place.
+      writeFileSync(join(mktDir, "winter-plugin.json"), JSON.stringify({
+        id: "p", tier: "platform", entry: { command: "sh", args: ["payload.sh"] },
+      }));
+
+      const listRes = await c.request(METHODS.pluginList, {});
+      expect(listRes.result.plugins[0].extras.consented).toEqual([]);
+    });
+
+    test("a legacy bare-array consent value reads as not consented", async () => {
+      const { home, c } = await boot();
+      const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-c1-legacy-"));
+      writeMarketplace(mktDir);
+      await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+      await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+      writeConsent(home, "p@m", ["exec", "tcc"]); // the pre-fix bare-array shape
+
+      const listRes = await c.request(METHODS.pluginList, {});
+      expect(listRes.result.plugins[0].extras.consented).toEqual([]);
+    });
+
+    test("uninstalling the last scope clears the stored consent", async () => {
+      const { home, c } = await boot();
+      const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-c1-uninstall-"));
+      writeMarketplace(mktDir);
+      await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+      await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+      writeConsent(home, "p@m", {
+        classes: ["exec"],
+        fingerprint: pluginConsentFingerprint(mktDir, { command: "bun", args: ["--version"] }),
+      });
+      expect((await c.request(METHODS.pluginList, {})).result.plugins[0].extras.consented).toEqual(["exec"]);
+
+      await c.request(METHODS.pluginUninstall, { spec: "p@m", scope: "user" });
+
+      const settings = JSON.parse(readFileSync(join(home, "settings.json"), "utf8"));
+      expect(settings.plugins?.consents?.["p@m"]).toBeUndefined();
     });
   });
 

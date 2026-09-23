@@ -17,6 +17,7 @@ import {
   type SupervisedProcess,
 } from "../../src/plugins/supervisor";
 import { PluginContribRegistry } from "../../src/plugins/contrib";
+import { pluginConsentFingerprint } from "../../src/plugins/consent-fingerprint";
 import { AuditLog } from "../../src/peripheral/audit";
 import { PeripheralBroker } from "../../src/peripheral/broker";
 import { ProviderLink } from "../../src/peripheral/provider-link";
@@ -146,12 +147,20 @@ export function realSpawn(cmd: string[], opts: { cwd: string; env: Record<string
  *  `installBatteryLimiter` (needs `pluginId`'s own marketplace-qualified key, see `pluginSpecFor`). */
 export function writeAndLoadSettings(home: string, pluginId: string, opts?: { hardwareConsent?: boolean }): Settings {
   const key = pluginSpecFor(pluginId);
-  const consent: { exec: number; hardware?: number } = { exec: Date.now() };
-  if (opts?.hardwareConsent) consent.hardware = Date.now();
+  const classes: string[] = ["exec"];
+  if (opts?.hardwareConsent) classes.push("hardware");
+  // C1 fix round 2: the record is now fingerprinted (`{classes, fingerprint}`), bound to the
+  // plugin's real install path — re-derived here off the SAME `EXAMPLE_MARKETPLACE_PREFIX`
+  // convention `installExample` uses for `dest` (this function's own doc: must run AFTER
+  // installSampleEcho/installBatteryLimiter, so that directory already exists) — plus its entry;
+  // every example plugin these fixtures install is tier "platform" with the identical
+  // `{command:"bun", args:["index.ts"]}` entry (examples/sample-echo, examples/battery-limiter).
+  const installPath = join(home, `${EXAMPLE_MARKETPLACE_PREFIX}${pluginId}`);
+  const fingerprint = pluginConsentFingerprint(installPath, { command: "bun", args: ["index.ts"] });
   writeFileSync(join(home, "settings.json"), JSON.stringify({
     schemaVersion: 3,
     provider: { model: "codex-oauth/gpt-5.4" }, // unused (nothing here constructs a real provider) but required by the settings schema
-    plugins: { consents: { [key]: consent } },
+    plugins: { consents: { [key]: { classes, fingerprint } } },
   }));
   writeFileSync(sdkSettingsPath(home), JSON.stringify({ enabledPlugins: { [key]: true } }));
   return loadSettings(join(home, "settings.json"));
