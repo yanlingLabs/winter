@@ -628,6 +628,10 @@ export const GLOBAL_READ_ALLOW_RULES: readonly string[] = ["Read", "Glob", "Grep
  *   `BashUnsandboxed(…)`               → `Bash(…)`. claude has no separate rule: `dangerouslyDisableSandbox`
  *                                       only removes the sandbox's auto-allow, and rules then decide
  *                                       (lane C's parity ruling — see `sandboxConfigFor`'s last note).
+ *                                       TRUE ON THE OFFICIAL LEG TODAY; on the Winter leg only once agent
+ *                                       SDK 0.0.18 is pinned — the pinned 0.0.17 makes an escape a
+ *                                       MANDATORY interaction (`permissions/evaluator.ts`, "RULING P3-J"),
+ *                                       so there a saved rule does not yet decide one.
  *   `Edit`                             → `Edit` + `Write` (Winter's rule covered both; the agent SDK
  *                                       matches a bare rule's tool name literally).
  *   `Edit(<abs dir>)`                  NOT forwarded: Winter's writable-DIRECTORY declaration, which never
@@ -801,6 +805,10 @@ export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSett
     // P8b-31's always-card): the flag only removes the SANDBOX'S auto-allow, so the call goes through
     // the ordinary pipeline — deny/ask rules, the permission mode, allow rules (the persisted ones
     // included, `persistedAllowRulesFor`), then the approval bridge — exactly like any other command.
+    // That is what the OFFICIAL leg does today (it is claude). The Winter leg follows only once agent
+    // SDK 0.0.18 is pinned: the pinned 0.0.17 still treats an escape as a MANDATORY interaction
+    // (`permissions/evaluator.ts`, "RULING P3-J" — a card in code, a deny under `dont-ask`), so a saved
+    // rule does not decide one there yet.
   };
 }
 
