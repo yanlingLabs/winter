@@ -89,6 +89,9 @@ import { resolveAntExecutable } from "./runtime-sdk/bundle-layout";
 import { advisorReviewerFor, familyOfModel, officialLegDefaultSessionModel } from "./runtime-sdk/advisor-reviewer";
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
 import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
+import { linkedRunHomeBuilder } from "./runtime-sdk/run-home-support";
+import { runHomeInputFor } from "./runtime-sdk/run-home-input";
+import { reservedMcpServerNames } from "./capabilities/names";
 import { persistedAllowRulesFor, winterGateRulesFromSdk } from "./runtime-sdk/mode-options";
 import { configuredMcpServersFor } from "./runtime-sdk/external-mcp";
 import { planBridgeFor, type PlanBridge } from "./runtime-sdk/plan-bridge";
@@ -1214,10 +1217,40 @@ export async function startDaemon(opts: {
    *  that key, so the keying must not be the driver's to get wrong). */
   const buildSessionCapabilities = (session: CapabilitySession): CapabilityServerRecord =>
     buildCapabilitiesFor(session, capabilityDeps);
+  // WS-21 (spec §3.1, Contract A): the per-run folder every incarnation awaits — ONLY when the linked
+  // router exports `buildRunHome` (feature detection; router 0.0.11 does not, and then nothing here is
+  // wired and every child launches exactly as before). The inputs are live: trust, `mcp.disabled`, the
+  // capability-server names and the relocation-aware MEMDIR are re-read for every incarnation.
+  const runHomeBuilder = linkedRunHomeBuilder();
+  const runHomeDeps: WinterLegDeps["runHome"] = runHomeBuilder === undefined ? undefined : {
+    build: runHomeBuilder,
+    inputFor: (facts) => runHomeInputFor({
+      home: winterHome,
+      trust: trustStore,
+      settings: () => settings,
+      reservedMcpServerNames: [...reservedMcpServerNames()],
+      memoryDirFor: (cwd) => memoryDirOf(cwd),
+    }, facts),
+  };
+
   try {
     runtimeSdk = await createWinterRuntimeSdk({
       home: winterHome,
       settings: () => settings, // LIVE holder, never a boot snapshot
+      // WS-21 (spec §3.1): a run-home router is created with `requireRunHome: true` and this builder
+      // for its OWN cold-resume path. Absent (router 0.0.11) — the router is created as before.
+      ...(runHomeDeps === undefined ? {} : {
+        runHomeFor: async (ctx) => {
+          let origin: string | undefined;
+          let workdirLess = false;
+          try {
+            const meta = store.meta(ctx.sessionId);
+            origin = meta.origin;
+            workdirLess = (meta.cwd ?? store.dirs(ctx.sessionId)[0]?.path) === undefined;
+          } catch { /* an unknown session: the router refuses it on its own */ }
+          return runHomeDeps.build(runHomeDeps.inputFor({ mode: ctx.mode, dispatchChild: origin === "dispatch-child", leg: ctx.leg, cwd: ctx.cwd, workdirLess }));
+        },
+      }),
       secrets,
       directoryStore: runtime?.directory,
       // EMPTY ON PURPOSE (P8b-36) — this list is handle-wide and construction-time, which is
@@ -1614,6 +1647,8 @@ export async function startDaemon(opts: {
   const supportedAgentsCache = new SupportedAgentsCache();
   const winterDrivers: WinterSessionDrivers = createWinterSessionDrivers({
     home: winterHome,
+    // WS-21: every incarnation's run home, when the linked router applies them (see `runHomeDeps`).
+    ...(runHomeDeps === undefined ? {} : { runHome: runHomeDeps }),
     profile: process.env.WINTER_PROFILE,
     settings: () => settings, // LIVE holder
     runtime: runtimeSdk,

@@ -88,7 +88,9 @@ function mergedAgentDefinitions(
 import type { AgentRegistry } from "../agent/bg-agent-registry";
 import type { ContextAssembler } from "../agent/context";
 import type { SkillStore } from "../agent/skills";
-import { startWinterSession, unconsumedUserMessages, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
+import { startWinterSession, unconsumedUserMessages, withRunHome, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
+import type { RunHome, RunHomeInput } from "./run-home-contract";
+import type { RunHomeSessionFacts } from "./run-home-input";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import { startOfficialSession, type OfficialSession } from "./official-session";
 import { officialAuthArmFor, OfficialConsoleProfileMissing, OfficialConsoleRouterUnsupported, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
@@ -368,6 +370,18 @@ export interface WinterLegDeps {
    * an explicit parameter, inert unless a caller supplies one.
    */
   officialConnectionOverride?: () => { explicitConnectionEnv?: Readonly<Record<string, string>>; authFamily?: RuntimeSelection["authFamily"] } | undefined;
+  /**
+   * WS-21 (spec §3.1): present ONLY when the linked router applies run homes (`daemon.ts` wires it
+   * from `linkedRunHomeBuilder()`; a test injects a stub). Then EVERY incarnation on either leg —
+   * create, resume, eviction, a policy switch across the bypass boundary, a model switch — awaits
+   * `build(inputFor(facts))` and hands the result to the router as `runtime.runHome`: the Winter leg
+   * in `optionsFor` (built LAST, after every refusal), the official leg in its session's `open()`.
+   * Absent (router 0.0.11): no run home, and every child is launched exactly as before.
+   */
+  runHome?: {
+    build: (input: RunHomeInput) => Promise<RunHome>;
+    inputFor: (facts: RunHomeSessionFacts) => RunHomeInput;
+  };
 }
 
 export interface WinterSessionDrivers {
@@ -778,7 +792,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       if (digestModel !== undefined && selection !== undefined && digestProviderId !== undefined && digestProviderId !== selection.providerId) {
         deps.log?.(`pins.research: this session runs on ${selection.providerId} and its WebFetch digest runs on ${digestProviderId} — that provider's own credential pays for it`);
       }
-      return buildWinterOptions({
+      const options = buildWinterOptions({
         mode,
         policy: live.approvalPolicy,
         origin: live.origin,
@@ -836,6 +850,14 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // WS-21: the user tier's allow and deny rules, read live from `sdk/settings.json` (claude grammar).
         ...userRulesFrom(home),
       });
+      // WS-21 (spec §3.1): LAST, so a refusal above never leaves a run folder behind. The router's Winter
+      // overload reads `options.runtime.runHome` and applies it synchronously; `WinterSession` disposes it
+      // when the incarnation ends (or at once, if the open fails before the child iterates).
+      if (deps.runHome === undefined) return options;
+      const runHome = await deps.runHome.build(deps.runHome.inputFor({
+        mode, dispatchChild: live.origin === "dispatch-child", leg: "winter", cwd, workdirLess: primary === undefined,
+      }));
+      return withRunHome(options, runHome);
     };
 
     const projectorFor = (inc: WinterIncarnation): Projector =>
@@ -1163,10 +1185,21 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         },
       });
 
+    // WS-21 (spec §3.1): the official leg's run home, built inside its session's `open()` for every
+    // incarnation (the SAME live session facts `sessionInput()` answers, on this leg).
+    const runHomeDeps = deps.runHome;
+    const runHomeForOpen = runHomeDeps === undefined ? undefined : async (): Promise<RunHome> => {
+      const input = sessionInput();
+      return runHomeDeps.build(runHomeDeps.inputFor({
+        mode, dispatchChild: input.origin === "dispatch-child", leg: "official", cwd: input.cwd, workdirLess: input.primary === undefined,
+      }));
+    };
+
     const session = startOfficialSession({
       sessionId, backendSessionId, mode, runtime, selection,
       sessionInput,
       inputDeps,
+      ...(runHomeForOpen === undefined ? {} : { runHome: runHomeForOpen }),
       projector: projectorFor,
       append,
       broadcast: (event) => { deps.hub.broadcastTransient(sessionId, event); },

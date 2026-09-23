@@ -84,7 +84,7 @@ class FakeQuery {
 
 const result = (): Frame => ({ type: "result", subtype: "success", is_error: false, permission_denials: [], result: "" });
 
-function table(overrides: Partial<WinterLegDeps> = {}, runtimeExtra: Record<string, unknown> = {}) {
+function table(overrides: Partial<WinterLegDeps> = {}, runtimeExtra: Record<string, unknown> = {}, wrapSdk?: (sdk: ReturnType<typeof createRuntimeSdk>) => ReturnType<typeof createRuntimeSdk>) {
   const home = mkdtempSync(join(tmpdir(), "winter-table-"));
   const store = new SessionStore(home);
   const hub = new SessionHub(store);
@@ -102,7 +102,7 @@ function table(overrides: Partial<WinterLegDeps> = {}, runtimeExtra: Record<stri
   });
   const tracked: string[] = [];
   const runtime = {
-    sdk,
+    sdk: wrapSdk === undefined ? sdk : wrapSdk(sdk),
     spawnHookFor: () => ({ pathToClaudeCodeExecutable: join(home, "winter-fake") }),
     trackQuery: (sid: string) => { tracked.push(sid); },
     untrack: () => {},
@@ -1009,5 +1009,161 @@ describe("role efforts on the runtime leg (pins.dispatch, and provider.model's d
         await second?.end();
       } finally { t.close(); }
     });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// WS-21 L3.3 (spec §3.1, Contract A): every incarnation awaits a run home — when the linked router
+// applies them. The router here is the published 0.0.11 (no `buildRunHome`), so the builder is a stub
+// injected through `WinterLegDeps.runHome`, and `sdk.query` is observed directly (0.0.11 strips
+// `runtime` before the peer, as a run-home router applies it).
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describe("WS-21: run homes on the Winter leg (stubbed router builder)", () => {
+  function stubRunHomes() {
+    const built: import("../../src/runtime-sdk/run-home-contract").RunHomeInput[] = [];
+    const disposed: string[] = [];
+    const facts: import("../../src/runtime-sdk/run-home-input").RunHomeSessionFacts[] = [];
+    const runHome: NonNullable<WinterLegDeps["runHome"]> = {
+      inputFor: (f) => {
+        facts.push(f);
+        return { home: "/h", mode: f.mode, dispatchChild: f.dispatchChild, leg: f.leg, cwd: f.cwd, trustedProjectRoot: null, gitRoot: null, mcpDisabled: [], reservedMcpServerNames: [], memoryDir: "/m" };
+      },
+      build: async (input) => {
+        built.push(input);
+        const runId = `run-${built.length}`;
+        return {
+          runId, dir: `/h/cache/runs/${runId}`, sdkHome: "/h/sdk", input, effectiveSettings: {},
+          report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [] },
+          dispose: async () => { disposed.push(runId); },
+        };
+      },
+    };
+    return { built, disposed, facts, runHome };
+  }
+  const querySpy = () => {
+    const calls: Array<{ options: Options & { runtime?: { runHome?: { runId: string } } } }> = [];
+    let failNext = false;
+    const wrap = (sdk: ReturnType<typeof createRuntimeSdk>) => new Proxy(sdk, {
+      get(target, prop, receiver) {
+        if (prop !== "query") return Reflect.get(target, prop, receiver);
+        return (args: { prompt: AsyncIterable<string>; options: Options }) => {
+          calls.push(args as never);
+          if (failNext) { failNext = false; throw new Error("run_home_required (simulated router refusal)"); }
+          return target.query(args as never);
+        };
+      },
+    });
+    return { calls, wrap, failOnce: () => { failNext = true; } };
+  };
+  const settle = async (disposed: string[], n: number): Promise<void> => {
+    const until = Date.now() + 2000;
+    while (disposed.length < n && Date.now() < until) await Bun.sleep(5);
+  };
+
+  test("optionsFor awaits buildRunHome and passes the result as options.runtime.runHome", async () => {
+    const rh = stubRunHomes();
+    const spy = querySpy();
+    const t = table({ runHome: rh.runHome }, {}, spy.wrap);
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const session = await t.drivers.create(sid);
+      expect(rh.built).toHaveLength(1);
+      expect(spy.calls).toHaveLength(1);
+      expect(spy.calls[0]!.options.runtime?.runHome?.runId).toBe("run-1");
+      expect(rh.built[0]!.leg).toBe("winter");
+      expect(rh.built[0]!.cwd).toBe(spy.calls[0]!.options.cwd!); // the router refuses a run home for another cwd
+      // L3.3 leaves the old defaults in place (L3.4 drops them only when the router applies run homes).
+      expect(spy.calls[0]!.options.env?.WINTER_HOME).toBe(t.home);
+      expect(spy.calls[0]!.options.settingSources).toEqual([]);
+      await session.end();
+    } finally { t.close(); }
+  });
+
+  test("a router without buildRunHome (no runHome dep) builds nothing and keeps WINTER_HOME and settingSources: []", async () => {
+    const spy = querySpy();
+    const t = table({}, {}, spy.wrap);
+    try {
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", approvalPolicy: "ask" });
+      const session = await t.drivers.create(sid);
+      expect("runtime" in spy.calls[0]!.options).toBe(false);
+      expect(spy.calls[0]!.options.env?.WINTER_HOME).toBe(t.home);
+      expect(spy.calls[0]!.options.settingSources).toEqual([]);
+      await session.end();
+    } finally { t.close(); }
+  });
+
+  test("the session facts: mode, dispatchChild (origin dispatch-child), workdir-less", async () => {
+    const rh = stubRunHomes();
+    const t = table({ runHome: rh.runHome });
+    try {
+      const chat = await t.drivers.create(t.store.createSession("t", { mode: "chat", model: "winter-test/echo" }));
+      const child = await t.drivers.create(t.store.createSession("t", { mode: "code", model: "winter-test/echo", approvalPolicy: "ask", origin: "dispatch-child" }));
+      expect(rh.facts.map((f) => [f.mode, f.dispatchChild, f.leg])).toEqual([["chat", false, "winter"], ["code", true, "winter"]]);
+      expect(rh.facts[1]!.workdirLess).toBe(true); // no cwd, no dirs: the session tmp dir
+      await chat.end();
+      await child.end();
+    } finally { t.close(); }
+  });
+
+  test("EVERY incarnation path builds a fresh run home: create, resume after an idle end, eviction and replacement", async () => {
+    const rh = stubRunHomes();
+    const spy = querySpy();
+    const t = table({ runHome: rh.runHome }, {}, spy.wrap);
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const session = await t.drivers.create(sid);                       // create
+      expect(rh.built).toHaveLength(1);
+      await session.end();                                               // the incarnation ends (resumable)…
+      await (await t.drivers.ensure(sid))!.open();                        // …resume
+      expect(rh.built).toHaveLength(2);
+      await t.drivers.evict(sid);                                         // eviction (a credential write, a
+      await (await t.drivers.ensure(sid))!.open();                        //  policy switch across bypass,
+      expect(rh.built).toHaveLength(3);                                   //  a cross-family model switch)
+      t.store.setModel(sid, "winter-test/tooluse");                       // a model change while parked…
+      await t.drivers.evict(sid);
+      await (await t.drivers.ensure(sid))!.open();                        // …reaches the next incarnation
+      expect(rh.built).toHaveLength(4);
+      expect(new Set(spy.calls.map((c) => c.options.runtime?.runHome?.runId)).size).toBe(4); // never reused
+      await t.drivers.evict(sid);
+    } finally { t.close(); }
+  });
+
+  test("an ended incarnation's run home is disposed when the router says safe (the Winter leg is safe by construction)", async () => {
+    const rh = stubRunHomes();
+    const t = table({ runHome: rh.runHome });
+    try {
+      const session = await t.drivers.create(t.store.createSession("t", { mode: "chat", model: "winter-test/echo" }));
+      expect(rh.disposed).toEqual([]);
+      await session.end();
+      await settle(rh.disposed, 1);
+      expect(rh.disposed).toEqual(["run-1"]);
+    } finally { t.close(); }
+  });
+
+  test("pending keeps the folder (recovery's to settle); quarantined disposes it", async () => {
+    for (const [outcome, expected] of [["pending", []], ["quarantined", ["run-1"]]] as const) {
+      const rh = stubRunHomes();
+      const t = table({ runHome: rh.runHome }, { runHomeOutcome: () => outcome });
+      try {
+        const session = await t.drivers.create(t.store.createSession("t", { mode: "chat", model: "winter-test/echo" }));
+        await session.end();
+        await settle(rh.disposed, expected.length);
+        await Bun.sleep(20);
+        expect(rh.disposed).toEqual([...expected]);
+      } finally { t.close(); }
+    }
+  });
+
+  test("a run home built for an open that then FAILS is disposed immediately", async () => {
+    const rh = stubRunHomes();
+    const spy = querySpy();
+    const t = table({ runHome: rh.runHome }, {}, spy.wrap);
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      spy.failOnce();
+      await expect(t.drivers.create(sid)).rejects.toThrow(/could not be started/); // the driver's own wording
+      expect(rh.built).toHaveLength(1);
+      expect(rh.disposed).toEqual(["run-1"]);
+    } finally { t.close(); }
   });
 });
