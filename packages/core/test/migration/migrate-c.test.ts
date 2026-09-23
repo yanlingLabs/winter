@@ -363,6 +363,56 @@ describe("review I6: phase 2 per transcript", () => {
   });
 });
 
+// Round 3, minor 3: move-dirs records a move only when it PROVABLY happened — the intent is written before
+// the rename and checked after it. The old "the target has files, so it must be this move's" guess stopped
+// being true once I1 let the new build's own content sit in a target.
+describe("round 3, minor 3: move-dirs never claims a move that did not happen", () => {
+  test("the new build's content in a target with no old directory is never recorded as moved (nor linked, nor carried back by rollback)", async () => {
+    const { home } = fixture();
+    mkdirSync(join(home, "sdk", "output-styles"), { recursive: true });
+    writeFileSync(join(home, "sdk", "output-styles", "mine.md"), "x");       // the new build wrote it; no old dir
+    const m = await runMigrationC(home, deps({ reconcile: stubReconcile().reconcile }));
+    expect(m.moved.map((mv) => mv.from)).not.toContain("output-styles");
+    expect(existsSync(join(home, "output-styles"))).toBe(false);
+    await rollbackMigrationC(home, { log: () => {} });
+    expect(existsSync(join(home, "sdk", "output-styles", "mine.md"))).toBe(true);   // left where the new build put it
+    expect(existsSync(join(home, "output-styles"))).toBe(false);
+  });
+
+  const inProgress = (home: string, moving: { from: string; to: string }) => {
+    const archiveDir = join(home, "migration", "c-test");
+    mkdirSync(archiveDir, { recursive: true });
+    writeFileSync(migrationCManifestPath(home), JSON.stringify({
+      schemaVersion: 1, home, startedAt: new Date(0).toISOString(), status: "in-progress", archiveDir,
+      steps: [{ step: "preflight", status: "done", at: new Date(0).toISOString() }],
+      backups: { settings: null, runtimeState: null, sdkSettings: null, sdkGlobal: null, splitMarker: null },
+      moved: [], links: [], copied: [], archived: [], reconciled: [], moving,
+    }));
+  };
+
+  test("a crash AFTER the rename (the intent recorded, the old path gone) is recorded on resume, then linked", async () => {
+    const { home } = fixture();
+    mkdirSync(join(home, "migration", "c"), { recursive: true });
+    inProgress(home, { from: "skills", to: "sdk/skills" });
+    renameSync(join(home, "skills"), join(home, "sdk", "skills"));
+    const m = await runMigrationC(home, deps({ reconcile: stubReconcile().reconcile }));
+    expect(m.moved).toContainEqual({ from: "skills", to: "sdk/skills" });
+    expect(m.moving).toBeUndefined();
+    expect(lstatSync(join(home, "skills")).isSymbolicLink()).toBe(true);
+    await rollbackMigrationC(home, { log: () => {} });
+    expect(existsSync(join(home, "skills", "self", "deploy", "SKILL.md"))).toBe(true);
+  });
+
+  test("a crash BEFORE the rename (the intent recorded, the old path still there) simply moves it", async () => {
+    const { home } = fixture();
+    mkdirSync(join(home, "migration", "c"), { recursive: true });
+    inProgress(home, { from: "skills", to: "sdk/skills" });
+    const m = await runMigrationC(home, deps({ reconcile: stubReconcile().reconcile }));
+    expect(m.moved.filter((mv) => mv.from === "skills")).toEqual([{ from: "skills", to: "sdk/skills" }]);
+    expect(existsSync(join(home, "sdk", "skills", "self", "deploy", "SKILL.md"))).toBe(true);
+  });
+});
+
 describe("review M4: the archive's crash window", () => {
   test("an item renamed into the archive before the manifest recorded it is found, recorded, and restored by rollback", async () => {
     const { home } = fixture();
