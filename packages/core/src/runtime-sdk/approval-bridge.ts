@@ -8,6 +8,7 @@ import { parseRule } from "../agent/permission-rules";
 import type { Mode as SessionMode } from "../agent/tools/registry";
 import { repoRootFor } from "../agent/memory-dir";
 import { protectedPathsFor, protectedWriteDecision } from "./protected-paths";
+import { bashProtectedWriteHit } from "./hooks";
 import { privateAddressRefusal } from "../agent/tools/web";
 import { gateClassFor, gateToolNameFor, WINTER_OWN_TOOL_NAMES } from "./tool-names";
 import { controlPlaneTargetForCall, controlPlaneDenialMessage } from "./control-plane";
@@ -611,7 +612,12 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     // sensitive-file check swallowed arrives here as a plain request). Checked on the INPUT itself, never
     // on `ctx.matchedAskRule`/`blockedPath`. Narrows only: a gate `deny` stays a deny; `dont-ask`, which
     // declines everything it would card, declines this too; chat and dispatch reach (6)'s typed deny.
-    const protectedWrite = deps.home !== undefined && protectedWriteDecision(toolName, input, {
+    // Fix round 2: …and a Bash command writing under any `.winter/{skills,commands,rules,output-styles,
+    // agents}` (the path-fence Bash hook's own detector) — the seatbelt cannot fence those off the walk.
+    const protectedBashWrite = classificationName === "bash" && typeof input === "object" && input !== null
+      && typeof (input as Record<string, unknown>).command === "string"
+      && bashProtectedWriteHit((input as Record<string, unknown>).command as string) !== undefined;
+    const protectedWrite = protectedBashWrite || deps.home !== undefined && protectedWriteDecision(toolName, input, {
       mode: "code", cwd: deps.cwd ?? "",
       protected: protectedPathsFor(deps.home, deps.cwd && deps.projectTrusted?.() === true ? repoRootFor(deps.cwd) : null, { cwd: deps.cwd ?? "/" }),
     }) !== null;
