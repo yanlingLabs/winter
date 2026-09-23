@@ -95,17 +95,57 @@ describe("convertLegacyPlugins: maps fields and hook events; the original stays 
     const listing = await listPlugins(options);
     expect(listing).toEqual([{ id: "demo", installPath: targetDir, scope: "user", enabled: true, marketplace: "winter-legacy" }]);
 
-    // Consent record re-keyed to the qualified spec, same file, same field.
+    // Consent record re-keyed to the qualified spec, same file, same field — I3 fix round 1: `exec`
+    // is DROPPED (pre-WS-21 it was granted because the plugin shipped skills, which enabling a
+    // plugin now covers, spec §5.4); `tcc`/`hardware` carry forward unchanged.
     const settings = JSON.parse(readFileSync(join(h, "settings.json"), "utf8"));
-    expect(settings.plugins.consents).toEqual({ "demo@winter-legacy": { exec: 111, tcc: 222, hardware: 333 } });
+    expect(settings.plugins.consents).toEqual({ "demo@winter-legacy": { tcc: 222, hardware: 333 } });
 
-    // PluginStore (the daemon's own sync reader) sees the converted, enabled plugin with its extras.
+    // PluginStore (the daemon's own sync reader) sees the converted, enabled plugin with its
+    // extras — `consented` no longer includes "exec", so the entry process prompts fresh.
     const store = new PluginStore({ winterHome: h, consents: settings.plugins.consents });
     const [info] = store.list();
     expect(info?.name).toBe("demo");
     expect(info?.tier).toBe("platform");
     expect(info?.disabled).toBe(false);
-    expect(info?.consented).toEqual(["exec", "tcc", "hardware"]);
+    expect(info?.consented).toEqual(["tcc", "hardware"]);
+  });
+
+  // I3 fix round 1 (ruling): the legacy `exec` consent is DROPPED during conversion, never
+  // re-keyed — before WS-21 it was granted because a plugin shipped skills, and enabling a plugin
+  // now covers that (spec §5.4, native content needs no separate Winter consent). `tcc`/`hardware`
+  // carry forward untouched.
+  test("a converted legacy plugin with exec consent has NONE after conversion, and keeps its tcc/hardware consents", async () => {
+    const h = home();
+    legacyPlugin(h, "solo", { id: "solo", tier: "platform", entry: { command: "bun" }, permissions: { exec: true, tcc: ["accessibility"], hardware: ["battery"] } });
+    writeFileSync(join(h, "settings.json"), JSON.stringify({
+      schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
+      plugins: { enabled: ["solo"], consents: { solo: { exec: 999, tcc: 111, hardware: 222 } } },
+    }));
+
+    await convertLegacyPlugins(h);
+
+    const settings = JSON.parse(readFileSync(join(h, "settings.json"), "utf8"));
+    expect(settings.plugins.consents).toEqual({ "solo@winter-legacy": { tcc: 111, hardware: 222 } });
+    expect(settings.plugins.consents["solo@winter-legacy"]).not.toHaveProperty("exec");
+  });
+
+  // I3 / M5: a consent record with ONLY `exec` (no tcc/hardware) converts to an EMPTY record, never
+  // dropped from the map entirely (a present-but-empty record is still "no exec consent on file",
+  // distinct from "never consented at all" — PluginStore#consentedClasses reads either the same way,
+  // but keeping the key means a future re-grant of tcc/hardware finds a record to merge onto).
+  test("a consent record with only exec becomes an empty record for the qualified spec", async () => {
+    const h = home();
+    legacyPlugin(h, "onlyexec", { id: "onlyexec", tier: "platform", entry: { command: "bun" }, permissions: { exec: true } });
+    writeFileSync(join(h, "settings.json"), JSON.stringify({
+      schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
+      plugins: { enabled: ["onlyexec"], consents: { onlyexec: { exec: 1 } } },
+    }));
+
+    await convertLegacyPlugins(h);
+
+    const settings = JSON.parse(readFileSync(join(h, "settings.json"), "utf8"));
+    expect(settings.plugins.consents).toEqual({ "onlyexec@winter-legacy": {} });
   });
 
   test("a plugin NOT in the legacy enabled list converts but stays disabled", async () => {
