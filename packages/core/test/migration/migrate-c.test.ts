@@ -4,7 +4,7 @@
 // selection_json. The router's reconcile is a stub here (its real outcomes are L2's, proven at R.2).
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -93,6 +93,20 @@ describe("preflight", () => {
     const recycled = { alive: () => true, startedAt: () => "2026-09-23T09:99:00.000Z" };
     const m = await runMigrationC(home, deps({ probe: recycled }));
     expect(m.status).toBe("phase1-complete");
+  });
+
+  test("review I4: an UNKNOWN lease identity refuses too (never proven stale), and so does an unreadable store", async () => {
+    const a = fixture();
+    const rs = openRuntimeStateDb(a.home);
+    rs.db.run("UPDATE runtime_generations SET lease_holder_pid = 4242, lease_holder_started_at = '2026-09-23T00:00:00.000Z', lease_renewed_at = 't' WHERE winter_session_id = 's_2'");
+    rs.close();
+    const unknownIdentity = { alive: () => true, startedAt: () => "unknown" };
+    await expect(runMigrationC(a.home, deps({ probe: unknownIdentity }))).rejects.toMatchObject({ code: "sdk_home_migration_refused" });
+    const b = fixture();
+    writeFileSync(join(b.home, "runtimes", "runtime-state.db"), "not a database at all");
+    for (const suffix of ["-wal", "-shm"]) rmSync(join(b.home, "runtimes", `runtime-state.db${suffix}`), { force: true });
+    await expect(runMigrationC(b.home, deps())).rejects.toMatchObject({ code: "sdk_home_migration_refused" });
+    expect(lstatSync(join(b.home, "projects")).isSymbolicLink()).toBe(false);
   });
 
   test("without a reconcile door, an official working copy with content refuses the whole migration", async () => {

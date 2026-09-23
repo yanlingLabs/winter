@@ -163,21 +163,29 @@ function sdkPreflightProblem(home: string): string | undefined {
   return undefined;
 }
 
-/** A live transcript lease anywhere in runtime-state: pid running AND start identity matching. */
-function liveLease(home: string, probe: LeaseProbe | undefined): string | undefined {
+/**
+ * A transcript lease that is not PROVEN stale, anywhere in runtime-state — review I4: `live` (pid running
+ * AND start identity matching) or `unknown` (alive, identity unestablished — never broken by the lease
+ * code itself, so never assumed dead here). A store that cannot be read at all refuses too: fail closed.
+ */
+function leaseProblem(home: string, probe: LeaseProbe | undefined): string | undefined {
   if (!existsSync(join(home, "runtimes", "runtime-state.db"))) return undefined;
   let rs;
-  try { rs = openRuntimeStateDb(home, { readonly: true }); } catch { return undefined; }
+  try { rs = openRuntimeStateDb(home, { readonly: true }); } catch (err) {
+    return `runtime-state.db cannot be read (${(err as Error).name}) — its transcript leases cannot be checked; repair it first (\`winter doctor\`)`;
+  }
   try {
     const leases = new RuntimeLeases(rs, { pid: process.pid, startedAt: "unknown" });
     const ids = rs.db.query<{ id: string }, []>("SELECT DISTINCT winter_session_id AS id FROM runtime_generations WHERE lease_holder_pid IS NOT NULL AND lease_released_at IS NULL").all();
     for (const { id } of ids) {
       const lease = leases.holder(id);
-      if (lease && leases.revalidate(lease, probe) === "live") return id;
+      if (lease === undefined) continue;
+      const verdict = leases.revalidate(lease, probe);
+      if (verdict !== "stale") return `session ${id} holds a transcript lease that is ${verdict === "live" ? "live" : "not provably stale"} — stop it first`;
     }
     return undefined;
-  } catch {
-    return undefined;
+  } catch (err) {
+    return `runtime-state.db's transcript leases cannot be read (${(err as Error).name}) — repair it first (\`winter doctor\`)`;
   } finally {
     rs.close();
   }
@@ -186,8 +194,8 @@ function liveLease(home: string, probe: LeaseProbe | undefined): string | undefi
 /** Why phase 1 cannot run on this home, or `undefined`. Every check that can refuse runs BEFORE the
  *  first byte moves. */
 export function migrationCPreflightProblem(home: string, deps: Pick<MigrationCDeps, "reconcileAvailable" | "convertLegacyPlugins" | "probe">): string | undefined {
-  const lease = liveLease(home, deps.probe);
-  if (lease !== undefined) return `session ${lease} holds a live transcript lease — stop it first`;
+  const lease = leaseProblem(home, deps.probe);
+  if (lease !== undefined) return lease;
   const sdk = sdkPreflightProblem(home);
   if (sdk !== undefined) return sdk;
   if (!deps.reconcileAvailable) {
