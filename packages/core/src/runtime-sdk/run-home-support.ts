@@ -43,24 +43,30 @@ export function runHomeHandleOf(sdk: unknown): RouterRunHomeHandle | undefined {
 }
 
 /**
- * THE INCARNATION-END DISPOSAL RULE (spec §3.8, r3), one function for both legs:
- *  - `safe` → the router reconciled (or there was nothing to reconcile) — dispose the folder;
- *  - `quarantined` → the router already copied the working copy to `<home>/cache/quarantine/` —
- *    the folder is disposable too;
- *  - `pending`/unknown → KEEP it: an exit the router has not settled is recovery's to reconcile
- *    (`reconcileRootForRecovery` at the next boot), never a delete here.
- * `winterLegSafe`: the Winter leg writes the canonical store directly and has no working copy, so a
- * router that cannot answer (no outcome door) still makes its run home safe by construction; the
- * official leg is never disposed without an answer.
+ * THE INCARNATION-END DISPOSAL RULE (spec §3.8, r3; L2 fix round 1), one function for both legs: dispose
+ * ONLY when the router says `safe` — on the official leg its exit reconcile found the working copy clean
+ * (or appended it); on the Winter leg the query finished, was closed or failed (it reports `pending`
+ * while the child runs, and for a query nobody iterated). Everything else KEEPS the folder:
+ *  - `quarantined` → the router copied the working copy under `<home>/cache/quarantine/`; the folder is
+ *    kept and handed to `onQuarantined` (the daemon records it, so the boot sweep never re-reconciles
+ *    it and `winter doctor` reports it);
+ *  - `pending` / no answer → recovery's to reconcile at the next boot (`reconcileRootForRecovery`),
+ *    never a delete here.
+ * A query that threw before it was created records nothing: that open disposes through
+ * `disposeFailedRunHome` instead.
  */
 export async function settleRunHome(
   runHome: RunHome,
   outcome: RunHomeOutcome | undefined,
-  opts: { winterLegSafe: boolean; log?: (line: string) => void },
+  opts: { log?: (line: string) => void; onQuarantined?: (dir: string) => void } = {},
 ): Promise<"disposed" | "kept"> {
-  const effective = outcome ?? (opts.winterLegSafe ? "safe" : "pending");
-  if (effective === "pending") {
-    opts.log?.(`run home ${runHome.runId} kept: the router has not settled its exit (recovery reconciles it)`);
+  if (outcome !== "safe") {
+    if (outcome === "quarantined") {
+      try { opts.onQuarantined?.(runHome.dir); } catch { /* bounded: the record is evidence, never a dependency */ }
+      opts.log?.(`run home ${runHome.runId} kept: the router quarantined its working copy (see \`winter doctor\`)`);
+    } else {
+      opts.log?.(`run home ${runHome.runId} kept: the router has not settled its exit (recovery reconciles it)`);
+    }
     return "kept";
   }
   try {
@@ -70,6 +76,24 @@ export async function settleRunHome(
     return "kept";
   }
   return "disposed";
+}
+
+/**
+ * What a run home's builder did NOT do, as one log line (spec §8: surfaced, never silent) — every
+ * `RunHome.report` field, `skippedAgents` included (L2 fix round 1). Paths, server names and reasons
+ * only. `undefined` for a report with nothing in it.
+ */
+export function runHomeReportSummary(runHome: RunHome): string | undefined {
+  const r = runHome.report;
+  const parts: string[] = [];
+  if (r.skippedLinks.length > 0) parts.push(`skipped links: ${r.skippedLinks.map((l) => `${l.path} (${l.reason})`).join(", ")}`);
+  if (r.externalUserLinks.length > 0) parts.push(`links outside the shared home: ${r.externalUserLinks.join(", ")}`);
+  if (r.droppedMcpServers.length > 0) parts.push(`MCP servers dropped: ${r.droppedMcpServers.map((m) => `${m.name} (${m.reason})`).join(", ")}`);
+  if (r.unconditionalRules.length > 0) parts.push(`rules without paths (always loaded): ${r.unconditionalRules.join(", ")}`);
+  if (r.droppedImports.length > 0) parts.push(`@imports dropped (outside the project): ${r.droppedImports.join(", ")}`);
+  const skippedAgents = r.skippedAgents ?? [];
+  if (skippedAgents.length > 0) parts.push(`agents not copied: ${skippedAgents.map((a) => `${a.path} (${a.reason})`).join(", ")}`);
+  return parts.length === 0 ? undefined : `run home ${runHome.runId}: ${parts.join("; ")}`;
 }
 
 /** A run home whose open FAILED is disposed at once (spec §3.8 r3: nothing ran on it). Never throws. */

@@ -1033,7 +1033,7 @@ describe("WS-21: run homes on the Winter leg (stubbed router builder)", () => {
         const runId = `run-${built.length}`;
         return {
           runId, dir: `/h/cache/runs/${runId}`, sdkHome: "/h/sdk", input, effectiveSettings: {},
-          report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [] },
+          report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [] },
           dispose: async () => { disposed.push(runId); },
         };
       },
@@ -1128,20 +1128,24 @@ describe("WS-21: run homes on the Winter leg (stubbed router builder)", () => {
     } finally { t.close(); }
   });
 
-  test("an ended incarnation's run home is disposed when the router says safe (the Winter leg is safe by construction)", async () => {
+  test("an ended incarnation's run home is disposed once the router says safe (after the query drained or closed)", async () => {
     const rh = stubRunHomes();
-    const t = table({ runHome: rh.runHome });
+    let ended = false;
+    // L2 fix round 1 (M6): the router reports a Winter run home `pending` while the child runs and `safe`
+    // once the query finished, was closed or failed — the stub answers the same way.
+    const t = table({ runHome: rh.runHome }, { runHomeOutcome: () => (ended ? "safe" : "pending") });
     try {
       const session = await t.drivers.create(t.store.createSession("t", { mode: "chat", model: "winter-test/echo" }));
       expect(rh.disposed).toEqual([]);
+      ended = true;
       await session.end();
       await settle(rh.disposed, 1);
       expect(rh.disposed).toEqual(["run-1"]);
     } finally { t.close(); }
   });
 
-  test("pending keeps the folder (recovery's to settle); quarantined disposes it", async () => {
-    for (const [outcome, expected] of [["pending", []], ["quarantined", ["run-1"]]] as const) {
+  test("pending, quarantined and no answer all KEEP the folder — dispose only on safe (L2 fix round 1)", async () => {
+    for (const [outcome, expected] of [["pending", []], ["quarantined", []], [undefined, []]] as const) {
       const rh = stubRunHomes();
       const t = table({ runHome: rh.runHome }, { runHomeOutcome: () => outcome });
       try {
@@ -1177,7 +1181,7 @@ describe("WS-21: the driver stops building run-home inputs once a run home is ap
     inputFor: (f) => ({ home: "/h", mode: f.mode, dispatchChild: f.dispatchChild, leg: f.leg, cwd: f.cwd, trustedProjectRoot: null, gitRoot: null, mcpDisabled: [], reservedMcpServerNames: [], memoryDir: "/m" }),
     build: async (input) => ({
       runId: "r", dir: "/h/cache/runs/r", sdkHome: "/h/sdk", input, effectiveSettings: {},
-      report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [] },
+      report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [] },
       dispose: async () => {},
     }),
   };

@@ -1315,7 +1315,7 @@ describe("D1-8 — the P9c-1/P10a assertions on a RESUMED official init", () => 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // WS-21 L3.3 (spec §3.1, §3.8): the official leg awaits its run home inside `open()`, passes it as
 // `runtime.runHome` beside the selection, drops the Winter-owned spool (the router refuses the pair),
-// and disposes it only when the router says `safe` (or `quarantined`) — never on a bare exit.
+// and disposes it only when the router says `safe` — never on a bare exit, a quarantine or no answer.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 describe("WS-21: the official leg's run home", () => {
   const stubRunHome = () => {
@@ -1327,7 +1327,7 @@ describe("WS-21: the official leg's run home", () => {
         runId, dir: `/h/cache/runs/${runId}`, sdkHome: "/h/sdk",
         input: { home: "/h", mode: "code" as const, dispatchChild: false, leg: "official" as const, cwd: "/repo", trustedProjectRoot: null, gitRoot: null, mcpDisabled: [], reservedMcpServerNames: [], memoryDir: "/m" },
         effectiveSettings: {},
-        report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [] },
+        report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [] },
         dispose: async () => { disposed.push(runId); },
       };
     };
@@ -1364,7 +1364,9 @@ describe("WS-21: the official leg's run home", () => {
     await h.session.end();
   });
 
-  for (const [outcome, expected] of [["safe", ["orun-1"]], ["quarantined", ["orun-1"]], ["pending", []], [undefined, []]] as const) {
+  // L2 fix round 1: dispose ONLY on `safe`. A quarantined folder is kept (the router copied its working
+  // copy; the daemon records it so recovery never re-reconciles it).
+  for (const [outcome, expected] of [["safe", ["orun-1"]], ["quarantined", []], ["pending", []], [undefined, []]] as const) {
     test(`an ended incarnation's run home is ${expected.length ? "disposed" : "KEPT"} when the router says ${String(outcome)}`, async () => {
       const rh = stubRunHome();
       const h = harness({ runHome: rh.build }, { runHomeOutcome: () => outcome });

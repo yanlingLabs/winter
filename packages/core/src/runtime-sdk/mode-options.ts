@@ -1,4 +1,4 @@
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
   AgentDefinition, CanUseTool, CredentialRef, EffortLevel, McpServerConfig, Options, PermissionMode, ProviderConnectionConfig,
@@ -9,6 +9,7 @@ import { EXA_API_KEY_SECRET } from "../agent/tools/search";
 import { approvedProjectRulesDir, homeCacheDir, sdkHomeFor, trustRecordFile } from "../agent/paths";
 import { repoRootFor } from "../agent/memory-dir";
 import { PROTECTED_ITEM_DIRS } from "./run-home-contract";
+import { projectWalk } from "./project-walk";
 import { parseRule } from "../agent/permission-rules";
 import { WINTER_ROUTER_OWNED_ENV } from "./run-home-contract";
 import { keychainService } from "../profile";
@@ -839,7 +840,12 @@ function projectSandboxDenyWrite(cwd: string): string[] {
   for (const base of new Set([cwd, root])) {
     for (const f of ["mcp.json", "settings.json", "settings.local.json", "agents", ...PROTECTED_ITEM_DIRS]) out.push(join(base, ".winter", f));
   }
-  return out;
+  // …and the protected item directories of every directory BETWEEN them (L2 fix round 1, I2: a run home
+  // loads a nested project dir's items, so its protection covers the same walk). `$HOME` and above never.
+  for (const dir of projectWalk(cwd, root, homedir())) {
+    for (const kind of PROTECTED_ITEM_DIRS) out.push(join(dir, ".winter", kind));
+  }
+  return [...new Set(out)];
 }
 
 export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSettingsConfig {
@@ -1116,7 +1122,10 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
   }
   if (input.effort !== undefined) options.effort = input.effort;
   if (input.systemPrompt !== undefined) options.systemPrompt = input.systemPrompt;
-  if (input.outputStyle !== undefined) options.outputStyle = input.outputStyle;
+  // WS-21 (L2 fix round 1, M1): beside a run home the router REFUSES a caller's `outputStyle` (with
+  // `plugins`, `skills`, `agents` and `brand` — `RUN_HOME_DECIDED_OPTIONS`); the run folder's effective
+  // settings carry it.
+  if (input.outputStyle !== undefined && input.runHomeApplied !== true) options.outputStyle = input.outputStyle;
   if (bypassAllowedAtSpawn(input.policy)) options.allowDangerouslySkipPermissions = true;
   if (input.hooks !== undefined) options.hooks = input.hooks;
   const provider = input.model !== undefined ? providerFor(input.model, input.home) : undefined;

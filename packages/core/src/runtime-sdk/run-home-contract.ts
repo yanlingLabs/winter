@@ -4,7 +4,7 @@
 // names, every import of this file switches to `@yanlinglabs/winter-runtime-sdk`.
 //
 // Types and constants only, mirrored field for field from L2's final Contract A (`ws21/router` at
-// 53784ad: `src/run-home/{types,errors}.ts`, the lane-L2 report's "final signatures"). The functions —
+// aa5201e, fix round 1: `src/run-home/{types,errors}.ts`, the lane-L2 report's "final signatures"). The functions —
 // `buildRunHome`, `sdkHomeOf`, `fsRootAnchored`, `protectedPathRules` — are the router's; the daemon
 // reaches `buildRunHome` only through feature detection (`run-home-support.ts`), and uses its own
 // `fsRootAnchored` (`mode-options.ts`, ledger ruling 2).
@@ -54,6 +54,9 @@ export interface RunHomeReport {
   droppedMcpServers: { name: string; reason: "disabled" | "reserved-name" }[];
   unconditionalRules: string[];
   droppedImports: string[];
+  /** Agent definitions not copied (L2 fix round 1, I1): the runtime's own frontmatter parse failed, the
+   *  rewrite could not be proved to read back as intended, or the process has no `Bun.YAML`. */
+  skippedAgents: { path: string; reason: "unparseable" | "no-yaml-parser" }[];
 }
 
 export interface RunHome {
@@ -80,7 +83,7 @@ export const PROTECTED_ITEM_DIRS = ["skills", "commands", "rules", "output-style
 export const RUN_HOME_ERROR_CODES = [
   "run_home_required", "run_home_foreign", "run_home_leg_mismatch", "run_home_cwd_mismatch",
   "run_home_brand_mismatch", "run_home_store_mismatch", "run_home_link_refused", "run_home_staging_not_bare",
-  "setting_sources_refused", "router_owned_variable", "run_home_for_missing", "loop_refused",
+  "setting_sources_refused", "router_owned_variable", "run_home_option_refused", "run_home_for_missing", "loop_refused",
 ] as const;
 export type RunHomeErrorCode = (typeof RUN_HOME_ERROR_CODES)[number];
 
@@ -97,6 +100,14 @@ export function isRunHomeError(err: unknown): err is Error & { code: RunHomeErro
  * never state one then.
  */
 export const WINTER_ROUTER_OWNED_ENV = ["WINTER_HOME", "WINTER_STORE_HOME", "WINTER_PLUGIN_CACHE_DIR", "WINTER_PROVIDER_MANAGED_BY_HOST", "WINTER_DISABLE_CRON"] as const;
+
+/**
+ * The options a run home DECIDES (L2 fix round 1, M1): beside a run home, both legs refuse a caller's
+ * `plugins`, `skills`, `agents`, `outputStyle` or `brand` (`run_home_option_refused`) — they come from
+ * the run folder's items and effective settings, or from the router itself (the brand). The official
+ * template's `policy.agents` is gone too.
+ */
+export const RUN_HOME_DECIDED_OPTIONS = ["plugins", "skills", "agents", "outputStyle", "brand"] as const;
 
 /** Bumped when a field a host reads changes meaning. */
 export const RUN_HOME_CONTRACT_VERSION = 1;

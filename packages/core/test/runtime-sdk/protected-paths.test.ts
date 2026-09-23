@@ -5,14 +5,14 @@
 //   a write    code → a card under every policy; chat and dispatch → a typed deny
 //
 // The set is pinned against the LITERAL list spec §7.2 names, spelled the way L2's
-// `protectedPathRules` (`winter-runtime-sdk` `src/run-home/types.ts` at 53784ad) spells it — claude's
+// `protectedPathRules` (`winter-runtime-sdk` `src/run-home/types.ts` at aa5201e, fix round 1 adds the walk) spells it — claude's
 // absolute form, `//` + the absolute path, built with the daemon's own `fsRootAnchored` (ruling 2).
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  protectedPathsFor, protectedReadDenial, protectedWriteDecision, storeWriteDenial,
+  projectWalk, protectedPathsFor, protectedReadDenial, protectedWriteDecision, storeWriteDenial,
 } from "../../src/runtime-sdk/protected-paths";
 
 const real = (p: string): string => realpathSync(mkdtempSync(join(tmpdir(), p)));
@@ -44,7 +44,39 @@ describe("protectedPathsFor — spec §7.2's literal set, in claude's absolute s
     expect(set).not.toContain("//Users/x/code/app/WINTER.md");
   });
 
-  test("as Edit/Write rules it is exactly the router's protectedPathRules output (hand mirror at 53784ad)", () => {
+  test("with a walk: every directory from the cwd up to the trusted root, nearest first (L2 fix round 1, I2)", () => {
+    expect(protectedPathsFor("/Users/x/.winter", "/Users/x/code/app", { cwd: "/Users/x/code/app/packages/web", userHome: "/Users/x" })).toEqual([
+      "//Users/x/.winter/sdk/skills/**",
+      "//Users/x/.winter/sdk/commands/**",
+      "//Users/x/.winter/sdk/rules/**",
+      "//Users/x/.winter/sdk/output-styles/**",
+      "//Users/x/.winter/sdk/WINTER.md",
+      "//Users/x/code/app/packages/web/.winter/skills/**",
+      "//Users/x/code/app/packages/web/.winter/commands/**",
+      "//Users/x/code/app/packages/web/.winter/rules/**",
+      "//Users/x/code/app/packages/web/.winter/output-styles/**",
+      "//Users/x/code/app/packages/.winter/skills/**",
+      "//Users/x/code/app/packages/.winter/commands/**",
+      "//Users/x/code/app/packages/.winter/rules/**",
+      "//Users/x/code/app/packages/.winter/output-styles/**",
+      "//Users/x/code/app/.winter/skills/**",
+      "//Users/x/code/app/.winter/commands/**",
+      "//Users/x/code/app/.winter/rules/**",
+      "//Users/x/code/app/.winter/output-styles/**",
+    ]);
+  });
+
+  test("the walk stops at $HOME, and is empty when the cwd lies outside the root (the router's projectWalk)", () => {
+    expect(projectWalk("/Users/x/code/app/a", "/Users/x/code/app", "/Users/x")).toEqual(["/Users/x/code/app/a", "/Users/x/code/app"]);
+    expect(projectWalk("/Users/x/notes", "/Users/x", "/Users/x")).toEqual(["/Users/x/notes"]);   // $HOME itself never
+    expect(projectWalk("/Users/x", "/Users/x", "/Users/x")).toEqual([]);
+    expect(projectWalk("/elsewhere", "/Users/x/code/app", "/Users/x")).toEqual([]);
+    expect(projectWalk("/Users/x/code/app", null, "/Users/x")).toEqual([]);
+    // a trusted root at $HOME protects nothing of its own tier
+    expect(protectedPathsFor("/h", "/Users/x", { cwd: "/Users/x", userHome: "/Users/x" })).toHaveLength(5);
+  });
+
+  test("as Edit/Write rules it is exactly the router's protectedPathRules output (hand mirror at aa5201e, no walk)", () => {
     const rules = ["Edit", "Write"].flatMap((t) => protectedPathsFor("/h", "/r").map((p) => `${t}(${p})`));
     const routerMirror = ["Edit", "Write"].flatMap((t) => [
       "//h/sdk/skills/**", "//h/sdk/commands/**", "//h/sdk/rules/**", "//h/sdk/output-styles/**", "//h/sdk/WINTER.md",
@@ -81,6 +113,12 @@ describe("protectedWriteDecision", () => {
 
   test("an .envrc-named protected file is still an ask (claude's own sensitive-file check must not swallow it — F16)", () => {
     expect(protectedWriteDecision("Write", { file_path: `${root}/.winter/skills/x/.envrc` }, { mode: "code", protected: set, cwd: root })).toEqual({ decision: "ask" });
+  });
+
+  test("a nested project dir on the walk is protected like the root's", () => {
+    const walkSet = protectedPathsFor(home, root, { cwd: `${root}/packages/web`, userHome: "/Users/x" });
+    expect(protectedWriteDecision("Write", { file_path: `${root}/packages/web/.winter/skills/a/SKILL.md` }, { mode: "code", protected: walkSet, cwd: root })).toEqual({ decision: "ask" });
+    expect(protectedWriteDecision("Write", { file_path: `${root}/packages/api/.winter/skills/a/SKILL.md` }, { mode: "code", protected: walkSet, cwd: root })).toBeNull(); // not on the walk
   });
 
   test("a relative target resolves against the cwd", () => {

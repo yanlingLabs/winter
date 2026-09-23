@@ -613,7 +613,7 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     // declines everything it would card, declines this too; chat and dispatch reach (6)'s typed deny.
     const protectedWrite = deps.home !== undefined && protectedWriteDecision(toolName, input, {
       mode: "code", cwd: deps.cwd ?? "",
-      protected: protectedPathsFor(deps.home, deps.cwd && deps.projectTrusted?.() === true ? repoRootFor(deps.cwd) : null),
+      protected: protectedPathsFor(deps.home, deps.cwd && deps.projectTrusted?.() === true ? repoRootFor(deps.cwd) : null, { cwd: deps.cwd ?? "/" }),
     }) !== null;
     if (protectedWrite && decision === "allow") {
       log.info(`canUseTool: escalate session=${deps.sessionId} tool=${toolName} reason=protected-path`);

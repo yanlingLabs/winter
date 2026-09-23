@@ -150,7 +150,13 @@ export interface WinterSessionRecords {
   bumpGeneration(winterSessionId: string, input: { runtimeKind: "winter-agent"; backendSessionId: string }): { generation: number };
   endGeneration(winterSessionId: string, generation: number, endReason: string): void;
   transition(winterSessionId: string, to: RuntimeSessionState): unknown;
-  get(winterSessionId: string): { state: RuntimeSessionState; generation: number } | undefined;
+  get(winterSessionId: string): { state: RuntimeSessionState; generation: number   /** WS-21: a run folder the router quarantined at exit (kept; recorded for recovery and doctor). Optional:
+   *  a test double need not implement it. */
+  noteQuarantinedRoot?(root: string): void;
+} | undefined;
+  /** WS-21: a run folder the router quarantined at exit (kept; recorded for recovery and doctor). Optional:
+   *  a test double need not implement it. */
+  noteQuarantinedRoot?(root: string): void;
 }
 
 export interface WinterSessionDeps {
@@ -707,11 +713,13 @@ class WinterSessionImpl implements WinterSession {
       this.recordState(ended === "ended" ? "failed" : "exited");
       if (this.inc === inc) this.inc = undefined;
       this.stateValue = ended ?? "resumable";
-      // WS-21 (spec §3.8): the incarnation is over — dispose its run home once the router says it is
-      // safe. The Winter leg writes the canonical store directly and has no working copy, so its run
-      // homes are safe by construction; the router's own answer still wins when it has one.
+      // WS-21 (spec §3.8; L2 fix round 1): the iteration is over (drained, closed or failed), which is
+      // exactly when the router reports a Winter run home `safe` — dispose it only then.
       if (inc.runHome !== undefined) {
-        await settleRunHome(inc.runHome, this.deps.runtime.runHomeOutcome?.(inc.runHome.runId), { winterLegSafe: true, log: (line) => this.log(line) });
+        await settleRunHome(inc.runHome, this.deps.runtime.runHomeOutcome?.(inc.runHome.runId), {
+          log: (line) => this.log(line),
+          onQuarantined: (dir) => this.deps.records?.noteQuarantinedRoot?.(dir),
+        });
       }
     }
   }

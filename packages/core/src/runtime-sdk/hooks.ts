@@ -518,7 +518,7 @@ function pathFenceHook(deps: SessionHooksDeps): HookCallback {
     if (read !== undefined) return deny(read);
     let root: string | null = null;
     try { root = deps.trustedProjectRoot?.() ?? null; } catch { root = null; }
-    const decision = protectedWriteDecision(toolName, toolInput, { mode: deps.mode ?? "code", protected: protectedPathsFor(home, root), cwd });
+    const decision = protectedWriteDecision(toolName, toolInput, { mode: deps.mode ?? "code", protected: protectedPathsFor(home, root, { cwd }), cwd });
     if (decision === null) return allow();
     return decision.decision === "ask"
       ? ask(`${toolName} writes a protected path (skills, commands, rules, output styles and WINTER.md load into every future session) — the user decides.`)

@@ -1,14 +1,14 @@
 // WS-21 L3.3 (spec §3.1, §3.8): feature detection of the run-home router, and the ONE disposal rule both
 // legs apply when an incarnation ends.
 import { describe, expect, test } from "bun:test";
-import { disposeFailedRunHome, linkedRunHomeBuilder, routerSupportsRunHome, runHomeHandleOf, settleRunHome } from "../../src/runtime-sdk/run-home-support";
+import { disposeFailedRunHome, linkedRunHomeBuilder, routerSupportsRunHome, runHomeHandleOf, runHomeReportSummary, settleRunHome } from "../../src/runtime-sdk/run-home-support";
 import type { RunHome } from "../../src/runtime-sdk/run-home-contract";
 
 const stub = (onDispose: () => void, failDispose = false): RunHome => ({
   runId: "r1", dir: "/h/cache/runs/r1", sdkHome: "/h/sdk",
   input: { home: "/h", mode: "code", dispatchChild: false, leg: "official", cwd: "/c", trustedProjectRoot: null, gitRoot: null, mcpDisabled: [], reservedMcpServerNames: [], memoryDir: "/m" },
   effectiveSettings: {},
-  report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [] },
+  report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [] },
   dispose: async () => { onDispose(); if (failDispose) throw new Error("EBUSY"); },
 });
 
@@ -26,26 +26,29 @@ describe("feature detection", () => {
   });
 });
 
-describe("settleRunHome — dispose only on the router's say-so", () => {
-  const cases: Array<[string | undefined, boolean, "disposed" | "kept"]> = [
-    ["safe", false, "disposed"],
-    ["quarantined", false, "disposed"],   // the working copy was already preserved
-    ["pending", false, "kept"],           // not settled: recovery reconciles it
-    [undefined, false, "kept"],           // the official leg never guesses
-    [undefined, true, "disposed"],        // the Winter leg has no working copy: safe by construction
-    ["pending", true, "kept"],            // …but the router's own answer still wins
+describe("settleRunHome — dispose ONLY when the router says safe (L2 fix round 1)", () => {
+  // Both legs, one rule: `safe` is the router's word that the incarnation ended AND reconciled (the
+  // Winter leg reports it once the query finished, closed or failed — `pending` while the child runs, and
+  // for a query nobody iterated). Everything else keeps the folder for recovery.
+  const cases: Array<[string | undefined, "disposed" | "kept"]> = [
+    ["safe", "disposed"],
+    ["quarantined", "kept"],   // kept, and recorded so the boot sweep never re-reconciles it
+    ["pending", "kept"],       // not settled: recovery reconciles it
+    [undefined, "kept"],       // no answer: never a guess, on either leg
   ];
-  for (const [outcome, winterLegSafe, expected] of cases) {
-    test(`${String(outcome)} (winterLegSafe=${winterLegSafe}) → ${expected}`, async () => {
+  for (const [outcome, expected] of cases) {
+    test(`${String(outcome)} → ${expected}`, async () => {
       let disposed = 0;
-      expect(await settleRunHome(stub(() => { disposed++; }), outcome as never, { winterLegSafe })).toBe(expected);
+      const quarantined: string[] = [];
+      expect(await settleRunHome(stub(() => { disposed++; }), outcome as never, { onQuarantined: (d) => quarantined.push(d) })).toBe(expected);
       expect(disposed).toBe(expected === "disposed" ? 1 : 0);
+      expect(quarantined).toEqual(outcome === "quarantined" ? ["/h/cache/runs/r1"] : []);
     });
   }
 
   test("a dispose that fails is reported kept (the boot sweep retries), never thrown", async () => {
     const lines: string[] = [];
-    expect(await settleRunHome(stub(() => {}, true), "safe", { winterLegSafe: false, log: (l) => lines.push(l) })).toBe("kept");
+    expect(await settleRunHome(stub(() => {}, true), "safe", { log: (l) => lines.push(l) })).toBe("kept");
     expect(lines.join("\n")).toContain("r1");
   });
 
@@ -54,5 +57,22 @@ describe("settleRunHome — dispose only on the router's say-so", () => {
     await disposeFailedRunHome(stub(() => { disposed++; }, true));
     await disposeFailedRunHome(undefined);
     expect(disposed).toBe(1);
+  });
+});
+
+describe("runHomeReportSummary — what the builder did not do, for the daemon log", () => {
+  test("empty report: nothing to say", () => {
+    expect(runHomeReportSummary(stub(() => {}))).toBeUndefined();
+  });
+  test("every field is named, skippedAgents included (L2 fix round 1)", () => {
+    const rh = stub(() => {});
+    rh.report = {
+      skippedLinks: [{ path: "/p/a", reason: "outside-root" }], externalUserLinks: ["/u/x"],
+      droppedMcpServers: [{ name: "srv", reason: "reserved-name" }], unconditionalRules: ["r.md"], droppedImports: ["../x.md"],
+      skippedAgents: [{ path: "/h/sdk/agents/bad.md", reason: "unparseable" }],
+    };
+    const line = runHomeReportSummary(rh)!;
+    expect(line).toContain("r1");
+    for (const bit of ["/p/a (outside-root)", "/u/x", "srv (reserved-name)", "r.md", "../x.md", "/h/sdk/agents/bad.md (unparseable)"]) expect(line).toContain(bit);
   });
 });

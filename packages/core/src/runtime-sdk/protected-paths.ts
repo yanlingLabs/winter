@@ -19,7 +19,7 @@
 // at `storeHomeFor(home)`: the set is the router's, and on a build whose router applies no run home
 // the store still lives at `<home>` and nothing loads `<home>/sdk/skills` (DECISION 11).
 import { realpathSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { canonicalizeForWrite, resolveLeafSymlinks, sdkHomeFor } from "../agent/paths";
 import type { Mode as SessionMode } from "../agent/tools/registry";
@@ -27,6 +27,9 @@ import { RESUME_STAGING_PREFIX } from "@yanlinglabs/winter-runtime-sdk";
 import { WRITE_CLASS_TOOL_NAMES, homeFenceTarget, writeTargetPathsIn } from "./control-plane";
 import { fsRootAnchored } from "./mode-options";
 import { PROTECTED_ITEM_DIRS } from "./run-home-contract";
+import { projectWalk } from "./project-walk";
+
+export { projectWalk };
 
 /** The instructions file the sdk tier protects (the router's `brand.instructionsFile`). A project's own
  *  `<root>/WINTER.md` is deliberately NOT protected — claude treats `CLAUDE.md` as ordinary. */
@@ -37,15 +40,20 @@ export const PROJECT_DIR_NAME = ".winter";
 /**
  * Spec §7.2's protected set in claude's ABSOLUTE rule spelling (`//` + the absolute path; a subtree is
  * `<dir>/**`), in the router's order: the four sdk item dirs, `sdk/WINTER.md`, then — for a trusted
- * project only — its four `.winter/` item dirs. Built with the daemon's own `fsRootAnchored` (ruling 2),
- * so `["Edit","Write"] × this` is exactly the router's `protectedPathRules(sdkHome, root)`.
+ * project only — the four `.winter/` item dirs of every directory on the project walk from `walk.cwd`
+ * (nearest first; L2 fix round 1, I2), or of the root alone when no walk is given. Built with the
+ * daemon's own `fsRootAnchored` (ruling 2), so `["Edit","Write"] × this` is exactly the router's
+ * `protectedPathRules(sdkHome, root, brand, walk)`.
  */
-export function protectedPathsFor(home: string, trustedProjectRoot: string | null): string[] {
+export function protectedPathsFor(home: string, trustedProjectRoot: string | null, walk?: { cwd: string; userHome?: string }): string[] {
   const sdk = sdkHomeFor(home);
   const out: string[] = PROTECTED_ITEM_DIRS.map((kind) => `${fsRootAnchored(join(sdk, kind))}/**`);
   out.push(fsRootAnchored(join(sdk, SDK_INSTRUCTIONS_FILE)));
   if (trustedProjectRoot !== null) {
-    for (const kind of PROTECTED_ITEM_DIRS) out.push(`${fsRootAnchored(join(trustedProjectRoot, PROJECT_DIR_NAME, kind))}/**`);
+    const dirs = walk === undefined ? [trustedProjectRoot] : projectWalk(walk.cwd, trustedProjectRoot, walk.userHome ?? homedir());
+    for (const dir of dirs) {
+      for (const kind of PROTECTED_ITEM_DIRS) out.push(`${fsRootAnchored(join(dir, PROJECT_DIR_NAME, kind))}/**`);
+    }
   }
   return out;
 }
