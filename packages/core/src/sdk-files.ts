@@ -6,8 +6,9 @@
 //
 //  - Reads never throw. A missing file is `{}`; an unparseable one (a hand edit in progress, a torn
 //    write by some other tool) is reported through the `…Detailed` readers and read as `{}` by the
-//    plain ones. Keep-last-good across a torn edit is the settings watcher's job (`settings-watcher.ts`),
-//    not this module's.
+//    plain ones. Feature code reads through `liveSdkSettings`/`liveSdkGlobalConfig`, which keep the
+//    last good version across an unparseable one (see "Live reads" below); the settings watcher
+//    (`SdkFilesWatcher`, `settings-watcher.ts`) only adds a debounced notification on top.
 //  - Writes are read-modify-write through a mutator and REFUSE to clobber a file that exists but does
 //    not parse (`SdkFileUnreadable`): replacing a half-edited file with `{…one key…}` would silently
 //    discard every other setting the user had.
@@ -18,7 +19,7 @@
 // Callers in this process are single-threaded and every update is synchronous from read to rename, so
 // two in-process writers cannot interleave. A writer in ANOTHER process (the CLI with no daemon, the
 // user) is last-writer-wins — exactly claude's own discipline for these files (F15).
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 import { sdkGlobalConfigPath, sdkSettingsPath } from "./agent/paths";
@@ -113,7 +114,60 @@ function updateJsonObject<T extends Record<string, unknown>>(path: string, mutat
   // changed anything a caller still holds.
   const next = mutate(structuredClone(current));
   writeJsonAtomic(path, next);
+  remember(path, next);
   return next;
+}
+
+// ── Live reads (keep-last-good) ──────────────────────────────────────────────────────────────────
+//
+// The daemon's feature code reads these files through the `live…` readers below, at the moment it
+// needs a value (a spawn, an RPC) — never a boot snapshot, so an edit reaches the next read with no
+// restart. Each read costs one `stat`: the parsed value is cached against the file's identity
+// (inode, mtime, size), and re-parsed only when that changes. A file that exists but does not parse —
+// a hand edit caught half-saved — keeps the LAST GOOD value (the same keep-last-good posture as the
+// settings watcher), is reported once per distinct bad version, and is retried on the next read. A
+// missing file is a real state (the user deleted it) and reads as `{}`.
+interface LiveEntry { sig: string; value: Record<string, unknown> }
+const live = new Map<string, LiveEntry>();
+const reportedInvalid = new Set<string>();
+
+function signatureOf(path: string): string {
+  try {
+    const st = statSync(path);
+    return `${st.ino}:${st.mtimeMs}:${st.size}`;
+  } catch {
+    return "absent";
+  }
+}
+
+function remember(path: string, value: Record<string, unknown>): void {
+  live.set(path, { sig: signatureOf(path), value });
+}
+
+function liveRead<T extends Record<string, unknown>>(path: string): T {
+  const sig = signatureOf(path);
+  const hit = live.get(path);
+  if (hit !== undefined && hit.sig === sig) return hit.value as T;
+  const r = readJsonObjectDetailed<T>(path);
+  if (r.state === "ok") { live.set(path, { sig, value: r.value }); return r.value; }
+  if (r.state === "missing") { live.set(path, { sig, value: {} }); return {} as T; }
+  const key = `${path}\u0000${sig}`;
+  if (!reportedInvalid.has(key)) {
+    reportedInvalid.add(key);
+    if (reportedInvalid.size > 256) reportedInvalid.clear();
+    console.error(`sdk-files: ${path} is not a readable JSON object (${r.reason}) — keeping the last good version`);
+  }
+  return (hit?.value ?? {}) as T;
+}
+
+/** `sdk/settings.json` as the daemon reads it now: live, cached, keep-last-good. Treat as READ-ONLY. */
+export function liveSdkSettings(home: string): SdkSettingsFile {
+  return liveRead<SdkSettingsFile>(sdkSettingsPath(home));
+}
+
+/** `sdk/.winter.json` as the daemon reads it now: live, cached, keep-last-good. Treat as READ-ONLY. */
+export function liveSdkGlobalConfig(home: string): SdkGlobalConfigFile {
+  return liveRead<SdkGlobalConfigFile>(sdkGlobalConfigPath(home));
 }
 
 /** `sdk/settings.json` with its state (`ok`/`missing`/`invalid`). */
@@ -147,4 +201,13 @@ export function readSdkGlobalConfig(home: string): SdkGlobalConfigFile {
 /** Read-modify-write `sdk/.winter.json` atomically (0600). Same refusal as `updateSdkSettings`. */
 export function updateSdkGlobalConfig(home: string, mutate: (current: SdkGlobalConfigFile) => SdkGlobalConfigFile): SdkGlobalConfigFile {
   return updateJsonObject<SdkGlobalConfigFile>(sdkGlobalConfigPath(home), mutate);
+}
+
+/** Invalidate the cached parse of `path`, so the next live read re-reads the file even if its
+ *  identity (inode, mtime, size) happens not to have changed — an in-place same-size rewrite within
+ *  one mtime tick. The last good VALUE is kept, so a file that is unparseable at that moment still
+ *  reads as its last good version. The settings watcher calls it on every settled change. */
+export function forgetSdkFile(path: string): void {
+  const entry = live.get(path);
+  if (entry !== undefined) live.set(path, { sig: "", value: entry.value });
 }

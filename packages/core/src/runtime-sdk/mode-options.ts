@@ -327,11 +327,19 @@ export interface WinterOptionsInput {
   advisorModel?: ModelTag;
   /** WS-20: the "anthropic" vs "console" arm is the tag's own prefix (`providerFor`,
    *  provider-selection.ts), not a settings-driven decision `credentialRefFor` used to make — this
-   *  field is NOT consumed for that anymore. Batch 3 (item 2) gave it a second, unrelated consumer:
-   *  `permissionDenyRulesFor(input.home, input.settings)` reads `settings.permissions.deny` for the
-   *  extra SDK-grammar deny rules layered onto the fixed control-plane fence. Still just an input
-   *  the caller passes in — `buildWinterOptions` never reads a file itself. */
+   *  field is NOT consumed for that anymore. (WS-21: `permissions.deny` moved to `sdk/settings.json`,
+   *  so the deny rules now arrive as `userDeny` below, never off this object.) Still just an input the
+   *  caller passes in — `buildWinterOptions` never reads a file itself. */
   settings?: Settings | null;
+  /** WS-21: the user's `sdk/settings.json` `permissions.deny` (`sdkDenyRules`), claude grammar,
+   *  verbatim — read live by the caller and layered onto the fixed control-plane fence
+   *  (`permissionDenyRulesFor`). Absent ⇒ none. */
+  userDeny?: readonly string[];
+  /** WS-21: the user's `sdk/settings.json` `permissions.allow` (`sdkAllowRules`) — ALREADY claude
+   *  grammar, so forwarded verbatim (never through `sdkAllowRulesFor`, which would re-translate a
+   *  claude `Edit` into `Edit` + `Write`, wider than what was saved). Code mode only, like
+   *  `persistedAllow`. Absent ⇒ none. */
+  userAllow?: readonly string[];
   /**
    * Daemon settings surface (2026-09-17 plan, item 3): `<home>/agents/*.md`, ALREADY PARSED by the
    * caller (`session-driver.ts`'s `optionsFor`, `loadUserAgentDefinitions(home).definitions`) —
@@ -400,8 +408,9 @@ export interface WinterOptionsInput {
   plugins?: readonly SdkPluginConfig[];
   skills?: readonly string[];
   /**
-   * The user's SAVED allow rules for this session's project, in Winter's own grammar —
+   * The user's SAVED allow rules for this session's PROJECT, in Winter's own grammar —
    * `persistedAllowRulesFor`'s answer, read live by the caller (`session-driver.ts`'s `optionsFor`).
+   * (WS-21: the user-scope "everywhere" rules are `userAllow`, already in claude's grammar.)
    * Translated here by `sdkAllowRulesFor` and appended to `permissions.allow` AFTER Winter's fixed
    * rules, in CODE mode only (see the allow assembly in `buildWinterOptions`). Absent or empty ⇒
    * byte-identical to a session before this field existed.
@@ -569,7 +578,8 @@ export function controlPlaneDenyRules(home: string): string[] {
 
 /**
  * Daemon settings surface batch 3 (item 2): `controlPlaneDenyRules(home)` (the FIXED control-plane
- * fence above) PLUS whatever `settings.permissions.deny` names (user/daemon-authored SDK-grammar
+ * fence above) PLUS whatever the user's deny rules name — WS-21: `sdk/settings.json`
+ * `permissions.deny` (`sdkDenyRules`), passed in by the caller (user/daemon-authored SDK-grammar
  * rules — today only `Skill(<name>)`, written by `settings.setSkillDenied`, but a hand-written entry
  * of any other shape rides along unchanged). This is the ONE place both legs' `Options.permissions.
  * deny` is assembled from, so `buildWinterOptions` (below) and `official-options.ts`'s
@@ -579,8 +589,8 @@ export function controlPlaneDenyRules(home: string): string[] {
  * passes in (never a file read here) — this function stays as pure as `controlPlaneDenyRules`
  * itself, just with one more input.
  */
-export function permissionDenyRulesFor(home: string, settings: Settings | null | undefined): string[] {
-  return [...controlPlaneDenyRules(home), ...(settings?.permissions?.deny ?? [])];
+export function permissionDenyRulesFor(home: string, userDeny: readonly string[] | undefined): string[] {
+  return [...controlPlaneDenyRules(home), ...(userDeny ?? [])];
 }
 
 /**
@@ -703,16 +713,50 @@ export function sdkAllowRulesFor(winterRules: readonly string[]): string[] {
   return [...new Set(out)];
 }
 
+/**
+ * **The user's "everywhere" rules, as Winter's OWN gate reads them** (WS-21).
+ *
+ * Those rules now live in `sdk/settings.json` in claude's grammar (the settings split translates them
+ * once, through `sdkAllowRulesFor`), and the children apply them natively. Winter's gate
+ * (`agent/permission-rules.ts`'s `PermissionRules`) still evaluates the calls a child DOES send to
+ * `canUseTool`, in Winter's grammar — so this is `sdkAllowRulesFor`'s inverse, and like it, NEVER WIDER
+ * than what was saved:
+ *
+ *   `Bash` / `Bash(x)` / `Bash(x:*)`        unchanged (one spelling in both grammars; a `*` inside a
+ *                                          value is compared literally by the gate — narrower, never wider)
+ *   `WebFetch(domain:h)`                   unchanged
+ *   `mcp__winter__computer__computer`      → `Computer`
+ *   `EnterWorktree` + `ExitWorktree`       → `Worktree` (only when BOTH are present)
+ *   `Edit` + `Write`                       → `Edit` (Winter's `Edit` covers both tools; one alone would widen)
+ *   anything else                          not the gate's (the child applies it natively)
+ */
+export function winterGateRulesFromSdk(rules: readonly string[]): string[] {
+  const set = new Set(rules.filter((r): r is string => typeof r === "string"));
+  const out: string[] = [];
+  for (const raw of set) {
+    const parsed = parseRule(raw);
+    if (parsed !== null && (parsed.tool === "bash" || parsed.tool === "web_fetch")) out.push(raw);
+  }
+  if (set.has("mcp__winter__computer__computer")) out.push("Computer");
+  if (set.has("EnterWorktree") && set.has("ExitWorktree")) out.push("Worktree");
+  if (set.has("Edit") && set.has("Write")) out.push("Edit");
+  return [...new Set(out)];
+}
+
 /** A string whose head is one of Winter's own rule tools (`agent/permission-rules.ts`'s `KNOWN_TOOLS`),
  *  i.e. one `parseRule` had the say over. */
 const WINTER_RULE_HEAD = /^(?:BashUnsandboxed|Bash|Edit|Computer|Worktree|WebFetch)(?:\(|$)/;
 
 /**
- * **Which saved allow rules apply to a session at `cwd`** — Winter's raw rule strings, for
+ * **Which saved PROJECT allow rules apply to a session at `cwd`** — Winter's raw rule strings, for
  * `sdkAllowRulesFor`. Read LIVE per incarnation (every input is a live getter), so a rule saved from
  * a card reaches the next child with no restart.
  *
- *  - `settings.json`'s `permissions.allow` — always (the "everywhere" scope).
+ * WS-21: the "everywhere" scope is no longer here. It moved to `sdk/settings.json` in claude's grammar
+ * (`sdkAllowRules`) and reaches the child verbatim as `userAllow`; `effectiveSettings`' base is the
+ * live settings holder, which no longer carries `permissions.allow` (`withoutMovedKeys`), so only a
+ * trusted overlay contributes through it.
+ *
  *  - a project's `.winter/settings.json` `permissions.allow` — only when the project is TRUSTED:
  *    `effectiveSettings` is `ProjectSettingsResolver.effective`, which unions the overlay in for a
  *    trusted root and returns the base verbatim otherwise.
@@ -948,8 +992,8 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
       //    writes back in plan whatever the allow list says;
       //  - a DISPATCH session's children run in CODE mode, so they receive the saved rules too — the
       //    same as claude's headless mode applying its settings files' `permissions.allow`.
-      ...(input.mode === "code" ? { allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES, ...sdkAllowRulesFor(input.persistedAllow ?? [])])] } : {}),
-      deny: permissionDenyRulesFor(input.home, input.settings),
+      ...(input.mode === "code" ? { allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES, ...(input.userAllow ?? []), ...sdkAllowRulesFor(input.persistedAllow ?? [])])] } : {}),
+      deny: permissionDenyRulesFor(input.home, input.userDeny),
       disableBypassPermissionsMode: !bypassAllowedAtSpawn(input.policy),
     },
     sandbox: sandboxConfigFor(input.home, input.cwd),

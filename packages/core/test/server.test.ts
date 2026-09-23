@@ -742,8 +742,10 @@ describe("daemon IPC", () => {
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 3,
       provider: { model: "codex-oauth/gpt-5.4" },
-      mcpServers: { fake: { command: "bun", args: ["run", fixture] } },
     }, null, 2));
+    // WS-21: the user-scope MCP servers live in `sdk/.winter.json` (claude's `.claude.json` shape).
+    mkdirSync(join(home, "sdk"), { recursive: true });
+    writeFileSync(join(home, "sdk", ".winter.json"), JSON.stringify({ mcpServers: { fake: { command: "bun", args: ["run", fixture] } } }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     const fake = new FakeProvider([[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]]);
     daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
@@ -764,8 +766,10 @@ describe("daemon IPC", () => {
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 3,
       provider: { model: "codex-oauth/gpt-5.4" },
-      mcpServers: { fake: { command: "bun", args: ["run", fixture] } },
     }, null, 2));
+    // WS-21: the user-scope MCP servers live in `sdk/.winter.json` (claude's `.claude.json` shape).
+    mkdirSync(join(home, "sdk"), { recursive: true });
+    writeFileSync(join(home, "sdk", ".winter.json"), JSON.stringify({ mcpServers: { fake: { command: "bun", args: ["run", fixture] } } }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     const fake = new FakeProvider([[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]]);
     daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
@@ -804,8 +808,10 @@ describe("daemon IPC", () => {
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 3,
       provider: { model: "codex-oauth/gpt-5.4" },
-      mcpServers: { fake: { command: "bun", args: ["run", fixture] } },
     }, null, 2));
+    // WS-21: the user-scope MCP servers live in `sdk/.winter.json` (claude's `.claude.json` shape).
+    mkdirSync(join(home, "sdk"), { recursive: true });
+    writeFileSync(join(home, "sdk", ".winter.json"), JSON.stringify({ mcpServers: { fake: { command: "bun", args: ["run", fixture] } } }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     const fake = new FakeProvider([[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]]);
     daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
@@ -851,8 +857,10 @@ describe("daemon IPC", () => {
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 3,
       provider: { model: "codex-oauth/gpt-5.4" },
-      mcpServers: { fake: { command: "bun", args: ["run", fixture] } },
     }, null, 2));
+    // WS-21: the user-scope MCP servers live in `sdk/.winter.json` (claude's `.claude.json` shape).
+    mkdirSync(join(home, "sdk"), { recursive: true });
+    writeFileSync(join(home, "sdk", ".winter.json"), JSON.stringify({ mcpServers: { fake: { command: "bun", args: ["run", fixture] } } }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     const fake = new FakeProvider([[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]]);
     daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });

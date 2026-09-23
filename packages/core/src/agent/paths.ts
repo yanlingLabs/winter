@@ -120,6 +120,7 @@ export const SDK_COMPAT_LINKS: ReadonlyArray<readonly [name: string, target: str
   ["skills", "sdk/skills"],
   ["agents", "sdk/agents"],
   ["workflows", "sdk/workflows"],
+  ["output-styles", "sdk/output-styles"],
 ];
 
 // Symlink chains longer than this are rejected outright (mirrors the kernel's own ELOOP guard,

@@ -17,7 +17,7 @@ import { ensureOutdir } from "./sessions/outdir";
 import { writeDiff, type DiffHeader } from "./diffs/store";
 import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
-import { loadSettings, loadPermissionDirs, effortRefusalFor, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, pinsFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, type Settings } from "./settings";
+import { loadSettings, loadPermissionDirs, effortRefusalFor, hooksEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, pinsFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, sdkAllowRules, sdkAutoMemory, sdkOutputStyle, sdkUserMcpServers, withoutMovedKeys, type Settings } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
@@ -40,7 +40,8 @@ import { LspManager } from "./agent/lsp/manager";
 import { PermissionGate, type SessionApprovalPolicy } from "./agent/gate";
 import { PermissionRules } from "./agent/permission-rules";
 import { ApprovedProjectRules } from "./agent/approved-project-rules";
-import { trustRecordFile } from "./agent/paths";
+import { sdkGlobalConfigPath, sdkHomeFor, sdkSettingsPath, trustRecordFile } from "./agent/paths";
+import { forgetSdkFile, liveSdkGlobalConfig, liveSdkSettings, readSdkGlobalConfigDetailed, readSdkSettingsDetailed } from "./sdk-files";
 import { ApprovalBroker } from "./agent/approvals";
 import { QuestionBroker } from "./agent/questions";
 import { createPersistedChildren, type AgentRegistry } from "./agent/bg-agent-registry";
@@ -78,7 +79,7 @@ import { mintPanelTab } from "./panel/open-tab";
 import { openRoutineStore } from "./routines/store";
 import { RoutineAuditLog } from "./routines/audit";
 import { makeApply } from "./settings-apply";
-import { SettingsWatcher } from "./settings-watcher";
+import { SettingsWatcher, watchViaParentDir } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { restampStep } from "./runtime-state/recovery";
 import { createWinterRuntimeSdk, describeLoadError, type WinterRuntimeSdk } from "./runtime-sdk/create";
@@ -88,7 +89,7 @@ import { resolveAntExecutable } from "./runtime-sdk/bundle-layout";
 import { advisorReviewerFor, familyOfModel, officialLegDefaultSessionModel } from "./runtime-sdk/advisor-reviewer";
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
 import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
-import { persistedAllowRulesFor } from "./runtime-sdk/mode-options";
+import { persistedAllowRulesFor, winterGateRulesFromSdk } from "./runtime-sdk/mode-options";
 import { configuredMcpServersFor } from "./runtime-sdk/external-mcp";
 import { planBridgeFor, type PlanBridge } from "./runtime-sdk/plan-bridge";
 import { importEngineEraSession } from "./runtime-sdk/import-legacy";
@@ -511,7 +512,9 @@ export async function startDaemon(opts: {
   try {
     // WS-20 (review round 2, M5): `persistMigration: true` — this boot hook, WITH presence in
     // hand, is the ONLY writer of a migrated v3 settings file (see `loadSettings`'s own doc).
-    settings = loadSettings(dirs.settingsPath, { presentProviders, persistMigration: true });
+    // WS-21: the live holder never carries the keys that moved to `sdk/` (`withoutMovedKeys`) — their
+    // only doors are the `sdk…` readers, so no reader here can see a stale copy kept for a downgrade.
+    settings = withoutMovedKeys(loadSettings(dirs.settingsPath, { presentProviders, persistMigration: true }));
     // Task 17: the engine leg no longer exists — a `winterLeg.<mode>: false` is accepted for one
     // release, reported here (and by settings-apply on a hot edit), never obeyed.
     for (const key of winterLegDisabledKeys(settings)) console.error(`settings: runtimes.winterLeg.${key} = false — the engine leg no longer exists; ignored`);
@@ -617,7 +620,10 @@ export async function startDaemon(opts: {
   // project-supplied name escaping the output-styles dir) lives in OutputStyleStore.resolve — this is
   // just the name lookup.
   const outputStyleStore = new OutputStyleStore({ winterHome, trust: trustStore, legacySettings: () => settings });
-  const outputStyleFor = (cwd?: string | null): string | undefined => projectSettings.effective(projectRootOf(cwd ?? null))?.outputStyle;
+  // WS-21: a trusted project's overlay still wins (its `.winter/settings.json` `outputStyle`); the user
+  // tier moved to `sdk/settings.json` (`sdkOutputStyle`) — the live holder no longer carries one.
+  const outputStyleFor = (cwd?: string | null): string | undefined =>
+    projectSettings.effective(projectRootOf(cwd ?? null))?.outputStyle ?? sdkOutputStyle(winterHome);
   // CC-parity phase 3 (Workflows, Track C Task C2): built unconditionally, same "no engine
   // dependency" precedent as `outputStyleStore` just above — workflow.list's "saved" section and
   // workflow.run's by-name resolution work even on a no-agentProvider daemon (only launching a
@@ -660,7 +666,11 @@ export async function startDaemon(opts: {
   // watcher below), read fresh by BOTH the write-root join (`sessionDirs`, just below) and the
   // assembler's injection — a `memory.enabled`/`memory.directory` edit applies to the session's
   // NEXT tool call / turn, no daemon restart, same shape as `hooksEnabledHot` further down.
-  const memoryEnabledHot = (): boolean => (settings ? memoryEnabledFrom(settings) : true);
+  // WS-21: `memory.enabled`/`memory.directory` moved to `sdk/settings.json` as claude's
+  // `autoMemoryEnabled`/`autoMemoryDirectory` (`sdkAutoMemory`, read live — an edit applies on the next
+  // read, no restart). Same default: ON unless explicitly false.
+  const memoryEnabledHot = (): boolean => sdkAutoMemory(winterHome).enabled;
+  const memoryDirectoryHot = (): string | undefined => sdkAutoMemory(winterHome).directory;
   // session-activity-hygiene T7 (spec §3): the session cleaner's own switch, on exactly the
   // `memoryEnabledHot` terms one line up — a live getter over the reassignable `settings` holder
   // (the settings watcher swaps a NEW object into that same binding), so a `cleaner.enabled` edit
@@ -674,8 +684,8 @@ export async function startDaemon(opts: {
   // moves the trees, and the next memory read has to follow them. Absent (no runtime store, or
   // nothing relocated) leaves the derivation exactly as it was.
   const memoryDirOf = (cwd: string): string =>
-    memoryDirFor(cwd, { winterHome, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) });
-  const memoryGlobalDirOf = (): string => globalMemoryDirFor({ winterHome, directory: settings?.memory?.directory });
+    memoryDirFor(cwd, { winterHome, directory: memoryDirectoryHot(), relocatedKey: (k) => runtime?.relocatedMemoryKey(k) });
+  const memoryGlobalDirOf = (): string => globalMemoryDirFor({ winterHome, directory: memoryDirectoryHot() });
   const assembler = new ContextAssembler({
     winterHome, trust: trustStore, skills: skillStore,
     memory: {
@@ -719,7 +729,7 @@ export async function startDaemon(opts: {
   // — so a mid-session `memory.enabled` false→true flip no longer waits for a restart either.
   if (memoryEnabledHot()) {
     try {
-      migrateMemoryStore({ winterHome, trust: trustStore, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) });
+      migrateMemoryStore({ winterHome, trust: trustStore, directory: memoryDirectoryHot(), relocatedKey: (k) => runtime?.relocatedMemoryKey(k) });
     } catch (err) {
       console.error(`memory migration skipped: ${(err as Error).message}`);
     }
@@ -952,6 +962,10 @@ export async function startDaemon(opts: {
   // engine/registry exist to hot-apply against); declared here (function scope, outside the gate)
   // so the shutdown path past the gate's close can still stop() it regardless of agentProvider.
   let settingsWatcher: SettingsWatcher | null = null;
+  // WS-21: the two claude-format files in `sdk/`. Feature code reads them live (`sdk-files.ts`); these
+  // watchers add the same debounce + keep-last-good notification the settings watcher gives
+  // `settings.json`, for the one reaction a moved key still drives here (the memory importer).
+  const sdkWatchers: Array<SettingsWatcher<Record<string, unknown>>> = [];
   // P8b Task 16 HOISTED this out of the `if (agentProvider)` gate (it used to be built beside
   // `taskStore` inside it): the Winter leg's question bridge (`AskUserQuestion` → `question_asked`)
   // needs a broker whether or not an engine exists, and `ask_user.respond` must resolve into the
@@ -1615,7 +1629,7 @@ export async function startDaemon(opts: {
     outDirOf: (sid) => ensureOutdir(winterHome, sid),
     // The SAME relocation-aware derivation the live memory path uses (`memoryDirOf` above), so the
     // record names the directory the session actually reads.
-    memoryKeyOf: (cwd) => memoryProjectKeyFor(cwd, { winterHome, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) }),
+    memoryKeyOf: (cwd) => memoryProjectKeyFor(cwd, { winterHome, directory: memoryDirectoryHot(), relocatedKey: (k) => runtime?.relocatedMemoryKey(k) }),
     // Task 17 Step 0(a): the SAME assembler the engine's `turn()` composes its instructions with —
     // Winter's persona per mode, the `_assistant` bucket, the output style — so a Winter-leg session
     // speaks as Winter.
@@ -1644,7 +1658,8 @@ export async function startDaemon(opts: {
     // (stdio/http/sse). Read LIVE per incarnation from the same holder and the same `TrustStore`
     // the McpManager consults. `log`: the SAME one-stderr-line-per-name convention `McpManager`'s
     // own `log` dep already uses (below), for a project-scope entry that didn't validate.
-    extraMcpServers: (session) => configuredMcpServersFor({ settings, cwd: session.cwd, trusted: (dir) => trustStore.isTrusted(dir), log: (m) => console.error(m) }),
+    // WS-21: the user-scope servers moved to `sdk/.winter.json` (`sdkUserMcpServers`, read live).
+    extraMcpServers: (session) => configuredMcpServersFor({ settings, userMcpServers: sdkUserMcpServers(winterHome), cwd: session.cwd, trusted: (dir) => trustStore.isTrusted(dir), log: (m) => console.error(m) }),
     // Daemon settings surface batch 3 (item 1): the SAME trust gate `extraMcpServers` above and
     // `agents.list`'s own handler (ipc/server.ts) both use — an untrusted `cwd` gets the empty scan
     // shape outright, never even reaching the filesystem read `loadProjectAgentDefinitions` would do.
@@ -1996,7 +2011,7 @@ export async function startDaemon(opts: {
     // fine, the spawned child connects to those itself) and must not start anything the user has
     // disabled (`settings.mcp.disabled`) — `stdioMcpServersFor` is the one filter both facts go
     // through (settings.ts).
-    await mcp.startAll(stdioMcpServersFor(settings));
+    await mcp.startAll(stdioMcpServersFor(sdkUserMcpServers(winterHome), settings?.mcp?.disabled));
     // Plugin MCP servers start only with explicit settings consent (mcpEnabled = enabled &&
     // !disabled); a plugin's skills are always live (SkillStore above), but its MCP/manifest
     // content is the seam that needs the user opting in via settings.plugins.enabled AND,
@@ -2108,7 +2123,15 @@ export async function startDaemon(opts: {
     // value; `effective(null)` degrades to `settings` verbatim, so a null projectRoot (or an
     // untrusted/overlay-less one) reads byte-identically to the pre-Task-7 global-only getter.
     permissionRules = new PermissionRules({
-      globalAllow: (projectRoot) => projectSettings.effective(projectRoot)?.permissions?.allow ?? ["Computer"],
+      // WS-21: the "everywhere" rules moved to `sdk/settings.json` in claude's grammar; the gate reads
+      // them back in its own (`winterGateRulesFromSdk`, never wider), plus a trusted project's overlay.
+      // The `["Computer"]` default still applies only when NEITHER tier states `allow` at all.
+      globalAllow: (projectRoot) => {
+        const user = sdkAllowRules(winterHome);
+        const overlay = projectSettings.effective(projectRoot)?.permissions?.allow;
+        if (user === undefined && overlay === undefined) return ["Computer"];
+        return [...new Set([...winterGateRulesFromSdk(user ?? []), ...(overlay ?? [])])];
+      },
       winterHome,
     });
     // P8b Task 5, deliberately: `runtimeSdk` is NOT on this config. The engine never consumes the
@@ -2190,7 +2213,7 @@ export async function startDaemon(opts: {
     // engine to hot-apply against (same "agent disabled" boundary the rest of this gate follows).
     const apply = makeApply({
       // THE atomic swap — a single synchronous assignment, first thing every apply does (T4).
-      setLiveSettings: (s) => { settings = s; },
+      setLiveSettings: (s) => { settings = withoutMovedKeys(s); },
       registry,
       buildComputerService: (s) => new ComputerUseService({ broker: peripheral, heartbeatMs: s?.peripheral?.heartbeatMs }),
       registerComputer: (svc, s) => {
@@ -2230,7 +2253,10 @@ export async function startDaemon(opts: {
       // call reflects the settings loaded at THAT time. Failures are logged by settings-apply.ts's
       // own `.catch` (this closure just re-throws/returns whatever `migrateMemoryStore` does);
       // never touches/deletes the old store either way (memory-migrate.ts's own contract).
-      migrateMemory: () => { migrateMemoryStore({ winterHome, trust: trustStore, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) }); },
+      // WS-21: inert here — the live holder no longer carries `memory.enabled` (`withoutMovedKeys`), so
+      // `makeApply` never sees a flip. The live trigger is the `sdk/settings.json` watcher below, on
+      // claude's `autoMemoryEnabled`.
+      migrateMemory: () => { migrateMemoryStore({ winterHome, trust: trustStore, directory: memoryDirectoryHot(), relocatedKey: (k) => runtime?.relocatedMemoryKey(k) }); },
       // P8a Task 12: `runtimes.migrations.memoryKeys` flipped on a RUNNING daemon must migrate
       // without a restart (the project's standing no-restart-for-settings rule). The wiring's own
       // `schema_meta` marker is what keeps it a ONE-TIME relocation, so this is handed the new
@@ -2250,6 +2276,62 @@ export async function startDaemon(opts: {
       log: (msg) => console.error(`settings-watcher: ${msg}`),
     });
     settingsWatcher.start(settings);
+  }
+
+  // WS-21: `sdk/settings.json` and `sdk/.winter.json` — debounced, single-flight, keep-last-good, like
+  // `settings.json` above. Built unconditionally: a no-provider daemon still serves the `sdk/`-backed
+  // RPCs, and the reaction below needs no engine. `load` drops the cached parse first (so an in-place
+  // same-size edit within one mtime tick is still seen) and THROWS on an unparseable file, which the
+  // watcher turns into "keep the last good version" — the live readers already do the same on their own.
+  const loadSdkFileStrict = (path: string): Record<string, unknown> => {
+    forgetSdkFile(path);
+    const read = path === sdkSettingsPath(winterHome) ? readSdkSettingsDetailed(winterHome) : readSdkGlobalConfigDetailed(winterHome);
+    if (read.state === "invalid") throw new Error(`${path} is not a readable JSON object (${read.reason})`);
+    return read.state === "ok" ? read.value : {};
+  };
+  const sdkSettingsWatcher = new SettingsWatcher<Record<string, unknown>>({
+    path: sdkSettingsPath(winterHome),
+    load: loadSdkFileStrict,
+    // The memory importer's hot trigger moved with `memory.enabled`: it re-runs on exactly an
+    // `autoMemoryEnabled` false→true flip (claude's default is ON, so only an explicit `false` is off).
+    apply: (prev, next) => {
+      // …and the memory-key migration's decline moved with `memory.directory`: clearing (or setting)
+      // `autoMemoryDirectory` on a RUNNING daemon re-enters it with no restart, exactly as a
+      // `settings.json` change does (`runtime.applySettings` re-reads the override live).
+      if (prev?.autoMemoryDirectory !== next.autoMemoryDirectory && settings) runtime?.applySettings(settings);
+      const was = prev?.autoMemoryEnabled !== false;
+      const is = next.autoMemoryEnabled !== false;
+      if (!was && is) {
+        try {
+          migrateMemoryStore({ winterHome, trust: trustStore, directory: memoryDirectoryHot(), relocatedKey: (k) => runtime?.relocatedMemoryKey(k) });
+        } catch (err) {
+          console.error(`memory migration on hot-toggle failed (best-effort, will retry next boot): ${(err as Error).message}`);
+        }
+      }
+    },
+    watch: watchViaParentDir,
+    log: (msg) => console.error(`settings-watcher (sdk/settings.json): ${msg}`),
+  });
+  const sdkGlobalConfigWatcher = new SettingsWatcher<Record<string, unknown>>({
+    path: sdkGlobalConfigPath(winterHome),
+    load: loadSdkFileStrict,
+    apply: () => {},
+    watch: watchViaParentDir,
+    log: (msg) => console.error(`settings-watcher (sdk/.winter.json): ${msg}`),
+  });
+  const sdkWatcherStarts: Array<[SettingsWatcher<Record<string, unknown>>, () => Record<string, unknown>]> = [
+    [sdkSettingsWatcher, () => liveSdkSettings(winterHome)],
+    [sdkGlobalConfigWatcher, () => liveSdkGlobalConfig(winterHome)],
+  ];
+  for (const [w, current] of sdkWatcherStarts) {
+    try {
+      w.start(current()); // diff the first change against what the daemon booted with
+      sdkWatchers.push(w);
+    } catch (err) {
+      // A missing `sdk/` (it is created by the bootstrap, so this is a torn home) degrades to the live
+      // readers alone — every read still goes to the file; only the debounced reaction is lost.
+      console.error(`settings-watcher: could not watch ${sdkHomeFor(winterHome)} (${(err as Error).message}) — sdk/ files are still read live`);
+    }
   }
 
   // Scheduled routines (Phase 5 T2, design doc §2; `routineStore` itself hoisted above the
@@ -2566,6 +2648,7 @@ export async function startDaemon(opts: {
       // any in-flight spawn on the in-process (awaited) path.
       server.stop(); mcp?.stopAll(); lspManager?.killAllNow(); void lspManager?.stopAll(); pluginSupervisor.stopAll(); bgRegistry.killAll();
       settingsWatcher?.stop(); // closes the fs.watch handle on settings.json — no leaked watcher past shutdown
+      for (const w of sdkWatchers) w.stop();
       routineScheduler.stop(); routineStore.close(); // no orphan tick timer past drain
       dreamer?.stop(); // no orphan dream tick timer past shutdown (unref'd already, but never left running)
       consoleBroker.stopRefresher(); // Winter Phase 10a (fix round 1 item 2): no orphan bearer-refresh timer past shutdown (unref'd already, belt-and-braces)

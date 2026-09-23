@@ -2632,24 +2632,20 @@ if (import.meta.main) {
     // settings.outputStyle, live, on the session's next turn — same live-getter precedent as the
     // provider model).
     const { parseOutputStyleArgs } = await import("./output-style-cli");
-    const { loadSettings, saveSettings, resolveWinterHome, setOutputStyle, OutputStyleStore, TrustStore } = await import("@yanlinglabs/winter-core");
+    const { resolveWinterHome, setOutputStyle, OutputStyleStore, TrustStore, sdkOutputStyle, updateSdkSettings } = await import("@yanlinglabs/winter-core");
     const action = parseOutputStyleArgs(process.argv.slice(3));
     const home = resolveWinterHome();
-    const settingsPath = join(home, "settings.json");
 
     if (action.action === "help") {
       console.log("Usage: winter output-style [name]\n  (no arg)  list available styles\n  <name>    set the active output style");
       break;
     }
 
-    // loadSettings throws its own helpful error (mirrors `case "model"` above, which loads
-    // unguarded the same way) if settings.json is missing/unparseable — a Winter install always
-    // has one, so this never fabricates a fallback Settings object; a missing/invalid file fails
-    // the exact same way `winter model` would.
-    const settings = loadSettings(settingsPath);
+    // WS-21: `outputStyle` lives in `sdk/settings.json` (claude `Settings`) — read and written there
+    // (`sdkOutputStyle`/`updateSdkSettings`; the write refuses to clobber an unparseable file).
     const store = new OutputStyleStore({ winterHome: home, trust: new TrustStore(join(home, "trust.json")) });
     const cwd = process.cwd();
-    const current = settings.outputStyle ?? "default";
+    const current = sdkOutputStyle(home) ?? "default";
 
     if (action.action === "list") {
       for (const s of store.list(cwd)) {
@@ -2665,7 +2661,7 @@ if (import.meta.main) {
       process.exitCode = 1;
       break;
     }
-    saveSettings(settingsPath, setOutputStyle(settings, action.name));
+    updateSdkSettings(home, (s) => setOutputStyle(s, action.name));
     console.log(`Output style set to: ${action.name}`);
     break;
   }

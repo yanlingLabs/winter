@@ -47,7 +47,7 @@ import type { RuntimeSessionRecord, RuntimeSessionRecords } from "../runtime-sta
 import type { ProjectionCheckpoints } from "../runtime-state/checkpoints";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
-import { DEFAULT_PROVIDER, effortRefusalFor, effortToSpendForRole, officialSubscriptionAuthEnabled, ownProviderFor, pinsFor, providerBaseUrlFor, winterOptionsFromSettings, type Settings } from "../settings";
+import { DEFAULT_PROVIDER, effortRefusalFor, effortToSpendForRole, officialSubscriptionAuthEnabled, ownProviderFor, pinsFor, providerBaseUrlFor, sdkAllowRules, sdkDenyRules, winterOptionsFromSettings, type Settings } from "../settings";
 import { d30DefaultModel } from "./advisor-reviewer";
 import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
 import type { WinterRuntimeSdk, SessionMode } from "./create";
@@ -176,6 +176,16 @@ export class WinterLegRefusal extends Error {
  */
 export function refusalMayBeCredentialShaped(reason: string): boolean {
   return reason === "no-credential" || reason === "slot-unservable";
+}
+
+/**
+ * WS-21: the user tier's rules, read live from `sdk/settings.json` at every incarnation (claude grammar,
+ * verbatim — see `WinterOptionsInput.userAllow`). `userAllow` is omitted when the key is absent, so an
+ * untouched home's `Options` are byte-identical to before.
+ */
+function userRulesFrom(home: string): { userAllow?: readonly string[]; userDeny: readonly string[] } {
+  const allow = sdkAllowRules(home);
+  return { ...(allow === undefined ? {} : { userAllow: allow }), userDeny: sdkDenyRules(home) };
 }
 
 /** The narrowed `SessionMode` a stored `mode` column resolves to (absent = code, as everywhere). */
@@ -649,7 +659,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // The model sees ONE listing: the child's own `skill_listing` attachment, built from exactly
       // this set (`winterSystemPromptFor` no longer renders the daemon's).
       const skillSurface = mode === "code" && deps.skills !== undefined
-        ? deps.skills.childSkillSurface({ cwd: primary ?? deps.tmpDirOf(sessionId), deny: settings?.permissions?.deny ?? [] })
+        ? deps.skills.childSkillSurface({ cwd: primary ?? deps.tmpDirOf(sessionId), deny: sdkDenyRules(home) })
         : undefined;
       const systemPrompt = deps.assembler === undefined ? undefined : winterSystemPromptFor(deps.assembler, {
         mode, origin: live.origin, primary, cwd: primary ?? deps.tmpDirOf(sessionId),
@@ -823,6 +833,8 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         ...(skillSurface === undefined ? {} : { plugins: skillSurface.plugins, skills: skillSurface.skills }),
         // Lane B: the user's SAVED allow rules, live and trust-gated (`WinterLegDeps.persistedAllowRules`).
         ...(deps.persistedAllowRules === undefined ? {} : { persistedAllow: deps.persistedAllowRules(cwd) }),
+        // WS-21: the user tier's allow and deny rules, read live from `sdk/settings.json` (claude grammar).
+        ...userRulesFrom(home),
       });
     };
 
@@ -1100,12 +1112,14 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // Lane B: the SAME saved-rule read the Winter leg's `optionsFor` makes, for this leg's
         // flag-settings `permissions.allow` (translated there by the same `sdkAllowRulesFor`).
         ...(deps.persistedAllowRules === undefined ? {} : { persistedAllow: deps.persistedAllowRules(capSession.cwd) }),
+        // WS-21: the SAME live `sdk/settings.json` read the Winter leg's `optionsFor` makes.
+        ...userRulesFrom(deps.home),
         // Lane B (router 0.0.11): the SAME skills-only plugin views the Winter leg's child gets —
         // enabled + `exec`-consented plugins only (`SkillStore.childSkillSurface`) — handed to claude
         // through the router's `plugins` policy, plus the deny rules under claude's own skill spelling.
         ...(() => {
           if (mode !== "code" || deps.skills === undefined) return {};
-          const surface = deps.skills.childSkillSurface({ cwd: capSession.cwd, deny: deps.settings()?.permissions?.deny ?? [] });
+          const surface = deps.skills.childSkillSurface({ cwd: capSession.cwd, deny: sdkDenyRules(deps.home) });
           return { skillPlugins: surface.plugins, skillDenyAliases: surface.officialDeny };
         })(),
         // Phase 9c (P9c-1): the LIVE settings snapshot (`deps.settings()` — the same hot holder

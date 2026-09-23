@@ -426,6 +426,12 @@ export interface OfficialInputDeps {
    *  by the SAME `sdkAllowRulesFor` (`mode-options.ts`) onto the flag-settings `permissions.allow`.
    *  Absent/empty ⇒ byte-identical to a session before this field existed. */
   persistedAllow?: readonly string[];
+  /** WS-21: the user's `sdk/settings.json` `permissions.allow` (`sdkAllowRules`) — already claude
+   *  grammar, forwarded verbatim (the same field, the same reason, as `WinterOptionsInput.userAllow`). */
+  userAllow?: readonly string[];
+  /** WS-21: the user's `sdk/settings.json` `permissions.deny` (`sdkDenyRules`) — the same list
+   *  `WinterOptionsInput.userDeny` carries, layered by the same `permissionDenyRulesFor`. */
+  userDeny?: readonly string[];
   /** Lane B (router 0.0.11): the skills-only plugin views `SkillStore.childSkillSurface` builds — the
    *  SAME ones the Winter leg's child gets, so enabled + `exec`-consented plugins only — forwarded to
    *  the router's `plugins` policy (`local`, absolute, `skipMcpDiscovery: true`; the router refuses the
@@ -751,7 +757,7 @@ export function officialInputFor(
         // and a real `<home>/runtimes/` Write while an ordinary cwd file Read still succeeds.
         //
         // Batch 3 (item 2): `permissionDenyRulesFor` (not `controlPlaneDenyRules` directly) so this
-        // leg's deny list ALSO carries `settings.permissions.deny` (today's `Skill(<name>)` toggles)
+        // leg's deny list ALSO carries the user's deny rules (WS-21: `sdk/settings.json`, `userDeny`)
         // — the exact same combined list the Winter leg's `buildWinterOptions` now sends, never a
         // second copy that could drift.
         // HIGH (fix wave, pre-merge review, finding 2a): same rationale as `mode-options.ts`'s
@@ -771,9 +777,9 @@ export function officialInputFor(
             // …then the user's SAVED rules, translated by the ONE translation the Winter leg uses
             // (`sdkAllowRulesFor`) — claude applies its own settings files' `permissions.allow`
             // natively; `settingSources: []` means this flag layer is the only way ours reach it.
-            ...(input.mode === "code" ? { allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...sdkAllowRulesFor(deps.persistedAllow ?? [])])] } : {}),
+            ...(input.mode === "code" ? { allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...(deps.userAllow ?? []), ...sdkAllowRulesFor(deps.persistedAllow ?? [])])] } : {}),
             // …plus the claude-spelling aliases of any denied plugin skill (`skillDenyAliases`).
-            deny: [...permissionDenyRulesFor(deps.home, deps.settings), ...(deps.skillDenyAliases ?? [])],
+            deny: [...permissionDenyRulesFor(deps.home, deps.userDeny), ...(deps.skillDenyAliases ?? [])],
             ...(deps.policy === "bypass" ? {} : { disableBypassPermissionsMode: "disable" as const }),
           },
           // `input.cwd`: the session's project agent definitions (`<cwd>/.winter/agents`) are fenced too.

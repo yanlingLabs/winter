@@ -557,47 +557,72 @@ export const McpDisableParams = z.object({ name: z.string().min(1) });
 export const McpDisableResult = z.object({ ok: z.literal(true), name: z.string(), enabled: z.literal(false) });
 
 /**
- * `winter mcp add`/`add-json` (CLI parity with `claude mcp add`) — USER scope only. Winter's
- * project scope (`<cwd>/.mcp.json`) is never RPC-routed: that file isn't daemon state (no watcher,
- * no settings-schema validation, read live per session spawn by `configuredMcpServersFor`), so the
- * CLI writes it directly, with or without a daemon (see `packages/cli/src/mcp-cli.ts`'s own header).
- * `entry` hand-mirrors `settings.ts`'s `McpServerSettingsEntry` discriminated union field-for-field
- * — protocol never imports from core (same cross-package literal-mirroring precedent as this file's
- * other core-shaped params) — so the REAL enforcement (including the credential-shaped-header
- * refusal on an http/sse entry) still happens once, in `saveSettings`, on the daemon side; this
- * schema only bounds the wire shape. LOCAL role only (never added to `REMOTE_ALLOWED_METHODS`),
- * same posture as `mcp.enable`/`mcp.disable`.
+ * `winter mcp add`/`add-json` (CLI parity with `claude mcp add`) — all three of claude's scopes since
+ * WS-21 (`McpScopeSchema` below). `entry` hand-mirrors `settings.ts`'s `McpServerSettingsEntry`
+ * discriminated union field-for-field — protocol never imports from core (same cross-package
+ * literal-mirroring precedent as this file's other core-shaped params) — so the REAL enforcement
+ * (including the credential-shaped-header refusal on an http/sse entry written to `sdk/.winter.json`)
+ * still happens once, on the daemon side; this schema only bounds the wire shape. LOCAL role only
+ * (never added to `REMOTE_ALLOWED_METHODS`), same posture as `mcp.enable`/`mcp.disable`.
  */
 export const McpAddEntrySchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("stdio"), command: z.string().min(1), args: z.array(z.string()).optional(), env: z.record(z.string(), z.string()).optional() }),
   z.object({ type: z.literal("http"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional() }),
   z.object({ type: z.literal("sse"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional() }),
 ]);
-export const McpAddParams = z.object({ name: z.string().min(1), entry: McpAddEntrySchema });
+/**
+ * WS-21 (spec §4.4, `winter mcp add` = `claude mcp add`): the three MCP scopes, claude's names and
+ * claude's default.
+ *
+ *   local    (the DEFAULT, as in claude)  `sdk/.winter.json` → `projects[<abs project root>].mcpServers`
+ *   user                                  `sdk/.winter.json` → `mcpServers`
+ *   project                               `<project root>/.winter/mcp.json` (claude's `.mcp.json` format;
+ *                                         loaded only when the project is trusted)
+ *
+ * `local` and `project` name a project, so they need `cwd` (the daemon resolves its project root); a
+ * call without one is refused typed. The repo-root `.mcp.json` is no longer read at all.
+ */
+export const McpScopeSchema = z.enum(["local", "user", "project"]);
+export type McpScope = z.infer<typeof McpScopeSchema>;
+
+export const McpAddParams = z.object({
+  name: z.string().min(1),
+  entry: McpAddEntrySchema,
+  scope: McpScopeSchema.default("local"),
+  cwd: z.string().min(1).optional(),
+});
 /** `started`: true only when this call ALSO brought a stdio user server up right now
  *  (`McpManager.startOneUserServer`, mirroring `mcp.enable`'s own restart) — false for an http/sse
  *  entry (no in-daemon client for those transports) or a name also listed in `mcp.disabled`. */
-export const McpAddResult = z.object({ ok: z.literal(true), name: z.string(), transport: z.enum(["stdio", "http", "sse"]), started: z.boolean() });
+export const McpAddResult = z.object({ ok: z.literal(true), name: z.string(), transport: z.enum(["stdio", "http", "sse"]), started: z.boolean(), scope: McpScopeSchema.optional() });
 
-export const McpRemoveParams = z.object({ name: z.string().min(1) });
-/** `removed`: false when the name was not present in `settings.mcpServers` at all — an idempotent
- *  no-op, same posture `mcp.enable`/`mcp.disable` already take on an absent/never-disabled name. */
-export const McpRemoveResult = z.object({ ok: z.literal(true), name: z.string(), removed: z.boolean() });
+export const McpRemoveParams = z.object({
+  name: z.string().min(1),
+  scope: McpScopeSchema.default("local"),
+  cwd: z.string().min(1).optional(),
+});
+/** `removed`: false when the name was not present in that scope at all — an idempotent no-op, same
+ *  posture `mcp.enable`/`mcp.disable` already take on an absent/never-disabled name. */
+export const McpRemoveResult = z.object({ ok: z.literal(true), name: z.string(), removed: z.boolean(), scope: McpScopeSchema.optional() });
 
 /**
- * `winter mcp get <name>` (USER scope; project scope is read directly off `<cwd>/.mcp.json` by the
- * CLI, same "never RPC-routed" posture as `mcp.add`/`mcp.remove` above). Read-only — LOCAL role
+ * `winter mcp get <name>` in one of the three scopes (WS-21, `McpScopeSchema`). Read-only — LOCAL role
  * only, but never refuses on a missing `winterHome` the way the write doors do (a read degrades to
  * `found: false` instead, same "typed absence, never a crash" posture `mcp.list` already has).
  * Carries the full configured shape `mcp.list` deliberately does NOT (that RPC is a live-status
  * listing, not a config reader) — `strippedHeaders` mirrors `McpServerStatusSchema`'s own field,
  * same read-door correction (names only, never a header value).
  */
-export const McpGetParams = z.object({ name: z.string().min(1) });
+export const McpGetParams = z.object({
+  name: z.string().min(1),
+  scope: McpScopeSchema.default("local"),
+  cwd: z.string().min(1).optional(),
+});
 export const McpGetResult = z.object({
   ok: z.literal(true),
   name: z.string(),
   found: z.boolean(),
+  scope: McpScopeSchema.optional(),
   transport: z.enum(["stdio", "http", "sse"]).optional(),
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
@@ -1374,6 +1399,90 @@ export const PluginSetConsentResult = z.union([
   z.object({ ok: z.literal(true) }),
   z.object({ code: z.literal("unknown_plugin") }),
 ]);
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// WS-21 (spec §5.2): `winter plugin` = `claude plugin`. Params and results mirror the agent SDK's
+// plugin-management API (Contract B, `packages/sdk/src/plugins/manage.ts`: `PluginScope`,
+// `InstalledPlugin`, `PluginListing`, `MarketplaceInfo`) field for field — protocol never imports the
+// SDK, same literal-mirroring precedent as the rest of this file. A plugin is named by its claude
+// spec, `"<plugin>@<marketplace>"` (`spec`), and scoped like claude's settings tiers.
+//
+// `plugin.enable`/`plugin.disable` already exist with the pre-WS-21 contract (`PluginEnableParams`,
+// `PluginDisableParams`: a legacy plugin NAME plus the two-step consent flow). Their WS-21 params are
+// `PluginEnableScopedParams`/`PluginDisableScopedParams` below; lane L4 replaces the legacy handlers
+// (and retires the legacy schemas) when it moves the plugin surface onto Contract B. The legacy
+// `plugins.install`/`plugins.list`/`plugin.remove` stay until then too.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+/** claude's plugin scopes: which settings tier carries `enabledPlugins` (`user` = `sdk/settings.json`,
+ *  `project` = `.winter/settings.json`, `local` = `.winter/settings.local.json`). */
+export const PluginScopeSchema = z.enum(["user", "project", "local"]);
+export type PluginScope = z.infer<typeof PluginScopeSchema>;
+
+/** Contract B `InstalledPlugin`. `installPath` is absolute and stable. */
+export const InstalledPluginSchema = z.object({
+  id: z.string(),
+  version: z.string().optional(),
+  installPath: z.string(),
+  scope: PluginScopeSchema,
+});
+/** Contract B `PluginListing`. */
+export const PluginListingSchema = InstalledPluginSchema.extend({
+  enabled: z.boolean(),
+  marketplace: z.string(),
+});
+/** Contract B `MarketplaceInfo`. A `directory` marketplace is read in place (`path` IS the source). */
+export const MarketplaceInfoSchema = z.object({
+  name: z.string(),
+  source: z.string(),
+  kind: z.enum(["directory", "git", "github", "url"]),
+  path: z.string(),
+});
+
+/** Shared by every scoped plugin call: `project`/`local` need `cwd` (the daemon resolves its root). */
+const PluginScopedTarget = {
+  spec: z.string().min(1),
+  scope: PluginScopeSchema.default("user"),
+  cwd: z.string().min(1).optional(),
+};
+
+/** `plugin.install <plugin>[@<marketplace>] [--scope user|project|local]` (claude's default: user). */
+export const PluginInstallParams = z.object(PluginScopedTarget);
+export const PluginInstallResult = z.object({ ok: z.literal(true), plugin: InstalledPluginSchema });
+
+/** `plugin.uninstall <plugin> [--scope …]`. */
+export const PluginUninstallParams = z.object(PluginScopedTarget);
+export const PluginUninstallResult = z.object({ ok: z.literal(true), spec: z.string(), scope: PluginScopeSchema });
+
+/** WS-21 `plugin.enable` params (Contract B `setPluginEnabled(…, true)`). See this block's header. */
+export const PluginEnableScopedParams = z.object(PluginScopedTarget);
+/** WS-21 `plugin.disable` params (Contract B `setPluginEnabled(…, false)`). */
+export const PluginDisableScopedParams = z.object(PluginScopedTarget);
+export const PluginSetEnabledResult = z.object({ ok: z.literal(true), spec: z.string(), scope: PluginScopeSchema, enabled: z.boolean() });
+
+/** `plugin.update <plugin>` (Contract B `updatePlugin`: no scope — an install is updated in place). */
+export const PluginUpdateParams = z.object({ spec: z.string().min(1) });
+export const PluginUpdateResult = z.object({ ok: z.literal(true), plugin: InstalledPluginSchema });
+
+/** `plugin.list` — every installed plugin with its enabled state for the project at `cwd` (when given). */
+export const PluginListParams = z.object({ cwd: z.string().min(1).optional() });
+export const PluginListResult = z.object({ ok: z.literal(true), plugins: z.array(PluginListingSchema) });
+
+/** `plugin.marketplace.add <source>` — a directory path, `owner/repo`, a git URL or a URL. */
+export const PluginMarketplaceAddParams = z.object({ source: z.string().min(1) });
+export const PluginMarketplaceAddResult = z.object({ ok: z.literal(true), marketplace: MarketplaceInfoSchema });
+
+/** `plugin.marketplace.remove <name>`. */
+export const PluginMarketplaceRemoveParams = z.object({ name: z.string().min(1) });
+export const PluginMarketplaceRemoveResult = z.object({ ok: z.literal(true), name: z.string() });
+
+/** `plugin.marketplace.list`. */
+export const PluginMarketplaceListParams = z.object({});
+export const PluginMarketplaceListResult = z.object({ ok: z.literal(true), marketplaces: z.array(MarketplaceInfoSchema) });
+
+/** `plugin.marketplace.update [name]` — every marketplace when `name` is absent (Contract B). */
+export const PluginMarketplaceUpdateParams = z.object({ name: z.string().min(1).optional() });
+export const PluginMarketplaceUpdateResult = z.object({ ok: z.literal(true) });
 
 // ---------------------------------------------------------------------------------------------
 // Scheduled routines (Phase 5 / Routines, design doc §3): the management surface over
@@ -2632,6 +2741,16 @@ export const METHODS = {
   pluginDisable: "plugin.disable",
   pluginRemove: "plugin.remove",
   pluginSetConsent: "plugin.setConsent",
+  // WS-21 (spec §5.2, Contract B): `winter plugin` = `claude plugin`. `plugin.enable`/`plugin.disable`
+  // keep their keys above; their WS-21 params are `PluginEnableScopedParams`/`PluginDisableScopedParams`.
+  pluginInstall: "plugin.install",
+  pluginUninstall: "plugin.uninstall",
+  pluginUpdate: "plugin.update",
+  pluginList: "plugin.list",
+  pluginMarketplaceAdd: "plugin.marketplace.add",
+  pluginMarketplaceRemove: "plugin.marketplace.remove",
+  pluginMarketplaceList: "plugin.marketplace.list",
+  pluginMarketplaceUpdate: "plugin.marketplace.update",
   routinesCreate: "routines.create",
   routinesList: "routines.list",
   routinesUpdate: "routines.update",

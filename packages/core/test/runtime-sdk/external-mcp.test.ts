@@ -1,11 +1,11 @@
 // Fix wave (review row 7): Winter's configured MCP servers → the SDK's stdio configs, keyed as the
 // daemon's registry keys them, trust-gated for the project half.
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { configuredMcpServersFor } from "../../src/runtime-sdk/external-mcp";
-import { Settings, loadSettings } from "../../src/settings";
+import { Settings, sdkUserMcpServers } from "../../src/settings";
 
 // Daemon settings surface batch 3 (item 3b): a real `Settings.parse` always normalizes a `type`-less
 // entry to `{ type: "stdio", ... }` (settings.ts's own preprocess step), so this helper stamps the
@@ -14,11 +14,13 @@ import { Settings, loadSettings } from "../../src/settings";
 const settingsWith = (servers: Record<string, { command: string; args?: string[]; env?: Record<string, string> }>): Settings =>
   ({ mcpServers: Object.fromEntries(Object.entries(servers).map(([k, v]) => [k, { type: "stdio" as const, ...v }])) } as unknown as Settings);
 
-test("user servers from settings.mcpServers become stdio configs under their own keys (mcp__<key>__<tool> on the child)", () => {
-  const out = configuredMcpServersFor({
-    settings: settingsWith({ fake: { command: "bun", args: ["run", "fake.ts"], env: { A: "1" } }, bare: { command: "npx" } }),
-    cwd: undefined, trusted: () => false,
-  });
+// WS-21: the user-scope servers moved to `sdk/.winter.json` and arrive as `userMcpServers`
+// (`sdkUserMcpServers`, read live by the daemon); `settings` is read for `mcp.disabled` only.
+const userServers = (settings: Settings) => ({ userMcpServers: settings.mcpServers ?? {} });
+
+test("user servers (sdk/.winter.json) become stdio configs under their own keys (mcp__<key>__<tool> on the child)", () => {
+  const settings = settingsWith({ fake: { command: "bun", args: ["run", "fake.ts"], env: { A: "1" } }, bare: { command: "npx" } });
+  const out = configuredMcpServersFor({ settings, ...userServers(settings), cwd: undefined, trusted: () => false });
   expect(out).toEqual({
     fake: { type: "stdio", command: "bun", args: ["run", "fake.ts"], env: { A: "1" } },
     bare: { type: "stdio", command: "npx" },
@@ -43,7 +45,8 @@ test("a missing or malformed .mcp.json contributes nothing and never throws; a u
     writeFileSync(join(dir, ".mcp.json"), "{ not json");
     expect(configuredMcpServersFor({ settings: null, cwd: dir, trusted: () => true })).toEqual({});
     writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { shared: { command: "project-cmd" }, only: { command: "p" } } }));
-    const out = configuredMcpServersFor({ settings: settingsWith({ shared: { command: "user-cmd" } }), cwd: dir, trusted: () => true });
+    const withShared = settingsWith({ shared: { command: "user-cmd" } });
+    const out = configuredMcpServersFor({ settings: withShared, ...userServers(withShared), cwd: dir, trusted: () => true });
     expect(out.shared).toEqual({ type: "stdio", command: "user-cmd" });
     expect(out.only).toEqual({ type: "stdio", command: "p" });
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -132,7 +135,7 @@ test("an HTTP server and an SSE server pass through with their own shape (url, h
       sseOne: { type: "sse", url: "https://example.com/sse" },
     },
   });
-  const out = configuredMcpServersFor({ settings, cwd: undefined, trusted: () => false });
+  const out = configuredMcpServersFor({ settings, ...userServers(settings), cwd: undefined, trusted: () => false });
   expect(out).toEqual({
     httpOne: { type: "http", url: "https://example.com/mcp", headers: { "X-Request-Id": "abc123" } },
     sseOne: { type: "sse", url: "https://example.com/sse" },
@@ -145,11 +148,10 @@ test("an HTTP server and an SSE server pass through with their own shape (url, h
 // EITHER leg's `Options` — `configuredMcpServersFor` is the one function both `mode-options.ts`'s
 // `buildWinterOptions` and `official-options.ts`'s `officialInputFor` consume verbatim, so proving
 // it is absent from THIS function's output proves it is absent from both legs.
-test("a credential-shaped header a user hand-edited into settings.json is stripped by loadSettings and never reaches configuredMcpServersFor's output", () => {
-  const dir = mkdtempSync(join(tmpdir(), "winter-ext-mcp-cred-header-"));
-  const path = join(dir, "settings.json");
-  writeFileSync(path, JSON.stringify({
-    schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
+test("a credential-shaped header a user hand-edited into sdk/.winter.json is stripped by sdkUserMcpServers and never reaches configuredMcpServersFor's output", () => {
+  const home = mkdtempSync(join(tmpdir(), "winter-ext-mcp-cred-header-"));
+  mkdirSync(join(home, "sdk"), { recursive: true });
+  writeFileSync(join(home, "sdk", ".winter.json"), JSON.stringify({
     mcpServers: {
       httpOne: {
         type: "http", url: "https://example.com/mcp",
@@ -157,10 +159,9 @@ test("a credential-shaped header a user hand-edited into settings.json is stripp
       },
     },
   }));
-  // Load through the real daemon-facing door (not Settings.parse, which would itself refuse this
-  // shape) — this IS the read door under test.
-  const settings = loadSettings(path);
-  const out = configuredMcpServersFor({ settings, cwd: undefined, trusted: () => false });
+  // Read through the real daemon-facing door (WS-21: the user scope is `sdk/.winter.json`) — this IS
+  // the read door under test.
+  const out = configuredMcpServersFor({ settings: null, userMcpServers: sdkUserMcpServers(home), cwd: undefined, trusted: () => false });
   expect(out).toEqual({ httpOne: { type: "http", url: "https://example.com/mcp", headers: { "X-Request-Id": "abc123" } } });
   expect(JSON.stringify(out)).not.toContain("sk-SENTINEL");
   expect(JSON.stringify(out)).not.toContain("Authorization");
@@ -177,7 +178,7 @@ test("a disabled server is withheld entirely — neither a user nor a project en
       mcpServers: { blocked: { type: "stdio", command: "user-cmd" }, kept: { type: "stdio", command: "keep" } },
       mcp: { disabled: ["blocked"] },
     });
-    const out = configuredMcpServersFor({ settings, cwd: dir, trusted: () => true });
+    const out = configuredMcpServersFor({ settings, ...userServers(settings), cwd: dir, trusted: () => true });
     expect(out.blocked).toBeUndefined();
     expect(out.kept).toEqual({ type: "stdio", command: "keep" });
     expect(out.allowed).toEqual({ type: "stdio", command: "p" });
