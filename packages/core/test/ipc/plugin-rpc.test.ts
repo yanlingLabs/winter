@@ -19,6 +19,7 @@ import { ToolRegistry } from "../../src/agent/tools/registry";
 import { PluginSupervisor } from "../../src/plugins/supervisor";
 import { sdkPluginsRoot, sdkSettingsPath } from "../../src/agent/paths";
 import { pluginConsentFingerprint } from "../../src/plugins/consent-fingerprint";
+import { HookRegistry } from "../../src/plugins/hook-registry";
 
 class TestClient {
   private decoder = new LineDecoder();
@@ -75,7 +76,7 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
   let stop: (() => void) | undefined;
   afterEach(() => { stop?.(); stop = undefined; });
 
-  async function boot(opts: { withSupervisor?: boolean } = {}) {
+  async function boot(opts: { withSupervisor?: boolean; withHookRegistry?: boolean } = {}) {
     const home = mkdtempSync(join(tmpdir(), "winter-plugin-rpc-"));
     writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } }));
     const store = new SessionStore(home);
@@ -90,11 +91,15 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
           isAlivePid: () => false, signalPid: () => {},
         })
       : undefined;
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, registry, supervisor });
+    // Post-merge round: a REAL HookRegistry, wired exactly like daemon.ts wires opts.hooks, so a
+    // test can prove the plugin RPCs never feed it (DECISION 22) rather than just asserting an
+    // absence of source-level calls.
+    const hooks = opts.withHookRegistry ? new HookRegistry() : undefined;
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, registry, supervisor, hooks });
     stop = () => { supervisor?.stopAll(); server.stop(); store.close(); };
     const c = await TestClient.connect(socketPath);
     await c.hello(tokens.harness, "plugin-rpc");
-    return { home, socketPath, c, store, supervisor };
+    return { home, socketPath, c, store, supervisor, hooks };
   }
 
   test("plugin.marketplace.add + plugin.install + plugin.list: a directory marketplace installs and lists, enabled by default", async () => {
@@ -484,6 +489,48 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
       const hooks = listRes.result.plugins[0].hooks;
       expect(hooks).toHaveLength(100);
       expect(hooks[0].command).toBe("x".repeat(500));
+    });
+  });
+
+  // Post-merge round (DECISION 22): the daemon's OWN HookRegistry (opts.hooks, ipc/server.ts) is
+  // never fed plugin hooks any more -- plugin.enable/disable/setConsent used to call
+  // rebuildHookRegistry() (retired this round, along with agent/plugins.ts's
+  // pluginHooksEligible/hookRegistryPlugins, its only support code). A plugin's hooks reach a
+  // session's runtime child through the shared run folder and both SDKs natively (spec §5.1/§5.3),
+  // never the daemon's own registry executing them.
+  describe("the daemon's own hook registry holds no plugin hooks (DECISION 22)", () => {
+    test("after plugin.enable (a Tier-2, spawn-eligible, consented plugin), the hook registry is still empty for every event", async () => {
+      const { c, hooks } = await boot({ withHookRegistry: true });
+      const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-hookreg-"));
+      writeMarketplace(mktDir); // tier "platform", entry present
+      await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+      await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+      await c.request(METHODS.pluginSetConsent, {
+        spec: "p@m", classes: ["exec"],
+        fingerprint: pluginConsentFingerprint(mktDir, { entry: { command: "bun", args: ["--version"] }, requiredConsents: ["exec"] }),
+      });
+
+      const enableRes = await c.request(METHODS.pluginEnable, { spec: "p@m", scope: "user" });
+      expect(enableRes.result).toEqual({ ok: true, spec: "p@m", scope: "user", enabled: true });
+
+      // Every event claude/Winter hooks ever fire on -- none of them ever got a plugin entry.
+      for (const event of ["PreToolUse", "PostToolUse", "SessionStart", "Stop", "UserPromptSubmit"]) {
+        expect(hooks!.hooksFor(event)).toEqual([]);
+      }
+    });
+
+    test("after plugin.disable and plugin.setConsent too, the hook registry is still empty", async () => {
+      const { c, hooks } = await boot({ withHookRegistry: true });
+      const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-hookreg-2-"));
+      writeMarketplace(mktDir);
+      await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+      await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+      const fingerprint = pluginConsentFingerprint(mktDir, { entry: { command: "bun", args: ["--version"] }, requiredConsents: ["exec"] });
+      await c.request(METHODS.pluginSetConsent, { spec: "p@m", classes: ["exec"], fingerprint });
+      await c.request(METHODS.pluginEnable, { spec: "p@m", scope: "user" });
+      await c.request(METHODS.pluginDisable, { spec: "p@m", scope: "user" });
+
+      expect(hooks!.hooksFor("PreToolUse")).toEqual([]);
     });
   });
 
