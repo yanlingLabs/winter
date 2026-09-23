@@ -539,10 +539,11 @@ export function controlPlaneDenyRules(home: string): string[] {
   // root — `claude-resume-<uuid>` directories the Claude Agent SDK stages a cross-generation resume
   // payload under, directly in the SYSTEM temp dir (never under `home`, which is why this rule
   // anchors at `tmpdir()` rather than joining `home` the way every other rule here does). Nothing on
-  // either leg may read OR write another generation's — or another session's — staged resume
-  // payload: the official SDK's own process boundary does not fence that off from a child it spawns,
-  // and a resume payload can carry provider-native state as sensitive as anything under
-  // `<home>/runtimes`. As of 10b the prefix is IMPORTED from the router's own
+  // either leg may WRITE a staged resume payload: the official SDK's own process boundary does not fence
+  // that off from a child it spawns. READS (round 6): every resumed official generation runs IN a staging
+  // root and claude points the model at its own large tool outputs there, so only the generated config
+  // files and `backups/` are read-denied (`readTargets` below), as for a run folder. As of 10b the prefix
+  // is IMPORTED from the router's own
   // `RESUME_STAGING_PREFIX` (`@yanlinglabs/winter-runtime-sdk`, exported since 0.0.4) rather than
   // hand-rolled here — this is the same literal `isResumeStagingRoot`/`resumeStagingRoot` build
   // staging roots FROM, so a future rename on the router's side fails this rule at compile/test time
@@ -613,16 +614,25 @@ export function controlPlaneDenyRules(home: string): string[] {
   // Task 17: the engine's read tool denied `<home>/run` and `<home>/runtimes` (the runtime store,
   // 8a's model-denied directory); the Winter leg's read-class tools carry the same two denials.
   const readTools = ["Read", "Glob", "Grep"];
+  // Round 6: a claude staging root is NO LONGER read-denied whole — every resumed official generation runs
+  // in one, and claude tells the model to `Read` its own large tool outputs there
+  // (`projects/<key>/<sid>/tool-results/<id>.txt`). Like a run folder, only what needs protecting is: the
+  // generated config files and `backups/` (claude's `.claude.json.backup.*` copies). The WRITE fence above
+  // keeps the whole root.
+  const stagingRoot = join(lit(tmpdir()), `${RESUME_STAGING_PREFIX}*`);
+  const runFolders = [lit(homeCacheDir(home)), "runs", "*"].join("/");
   const readTargets = [
     fsRootAnchored([lit(join(home, "run")), "**"].join("/")),
     fsRootAnchored([lit(join(home, "runtimes")), "**"].join("/")),
-    claudeResumeStaging,
     // WS-21 (spec §7.1, reads): the user's MCP servers (a stdio server's `env` may carry a key) and the
-    // generated config of every run folder — its `.winter.json` copy of them, and the official child's
-    // `.claude.json`/`.credentials.json`. A mid-segment `*` is a real wildcard on both matchers (see
-    // `claudeResumeStaging` above). A staging root is read-denied whole already.
+    // generated config of every run folder and staging root — its `.winter.json` copy of them, and the
+    // official child's `.claude.json`/`.credentials.json` — plus (round 6) the `backups/` claude keeps of
+    // `.claude.json`. A mid-segment `*` is a real wildcard on both matchers (see `claudeResumeStaging`).
     fsRootAnchored(lit(join(sdkHomeFor(home), ".winter.json"))),
-    ...RUN_FOLDER_CONFIG_FILES.map((f) => fsRootAnchored([lit(homeCacheDir(home)), "runs", "*", f].join("/"))),
+    ...RUN_FOLDER_CONFIG_FILES.map((f) => fsRootAnchored([runFolders, f].join("/"))),
+    fsRootAnchored([runFolders, "backups", "**"].join("/")),
+    ...RUN_FOLDER_CONFIG_FILES.map((f) => fsRootAnchored([stagingRoot, f].join("/"))),
+    fsRootAnchored([stagingRoot, "backups", "**"].join("/")),
   ];
   return [...writeTools.flatMap((t) => targets.map((p) => `${t}(${p})`)), ...readTools.flatMap((t) => readTargets.map((p) => `${t}(${p})`))];
 }

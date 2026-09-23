@@ -10,7 +10,7 @@ import {
 } from "../../src/settings";
 import { ProjectSettingsResolver } from "../../src/project-settings";
 import { persistedAllowRulesFor, winterGateRulesFromSdk, sdkAllowRulesFor } from "../../src/runtime-sdk/mode-options";
-import { SettingsWatcher, watchViaParentDir } from "../../src/settings-watcher";
+import { SettingsWatcher, namesWatchedFile, watchViaParentDir } from "../../src/settings-watcher";
 import { liveSdkSettings, readSdkSettingsDetailed, updateSdkSettings } from "../../src/sdk-files";
 import { sdkSettingsPath } from "../../src/agent/paths";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
@@ -141,14 +141,36 @@ describe("live reads: an on-disk edit shows up; a torn edit keeps the last good 
       watch: watchViaParentDir,
     });
     watcher.start(liveSdkSettings(home));
-    await Bun.sleep(30);
-    // An atomic replace, the way an editor (or the daemon) saves.
-    writeFileSync(`${sdkSettingsPath(home)}.tmp`, JSON.stringify({ permissions: { deny: ["Skill(two)"] } }));
-    require("node:fs").renameSync(`${sdkSettingsPath(home)}.tmp`, sdkSettingsPath(home));
-    const until = Date.now() + 3000;
-    while (applied.length === 0 && Date.now() < until) await Bun.sleep(20);
-    expect(applied.at(-1)).toEqual({ permissions: { deny: ["Skill(two)"] } });
+    // Round 6 (a flake in a shared process): wait on CONDITIONS, never a fixed sleep. fs.watch gives no
+    // "armed" signal, so the atomic replace — the way the daemon's own `updateSdkSettings` saves (a
+    // `<file>.<pid>.<hex>.tmp` renamed over the file) — is repeated until the watcher applies it; an
+    // event dropped by a stream not yet live costs one more round, never the test.
+    const want = { permissions: { deny: ["Skill(two)"] } };
+    const until = Date.now() + 8000;
+    while (!applied.some((a) => JSON.stringify(a) === JSON.stringify(want)) && Date.now() < until) {
+      const tmp = `${sdkSettingsPath(home)}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
+      writeFileSync(tmp, JSON.stringify(want));
+      require("node:fs").renameSync(tmp, sdkSettingsPath(home));
+      const round = Date.now() + 600;
+      while (!applied.some((a) => JSON.stringify(a) === JSON.stringify(want)) && Date.now() < round) await Bun.sleep(10);
+    }
+    expect(applied.at(-1)).toEqual(want);
     expect(sdkDenyRules(home)).toEqual(["Skill(two)"]);
+  });
+
+  // Round 6 — the ROOT CAUSE of the flake: after an atomic replace, macOS reported the parent-directory
+  // event under the TEMP file's name only (measured in the shared-process run: `rename settings.json.tmp`,
+  // never `settings.json`), which the filter ignored — the test passed only when a stale event from the
+  // setup write happened to fire the reload after the rename. The watcher now takes a temp spelling of the
+  // file (its name plus a suffix) as the file's own event.
+  test("the parent-directory filter takes the file's temp spellings as its own; other files are not it", () => {
+    for (const f of ["settings.json", "settings.json.tmp", "settings.json.4242.a1b2c3.tmp", "settings.json~", null, undefined]) {
+      expect({ f, hit: namesWatchedFile(f, "settings.json") }).toEqual({ f, hit: true });
+    }
+    for (const f of ["settings.local.json", ".winter.json", "history.jsonl", "xsettings.json"]) {
+      expect({ f, hit: namesWatchedFile(f, "settings.json") }).toEqual({ f, hit: false });
+    }
+    expect(namesWatchedFile(".winter.json.99.ff.tmp", ".winter.json")).toBe(true);
   });
 
   test("a half-written edit keeps the last good version (readers and watcher alike)", async () => {
