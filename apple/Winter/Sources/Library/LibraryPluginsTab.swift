@@ -91,7 +91,8 @@ struct LibraryPluginsList: View {
                             let ref = LibraryItemRef.plugin(name: row.spec)
                             LibraryLinkRow(
                                 systemImage: "puzzlepiece.extension",
-                                title: row.pluginId,
+                                // Fix round 5: `pluginId` is marketplace-authored (untrusted) too.
+                                title: librarySanitizedHookField(row.pluginId),
                                 subtitle: libraryPluginSubtitle(row),
                                 isSelected: selected == ref,
                                 action: { onOpen(ref) }
@@ -149,7 +150,10 @@ struct LibraryPluginDetail: View {
 
     var body: some View {
         LibraryDetailPage(
-            title: row?.pluginId ?? spec,
+            // Fix round 5: `pluginId` is marketplace-authored (untrusted) too; the `?? spec`
+            // fallback (loading, or the row already vanished) is unaffected — `spec` is this
+            // view's own opaque identity string, not rendered as a plugin-authored display name.
+            title: row.map { librarySanitizedHookField($0.pluginId) } ?? spec,
             subtitle: row.map { "\($0.tierBadge) · \($0.version)" } ?? "Plugin",
             backLabel: "Back to Plugins",
             onBack: onBack

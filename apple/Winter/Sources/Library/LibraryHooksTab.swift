@@ -30,13 +30,19 @@ func libraryHooksListSubtitle(_ hooks: [PluginHookEntry]?) -> String {
     return "\(count) hook\(count == 1 ? "" : "s")"
 }
 
-/// PURE (fix round 3, widened round 4): replaces control characters, line/paragraph separators,
-/// zero-width characters and bidirectional text marks/overrides/isolates with a visible `\u{XXXX}`
-/// escape, in every hook field this file renders (and, since round 4, `ConsentSheet`'s disclosure
-/// lines too — `pluginConsentDisclosureLines`). A plugin's `event`/`matcher`/`type`/`command`, or a
-/// consent disclosure's entry command/TCC/hardware strings, are attacker-controllable strings from
-/// `winter-plugin.json`/`hooks.json` — sanitized before they reach either a truncated summary or a
-/// full-text tooltip/disclosure block, never just one of the two. Ranges, each with a concrete
+/// PURE (fix round 3, widened round 4, widened again round 5): replaces control characters, line/
+/// paragraph separators, zero-width characters and bidirectional text marks/overrides/isolates with
+/// a visible `\u{XXXX}` escape, in every hook field this file renders (and, since round 4,
+/// `ConsentSheet`'s disclosure lines too — `pluginConsentDisclosureLines`). A plugin's `event`/
+/// `matcher`/`type`/`command`, a consent disclosure's entry command/TCC/hardware strings, or a
+/// plugin's own DISPLAY NAME (`pluginId`, since round 5 — it comes straight from the marketplace
+/// file, the exact same trust boundary as those other fields) are attacker-controllable strings
+/// from `winter-plugin.json`/`hooks.json`/`marketplace.json` — sanitized before they reach a
+/// truncated summary, a full-text tooltip/disclosure block, or a single-line title/row label,
+/// never just some of those. Round 5's own call sites: the consent sheet's title and first
+/// disclosure line (`ConsentSheet.swift`), the plugin screen's row label
+/// (`PluginManagerView.swift`), and the Hooks/Plugins tabs' row and detail-page titles
+/// (`LibraryHooksTab.swift`, `LibraryPluginsTab.swift`). Ranges, each with a concrete
 /// spoofing/truncation risk this pane actually renders into:
 /// - `0x00...0x1F`/`0x7F` — C0 controls and DEL.
 /// - `0x80...0x9F` — C1 controls, including NEL (U+0085): like LF, it forces a line break, which
@@ -137,7 +143,8 @@ struct LibraryHooksList: View {
                             let ref = LibraryItemRef.hooks(pluginName: row.spec)
                             LibraryLinkRow(
                                 systemImage: "point.3.connected.trianglepath.dotted",
-                                title: row.pluginId,
+                                // Fix round 5: `pluginId` is marketplace-authored (untrusted) too.
+                                title: librarySanitizedHookField(row.pluginId),
                                 subtitle: libraryHooksListSubtitle(row.hooks),
                                 isSelected: selected == ref,
                                 action: { onOpen(ref) }
@@ -170,7 +177,10 @@ struct LibraryHooksDetail: View {
 
     var body: some View {
         LibraryDetailPage(
-            title: row?.pluginId ?? spec,
+            // Fix round 5: `pluginId` is marketplace-authored (untrusted) too; the `?? spec`
+            // fallback (loading, or the row already vanished) is unaffected — `spec` is this
+            // view's own opaque identity string, not rendered as a plugin-authored display name.
+            title: row.map { librarySanitizedHookField($0.pluginId) } ?? spec,
             subtitle: "Hooks",
             backLabel: "Back to Hooks",
             onBack: onBack
