@@ -29,6 +29,7 @@
 import { mkdir, readFile, rmdir } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { writeJsonAtomic } from "../sdk-files";
+import { ensureGlobalGitExclude } from "../agent/git-exclude";
 
 export class PluginManagerError extends Error {
   constructor(message: string) {
@@ -324,6 +325,17 @@ async function setEnabledInSettings(o: PluginManagerOptions, scope: PluginScope,
   settings.enabledPlugins = enabledPlugins;
   await mkdir(dirname(path), { recursive: true });
   await writeJsonAtomicNoLock(path, settings);
+  // Post-merge round: `local` scope's own file (`<root>/.winter/settings.local.json`, this exact
+  // path -- `settingsPathFor`'s own `join(root, ".winter", "settings.local.json")` convention, both
+  // the CLI's and the daemon's) is a PERSONAL overlay, never meant to be committed -- claude parity
+  // (F21, `agent/git-exclude.ts`'s own header) keeps it out of git the same way L3's
+  // `agent/saved-answers.ts` does for its own `.winter/settings.local.json` writes. `project` scope
+  // writes the TEAM-SHARED `.winter/settings.json` instead (meant to be committed) and `user` scope
+  // never touches the project's git tree at all, so neither needs this. Best-effort, never throws
+  // (`ensureGlobalGitExclude`'s own contract) -- this install/uninstall/enable/disable never fails
+  // over a cosmetic git-excludes write. `dirname(dirname(path))` recovers `root` from the two-level
+  // `.winter/settings.local.json` suffix every `settingsPathFor` implementation uses.
+  if (scope === "local") ensureGlobalGitExclude(dirname(dirname(path)));
 }
 
 // --- marketplaces -----------------------------------------------------------------------------
