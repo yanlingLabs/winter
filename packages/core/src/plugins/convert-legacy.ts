@@ -154,7 +154,12 @@ function convertOnePlugin(legacyDir: string, targetDir: string, id: string): voi
   const declaredHooks = manifest?.contributes?.hooks;
   if (declaredHooks && declaredHooks.length > 0) {
     mkdirSync(join(targetDir, "hooks"), { recursive: true });
-    writeFileSync(join(targetDir, "hooks", "hooks.json"), `${JSON.stringify(convertHooksJson(declaredHooks), null, 2)}\n`);
+    // Post-merge round: WRAPPED in claude's own top-level "hooks" key — plugins/plugin-hooks.ts's
+    // own reader (readHookSource) expects `{hooks: {<Event>: [...]}}` at this file's root, not the
+    // bare event map; writing the bare shape (as this line used to) meant a converted legacy
+    // plugin's hooks silently read back as `[]` over plugin.list, never as an absent/malformed
+    // field either — a genuinely undetectable data-loss bug until this fix.
+    writeFileSync(join(targetDir, "hooks", "hooks.json"), `${JSON.stringify({ hooks: convertHooksJson(declaredHooks) }, null, 2)}\n`);
   }
 
   if (manifest && (manifest.tier || manifest.permissions || manifest.entry || manifest.contributes?.tools || manifest.contributes?.shortcuts || manifest.contributes?.tile || manifest.contributes?.provider)) {
