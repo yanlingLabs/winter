@@ -481,14 +481,17 @@ export function escapeFloorHit(command: string, home: string | undefined): strin
   }
   // …and the runtimes' transcript store, `sdk/projects`, write-shaped and OUTSIDE each project's
   // `memory/` (the model's MEMDIR, which it maintains itself).
+  // Review M2: and under its compat-link spelling `<home>/projects` (a link into `sdk/projects` on a
+  // migrated home; the store itself on router 0.0.11).
   for (const pre of homePrefixes(bareHome)) {
-    const needle = `${pre}/sdk/projects`;
-    for (let at = c.indexOf(needle); at >= 0; at = c.indexOf(needle, at + 1)) {
-      if (at <= writeStart) continue;
-      const rest = c.slice(at + needle.length).split(/[\s;&|()<>]/, 1)[0] ?? "";
-      if (rest !== "" && !rest.startsWith("/")) continue; // `sdk/projectsx`: not this directory
-      if (/^\/[^/]+\/memory(\/|$)/.test(rest)) continue;
-      return "sdk/projects, the runtimes' own transcript store";
+    for (const needle of [`${pre}/sdk/projects`, `${pre}/projects`]) {
+      for (let at = c.indexOf(needle); at >= 0; at = c.indexOf(needle, at + 1)) {
+        if (at <= writeStart) continue;
+        const rest = c.slice(at + needle.length).split(/[\s;&|()<>]/, 1)[0] ?? "";
+        if (rest !== "" && !rest.startsWith("/")) continue; // `sdk/projectsx`: not this directory
+        if (/^\/[^/]+\/memory(\/|$)/.test(rest)) continue;
+        return "sdk/projects, the runtimes' own transcript store";
+      }
     }
   }
   return undefined;
