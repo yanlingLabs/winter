@@ -399,8 +399,15 @@ final class PluginManagerModel: ObservableObject {
                 // plugin installed from the SAME marketplace would otherwise be invisible to this
                 // check, and the marketplace could be pulled out from under it.
                 do {
+                    // Round 4: dropped the `$0.spec != spec` exclusion. This list is fetched AFTER
+                    // `pluginUninstall` above already returned, so the just-removed record is gone
+                    // from it on its own — nothing here needs to exclude it by spec. The exclusion
+                    // was actively wrong: `spec` (`"<id>@<marketplace>"`) doesn't encode scope, so a
+                    // PROJECT-scope install of the SAME plugin from the SAME marketplace shares the
+                    // identical spec string as the user-scope one just uninstalled, and the old
+                    // clause silently excluded that still-live row too.
                     let everyListing = try await client.pluginList()
-                    let stillUsed = everyListing.contains { $0.spec != spec && $0.marketplace == listing.marketplace }
+                    let stillUsed = everyListing.contains { $0.marketplace == listing.marketplace }
                     if !stillUsed {
                         try? await client.pluginMarketplaceRemove(name: listing.marketplace)
                         marketplacesAddedThisSession.remove(listing.marketplace)
@@ -593,16 +600,27 @@ final class PluginManagerModel: ObservableObject {
             switch consentResult {
             case .unknownPlugin:
                 actionError = "\(sheet.pluginId) is no longer installed — couldn't record consent"
+                // Round 4: the sheet stays open (I1, unchanged), but is now marked `pluginGone` —
+                // `consentSheetDismissed()` reads this to skip a `pluginDisable` call that would
+                // just fail on the same unknown id when the user next dismisses this sheet.
+                sheet.pluginGone = true
+                consentSheet = sheet
             case .staleDisclosure:
                 await refresh()
+                // Round 4: a FAILED refresh here must not be masked by the "please review again"
+                // notice below — `refresh()` already set its own `errorText`, and that failure is
+                // more actionable than restating the stale-disclosure notice over it. The sheet is
+                // left exactly as `consentSheet = sheet` (above) already put it.
+                guard errorText == nil else { return }
                 if let listing = listingsBySpec[spec], let extras = listing.extras {
                     consentSheet = ConsentSheetState(pluginId: listing.id, spec: spec, scope: listing.scope,
-                                                     extras: extras, openedByInstall: sheet.openedByInstall)
+                                                     extras: extras, openedByInstall: sheet.openedByInstall,
+                                                     notice: "This plugin changed while you were reviewing it — please review again.")
                 } else {
                     lastConsentSheet = nil
                     consentSheet = nil
+                    errorText = "This plugin changed while you were reviewing it — please review again."
                 }
-                errorText = "This plugin changed while you were reviewing it — please review again."
                 return
             case .ok:
                 _ = try await client.pluginEnable(spec: spec, scope: sheet.scope)
@@ -642,6 +660,15 @@ final class PluginManagerModel: ObservableObject {
         guard let sheet = lastConsentSheet else { return }
         lastConsentSheet = nil
         guard sheet.openedByInstall else { return }
+        // Round 4: a sheet `confirmConsent()` already found `.unknownPlugin` on is marked
+        // `pluginGone` — dismissing it must not try `pluginDisable` again on the same id the
+        // daemon already said doesn't exist; that call would just fail, surfacing a confusing
+        // "installed X but couldn't turn it off" for a plugin that was never really there to begin
+        // with by this point.
+        guard !sheet.pluginGone else {
+            errorText = "The plugin is no longer installed."
+            return
+        }
         busySpec = sheet.spec
         defer { busySpec = nil }
         do {

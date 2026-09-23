@@ -46,13 +46,28 @@ struct ConsentSheetState: Equatable, Identifiable {
     /// claude-native content; an enable-triggered sheet's plugin never started at all).
     let openedByInstall: Bool
     private(set) var decision: Decision = .pending
+    /// Fix round 4: set when `plugin.setConsent` answers `.staleDisclosure` and this sheet is
+    /// rebuilt from the plugin's current `plugin.list` row — rendered INSIDE the sheet itself
+    /// (`ConsentSheet`'s body, near the top) rather than the pane's general `errorText`, so it
+    /// reads naturally next to the disclosure it's warning about and survives the sheet staying
+    /// open for another attempt.
+    var notice: String?
+    /// Fix round 4: set when `plugin.setConsent` answers `.unknownPlugin` — the plugin this sheet
+    /// was raised for is already gone by the time the user next acts on it (confirms, then later
+    /// dismisses). `PluginManagerModel.consentSheetDismissed()` reads this to skip a `pluginDisable`
+    /// call that would just fail again on the same unknown id, showing a plain "already gone"
+    /// message instead of a confusing "installed but couldn't turn it off" one.
+    var pluginGone: Bool = false
 
-    init(pluginId: String, spec: String, scope: PluginScope, extras: PluginExtras, openedByInstall: Bool) {
+    init(pluginId: String, spec: String, scope: PluginScope, extras: PluginExtras, openedByInstall: Bool,
+         notice: String? = nil, pluginGone: Bool = false) {
         self.pluginId = pluginId
         self.spec = spec
         self.scope = scope
         self.extras = extras
         self.openedByInstall = openedByInstall
+        self.notice = notice
+        self.pluginGone = pluginGone
     }
 
     /// The classes `confirmConsent()` grants — required-but-not-yet-consented, verbatim from the
@@ -82,6 +97,12 @@ struct ConsentSheetState: Equatable, Identifiable {
 /// "never just a summary" discipline the pre-WS-21 server-computed `consentBlock` text enforced.
 /// Sourced straight from the daemon's `plugin.list` row (`winter-plugin.json`'s own declared
 /// fields), not fabricated. Table-tested in `ConsentSheetStateTests`.
+///
+/// Fix round 4: the entry command and every TCC/hardware string are plugin-authored (`winter-
+/// plugin.json`), same as a hook's `event`/`matcher`/`type`/`command` — sanitized through the same
+/// `librarySanitizedHookField` (`LibraryHooksTab.swift`) before they reach this sheet, which shows
+/// them verbatim in a monospaced, `textSelection(.enabled)` block a user is meant to actually read
+/// and trust.
 func pluginConsentDisclosureLines(pluginId: String, extras: PluginExtras) -> [String] {
     var lines = ["\(pluginId) is asking for the following, on this Mac:"]
     // `execPermission` alone can be absent/false while `requiredConsents` still lists `"exec"`
@@ -90,16 +111,16 @@ func pluginConsentDisclosureLines(pluginId: String, extras: PluginExtras) -> [St
     if extras.execPermission || extras.requiredConsents.contains("exec") || extras.entry != nil {
         if let entry = extras.entry {
             let command = ([entry.command] + entry.args).joined(separator: " ")
-            lines.append("- run its own background process: \(command)")
+            lines.append("- run its own background process: \(librarySanitizedHookField(command))")
         } else {
             lines.append("- run its own background process")
         }
     }
     for permission in extras.tccPermissions {
-        lines.append("- will request macOS permission: \(permission)")
+        lines.append("- will request macOS permission: \(librarySanitizedHookField(permission))")
     }
     for permission in extras.hardwarePermissions {
-        lines.append("- hardware access via Winter.app's helper: \(permission)")
+        lines.append("- hardware access via Winter.app's helper: \(librarySanitizedHookField(permission))")
     }
     return lines
 }
@@ -141,6 +162,15 @@ struct ConsentSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("\(state.pluginId) requests consent")
                 .font(Typography.paneTitle)
+            // Fix round 4: the stale-disclosure notice lives ON the sheet (`state.notice`), not the
+            // pane's general `errorText` — rendered at the top, above the intro copy, so it reads as
+            // "here's what changed" before the (possibly now-different) disclosure below it.
+            if let notice = state.notice {
+                Text(notice)
+                    .font(Typography.label())
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Text(introText)
                 .font(Typography.label())
                 .foregroundStyle(.secondary)

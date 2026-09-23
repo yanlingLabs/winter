@@ -30,19 +30,35 @@ func libraryHooksListSubtitle(_ hooks: [PluginHookEntry]?) -> String {
     return "\(count) hook\(count == 1 ? "" : "s")"
 }
 
-/// PURE (fix round 3): replaces control characters and bidirectional text overrides/isolates
-/// (U+202A–U+202E — LRE/RLE/PDF/LRO/RLO — and U+2066–U+2069, the isolate family) with a visible
-/// `\u{XXXX}` escape, in every hook field this file renders. A plugin's `event`/`matcher`/`type`/
-/// `command` are attacker-controllable strings from `hooks.json` — an embedded RLO could redraw
-/// `evil.sh` as `hs.live`, or a stray newline/tab could break the `.lineLimit(1)` truncation this
-/// row depends on to stay one line — so every one of them is sanitized before it reaches either the
-/// truncated summary or the full-text tooltip, never just one of the two.
+/// PURE (fix round 3, widened round 4): replaces control characters, line/paragraph separators,
+/// zero-width characters and bidirectional text marks/overrides/isolates with a visible `\u{XXXX}`
+/// escape, in every hook field this file renders (and, since round 4, `ConsentSheet`'s disclosure
+/// lines too — `pluginConsentDisclosureLines`). A plugin's `event`/`matcher`/`type`/`command`, or a
+/// consent disclosure's entry command/TCC/hardware strings, are attacker-controllable strings from
+/// `winter-plugin.json`/`hooks.json` — sanitized before they reach either a truncated summary or a
+/// full-text tooltip/disclosure block, never just one of the two. Ranges, each with a concrete
+/// spoofing/truncation risk this pane actually renders into:
+/// - `0x00...0x1F`/`0x7F` — C0 controls and DEL.
+/// - `0x80...0x9F` — C1 controls, including NEL (U+0085): like LF, it forces a line break, which
+///   would hide the tail of a `.lineLimit(1)`-truncated command.
+/// - `0x2028`/`0x2029` — Unicode LINE SEPARATOR / PARAGRAPH SEPARATOR, the same line-break risk as
+///   NEL but outside the C0/C1 blocks entirely.
+/// - `0x200B...0x200D`, `0x2060`, `0xFEFF` — zero-width space/non-joiner/joiner, word joiner, and
+///   the BOM-as-ZWNBSP — invisible characters that can split a command into two look-alike halves
+///   or hide inside an otherwise-innocuous string.
+/// - `0x200E`/`0x200F`/`0x061C` — the LEFT-TO-RIGHT MARK, RIGHT-TO-LEFT MARK and ARABIC LETTER MARK:
+///   invisible directional hints, one step short of the override/isolate family below but still a
+///   spoofing primitive on their own.
+/// - `0x202A...0x202E` — LRE/RLE/PDF/LRO/RLO — and `0x2066...0x2069`, the isolate family: an
+///   embedded RLO could redraw `evil.sh` as `hs.live`.
 func librarySanitizedHookField(_ s: String) -> String {
     var out = ""
     out.reserveCapacity(s.count)
     for scalar in s.unicodeScalars {
         switch scalar.value {
-        case 0x00...0x1F, 0x7F, 0x202A...0x202E, 0x2066...0x2069:
+        case 0x00...0x1F, 0x7F, 0x80...0x9F, 0x2028, 0x2029,
+             0x200B...0x200D, 0x2060, 0xFEFF, 0x200E, 0x200F, 0x061C,
+             0x202A...0x202E, 0x2066...0x2069:
             out += "\\u{\(String(scalar.value, radix: 16))}"
         default:
             out.unicodeScalars.append(scalar)
