@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileSecretStore, readMigrationManifest, type SecretStore } from "@yanlinglabs/winter-core";
@@ -203,5 +203,64 @@ describe("winter migrate — --resume and --rollback", () => {
     const code = await runMigrateCommand(deps);
     expect(code).toBe(1);
     expect(asked).toBe(true);
+  });
+});
+
+// WS-21 L3.7 (spec §8): `winter migrate --sdk-home [--home <dir>] [--resume | --rollback | --status]`.
+describe("winter migrate --sdk-home (Migration C)", () => {
+  function oldLayoutHome(): string {
+    const home = join(tempDir(), "old");
+    mkdirSync(join(home, "projects", "-Users-x-app", "memory"), { recursive: true });
+    writeFileSync(join(home, "projects", "-Users-x-app", "s.jsonl"), '{"type":"user"}\n');
+    writeFileSync(join(home, "projects", "-Users-x-app", "memory", "MEMORY.md"), "- fact\n");
+    mkdirSync(join(home, "sdk", "projects"), { recursive: true });
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" }, outputStyle: "terse" }));
+    return home;
+  }
+
+  test("--status names a home that needs it, and never needs the daemon stopped", async () => {
+    const home = oldLayoutHome();
+    const { deps, lines } = baseDeps({ argv: ["--sdk-home", "--status", "--home", home], isDaemonLockHeld: () => true });
+    expect(await runMigrateCommand(deps)).toBe(0);
+    expect(lines.join("\n")).toContain("needed");
+  });
+
+  test("refuses while the daemon runs", async () => {
+    const home = oldLayoutHome();
+    const { deps, errLines } = baseDeps({ argv: ["--sdk-home", "--home", home, "--yes"], isDaemonLockHeld: () => true });
+    expect(await runMigrateCommand(deps)).toBe(1);
+    expect(errLines.join("\n")).toContain("stop it first");
+  });
+
+  test("migrates --home <dir> (nothing to reconcile: both phases), then --rollback puts it back", async () => {
+    const home = oldLayoutHome();
+    const run = baseDeps({ argv: ["--sdk-home", "--home", home, "--yes"] });
+    expect(await runMigrateCommand(run.deps)).toBe(0);
+    expect(run.lines.join("\n")).toContain("migration C: complete");
+    expect(lstatSync(join(home, "projects")).isSymbolicLink()).toBe(true);
+    expect(existsSync(join(home, "sdk", "projects", "-Users-x-app", "memory", "MEMORY.md"))).toBe(true);
+    const again = baseDeps({ argv: ["--sdk-home", "--home", home, "--yes"] });
+    expect(await runMigrateCommand(again.deps)).toBe(0);
+    expect(again.lines.join("\n")).toContain("nothing to migrate");
+    const back = baseDeps({ argv: ["--sdk-home", "--rollback", "--home", home, "--yes"] });
+    expect(await runMigrateCommand(back.deps)).toBe(0);
+    expect(lstatSync(join(home, "projects")).isDirectory()).toBe(true);
+    expect(lstatSync(join(home, "projects")).isSymbolicLink()).toBe(false);
+  });
+
+  test("a preflight refusal is printed and moves nothing", async () => {
+    const home = oldLayoutHome();
+    writeFileSync(join(home, "sdk", "projects", "stray.jsonl"), "x");
+    const { deps, errLines } = baseDeps({ argv: ["--sdk-home", "--home", home, "--yes"] });
+    expect(await runMigrateCommand(deps)).toBe(1);
+    expect(errLines.join("\n")).toContain("refused");
+    expect(lstatSync(join(home, "projects")).isSymbolicLink()).toBe(false);
+  });
+
+  test("--resume with nothing in flight refuses", async () => {
+    const home = oldLayoutHome();
+    const { deps, errLines } = baseDeps({ argv: ["--sdk-home", "--resume", "--home", home, "--yes"] });
+    expect(await runMigrateCommand(deps)).toBe(1);
+    expect(errLines.join("\n")).toContain("nothing to resume");
   });
 });
