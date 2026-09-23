@@ -61,7 +61,7 @@
 // `hooksFor(session).official`, already wired at integration.
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename } from "node:path";
+import { basename, isAbsolute, relative } from "node:path";
 import type {
   HookCallback, HookCallbackMatcher, HookJSONOutput, Options,
   PostToolUseFailureHookInput, PostToolUseHookInput, PreToolUseHookInput,
@@ -78,6 +78,7 @@ import { DIFF_PATCH_MAX_BYTES, mintDiffId, writeDiff } from "../diffs/store";
 import type { HookResult } from "../plugins/hook-runner";
 import { attachFileDiff } from "./diff-attach";
 import { REVIEWER_ESCALATION_REASON, noteReviewerCleared } from "./bridge-common";
+import { ESCAPE_FENCED_FILENAMES, PROJECT_FENCED_SEGMENTS, homeFencedDirs, homeFencedFiles } from "./home-fence";
 
 /** The subset of `plugins/hook-registry.ts`'s `HookFacade` this module depends on — injected
  *  rather than imported concretely so a fake can stand in for tests with no real plugin process
@@ -282,27 +283,36 @@ function pluginPostToolUseFailureHook(deps: SessionHooksDeps): HookCallback {
 // behind, and the seatbelt WAS the bash half of two floors: the control-plane write fence
 // (`permissions.local.json` / `settings.json` / `settings.local.json`, where writing one is a
 // self-grant — the bridge's own fence at `approval-bridge.ts` (2) reads write-class tool inputs only)
-// and the daemon's own state under `<home>/run` and `<home>/runtimes` (credentials, the socket, the
-// `winter` binary `resolveWinterExecutable`'s rung 4 would run). Claude keeps its equivalent floor
+// and the daemon's own state under its home — `run`, `runtimes` (credentials, the socket, the `winter`
+// binary `resolveWinterExecutable`'s rung 4 would run), `plugins`, `permissions` (the approved-rules
+// store), `cache` (the skill-plugin views), `agents`, `trust.json`: `home-fence.ts`, derived from the
+// sandbox's own `denyWrite` so one edit reaches all three fences. Claude keeps its equivalent floor
 // bypass-immune (`utils/permissions/permissions.ts` ~1252-1260, `filesystem.ts` ~643-650) and denies
 // rather than prompts, so this does the same: a DETERMINISTIC deny, before any reviewer call, under
 // every policy and on both legs (`sessionHooksFor` feeds both). A PreToolUse deny is terminal ahead of
 // every permission mode (agent SDK 0.0.17 `permissions/evaluator.ts` ~1657).
 //
-// Conservative on purpose: a substring match on the three filenames and on every spelling of the
-// two home paths this file can predict — the literal home (and its realpath), `~`/`$HOME`/`${HOME}`
-// for a home under the user's own, `$WINTER_HOME`/`${WINTER_HOME}`, and `<home basename>/run` for a
-// command that `cd`s there first — compared case-insensitively (a default macOS volume is). A false
+// Conservative on purpose: a substring match on the control-plane filenames (plus `trust.json`), on
+// any `.winter/agents/`, and on every spelling of every fenced home path this file can predict — the
+// literal home (and its realpath), `~`/`$HOME`/`${HOME}` for a home under the user's own,
+// `$WINTER_HOME`/`${WINTER_HOME}`, and `<home basename>/…` for a command that `cd`s there first —
+// compared case-insensitively (a default macOS volume is). A false
 // positive costs a typed deny the model can route around by running the command sandboxed; a false
 // negative costs the floor. A command that builds the path at run time (`$(…)`, variables of its
 // own) is beyond any static check — the reviewer still judges what is left.
 
-const ESCAPE_FLOOR_FILENAMES: readonly string[] = ["permissions.local.json", "settings.json", "settings.local.json"];
-
-/** Every spelling of `<home>/run` (a prefix of `<home>/runtimes` too) this check can predict, lowercased. */
+/**
+ * Every spelling of every fenced `<home>` path this check can predict, lowercased — the fenced dirs
+ * and files come from `home-fence.ts`, i.e. from the SAME list the Bash sandbox's `denyWrite` carries
+ * (whole-branch review 2026-09-23: the first cut named only `run`/`runtimes` and missed `plugins`,
+ * `permissions`, `cache`, `agents` and `trust.json`). Each is spelled relative to every predictable
+ * home prefix: the literal home and its realpath, `~`/`$HOME`/`${HOME}` for a home under the user's
+ * own, `$WINTER_HOME`/`${WINTER_HOME}`, and the home's basename for a command that `cd`s first.
+ */
 function homeStateNeedles(home: string | undefined): string[] {
   if (home === undefined || home.length === 0) return [];
-  const homes = new Set<string>([home.replace(/\/+$/, "")]);
+  const trimmed = home.replace(/\/+$/, "");
+  const homes = new Set<string>([trimmed]);
   try { homes.add(realpathSync(home).replace(/\/+$/, "")); } catch { /* not created yet: the literal spelling is the one a command could name */ }
   const prefixes = new Set<string>(["$WINTER_HOME", "${WINTER_HOME}"]);
   const userHome = homedir().replace(/\/+$/, "");
@@ -315,7 +325,18 @@ function homeStateNeedles(home: string | undefined): string[] {
     const base = basename(h);
     if (base.length > 0) prefixes.add(base);
   }
-  return [...prefixes].map((p) => `${p}/run`.toLowerCase());
+  // Each fenced path as it sits UNDER the home (`run`, `plugins`, `cache/skill-plugins`, `trust.json`…);
+  // one that lies outside it is matched by its own absolute spelling.
+  const rels = new Set<string>();
+  const absolutes = new Set<string>();
+  for (const p of [...homeFencedDirs(trimmed), ...homeFencedFiles(trimmed)]) {
+    const r = relative(trimmed, p);
+    if (r.length === 0 || r.startsWith("..") || isAbsolute(r)) absolutes.add(p); else rels.add(r);
+  }
+  const needles = new Set<string>();
+  for (const pre of prefixes) for (const r of rels) needles.add(`${pre}/${r}`.toLowerCase());
+  for (const a of absolutes) needles.add(a.toLowerCase());
+  return [...needles];
 }
 
 /**
@@ -324,14 +345,15 @@ function homeStateNeedles(home: string | undefined): string[] {
  */
 export function escapeFloorHit(command: string, home: string | undefined): string | undefined {
   const c = command.toLowerCase();
-  for (const name of ESCAPE_FLOOR_FILENAMES) if (c.includes(name)) return name;
-  for (const needle of homeStateNeedles(home)) if (c.includes(needle)) return "Winter's own state (<home>/run, <home>/runtimes)";
+  for (const name of ESCAPE_FENCED_FILENAMES) if (c.includes(name)) return name;
+  for (const seg of PROJECT_FENCED_SEGMENTS) if (c.includes(seg)) return `a project's ${seg} directory`;
+  for (const needle of homeStateNeedles(home)) if (c.includes(needle)) return "Winter's own state under its home";
   return undefined;
 }
 
 export function escapeFloorDenial(hit: string): string {
   return `Bash was not run — a command that asks to run outside the sandbox (dangerouslyDisableSandbox) may not touch ${hit}. ` +
-    "Winter's control-plane files (permissions.local.json, settings.json, settings.local.json) and its own state under <home>/run and <home>/runtimes are off-limits to unsandboxed commands under every approval mode. Run the command inside the sandbox, or ask the user to make this change.";
+    "Winter's control-plane files (permissions.local.json, settings.json, settings.local.json, trust.json), agent definitions (.winter/agents) and its own state under its home (run, runtimes, plugins, permissions, cache, agents) are off-limits to unsandboxed commands under every approval mode. Run the command inside the sandbox, or ask the user to make this change.";
 }
 
 const bashEscapeInput = (input: unknown): { command: string; escape: boolean; description?: string } => {

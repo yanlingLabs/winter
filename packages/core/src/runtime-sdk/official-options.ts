@@ -226,6 +226,12 @@ export function officialBrokerFor(deps: CanUseToolDeps): (request: ApprovalReque
       ...(request.agentID === undefined ? {} : { agentID: request.agentID }),
       ...(request.suggestions === undefined ? {} : { suggestions: request.suggestions }),
       ...(request.blockedPath === undefined ? {} : { blockedPath: request.blockedPath }),
+      // Whole-branch review (2026-09-23): the two fields the bridge ACTS on. Without them the
+      // reviewer's no-verdict `ask` (`reviewerCouldNotJudge`) and a matched ask rule (`matchedAskRule`)
+      // reached the bridge looking like a plain call on this leg, and the gate's `auto` allow ran
+      // bash silently.
+      ...(request.decisionReason === undefined ? {} : { decisionReason: request.decisionReason }),
+      ...(request.matchedAskRule === undefined ? {} : { matchedAskRule: request.matchedAskRule }),
     });
     // `CanUseTool`'s own type allows `null` (the SDK's "transport escape") — `canUseToolFor`'s own
     // header says its bridge "never uses the null transport escape", so this never actually fires;
