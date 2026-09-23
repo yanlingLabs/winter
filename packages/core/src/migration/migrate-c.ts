@@ -28,6 +28,7 @@
 import { Database } from "bun:sqlite";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
+import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 import { SDK_COMPAT_LINKS, SDK_PERSISTENT_ENTRIES, canonicalCwd, sdkHomeFor } from "../agent/paths";
@@ -176,6 +177,14 @@ export interface MigrationCDeps {
   convertLegacyPlugins?: (home: string) => Promise<{ converted: string[]; unconvertible: { name: string; reason: string }[] }>;
   /** Preflight's lease probe (tests describe a live or recycled pid); the live machine by default. */
   probe?: LeaseProbe;
+  /** Where claude staging roots live (`WINTER_CLAUDE_RESUME_SCAN_ROOT`, else `os.tmpdir()`) — round 4. */
+  claudeResumeScanRoot?: string;
+}
+
+/** Round 4: does the scan root hold any claude staging root (`claude-resume-*`)? The daemon's boot sweep may
+ *  still have one to reconcile — at the key 0.116 wrote — so phase 2's re-key must wait for it. */
+function stagingRootsPresent(scanRoot: string): boolean {
+  try { return readdirSync(scanRoot, { withFileTypes: true }).some((e) => e.isDirectory() && e.name.startsWith("claude-resume-")); } catch { return false; }
 }
 
 /** The official leg's working-copy roots phase 2 reconciles (never recorded in runtime-state). */
@@ -584,8 +593,13 @@ export async function runMigrationC(home: string, deps: MigrationCDeps): Promise
     writeManifest(home, m);
     deps.log(`migration C: phase 1 complete — ${m.moved.length} director(ies) moved into ${sdkHomeFor(home)}`);
   }
-  // Phase 2 right away when a router door is here, or when there is nothing for one to reconcile.
-  if (deps.reconcile !== undefined || !officialRoots(home).some((r) => existsSync(r) && !isSymlink(r) && hasFiles(r))) return finishMigrationC(home, deps);
+  // Phase 2 right away when a router door is here, or when there is nothing for one to reconcile — no
+  // official working copy AND (round 4) no claude staging root: the daemon's boot sweep reconciles those
+  // BEFORE phase 2, because phase 2 re-keys transcripts and a staging copy swept after that would be
+  // appended into an orphan at the old key. Otherwise the daemon's late site finishes it, sweep first.
+  const scanRoot = deps.claudeResumeScanRoot ?? (process.env.WINTER_CLAUDE_RESUME_SCAN_ROOT?.trim() || tmpdir());
+  const nothingToReconcile = !officialRoots(home).some((r) => existsSync(r) && !isSymlink(r) && hasFiles(r)) && !stagingRootsPresent(scanRoot);
+  if (deps.reconcile !== undefined || nothingToReconcile) return finishMigrationC(home, deps);
   return m;
 }
 

@@ -1416,6 +1416,35 @@ export async function startDaemon(opts: {
   const linkedRecovery = runtimeSdk === undefined ? undefined : runHomeHandleOf(runtimeSdk.sdk);
   const routerRecovery: { reconcileRootForRecovery: RootReconcile } | undefined = linkedRecovery
     ?? (opts.runRootReconcileForTests === undefined ? undefined : { reconcileRootForRecovery: opts.runRootReconcileForTests });
+  // Round 4 (review): the sweep runs BEFORE Migration C's phase 2. Phase 2 re-keys transcripts to the
+  // canonical cwd; a crashed official resume's staging root still holds its working copy at the key 0.116
+  // wrote, and swept AFTER the re-key the router would find no canonical file there and append the whole copy
+  // into an orphan — the session resuming without its tail. Safe: phase 1 already cleared every recorded
+  // `claude-config` row, so this sweep never touches the roots phase 2 reconciles (spec §8 step 2 puts the
+  // recorded `claude-resume-*` roots in the same reconcile, ahead of everything else).
+  if (routerRecovery !== undefined && runtime !== undefined) {
+    try {
+      const recovered = await recoverRunRoots({
+        home: winterHome,
+        rs: runtime.db,
+        reconcile: (root) => routerRecovery.reconcileRootForRecovery(root),
+        claudeResumeScanRoot: process.env.WINTER_CLAUDE_RESUME_SCAN_ROOT?.trim() || undefined,
+        log: (line) => console.error(`runtime-sdk: ${line}`),
+      });
+      const quarantined = recovered.quarantinedRoots.length;
+      if (quarantined > 0) console.error(`runtime-sdk: run-root recovery kept ${quarantined} quarantined root(s) — see \`winter doctor\``);
+      if (runtime.lastRecovery.step6AttemptId !== undefined) {
+        const failed = recovered.recorded.failed + recovered.runFolders.failed + recovered.staging.failed;
+        restampStep(runtime.db.db, runtime.lastRecovery.step6AttemptId, 6, failed === 0 ? "ok" : "partial", rootRecoveryDetail(recovered));
+      }
+    } catch (err) {
+      console.error(`runtime-sdk: run-root recovery failed (${(err as Error)?.name ?? "unknown"}) — the roots are left for the next boot`);
+      if (runtime.lastRecovery.step6AttemptId !== undefined) {
+        restampStep(runtime.db.db, runtime.lastRecovery.step6AttemptId, 6, "failed", { errorName: (err as Error)?.name ?? "unknown" });
+      }
+    }
+  }
+
   // Migration C, phase 2 (spec §8 steps 2, 8, 9): the official working copies reconciled through the
   // router's own door, then the archive and the done marker — BEFORE any driver or the socket exists. A
   // home left `phase1-complete` must never open a session (its un-reconciled working copies would be
@@ -1436,28 +1465,6 @@ export async function startDaemon(opts: {
         try { store.close(); } catch { /* best effort */ }
         lock.release();
         throw new MigrationCRefused("sdk_home_migration_refused", `migration C: phase 2 could not finish (${(err as Error).message}) — no session opens until it does; the next boot retries it`);
-      }
-    }
-  }
-  if (routerRecovery !== undefined && runtime !== undefined) {
-    try {
-      const recovered = await recoverRunRoots({
-        home: winterHome,
-        rs: runtime.db,
-        reconcile: (root) => routerRecovery.reconcileRootForRecovery(root),
-        claudeResumeScanRoot: process.env.WINTER_CLAUDE_RESUME_SCAN_ROOT?.trim() || undefined,
-        log: (line) => console.error(`runtime-sdk: ${line}`),
-      });
-      const quarantined = recovered.quarantinedRoots.length;
-      if (quarantined > 0) console.error(`runtime-sdk: run-root recovery kept ${quarantined} quarantined root(s) — see \`winter doctor\``);
-      if (runtime.lastRecovery.step6AttemptId !== undefined) {
-        const failed = recovered.recorded.failed + recovered.runFolders.failed + recovered.staging.failed;
-        restampStep(runtime.db.db, runtime.lastRecovery.step6AttemptId, 6, failed === 0 ? "ok" : "partial", rootRecoveryDetail(recovered));
-      }
-    } catch (err) {
-      console.error(`runtime-sdk: run-root recovery failed (${(err as Error)?.name ?? "unknown"}) — the roots are left for the next boot`);
-      if (runtime.lastRecovery.step6AttemptId !== undefined) {
-        restampStep(runtime.db.db, runtime.lastRecovery.step6AttemptId, 6, "failed", { errorName: (err as Error)?.name ?? "unknown" });
       }
     }
   }
