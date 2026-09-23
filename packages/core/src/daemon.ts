@@ -1263,13 +1263,10 @@ export async function startDaemon(opts: {
   // wired and every child launches exactly as before). The inputs are live: trust, `mcp.disabled`, the
   // capability-server names and the relocation-aware MEMDIR are re-read for every incarnation.
   const runHomeBuilder = linkedRunHomeBuilder();
-  // Every run folder THIS process built (the late boot sweep below never touches one). The run home
-  // itself is returned untouched — the router refuses one `buildRunHome` did not build.
-  const builtRunDirs = new Set<string>();
+  // The run home itself is returned untouched — the router refuses one `buildRunHome` did not build.
   const runHomeDeps: WinterLegDeps["runHome"] = runHomeBuilder === undefined ? undefined : {
     build: async (input) => {
       const built = await runHomeBuilder(input);
-      builtRunDirs.add(built.dir);
       // Spec §8: what the builder did NOT do (skipped links, dropped MCP servers and imports,
       // unconditional rules, agents not copied — L2 fix round 1's `skippedAgents`) is never silent.
       const summary = runHomeReportSummary(built);
@@ -1424,11 +1421,15 @@ export async function startDaemon(opts: {
   // `<home>/cache/runs/*` folders and stale claude staging roots are reconciled HERE, before anything is
   // deleted — clean/appended ones removed, quarantined ones kept, recorded and reported (`root-recovery.ts`).
   // Only on a router that has the door (0.0.11 has not: step 6 stays skipped and step 8 sweeps as before).
-  // Still before `startIpcServer`, so no incarnation exists yet; bounded — a failure costs the sweep.
+  // Still before `startIpcServer` and before any driver exists, so no incarnation — and no run folder of
+  // this process — can exist yet (review M8: the old "skip the folders this process built" set was always
+  // empty here); bounded — a failure costs the sweep.
   const routerRecovery = runtimeSdk === undefined ? undefined : runHomeHandleOf(runtimeSdk.sdk);
   // Migration C, phase 2 (spec §8 steps 2, 8, 9): the official working copies reconciled through the
-  // router's own door, then the archive and the done marker. Without a door it finishes only when there
-  // is nothing to reconcile; otherwise it waits (logged) for a boot that has one. Bounded: never fatal.
+  // router's own door, then the archive and the done marker — BEFORE any driver or the socket exists. A
+  // home left `phase1-complete` must never open a session (its un-reconciled working copies would be
+  // resumed from a canonical store missing their tail), so a phase 2 that cannot finish REFUSES BOOT,
+  // typed, after closing what this boot opened; the next boot retries it.
   {
     const cState = migrationCState(home);
     if (cState.kind === "parsed" && cState.manifest.status === "phase1-complete") {
@@ -1438,7 +1439,12 @@ export async function startDaemon(opts: {
           ...(routerRecovery === undefined ? {} : { reconcile: (root: string) => routerRecovery.reconcileRootForRecovery(root) }),
         });
       } catch (err) {
-        console.error(`migration C: phase 2 not finished (${(err as Error).message}) — retried at the next boot`);
+        try { consoleBroker.stopRefresher(); consoleBroker.stopWatcher(); } catch { /* best effort */ }
+        try { await runtimeSdk?.dispose(); } catch { /* best effort */ }
+        try { await runtime?.close(); } catch { /* best effort */ }
+        try { store.close(); } catch { /* best effort */ }
+        lock.release();
+        throw new MigrationCRefused("sdk_home_migration_refused", `migration C: phase 2 could not finish (${(err as Error).message}) — no session opens until it does; the next boot retries it`);
       }
     }
   }
@@ -1448,7 +1454,6 @@ export async function startDaemon(opts: {
         home: winterHome,
         rs: runtime.db,
         reconcile: (root) => routerRecovery.reconcileRootForRecovery(root),
-        isLive: (dir) => builtRunDirs.has(dir),
         claudeResumeScanRoot: process.env.WINTER_CLAUDE_RESUME_SCAN_ROOT?.trim() || undefined,
         log: (line) => console.error(`runtime-sdk: ${line}`),
       });
