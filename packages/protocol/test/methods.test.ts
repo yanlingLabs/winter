@@ -46,9 +46,6 @@ import {
   SkillsDeleteParams,
   SkillsDeleteResult,
   McpServerStatusSchema,
-  PluginInfoSchema,
-  PluginsListParams,
-  PluginsListResult,
   ThreadInfoSchema,
   ThreadListParams,
   ThreadListResult,
@@ -401,66 +398,12 @@ describe("skills.read/write/delete schemas (Phase 5c Task 3)", () => {
   });
 });
 
-describe("plugins.list schema", () => {
-  test("plugins.list params/result + method string", () => {
-    expect(PluginsListParams.parse({})).toEqual({});
-    const info = PluginInfoSchema.parse({
-      name: "demo", description: "d", version: "0.1.0",
-      skills: ["greet"], hasMcp: true, mcpEnabled: false, disabled: false,
-    });
-    expect(info.name).toBe("demo");
-    // description/version are optional
-    expect(PluginInfoSchema.parse({ name: "bare", skills: [], hasMcp: false, mcpEnabled: false, disabled: false }).description).toBeUndefined();
-    const r = PluginsListResult.parse({ ok: true, plugins: [info] });
-    expect(r.plugins).toHaveLength(1);
-    expect(METHODS.pluginsList).toBe("plugins.list");
-  });
-
-  test("Phase 4a Task 3: consent-flow fields (tier/requiredConsents/consented/legacy/execPayload/tccPermissions/hardwarePermissions) round-trip", () => {
-    const info = PluginInfoSchema.parse({
-      name: "demo", skills: [], hasMcp: false, mcpEnabled: true, disabled: false,
-      tier: "platform", requiredConsents: ["exec", "tcc", "hardware"], consented: ["exec"], legacy: false,
-      execPayload: ["mcp: node server.js", "entry: node index.js"],
-      tccPermissions: ["accessibility"], hardwarePermissions: ["battery"],
-    });
-    expect(info).toMatchObject({
-      tier: "platform", requiredConsents: ["exec", "tcc", "hardware"], consented: ["exec"], legacy: false,
-      execPayload: ["mcp: node server.js", "entry: node index.js"],
-      tccPermissions: ["accessibility"], hardwarePermissions: ["battery"],
-    });
-  });
-
+// Post-merge round (L3 request #5): the pre-WS-21 "plugins.list schema" describe block (PluginInfoSchema,
+// PluginsListParams/Result) retired along with the schemas themselves — see methods.ts's own retirement
+// note just above where they used to live. plugin.list's current coverage is PluginListingSchema's own.
+describe("plugin schema: McpServerStatusSchema plugin-source widening", () => {
   test("McpServerStatusSchema.source is widened to include \"plugin\"", () => {
     expect(McpServerStatusSchema.parse({ name: "x", status: "connected", toolNames: [], source: "plugin" }).source).toBe("plugin");
-  });
-
-  test("Phase 4d-i Task 4: status is optional and accepts every SupervisorStatus value plus \"na\"", () => {
-    expect(PluginInfoSchema.parse({ name: "bare", skills: [], hasMcp: false, mcpEnabled: false, disabled: false }).status).toBeUndefined();
-    for (const status of ["starting", "running", "backoff", "circuit-open", "stopped", "na"] as const) {
-      expect(PluginInfoSchema.parse({ name: "demo", skills: [], hasMcp: false, mcpEnabled: true, disabled: false, status }).status).toBe(status);
-    }
-    expect(() => PluginInfoSchema.parse({ name: "demo", skills: [], hasMcp: false, mcpEnabled: true, disabled: false, status: "bogus" })).toThrow();
-  });
-
-  test("daemon settings surface item 1: manifestHooks mirrors WinterPluginManifest.contributes.hooks exactly, verbatim (no regrouping) — absent when omitted", () => {
-    // Absent entirely (legacy/no-hooks plugin, agent/plugins.ts's PluginInfo.manifestHooks shape).
-    expect(PluginInfoSchema.parse({ name: "bare", skills: [], hasMcp: false, mcpEnabled: false, disabled: false }).manifestHooks).toBeUndefined();
-    // Every declared hook event, and duplicate events for the same plugin both survive — the
-    // schema is a plain array mirror of plugin-manifest.ts's `contributes.hooks`, never regrouped
-    // or deduped by event.
-    const hooks = [
-      { event: "session-start", command: "notify.sh" },
-      { event: "pre-tool", command: "guard.sh", timeoutMs: 250 },
-      { event: "pre-tool", command: "guard2.sh" },
-      { event: "post-tool", command: "observe.sh" },
-      { event: "turn-end", command: "wrapup.sh" },
-    ] as const;
-    const info = PluginInfoSchema.parse({ name: "demo", skills: [], hasMcp: false, mcpEnabled: true, disabled: false, manifestHooks: hooks });
-    expect(info.manifestHooks).toEqual(hooks as unknown as typeof info.manifestHooks);
-    // Same door's own shape guards: an unknown event is refused, and a blank command is refused
-    // (the manifest schema's own `command: z.string().min(1)`).
-    expect(() => PluginInfoSchema.parse({ name: "demo", skills: [], hasMcp: false, mcpEnabled: true, disabled: false, manifestHooks: [{ event: "bogus", command: "x" }] })).toThrow();
-    expect(() => PluginInfoSchema.parse({ name: "demo", skills: [], hasMcp: false, mcpEnabled: true, disabled: false, manifestHooks: [{ event: "pre-tool", command: "" }] })).toThrow();
   });
 });
 
