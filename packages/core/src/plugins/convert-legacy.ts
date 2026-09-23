@@ -192,6 +192,42 @@ function readLegacyPluginSettings(home: string): { enabled: Set<string>; disable
   };
 }
 
+/** The PRE-WS-21 exec-consent rule, reconstructed here for MIGRATION-TIME verification only — NOT
+ *  the current (WS-21-narrowed) `agent/plugin-manifest.ts#requiredConsentClasses`, which no longer
+ *  requires `exec` for MCP servers/hooks/skills at all (they're claude-native content now, spec
+ *  §5.4). Before WS-21, a manifest plugin's declared MCP servers, hooks and shipped skills all ran
+ *  through the daemon's own process/tool machinery, gated on the SAME `exec` consent the Tier-2
+ *  entry process needed (`agent/plugins.ts`'s pre-rewrite eligibility predicates). Used ONLY to
+ *  decide whether a legacy plugin's OWN historical consent record already covered everything it
+ *  needed BEFORE conversion — post-merge fix round, finding 1 (Opus review): converting an
+ *  enabled-but-unconsented plugin must install it DISABLED, never silently start running commands
+ *  the user never approved. */
+function legacyRequiredConsentClasses(m: LegacyWinterManifest, opts: { shipsSkills: boolean }): Array<"exec" | "tcc" | "hardware"> {
+  const classes: Array<"exec" | "tcc" | "hardware"> = [];
+  const execNeeded = Boolean(m.entry) || Boolean(m.permissions?.exec)
+    || Boolean(m.contributes?.mcpServers?.length) || Boolean(m.contributes?.hooks?.length) || opts.shipsSkills;
+  if (execNeeded) classes.push("exec");
+  if (m.permissions?.tcc?.length) classes.push("tcc");
+  if (m.permissions?.hardware?.length) classes.push("hardware");
+  return classes;
+}
+
+/** Whether `dir/skills` holds at least one skill directory — the same coarse signal
+ *  `legacyRequiredConsentClasses`'s `shipsSkills` needs (a skill can run shell commands, so shipping
+ *  one contributed to the pre-WS-21 exec requirement); never throws. */
+function legacyShipsSkills(dir: string): boolean {
+  try { return readdirSync(join(dir, "skills"), { withFileTypes: true }).some((e) => e.isDirectory()); } catch { return false; }
+}
+
+/** Whether a legacy consent record (the bare pre-fix `{exec?,tcc?,hardware?}` timestamp shape) held
+ *  EVERY class `required` lists — vacuously true when `required` is empty. */
+function legacyConsentCovers(record: unknown, required: readonly string[]): boolean {
+  if (required.length === 0) return true;
+  if (record === null || typeof record !== "object") return false;
+  const r = record as Record<string, unknown>;
+  return required.every((cls) => r[cls] !== undefined);
+}
+
 /** Consent classes carried forward verbatim from a legacy record — `exec` is deliberately excluded
  *  (I3 fix round 1, ruling): before WS-21 it was granted because a plugin shipped skills, and
  *  enabling a plugin now covers that (native content, spec §5.4) — the ONLY thing an `exec` record
@@ -301,7 +337,19 @@ export async function convertLegacyPlugins(home: string): Promise<ConvertLegacyP
   for (const id of okIds) {
     const spec = `${id}@${LEGACY_MARKETPLACE_NAME}`;
     idToKey.set(id, spec);
-    const enabled = legacySettings.enabled.has(id) && !legacySettings.disabled.has(id);
+    // Post-merge fix round, finding 1 (Opus review): an enabled legacy plugin converts ENABLED only
+    // when it also had no manifest, or its OWN legacy consent record already covered every class
+    // the PRE-WS-21 rule (legacyRequiredConsentClasses) required — never silently start running a
+    // manifest plugin's MCP servers/hooks/entry process/skills that the user consented to nothing
+    // for. Installed DISABLED otherwise; the user re-consents on first enable, exactly the fresh-
+    // consent posture `plugin.enable` already has for any other never-yet-consented plugin.
+    const legacyDir = join(legacyRoot, id);
+    const { manifest: legacyManifestForConsent } = readLegacyManifest(legacyDir);
+    const wasFullyConsented = legacyManifestForConsent === undefined || legacyConsentCovers(
+      legacySettings.consents[id],
+      legacyRequiredConsentClasses(legacyManifestForConsent, { shipsSkills: legacyShipsSkills(legacyDir) }),
+    );
+    const enabled = legacySettings.enabled.has(id) && !legacySettings.disabled.has(id) && wasFullyConsented;
     try {
       const installed = await installPlugin(options, spec, "user");
       if (!enabled) await setPluginEnabled(options, spec, "user", false);
