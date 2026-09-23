@@ -233,6 +233,36 @@ describe("fix round 2: Bash writes under .winter/<kind>", () => {
     ]) expect({ cmd, hit: bashProtectedWriteHit(cmd) }).toEqual({ cmd, hit: undefined });
   });
 
+  // Round 4, minor 2: write shapes round 3's per-segment rules had stopped asking about — a short-flag cluster
+  // holding `t` and the space-separated `--target-directory`, an option after the destination, `find -exec`
+  // (both terminators), and a `cd` inside a command substitution (both spellings).
+  test("round 4, minor 2: -t clusters, --target-directory <dir>, trailing options, find -exec and substitutions ask", () => {
+    const writes4 = [
+      "cp -rt .winter/skills/x src/",
+      "cp --target-directory .winter/skills/x a.md",
+      "rsync -a src/ .winter/skills/x/ --exclude tmp",
+      "find . -name '*.md' -exec cp {} .winter/skills/ +",
+      "find . -name '*.md' -exec cp {} .winter/skills/ \;",
+      "find src -execdir mv {} ../.winter/rules/ \;",
+      "echo $(cd .winter/skills; touch x)",
+      "echo `cd .winter/skills; touch x`",
+      'echo "$(touch .winter/rules/r.md)"',
+    ];
+    for (const cmd of writes4) expect({ cmd, hit: bashProtectedWriteHit(cmd) !== undefined }).toEqual({ cmd, hit: true });
+    const stillNoCard = [
+      "git status && ls .winter/rules",
+      "cat a 2>/dev/null; cat .winter/commands/x.md",
+      "mkdir -p build && grep -r foo .winter/rules",
+      "git log -- .winter/skills",
+      "cp .winter/skills/a/ref.md /tmp/",
+      "cd .winter/skills && git status",
+      "find .winter/skills -name '*.md' -exec cat {} +",
+      "echo $(cat .winter/rules/r.md)",
+      "rsync -a .winter/skills/ /tmp/backup/ --exclude tmp",
+    ];
+    for (const cmd of stillNoCard) expect({ cmd, hit: bashProtectedWriteHit(cmd) }).toEqual({ cmd, hit: undefined });
+  });
+
   test("the hook asks (both legs, sandboxed or not); a read gets no answer from it", async () => {
     const built = sessionHooksFor({ sessionId: "s_1", roots: ["/r"], home: "/Users/x/.winter", mode: "code" });
     const groups = (built.winter?.PreToolUse ?? []).filter((g: HookCallbackMatcher) => g.matcher === "Bash");
