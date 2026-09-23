@@ -548,6 +548,9 @@ export async function startDaemon(opts: {
   // card (`<home>/permissions/projects.json`) — written by `approval.respond`, applied to children
   // regardless of trust. Provider-independent, so built unconditionally.
   const approvedProjectRules = new ApprovedProjectRules({ winterHome });
+  // Re-review R1: its directory exists (0700, real) before any session runs, so a link cannot be
+  // planted there first; something already there that is not is refused, with one log line.
+  approvedProjectRules.prepare();
   // fix-wave B (I1): every per-project getter below resolves at the REPO ROOT, matching
   // `globalAllow`'s own `projectRoot` (engine.ts's `repoRootFor(cwd)`) — NOT the raw session cwd.
   // Before this, a SUBDIRECTORY session read a DIFFERENT `.winter/settings.json` than

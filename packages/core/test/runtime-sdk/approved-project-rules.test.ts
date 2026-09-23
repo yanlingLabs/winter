@@ -7,7 +7,7 @@
 // in its OWN `<home>/permissions/projects.json` (written only by `approval.respond`, write-fenced from
 // every tool), and that record applies regardless of trust; a forged in-repo file still does not.
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@yanlinglabs/winter-protocol";
@@ -17,6 +17,7 @@ import { PermissionRules } from "../../src/agent/permission-rules";
 import { TrustStore } from "../../src/agent/trust";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
+import { startDaemon } from "../../src/daemon";
 import { startIpcServer } from "../../src/ipc/server";
 import { ProjectSettingsResolver } from "../../src/project-settings";
 import { persistedAllowRulesFor } from "../../src/runtime-sdk/mode-options";
@@ -79,6 +80,96 @@ describe("ApprovedProjectRules — the daemon's own record", () => {
     expect(store.rulesFor("/anything")).toEqual([]);
     expect(() => store.record("/anything", "Bash(x)")).toThrow();
     expect(readFileSync(join(home, "permissions", "projects.json"), "utf8")).toBe("{ not json");
+  });
+});
+
+// Re-review R1 (2026-09-23): the record is applied WITHOUT a trust check, so it must be the daemon's own
+// file. The reviewer's probe: one unsandboxed `ln -s` (reachable under a saved `Bash(ln:*)`) turned
+// `<home>/permissions` into a link to a session-writable directory holding a planted `projects.json`,
+// and `rulesFor()` then answered `["Bash"]` — after which any SANDBOXED session could mint
+// "user-approved" rules for any project by writing that directory. The store now refuses any
+// `<home>/permissions` that is not the home's own real directory, and any `projects.json` that is a link.
+describe("ApprovedProjectRules — never through a link (re-review R1)", () => {
+  function plantedStore(repo: string, rules: string[]): string {
+    const elsewhere = realDir("winter-approved-planted-");
+    writeFileSync(join(elsewhere, "projects.json"), JSON.stringify({ version: 1, projects: { [repo]: rules } }));
+    return elsewhere;
+  }
+
+  test("the reviewer's probe — a symlinked STORE directory — reads as nothing, logs once, and is never written through", () => {
+    const home = realDir("winter-approved-r1-home-");
+    const repo = realDir("winter-approved-r1-repo-");
+    const elsewhere = plantedStore(repo, ["Bash"]);
+    symlinkSync(elsewhere, join(home, "permissions"));
+    const logs: string[] = [];
+    const store = new ApprovedProjectRules({ winterHome: home, log: (m) => logs.push(m) });
+
+    expect(store.rulesFor(repo)).toEqual([]);
+    // …and through the daemon's own saved-rules reader, which is what reached the child.
+    const saved = persistedAllowRulesFor(repo, {
+      projectRootOf: (c) => c, effectiveSettings: () => null,
+      approvedProjectRules: (root) => store.rulesFor(root), isTrusted: () => false,
+    });
+    expect(saved).toEqual([]);
+    expect(logs).toHaveLength(1); // one line for the condition, not one per read
+    expect(logs[0]).toContain(join(home, "permissions"));
+
+    expect(() => store.record(repo, "Bash(npm test)")).toThrow();
+    expect(readdirSync(elsewhere)).toEqual(["projects.json"]); // no temp file planted there either
+    expect(JSON.parse(readFileSync(join(elsewhere, "projects.json"), "utf8")).projects[repo]).toEqual(["Bash"]);
+  });
+
+  test("a symlinked projects.json inside the real store directory is refused the same way", () => {
+    const home = realDir("winter-approved-r1-file-");
+    const repo = realDir("winter-approved-r1-file-repo-");
+    const elsewhere = plantedStore(repo, ["Bash"]);
+    mkdirSync(join(home, "permissions"), { mode: 0o700 });
+    symlinkSync(join(elsewhere, "projects.json"), join(home, "permissions", "projects.json"));
+    const logs: string[] = [];
+    const store = new ApprovedProjectRules({ winterHome: home, log: (m) => logs.push(m) });
+
+    expect(store.rulesFor(repo)).toEqual([]);
+    expect(logs).toHaveLength(1);
+    expect(() => store.record(repo, "Bash(npm test)")).toThrow();
+    expect(lstatSync(join(home, "permissions", "projects.json")).isSymbolicLink()).toBe(true); // left for the user
+    expect(JSON.parse(readFileSync(join(elsewhere, "projects.json"), "utf8")).projects[repo]).toEqual(["Bash"]);
+  });
+
+  test("prepare() (daemon boot) makes the store a real 0700 directory before a link can be planted", () => {
+    const home = realDir("winter-approved-r1-prep-");
+    const repo = realDir("winter-approved-r1-prep-repo-");
+    const store = new ApprovedProjectRules({ winterHome: home, log: () => {} });
+    store.prepare();
+    const st = lstatSync(join(home, "permissions"));
+    expect(st.isDirectory()).toBe(true);
+    expect(st.mode & 0o777).toBe(0o700);
+    store.record(repo, "Bash(npm test)");
+    expect(store.rulesFor(repo)).toEqual(["Bash(npm test)"]);
+  });
+
+  test("prepare() never replaces a link it finds — it is refused (one log line) and left for the user", () => {
+    const home = realDir("winter-approved-r1-prep-link-");
+    const repo = realDir("winter-approved-r1-prep-link-repo-");
+    const elsewhere = plantedStore(repo, ["Bash"]);
+    symlinkSync(elsewhere, join(home, "permissions"));
+    const logs: string[] = [];
+    const store = new ApprovedProjectRules({ winterHome: home, log: (m) => logs.push(m) });
+    store.prepare();
+    expect(lstatSync(join(home, "permissions")).isSymbolicLink()).toBe(true);
+    expect(store.rulesFor(repo)).toEqual([]);
+    expect(logs).toHaveLength(1);
+  });
+
+  test("the daemon creates <home>/permissions at boot", async () => {
+    const home = realDir("winter-approved-r1-boot-");
+    const daemon = await startDaemon({ home, secrets: new FileSecretStore(join(home, "test-secrets")), agentProvider: null });
+    try {
+      const st = lstatSync(join(home, "permissions"));
+      expect(st.isDirectory()).toBe(true);
+      expect(st.mode & 0o777).toBe(0o700);
+    } finally {
+      await daemon.stop();
+    }
   });
 });
 
