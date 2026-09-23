@@ -1,17 +1,18 @@
 import fs from "node:fs";
+import { basename, dirname } from "node:path";
 import type { Settings } from "./settings";
 
 /** Error → message without assuming the thrown value is an Error (a `throw "str"` must not
  *  become `undefined`). Used for both the load-throw and apply-throw log lines. */
 const msg = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
-export interface SettingsWatcherDeps {
+export interface SettingsWatcherDeps<T = Settings> {
   path: string; // dirs.settingsPath
-  load: (path: string) => Settings; // loadSettings (throws on parse failure)
+  load: (path: string) => T; // loadSettings (throws on parse failure)
   // The atomic swap + feature-flag diff (T4 wires the real one). MAY be async: T4's makeApply
   // returns Promise<void> (its drain gate awaits — e.g. a CU-disable drain up to 10s). The
   // watcher awaits it, so a rejection is caught and prevSnapshot advances only after it resolves.
-  apply: (prev: Settings | null, next: Settings) => void | Promise<void>;
+  apply: (prev: T | null, next: T) => void | Promise<void>;
   debounceMs?: number; // default 150
   watch?: (path: string, cb: () => void) => { close(): void }; // injectable fs.watch seam for tests
   log?: (msg: string) => void;
@@ -22,15 +23,15 @@ export interface SettingsWatcherDeps {
  * file, and calls the injected `apply(prev, next)` exactly once per settled good change. Owns
  * only the prev-snapshot used for diffing — the actual reference swap lives in `apply` (T4).
  */
-export class SettingsWatcher {
+export class SettingsWatcher<T = Settings> {
   private readonly path: string;
-  private readonly load: (path: string) => Settings;
-  private readonly apply: (prev: Settings | null, next: Settings) => void | Promise<void>;
+  private readonly load: (path: string) => T;
+  private readonly apply: (prev: T | null, next: T) => void | Promise<void>;
   private readonly debounceMs: number;
   private readonly watchFn: (path: string, cb: () => void) => { close(): void };
   private readonly log: (msg: string) => void;
 
-  private prevSnapshot: Settings | null = null;
+  private prevSnapshot: T | null = null;
   private watcher: { close(): void } | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
@@ -40,7 +41,7 @@ export class SettingsWatcher {
   private applying = false;
   private pendingReload = false;
 
-  constructor(deps: SettingsWatcherDeps) {
+  constructor(deps: SettingsWatcherDeps<T>) {
     this.path = deps.path;
     this.load = deps.load;
     this.apply = deps.apply;
@@ -54,7 +55,7 @@ export class SettingsWatcher {
     this.log = deps.log ?? (() => {});
   }
 
-  start(prev: Settings | null): void {
+  start(prev: T | null): void {
     // Idempotent re-arm: if already watching (double start), close the old fs.watch handle and
     // clear any pending timer first so the previous watcher can't also drive an apply (no leak).
     this.teardown();
@@ -112,7 +113,7 @@ export class SettingsWatcher {
       do {
         this.pendingReload = false;
         if (this.stopped) break; // stop() mid-drain: don't start a new cycle (in-flight one finishes)
-        let next: Settings;
+        let next: T;
         try {
           next = this.load(this.path);
         } catch (err) {
@@ -136,4 +137,18 @@ export class SettingsWatcher {
       this.applying = false;
     }
   }
+}
+
+/**
+ * WS-21: a `watch` seam for a file that may not exist yet and is replaced by atomic rename (both are
+ * true of `sdk/settings.json` and `sdk/.winter.json`): watch its PARENT directory and fire on events
+ * naming the file (or on a platform event with no name). A file watch would fail on a missing file
+ * and, on some platforms, go deaf after the first rename replaces the inode it holds.
+ */
+export function watchViaParentDir(path: string, cb: () => void): { close(): void } {
+  const name = basename(path);
+  const w = fs.watch(dirname(path), (_event, filename) => {
+    if (filename === null || filename === undefined || String(filename) === name) cb();
+  });
+  return { close: () => w.close() };
 }

@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { storeHomeFor } from "../src/agent/paths";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, SkillsListResult, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startDaemon, type RunningDaemon } from "../src/daemon";
+import { setRunHomeSupportForTests } from "../src/runtime-sdk/run-home-support";
 import { startIpcServer } from "../src/ipc/server";
 import { SessionStore } from "../src/sessions/store";
 import { FileSecretStore } from "../src/auth/secret-store";
@@ -148,8 +150,8 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
   // session can load it and why not, so no client presents an unloadable skill as usable.
   test("skills.list and skills.read say truthfully which skills a session can load, and why not", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-daemon-skills-"));
-    mkdirSync(join(home, "skills", "greet"), { recursive: true });
-    writeFileSync(join(home, "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nhi\n");
+    mkdirSync(join(storeHomeFor(home), "skills", "greet"), { recursive: true });
+    writeFileSync(join(storeHomeFor(home), "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nhi\n");
     mkdirSync(join(home, "plugins", "superpowers", "skills", "brainstorming"), { recursive: true });
     writeFileSync(join(home, "plugins", "superpowers", "skills", "brainstorming", "SKILL.md"), "---\nname: brainstorming\ndescription: Explore\n---\nx\n");
     mkdirSync(join(home, "plugins", "untrusted", "skills", "risky"), { recursive: true });
@@ -159,7 +161,6 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
     // — `superpowers` is; `untrusted` is installed but never enabled.
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
-      plugins: { enabled: ["superpowers"], consents: { superpowers: { exec: 1 } } },
     }));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     daemon = await startDaemon({ home, secrets, agentProvider: null });
@@ -170,22 +171,101 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
     const listed = await c.request(METHODS.skillsList, {});
     expect(SkillsListResult.safeParse(listed.result).success).toBe(true);
     const byName = new Map<string, { loadsInSessions?: boolean; sessionNote?: string }>(listed.result.skills.map((s: { name: string }) => [s.name, s]));
-    expect(byName.get("superpowers:brainstorming")).toMatchObject({ loadsInSessions: true });
-    expect(byName.get("superpowers:brainstorming")!.sessionNote).toBeUndefined();
+    // WS-21 (L4 request 2): the legacy `<home>/plugins/*/skills` scan is gone (the plugin half of this
+    // list is lane L4's plugin manager), and on router 0.0.11 no tier reaches a child any more — on a
+    // run-home build the run folder carries the user/self/project tiers (`skills-ws21.test.ts`).
+    expect(byName.has("superpowers:brainstorming")).toBe(false);
+    expect(byName.has("untrusted:risky")).toBe(false);
     expect(byName.get("greet")).toMatchObject({ loadsInSessions: false });
-    expect(byName.get("greet")!.sessionNote).toContain("only plugin skills");
-    expect(byName.get("untrusted:risky")).toMatchObject({ loadsInSessions: false });
-    expect(byName.get("untrusted:risky")!.sessionNote).toContain('"exec" consent');
+    expect(byName.get("greet")!.sessionNote).toContain("no door");
 
     const read = await c.request(METHODS.skillsRead, { name: "greet" });
     expect(read.result.skill).toMatchObject({ name: "greet", loadsInSessions: false });
     c.close();
   });
 
+  // Post-merge round ("flip your skills test"): the companion of the test above, on a build whose
+  // router DOES apply run homes -- agent/skills-ws21.test.ts already proves this at the
+  // SkillStore#sessionAvailability unit level (`setRunHomeSupportForTests(true)` -> user/self/
+  // project/builtin all loadsInSessions:true, "the run folder carries them"); this is that same
+  // flip proven end to end through the REAL skills.list/skills.read RPCs over the wire, not just the
+  // underlying store.
+  test("skills.list and skills.read report loadsInSessions:true for a user skill on a run-home-capable build", async () => {
+    // Old-layout tripwire (post-merge sweep): the override must flip BEFORE any file is seeded, so
+    // `storeHomeFor` resolves to `<home>/sdk/skills` from the start (Migration C's boot check --
+    // linkedRouterSupportsRunHome() && isOldLayout(home) -- refuses typed on a temp home that isn't
+    // the profile's default the moment ANY SDK_COMPAT_LINKS path, "skills" included, has content at
+    // the OLD top-level location once the router is considered linked).
+    setRunHomeSupportForTests(true);
+    try {
+      const home = mkdtempSync(join(tmpdir(), "winter-daemon-skills-runhome-"));
+      mkdirSync(join(storeHomeFor(home), "skills", "greet"), { recursive: true });
+      writeFileSync(join(storeHomeFor(home), "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nhi\n");
+      writeFileSync(join(home, "settings.json"), JSON.stringify({
+        schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
+      }));
+      const secrets = new FileSecretStore(join(home, "test-secrets"));
+      daemon = await startDaemon({ home, secrets, agentProvider: null });
+      harnessToken = daemon.tokens.harness;
+      const c = await TestClient.connect(daemon.socketPath);
+      await c.hello(harnessToken, "skills-tester-runhome");
+
+      const listed = await c.request(METHODS.skillsList, {});
+      expect(SkillsListResult.safeParse(listed.result).success).toBe(true);
+      const byName = new Map<string, { loadsInSessions?: boolean; sessionNote?: string }>(listed.result.skills.map((s: { name: string }) => [s.name, s]));
+      expect(byName.get("greet")).toMatchObject({ loadsInSessions: true });
+      expect(byName.get("greet")!.sessionNote).toBeUndefined(); // nothing to explain when it DOES load
+
+      const read = await c.request(METHODS.skillsRead, { name: "greet" });
+      expect(read.result.skill).toMatchObject({ name: "greet", loadsInSessions: true });
+      c.close();
+    } finally {
+      setRunHomeSupportForTests(undefined);
+    }
+  });
+
+  // Post-merge fix round, finding 3 (Opus review): L3 deleted SkillStore's own plugin tier outright
+  // (agent/skills.ts), so `store.list()` returns no plugin-sourced entries at all any more -- the
+  // ipc/server.ts merge resolution that dropped this lane's own `pluginSkillsFor` append was wrong.
+  // This is the RPC-level regression guard: a plugin installed through the real plugin.marketplace.add
+  // + plugin.install RPCs, with a shipped skill, must actually appear in skills.list.
+  test("skills.list includes an installed plugin's own skill (plugin half restored, finding 3)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-daemon-skills-plugin-"));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({
+      schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
+    }));
+    const secrets = new FileSecretStore(join(home, "test-secrets"));
+    daemon = await startDaemon({ home, secrets, agentProvider: null });
+    harnessToken = daemon.tokens.harness;
+    const c = await TestClient.connect(daemon.socketPath);
+    await c.hello(harnessToken, "skills-tester-plugin");
+
+    const mktDir = mkdtempSync(join(tmpdir(), "winter-daemon-skills-plugin-mkt-"));
+    mkdirSync(join(mktDir, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(mktDir, ".claude-plugin", "marketplace.json"), JSON.stringify({
+      name: "m", owner: { name: "test" }, plugins: [{ name: "p", source: "." }],
+    }));
+    mkdirSync(join(mktDir, "skills", "brainstorming"), { recursive: true });
+    writeFileSync(join(mktDir, "skills", "brainstorming", "SKILL.md"), "---\nname: brainstorming\ndescription: Explore ideas\n---\nbody");
+
+    const mktRes = await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+    expect(mktRes.result.ok).toBe(true);
+    const installRes = await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+    expect(installRes.result.ok).toBe(true); // installed AND enabled by default (Contract B)
+
+    const listed = await c.request(METHODS.skillsList, {});
+    expect(SkillsListResult.safeParse(listed.result).success).toBe(true);
+    const byName = new Map<string, { loadsInSessions?: boolean; sessionNote?: string; description?: string }>(
+      listed.result.skills.map((s: { name: string }) => [s.name, s]),
+    );
+    expect(byName.get("p:brainstorming")).toMatchObject({ loadsInSessions: true, description: "Explore ideas" });
+    c.close();
+  });
+
   test("deleting a name that resolves to a non-self source (user root) -> INVALID_PARAMS, refused before touching self/", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-daemon-skills-"));
-    mkdirSync(join(home, "skills", "greet"), { recursive: true });
-    writeFileSync(join(home, "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nSay hello warmly.\n");
+    mkdirSync(join(storeHomeFor(home), "skills", "greet"), { recursive: true });
+    writeFileSync(join(storeHomeFor(home), "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nSay hello warmly.\n");
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     daemon = await startDaemon({ home, secrets, agentProvider: null });
     harnessToken = daemon.tokens.harness;

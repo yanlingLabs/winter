@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { storeProjectsDir } from "../../src/agent/paths";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -803,7 +804,7 @@ describe("sync.memory (Chat Slice D task 3)", () => {
   afterEach(() => { stop?.(); stop = undefined; });
 
   function assistantDir(home: string): string {
-    return join(home, "projects", "_assistant", "memory");
+    return join(storeProjectsDir(home), "_assistant", "memory");
   }
 
   async function boot(home: string): Promise<{ socketPath: string; harnessToken: string; remoteToken: string }> {

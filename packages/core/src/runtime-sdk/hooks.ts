@@ -61,7 +61,7 @@
 // `hooksFor(session).official`, already wired at integration.
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, isAbsolute, relative } from "node:path";
+import { basename, dirname, isAbsolute, relative } from "node:path";
 import type {
   HookCallback, HookCallbackMatcher, HookJSONOutput, Options,
   PostToolUseFailureHookInput, PostToolUseHookInput, PreToolUseHookInput,
@@ -78,7 +78,10 @@ import { DIFF_PATCH_MAX_BYTES, mintDiffId, writeDiff } from "../diffs/store";
 import type { HookResult } from "../plugins/hook-runner";
 import { attachFileDiff } from "./diff-attach";
 import { REVIEWER_ESCALATION_REASON, noteReviewerCleared } from "./bridge-common";
-import { ESCAPE_FENCED_FILENAMES, HOME_WRITE_ONLY_FENCED, PROJECT_FENCED_SEGMENTS, homeFencedDirs, homeFencedFiles } from "./home-fence";
+import { ESCAPE_FENCED_FILENAMES, PROJECT_FENCED_SEGMENTS, homeFenceFor, homeFencedDirs, homeFencedFiles, isHomeWriteOnly } from "./home-fence";
+import { controlPlaneDenialMessage, controlPlaneTargetForCall } from "./control-plane";
+import { protectedPathsFor, protectedReadDenial, protectedWriteDecision, storeWriteDenial } from "./protected-paths";
+import type { Mode as SessionMode } from "../agent/tools/registry";
 
 /** The subset of `plugins/hook-registry.ts`'s `HookFacade` this module depends on — injected
  *  rather than imported concretely so a fake can stand in for tests with no real plugin process
@@ -147,6 +150,17 @@ export interface SessionHooksDeps {
    * the wiring. A getter that THROWS reads as "no additions" (never propagates into the child).
    */
   dangerousDomainsAdded?: () => readonly string[] | undefined;
+
+  /**
+   * WS-21 (spec §7.1, §7.2) — the path fence (`pathFenceHook`). THIS session's mode (a protected write
+   * is a card in code and a typed deny in chat and dispatch), its working directory (a relative target
+   * resolves against it) and, read LIVE per call, its TRUSTED project root (`repoRootFor(cwd)` when the
+   * cwd is trusted, else `null` — an untrusted project has no project tier to protect). Absent `mode`:
+   * the hook treats the session as code, the answer that raises a card rather than none.
+   */
+  mode?: SessionMode;
+  cwd?: string;
+  trustedProjectRoot?: () => string | null;
 }
 
 function readRootsOf(roots: string[], tmpDir?: string): string[] {
@@ -324,7 +338,7 @@ export function normaliseEscapeCommand(command: string): string {
  * `~`/`$HOME`/`${HOME}` for a home under the user's own, `$WINTER_HOME`/`${WINTER_HOME}`, and the
  * home's basename (a command that `cd`s to its parent first).
  */
-function homePrefixes(home: string): string[] {
+function homePrefixes(home: string, opts: { basename?: boolean } = {}): string[] {
   const homes = new Set<string>([home]);
   try { homes.add(realpathSync(home).replace(/\/+$/, "")); } catch { /* not created yet: the literal spelling is the one a command could name */ }
   const prefixes = new Set<string>(["$winter_home", "${winter_home}"]);
@@ -336,9 +350,23 @@ function homePrefixes(home: string): string[] {
       for (const tilde of ["~", "$home", "${home}"]) prefixes.add(`${tilde}${rest}`.toLowerCase());
     }
     const base = basename(h);
-    if (base.length > 0) prefixes.add(base.toLowerCase());
+    if (opts.basename !== false && base.length > 0) prefixes.add(base.toLowerCase());
   }
   return [...prefixes];
+}
+
+/** Does a word start at `at` in the normalised command (optionally after a leading `./`)? */
+function startsWord(c: string, at: number): boolean {
+  const boundary = (i: number): boolean => i <= 0 || /[\s;&|()<>=]/.test(c.charAt(i - 1));
+  return boundary(at) || (c.slice(at - 2, at) === "./" && boundary(at - 2));
+}
+
+/** Is `cwd` the home's parent directory (literally or through a link) — where the home's bare basename IS
+ *  the home? `false` when either side is unknown. */
+function isHomeParent(cwd: string | undefined, home: string): boolean {
+  if (cwd === undefined || cwd.length === 0) return false;
+  const real = (p: string): string => { try { return realpathSync(p).replace(/\/+$/, ""); } catch { return p.replace(/\/+$/, ""); } };
+  return real(cwd) === real(dirname(home));
 }
 
 /** One fenced target as the floor matches it. `writeOnly` — the model is POINTED at content under it
@@ -355,7 +383,7 @@ function floorNeedles(home: string): FloorNeedle[] {
   const out = new Map<string, boolean>();
   for (const p of [...homeFencedDirs(home), ...homeFencedFiles(home)]) {
     const r = relative(home, p);
-    const writeOnly = HOME_WRITE_ONLY_FENCED.includes(r.split("/")[0] ?? "");
+    const writeOnly = isHomeWriteOnly(r);
     const spellings = r.length === 0 || r.startsWith("..") || isAbsolute(r)
       ? [p.toLowerCase()]
       : prefixes.map((pre) => `${pre}/${r}`.toLowerCase());
@@ -413,8 +441,283 @@ function writeContextStart(c: string): number {
     if (m.index >= start) break;
     const word = m[0].slice(m[0].lastIndexOf("/") + 1);
     if (ESCAPE_WRITE_VERBS.has(word)) { start = m.index; break; }
+    // Fix round 2: an IN-PLACE editor writes the file it names — `sed -i`/`sed --in-place`, `perl -i`/`-pi`
+    // — judged within this command segment (up to the next `;`, `&` or `|`) only.
+    if (word === "sed" || word === "perl") {
+      const rest = c.slice(m.index + m[0].length).split(/[;&|]/, 1)[0] ?? "";
+      if (/(?:^|\s)(?:-[a-z]*i[^\s]*|--in-place\S*)(?=\s|$)/.test(rest)) { start = m.index; break; }
+    }
   }
   return start;
+}
+
+/**
+ * Fix round 2 (controller ruling on SPEC CONCERN D): the protected item directories and agent definitions
+ * of ANY project, at ANY depth and whatever its trust — `.winter/{skills,commands,rules,output-styles,
+ * agents}` — as the TARGET of a write in a Bash command, sandboxed or not. The seatbelt cannot fence these
+ * off this session's walk (it takes real subpaths only, and a later session in a sibling package loads
+ * them). Returns the segment named, or `undefined`.
+ *
+ * Round 3, minor 10 — JUDGED PER SHELL SEGMENT (split on `;`, `&&`, `||`, `|`, `&` and newlines on the RAW
+ * text, never inside quotes; a `cd`/`pushd` carried across segments), so a read after a redirect or a write
+ * elsewhere in the line is no longer taken for a write. In a segment, a write target is:
+ *   * the target of an output redirect (`>`, `>>`, `>|`, `&>`; never an fd dup like `2>&1`);
+ *   * for `cp`/`mv`/`ln`/`install`/`rsync`, ONLY the destination — the last operand, or the `-t`/
+ *     `--target-directory` value (a copy's SOURCE is read; `mv`'s removal of it loads nothing new); round 4:
+ *     `-t` inside a short-flag cluster and `--target-directory <dir>` too, and every operand after the first
+ *     once an option follows an operand;
+ *   * round 4: the command a `find -exec`/`-execdir` runs, as a segment of its own;
+ *   * for `git`, nothing when the subcommand only reads (status, log, diff, show, blame, ls-files, grep),
+ *     every later word otherwise;
+ *   * for an in-place editor (`sed -i`, `perl -i`, gawk's `-i inplace`) and every other write verb, every
+ *     later word;
+ *   * for an interpreter one-liner (`python`/`python3`/`node`/`bun`/`ruby`/`perl`/`deno` with `-c`, `-e`,
+ *     `--eval`; `deno eval`), any protected segment its code names (round 3, minor 9).
+ *
+ * THE LIMITATION, the escape floor's own: a static match on the normalised text (case folded, quotes
+ * stripped, `//`/`/./`/`..` collapsed, `cd` tracked). A path the command ASSEMBLES at run time (`$(…)`,
+ * its own variables — `d=.winter; touch $d/rules/x` —, a script it writes and then runs, an interpreter
+ * that joins the path from pieces) is beyond its reach, and so is a write whose path is not in the command
+ * at all — `git apply x.patch`, `patch < x.diff`.
+ */
+export function bashProtectedWriteHit(command: string, depth = 0): string | undefined {
+  let cwd: string | undefined;
+  for (const raw of shellSegments(command)) {
+    // Round 5: a shell's `-c` string, `eval`'s argument and the same inside `find -exec` are COMMANDS — each
+    // judged as one of its own (from the cwd carried so far), before its quotes are blanked as text below.
+    if (depth < 4) {
+      for (const nested of nestedCommandStrings(shellWords(raw))) {
+        const hit = bashProtectedWriteHit(cwd === undefined ? nested : `cd ${cwd}; ${nested}`, depth + 1);
+        if (hit !== undefined) return hit;
+      }
+    }
+    const seg = normaliseEscapeCommand(quotedOperatorsAsText(raw)).replace(/^[\s({]+/, "").replace(/[\s)}]+$/, "");
+    if (seg.length === 0) continue;
+    const words = seg.split(/\s+/);
+    if (words[0] === "cd" || words[0] === "pushd") {
+      const arg = words[1]?.replace(/\/+$/, "");
+      cwd = arg === undefined || arg === "" ? "~" : arg === "-" ? undefined : /^[/~$]/.test(arg) || cwd === undefined ? arg : `${cwd}/${arg.replace(/^\.\//, "")}`;
+      continue;
+    }
+    for (const target of segmentWriteTargets(seg)) {
+      const path = cwd === undefined || /^[/~$]/.test(target) ? target : `${cwd}/${target.replace(/^\.\//, "")}`;
+      const m = PROTECTED_BASH_TARGET.exec(path);
+      if (m !== null) return m[0];
+    }
+  }
+  return undefined;
+}
+
+/** Round 5: the shells whose `-c` string is a command. */
+const SHELLS: ReadonlySet<string> = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
+/** Words a command may be prefixed with and still be that command. */
+const COMMAND_PREFIXES: ReadonlySet<string> = new Set(["sudo", "env", "exec", "command", "nohup", "time", "nice"]);
+
+/** Round 5: one raw segment's words as the shell hands them to the program — split on unquoted whitespace,
+ *  quotes removed, a backslash escaping the next character. */
+function shellWords(raw: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let started = false;
+  let quote: "'" | "\"" | undefined;
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i]!;
+    if (quote === "'") { if (ch === "'") quote = undefined; else cur += ch; continue; }
+    if (quote === "\"") {
+      if (ch === "\"") quote = undefined;
+      else if (ch === "\\" && i + 1 < raw.length && /["\\$`]/.test(raw[i + 1]!)) cur += raw[++i];
+      else cur += ch;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < raw.length) { cur += raw[++i]; started = true; continue; }
+    if (ch === "'" || ch === "\"") { quote = ch; started = true; continue; }
+    if (/\s/.test(ch)) { if (started) out.push(cur); cur = ""; started = false; continue; }
+    cur += ch;
+    started = true;
+  }
+  if (started) out.push(cur);
+  return out;
+}
+
+/** Round 5: the command strings a command line runs — a shell's `-c` string (`-c` alone or in a cluster such
+ *  as `-lc`), `eval`'s arguments joined, and the same for a command `find -exec`/`-execdir`/`-ok`/`-okdir`
+ *  runs. Words as `shellWords` gives them. */
+function nestedCommandStrings(words: readonly string[]): string[] {
+  let i = 0;
+  while (i < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i]!) || COMMAND_PREFIXES.has(baseName(words[i]!)))) i += 1;
+  const verb = baseName(words[i] ?? "");
+  const rest = words.slice(i + 1);
+  if (SHELLS.has(verb)) {
+    const at = rest.findIndex((w) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(w));
+    return at >= 0 && rest[at + 1] !== undefined ? [rest[at + 1]!] : [];
+  }
+  if (verb === "eval") return rest.length === 0 ? [] : [rest.join(" ")];
+  if (verb === "find") {
+    const out: string[] = [];
+    for (let j = 0; j < rest.length; j += 1) {
+      if (!["-exec", "-execdir", "-ok", "-okdir"].includes(rest[j]!)) continue;
+      const sub: string[] = [];
+      for (j += 1; j < rest.length && rest[j] !== "+" && rest[j] !== ";"; j += 1) sub.push(rest[j]!);
+      out.push(...nestedCommandStrings(sub));
+    }
+    return out;
+  }
+  return [];
+}
+
+const baseName = (w: string): string => w.slice(w.lastIndexOf("/") + 1).toLowerCase();
+
+/** A protected segment inside ONE write target (a single word). *//** A protected segment inside ONE write target (a single word). */
+const PROTECTED_BASH_TARGET = /\.winter\/(?:skills|commands|rules|output-styles|agents)(?=\/|$)/;
+
+/** Round 3, minor 10: a command's shell segments — split on `;`, `&&`, `||`, `|`, `|&`, a background `&` and
+ *  newlines, on the RAW text: a separator inside single or double quotes (or escaped) is text. Round 4: a
+ *  command substitution's opening and closing (`$(`/`)`, a backtick) are boundaries too. */
+export function shellSegments(command: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  // Round 4, minor 2: a COMMAND SUBSTITUTION (`$(…)`, `` `…` ``) is a segment of its own — outside quotes
+  // and inside double quotes alike — so a `cd` inside one is seen and carried to what follows it.
+  const stack: Array<"sq" | "dq" | "sub" | "paren" | "bt"> = [];
+  const cut = (): void => { out.push(cur); cur = ""; };
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i]!;
+    const ctx = stack[stack.length - 1];
+    if (ctx === "sq") { cur += ch; if (ch === "'") stack.pop(); continue; }
+    if (ch === "\\" && i + 1 < command.length) { cur += ch + command[++i]; continue; }
+    if (ch === "$" && command[i + 1] === "(" && command[i + 2] !== "(") { cut(); stack.push("sub"); i += 1; continue; }
+    if (ch === "`") { cut(); if (ctx === "bt") stack.pop(); else stack.push("bt"); continue; }
+    if (ctx === "dq") { cur += ch; if (ch === "\"") stack.pop(); continue; }
+    if (ch === "'") { stack.push("sq"); cur += ch; continue; }
+    if (ch === "\"") { stack.push("dq"); cur += ch; continue; }
+    if (ch === "(" && (ctx === "sub" || ctx === "paren")) { stack.push("paren"); cur += ch; continue; }
+    if (ch === ")" && ctx === "sub") { stack.pop(); cut(); continue; }
+    if (ch === ")" && ctx === "paren") { stack.pop(); cur += ch; continue; }
+    if (ch === "\n" || ch === ";") { cut(); continue; }
+    if (ch === "|") { if (command[i + 1] === "|" || command[i + 1] === "&") i += 1; cut(); continue; }
+    if (ch === "&") {
+      if (command[i + 1] === "&") { i += 1; cut(); continue; }
+      if (command[i - 1] === ">" || command[i - 1] === "<" || command[i + 1] === ">") { cur += ch; continue; } // a redirect
+      cut();
+      continue;
+    }
+    cur += ch;
+  }
+  cut();
+  return out.map((s) => s.trim()).filter((s) => s.length > 0);
+}
+
+/** A redirect or separator character INSIDE quotes is text: it becomes a space before the quotes are
+ *  stripped, so `echo 'a > .winter/rules/x'` names no write target (a quoted PATH is kept as it is). */
+function quotedOperatorsAsText(raw: string): string {
+  let out = "";
+  let quote: "'" | "\"" | undefined;
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i]!;
+    if (quote === undefined) {
+      if (ch === "\\" && i + 1 < raw.length) { out += ch + raw[++i]; continue; }
+      if (ch === "'" || ch === "\"") quote = ch;
+      out += ch;
+      continue;
+    }
+    if (ch === quote) { quote = undefined; out += ch; continue; }
+    out += /[<>|;&()]/.test(ch) ? " " : ch;
+  }
+  return out;
+}
+
+/** Round 3, minor 9: the interpreters whose one-liners count, their code flags, and a protected segment as
+ *  code names it. */
+const INTERPRETERS = /^(?:python(?:\d+(?:\.\d+)?)?|node|bun|ruby|perl|deno)$/;
+const ONE_LINER_FLAG = /^(?:-[a-z]*[ce]|--eval|--print|-p)$/;
+const PROTECTED_IN_CODE = /\.winter\/(?:skills|commands|rules|output-styles|agents)(?![a-z0-9_.-])/;
+
+/** git's subcommands that only read (round 3, minor 10). */
+const GIT_READ_SUBCOMMANDS: ReadonlySet<string> = new Set(["status", "log", "diff", "show", "blame", "ls-files", "grep"]);
+/** Verbs whose only write target is the destination (round 3, minor 10). */
+const DESTINATION_VERBS: ReadonlySet<string> = new Set(["cp", "mv", "ln", "install", "rsync"]);
+
+/** One normalised segment's write targets (words), per `bashProtectedWriteHit`'s rules. */
+function segmentWriteTargets(seg: string): string[] {
+  const targets: string[] = [];
+  // Output redirects: the word after the operator; an fd dup (`>&1`, `>&-`) names no file.
+  const redirect = /(?:\d*|&)>{1,2}\|?(&?)\s*([^\s<>&|;()]*)/g;
+  for (const m of seg.matchAll(redirect)) {
+    if (m[1] === "&" && /^(\d+|-)?$/.test(m[2] ?? "")) continue;
+    if (m[2] !== undefined && m[2].length > 0) targets.push(m[2]);
+  }
+  const words = seg.replace(redirect, " ").replace(/<\s*[^\s<>&|;()]*/g, " ").split(/\s+/).filter((w) => w.length > 0);
+  for (let i = 0; i < words.length; i += 1) {
+    const verb = words[i]!.slice(words[i]!.lastIndexOf("/") + 1);
+    const rest = words.slice(i + 1);
+    // Round 3, minor 9: an interpreter ONE-LINER writes whatever its code names — any protected segment in
+    // it is the target (its own boundary: the code's `'…/rules',` punctuation is no path character).
+    if (INTERPRETERS.test(verb) && (rest.some((w) => ONE_LINER_FLAG.test(w)) || (verb === "deno" && rest[0] === "eval"))) {
+      const named = PROTECTED_IN_CODE.exec(rest.join(" "));
+      return named === null ? targets : [...targets, named[0]];
+    }
+    // …and gawk's in-place edit, `-i inplace`, writes the files it names.
+    if ((verb === "awk" || verb === "gawk") && rest.some((w, j) => w === "-iinplace" || w === "--include=inplace" || ((w === "-i" || w === "--include") && rest[j + 1] === "inplace"))) {
+      return [...targets, ...rest];
+    }
+    if (verb === "git") {
+      let j = 0;
+      while (j < rest.length && rest[j]!.startsWith("-")) j += /^-[cC]$/.test(rest[j]!) ? 2 : 1;   // `-C dir`, `-c k=v`
+      if (GIT_READ_SUBCOMMANDS.has(rest[j] ?? "")) return targets;
+      return [...targets, ...rest];
+    }
+    if (DESTINATION_VERBS.has(verb)) {
+      const operands: string[] = [];
+      let optionAfterOperand = false;
+      for (const w of rest) {
+        if (w.startsWith("-")) { if (operands.length > 0) optionAfterOperand = true; } else operands.push(w);
+      }
+      const last = operands.length === 0 ? [] : [operands[operands.length - 1]!];
+      for (let j = 0; j < rest.length; j += 1) {
+        const w = rest[j]!;
+        // Round 4, minor 2: `-t` inside a short-flag cluster (`-rt dir`) and the space-separated
+        // `--target-directory dir` name the target as the NEXT word. (rsync has no `-t` target: its `-t`
+        // keeps times.) The text is case-folded, so `-T` reads as `-t` too — hence the last operand as well.
+        if (verb !== "rsync" && /^-[a-z]*t[a-z]*$/.test(w) && rest[j + 1] !== undefined) return [...targets, rest[j + 1]!, ...last];
+        if (w === "--target-directory" && rest[j + 1] !== undefined) return [...targets, rest[j + 1]!];
+        if (w.startsWith("--target-directory=")) return [...targets, w.slice("--target-directory=".length)];
+      }
+      // …and once an option follows an operand (an option's VALUE may then sit after the destination —
+      // `rsync -a src/ dst/ --exclude tmp`), every operand after the first is a possible target.
+      return optionAfterOperand ? [...targets, ...operands.slice(1)] : [...targets, ...last];
+    }
+    // Round 4, minor 2: `find … -exec CMD … +` (or `\;`) runs CMD — judged as a segment of its own; and
+    // `-fprint`/`-fprintf`/`-fls` write the file they name.
+    if (verb === "find") {
+      for (let j = 0; j < rest.length; j += 1) {
+        const w = rest[j]!;
+        if (w === "-fprint" || w === "-fprintf" || w === "-fls") { if (rest[j + 1] !== undefined) targets.push(rest[j + 1]!); continue; }
+        if (w !== "-exec" && w !== "-execdir" && w !== "-ok" && w !== "-okdir") continue;
+        const sub: string[] = [];
+        for (j += 1; j < rest.length && rest[j] !== "+" && rest[j] !== "\\;" && rest[j] !== ";"; j += 1) sub.push(rest[j]!);
+        targets.push(...segmentWriteTargets(sub.join(" ")));
+      }
+      return targets;
+    }
+    if (verb === "sed" || verb === "perl") {
+      if (rest.some((w) => /^(?:-[a-z]*i\S*|--in-place\S*)$/.test(w))) return [...targets, ...rest];
+      continue;
+    }
+    if (ESCAPE_WRITE_VERBS.has(verb)) return [...targets, ...rest];
+  }
+  return targets;
+}
+
+/** The ASK a protected-path Bash write gets (fix round 2) — a card in code; the bridge turns it into the
+ *  typed deny wherever nobody can answer (dispatch, chat, a dispatch child). Every policy, both legs. */
+function bashProtectedWriteHook(): HookCallback {
+  return async (input) => {
+    const { command } = bashEscapeInput(input);
+    const hit = bashProtectedWriteHit(command);
+    return hit === undefined
+      ? allow()
+      : ask(`Bash writes under ${hit} — skills, commands, rules, output styles and agent definitions load into every future session; the user decides.`);
+  };
 }
 
 /**
@@ -426,28 +729,122 @@ function writeContextStart(c: string): number {
  * refused on ANY mention; `cache` and `plugins` — whose skill content the model is pointed at to read
  * and execute — only in a write-shaped position (after a redirect or a write verb).
  */
-export function escapeFloorHit(command: string, home: string | undefined): string | undefined {
+export function escapeFloorHit(command: string, home: string | undefined, cwd?: string): string | undefined {
   const c = expandAfterCd(normaliseEscapeCommand(command));
   for (const name of ESCAPE_FENCED_FILENAMES) if (c.includes(name)) return name;
   for (const seg of PROJECT_FENCED_SEGMENTS) {
     const bare = seg.replace(/\/+$/, "");
     if (c.includes(bare)) return `a project's ${bare} directory`;
   }
-  if (home === undefined || home.length === 0) return undefined;
   const writeStart = writeContextStart(c);
-  for (const { needle, writeOnly } of floorNeedles(home.replace(/\/+$/, ""))) {
+  // WS-21 (spec §7.1), write-shaped only: a project's `.winter/mcp.json` and any `.winter/settings*.json`
+  // (the two claude tiers are already refused on any mention above), and a claude staging root.
+  for (const re of PROJECT_WRITE_FENCED) {
+    for (const m of c.matchAll(re)) if (m.index !== undefined && m.index > writeStart) return `a project's ${m[0]}`;
+  }
+  for (let at = c.indexOf(RESUME_STAGING_NEEDLE); at >= 0; at = c.indexOf(RESUME_STAGING_NEEDLE, at + 1)) {
+    if (at > writeStart) return "a claude resume staging root";
+  }
+  if (home === undefined || home.length === 0) return undefined;
+  const bareHome = home.replace(/\/+$/, "");
+  for (const { needle, writeOnly } of floorNeedles(bareHome)) {
     let at = c.indexOf(needle);
     while (at >= 0) {
       if (!writeOnly || at > writeStart) return "Winter's own state under its home";
       at = c.indexOf(needle, at + 1);
     }
   }
+  // Review I7: the user tier's PROTECTED paths (spec §7.2), write-shaped — the shared runtime home's and
+  // the old/compat spelling at the home's top level (a link into `sdk/` on a migrated home, the store
+  // itself on router 0.0.11). A write tool gets a card for these; an unsandboxed command gets none.
+  // Round 3, minor 4: the WINTER.md needle is the HOME's own — a project's `.winter/WINTER.md` is ordinary
+  // (spec §7.2), and the home's bare basename (`.winter`) names a project's `.winter/` just as well. So the
+  // bare spelling counts for WINTER.md only when the command runs from the home's parent directory.
+  const fullPrefixes = new Set(homePrefixes(bareHome, { basename: false }));
+  const fromHomeParent = isHomeParent(cwd, bareHome);
+  for (const pre of homePrefixes(bareHome)) {
+    const instructionsNeedleHere = fullPrefixes.has(pre) || fromHomeParent;
+    for (const base of [`${pre}/sdk`, pre]) {
+      for (const needle of [...PROTECTED_KIND_NAMES.map((k) => `${base}/${k}`), ...(instructionsNeedleHere ? [`${base}/winter.md`] : [])]) {
+        for (let at = c.indexOf(needle); at >= 0; at = c.indexOf(needle, at + 1)) {
+          if (at <= writeStart) continue;
+          // the bare basename names the home only as a word of its own (`proj/.winter/WINTER.md` is a project's)
+          if (!fullPrefixes.has(pre) && needle.endsWith("/winter.md") && !startsWord(c, at)) continue;
+          const next = c.charAt(at + needle.length);
+          if (next === "" || next === "/" || /[\s;&|()<>]/.test(next)) return "a protected path (skills, commands, rules, output styles or WINTER.md)";
+        }
+      }
+    }
+  }
+  // …and the runtimes' transcript store, `sdk/projects`, write-shaped and OUTSIDE each project's
+  // `memory/` (the model's MEMDIR, which it maintains itself).
+  // Review M2: and under its compat-link spelling `<home>/projects` (a link into `sdk/projects` on a
+  // migrated home; the store itself on router 0.0.11).
+  for (const pre of homePrefixes(bareHome)) {
+    for (const needle of [`${pre}/sdk/projects`, `${pre}/projects`]) {
+      for (let at = c.indexOf(needle); at >= 0; at = c.indexOf(needle, at + 1)) {
+        if (at <= writeStart) continue;
+        const rest = c.slice(at + needle.length).split(/[\s;&|()<>]/, 1)[0] ?? "";
+        if (rest !== "" && !rest.startsWith("/")) continue; // `sdk/projectsx`: not this directory
+        if (/^\/[^/]+\/memory(\/|$)/.test(rest)) continue;
+        return "sdk/projects, the runtimes' own transcript store";
+      }
+    }
+  }
   return undefined;
 }
 
+/** WS-21 (spec §7.1): project files the escape floor refuses in a write-shaped position, matched on the
+ *  normalised command. */
+const PROJECT_WRITE_FENCED: readonly RegExp[] = [
+  /\.winter\/mcp\.json/g,
+  /\.winter\/settings[^/\s;&|()<>]*\.json/g,
+  // Review I7: any project's protected item directories, at any depth (review C1's shape).
+  /\.winter\/(?:skills|commands|rules|output-styles)(?=\/|[\s;&|()<>]|$)/g,
+];
+/** The protected item directory names (spec §7.2), as the lowercased floor matches them. */
+const PROTECTED_KIND_NAMES: readonly string[] = ["skills", "commands", "rules", "output-styles"];
+const RESUME_STAGING_NEEDLE = "claude-resume-";
+
 export function escapeFloorDenial(hit: string): string {
   return `Bash was not run — a command that asks to run outside the sandbox (dangerouslyDisableSandbox) may not touch ${hit}. ` +
-    "Winter's control-plane files (permissions.local.json, settings.json, settings.local.json, trust.json), agent definitions (.winter/agents) and its own state under its home (run, runtimes, plugins, permissions, cache, agents) are off-limits to unsandboxed commands under every approval mode. Run the command inside the sandbox, or ask the user to make this change.";
+    "Winter's control-plane files (permissions.local.json, settings.json, settings.local.json, trust.json, .winter.json, a project's .winter/mcp.json), agent definitions (.winter/agents) and its own state under its home (run, runtimes, plugins, permissions, cache, agents, and sdk/ — settings, MCP servers, agents, plugins and the transcript store outside memory/) are off-limits to unsandboxed commands under every approval mode. Run the command inside the sandbox, or ask the user to make this change.";
+}
+
+// ── 2b. The path fence (WS-21, spec §7.1 "hook" column, §7.2) ─────────────────────────────────
+//
+// One PreToolUse hook for the write- and read-class tools, on both legs and under every policy (a
+// PreToolUse answer is evaluated ahead of the permission mode — F16), in this order:
+//  1. the control-plane fence the bridge already applies at (2) — the three control-plane filenames,
+//     `mcp.json` and `settings*.json` under any `.winter/`, and every home-fenced path — as a hook too,
+//     so it binds where the bridge is never consulted (a matching allow rule, bypass);
+//  2. `sdk/projects/**` outside each project's `memory/` (`storeWriteDenial`) — deny;
+//  3. the read row (`protectedReadDenial`) — deny;
+//  4. a protected write (`protectedWriteDecision`) — ask in code, deny in chat and dispatch. The bridge
+//     (5e) independently refuses to auto-allow one, and the router pins the same set as flag-layer ask
+//     rules (claude's own sensitive-file check could otherwise swallow this hook's ask — F16).
+function pathFenceHook(deps: SessionHooksDeps): HookCallback {
+  return async (input) => {
+    const home = deps.home;
+    if (!home) return allow();
+    const pre = input as PreToolUseHookInput;
+    const toolName = typeof pre.tool_name === "string" ? pre.tool_name : "";
+    const toolInput = pre.tool_input as unknown;
+    const cwd = deps.cwd ?? deps.roots[0] ?? "";
+    const fenced = controlPlaneTargetForCall(toolName, toolInput, cwd, homeFenceFor(home));
+    if (fenced) return deny(controlPlaneDenialMessage(toolName, fenced.path, fenced.home));
+    const store = storeWriteDenial(toolName, toolInput, { home, cwd });
+    if (store !== undefined) return deny(store);
+    const read = protectedReadDenial(toolName, toolInput, { home, cwd });
+    if (read !== undefined) return deny(read);
+    let root: string | null = null;
+    try { root = deps.trustedProjectRoot?.() ?? null; } catch { root = null; }
+    const decision = protectedWriteDecision(toolName, toolInput, { mode: deps.mode ?? "code", protected: protectedPathsFor(home, root, { cwd }), cwd });
+    if (decision === null) return allow();
+    return decision.decision === "ask"
+      ? ask(`${toolName} writes a protected path (skills, commands, rules, output styles and WINTER.md load into every future session) — the user decides.`)
+      : deny(decision.reason);
+  };
 }
 
 const bashEscapeInput = (input: unknown): { command: string; escape: boolean; description?: string } => {
@@ -459,11 +856,17 @@ const bashEscapeInput = (input: unknown): { command: string; escape: boolean; de
   };
 };
 
+/** The hook input's own `cwd` (every runtime's hook input carries the session's working directory). */
+function hookCwd(input: unknown): string | undefined {
+  const cwd = (input as { cwd?: unknown } | null | undefined)?.cwd;
+  return typeof cwd === "string" && cwd.length > 0 ? cwd : undefined;
+}
+
 function escapeFloorHook(deps: SessionHooksDeps): HookCallback {
   return async (input) => {
     const { command, escape } = bashEscapeInput(input);
     if (!escape) return allow();
-    const hit = escapeFloorHit(command, deps.home);
+    const hit = escapeFloorHit(command, deps.home, hookCwd(input));
     return hit === undefined ? allow() : deny(escapeFloorDenial(hit));
   };
 }
@@ -505,7 +908,7 @@ function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
     const escape = (pre.tool_input as { dangerouslyDisableSandbox?: unknown } | null | undefined)?.dangerouslyDisableSandbox === true;
     // §2a's floor denies this one on its own, whatever the order the hooks run in; never spend (or
     // record) a review on it.
-    if (escape && escapeFloorHit(command, deps.home) !== undefined) return allow();
+    if (escape && escapeFloorHit(command, deps.home, hookCwd(input)) !== undefined) return allow();
     if (!escape && bashLooksSafe(command, deps.reviewerAllow?.() ?? [])) return allow();
     try {
       // C3 round 3: for an escape the reviewer also sees the session's cwd (what "outside the project"
@@ -892,7 +1295,12 @@ export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hook
   // C3 round 3: the escape floor runs under EVERY policy, reviewer or none — see §2a. Its position
   // does not matter: a deny outranks every other hook answer, and the reviewer skips (never reviews,
   // never clears) a command this floor denies, whichever of the two runs first.
-  preToolUse.push({ matcher: "Bash", hooks: [escapeFloorHook(deps)] });
+  // Fix round 2: in the escape floor's own group, a Bash write under any `.winter/<kind>` is asked about,
+  // sandboxed or not (see `bashProtectedWriteHit`). An `ask` — the floor's deny, when both apply, outranks it.
+  preToolUse.push({ matcher: "Bash", hooks: [escapeFloorHook(deps), bashProtectedWriteHook()] });
+  // WS-21 (spec §7.1, §7.2): the path fence — every policy, both legs. Unmatched (one callback per tool
+  // call) because the write and read tools carry two vocabularies; anything else is an immediate allow.
+  if (deps.home) preToolUse.push({ hooks: [pathFenceHook(deps)] });
   if (deps.home) {
     for (const tool of Object.keys(DIFF_TOOL_FILE_PATH_ARG)) {
       preToolUse.push({ matcher: tool, hooks: [fileDiffPreToolUseHook(deps, pending)] });

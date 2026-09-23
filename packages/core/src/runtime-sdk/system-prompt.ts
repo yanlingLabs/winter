@@ -46,6 +46,9 @@ export interface WinterSystemPromptInput {
    * list can never disagree. ABSENT reads as PRESENT, as it does at every other door.
    */
   exaKeyPresent?: boolean;
+  /** WS-21: the incarnation runs on a router-built run folder — see `ContextAssembler.assemble`'s own
+   *  `runHomeApplied` for exactly what stops being composed here. Absent/false: byte-identical. */
+  runHomeApplied?: boolean;
 }
 
 export function winterSystemPromptFor(assembler: Pick<ContextAssembler, "assemble">, input: WinterSystemPromptInput): string {
@@ -79,5 +82,6 @@ export function winterSystemPromptFor(assembler: Pick<ContextAssembler, "assembl
     ...(input.outDir === undefined ? {} : { outDir: input.outDir }),
     workdirLess: input.primary === undefined,
     extraDirs: input.primary === undefined ? [] : (input.extraDirs ?? []),
+    ...(input.runHomeApplied === true ? { runHomeApplied: true } : {}),
   });
 }

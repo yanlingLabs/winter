@@ -1,6 +1,14 @@
 import { readFileSync, readdirSync, statSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { TrustStore } from "../agent/trust";
+import { storeHomeFor } from "../agent/paths";
+
+/** WS-21: user-scope workflow scripts live in the store home's `workflows/` — `<home>/sdk/workflows`
+ *  (claude's persistent config-dir entry of the same name, spec §3.3, F18) on a run-home build,
+ *  `<home>/workflows` before it (`storeHomeFor`). */
+export function userWorkflowsDir(winterHome: string): string {
+  return join(storeHomeFor(winterHome), "workflows");
+}
 
 /** A resolved workflow's identity + where it came from. Unlike OutputStyleStore's ResolvedStyle
  *  (agent/output-styles.ts) there is no `body` here — `resolve()` is the cheap "does this name
@@ -96,7 +104,7 @@ function parseWorkflowFile(path: string, fallbackName: string): { name: string; 
 
 /**
  * Resolves a workflow script by name from two sources, closest-wins: a trusted project's
- * `<cwd>/.winter/workflows/<name>.js`, then `<winterHome>/workflows/<name>.js`. Unlike
+ * `<cwd>/.winter/workflows/<name>.js`, then `userWorkflowsDir(winterHome)/<name>.js`. Unlike
  * OutputStyleStore (agent/output-styles.ts) there are no built-ins to fall back to — an unresolved
  * name simply resolves to null. Mirrors OutputStyleStore's trust-gated project-dir discovery and
  * slug-guard exactly, adapted for the `.js` extension and the lack of built-ins. Never throws,
@@ -112,7 +120,7 @@ export class WorkflowStore {
       const p = parseWorkflowFile(join(cwd, ".winter", "workflows", `${name}.js`), name);
       if (p) return { ...p, source: "project" };
     }
-    const u = parseWorkflowFile(join(this.deps.winterHome, "workflows", `${name}.js`), name);
+    const u = parseWorkflowFile(join(userWorkflowsDir(this.deps.winterHome), `${name}.js`), name);
     if (u) return { ...u, source: "user" };
     return null;
   }
@@ -143,19 +151,19 @@ export class WorkflowStore {
         if (p) out.set(p.name, { description: p.description, source });
       }
     };
-    scan(join(this.deps.winterHome, "workflows"), "user");
+    scan(userWorkflowsDir(this.deps.winterHome), "user");
     if (cwd && this.deps.trust.isTrusted(cwd)) scan(join(cwd, ".winter", "workflows"), "project"); // project overrides user
     return [...out].map(([name, v]) => ({ name, description: v.description, source: v.source }));
   }
 
-  /** Writes a run's script to `<winterHome>/workflows/<name>.js` (creating the directory if it
+  /** Writes a run's script to `userWorkflowsDir(winterHome)/<name>.js` (creating the directory if it
    *  doesn't exist yet). Slug-guarded — same regex/rationale as resolve(); rejected BEFORE any
    *  filesystem call, since `name` here can come from a tool-call argument (the Workflow tool's
    *  `name` param) just as readily as from a human. Throws on an invalid name, rather than
    *  returning a result object — callers are expected to validate/catch, not silently no-op. */
   save(name: string, source: string): void {
     if (!SLUG_RE.test(name)) throw new Error(`invalid workflow name: "${name}"`);
-    const dir = join(this.deps.winterHome, "workflows");
+    const dir = userWorkflowsDir(this.deps.winterHome);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, `${name}.js`), source);
   }

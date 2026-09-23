@@ -127,7 +127,9 @@ describe("4d-i gate: live tiles + shortcut/tile-action round-trip (real sample-e
 
       // `plugins: true` (not `hardware: true` — this gate never touches ctx.hardware()) wires just
       // enough PluginStore machinery for (e)'s `plugins.list` status assertion below.
-      const inst: SupervisedInstance = await createSupervisedInstance({ home, socketPath, plugins: true });
+      // WS-21: plugin.list now reads through the Contract B adapter (opts.winterHome), not
+      // opts.plugins alone — wireWinterHome:true is needed for step (e)'s plugin.list call.
+      const inst: SupervisedInstance = await createSupervisedInstance({ home, socketPath, plugins: true, wireWinterHome: true });
 
       // The harness connects and hellos BEFORE startAll() spawns the child — `plugin_tile_updated`
       // (like `session_created`) is a one-shot broadcast to whoever is in `harnessConns` at the
@@ -187,11 +189,14 @@ describe("4d-i gate: live tiles + shortcut/tile-action round-trip (real sample-e
       const afterReset = await harness.waitForNotification((n) => isPluginTileUpdated(n, pluginId));
       expect(afterReset.params.tile).toEqual({ title: "echo", value: "0", actions: [{ id: "reset", label: "Reset" }] });
 
-      // --- (e) plugins.list reports the live child's real supervisor status ---
-      const listed = await harness.request(METHODS.pluginsList, {});
+      // --- (e) the live child's real supervisor status (WS-21: plugin.list's own result mirrors
+      //     Contract B's PluginListing field-for-field, no `status` enrichment any more — see
+      //     gate-4d-ii.test.ts's own header) ---
+      const listed = await harness.request(METHODS.pluginList, {});
       expect(listed.result.ok).toBe(true);
-      const entry = listed.result.plugins.find((p: any) => p.name === pluginId);
-      expect(entry?.status).toBe("running");
+      const entry = listed.result.plugins.find((p: any) => p.id === pluginId);
+      expect(entry?.enabled).toBe(true);
+      expect(inst.supervisor.status(pluginId)).toBe("running");
 
       // --- (f) kill -9 the real child -> disconnect clears the tile + contrib entry ---
       harness.notifications.length = 0;

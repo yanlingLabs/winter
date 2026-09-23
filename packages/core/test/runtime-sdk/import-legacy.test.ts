@@ -4,7 +4,7 @@
 // transcript actually RESUMES on `winter` lives in `test/e2e/import-legacy-real-child.test.ts` —
 // this file never spawns a child.
 import { describe, expect, test } from "bun:test";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { transcriptProjectKey, type SessionKey, type SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
@@ -131,7 +131,7 @@ describe("importEngineEraSession", () => {
 
         expect(result.entries).toBeGreaterThan(0);
         expect(appended).toHaveLength(1);
-        expect(appended[0]!.key).toEqual({ projectKey: transcriptProjectKey(cwd), sessionId: result.backendSessionId });
+        expect(appended[0]!.key).toEqual({ projectKey: transcriptProjectKey(realpathSync(cwd)), sessionId: result.backendSessionId }); // WS-21 (L2 O-1)
 
         const after = records.get(sid)!;
         expect(after.winterSessionId).toBe(sid); // SAME Winter session id — never a new record

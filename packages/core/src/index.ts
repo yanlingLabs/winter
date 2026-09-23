@@ -18,14 +18,29 @@ export {
   // headers `loadSettings` silently stripped from a USER-scope entry, read fresh off the raw file
   // (never off the already-stripped `Settings` value, which can no longer say what it removed).
   stripCredentialShapedMcpHeaders, readRawSettings,
+  // WS-21: the runtime-facing keys live in `sdk/` now — these are their only doors (spec §4.1).
+  MOVED_SETTINGS_KEYS, withoutMovedKeys, sdkAllowRules, sdkDenyRules, sdkAdditionalDirectories, sdkOutputStyle,
+  sdkAutoMemory, sdkEnabledPlugins, sdkUserMcpServers, sdkLocalMcpServers, validateMcpServerEntryForWrite,
   type Settings, type McpServerSettingsEntry,
 } from "./settings";
+// WS-21 (Contract C): the shared runtime home's paths and its two claude-format files.
+export {
+  sdkHomeFor, sdkSettingsPath, sdkGlobalConfigPath, sdkPluginsRoot, storeHomeFor, storeProjectsDir,
+  SDK_PERSISTENT_ENTRIES, SDK_COMPAT_LINKS,
+} from "./agent/paths";
+export {
+  readSdkSettings, readSdkSettingsDetailed, updateSdkSettings, readSdkGlobalConfig, readSdkGlobalConfigDetailed,
+  updateSdkGlobalConfig, liveSdkSettings, liveSdkGlobalConfig, SdkFileUnreadable,
+  type SdkSettingsFile, type SdkGlobalConfigFile, type SdkFileRead,
+} from "./sdk-files";
+export { linkedRouterSupportsRunHome, routerSupportsRunHome } from "./runtime-sdk/run-home-support";
 // `winter mcp add/remove` (CLI parity with `claude mcp add/remove`): the ONE validated write door
 // for either scope (`agent/mcp/mcp-write.ts`'s own header explains the reuse), plus the project
 // (`.mcp.json`) file helpers that scope needs directly — that file is never daemon state / never
 // RPC-routed, so the CLI reads and writes it itself with or without a daemon running.
 export {
   validateMcpServerName, addUserMcpServer, removeUserMcpServer, addProjectMcpServer, removeProjectMcpServer,
+  addSdkUserMcpServer, removeSdkUserMcpServer,
 } from "./agent/mcp/mcp-write";
 export {
   readProjectMcpConfig, writeProjectMcpConfig, projectMcpConfigPath, projectMcpConfigExists,
@@ -57,7 +72,7 @@ export { runRuntimesProbe, type RuntimesProbeResult } from "./runtime-sdk/runtim
 export { diagnoseRuntimes, type RuntimesReport } from "./runtime-sdk/runtimes-doctor";
 export { RUNTIME_BUNDLE_LAYOUT, bundleRuntimePath, parseVersionsJson, type VersionsJson, type RuntimeBundleEntry } from "./runtime-sdk/bundle-layout";
 export { WorkflowRuntime, type WorkflowRuntimeDeps, type WorkflowRuntimeEvent, type WorkflowLaunch } from "./workflows/runtime";
-export { WorkflowStore, type ResolvedWorkflow } from "./workflows/store";
+export { WorkflowStore, userWorkflowsDir, type ResolvedWorkflow } from "./workflows/store";
 export {
   deriveInstallName,
   resolvePluginTarget,
@@ -169,6 +184,23 @@ export {
   type MemoryDirOptions,
 } from "./agent/memory-dir";
 export { PluginStore, PluginManifest, type PluginInfo } from "./agent/plugins";
+// WS-21 lane L4 DECISION (spec §5.2): `packages/core/src/index.ts` is nominally L3-owned
+// (file-ownership table, WS-21 lane brief), but the CLI's `winter plugin`/`winter mcp` surface can
+// only reach `packages/core/src/plugins/` through this one barrel — `package.json`'s own `exports`
+// map is `{".": "./src/index.ts"}`, no subpath. This block is purely ADDITIVE (no existing line
+// touched) and mirrors the exact pattern every other "WS-21 (Contract C):" block in this file
+// already uses for the same reason. `setPluginEnabled` collides by NAME with the pre-WS-21
+// `plugins/lifecycle.ts` export two lines above (a different signature, `Settings -> Settings`) —
+// aliased here to keep both importable. Flagged in the lane report for L3/controller awareness.
+export {
+  PluginManagerError,
+  addMarketplace, installPlugin, listMarketplaces, listPlugins, removeMarketplace,
+  setPluginEnabled as setPluginEnabledScoped, uninstallPlugin, updateMarketplace, updatePlugin,
+  type PluginManagerOptions, type PluginScope as PluginManagerScope,
+  type MarketplaceInfo, type InstalledPlugin, type PluginListing,
+} from "./plugins/sdk-plugin-api";
+export { installPluginFromDirectory, directoryMarketplacePluginNames } from "./plugins/lifecycle";
+export { convertLegacyPlugins, convertLegacyPluginsForMigration, type ConvertLegacyPluginsResult } from "./plugins/convert-legacy";
 export { BackgroundTaskRegistry, type BgDeps } from "./agent/bg-registry";
 export { Compactor, SUMMARIZE_INSTRUCTION } from "./agent/compactor";
 export { bashLooksSafe, BashReviewer, REVIEW_INSTRUCTION, type ReviewVerdict } from "./agent/reviewer";
@@ -201,6 +233,19 @@ export {
 export { LegacyKeychainSecretStore, legacyKeychainServiceFor } from "./migration/legacy-keychain-store";
 export { DEAD_LEGACY_TOP_LEVEL_FILES, findDeadLegacyFiles, describeDeadLegacyFiles, type DeadLegacyFile } from "./migration/dead-legacy-files";
 export { rekeySettings, type RekeyChange, type RekeyResult } from "./migration/rekey-settings";
+// WS-21 (spec §8): Migration C and the settings split — the CLI's `winter migrate --sdk-home` and
+// `winter doctor` read these; the daemon's boot hook is the other caller.
+export {
+  MIGRATION_C_PHASE1, MIGRATION_C_PHASE2, MigrationCRefused, finishMigrationC, isOldLayout,
+  migrationCCompletePath, migrationCManifestPath, migrationCRolledBackPath, migrationCState,
+  planMigrationC, rollbackMigrationC, runMigrationC,
+  type MigrationCManifest, type MigrationCState, type MigrationCStep,
+} from "./migration/migrate-c";
+export { splitSettingsToSdk, settingsSplitMarkerPath, SPLIT_KEYS, type SettingsSplitReport } from "./migration/settings-split";
+export { sdkHomeDoctorLines } from "./migration/sdk-home-doctor";
+export { downgradeRuntimeStateToV6, openRuntimeStateDb } from "./runtime-state/db";
+// Review I5: THE local MCP/settings scope key — the CLI's `winter mcp` uses it too (lane L4).
+export { localScopeKeyFor } from "./runtime-sdk/run-home-input";
 export {
   ProjectMigrationRefused,
   planProjectMigration,

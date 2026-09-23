@@ -35,6 +35,7 @@
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentDefinition } from "@yanlinglabs/winter-agent-sdk";
+import { storeHomeFor } from "./paths";
 
 /** One rejected `<home>/agents/*.md` file — never silently skipped (measured against the SDK's own
  *  posture: a missing `name`/`description` is a rejection with a reason, not a silent drop). */
@@ -243,10 +244,18 @@ function scanAgentDefinitionsDir(dir: string): LoadedAgentDefinitions {
   return { definitions, sources, rejected };
 }
 
-/** The USER tier: `<home>/agents/*.md`, always readable (home is fully trusted by construction —
+/** WS-21: the user agents directory — `<home>/sdk/agents` on a run-home build, `<home>/agents` before
+ *  it (`storeHomeFor`). */
+export function userAgentsDir(home: string): string {
+  return join(storeHomeFor(home), "agents");
+}
+
+/** The USER tier: `userAgentsDir(home)/*.md` (WS-21), always readable (home is fully trusted by construction —
  *  no trust gate here, mirroring `SkillStore`'s own user-tier treatment). */
 export function loadUserAgentDefinitions(home: string): LoadedAgentDefinitions {
-  return scanAgentDefinitionsDir(join(home, "agents"));
+  // WS-21: user agents live in the store home (`storeHomeFor`) — the same directory this build's
+  // Winter child scans itself.
+  return scanAgentDefinitionsDir(userAgentsDir(home));
 }
 
 /**

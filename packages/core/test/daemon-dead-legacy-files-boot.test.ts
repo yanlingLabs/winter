@@ -35,7 +35,7 @@ describe("daemon boot — dead legacy files", () => {
       expect(lines).toHaveLength(1);
       expect(lines[0]).toContain("mcp.json, tools.json");
       expect(lines[0]).toContain("mcp.json declares 1 MCP server");
-      expect(lines[0]).toContain("settings.json → mcpServers");
+      expect(lines[0]).toContain("winter mcp add");
       expect(readFileSync(join(home, "mcp.json"), "utf8")).toBe(mcp);
       expect(readFileSync(join(home, "tools.json"), "utf8")).toBe("[]");
     });
