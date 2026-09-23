@@ -147,17 +147,32 @@ function hasFiles(dir: string, budget = { left: 20_000 }): boolean {
   return false;
 }
 
+/** Post-merge fix round, minor 1 (promoted): `<home>/plugins` holding at least one legacy plugin
+ *  dir (one with a `winter-plugin.json`) also counts as old layout — `SDK_COMPAT_LINKS` never
+ *  included it (step 6's own conversion is a COPY, never a move+symlink, so `plugins` was never one
+ *  of the directories Migration C relocates), but a home whose ONLY legacy content is plugins must
+ *  still migrate rather than sit forever unconverted (`isOldLayout` returning `false` skips the
+ *  whole boot-time Migration C check, so `convertLegacyPlugins` never even runs). */
+function hasLegacyPluginManifest(home: string): boolean {
+  let entries;
+  try { entries = readdirSync(join(home, "plugins"), { withFileTypes: true }); } catch { return false; }
+  return entries.some((e) => e.isDirectory() && existsSync(join(home, "plugins", e.name, "winter-plugin.json")));
+}
+
 /**
  * Spec §8's OLD LAYOUT (r3, widened by review M7): any directory Migration C moves (`SDK_COMPAT_LINKS`:
  * projects, backups, skills, agents, workflows, output-styles) is a real directory (not a compatibility
  * link) WITH CONTENT (a file somewhere below it), or the home holds an instructions file (`WINTER.md`, or
- * the legacy one) that `sdk/` does not — and Migration C is not done. A run-home build reads none of those
- * from the old place, so a home holding only one of them would otherwise have it silently unread. Moved
- * keys in `settings.json` never count. A fresh home — bootstrap creates none of them — never matches.
+ * the legacy one) that `sdk/` does not, or `<home>/plugins` holds at least one legacy plugin (post-merge
+ * fix round, minor 1 — see `hasLegacyPluginManifest`'s own doc) — and Migration C is not done. A
+ * run-home build reads none of those from the old place, so a home holding only one of them would
+ * otherwise have it silently unread. Moved keys in `settings.json` never count. A fresh home —
+ * bootstrap creates none of them — never matches.
  */
 export function isOldLayout(home: string): boolean {
   if (existsSync(migrationCCompletePath(home))) return false;
   if (SDK_COMPAT_LINKS.some(([name]) => hasFiles(join(home, name)))) return true;
+  if (hasLegacyPluginManifest(home)) return true;
   if (existsSync(join(sdkHomeFor(home), "WINTER.md"))) return false;
   return [join(home, "WINTER.md"), join(home, LEGACY_INSTRUCTIONS_FILE)].some((p) => {
     try { return lstatSync(p).isFile(); } catch { return false; }
