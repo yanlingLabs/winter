@@ -840,63 +840,11 @@ export const AgentsListResult = z.object({
   }).nullable(),
 });
 
-/** The `SupervisorStatus` union (core/plugins/supervisor.ts) plus `"na"` for Tier-1/legacy plugins
- *  that never run a process — shared by `PluginInfoSchema.status` (below) and, from Phase 4d-ii
- *  Task 2, `plugin.enable`'s result, which reports the SAME status right after its hot-apply
- *  start (factored out here so the two can't drift apart). */
-export const PluginRuntimeStatusSchema = z.enum(["starting", "running", "backoff", "circuit-open", "stopped", "na"]);
-
-export const PluginInfoSchema = z.object({
-  name: z.string(),
-  description: z.string().optional(),
-  version: z.string().optional(),
-  skills: z.array(z.string()),
-  hasMcp: z.boolean(),
-  mcpEnabled: z.boolean(),
-  disabled: z.boolean(),
-  // Phase 4a Task 3 additions — carried so the CLI's consent flow (winter plugin enable/list) can
-  // render tier + consent state + the full exec-payload disclosure without a second round trip.
-  // All optional so older-shaped fixtures/servers still parse (see methods.test.ts).
-  tier: z.enum(["capability", "platform"]).optional(),
-  requiredConsents: z.array(z.string()).optional(),
-  consented: z.array(z.string()).optional(),
-  legacy: z.boolean().optional(),
-  /** Verbatim exec-payload disclosure lines (plugin-manifest.ts#execPayloadLines) — spec §1:
-   *  "Consent text always shows the exec payload ... never just a summary." */
-  execPayload: z.array(z.string()).optional(),
-  /** manifest.permissions.tcc verbatim, for the "will request macOS permission: <each>" lines. */
-  tccPermissions: z.array(z.string()).optional(),
-  /** manifest.permissions.hardware verbatim, for the "hardware access via Winter.app helper: <each>" lines. */
-  hardwarePermissions: z.array(z.string()).optional(),
-  /** Phase 4d-i Task 4: live PluginSupervisor runtime status for Tier-2 (`platform`,
-   *  pluginSpawnEligible) plugins — the SAME `SupervisorStatus` the supervisor tracks
-   *  (supervisor.ts), surfaced here so a dashboard can tell running/crashed/circuit-open apart
-   *  from static manifest/consent data. `"na"` for Tier-1 (`capability`) plugins and legacy
-   *  plugins, which never run a process and so have no supervisor status to report. Optional so
-   *  older-shaped fixtures/servers still parse, same precedent as the Phase 4a Task 3 fields above. */
-  status: PluginRuntimeStatusSchema.optional(),
-  /** Daemon settings surface (2026-09-17 plan, item 1): `winter-plugin.json`'s
-   *  `contributes.hooks` VERBATIM — mirrors `plugin-manifest.ts`'s `WinterPluginManifest.contributes.hooks`
-   *  shape exactly (agent/plugins.ts's `PluginInfo.manifestHooks`, itself filled from the SAME single
-   *  `loadManifest` call `PluginStore.list()` already makes). One entry per declared hook, in manifest
-   *  order — never regrouped by event, so a manifest with two `pre-tool` hooks round-trips as two
-   *  entries, not one. `undefined` (the key absent from the wire object, never an empty array) for a
-   *  legacy plugin or a manifest plugin that declares no hooks at all — `PluginInfo.manifestHooks` is
-   *  `undefined` in both those cases, and JSON drops an `undefined`-valued key entirely, so the two
-   *  are indistinguishable on the wire, exactly as they are in `PluginInfo` itself. Before this field
-   *  existed, `plugins.list`'s handler (ipc/server.ts) already carried `manifestHooks` on the raw
-   *  object it returned — genuinely on the wire — but `WinterClient.validated()` (packages/cli/src/
-   *  client.ts) runs every result through this schema's `.safeParse()`, and zod strips a key absent
-   *  from the schema by default: every CLI caller was silently losing it. This field is additive
-   *  (`.optional()`), so an older daemon's response (no `manifestHooks` key at all) still parses. */
-  manifestHooks: z.array(z.object({
-    event: z.enum(["session-start", "pre-tool", "post-tool", "turn-end"]),
-    command: z.string().min(1),
-    timeoutMs: z.number().int().positive().optional(),
-  })).optional(),
-});
-export const PluginsListParams = z.object({});
-export const PluginsListResult = z.object({ ok: z.literal(true), plugins: z.array(PluginInfoSchema) });
+// Post-merge round (L3 request #5): PluginRuntimeStatusSchema/PluginInfoSchema/PluginsListParams/
+// PluginsListResult (the pre-WS-21 `plugins.list` schema family) retired here — no daemon-side
+// handler has parsed against them since this lane's Contract B rewrite (`plugin.list` /
+// PluginListingSchema is their replacement). See this file's own `PluginListingSchema` and
+// `PluginListingExtrasSchema` for the current shape.
 
 export const AskUserRespondParams = z.object({
   sessionId: z.string().min(1), callId: z.string().min(1), answers: z.record(z.string(), z.string()),
@@ -1363,52 +1311,13 @@ export const TileActionResult = PluginPushResult;
 // before dispatch for every one of them.
 // ---------------------------------------------------------------------------------------------
 
-/** Copies a local directory (`source`) into the daemon's plugins root — the RPC analog of the
- *  CLI's `installPlugin` (git clone) for a caller that already has the plugin's contents on disk
- *  (e.g. a dashboard-driven local install, or a git checkout the app did itself). `name` defaults
- *  to `source`'s basename (`deriveInstallName`) when omitted. Installs DISABLED + UNCONSENTED —
- *  NEVER touches settings.json (installPluginFromDir's own contract) — so the caller always gets
- *  `requiredConsents`/`consentBlock` back to drive a consent sheet before the plugin can do
- *  anything, exactly like `plugin.enable`'s `needs_consent` branch below. */
-export const PluginsInstallParams = z.object({ source: z.string().min(1), name: z.string().min(1).optional() });
-export const PluginsInstallResult = z.union([
-  z.object({
-    ok: z.literal(true), name: z.string(),
-    requiredConsents: z.array(z.string()), hasMcp: z.boolean(), consentBlock: z.array(z.string()),
-  }),
-  z.object({ code: z.literal("invalid_source") }),
-  z.object({ code: z.literal("already_installed"), name: z.string() }),
-]);
-
-/** Two-step consent flow, both over this ONE verb: called with no `consent` (or `consent:false`),
- *  a plugin with outstanding required-but-ungranted consent classes returns `needs_consent` +
- *  the full disclosure block (spec §1: "Consent text always shows the exec payload ... never
- *  just a summary.") WITHOUT mutating settings at all — the caller shows that block to the user,
- *  then re-calls with `consent:true` once they agree, which grants every required class fresh
- *  (`applyFreshPluginConsent`) and enables. `status` on success is the SAME `SupervisorStatus`
- *  union `PluginInfoSchema.status` reports (`"na"` for a non-Tier-2 plugin; `"stopped"` for a
- *  Tier-2 plugin when this daemon has no supervisor wired at all — settings are still recorded,
- *  there's just nothing to hot-spawn onto). */
-export const PluginEnableParams = z.object({ name: z.string().min(1), consent: z.boolean().optional() });
-export const PluginEnableResult = z.union([
-  // `notice` (lane B, 2026-09-23): the disclosure for a plugin that needs no consent but ships skills
-  // ("a skill can run shell commands when a session uses it"); absent when there is nothing to say.
-  z.object({ ok: z.literal(true), status: PluginRuntimeStatusSchema, notice: z.array(z.string()).optional() }),
-  z.object({ code: z.literal("needs_consent"), requiredConsents: z.array(z.string()), consentBlock: z.array(z.string()) }),
-  z.object({ code: z.literal("unknown_plugin") }),
-]);
-
-export const PluginDisableParams = z.object({ name: z.string().min(1) });
-export const PluginDisableResult = z.union([
-  z.object({ ok: z.literal(true) }),
-  z.object({ code: z.literal("unknown_plugin") }),
-]);
-
-export const PluginRemoveParams = z.object({ name: z.string().min(1) });
-export const PluginRemoveResult = z.union([
-  z.object({ ok: z.literal(true) }),
-  z.object({ code: z.literal("unknown_plugin") }),
-]);
+// Post-merge round (L3 request #5): PluginsInstallParams/Result, PluginEnableParams/Result,
+// PluginDisableParams/Result and PluginRemoveParams/Result (the pre-WS-21 install/two-step-consent/
+// disable/remove RPCs this section's own header describes) are retired — no daemon-side handler has
+// parsed against them since this lane's Contract B rewrite. `plugin.install`/`plugin.uninstall`
+// (PluginInstallParams/PluginUninstallParams below) are their replacements; `plugin.enable`/
+// `plugin.disable` keep their wire method NAMES (METHODS.pluginEnable/pluginDisable) but now parse
+// PluginEnableScopedParams/PluginDisableScopedParams (below), not these.
 
 /** Records consent separately from enabling, for a UI that wants to disclose/collect consent as
  *  its own step rather than folding it into `plugin.enable {consent:true}` (the common path).
@@ -2768,7 +2677,6 @@ export const METHODS = {
   mcpAdd: "mcp.add",
   mcpRemove: "mcp.remove",
   mcpGet: "mcp.get",
-  pluginsList: "plugins.list",
   askUserRespond: "ask_user.respond",
   taskList: "task.list",
   planRespond: "plan.respond",
@@ -2804,10 +2712,8 @@ export const METHODS = {
   hardwareRespond: "hardware.respond",
   shortcutInvoke: "shortcut.invoke",
   tileAction: "tile.action",
-  pluginsInstall: "plugins.install",
   pluginEnable: "plugin.enable",
   pluginDisable: "plugin.disable",
-  pluginRemove: "plugin.remove",
   pluginSetConsent: "plugin.setConsent",
   // WS-21 (spec §5.2, Contract B): `winter plugin` = `claude plugin`. `plugin.enable`/`plugin.disable`
   // keep their keys above; their WS-21 params are `PluginEnableScopedParams`/`PluginDisableScopedParams`.
