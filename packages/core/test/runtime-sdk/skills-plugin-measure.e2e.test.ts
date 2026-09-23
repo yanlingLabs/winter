@@ -75,8 +75,8 @@ describeWithWinterBinary("B1 measurement — the daemon's plugin skills inside a
       });
       expect(options.settingSources).toEqual([]);
       expect(surface.plugins[0]!.path.startsWith(join(home, "cache", "skill-plugins") + "/")).toBe(true);
-      expect(options.sandbox?.filesystem?.denyWrite).toContain(join(home, "cache", "skill-plugins"));
-      expect(options.permissions?.deny?.some((r) => r.startsWith("Write(") && r.includes(join(home, "cache", "skill-plugins")))).toBe(true);
+      expect(options.sandbox?.filesystem?.denyWrite).toContain(join(home, "cache"));
+      expect(options.permissions?.deny?.some((r) => r.startsWith("Write(") && r.includes(`${join(home, "cache")}/**`))).toBe(true);
       const q = query({ prompt: queue, options });
       queue.push("list your skills");
       try {

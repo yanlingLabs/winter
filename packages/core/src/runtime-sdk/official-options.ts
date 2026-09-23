@@ -776,7 +776,8 @@ export function officialInputFor(
             deny: [...permissionDenyRulesFor(deps.home, deps.settings), ...(deps.skillDenyAliases ?? [])],
             ...(deps.policy === "bypass" ? {} : { disableBypassPermissionsMode: "disable" as const }),
           },
-          sandbox: sandboxConfigFor(deps.home),
+          // `input.cwd`: the session's project agent definitions (`<cwd>/.winter/agents`) are fenced too.
+          sandbox: sandboxConfigFor(deps.home, input.cwd),
         },
         // 0.0.17 / the 2026-09-18 ruling: `leg: "official"` is what keeps claude's OWN `WebFetch` and
         // `WebSearch` on this leg. The daemon used to disallow both in every mode (P8b-33) because

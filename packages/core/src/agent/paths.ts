@@ -13,7 +13,17 @@ import { isAbsolute, resolve, sep, dirname, basename, join } from "node:path";
  * skips `cache/**` (`migration/migrate-b.ts`).
  */
 export function skillPluginViewsRoot(winterHome: string): string {
-  return join(winterHome, "cache", "skill-plugins");
+  return join(homeCacheDir(winterHome), "skill-plugins");
+}
+
+/**
+ * `<home>/cache` — today used ONLY by the skill views above, and write-fenced WHOLE on both legs
+ * (re-review M-a: fencing just the views left the directories above them swappable for links).
+ * Because a user may deliberately make it a link (a cache on another volume), the daemon never
+ * unlinks it — a spawn that finds it a link gets no plugin skills (`agent/skills.ts`).
+ */
+export function homeCacheDir(winterHome: string): string {
+  return join(winterHome, "cache");
 }
 
 /**
@@ -23,6 +33,15 @@ export function skillPluginViewsRoot(winterHome: string): string {
  */
 export function approvedProjectRulesDir(winterHome: string): string {
   return join(winterHome, "permissions");
+}
+
+/**
+ * The trust record (`TrustStore`) — `<home>/trust.json`. A leaf helper for the same reason: the
+ * daemon builds the store on it and `runtime-sdk/mode-options.ts` write-fences it (writing it trusts
+ * any project).
+ */
+export function trustRecordFile(winterHome: string): string {
+  return join(winterHome, "trust.json");
 }
 
 // Symlink chains longer than this are rejected outright (mirrors the kernel's own ELOOP guard,

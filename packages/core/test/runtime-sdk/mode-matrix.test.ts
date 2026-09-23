@@ -292,6 +292,9 @@ test("the control-plane deny rules cover the four write tools × the control-pla
     expect(deny).toContain(`${tool}(//**/.winter/settings.local.json)`);
     expect(deny).toContain(`${tool}(//h/permissions.local.json)`);
     expect(deny).toContain(`${tool}(//h/run/**)`);
+    // Whole-branch review: the trust record — writing it trusts any project, and a trusted project's
+    // in-repo allow rules then reach the child.
+    expect(deny).toContain(`${tool}(//h/trust.json)`);
     // HIGH (fix wave, pre-merge review, finding 2c): an agent definition file is a permission-
     // bearing surface (`permissionMode`) — same "project-INDEPENDENT, any depth" fence as the three
     // control-plane filenames above, just for a directory of them.
@@ -299,7 +302,9 @@ test("the control-plane deny rules cover the four write tools × the control-pla
     expect(deny).toContain(`${tool}(//**/.winter/agents/**)`);
     // B1 follow-up: the skills-only plugin views — a planted manifest there becomes the next child's
     // plugin hooks. Write-fenced; deliberately NOT read-fenced (a skill reads its own files).
-    expect(deny).toContain(`${tool}(//h/cache/skill-plugins/**)`);
+    // Re-review M-a: ALL of `<home>/cache` (only the views use it), so the directories above the views
+    // cannot be swapped for links by a write tool either.
+    expect(deny).toContain(`${tool}(//h/cache/**)`);
     // Review M6 (2026-09-23): the runtime store was read-denied but NOT write-denied to the write
     // TOOLS — with a saved `Edit` (→ `Edit` + `Write` in the child) a Write could drop a file into
     // `<home>/runtimes/bin/winter`, rung 4 of the executable ladder. And an installed plugin must not
@@ -323,7 +328,7 @@ test("the control-plane deny rules cover the four write tools × the control-pla
   for (const tool of ["Edit", "Write", "MultiEdit", "NotebookEdit", "Read", "Glob", "Grep"]) {
     expect(deny).toContain(`${tool}(${claudeResumeTarget})`);
   }
-  expect(deny).toHaveLength(4 * 14 + 3 * 3);
+  expect(deny).toHaveLength(4 * 15 + 3 * 3);
 });
 
 // Daemon settings surface batch 3 (item 2): `settings.permissions.deny` (Skill(<name>) toggles,
@@ -337,14 +342,14 @@ test("item 2: settings.permissions.deny is appended after the fixed control-plan
   const deny = buildWinterOptions(optionsInput({ home: "/h", settings })).permissions!.deny!;
   expect(deny.slice(-2)).toEqual(["Skill(writing-skills)", "Agent(fork)"]);
   // The fixed fence is untouched (same count this file's other test pins).
-  expect(deny).toHaveLength(4 * 14 + 3 * 3 + 2);
+  expect(deny).toHaveLength(4 * 15 + 3 * 3 + 2);
 });
 
 test("item 2: an absent settings.permissions.deny changes nothing — byte-identical to before item 2", () => {
   const withNull = buildWinterOptions(optionsInput({ home: "/h", settings: null })).permissions!.deny!;
   const withUndefined = buildWinterOptions(optionsInput({ home: "/h" })).permissions!.deny!;
-  expect(withNull).toHaveLength(4 * 14 + 3 * 3);
-  expect(withUndefined).toHaveLength(4 * 14 + 3 * 3);
+  expect(withNull).toHaveLength(4 * 15 + 3 * 3);
+  expect(withUndefined).toHaveLength(4 * 15 + 3 * 3);
 });
 
 // Winter Phase 10b (D1-3, W18-9): a read of a `claude-resume-*` staging root is denied — proved
@@ -410,10 +415,11 @@ test("every deny rule is //-anchored, and resolves to the fence target it names"
   expect(specs.has(`/${join(tmpdir(), "claude-resume-*", "**")}`)).toBe(true); // P8d-12's staging root
   expect(specs.has(`/${join(home, "agents")}/**`)).toBe(true);     // finding 2c: the user's own agent definitions
   expect(specs.has(`//**/.winter/agents/**`)).toBe(true);          // finding 2c: any project's, any depth
-  expect(specs.has(`/${join(home, "cache", "skill-plugins")}/**`)).toBe(true); // B1: the skills-only plugin views
+  expect(specs.has(`/${join(home, "cache")}/**`)).toBe(true);      // B1 + M-a: the cache holding the skills-only plugin views
   expect(specs.has(`/${join(home, "plugins")}/**`)).toBe(true);    // M6: installed plugins
   expect(specs.has(`/${join(home, "permissions")}/**`)).toBe(true); // I2: the approved-project-rules record
-  expect(specs.size).toBe(14);                                       // (runtimes/** was already a READ target)
+  expect(specs.has(`/${join(home, "trust.json")}`)).toBe(true);     // whole-branch review: the trust record
+  expect(specs.size).toBe(15);                                       // (runtimes/** was already a READ target)
   // The two inert forms must never reappear.
   for (const s of specs) {
     expect({ s, singleSlashAbsolute: /^\/[^/]/.test(s) }).toEqual({ s, singleSlashAbsolute: false });
@@ -442,8 +448,17 @@ test("the Bash sandbox names real DIRECTORIES, because its consumer renders seat
   // in official-leg.e2e.test.ts), and a per-tool `Write(path)` deny rule does not constrain a Bash
   // redirect — so `<home>/runtimes/bin/winter`, rung 4 of `resolveWinterExecutable`'s ladder, was
   // writable there. If either list loses it, that is the regression this line exists to catch.
-  // B1 follow-up: + the skills-only plugin views (write only — see `controlPlaneDenyRules`).
-  expect(sb.filesystem!.denyWrite).toEqual(["/h/run", "/h/runtimes", "/h/cache/skill-plugins", "/h/plugins", "/h/permissions"]);
+  // B1 follow-up: + the skills-only plugin views (write only — see `controlPlaneDenyRules`); since
+  // re-review M-a the whole `<home>/cache` that holds them.
+  // Whole-branch review: EVERY self-grant path, because lane C's escape floor (an unsandboxed command)
+  // derives from this list — the trust record, the user's agent definitions, the user's three global
+  // control-plane files (the SDK's own profile covers those only under a home NAMED `.winter`), and
+  // the session's project agent definitions (`<cwd>/.winter/agents`, the loader's one path —
+  // `loadProjectAgentDefinitions`), which sandboxed Bash could otherwise write on the Winter leg.
+  expect(sb.filesystem!.denyWrite).toEqual([
+    "/h/run", "/h/runtimes", "/h/cache", "/h/plugins", "/h/permissions", "/h/trust.json", "/h/agents",
+    "/h/permissions.local.json", "/h/settings.json", "/h/settings.local.json", "/repo/.winter/agents",
+  ]);
   // CLAUDE.md: "the sole read denial is ~/.winter/run" — reads are otherwise unrestricted.
   expect(sb.filesystem!.denyRead).toEqual(["/h/run", "/h/runtimes"]);   // Task 17: runtimes/ is model-denied (8a)
   for (const p of [...sb.filesystem!.denyWrite!, ...sb.filesystem!.denyRead!]) {

@@ -6,7 +6,7 @@ import type {
 } from "@yanlinglabs/winter-agent-sdk";
 import { RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
-import { approvedProjectRulesDir, skillPluginViewsRoot } from "../agent/paths";
+import { approvedProjectRulesDir, homeCacheDir, trustRecordFile } from "../agent/paths";
 import { parseRule } from "../agent/permission-rules";
 import { keychainService } from "../profile";
 import type { SessionApprovalPolicy } from "../agent/gate";
@@ -531,7 +531,9 @@ export function controlPlaneDenyRules(home: string): string[] {
     // so a file written here is a self-grant of the same class as the definitions above. Write-fenced
     // only: the views are deliberately READABLE, because a skill points the model at its own files.
     // The daemon also rebuilds each view before every spawn; this closes the window in between.
-    fsRootAnchored([skillPluginViewsRoot(home), "**"].join("/")),
+    // Re-review M-a: the WHOLE `<home>/cache` (only the views use it), so a write tool cannot swap the
+    // directories above the views for links either.
+    fsRootAnchored([homeCacheDir(home), "**"].join("/")),
     // Review M6 (2026-09-23): the runtime store, write-denied to the write TOOLS too. It was read-denied
     // (below) and in the Bash sandbox's `denyWrite`, but `Write(<home>/runtimes/bin/winter)` — rung 4
     // of `resolveWinterExecutable`'s ladder, code the NEXT spawn runs — had no rule against it, and a
@@ -543,6 +545,9 @@ export function controlPlaneDenyRules(home: string): string[] {
     // Review I2: the daemon's own record of rules approved "in this project" — applied to a child
     // WITHOUT a trust check (it cannot come from a repository), so writing it would be a self-grant.
     fsRootAnchored([approvedProjectRulesDir(home), "**"].join("/")),
+    // Whole-branch review: the trust record (`TrustStore`, daemon.ts). Writing it trusts any project,
+    // and a trusted project's in-repo allow rules and overlay then reach the child.
+    fsRootAnchored(trustRecordFile(home)),
   ];
   // Task 17: the engine's read tool denied `<home>/run` and `<home>/runtimes` (the runtime store,
   // 8a's model-denied directory); the Winter leg's read-class tools carry the same two denials.
@@ -623,6 +628,10 @@ export const GLOBAL_READ_ALLOW_RULES: readonly string[] = ["Read", "Glob", "Grep
  *   `BashUnsandboxed(…)`               → `Bash(…)`. claude has no separate rule: `dangerouslyDisableSandbox`
  *                                       only removes the sandbox's auto-allow, and rules then decide
  *                                       (lane C's parity ruling — see `sandboxConfigFor`'s last note).
+ *                                       TRUE ON THE OFFICIAL LEG TODAY; on the Winter leg only once agent
+ *                                       SDK 0.0.18 is pinned — the pinned 0.0.17 makes an escape a
+ *                                       MANDATORY interaction (`permissions/evaluator.ts`, "RULING P3-J"),
+ *                                       so there a saved rule does not yet decide one.
  *   `Edit`                             → `Edit` + `Write` (Winter's rule covered both; the agent SDK
  *                                       matches a bare rule's tool name literally).
  *   `Edit(<abs dir>)`                  NOT forwarded: Winter's writable-DIRECTORY declaration, which never
@@ -729,7 +738,7 @@ export function persistedAllowRulesFor(cwd: string, deps: {
   return [...new Set([...settingsAllow, ...approved, ...projectAllow])];
 }
 
-export function sandboxConfigFor(home: string): SandboxSettingsConfig {
+export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSettingsConfig {
   return {
     enabled: true,
     filesystem: {
@@ -762,10 +771,26 @@ export function sandboxConfigFor(home: string): SandboxSettingsConfig {
       // never its Bash sandbox's.
       // …and the skills-only plugin views (B1 follow-up): a Bash redirect planting a manifest with
       // command hooks there would be run by the next child — see `controlPlaneDenyRules`' matching
-      // entry. Write only; the views stay readable (a skill reads its own supporting files).
+      // entry. Write only; the views stay readable (a skill reads its own supporting files). The whole
+      // `<home>/cache` since re-review M-a — the directories above the views included.
       // …and every installed plugin (review M6) — same reason as the write-tool rule.
       // …and the daemon's approved-project-rules record (review I2) — a self-grant if writable.
-      denyWrite: [join(home, "run"), join(home, "runtimes"), skillPluginViewsRoot(home), join(home, "plugins"), approvedProjectRulesDir(home)],
+      //
+      // EVERY SELF-GRANT PATH belongs on this list (whole-branch review): lane C's escape floor — what
+      // an unsandboxed command may not touch — is derived from it. So also: the trust record, the
+      // user's agent definitions, and the user's three global control-plane files (a FILE is a valid
+      // entry: a subpath of a file path is that file; Winter's profile covers these three only under
+      // a home NAMED `.winter`, and claude's not at all). And, when the session's cwd is known, the
+      // project agent definitions the daemon loads for it (`loadProjectAgentDefinitions(cwd)` reads
+      // exactly `<cwd>/.winter/agents`): sandboxed Bash on the Winter leg could write that directory,
+      // which the write TOOLS were already denied (`**/.winter/agents/**`). An any-depth form is not
+      // expressible here (subpaths only), and only this one path is ever loaded.
+      denyWrite: [
+        join(home, "run"), join(home, "runtimes"), homeCacheDir(home), join(home, "plugins"), approvedProjectRulesDir(home),
+        trustRecordFile(home), join(home, "agents"),
+        ...[...CONTROL_PLANE_FILENAMES].sort().map((f) => join(home, f)),
+        ...(cwd ? [join(cwd, ".winter", "agents")] : []),
+      ],
       // The sole read denial Winter has ever had (CLAUDE.md: "the sole read denial is
       // `~/.winter/run`") — reads are otherwise deliberately unrestricted.
       // …plus `runtimes/` (8a: the runtime store is never model-readable — the engine's read tool
@@ -780,6 +805,10 @@ export function sandboxConfigFor(home: string): SandboxSettingsConfig {
     // P8b-31's always-card): the flag only removes the SANDBOX'S auto-allow, so the call goes through
     // the ordinary pipeline — deny/ask rules, the permission mode, allow rules (the persisted ones
     // included, `persistedAllowRulesFor`), then the approval bridge — exactly like any other command.
+    // That is what the OFFICIAL leg does today (it is claude). The Winter leg follows only once agent
+    // SDK 0.0.18 is pinned: the pinned 0.0.17 still treats an escape as a MANDATORY interaction
+    // (`permissions/evaluator.ts`, "RULING P3-J" — a card in code, a deny under `dont-ask`), so a saved
+    // rule does not decide one there yet.
   };
 }
 
@@ -904,11 +933,19 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
       // …then the user's SAVED rules (`persistedAllowRulesFor` → `sdkAllowRulesFor`), code mode only:
       // they are answers to code-mode cards, chat's policy is fixed and dispatch never cards. Deny
       // still comes first in the runtime, so none of them can open the fence stated just below.
+      //
+      // Two consequences, DOCUMENTED rather than changed (whole-branch review minors a/b — the official
+      // leg IS claude, and claude parity is the ruling):
+      //  - under `plan`, the two legs differ: claude applies saved allow rules in plan mode (its own
+      //    behaviour, and the official leg sends it the same list), while the Winter SDK still holds
+      //    writes back in plan whatever the allow list says;
+      //  - a DISPATCH session's children run in CODE mode, so they receive the saved rules too — the
+      //    same as claude's headless mode applying its settings files' `permissions.allow`.
       ...(input.mode === "code" ? { allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES, ...sdkAllowRulesFor(input.persistedAllow ?? [])])] } : {}),
       deny: permissionDenyRulesFor(input.home, input.settings),
       disableBypassPermissionsMode: !bypassAllowedAtSpawn(input.policy),
     },
-    sandbox: sandboxConfigFor(input.home),
+    sandbox: sandboxConfigFor(input.home, input.cwd),
     // Agent SDK 0.0.16 defaults a spawn to BACKGROUND (claude's own default), which means a finished
     // child re-enters the model on a turn NOBODY PUSHED — a second `system/init`, an assistant
     // stream and its own `result`, with no `user` frame. The projector opens a turn only from

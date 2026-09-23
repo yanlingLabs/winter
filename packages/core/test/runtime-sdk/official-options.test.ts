@@ -481,11 +481,14 @@ describe("officialInputFor — the control-plane fence (C1)", () => {
     expect(official).not.toContain("WebSearch");
   });
 
-  test("settings.sandbox is EXACTLY sandboxConfigFor(home) — same real directory paths, no globs", () => {
+  test("settings.sandbox is EXACTLY sandboxConfigFor(home, cwd) — same real paths, no globs", () => {
     const home = "/Users/x/.winter-test-home";
     const options = optionsFor("code", home);
-    const settings = options.settings as { sandbox?: unknown } | undefined;
-    expect(settings?.sandbox).toEqual(sandboxConfigFor(home));
+    const settings = options.settings as { sandbox?: { filesystem?: { denyWrite?: string[] } } } | undefined;
+    expect(settings?.sandbox).toEqual(sandboxConfigFor(home, "/Users/x/repo"));
+    // Whole-branch review: the trust record and the session's project agent definitions are on it.
+    expect(settings?.sandbox?.filesystem?.denyWrite).toContain(`${home}/trust.json`);
+    expect(settings?.sandbox?.filesystem?.denyWrite).toContain("/Users/x/repo/.winter/agents");
   });
 
   test("additionalDisallowedTools is EXACTLY disallowedToolsFor(mode, {leg:\"official\"}) — claude's own web pair stays", () => {

@@ -183,11 +183,41 @@ describe("SkillStore.childSkillSurface — the plugin skills a Winter child can 
     for (const root of [...readDenyRoots, ...(options.sandbox?.filesystem?.denyRead ?? [])]) {
       expect({ root, covers: skillFile === root || skillFile.startsWith(root + "/") }).toEqual({ root, covers: false });
     }
-    // WRITE: every write tool and the Bash sandbox are fenced off the views' subtree.
+    // WRITE: every write tool and the Bash sandbox are fenced off the whole `<home>/cache` (re-review
+    // M-a) — the views AND the directories above them, which a write could otherwise swap for a link.
     for (const tool of ["Edit", "Write", "MultiEdit", "NotebookEdit"]) {
-      expect(options.permissions?.deny).toContain(`${tool}(/${skillPluginViewsRoot(home)}/**)`);
+      expect(options.permissions?.deny).toContain(`${tool}(/${join(home, "cache")}/**)`);
     }
-    expect(options.sandbox?.filesystem?.denyWrite).toContain(skillPluginViewsRoot(home));
+    expect(options.sandbox?.filesystem?.denyWrite).toContain(join(home, "cache"));
+  });
+
+  // Re-review M-a: `<home>/cache` ITSELF may be a link the user made on purpose (a cache on another
+  // volume). The daemon never unlinks it: that spawn simply gets no plugin skills, with one log line,
+  // and neither the link nor what it points at is touched.
+  test("M-a: a symlinked <home>/cache is refused for this spawn — never unlinked, its target untouched", () => {
+    const { home, trust } = world();
+    writeSkill(join(home, "plugins", "p", "skills"), "alpha", "alpha", "A");
+    const elsewhere = realDir();
+    writeFileSync(join(elsewhere, "user-file.txt"), "mine");
+    // …including something shaped like a stale view, which a prune through the link would delete (I1).
+    mkdirSync(join(elsewhere, "skill-plugins", "stale"), { recursive: true });
+    writeFileSync(join(elsewhere, "skill-plugins", "stale", "precious.txt"), "keep me");
+    symlinkSync(elsewhere, join(home, "cache"));
+    const logs: string[] = [];
+    const orig = console.error;
+    console.error = (...args: unknown[]) => { logs.push(args.map(String).join(" ")); };
+    let surface: ReturnType<SkillStore["childSkillSurface"]>;
+    try {
+      surface = new SkillStore({ winterHome: home, trust }).childSkillSurface({ cwd: null });
+    } finally {
+      console.error = orig;
+    }
+    expect(surface).toEqual({ plugins: [], skills: [], officialDeny: [] });
+    expect(lstatSync(join(home, "cache")).isSymbolicLink()).toBe(true);
+    expect(readdirSync(elsewhere).sort()).toEqual(["skill-plugins", "user-file.txt"]);
+    expect(readdirSync(join(elsewhere, "skill-plugins"))).toEqual(["stale"]);
+    expect(existsSync(join(elsewhere, "skill-plugins", "stale", "precious.txt"))).toBe(true);
+    expect(logs.filter((l) => l.includes(join(home, "cache")))).toHaveLength(1);
   });
 
   // Review I1 (2026-09-23), the probe reproduced: a planted `<views>/<plugin>` -> `victim/` link had
@@ -214,20 +244,9 @@ describe("SkillStore.childSkillSurface — the plugin skills a Winter child can 
     expect(existsSync(join(skillPluginViewsRoot(home), "gone"))).toBe(false);
   });
 
-  test("I1: `<home>/cache` swapped for a link is replaced by a real directory — never worked through", () => {
-    const { home, trust } = world();
-    writeSkill(join(home, "plugins", "p", "skills"), "alpha", "alpha", "A");
-    const elsewhere = realDir();
-    mkdirSync(join(elsewhere, "skill-plugins", "stale"), { recursive: true });
-    writeFileSync(join(elsewhere, "skill-plugins", "stale", "precious.txt"), "keep me");
-    symlinkSync(elsewhere, join(home, "cache"));
-
-    const s = new SkillStore({ winterHome: home, trust });
-    expect(s.childSkillSurface({ cwd: null }).skills).toEqual(["p:alpha"]);
-    expect(lstatSync(join(home, "cache")).isSymbolicLink()).toBe(false);
-    expect(existsSync(join(elsewhere, "skill-plugins", "stale", "precious.txt"))).toBe(true);
-    expect(realpathSync(s.childSkillSurface({ cwd: null }).plugins[0]!.path)).toBe(join(realpathSync(home), "cache", "skill-plugins", "p"));
-  });
+  // (I1's `<home>/cache`-swapped-for-a-link case: since re-review M-a the link is never unlinked — the
+  // spawn is refused instead; see the "M-a: a symlinked <home>/cache" test above, which also pins that
+  // nothing is worked through it.)
 
   test("a rebuild removes the views of plugins that were removed or disabled", () => {
     const { home, trust } = world();
