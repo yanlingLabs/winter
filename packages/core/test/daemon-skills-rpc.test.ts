@@ -224,6 +224,44 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
     }
   });
 
+  // Post-merge fix round, finding 3 (Opus review): L3 deleted SkillStore's own plugin tier outright
+  // (agent/skills.ts), so `store.list()` returns no plugin-sourced entries at all any more -- the
+  // ipc/server.ts merge resolution that dropped this lane's own `pluginSkillsFor` append was wrong.
+  // This is the RPC-level regression guard: a plugin installed through the real plugin.marketplace.add
+  // + plugin.install RPCs, with a shipped skill, must actually appear in skills.list.
+  test("skills.list includes an installed plugin's own skill (plugin half restored, finding 3)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-daemon-skills-plugin-"));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({
+      schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
+    }));
+    const secrets = new FileSecretStore(join(home, "test-secrets"));
+    daemon = await startDaemon({ home, secrets, agentProvider: null });
+    harnessToken = daemon.tokens.harness;
+    const c = await TestClient.connect(daemon.socketPath);
+    await c.hello(harnessToken, "skills-tester-plugin");
+
+    const mktDir = mkdtempSync(join(tmpdir(), "winter-daemon-skills-plugin-mkt-"));
+    mkdirSync(join(mktDir, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(mktDir, ".claude-plugin", "marketplace.json"), JSON.stringify({
+      name: "m", owner: { name: "test" }, plugins: [{ name: "p", source: "." }],
+    }));
+    mkdirSync(join(mktDir, "skills", "brainstorming"), { recursive: true });
+    writeFileSync(join(mktDir, "skills", "brainstorming", "SKILL.md"), "---\nname: brainstorming\ndescription: Explore ideas\n---\nbody");
+
+    const mktRes = await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+    expect(mktRes.result.ok).toBe(true);
+    const installRes = await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+    expect(installRes.result.ok).toBe(true); // installed AND enabled by default (Contract B)
+
+    const listed = await c.request(METHODS.skillsList, {});
+    expect(SkillsListResult.safeParse(listed.result).success).toBe(true);
+    const byName = new Map<string, { loadsInSessions?: boolean; sessionNote?: string; description?: string }>(
+      listed.result.skills.map((s: { name: string }) => [s.name, s]),
+    );
+    expect(byName.get("p:brainstorming")).toMatchObject({ loadsInSessions: true, description: "Explore ideas" });
+    c.close();
+  });
+
   test("deleting a name that resolves to a non-self source (user root) -> INVALID_PARAMS, refused before touching self/", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-daemon-skills-"));
     mkdirSync(join(storeHomeFor(home), "skills", "greet"), { recursive: true });
