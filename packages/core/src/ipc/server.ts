@@ -111,7 +111,7 @@ import { modelCatalogWire } from "../providers/model-catalog-wire";
 import { withProblemsForRoles, type RoleHealthRegistry } from "../providers/role-health";
 import type { InternalRouter } from "../providers/internal-router";
 import { internalRoleProblemsFor } from "../providers/internal-role-problems";
-import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, withoutMovedKeys, type McpServerSettingsEntry } from "../settings";
+import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, type McpServerSettingsEntry } from "../settings";
 import { addMcpServerInScope, mcpServerInScope, removeMcpServerInScope, type McpScope, type McpScopeTarget } from "../agent/mcp/mcp-write";
 import { saveAnswerEverywhere, saveAnswerInProject, SavedAnswerRefused } from "../agent/saved-answers";
 import { gitRootFor } from "../runtime-sdk/run-home-input";
@@ -853,7 +853,7 @@ function liveSettingsFor(opts: { winterHome?: string }): Settings | undefined {
   if (!opts.winterHome) return undefined;
   try {
     // WS-21: never the moved keys (`withoutMovedKeys`) — their only doors are the `sdk…` readers.
-    return withoutMovedKeys(loadSettings(join(opts.winterHome, "settings.json")));
+    return liveSettingsView(loadSettings(join(opts.winterHome, "settings.json")));
   } catch {
     return undefined;
   }

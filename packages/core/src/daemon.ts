@@ -17,7 +17,7 @@ import { ensureOutdir } from "./sessions/outdir";
 import { writeDiff, type DiffHeader } from "./diffs/store";
 import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
-import { loadSettings, loadPermissionDirs, effortRefusalFor, hooksEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, pinsFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, sdkAllowRules, sdkAutoMemory, sdkLocalMcpServers, sdkOutputStyle, sdkUserMcpServers, withoutMovedKeys, type Settings } from "./settings";
+import { loadSettings, loadPermissionDirs, effortRefusalFor, hooksEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, pinsFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, sdkAllowRules, sdkAutoMemory, sdkLocalMcpServers, sdkOutputStyle, sdkUserMcpServers, liveSettingsView, type Settings } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
@@ -518,7 +518,7 @@ export async function startDaemon(opts: {
     // hand, is the ONLY writer of a migrated v3 settings file (see `loadSettings`'s own doc).
     // WS-21: the live holder never carries the keys that moved to `sdk/` (`withoutMovedKeys`) — their
     // only doors are the `sdk…` readers, so no reader here can see a stale copy kept for a downgrade.
-    settings = withoutMovedKeys(loadSettings(dirs.settingsPath, { presentProviders, persistMigration: true }));
+    settings = liveSettingsView(loadSettings(dirs.settingsPath, { presentProviders, persistMigration: true }));
     // Task 17: the engine leg no longer exists — a `winterLeg.<mode>: false` is accepted for one
     // release, reported here (and by settings-apply on a hot edit), never obeyed.
     for (const key of winterLegDisabledKeys(settings)) console.error(`settings: runtimes.winterLeg.${key} = false — the engine leg no longer exists; ignored`);
@@ -2306,7 +2306,7 @@ export async function startDaemon(opts: {
     // engine to hot-apply against (same "agent disabled" boundary the rest of this gate follows).
     const apply = makeApply({
       // THE atomic swap — a single synchronous assignment, first thing every apply does (T4).
-      setLiveSettings: (s) => { settings = withoutMovedKeys(s); },
+      setLiveSettings: (s) => { settings = liveSettingsView(s); },
       registry,
       buildComputerService: (s) => new ComputerUseService({ broker: peripheral, heartbeatMs: s?.peripheral?.heartbeatMs }),
       registerComputer: (svc, s) => {
