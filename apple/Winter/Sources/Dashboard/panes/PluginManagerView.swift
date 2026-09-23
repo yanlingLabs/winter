@@ -44,16 +44,25 @@ enum PluginAction: String, Equatable, Hashable, CaseIterable {
 struct PluginRowDisplay: Equatable, Identifiable {
     var id: String { spec }
     /// The qualified `"<plugin>@<marketplace>"` — every lifecycle action (`enable`/`disable`/
-    /// `uninstall`/`update`) is called with this.
+    /// `uninstall`/`plugin.setConsent`) is called with this (fix round 1: `plugin.setConsent` now
+    /// takes `spec` too, not the bare id — see `WinterClient.pluginSetConsent`'s own doc).
     let spec: String
-    /// The bare plugin id — for `plugin.restart{pluginId}`/`plugin.setConsent{name}` and display.
+    /// The bare plugin id — for `plugin.restart{pluginId}` and display only now.
     let pluginId: String
     let scope: PluginScope
     let tierBadge: String
     let version: String
     let consentText: String
     let enabled: Bool
+    /// Fix round 1 (M6): whether ANY required consent class is still outstanding — drives the
+    /// status dot (`.needsConsent` suppresses the "enabled" green dot even though `enabled` is
+    /// separately `true`, which it always is for a fresh install regardless of consent).
+    let needsConsent: Bool
     let actions: [PluginAction]
+    /// Fix round 1 (I3): the plugin's own declared hooks, straight off `PluginListing.hooks` —
+    /// `nil` (daemon couldn't read them) and `[]` (read: none declared) are different answers, and
+    /// the Hooks tab / this plugin's own detail page must render two different sentences for them.
+    let hooks: [PluginHookEntry]?
 }
 
 /// PURE: `plugin.list` entry → row display + the action-availability rule.
@@ -112,7 +121,8 @@ func pluginRowDisplay(_ p: PluginListing) -> PluginRowDisplay {
 
     return PluginRowDisplay(
         spec: p.spec, pluginId: p.id, scope: p.scope, tierBadge: tierBadge,
-        version: p.version ?? "—", consentText: consentText, enabled: p.enabled, actions: actions
+        version: p.version ?? "—", consentText: consentText, enabled: p.enabled,
+        needsConsent: needsConsent, actions: actions, hooks: p.hooks
     )
 }
 
@@ -130,29 +140,54 @@ func pluginRowDisplay(_ p: PluginListing) -> PluginRowDisplay {
 // supported source now.
 // -----------------------------------------------------------------------------------------------
 
-/// `directoryMarketplacePluginNames` failed to find or parse `<dir>/.claude-plugin/marketplace.json`.
+/// `readDirectoryMarketplaceManifest`/`directoryMarketplacePluginNames` failed to find or parse
+/// `<dir>/.claude-plugin/marketplace.json`.
 struct PluginFolderReadError: Error, Equatable {
     let message: String
 }
 
-/// Mirrors `directoryMarketplacePluginNames` (`packages/core/src/plugins/lifecycle.ts`) — reads a
-/// directory marketplace's plugin names straight off the Mac's OWN filesystem, the same machine
-/// the picked folder lives on (same reasoning `plugin-cli.ts`'s `readMarketplacePluginNames` gives:
-/// the daemon has no "read this marketplace before it's registered" RPC and does not need one).
-func directoryMarketplacePluginNames(at dir: URL, fileManager: FileManager = .default) throws -> [String] {
+/// A directory marketplace's own manifest, read locally — its registered NAME (what
+/// `plugin.marketplace.add` will register it as; the daemon derives this the same way,
+/// `readDirectoryMarketplaceManifest` in `plugins/sdk-plugin-api.ts`) and the plugin names it
+/// lists.
+struct DirectoryMarketplaceManifest: Equatable {
+    let name: String
+    let pluginNames: [String]
+}
+
+/// Mirrors the daemon's own `readDirectoryMarketplaceManifest`/`addMarketplace`
+/// (`packages/core/src/plugins/sdk-plugin-api.ts`) — reads a directory marketplace's manifest
+/// straight off the Mac's OWN filesystem, the same machine the picked folder lives on (same
+/// reasoning `plugin-cli.ts`'s `readMarketplacePluginNames` gives: the daemon has no "read this
+/// marketplace before it's registered" RPC and does not need one). Reading the NAME here, before
+/// ever calling `plugin.marketplace.add`, is what lets `installFromFolder` check for a name
+/// collision (fix round 1, C1) BEFORE registering anything.
+func readDirectoryMarketplaceManifest(at dir: URL, fileManager: FileManager = .default) throws -> DirectoryMarketplaceManifest {
     let manifestURL = dir.appendingPathComponent(".claude-plugin/marketplace.json")
     guard let data = fileManager.contents(atPath: manifestURL.path) else {
         throw PluginFolderReadError(message: "\(manifestURL.path): no marketplace manifest there (expected .claude-plugin/marketplace.json under \(dir.path))")
     }
     struct Entry: Decodable { let name: String? }
-    struct Manifest: Decodable { let plugins: [Entry]? }
+    struct Manifest: Decodable { let name: String?; let plugins: [Entry]? }
     let parsed: Manifest
     do {
         parsed = try JSONDecoder().decode(Manifest.self, from: data)
     } catch {
         throw PluginFolderReadError(message: "\(manifestURL.path): not a valid marketplace manifest")
     }
-    return (parsed.plugins ?? []).compactMap { $0.name }.filter { !$0.isEmpty }
+    guard let name = parsed.name, !name.isEmpty else {
+        throw PluginFolderReadError(message: "\(manifestURL.path): marketplace manifest has no name")
+    }
+    let pluginNames = (parsed.plugins ?? []).compactMap { $0.name }.filter { !$0.isEmpty }
+    return DirectoryMarketplaceManifest(name: name, pluginNames: pluginNames)
+}
+
+/// The plugin names half of `readDirectoryMarketplaceManifest` — kept as its own entry point
+/// because it is what the existing test suite (`DirectoryMarketplacePluginNamesTests`) exercises,
+/// and because a caller that only needs the names (none, today) shouldn't have to unpack the
+/// whole manifest.
+func directoryMarketplacePluginNames(at dir: URL, fileManager: FileManager = .default) throws -> [String] {
+    try readDirectoryMarketplaceManifest(at: dir, fileManager: fileManager).pluginNames
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -167,6 +202,10 @@ final class PluginManagerModel: ObservableObject {
 
     @Published private(set) var rows: [PluginRowDisplay] = []
     @Published var errorText: String?
+    /// Fix round 1 (I2): a non-error, informational line — today only "installed but turned off"
+    /// after a cancelled install-triggered consent sheet. Kept separate from `errorText` (which
+    /// renders in red) because declining consent is an expected, correct outcome, not a failure.
+    @Published var noticeText: String?
     /// The live consent sheet, seeded from EITHER trigger — an `enable(_:)` whose row's extras
     /// still have a pending class, or a successful `installFromFolder(_:)`. `PluginManagerView`
     /// presents this via `.sheet(item:)`; setting it to `nil` (confirm/cancel, or a swipe-to-
@@ -186,6 +225,11 @@ final class PluginManagerModel: ObservableObject {
     /// The full `plugin.list` row behind each displayed spec — actions need the scope/bare id/
     /// extras a `PluginRowDisplay` doesn't carry.
     private var listingsBySpec: [String: PluginListing] = [:]
+    /// Fix round 1 (M8): marketplace names THIS pane's own `installFromFolder(_:)` registered —
+    /// `uninstall(_:)` offers to clean one up only when it's in this set (never a marketplace that
+    /// predates this pane, e.g. one the CLI registered or that shipped with the daemon) and
+    /// nothing else installed at `.user` scope still uses it.
+    private var marketplacesAddedThisSession: Set<String> = []
     /// Fires at the end of EVERY `refresh()` (the manual "Refresh" click and each action's own
     /// follow-up refresh) so the pane can keep sibling models (the shortcut editor, primarily) in
     /// sync with the plugin list's latest state without a second, independently-timed poll of
@@ -194,6 +238,25 @@ final class PluginManagerModel: ObservableObject {
 
     init(client: WinterClient) {
         self.client = client
+    }
+
+    /// Fix round 1 (M1): the daemon's own refusal text, when there is one — an `RpcError` (the
+    /// ordinary shape every plugin-lifecycle RPC throws for an expected refusal now, see
+    /// `WinterClient+Methods.swift`'s own header) carries the daemon's exact wording; anything
+    /// else falls back to its Swift description rather than a generic "try again" that discards
+    /// what the daemon actually said.
+    private func daemonMessage(_ error: Error) -> String {
+        (error as? RpcError)?.message ?? "\(error)"
+    }
+
+    /// Fix round 1 (C2 defence in depth): true when more than one LISTED (`.user`-scope) plugin
+    /// shares `id` — e.g. the same plugin installed from two different marketplaces.
+    /// `plugin.restart{pluginId}` and `plugin.setConsent{spec}`'s OWN daemon-side lookup
+    /// (`livePlugins().find`, `ipc/server.ts`) are both keyed by the bare id/first-match, so acting
+    /// on one when two exist is ambiguous — refused rather than guessed at, mirroring the existing
+    /// "this folder lists N plugins" refusal `installFromFolder` already gives.
+    private func hasAmbiguousBareId(_ id: String) -> Bool {
+        listingsBySpec.values.filter { $0.id == id }.count > 1
     }
 
     func refresh() async {
@@ -208,18 +271,19 @@ final class PluginManagerModel: ObservableObject {
             // id in `ForEach` (silently dropping one, SwiftUI's usual behavior for a duplicate id).
             // Filtering to `.user` here is the honest scope for a global, no-project-context pane;
             // managing a project/local-scope install is CLI-only for now (`winter plugin
-            // list/enable/disable --scope project|local`, inside that project).
+            // list/enable/disable --scope project|local`, inside that project). See M10's note in
+            // the view header for the user-facing spelling of this same limitation.
             let listings = try await client.pluginList().filter { $0.scope == .user }
             listingsBySpec = Dictionary(listings.map { ($0.spec, $0) }, uniquingKeysWith: { _, last in last })
             rows = listings.map(pluginRowDisplay)
             errorText = nil
         } catch {
-            errorText = "couldn't load plugins — try Refresh"
+            errorText = "couldn't load plugins: \(daemonMessage(error))"
         }
         onRefreshed?()
     }
 
-    // MARK: Enable / disable / uninstall / restart / update
+    // MARK: Enable / disable / uninstall / restart
 
     /// Opens the consent sheet FIRST when the row's extras still have a pending class (spec §5.4:
     /// the Winter-only Tier-2 extra keeps its own consent, orthogonal to install+enable — which is
@@ -227,9 +291,20 @@ final class PluginManagerModel: ObservableObject {
     /// calls `pluginSetConsent` then `pluginEnable`. Calls `pluginEnable` directly otherwise (no
     /// extras, or every required class is already consented — re-enabling after a disable, say).
     func enable(_ spec: String) async {
+        noticeText = nil
+        // Fix round 1 (M5): refresh FIRST so the needsConsent decision — and, if a sheet opens,
+        // its disclosure — reflect the daemon's CURRENT state, not a possibly-stale snapshot from
+        // whenever this pane last refreshed (another client, or this plugin's own consent
+        // fingerprint, could have changed since).
+        await refresh()
         guard let listing = listingsBySpec[spec] else { return }
+        guard !hasAmbiguousBareId(listing.id) else {
+            errorText = "\(listing.id) is installed from more than one marketplace — this pane can't tell them apart for consent yet"
+            return
+        }
         if let extras = listing.extras, extras.needsConsent {
-            consentSheet = ConsentSheetState(pluginId: listing.id, spec: spec, scope: listing.scope, extras: extras)
+            consentSheet = ConsentSheetState(pluginId: listing.id, spec: spec, scope: listing.scope,
+                                             extras: extras, openedByInstall: false)
             return
         }
         await performEnable(spec: spec, scope: listing.scope)
@@ -242,13 +317,14 @@ final class PluginManagerModel: ObservableObject {
         do {
             _ = try await client.pluginEnable(spec: spec, scope: scope)
         } catch {
-            actionError = "couldn't enable \(spec) — try again"
+            actionError = "couldn't enable \(spec): \(daemonMessage(error))"
         }
         await refresh()
         if let actionError { errorText = actionError }
     }
 
     func disable(_ spec: String) async {
+        noticeText = nil
         guard let listing = listingsBySpec[spec] else { return }
         busySpec = spec
         defer { busySpec = nil }
@@ -256,7 +332,7 @@ final class PluginManagerModel: ObservableObject {
         do {
             _ = try await client.pluginDisable(spec: spec, scope: listing.scope)
         } catch {
-            actionError = "couldn't disable \(spec) — try again"
+            actionError = "couldn't disable \(spec): \(daemonMessage(error))"
         }
         await refresh()
         if let actionError { errorText = actionError }
@@ -264,29 +340,27 @@ final class PluginManagerModel: ObservableObject {
 
     /// Contract B's own name (replaces the pre-WS-21 `.remove`) — unregisters the install record +
     /// `enabledPlugins` entry ONLY; a directory marketplace is read in place (F15), so this never
-    /// deletes anything on disk.
+    /// deletes anything on disk. Fix round 1 (M8): when this pane's OWN `installFromFolder(_:)`
+    /// registered `spec`'s marketplace and nothing else `.user`-scope still uses it, also removes
+    /// the marketplace registration — best-effort, never turns an otherwise-successful uninstall
+    /// into a reported failure.
     func uninstall(_ spec: String) async {
+        noticeText = nil
         guard let listing = listingsBySpec[spec] else { return }
         busySpec = spec
         defer { busySpec = nil }
         var actionError: String?
         do {
             _ = try await client.pluginUninstall(spec: spec, scope: listing.scope)
+            if marketplacesAddedThisSession.contains(listing.marketplace) {
+                let stillUsed = listingsBySpec.values.contains { $0.spec != spec && $0.marketplace == listing.marketplace }
+                if !stillUsed {
+                    try? await client.pluginMarketplaceRemove(name: listing.marketplace)
+                    marketplacesAddedThisSession.remove(listing.marketplace)
+                }
+            }
         } catch {
-            actionError = "couldn't uninstall \(spec) — try again"
-        }
-        await refresh()
-        if let actionError { errorText = actionError }
-    }
-
-    func update(_ spec: String) async {
-        busySpec = spec
-        defer { busySpec = nil }
-        var actionError: String?
-        do {
-            _ = try await client.pluginUpdate(spec: spec)
-        } catch {
-            actionError = "couldn't update \(spec) — try again"
+            actionError = "couldn't uninstall \(spec): \(daemonMessage(error))"
         }
         await refresh()
         if let actionError { errorText = actionError }
@@ -294,16 +368,23 @@ final class PluginManagerModel: ObservableObject {
 
     /// `plugin.restart` takes the BARE id, not the qualified spec (`PluginSupervisor` tracks
     /// Tier-2 processes by bare name — `agent/plugins.ts`'s own doc on the collision this implies
-    /// for two same-named plugins from different marketplaces, noted there, not fixed here).
+    /// for two same-named plugins from different marketplaces). Fix round 1 (C2): refused up front
+    /// when that collision is real, rather than silently restarting whichever one the supervisor's
+    /// own lookup happens to find.
     func restart(_ spec: String) async {
+        noticeText = nil
         guard let listing = listingsBySpec[spec] else { return }
+        guard !hasAmbiguousBareId(listing.id) else {
+            errorText = "\(listing.id) is installed from more than one marketplace — this pane can't tell them apart for restart yet"
+            return
+        }
         busySpec = spec
         defer { busySpec = nil }
         var actionError: String?
         do {
             try await client.pluginRestart(name: listing.id)
         } catch {
-            actionError = "couldn't restart \(spec) — try again"
+            actionError = "couldn't restart \(spec): \(daemonMessage(error))"
         }
         await refresh()
         if let actionError { errorText = actionError }
@@ -326,34 +407,61 @@ final class PluginManagerModel: ObservableObject {
     func installFromFolder(_ dir: URL) async {
         installing = true
         defer { installing = false }
-        let names: [String]
+        noticeText = nil
+        let manifest: DirectoryMarketplaceManifest
         do {
-            names = try directoryMarketplacePluginNames(at: dir)
+            manifest = try readDirectoryMarketplaceManifest(at: dir)
         } catch {
-            errorText = (error as? PluginFolderReadError)?.message ?? "couldn't read \(dir.lastPathComponent) — try again"
+            errorText = (error as? PluginFolderReadError)?.message ?? "couldn't read \(dir.lastPathComponent): \(daemonMessage(error))"
             return
         }
-        guard names.count == 1 else {
-            errorText = "\(dir.lastPathComponent): this folder lists \(names.count) plugin(s) — installing one of several isn't supported from this picker yet"
+        guard manifest.pluginNames.count == 1 else {
+            errorText = "\(dir.lastPathComponent): this folder lists \(manifest.pluginNames.count) plugin(s) — installing one of several isn't supported from this picker yet"
             return
         }
-        var actionError: String?
+        let pluginName = manifest.pluginNames[0]
+
+        // C1: refuse a marketplace NAME collision with a DIFFERENT path before registering
+        // anything — `plugin.marketplace.add` would otherwise silently repoint every plugin
+        // already installed from the old path (a directory marketplace is read in place, F15).
+        do {
+            let known = try await client.pluginMarketplaceList()
+            if let existing = known.first(where: { $0.name == manifest.name }), existing.path != dir.path {
+                errorText = "a marketplace named \"\(manifest.name)\" already points at \(existing.path) — rename this folder's marketplace.json, or remove the old marketplace first"
+                return
+            }
+        } catch {
+            errorText = "couldn't check existing marketplaces: \(daemonMessage(error))"
+            return
+        }
+
         do {
             let marketplace = try await client.pluginMarketplaceAdd(source: dir.path)
-            let spec = "\(names[0])@\(marketplace.name)"
+            marketplacesAddedThisSession.insert(marketplace.name)
+            let spec = "\(pluginName)@\(marketplace.name)"
             _ = try await client.pluginInstall(spec: spec, scope: .user)
             await refresh()
-            if let listing = listingsBySpec[spec], let extras = listing.extras, extras.needsConsent {
-                consentSheet = ConsentSheetState(pluginId: listing.id, spec: spec, scope: .user, extras: extras)
+            // M3: a failed post-install refresh must not fall through to opening a sheet or
+            // enabling off a stale/absent listing — the error `refresh()` already set stands.
+            guard errorText == nil, let listing = listingsBySpec[spec] else { return }
+            guard !hasAmbiguousBareId(listing.id) else {
+                errorText = "\(listing.id) is already installed from another marketplace — this pane can't tell them apart yet"
+                return
+            }
+            // C1: a plugin with ANY required consent class ALWAYS shows the sheet on a fresh
+            // install, whatever `consented` says — the daemon fingerprints consent by install path
+            // + entry, so a reinstall to the identical path/entry can read `consented: true`
+            // immediately, but a fresh install still needs a deliberate, current confirmation.
+            // `performEnable` is never called directly for such a plugin.
+            if let extras = listing.extras, !extras.requiredConsents.isEmpty {
+                consentSheet = ConsentSheetState(pluginId: listing.id, spec: spec, scope: .user,
+                                                 extras: extras, openedByInstall: true)
                 return
             }
             await performEnable(spec: spec, scope: .user)
-            return
         } catch {
-            actionError = "couldn't install \(dir.lastPathComponent) — try again"
+            errorText = "couldn't install \(dir.lastPathComponent): \(daemonMessage(error))"
         }
-        await refresh()
-        if let actionError { errorText = actionError }
     }
 
     // MARK: Consent sheet
@@ -362,7 +470,9 @@ final class PluginManagerModel: ObservableObject {
     /// called: the daemon's `plugin.enable` handler hot-spawns a Tier-2 process synchronously and
     /// reads consent to decide spawn eligibility right then — granting consent AFTER an `enable`
     /// that already ran leaves the process unspawned until another `enable`/`plugin.restart`
-    /// (`WinterClient.pluginEnable`'s own doc comment).
+    /// (`WinterClient.pluginEnable`'s own doc comment). Fix round 1 (C1): grants every class in
+    /// `extras.requiredConsents`, not just the ones `pendingConsents` says are still missing — a
+    /// fresh confirmation re-affirms the whole disclosure, not a stale delta.
     func confirmConsent() async {
         guard !isConfirmingConsent else { return }
         guard var sheet = consentSheet else { return }
@@ -375,21 +485,44 @@ final class PluginManagerModel: ObservableObject {
         defer { busySpec = nil }
         var actionError: String?
         do {
-            _ = try await client.pluginSetConsent(name: sheet.pluginId, classes: sheet.pendingConsents)
-            _ = try await client.pluginEnable(spec: spec, scope: sheet.scope)
-            consentSheet = nil
+            // I1: the result used to be discarded — an `.unknownPlugin` refusal (the plugin was
+            // uninstalled, or its spec no longer resolves, between the sheet opening and this
+            // click) must not silently fall through to `pluginEnable`. The sheet stays open
+            // (never nil'd on this branch) and the enable call is skipped entirely.
+            let consentResult = try await client.pluginSetConsent(spec: spec, classes: sheet.extras.requiredConsents)
+            if consentResult == .unknownPlugin {
+                actionError = "\(sheet.pluginId) is no longer installed — couldn't record consent"
+            } else {
+                _ = try await client.pluginEnable(spec: spec, scope: sheet.scope)
+                consentSheet = nil
+            }
         } catch {
-            actionError = "couldn't enable \(spec) — try again"
+            actionError = "couldn't enable \(spec): \(daemonMessage(error))"
         }
         await refresh()
         if let actionError { errorText = actionError }
     }
 
-    /// Dismisses without ever calling `pluginSetConsent`/`pluginEnable` — the plugin stays exactly
-    /// as it was.
-    func cancelConsent() {
-        consentSheet?.cancel()
+    /// Dismisses without ever calling `pluginSetConsent`/`pluginEnable`. Fix round 1 (I2): when
+    /// the sheet was raised by an INSTALL (`installFromFolder`'s own trigger, `openedByInstall`),
+    /// the plugin landed ENABLED already (Contract B's `installPlugin`) — its skills, hooks and
+    /// MCP servers would otherwise keep loading even though the user just declined the Tier-2
+    /// process's consent. Cancelling there turns the plugin back off and leaves one explanatory
+    /// line. A sheet raised by an ordinary `enable(_:)` on an already-installed, already-disabled
+    /// row needs no such follow-up — cancelling it just leaves that row exactly as it was.
+    func cancelConsent() async {
+        guard let sheet = consentSheet else { return }
         consentSheet = nil
+        guard sheet.openedByInstall else { return }
+        busySpec = sheet.spec
+        defer { busySpec = nil }
+        do {
+            _ = try await client.pluginDisable(spec: sheet.spec, scope: sheet.scope)
+            noticeText = "Installed but turned off — enable it to review its permissions again."
+        } catch {
+            errorText = "installed \(sheet.spec) but couldn't turn it off: \(daemonMessage(error))"
+        }
+        await refresh()
     }
 }
 
@@ -414,6 +547,9 @@ struct PluginManagerView: View {
             header
             if let errorText = model.errorText {
                 Text(errorText).foregroundStyle(.red).font(Typography.label()).padding(.horizontal)
+            }
+            if let noticeText = model.noticeText {
+                Text(noticeText).foregroundStyle(.secondary).font(Typography.label()).padding(.horizontal)
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
@@ -445,15 +581,17 @@ struct PluginManagerView: View {
         }
         // The GUI consent sheet — presented from BOTH triggers `model.consentSheet` can be set
         // from (`enable(_:)`'s pending-consent path, or a successful `installFromFolder(_:)`).
-        // Dismissing any other way (Esc/swipe) also nils the binding via SwiftUI's own `.sheet`
-        // machinery — same end state as `cancelConsent()`, just without that method's explicit
-        // `.cancel()` record on the (by-then-discarded) state value.
+        // Fix round 1 (I2): `onCancel` now runs an async follow-up (a cancelled INSTALL-triggered
+        // sheet disables the plugin — see `cancelConsent()`'s own doc) — a swipe/Esc dismiss nils
+        // `model.consentSheet` through SwiftUI's own `.sheet(item:)` binding WITHOUT calling
+        // `onCancel` at all, so that path does NOT run the disable follow-up. Left as a known gap
+        // (not in this fix round's scope): only the Cancel button's explicit click is covered.
         .sheet(item: $model.consentSheet) { sheet in
             ConsentSheet(
                 state: sheet,
                 busy: model.busySpec == sheet.spec,
                 onConfirm: { Task { await model.confirmConsent() } },
-                onCancel: { model.cancelConsent() }
+                onCancel: { Task { await model.cancelConsent() } }
             )
         }
     }
@@ -463,6 +601,12 @@ struct PluginManagerView: View {
     private var pluginListSection: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Installed Plugins").font(Typography.label(.semibold)).foregroundStyle(.secondary).padding(.horizontal)
+            // M10: this pane only ever lists `.user`-scope installs (see `refresh()`'s own doc for
+            // why) — said here so that absence reads as "not shown here", not "not installed".
+            Text("Project- and local-scope plugins aren't shown here — manage those with winter plugin, inside the project.")
+                .font(Typography.caption())
+                .foregroundStyle(.secondary)
+                .padding(.horizontal)
             if model.rows.isEmpty {
                 Text("No plugins installed")
                     .font(Typography.label())
@@ -496,7 +640,13 @@ struct PluginManagerView: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.message = "Choose a plugin marketplace folder (containing .claude-plugin/marketplace.json)"
+        // M4: the folder is read IN PLACE, forever (F15) — a directory marketplace's `path` IS the
+        // source, so moving or deleting it later breaks the plugin. A zip is not a valid pick at
+        // all any more (see this file's header); the message says so rather than letting the pick
+        // fail silently against a temporary Downloads extraction.
+        panel.message = "Choose a plugin marketplace folder (containing .claude-plugin/marketplace.json). "
+            + "It's used in place — moving or deleting it later breaks the plugin. A .zip must be "
+            + "unzipped to a permanent folder first."
         guard panel.runModal() == .OK, let url = panel.url else { return }
         Task { await model.installFromFolder(url) }
     }
@@ -548,11 +698,13 @@ struct PluginManagerView: View {
     }
 
     /// No live runtime status on the wire any more (see this file's header) — a row shows only
-    /// whether it is enabled, with a dot only for "enabled" (there is nothing to distinguish a
-    /// disabled plugin from any other non-running state any more, so it gets none).
+    /// whether it is enabled, with a dot only for "enabled". Fix round 1 (M6): `needsConsent`
+    /// suppresses the dot even though `enabled` is separately `true` — a fresh install lands
+    /// enabled in settings regardless of consent (Contract B's own `installPlugin`), and a green
+    /// dot there would read as "fully working" when a Tier-2 plugin's process was never spawned.
     private func statusIndicator(_ row: PluginRowDisplay) -> some View {
         HStack(spacing: 4) {
-            if row.enabled {
+            if row.enabled && !row.needsConsent {
                 Circle().fill(Color.green).frame(width: 6, height: 6)
             }
             Text(row.enabled ? "Enabled" : "Disabled").font(Typography.caption()).foregroundStyle(.secondary)

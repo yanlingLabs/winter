@@ -178,8 +178,15 @@ final class LibraryDisplayHelperTests: XCTestCase {
     }
 
     func testOnlyAnEnabledPluginGetsAStatusDot() {
-        XCTAssertNil(libraryPluginStatusDot(enabled: false))
-        XCTAssertNotNil(libraryPluginStatusDot(enabled: true))
+        XCTAssertNil(libraryPluginStatusDot(enabled: false, needsConsent: false))
+        XCTAssertNotNil(libraryPluginStatusDot(enabled: true, needsConsent: false))
+    }
+
+    /// Fix round 1 (M6): a pending consent class suppresses the dot even though `enabled` is true
+    /// — a fresh install lands enabled regardless of consent.
+    func testAPendingConsentSuppressesTheDotEvenWhenEnabled() {
+        XCTAssertNil(libraryPluginStatusDot(enabled: true, needsConsent: true))
+        XCTAssertNil(libraryPluginStatusDot(enabled: false, needsConsent: true))
     }
 
     // MARK: MCP

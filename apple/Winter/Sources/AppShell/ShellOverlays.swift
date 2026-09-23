@@ -741,7 +741,10 @@ struct LibraryPanel: View {
                                     spec: name,
                                     onBack: back, onVanished: { vanished(item) })
             case let .hooks(pluginName):
-                LibraryHooksDetail(model: wiring.pluginManager, pluginName: pluginName,
+                // Fix round 1 (M7): `pluginName` here is the QUALIFIED spec now (`LibraryHooksList`
+                // opens `.hooks(pluginName: row.spec)`) — both this page's own identity and its
+                // "Open plugin" door need that, not the bare id, to resolve the right plugin.
+                LibraryHooksDetail(model: wiring.pluginManager, spec: pluginName,
                                    onBack: back,
                                    onOpenPlugin: { open(.plugin(name: pluginName)) },
                                    onVanished: { vanished(item) })

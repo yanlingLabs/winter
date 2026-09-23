@@ -532,6 +532,39 @@ final class MethodWrapperTests: XCTestCase {
         XCTAssertNil(legacy.version)
         XCTAssertFalse(legacy.enabled)
         XCTAssertNil(legacy.extras, "no winter-plugin.json ⇒ no extras object at all")
+        XCTAssertNil(legacy.hooks, "hooks key absent ⇒ nil, not []")
+    }
+
+    /// Fix round 1: `plugin.list`'s per-row `hooks` — `nil` (key absent) and `[]` (present, empty)
+    /// must decode to different things, same discipline the retired whole-list `manifestHooks`
+    /// used to need across rows, now scoped to one row.
+    func testPluginListDecodesHooksDistinguishingAbsentFromEmpty() async throws {
+        let (client, t) = try await connected()
+        let (_, plugins) = try await roundTrip(t, sentIndex: 1,
+            result: #"{"ok":true,"plugins":[{"id":"a","installPath":"/a","scope":"user","enabled":true,"marketplace":"m","hooks":[{"event":"PreToolUse","matcher":"Bash","type":"command","command":"./deny.sh"},{"event":"Stop","type":"command"}]},{"id":"b","installPath":"/b","scope":"user","enabled":true,"marketplace":"m","hooks":[]},{"id":"c","installPath":"/c","scope":"user","enabled":true,"marketplace":"m"}]}"#
+        ) { try await client.pluginList() }
+
+        let hooksA = try XCTUnwrap(plugins[0].hooks)
+        XCTAssertEqual(hooksA.count, 2)
+        XCTAssertEqual(hooksA[0].event, "PreToolUse")
+        XCTAssertEqual(hooksA[0].matcher, "Bash")
+        XCTAssertEqual(hooksA[0].type, "command")
+        XCTAssertEqual(hooksA[0].command, "./deny.sh")
+        XCTAssertNil(hooksA[1].matcher)
+        XCTAssertNil(hooksA[1].command)
+
+        XCTAssertEqual(plugins[1].hooks, [], "present-but-empty ⇒ []")
+        XCTAssertNil(plugins[2].hooks, "key absent ⇒ nil")
+    }
+
+    /// Fix round 1 (M2): a row with a missing/unrecognized `scope` is DROPPED, never decoded as a
+    /// silent `.user` guess — acting on the wrong settings tier is worse than acting on nothing.
+    func testPluginListDropsRowsWithMissingOrUnknownScope() async throws {
+        let (client, t) = try await connected()
+        let (_, plugins) = try await roundTrip(t, sentIndex: 1,
+            result: #"{"ok":true,"plugins":[{"id":"good","installPath":"/g","scope":"user","enabled":true,"marketplace":"m"},{"id":"no-scope","installPath":"/n","enabled":true,"marketplace":"m"},{"id":"bad-scope","installPath":"/b","scope":"workspace","enabled":true,"marketplace":"m"}]}"#
+        ) { try await client.pluginList() }
+        XCTAssertEqual(plugins.map(\.id), ["good"])
     }
 
     func testPluginListSendsCwdWhenGiven() async throws {
@@ -629,17 +662,22 @@ final class MethodWrapperTests: XCTestCase {
         XCTAssertNil((req4["params"] as? [String: Any])?["name"])
     }
 
-    func testPluginSetConsentOutcomes() async throws {
+    /// Fix round 1: `plugin.setConsent`'s param is `spec` now (the qualified `"<id>@<marketplace>"`)
+    /// — the daemon fingerprints consent by install path + entry, so a bare id can't name which
+    /// install a grant is for once two marketplaces install the same plugin.
+    func testPluginSetConsentSendsSpecAndDecodesOutcomes() async throws {
         let (client, t) = try await connected()
         let (req1, ok) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true}"#) {
-            try await client.pluginSetConsent(name: "sample-echo", classes: ["exec", "tcc"])
+            try await client.pluginSetConsent(spec: "sample-echo@winter-examples", classes: ["exec", "tcc"])
         }
         XCTAssertEqual(req1["method"] as? String, "plugin.setConsent")
+        XCTAssertEqual((req1["params"] as? [String: Any])?["spec"] as? String, "sample-echo@winter-examples")
+        XCTAssertNil((req1["params"] as? [String: Any])?["name"], "the retired name param must not still be sent")
         XCTAssertEqual((req1["params"] as? [String: Any])?["classes"] as? [String], ["exec", "tcc"])
         XCTAssertEqual(ok, .ok)
 
         let (_, unknown) = try await roundTrip(t, sentIndex: 2, result: #"{"code":"unknown_plugin"}"#) {
-            try await client.pluginSetConsent(name: "ghost", classes: ["exec"])
+            try await client.pluginSetConsent(spec: "ghost@nowhere", classes: ["exec"])
         }
         XCTAssertEqual(unknown, .unknownPlugin)
     }

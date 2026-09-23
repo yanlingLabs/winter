@@ -202,14 +202,19 @@ final class PluginManagerModelAsyncTests: XCTestCase {
     }
 
     /// `enable(_:)` on a spec `plugin.list` never reported is a silent no-op (no matching listing
-    /// to act against) — no RPC beyond the initial `refresh()`-free handshake is sent.
+    /// to act against) — fix round 1 (M5): `enable(_:)` now refreshes FIRST, so its own
+    /// `plugin.list` IS sent, but nothing beyond that (no `plugin.enable`, no sheet).
     func testEnableOnUnknownSpecIsANoOp() async throws {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
 
-        await model.enable("ghost@nowhere")
+        async let action: Void = model.enable("ghost@nowhere")
+        await feedWaitUntil { t.sent.count >= 2 }
+        let listReq = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"plugins":[]}}"#)
+        await action
 
-        XCTAssertEqual(t.sent.count, 1, "hello only — no plugin.enable for a spec never listed")
+        XCTAssertEqual(t.sent.count, 2, "hello + enable(_:)'s own refresh — no plugin.enable for a spec never listed")
         XCTAssertNil(model.consentSheet)
     }
 
@@ -240,7 +245,8 @@ final class PluginManagerModelAsyncTests: XCTestCase {
 
         await action
 
-        XCTAssertEqual(model.errorText, "couldn't disable sample-echo@winter-examples — try again")
+        // Fix round 1 (M1): the daemon's own refusal text, not a generic "try again".
+        XCTAssertEqual(model.errorText, "couldn't disable sample-echo@winter-examples: unknown plugin: sample-echo@winter-examples")
         XCTAssertTrue(model.rows.isEmpty)
     }
 

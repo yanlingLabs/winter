@@ -13,8 +13,9 @@ import SwiftUI
 
 /// Built from EITHER of the two triggers the brief calls out: `PluginManagerModel.enable(_:)` when
 /// the row's extras still have a pending consent class, or a successful `installFromFolder(_:)`
-/// whose freshly-installed row does. `spec`/`scope` are what `confirmConsent()` calls
-/// `pluginEnable` with; `pluginId` is the bare id `pluginSetConsent(name:)` takes.
+/// whose freshly-installed row does. `spec`/`scope` are what `confirmConsent()` calls both
+/// `pluginSetConsent` and `pluginEnable` with (fix round 1: `pluginSetConsent`'s param is `spec`
+/// now too, not the bare id).
 ///
 /// `extras` is carried verbatim from the daemon's `plugin.list` row (`winter-plugin.json`'s own
 /// declared permissions, not a client-fabricated summary) — `ConsentSheet`'s body lists each
@@ -38,13 +39,20 @@ struct ConsentSheetState: Equatable, Identifiable {
     let spec: String
     let scope: PluginScope
     let extras: PluginExtras
+    /// Fix round 1 (I2): which trigger raised this sheet — `installFromFolder(_:)` (a fresh install,
+    /// already landed ENABLED) or an ordinary `enable(_:)` on an existing, still-disabled row.
+    /// `PluginManagerModel.cancelConsent()` reads this to decide whether declining needs a
+    /// follow-up `pluginDisable` (an install-triggered sheet's plugin is already loading its
+    /// claude-native content; an enable-triggered sheet's plugin never started at all).
+    let openedByInstall: Bool
     private(set) var decision: Decision = .pending
 
-    init(pluginId: String, spec: String, scope: PluginScope, extras: PluginExtras) {
+    init(pluginId: String, spec: String, scope: PluginScope, extras: PluginExtras, openedByInstall: Bool) {
         self.pluginId = pluginId
         self.spec = spec
         self.scope = scope
         self.extras = extras
+        self.openedByInstall = openedByInstall
     }
 
     /// The classes `confirmConsent()` grants — required-but-not-yet-consented, verbatim from the
@@ -114,7 +122,13 @@ struct ConsentSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("\(state.pluginId) requests consent")
                 .font(Typography.paneTitle)
-            Text("Granting consent lets this plugin run the following, verbatim, on this Mac. Review it before continuing.")
+            // I2: this consent covers ONLY the background process below — a plugin's skills, hooks
+            // and MCP servers are not gated on it at all (installing+enabling already loads those,
+            // spec §5.4). Declining here (Cancel) turns the whole plugin back off, not just the
+            // process, so the two facts belong in the same sentence.
+            Text("This consent covers only the background process listed below. Skills, hooks and "
+                + "MCP servers this plugin declares load when it's enabled, whether or not this "
+                + "process runs — declining here turns the whole plugin off.")
                 .font(Typography.label())
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
