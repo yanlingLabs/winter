@@ -460,12 +460,16 @@ function writeContextStart(c: string): number {
  *     `--target-directory` value (a copy's SOURCE is read; `mv`'s removal of it loads nothing new);
  *   * for `git`, nothing when the subcommand only reads (status, log, diff, show, blame, ls-files, grep),
  *     every later word otherwise;
- *   * for an in-place editor (`sed -i`, `perl -i`) and every other write verb, every later word.
+ *   * for an in-place editor (`sed -i`, `perl -i`, gawk's `-i inplace`) and every other write verb, every
+ *     later word;
+ *   * for an interpreter one-liner (`python`/`python3`/`node`/`bun`/`ruby`/`perl`/`deno` with `-c`, `-e`,
+ *     `--eval`; `deno eval`), any protected segment its code names (round 3, minor 9).
  *
  * THE LIMITATION, the escape floor's own: a static match on the normalised text (case folded, quotes
  * stripped, `//`/`/./`/`..` collapsed, `cd` tracked). A path the command ASSEMBLES at run time (`$(…)`,
- * its own variables, a script it writes and then runs) is beyond its reach, and so is a write whose path is
- * not in the command at all — `git apply x.patch`, `patch < x.diff`.
+ * its own variables — `d=.winter; touch $d/rules/x` —, a script it writes and then runs, an interpreter
+ * that joins the path from pieces) is beyond its reach, and so is a write whose path is not in the command
+ * at all — `git apply x.patch`, `patch < x.diff`.
  */
 export function bashProtectedWriteHit(command: string): string | undefined {
   let cwd: string | undefined;
@@ -540,6 +544,12 @@ function quotedOperatorsAsText(raw: string): string {
   return out;
 }
 
+/** Round 3, minor 9: the interpreters whose one-liners count, their code flags, and a protected segment as
+ *  code names it. */
+const INTERPRETERS = /^(?:python(?:\d+(?:\.\d+)?)?|node|bun|ruby|perl|deno)$/;
+const ONE_LINER_FLAG = /^(?:-[a-z]*[ce]|--eval|--print|-p)$/;
+const PROTECTED_IN_CODE = /\.winter\/(?:skills|commands|rules|output-styles|agents)(?![a-z0-9_.-])/;
+
 /** git's subcommands that only read (round 3, minor 10). */
 const GIT_READ_SUBCOMMANDS: ReadonlySet<string> = new Set(["status", "log", "diff", "show", "blame", "ls-files", "grep"]);
 /** Verbs whose only write target is the destination (round 3, minor 10). */
@@ -558,6 +568,16 @@ function segmentWriteTargets(seg: string): string[] {
   for (let i = 0; i < words.length; i += 1) {
     const verb = words[i]!.slice(words[i]!.lastIndexOf("/") + 1);
     const rest = words.slice(i + 1);
+    // Round 3, minor 9: an interpreter ONE-LINER writes whatever its code names — any protected segment in
+    // it is the target (its own boundary: the code's `'…/rules',` punctuation is no path character).
+    if (INTERPRETERS.test(verb) && (rest.some((w) => ONE_LINER_FLAG.test(w)) || (verb === "deno" && rest[0] === "eval"))) {
+      const named = PROTECTED_IN_CODE.exec(rest.join(" "));
+      return named === null ? targets : [...targets, named[0]];
+    }
+    // …and gawk's in-place edit, `-i inplace`, writes the files it names.
+    if ((verb === "awk" || verb === "gawk") && rest.some((w, j) => w === "-iinplace" || w === "--include=inplace" || ((w === "-i" || w === "--include") && rest[j + 1] === "inplace"))) {
+      return [...targets, ...rest];
+    }
     if (verb === "git") {
       let j = 0;
       while (j < rest.length && rest[j]!.startsWith("-")) j += /^-[cC]$/.test(rest[j]!) ? 2 : 1;   // `-C dir`, `-c k=v`
