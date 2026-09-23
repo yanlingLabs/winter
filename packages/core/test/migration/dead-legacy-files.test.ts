@@ -91,7 +91,7 @@ describe("describeDeadLegacyFiles — the one boot/doctor line", () => {
   test("an mcp.json that declares servers says plainly where MCP servers belong", () => {
     const line = describeDeadLegacyFiles([{ name: "mcp.json", path: "/h/mcp.json", mcpServers: 1 }], "/h")!;
     expect(line).toContain("mcp.json declares 1 MCP server");
-    expect(line).toContain("settings.json → mcpServers");
-    expect(line).toContain(".mcp.json");
+    expect(line).toContain("winter mcp add");
+    expect(line).toContain(".winter/mcp.json"); // WS-21: the repo-root .mcp.json is no longer read
   });
 });
