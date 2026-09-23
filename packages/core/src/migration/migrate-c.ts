@@ -28,6 +28,7 @@
 import { Database } from "bun:sqlite";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
+import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 import { SDK_COMPAT_LINKS, SDK_PERSISTENT_ENTRIES, canonicalCwd, sdkHomeFor } from "../agent/paths";
@@ -176,6 +177,14 @@ export interface MigrationCDeps {
   convertLegacyPlugins?: (home: string) => Promise<{ converted: string[]; unconvertible: { name: string; reason: string }[] }>;
   /** Preflight's lease probe (tests describe a live or recycled pid); the live machine by default. */
   probe?: LeaseProbe;
+  /** Where claude staging roots live (`WINTER_CLAUDE_RESUME_SCAN_ROOT`, else `os.tmpdir()`) — round 4. */
+  claudeResumeScanRoot?: string;
+}
+
+/** Round 4: does the scan root hold any claude staging root (`claude-resume-*`)? The daemon's boot sweep may
+ *  still have one to reconcile — at the key 0.116 wrote — so phase 2's re-key must wait for it. */
+function stagingRootsPresent(scanRoot: string): boolean {
+  try { return readdirSync(scanRoot, { withFileTypes: true }).some((e) => e.isDirectory() && e.name.startsWith("claude-resume-")); } catch { return false; }
 }
 
 /** The official leg's working-copy roots phase 2 reconciles (never recorded in runtime-state). */
@@ -398,6 +407,25 @@ function rekeyTranscripts(home: string, m: MigrationCManifest, log: (line: strin
 }
 
 /**
+ * Round 4, minor 1: a LAZY re-key (the driver's, at resume) joins the manifest's `rekeyed` list whenever a
+ * Migration C manifest exists, so rollback reverses it exactly like the bulk step's moves. The caller records
+ * the intent (`pending`) BEFORE the files move and the outcome after; a later call for the same
+ * session/from/to replaces the pending entry. Bounded: no manifest, a rolled-back or unreadable one, or a
+ * write that fails records nothing (the move itself is unaffected).
+ */
+export function recordLazyRekey(home: string, entry: MigrationCRekey): void {
+  try {
+    const state = migrationCState(home);
+    if (state.kind !== "parsed" || state.manifest.status === "rolled-back") return;
+    const m = state.manifest;
+    const list = (m.rekeyed ??= []);
+    const at = list.findIndex((e) => e.sessionId === entry.sessionId && e.from === entry.from && e.to === entry.to && e.outcome === "pending");
+    if (at >= 0) list[at] = entry; else list.push(entry);
+    writeManifest(home, m);
+  } catch { /* bounded */ }
+}
+
+/**
  * Run (or resume) Migration C: phase 1, then phase 2 when `deps.reconcile` is given. Throws
  * `MigrationCRefused` before anything moves when the preflight refuses. Returns the manifest.
  */
@@ -584,8 +612,13 @@ export async function runMigrationC(home: string, deps: MigrationCDeps): Promise
     writeManifest(home, m);
     deps.log(`migration C: phase 1 complete — ${m.moved.length} director(ies) moved into ${sdkHomeFor(home)}`);
   }
-  // Phase 2 right away when a router door is here, or when there is nothing for one to reconcile.
-  if (deps.reconcile !== undefined || !officialRoots(home).some((r) => existsSync(r) && !isSymlink(r) && hasFiles(r))) return finishMigrationC(home, deps);
+  // Phase 2 right away when a router door is here, or when there is nothing for one to reconcile — no
+  // official working copy AND (round 4) no claude staging root: the daemon's boot sweep reconciles those
+  // BEFORE phase 2, because phase 2 re-keys transcripts and a staging copy swept after that would be
+  // appended into an orphan at the old key. Otherwise the daemon's late site finishes it, sweep first.
+  const scanRoot = deps.claudeResumeScanRoot ?? (process.env.WINTER_CLAUDE_RESUME_SCAN_ROOT?.trim() || tmpdir());
+  const nothingToReconcile = !officialRoots(home).some((r) => existsSync(r) && !isSymlink(r) && hasFiles(r)) && !stagingRootsPresent(scanRoot);
+  if (deps.reconcile !== undefined || nothingToReconcile) return finishMigrationC(home, deps);
   return m;
 }
 
@@ -631,7 +664,7 @@ function markQuarantinedSessions(home: string, backendIds: readonly string[]): s
  * the new layout no longer reads, and mark the migration done. Idempotent; a root the router cannot
  * reconcile is recorded `failed` and still archived (a move — nothing is lost).
  */
-export async function finishMigrationC(home: string, deps: Pick<MigrationCDeps, "log" | "now" | "reconcile">): Promise<MigrationCManifest> {
+export async function finishMigrationC(home: string, deps: Pick<MigrationCDeps, "log" | "now" | "reconcile" | "claudeResumeScanRoot">): Promise<MigrationCManifest> {
   const now = deps.now ?? (() => new Date());
   const state = migrationCState(home);
   if (state.kind !== "parsed" || state.manifest.status !== "phase1-complete") {
@@ -679,6 +712,13 @@ export async function finishMigrationC(home: string, deps: Pick<MigrationCDeps, 
   }
 
   if (!done("rekey-transcripts")) {
+    // Round 5: with no router door the daemon could not sweep the claude staging roots first (its late site
+    // sweeps only through the door), and a staging copy swept at the OLD key after this re-key becomes an
+    // orphan — so, like an official working copy with no door, a staging root refuses phase 2 here.
+    const scanRoot = deps.claudeResumeScanRoot ?? (process.env.WINTER_CLAUDE_RESUME_SCAN_ROOT?.trim() || tmpdir());
+    if (deps.reconcile === undefined && stagingRootsPresent(scanRoot)) {
+      throw new MigrationCRefused("sdk_home_migration_refused", `${scanRoot} holds a claude staging root and no router can reconcile it here — the transcripts are not re-keyed before it is; the next daemon boot with a working router finishes Migration C`);
+    }
     const detail = rekeyTranscripts(home, m, deps.log);
     record("rekey-transcripts", (m.rekeyed ?? []).length === 0 ? "skipped" : "done", detail);
   }

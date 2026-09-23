@@ -13,7 +13,7 @@ import { mkdirSync, mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RESUME_STAGING_PREFIX } from "@yanlinglabs/winter-runtime-sdk";
-import { controlPlaneDenyRules, sandboxConfigFor } from "../../src/runtime-sdk/mode-options";
+import { controlPlaneDenyRules, escapeRulePath, sandboxConfigFor } from "../../src/runtime-sdk/mode-options";
 import { escapeFloorHit } from "../../src/runtime-sdk/hooks";
 import { homeFencedDirs } from "../../src/runtime-sdk/home-fence";
 import { storeWriteDenial, protectedReadDenial } from "../../src/runtime-sdk/protected-paths";
@@ -222,5 +222,47 @@ describe("review I7: protected paths vs Bash", () => {
       ["echo x > .winter/WINTER.md", "/Users/x"],                  // run from the home's parent: it IS the home's
       ["cd /Users/x && echo x > .winter/sdk/WINTER.md", "/Users/x/proj"],
     ] as const) expect({ cmd, hit: escapeFloorHit(cmd, H, cwd) !== undefined }).toEqual({ cmd, hit: true });
+  });
+});
+
+// Round 4, minor 4 (controller item): both legs read permission-rule paths in gitignore-style grammar, where
+// `[x]` is a character class and `*`/`\` are special — so a home (or tmpdir) whose path holds `[`, `]`, `*`
+// or `\` got deny rules that never matched it. Every filesystem PATH the daemon writes into a rule is spelled
+// with `escapeRulePath` (the router's own measured rule: `[ ] * \` backslash-escaped, `?` left raw); the glob
+// parts (`**`, `settings*.json`, `claude-resume-*`) stay the rule's own. `gitignoreMatch` below emulates the
+// measured semantics: `\c` is a literal c, `[…]` a class, `**` any depth, `*`/`?` within one segment.
+describe("round 4, minor 4: glob metacharacters in the daemon's own rule paths", () => {
+  const gitignoreMatch = (rule: string, path: string): boolean => {
+    const pattern = rule.replace(/^[A-Za-z]+\(/, "").replace(/\)$/, "").replace(/^\/\//, "/");
+    let re = "";
+    for (let i = 0; i < pattern.length; i += 1) {
+      const c = pattern[i]!;
+      if (c === "\\" && i + 1 < pattern.length) { re += `\\${pattern[++i]!}`; continue; }
+      if (c === "*" && pattern[i + 1] === "*") { re += ".*"; i += 1; continue; }
+      if (c === "*") { re += "[^/]*"; continue; }
+      if (c === "?") { re += "[^/]"; continue; }
+      if (c === "[") { const end = pattern.indexOf("]", i + 1); if (end > i) { re += `[${pattern.slice(i + 1, end)}]`; i = end; continue; } }
+      re += c.replace(/[.+^${}()|]/g, "\\$&");
+    }
+    return new RegExp(`^${re}$`).test(path);
+  };
+  test("escapeRulePath escapes [ ] * \\ and leaves ? raw", () => {
+    expect(escapeRulePath("/u/[wip]*a\\b?c")).toBe("/u/\\[wip\\]\\*a\\\\b?c");
+  });
+  test("a home containing [x] still has its control-plane deny rules applied — glob parts intact", () => {
+    const home = "/Users/x/[wip] homes/.winter";
+    const rules = controlPlaneDenyRules(home);
+    const writes = rules.filter((r) => r.startsWith("Write("));
+    const reads = rules.filter((r) => r.startsWith("Read("));
+    for (const target of [`${home}/run/core.sock`, `${home}/runtimes/bin/winter`, `${home}/settings.json`, `${home}/sdk/settings.json`, `${home}/sdk/agents/a.md`, `${home}/cache/runs/r1/x`, `${home}/plugins/p/plugin.json`, `${home}/trust.json`]) {
+      expect({ target, denied: writes.some((r) => gitignoreMatch(r, target)) }).toEqual({ target, denied: true });
+    }
+    for (const target of [`${home}/run/core.sock`, `${home}/runtimes/runtime-state.db`, `${home}/sdk/.winter.json`, `${home}/cache/runs/r1/.claude.json`]) {
+      expect({ target, denied: reads.some((r) => gitignoreMatch(r, target)) }).toEqual({ target, denied: true });
+    }
+    // the project-independent glob rules are untouched, and still match
+    expect(writes.some((r) => gitignoreMatch(r, "/p/app/.winter/settings.local.json"))).toBe(true);
+    // the old spelling (unescaped) is what failed: `[wip]` read as a one-character class
+    expect(gitignoreMatch(`Write(//${home}/run/**)`, `${home}/run/core.sock`)).toBe(false);
   });
 });
