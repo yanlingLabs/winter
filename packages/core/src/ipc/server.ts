@@ -101,7 +101,7 @@ import type { TrustStore } from "../agent/trust";
 import type { BackgroundTaskRegistry } from "../agent/bg-registry";
 import type { SkillStore, SkillErrorKind } from "../agent/skills";
 import type { McpManager } from "../agent/mcp/manager";
-import { PluginStore, type PluginInfo } from "../agent/plugins";
+import { PluginStore, type PluginInfo, type PluginConsentRecord } from "../agent/plugins";
 import { pluginSpawnEligible, hookRegistryPlugins } from "../agent/plugins";
 import type { ToolRegistry } from "../agent/tools/registry";
 import type { PluginSupervisor, PluginConn, InvokeError, EligiblePlugin, SupervisorStatus } from "../plugins/supervisor";
@@ -140,6 +140,7 @@ import {
   type PluginManagerOptions, type PluginScope as AdapterPluginScope,
 } from "../plugins/sdk-plugin-api";
 import { pluginSkillsFor } from "../plugins/plugin-skills";
+import { loadManifest, requiredConsentClasses } from "../agent/plugin-manifest";
 import { sdkPluginsRoot, sdkSettingsPath } from "../agent/paths";
 
 interface ConnState {
@@ -1456,6 +1457,35 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     return at > 0 ? spec.slice(0, at) : spec;
   }
 
+  const PLUGIN_CONSENT_CLASSES = ["exec", "tcc", "hardware"] as const;
+
+  /** I1 fix round 1: `plugin.list`'s `extras` — winter-plugin.json's tier/permissions/entry plus
+   *  the SAME consent-completeness pair `agent/plugins.ts#PluginStore` computes (requiredConsents
+   *  from the manifest, consented from `<home>/settings.json`'s `plugins.consents`, keyed by the
+   *  qualified `"<id>@<marketplace>"` spec — the same key `plugin.setConsent` writes under). `undefined`
+   *  when the plugin has no winter-plugin.json (matches `PluginInfo.legacy`'s own "no manifest"
+   *  case). Scope-independent: `plugins.consents` is Winter's own daemon-level store (spec §4.1,
+   *  "stays"), not tied to which sdk file the enabled flag lives in, so this works the same for a
+   *  project/local-scope listing as it does for user scope. */
+  function pluginExtrasFor(installPath: string, id: string, consentRecord: PluginConsentRecord | undefined): {
+    tier: "capability" | "platform";
+    permissions?: { exec?: boolean; tcc?: string[]; hardware?: string[] };
+    requiredConsents: Array<"exec" | "tcc" | "hardware">;
+    consented: Array<"exec" | "tcc" | "hardware">;
+    entry?: { command: string; args?: string[] };
+  } | undefined {
+    const { manifest } = loadManifest(installPath, id);
+    if (!manifest) return undefined;
+    const consented = PLUGIN_CONSENT_CLASSES.filter((c) => consentRecord?.[c] !== undefined);
+    return {
+      tier: manifest.tier,
+      ...(manifest.permissions ? { permissions: manifest.permissions } : {}),
+      requiredConsents: requiredConsentClasses(manifest),
+      consented,
+      ...(manifest.entry ? { entry: { command: manifest.entry.command, ...(manifest.entry.args ? { args: manifest.entry.args } : {}) } } : {}),
+    };
+  }
+
   /** `PluginManagerError` (a typed, expected refusal — unknown marketplace/plugin, not installed,
    *  an unwritable settings file, …) becomes `RpcFailure(INVALID_PARAMS, message)`; anything else
    *  propagates unchanged — never swallowed. */
@@ -2637,7 +2667,17 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.pluginList: {
         const p = parseParams(PluginListParams, params);
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.list is not available on this server (no winterHome configured)");
-        const plugins = await listPlugins(pluginManagerOptionsFor(opts.winterHome, p.cwd));
+        const listed = await listPlugins(pluginManagerOptionsFor(opts.winterHome, p.cwd));
+        // I1 fix round 1: `extras` over the wire — lane L5's Mac app consent UI needs
+        // tier/permissions/requiredConsents/consented/entry, not just Contract B's bare listing.
+        let consents: Record<string, PluginConsentRecord> = {};
+        try {
+          consents = loadSettings(join(opts.winterHome, "settings.json")).plugins?.consents ?? {};
+        } catch { /* degrade to "nothing consented" rather than fail the whole list */ }
+        const plugins = listed.map((entry) => {
+          const extras = pluginExtrasFor(entry.installPath, entry.id, consents[`${entry.id}@${entry.marketplace}`]);
+          return extras ? { ...entry, extras } : entry;
+        });
         return { ok: true, plugins };
       }
       case METHODS.pluginInstall: {
