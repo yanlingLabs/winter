@@ -171,10 +171,15 @@ describe("BLOCKING: convertLegacyPlugins wired into Migration C's convert-plugin
     writeFileSync(join(home, "plugins", "battery-limiter", "winter-plugin.json"), JSON.stringify({
       id: "battery-limiter", tier: "capability", permissions: { hardware: ["battery"] },
     }));
-    // The legacy home had this plugin ENABLED — convertLegacyPlugins reads plugins.enabled/disabled
-    // off the LEGACY settings.json to decide the converted plugin's enabled state (see its own doc).
+    // The legacy home had this plugin ENABLED and fully consented (finding 1, post-merge fix round:
+    // enabled alone is no longer enough — the legacy consent record must have covered every class
+    // the pre-WS-21 rule required; battery-limiter's manifest declares permissions.hardware, so it
+    // needed "hardware") — convertLegacyPlugins reads plugins.enabled/disabled/consents off the
+    // LEGACY settings.json to decide the converted plugin's enabled state (see its own doc).
     const legacySettings = JSON.parse(readFileSync(join(home, "settings.json"), "utf8"));
-    writeFileSync(join(home, "settings.json"), JSON.stringify({ ...legacySettings, plugins: { enabled: ["battery-limiter"] } }));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({
+      ...legacySettings, plugins: { enabled: ["battery-limiter"], consents: { "battery-limiter": { hardware: Date.now() } } },
+    }));
 
     const m = await runMigrationC(home, deps({
       reconcile: stubReconcile().reconcile,

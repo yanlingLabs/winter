@@ -197,6 +197,86 @@ describe("convertLegacyPlugins: maps fields and hook events; the original stays 
     expect(listing?.enabled).toBe(false);
   });
 
+  // Post-merge fix round, finding 1 (Opus review): before WS-21, a manifest plugin's MCP servers,
+  // hooks and skills only ran with its OWN exec consent -- the legacy enabled flag alone was never
+  // enough. Converting an enabled-but-unconsented plugin straight to enabled would silently start
+  // running commands the user never approved.
+  describe("finding 1: enabled state requires the legacy consent to have covered everything required", () => {
+    test("enabled in legacy settings but with NO consent record at all converts DISABLED", async () => {
+      const h = home();
+      legacyPlugin(h, "risky", {
+        id: "risky", tier: "platform", entry: { command: "bun", args: ["index.ts"] },
+      });
+      writeFileSync(join(h, "settings.json"), JSON.stringify({
+        schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
+        plugins: { enabled: ["risky"] }, // enabled, but plugins.consents has no "risky" entry at all
+      }));
+
+      const result = await convertLegacyPlugins(h);
+      expect(result.converted[0]?.enabled).toBe(false);
+
+      const options = { pluginsRoot: sdkPluginsRoot(h), settingsPathFor: () => join(sdkHomeFor(h), "settings.json") };
+      const [listing] = await listPlugins(options);
+      expect(listing?.enabled).toBe(false);
+    });
+
+    test("enabled with a PARTIAL consent record (missing hardware) converts DISABLED", async () => {
+      const h = home();
+      legacyPlugin(h, "partial", {
+        id: "partial", tier: "capability", permissions: { exec: true, hardware: ["battery"] },
+      });
+      writeFileSync(join(h, "settings.json"), JSON.stringify({
+        schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
+        plugins: { enabled: ["partial"], consents: { partial: { exec: 1 } } }, // hardware missing
+      }));
+
+      const result = await convertLegacyPlugins(h);
+      expect(result.converted[0]?.enabled).toBe(false);
+    });
+
+    test("enabled with a FULLY consented record converts ENABLED", async () => {
+      const h = home();
+      legacyPlugin(h, "trusted", {
+        id: "trusted", tier: "platform", entry: { command: "bun" }, permissions: { tcc: ["accessibility"] },
+      });
+      writeFileSync(join(h, "settings.json"), JSON.stringify({
+        schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
+        plugins: { enabled: ["trusted"], consents: { trusted: { exec: 1, tcc: 2 } } },
+      }));
+
+      const result = await convertLegacyPlugins(h);
+      expect(result.converted[0]?.enabled).toBe(true);
+
+      const options = { pluginsRoot: sdkPluginsRoot(h), settingsPathFor: () => join(sdkHomeFor(h), "settings.json") };
+      const [listing] = await listPlugins(options);
+      expect(listing?.enabled).toBe(true);
+    });
+
+    test("a plugin.json-only (no winter-plugin.json) legacy plugin never needed consent -- enabled state is untouched", async () => {
+      const h = home();
+      const dir = join(h, "plugins", "meta-only");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "plugin.json"), JSON.stringify({ name: "Meta Only" }));
+      writeFileSync(join(h, "settings.json"), JSON.stringify({
+        schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, plugins: { enabled: ["meta-only"] },
+      }));
+
+      const result = await convertLegacyPlugins(h);
+      expect(result.converted[0]?.enabled).toBe(true);
+    });
+
+    test("a manifest with nothing to consent to (no entry/permissions/mcpServers/hooks/skills) stays enabled", async () => {
+      const h = home();
+      legacyPlugin(h, "harmless", { id: "harmless", tier: "capability", contributes: { tools: true } });
+      writeFileSync(join(h, "settings.json"), JSON.stringify({
+        schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, plugins: { enabled: ["harmless"] },
+      }));
+
+      const result = await convertLegacyPlugins(h);
+      expect(result.converted[0]?.enabled).toBe(true);
+    });
+  });
+
   test("a legacy plugin.json-only (no winter-plugin.json) plugin converts with metadata only", async () => {
     const h = home();
     const dir = join(h, "plugins", "legacy-meta");
