@@ -1,9 +1,9 @@
 // Fix wave (whole-branch review row 7): Winter's CONFIGURED MCP servers, forwarded to a Winter child.
 //
-// Two sources, the same two `McpManager` starts for the daemon's shared registry (`agent/mcp/
-// manager.ts`): the user's `settings.mcpServers` (source "user") and a TRUSTED project's
-// `<cwd>/.mcp.json` (source "project", trust-gated exactly as `McpManager.ensureProject` gates it —
-// an untrusted directory contributes nothing, and nothing is read from it). Daemon settings surface
+// The sources (WS-21: see the paragraph below for the current three): originally the user's
+// `settings.mcpServers` (source "user") and a TRUSTED project's MCP file (source "project", trust-gated
+// exactly as `McpManager.ensureProject` gates it — an untrusted directory contributes nothing, and
+// nothing is read from it). The repo-root `.mcp.json` named in the history below is no longer read. Daemon settings surface
 // batch 3 (item 3b) widened the USER side (`settings.mcpServers`) to accept the HTTP/SSE shapes both
 // SDKs' `Options.mcpServers` support; a later parity fix (controller-directed) widened the PROJECT
 // side to match — `.mcp.json` now accepts stdio/http/sse too, PER ENTRY (`parseProjectMcpServers`,

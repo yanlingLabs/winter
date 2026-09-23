@@ -1781,12 +1781,14 @@ export async function startDaemon(opts: {
     onTurnSettled: (sid) => { signals.onTurnSettled?.(sid); },
     onSupportedAgents: (sid, agents) => supportedAgentsCache.observe(sid, agents),
     ...(titler === undefined ? {} : { titler }),
-    // Fix wave (review row 7): the user's `settings.mcpServers` and a TRUSTED project's `.mcp.json`
-    // reach the child under the registry's own keys (`mcp__<key>__<tool>`), any transport
+    // Fix wave (review row 7): the user's servers and a TRUSTED project's MCP file (WS-21: its
+    // `.winter/mcp.json`; the repo-root `.mcp.json` is no longer read) reach the child under the
+    // registry's own keys (`mcp__<key>__<tool>`), any transport
     // (stdio/http/sse). Read LIVE per incarnation from the same holder and the same `TrustStore`
     // the McpManager consults. `log`: the SAME one-stderr-line-per-name convention `McpManager`'s
     // own `log` dep already uses (below), for a project-scope entry that didn't validate.
-    // WS-21: the user-scope servers moved to `sdk/.winter.json` (`sdkUserMcpServers`, read live).
+    // WS-21: the user and local scopes live in `sdk/.winter.json` (`sdkUserMcpServers`/`sdkLocalMcpServers`,
+    // the local one keyed by `localScopeKeyFor`), read live; precedence local > project > user.
     extraMcpServers: (session) => configuredMcpServersFor({
       settings,
       userMcpServers: sdkUserMcpServers(winterHome),
