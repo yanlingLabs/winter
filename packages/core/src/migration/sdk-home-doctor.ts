@@ -51,7 +51,7 @@ export function sdkHomeDoctorLines(home: string): string[] {
     else if (state.kind === "parsed") {
       const m = state.manifest;
       if (m.status === "complete") lines.push(`sdk home: migrated (Migration C complete ${m.finishedAt ?? ""}) — backups and archives under ${m.archiveDir}`);
-      else if (m.status === "phase1-complete") lines.push(`sdk home: phase 1 done — the official working copies are reconciled and Migration C finishes at the next daemon boot (archive ${m.archiveDir})`);
+      else if (m.status === "phase1-complete") lines.push(`sdk home: Migration C phase 1 done, phase 2 NOT — the official working copies still await the router's reconcile; the next daemon boot on a build that has it finishes Migration C (and refuses to open sessions until it does) — archive ${m.archiveDir}`);
       else lines.push("sdk home: HALF-MIGRATED — run `winter migrate --sdk-home --resume` or `winter migrate --sdk-home --rollback`");
       const quarantinedAtMigration = m.reconciled.filter((r) => r.outcome === "quarantined" || r.outcome === "failed");
       if (quarantinedAtMigration.length > 0) lines.push(`sdk home: ${quarantinedAtMigration.length} official working cop(ies) could not be proved clean at migration: ${quarantinedAtMigration.map((r) => `${r.root} (${r.outcome})`).join(", ")} — a copy is under ${join(home, "cache", "quarantine")} and the original in the archive`);

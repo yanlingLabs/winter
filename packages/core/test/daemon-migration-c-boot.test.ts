@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { startDaemon, type RunningDaemon } from "../src/daemon";
 import { FileSecretStore } from "../src/auth/secret-store";
 import { setRunHomeSupportForTests } from "../src/runtime-sdk/run-home-support";
-import { MigrationCRefused, migrationCCompletePath, migrationCState } from "../src/migration/migrate-c";
+import { MigrationCRefused, migrationCCompletePath, migrationCState, runMigrationC } from "../src/migration/migrate-c";
 import { openRuntimeStateDb } from "../src/runtime-state/db";
 import { readSdkSettings } from "../src/sdk-files";
 
@@ -125,6 +125,27 @@ describe("Migration C at boot (run-home router)", () => {
     } finally {
       if (prior === undefined) delete process.env.WINTER_PROFILE; else process.env.WINTER_PROFILE = prior;
     }
+  });
+
+  // Review: the two-phase ordering — no session can open while the manifest says `phase1-complete`.
+  test("a home left phase1-complete whose phase 2 cannot finish refuses BOOT (no socket, no session), and says why", async () => {
+    setRunHomeSupportForTests(true);
+    const parent = parentDir();
+    const home = join(parent, ".winter");
+    seedOldLayout(home);
+    mkdirSync(join(home, "runtimes", "claude-config", "projects", "-Users-x-app"), { recursive: true });
+    writeFileSync(join(home, "runtimes", "claude-config", "projects", "-Users-x-app", "s-official.jsonl"), '{"type":"user"}\n');
+    // phase 1 ran (the CLI, say); the linked router 0.0.11 has no reconcile door for phase 2
+    const m = await runMigrationC(home, { log: () => {}, reconcileAvailable: true, probe: { alive: () => false, startedAt: () => "unknown" } });
+    expect(m.status).toBe("phase1-complete");
+    for (let attempt = 0; attempt < 2; attempt++) { // the lock was released: a retry refuses the same way
+      let caught: unknown;
+      try { daemon = await boot(home, parent); } catch (err) { caught = err; }
+      expect((caught as MigrationCRefused).code).toBe("sdk_home_migration_refused");
+      expect((caught as Error).message).toContain("no session opens");
+      expect(existsSync(join(home, "run", "core.sock"))).toBe(false);
+    }
+    expect(migrationCState(home)).toMatchObject({ kind: "parsed", manifest: { status: "phase1-complete" } });
   });
 
   test("router 0.0.11 (no run homes): the old layout is left exactly as it is", async () => {
