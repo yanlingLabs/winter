@@ -11,17 +11,11 @@ import { linkedRouterSupportsRunHome } from "../runtime-sdk/run-home-support";
  * `cache/` because the location has to be READABLE by the session — a skill points at its own
  * supporting files by path, and `<home>/run`/`<home>/runtimes` are denied to Read/Glob/Grep and to the
  * Bash sandbox on both legs — and DISPOSABLE: the views are rebuilt before every spawn, and Migration B
- * skips `cache/**` (`migration/migrate-b.ts`).
- */
-export function skillPluginViewsRoot(winterHome: string): string {
-  return join(homeCacheDir(winterHome), "skill-plugins");
-}
-
-/**
- * `<home>/cache` — today used ONLY by the skill views above, and write-fenced WHOLE on both legs
- * (re-review M-a: fencing just the views left the directories above them swappable for links).
- * Because a user may deliberately make it a link (a cache on another volume), the daemon never
- * unlinks it — a spawn that finds it a link gets no plugin skills (`agent/skills.ts`).
+ * skips `cache/**
+ * `<home>/cache` — WS-21: the per-run folders (`cache/runs/<id>`) and the router's quarantine
+ * (`cache/quarantine/`); an older build's skill-plugin views (`cache/skill-plugins`, retired — Migration C
+ * archives them). Write-fenced WHOLE on both legs (re-review M-a). A user may deliberately make it a link
+ * (a cache on another volume); boot recovery then reconciles and removes nothing through it.
  */
 export function homeCacheDir(winterHome: string): string {
   return join(winterHome, "cache");
@@ -29,8 +23,8 @@ export function homeCacheDir(winterHome: string): string {
 
 /**
  * The directory holding the daemon's OWN record of per-project rules the user approved from a card
- * (`agent/approved-project-rules.ts`) — `<home>/permissions`. A leaf helper for the same reason as
- * `skillPluginViewsRoot`: the store writes it and `runtime-sdk/mode-options.ts` write-fences it.
+ * (`agent/approved-project-rules.ts`) — `<home>/permissions`. A leaf helper: the store reads it and
+ * `runtime-sdk/mode-options.ts` write-fences it.
  */
 export function approvedProjectRulesDir(winterHome: string): string {
   return join(winterHome, "permissions");

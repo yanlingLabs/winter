@@ -576,14 +576,10 @@ export function controlPlaneDenyRules(home: string): string[] {
     // depth, whichever project owns them — the same project-INDEPENDENT shape as the control-plane files.
     fsRootAnchored(["**", ".winter", "mcp.json"].join("/")),
     fsRootAnchored(["**", ".winter", "settings*.json"].join("/")),
-    // B1 follow-up (2026-09-22): the skills-only plugin VIEWS (`SkillStore.childSkillSurface`,
-    // `agent/paths.ts`'s `skillPluginViewsRoot`). The next child loads each view as a local plugin,
-    // and a local plugin's manifest may declare COMMAND HOOKS the child runs outside the Bash sandbox —
-    // so a file written here is a self-grant of the same class as the definitions above. Write-fenced
-    // only: the views are deliberately READABLE, because a skill points the model at its own files.
-    // The daemon also rebuilds each view before every spawn; this closes the window in between.
-    // Re-review M-a: the WHOLE `<home>/cache` (only the views use it), so a write tool cannot swap the
-    // directories above the views for links either.
+    // The WHOLE `<home>/cache` (re-review M-a): WS-21's per-run folders — a run home's items, settings
+    // and generated config, which the next child LOADS — and the router's quarantine. (It first held the
+    // retired skills-only plugin views.) Write-fenced only; the run folders' generated config files are
+    // read-denied separately below.
     fsRootAnchored([homeCacheDir(home), "**"].join("/")),
     // Review M6 (2026-09-23): the runtime store, write-denied to the write TOOLS too. It was read-denied
     // (below) and in the Bash sandbox's `denyWrite`, but `Write(<home>/runtimes/bin/winter)` — rung 4

@@ -39,14 +39,12 @@ describe("SkillStore", () => {
     expect(trusted.find((m) => m.name === "proj-skill")!.source).toBe("project");
   });
 
-  test("plugin skills are namespaced <plugin>:<skill>", () => {
+  test("WS-21 (L4 request 2): <home>/plugins/<p>/skills is no tier any more — the plugin manager lists plugin skills", () => {
     const { home, trust } = setup();
     writeSkill(join(home, "plugins", "cool", "skills"), "doit", "doit", "Do it", "Do the thing.");
     const s = new SkillStore({ winterHome: home, trust });
-    const m = s.list({ cwd: null });
-    expect(m.map((x) => x.name)).toContain("cool:doit");
-    expect(m.find((x) => x.name === "cool:doit")!.source).toBe("plugin");
-    expect(s.load("cool:doit", { cwd: null })!.body).toContain("Do the thing");
+    expect(s.list({ cwd: null }).map((x) => x.name)).not.toContain("cool:doit");
+    expect(s.load("cool:doit", { cwd: null })).toBeNull();
   });
 
   test("name precedence project > user for the same bare name", () => {
@@ -92,87 +90,6 @@ describe("SkillStore", () => {
     expect(s.load("nope", { cwd: null })).toBeNull();
   });
 
-  test("a disabled plugin's skills are not discovered; others unaffected", () => {
-    const { home, trust } = setup();
-    writeSkill(join(home, "plugins", "on", "skills"), "hi", "hi", "Say hi", "Hi there!");
-    writeSkill(join(home, "plugins", "off", "skills"), "bye", "bye", "Say bye", "Goodbye!");
-
-    const store = new SkillStore({ winterHome: home, trust, plugins: { disabled: ["off"] } });
-    const names = store.list({ cwd: null }).map((s) => s.name);
-
-    expect(names).toContain("on:hi");
-    expect(names).not.toContain("off:bye");
-  });
-
-  test("without disabled plugins dep, all plugin skills are discovered (unchanged behavior)", () => {
-    const { home, trust } = setup();
-    writeSkill(join(home, "plugins", "on", "skills"), "hi", "hi", "Say hi", "Hi there!");
-    writeSkill(join(home, "plugins", "off", "skills"), "bye", "bye", "Say bye", "Goodbye!");
-
-    const store = new SkillStore({ winterHome: home, trust });
-    const names = store.list({ cwd: null }).map((s) => s.name);
-
-    expect(names).toContain("on:hi");
-    expect(names).toContain("off:bye");
-  });
-
-  test("load() prepends the compat preamble for a claude-format plugin skill", () => {
-    const { home, trust } = setup();
-    // Fixture A: claude-format plugin with .claude-plugin/plugin.json
-    const ccPlugPath = join(home, "plugins", "cc-plug");
-    mkdirSync(join(ccPlugPath, ".claude-plugin"), { recursive: true });
-    writeFileSync(join(ccPlugPath, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "cc-plug" }));
-    writeSkill(join(ccPlugPath, "skills"), "greet", "greet", "d", "BODY-CC" + "x".repeat(100));
-
-    const store = new SkillStore({ winterHome: home, trust });
-    const s = store.load("cc-plug:greet", { cwd: null })!;
-    expect(s.body).toContain("written for Claude Code");           // preamble marker
-    expect(s.body).toContain("task_create");                        // mapping table present
-    expect(s.body).toContain("spawn_agent");
-    expect(s.body).toContain(join(home, "plugins", "cc-plug", "skills", "greet")); // base dir line
-    expect(s.body.indexOf("written for Claude Code")).toBeLessThan(s.body.indexOf("BODY-CC")); // preamble BEFORE body
-  });
-
-  test("load() does NOT prepend the preamble for a winter-native plugin skill", () => {
-    const { home, trust } = setup();
-    // Fixture B: winter-native plugin without .claude-plugin
-    writeSkill(join(home, "plugins", "native-plug", "skills"), "greet", "greet", "d", "BODY-NATIVE");
-
-    const store = new SkillStore({ winterHome: home, trust });
-    const s = store.load("native-plug:greet", { cwd: null })!;
-    expect(s.body).not.toContain("written for Claude Code");
-  });
-
-  test("preamble survives body capping (prepended after the cap)", () => {
-    const { home, trust } = setup();
-    // Use cc-plug with body > 64 bytes
-    const ccPlugPath = join(home, "plugins", "cc-plug");
-    mkdirSync(join(ccPlugPath, ".claude-plugin"), { recursive: true });
-    writeFileSync(join(ccPlugPath, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "cc-plug" }));
-    writeSkill(join(ccPlugPath, "skills"), "greet", "greet", "d", "BODY-CC" + "x".repeat(100));
-
-    const smallCapStore = new SkillStore({ winterHome: home, trust, caps: { bodyBytes: 64 } });
-    const s = smallCapStore.load("cc-plug:greet", { cwd: null })!;
-    expect(s.body).toContain("task_create"); // mapping intact despite truncated body
-    expect(s.body).toContain("[…truncated]"); // body itself was capped
-  });
-
-  test("discover() marks claudeFormat only on claude-format plugin skills", () => {
-    const { home, trust } = setup();
-    // Fixture A: claude-format plugin
-    const ccPlugPath = join(home, "plugins", "cc-plug");
-    mkdirSync(join(ccPlugPath, ".claude-plugin"), { recursive: true });
-    writeFileSync(join(ccPlugPath, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "cc-plug" }));
-    writeSkill(join(ccPlugPath, "skills"), "greet", "greet", "d", "BODY-CC" + "x".repeat(100));
-
-    // Fixture B: winter-native plugin
-    writeSkill(join(home, "plugins", "native-plug", "skills"), "greet", "greet", "d", "BODY-NATIVE");
-
-    const store = new SkillStore({ winterHome: home, trust });
-    const all = store.list({ cwd: null });
-    expect(all.find((s) => s.name === "cc-plug:greet")?.claudeFormat).toBe(true);
-    expect(all.find((s) => s.name === "native-plug:greet")?.claudeFormat).toBeUndefined();
-  });
 
   describe("writeSelf / deleteSelf", () => {
     test("writeSelf → list shows source self + author stamped in frontmatter", async () => {

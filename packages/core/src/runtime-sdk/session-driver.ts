@@ -272,14 +272,6 @@ export interface WinterLegDeps {
    *  MEMDIR decision this assembler's `assemble()` just used to build the system prompt. */
   assembler?: Pick<ContextAssembler, "assemble" | "memoryDirFor">;
   /**
-   * B1 (2026-09-22): the daemon's ONE `SkillStore` — the same instance the assembler and the
-   * `skills.*` RPCs read — asked, per incarnation, which of its skills a CODE child can load
-   * (`childSkillSurface`: skills-only plugin views + the invocable names, `Skill(<name>)` deny rules
-   * applied from the LIVE settings). Absent (a harness without one) ⇒ no `Options.plugins`/`skills`,
-   * exactly as before, and the child indexes no skill at all (`settingSources: []`).
-   */
-  skills?: Pick<SkillStore, "childSkillSurface">;
-  /**
    * Lane B (2026-09-22): the user's SAVED allow rules for a session at `cwd` — Winter's raw rule
    * strings, trust-gated (`mode-options.ts`'s `persistedAllowRulesFor`, wired by `daemon.ts` over the
    * live settings, the project-settings resolver, the rules store and the trust store). Read at EVERY
@@ -683,17 +675,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         primary ??= rows[0];
         extraDirs = primary === undefined ? [] : rows.filter((d) => d !== primary);
       } catch { /* a session with no dirs row: workdir-less */ }
-      // B1: the skills this child may load, from the SAME SkillStore (and the same cwd) the daemon's
-      // `skills.list` answers from — CODE only, as the engine's registry always had it (chat and
-      // dispatch never offered `Skill`). Re-read here at every incarnation, so an installed/removed/
-      // disabled plugin or a toggled `Skill(<name>)` deny rule reaches the next child, no restart.
-      // The model sees ONE listing: the child's own `skill_listing` attachment, built from exactly
-      // this set (`winterSystemPromptFor` no longer renders the daemon's).
-      // WS-21 (L3.4): on a run-home incarnation the run folder carries the skills (and plugins load natively
-      // from `enabledPlugins`), so no daemon-built surface is handed over.
-      const skillSurface = !runHomeApplied && mode === "code" && deps.skills !== undefined
-        ? deps.skills.childSkillSurface({ cwd: primary ?? deps.tmpDirOf(sessionId), deny: sdkDenyRules(home) })
-        : undefined;
+      // WS-21 (L4 request 2): the daemon hands no skills or plugin views to a child any more — the run
+      // folder carries the skills and both runtimes load plugins natively (`enabledPlugins`); the old
+      // skills-only plugin-view handover (`SkillStore.childSkillSurface`) is retired.
       const systemPrompt = deps.assembler === undefined ? undefined : winterSystemPromptFor(deps.assembler, {
         mode, origin: live.origin, primary, cwd: primary ?? deps.tmpDirOf(sessionId),
         outDir: deps.outDirOf(sessionId), extraDirs, effort: live.effort,
@@ -868,7 +852,6 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // identical merged map from one owner.
         // WS-21 (L3.4): on a run-home incarnation the agents are the run folder's (copies, spec §3.3).
         ...(runHomeApplied ? {} : { agents: mergedAgentDefinitions(home, cwd, deps.projectAgentDefinitions) }),
-        ...(skillSurface === undefined ? {} : { plugins: skillSurface.plugins, skills: skillSurface.skills }),
         // Lane B: the user's SAVED allow rules, live and trust-gated (`WinterLegDeps.persistedAllowRules`).
         ...(runHomeApplied || deps.persistedAllowRules === undefined ? {} : { persistedAllow: deps.persistedAllowRules(cwd) }),
         // WS-21: the user tier's allow and deny rules, read live from `sdk/settings.json` (claude grammar).
@@ -1164,14 +1147,6 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // WS-21: the SAME live `sdk/settings.json` read the Winter leg's `optionsFor` makes.
         ...userRulesFrom(deps.home, runHomeApplied),
         ...(runHomeApplied ? { runHomeApplied: true } : {}),
-        // Lane B (router 0.0.11): the SAME skills-only plugin views the Winter leg's child gets —
-        // enabled + `exec`-consented plugins only (`SkillStore.childSkillSurface`) — handed to claude
-        // through the router's `plugins` policy, plus the deny rules under claude's own skill spelling.
-        ...(() => {
-          if (runHomeApplied || mode !== "code" || deps.skills === undefined) return {};
-          const surface = deps.skills.childSkillSurface({ cwd: capSession.cwd, deny: sdkDenyRules(deps.home) });
-          return { skillPlugins: surface.plugins, skillDenyAliases: surface.officialDeny };
-        })(),
         // Phase 9c (P9c-1): the LIVE settings snapshot (`deps.settings()` — the same hot holder
         // `create()`/`legForNew` already read above; never a boot snapshot) — `official-options.ts`'s
         // `officialInputFor` reads it ONLY through `officialSubscriptionAuthEnabled`, and

@@ -63,7 +63,7 @@ import { loadUserAgentDefinitions, loadProjectAgentDefinitions } from "./agent/a
 import { SupportedAgentsCache } from "./agent/supported-agents-cache";
 import { BackgroundTaskRegistry } from "./agent/bg-registry";
 import { sessionTmpDir } from "./agent/session-tmp";
-import { PluginStore, pluginMcpEligible, pluginSkillsEligible, pluginSpawnEligible, hookRegistryPlugins } from "./agent/plugins";
+import { PluginStore, pluginSpawnEligible } from "./agent/plugins";
 import { PluginSupervisor } from "./plugins/supervisor";
 import { PluginContribRegistry } from "./plugins/contrib";
 import { HookRegistry, HookFacade } from "./plugins/hook-registry";
@@ -689,22 +689,9 @@ export async function startDaemon(opts: {
   // but ALSO hot-rebuilt on lifecycle changes (unlike MCP servers today), matching Tier-2's
   // hotApplyStart/hotApplyStop precedent for "no restart needed" plugin changes.
   const hookRegistry = new HookRegistry();
-  // B1 (lane B): `disabled` is a LIVE getter over the reassignable `settings` holder, not a boot
-  // snapshot — the store now also decides which plugin skills a runtime child loads, per incarnation.
-  const skillStore = new SkillStore({
-    winterHome, trust: trustStore,
-    plugins: {
-      disabled: () => settings?.plugins?.disabled ?? [],
-      // Lane B (review, 2026-09-23): a plugin's skills reach a session (either leg) only when the user
-      // ENABLED it and granted its `exec` consent — a skill can run shell commands. Read LIVE from the
-      // settings holder (a fresh `PluginStore` over it, as `ipc/server.ts`'s own live plugin list does),
-      // so enabling/consenting reaches the next spawn with no restart.
-      sessionEligible: () => new Set(
-        new PluginStore({ winterHome, plugins: settings?.plugins, consents: settings?.plugins?.consents }).list()
-          .filter(pluginSkillsEligible).map((p) => p.name),
-      ),
-    },
-  });
+  // WS-21 (L4 request 2): the store lists the user, self, project and builtin tiers; a plugin's skills are
+  // claude-native content now (the runtimes load them, and `skills.list`'s plugin half is lane L4's).
+  const skillStore = new SkillStore({ winterHome, trust: trustStore });
   // File-based memory (MEMDIR, T1 — design doc `2026-07-15-file-based-memory-design.md`): a live
   // getter over the `settings` holder (assigned above; reassigned in place by the hot-settings
   // watcher below), read fresh by BOTH the write-root join (`sessionDirs`, just below) and the
@@ -1042,10 +1029,8 @@ export async function startDaemon(opts: {
   // `registry` const, which isn't in scope here) so it keeps behaving correctly either way — a safe
   // no-op via optional chaining while `sharedRegistry` is still null (no provider).
   const allPlugins = pluginStore.list();
-  // Boot-time hook-registry build (Phase 4f Task 2) — the SAME eligible-plugin projection
-  // (`hookRegistryPlugins`, agent/plugins.ts) ipc/server.ts's lifecycle RPCs use to rebuild this
-  // SAME `hookRegistry` instance hot, later, off a fresh `livePlugins()` read.
-  hookRegistry.rebuild(hookRegistryPlugins(allPlugins, winterHome));
+  // WS-21 (L4 request 2): no boot-time plugin hook build — a plugin's hooks are claude-native
+  // `hooks/hooks.json` content the runtimes load themselves (spec §5.1/§5.3).
   const pluginSupervisor = new PluginSupervisor({
     runDir: dirs.runDir,
     socketPath: dirs.socketPath,
@@ -1780,9 +1765,6 @@ export async function startDaemon(opts: {
     // Winter's persona per mode, the `_assistant` bucket, the output style — so a Winter-leg session
     // speaks as Winter.
     assembler,
-    // B1 (lane B): the SAME SkillStore the assembler and `skills.*` read — the plugin skills a code
-    // child loads ride `Options.plugins`/`skills` from it (`SkillStore.childSkillSurface`).
-    skills: skillStore,
     // Lane B: the user's SAVED allow rules reach both legs' children — `settings.json`, a TRUSTED
     // project's overlay (the SAME `projectSettings` resolver, at the SAME repo root) and its
     // `permissions.local.json` (the SAME `permissionRules` store `approval.respond` writes, read only
@@ -2164,34 +2146,9 @@ export async function startDaemon(opts: {
     // disabled (`settings.mcp.disabled`) — `stdioMcpServersFor` is the one filter both facts go
     // through (settings.ts).
     await mcp.startAll(stdioMcpServersFor(sdkUserMcpServers(winterHome), settings?.mcp?.disabled));
-    // Plugin MCP servers start only with explicit settings consent (mcpEnabled = enabled &&
-    // !disabled); a plugin's skills are always live (SkillStore above), but its MCP/manifest
-    // content is the seam that needs the user opting in via settings.plugins.enabled AND,
-    // per-exec-class, a settings.plugins.consents record (pluginMcpEligible in agent/plugins.ts —
-    // legacy plugins have requiredConsents [] so this is unchanged for them; a manifest plugin
-    // with exec content that's enabled but unconsented is excluded here, logged below). The
-    // `!pluginMcpEligible(p)` on the right is the SAME eligibility predicate the enabledPlugins
-    // filter below uses — deriving it inline (e.g. hand-rolling !consentComplete(p)) would let the
-    // why-log drift out of sync with what actually gates MCP start; the left-hand guard just
-    // narrows the log to the "would be eligible if not for consent" case so we don't log for
-    // plugins that were never enabled or never carried MCP content in the first place.
-    for (const p of allPlugins) {
-      if (p.mcpEnabled && !p.disabled && (p.hasMcp || p.hasManifestMcp) && !pluginMcpEligible(p)) {
-        const missing = p.requiredConsents.filter((c) => !p.consented.includes(c));
-        console.error(`plugin ${p.name}: enabled but missing consent for ${missing.join(", ")} — MCP not started`);
-      }
-    }
-    // manifestServers (Task 4, spec §2: "mcpServers may now come from the manifest instead of
-    // .mcp.json ... manifest wins on conflict") comes straight off PluginInfo — PluginStore.list()
-    // already ran loadManifest once per plugin and carried contributes.mcpServers through as
-    // p.manifestServers (undefined for legacy plugins and manifest plugins with no mcpServers
-    // declared). Re-reading winter-plugin.json here would risk a manifest that read fine moments
-    // ago (hasManifestMcp true, gating eligibility) but fails to reparse on a second read —
-    // silently falling back to the legacy .mcp.json path without ever disclosing that switch.
-    const enabledPlugins = allPlugins
-      .filter(pluginMcpEligible)
-      .map((p) => ({ name: p.name, dir: join(winterHome, "plugins", p.name), manifestServers: p.manifestServers }));
-    await mcp.startPlugins(enabledPlugins);
+    // WS-21 (L4 request 2): a plugin's MCP servers are claude-native content now (its `.mcp.json`, or a
+    // claude manifest's own `mcpServers`), loaded by both runtimes themselves (spec §5.3) — the daemon no
+    // longer starts one.
 
     // Tier-2 platform plugins (Phase 4b Task 3, spec §3): PluginSupervisor owns process lifecycle
     // (spawn/registration timeout/crash backoff/circuit breaker/PID-file orphan reclaim) for every
