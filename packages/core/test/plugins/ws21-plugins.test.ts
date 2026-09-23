@@ -26,6 +26,7 @@ import {
   type PluginManagerOptions,
 } from "../../src/plugins/sdk-plugin-api";
 import { installPluginFromDirectory } from "../../src/plugins/lifecycle";
+import { pluginSkillsFor } from "../../src/plugins/plugin-skills";
 import { loadManifest } from "../../src/agent/plugin-manifest";
 import { PluginStore } from "../../src/agent/plugins";
 
@@ -183,5 +184,29 @@ describe("PluginStore (sync): list shows extras for an installed, enabled plugin
     const [info] = store.list();
     expect(info?.disabled).toBe(true);
     expect(info?.mcpEnabled).toBe(false);
+  });
+});
+
+describe("skills.list shows plugin:skill (spec §5.3)", () => {
+  test("an enabled plugin's skills appear namespaced plugin:skill, loadable in sessions", async () => {
+    mkdirSync(join(marketplaceDir, "plugins", "p", "skills", "greet"), { recursive: true });
+    writeFileSync(join(marketplaceDir, "plugins", "p", "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: hi\n---\nbody");
+    await addMarketplace(options, marketplaceDir);
+    await installPlugin(options, "p@m", "user");
+
+    const skills = await pluginSkillsFor(options);
+    expect(skills).toEqual([{ name: "p:greet", description: "hi", source: "plugin", path: join(marketplaceDir, "plugins", "p", "skills", "greet", "SKILL.md"), loadsInSessions: true }]);
+  });
+
+  test("a disabled plugin's skills still appear, marked not loadable", async () => {
+    mkdirSync(join(marketplaceDir, "plugins", "p", "skills", "greet"), { recursive: true });
+    writeFileSync(join(marketplaceDir, "plugins", "p", "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: hi\n---\nbody");
+    await addMarketplace(options, marketplaceDir);
+    await installPlugin(options, "p@m", "user");
+    await setPluginEnabled(options, "p@m", "user", false);
+
+    const [skill] = await pluginSkillsFor(options);
+    expect(skill?.loadsInSessions).toBe(false);
+    expect(skill?.sessionNote).toContain("Enable the p plugin");
   });
 });

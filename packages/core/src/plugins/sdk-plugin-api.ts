@@ -291,7 +291,19 @@ async function loadPluginSettingsFile(path: string): Promise<LoadedSettingsFile>
 }
 
 async function readEnabledFromSettings(o: PluginManagerOptions, scope: PluginScope, key: string): Promise<boolean> {
-  const loaded = await loadPluginSettingsFile(o.settingsPathFor(scope));
+  // `listPlugins` (below) enumerates every installed record's scope, including a project/local one
+  // a caller with no `cwd` in hand cannot resolve — the daemon's own `settingsPathFor` (a caller
+  // concern, not the adapter's) throws typed in exactly that case (spec: mutating a scope without a
+  // cwd is a refusal, never a silent write to the wrong place). A pure LIST must not crash on that:
+  // a scope this call has no cwd context for reads conservatively as "not enabled", the same
+  // degrade a genuinely missing/unparseable settings file already gets.
+  let path: string;
+  try {
+    path = o.settingsPathFor(scope);
+  } catch {
+    return false;
+  }
+  const loaded = await loadPluginSettingsFile(path);
   return loaded.values.enabledPlugins?.[key] === true;
 }
 

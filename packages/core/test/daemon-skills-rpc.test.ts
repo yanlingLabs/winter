@@ -150,16 +150,29 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
     const home = mkdtempSync(join(tmpdir(), "winter-daemon-skills-"));
     mkdirSync(join(home, "skills", "greet"), { recursive: true });
     writeFileSync(join(home, "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nhi\n");
-    mkdirSync(join(home, "plugins", "superpowers", "skills", "brainstorming"), { recursive: true });
-    writeFileSync(join(home, "plugins", "superpowers", "skills", "brainstorming", "SKILL.md"), "---\nname: brainstorming\ndescription: Explore\n---\nx\n");
-    mkdirSync(join(home, "plugins", "untrusted", "skills", "risky"), { recursive: true });
-    writeFileSync(join(home, "plugins", "untrusted", "skills", "risky", "SKILL.md"), "---\nname: risky\ndescription: Risky\n---\nx\n");
-    // Only a plugin the user ENABLED (with every consent class it requires — none for these legacy
-    // plugins, so the exec record below is inert) reaches a session (a skill can run shell commands)
-    // — `superpowers` is; `untrusted` is installed but never enabled.
+
+    // WS-21: plugin skills are claude-native content now, read off Contract B's installed+enabled
+    // set (`plugins/plugin-skills.ts`), never the retired `<home>/plugins` scan — register both
+    // plugins under `sdk/plugins/installed_plugins.json`, one enabled, one installed-but-disabled
+    // (no more "exec consent" gate for shipped skills, spec §5.4 — enable alone is the consent).
+    const superpowersDir = join(home, "test-mkt", "superpowers");
+    mkdirSync(join(superpowersDir, "skills", "brainstorming"), { recursive: true });
+    writeFileSync(join(superpowersDir, "skills", "brainstorming", "SKILL.md"), "---\nname: brainstorming\ndescription: Explore\n---\nx\n");
+    const untrustedDir = join(home, "test-mkt", "untrusted");
+    mkdirSync(join(untrustedDir, "skills", "risky"), { recursive: true });
+    writeFileSync(join(untrustedDir, "skills", "risky", "SKILL.md"), "---\nname: risky\ndescription: Risky\n---\nx\n");
+    mkdirSync(join(home, "sdk", "plugins"), { recursive: true });
+    writeFileSync(join(home, "sdk", "plugins", "installed_plugins.json"), JSON.stringify({
+      version: 2,
+      plugins: {
+        "superpowers@test-mkt": [{ scope: "user", installPath: superpowersDir, installedAt: new Date().toISOString() }],
+        "untrusted@test-mkt": [{ scope: "user", installPath: untrustedDir, installedAt: new Date().toISOString() }],
+      },
+    }));
+    mkdirSync(join(home, "sdk"), { recursive: true });
+    writeFileSync(join(home, "sdk", "settings.json"), JSON.stringify({ enabledPlugins: { "superpowers@test-mkt": true } }));
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
-      plugins: { enabled: ["superpowers"], consents: { superpowers: { exec: 1 } } },
     }));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     daemon = await startDaemon({ home, secrets, agentProvider: null });
@@ -175,7 +188,7 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
     expect(byName.get("greet")).toMatchObject({ loadsInSessions: false });
     expect(byName.get("greet")!.sessionNote).toContain("only plugin skills");
     expect(byName.get("untrusted:risky")).toMatchObject({ loadsInSessions: false });
-    expect(byName.get("untrusted:risky")!.sessionNote).toContain('"exec" consent');
+    expect(byName.get("untrusted:risky")!.sessionNote).toContain("Enable the untrusted plugin");
 
     const read = await c.request(METHODS.skillsRead, { name: "greet" });
     expect(read.result.skill).toMatchObject({ name: "greet", loadsInSessions: false });
