@@ -57,7 +57,7 @@ import { mountAgents } from "./tui/agents-view";
 import { MEMORY_USAGE, formatDeleted, formatFactDetail, parseMemoryArgs, runMemoryRoute } from "./memory-cli";
 import { formatOptionLines, isOtherChoice, parseQuestionAnswer } from "./questions";
 import { parsePlanResponse } from "./plan-response";
-import { legacyFilesDoctorLine } from "./doctor-legacy-files";
+import { legacyFilesDoctorLine, sdkHomeDoctorSection } from "./doctor-legacy-files";
 import { makeEventBridge, type EventBridge } from "./tui/event-bridge";
 
 const AQUA = "\x1b[38;2;53;214;232m";
@@ -1587,6 +1587,9 @@ if (import.meta.main) {
       // the daemon logs at boot. Named, never touched.
       const legacyLine = legacyFilesDoctorLine(home);
       if (legacyLine !== undefined) console.log(`${AQUA}${legacyLine}${RESET}`);
+      // WS-21 (spec §8): the shared runtime home — Migration C, the settings split, quarantined roots,
+      // untranslated rules, leftover approved-rules entries, the last run-folder sweep.
+      for (const line of sdkHomeDoctorSection(home)) console.log(`${AQUA}${line}${RESET}`);
     };
     // Winter Phase 10a (O7, P10a-2): IN-PROCESS like the two sections above — a plain filesystem
     // presence check (`anthropicConsoleProfileExists`'s own daemon-side equivalent, without

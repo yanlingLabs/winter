@@ -225,6 +225,7 @@ export {
   type MigrationCManifest, type MigrationCState, type MigrationCStep,
 } from "./migration/migrate-c";
 export { splitSettingsToSdk, settingsSplitMarkerPath, SPLIT_KEYS, type SettingsSplitReport } from "./migration/settings-split";
+export { sdkHomeDoctorLines } from "./migration/sdk-home-doctor";
 export {
   ProjectMigrationRefused,
   planProjectMigration,
