@@ -61,7 +61,7 @@
 // `hooksFor(session).official`, already wired at integration.
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, isAbsolute, relative } from "node:path";
+import { basename, dirname, isAbsolute, relative } from "node:path";
 import type {
   HookCallback, HookCallbackMatcher, HookJSONOutput, Options,
   PostToolUseFailureHookInput, PostToolUseHookInput, PreToolUseHookInput,
@@ -338,7 +338,7 @@ export function normaliseEscapeCommand(command: string): string {
  * `~`/`$HOME`/`${HOME}` for a home under the user's own, `$WINTER_HOME`/`${WINTER_HOME}`, and the
  * home's basename (a command that `cd`s to its parent first).
  */
-function homePrefixes(home: string): string[] {
+function homePrefixes(home: string, opts: { basename?: boolean } = {}): string[] {
   const homes = new Set<string>([home]);
   try { homes.add(realpathSync(home).replace(/\/+$/, "")); } catch { /* not created yet: the literal spelling is the one a command could name */ }
   const prefixes = new Set<string>(["$winter_home", "${winter_home}"]);
@@ -350,9 +350,17 @@ function homePrefixes(home: string): string[] {
       for (const tilde of ["~", "$home", "${home}"]) prefixes.add(`${tilde}${rest}`.toLowerCase());
     }
     const base = basename(h);
-    if (base.length > 0) prefixes.add(base.toLowerCase());
+    if (opts.basename !== false && base.length > 0) prefixes.add(base.toLowerCase());
   }
   return [...prefixes];
+}
+
+/** Is `cwd` the home's parent directory (literally or through a link) — where the home's bare basename IS
+ *  the home? `false` when either side is unknown. */
+function isHomeParent(cwd: string | undefined, home: string): boolean {
+  if (cwd === undefined || cwd.length === 0) return false;
+  const real = (p: string): string => { try { return realpathSync(p).replace(/\/+$/, ""); } catch { return p.replace(/\/+$/, ""); } };
+  return real(cwd) === real(dirname(home));
 }
 
 /** One fenced target as the floor matches it. `writeOnly` — the model is POINTED at content under it
@@ -482,7 +490,7 @@ function bashProtectedWriteHook(): HookCallback {
  * refused on ANY mention; `cache` and `plugins` — whose skill content the model is pointed at to read
  * and execute — only in a write-shaped position (after a redirect or a write verb).
  */
-export function escapeFloorHit(command: string, home: string | undefined): string | undefined {
+export function escapeFloorHit(command: string, home: string | undefined, cwd?: string): string | undefined {
   const c = expandAfterCd(normaliseEscapeCommand(command));
   for (const name of ESCAPE_FENCED_FILENAMES) if (c.includes(name)) return name;
   for (const seg of PROJECT_FENCED_SEGMENTS) {
@@ -510,9 +518,15 @@ export function escapeFloorHit(command: string, home: string | undefined): strin
   // Review I7: the user tier's PROTECTED paths (spec §7.2), write-shaped — the shared runtime home's and
   // the old/compat spelling at the home's top level (a link into `sdk/` on a migrated home, the store
   // itself on router 0.0.11). A write tool gets a card for these; an unsandboxed command gets none.
+  // Round 3, minor 4: the WINTER.md needle is the HOME's own — a project's `.winter/WINTER.md` is ordinary
+  // (spec §7.2), and the home's bare basename (`.winter`) names a project's `.winter/` just as well. So the
+  // bare spelling counts for WINTER.md only when the command runs from the home's parent directory.
+  const fullPrefixes = new Set(homePrefixes(bareHome, { basename: false }));
+  const fromHomeParent = isHomeParent(cwd, bareHome);
   for (const pre of homePrefixes(bareHome)) {
+    const instructionsNeedleHere = fullPrefixes.has(pre) || fromHomeParent;
     for (const base of [`${pre}/sdk`, pre]) {
-      for (const needle of [...PROTECTED_KIND_NAMES.map((k) => `${base}/${k}`), `${base}/winter.md`]) {
+      for (const needle of [...PROTECTED_KIND_NAMES.map((k) => `${base}/${k}`), ...(instructionsNeedleHere ? [`${base}/winter.md`] : [])]) {
         for (let at = c.indexOf(needle); at >= 0; at = c.indexOf(needle, at + 1)) {
           if (at <= writeStart) continue;
           const next = c.charAt(at + needle.length);
@@ -601,11 +615,17 @@ const bashEscapeInput = (input: unknown): { command: string; escape: boolean; de
   };
 };
 
+/** The hook input's own `cwd` (every runtime's hook input carries the session's working directory). */
+function hookCwd(input: unknown): string | undefined {
+  const cwd = (input as { cwd?: unknown } | null | undefined)?.cwd;
+  return typeof cwd === "string" && cwd.length > 0 ? cwd : undefined;
+}
+
 function escapeFloorHook(deps: SessionHooksDeps): HookCallback {
   return async (input) => {
     const { command, escape } = bashEscapeInput(input);
     if (!escape) return allow();
-    const hit = escapeFloorHit(command, deps.home);
+    const hit = escapeFloorHit(command, deps.home, hookCwd(input));
     return hit === undefined ? allow() : deny(escapeFloorDenial(hit));
   };
 }
@@ -647,7 +667,7 @@ function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
     const escape = (pre.tool_input as { dangerouslyDisableSandbox?: unknown } | null | undefined)?.dangerouslyDisableSandbox === true;
     // §2a's floor denies this one on its own, whatever the order the hooks run in; never spend (or
     // record) a review on it.
-    if (escape && escapeFloorHit(command, deps.home) !== undefined) return allow();
+    if (escape && escapeFloorHit(command, deps.home, hookCwd(input)) !== undefined) return allow();
     if (!escape && bashLooksSafe(command, deps.reviewerAllow?.() ?? [])) return allow();
     try {
       // C3 round 3: for an escape the reviewer also sees the session's cwd (what "outside the project"
