@@ -115,6 +115,44 @@ describe("preflight", () => {
   });
 });
 
+describe("review I1: a rolled-back home can migrate again", () => {
+  test("whatever the new build wrote into sdk/ after the upgrade is no collision; only a compat target with content beside an old dir with content is", async () => {
+    const { home, key } = fixture();
+    await runMigrationC(home, deps({ reconcile: stubReconcile().reconcile }));
+    // the new build ran for a while…
+    for (const [d, f] of [["tasks", "t.json"], ["teams", "t.json"], ["agent-memory", "m.md"], ["file-history", "s/x.bak"], ["plugins", "p/plugin.json"], ["commands", "c.md"]]) {
+      mkdirSync(join(home, "sdk", d!, f!.includes("/") ? f!.split("/")[0]! : ""), { recursive: true });
+      writeFileSync(join(home, "sdk", d!, f!), "x");
+    }
+    await rollbackMigrationC(home, { log: () => {} });
+    expect(isOldLayout(home)).toBe(true);
+    // …and the next boot of the new build migrates it again rather than refusing forever
+    const again = await runMigrationC(home, deps({ reconcile: stubReconcile().reconcile }));
+    expect(again.status).toBe("complete");
+    expect(existsSync(join(home, "sdk", "projects", key, "memory", "MEMORY.md"))).toBe(true);
+    expect(existsSync(join(home, "sdk", "tasks", "t.json"))).toBe(true);
+  });
+
+  test("a real collision still refuses: an old dir with content AND its sdk target with content", async () => {
+    const { home, key } = fixture();
+    mkdirSync(join(home, "sdk", "skills", "other"), { recursive: true });
+    writeFileSync(join(home, "sdk", "skills", "other", "SKILL.md"), "x");
+    await expect(runMigrationC(home, deps())).rejects.toMatchObject({ code: "sdk_home_migration_refused" });
+    expect(lstatSync(join(home, "projects", key)).isDirectory()).toBe(true);
+  });
+
+  test("an EMPTY old dir beside a target with content is linked, not refused", async () => {
+    const { home } = fixture();
+    mkdirSync(join(home, "workflows"), { recursive: true });           // empty old dir
+    mkdirSync(join(home, "sdk", "workflows"), { recursive: true });
+    writeFileSync(join(home, "sdk", "workflows", "w.js"), "x");          // the new build's content
+    const m = await runMigrationC(home, deps({ reconcile: stubReconcile().reconcile }));
+    expect(m.status).toBe("complete");
+    expect(lstatSync(join(home, "workflows")).isSymbolicLink()).toBe(true);
+    expect(existsSync(join(home, "workflows", "w.js"))).toBe(true);
+  });
+});
+
 describe("both phases", () => {
   test("every step's effect; old paths are links; the extra official entry is reconciled; tags stay stored", async () => {
     const { home, key } = fixture();
