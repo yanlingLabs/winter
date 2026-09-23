@@ -45,7 +45,8 @@ import { WINTER_CAPABILITY_TOOLS, assertNoCapabilityCollision, type CapabilitySe
 import { createProjector, type Projector } from "../projector";
 import type { RuntimeSessionRecord, RuntimeSessionRecords } from "../runtime-state/records";
 import type { ProjectionCheckpoints } from "../runtime-state/checkpoints";
-import { moveTranscriptFiles } from "../runtime-state/transcript-rekey";
+import { moveTranscriptFiles, transcriptEntriesOf } from "../runtime-state/transcript-rekey";
+import { recordLazyRekey } from "../migration/migrate-c";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
 import { DEFAULT_PROVIDER, effortRefusalFor, effortToSpendForRole, officialSubscriptionAuthEnabled, ownProviderFor, pinsFor, providerBaseUrlFor, sdkAllowRules, sdkDenyRules, winterOptionsFromSettings, type Settings } from "../settings";
@@ -546,7 +547,15 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     try { toKey = transcriptProjectKey(transcriptCwdOf(sessionId, leg)); } catch { return record; }
     if (toKey === record.transcriptProjectKey) return record;
     const projects = storeProjectsDir(deps.home);
-    const moved = moveTranscriptFiles(projects, backendId, record.transcriptProjectKey, toKey);
+    // Round 4, minor 1: on a migrated home the move joins Migration C's manifest (intent first), so a
+    // rollback reverses it like the bulk step's.
+    const fromKey = record.transcriptProjectKey;
+    const intent = { sessionId, backendId, from: fromKey, to: toKey, entries: transcriptEntriesOf(join(projects, fromKey), backendId) };
+    recordLazyRekey(deps.home, { ...intent, outcome: "pending" });
+    const moved = moveTranscriptFiles(projects, backendId, fromKey, toKey);
+    recordLazyRekey(deps.home, moved.kind === "moved" || moved.kind === "not-needed"
+      ? { ...intent, ...(moved.kind === "moved" ? { entries: moved.entries } : {}), outcome: "moved" }
+      : { ...intent, outcome: moved.kind, ...(moved.kind === "refused" ? { reason: moved.reason } : {}) });
     if (moved.kind === "not-needed") return record;
     if (moved.kind === "moved") {
       try {
