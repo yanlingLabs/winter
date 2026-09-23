@@ -93,6 +93,7 @@ import { linkedRouterSupportsRunHome, linkedRunHomeBuilder, runHomeHandleOf, run
 import { recoverRunRoots, rootRecoveryDetail, type RootReconcile } from "./runtime-state/root-recovery";
 import { splitSettingsToSdk } from "./migration/settings-split";
 import { MigrationCRefused, finishMigrationC, isOldLayout, migrationCManifestPath, migrationCState, runMigrationC } from "./migration/migrate-c";
+import { convertLegacyPluginsForMigration } from "./plugins/convert-legacy";
 import { localScopeKeyFor, runHomeInputFor } from "./runtime-sdk/run-home-input";
 import { reservedMcpServerNames } from "./capabilities/names";
 import { persistedAllowRulesFor, winterGateRulesFromSdk } from "./runtime-sdk/mode-options";
@@ -560,7 +561,7 @@ export async function startDaemon(opts: {
       if (!isDefaultWinterHome(home, profile, opts.migration?.homedirOverride)) {
         throw new MigrationCRefused("sdk_home_migration_required", `migration C: ${home} is in the old layout and is not the profile's default home — stop, then run \`winter migrate --sdk-home --home ${home}\``);
       }
-      await runMigrationC(home, { log: (line) => console.error(line), reconcileAvailable: true });
+      await runMigrationC(home, { log: (line) => console.error(line), reconcileAvailable: true, convertLegacyPlugins: convertLegacyPluginsForMigration });
     } catch (err) {
       try { store.close(); } catch { /* already closed: nothing to release */ }
       lock.release();

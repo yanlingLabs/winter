@@ -316,3 +316,22 @@ export async function convertLegacyPlugins(home: string): Promise<ConvertLegacyP
   rekeyConsents(home, idToKey, idToFingerprint);
   return result;
 }
+
+/**
+ * Post-merge round (BLOCKING): the adapter Migration C's own `MigrationCDeps.convertLegacyPlugins`
+ * seam expects (`migration/migrate-c.ts`) — `(home) => Promise<{converted: string[], unconvertible:
+ * {name, reason}[]}>`, a plain-strings shape its manifest recording (`record("convert-plugins", ...,
+ * {converted, unconvertible})`) and CLI summary printer both already assume. `convertLegacyPlugins`
+ * itself returns richer per-plugin records (`{id, installPath, enabled}` / `{id, reason}`) that this
+ * lane's own RPCs and tests use directly; this reshapes them into the migration step's plain form
+ * without changing `convertLegacyPlugins`'s own return type. Wired in at the two real call sites
+ * (`daemon.ts`'s boot hook, `cli/src/commands/migrate.ts`'s `winter migrate --sdk-home`), both via
+ * `packages/core/src/index.ts`'s export of this function.
+ */
+export async function convertLegacyPluginsForMigration(home: string): Promise<{ converted: string[]; unconvertible: { name: string; reason: string }[] }> {
+  const result = await convertLegacyPlugins(home);
+  return {
+    converted: result.converted.map((c) => c.id),
+    unconvertible: result.skipped.map((s) => ({ name: s.id, reason: s.reason })),
+  };
+}

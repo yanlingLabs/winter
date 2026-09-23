@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   MigrationCRefused,
   MigrationRefused,
+  convertLegacyPluginsForMigration,
   downgradeRuntimeStateToV6,
   isOldLayout,
   isPristineHome,
@@ -106,7 +107,7 @@ async function runMigrateSdkHome(deps: MigrateCommandDeps, yes: boolean): Promis
     deps.error("winter migrate --sdk-home: this build cannot run a migrated home (its router applies no run homes) — nothing was changed; use a build that does");
     return 1;
   }
-  const migrationDeps = { log: deps.log, reconcileAvailable: supported };
+  const migrationDeps = { log: deps.log, reconcileAvailable: supported, convertLegacyPlugins: convertLegacyPluginsForMigration };
   try {
     if (deps.argv.includes("--rollback")) {
       if (migrationCState(home).kind === "absent") {
