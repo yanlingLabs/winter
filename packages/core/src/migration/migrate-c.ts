@@ -551,6 +551,18 @@ export async function finishMigrationC(home: string, deps: Pick<MigrationCDeps, 
   return m;
 }
 
+/** One transaction on runtime-state through a RAW handle — no schema step on open (a rollback has already
+ *  stepped the store back to v6, and `openRuntimeStateDb` would step it forward again). Absent: a no-op. */
+function rawRuntimeState(home: string, fn: (db: Database) => void): void {
+  const path = join(home, "runtimes", "runtime-state.db");
+  if (!existsSync(path)) return;
+  const db = new Database(path);
+  try {
+    db.run("PRAGMA busy_timeout = 5000");
+    db.transaction(() => fn(db))();
+  } finally { db.close(); }
+}
+
 /**
  * Put the home back in the old layout: everything Migration C did, undone — EXCEPT the step-2 reconcile
  * appends, which stay in the canonical transcripts (lines that were already the session's own).
@@ -571,6 +583,20 @@ export async function rollbackMigrationC(home: string, deps: Pick<MigrationCDeps
   const m = state.manifest;
   if (m.status === "rolled-back") throw new MigrationCRefused("nothing_to_rollback", "Migration C was already rolled back");
 
+  // Round 3, minor 1: the schema step FIRST — before any archive restore or `backend_root` reversal — so
+  // a store that cannot step back (a newer build's schema, a broken reference) refuses the rollback with
+  // NOTHING undone, never a half-rolled-back home. Review I3: the older build a rollback is for reads v7
+  // as `newer-schema` and would run with its runtime spine offline. DOCUMENTED CONSEQUENCE: the step drops
+  // `run_root_quarantine`, so after a re-upgrade the boot sweep reconciles those kept roots AGAIN — a
+  // still-unprovable one quarantines again (another evidence copy under `cache/quarantine/`, its sessions
+  // re-marked, both idempotent); nothing is deleted on the way. Every store write below therefore goes
+  // through a RAW handle (`rawRuntimeState`): `openRuntimeStateDb` would run the v7 step again on open.
+  let schema: ReturnType<typeof downgradeRuntimeStateToV6>;
+  try {
+    schema = downgradeRuntimeStateToV6(home);
+  } catch (err) {
+    throw new MigrationCRefused("sdk_home_migration_refused", `Migration C rollback refused: runtime-state.db cannot step back to schema v6 (${(err as { reason?: string }).reason ?? (err as Error).name}) — nothing was restored`);
+  }
   // archive → back in place (reverse order)
   for (const a of [...m.archived].reverse()) {
     const from = join(home, a.to);
@@ -578,17 +604,13 @@ export async function rollbackMigrationC(home: string, deps: Pick<MigrationCDeps
     if (existsSync(from) && !existsSync(to)) { mkdirSync(dirname(to), { recursive: true }); renameSync(from, to); }
   }
   // runtime-state → the one rewrite reversed (`backend_root` back under <home>/projects)
-  if (m.steps.some((st) => st.step === "runtime-state") && existsSync(join(home, "runtimes", "runtime-state.db"))) {
-    const rs = openRuntimeStateDb(home);
-    try {
+  if (m.steps.some((st) => st.step === "runtime-state")) {
+    rawRuntimeState(home, (db) => {
       const sdkPrefix = `${join(sdkHomeFor(home), "projects")}/`;
       const oldPrefix = `${join(home, "projects")}/`;
-      rs.db.run("UPDATE runtime_sessions SET backend_root = ? || substr(backend_root, ?) WHERE substr(backend_root, 1, ?) = ?", [oldPrefix, sdkPrefix.length + 1, sdkPrefix.length, sdkPrefix]);
-    } finally { rs.close(); }
+      db.run("UPDATE runtime_sessions SET backend_root = ? || substr(backend_root, ?) WHERE substr(backend_root, 1, ?) = ?", [oldPrefix, sdkPrefix.length + 1, sdkPrefix.length, sdkPrefix]);
+    });
   }
-  // Review I3: …and the schema back to v6, so the older build a rollback is for can open the store at all
-  // (0.116.0 reads v7 as `newer-schema` and would run with its runtime spine offline).
-  const schema = downgradeRuntimeStateToV6(home);
   // copy-files → the copies moved aside (a user edit to one after the upgrade is kept, not lost)
   for (const rel of m.copied) {
     const src = join(home, rel);

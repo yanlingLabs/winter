@@ -399,4 +399,19 @@ describe("rollback", () => {
     expect(existsSync(migrationCManifestPath(home))).toBe(false);
     await expect(rollbackMigrationC(home, { log: () => {} })).rejects.toMatchObject({ code: "nothing_to_rollback" });
   });
+
+  // Round 3, minor 1: the schema step runs FIRST — a store that cannot step back to v6 refuses the rollback
+  // typed with nothing restored, reversed or moved (it used to run after the archive restore and the
+  // backend_root reversal, leaving a half-rolled-back home behind).
+  test("the v7→v6 step runs first: a store that cannot step back refuses typed, with NOTHING undone", async () => {
+    const { home, key } = fixture();
+    await runMigrationC(home, deps({ reconcile: stubReconcile().reconcile }));
+    { const db = new Database(join(home, "runtimes", "runtime-state.db")); db.run("PRAGMA user_version = 8"); db.close(); } // a newer build's store
+    await expect(rollbackMigrationC(home, { log: () => {} })).rejects.toMatchObject({ name: "MigrationCRefused", code: "sdk_home_migration_refused" });
+    expect(existsSync(join(home, "permissions"))).toBe(false);                                  // the archive not restored
+    expect(lstatSync(join(home, "projects")).isSymbolicLink()).toBe(true);                     // move-dirs not reversed
+    expect(migrationCState(home)).toMatchObject({ kind: "parsed", manifest: { status: "complete" } });
+    const db = new Database(join(home, "runtimes", "runtime-state.db"), { readonly: true });
+    try { expect(db.query<{ b: string }, []>("SELECT backend_root AS b FROM runtime_sessions WHERE winter_session_id='s_1'").get()!.b).toBe(join(home, "sdk", "projects", key)); } finally { db.close(); }
+  });
 });

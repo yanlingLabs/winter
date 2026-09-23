@@ -238,6 +238,11 @@ function foreignKeyViolations(db: Database): number {
  * 12-step procedure (keys off OUTSIDE the transaction, `foreign_key_check` no worse), the quarantine
  * record dropped, `user_version` 6. `"not-needed"` for no store or a store already at v6 or below; a store
  * NEWER than v7 is refused (this build does not know its shape). The daemon must be stopped.
+ *
+ * Dropping `run_root_quarantine` forgets which kept roots were quarantined: after a re-upgrade the boot
+ * sweep reconciles those roots AGAIN (they are still on disk — nothing here deletes one). A root that is
+ * still unprovable quarantines again: a second evidence copy under `cache/quarantine/`, its sessions
+ * re-marked `repair-required` — idempotent, never a loss. Rollback runs this step FIRST (round 3, minor 1).
  */
 export function downgradeRuntimeStateToV6(home: string): { from: 7; to: 6 } | "not-needed" {
   const path = join(home, "runtimes", "runtime-state.db");
