@@ -842,8 +842,9 @@ describe("sessionHooksFor — the floor's wiring, ordering and both legs", () =>
         hookFacade: { async runFor() { return []; } },
         reviewer: new BashReviewer({ provider: { async *streamTurn() { /* never reached */ } } as never }),
       }).winter?.PreToolUse ?? [];
-      // "Bash" twice: the reviewer, then the escape floor (C3 round 3), which runs under every policy
-      expect(matchers.map((m) => m.matcher)).toEqual([undefined, "Bash", "Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]);
+      // "Bash" twice: the reviewer, then the escape floor (C3 round 3), which runs under every policy;
+      // then (WS-21 §7.1/§7.2) the unmatched path fence, which answers deny/ask and never transforms
+      expect(matchers.map((m) => m.matcher)).toEqual([undefined, "Bash", "Bash", undefined, "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

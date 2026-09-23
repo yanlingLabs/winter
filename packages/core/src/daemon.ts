@@ -1581,6 +1581,11 @@ export async function startDaemon(opts: {
       // so the host-side floor hook, a Winter child's `Options.web.blockedDomains` and the daemon's
       // own `Search` are provably reading one list. `hooks.ts` unions the shipped half itself.
       dangerousDomainsAdded: () => dangerousDomainsAdded(session.cwd),
+      // WS-21 (spec §7.1/§7.2): the path fence — the mode decides card vs typed deny, and the project
+      // tier is protected only while the project is trusted (read live, like every trust decision).
+      mode: session.mode,
+      cwd: session.cwd,
+      trustedProjectRoot: () => (trustStore.isTrusted(session.cwd) ? repoRootFor(session.cwd) : null),
     });
   // ── P8c integration Wiring 2: the notification/schedule sinks (lane 2's `sinks.ts`, P8c-11) ────
   // `hub.addObserver` (Dispatch/Phase 7's existing fan-out of every appended event of EVERY

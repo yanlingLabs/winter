@@ -78,7 +78,10 @@ import { DIFF_PATCH_MAX_BYTES, mintDiffId, writeDiff } from "../diffs/store";
 import type { HookResult } from "../plugins/hook-runner";
 import { attachFileDiff } from "./diff-attach";
 import { REVIEWER_ESCALATION_REASON, noteReviewerCleared } from "./bridge-common";
-import { ESCAPE_FENCED_FILENAMES, HOME_WRITE_ONLY_FENCED, PROJECT_FENCED_SEGMENTS, homeFencedDirs, homeFencedFiles } from "./home-fence";
+import { ESCAPE_FENCED_FILENAMES, PROJECT_FENCED_SEGMENTS, homeFenceFor, homeFencedDirs, homeFencedFiles, isHomeWriteOnly } from "./home-fence";
+import { controlPlaneDenialMessage, controlPlaneTargetForCall } from "./control-plane";
+import { protectedPathsFor, protectedReadDenial, protectedWriteDecision, storeWriteDenial } from "./protected-paths";
+import type { Mode as SessionMode } from "../agent/tools/registry";
 
 /** The subset of `plugins/hook-registry.ts`'s `HookFacade` this module depends on — injected
  *  rather than imported concretely so a fake can stand in for tests with no real plugin process
@@ -147,6 +150,17 @@ export interface SessionHooksDeps {
    * the wiring. A getter that THROWS reads as "no additions" (never propagates into the child).
    */
   dangerousDomainsAdded?: () => readonly string[] | undefined;
+
+  /**
+   * WS-21 (spec §7.1, §7.2) — the path fence (`pathFenceHook`). THIS session's mode (a protected write
+   * is a card in code and a typed deny in chat and dispatch), its working directory (a relative target
+   * resolves against it) and, read LIVE per call, its TRUSTED project root (`repoRootFor(cwd)` when the
+   * cwd is trusted, else `null` — an untrusted project has no project tier to protect). Absent `mode`:
+   * the hook treats the session as code, the answer that raises a card rather than none.
+   */
+  mode?: SessionMode;
+  cwd?: string;
+  trustedProjectRoot?: () => string | null;
 }
 
 function readRootsOf(roots: string[], tmpDir?: string): string[] {
@@ -355,7 +369,7 @@ function floorNeedles(home: string): FloorNeedle[] {
   const out = new Map<string, boolean>();
   for (const p of [...homeFencedDirs(home), ...homeFencedFiles(home)]) {
     const r = relative(home, p);
-    const writeOnly = HOME_WRITE_ONLY_FENCED.includes(r.split("/")[0] ?? "");
+    const writeOnly = isHomeWriteOnly(r);
     const spellings = r.length === 0 || r.startsWith("..") || isAbsolute(r)
       ? [p.toLowerCase()]
       : prefixes.map((pre) => `${pre}/${r}`.toLowerCase());
@@ -433,21 +447,83 @@ export function escapeFloorHit(command: string, home: string | undefined): strin
     const bare = seg.replace(/\/+$/, "");
     if (c.includes(bare)) return `a project's ${bare} directory`;
   }
-  if (home === undefined || home.length === 0) return undefined;
   const writeStart = writeContextStart(c);
-  for (const { needle, writeOnly } of floorNeedles(home.replace(/\/+$/, ""))) {
+  // WS-21 (spec §7.1), write-shaped only: a project's `.winter/mcp.json` and any `.winter/settings*.json`
+  // (the two claude tiers are already refused on any mention above), and a claude staging root.
+  for (const re of PROJECT_WRITE_FENCED) {
+    for (const m of c.matchAll(re)) if (m.index !== undefined && m.index > writeStart) return `a project's ${m[0]}`;
+  }
+  for (let at = c.indexOf(RESUME_STAGING_NEEDLE); at >= 0; at = c.indexOf(RESUME_STAGING_NEEDLE, at + 1)) {
+    if (at > writeStart) return "a claude resume staging root";
+  }
+  if (home === undefined || home.length === 0) return undefined;
+  const bareHome = home.replace(/\/+$/, "");
+  for (const { needle, writeOnly } of floorNeedles(bareHome)) {
     let at = c.indexOf(needle);
     while (at >= 0) {
       if (!writeOnly || at > writeStart) return "Winter's own state under its home";
       at = c.indexOf(needle, at + 1);
     }
   }
+  // …and the runtimes' transcript store, `sdk/projects`, write-shaped and OUTSIDE each project's
+  // `memory/` (the model's MEMDIR, which it maintains itself).
+  for (const pre of homePrefixes(bareHome)) {
+    const needle = `${pre}/sdk/projects`;
+    for (let at = c.indexOf(needle); at >= 0; at = c.indexOf(needle, at + 1)) {
+      if (at <= writeStart) continue;
+      const rest = c.slice(at + needle.length).split(/[\s;&|()<>]/, 1)[0] ?? "";
+      if (rest !== "" && !rest.startsWith("/")) continue; // `sdk/projectsx`: not this directory
+      if (/^\/[^/]+\/memory(\/|$)/.test(rest)) continue;
+      return "sdk/projects, the runtimes' own transcript store";
+    }
+  }
   return undefined;
 }
 
+/** WS-21 (spec §7.1): project files the escape floor refuses in a write-shaped position, matched on the
+ *  normalised command. */
+const PROJECT_WRITE_FENCED: readonly RegExp[] = [/\.winter\/mcp\.json/g, /\.winter\/settings[^/\s;&|()<>]*\.json/g];
+const RESUME_STAGING_NEEDLE = "claude-resume-";
+
 export function escapeFloorDenial(hit: string): string {
   return `Bash was not run — a command that asks to run outside the sandbox (dangerouslyDisableSandbox) may not touch ${hit}. ` +
-    "Winter's control-plane files (permissions.local.json, settings.json, settings.local.json, trust.json), agent definitions (.winter/agents) and its own state under its home (run, runtimes, plugins, permissions, cache, agents) are off-limits to unsandboxed commands under every approval mode. Run the command inside the sandbox, or ask the user to make this change.";
+    "Winter's control-plane files (permissions.local.json, settings.json, settings.local.json, trust.json, .winter.json, a project's .winter/mcp.json), agent definitions (.winter/agents) and its own state under its home (run, runtimes, plugins, permissions, cache, agents, and sdk/ — settings, MCP servers, agents, plugins and the transcript store outside memory/) are off-limits to unsandboxed commands under every approval mode. Run the command inside the sandbox, or ask the user to make this change.";
+}
+
+// ── 2b. The path fence (WS-21, spec §7.1 "hook" column, §7.2) ─────────────────────────────────
+//
+// One PreToolUse hook for the write- and read-class tools, on both legs and under every policy (a
+// PreToolUse answer is evaluated ahead of the permission mode — F16), in this order:
+//  1. the control-plane fence the bridge already applies at (2) — the three control-plane filenames,
+//     `mcp.json` and `settings*.json` under any `.winter/`, and every home-fenced path — as a hook too,
+//     so it binds where the bridge is never consulted (a matching allow rule, bypass);
+//  2. `sdk/projects/**` outside each project's `memory/` (`storeWriteDenial`) — deny;
+//  3. the read row (`protectedReadDenial`) — deny;
+//  4. a protected write (`protectedWriteDecision`) — ask in code, deny in chat and dispatch. The bridge
+//     (5e) independently refuses to auto-allow one, and the router pins the same set as flag-layer ask
+//     rules (claude's own sensitive-file check could otherwise swallow this hook's ask — F16).
+function pathFenceHook(deps: SessionHooksDeps): HookCallback {
+  return async (input) => {
+    const home = deps.home;
+    if (!home) return allow();
+    const pre = input as PreToolUseHookInput;
+    const toolName = typeof pre.tool_name === "string" ? pre.tool_name : "";
+    const toolInput = pre.tool_input as unknown;
+    const cwd = deps.cwd ?? deps.roots[0] ?? "";
+    const fenced = controlPlaneTargetForCall(toolName, toolInput, cwd, homeFenceFor(home));
+    if (fenced) return deny(controlPlaneDenialMessage(toolName, fenced.path, fenced.home));
+    const store = storeWriteDenial(toolName, toolInput, { home, cwd });
+    if (store !== undefined) return deny(store);
+    const read = protectedReadDenial(toolName, toolInput, { home, cwd });
+    if (read !== undefined) return deny(read);
+    let root: string | null = null;
+    try { root = deps.trustedProjectRoot?.() ?? null; } catch { root = null; }
+    const decision = protectedWriteDecision(toolName, toolInput, { mode: deps.mode ?? "code", protected: protectedPathsFor(home, root), cwd });
+    if (decision === null) return allow();
+    return decision.decision === "ask"
+      ? ask(`${toolName} writes a protected path (skills, commands, rules, output styles and WINTER.md load into every future session) — the user decides.`)
+      : deny(decision.reason);
+  };
 }
 
 const bashEscapeInput = (input: unknown): { command: string; escape: boolean; description?: string } => {
@@ -893,6 +969,9 @@ export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hook
   // does not matter: a deny outranks every other hook answer, and the reviewer skips (never reviews,
   // never clears) a command this floor denies, whichever of the two runs first.
   preToolUse.push({ matcher: "Bash", hooks: [escapeFloorHook(deps)] });
+  // WS-21 (spec §7.1, §7.2): the path fence — every policy, both legs. Unmatched (one callback per tool
+  // call) because the write and read tools carry two vocabularies; anything else is an immediate allow.
+  if (deps.home) preToolUse.push({ hooks: [pathFenceHook(deps)] });
   if (deps.home) {
     for (const tool of Object.keys(DIFF_TOOL_FILE_PATH_ARG)) {
       preToolUse.push({ matcher: tool, hooks: [fileDiffPreToolUseHook(deps, pending)] });
