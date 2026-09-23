@@ -39,6 +39,7 @@ import {
   readSdkGlobalConfig, updateSdkGlobalConfig, sdkGlobalConfigPath, validateMcpServerEntryForWrite, validateMcpServerName,
   parseProjectMcpServers, TrustStore,
   stripCredentialShapedMcpHeaders, readRawSettings,
+  localScopeKeyFor,
   type McpServerSettingsEntry, type ProjectMcpServerEntry,
 } from "@yanlinglabs/winter-core";
 import { McpAddEntrySchema } from "@yanlinglabs/winter-protocol";
@@ -398,14 +399,12 @@ function isTrustedDir(winterHome: string, dir: string): boolean {
   return new TrustStore(join(winterHome, "trust.json")).isTrusted(real);
 }
 
-/** The project ROOT `local`/`project` scope resolve against — the trusted root when one is found,
- *  else `cwd` itself (a not-yet-trusted project still gets a root to write under; `renderMcpAddOutcome`
- *  says so). Mirrors `repoRootFor`'s own precedent without importing it (a plain `cwd` fallback is
- *  enough here — this file never walks up a `.git` the way the daemon's own resolver does, since a
- *  CLI invocation is always run FROM the project root by convention, same as `git`/`npm` commands). */
-function projectRootFor(cwd: string): string {
-  try { return realpathSync(cwd); } catch { return cwd; }
-}
+// Post-merge round: `projectRootFor` (a plain `realpathSync(cwd)`, no git awareness — this file's own
+// prior stand-in, DECISION 6 in the lane report) retired in favor of core's own `localScopeKeyFor`
+// (`runtime-sdk/run-home-input.ts`) — the SAME canonical-git-root rule (F17) every daemon-side reader
+// and writer of the local MCP scope already uses, so a CLI write and a daemon read of the identical
+// project can never land under two different keys. Falls back to `realpathSync(cwd)` outside a git
+// repository, matching this file's old behavior exactly in that case.
 
 async function addUserScope(deps: McpRouteDeps, name: string, entry: McpServerSettingsEntry, transport: McpTransport): Promise<McpAddOutcome> {
   if (deps.door) {
@@ -425,7 +424,7 @@ async function addUserScope(deps: McpRouteDeps, name: string, entry: McpServerSe
 }
 
 function addLocalScope(deps: McpRouteDeps, name: string, entry: McpServerSettingsEntry, transport: McpTransport): McpAddOutcome {
-  const root = projectRootFor(deps.cwd);
+  const root = localScopeKeyFor(deps.cwd);
   try {
     addSdkLocalMcpServer(deps.winterHome, root, name, entry);
   } catch (err) {
@@ -443,7 +442,7 @@ function malformedProjectFileMessage(cwd: string, verb: string): string {
 }
 
 function addProjectScope(deps: McpRouteDeps, name: string, entry: ProjectMcpServerEntry): McpAddOutcome {
-  const root = projectRootFor(deps.cwd);
+  const root = localScopeKeyFor(deps.cwd);
   const read = readRawWinterMcpConfig(root);
   if (read.kind === "malformed") return { ok: false, message: malformedProjectFileMessage(root, `adding "${name}"`) };
   const servers = read.kind === "ok" ? read.servers : {};
@@ -564,7 +563,7 @@ async function userScopeHasServer(deps: McpRouteDeps, name: string): Promise<boo
 }
 
 function localScopeHasServer(deps: McpRouteDeps, name: string): boolean {
-  try { return sdkLocalServer(deps.winterHome, projectRootFor(deps.cwd), name) !== undefined; } catch { return false; }
+  try { return sdkLocalServer(deps.winterHome, localScopeKeyFor(deps.cwd), name) !== undefined; } catch { return false; }
 }
 
 /** Tri-state, not a boolean: a malformed project `.winter/mcp.json` must never be silently read as
@@ -573,7 +572,7 @@ function localScopeHasServer(deps: McpRouteDeps, name: string): boolean {
 type ProjectScopeCheck = { kind: "found" } | { kind: "absent" } | { kind: "malformed"; message: string };
 
 function projectScopeHasServer(deps: McpRouteDeps, name: string): ProjectScopeCheck {
-  const root = projectRootFor(deps.cwd);
+  const root = localScopeKeyFor(deps.cwd);
   const read = readRawWinterMcpConfig(root);
   if (read.kind === "malformed") return { kind: "malformed", message: malformedProjectFileMessage(root, `checking for "${name}"`) };
   if (read.kind === "absent") return { kind: "absent" };
@@ -589,14 +588,14 @@ async function removeUserScope(deps: McpRouteDeps, name: string): Promise<{ remo
 }
 
 function removeLocalScope(deps: McpRouteDeps, name: string): { removed: boolean; root: string } {
-  const root = projectRootFor(deps.cwd);
+  const root = localScopeKeyFor(deps.cwd);
   return { removed: removeSdkLocalMcpServer(deps.winterHome, root, name), root };
 }
 
 type ProjectRemoveResult = { ok: true; removed: boolean } | { ok: false; message: string };
 
 function removeProjectScope(deps: McpRouteDeps, name: string): ProjectRemoveResult {
-  const root = projectRootFor(deps.cwd);
+  const root = localScopeKeyFor(deps.cwd);
   const read = readRawWinterMcpConfig(root);
   if (read.kind === "malformed") return { ok: false, message: malformedProjectFileMessage(root, `removing "${name}"`) };
   if (read.kind === "absent") return { ok: true, removed: false };
@@ -628,7 +627,7 @@ export async function runMcpRemoveRoute(args: string[], deps: McpRouteDeps): Pro
     }
     const projectResult = removeProjectScope(deps, parsed.name);
     if (!projectResult.ok) return { ok: false, message: projectResult.message };
-    return { ok: true, scope: "project", name: parsed.name, removed: projectResult.removed, cwd: projectRootFor(deps.cwd) };
+    return { ok: true, scope: "project", name: parsed.name, removed: projectResult.removed, cwd: localScopeKeyFor(deps.cwd) };
   }
 
   const [inUser, inLocal, projectCheck] = await Promise.all([
@@ -653,7 +652,7 @@ export async function runMcpRemoveRoute(args: string[], deps: McpRouteDeps): Pro
   if (inProject) {
     const projectResult = removeProjectScope(deps, parsed.name);
     if (!projectResult.ok) return { ok: false, message: projectResult.message };
-    return { ok: true, scope: "project", name: parsed.name, removed: projectResult.removed, cwd: projectRootFor(deps.cwd) };
+    return { ok: true, scope: "project", name: parsed.name, removed: projectResult.removed, cwd: localScopeKeyFor(deps.cwd) };
   }
   return { ok: false, message: `No MCP server found with name: "${parsed.name}"` };
 }
@@ -688,7 +687,7 @@ export async function runMcpGetRoute(args: string[], deps: McpRouteDeps): Promis
   // knows nothing about this header rule (it's a `settings.ts`-level concern). `strippedHeaders`
   // below is computed separately, off the RAW file, since the cleaned entry can no longer say what
   // it lost.
-  const local = sdkLocalMcpServers(deps.winterHome, projectRootFor(deps.cwd))[name];
+  const local = sdkLocalMcpServers(deps.winterHome, localScopeKeyFor(deps.cwd))[name];
   if (local) {
     return {
       ok: true, found: true, name, scope: "local", transport: local.type,
@@ -724,7 +723,7 @@ export async function runMcpGetRoute(args: string[], deps: McpRouteDeps): Promis
     } catch { /* no sdk/.winter.json yet — fall through */ }
   }
 
-  const root = projectRootFor(deps.cwd);
+  const root = localScopeKeyFor(deps.cwd);
   const read = readRawWinterMcpConfig(root);
   if (read.kind === "malformed") return { ok: false, message: malformedProjectFileMessage(root, `reading "${name}"`) };
   if (read.kind === "ok") {
