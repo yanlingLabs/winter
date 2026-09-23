@@ -63,7 +63,7 @@ import { buildWinterOptions, bypassAllowedAtSpawn, permissionModeFor } from "./m
 import { providerFor, rowForTag, testProviderNameFor } from "./provider-selection";
 import { splitTag, UNSTATED_TAG, isModelTag, WINTER_TEST_PREFIX, type ModelTag } from "./model-tag";
 import { winterSessions } from "./sessions";
-import { storeProjectsDir } from "../agent/paths";
+import { canonicalCwd, storeProjectsDir } from "../agent/paths";
 import { WINTER_PEER_VERSIONS } from "./versions";
 import { winterSystemPromptFor } from "./system-prompt";
 import { dispatchEffortFor } from "../agent/dispatch-config";
@@ -518,7 +518,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
    *  $TMPDIR — the directory the child actually runs in, so its transcript key names it). 8a's
    *  boot backfill uses `home` for a pre-8b row instead (`migrations/backfill.ts`) — that shape
    *  is the surviving truth for engine-ERA records, which nothing here writes any more. */
-  const winterCwdOf = (sessionId: string, cwd: string | null | undefined): string => cwd ?? deps.tmpDirOf(sessionId);
+  // WS-21 (L2 O-1): the CANONICAL path — the Winter child keys its transcript by realpath(cwd), the router
+  // by the cwd it is given; every Options.cwd, run-home input and recorded transcript key derives from this.
+  const winterCwdOf = (sessionId: string, cwd: string | null | undefined): string => canonicalCwd(cwd ?? deps.tmpDirOf(sessionId));
 
   /** The facts every incarnation of a session needs, assembled once per driver. */
   const assemble = (sessionId: string, backendSessionId: string): WinterSession => {
@@ -1046,7 +1048,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       } catch { /* a session with no dirs row: workdir-less */ }
       return {
         sessionId, mode,
-        cwd: primary ?? cwd,
+        cwd: primary === undefined ? cwd : canonicalCwd(primary), // WS-21 (L2 O-1): canonical, like the Winter leg
         outDir: deps.outDirOf(sessionId),
         extraDirs,
         ...(live.effort === undefined ? {} : { effort: live.effort }),

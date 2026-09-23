@@ -91,6 +91,16 @@ export function sdkPluginsRoot(home: string): string {
  * itself, so no call site can pick the wrong layout. Migration C moves the directories only on a
  * build where this answers `sdk/`, so the reads and the data always agree.
  */
+/**
+ * WS-21 (L2 O-1): a session working directory as the RUNTIMES key it — its realpath (the Winter child keys
+ * its transcript by `realpath(cwd)`, while the router keys by the cwd it is handed). The daemon hands the
+ * canonical path everywhere a transcript or run home is keyed: `RunHomeInput.cwd`, `Options.cwd` on both
+ * legs, and the recorded transcript key. A directory that does not exist (yet) keeps its given spelling.
+ */
+export function canonicalCwd(cwd: string): string {
+  try { return realpathSync(cwd); } catch { return cwd; }
+}
+
 export function storeHomeFor(home: string): string {
   return linkedRouterSupportsRunHome() ? sdkHomeFor(home) : home;
 }

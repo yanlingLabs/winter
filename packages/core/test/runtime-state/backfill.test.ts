@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { repoRootFor, sanitizeProjectKey, _clearRepoRootCacheForTests } from "../../src/agent/memory-dir";
 import { openRuntimeStateDb, RuntimeSessionRecords, backfillNativeSessions } from "../../src/runtime-state";
@@ -53,7 +53,8 @@ describe("backfillNativeSessions", () => {
         expect(ra.generation).toBe(0);
 
         // The two key algorithms, both spelled from their own source of truth.
-        expect(ra.transcriptProjectKey).toBe(transcriptProjectKey(cwdA));
+        // WS-21 (L2 O-1): the child's own key — the canonical cwd.
+        expect(ra.transcriptProjectKey).toBe(transcriptProjectKey(realpathSync(cwdA)));
         expect(ra.memoryProjectKey).toBe(sanitizeProjectKey(repoRootFor(cwdA)));
         expect(ra.tempProjectKey).toBe(ra.transcriptProjectKey);
         expect(ra.transcriptProjectKey).not.toBe(ra.memoryProjectKey);
@@ -263,7 +264,7 @@ describe("backfillNativeSessions", () => {
       try {
         backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
         const record = new RuntimeSessionRecords(rs).get(id)!;
-        expect(record.transcriptProjectKey).toBe(transcriptProjectKey(home));
+        expect(record.transcriptProjectKey).toBe(transcriptProjectKey(realpathSync(home)));
         expect(record.memoryProjectKey).toBe(sanitizeProjectKey(repoRootFor(home)));
       } finally {
         rs.close();
