@@ -5,7 +5,7 @@ import type { CanUseTool, PermissionMode } from "@yanlinglabs/winter-agent-sdk";
 import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { RESUME_STAGING_PREFIX, isResumeStagingRoot, resumeStagingRoot } from "@yanlinglabs/winter-runtime-sdk";
 import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
-import { Settings } from "../../src/settings";
+import { Settings, modelRoleConstraint } from "../../src/settings";
 import { keychainService } from "../../src/profile";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { QuestionBroker } from "../../src/agent/questions";
@@ -141,6 +141,9 @@ test("disableBypassPermissionsMode is set for every policy except bypass itself"
 // over material `ContextAssembler`/`SkillStore`/`Options.agents` already supply. (It does NOT make the
 // child parse `<home>/settings.json`: that cascade has no production call site at 0.0.16. See the
 // comment on the field itself in mode-options.ts.)
+// 0.0.17 CORRECTION: that cascade IS wired in production now (`production-wiring.ts`'s
+// `resolveSettingsDetailed`), so a `"user"` source would ALSO make the child parse the daemon's own
+// `<home>/settings.json` as a settings tier — `settingSources: []` is more load-bearing, not less.
 test("every cell discovers no settings tier of its own and keeps the foreground spawn default", () => {
   for (const mode of MODES) {
     for (const policy of POLICIES) {
@@ -149,6 +152,30 @@ test("every cell discovers no settings tier of its own and keeps the foreground 
       expect(o.settingSources).toEqual([]);
     }
   }
+});
+
+// B1 (2026-09-22): with `settingSources: []` a local plugin is the ONE skill source the child still
+// indexes, so the daemon's resolved plugin skills ride `Options.plugins` (skills-only views, built by
+// `SkillStore.childSkillSurface`) and `Options.skills` names which of them the session may invoke.
+test("B1: the daemon's skill surface rides Options.plugins + Options.skills verbatim; none ⇒ neither key", () => {
+  const plugins = [{ type: "local" as const, path: "/tmp/winter-home/runtimes/skill-plugins/superpowers", skipMcpDiscovery: true }];
+  const o = buildWinterOptions(optionsInput({ mode: "code", plugins, skills: ["superpowers:brainstorming"] }));
+  expect(o.plugins).toEqual(plugins);
+  expect(o.skills).toEqual(["superpowers:brainstorming"]);
+  // An empty list is a real answer (every plugin skill denied): the SDK reads `[]` as "none", which
+  // is exactly what the daemon means — never "all", which is what dropping the key would say.
+  expect(buildWinterOptions(optionsInput({ mode: "code", plugins, skills: [] })).skills).toEqual([]);
+  for (const mode of MODES) {
+    for (const policy of POLICIES) {
+      const bare = buildWinterOptions(optionsInput({ mode, policy }));
+      expect("plugins" in bare).toBe(false);
+      expect("skills" in bare).toBe(false);
+    }
+  }
+  // No plugin ⇒ no `skills` either: with nothing indexed, a filter would only add a validation warning.
+  const noPlugins = buildWinterOptions(optionsInput({ mode: "code", plugins: [], skills: [] }));
+  expect("plugins" in noPlugins).toBe(false);
+  expect("skills" in noPlugins).toBe(false);
 });
 
 // USER RULING 2026-09-18: reads are globally allowed, stated as an allow rule rather than left to a
@@ -270,7 +297,17 @@ test("the control-plane deny rules cover the four write tools × the control-pla
     // control-plane filenames above, just for a directory of them.
     expect(deny).toContain(`${tool}(//h/agents/**)`);
     expect(deny).toContain(`${tool}(//**/.winter/agents/**)`);
+    // B1 follow-up: the skills-only plugin views — a planted manifest there becomes the next child's
+    // plugin hooks. Write-fenced; deliberately NOT read-fenced (a skill reads its own files).
+    expect(deny).toContain(`${tool}(//h/cache/skill-plugins/**)`);
+    // Review M6 (2026-09-23): the runtime store was read-denied but NOT write-denied to the write
+    // TOOLS — with a saved `Edit` (→ `Edit` + `Write` in the child) a Write could drop a file into
+    // `<home>/runtimes/bin/winter`, rung 4 of the executable ladder. And an installed plugin must not
+    // be a place a session can plant a SKILL.md or a hook.
+    expect(deny).toContain(`${tool}(//h/runtimes/**)`);
+    expect(deny).toContain(`${tool}(//h/plugins/**)`);
   }
+  for (const tool of ["Read", "Glob", "Grep"]) expect(deny.some((r) => r.startsWith(`${tool}(`) && r.includes("/cache"))).toBe(false);
   // Task 17: + the engine's read-tool denials, carried: Read/Glob/Grep × { run/**, runtimes/** }
   for (const tool of ["Read", "Glob", "Grep"]) {
     expect(deny).toContain(`${tool}(//h/run/**)`);
@@ -286,7 +323,7 @@ test("the control-plane deny rules cover the four write tools × the control-pla
   for (const tool of ["Edit", "Write", "MultiEdit", "NotebookEdit", "Read", "Glob", "Grep"]) {
     expect(deny).toContain(`${tool}(${claudeResumeTarget})`);
   }
-  expect(deny).toHaveLength(4 * 10 + 3 * 3);
+  expect(deny).toHaveLength(4 * 14 + 3 * 3);
 });
 
 // Daemon settings surface batch 3 (item 2): `settings.permissions.deny` (Skill(<name>) toggles,
@@ -300,14 +337,14 @@ test("item 2: settings.permissions.deny is appended after the fixed control-plan
   const deny = buildWinterOptions(optionsInput({ home: "/h", settings })).permissions!.deny!;
   expect(deny.slice(-2)).toEqual(["Skill(writing-skills)", "Agent(fork)"]);
   // The fixed fence is untouched (same count this file's other test pins).
-  expect(deny).toHaveLength(4 * 10 + 3 * 3 + 2);
+  expect(deny).toHaveLength(4 * 14 + 3 * 3 + 2);
 });
 
 test("item 2: an absent settings.permissions.deny changes nothing — byte-identical to before item 2", () => {
   const withNull = buildWinterOptions(optionsInput({ home: "/h", settings: null })).permissions!.deny!;
   const withUndefined = buildWinterOptions(optionsInput({ home: "/h" })).permissions!.deny!;
-  expect(withNull).toHaveLength(4 * 10 + 3 * 3);
-  expect(withUndefined).toHaveLength(4 * 10 + 3 * 3);
+  expect(withNull).toHaveLength(4 * 14 + 3 * 3);
+  expect(withUndefined).toHaveLength(4 * 14 + 3 * 3);
 });
 
 // Winter Phase 10b (D1-3, W18-9): a read of a `claude-resume-*` staging root is denied — proved
@@ -373,7 +410,10 @@ test("every deny rule is //-anchored, and resolves to the fence target it names"
   expect(specs.has(`/${join(tmpdir(), "claude-resume-*", "**")}`)).toBe(true); // P8d-12's staging root
   expect(specs.has(`/${join(home, "agents")}/**`)).toBe(true);     // finding 2c: the user's own agent definitions
   expect(specs.has(`//**/.winter/agents/**`)).toBe(true);          // finding 2c: any project's, any depth
-  expect(specs.size).toBe(11);
+  expect(specs.has(`/${join(home, "cache", "skill-plugins")}/**`)).toBe(true); // B1: the skills-only plugin views
+  expect(specs.has(`/${join(home, "plugins")}/**`)).toBe(true);    // M6: installed plugins
+  expect(specs.has(`/${join(home, "permissions")}/**`)).toBe(true); // I2: the approved-project-rules record
+  expect(specs.size).toBe(14);                                       // (runtimes/** was already a READ target)
   // The two inert forms must never reappear.
   for (const s of specs) {
     expect({ s, singleSlashAbsolute: /^\/[^/]/.test(s) }).toEqual({ s, singleSlashAbsolute: false });
@@ -402,7 +442,8 @@ test("the Bash sandbox names real DIRECTORIES, because its consumer renders seat
   // in official-leg.e2e.test.ts), and a per-tool `Write(path)` deny rule does not constrain a Bash
   // redirect — so `<home>/runtimes/bin/winter`, rung 4 of `resolveWinterExecutable`'s ladder, was
   // writable there. If either list loses it, that is the regression this line exists to catch.
-  expect(sb.filesystem!.denyWrite).toEqual(["/h/run", "/h/runtimes"]);
+  // B1 follow-up: + the skills-only plugin views (write only — see `controlPlaneDenyRules`).
+  expect(sb.filesystem!.denyWrite).toEqual(["/h/run", "/h/runtimes", "/h/cache/skill-plugins", "/h/plugins", "/h/permissions"]);
   // CLAUDE.md: "the sole read denial is ~/.winter/run" — reads are otherwise unrestricted.
   expect(sb.filesystem!.denyRead).toEqual(["/h/run", "/h/runtimes"]);   // Task 17: runtimes/ is model-denied (8a)
   for (const p of [...sb.filesystem!.denyWrite!, ...sb.filesystem!.denyRead!]) {
@@ -1076,45 +1117,58 @@ test("Task 16 / P8b-30: a BYO `connection` rides provider.connection; without a 
 // override the session itself is using (measured root cause of `advisor-winter-leg-e2e.test.ts`'s
 // F2 case hanging on a real machine's Keychain consent dialog against a freshly re-signed
 // `dist/winter`).
-test("M7: same-provider advisor gets authRef — the SAME ref providerSelectionFor already resolved for the session", () => {
+// D3 (2026-09-22): `advisor.model` is the FULL qualified tag. The pinned SDK 0.0.17 resolves a
+// `<providerId>/<model>` advisor key to ITS OWN provider (`slots.ts`'s qualified-key door, then
+// `session-provider.ts` builds the reviewer on `config.advisor.authRef`) — the same way `WebFetch`'s
+// digest model already runs cross-provider. The bare modelId the daemon used to send is what made the
+// SDK read it under the SESSION's provider, which is why a cross-provider advisor had to be dropped.
+test("M7/D3: a same-provider advisor names its full tag and its provider's own authRef", () => {
   const credentials: CredentialPresence = { byProvider: { openai: "keychain" } };
   const o = buildWinterOptions(optionsInput({ model: "openai/gpt-5.6-sol", advisorModel: "openai/gpt-6-astra", credentials }));
-  expect(o.advisor).toEqual({ model: "gpt-6-astra", authRef: o.provider!.authRef }); // WS-20: advisor.model is also the BARE modelId now
+  expect(o.advisor).toEqual({ model: "openai/gpt-6-astra", authRef: o.provider!.authRef });
   expect(o.advisor!.authRef).toEqual(expect.objectContaining({ kind: "keychain" }));
 });
 
-// WS-20 (review round 2, nit a): the pinned SDK's `AdvisorConfig` has no `providerId` field, so a
-// cross-provider (or unroutable) advisor can never be PINNED to its own provider through this door
-// — the only safe rule left is same-provider-only. `Options.advisor` is DROPPED entirely rather
-// than guessed at, superseding the old "falls through to the advisor's own resolved authRef" M7
-// behavior this test used to pin.
-test("nit(a): cross-provider (or unroutable) advisor is DROPPED entirely — never guessed at", () => {
-  const credentials: CredentialPresence = { byProvider: { openai: "keychain" } };
-  // The advisor's own model names no catalog identity at all (Winter's inventory cannot serve it) —
-  // `providerSelectionFor` answers `undefined`, so there is no provider to agree with the session's.
-  const o = buildWinterOptions(optionsInput({ model: "openai/gpt-5.6-sol", advisorModel: "winter-test/echo", credentials }));
+// D3: the dist log's case — every spawn dropped `codex-oauth/gpt-5.6-sol` for sessions on deepseek.
+test("D3: a CROSS-provider advisor reaches the child on its OWN provider's credential, never the session's", () => {
+  const o = buildWinterOptions(optionsInput({ model: "deepseek-anthropic/deepseek-v4-flash", advisorModel: "codex-oauth/gpt-5.6-sol", credentials: NO_CREDS }));
+  expect(o.provider).toEqual({ providerId: "deepseek-anthropic", authRef: expect.objectContaining({ kind: "keychain", account: "deepseek-anthropic:default" }) });
+  expect(o.advisor).toEqual({ model: "codex-oauth/gpt-5.6-sol", authRef: expect.objectContaining({ kind: "keychain", account: "codex-oauth:default" }) });
+  expect(o.advisor!.authRef).not.toEqual(o.provider!.authRef);
+  // …and the settings surface stops telling the Mac the advisor "follows whatever the session runs".
+  expect(modelRoleConstraint("runtimes.advisorModel")).toBe("any");
+});
+
+// D3: a session with no provider of its own (a `winter-test/*` double) still gets an advisor that
+// names one — the advisor's routing no longer depends on agreeing with the session's.
+test("D3: the session having NO resolvable provider (winter-test/*) no longer drops a routable advisor", () => {
+  const o = buildWinterOptions(optionsInput({ model: "winter-test/echo", advisorModel: "openai/gpt-6-astra", credentials: NO_CREDS }));
+  expect(o.provider).toBeUndefined();
+  expect(o.advisor).toEqual({ model: "openai/gpt-6-astra", authRef: expect.objectContaining({ kind: "keychain", account: "openai:default" }) });
+});
+
+// The reserved test double travels WHOLE, as it always has (it is not a provider tag, and the SDK's
+// qualified-key door passes the reserved namespace through); it names no credential.
+test("D3: a winter-test advisor double is passed whole, with no authRef", () => {
+  const o = buildWinterOptions(optionsInput({ model: "openai/gpt-5.6-sol", advisorModel: "winter-test/echo", credentials: NO_CREDS }));
+  expect(o.advisor).toEqual({ model: "winter-test/echo" });
+});
+
+// D3: only a GENUINELY unroutable advisor tag is dropped — the `unstated/unstated` sentinel a
+// hand-edited settings file can carry (`isModelTag` accepts it) names no provider at all.
+test("D3: an unroutable advisor tag (the unstated sentinel) is dropped, never guessed at", () => {
+  const o = buildWinterOptions(optionsInput({ model: "openai/gpt-5.6-sol", advisorModel: "unstated/unstated", credentials: NO_CREDS }));
   expect(o.advisor).toBeUndefined();
 });
 
 // WS-20: `providerFor` names a provider's credential LOCATOR unconditionally — a tag always
 // resolves to exactly its provider, never gated on `credentials` presence (that field is now
 // unread by this file; presence-based refusal is `beforeTurn`'s own separate job) — so the
-// same-provider advisor STILL gets the session's own authRef even with `NO_CREDS` passed in.
-test("M7: the shared provider's authRef threads through regardless of the (now-unread) credentials presence input", () => {
+// advisor STILL gets its provider's authRef even with `NO_CREDS` passed in.
+test("M7: the advisor's authRef threads through regardless of the (now-unread) credentials presence input", () => {
   const o = buildWinterOptions(optionsInput({ model: "openai/gpt-5.6-sol", advisorModel: "openai/gpt-6-astra", credentials: NO_CREDS }));
   expect(o.provider!.authRef).toEqual(expect.objectContaining({ kind: "keychain", account: "openai:default" }));
-  expect(o.advisor).toEqual({ model: "gpt-6-astra", authRef: o.provider!.authRef });
-});
-
-// WS-20 (review round 2, nit a): supersedes the OLD "threads the advisor's own resolved authRef
-// regardless of the session's own provider" M7 behavior — a session with no resolvable provider at
-// all has nothing to agree with, so `sameProvider` is false and the advisor is DROPPED, same as any
-// other non-matching pair.
-test("nit(a): the session having NO resolvable provider at all (winter-test/*) drops the advisor too", () => {
-  const credentials: CredentialPresence = { byProvider: { openai: "keychain" } };
-  const o = buildWinterOptions(optionsInput({ model: "winter-test/echo", advisorModel: "openai/gpt-6-astra", credentials }));
-  expect(o.provider).toBeUndefined();
-  expect(o.advisor).toBeUndefined();
+  expect(o.advisor).toEqual({ model: "openai/gpt-6-astra", authRef: o.provider!.authRef });
 });
 
 test("M7: no advisorModel at all -> no Options.advisor key, unchanged from before this fix", () => {

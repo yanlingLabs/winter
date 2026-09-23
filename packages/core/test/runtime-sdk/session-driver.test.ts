@@ -17,9 +17,12 @@ import { createInMemoryRuntimeDirectoryStore, createRuntimeSdk } from "@yanlingl
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { FakeProvider } from "../../src/agent/fake-provider";
 import { SessionTitler, TITLE_INSTRUCTION } from "../../src/agent/titles";
+import { SkillStore } from "../../src/agent/skills";
+import { TrustStore } from "../../src/agent/trust";
 import { PermissionGate } from "../../src/agent/gate";
 import { QuestionBroker } from "../../src/agent/questions";
 import { FileSecretStore } from "../../src/auth/secret-store";
+import { CREDENTIAL_MATERIAL_NAMES, writeCredentialMaterial } from "../../src/auth/credential-material";
 import { CORE_BRAND } from "../../src/runtime-sdk/brand";
 import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import { createWinterSessionDrivers, refusalMayBeCredentialShaped, type WinterLegDeps } from "../../src/runtime-sdk/session-driver";
@@ -662,6 +665,142 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
       // …and the legacy Brave row still evicts nothing: no child's `Options` names it.
       expect(await evictSessionsForCredential(deps, "web-search")).toEqual([]);
       await session.end();
+    } finally { t.close(); }
+  });
+
+  // B1 (2026-09-22): the dist session whose first `Skill` call answered `Available: (none)` with a
+  // `superpowers` plugin installed. The child's index is built from its Options alone
+  // (`settingSources: []`), so an installed plugin skill that is not in `Options.plugins` does not
+  // exist for it — this is the table half: `optionsFor` asks the daemon's SkillStore, LIVE, per
+  // incarnation, and only for a code session (chat/dispatch never had the Skill tool).
+  test("B1: an installed plugin skill reaches a CODE child's Options.plugins/skills; deny rules and chat/dispatch are honoured", async () => {
+    let skillStore: SkillStore | undefined;
+    let settings = { permissions: { deny: ["Skill(superpowers:brainstorming)"] }, runtimes: { winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } } as unknown as Settings;
+    const t = table({ settings: () => settings, skills: { childSkillSurface: (input) => skillStore!.childSkillSurface(input) } });
+    try {
+      skillStore = new SkillStore({ winterHome: t.home, trust: new TrustStore(join(t.home, "trust.json")) });
+      for (const name of ["using-superpowers", "brainstorming"]) {
+        mkdirSync(join(t.home, "plugins", "superpowers", "skills", name), { recursive: true });
+        writeFileSync(join(t.home, "plugins", "superpowers", "skills", name, "SKILL.md"), `---\nname: ${name}\ndescription: ${name} skill\n---\nbody\n`);
+      }
+      const view = join(t.home, "cache", "skill-plugins", "superpowers");
+
+      const code = t.store.createSession("t", { mode: "code", model: "winter-test/echo", approvalPolicy: "ask" });
+      const session = await t.drivers.create(code);
+      expect(t.q().options.plugins).toEqual([{ type: "local", path: view, skipMcpDiscovery: true }]);
+      expect(t.q().options.skills).toEqual(["superpowers:using-superpowers"]);
+      expect(t.q().options.settingSources).toEqual([]);
+
+      // LIVE: lifting the deny rule reaches the next incarnation with no restart.
+      settings = { ...settings, permissions: { deny: [] } } as unknown as Settings;
+      await t.drivers.evict(code);
+      await (await t.drivers.ensure(code))!.open();
+      expect([...(t.q().options.skills ?? [])].sort()).toEqual(["superpowers:brainstorming", "superpowers:using-superpowers"]);
+      await t.drivers.evict(code);
+
+      for (const mode of ["chat", "dispatch"] as const) {
+        const sid = t.store.createSession("t", { mode, model: "winter-test/echo" });
+        const s = await t.drivers.create(sid);
+        expect("plugins" in t.q().options).toBe(false);
+        expect("skills" in t.q().options).toBe(false);
+        await s.end();
+      }
+      await session.end();
+    } finally { t.close(); }
+  });
+
+  // D3 follow-up (2026-09-22): a cross-provider `runtimes.advisorModel` pin is honoured on its own
+  // provider's credential — but, exactly like `pins.research`'s digest, a pin whose provider has NO
+  // stored material is not stated: a present-but-unusable `Options.advisor` makes every `advisor` call
+  // fail, while the family default keeps the tool working. Falls back to the D30 default, logged.
+  test("D3: a cross-provider advisor pin rides the child when its provider holds material; a KEYLESS one falls back to the D30 default", async () => {
+    const secrets = new FileSecretStore(join(mkdtempSync(join(tmpdir(), "winter-advisor-secrets-")), "secrets.json"));
+    const settings = { runtimes: { advisorModel: "codex-oauth/gpt-5.6-sol", winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } } as unknown as Settings;
+    const t = table({ settings: () => settings, secrets });
+    try {
+      const sid = t.store.createSession("t", { mode: "code", model: "openai/gpt-5.6-sol", approvalPolicy: "ask" });
+      const first = await t.drivers.create(sid);
+      // No codex-oauth material: the D30 default for an openai session, on openai's own locator.
+      expect(t.q().options.advisor).toEqual({ model: "openai/gpt-6-astra", authRef: expect.objectContaining({ account: "openai:default" }) });
+      expect(t.logs.some((l) => l.includes("runtimes.advisorModel") && l.includes("codex-oauth"))).toBe(true);
+      await first.end();
+
+      await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "api-key", key: "sk-test-not-real" });
+      await t.drivers.evict(sid);
+      await (await t.drivers.ensure(sid))!.open();
+      expect(t.q().options.advisor).toEqual({ model: "codex-oauth/gpt-5.6-sol", authRef: expect.objectContaining({ account: "codex-oauth:default" }) });
+      await t.drivers.evict(sid);
+    } finally { t.close(); }
+  });
+
+  // Lane B (2026-09-22): the user's SAVED allow rules reach the child — read through the dep at every
+  // incarnation (so a rule saved mid-session lands at the next one), translated onto `permissions.allow`.
+  test("saved allow rules ride a CODE child's Options.permissions.allow, read live per incarnation", async () => {
+    let saved: string[] = ["Bash(gh repo:*)"];
+    const seenCwds: string[] = [];
+    const t = table({ persistedAllowRules: (cwd) => { seenCwds.push(cwd); return saved; } });
+    try {
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", approvalPolicy: "ask" });
+      await t.drivers.create(sid);
+      expect(t.q().options.permissions?.allow).toContain("Bash(gh repo:*)");
+      saved = ["Bash(gh repo:*)", "BashUnsandboxed(curl:*)"];
+      await t.drivers.evict(sid);
+      await (await t.drivers.ensure(sid))!.open();
+      expect(t.q().options.permissions?.allow).toEqual(expect.arrayContaining(["Bash(gh repo:*)", "Bash(curl:*)"]));
+      expect(seenCwds.length).toBeGreaterThanOrEqual(2);
+      await t.drivers.evict(sid);
+    } finally { t.close(); }
+  });
+
+  // Review M2 (2026-09-23): the advisor pin follows the `pins.research` digest rule in full — an
+  // off-catalog pin, and a cross-provider pin whose credential has no Keychain LOCATOR at all (a
+  // `console/*` login lives in an `ant` profile), fall back to the family default too.
+  test("M2: an off-catalog advisor pin, or a cross-provider pin with no credential locator, falls back to the D30 default", async () => {
+    for (const pin of ["openai/no-such-model-anywhere", "console/claude-fable-5-1"]) {
+      const settings = { runtimes: { advisorModel: pin, winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } } as unknown as Settings;
+      const t = table({ settings: () => settings });
+      try {
+        const sid = t.store.createSession("t", { mode: "code", model: "openai/gpt-5.6-sol", approvalPolicy: "ask" });
+        const s = await t.drivers.create(sid);
+        expect({ pin, advisor: t.q().options.advisor }).toEqual({ pin, advisor: { model: "openai/gpt-6-astra", authRef: expect.objectContaining({ account: "openai:default" }) } });
+        expect(t.logs.some((l) => l.includes("runtimes.advisorModel"))).toBe(true);
+        await s.end();
+      } finally { t.close(); }
+    }
+  });
+
+  // B2 (2026-09-22): `session.setPolicy` across the bypass boundary replaces the child through THIS
+  // table's `evict` (ipc/server.ts's `replaceChildForPolicy`). The table half of that claim: the next
+  // incarnation re-reads the stored policy, so both spawn-time bypass facts follow it — in, and back out.
+  test("B2: after an evict, the next incarnation spawns with the STORED policy's bypass clamp — both ways", async () => {
+    const t = table();
+    try {
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", approvalPolicy: "ask" });
+      const first = await t.drivers.create(sid);
+      expect(t.q().options.permissionMode).toBe("default");
+      expect(t.q().options.permissions?.disableBypassPermissionsMode).toBe(true);
+      expect(t.q().options.allowDangerouslySkipPermissions).toBeUndefined();
+
+      t.store.setApprovalPolicy(sid, "bypass");
+      await t.drivers.evict(sid);
+      const second = (await t.drivers.ensure(sid))!;
+      expect(second).not.toBe(first);
+      await second.open();
+      expect(t.queries).toHaveLength(2);
+      expect(t.q().options.permissionMode).toBe("bypassPermissions");
+      expect(t.q().options.permissions?.disableBypassPermissionsMode).toBe(false);
+      expect(t.q().options.allowDangerouslySkipPermissions).toBe(true);
+      // Resumed, not restarted: the same backend transcript.
+      expect(t.q().options.resume ?? t.q().options.sessionId).toBe(first.backendSessionId);
+
+      t.store.setApprovalPolicy(sid, "accept-edits");
+      await t.drivers.evict(sid);
+      const third = (await t.drivers.ensure(sid))!;
+      await third.open();
+      expect(t.q().options.permissionMode).toBe("acceptEdits");
+      expect(t.q().options.permissions?.disableBypassPermissionsMode).toBe(true);
+      expect(t.q().options.allowDangerouslySkipPermissions).toBeUndefined();
+      await third.end();
     } finally { t.close(); }
   });
 

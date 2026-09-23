@@ -5,6 +5,7 @@ import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadS
 import type { CredentialRow, SecretStore, Settings } from "@yanlinglabs/winter-core";
 import { METHODS, type ApprovalPolicy, type Task } from "@yanlinglabs/winter-protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
+import { policySwitchNotes } from "./tui/policy-switch-notes";
 import { WinterClient } from "./client";
 import { checkCodeSession, filterCodeSessions, sessionModeMarker, sessionRuntimeMarker } from "./session-mode";
 import { applyEvent, isStalled, type WatchdogState } from "./watchdog";
@@ -34,6 +35,7 @@ import {
 import {
   applyFreshPluginConsent,
   buildConsentBlock,
+  enableNotice,
   installNeedsConsentHint,
   installPlugin,
   missingConsents,
@@ -566,9 +568,11 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
     const order = POLICY_ORDER;
     const next = order[(order.indexOf(policy) + 1) % order.length]!;
     try {
-      await c.setPolicy(sessionId, next);
+      const result = await c.setPolicy(sessionId, next);
       policy = next;
       refreshBlock();
+      // A bypass crossing says when it lands, and a turn still bypassing says so (lane B).
+      for (const line of policySwitchNotes(next, result)) emit(`${DIM}${line}${RESET}\n`);
     } catch {
       emit(`${DIM}couldn't switch to ${next} mode${RESET}\n`);
     } finally {
@@ -1801,7 +1805,11 @@ if (import.meta.main) {
     const c = await connect("cli-skills");
     const rows = await c.listSkills(process.cwd());
     if (!rows.length) console.log("no skills installed");
-    for (const s of rows) console.log(`${AQUA}${s.name}${RESET}  ${DIM}(${s.source})${RESET}  — ${s.description}`);
+    for (const s of rows) {
+      console.log(`${AQUA}${s.name}${RESET}  ${DIM}(${s.source})${RESET}  — ${s.description}`);
+      // Lane B (2026-09-22): a skill no session can load says so, in the daemon's own words.
+      if (s.loadsInSessions === false) console.log(`  ${DIM}not in sessions: ${s.sessionNote ?? "a session can't load this skill"}${RESET}`);
+    }
     c.close();
     process.exit(0);
   }
@@ -1958,6 +1966,9 @@ if (import.meta.main) {
         process.exit(0);
       }
 
+      // Lane B (2026-09-23): a plugin that needs no consent (a legacy one) but ships skills says so —
+      // its skills now reach a session, and a skill can run shell commands.
+      for (const line of enableNotice(info)) console.log(line);
       saveSettings(settingsPath, setPluginEnabled(settings, name, true));
       console.log(`${AQUA}${name} enabled${RESET} — restart the daemon to apply`);
       process.exit(0);

@@ -432,6 +432,17 @@ export const SkillMetaSchema = z.object({
    *  present; the field exists so the wire shape does not need to change if a second source (e.g. a
    *  project-scoped deny) is ever added later. */
   deniedBy: z.enum(["settings"]).optional(),
+  /** 2026-09-22 (lane B): can a SESSION's runtime child actually load this skill? `true` means a Code
+   *  session on EITHER leg loads it (router 0.0.11 hands the official leg the same views). `false`
+   *  for every tier the runtimes have no door for yet (user, self, project, built-in — only plugin
+   *  skills reach a child), for a plugin the user has not enabled AND granted `exec` consent (a skill
+   *  can run shell commands), and for a name the runtime's own jail refuses; `sessionNote` then says
+   *  why, in a sentence a client can show as-is. Chat and dispatch never load skills. Independent of
+   *  `denied` (a deny rule is its own field). The daemon's `SkillStore.sessionAvailability` is the one
+   *  rule, shared with what the child is handed. Additive/optional: absent means an older daemon that
+   *  never said — NOT "loads". */
+  loadsInSessions: z.boolean().optional(),
+  sessionNote: z.string().optional(),
 });
 export const SkillsListParams = z.object({ cwd: z.string().optional() });
 export const SkillsListResult = z.object({ ok: z.literal(true), skills: z.array(SkillMetaSchema) });
@@ -863,7 +874,16 @@ export const PlanRespondParams = z.object({
 export const PlanRespondResult = z.object({ ok: z.literal(true), alreadyResolved: z.boolean() });
 
 export const SessionSetPolicyParams = z.object({ sessionId: z.string().min(1), policy: ApprovalPolicy });
-export const SessionSetPolicyResult = z.object({ ok: z.literal(true) });
+export const SessionSetPolicyResult = z.object({
+  ok: z.literal(true),
+  /** 2026-09-22/23 (lane B): set only when the change crossed the BYPASS boundary on a live
+   *  Winter-leg child, which is REPLACED (resumably) rather than told — `"now"` when it was idle,
+   *  `"at-idle"` when a turn was running and the replacement waits for its end. */
+  replaced: z.enum(["now", "at-idle"]).optional(),
+  /** Set when a running turn could not leave bypass at once (review M4): it keeps bypassing approvals
+   *  until it ends, and a client should say so rather than show the new mode as already in force. */
+  warning: z.string().optional(),
+});
 
 // Chat Slice D Task 1: per-session model override, mode-agnostic — unlike session.setPolicy
 // (chat rejects EVERY value, plan-immunity's fixed policy), session.setModel works identically
@@ -1328,7 +1348,9 @@ export const PluginsInstallResult = z.union([
  *  there's just nothing to hot-spawn onto). */
 export const PluginEnableParams = z.object({ name: z.string().min(1), consent: z.boolean().optional() });
 export const PluginEnableResult = z.union([
-  z.object({ ok: z.literal(true), status: PluginRuntimeStatusSchema }),
+  // `notice` (lane B, 2026-09-23): the disclosure for a plugin that needs no consent but ships skills
+  // ("a skill can run shell commands when a session uses it"); absent when there is nothing to say.
+  z.object({ ok: z.literal(true), status: PluginRuntimeStatusSchema, notice: z.array(z.string()).optional() }),
   z.object({ code: z.literal("needs_consent"), requiredConsents: z.array(z.string()), consentBlock: z.array(z.string()) }),
   z.object({ code: z.literal("unknown_plugin") }),
 ]);

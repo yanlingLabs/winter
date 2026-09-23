@@ -1725,10 +1725,11 @@ export type ModelRole = (typeof MODEL_ROLES)[number];
  *    (`WebFetch`'s page digest, `Options.web.fetch.digestModel` inside the child) — any catalog
  *    provider the daemon has (or could have) credentials for, unconstrained by
  *    `INTERNAL_PROVIDER_IDS`.
- *  - `"same-as-session"`: `runtimes.advisorModel` — `mode-options.ts`'s `buildWinterOptions` drops
- *    an advisor whose provider disagrees with the SESSION's own model's provider (never guesses a
- *    credential). There is no single daemon-wide default to report: whether the advisor actually
- *    appears for a given session is decided per-session, not by this setting alone.
+ *  - `"same-as-session"`: no role reports it any more. `runtimes.advisorModel` did until D3
+ *    (2026-09-22), when `buildWinterOptions` dropped an advisor on any provider but the session's;
+ *    it now sends the FULL tag plus that provider's own `authRef`, and the child runs the advisor on
+ *    its own provider — the `pins.research` shape — so the role is `"any"`. Kept in the union because
+ *    it is a protocol enum value (`ModelRoleConstraintSchema`) a client may still decode.
  */
 export type ModelRoleConstraint = "internal-provider" | "any" | "same-as-session";
 
@@ -1752,8 +1753,10 @@ export function modelRoleConstraint(role: ModelRole): ModelRoleConstraint {
       return "any";
     case "provider.model": case "pins.dispatch":
       return "any";
+    // D3 (2026-09-22): the advisor runs on its OWN provider (full tag + that provider's `authRef`,
+    // `mode-options.ts`), so it is no longer "whatever the session itself is running".
     case "runtimes.advisorModel":
-      return "same-as-session";
+      return "any";
   }
 }
 

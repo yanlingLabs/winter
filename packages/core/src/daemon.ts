@@ -39,6 +39,7 @@ import { notifyHeadless } from "./agent/notify-fallback";
 import { LspManager } from "./agent/lsp/manager";
 import { PermissionGate, type SessionApprovalPolicy } from "./agent/gate";
 import { PermissionRules } from "./agent/permission-rules";
+import { ApprovedProjectRules } from "./agent/approved-project-rules";
 import { ApprovalBroker } from "./agent/approvals";
 import { QuestionBroker } from "./agent/questions";
 import { createPersistedChildren, type AgentRegistry } from "./agent/bg-agent-registry";
@@ -60,7 +61,7 @@ import { loadUserAgentDefinitions, loadProjectAgentDefinitions } from "./agent/a
 import { SupportedAgentsCache } from "./agent/supported-agents-cache";
 import { BackgroundTaskRegistry } from "./agent/bg-registry";
 import { sessionTmpDir } from "./agent/session-tmp";
-import { PluginStore, pluginMcpEligible, pluginSpawnEligible, hookRegistryPlugins } from "./agent/plugins";
+import { PluginStore, pluginMcpEligible, pluginSkillsEligible, pluginSpawnEligible, hookRegistryPlugins } from "./agent/plugins";
 import { PluginSupervisor } from "./plugins/supervisor";
 import { PluginContribRegistry } from "./plugins/contrib";
 import { HookRegistry, HookFacade } from "./plugins/hook-registry";
@@ -86,6 +87,7 @@ import { resolveAntExecutable } from "./runtime-sdk/bundle-layout";
 import { advisorReviewerFor, familyOfModel, officialLegDefaultSessionModel } from "./runtime-sdk/advisor-reviewer";
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
 import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
+import { persistedAllowRulesFor } from "./runtime-sdk/mode-options";
 import { configuredMcpServersFor } from "./runtime-sdk/external-mcp";
 import { planBridgeFor, type PlanBridge } from "./runtime-sdk/plan-bridge";
 import { importEngineEraSession } from "./runtime-sdk/import-legacy";
@@ -566,6 +568,10 @@ export async function startDaemon(opts: {
   // down; later tasks convert more getters against this SAME instance, never a second one, so
   // there is exactly one mtime cache per project cwd for the whole daemon).
   const projectSettings = new ProjectSettingsResolver({ base: () => settings, trust: trustStore });
+  // Review I2 (lane B): the daemon's own record of rules the user approved "in this project" from a
+  // card (`<home>/permissions/projects.json`) — written by `approval.respond`, applied to children
+  // regardless of trust. Provider-independent, so built unconditionally.
+  const approvedProjectRules = new ApprovedProjectRules({ winterHome });
   // fix-wave B (I1): every per-project getter below resolves at the REPO ROOT, matching
   // `globalAllow`'s own `projectRoot` (engine.ts's `repoRootFor(cwd)`) — NOT the raw session cwd.
   // Before this, a SUBDIRECTORY session read a DIFFERENT `.winter/settings.json` than
@@ -628,7 +634,22 @@ export async function startDaemon(opts: {
   // but ALSO hot-rebuilt on lifecycle changes (unlike MCP servers today), matching Tier-2's
   // hotApplyStart/hotApplyStop precedent for "no restart needed" plugin changes.
   const hookRegistry = new HookRegistry();
-  const skillStore = new SkillStore({ winterHome, trust: trustStore, plugins: { disabled: settings?.plugins?.disabled ?? [] } });
+  // B1 (lane B): `disabled` is a LIVE getter over the reassignable `settings` holder, not a boot
+  // snapshot — the store now also decides which plugin skills a runtime child loads, per incarnation.
+  const skillStore = new SkillStore({
+    winterHome, trust: trustStore,
+    plugins: {
+      disabled: () => settings?.plugins?.disabled ?? [],
+      // Lane B (review, 2026-09-23): a plugin's skills reach a session (either leg) only when the user
+      // ENABLED it and granted its `exec` consent — a skill can run shell commands. Read LIVE from the
+      // settings holder (a fresh `PluginStore` over it, as `ipc/server.ts`'s own live plugin list does),
+      // so enabling/consenting reaches the next spawn with no restart.
+      sessionEligible: () => new Set(
+        new PluginStore({ winterHome, plugins: settings?.plugins, consents: settings?.plugins?.consents }).list()
+          .filter(pluginSkillsEligible).map((p) => p.name),
+      ),
+    },
+  });
   // File-based memory (MEMDIR, T1 — design doc `2026-07-15-file-based-memory-design.md`): a live
   // getter over the `settings` holder (assigned above; reassigned in place by the hot-settings
   // watcher below), read fresh by BOTH the write-root join (`sessionDirs`, just below) and the
@@ -1594,6 +1615,20 @@ export async function startDaemon(opts: {
     // Winter's persona per mode, the `_assistant` bucket, the output style — so a Winter-leg session
     // speaks as Winter.
     assembler,
+    // B1 (lane B): the SAME SkillStore the assembler and `skills.*` read — the plugin skills a code
+    // child loads ride `Options.plugins`/`skills` from it (`SkillStore.childSkillSurface`).
+    skills: skillStore,
+    // Lane B: the user's SAVED allow rules reach both legs' children — `settings.json`, a TRUSTED
+    // project's overlay (the SAME `projectSettings` resolver, at the SAME repo root) and its
+    // `permissions.local.json` (the SAME `permissionRules` store `approval.respond` writes, read only
+    // when trusted). All live getters: a saved rule reaches the next incarnation, no restart.
+    persistedAllowRules: (cwd) => persistedAllowRulesFor(cwd, {
+      projectRootOf: (c) => projectRootOf(c),
+      effectiveSettings: (root) => projectSettings.effective(root),
+      approvedProjectRules: (root) => approvedProjectRules.rulesFor(root),
+      ...(permissionRules === undefined ? {} : { projectRules: (root: string) => permissionRules!.rulesFor(root).project }),
+      isTrusted: (dir) => trustStore.isTrusted(dir),
+    }),
     // Task 17 (P8b-15): Winter children land in the persisted roster (absent when the spine is offline).
     ...(bgAgents === undefined ? {} : { children: bgAgents }),
     onTurnSettled: (sid) => { signals.onTurnSettled?.(sid); },
@@ -2355,6 +2390,9 @@ export async function startDaemon(opts: {
     // so no approval flow could ever produce a rule-bearing optionId to persist in the first
     // place) — same typed-no-op precedent as `registry`/`mcp` elsewhere in this options object.
     permissionRules,
+    // Review I2 (lane B): the daemon's own record of "in this project" approvals — the SAME instance
+    // the session drivers' saved-rules reader applies.
+    approvedProjectRules,
     dirs: sessionDirs,
     trust: trustStore,
     bg: bgRegistry,

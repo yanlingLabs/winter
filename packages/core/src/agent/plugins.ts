@@ -101,13 +101,13 @@ export class PluginStore {
           description: manifest.description,
           version: manifest.version,
           tier: manifest.tier,
-          requiredConsents: requiredConsentClasses(manifest),
+          requiredConsents: requiredConsentClasses(manifest, { shipsSkills: skills.length > 0 }),
           consented,
           legacy: false,
           hasManifestMcp: Boolean(manifest.contributes?.mcpServers?.length),
           manifestServers: manifest.contributes?.mcpServers,
           manifestHooks: manifest.contributes?.hooks,
-          execPayload: execPayloadLines(manifest),
+          execPayload: execPayloadLines(manifest, { skills }),
           tccPermissions: manifest.permissions?.tcc ?? [],
           hardwarePermissions: manifest.permissions?.hardware ?? [],
           entry: manifest.entry,
@@ -121,6 +121,12 @@ export class PluginStore {
         ...shared,
         description: meta.description,
         version: meta.version,
+        // A LEGACY plugin requires no consent class — enabling it has always been the user's trust
+        // decision for its code (its `.mcp.json` server), and that must not regress (controller ruling,
+        // 2026-09-23). Its skills therefore reach a session on `enabled && !disabled` alone
+        // (`pluginSkillsEligible`, `consentComplete` vacuous as before), and this whole shape stays
+        // exactly what it was. The enable flow discloses the skills itself (`enableNotice`, from
+        // `skills`), so the user is told a skill can run shell commands before it reaches a session.
         requiredConsents: [],
         consented,
         legacy: true,
@@ -137,7 +143,8 @@ export class PluginStore {
  * True when every consent class a plugin's manifest requires (`requiredConsents`) has a matching
  * record in `consented`. Legacy plugins have `requiredConsents === []`, so this is vacuously true
  * for them — consent never gates legacy plugin content (spec: "everything above keeps working
- * unchanged").
+ * unchanged"). A MANIFEST plugin that ships skills requires `exec` since 2026-09-23 (a session's
+ * runtime can run a skill's shell — see `requiredConsentClasses`).
  */
 export function consentComplete(p: PluginInfo): boolean {
   return p.requiredConsents.every((c) => p.consented.includes(c));
@@ -167,6 +174,22 @@ export function pluginMcpEligible(p: PluginInfo): boolean {
  */
 export function pluginHooksEligible(p: PluginInfo): boolean {
   return p.mcpEnabled && !p.disabled && Boolean(p.manifestHooks?.length) && consentComplete(p);
+}
+
+/**
+ * Lane B (2026-09-23, review): may a SESSION load this plugin's skills? The SAME enabled/disabled/
+ * consent shape as `pluginHooksEligible`, because a skill is code on a session's runtime — claude runs
+ * a skill's inline `` !`cmd` `` and honours its `allowed-tools` pre-approval without asking the host
+ * (router 0.0.11's `OptionsTemplatePolicy.plugins` doc records the measurement), so exposing a plugin's
+ * skills is the same trust decision as running its hooks. For a MANIFEST plugin, shipped skills count
+ * as the `exec` consent class (`requiredConsentClasses`), so `consentComplete` carries the user's
+ * consent. For a LEGACY plugin `consentComplete` stays vacuous (controller ruling, 2026-09-23):
+ * enabling it was already the user's trust decision for its code, so enabled + not disabled suffices,
+ * and the enable flow discloses that its skills can run shell commands (`enableNotice`). Applied on
+ * BOTH legs (`SkillStore.childSkillSurface`).
+ */
+export function pluginSkillsEligible(p: PluginInfo): boolean {
+  return p.mcpEnabled && !p.disabled && p.skills.length > 0 && consentComplete(p);
 }
 
 /**

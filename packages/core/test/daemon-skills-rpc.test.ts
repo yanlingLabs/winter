@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@yanlinglabs/winter-protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, SkillsListResult, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startDaemon, type RunningDaemon } from "../src/daemon";
 import { startIpcServer } from "../src/ipc/server";
 import { SessionStore } from "../src/sessions/store";
@@ -143,6 +143,45 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
   // message — never silently no-oped, and never the generic "not found" deleteSelf alone would give
   // (there being no self/<name> to delete, deleteSelf on its own can't tell "wrong source" apart
   // from "never existed").
+  // Lane B (2026-09-22): only PLUGIN skills reach a session's runtime child. Every skill stays listed
+  // — it exists, `skills.read` serves it — but `skills.list`/`skills.read` say, per skill, whether a
+  // session can load it and why not, so no client presents an unloadable skill as usable.
+  test("skills.list and skills.read say truthfully which skills a session can load, and why not", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-daemon-skills-"));
+    mkdirSync(join(home, "skills", "greet"), { recursive: true });
+    writeFileSync(join(home, "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nhi\n");
+    mkdirSync(join(home, "plugins", "superpowers", "skills", "brainstorming"), { recursive: true });
+    writeFileSync(join(home, "plugins", "superpowers", "skills", "brainstorming", "SKILL.md"), "---\nname: brainstorming\ndescription: Explore\n---\nx\n");
+    mkdirSync(join(home, "plugins", "untrusted", "skills", "risky"), { recursive: true });
+    writeFileSync(join(home, "plugins", "untrusted", "skills", "risky", "SKILL.md"), "---\nname: risky\ndescription: Risky\n---\nx\n");
+    // Only a plugin the user ENABLED (with every consent class it requires — none for these legacy
+    // plugins, so the exec record below is inert) reaches a session (a skill can run shell commands)
+    // — `superpowers` is; `untrusted` is installed but never enabled.
+    writeFileSync(join(home, "settings.json"), JSON.stringify({
+      schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
+      plugins: { enabled: ["superpowers"], consents: { superpowers: { exec: 1 } } },
+    }));
+    const secrets = new FileSecretStore(join(home, "test-secrets"));
+    daemon = await startDaemon({ home, secrets, agentProvider: null });
+    harnessToken = daemon.tokens.harness;
+    const c = await TestClient.connect(daemon.socketPath);
+    await c.hello(harnessToken, "skills-tester");
+
+    const listed = await c.request(METHODS.skillsList, {});
+    expect(SkillsListResult.safeParse(listed.result).success).toBe(true);
+    const byName = new Map<string, { loadsInSessions?: boolean; sessionNote?: string }>(listed.result.skills.map((s: { name: string }) => [s.name, s]));
+    expect(byName.get("superpowers:brainstorming")).toMatchObject({ loadsInSessions: true });
+    expect(byName.get("superpowers:brainstorming")!.sessionNote).toBeUndefined();
+    expect(byName.get("greet")).toMatchObject({ loadsInSessions: false });
+    expect(byName.get("greet")!.sessionNote).toContain("only plugin skills");
+    expect(byName.get("untrusted:risky")).toMatchObject({ loadsInSessions: false });
+    expect(byName.get("untrusted:risky")!.sessionNote).toContain('"exec" consent');
+
+    const read = await c.request(METHODS.skillsRead, { name: "greet" });
+    expect(read.result.skill).toMatchObject({ name: "greet", loadsInSessions: false });
+    c.close();
+  });
+
   test("deleting a name that resolves to a non-self source (user root) -> INVALID_PARAMS, refused before touching self/", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-daemon-skills-"));
     mkdirSync(join(home, "skills", "greet"), { recursive: true });
