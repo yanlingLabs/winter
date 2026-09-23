@@ -81,6 +81,32 @@ describe("the old-layout definition (spec §8, r3)", () => {
     writeFileSync(join(fresh, "settings.json"), JSON.stringify({ schemaVersion: 3, permissions: { allow: ["Bash"] }, mcpServers: { a: { command: "x" } } }));
     expect(isOldLayout(fresh)).toBe(false);
   });
+
+  // Post-merge fix round, minor 1 (promoted): <home>/plugins was never in SDK_COMPAT_LINKS (its own
+  // conversion is a copy, never a move+symlink) -- a home whose ONLY legacy content is a plugin must
+  // still be detected as old layout, or it never migrates at all.
+  test("a home whose ONLY legacy content is a plugin (with a winter-plugin.json) is old layout too", () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-migc-pluginsonly-")));
+    mkdirSync(join(home, "sdk", "projects"), { recursive: true });
+    mkdirSync(join(home, "plugins", "battery-limiter"), { recursive: true });
+    writeFileSync(join(home, "plugins", "battery-limiter", "winter-plugin.json"), JSON.stringify({ id: "battery-limiter", tier: "capability" }));
+    expect(isOldLayout(home)).toBe(true);
+  });
+
+  test("a <home>/plugins dir with only a plugin.json (no winter-plugin.json) does NOT alone trigger old layout", () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-migc-metaonly-")));
+    mkdirSync(join(home, "sdk", "projects"), { recursive: true });
+    mkdirSync(join(home, "plugins", "meta-only"), { recursive: true });
+    writeFileSync(join(home, "plugins", "meta-only", "plugin.json"), JSON.stringify({ name: "Meta Only" }));
+    expect(isOldLayout(home)).toBe(false);
+  });
+
+  test("an EMPTY <home>/plugins directory does not trigger old layout", () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-migc-emptyplugins-")));
+    mkdirSync(join(home, "sdk", "projects"), { recursive: true });
+    mkdirSync(join(home, "plugins"), { recursive: true });
+    expect(isOldLayout(home)).toBe(false);
+  });
 });
 
 describe("review M7: every moved directory and the instructions file count", () => {
