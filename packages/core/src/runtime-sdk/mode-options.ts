@@ -7,7 +7,7 @@ import type {
 import {
   WINTER_BRAND, disableCronEnvName, envName, pluginCacheDirEnvName, providerManagedByHostEnvName, storeHomeEnvName,
 } from "@yanlinglabs/winter-agent-sdk";
-import { PROTECTED_ITEM_DIRS, RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
+import { escapeRulePath, PROTECTED_ITEM_DIRS, RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
 import { approvedProjectRulesDir, homeCacheDir, sdkHomeFor, storeHomeFor, trustRecordFile } from "../agent/paths";
 import { repoRootFor } from "../agent/memory-dir";
@@ -200,17 +200,6 @@ export function fsRootAnchored(pathOrPattern: string): string {
   return pathOrPattern.startsWith("/") ? `/${pathOrPattern}` : `//${pathOrPattern}`;
 }
 
-/**
- * Round 4, minor 4 — a filesystem PATH as a permission rule's gitignore-style pattern spells it, on BOTH
- * legs: `[`, `]`, `*` and `\` backslash-escaped, so a home named `[wip] app` is that directory rather than
- * a character class. `?` stays RAW: claude has no working escape for it, and over-matching is the safe
- * direction for a deny. The router's `escapeRulePath`, character for character (its comment carries the
- * measurement). Only the PATH parts of a rule go through here — the glob parts (`**`, `settings*.json`,
- * `claude-resume-*`) are the rule's own.
- */
-export function escapeRulePath(path: string): string {
-  return path.replace(/[[\]*\\]/g, (character) => `\\${character}`);
-}
 
 /**
  * **What CHAT is allowed to call**, by Winter name — the whole set, pinned as a literal.
@@ -557,6 +546,8 @@ export const RUN_FOLDER_CONFIG_FILES = [".winter.json", ".claude.json", ".creden
 export function controlPlaneDenyRules(home: string): string[] {
   const writeTools = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
   // Round 4, minor 4: every literal PATH below is spelled with `escapeRulePath` (`lit`); glob parts are not.
+  // R.1 ruling 2: `escapeRulePath` is the ROUTER's (one source for both legs' rule spelling) — the daemon's
+  // character-for-character copy is gone.
   const lit = escapeRulePath;
   // P8d-12 (WS-16 §10); Winter Phase 10b (D1-3, W18-9): the official leg's own SDK-parent staging
   // root — `claude-resume-<uuid>` directories the Claude Agent SDK stages a cross-generation resume

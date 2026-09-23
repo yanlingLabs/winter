@@ -13,7 +13,8 @@ import { mkdirSync, mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RESUME_STAGING_PREFIX } from "@yanlinglabs/winter-runtime-sdk";
-import { controlPlaneDenyRules, escapeRulePath, sandboxConfigFor } from "../../src/runtime-sdk/mode-options";
+import { escapeRulePath } from "@yanlinglabs/winter-runtime-sdk";
+import { controlPlaneDenyRules, sandboxConfigFor } from "../../src/runtime-sdk/mode-options";
 import { escapeFloorHit } from "../../src/runtime-sdk/hooks";
 import { homeFencedDirs } from "../../src/runtime-sdk/home-fence";
 import { storeWriteDenial, protectedReadDenial } from "../../src/runtime-sdk/protected-paths";
@@ -246,8 +247,12 @@ describe("round 4, minor 4: glob metacharacters in the daemon's own rule paths",
     }
     return new RegExp(`^${re}$`).test(path);
   };
-  test("escapeRulePath escapes [ ] * \\ and leaves ? raw", () => {
-    expect(escapeRulePath("/u/[wip]*a\\b?c")).toBe("/u/\\[wip\\]\\*a\\\\b?c");
+  // R.1 ruling 2: the router's `escapeRulePath` (now imported, the one source). `[`, `]`, `*` escaped once
+  // and `?` raw are measured on both legs; the BACKSLASH spelling is the router's to make claude-correct
+  // (`rule-path-escape-measure.e2e.test.ts` measures it on both real binaries), so it is not pinned here.
+  test("escapeRulePath escapes [ ] * and leaves ? raw", () => {
+    expect(escapeRulePath("/u/[wip]*a?c")).toBe("/u/\\[wip\\]\\*a?c");
+    expect(escapeRulePath("/u/a\\b")).not.toBe("/u/a\\b"); // a backslash is escaped, never passed raw
   });
   test("a home containing [x] still has its control-plane deny rules applied — glob parts intact", () => {
     const home = "/Users/x/[wip] homes/.winter";
