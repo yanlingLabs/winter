@@ -110,7 +110,11 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     // interprets nothing — `provider/tool-secret.ts` accepts a BARE key string as well as
     // `{"kind":"api-key",…}` — which is exactly why it is NOT a second thing for this mirror to
     // mirror: no `CredentialMaterial` parse happens on that path at all.)
-    expect(pkg.version).toBe("0.0.17");
+    //
+    // 0.0.17 → 0.0.20 (the dist-session parity fixes; 0.0.18 and 0.0.19 were tagged but never
+    // published): `git diff v0.0.17 v0.0.20 -- packages/runtime/src/provider/keychain-store.ts` came
+    // back EMPTY (0 lines); the mirror stands unchanged.
+    expect(pkg.version).toBe("0.0.20");
   });
 
 
