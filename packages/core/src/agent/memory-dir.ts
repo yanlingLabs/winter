@@ -76,11 +76,12 @@ export function repoRootFor(cwd: string): string {
       if (raw) {
         const commonDir = canon(isAbsolute(raw) ? raw : resolve(key, raw));
         const candidate = dirname(commonDir);
-        const configured = configuredWorktree(commonDir);
+        // Each extra git spawn only when the rung before it failed — an ordinary checkout pays none.
+        let configured: string | null = null;
         if (within(key, candidate) || registeredWorktrees(commonDir).some((wt) => within(key, wt))) root = candidate;
         // A submodule: its common dir is `<outer>/.git/modules/<name>`, and its own `core.worktree`
         // names the checkout — the submodule's one root from any depth inside it.
-        else if (configured !== null && within(key, configured)) root = configured;
+        else if ((configured = configuredWorktree(commonDir)) !== null && within(key, configured)) root = configured;
         else console.error(`memory-dir: ${key}'s git dir resolves to ${commonDir}, which neither contains it nor registers it as a worktree — using the directory itself as its project root`);
       }
     }
