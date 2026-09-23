@@ -6,7 +6,7 @@ import type {
 } from "@yanlinglabs/winter-agent-sdk";
 import { RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
-import { approvedProjectRulesDir, homeCacheDir } from "../agent/paths";
+import { approvedProjectRulesDir, homeCacheDir, trustRecordFile } from "../agent/paths";
 import { parseRule } from "../agent/permission-rules";
 import { keychainService } from "../profile";
 import type { SessionApprovalPolicy } from "../agent/gate";
@@ -545,6 +545,9 @@ export function controlPlaneDenyRules(home: string): string[] {
     // Review I2: the daemon's own record of rules approved "in this project" — applied to a child
     // WITHOUT a trust check (it cannot come from a repository), so writing it would be a self-grant.
     fsRootAnchored([approvedProjectRulesDir(home), "**"].join("/")),
+    // Whole-branch review: the trust record (`TrustStore`, daemon.ts). Writing it trusts any project,
+    // and a trusted project's in-repo allow rules and overlay then reach the child.
+    fsRootAnchored(trustRecordFile(home)),
   ];
   // Task 17: the engine's read tool denied `<home>/run` and `<home>/runtimes` (the runtime store,
   // 8a's model-denied directory); the Winter leg's read-class tools carry the same two denials.
@@ -731,7 +734,7 @@ export function persistedAllowRulesFor(cwd: string, deps: {
   return [...new Set([...settingsAllow, ...approved, ...projectAllow])];
 }
 
-export function sandboxConfigFor(home: string): SandboxSettingsConfig {
+export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSettingsConfig {
   return {
     enabled: true,
     filesystem: {
@@ -768,7 +771,22 @@ export function sandboxConfigFor(home: string): SandboxSettingsConfig {
       // `<home>/cache` since re-review M-a — the directories above the views included.
       // …and every installed plugin (review M6) — same reason as the write-tool rule.
       // …and the daemon's approved-project-rules record (review I2) — a self-grant if writable.
-      denyWrite: [join(home, "run"), join(home, "runtimes"), homeCacheDir(home), join(home, "plugins"), approvedProjectRulesDir(home)],
+      //
+      // EVERY SELF-GRANT PATH belongs on this list (whole-branch review): lane C's escape floor — what
+      // an unsandboxed command may not touch — is derived from it. So also: the trust record, the
+      // user's agent definitions, and the user's three global control-plane files (a FILE is a valid
+      // entry: a subpath of a file path is that file; Winter's profile covers these three only under
+      // a home NAMED `.winter`, and claude's not at all). And, when the session's cwd is known, the
+      // project agent definitions the daemon loads for it (`loadProjectAgentDefinitions(cwd)` reads
+      // exactly `<cwd>/.winter/agents`): sandboxed Bash on the Winter leg could write that directory,
+      // which the write TOOLS were already denied (`**/.winter/agents/**`). An any-depth form is not
+      // expressible here (subpaths only), and only this one path is ever loaded.
+      denyWrite: [
+        join(home, "run"), join(home, "runtimes"), homeCacheDir(home), join(home, "plugins"), approvedProjectRulesDir(home),
+        trustRecordFile(home), join(home, "agents"),
+        ...[...CONTROL_PLANE_FILENAMES].sort().map((f) => join(home, f)),
+        ...(cwd ? [join(cwd, ".winter", "agents")] : []),
+      ],
       // The sole read denial Winter has ever had (CLAUDE.md: "the sole read denial is
       // `~/.winter/run`") — reads are otherwise deliberately unrestricted.
       // …plus `runtimes/` (8a: the runtime store is never model-readable — the engine's read tool
@@ -911,7 +929,7 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
       deny: permissionDenyRulesFor(input.home, input.settings),
       disableBypassPermissionsMode: !bypassAllowedAtSpawn(input.policy),
     },
-    sandbox: sandboxConfigFor(input.home),
+    sandbox: sandboxConfigFor(input.home, input.cwd),
     // Agent SDK 0.0.16 defaults a spawn to BACKGROUND (claude's own default), which means a finished
     // child re-enters the model on a turn NOBODY PUSHED — a second `system/init`, an assistant
     // stream and its own `result`, with no `user` frame. The projector opens a turn only from

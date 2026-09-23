@@ -40,6 +40,7 @@ import { LspManager } from "./agent/lsp/manager";
 import { PermissionGate, type SessionApprovalPolicy } from "./agent/gate";
 import { PermissionRules } from "./agent/permission-rules";
 import { ApprovedProjectRules } from "./agent/approved-project-rules";
+import { trustRecordFile } from "./agent/paths";
 import { ApprovalBroker } from "./agent/approvals";
 import { QuestionBroker } from "./agent/questions";
 import { createPersistedChildren, type AgentRegistry } from "./agent/bg-agent-registry";
@@ -533,7 +534,8 @@ export async function startDaemon(opts: {
     console.error(`empty-session boot sweep failed: ${(err as Error).message}`);
   }
 
-  const trustStore = new TrustStore(join(winterHome, "trust.json"));
+  // `trustRecordFile`: the same path the write fences name (`controlPlaneDenyRules`/`sandboxConfigFor`).
+  const trustStore = new TrustStore(trustRecordFile(winterHome));
   // Task 7 (CC project-folder-mechanics): the ONE cwd-keyed "effective settings" resolver for the
   // whole daemon — `base` reads the reassignable `settings` holder above LIVE (same hot-settings
   // shape as memoryEnabledHot/hooksEnabledHot below: a watcher-driven reload swaps in a NEW object
