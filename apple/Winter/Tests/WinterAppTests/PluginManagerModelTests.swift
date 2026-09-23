@@ -2,151 +2,146 @@ import XCTest
 import WinterKit
 @testable import Winter
 
-/// Task 2 (Phase 4d-iii): `pluginRowDisplay(...)` — the PURE `plugins.list` entry → row-display
-/// mapping (tier badge / version / consent text / status text+color / action set). No
-/// `WinterClient`, no SwiftUI — same "pure helper, table-tested directly" posture as
-/// `DashboardTests`' coverage of `formatDaemonStatus`/`formatQuotaState`/`sortedTrustPaths`.
+/// WS-21 rewrite: `pluginRowDisplay(_:)` — the PURE `plugin.list` entry → row-display mapping
+/// (tier badge / version / consent text / enabled state / action set). No `WinterClient`, no
+/// SwiftUI — same "pure helper, table-tested directly" posture as `DashboardTests`' coverage of
+/// `formatDaemonStatus`/`formatQuotaState`/`sortedTrustPaths`.
 final class PluginManagerModelTests: XCTestCase {
     /// Convenience default-args wrapper so each test below only spells out the fields it's
     /// actually varying.
-    private func row(
-        name: String = "sample-echo",
+    private func listing(
+        id: String = "sample-echo",
         version: String? = "1.2.0",
-        tier: String? = "platform",
+        marketplace: String = "winter-examples",
+        scope: PluginScope = .user,
+        enabled: Bool = true,
+        extras: PluginExtras? = PluginExtras(
+            tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
+            requiredConsents: [], consented: [], entry: nil, fingerprint: "fp-1"
+        )
+    ) -> PluginListing {
+        PluginListing(id: id, installPath: "/plugins/\(id)", scope: scope, enabled: enabled,
+                      marketplace: marketplace, version: version, extras: extras)
+    }
+
+    private func row(
+        id: String = "sample-echo",
+        version: String? = "1.2.0",
+        tier: String = "platform",
         requiredConsents: [String] = [],
         consented: [String] = [],
-        legacy: Bool = false,
-        status: String? = "running",
-        disabled: Bool = false
+        enabled: Bool = true,
+        hasExtras: Bool = true
     ) -> PluginRowDisplay {
-        pluginRowDisplay(
-            name: name, version: version, tier: tier, requiredConsents: requiredConsents,
-            consented: consented, legacy: legacy, status: status, disabled: disabled
-        )
+        let extras: PluginExtras? = hasExtras
+            ? PluginExtras(tier: tier, execPermission: true, tccPermissions: [], hardwarePermissions: [],
+                           requiredConsents: requiredConsents, consented: consented, entry: nil, fingerprint: "fp-1")
+            : nil
+        return pluginRowDisplay(listing(id: id, version: version, enabled: enabled, extras: extras))
     }
 
-    // MARK: - Action rule: running Tier-2 → [.restart, .disable, .remove]
+    // MARK: - Action rule: enabled Tier-2 (`platform`, extras present) → [.restart, .disable, .uninstall]
 
-    func testRunningTier2EnabledGetsRestartDisableRemove() {
-        let r = row(tier: "platform", status: "running", disabled: false)
+    func testEnabledTier2GetsRestartDisableUninstall() {
+        let r = row(tier: "platform", enabled: true)
         XCTAssertEqual(r.tierBadge, "Tier 2")
-        XCTAssertEqual(r.statusText, "Running")
-        XCTAssertEqual(r.statusColorKind, .running)
-        XCTAssertEqual(r.actions, [.restart, .disable, .remove])
+        XCTAssertTrue(r.enabled)
+        XCTAssertEqual(r.actions, [.restart, .disable, .uninstall])
     }
 
-    /// The central "never offer .enable for an already-running plugin" carryover from 4d-ii —
-    /// enabling a running plugin bounces it.
-    func testNeverOffersEnableForARunningPlugin() {
-        let r = row(status: "running", disabled: false)
+    /// The central "never offer .enable for an already-enabled plugin" carryover.
+    func testNeverOffersEnableForAnEnabledPlugin() {
+        let r = row(enabled: true)
         XCTAssertFalse(r.actions.contains(.enable))
     }
 
-    // MARK: - Action rule: `.restart` ONLY for a running Tier-2 plugin — every other enabled,
-    // non-running Tier-2 runtime state (stopped/backoff/circuit-open/starting) gets
-    // [.disable, .remove], no restart button (recovery goes through disable→enable instead, which
-    // hot-restarts the process server-side via `PluginSupervisor.restart`).
+    // MARK: - Action rule: needsConsent OVERRIDES both enabled and tier — the consent-trap fix.
+    //
+    // `installPlugin` (Contract B) writes `enabled: true` on every fresh install, Tier-2 or not,
+    // so a freshly-installed-but-unconsented Tier-2 plugin is `enabled == true` with
+    // `needsConsent == true` SIMULTANEOUSLY. Checking `enabled`/`tier` before `needsConsent` would
+    // read that row as "enabled Tier-2" and offer [.restart, .disable, .uninstall] — a dead end:
+    // .restart throws (the supervisor never tracked a process that was never spawned, since only
+    // plugin.enable's handler calls hotApplyStart, and it needs consent complete first) and there
+    // is no .enable button left to reach the consent sheet from.
 
-    func testStoppedTier2EnabledGetsDisableRemoveNoRestart() {
-        let r = row(tier: "platform", status: "stopped", disabled: false)
-        XCTAssertEqual(r.statusText, "Stopped")
-        XCTAssertEqual(r.statusColorKind, .stopped)
-        XCTAssertEqual(r.actions, [.disable, .remove])
+    func testEnabledTier2WithPendingConsentOffersGrantConsentNotRestart() {
+        let r = row(tier: "platform", requiredConsents: ["exec"], consented: [], enabled: true)
+        XCTAssertTrue(r.enabled, "installPlugin lands every fresh install enabled, consent or not")
+        XCTAssertEqual(r.actions, [.grantConsent, .disable, .uninstall])
+        XCTAssertFalse(r.actions.contains(.restart))
+        XCTAssertFalse(r.actions.contains(.enable))
     }
 
-    func testBackoffTier2EnabledGetsDisableRemoveNoRestart() {
-        let r = row(tier: "platform", status: "backoff", disabled: false)
-        XCTAssertEqual(r.statusText, "Backoff")
-        XCTAssertEqual(r.statusColorKind, .backoff)
-        XCTAssertEqual(r.actions, [.disable, .remove])
+    /// The same trap reachable from the OTHER direction: a Tier-2 plugin the user manually
+    /// disabled before ever granting consent (disable doesn't strip a pending/absent consent —
+    /// DECISION 5, L4's report) must still offer a way back to the sheet, not a dead `.enable`
+    /// that would spawn-fail silently.
+    func testDisabledTier2WithPendingConsentOffersGrantConsentNotEnable() {
+        let r = row(tier: "platform", requiredConsents: ["exec"], consented: [], enabled: false)
+        XCTAssertEqual(r.actions, [.grantConsent, .uninstall])
+        XCTAssertFalse(r.actions.contains(.enable))
     }
 
-    func testCircuitOpenTier2EnabledGetsDisableRemoveNoRestart() {
-        let r = row(tier: "platform", status: "circuit-open", disabled: false)
-        XCTAssertEqual(r.statusText, "Circuit open")
-        XCTAssertEqual(r.statusColorKind, .circuitOpen)
-        XCTAssertEqual(r.actions, [.disable, .remove])
+    func testPartiallyConsentedEnabledTier2StillOffersGrantConsent() {
+        let r = row(tier: "platform", requiredConsents: ["exec", "tcc"], consented: ["exec"], enabled: true)
+        XCTAssertEqual(r.actions, [.grantConsent, .disable, .uninstall])
     }
 
-    func testStartingTier2EnabledGetsDisableRemoveNoRestart() {
-        let r = row(tier: "platform", status: "starting", disabled: false)
-        XCTAssertEqual(r.statusText, "Starting")
-        XCTAssertEqual(r.statusColorKind, .starting)
-        XCTAssertEqual(r.actions, [.disable, .remove])
+    /// Once every required class is consented, the row falls through to the ordinary enabled-
+    /// Tier-2 rule — `.grantConsent` disappears, `.restart` reappears.
+    func testFullyConsentedEnabledTier2FallsBackToRestartDisableUninstall() {
+        let r = row(tier: "platform", requiredConsents: ["exec"], consented: ["exec"], enabled: true)
+        XCTAssertEqual(r.actions, [.restart, .disable, .uninstall])
     }
 
-    func testRestartIsNeverOfferedOutsideRunning() {
-        for status in ["stopped", "backoff", "circuit-open", "starting", "na", nil] {
-            let r = row(status: status, disabled: false)
-            XCTAssertFalse(r.actions.contains(.restart), "status \(status ?? "nil") must not offer .restart")
-        }
+    // MARK: - Action rule: DISABLED (any tier) → [.enable, .uninstall]
+
+    func testDisabledTier2GetsEnableUninstall() {
+        let r = row(tier: "platform", enabled: false)
+        XCTAssertFalse(r.enabled)
+        XCTAssertEqual(r.actions, [.enable, .uninstall])
     }
 
-    // MARK: - Action rule: DISABLED (any tier/status) → [.enable, .remove]
-
-    func testDisabledTier2GetsEnableRemove() {
-        let r = row(tier: "platform", status: "na", disabled: true)
-        XCTAssertEqual(r.statusText, "Disabled")
-        XCTAssertEqual(r.statusColorKind, .disabled)
-        XCTAssertEqual(r.actions, [.enable, .remove])
+    func testDisabledTier1GetsEnableUninstall() {
+        let r = row(tier: "capability", enabled: false)
+        XCTAssertEqual(r.actions, [.enable, .uninstall])
     }
 
-    func testDisabledTier1GetsEnableRemove() {
-        let r = row(tier: "capability", status: "na", disabled: true)
-        XCTAssertEqual(r.statusText, "Disabled")
-        XCTAssertEqual(r.statusColorKind, .disabled)
-        XCTAssertEqual(r.actions, [.enable, .remove])
-    }
-
-    /// `disabled` is checked BEFORE `status` — a stale/inconsistent "running" status on a disabled
-    /// row (shouldn't happen server-side, but the mapping must still fail toward "Disabled", never
-    /// toward offering a Restart on a plugin the user just turned off) still reads as disabled.
-    func testDisabledTakesPriorityOverAnyReportedStatus() {
-        let r = row(status: "running", disabled: true)
-        XCTAssertEqual(r.statusText, "Disabled")
-        XCTAssertEqual(r.statusColorKind, .disabled)
-        XCTAssertEqual(r.actions, [.enable, .remove])
+    func testDisabledTakesPriorityOverTier() {
+        let r = row(tier: "platform", enabled: false)
+        XCTAssertEqual(r.actions, [.enable, .uninstall])
         XCTAssertFalse(r.actions.contains(.restart))
     }
 
-    // MARK: - Action rule: na/Tier-1/legacy (enabled) → [.disable, .remove], NO running indicator
+    // MARK: - Action rule: enabled, no Tier-2 entry (Tier-1 or no extras) → [.disable, .uninstall],
+    // never `.restart` (there is no process to restart).
 
-    func testTier1EnabledNaGetsDisableRemove() {
-        let r = row(tier: "capability", status: "na", disabled: false)
+    func testEnabledTier1GetsDisableUninstallNoRestart() {
+        let r = row(tier: "capability", enabled: true)
         XCTAssertEqual(r.tierBadge, "Tier 1")
-        XCTAssertEqual(r.statusText, "N/A")
-        XCTAssertEqual(r.statusColorKind, .na)
-        XCTAssertEqual(r.actions, [.disable, .remove])
+        XCTAssertEqual(r.actions, [.disable, .uninstall])
     }
 
-    func testLegacyPluginGetsLegacyBadgeAndNaBehavior() {
-        let r = row(tier: nil, legacy: true, status: nil, disabled: false)
-        XCTAssertEqual(r.tierBadge, "Legacy")
-        XCTAssertEqual(r.statusText, "N/A")
-        XCTAssertEqual(r.statusColorKind, .na)
-        XCTAssertEqual(r.actions, [.disable, .remove])
+    func testEnabledPluginWithNoExtrasGetsDisableUninstallNoRestart() {
+        let r = row(enabled: true, hasExtras: false)
+        XCTAssertEqual(r.tierBadge, "Plugin")
+        XCTAssertEqual(r.actions, [.disable, .uninstall])
     }
 
-    func testUnrecognizedTierNonLegacyGetsUnknownBadge() {
-        let r = row(tier: nil, legacy: false)
+    func testUnrecognizedTierGetsUnknownBadge() {
+        let extras = PluginExtras(tier: "mystery", execPermission: false, tccPermissions: [],
+                                  hardwarePermissions: [], requiredConsents: [], consented: [], entry: nil, fingerprint: "fp-1")
+        let r = pluginRowDisplay(listing(extras: extras))
         XCTAssertEqual(r.tierBadge, "Unknown")
     }
 
-    // MARK: - `na` must render DISTINCTLY from every Tier-2 runtime state (and `disabled`)
-
-    func testNaColorKindIsDistinctFromEveryOtherKind() {
-        let others: Set<PluginStatusColorKind> = [.running, .starting, .stopped, .backoff, .circuitOpen, .disabled]
-        XCTAssertFalse(others.contains(.na))
-    }
-
-    func testNaAndStoppedAreDifferentRenderStates() {
-        let na = row(tier: "capability", status: "na", disabled: false)
-        let stopped = row(tier: "platform", status: "stopped", disabled: false)
-        XCTAssertNotEqual(na.statusColorKind, stopped.statusColorKind)
-        XCTAssertNotEqual(na.statusText, stopped.statusText)
-    }
-
     // MARK: - Consent text
+
+    func testConsentTextNoExtras() {
+        let r = row(hasExtras: false)
+        XCTAssertEqual(r.consentText, "No consent required")
+    }
 
     func testConsentTextNoConsentRequired() {
         let r = row(requiredConsents: [], consented: [])
@@ -154,13 +149,13 @@ final class PluginManagerModelTests: XCTestCase {
     }
 
     func testConsentTextFullyConsented() {
-        let r = row(requiredConsents: ["network"], consented: ["network"])
-        XCTAssertEqual(r.consentText, "Consented: network")
+        let r = row(requiredConsents: ["exec"], consented: ["exec"])
+        XCTAssertEqual(r.consentText, "Consented: exec")
     }
 
     func testConsentTextReportsOnlyMissingClasses() {
-        let r = row(requiredConsents: ["network", "fs"], consented: ["network"])
-        XCTAssertEqual(r.consentText, "Needs consent: fs")
+        let r = row(requiredConsents: ["exec", "tcc"], consented: ["exec"])
+        XCTAssertEqual(r.consentText, "Needs consent: tcc")
     }
 
     // MARK: - Version
@@ -173,87 +168,24 @@ final class PluginManagerModelTests: XCTestCase {
         XCTAssertEqual(row(version: nil).version, "—")
     }
 
-    // MARK: - Identifiable
+    // MARK: - Identity
 
-    func testRowIdIsThePluginName() {
-        XCTAssertEqual(row(name: "sample-echo").id, "sample-echo")
-    }
-
-    // MARK: - `settleShouldContinue` (4d gate-fix loop 1, UX fix #1): the settle loop's PURE
-    // CONTINUE/STOP decision — continues only while a row is STILL "starting" and under the 15s
-    // bound; stops for every other status (or `nil`) regardless of elapsed time, and for "starting"
-    // itself once the bound is reached.
-
-    func testSettleContinuesWhileStartingUnder15Seconds() {
-        XCTAssertTrue(settleShouldContinue(status: "starting", elapsedSeconds: 0))
-        XCTAssertTrue(settleShouldContinue(status: "starting", elapsedSeconds: 14.9))
-    }
-
-    func testSettleStopsOnceStartingReaches15Seconds() {
-        // Exact boundary: `elapsedSeconds == 15` must stop (strict `<`, not `<=`).
-        XCTAssertFalse(settleShouldContinue(status: "starting", elapsedSeconds: 15))
-        XCTAssertFalse(settleShouldContinue(status: "starting", elapsedSeconds: 20))
-    }
-
-    func testSettleStopsForEveryNonStartingStatusRegardlessOfElapsed() {
-        for status in ["running", "stopped", "backoff", "circuit-open", "na", nil] {
-            XCTAssertFalse(settleShouldContinue(status: status, elapsedSeconds: 0), "status \(status ?? "nil") must stop immediately")
-            XCTAssertFalse(settleShouldContinue(status: status, elapsedSeconds: 10), "status \(status ?? "nil") must stay stopped")
-        }
-    }
-
-    // MARK: - manifestHooks (2026-09-18): the Hooks tab's data path
-
-    /// The row factory carries `plugins.list`'s `manifestHooks` through in MANIFEST ORDER, with
-    /// duplicates intact and each declaration's index folded into its `id` — a `ForEach` over
-    /// colliding ids silently drops rows, which would under-report hooks that really do run twice.
-    func testManifestHooksKeepManifestOrderAndDuplicatesStayDistinct() {
-        let display = pluginRowDisplay(
-            name: "demo", version: nil, tier: "capability", requiredConsents: [], consented: [],
-            legacy: false, status: "running", disabled: false,
-            manifestHooks: [
-                PluginManifestHook(event: "pre-tool", command: "./deny.sh", timeoutMs: 500),
-                PluginManifestHook(event: "post-tool", command: "./observe.sh", timeoutMs: nil),
-                PluginManifestHook(event: "pre-tool", command: "./deny.sh", timeoutMs: 500),
-            ])
-        let hooks = display.manifestHooks ?? []
-        XCTAssertEqual(hooks.map(\.event), ["pre-tool", "post-tool", "pre-tool"])
-        XCTAssertNil(hooks[1].timeoutMs, "an absent timeout is the daemon's default, never 0")
-        XCTAssertEqual(Set(hooks.map(\.id)).count, 3, "two identical declarations must stay two rows")
-    }
-
-    /// The one cross-row question the Hooks tab has to answer: an older daemon omits the field for
-    /// EVERY plugin, and a supporting daemon omits it for a hookless one. Only the whole list can
-    /// tell those apart — and getting it backwards tells a user their hooks do not run.
-    func testHooksAreReportedOnlyWhenSomeRowActuallyCarriesTheField() {
-        let unreported = pluginRowDisplay(name: "a", version: nil, tier: nil, requiredConsents: [],
-                                          consented: [], legacy: false, status: nil, disabled: false)
-        let declaresNone = pluginRowDisplay(name: "b", version: nil, tier: nil, requiredConsents: [],
-                                            consented: [], legacy: false, status: nil, disabled: false,
-                                            manifestHooks: [])
-        XCTAssertFalse(pluginHooksAreReported(rows: [unreported, unreported]))
-        XCTAssertFalse(pluginHooksAreReported(rows: []), "no plugins ⇒ nobody told us anything either way")
-        XCTAssertTrue(pluginHooksAreReported(rows: [unreported, declaresNone]),
-                      "an EMPTY array is the daemon saying 'none' — that counts as reporting")
-
-        // A row that reported nothing is omitted from the dictionary rather than mapped to [],
-        // so the group builder's own empty-state stays reachable only when it is true.
-        let map = pluginHooksByPlugin(rows: [unreported, declaresNone])
-        XCTAssertNil(map["a"])
-        XCTAssertEqual(map["b"], [])
+    func testRowIdIsTheQualifiedSpec() {
+        let r = row(id: "sample-echo")
+        XCTAssertEqual(r.spec, "sample-echo@winter-examples")
+        XCTAssertEqual(r.id, r.spec)
+        XCTAssertEqual(r.pluginId, "sample-echo")
     }
 }
 
 // -----------------------------------------------------------------------------------------------
-// PluginManagerModel — async error-surfacing path (Fix wave 1, Task 2 review defect). A SEPARATE
-// `@MainActor` test class (not folded into `PluginManagerModelTests` above) so that class's 21
-// pure-`pluginRowDisplay` tests stay byte-for-byte untouched, per the fix brief. Uses the SAME
-// scripted-transport double every other test file in this target uses to drive a real (actor)
-// `WinterClient` end-to-end (`FeedScriptedTransport`/`feedLineJSON`/`feedWaitUntil`, defined in
-// `SessionFeedTests.swift`, same target) — `PluginManagerModel` takes a concrete `WinterClient`,
-// but that client is ALREADY mockable at the transport layer (see `PeripheralProviderTests.
-// connectedProvider()`/`HardwareBridgeTests.connectedBridge()`), so no new protocol seam is
-// introduced here.
+// PluginManagerModel — async error-surfacing path (Fix wave 1, Task 2 review defect, carried
+// through the WS-21 rewrite). A SEPARATE `@MainActor` test class (not folded into
+// `PluginManagerModelTests` above) so that class's pure-`pluginRowDisplay` tests stay untouched.
+// Uses the SAME scripted-transport double every other test file in this target uses to drive a
+// real (actor) `WinterClient` end-to-end (`FeedScriptedTransport`/`feedLineJSON`/`feedWaitUntil`,
+// defined in `SessionFeedTests.swift`, same target).
+// -----------------------------------------------------------------------------------------------
 @MainActor
 final class PluginManagerModelAsyncTests: XCTestCase {
     /// Opens + hellos a scripted `WinterClient`, mirroring `PeripheralProviderTests.
@@ -269,38 +201,53 @@ final class PluginManagerModelAsyncTests: XCTestCase {
         return (client, t)
     }
 
-    /// THE defect this fix wave closes: `enable`'s `.unknownPlugin` branch used to write
-    /// `errorText` directly, then unconditionally `await refresh()` — whose SUCCESS path
-    /// unconditionally nils `errorText` — wiping the action's error the instant `plugins.list`
-    /// (called independently of whether the action failed) came back clean. Pre-fix this test
-    /// fails (`model.errorText` ends up `nil`); post-fix the action error is the LAST write and
-    /// survives the trailing refresh.
+    /// `enable(_:)` on a spec `plugin.list` never reported is a silent no-op (no matching listing
+    /// to act against) — fix round 1 (M5): `enable(_:)` now refreshes FIRST, so its own
+    /// `plugin.list` IS sent, but nothing beyond that (no `plugin.enable`, no sheet).
+    func testEnableOnUnknownSpecIsANoOp() async throws {
+        let (client, t) = try await connectedClient()
+        let model = PluginManagerModel(client: client)
+
+        async let action: Void = model.enable("ghost@nowhere")
+        await feedWaitUntil { t.sent.count >= 2 }
+        let listReq = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"plugins":[]}}"#)
+        await action
+
+        XCTAssertEqual(t.sent.count, 2, "hello + enable(_:)'s own refresh — no plugin.enable for a spec never listed")
+        XCTAssertNil(model.consentSheet)
+    }
+
+    /// THE defect this fix wave closes (carried through WS-21): an action's own failure must
+    /// survive the trailing `refresh()`, which clears `errorText` on ITS OWN success independent
+    /// of whether the action failed.
     func testFailedActionErrorSurvivesTrailingRefresh() async throws {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
 
-        async let action: Void = model.enable("ghost")
-
-        // Request #2 (after hello): `plugin.enable` — respond with the typed `unknown_plugin`
-        // failure result (methods.ts `PluginEnableResult`), NOT a thrown RpcError.
+        // Seed a listing via a first refresh so `disable("sample-echo@winter-examples")` has a
+        // row to act against.
+        async let firstRefresh: Void = model.refresh()
         await feedWaitUntil { t.sent.count >= 2 }
-        let enableReq = feedLineJSON(t.sent[1])
-        t.feed(#"{"jsonrpc":"2.0","id":\#(enableReq["id"] as! Int),"result":{"code":"unknown_plugin"}}"#)
+        let listReq1 = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq1["id"] as! Int),"result":{"plugins":[{"id":"sample-echo","installPath":"/p","scope":"user","enabled":true,"marketplace":"winter-examples"}]}}"#)
+        await firstRefresh
 
-        // Request #3: the action's trailing `refresh()` → `plugins.list` — succeeds with an empty
-        // list, exercising the exact "refresh succeeds independently of the action's failure" path
-        // that used to wipe the error.
+        async let action: Void = model.disable("sample-echo@winter-examples")
+
         await feedWaitUntil { t.sent.count >= 3 }
-        let listReq = feedLineJSON(t.sent[2])
-        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"plugins":[]}}"#)
+        let disableReq = feedLineJSON(t.sent[2])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(disableReq["id"] as! Int),"error":{"code":-32000,"message":"unknown plugin: sample-echo@winter-examples"}}"#)
+
+        await feedWaitUntil { t.sent.count >= 4 }
+        let listReq2 = feedLineJSON(t.sent[3])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq2["id"] as! Int),"result":{"plugins":[]}}"#)
 
         await action
 
-        XCTAssertEqual(model.errorText, "unknown plugin: ghost")
+        // Fix round 1 (M1): the daemon's own refusal text, not a generic "try again".
+        XCTAssertEqual(model.errorText, "couldn't disable sample-echo@winter-examples: unknown plugin: sample-echo@winter-examples")
         XCTAssertTrue(model.rows.isEmpty)
-        // Re-targeted from the deleted `pendingConsent` field (Task 2 review fix wave): an
-        // `.unknownPlugin` outcome must not spuriously open the consent sheet either.
-        XCTAssertNil(model.consentSheet)
     }
 
     /// A genuinely-successful action must still end with `errorText == nil` (clearing any stale
@@ -311,25 +258,29 @@ final class PluginManagerModelAsyncTests: XCTestCase {
         let model = PluginManagerModel(client: client)
         model.errorText = "stale error from a previous action"
 
-        async let action: Void = model.disable("sample-echo")
-
+        async let firstRefresh: Void = model.refresh()
         await feedWaitUntil { t.sent.count >= 2 }
-        let disableReq = feedLineJSON(t.sent[1])
-        t.feed(#"{"jsonrpc":"2.0","id":\#(disableReq["id"] as! Int),"result":{"ok":true}}"#)
+        let listReq1 = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq1["id"] as! Int),"result":{"plugins":[{"id":"sample-echo","installPath":"/p","scope":"user","enabled":true,"marketplace":"winter-examples"}]}}"#)
+        await firstRefresh
+
+        async let action: Void = model.disable("sample-echo@winter-examples")
 
         await feedWaitUntil { t.sent.count >= 3 }
-        let listReq = feedLineJSON(t.sent[2])
-        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"plugins":[]}}"#)
+        let disableReq = feedLineJSON(t.sent[2])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(disableReq["id"] as! Int),"result":{"ok":true,"spec":"sample-echo@winter-examples","scope":"user","enabled":false}}"#)
+
+        await feedWaitUntil { t.sent.count >= 4 }
+        let listReq2 = feedLineJSON(t.sent[3])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq2["id"] as! Int),"result":{"plugins":[]}}"#)
 
         await action
 
         XCTAssertNil(model.errorText)
     }
 
-    /// UX fix #2 (4d gate-fix loop 1): `onRefreshed` is the hook `PluginManagerView` wires to
-    /// `shortcutsModel.refresh()` (and every settle-loop tick funnels through it too) so a newly
-    /// installed plugin's declared shortcuts show up without the dashboard being closed/reopened —
-    /// this pins that it fires at the end of a `refresh()` call, independent of the view.
+    /// `onRefreshed` fires at the end of a `refresh()` call, independent of the view — the hook
+    /// `PluginManagerView` wires to `shortcutsModel.refresh()`.
     func testOnRefreshedFiresAfterRefresh() async throws {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
@@ -345,5 +296,26 @@ final class PluginManagerModelAsyncTests: XCTestCase {
         await refresh
 
         XCTAssertEqual(fireCount, 1)
+    }
+
+    /// `refresh()` filters to `.user` scope only — `plugin.list` emits one row per scope record
+    /// (`plugins/sdk-plugin-api.ts`'s `listPlugins`), so a plugin installed at BOTH `user` and
+    /// `project` scope would otherwise produce two rows sharing the identical `spec`, colliding on
+    /// `PluginRowDisplay`'s `Identifiable` id (this pane has no `cwd`, so it can't tell those
+    /// scopes' rows apart or manage them anyway).
+    func testRefreshFiltersOutNonUserScopeRows() async throws {
+        let (client, t) = try await connectedClient()
+        let model = PluginManagerModel(client: client)
+
+        async let refresh: Void = model.refresh()
+
+        await feedWaitUntil { t.sent.count >= 2 }
+        let listReq = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"plugins":[{"id":"demo","installPath":"/a","scope":"user","enabled":true,"marketplace":"winter-examples"},{"id":"demo","installPath":"/b","scope":"project","enabled":false,"marketplace":"winter-examples"}]}}"#)
+
+        await refresh
+
+        XCTAssertEqual(model.rows.count, 1)
+        XCTAssertEqual(model.rows.first?.scope, .user)
     }
 }

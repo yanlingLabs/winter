@@ -1,17 +1,23 @@
 import SwiftUI
 
 // -----------------------------------------------------------------------------------------------
-// Settings → Plugins (2026-09-18) — a DOOR into the library panel, not a second library.
+// Settings → Plugins (2026-09-18; WS-21 copy pass 2026-09-23) — a DOOR into the library panel, not
+// a second library.
 //
 // The library floating panel (`LibraryPanel`, `ShellOverlays.swift`) already lists skills, plugins,
 // hooks, MCP tools and agents, each on its own tab. A settings page that listed them again would be
 // two homes for one thing — the exact duplication Settings was restructured to avoid. So this page
-// is five rows, each opening the library AT that tab, plus the one fact about hooks that is a
-// setting rather than a list (`hooks.enabled`).
+// is five rows, each opening the library AT that tab, plus the one fact about hooks that used to be
+// a setting rather than a list (`hooks.enabled`) — see the note below for why that's now a fact
+// about the PAST rather than a live toggle.
 //
-// Hooks are here because plugins declare them (each manifest's `contributes.hooks`, reported by the
-// daemon per plugin as `manifestHooks`) — which is also why the row sits next to Plugins and Skills
-// rather than in the Assistant group where its standalone section used to be.
+// WS-21: a plugin's hooks are claude-native `hooks/hooks.json` content now, loaded directly by
+// both runtimes — the daemon no longer parses or runs a plugin's declared hooks itself
+// (`plugins/hook-registry.ts`'s `HookFacade` is permanently inert, spec §5.3/§5.5's own "Removed"
+// list), so `hooks.enabled` gates nothing real any more (it still exists in `settings.json` — it
+// "stays", spec §4.1's table — but has no live plugin-hook mechanism left to switch off). The
+// Hooks row/tab is kept for continuity, not because the daemon has anything to report there any
+// more — see `LibraryHooksTab.swift`'s own header.
 // -----------------------------------------------------------------------------------------------
 
 /// The narrow door the Plugins page needs from the shell: "show the library at this tab". Declared
@@ -43,27 +49,30 @@ let settingsLibraryDoors: [SettingsLibraryDoor] = [
                         description: "The skills Winter can load.",
                         tab: .skills),
     SettingsLibraryDoor(title: "Hooks",
-                        description: "The hooks your plugins declare.",
+                        description: "No longer reported here — hooks live in each plugin's own "
+                            + "hooks/hooks.json and run directly, without the daemon listing them.",
                         tab: .hooks),
     SettingsLibraryDoor(title: "MCP servers",
                         description: "Tool servers — stdio, HTTP or SSE — added under mcpServers "
-                            + "in settings.json, and the tools each one offers.",
+                            + "in sdk/.winter.json (claude's own config file), and the tools each "
+                            + "one offers.",
                         tab: .mcp),
     SettingsLibraryDoor(title: "Agents",
                         description: "Agent definitions.",
                         tab: .agents),
 ]
 
-/// PURE: the note under the rows. `hooks.enabled` is the ONE setting about plugin hooks in general —
-/// not about any one plugin — so it is a note on this page rather than a sixth door. Verified
-/// against `packages/core/src/settings.ts`'s `hooksEnabledFrom` (`s.hooks?.enabled !== false`): on
-/// unless explicitly false. It gates the PLUGIN hook registry (`plugins/hook-registry.ts`'s
-/// `HookFacade`) — not the daemon's own built-in hooks (the bash reviewer, diagnostics-after-edit),
-/// which is why the note says "plugin hooks" rather than "hooks". A note, not a disabled toggle: a control that cannot be used reads as broken.
+/// PURE: the note under the rows. WS-21 retired the daemon-side plugin hook registry
+/// (`plugins/hook-registry.ts`'s `HookFacade` — `pluginHooksEligible` is now permanently `false`,
+/// `agent/plugins.ts`) — a plugin's hooks are claude-native `hooks/hooks.json` content, loaded
+/// directly by both runtimes, so `hooks.enabled` (still present in `settings.json`, spec §4.1: it
+/// "stays") has nothing left to gate. The note says that plainly rather than describing a switch
+/// that no longer switches anything, which is what it said before this pass.
 /// Plain text, no backticks (it reaches `Text` as a variable).
 let settingsHooksSwitchNote =
-    "Whether plugin hooks run at all is one switch: hooks.enabled in settings.json today. They "
-    + "run unless it is set to false."
+    "Plugin hooks run directly now, declared in each plugin's own hooks/hooks.json — there is no "
+    + "daemon-side switch for them any more (hooks.enabled in settings.json still exists but no "
+    + "longer gates anything)."
 
 /// PURE: whether a door row can be clicked. With no presenter (a preview, a test, a surface built
 /// without a shell) the row is honestly inert rather than clickable-but-dead.

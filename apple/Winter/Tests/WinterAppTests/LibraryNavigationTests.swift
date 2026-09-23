@@ -146,18 +146,19 @@ final class LibraryNavigationTests: XCTestCase {
 
 /// The small pure display helpers the five lists and details read.
 final class LibraryDisplayHelperTests: XCTestCase {
-    private func plugin(_ name: String, status: String? = "running", disabled: Bool = false,
-                        hooks: [PluginManifestHook]? = nil) -> PluginRowDisplay {
-        pluginRowDisplay(name: name, version: "1.0.0", tier: "platform", requiredConsents: [],
-                         consented: [], legacy: false, status: status, disabled: disabled,
-                         manifestHooks: hooks)
+    private func plugin(_ id: String, enabled: Bool = true, tier: String = "platform") -> PluginRowDisplay {
+        let extras = PluginExtras(tier: tier, execPermission: true, tccPermissions: [], hardwarePermissions: [],
+                                  requiredConsents: [], consented: [], entry: nil, fingerprint: "fp-1")
+        let listing = PluginListing(id: id, installPath: "/p/\(id)", scope: .user, enabled: enabled,
+                                    marketplace: "winter-examples", version: "1.0.0", extras: extras)
+        return pluginRowDisplay(listing)
     }
 
     // MARK: Plugins
 
-    func testPluginSubtitleLeadsWithStatus() {
-        XCTAssertEqual(libraryPluginSubtitle(plugin("p")), "Running · Tier 2 · 1.0.0")
-        XCTAssertEqual(libraryPluginSubtitle(plugin("p", disabled: true)), "Disabled · Tier 2 · 1.0.0")
+    func testPluginSubtitleLeadsWithEnabledState() {
+        XCTAssertEqual(libraryPluginSubtitle(plugin("p")), "Enabled · Tier 2 · 1.0.0")
+        XCTAssertEqual(libraryPluginSubtitle(plugin("p", enabled: false)), "Disabled · Tier 2 · 1.0.0")
     }
 
     func testShortcutsAndTilesAreFilteredToThePlugin() {
@@ -176,48 +177,16 @@ final class LibraryDisplayHelperTests: XCTestCase {
         XCTAssertNil(libraryPluginTile(tiles, plugin: "b"))
     }
 
-    func testOnlyALiveProcessGetsAStatusDot() {
-        XCTAssertNil(libraryPluginStatusDot(.na))
-        XCTAssertNil(libraryPluginStatusDot(.disabled))
-        for kind: PluginStatusColorKind in [.running, .starting, .stopped, .backoff, .circuitOpen] {
-            XCTAssertNotNil(libraryPluginStatusDot(kind), "\(kind)")
-        }
+    func testOnlyAnEnabledPluginGetsAStatusDot() {
+        XCTAssertNil(libraryPluginStatusDot(enabled: false, needsConsent: false))
+        XCTAssertNotNil(libraryPluginStatusDot(enabled: true, needsConsent: false))
     }
 
-    // MARK: Hooks
-
-    func testTheHooksListIsOnlyPluginsThatDeclareHooks() {
-        let hook = PluginManifestHook(event: "pre-tool", command: "echo hi", timeoutMs: nil)
-        let rows = [plugin("declares", hooks: [hook]), plugin("none", hooks: []), plugin("unreported")]
-        let groups = libraryHookListGroups(
-            hooksGroupedByPlugin(rows: rows, hooks: pluginHooksByPlugin(rows: rows)))
-        XCTAssertEqual(groups.map(\.pluginName), ["declares"])
-    }
-
-    func testTheHooksListsEmptySentenceNeverClaimsNoneOnADaemonThatDidNotSay() {
-        let unreported = [plugin("a"), plugin("b")]
-        XCTAssertNil(libraryHookListEmptyText(rows: unreported, reported: false, listGroups: []),
-                     "the pending note is the whole answer")
-        XCTAssertEqual(libraryHookListEmptyText(rows: [plugin("a", hooks: [])], reported: true,
-                                                listGroups: []),
-                       "No installed plugin declares a hook.")
-        XCTAssertEqual(libraryHookListEmptyText(rows: [], reported: false, listGroups: []),
-                       "No plugins are installed, so nothing can declare a hook.")
-        let group = LibraryHookGroup(pluginName: "a", statusText: "Running", isEnabled: true,
-                                     hooks: [PluginHookDeclaration(event: "pre-tool", command: "x",
-                                                                   timeoutMs: nil, manifestIndex: 0)])
-        XCTAssertNil(libraryHookListEmptyText(rows: [plugin("a")], reported: true, listGroups: [group]))
-    }
-
-    func testAHookGroupSaysWhenItsHooksDoNotRun() {
-        let hook = PluginHookDeclaration(event: "pre-tool", command: "x", timeoutMs: nil, manifestIndex: 0)
-        let on = LibraryHookGroup(pluginName: "a", statusText: "Running", isEnabled: true, hooks: [hook])
-        let off = LibraryHookGroup(pluginName: "a", statusText: "Disabled", isEnabled: false,
-                                   hooks: [hook, hook])
-        let orphan = LibraryHookGroup(pluginName: "a", statusText: "", isEnabled: false, hooks: [hook])
-        XCTAssertEqual(libraryHookGroupSubtitle(on), "1 hook")
-        XCTAssertEqual(libraryHookGroupSubtitle(off), "2 hooks · plugin off, none run")
-        XCTAssertEqual(libraryHookGroupSubtitle(orphan), "1 hook · plugin not installed")
+    /// Fix round 1 (M6): a pending consent class suppresses the dot even though `enabled` is true
+    /// — a fresh install lands enabled regardless of consent.
+    func testAPendingConsentSuppressesTheDotEvenWhenEnabled() {
+        XCTAssertNil(libraryPluginStatusDot(enabled: true, needsConsent: true))
+        XCTAssertNil(libraryPluginStatusDot(enabled: false, needsConsent: true))
     }
 
     // MARK: MCP
