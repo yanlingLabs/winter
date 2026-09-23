@@ -664,7 +664,7 @@ function markQuarantinedSessions(home: string, backendIds: readonly string[]): s
  * the new layout no longer reads, and mark the migration done. Idempotent; a root the router cannot
  * reconcile is recorded `failed` and still archived (a move — nothing is lost).
  */
-export async function finishMigrationC(home: string, deps: Pick<MigrationCDeps, "log" | "now" | "reconcile">): Promise<MigrationCManifest> {
+export async function finishMigrationC(home: string, deps: Pick<MigrationCDeps, "log" | "now" | "reconcile" | "claudeResumeScanRoot">): Promise<MigrationCManifest> {
   const now = deps.now ?? (() => new Date());
   const state = migrationCState(home);
   if (state.kind !== "parsed" || state.manifest.status !== "phase1-complete") {
@@ -712,6 +712,13 @@ export async function finishMigrationC(home: string, deps: Pick<MigrationCDeps, 
   }
 
   if (!done("rekey-transcripts")) {
+    // Round 5: with no router door the daemon could not sweep the claude staging roots first (its late site
+    // sweeps only through the door), and a staging copy swept at the OLD key after this re-key becomes an
+    // orphan — so, like an official working copy with no door, a staging root refuses phase 2 here.
+    const scanRoot = deps.claudeResumeScanRoot ?? (process.env.WINTER_CLAUDE_RESUME_SCAN_ROOT?.trim() || tmpdir());
+    if (deps.reconcile === undefined && stagingRootsPresent(scanRoot)) {
+      throw new MigrationCRefused("sdk_home_migration_refused", `${scanRoot} holds a claude staging root and no router can reconcile it here — the transcripts are not re-keyed before it is; the next daemon boot with a working router finishes Migration C`);
+    }
     const detail = rekeyTranscripts(home, m, deps.log);
     record("rekey-transcripts", (m.rekeyed ?? []).length === 0 ? "skipped" : "done", detail);
   }
