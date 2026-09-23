@@ -154,8 +154,9 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
     writeFileSync(join(home, "plugins", "superpowers", "skills", "brainstorming", "SKILL.md"), "---\nname: brainstorming\ndescription: Explore\n---\nx\n");
     mkdirSync(join(home, "plugins", "untrusted", "skills", "risky"), { recursive: true });
     writeFileSync(join(home, "plugins", "untrusted", "skills", "risky", "SKILL.md"), "---\nname: risky\ndescription: Risky\n---\nx\n");
-    // Only a plugin the user ENABLED and granted `exec` consent to reaches a session (a skill can run
-    // shell commands) — `superpowers` is; `untrusted` is installed but never consented.
+    // Only a plugin the user ENABLED (with every consent class it requires — none for these legacy
+    // plugins, so the exec record below is inert) reaches a session (a skill can run shell commands)
+    // — `superpowers` is; `untrusted` is installed but never enabled.
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
       plugins: { enabled: ["superpowers"], consents: { superpowers: { exec: 1 } } },
