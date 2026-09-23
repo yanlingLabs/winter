@@ -1447,11 +1447,23 @@ export const PluginListingExtrasSchema = z.object({
   consented: z.array(z.enum(["exec", "tcc", "hardware"])),
   entry: z.object({ command: z.string(), args: z.array(z.string()).optional() }).optional(),
 });
+/** WS-21 fix round 2: `plugin.list`'s `hooks` — TOP-LEVEL (a sibling of `extras`, not nested in it),
+ *  because a claude-format plugin with no `winter-plugin.json` at all still carries hooks (they're
+ *  claude-native content, read from `hooks/hooks.json` and/or the claude manifest's own inline
+ *  `hooks` field — `plugins/plugin-hooks.ts`'s own header has the full ruling). Absent when the
+ *  plugin declares none, or when both sources are missing/malformed — never a thrown error. */
+export const PluginHookEntrySchema = z.object({
+  event: z.string(),
+  matcher: z.string().optional(),
+  type: z.string(),
+  command: z.string().optional(),
+});
 /** Contract B `PluginListing`. */
 export const PluginListingSchema = InstalledPluginSchema.extend({
   enabled: z.boolean(),
   marketplace: z.string(),
   extras: PluginListingExtrasSchema.optional(),
+  hooks: z.array(PluginHookEntrySchema).optional(),
 });
 /** Contract B `MarketplaceInfo`. A `directory` marketplace is read in place (`path` IS the source). */
 export const MarketplaceInfoSchema = z.object({
