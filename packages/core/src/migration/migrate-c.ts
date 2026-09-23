@@ -407,6 +407,25 @@ function rekeyTranscripts(home: string, m: MigrationCManifest, log: (line: strin
 }
 
 /**
+ * Round 4, minor 1: a LAZY re-key (the driver's, at resume) joins the manifest's `rekeyed` list whenever a
+ * Migration C manifest exists, so rollback reverses it exactly like the bulk step's moves. The caller records
+ * the intent (`pending`) BEFORE the files move and the outcome after; a later call for the same
+ * session/from/to replaces the pending entry. Bounded: no manifest, a rolled-back or unreadable one, or a
+ * write that fails records nothing (the move itself is unaffected).
+ */
+export function recordLazyRekey(home: string, entry: MigrationCRekey): void {
+  try {
+    const state = migrationCState(home);
+    if (state.kind !== "parsed" || state.manifest.status === "rolled-back") return;
+    const m = state.manifest;
+    const list = (m.rekeyed ??= []);
+    const at = list.findIndex((e) => e.sessionId === entry.sessionId && e.from === entry.from && e.to === entry.to && e.outcome === "pending");
+    if (at >= 0) list[at] = entry; else list.push(entry);
+    writeManifest(home, m);
+  } catch { /* bounded */ }
+}
+
+/**
  * Run (or resume) Migration C: phase 1, then phase 2 when `deps.reconcile` is given. Throws
  * `MigrationCRefused` before anything moves when the preflight refuses. Returns the manifest.
  */
