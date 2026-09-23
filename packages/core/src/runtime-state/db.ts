@@ -230,6 +230,57 @@ function foreignKeyViolations(db: Database): number {
   return db.query("PRAGMA foreign_key_check").all().length;
 }
 
+/**
+ * Review I3 (controller ruling): step a v7 store back to v6 so an OLDER build (0.116.0 refuses a v7 store
+ * as `newer-schema` and runs with its runtime spine offline) can open it — what `winter migrate --sdk-home
+ * --rollback` runs before a downgrade. The inverse of migration v7, the same way: `run-folder` roots
+ * cleared (the older CHECK has no such kind), `runtime_sessions` rebuilt under the v6 CHECK by SQLite's
+ * 12-step procedure (keys off OUTSIDE the transaction, `foreign_key_check` no worse), the quarantine
+ * record dropped, `user_version` 6. `"not-needed"` for no store or a store already at v6 or below; a store
+ * NEWER than v7 is refused (this build does not know its shape). The daemon must be stopped.
+ */
+export function downgradeRuntimeStateToV6(home: string): { from: 7; to: 6 } | "not-needed" {
+  const path = join(home, "runtimes", "runtime-state.db");
+  if (!existsSync(path)) return "not-needed";
+  const db = new Database(path);
+  try {
+    const version = db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
+    if (version <= 6) return "not-needed";
+    if (version > 7) throw new RuntimeStateUnavailableError(path, "newer-schema");
+    const row = db.query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE type='table' AND name='runtime_sessions'").get();
+    const v7Check = "IN ('official-spool','sdk-resume-staging','run-folder')";
+    db.run("PRAGMA foreign_keys = OFF");
+    try {
+      db.transaction(() => {
+        const before = foreignKeyViolations(db);
+        db.run("UPDATE runtime_sessions SET active_local_write_root = NULL, active_local_write_root_kind = NULL WHERE active_local_write_root_kind = 'run-folder'");
+        db.run("UPDATE runtime_generations SET local_write_root = NULL, local_write_root_kind = NULL WHERE local_write_root_kind = 'run-folder'");
+        if (row && row.sql.includes(v7Check)) {
+          const rebuilt = row.sql
+            .replace(v7Check, "IN ('official-spool','sdk-resume-staging')")
+            .replace(/^CREATE TABLE "?runtime_sessions"?(?=\s|\()/, "CREATE TABLE runtime_sessions_v6");
+          if (!rebuilt.startsWith("CREATE TABLE runtime_sessions_v6")) throw new Error("runtime_sessions: unexpected CREATE TABLE text");
+          db.run("DROP TABLE IF EXISTS runtime_sessions_v6");
+          db.run(rebuilt);
+          db.run("INSERT INTO runtime_sessions_v6 SELECT * FROM runtime_sessions");
+          db.run("DROP TABLE runtime_sessions");
+          db.run("ALTER TABLE runtime_sessions_v6 RENAME TO runtime_sessions");
+          db.run("CREATE INDEX IF NOT EXISTS runtime_sessions_state ON runtime_sessions(state)");
+        }
+        db.run("DROP TABLE IF EXISTS run_root_quarantine");
+        const after = foreignKeyViolations(db);
+        if (after > before) throw new Error(`the v7→v6 step would break ${after - before} foreign key reference(s)`);
+        db.run("PRAGMA user_version = 6");
+      })();
+    } finally {
+      db.run("PRAGMA foreign_keys = ON");
+    }
+    return { from: 7, to: 6 };
+  } finally {
+    db.close();
+  }
+}
+
 // Fix round 1, finding (b): backup() can be called more than once per millisecond (two immediate
 // backups, or two db instances in the same process); a Date.toISOString() name alone collides and
 // the second VACUUM INTO silently clobbers the first. A process-wide monotonic counter alongside

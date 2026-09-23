@@ -292,6 +292,8 @@ describe("rollback", () => {
     expect(existsSync(join(home, "sdk", "settings.json"))).toBe(true);
     expect(existsSync(join(home, "sdk", "projects"))).toBe(true); // bootstrap's placeholder
     expect(readFileSync(join(home, "settings.json"), "utf8")).toContain('"explanatory"'); // the user's edit is kept
+    // review I3: the store is back at schema v6, so the older build opens it
+    expect(userVersion(join(home, "runtimes", "runtime-state.db"))).toBe(6);
     // runtime-state: the one rewrite reversed; a row written after the upgrade survives the rollback
     const rs = openRuntimeStateDb(home);
     expect(rs.db.query<{ b: string }, []>("SELECT backend_root AS b FROM runtime_sessions WHERE winter_session_id='s_1'").get()!.b).toBe(join(home, "projects", key));

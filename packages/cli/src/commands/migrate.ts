@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   MigrationCRefused,
   MigrationRefused,
+  downgradeRuntimeStateToV6,
   isOldLayout,
   isPristineHome,
   linkedRouterSupportsRunHome,
@@ -98,6 +99,15 @@ async function runMigrateSdkHome(deps: MigrateCommandDeps, yes: boolean): Promis
   const migrationDeps = { log: deps.log, reconcileAvailable: linkedRouterSupportsRunHome() };
   try {
     if (deps.argv.includes("--rollback")) {
+      if (migrationCState(home).kind === "absent") {
+        // Review I3: no Migration C to undo, but this build still left the store at schema v7, which an
+        // older build refuses — step it back so a downgrade works.
+        const schema = downgradeRuntimeStateToV6(home);
+        deps.log(schema === "not-needed"
+          ? `winter migrate --sdk-home --rollback: nothing to roll back in ${home}`
+          : `winter migrate --sdk-home --rollback: no Migration C in ${home}; runtime-state.db stepped back to schema v6 for an older build`);
+        return 0;
+      }
       if (!yes && !(await deps.confirm(`Roll back Migration C in ${home}? The reconcile appends stay in the transcripts. [y/N] `))) {
         deps.log("aborted");
         return 1;

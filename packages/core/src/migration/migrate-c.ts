@@ -25,7 +25,7 @@ import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSy
 import { dirname, join, relative } from "node:path";
 import { randomBytes } from "node:crypto";
 import { SDK_COMPAT_LINKS, SDK_PERSISTENT_ENTRIES, sdkHomeFor } from "../agent/paths";
-import { openRuntimeStateDb } from "../runtime-state/db";
+import { downgradeRuntimeStateToV6, openRuntimeStateDb } from "../runtime-state/db";
 import { RuntimeLeases, type LeaseProbe } from "../runtime-state/leases";
 import { DEAD_LEGACY_TOP_LEVEL_FILES } from "./dead-legacy-files";
 import { LEGACY_INSTRUCTIONS_FILE } from "../legacy-names";
@@ -530,6 +530,9 @@ export async function rollbackMigrationC(home: string, deps: Pick<MigrationCDeps
       rs.db.run("UPDATE runtime_sessions SET backend_root = ? || substr(backend_root, ?) WHERE substr(backend_root, 1, ?) = ?", [oldPrefix, sdkPrefix.length + 1, sdkPrefix.length, sdkPrefix]);
     } finally { rs.close(); }
   }
+  // Review I3: …and the schema back to v6, so the older build a rollback is for can open the store at all
+  // (0.116.0 reads v7 as `newer-schema` and would run with its runtime spine offline).
+  const schema = downgradeRuntimeStateToV6(home);
   // copy-files → the copies moved aside (a user edit to one after the upgrade is kept, not lost)
   for (const rel of m.copied) {
     const src = join(home, rel);
@@ -556,6 +559,6 @@ export async function rollbackMigrationC(home: string, deps: Pick<MigrationCDeps
   m.finishedAt = now().toISOString();
   writeFileSync(migrationCRolledBackPath(home), `${JSON.stringify(m, null, 2)}\n`, { mode: 0o600 });
   rmSync(migrationCManifestPath(home), { force: true });
-  deps.log(`migration C: rolled back — ${m.moved.length} director(ies) moved back; the reconcile appends stay in the canonical transcripts; backups kept under ${m.archiveDir}`);
+  deps.log(`migration C: rolled back — ${m.moved.length} director(ies) moved back${schema === "not-needed" ? "" : ", runtime-state.db stepped back to schema v6"}; the reconcile appends stay in the canonical transcripts; backups kept under ${m.archiveDir}`);
   return m;
 }
