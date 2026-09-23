@@ -325,8 +325,10 @@ export function approvalOptionsFromSuggestions(suggestions: readonly PermissionU
  * `~/.winter` grant denylist; the out-of-root `dirGrant` card; the web class's and `browser`'s
  * dangerous-domain floors (which move with the capability tools, P8b-12); bash's always-card
  * escalation args (P8b-31 re-asserted the sandbox-escape one here until C3 retired it for claude
- * parity — see (5b)); and the safety reviewer. It also performs no rules-store READ, so a standing
- * rule that silences a card today does not silence it here — Winter's own rule stages do that.
+ * parity — see (5b)); and the safety reviewer. It also performs no rules-store READ: a standing
+ * rule is honoured one stage earlier, by the CHILD — the user's saved allow rules reach it on both
+ * legs through `Options.permissions.allow` (`mode-options.ts`'s `persistedAllowRulesFor` +
+ * `sdkAllowRulesFor`, trust-gated for a project's own), so a call a rule allows never gets here.
  */
 
 /**
@@ -526,11 +528,12 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     // WAS the bash floor for the control-plane files and `<home>/runtimes` (the fence at (2) covers the
     // write-class tools only), which is why nothing weaker than a positive verdict may stand in for it.
     //
-    // The card's text is unchanged — an escape still reads `bash (UNSANDBOXED): …`. WHAT STILL CARDS
-    // AN ESCAPE UNDER A MATCHING ALLOW RULE is outside this file: the agent SDK's RULING P3-J makes the
-    // flag "mandatory interaction" ahead of its allow-rule stage (0.0.17
-    // `permissions/evaluator.ts:1852-1869`), and the daemon never hands the child the user's persisted
-    // allow rules (`mode-options.ts`'s `permissions.allow` carries only Winter's own reads).
+    // The card's text is unchanged — an escape still reads `bash (UNSANDBOXED): …`. The user's saved
+    // allow rules DO reach the child now, on both legs (`mode-options.ts`'s `persistedAllowRulesFor`),
+    // so on the official leg a matching `Bash(...)` rule allows an escape before it ever gets here, as
+    // claude does. WHAT STILL CARDS ONE ON THE WINTER LEG is the agent SDK's RULING P3-J, which makes
+    // the flag "mandatory interaction" ahead of its own allow-rule stage (0.0.17
+    // `permissions/evaluator.ts:1852-1869`) — an SDK carry, not something this bridge can answer.
     const escape = classificationName === "bash" && typeof input === "object" && input !== null
       && (input as Record<string, unknown>).dangerouslyDisableSandbox === true;
     // Consumed on every escape that gets this far, whatever the verdict, so none lingers.
