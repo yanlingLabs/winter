@@ -27,7 +27,7 @@ import type { Mode as SessionMode } from "../agent/tools/registry";
 import { RESUME_STAGING_PREFIX } from "@yanlinglabs/winter-runtime-sdk";
 import { WRITE_CLASS_TOOL_NAMES, homeFenceTarget, writeTargetPathsIn } from "./control-plane";
 import { fsRootAnchored } from "./mode-options";
-import { PROTECTED_ITEM_DIRS } from "./run-home-contract";
+import { PROTECTED_ITEM_DIRS } from "@yanlinglabs/winter-runtime-sdk";
 import { projectWalk } from "./project-walk";
 
 export { projectWalk };

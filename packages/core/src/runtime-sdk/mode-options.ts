@@ -4,14 +4,15 @@ import type {
   AgentDefinition, CanUseTool, CredentialRef, EffortLevel, McpServerConfig, Options, PermissionMode, ProviderConnectionConfig,
   SandboxSettingsConfig, SdkPluginConfig, SpawnClaudeCodeProcess, WebFetchConfig, WebToolsConfig,
 } from "@yanlinglabs/winter-agent-sdk";
-import { RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
+import {
+  WINTER_BRAND, disableCronEnvName, envName, pluginCacheDirEnvName, providerManagedByHostEnvName, storeHomeEnvName,
+} from "@yanlinglabs/winter-agent-sdk";
+import { PROTECTED_ITEM_DIRS, RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
 import { approvedProjectRulesDir, homeCacheDir, sdkHomeFor, storeHomeFor, trustRecordFile } from "../agent/paths";
 import { repoRootFor } from "../agent/memory-dir";
-import { PROTECTED_ITEM_DIRS } from "./run-home-contract";
 import { projectWalk } from "./project-walk";
 import { parseRule } from "../agent/permission-rules";
-import { WINTER_ROUTER_OWNED_ENV } from "./run-home-contract";
 import { keychainService } from "../profile";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import type { Settings } from "../settings";
@@ -460,6 +461,28 @@ export interface WinterOptionsInput {
  * (surface map §7.1: "an `ANTHROPIC_API_KEY` sitting in the environment does not become a
  * credential by existing" — and this is the host half of that promise).
  */
+/**
+ * The variables the ROUTER sets on the Winter leg when it applies a run home (its `apply.ts`; the router
+ * exports no list of them, so this is the host's side of that contract, spelled through the agent SDK's
+ * own host-env names). Beside a run home each is REFUSED from the host's `Options.env`
+ * (`router_owned_variable`), not overwritten — so the daemon must never state one then.
+ */
+export const WINTER_ROUTER_OWNED_ENV: readonly string[] = [
+  envName(WINTER_BRAND, "HOME"),
+  storeHomeEnvName(WINTER_BRAND),
+  pluginCacheDirEnvName(WINTER_BRAND),
+  providerManagedByHostEnvName(WINTER_BRAND),
+  disableCronEnvName(WINTER_BRAND),
+];
+
+/**
+ * The options a run home DECIDES (router L2 fix round 1, M1; its `apply.ts`, not exported): beside a run
+ * home, both legs refuse a caller's `plugins`, `skills`, `agents`, `outputStyle` or `brand`
+ * (`run_home_option_refused`) — they come from the run folder's items and effective settings, or from
+ * the router itself (the brand).
+ */
+export const RUN_HOME_DECIDED_OPTIONS = ["plugins", "skills", "agents", "outputStyle", "brand"] as const;
+
 export function buildChildEnv(input: WinterOptionsInput): Record<string, string> {
   const base = input.baseEnv ?? process.env;
   const env: Record<string, string> = {};

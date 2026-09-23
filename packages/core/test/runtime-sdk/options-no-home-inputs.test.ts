@@ -9,7 +9,7 @@ import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CanUseTool } from "@yanlinglabs/winter-agent-sdk";
-import { RUN_HOME_DECIDED_OPTIONS } from "../../src/runtime-sdk/run-home-contract";
+import { RUN_HOME_DECIDED_OPTIONS } from "../../src/runtime-sdk/mode-options";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import { ContextAssembler } from "../../src/agent/context";
 import { TrustStore } from "../../src/agent/trust";

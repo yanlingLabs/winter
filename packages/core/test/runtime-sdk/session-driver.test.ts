@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Options, Query } from "@yanlinglabs/winter-agent-sdk";
 import * as winter from "@yanlinglabs/winter-agent-sdk";
-import { createInMemoryRuntimeDirectoryStore, createRuntimeSdk } from "@yanlinglabs/winter-runtime-sdk";
+import { createInMemoryRuntimeDirectoryStore, createRuntimeSdk, RunHomeError } from "@yanlinglabs/winter-runtime-sdk";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { FakeProvider } from "../../src/agent/fake-provider";
 import { SessionTitler, TITLE_INSTRUCTION } from "../../src/agent/titles";
@@ -998,7 +998,7 @@ describe("role efforts on the runtime leg (pins.dispatch, and provider.model's d
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 describe("WS-21: run homes on the Winter leg (stubbed router builder)", () => {
   function stubRunHomes() {
-    const built: import("../../src/runtime-sdk/run-home-contract").RunHomeInput[] = [];
+    const built: import("@yanlinglabs/winter-runtime-sdk").RunHomeInput[] = [];
     const disposed: string[] = [];
     const facts: import("../../src/runtime-sdk/run-home-input").RunHomeSessionFacts[] = [];
     const runHome: NonNullable<WinterLegDeps["runHome"]> = {
@@ -1026,7 +1026,7 @@ describe("WS-21: run homes on the Winter leg (stubbed router builder)", () => {
         if (prop !== "query") return Reflect.get(target, prop, receiver);
         return (args: { prompt: AsyncIterable<string>; options: Options }) => {
           calls.push(args as never);
-          if (failNext) { failNext = false; throw Object.assign(new Error("every generation must carry a run home (simulated)"), { name: "RunHomeError", code: "run_home_required" }); }
+          if (failNext) { failNext = false; throw new RunHomeError("run_home_required", "every generation must carry a run home (simulated)"); }
           return target.query(args as never);
         };
       },
@@ -1312,7 +1312,7 @@ describe("WS-21 round 3: the lazy canonical-cwd re-key at resume (Winter leg)", 
   test("round 4: the router's cold-resume runHomeFor canonicalizes the cwd and re-keys the transcript first", async () => {
     const { t, sid, id, real, projects, rawKey, canonKey } = await oldLayoutSession();
     try {
-      const built: import("../../src/runtime-sdk/run-home-contract").RunHomeInput[] = [];
+      const built: import("@yanlinglabs/winter-runtime-sdk").RunHomeInput[] = [];
       const facts: import("../../src/runtime-sdk/run-home-input").RunHomeSessionFacts[] = [];
       const runHome: NonNullable<WinterLegDeps["runHome"]> = {
         inputFor: (f) => { facts.push(f); return { home: t.home, mode: f.mode, dispatchChild: f.dispatchChild, leg: f.leg, cwd: f.cwd, trustedProjectRoot: null, gitRoot: null, mcpDisabled: [], reservedMcpServerNames: [], memoryDir: "/m" }; },

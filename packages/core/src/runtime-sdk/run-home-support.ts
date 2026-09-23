@@ -18,7 +18,10 @@
 // is read from the module namespace once and cached. Tests pin either answer with the seam below and
 // must restore it.
 import * as routerModule from "@yanlinglabs/winter-runtime-sdk";
-import type { RecoveryReport, RouterRunHomeHandle, RunHome, RunHomeInput, RunHomeOutcome } from "./run-home-contract";
+import type { RecoveryReport, RunHome, RunHomeInput, RunHomeOutcome, RuntimeSdk } from "@yanlinglabs/winter-runtime-sdk";
+
+/** The router HANDLE's run-home members (`createRuntimeSdk(...)`'s result on a run-home router). */
+export type RouterRunHomeHandle = Pick<RuntimeSdk, "runHomeOutcome" | "reconcileRootForRecovery">;
 
 /** True when `router` (a module namespace or any object) exports a callable `buildRunHome`. */
 export function routerSupportsRunHome(router: unknown): router is { buildRunHome: (i: RunHomeInput) => Promise<RunHome> } {

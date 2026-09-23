@@ -40,7 +40,7 @@ import { splitTag, WINTER_TEST_PREFIX } from "./model-tag";
 import { releaseAllHeld } from "./messaging";
 import { daemonResolveEndpoint } from "../providers/registry";
 import { WINTER_PEER_VERSIONS, REQUIRED_CLAUDE_AGENT_SDK } from "./versions";
-import type { RecoveryReport, RunHomeFor, RunHomeOutcome } from "./run-home-contract";
+import type { RecoveryReport, RunHomeFor, RunHomeOutcome } from "@yanlinglabs/winter-runtime-sdk";
 import { runHomeHandleOf } from "./run-home-support";
 
 /**

@@ -92,7 +92,7 @@ import type { attachWinterSession, WinterSessionAttachHandle, WinterSessionAttac
 import { createHostPromptQueue, type HostPromptQueue } from "./prompt-queue";
 import { permissionModeFor } from "./mode-options";
 import type { SessionApprovalPolicy } from "../agent/gate";
-import type { RunHome } from "./run-home-contract";
+import type { RunHome } from "@yanlinglabs/winter-runtime-sdk";
 import { disposeFailedRunHome, settleRunHome } from "./run-home-support";
 
 /**
