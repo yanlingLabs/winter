@@ -2,53 +2,53 @@
 // `claude mcp add|add-json|remove|get` (reference clone: `src/commands/mcp/addCommand.ts`,
 // `src/cli/handlers/mcp.tsx`, `src/services/mcp/utils.ts`). Split out of main.ts the same way
 // `model-cli.ts`/`plugin-cli.ts` are: main.ts owns argv slicing + printing + `process.exit`; this
-// file owns parsing, scope/transport validation, and the actual read-modify-write (the writes
-// themselves are cheap enough, and few enough call sites, that there is no separate "pure
-// transform vs. I/O" split the way `settings.ts` has one — every exported `run*Route` function
-// here IS the full round trip, returning a plain result object main.ts renders and exits on,
-// mirroring `runCredentialsRoute`'s own "store+args in, a plain result out, nothing printed and
-// nothing exited" convention, `credentials-cli.test.ts`'s own header).
+// file owns parsing, scope/transport validation, and the actual read-modify-write.
 //
-// SCOPE MAPPING (decided against Winter's real MCP sources, not assumed from claude's):
-//   - "user"    -> `<WINTER_HOME>/settings.json`'s `mcpServers` (daemon-owned, hot-reloaded,
-//                  `settings.ts`'s full schema — including the credential-shaped-header refusal on
-//                  an http/sse entry). Default scope (claude defaults to "local"; Winter has no
-//                  such scope — see below).
-//   - "project" -> `<cwd>/.mcp.json`, claude's OWN file format, byte-identical shape. NEVER
-//                  RPC-routed: this file isn't daemon state (no watcher, no settings-schema
-//                  validation — `configuredMcpServersFor`/`McpManager.doEnsureProject` just read it
-//                  live off disk per session spawn), so the CLI reads/writes it directly, with or
-//                  without a live daemon. The READERS accept stdio/http/sse per entry (parity fix,
-//                  `agent/mcp/project-file.ts`'s `parseProjectMcpServers`, shared with the daemon's
-//                  own readers) — but `winter mcp add --scope project` still writes ONLY a stdio
-//                  entry, a narrower, deliberate choice of THIS write door (not a limitation of what
-//                  the file format or the readers accept): `--transport http`/`sse` is refused here
-//                  rather than silently writing a shape this command has not been asked to grow.
-//   - "local"   -> REFUSED with a one-line explanation. claude's "local" scope is a project-private
-//                  overlay Winter has no equivalent source for today (no per-project-private MCP
-//                  config the daemon reads) — inventing one silently would be a false parity claim.
+// WS-21 (spec §4.4, `winter mcp add` = `claude mcp add`): all three of claude's scopes, claude's
+// names and claude's default —
+//   local    (the DEFAULT, as in claude)  sdk/.winter.json -> projects[<abs project root>].mcpServers
+//   user                                  sdk/.winter.json -> mcpServers
+//   project                               <project root>/.winter/mcp.json (claude's .mcp.json
+//                                         format; loaded only when the project is trusted; the
+//                                         repo-root .mcp.json is no longer read at all)
 //
-// `mcp add`'s USER-scope write goes through the daemon when it's live (`mcp.add`/`mcp.remove` RPC,
-// `WinterClient.mcpAdd`/`mcpRemove`/`mcpGet`) and directly through `@yanlinglabs/winter-core`'s
-// `addUserMcpServer`/`removeUserMcpServer` + `loadSettings`/`saveSettings` when it is not — the SAME
-// validated-write functions the daemon's own RPC handler calls (`agent/mcp/mcp-write.ts`'s own
-// header), so the two paths can never accept a write the other would refuse.
-import { realpathSync } from "node:fs";
-import { join } from "node:path";
+// DOOR VS. DIRECT: `user` scope's write goes through the daemon when it's live (`mcp.add`/
+// `mcp.remove` RPC, already wired to sdk/.winter.json — protocol/methods.ts's own header) and
+// directly through Contract C's `addSdkUserMcpServer`/`removeSdkUserMcpServer` when it's not — the
+// SAME validated-write functions the daemon's own RPC handler calls, so the two paths can never
+// accept a write the other would refuse.
+//
+// `local` and `project` are ALWAYS direct, never routed through the door, on THIS branch:
+//   - `local`'s daemon-side RPC handler still refuses the scope typed (protocol/methods.ts's own
+//     doc: "Local and project MCP scopes are refused typed until L3.5" — a FUTURE daemon-side task,
+//     not this lane's). `sdk/.winter.json` is a plain, atomically-written file the daemon's own
+//     SdkFilesWatcher picks up live regardless of who writes it (the "no daemon restart for
+//     settings" hard rule) — writing it directly works today and needs no daemon coordination, the
+//     same reasoning `user` scope's own no-daemon fallback already relies on.
+//   - `local`-scope servers are, unlike `user`-scope ones, never a live in-daemon connection to
+//     begin with — they're folded into a run folder's `.winter.json` at spawn time by the ROUTER
+//     (spec §3.4.5), not started/managed by the daemon's own `McpManager` the way `user` servers
+//     are. There is no "hot-start" a door call could buy that a direct write doesn't already give.
+//   - `project` has always been direct (this file's own precedent, pre-WS-21): `.winter/mcp.json`
+//     isn't daemon state either — no watcher, no settings-schema validation, just a project file the
+//     router reads live off disk when trusted (spec §3.4.5).
+import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import {
-  loadSettings, saveSettings, addUserMcpServer, removeUserMcpServer,
-  addProjectMcpServer, removeProjectMcpServer, readRawProjectMcpConfig, writeRawProjectMcpConfig,
-  parseProjectMcpServers, projectMcpConfigPath, TrustStore,
+  addSdkUserMcpServer, removeSdkUserMcpServer, sdkUserMcpServers, sdkLocalMcpServers,
+  readSdkGlobalConfig, updateSdkGlobalConfig, sdkGlobalConfigPath, validateMcpServerEntryForWrite, validateMcpServerName,
+  parseProjectMcpServers, TrustStore,
   stripCredentialShapedMcpHeaders, readRawSettings,
   type McpServerSettingsEntry, type ProjectMcpServerEntry,
 } from "@yanlinglabs/winter-core";
 import { McpAddEntrySchema } from "@yanlinglabs/winter-protocol";
 
-export type McpScope = "user" | "project";
+export type McpScope = "local" | "user" | "project";
 export type McpTransport = "stdio" | "http" | "sse";
 
 /** Structural — matches exactly the three `WinterClient` methods this file calls, so a test can
- *  hand in a plain fake instead of a real socket connection. */
+ *  hand in a plain fake instead of a real socket connection. USER scope only (see this file's own
+ *  header for why `local`/`project` never reach this door on this branch). */
 export interface McpDoor {
   mcpAdd(name: string, entry: McpServerSettingsEntry): Promise<{ ok: true; name: string; transport: McpTransport; started: boolean }>;
   mcpRemove(name: string): Promise<{ ok: true; name: string; removed: boolean }>;
@@ -62,8 +62,8 @@ export interface McpDoor {
 export interface McpRouteDeps {
   cwd: string;
   winterHome: string;
-  /** `undefined` when no daemon answered — every route falls back to a direct, in-process write
-   *  for user scope; project scope never uses this at all (see this file's own header). */
+  /** `undefined` when no daemon answered — the USER-scope route falls back to a direct, in-process
+   *  write; `local`/`project` never use this at all (see this file's own header). */
   door?: McpDoor;
 }
 
@@ -71,22 +71,13 @@ export interface McpRouteDeps {
 // Scope / transport / header / env parsing (pure, no I/O)
 // ------------------------------------------------------------------------------------------------
 
-export type ScopeResolution =
-  | { kind: "ok"; scope: McpScope }
-  | { kind: "localRefused"; message: string }
-  | { kind: "invalid"; message: string };
+export type ScopeResolution = { kind: "ok"; scope: McpScope } | { kind: "invalid"; message: string };
 
-const LOCAL_SCOPE_REFUSAL =
-  "winter has no private per-project MCP scope yet (claude's own \"local\") — use \"user\" " +
-  "(settings.json, available in every project; the default) or \"project\" (.mcp.json, shared with your team)";
-
-/** Default scope is "user" (claude's own default, "local", has no Winter equivalent — see this
- *  file's header). */
+/** Default scope is "local" (claude's own default, WS-21). */
 export function ensureMcpScope(raw?: string): ScopeResolution {
-  if (!raw) return { kind: "ok", scope: "user" };
-  if (raw === "local") return { kind: "localRefused", message: LOCAL_SCOPE_REFUSAL };
-  if (raw === "user" || raw === "project") return { kind: "ok", scope: raw };
-  return { kind: "invalid", message: `invalid scope: ${raw}. Must be one of: user, project` };
+  if (!raw) return { kind: "ok", scope: "local" };
+  if (raw === "local" || raw === "user" || raw === "project") return { kind: "ok", scope: raw };
+  return { kind: "invalid", message: `invalid scope: ${raw}. Must be one of: local, user, project` };
 }
 
 export function ensureMcpTransport(raw?: string): { kind: "ok"; transport: McpTransport } | { kind: "invalid"; message: string } {
@@ -142,7 +133,7 @@ export interface McpAddParsed {
 }
 export type McpAddParseResult = { kind: "ok"; parsed: McpAddParsed } | { kind: "usageError"; message: string };
 
-const ADD_USAGE = "usage: winter mcp add [-s user|project] [-t stdio|sse|http] [-e KEY=value...] [-H \"Name: value\"...] <name> <commandOrUrl> [-- args...]";
+const ADD_USAGE = "usage: winter mcp add [-s local|user|project] [-t stdio|sse|http] [-e KEY=value...] [-H \"Name: value\"...] <name> <commandOrUrl> [-- args...]";
 
 /** Flags may appear anywhere before the positionals; a bare `--` (commander's own convention, kept
  *  identical here) stops FLAG parsing only — positional consumption continues across it exactly as
@@ -188,7 +179,7 @@ export function parseMcpAddArgs(args: string[]): McpAddParseResult {
 export interface McpAddJsonParsed { name: string; json: string; scopeRaw?: string }
 export type McpAddJsonParseResult = { kind: "ok"; parsed: McpAddJsonParsed } | { kind: "usageError"; message: string };
 
-const ADD_JSON_USAGE = "usage: winter mcp add-json [-s user|project] <name> <json>";
+const ADD_JSON_USAGE = "usage: winter mcp add-json [-s local|user|project] <name> <json>";
 
 export function parseMcpAddJsonArgs(args: string[]): McpAddJsonParseResult {
   let scopeRaw: string | undefined;
@@ -220,7 +211,7 @@ export function parseMcpRemoveArgs(args: string[]): McpRemoveParseResult {
     positionals.push(tok);
   }
   const name = positionals[0];
-  if (!name) return { kind: "usageError", message: "usage: winter mcp remove <name> [-s user|project]" };
+  if (!name) return { kind: "usageError", message: "usage: winter mcp remove <name> [-s local|user|project]" };
   return { kind: "ok", parsed: { name, scopeRaw } };
 }
 
@@ -276,12 +267,128 @@ function wrongTransportFlagWarnings(parsed: McpAddParsed, transport: McpTranspor
 }
 
 // ------------------------------------------------------------------------------------------------
+// sdk/.winter.json LOCAL scope (projects[<root>].mcpServers) — always direct, see this file's own
+// header. No Contract C writer exists for this yet (only the `user`-scope one, `mcp-write.ts`'s
+// `addSdkUserMcpServer`/`removeSdkUserMcpServer`), so this file carries its own — the SAME
+// validation (`validateMcpServerName`/`validateMcpServerEntryForWrite`) and the SAME
+// read-modify-write door (`updateSdkGlobalConfig`) Contract C's own writer uses.
+// ------------------------------------------------------------------------------------------------
+
+function addSdkLocalMcpServer(home: string, root: string, name: string, entry: unknown): McpServerSettingsEntry {
+  const nameErr = validateMcpServerName(name);
+  if (nameErr) throw new Error(nameErr);
+  const valid = validateMcpServerEntryForWrite(entry);
+  updateSdkGlobalConfig(home, (config) => {
+    const projects = { ...(config.projects ?? {}) };
+    const existing = projects[root] ?? {};
+    const servers = (existing.mcpServers as Record<string, unknown> | undefined) ?? {};
+    if (Object.hasOwn(servers, name)) {
+      throw new Error(`MCP server "${name}" already exists in local config for ${root} — remove it first ("winter mcp remove ${name} --scope local") or edit sdk/.winter.json directly`);
+    }
+    projects[root] = { ...existing, mcpServers: { ...servers, [name]: valid } };
+    return { ...config, projects };
+  });
+  return valid;
+}
+
+function removeSdkLocalMcpServer(home: string, root: string, name: string): boolean {
+  const current = readSdkGlobalConfig(home);
+  const currentServers = current.projects?.[root]?.mcpServers as Record<string, unknown> | undefined;
+  if (!currentServers || !Object.hasOwn(currentServers, name)) return false;
+  let removed = false;
+  updateSdkGlobalConfig(home, (config) => {
+    const projects = { ...(config.projects ?? {}) };
+    const existing = projects[root];
+    const servers = existing?.mcpServers as Record<string, unknown> | undefined;
+    if (!existing || !servers || !Object.hasOwn(servers, name)) return config;
+    removed = true;
+    const rest = { ...servers };
+    delete rest[name];
+    projects[root] = { ...existing, mcpServers: rest };
+    return { ...config, projects };
+  });
+  return removed;
+}
+
+function sdkLocalServer(home: string, root: string, name: string): McpServerSettingsEntry | undefined {
+  const servers = readSdkGlobalConfig(home).projects?.[root]?.mcpServers as Record<string, McpServerSettingsEntry> | undefined;
+  return servers?.[name];
+}
+
+// ------------------------------------------------------------------------------------------------
+// <root>/.winter/mcp.json PROJECT scope — claude's `.mcp.json` shape, at the WINTER-named path
+// (spec §4.4: "the repo-root .mcp.json is no longer read at all"). Reuses `parseProjectMcpServers`
+// (the per-entry validator — a pure function of the parsed JSON, not tied to any path) but never
+// `agent/mcp/project-file.ts`'s own path/read/write helpers, which are hardcoded to `.mcp.json`.
+// ------------------------------------------------------------------------------------------------
+
+export function winterMcpConfigPath(root: string): string {
+  return join(root, ".winter", "mcp.json");
+}
+
+type RawWinterMcpConfig =
+  | { kind: "absent" }
+  | { kind: "malformed" }
+  | { kind: "ok"; raw: Record<string, unknown>; servers: Record<string, unknown> };
+
+function readRawWinterMcpConfig(root: string): RawWinterMcpConfig {
+  const path = winterMcpConfigPath(root);
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return { kind: "absent" };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { kind: "malformed" };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { kind: "malformed" };
+  const raw = parsed as Record<string, unknown>;
+  const servers = typeof raw.mcpServers === "object" && raw.mcpServers !== null && !Array.isArray(raw.mcpServers)
+    ? (raw.mcpServers as Record<string, unknown>)
+    : {};
+  return { kind: "ok", raw, servers };
+}
+
+/** Atomic write: temp file beside the target, then rename — same discipline
+ *  `agent/mcp/project-file.ts`'s own `.mcp.json` writer uses, for the same reason (a team-shared
+ *  file another process/editor may read mid-write). */
+function writeRawWinterMcpConfig(root: string, raw: Record<string, unknown>, servers: Record<string, unknown>): void {
+  const path = winterMcpConfigPath(root);
+  mkdirSync(dirname(path), { recursive: true });
+  const next = { ...raw, mcpServers: servers };
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`);
+  renameSync(tmp, path);
+}
+
+function addProjectMcpServer(servers: Record<string, unknown>, name: string, entry: ProjectMcpServerEntry): Record<string, unknown> {
+  const nameErr = validateMcpServerName(name);
+  if (nameErr) throw new Error(nameErr);
+  if (Object.hasOwn(servers, name)) {
+    throw new Error(`MCP server "${name}" already exists in project config — remove it first ("winter mcp remove ${name} --scope project") or edit .winter/mcp.json directly`);
+  }
+  return { ...servers, [name]: entry };
+}
+
+function removeProjectMcpServerEntry(servers: Record<string, unknown>, name: string): { servers: Record<string, unknown>; removed: boolean } {
+  if (!Object.hasOwn(servers, name)) return { servers, removed: false };
+  const next = { ...servers };
+  delete next[name];
+  return { servers: next, removed: true };
+}
+
+// ------------------------------------------------------------------------------------------------
 // Route functions — the full round trip (I/O via the injected door and `@yanlinglabs/winter-core`),
 // returning a plain outcome object. Nothing here prints or exits; `main.ts`'s `case "mcp"` does.
 // ------------------------------------------------------------------------------------------------
 
 export type McpAddOutcome =
   | { ok: true; scope: "user"; name: string; transport: McpTransport; via: "daemon" | "local"; started?: boolean; warning?: string }
+  | { ok: true; scope: "local"; name: string; transport: McpTransport; root: string; warning?: string }
   | { ok: true; scope: "project"; name: string; transport: "stdio"; cwd: string; trusted: boolean; warning?: string }
   | { ok: false; message: string };
 
@@ -289,6 +396,15 @@ function isTrustedDir(winterHome: string, dir: string): boolean {
   let real = dir;
   try { real = realpathSync(dir); } catch { /* the trust store falls back to the given path too */ }
   return new TrustStore(join(winterHome, "trust.json")).isTrusted(real);
+}
+
+/** The project ROOT `local`/`project` scope resolve against — the trusted root when one is found,
+ *  else `cwd` itself (a not-yet-trusted project still gets a root to write under; `renderMcpAddOutcome`
+ *  says so). Mirrors `repoRootFor`'s own precedent without importing it (a plain `cwd` fallback is
+ *  enough here — this file never walks up a `.git` the way the daemon's own resolver does, since a
+ *  CLI invocation is always run FROM the project root by convention, same as `git`/`npm` commands). */
+function projectRootFor(cwd: string): string {
+  try { return realpathSync(cwd); } catch { return cwd; }
 }
 
 async function addUserScope(deps: McpRouteDeps, name: string, entry: McpServerSettingsEntry, transport: McpTransport): Promise<McpAddOutcome> {
@@ -300,32 +416,36 @@ async function addUserScope(deps: McpRouteDeps, name: string, entry: McpServerSe
       return { ok: false, message: (err as Error).message };
     }
   }
-  const settingsPath = join(deps.winterHome, "settings.json");
-  let next;
   try {
-    next = addUserMcpServer(loadSettings(settingsPath), name, entry);
-  } catch (err) {
-    return { ok: false, message: (err as Error).message };
-  }
-  try {
-    saveSettings(settingsPath, next);
+    addSdkUserMcpServer(deps.winterHome, name, entry);
   } catch (err) {
     return { ok: false, message: (err as Error).message };
   }
   return { ok: true, scope: "user", name, transport, via: "local" };
 }
 
-/** A message shared by every project-scope write that finds `.mcp.json` unreadable — REFUSES
- *  rather than silently replaces it (`readRawProjectMcpConfig`'s own doc explains why: this file has
- *  no watcher/keep-last-good the way settings.json does, so "degrade to empty and write anyway"
- *  would delete every server a human or claude configured there). */
+function addLocalScope(deps: McpRouteDeps, name: string, entry: McpServerSettingsEntry, transport: McpTransport): McpAddOutcome {
+  const root = projectRootFor(deps.cwd);
+  try {
+    addSdkLocalMcpServer(deps.winterHome, root, name, entry);
+  } catch (err) {
+    return { ok: false, message: (err as Error).message };
+  }
+  return { ok: true, scope: "local", name, transport, root };
+}
+
+/** A message shared by every project-scope write that finds `.winter/mcp.json` unreadable —
+ *  REFUSES rather than silently replaces it: this file has no watcher/keep-last-good the way
+ *  settings.json does, so "degrade to empty and write anyway" would delete every server a human or
+ *  claude configured there. */
 function malformedProjectFileMessage(cwd: string, verb: string): string {
-  return `${projectMcpConfigPath(cwd)} is not valid JSON — fix it before ${verb} (Winter refuses to overwrite a project file it cannot parse)`;
+  return `${winterMcpConfigPath(cwd)} is not valid JSON — fix it before ${verb} (Winter refuses to overwrite a project file it cannot parse)`;
 }
 
 function addProjectScope(deps: McpRouteDeps, name: string, entry: ProjectMcpServerEntry): McpAddOutcome {
-  const read = readRawProjectMcpConfig(deps.cwd);
-  if (read.kind === "malformed") return { ok: false, message: malformedProjectFileMessage(deps.cwd, `adding "${name}"`) };
+  const root = projectRootFor(deps.cwd);
+  const read = readRawWinterMcpConfig(root);
+  if (read.kind === "malformed") return { ok: false, message: malformedProjectFileMessage(root, `adding "${name}"`) };
   const servers = read.kind === "ok" ? read.servers : {};
   let next: Record<string, unknown>;
   try {
@@ -333,14 +453,15 @@ function addProjectScope(deps: McpRouteDeps, name: string, entry: ProjectMcpServ
   } catch (err) {
     return { ok: false, message: (err as Error).message };
   }
-  writeRawProjectMcpConfig(deps.cwd, read.kind === "ok" ? read.raw : {}, next);
-  return { ok: true, scope: "project", name, transport: "stdio", cwd: deps.cwd, trusted: isTrustedDir(deps.winterHome, deps.cwd) };
+  writeRawWinterMcpConfig(root, read.kind === "ok" ? read.raw : {}, next);
+  return { ok: true, scope: "project", name, transport: "stdio", cwd: root, trusted: isTrustedDir(deps.winterHome, root) };
 }
 
 /** `winter mcp add` — the full route. Refuses `--transport http|sse` at PROJECT scope: not because
- *  the reader can't handle it any more (it now can, per-entry — this file's own header), but
- *  because THIS write door hasn't been asked to grow a new transport; use `-s user`, or hand-edit
- *  `.mcp.json` directly for a project-scope http/sse entry. */
+ *  the reader can't handle it any more (it accepts http/sse too, per-entry — this file's own
+ *  header), but because THIS write door hasn't been asked to grow a new transport; use `-s user`
+ *  or `-s local`, or hand-edit `.winter/mcp.json` directly for a project-scope http/sse entry.
+ *  LOCAL scope has the same restriction, same reasoning. */
 export async function runMcpAddRoute(args: string[], deps: McpRouteDeps): Promise<McpAddOutcome> {
   const parseResult = parseMcpAddArgs(args);
   if (parseResult.kind === "usageError") return { ok: false, message: parseResult.message };
@@ -353,8 +474,8 @@ export async function runMcpAddRoute(args: string[], deps: McpRouteDeps): Promis
   if (transportResult.kind !== "ok") return { ok: false, message: transportResult.message };
   const { transport } = transportResult;
 
-  if (scopeResult.scope === "project" && transport !== "stdio") {
-    return { ok: false, message: "winter mcp add --scope project only writes a stdio entry today (Winter's .mcp.json reader itself now accepts http/sse too, same as claude's — see project-file.ts's own header) — use \"-s user\" to add an http/sse server, or edit .mcp.json directly for one at project scope" };
+  if ((scopeResult.scope === "project" || scopeResult.scope === "local") && transport !== "stdio") {
+    return { ok: false, message: `winter mcp add --scope ${scopeResult.scope} only writes a stdio entry today — use "-s user" to add an http/sse server, or edit ${scopeResult.scope === "project" ? ".winter/mcp.json" : "sdk/.winter.json"} directly for one at this scope` };
   }
 
   const entryResult = buildMcpEntry(parsed, transport);
@@ -376,6 +497,8 @@ export async function runMcpAddRoute(args: string[], deps: McpRouteDeps): Promis
   if (scopeResult.scope === "project") {
     const stdioEntry = entryResult.entry as Extract<McpServerSettingsEntry, { type: "stdio" }>;
     outcome = addProjectScope(deps, parsed.name, { command: stdioEntry.command, ...(stdioEntry.args ? { args: stdioEntry.args } : {}), ...(stdioEntry.env ? { env: stdioEntry.env } : {}) });
+  } else if (scopeResult.scope === "local") {
+    outcome = addLocalScope(deps, parsed.name, entryResult.entry, transport);
   } else {
     outcome = await addUserScope(deps, parsed.name, entryResult.entry, transport);
   }
@@ -413,18 +536,22 @@ export async function runMcpAddJsonRoute(args: string[], deps: McpRouteDeps): Pr
     return { ok: false, message: `Invalid configuration: ${formatted}` };
   }
 
-  if (scopeResult.scope === "project" && shaped.data.type !== "stdio") {
-    return { ok: false, message: "winter mcp add --scope project only writes a stdio entry today (Winter's .mcp.json reader itself now accepts http/sse too, same as claude's — see project-file.ts's own header) — use \"-s user\" to add an http/sse server, or edit .mcp.json directly for one at project scope" };
+  if ((scopeResult.scope === "project" || scopeResult.scope === "local") && shaped.data.type !== "stdio") {
+    return { ok: false, message: `winter mcp add --scope ${scopeResult.scope} only writes a stdio entry today — use "-s user" to add an http/sse server, or edit ${scopeResult.scope === "project" ? ".winter/mcp.json" : "sdk/.winter.json"} directly for one at this scope` };
   }
   if (scopeResult.scope === "project") {
     const e = shaped.data as Extract<McpServerSettingsEntry, { type: "stdio" }>;
     return addProjectScope(deps, parsed.name, { command: e.command, ...(e.args ? { args: e.args } : {}), ...(e.env ? { env: e.env } : {}) });
+  }
+  if (scopeResult.scope === "local") {
+    return addLocalScope(deps, parsed.name, shaped.data, shaped.data.type);
   }
   return addUserScope(deps, parsed.name, shaped.data, shaped.data.type);
 }
 
 export type McpRemoveOutcome =
   | { ok: true; scope: "user"; name: string; removed: boolean }
+  | { ok: true; scope: "local"; name: string; removed: boolean; root: string }
   | { ok: true; scope: "project"; name: string; removed: boolean; cwd: string }
   | { ok: false; message: string }
   | { ok: false; multi: true; name: string; scopes: McpScope[] };
@@ -433,20 +560,22 @@ async function userScopeHasServer(deps: McpRouteDeps, name: string): Promise<boo
   if (deps.door) {
     try { return (await deps.door.mcpGet(name)).found; } catch { return false; }
   }
-  try { return loadSettings(join(deps.winterHome, "settings.json")).mcpServers?.[name] !== undefined; } catch { return false; }
+  try { return Object.hasOwn(readSdkGlobalConfig(deps.winterHome).mcpServers ?? {}, name); } catch { return false; }
 }
 
-/** Tri-state, not a boolean: a malformed project `.mcp.json` must never be silently read as "not
- *  there" (a review caught the ambient `mcp remove` — no `-s` — doing exactly that, which could
- *  make a REAL project-scope entry vanish from the "which scope did you mean" reasoning entirely,
- *  or worse, "not found anywhere" when it was actually sitting in a file this command simply
- *  couldn't parse). `runMcpRemoveRoute`'s ambient branch surfaces the parse error instead, the same
- *  way `mcp get` already does. */
+function localScopeHasServer(deps: McpRouteDeps, name: string): boolean {
+  try { return sdkLocalServer(deps.winterHome, projectRootFor(deps.cwd), name) !== undefined; } catch { return false; }
+}
+
+/** Tri-state, not a boolean: a malformed project `.winter/mcp.json` must never be silently read as
+ *  "not there" — the ambient (no `-s`) branch surfaces the parse error instead, the same way
+ *  `mcp get` already does. */
 type ProjectScopeCheck = { kind: "found" } | { kind: "absent" } | { kind: "malformed"; message: string };
 
 function projectScopeHasServer(deps: McpRouteDeps, name: string): ProjectScopeCheck {
-  const read = readRawProjectMcpConfig(deps.cwd);
-  if (read.kind === "malformed") return { kind: "malformed", message: malformedProjectFileMessage(deps.cwd, `checking for "${name}"`) };
+  const root = projectRootFor(deps.cwd);
+  const read = readRawWinterMcpConfig(root);
+  if (read.kind === "malformed") return { kind: "malformed", message: malformedProjectFileMessage(root, `checking for "${name}"`) };
   if (read.kind === "absent") return { kind: "absent" };
   return { kind: Object.hasOwn(read.servers, name) ? "found" : "absent" };
 }
@@ -456,28 +585,31 @@ async function removeUserScope(deps: McpRouteDeps, name: string): Promise<{ remo
     const r = await deps.door.mcpRemove(name);
     return { removed: r.removed };
   }
-  const settingsPath = join(deps.winterHome, "settings.json");
-  const { settings: next, removed } = removeUserMcpServer(loadSettings(settingsPath), name);
-  if (removed) saveSettings(settingsPath, next);
-  return { removed };
+  return { removed: removeSdkUserMcpServer(deps.winterHome, name) };
+}
+
+function removeLocalScope(deps: McpRouteDeps, name: string): { removed: boolean; root: string } {
+  const root = projectRootFor(deps.cwd);
+  return { removed: removeSdkLocalMcpServer(deps.winterHome, root, name), root };
 }
 
 type ProjectRemoveResult = { ok: true; removed: boolean } | { ok: false; message: string };
 
 function removeProjectScope(deps: McpRouteDeps, name: string): ProjectRemoveResult {
-  const read = readRawProjectMcpConfig(deps.cwd);
-  if (read.kind === "malformed") return { ok: false, message: malformedProjectFileMessage(deps.cwd, `removing "${name}"`) };
+  const root = projectRootFor(deps.cwd);
+  const read = readRawWinterMcpConfig(root);
+  if (read.kind === "malformed") return { ok: false, message: malformedProjectFileMessage(root, `removing "${name}"`) };
   if (read.kind === "absent") return { ok: true, removed: false };
-  const { servers: next, removed } = removeProjectMcpServer(read.servers, name);
-  if (removed) writeRawProjectMcpConfig(deps.cwd, read.raw, next);
+  const { servers: next, removed } = removeProjectMcpServerEntry(read.servers, name);
+  if (removed) writeRawWinterMcpConfig(root, read.raw, next);
   return { ok: true, removed };
 }
 
 /** `winter mcp remove` — with an explicit `-s`, removes from just that scope (a "not found there"
  *  still reports `removed: false`, never an error, matching `mcp.remove`'s own idempotent RPC
- *  posture). With NO `-s`, mirrors claude's own ambiguity handling (`mcpRemoveHandler`): check both
- *  scopes, remove from whichever ONE has it, refuse typed if it's in neither, and hand back the
- *  "which scope did you mean" listing if it's in both. */
+ *  posture). With NO `-s`, mirrors claude's own ambiguity handling (`mcpRemoveHandler`): check all
+ *  three scopes, remove from whichever ONE has it, refuse typed if it's in none, and hand back the
+ *  "which scope did you mean" listing if it's in more than one. */
 export async function runMcpRemoveRoute(args: string[], deps: McpRouteDeps): Promise<McpRemoveOutcome> {
   const parseResult = parseMcpRemoveArgs(args);
   if (parseResult.kind === "usageError") return { ok: false, message: parseResult.message };
@@ -490,18 +622,30 @@ export async function runMcpRemoveRoute(args: string[], deps: McpRouteDeps): Pro
       const { removed } = await removeUserScope(deps, parsed.name);
       return { ok: true, scope: "user", name: parsed.name, removed };
     }
+    if (scopeResult.scope === "local") {
+      const { removed, root } = removeLocalScope(deps, parsed.name);
+      return { ok: true, scope: "local", name: parsed.name, removed, root };
+    }
     const projectResult = removeProjectScope(deps, parsed.name);
     if (!projectResult.ok) return { ok: false, message: projectResult.message };
-    return { ok: true, scope: "project", name: parsed.name, removed: projectResult.removed, cwd: deps.cwd };
+    return { ok: true, scope: "project", name: parsed.name, removed: projectResult.removed, cwd: projectRootFor(deps.cwd) };
   }
 
-  const [inUser, projectCheck] = await Promise.all([userScopeHasServer(deps, parsed.name), Promise.resolve(projectScopeHasServer(deps, parsed.name))]);
+  const [inUser, inLocal, projectCheck] = await Promise.all([
+    userScopeHasServer(deps, parsed.name),
+    Promise.resolve(localScopeHasServer(deps, parsed.name)),
+    Promise.resolve(projectScopeHasServer(deps, parsed.name)),
+  ]);
   // A malformed project file is NEVER silently read as "not there" — this command can't tell
-  // whether the name is ALSO in project scope, so it surfaces the parse error rather than guess
-  // either "user only" or "found nowhere", exactly as `mcp get` already does for this file.
+  // whether the name is ALSO in project scope, so it surfaces the parse error rather than guess.
   if (projectCheck.kind === "malformed") return { ok: false, message: projectCheck.message };
   const inProject = projectCheck.kind === "found";
-  if (inUser && inProject) return { ok: false, multi: true, name: parsed.name, scopes: ["user", "project"] };
+  const foundIn: McpScope[] = [...(inLocal ? (["local"] as const) : []), ...(inUser ? (["user"] as const) : []), ...(inProject ? (["project"] as const) : [])];
+  if (foundIn.length > 1) return { ok: false, multi: true, name: parsed.name, scopes: foundIn };
+  if (inLocal) {
+    const { removed, root } = removeLocalScope(deps, parsed.name);
+    return { ok: true, scope: "local", name: parsed.name, removed, root };
+  }
   if (inUser) {
     const { removed } = await removeUserScope(deps, parsed.name);
     return { ok: true, scope: "user", name: parsed.name, removed };
@@ -509,7 +653,7 @@ export async function runMcpRemoveRoute(args: string[], deps: McpRouteDeps): Pro
   if (inProject) {
     const projectResult = removeProjectScope(deps, parsed.name);
     if (!projectResult.ok) return { ok: false, message: projectResult.message };
-    return { ok: true, scope: "project", name: parsed.name, removed: projectResult.removed, cwd: deps.cwd };
+    return { ok: true, scope: "project", name: parsed.name, removed: projectResult.removed, cwd: projectRootFor(deps.cwd) };
   }
   return { ok: false, message: `No MCP server found with name: "${parsed.name}"` };
 }
@@ -521,26 +665,36 @@ export type McpGetOutcome =
       command?: string; args?: string[]; env?: Record<string, string>;
       url?: string; headers?: Record<string, string>; disabled?: boolean; strippedHeaders?: string[];
       cwd?: string;
-      /** Set ONLY for a project-scope entry that is PRESENT in `.mcp.json` but does not validate
-       *  against any recognized shape (`parseProjectMcpServers`' own skip reason, the SAME per-
-       *  branch message `settings.mcpServers` itself would raise for the identical malformed
-       *  entry). When set, `transport`/`command`/`url`/etc. above carry no information (there was
-       *  no valid entry to read them from) — `renderMcpGetOutcome` checks this FIRST. */
+      /** Set ONLY for a project-scope entry that is PRESENT in `.winter/mcp.json` but does not
+       *  validate against any recognized shape (`parseProjectMcpServers`' own skip reason). */
       unrecognized?: string;
     }
   | { ok: false; message: string };
 
-/** `winter mcp get <name>` — no `-s` flag (claude's own `get` has none either): checks USER scope
- *  first, then PROJECT — the same precedence `external-mcp.ts`'s own header documents ("a user
- *  server shadows a same-keyed project server"), so `get` shows whichever one a real session would
- *  actually run. Project-scope reads go through the SAME per-entry parser
- *  (`parseProjectMcpServers`) the daemon's own readers use (`manager.ts`/`external-mcp.ts`) — a
- *  present-but-invalid entry is reported as `found: true` with `unrecognized` set, never silently
- *  treated as absent, and never crashes the lookup of any OTHER name in the same file. */
+/** `winter mcp get <name>` — no `-s` flag (claude's own `get` has none either): checks LOCAL scope
+ *  first, then USER, then PROJECT — local shadows user shadows project, mirroring claude's own
+ *  merge-order precedence (F17: arrays/tiers layer local-most-specific-wins). Project-scope reads
+ *  go through the SAME per-entry parser (`parseProjectMcpServers`) the daemon's own readers use —
+ *  a present-but-invalid entry is reported as `found: true` with `unrecognized` set, never silently
+ *  treated as absent. */
 export async function runMcpGetRoute(args: string[], deps: McpRouteDeps): Promise<McpGetOutcome> {
   const parseResult = parseMcpGetArgs(args);
   if (parseResult.kind === "usageError") return { ok: false, message: parseResult.message };
   const { name } = parseResult;
+
+  // WS-21: reads through the SAME credential-shaped-header-stripping map `settings.ts`'s own
+  // `sdkLocalMcpServers`/`sdkUserMcpServers` readers use (`parseMcpServerMap`), never the raw
+  // `readSdkGlobalConfig` passthrough — that reader is `sdk-files.ts`'s own Contract C surface and
+  // knows nothing about this header rule (it's a `settings.ts`-level concern). `strippedHeaders`
+  // below is computed separately, off the RAW file, since the cleaned entry can no longer say what
+  // it lost.
+  const local = sdkLocalMcpServers(deps.winterHome, projectRootFor(deps.cwd))[name];
+  if (local) {
+    return {
+      ok: true, found: true, name, scope: "local", transport: local.type,
+      ...(local.type === "stdio" ? { command: local.command, args: local.args, env: local.env } : { url: local.url, headers: local.headers }),
+    };
+  }
 
   if (deps.door) {
     try {
@@ -555,36 +709,36 @@ export async function runMcpGetRoute(args: string[], deps: McpRouteDeps): Promis
     } catch { /* fall through to project scope below */ }
   } else {
     try {
-      const settingsPath = join(deps.winterHome, "settings.json");
-      const entry = loadSettings(settingsPath).mcpServers?.[name];
+      const entry = sdkUserMcpServers(deps.winterHome)[name];
       if (entry) {
-        // Read-door correction, matching the RPC handler's own `mcp.get` exactly (`ipc/server.ts`):
-        // which credential-shaped headers `loadSettings` silently stripped for THIS server, read
-        // fresh off the RAW file — `entry` above, by construction, can no longer say what it lost.
-        const strippedHeaders = stripCredentialShapedMcpHeaders(readRawSettings(settingsPath) ?? {})[name];
+        // Read-door correction, matching the RPC handler's own `mcp.get` exactly: which
+        // credential-shaped headers were silently stripped for THIS server, read fresh off the
+        // RAW file — `entry` above, by construction, can no longer say what it lost.
+        const strippedHeaders = stripCredentialShapedMcpHeaders(readRawSettings(sdkGlobalConfigPath(deps.winterHome)) ?? {})[name];
         return {
           ok: true, found: true, name, scope: "user", transport: entry.type,
           ...(entry.type === "stdio" ? { command: entry.command, args: entry.args, env: entry.env } : { url: entry.url, headers: entry.headers }),
           ...(strippedHeaders && strippedHeaders.length > 0 ? { strippedHeaders } : {}),
         };
       }
-    } catch { /* no settings.json yet — fall through */ }
+    } catch { /* no sdk/.winter.json yet — fall through */ }
   }
 
-  const read = readRawProjectMcpConfig(deps.cwd);
-  if (read.kind === "malformed") return { ok: false, message: malformedProjectFileMessage(deps.cwd, `reading "${name}"`) };
+  const root = projectRootFor(deps.cwd);
+  const read = readRawWinterMcpConfig(root);
+  if (read.kind === "malformed") return { ok: false, message: malformedProjectFileMessage(root, `reading "${name}"`) };
   if (read.kind === "ok") {
     const { servers, skipped } = parseProjectMcpServers(read.servers);
     const entry = servers[name];
     if (entry) {
       return {
-        ok: true, found: true, name, scope: "project", transport: entry.type, cwd: deps.cwd,
+        ok: true, found: true, name, scope: "project", transport: entry.type, cwd: root,
         ...(entry.type === "stdio" ? { command: entry.command, args: entry.args, env: entry.env } : { url: entry.url, headers: entry.headers }),
       };
     }
     const skippedEntry = skipped.find((s) => s.name === name);
     if (skippedEntry) {
-      return { ok: true, found: true, name, scope: "project", transport: "stdio", cwd: deps.cwd, unrecognized: skippedEntry.reason };
+      return { ok: true, found: true, name, scope: "project", transport: "stdio", cwd: root, unrecognized: skippedEntry.reason };
     }
   }
   return { ok: true, found: false, name };
@@ -594,8 +748,10 @@ export async function runMcpGetRoute(args: string[], deps: McpRouteDeps): Promis
 // Rendering (pure) — main.ts prints exactly what these return.
 // ------------------------------------------------------------------------------------------------
 
-function scopeLabel(scope: McpScope, cwd?: string): string {
-  return scope === "user" ? "user config (settings.json)" : `project config (.mcp.json${cwd ? `, ${cwd}` : ""})`;
+function scopeLabel(scope: McpScope, location?: string): string {
+  if (scope === "user") return "user config (sdk/.winter.json)";
+  if (scope === "local") return `local config (sdk/.winter.json${location ? `, ${location}` : ""})`;
+  return `project config (.winter/mcp.json${location ? `, ${location}` : ""})`;
 }
 
 export function renderMcpAddOutcome(outcome: McpAddOutcome): string {
@@ -606,6 +762,9 @@ export function renderMcpAddOutcome(outcome: McpAddOutcome): string {
   if (outcome.scope === "project") {
     const trustNote = outcome.trusted ? "" : ` — not yet loaded: this project is not trusted yet (run \`winter trust ${outcome.cwd}\` to trust it)`;
     return `${warningLine}Added ${outcome.transport} MCP server "${outcome.name}" to ${scopeLabel("project", outcome.cwd)}${trustNote}`;
+  }
+  if (outcome.scope === "local") {
+    return `${warningLine}Added ${outcome.transport} MCP server "${outcome.name}" to ${scopeLabel("local", outcome.root)}`;
   }
   const effectNote = outcome.via === "daemon"
     ? (outcome.transport === "stdio"
@@ -628,9 +787,10 @@ export function renderMcpRemoveOutcome(outcome: McpRemoveOutcome): string {
     }
     return outcome.message;
   }
+  const location = outcome.scope === "project" ? outcome.cwd : outcome.scope === "local" ? outcome.root : undefined;
   return outcome.removed
-    ? `Removed MCP server "${outcome.name}" from ${scopeLabel(outcome.scope, outcome.scope === "project" ? outcome.cwd : undefined)}`
-    : `no MCP server named "${outcome.name}" in ${scopeLabel(outcome.scope, outcome.scope === "project" ? outcome.cwd : undefined)} — nothing removed`;
+    ? `Removed MCP server "${outcome.name}" from ${scopeLabel(outcome.scope, location)}`
+    : `no MCP server named "${outcome.name}" in ${scopeLabel(outcome.scope, location)} — nothing removed`;
 }
 
 export function renderMcpGetOutcome(outcome: McpGetOutcome): string {
@@ -663,7 +823,7 @@ export function renderMcpGetOutcome(outcome: McpGetOutcome): string {
       for (const [k, v] of Object.entries(outcome.headers)) lines.push(`    ${k}: ${v}`);
     }
   }
-  if (outcome.strippedHeaders?.length) lines.push(`  (dropped credential-shaped header(s) at read time: ${outcome.strippedHeaders.join(", ")} — settings.json is model-readable; see CLAUDE.md)`);
+  if (outcome.strippedHeaders?.length) lines.push(`  (dropped credential-shaped header(s) at read time: ${outcome.strippedHeaders.join(", ")} — sdk/.winter.json is model-readable; see CLAUDE.md)`);
   if (outcome.disabled) lines.push("  Disabled: yes (winter mcp add ran, but this name is in settings.mcp.disabled)");
   lines.push("", `To remove this server, run: winter mcp remove "${outcome.name}" -s ${outcome.scope}`);
   return lines.join("\n");
