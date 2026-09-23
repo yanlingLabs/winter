@@ -233,6 +233,19 @@ export {
 export { LegacyKeychainSecretStore, legacyKeychainServiceFor } from "./migration/legacy-keychain-store";
 export { DEAD_LEGACY_TOP_LEVEL_FILES, findDeadLegacyFiles, describeDeadLegacyFiles, type DeadLegacyFile } from "./migration/dead-legacy-files";
 export { rekeySettings, type RekeyChange, type RekeyResult } from "./migration/rekey-settings";
+// WS-21 (spec §8): Migration C and the settings split — the CLI's `winter migrate --sdk-home` and
+// `winter doctor` read these; the daemon's boot hook is the other caller.
+export {
+  MIGRATION_C_PHASE1, MIGRATION_C_PHASE2, MigrationCRefused, finishMigrationC, isOldLayout,
+  migrationCCompletePath, migrationCManifestPath, migrationCRolledBackPath, migrationCState,
+  planMigrationC, rollbackMigrationC, runMigrationC,
+  type MigrationCManifest, type MigrationCState, type MigrationCStep,
+} from "./migration/migrate-c";
+export { splitSettingsToSdk, settingsSplitMarkerPath, SPLIT_KEYS, type SettingsSplitReport } from "./migration/settings-split";
+export { sdkHomeDoctorLines } from "./migration/sdk-home-doctor";
+export { downgradeRuntimeStateToV6, openRuntimeStateDb } from "./runtime-state/db";
+// Review I5: THE local MCP/settings scope key — the CLI's `winter mcp` uses it too (lane L4).
+export { localScopeKeyFor } from "./runtime-sdk/run-home-input";
 export {
   ProjectMigrationRefused,
   planProjectMigration,

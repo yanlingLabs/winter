@@ -65,7 +65,7 @@ import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 import { MAIN_THREAD } from "../projector";
 import { RuntimeSessionRecords, type RuntimeSessionState } from "../runtime-state/records";
 import { sessionLegOf } from "./leg";
-import { storeHomeFor, storeProjectsDir } from "../agent/paths";
+import { canonicalCwd, storeHomeFor, storeProjectsDir } from "../agent/paths";
 
 export interface ConvertEngineEraLogOpts {
   /** The Winter session id — becomes the dialect entries' OWN `sessionId` field is the BACKEND id
@@ -287,7 +287,7 @@ async function doImport(deps: ImportLegacyDeps, sessionId: string): Promise<{ ba
   // the identical function `session-driver.ts` uses, rather than trusting `record.transcriptProjectKey`
   // (the key at the ORIGINAL 8a backfill time, which a later `session.setDirs` could have moved on
   // from).
-  const projectKey = transcriptProjectKey(cwd);
+  const projectKey = transcriptProjectKey(canonicalCwd(cwd)); // WS-21 (L2 O-1): the child's own key
   const backendSessionId = randomUUID();
   const events = deps.store.read(sessionId);
   const entries = convertEngineEraLog(events, { sessionId, backendSessionId, cwd, version: deps.version ?? "unknown" });

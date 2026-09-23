@@ -24,7 +24,8 @@
 // "refuse a silent overwrite" (mirrors claude's own `addMcpConfig`, `services/mcp/config.ts` in the
 // reference clone — it throws "already exists in <scope> config" rather than replace).
 import type { Settings, McpServerSettingsEntry } from "../../settings";
-import { setMcpServerEntry, removeMcpServerEntry, validateMcpServerEntryForWrite } from "../../settings";
+import { setMcpServerEntry, removeMcpServerEntry, sdkLocalMcpServers, sdkUserMcpServers, validateMcpServerEntryForWrite } from "../../settings";
+import { ProjectMcpEntrySchema, parseProjectMcpServers, projectMcpConfigPath, readRawProjectMcpConfig, writeRawProjectMcpConfig } from "./project-file";
 import { readSdkGlobalConfigDetailed, updateSdkGlobalConfig, type SdkGlobalConfigFile } from "../../sdk-files";
 import { reservedMcpServerNames } from "../../capabilities/names";
 import type { ProjectMcpServerEntry } from "./project-file";
@@ -144,5 +145,99 @@ export function removeSdkUserMcpServer(home: string, name: string): boolean {
     delete rest[name];
     return { ...config, mcpServers: rest };
   });
+  return removed;
+}
+
+// ── WS-21 (spec §4.4): claude's three MCP scopes ────────────────────────────────────────────────────
+//
+//   local    (claude's default)  `sdk/.winter.json` → `projects[<canonical project root>].mcpServers`
+//   user                         `sdk/.winter.json` → `mcpServers`
+//   project                      `<project root>/.winter/mcp.json` (claude's `.mcp.json` format)
+//
+// `root` is the CANONICAL project root (`repoRootFor(cwd)`) — the key the run home's builder folds the
+// local servers from and the directory it reads the project file in. The same validation as ever runs
+// before anything is written: the name rule, no silent overwrite, and the entry schema — user and local
+// entries live in the user's own file, so a credential-shaped header is REFUSED there (secrets never on
+// disk); a project entry follows claude's own `.mcp.json` reader and forwards headers verbatim (the
+// ruling in `project-file.ts`).
+
+export type McpScope = "local" | "user" | "project";
+export interface McpScopeTarget { home: string; scope: McpScope; root?: string }
+
+/** A scope that names a project needs its root; `user` does not. */
+function projectRootOf(t: McpScopeTarget): string {
+  if (t.root === undefined || t.root === "") throw new Error(`the "${t.scope}" MCP scope names a project — a working directory is required`);
+  return t.root;
+}
+
+/** The entry a scope holds under `name`, validated the way that scope's reader validates it, or
+ *  `undefined` when absent (or not valid there). */
+export function mcpServerInScope(t: McpScopeTarget, name: string): { type: "stdio" | "http" | "sse"; [key: string]: unknown } | undefined {
+  if (t.scope === "user") return sdkUserMcpServers(t.home)[name];
+  if (t.scope === "local") return sdkLocalMcpServers(t.home, projectRootOf(t))[name];
+  const read = readRawProjectMcpConfig(projectRootOf(t));
+  if (read.kind !== "ok") return undefined;
+  return parseProjectMcpServers(read.servers).servers[name];
+}
+
+/** Add one server to a scope. Throws a plain `Error` (bad name, already present, invalid entry,
+ *  credential-shaped header in user/local, an unreadable file) and writes nothing then. */
+export function addMcpServerInScope(t: McpScopeTarget, name: string, entry: unknown): { type: "stdio" | "http" | "sse" } {
+  if (t.scope === "user") return addSdkUserMcpServer(t.home, name, entry);
+  const nameErr = validateMcpServerName(name);
+  if (nameErr) throw new Error(nameErr);
+  const root = projectRootOf(t);
+  if (t.scope === "local") {
+    const valid = validateMcpServerEntryForWrite(entry);
+    updateSdkGlobalConfig(t.home, (config) => {
+      const projects = isRecord(config.projects) ? config.projects : {};
+      const project = isRecord(projects[root]) ? projects[root]! : {};
+      const servers = isRecord(project.mcpServers) ? project.mcpServers : {};
+      if (Object.hasOwn(servers, name)) {
+        throw new Error(`MCP server "${name}" already exists in local config for ${root} — remove it first ("winter mcp remove ${name} --scope local")`);
+      }
+      return { ...config, projects: { ...projects, [root]: { ...project, mcpServers: { ...servers, [name]: valid } } } };
+    });
+    return valid;
+  }
+  const parsed = ProjectMcpEntrySchema.safeParse(entry);
+  if (!parsed.success) throw new Error(parsed.error.issues.map((i) => i.message).join("; "));
+  const read = readRawProjectMcpConfig(root);
+  if (read.kind === "malformed") throw new Error(`${projectMcpConfigPath(root)} is not a readable MCP config — it was left untouched`);
+  const current = read.kind === "ok" ? read : { raw: {}, servers: {} };
+  if (Object.hasOwn(current.servers, name)) {
+    throw new Error(`MCP server "${name}" already exists in this project's .winter/mcp.json — remove it first or edit the file directly`);
+  }
+  writeRawProjectMcpConfig(root, current.raw, { ...current.servers, [name]: entry });
+  return parsed.data;
+}
+
+/** Remove one server from a scope. Idempotent: `false` when it was not there (nothing is rewritten). */
+export function removeMcpServerInScope(t: McpScopeTarget, name: string): boolean {
+  if (t.scope === "user") return removeSdkUserMcpServer(t.home, name);
+  const root = projectRootOf(t);
+  if (t.scope === "local") {
+    const present = (c: SdkGlobalConfigFile): boolean => {
+      const project = isRecord(c.projects) ? c.projects[root] : undefined;
+      return isRecord(project) && isRecord(project.mcpServers) && Object.hasOwn(project.mcpServers, name);
+    };
+    const current = readSdkGlobalConfigDetailed(t.home);
+    if (current.state === "missing" || (current.state === "ok" && !present(current.value))) return false;
+    let removed = false;
+    updateSdkGlobalConfig(t.home, (config) => {
+      if (!present(config)) return config;
+      removed = true;
+      const projects = config.projects as Record<string, Record<string, unknown>>;
+      const servers = { ...(projects[root]!.mcpServers as Record<string, unknown>) };
+      delete servers[name];
+      return { ...config, projects: { ...projects, [root]: { ...projects[root], mcpServers: servers } } };
+    });
+    return removed;
+  }
+  const read = readRawProjectMcpConfig(root);
+  if (read.kind === "absent") return false;
+  if (read.kind === "malformed") throw new Error(`${projectMcpConfigPath(root)} is not a readable MCP config — it was left untouched`);
+  const { servers, removed } = removeProjectMcpServer(read.servers, name);
+  if (removed) writeRawProjectMcpConfig(root, read.raw, servers);
   return removed;
 }

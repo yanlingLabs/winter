@@ -442,6 +442,12 @@ export interface OfficialInputDeps {
    *  frontmatter name — claude names a plugin skill by its directory, so the settings rule alone
    *  would bind nothing on this leg. */
   skillDenyAliases?: readonly string[];
+  /** WS-21 (spec §6.1, L3.4): the router applies a run home to this incarnation — the same meaning as
+   *  `WinterOptionsInput.runHomeApplied`: no agents, no plugins, no configured MCP servers, no saved
+   *  allow rules and no instructions/output-style/project-memory text from here (the run folder carries
+   *  them); the capability servers, Winter's fixed allow rules, the deny floor, the sandbox and the
+   *  hooks stay. Absent/false: exactly as before. */
+  runHomeApplied?: boolean;
   /** Everything `officialBrokerFor`/`canUseToolFor` needs, MINUS the three fields this function
    *  fills from `OfficialSessionInput` itself (never let a caller's stale `sessionId`/`mode`/`cwd`
    *  silently win over the session actually being opened). */
@@ -627,6 +633,7 @@ export function officialInputFor(
     ...(input.outDir === undefined ? {} : { outDir: input.outDir }),
     ...(input.extraDirs === undefined ? {} : { extraDirs: input.extraDirs }),
     ...(input.effort === undefined ? {} : { effort: input.effort }),
+    ...(deps.runHomeApplied === true ? { runHomeApplied: true } : {}),
   });
 
   // Batch 3 (item 3): configured servers FIRST, Winter's own capability servers LAST — the same
@@ -635,7 +642,7 @@ export function officialInputFor(
   // (the collision itself was already refused, typed, before this deps object was built).
   const mcpServers = deps.officialPeer === undefined
     ? {}
-    : { ...(deps.configuredMcpServers ?? {}), ...officialCapabilityServersFor(deps.capabilities, deps.officialPeer as unknown as OfficialMcpModule) };
+    : { ...(deps.runHomeApplied === true ? {} : (deps.configuredMcpServers ?? {})), ...officialCapabilityServersFor(deps.capabilities, deps.officialPeer as unknown as OfficialMcpModule) };
 
   const base: Record<string, string> = minimalOsEnvironment(env);
   // Phase 9c (P9c-1): defence in depth (see `FORBIDDEN_CHILD_ENV`'s own doc) — a no-op today given
@@ -696,10 +703,13 @@ export function officialInputFor(
       sessionId: input.sessionId,
       ...(input.parentSessionId === undefined ? {} : { parentSessionId: input.parentSessionId }),
       base,
-      autoMemoryDirectory: autoMemoryDirectoryFor(input, deps.assembler, deps.home),
+      // WS-21 (L2's contract): beside a run home the router pins the memory directory itself (from
+      // `runHome.input.memoryDir`, the same value) and REFUSES `spool`/`stagingRoot` — the run folder is
+      // the config dir — so neither this leg's memory dir nor its Winter-owned spool is named then.
+      ...(deps.runHomeApplied === true ? {} : { autoMemoryDirectory: autoMemoryDirectoryFor(input, deps.assembler, deps.home) }),
       projectKey,
       sharedTempRoot,
-      ...(spool === undefined ? {} : { spool }),
+      ...(spool === undefined || deps.runHomeApplied === true ? {} : { spool }),
       mcpServers,
       ...(credentials.length === 0 ? {} : { credentials }),
       ...(Object.keys(connectionEnv).length === 0 ? {} : { connectionEnv }),
@@ -777,7 +787,8 @@ export function officialInputFor(
             // …then the user's SAVED rules, translated by the ONE translation the Winter leg uses
             // (`sdkAllowRulesFor`) — claude applies its own settings files' `permissions.allow`
             // natively; `settingSources: []` means this flag layer is the only way ours reach it.
-            ...(input.mode === "code" ? { allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...(deps.userAllow ?? []), ...sdkAllowRulesFor(deps.persistedAllow ?? [])])] } : {}),
+            // WS-21: on a run-home incarnation the saved rules ride the run folder's own settings tiers.
+            ...(input.mode === "code" ? { allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...(deps.runHomeApplied === true ? [] : [...(deps.userAllow ?? []), ...sdkAllowRulesFor(deps.persistedAllow ?? [])])])] } : {}),
             // …plus the claude-spelling aliases of any denied plugin skill (`skillDenyAliases`).
             deny: [...permissionDenyRulesFor(deps.home, deps.userDeny), ...(deps.skillDenyAliases ?? [])],
             ...(deps.policy === "bypass" ? {} : { disableBypassPermissionsMode: "disable" as const }),
@@ -817,11 +828,11 @@ export function officialInputFor(
         // when empty, mirroring `mode-options.ts`'s own "empty is treated the same as absent" rule
         // for `Options.agents` (an explicit `{}` would tell the runtime "zero subagents are
         // defined" rather than "the host declared none").
-        ...(deps.agents !== undefined && Object.keys(deps.agents).length > 0 ? { agents: deps.agents } : {}),
+        ...(deps.runHomeApplied !== true && deps.agents !== undefined && Object.keys(deps.agents).length > 0 ? { agents: deps.agents } : {}),
         // Lane B (router 0.0.11): the enabled + consented plugins' skills-only views — the router's
         // `plugins` policy is the only way a plugin reaches this leg since 0.0.11 (it no longer names
         // `<cwd>/.winter` itself). Absent when there are none.
-        ...(deps.skillPlugins !== undefined && deps.skillPlugins.length > 0
+        ...(deps.runHomeApplied !== true && deps.skillPlugins !== undefined && deps.skillPlugins.length > 0
           ? { plugins: deps.skillPlugins.map((p) => ({ type: "local" as const, path: p.path, skipMcpDiscovery: true as const })) }
           : {}),
       } as RouterOfficialInput["options"],

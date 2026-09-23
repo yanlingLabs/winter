@@ -72,9 +72,27 @@ export const SESSION_TITLE_MAX_CHARS = 200;
  *  40 characters), far below anything that could bloat a row. */
 export const SESSION_MODEL_MAX_CHARS = 200;
 
+/**
+ * WS-21 (spec §8 step 5, layer 3 of 3): the wire's model tags canonicalize ON PARSE — the installed
+ * phone still sends a tag a catalog refresh has since renamed. This package is a leaf and cannot see
+ * the catalog, so the rename itself is the DAEMON's (`core`'s `canonicalModelTag`, which registers
+ * itself here when it loads); until something registers, the identity. One process-wide seam, set once.
+ */
+let wireModelTagCanonicalizer: (tag: string) => string = (tag) => tag;
+export function setWireModelTagCanonicalizer(fn: (tag: string) => string): void {
+  wireModelTagCanonicalizer = fn;
+}
+/** The registered canonicalizer (identity until the daemon registers one); never throws. */
+export function canonicalWireModelTag(tag: string): string {
+  try { return wireModelTagCanonicalizer(tag); } catch { return tag; }
+}
+
 /** WS-20: a model is ALWAYS a provider-qualified tag on the wire. Shape only — provider existence
- *  is the daemon's check (core's `isModelTag`/`ModelTagSchemaCore`), not this package's. */
-export const ModelTagSchema = z.string().min(3).max(SESSION_MODEL_MAX_CHARS).regex(/^[a-z0-9][a-z0-9.-]*\/\S+$/, "model must be a provider-qualified tag '<providerId>/<modelId>'");
+ *  is the daemon's check (core's `isModelTag`/`ModelTagSchemaCore`), not this package's. WS-21: every
+ *  field built on it (`session.create`/`setModel`, the model-role and advisor setters, `sync.push`
+ *  meta, …) canonicalizes a renamed tag at parse (`canonicalWireModelTag`). */
+export const ModelTagSchema = z.string().min(3).max(SESSION_MODEL_MAX_CHARS).regex(/^[a-z0-9][a-z0-9.-]*\/\S+$/, "model must be a provider-qualified tag '<providerId>/<modelId>'")
+  .transform((tag) => canonicalWireModelTag(tag));
 
 /** provider-correctness T4: the same unbounded-field hazard `SESSION_MODEL_MAX_CHARS` documents,
  *  one column over — a per-session `effort` rides every `session.list` row, unpaged and

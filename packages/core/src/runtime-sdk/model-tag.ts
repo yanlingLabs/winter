@@ -1,4 +1,5 @@
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
+import { setWireModelTagCanonicalizer } from "@yanlinglabs/winter-protocol";
 
 /** WS-20: a model is ALWAYS a provider-qualified tag ("<providerId>/<modelId>") in code — the
  *  catalog row `key` already IS the tag. This module is the one place the tag shape and its
@@ -129,3 +130,64 @@ export function facingNameOf(tag: ModelTag): string | undefined {
   for (const family of catalog.families ?? []) for (const slot of family.slots) if (slot.canonicalModelId === row.canonicalModelId) return slot.name;
   return undefined;
 }
+
+
+// ── WS-21 (spec §8 step 5): stored tags canonicalize ON READ ──────────────────────────────────────
+//
+// A catalog refresh can rename a row (DeepSeek's retired `deepseek-v4-flash` now lives at
+// `deepseek-flash`). Stored tags are NEVER rewritten — an older Winter's catalog has no row under the
+// new spelling, so a rewrite is a downgrade hazard (r2 I5) — they are resolved through this ONE
+// function at three parse layers: the live settings view (`liveSettingsView`), the runtime-state row
+// decoder (`records.ts` `fromRow`, `sessions/store.ts`'s `model` column) and the protocol request parse
+// (`ModelTagSchema`'s transform, registered below).
+
+/**
+ * The catalog's own `CATALOG_TAG_RENAMES` (lane L1b: derived from the refresh's reviewed exclusions and
+ * the surviving rows' aliases). A LOCAL COPY of its two entries until the SDK that exports it is linked
+ * (the pinned 0.0.20 catalog predates the rename); at integration this constant is replaced by the
+ * catalog's import, in exactly this one place.
+ */
+export const CATALOG_TAG_RENAMES_LOCAL: Readonly<Record<string, string>> = Object.freeze({
+  "deepseek/deepseek-v4-flash": "deepseek/deepseek-flash",
+  "deepseek-anthropic/deepseek-v4-flash": "deepseek-anthropic/deepseek-flash",
+});
+
+let liveKeysCache: ReadonlySet<string> | undefined;
+let liveKeysOverride: ReadonlySet<string> | undefined;
+function liveCatalogKeys(): ReadonlySet<string> {
+  if (liveKeysOverride !== undefined) return liveKeysOverride;
+  liveKeysCache ??= new Set(loadCatalog().models.map((m) => m.key));
+  return liveKeysCache;
+}
+
+/** TEST ONLY: stand in a catalog's row keys (e.g. the refreshed catalog's) — `undefined` restores the
+ *  linked catalog. A test that sets it must restore it. */
+export function setCatalogKeysForTests(keys: Iterable<string> | undefined): void {
+  liveKeysOverride = keys === undefined ? undefined : new Set(keys);
+}
+
+/**
+ * The pure rule: `tag` renames to `renames[tag]` only when the OLD tag no longer resolves on its own
+ * (L1b's "never shadow a tag that still resolves") AND the NEW one does (never rename into nothing). So
+ * against the pinned 0.0.20 catalog — where `deepseek/deepseek-v4-flash` is still a live row and
+ * `deepseek-flash` does not exist — this is the identity, and a working DeepSeek home is untouched.
+ */
+export function canonicalModelTagWith(tag: string, renames: Readonly<Record<string, string>>, liveKeys: ReadonlySet<string>): string {
+  const to = renames[tag];
+  if (to === undefined || liveKeys.has(tag) || !liveKeys.has(to)) return tag;
+  return to;
+}
+
+/** A stored or wire model tag, canonicalized through the catalog's renames (see above). Never throws. */
+export function canonicalModelTag(tag: string): string {
+  try {
+    return canonicalModelTagWith(tag, CATALOG_TAG_RENAMES_LOCAL, liveCatalogKeys());
+  } catch {
+    return tag;
+  }
+}
+
+// Layer 3: the protocol package cannot see the catalog, so the daemon registers the rule with it the
+// moment this module loads (every daemon, CLI and test that parses a request imports this module
+// through `settings.ts`).
+setWireModelTagCanonicalizer(canonicalModelTag);

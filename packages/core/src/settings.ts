@@ -6,7 +6,7 @@ import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { ensureGlobalGitignore, WINTER_PERSONAL_IGNORES } from "./global-gitignore";
 import { OFFICIAL_SUBSCRIPTION_AUTH_APPROVED } from "./runtime-sdk/versions";
 import { consoleProfileCredentialFile } from "./runtime-sdk/anthropic-paths";
-import { facingNameToTag, isModelTag, splitTag, UNSTATED_TAG, WINTER_TEST_PREFIX, type ModelTag } from "./runtime-sdk/model-tag";
+import { canonicalModelTag, facingNameToTag, isModelTag, splitTag, UNSTATED_TAG, WINTER_TEST_PREFIX, type ModelTag } from "./runtime-sdk/model-tag";
 // The ONE catalog-row-by-tag lookup (WS-20) — imported rather than re-written here so a role write
 // and a session's own model resolution agree on what "this model exists" means, by construction.
 // `effortVocabularyFor`: the ONE interpretation of a catalog row's `reasoning?.efforts`, shared with
@@ -974,6 +974,50 @@ export function withoutMovedKeys(settings: Settings): Settings {
   delete out.outputStyle;
   delete out.mcpServers;
   return out;
+}
+
+/**
+ * WS-21 (spec §8 step 5, layer 1 of 3): the settings' model tags, canonicalized ON READ through the
+ * catalog's renames (`canonicalModelTag`) — `provider.model`, every `pins` role, `reviewer.model`,
+ * `titles.model` and `runtimes.advisorModel` (`roleEfforts` holds efforts, not tags). Applied to the LIVE
+ * view only (`liveSettingsView`), never inside `loadSettings`: the writers load, patch and save whole
+ * objects, and a canonicalizing parse there would rewrite every stored tag on the next unrelated write —
+ * the downgrade hazard (r2 I5) the no-rewrite rule exists for. Returns its argument when nothing changes.
+ */
+export function canonicalSettingsModelTags(settings: Settings): Settings {
+  let out = settings;
+  const patch = <K extends keyof Settings>(key: K, value: Settings[K]): void => { if (out === settings) out = { ...settings }; out[key] = value; };
+  const provider = settings.provider;
+  if (provider?.model !== undefined && canonicalModelTag(provider.model) !== provider.model) {
+    patch("provider", { ...provider, model: canonicalModelTag(provider.model) as ModelTag });
+  }
+  const pins = settings.pins;
+  if (pins !== undefined) {
+    const next: Record<string, unknown> = { ...pins };
+    let changed = false;
+    for (const [role, tag] of Object.entries(pins)) {
+      if (typeof tag === "string" && canonicalModelTag(tag) !== tag) { next[role] = canonicalModelTag(tag); changed = true; }
+    }
+    if (changed) patch("pins", next as Settings["pins"]);
+  }
+  for (const key of ["reviewer", "titles"] as const) {
+    const block = settings[key] as { model?: string } | undefined;
+    if (block?.model !== undefined && canonicalModelTag(block.model) !== block.model) {
+      patch(key, { ...block, model: canonicalModelTag(block.model) } as Settings[typeof key]);
+    }
+  }
+  const advisor = settings.runtimes?.advisorModel;
+  if (typeof advisor === "string" && canonicalModelTag(advisor) !== advisor) {
+    patch("runtimes", { ...settings.runtimes, advisorModel: canonicalModelTag(advisor) } as Settings["runtimes"]);
+  }
+  return out;
+}
+
+/** The daemon's LIVE settings holder, from a parsed `settings.json`: the moved keys stripped
+ *  (`withoutMovedKeys`) and the model tags canonicalized on read (`canonicalSettingsModelTags`). Every
+ *  live holder is built through this one function. */
+export function liveSettingsView(settings: Settings): Settings {
+  return canonicalSettingsModelTags(withoutMovedKeys(settings));
 }
 
 const stringList = (v: unknown): string[] | undefined =>

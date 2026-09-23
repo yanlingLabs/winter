@@ -14,6 +14,19 @@ export const CONTROL_PLANE_FILENAMES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * WS-21 (spec §7.1): the project-scope files a runtime reads from a TRUSTED project's `.winter/` that are
+ * as much a self-grant as the three above — `mcp.json` (the project's MCP servers: a command the next
+ * child runs) and any `settings*.json` (claude reads `settings.json` and `settings.local.json`; the glob
+ * is the spec's, so a future tier is covered before it exists). Fenced for the write TOOLS by name under
+ * a `.winter` parent, exactly like `CONTROL_PLANE_FILENAMES` — but NOT added to that set, which also
+ * feeds the escape floor's ANY-mention list (`ESCAPE_FENCED_FILENAMES`), where §7.1 asks for a
+ * write-shaped match only (`hooks.ts`'s `PROJECT_WRITE_FENCED`).
+ */
+export function isProjectControlFilename(lowercasedName: string): boolean {
+  return CONTROL_PLANE_FILENAMES.has(lowercasedName) || lowercasedName === "mcp.json" || /^settings[^/]*\.json$/.test(lowercasedName);
+}
+
+/**
  * The tool names whose input this fence inspects — the WRITE class, in both vocabularies.
  *
  * **Reads are deliberately absent.** CLAUDE.md's tool-surface rule is that read/glob/grep/ls have
@@ -81,7 +94,7 @@ export function controlPlaneFileTarget(path: string, cwd: string): { path: strin
   const raw0 = isAbsolute(path) ? resolve(path) : resolve(cwd || "/", path);
   // Cheap, syscall-free early-out: a target whose filename isn't SOME casing of a control-plane
   // filename can never be one, whatever its parent resolves to.
-  if (!CONTROL_PLANE_FILENAMES.has(basename(raw0).toLowerCase())) return null;
+  if (!isProjectControlFilename(basename(raw0).toLowerCase())) return null;
   if (basename(dirname(raw0)).toLowerCase() === ".winter") {
     try { return { path, canonical: canonicalizeForWrite(resolveLeafSymlinks(raw0)) }; }
     catch { return { path, canonical: raw0 }; }   // still a confirmed match; report the raw target
@@ -170,6 +183,9 @@ export function homeFenceTarget(path: string, cwd: string, fence: HomeFence): { 
 export function controlPlaneDenialMessage(toolName: string, path: string, home?: boolean): string {
   if (home === true) {
     return `cannot ${toolName} ${path}: Winter's own state (its runtimes, plugins, approved rules, cache, agent definitions and directory trust) is never written by a tool — only by Winter itself or by you`;
+  }
+  if (basename(path).toLowerCase() === "mcp.json") {
+    return `cannot ${toolName} ${path}: a project's MCP server list is changed with \`winter mcp add --scope project\` (or by editing it yourself), never by a tool`;
   }
   return `cannot ${toolName} ${path}: the permission rules store can only be changed by answering an approval card (or editing it yourself)`;
 }

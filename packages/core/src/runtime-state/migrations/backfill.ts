@@ -24,7 +24,7 @@ import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { join } from "node:path";
 import { repoRootFor, sanitizeProjectKey } from "../../agent/memory-dir";
-import { storeProjectsDir } from "../../agent/paths";
+import { canonicalCwd, storeProjectsDir } from "../../agent/paths";
 import { SYNCED_SESSION_ID_RE, type SessionStore } from "../../sessions/store";
 import type { RuntimeStateDb } from "../db";
 import { RuntimeSessionRecords, type RuntimeSessionState } from "../records";
@@ -125,7 +125,7 @@ export function backfillNativeSessions(deps: BackfillDeps): BackfillReport {
 function backfillOne(deps: BackfillDeps, records: RuntimeSessionRecords, now: () => string, winterSessionId: string): void {
   const { rs, store, home, providerId } = deps;
   const meta = store.meta(winterSessionId);
-  const cwd = meta.cwd ?? home;
+  const cwd = canonicalCwd(meta.cwd ?? home); // WS-21 (L2 O-1): the child's own key
   const transcriptKey = transcriptProjectKey(cwd);
   // TODAY's memory key, exactly as `memoryDirFor` computes it (`<home>/projects/<key>/memory`) —
   // read from `agent/memory-dir.ts` rather than re-derived here, so this migration and the live

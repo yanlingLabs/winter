@@ -5,6 +5,7 @@
 // that the store opens before anything can route on it, that recovery runs before the socket exists,
 // that the reaper's deletions reach the runtime tables, and that a corrupt store costs the daemon
 // its runtime routing and nothing else.
+import { storeProjectsDir } from "../../src/agent/paths";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { compatibilityKeys } from "@yanlinglabs/winter-agent-sdk";
@@ -481,13 +482,13 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
     const sessionId = store.createSession("work", { cwd });
     store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: name, clientName: "test" });
     const oldKey = sanitizeProjectKey(repoRootFor(cwd));
-    mkdirSync(join(home, "projects", oldKey, "memory"), { recursive: true });
-    writeFileSync(join(home, "projects", oldKey, "memory", "MEMORY.md"), `# ${name}\n`);
+    mkdirSync(join(storeProjectsDir(home), oldKey, "memory"), { recursive: true });
+    writeFileSync(join(storeProjectsDir(home), oldKey, "memory", "MEMORY.md"), `# ${name}\n`);
     return { sessionId, cwd, oldKey, newKey: compatibilityKeys(cwd).memoryProjectKey };
   }
 
   const memoryBody = (home: string, key: string): string | undefined => {
-    const path = join(home, "projects", key, "memory", "MEMORY.md");
+    const path = join(storeProjectsDir(home), key, "memory", "MEMORY.md");
     return existsSync(path) ? readFileSync(path, "utf8") : undefined;
   };
 

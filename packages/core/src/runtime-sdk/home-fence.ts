@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { CONTROL_PLANE_FILENAMES, type HomeFence } from "./control-plane";
-import { sandboxConfigFor } from "./mode-options";
+import { selfGrantDenyWrite } from "./mode-options";
 
 /**
  * **What no agent may write under Winter's home — ONE list, three fences** (whole-branch review,
@@ -26,11 +26,13 @@ import { sandboxConfigFor } from "./mode-options";
  *  - `<home>/agents` — agent definitions are a permission-bearing surface (their `permissionMode`/
  *    `tools` are a grant); the write-tool deny rules fence it (`controlPlaneDenyRules`), the sandbox
  *    does not name it;
- *  - `<home>/cache` — wholesale: the skill-plugin views live there (`skillPluginViewsRoot`) and are
- *    loaded as local plugins by the next child, and nothing legitimate writes the cache through a tool.
+ *  - `<home>/cache` — wholesale: the run folders and the router's quarantine live there (WS-21), and
+ *    nothing legitimate writes the cache through a tool.
  */
 export function homeFencedDirs(home: string): string[] {
-  const fromSandbox = sandboxConfigFor(home).filesystem?.denyWrite ?? [];
+  // The sandbox's SELF-GRANT list — never its protected-path entries (review I7: those are a card for a
+  // write tool, and this list is the write-tool fence's hard deny).
+  const fromSandbox = selfGrantDenyWrite(home);
   return [...new Set([...fromSandbox, join(home, "agents"), join(home, "cache")])];
 }
 
@@ -38,10 +40,19 @@ export function homeFencedDirs(home: string): string[] {
  * The fenced home subtrees the model is POINTED AT to read and execute — plugin skill content, and the
  * skill-plugin views under `cache` (whole-branch review N1). The sandbox and the write-tool fence treat
  * every fenced path alike (they only ever fence writes); the escape floor, which matches a command's
- * text, refuses these two only in a write-shaped position, and every other fenced path on any mention.
- * First path segment relative to `<home>`.
+ * text, refuses these only in a write-shaped position, and every other fenced path on any mention.
+ *
+ * PATH PREFIXES relative to `<home>`, one or more segments (WS-21 §7.1: `sdk/plugins` is where the
+ * installed plugins live now); a fenced path is write-only when its relative path equals a prefix or
+ * lies under one (`isHomeWriteOnly`).
  */
-export const HOME_WRITE_ONLY_FENCED: readonly string[] = ["cache", "plugins"];
+export const HOME_WRITE_ONLY_FENCED: readonly string[] = ["cache", "plugins", "sdk/plugins"];
+
+/** Whether a fenced path, relative to `<home>`, is one the escape floor refuses in a write-shaped
+ *  position only. */
+export function isHomeWriteOnly(relativeToHome: string): boolean {
+  return HOME_WRITE_ONLY_FENCED.some((p) => relativeToHome === p || relativeToHome.startsWith(`${p}/`));
+}
 
 /** Fenced single FILES under `<home>` (absolute): the directory-trust store — writing it trusts a
  *  project, whose overlay then grants itself permissions. */
@@ -54,9 +65,10 @@ export function homeFencedFiles(home: string): string[] {
 export const PROJECT_FENCED_SEGMENTS: readonly string[] = [".winter/agents/"];
 
 /** The filenames the escape floor refuses to see named at all (its match is a conservative substring):
- *  the three control-plane files plus `trust.json`. The write-tool fence is precise instead
+ *  the three control-plane files plus `trust.json`, and (WS-21 §7.1, "any mention") `.winter.json` —
+ *  `sdk/.winter.json` is the user's MCP server list. The write-tool fence is precise instead
  *  (`controlPlaneFileTarget` + `homeFencedFiles`). */
-export const ESCAPE_FENCED_FILENAMES: readonly string[] = [...CONTROL_PLANE_FILENAMES, "trust.json"];
+export const ESCAPE_FENCED_FILENAMES: readonly string[] = [...CONTROL_PLANE_FILENAMES, "trust.json", ".winter.json"];
 
 export function homeFenceFor(home: string): HomeFence {
   return { dirs: homeFencedDirs(home), files: homeFencedFiles(home), segments: PROJECT_FENCED_SEGMENTS };

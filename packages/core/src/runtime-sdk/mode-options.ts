@@ -1,4 +1,4 @@
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
   AgentDefinition, CanUseTool, CredentialRef, EffortLevel, McpServerConfig, Options, PermissionMode, ProviderConnectionConfig,
@@ -6,8 +6,12 @@ import type {
 } from "@yanlinglabs/winter-agent-sdk";
 import { RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
-import { approvedProjectRulesDir, homeCacheDir, storeHomeFor, trustRecordFile } from "../agent/paths";
+import { approvedProjectRulesDir, homeCacheDir, sdkHomeFor, storeHomeFor, trustRecordFile } from "../agent/paths";
+import { repoRootFor } from "../agent/memory-dir";
+import { PROTECTED_ITEM_DIRS } from "./run-home-contract";
+import { projectWalk } from "./project-walk";
 import { parseRule } from "../agent/permission-rules";
+import { WINTER_ROUTER_OWNED_ENV } from "./run-home-contract";
 import { keychainService } from "../profile";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import type { Settings } from "../settings";
@@ -331,6 +335,16 @@ export interface WinterOptionsInput {
    *  so the deny rules now arrive as `userDeny` below, never off this object.) Still just an input the
    *  caller passes in — `buildWinterOptions` never reads a file itself. */
   settings?: Settings | null;
+  /**
+   * WS-21 (spec §6.1, L3.4): the router APPLIES a run home to this incarnation (`options.runtime.runHome`,
+   * set by `session-driver.ts` when the linked router builds them). Then the child reads its inputs from
+   * the per-run folder, and this builder stops building them: no `agents`, no `plugins`/`skills`, no saved
+   * allow rules (`userAllow`/`persistedAllow` — Winter's FIXED allow rules stay), no `WINTER_HOME` (the
+   * router sets it to the run folder) and `settingSources: ["user"]` (the one value the router accepts
+   * beside a run home, and never the SDK's absent-means-every-tier default). Deny rules, the sandbox, the
+   * capability servers and the hooks are the daemon's floor and stay. Absent/false: exactly as before.
+   */
+  runHomeApplied?: boolean;
   /** WS-21: the user's `sdk/settings.json` `permissions.deny` (`sdkDenyRules`), claude grammar,
    *  verbatim — read live by the caller and layered onto the fixed control-plane fence
    *  (`permissionDenyRulesFor`). Absent ⇒ none. */
@@ -446,7 +460,14 @@ export function buildChildEnv(input: WinterOptionsInput): Record<string, string>
   // which let a caller-supplied `input.env.WINTER_HOME` silently override the one value CLAUDE.md's
   // hard rule depends on — a test session would then have written a real transcript under
   // `~/.winter`. `input.env` is for extras; the home and profile are not negotiable.
-  env.WINTER_HOME = input.home;
+  //
+  // WS-21: on a run-home incarnation the ROUTER pins the home — `WINTER_HOME = runHome.dir` (and the
+  // store, plugin-cache, provider-managed and cron variables), laid over this env — so none may come
+  // from here, a caller's `input.env` included (the env allowlist refuses them anyway).
+  // Beside a run home the router REFUSES any of them in `Options.env` (`router_owned_variable`) rather
+  // than overwriting it — so every one is removed, whatever a caller put there.
+  if (input.runHomeApplied === true) for (const key of WINTER_ROUTER_OWNED_ENV) delete env[key];
+  else env.WINTER_HOME = input.home;
   env.WINTER_PROFILE = input.profile ?? "";
   // The scripted in-process double (Winter map §11.6): selection is BY NAME, because a spawned or
   // compiled child shares no module state with the test process. Set ONLY for a `winter-test/*`
@@ -494,6 +515,10 @@ export function buildChildEnv(input: WinterOptionsInput): Record<string, string>
  * package, so `mode-matrix.test.ts` pins the anchor FORM and resolves each rule to its absolute
  * target instead — see its own comment.
  */
+/** The generated config files of a run folder (and of a claude staging root) that no tool reads —
+ *  spec §7.1's read row. */
+export const RUN_FOLDER_CONFIG_FILES = [".winter.json", ".claude.json", ".credentials.json"] as const;
+
 export function controlPlaneDenyRules(home: string): string[] {
   const writeTools = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
   // P8d-12 (WS-16 §10); Winter Phase 10b (D1-3, W18-9): the official leg's own SDK-parent staging
@@ -537,18 +562,24 @@ export function controlPlaneDenyRules(home: string): string[] {
     // the same invariant, the same "two layers over one self-grant" posture `controlPlaneFileTarget`'s
     // own doc states for the host-side fence vs. the deny-rule fence.
     fsRootAnchored([join(home, "agents"), "**"].join("/")),
-    // WS-21: on a run-home build the user tier lives in the store home (`userAgentsDir`); the old path
-    // above stays fenced too (Migration C leaves a link there). Before that build the two are one path.
-    ...(storeHomeFor(home) === home ? [] : [fsRootAnchored([join(storeHomeFor(home), "agents"), "**"].join("/"))]),
     fsRootAnchored(["**", ".winter", "agents", "**"].join("/")),
-    // B1 follow-up (2026-09-22): the skills-only plugin VIEWS (`SkillStore.childSkillSurface`,
-    // `agent/paths.ts`'s `skillPluginViewsRoot`). The next child loads each view as a local plugin,
-    // and a local plugin's manifest may declare COMMAND HOOKS the child runs outside the Bash sandbox —
-    // so a file written here is a self-grant of the same class as the definitions above. Write-fenced
-    // only: the views are deliberately READABLE, because a skill points the model at its own files.
-    // The daemon also rebuilds each view before every spawn; this closes the window in between.
-    // Re-review M-a: the WHOLE `<home>/cache` (only the views use it), so a write tool cannot swap the
-    // directories above the views for links either.
+    // WS-21 (spec §7.1): the shared runtime home's self-grant files, on EVERY build — `sdk/settings.json`
+    // (permissions, since L3.2) and `sdk/.winter.json` (the user's MCP servers: commands the next child
+    // runs) live there whether or not the router applies run homes; `sdk/agents` is the user agent tier on
+    // a run-home build (and fenced on the other too, where it is merely unused); `sdk/plugins` holds every
+    // installed plugin (hooks, manifests) the runtimes load.
+    fsRootAnchored(join(sdkHomeFor(home), "settings.json")),
+    fsRootAnchored(join(sdkHomeFor(home), ".winter.json")),
+    fsRootAnchored([join(sdkHomeFor(home), "agents"), "**"].join("/")),
+    fsRootAnchored([join(sdkHomeFor(home), "plugins"), "**"].join("/")),
+    // …and a project's own MCP server list and ANY settings tier (the spec's `settings*.json`), at any
+    // depth, whichever project owns them — the same project-INDEPENDENT shape as the control-plane files.
+    fsRootAnchored(["**", ".winter", "mcp.json"].join("/")),
+    fsRootAnchored(["**", ".winter", "settings*.json"].join("/")),
+    // The WHOLE `<home>/cache` (re-review M-a): WS-21's per-run folders — a run home's items, settings
+    // and generated config, which the next child LOADS — and the router's quarantine. (It first held the
+    // retired skills-only plugin views.) Write-fenced only; the run folders' generated config files are
+    // read-denied separately below.
     fsRootAnchored([homeCacheDir(home), "**"].join("/")),
     // Review M6 (2026-09-23): the runtime store, write-denied to the write TOOLS too. It was read-denied
     // (below) and in the Bash sandbox's `denyWrite`, but `Write(<home>/runtimes/bin/winter)` — rung 4
@@ -572,6 +603,12 @@ export function controlPlaneDenyRules(home: string): string[] {
     fsRootAnchored([join(home, "run"), "**"].join("/")),
     fsRootAnchored([join(home, "runtimes"), "**"].join("/")),
     claudeResumeStaging,
+    // WS-21 (spec §7.1, reads): the user's MCP servers (a stdio server's `env` may carry a key) and the
+    // generated config of every run folder — its `.winter.json` copy of them, and the official child's
+    // `.claude.json`/`.credentials.json`. A mid-segment `*` is a real wildcard on both matchers (see
+    // `claudeResumeStaging` above). A staging root is read-denied whole already.
+    fsRootAnchored(join(sdkHomeFor(home), ".winter.json")),
+    ...RUN_FOLDER_CONFIG_FILES.map((f) => fsRootAnchored([homeCacheDir(home), "runs", "*", f].join("/"))),
   ];
   return [...writeTools.flatMap((t) => targets.map((p) => `${t}(${p})`)), ...readTools.flatMap((t) => readTargets.map((p) => `${t}(${p})`))];
 }
@@ -789,6 +826,55 @@ export function persistedAllowRulesFor(cwd: string, deps: {
   return [...new Set([...settingsAllow, ...approved, ...projectAllow])];
 }
 
+/**
+ * The SELF-GRANT paths under the home (every write-fence derives from this one list — the sandbox's
+ * `denyWrite`, the escape floor and the write-tool fence through `home-fence.ts`'s `homeFencedDirs`): the
+ * daemon's control plane, the runtime store, the cache, installed plugins, the approved-rules record, the
+ * trust record, agent definitions, the user's three control-plane files and the shared runtime home's
+ * settings, MCP servers, agents and plugins.
+ */
+export function selfGrantDenyWrite(home: string): string[] {
+  return [
+    join(home, "run"), join(home, "runtimes"), homeCacheDir(home), join(home, "plugins"), approvedProjectRulesDir(home),
+    trustRecordFile(home), join(home, "agents"),
+    join(sdkHomeFor(home), "settings.json"), join(sdkHomeFor(home), ".winter.json"),
+    join(sdkHomeFor(home), "agents"), join(sdkHomeFor(home), "plugins"),
+    ...[...CONTROL_PLANE_FILENAMES].sort().map((f) => join(home, f)),
+  ];
+}
+
+/**
+ * Review I7: the user tier's PROTECTED item directories and instructions file (spec §7.2) — for the shared
+ * runtime home and, when it differs (router 0.0.11), the store home the build actually loads them from.
+ * The sandbox's `denyWrite` only: a write TOOL gets the card (`protected-paths.ts`), never a hard deny.
+ */
+export function protectedHomeDenyWrite(home: string): string[] {
+  const out: string[] = [];
+  for (const base of new Set([sdkHomeFor(home), storeHomeFor(home)])) {
+    for (const kind of PROTECTED_ITEM_DIRS) out.push(join(base, kind));
+    out.push(join(base, "WINTER.md"));
+  }
+  return out;
+}
+
+/** The project half of the sandbox's `denyWrite` (WS-21 §7.1/§7.2): for the cwd and — when it differs —
+ *  its project root (`repoRootFor`, the root every project-tier reader uses), the `.winter/` MCP list,
+ *  claude's two settings tiers, the agent definitions and the four protected item directories. */
+function projectSandboxDenyWrite(cwd: string): string[] {
+  let root = cwd;
+  try { root = repoRootFor(cwd); } catch { /* an unresolvable cwd: its own spelling is the only base */ }
+  const out: string[] = [];
+  for (const base of new Set([cwd, root])) {
+    for (const f of ["mcp.json", "settings.json", "settings.local.json", "agents", ...PROTECTED_ITEM_DIRS]) out.push(join(base, ".winter", f));
+  }
+  // …and the protected item directories of every directory BETWEEN them (L2 fix round 1, I2: a run home
+  // loads a nested project dir's items, so its protection covers the same walk). `$HOME` and above never.
+  for (const dir of projectWalk(cwd, root, homedir())) {
+    for (const kind of PROTECTED_ITEM_DIRS) out.push(join(dir, ".winter", kind));
+  }
+  return [...new Set(out)];
+}
+
 export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSettingsConfig {
   return {
     enabled: true,
@@ -836,17 +922,30 @@ export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSett
       // exactly `<cwd>/.winter/agents`): sandboxed Bash on the Winter leg could write that directory,
       // which the write TOOLS were already denied (`**/.winter/agents/**`). An any-depth form is not
       // expressible here (subpaths only), and only this one path is ever loaded.
-      denyWrite: [
-        join(home, "run"), join(home, "runtimes"), homeCacheDir(home), join(home, "plugins"), approvedProjectRulesDir(home),
-        trustRecordFile(home), join(home, "agents"), ...(storeHomeFor(home) === home ? [] : [join(storeHomeFor(home), "agents")]),
-        ...[...CONTROL_PLANE_FILENAMES].sort().map((f) => join(home, f)),
-        ...(cwd ? [join(cwd, ".winter", "agents")] : []),
-      ],
+      //
+      // WS-21 (spec §7.1): the shared runtime home's self-grant files and stores — `sdk/settings.json`,
+      // `sdk/.winter.json` (files: a subpath of a file path is that file), `sdk/agents`, `sdk/plugins` —
+      // and, for the session's cwd AND its project root, the project's `.winter/` MCP list, both claude
+      // settings tiers and agent definitions, plus (spec §7.2) the four PROTECTED item directories, so a
+      // Bash write to one has to go through a tool and its card. `<root>/WINTER.md` stays ordinary.
+      // `sdk/projects` is deliberately absent: a subpath deny there would take the memory directories
+      // (which stay allowlisted) with it — its fence is the escape floor's and the path fence hook's.
+      denyWrite: [...new Set([
+        ...selfGrantDenyWrite(home),
+        // Review I7: the PROTECTED paths (spec §7.2) — a write has to go through a tool and its card, so
+        // Bash may not write them at all. A separate list, never part of `selfGrantDenyWrite`: that one
+        // feeds the write-tool fence's HARD deny (`homeFencedDirs`), which would swallow the card.
+        ...protectedHomeDenyWrite(home),
+        ...(cwd ? projectSandboxDenyWrite(cwd) : []),
+      ])],
       // The sole read denial Winter has ever had (CLAUDE.md: "the sole read denial is
       // `~/.winter/run`") — reads are otherwise deliberately unrestricted.
       // …plus `runtimes/` (8a: the runtime store is never model-readable — the engine's read tool
       // carried this denial; on the Winter leg the sandbox and the Read/Glob/Grep deny rules do).
-      denyRead: [join(home, "run"), join(home, "runtimes")],
+      // …plus (WS-21 §7.1) `sdk/.winter.json`. The run folders' generated config files are a
+      // regex row in the spec, and neither SDK's sandbox takes a regex (string subpaths only): the deny
+      // rules and the path fence hook carry them (DECISION 12).
+      denyRead: [join(home, "run"), join(home, "runtimes"), join(sdkHomeFor(home), ".winter.json")],
     },
     // `allowUnsandboxedCommands` is deliberately NOT set. It is consulted only together with
     // `excludedCommands` (`sandbox/spawn.ts:109,122`), which this config does not set, so `false`
@@ -992,7 +1091,9 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
       //    writes back in plan whatever the allow list says;
       //  - a DISPATCH session's children run in CODE mode, so they receive the saved rules too — the
       //    same as claude's headless mode applying its settings files' `permissions.allow`.
-      ...(input.mode === "code" ? { allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES, ...(input.userAllow ?? []), ...sdkAllowRulesFor(input.persistedAllow ?? [])])] } : {}),
+      // WS-21: on a run-home incarnation the SAVED rules reach the child through the run folder's own
+      // settings tiers (user, trusted project, local), so only Winter's fixed rules are stated here.
+      ...(input.mode === "code" ? { allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES, ...(input.runHomeApplied === true ? [] : [...(input.userAllow ?? []), ...sdkAllowRulesFor(input.persistedAllow ?? [])])])] } : {}),
       deny: permissionDenyRulesFor(input.home, input.userDeny),
       disableBypassPermissionsMode: !bypassAllowedAtSpawn(input.policy),
     },
@@ -1033,7 +1134,11 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     // the daemon doing the same. So this stays `[]`, and the skills the old discovery would have found
     // reach the child through the one door `[]` leaves open instead: `plugins`/`skills` below
     // (`SkillStore.childSkillSurface`), which the SDK's index does not source-gate.
-    settingSources: [],
+    //
+    // WS-21 (spec §3.5): on a run-home incarnation the child reads the router-built folder as its user
+    // tier — `["user"]`, the one value the router accepts beside a run home (it refuses `project` and
+    // `local`, and `"user"` without a run folder). Stated, never left absent: absent means all three.
+    settingSources: input.runHomeApplied === true ? ["user"] : [],
   };
   if (input.spawn.spawnClaudeCodeProcess) options.spawnClaudeCodeProcess = input.spawn.spawnClaudeCodeProcess;
   // WS-20 (§0.1 Spawn boundary): the Winter leg's `Options.model` is the BARE modelId, split from
@@ -1044,7 +1149,10 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
   }
   if (input.effort !== undefined) options.effort = input.effort;
   if (input.systemPrompt !== undefined) options.systemPrompt = input.systemPrompt;
-  if (input.outputStyle !== undefined) options.outputStyle = input.outputStyle;
+  // WS-21 (L2 fix round 1, M1): beside a run home the router REFUSES a caller's `outputStyle` (with
+  // `plugins`, `skills`, `agents` and `brand` — `RUN_HOME_DECIDED_OPTIONS`); the run folder's effective
+  // settings carry it.
+  if (input.outputStyle !== undefined && input.runHomeApplied !== true) options.outputStyle = input.outputStyle;
   if (bypassAllowedAtSpawn(input.policy)) options.allowDangerouslySkipPermissions = true;
   if (input.hooks !== undefined) options.hooks = input.hooks;
   const provider = input.model !== undefined ? providerFor(input.model, input.home) : undefined;
@@ -1109,9 +1217,10 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
   // Item 3: empty is treated the same as absent — an EMPTY `agents: {}` is not "no agents"
   // byte-identically to a session before this field existed the way `undefined` is, so both are
   // normalized to "no key at all" here rather than leaving that distinction to every caller.
-  if (input.agents !== undefined && Object.keys(input.agents).length > 0) options.agents = { ...input.agents };
+  // WS-21: on a run-home incarnation the agents, plugins and skills are the run folder's (`runHomeApplied`).
+  if (input.runHomeApplied !== true && input.agents !== undefined && Object.keys(input.agents).length > 0) options.agents = { ...input.agents };
   // B1: the daemon's resolved plugin skills — see `WinterOptionsInput.plugins` for the omission rule.
-  if (input.plugins !== undefined && input.plugins.length > 0) {
+  if (input.runHomeApplied !== true && input.plugins !== undefined && input.plugins.length > 0) {
     options.plugins = input.plugins.map((p) => ({ ...p }));
     options.skills = [...(input.skills ?? [])];
   }
