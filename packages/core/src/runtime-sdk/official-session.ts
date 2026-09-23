@@ -534,7 +534,9 @@ class OfficialSessionImpl implements OfficialSession {
         const routerQuery = this.deps.runtime.sdk.query({
           prompt: stream,
           options: {
-            cwd: this.deps.sessionInput().cwd,
+            // WS-21: the router refuses a run home built for another cwd (`options.cwd` must equal
+            // `runHome.input.cwd`), so beside one the cwd is the run home's own — never a second read.
+            cwd: runHome?.input.cwd ?? this.deps.sessionInput().cwd,
             // WS-20: `selection.modelRef` is a TAG — the official leg's own wire model is the BARE
             // modelId half, split at this boundary (explicit; see L3.5's measurement note).
             model: splitTag(this.deps.selection.modelRef).modelId,

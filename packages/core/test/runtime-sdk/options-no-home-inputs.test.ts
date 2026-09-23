@@ -148,6 +148,15 @@ describe("buildWinterOptions", () => {
     expect("WINTER_HOME" in on.env!).toBe(false); // the router pins it — a caller's value never survives
     expect(on.settingSources).toEqual(["user"]);  // stated, never absent (absent = every tier)
   });
+
+  // L2's contract: beside a run home the router REFUSES (`router_owned_variable`) — never overwrites —
+  // any of its five variables in `Options.env`, so none may survive from anywhere.
+  test("flag ON: none of the five router-owned variables survive, even from a caller's env", () => {
+    const owned = { WINTER_HOME: "/x", WINTER_STORE_HOME: "/x", WINTER_PLUGIN_CACHE_DIR: "/x", WINTER_PROVIDER_MANAGED_BY_HOST: "1", WINTER_DISABLE_CRON: "1" };
+    const on = buildWinterOptions(winterInput({ runHomeApplied: true, env: owned }));
+    for (const key of Object.keys(owned)) expect(key in on.env!).toBe(false);
+    expect(on.env!.WINTER_PROFILE).toBeDefined(); // the daemon's own pins stay
+  });
 });
 
 // ── the official leg's input ─────────────────────────────────────────────────────────────────────
@@ -195,6 +204,12 @@ describe("officialInputFor", () => {
     expect(allowOn).not.toContain("Bash(git status)");
     expect(optionsOf(on).settings!.permissions!.deny).toEqual(optionsOf(off).settings!.permissions!.deny);
     expect(optionsOf(on).settings!.permissions!.deny).toEqual(expect.arrayContaining([...controlPlaneDenyRules("/Users/x/.winter-test-home"), "Skill(denied)"]));
+    // L2's contract: beside a run home `spool`/`stagingRoot` are refused and the memory dir is the router's.
+    expect(inputOf(off).spool).toBeDefined();
+    expect(inputOf(off).autoMemoryDirectory).toBeDefined();
+    expect("spool" in inputOf(on)).toBe(false);
+    expect("stagingRoot" in inputOf(on)).toBe(false);
+    expect("autoMemoryDirectory" in inputOf(on)).toBe(false);
     const promptOn = JSON.stringify(optionsOf(on));
     for (const m of [MARK.userInstr, MARK.projInstr, MARK.rule, MARK.style, MARK.projMemory]) expect(promptOn).not.toContain(m);
     const promptOff = JSON.stringify(optionsOf(off));

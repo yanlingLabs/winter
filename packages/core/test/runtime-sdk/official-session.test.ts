@@ -1342,6 +1342,17 @@ describe("WS-21: the official leg's run home", () => {
     expect(rh.count()).toBe(1);
     expect(runtimeOf(h.capturedOptions[0]!)?.runHome?.runId).toBe("orun-1");
     expect(runtimeOf(h.capturedOptions[0]!)?.official?.spool).toBeUndefined();
+    // L2: the router refuses a run home built for another cwd — `options.cwd` IS the run home's own.
+    expect(h.capturedOptions[0]!["cwd"]).toBe("/repo");
+    await h.session.end();
+  });
+
+  test("options.cwd is taken from the run home's input, never from a second read of the session", async () => {
+    const rh = stubRunHome();
+    const moved = async () => ({ ...(await rh.build()), input: { ...(await rh.build()).input, cwd: "/moved" } });
+    const h = harness({ runHome: moved });
+    await h.session.open();
+    expect(h.capturedOptions[0]!["cwd"]).toBe("/moved");
     await h.session.end();
   });
 

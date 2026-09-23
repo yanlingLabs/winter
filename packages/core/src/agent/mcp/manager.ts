@@ -3,6 +3,7 @@ import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { McpStdioClient } from "./client";
 import { ProjectMcpConfig, readRawProjectMcpConfig, parseProjectMcpServers } from "./project-file";
+import { repoRootFor } from "../memory-dir";
 import type { ToolRegistry } from "../tools/registry";
 import type { TrustStore } from "../trust";
 
@@ -166,7 +167,9 @@ export class McpManager {
   private async doEnsureProject(dir: string): Promise<void> {
     if (!this.deps.trust.isTrusted(dir)) return; // untrusted → not recorded (retry after trust)
 
-    const read = readRawProjectMcpConfig(dir);
+    // WS-21 (spec §4.4): the project file is `<project root>/.winter/mcp.json` (the repo-root `.mcp.json`
+    // is no longer read) — the root the run home's builder reads it at.
+    const read = readRawProjectMcpConfig(repoRootFor(dir));
     if (read.kind !== "ok") {
       this.projects.set(dir, { kind: "none" }); // missing/malformed whole file → record none, unchanged
       return;

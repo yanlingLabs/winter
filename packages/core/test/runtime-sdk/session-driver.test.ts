@@ -1048,7 +1048,7 @@ describe("WS-21: run homes on the Winter leg (stubbed router builder)", () => {
         if (prop !== "query") return Reflect.get(target, prop, receiver);
         return (args: { prompt: AsyncIterable<string>; options: Options }) => {
           calls.push(args as never);
-          if (failNext) { failNext = false; throw new Error("run_home_required (simulated router refusal)"); }
+          if (failNext) { failNext = false; throw Object.assign(new Error("every generation must carry a run home (simulated)"), { name: "RunHomeError", code: "run_home_required" }); }
           return target.query(args as never);
         };
       },
@@ -1161,7 +1161,9 @@ describe("WS-21: run homes on the Winter leg (stubbed router builder)", () => {
     try {
       const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
       spy.failOnce();
-      await expect(t.drivers.create(sid)).rejects.toThrow(/could not be started/); // the driver's own wording
+      // The router's typed refusal is forwarded verbatim as the refusal's code (→ `data.code`).
+      const err = await t.drivers.create(sid).then(() => undefined, (e: unknown) => e as { code?: string });
+      expect(err?.code).toBe("run_home_required");
       expect(rh.built).toHaveLength(1);
       expect(rh.disposed).toEqual(["run-1"]);
     } finally { t.close(); }
