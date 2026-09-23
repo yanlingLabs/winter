@@ -103,19 +103,87 @@ final class GatewayGateTests: XCTestCase {
         )
     }
 
+    /// Lane J (2026-09): since `ed6ebeca6c1fce175ef0e818361fb3662b38d6ca` ("Dispatch on the Winter
+    /// leg") EVERY `session.send`, in every mode, spawns a real Winter-leg turn — this suite seeds
+    /// no provider credential, so that turn synchronously (well under a second) emits `turn_started`,
+    /// `agent_error` ("not signed in..."), `turn_completed` for EACH message. A seed that returns
+    /// right after `send()`'s own RPC response races that still-in-flight turn: whatever step runs
+    /// next (typically standing up a `Gateway` and attaching) can observe a different, timing-
+    /// dependent SLICE of that turn's events depending on how far it has gotten — this is the actual
+    /// root cause of the flakiness fixed here (previously this helper returned the RAW `send()` seq,
+    /// which is only the `user_message`'s own seq, not the turn's settled high-water).
+    ///
+    /// Waits (bounded) until `turnCompleted` has been observed `turns` times for `sessionId` on
+    /// `client` (already `attach()`ed to it), returning every session event seen meanwhile, in
+    /// order. `client.events` is the UNFILTERED hub broadcast a "harness"-role connection gets (no
+    /// remote-stream gate), so this sees `turn_started` too — unlike a phone, which never does (see
+    /// `crossesRemoteGate` below).
+    func collectUntilTurnsSettle(_ client: WinterClient, sessionId: String, turns: Int, timeout: TimeInterval = 5) async throws -> [SessionEvent] {
+        struct SettleTimeout: Error {}
+        return try await withThrowingTaskGroup(of: [SessionEvent].self) { group in
+            group.addTask {
+                var collected: [SessionEvent] = []
+                var completedSeen = 0
+                for await ev in client.events {
+                    guard case .session(let e) = ev, e.sessionId == sessionId else { continue }
+                    collected.append(e)
+                    if case .turnCompleted = e {
+                        completedSeen += 1
+                        if completedSeen >= turns { break }
+                    }
+                }
+                return collected
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                throw SettleTimeout()
+            }
+            let result = try await group.next()!
+            group.cancelAll()
+            return result
+        }
+    }
+
+    /// What a "remote"-role connection (the Gateway's own daemon client) actually receives, per the
+    /// daemon's remote-stream gate (`REMOTE_STREAM_EVENT_TYPES` = `HISTORY_EVENT_TYPES` ∪
+    /// `TRANSIENT_EVENT_TYPES` ∪ 3 stream-control types — `packages/core/src/sessions/
+    /// {history,remote-stream}.ts`): `turn_started` is in NEITHER list, so the daemon drops it before
+    /// broadcast — it never reaches the Gateway at all, let alone a phone. `agent_error` and
+    /// `turn_completed` ARE in `HISTORY_EVENT_TYPES`, so they cross. `harness_attached`/
+    /// `harness_detached` are retained (one of the 3 controls — the Gateway's own replay terminator)
+    /// but then filtered client-side as noise (`Gateway.isHarnessNoise`/`isHarnessNoiseEvent` below)
+    /// before ever reaching a phone. Mirroring the server-side half of that filter here is what lets
+    /// a test assert exact equality against what the daemon actually produced, instead of a fragile
+    /// hardcoded frame count that silently goes stale the next time a credential-less turn's shape
+    /// changes.
+    func crossesRemoteGate(_ ev: SessionEvent) -> Bool {
+        if case .turnStarted = ev { return false }
+        return true
+    }
+
     /// Seeds a real session with two user messages, returning the ids plus `afterHarnessAttach`
     /// (the seq of the seeding harness's own `harness_attached`, a clean cursor to resume from that
-    /// is PAST the session_created/harness_attached preamble) and the last content seq.
-    func seedTwoMessages(socketPath: String, harnessToken: String) async throws -> (sid: String, afterHarnessAttach: Int, seqM2: Int) {
+    /// is PAST the session_created/harness_attached preamble), the settled high-water seq (the
+    /// SECOND message's own `turn_completed` — not the raw `send()` return, see
+    /// `collectUntilTurnsSettle`'s doc comment), and exactly the content a phone should see for this
+    /// seed (`crossesRemoteGate` + no harness noise), in order.
+    func seedTwoMessages(socketPath: String, harnessToken: String) async throws -> (sid: String, afterHarnessAttach: Int, seqM2: Int, content: [SessionEvent]) {
         let harness = WinterClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: harnessToken, clientName: "seed")
         try await harness.connect(role: "harness")
         // `session.dispatch {}` (empty object, NOT nil — SessionDispatchParams is z.object({})).
         let sid = try await harness.request("session.dispatch", params: .object([:]))["sessionId"]!.stringValue!
         let afterAttach = try await harness.attach(sessionId: sid, fromSeq: 0)
         _ = try await harness.send(sessionId: sid, text: "m1")
-        let seqM2 = try await harness.send(sessionId: sid, text: "m2")
+        _ = try await harness.send(sessionId: sid, text: "m2")
+        let settled = try await collectUntilTurnsSettle(harness, sessionId: sid, turns: 2)
         await harness.close()
-        return (sid, afterAttach, seqM2)
+        let seqM2 = settled.last?.seq ?? afterAttach
+        // Only events AFTER `afterAttach` — `settled` also carries `session_created` (seq 1, before
+        // the seed harness's own attach), which is itself remote-visible (one of the 3 stream
+        // controls) but is excluded from any conn1 replay here purely by its cursor (`fromSeq:
+        // afterAttach`), same as it would be for any real caught-up-ish resume.
+        let content = settled.filter { $0.seq > afterAttach && crossesRemoteGate($0) && !isHarnessNoiseEvent($0) }
+        return (sid, afterAttach, seqM2, content)
     }
 
     func sessionEvent(_ frame: Data) -> SessionEvent? {
@@ -141,17 +209,20 @@ final class GatewayGateTests: XCTestCase {
         let runTask = Task { await gateway.run() }
         defer { runTask.cancel() }
 
-        // Connection 1 — BEHIND (resume just past the preamble): the daemon replays m1, m2, plus
-        // the gateway's OWN harness_attached. The phone must see helloAck + exactly m1, m2 (the
-        // harness_attached filtered out), and the verdict's highWatermark must be m2's CONTENT seq
-        // — NOT the raw attach return (which counts that harness_attached: SP1's gap G1).
+        // Connection 1 — BEHIND (resume just past the preamble): the daemon replays m1, m2 (each
+        // now a real, settled Winter-leg turn: `user_message` + `agent_error` + `turn_completed` —
+        // this suite seeds no credential — with `turn_started` invisible to a phone by construction,
+        // see `crossesRemoteGate`), plus the gateway's OWN harness_attached. The phone must see
+        // helloAck + EXACTLY `seed.content` (the harness noise filtered out), and the verdict's
+        // highWatermark must be m2's CONTENT seq — NOT the raw attach return (which counts that
+        // harness_attached: SP1's gap G1).
         let conn1 = ScriptedRemoteConn(peerID: "peer-A")
         listener.simulateConnection(conn1)
         conn1.enqueueInbound(try helloFrame(clientInstanceID: "phone-A", resumes: [
             StreamResume(sessionID: seed.sid, streamID: seed.sid, lastAppliedSeq: seed.afterHarnessAttach)
         ]))
 
-        let out1 = try await waitForOutbound(conn1, count: 3)
+        let out1 = try await waitForOutbound(conn1, count: 1 + seed.content.count)
         let ack1 = try decodeEnvelope(out1[0])
         XCTAssertEqual(ack1.kind, .helloAck, "helloAck must be the first phone-bound frame (G3)")
         let hello1 = try JSONDecoder().decode(ServerHello.self, from: ack1.payload)
@@ -164,8 +235,11 @@ final class GatewayGateTests: XCTestCase {
             XCTAssertFalse(isHarnessNoiseEvent(ev!), "a harness_attached/detached leaked to the phone (G1)")
         }
         try await Task.sleep(nanoseconds: 150_000_000)
-        XCTAssertEqual(conn1.outbound.count, 3, "exactly helloAck + m1 + m2 — no extra (harness) frames")
-        XCTAssertEqual(try decodeEnvelope(conn1.outbound[2]).seq, seed.seqM2)
+        XCTAssertEqual(conn1.outbound.count, 1 + seed.content.count,
+                       "exactly helloAck + the seed's own settled content — no extra (harness) frames")
+        let delivered1 = out1[1...].compactMap { sessionEvent($0) }
+        XCTAssertEqual(delivered1, seed.content, "delivered content must match the daemon's real, settled events exactly, in order")
+        XCTAssertEqual(try decodeEnvelope(conn1.outbound.last!).seq, seed.seqM2)
 
         // Connection 2 — CAUGHT UP (fresh phone, resume AT the content high-water): the daemon
         // still replays harness_attached noise, but after filtering there is nothing → the verdict
@@ -473,8 +547,15 @@ final class GatewayGateTests: XCTestCase {
         try await live.connect(role: "harness")
         let sid = try await live.request("session.dispatch", params: .object([:]))["sessionId"]!.stringValue!
         let afterAttach = try await live.attach(sessionId: sid, fromSeq: 0)
-        let seqM1 = try await live.send(sessionId: sid, text: "m1")
-        let seqM2 = try await live.send(sessionId: sid, text: "m2")
+        _ = try await live.send(sessionId: sid, text: "m1")
+        _ = try await live.send(sessionId: sid, text: "m2")
+        // Lane J: let both turns settle before the Gateway ever attaches — see
+        // `collectUntilTurnsSettle`'s doc comment (this suite seeds no credential, so every send
+        // is a real, erroring Winter-leg turn: `turn_started`/`agent_error`/`turn_completed`, the
+        // first invisible to a phone by construction — `crossesRemoteGate`). `replayContent` is
+        // exactly what conn's replay should deliver.
+        let settledSeed = try await collectUntilTurnsSettle(live, sessionId: sid, turns: 2)
+        let replayContent = settledSeed.filter { $0.seq > afterAttach && crossesRemoteGate($0) && !isHarnessNoiseEvent($0) }
 
         let listener = LoopbackListener()
         let gateway = realGateway(socketPath: socketPath, remoteToken: daemon.remoteToken, listener: listener)
@@ -495,16 +576,23 @@ final class GatewayGateTests: XCTestCase {
         _ = try await waitForOutbound(conn, count: 1) // parked on the helloAck send
 
         let seqLive = try await live.send(sessionId: sid, text: "m3-live")
-        try await Task.sleep(nanoseconds: 300_000_000) // let the pump route it while the gate holds
+        // Let the live turn settle too (its own `agent_error`/`turn_completed` are equally real,
+        // equally live-forwarded content — not something to race past) — then release the gate.
+        let settledLive = try await collectUntilTurnsSettle(live, sessionId: sid, turns: 1)
+        let liveContent = settledLive.filter { crossesRemoteGate($0) && !isHarnessNoiseEvent($0) }
         conn.releaseSends()
 
-        _ = try await waitForOutboundContainingSeq(conn, seq: seqLive)
-        let out = conn.outbound
-        XCTAssertEqual(out.count, 4, "exactly helloAck + m1 + m2 + live")
+        let out = try await waitForOutbound(conn, count: 1 + replayContent.count + liveContent.count)
+        XCTAssertEqual(out.count, 1 + replayContent.count + liveContent.count,
+                       "exactly helloAck + the settled replay + the settled live turn")
         XCTAssertEqual(try decodeEnvelope(out[0]).kind, .helloAck)
-        XCTAssertEqual(try decodeEnvelope(out[1]).seq, seqM1, "replay must precede the live event")
-        XCTAssertEqual(try decodeEnvelope(out[2]).seq, seqM2)
-        XCTAssertEqual(try decodeEnvelope(out[3]).seq, seqLive, "the live event drains strictly AFTER the replay flush")
+        let replayFrames = out[1..<(1 + replayContent.count)].compactMap { sessionEvent($0) }
+        let liveFrames = out[(1 + replayContent.count)...].compactMap { sessionEvent($0) }
+        XCTAssertEqual(replayFrames, replayContent, "replay must precede the live event, unmodified")
+        XCTAssertEqual(liveFrames, liveContent, "the live turn drains strictly AFTER the replay flush, unmodified")
+        XCTAssertEqual(liveFrames.first?.seq, seqLive, "the live turn's own user_message leads its group")
+        XCTAssertLessThan(replayContent.map(\.seq).max() ?? -1, liveContent.map(\.seq).min() ?? Int.max,
+                           "every replayed seq must precede every live seq — no interleave (R2)")
         await live.close()
     }
 
