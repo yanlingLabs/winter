@@ -85,7 +85,7 @@ describe("D1: the daemon's own provider selection is correct", () => {
   });
 });
 
-describe("D1: the Winter-leg SDK's shared-adapter descriptor lookup is NOT provider-scoped (the real bug)", () => {
+describe("D1: the Winter-leg SDK's shared-adapter descriptor lookup is provider-scoped (fixed in agent SDK 0.0.20)", () => {
   test("deepseek and alibaba-cn share the openai-chat-completions adapter and the SAME bare upstreamId", () => {
     const catalog = loadCatalog();
     const deepseekProvider = catalog.providers.find((p) => p.id === "deepseek");
@@ -94,28 +94,17 @@ describe("D1: the Winter-leg SDK's shared-adapter descriptor lookup is NOT provi
     expect(alibabaCnProvider?.adapterId).toBe("winter.openai-chat-completions");
   });
 
-  test("descriptorLookupForAdapter('deepseek-v4-flash') answers alibaba-cn's row, not deepseek's own -- reproduces the dist error verbatim", () => {
+  test("descriptorLookupForAdapter resolves 'deepseek-v4-flash' under the REQUEST's own provider -- the dist refusal cannot recur", () => {
+    // Until 0.0.20 the lookup took the bare id alone and answered alibaba-cn's row (no reasoning
+    // block), so a deepseek session's effort "max" was refused with alibaba-cn's name in the text.
     const catalog = loadCatalog();
     const lookup = descriptorLookupForAdapter(catalog, "winter.openai-chat-completions");
-    const resolved = lookup("deepseek-v4-flash");
-    // THE BUG: this is alibaba-cn's row (no `reasoning` block at all), even though a session that
-    // resolved (correctly, via `providerFor`/the registry) to `deepseek/deepseek-v4-flash` sends
-    // this exact bare id on the wire and gets THIS descriptor back for its effort check.
-    expect(resolved?.key).toBe("alibaba-cn/deepseek-v4-flash");
-    expect(resolved?.reasoning).toBeUndefined();
+    const deepseek = lookup("deepseek-v4-flash", "deepseek");
+    expect(deepseek?.key).toBe("deepseek/deepseek-v4-flash");
+    expect(deepseek?.reasoning?.efforts).toContain("max");
+    expect(noVocabularyReason(deepseek, "max")).toBeUndefined();
 
-    // The session's OWN row, looked up directly, is a completely different model: it declares a
-    // real effort vocabulary including "max" -- the exact effort the dist log shows.
-    const own = catalog.models.find((m) => m.key === "deepseek/deepseek-v4-flash");
-    expect(own?.reasoning?.efforts).toContain("max");
-
-    // Reproduce the EXACT dist error text, word for word, from the wrong (adapter-shared) descriptor:
-    expect(noVocabularyReason(resolved, "max")).toBe(
-      'model "alibaba-cn/deepseek-v4-flash" declares no reasoning effort vocabulary, so effort "max" cannot be mapped onto it — Winter rejects the selection rather than silently sending the provider\'s default (WS-13 §8.2)',
-    );
-
-    // ...while the SAME check against the session's OWN (correct) row raises nothing -- proving the
-    // refusal is an artifact of the lookup's bare-id collision, not a real capability gap.
-    expect(noVocabularyReason(own, "max")).toBeUndefined();
+    // Each provider sharing the adapter gets its OWN row for the same bare id.
+    expect(lookup("deepseek-v4-flash", "alibaba-cn")?.key).toBe("alibaba-cn/deepseek-v4-flash");
   });
 });
