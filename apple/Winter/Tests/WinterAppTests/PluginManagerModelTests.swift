@@ -17,7 +17,7 @@ final class PluginManagerModelTests: XCTestCase {
         enabled: Bool = true,
         extras: PluginExtras? = PluginExtras(
             tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
-            requiredConsents: [], consented: [], entry: nil
+            requiredConsents: [], consented: [], entry: nil, fingerprint: "fp-1"
         )
     ) -> PluginListing {
         PluginListing(id: id, installPath: "/plugins/\(id)", scope: scope, enabled: enabled,
@@ -35,7 +35,7 @@ final class PluginManagerModelTests: XCTestCase {
     ) -> PluginRowDisplay {
         let extras: PluginExtras? = hasExtras
             ? PluginExtras(tier: tier, execPermission: true, tccPermissions: [], hardwarePermissions: [],
-                           requiredConsents: requiredConsents, consented: consented, entry: nil)
+                           requiredConsents: requiredConsents, consented: consented, entry: nil, fingerprint: "fp-1")
             : nil
         return pluginRowDisplay(listing(id: id, version: version, enabled: enabled, extras: extras))
     }
@@ -131,7 +131,7 @@ final class PluginManagerModelTests: XCTestCase {
 
     func testUnrecognizedTierGetsUnknownBadge() {
         let extras = PluginExtras(tier: "mystery", execPermission: false, tccPermissions: [],
-                                  hardwarePermissions: [], requiredConsents: [], consented: [], entry: nil)
+                                  hardwarePermissions: [], requiredConsents: [], consented: [], entry: nil, fingerprint: "fp-1")
         let r = pluginRowDisplay(listing(extras: extras))
         XCTAssertEqual(r.tierBadge, "Unknown")
     }

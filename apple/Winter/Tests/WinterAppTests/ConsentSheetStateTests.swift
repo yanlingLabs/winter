@@ -17,7 +17,7 @@ final class ConsentSheetStateTests: XCTestCase {
     ) -> PluginExtras {
         PluginExtras(tier: tier, execPermission: exec, tccPermissions: tcc, hardwarePermissions: hardware,
                     requiredConsents: required, consented: consented,
-                    entry: PluginEntryInfo(command: "node", args: ["./server.js", "--port", "4000"]))
+                    entry: PluginEntryInfo(command: "node", args: ["./server.js", "--port", "4000"]), fingerprint: "fp-1")
     }
 
     // MARK: - Construction
@@ -94,7 +94,7 @@ final class PluginConsentDisclosureLinesTests: XCTestCase {
     func testListsTheEntryCommandWhenExecIsRequested() {
         let e = PluginExtras(tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
                              requiredConsents: ["exec"], consented: [],
-                             entry: PluginEntryInfo(command: "node", args: ["server.js", "--port", "4000"]))
+                             entry: PluginEntryInfo(command: "node", args: ["server.js", "--port", "4000"]), fingerprint: "fp-1")
         let lines = pluginConsentDisclosureLines(pluginId: "demo", extras: e)
         XCTAssertTrue(lines.contains("- run its own background process: node server.js --port 4000"))
     }
@@ -102,7 +102,7 @@ final class PluginConsentDisclosureLinesTests: XCTestCase {
     func testListsEachTccAndHardwarePermissionOnItsOwnLine() {
         let e = PluginExtras(tier: "platform", execPermission: false, tccPermissions: ["microphone", "camera"],
                              hardwarePermissions: ["battery"], requiredConsents: ["tcc", "hardware"],
-                             consented: [], entry: nil)
+                             consented: [], entry: nil, fingerprint: "fp-1")
         let lines = pluginConsentDisclosureLines(pluginId: "demo", extras: e)
         XCTAssertTrue(lines.contains("- will request macOS permission: microphone"))
         XCTAssertTrue(lines.contains("- will request macOS permission: camera"))
@@ -111,7 +111,7 @@ final class PluginConsentDisclosureLinesTests: XCTestCase {
 
     func testOmitsTheExecLineWhenExecPermissionIsFalse() {
         let e = PluginExtras(tier: "capability", execPermission: false, tccPermissions: [], hardwarePermissions: [],
-                             requiredConsents: [], consented: [], entry: nil)
+                             requiredConsents: [], consented: [], entry: nil, fingerprint: "fp-1")
         let lines = pluginConsentDisclosureLines(pluginId: "demo", extras: e)
         XCTAssertFalse(lines.contains { $0.contains("background process") })
     }
@@ -120,7 +120,7 @@ final class PluginConsentDisclosureLinesTests: XCTestCase {
     /// the exec line must still show, not render as a bare, contentless header.
     func testListsTheExecLineWhenRequiredConsentsSaysExecEvenIfPermissionFlagIsAbsent() {
         let e = PluginExtras(tier: "platform", execPermission: false, tccPermissions: [], hardwarePermissions: [],
-                             requiredConsents: ["exec"], consented: [], entry: nil)
+                             requiredConsents: ["exec"], consented: [], entry: nil, fingerprint: "fp-1")
         let lines = pluginConsentDisclosureLines(pluginId: "demo", extras: e)
         XCTAssertTrue(lines.contains { $0.contains("background process") })
     }
@@ -128,7 +128,7 @@ final class PluginConsentDisclosureLinesTests: XCTestCase {
     /// Same for a declared `entry` with no `execPermission`/`requiredConsents` echo.
     func testListsTheExecLineWhenEntryIsDeclaredEvenIfPermissionFlagIsAbsent() {
         let e = PluginExtras(tier: "platform", execPermission: false, tccPermissions: [], hardwarePermissions: [],
-                             requiredConsents: [], consented: [], entry: PluginEntryInfo(command: "node", args: []))
+                             requiredConsents: [], consented: [], entry: PluginEntryInfo(command: "node", args: []), fingerprint: "fp-1")
         let lines = pluginConsentDisclosureLines(pluginId: "demo", extras: e)
         XCTAssertTrue(lines.contains("- run its own background process: node"))
     }
@@ -226,10 +226,10 @@ final class PluginManagerModelConsentTests: XCTestCase {
         return (client, t)
     }
 
-    private let echoListing = #"{"id":"demo","installPath":"/p","scope":"user","enabled":true,"marketplace":"winter-examples","extras":{"tier":"platform","permissions":{"exec":true},"requiredConsents":["exec"],"consented":[]}}"#
+    private let echoListing = #"{"id":"demo","installPath":"/p","scope":"user","enabled":true,"marketplace":"winter-examples","extras":{"tier":"platform","permissions":{"exec":true},"requiredConsents":["exec"],"consented":[],"fingerprint":"fp-1"}}"#
     /// Same plugin, but the daemon's fingerprint already reads it consented (a reinstall to the
     /// identical path/entry) — used to prove C1's "always show the sheet on fresh install anyway".
-    private let echoListingAlreadyConsented = #"{"id":"demo","installPath":"/p","scope":"user","enabled":true,"marketplace":"winter-examples","extras":{"tier":"platform","permissions":{"exec":true},"requiredConsents":["exec"],"consented":["exec"]}}"#
+    private let echoListingAlreadyConsented = #"{"id":"demo","installPath":"/p","scope":"user","enabled":true,"marketplace":"winter-examples","extras":{"tier":"platform","permissions":{"exec":true},"requiredConsents":["exec"],"consented":["exec"],"fingerprint":"fp-1"}}"#
 
     private func feedNextResult(_ t: FeedScriptedTransport, index: Int, result: String) async {
         await feedWaitUntil { t.sent.count > index }
@@ -272,7 +272,7 @@ final class PluginManagerModelConsentTests: XCTestCase {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
         let extras = PluginExtras(tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
-                                  requiredConsents: ["exec"], consented: [], entry: nil)
+                                  requiredConsents: ["exec"], consented: [], entry: nil, fingerprint: "fp-1")
         model.consentSheet = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user,
                                                extras: extras, openedByInstall: false)
 
@@ -302,11 +302,89 @@ final class PluginManagerModelConsentTests: XCTestCase {
 
         // Fix round 2 (I2, "don't touch the confirm path"): a successful confirm still triggers
         // SwiftUI's `onDismiss` in production (its own `consentSheet = nil` IS a dismissal) — this
-        // must NOT re-run the install-declined follow-up. `dismissHandledByConfirm` is what
-        // prevents it; simulating the `onDismiss` call here proves it holds.
+        // must NOT re-run the install-declined follow-up. Round 3 (N1) replaced the original
+        // `dismissHandledByConfirm` flag with a proactive `lastConsentSheet = nil` INSIDE
+        // `confirmConsent()`'s own success branch — `consentSheetDismissed()`'s `guard let sheet =
+        // lastConsentSheet else { return }` is then a no-op; simulating the `onDismiss` call here
+        // proves it holds.
         await model.consentSheetDismissed()
         XCTAssertEqual(t.sent.count, 4, "no extra plugin.disable/plugin.list after a successful confirm's own dismissal")
         XCTAssertNil(model.noticeText)
+    }
+
+    /// N1 (round 3, controller-required): the Dashboard pane AND the Library host both mount
+    /// `.sheet(item: $model.consentSheet, onDismiss: ...)` on the SAME published property — a
+    /// successful confirm's own `consentSheet = nil` can trigger `onDismiss` on BOTH mounted hosts.
+    /// The pre-round-3 `dismissHandledByConfirm` flag was consumed by the FIRST call, leaving the
+    /// SECOND to run the install-declined follow-up on a plugin the user just consented to. This
+    /// pins that neither of two calls sends a `plugin.disable`.
+    func testConfirmConsentThenTwoDismissHandlerCallsSendsNoDisable() async throws {
+        let (client, t) = try await connectedClient()
+        let model = PluginManagerModel(client: client)
+        let extras = PluginExtras(tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
+                                  requiredConsents: ["exec"], consented: [], entry: nil, fingerprint: "fp-1")
+        model.consentSheet = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user,
+                                               extras: extras, openedByInstall: true)
+
+        async let action: Void = model.confirmConsent()
+        let setConsentReq = await feedNextRequest(t, index: 1)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(setConsentReq["id"] as! Int),"result":{"ok":true}}"#)
+        let enableReq = await feedNextRequest(t, index: 2)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(enableReq["id"] as! Int),"result":{"ok":true,"spec":"demo@winter-examples","scope":"user","enabled":true}}"#)
+        await feedNextResult(t, index: 3, result: #"{"plugins":[]}"#)
+        await action
+        XCTAssertNil(model.consentSheet)
+
+        // BOTH mounted `.sheet` hosts fire `onDismiss` off the SAME successful `consentSheet = nil`.
+        await model.consentSheetDismissed()
+        await model.consentSheetDismissed()
+
+        XCTAssertEqual(t.sent.count, 4, "no plugin.disable/refresh from either onDismiss call after a successful confirm")
+        XCTAssertNil(model.noticeText)
+        XCTAssertNil(model.errorText)
+    }
+
+    /// N1 (round 3, controller-required): `lastConsentSheet` tracks the LATEST sheet, not a stale
+    /// one — a confirm with NO dismiss call following it (the bug's other half: every mounted host
+    /// is gone, or Esc lands while a confirm is still in flight) must not leave a flag that then
+    /// swallows the NEXT install sheet's decline.
+    func testConfirmConsentWithNoDismissThenCancellingALaterInstallSheetStillDisables() async throws {
+        let (client, t) = try await connectedClient()
+        let model = PluginManagerModel(client: client)
+        let extras = PluginExtras(tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
+                                  requiredConsents: ["exec"], consented: [], entry: nil, fingerprint: "fp-1")
+        model.consentSheet = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user,
+                                               extras: extras, openedByInstall: true)
+
+        async let action: Void = model.confirmConsent()
+        let setConsentReq = await feedNextRequest(t, index: 1)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(setConsentReq["id"] as! Int),"result":{"ok":true}}"#)
+        let enableReq = await feedNextRequest(t, index: 2)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(enableReq["id"] as! Int),"result":{"ok":true,"spec":"demo@winter-examples","scope":"user","enabled":true}}"#)
+        await feedNextResult(t, index: 3, result: #"{"plugins":[]}"#)
+        await action
+        // Deliberately NO `consentSheetDismissed()` call here.
+
+        // A second, DIFFERENT plugin's install sheet opens...
+        let secondExtras = PluginExtras(tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
+                                        requiredConsents: ["exec"], consented: [], entry: nil, fingerprint: "fp-2")
+        model.consentSheet = ConsentSheetState(pluginId: "other", spec: "other@winter-examples", scope: .user,
+                                               extras: secondExtras, openedByInstall: true)
+        // ...and is declined via a swipe/Esc (no Cancel button call, matching this file's other
+        // dismiss-without-cancel tests).
+        model.consentSheet = nil
+        async let dismissAction: Void = model.consentSheetDismissed()
+
+        let disableReq = await feedNextRequest(t, index: 4)
+        XCTAssertEqual(disableReq["method"] as? String, "plugin.disable")
+        XCTAssertEqual((disableReq["params"] as? [String: Any])?["spec"] as? String, "other@winter-examples",
+                       "must disable the SECOND (latest) sheet's plugin, not the first one already confirmed")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(disableReq["id"] as! Int),"result":{"ok":true,"spec":"other@winter-examples","scope":"user","enabled":false}}"#)
+        await feedNextResult(t, index: 5, result: #"{"plugins":[]}"#)
+
+        await dismissAction
+
+        XCTAssertEqual(model.noticeText, "Installed but turned off — enable it to review its permissions again.")
     }
 
     /// C1: `confirmConsent()` grants EVERY class in `extras.requiredConsents`, not just
@@ -315,7 +393,7 @@ final class PluginManagerModelConsentTests: XCTestCase {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
         let extras = PluginExtras(tier: "platform", execPermission: true, tccPermissions: ["microphone"], hardwarePermissions: [],
-                                  requiredConsents: ["exec", "tcc"], consented: ["exec"], entry: nil)
+                                  requiredConsents: ["exec", "tcc"], consented: ["exec"], entry: nil, fingerprint: "fp-1")
         model.consentSheet = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user,
                                                extras: extras, openedByInstall: true)
         XCTAssertEqual(model.consentSheet?.pendingConsents, ["tcc"], "sanity: only tcc is still pending")
@@ -337,7 +415,7 @@ final class PluginManagerModelConsentTests: XCTestCase {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
         let extras = PluginExtras(tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
-                                  requiredConsents: ["exec"], consented: [], entry: nil)
+                                  requiredConsents: ["exec"], consented: [], entry: nil, fingerprint: "fp-1")
         model.consentSheet = ConsentSheetState(pluginId: "ghost", spec: "ghost@winter-examples", scope: .user,
                                                extras: extras, openedByInstall: false)
 
@@ -357,6 +435,61 @@ final class PluginManagerModelConsentTests: XCTestCase {
         XCTAssertEqual(model.errorText, "ghost is no longer installed — couldn't record consent")
     }
 
+    /// Contract update from L4 (round 3): `.staleDisclosure` (the `fingerprint` no longer matches —
+    /// the plugin changed under the sheet, a TOCTOU the fingerprint exists to close) must NOT enable
+    /// — it refreshes, rebuilds the sheet from the NEW disclosure, keeps it open, and shows the
+    /// "please review again" message.
+    func testConfirmConsentRebuildsTheSheetAndKeepsItOpenOnStaleDisclosure() async throws {
+        let (client, t) = try await connectedClient()
+        let model = PluginManagerModel(client: client)
+        let staleExtras = PluginExtras(tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
+                                       requiredConsents: ["exec"], consented: [], entry: nil, fingerprint: "fp-old")
+        model.consentSheet = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user,
+                                               extras: staleExtras, openedByInstall: true)
+
+        async let action: Void = model.confirmConsent()
+        let setConsentReq = await feedNextRequest(t, index: 1)
+        XCTAssertEqual((setConsentReq["params"] as? [String: Any])?["fingerprint"] as? String, "fp-old")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(setConsentReq["id"] as! Int),"result":{"code":"stale_disclosure"}}"#)
+
+        // No plugin.enable — refuses straight to the refresh that rebuilds the sheet.
+        let refreshReq = await feedNextRequest(t, index: 2)
+        XCTAssertEqual(refreshReq["method"] as? String, "plugin.list", "pluginEnable must be skipped entirely")
+        let newExtras = #"{"tier":"platform","permissions":{"exec":true},"requiredConsents":["exec"],"consented":[],"fingerprint":"fp-new"}"#
+        t.feed(#"{"jsonrpc":"2.0","id":\#(refreshReq["id"] as! Int),"result":{"plugins":[{"id":"demo","installPath":"/p","scope":"user","enabled":true,"marketplace":"winter-examples","extras":\#(newExtras)}]}}"#)
+
+        await action
+
+        XCTAssertEqual(t.sent.count, 3, "no plugin.enable, and no SECOND trailing refresh beyond the sheet-rebuilding one")
+        XCTAssertNotNil(model.consentSheet, "the sheet stays open")
+        XCTAssertEqual(model.consentSheet?.extras.fingerprint, "fp-new", "rebuilt from the fresh disclosure, not the stale one")
+        XCTAssertTrue(model.consentSheet?.openedByInstall ?? false, "carries the original trigger forward")
+        XCTAssertEqual(model.errorText, "This plugin changed while you were reviewing it — please review again.")
+    }
+
+    /// The stale-disclosure rebuild's OWN fallback: if the refresh no longer contains the plugin at
+    /// all (uninstalled from elsewhere while the sheet sat open), it closes the sheet instead of
+    /// rebuilding onto nothing.
+    func testConfirmConsentClosesTheSheetOnStaleDisclosureWhenThePluginIsGone() async throws {
+        let (client, t) = try await connectedClient()
+        let model = PluginManagerModel(client: client)
+        let staleExtras = PluginExtras(tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
+                                       requiredConsents: ["exec"], consented: [], entry: nil, fingerprint: "fp-old")
+        model.consentSheet = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user,
+                                               extras: staleExtras, openedByInstall: true)
+
+        async let action: Void = model.confirmConsent()
+        let setConsentReq = await feedNextRequest(t, index: 1)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(setConsentReq["id"] as! Int),"result":{"code":"stale_disclosure"}}"#)
+        let refreshReq = await feedNextRequest(t, index: 2)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(refreshReq["id"] as! Int),"result":{"plugins":[]}}"#)
+
+        await action
+
+        XCTAssertNil(model.consentSheet)
+        XCTAssertEqual(model.errorText, "This plugin changed while you were reviewing it — please review again.")
+    }
+
     /// Fix round 2 (I2): `consentSheetDismissed()` for an ENABLE-triggered sheet (not an install)
     /// runs without ever calling `pluginDisable` — no RPC beyond the initial handshake is sent.
     /// `model.consentSheet = nil` here stands in for EITHER the sheet's Cancel button (`onCancel`
@@ -367,7 +500,7 @@ final class PluginManagerModelConsentTests: XCTestCase {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
         let extras = PluginExtras(tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
-                                  requiredConsents: ["exec"], consented: [], entry: nil)
+                                  requiredConsents: ["exec"], consented: [], entry: nil, fingerprint: "fp-1")
         model.consentSheet = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user,
                                                extras: extras, openedByInstall: false)
 
@@ -387,7 +520,7 @@ final class PluginManagerModelConsentTests: XCTestCase {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
         let extras = PluginExtras(tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
-                                  requiredConsents: ["exec"], consented: [], entry: nil)
+                                  requiredConsents: ["exec"], consented: [], entry: nil, fingerprint: "fp-1")
         model.consentSheet = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user,
                                                extras: extras, openedByInstall: true)
 
@@ -417,7 +550,7 @@ final class PluginManagerModelConsentTests: XCTestCase {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
         let extras = PluginExtras(tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
-                                  requiredConsents: ["exec"], consented: [], entry: nil)
+                                  requiredConsents: ["exec"], consented: [], entry: nil, fingerprint: "fp-1")
         model.consentSheet = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user,
                                                extras: extras, openedByInstall: true)
 
@@ -443,7 +576,7 @@ final class PluginManagerModelConsentTests: XCTestCase {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
         let extras = PluginExtras(tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
-                                  requiredConsents: ["exec"], consented: [], entry: nil)
+                                  requiredConsents: ["exec"], consented: [], entry: nil, fingerprint: "fp-1")
         model.consentSheet = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user,
                                                extras: extras, openedByInstall: false)
 
@@ -476,9 +609,19 @@ final class PluginManagerModelConsentTests: XCTestCase {
         return dir
     }
 
-    /// `installFromFolder(_:)` checks `plugin.marketplace.list` FIRST (C1's collision check) before
-    /// ever calling `plugin.marketplace.add` — this pins that new RPC and its ordering.
-    func testInstallFromFolderChecksMarketplaceListBeforeAdding() async throws {
+    /// Helper: feeds the bare-id ambiguity pre-check (`plugin.list`, round 3's new FIRST RPC) with
+    /// an empty/non-colliding result, so a test can get straight to the marketplace steps.
+    private func feedNoBareIdCollision(_ t: FeedScriptedTransport, index: Int = 1) async {
+        let req = await feedNextRequest(t, index: index)
+        XCTAssertEqual(req["method"] as? String, "plugin.list")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"plugins":[]}}"#)
+    }
+
+    /// Ordering (round 3 minor): `installFromFolder(_:)` checks the bare-id ambiguity FIRST
+    /// (`plugin.list`, using the manifest's own plugin name — nothing is installed yet), then
+    /// `plugin.marketplace.list` (C1's collision check), all before ever calling
+    /// `plugin.marketplace.add` — this pins the full ordering.
+    func testInstallFromFolderChecksBareIdThenMarketplaceListBeforeAdding() async throws {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
         let dir = try makeMarketplaceDir()
@@ -486,24 +629,47 @@ final class PluginManagerModelConsentTests: XCTestCase {
 
         async let action: Void = model.installFromFolder(dir)
 
-        let listReq = await feedNextRequest(t, index: 1)
+        await feedNoBareIdCollision(t)
+
+        let listReq = await feedNextRequest(t, index: 2)
         XCTAssertEqual(listReq["method"] as? String, "plugin.marketplace.list")
         t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"marketplaces":[]}}"#)
 
-        let addReq = await feedNextRequest(t, index: 2)
+        let addReq = await feedNextRequest(t, index: 3)
         XCTAssertEqual(addReq["method"] as? String, "plugin.marketplace.add")
         t.feed(#"{"jsonrpc":"2.0","id":\#(addReq["id"] as! Int),"result":{"ok":true,"marketplace":{"name":"winter-examples","source":"\#(dir.path)","kind":"directory","path":"\#(dir.path)"}}}"#)
 
-        let installReq = await feedNextRequest(t, index: 3)
+        let installReq = await feedNextRequest(t, index: 4)
         XCTAssertEqual(installReq["method"] as? String, "plugin.install")
         t.feed(#"{"jsonrpc":"2.0","id":\#(installReq["id"] as! Int),"result":{"ok":true,"plugin":{"id":"demo","installPath":"\#(dir.path)","scope":"user"}}}"#)
 
-        await feedNextResult(t, index: 4, result: #"{"plugins":[\#(echoListing)]}"#)
+        await feedNextResult(t, index: 5, result: #"{"plugins":[\#(echoListing)]}"#)
 
         await action
 
         XCTAssertEqual(model.consentSheet?.pluginId, "demo")
         XCTAssertTrue(model.consentSheet?.openedByInstall ?? false)
+    }
+
+    /// Ordering (round 3 minor): a bare-id collision is refused via the PRE-install check, before
+    /// any marketplace RPC is ever sent — `pluginName` ("demo") is already installed from another
+    /// marketplace.
+    func testInstallFromFolderRefusesABareIdCollisionBeforeAnyMarketplaceCall() async throws {
+        let (client, t) = try await connectedClient()
+        let model = PluginManagerModel(client: client)
+        let dir = try makeMarketplaceDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        async let action: Void = model.installFromFolder(dir)
+
+        let bareIdReq = await feedNextRequest(t, index: 1)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(bareIdReq["id"] as! Int),"result":{"plugins":[{"id":"demo","installPath":"/elsewhere","scope":"user","enabled":true,"marketplace":"other-market"}]}}"#)
+
+        await action
+
+        XCTAssertEqual(t.sent.count, 2, "hello + the bare-id check — no marketplace.list/add/install")
+        XCTAssertNil(model.consentSheet)
+        XCTAssertTrue(model.errorText?.contains("demo") ?? false, "\(model.errorText ?? "nil")")
     }
 
     /// C1: a marketplace name collision with a DIFFERENT path is refused before `plugin.marketplace.
@@ -517,12 +683,14 @@ final class PluginManagerModelConsentTests: XCTestCase {
 
         async let action: Void = model.installFromFolder(dir)
 
-        let listReq = await feedNextRequest(t, index: 1)
+        await feedNoBareIdCollision(t)
+
+        let listReq = await feedNextRequest(t, index: 2)
         t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"marketplaces":[{"name":"winter-examples","source":"/somewhere/else","kind":"directory","path":"/somewhere/else"}]}}"#)
 
         await action
 
-        XCTAssertEqual(t.sent.count, 2, "no marketplace.add/install/list — refused before any of them")
+        XCTAssertEqual(t.sent.count, 3, "no marketplace.add/install/refresh — refused before any of them")
         XCTAssertNil(model.consentSheet)
         XCTAssertTrue(model.errorText?.contains("/somewhere/else") ?? false, "\(model.errorText ?? "nil")")
     }
@@ -537,19 +705,129 @@ final class PluginManagerModelConsentTests: XCTestCase {
 
         async let action: Void = model.installFromFolder(dir)
 
-        let listReq = await feedNextRequest(t, index: 1)
+        await feedNoBareIdCollision(t)
+
+        let listReq = await feedNextRequest(t, index: 2)
         t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"marketplaces":[{"name":"winter-examples","source":"\#(dir.path)","kind":"directory","path":"\#(dir.path)"}]}}"#)
 
-        let addReq = await feedNextRequest(t, index: 2)
+        let addReq = await feedNextRequest(t, index: 3)
         XCTAssertEqual(addReq["method"] as? String, "plugin.marketplace.add", "the same path is not a collision")
         t.feed(#"{"jsonrpc":"2.0","id":\#(addReq["id"] as! Int),"result":{"ok":true,"marketplace":{"name":"winter-examples","source":"\#(dir.path)","kind":"directory","path":"\#(dir.path)"}}}"#)
 
-        let installReq = await feedNextRequest(t, index: 3)
+        let installReq = await feedNextRequest(t, index: 4)
         t.feed(#"{"jsonrpc":"2.0","id":\#(installReq["id"] as! Int),"result":{"ok":true,"plugin":{"id":"demo","installPath":"\#(dir.path)","scope":"user"}}}"#)
 
-        await feedNextResult(t, index: 4, result: #"{"plugins":[\#(echoListing)]}"#)
+        await feedNextResult(t, index: 5, result: #"{"plugins":[\#(echoListing)]}"#)
 
         await action
+    }
+
+    /// N2 (round 3): a marketplace this session's OWN action did NOT create (it already existed
+    /// under this name — even at the identical path, an idempotent re-add) is never tracked as
+    /// "app-added", so a later `uninstall(_:)` never offers to remove it.
+    func testInstallFromFolderReaddingTheSamePathDoesNotTrackItAsAppAdded() async throws {
+        let (client, t) = try await connectedClient()
+        let model = PluginManagerModel(client: client)
+        let dir = try makeMarketplaceDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        async let action: Void = model.installFromFolder(dir)
+        await feedNoBareIdCollision(t)
+        let listReq = await feedNextRequest(t, index: 2)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"marketplaces":[{"name":"winter-examples","source":"\#(dir.path)","kind":"directory","path":"\#(dir.path)"}]}}"#)
+        let addReq = await feedNextRequest(t, index: 3)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(addReq["id"] as! Int),"result":{"ok":true,"marketplace":{"name":"winter-examples","source":"\#(dir.path)","kind":"directory","path":"\#(dir.path)"}}}"#)
+        let installReq = await feedNextRequest(t, index: 4)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(installReq["id"] as! Int),"result":{"ok":true,"plugin":{"id":"demo","installPath":"\#(dir.path)","scope":"user"}}}"#)
+        await feedNextResult(t, index: 5, result: #"{"plugins":[\#(echoListing)]}"#)
+        await action
+
+        // Now uninstall — since the marketplace was already known (not app-added), no
+        // plugin.marketplace.remove should ever be sent, and no unfiltered plugin.list check for
+        // "still used" either (the `marketplacesAddedThisSession.contains` guard short-circuits).
+        async let uninstallAction: Void = model.uninstall("demo@winter-examples")
+        let uninstallReq = await feedNextRequest(t, index: 6)
+        XCTAssertEqual(uninstallReq["method"] as? String, "plugin.uninstall")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(uninstallReq["id"] as! Int),"result":{"ok":true,"spec":"demo@winter-examples","scope":"user"}}"#)
+        let refreshReq = await feedNextRequest(t, index: 7)
+        XCTAssertEqual(refreshReq["method"] as? String, "plugin.list", "the trailing refresh — NOT a marketplace.remove or an extra unused-check plugin.list")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(refreshReq["id"] as! Int),"result":{"plugins":[]}}"#)
+        await uninstallAction
+
+        XCTAssertEqual(t.sent.count, 8, "no plugin.marketplace.remove anywhere in this sequence")
+    }
+
+    /// N2 (round 3, controller-required): a marketplace this session DID add (via
+    /// `installFromFolder`) is still kept when a PROJECT-scope plugin from the same marketplace is
+    /// still using it — `listingsBySpec` only ever holds `.user`-scope rows (`refresh()`'s own
+    /// filter), so the unfiltered `plugin.list` check in `uninstall(_:)` is what catches this; the
+    /// pre-round-3 code checked only the CACHED (user-scope-only) listings and would have missed it.
+    func testUninstallKeepsTheMarketplaceWhenAProjectScopePluginStillUsesIt() async throws {
+        let (client, t) = try await connectedClient()
+        let model = PluginManagerModel(client: client)
+        let dir = try makeMarketplaceDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        async let installAction: Void = model.installFromFolder(dir)
+        await feedNoBareIdCollision(t)
+        let listReq = await feedNextRequest(t, index: 2)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"marketplaces":[]}}"#)
+        let addReq = await feedNextRequest(t, index: 3)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(addReq["id"] as! Int),"result":{"ok":true,"marketplace":{"name":"winter-examples","source":"\#(dir.path)","kind":"directory","path":"\#(dir.path)"}}}"#)
+        let installReq = await feedNextRequest(t, index: 4)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(installReq["id"] as! Int),"result":{"ok":true,"plugin":{"id":"demo","installPath":"\#(dir.path)","scope":"user"}}}"#)
+        await feedNextResult(t, index: 5, result: #"{"plugins":[\#(echoListing)]}"#)
+        await installAction
+
+        async let uninstallAction: Void = model.uninstall("demo@winter-examples")
+        let uninstallReq = await feedNextRequest(t, index: 6)
+        XCTAssertEqual(uninstallReq["method"] as? String, "plugin.uninstall")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(uninstallReq["id"] as! Int),"result":{"ok":true,"spec":"demo@winter-examples","scope":"user"}}"#)
+
+        // The unfiltered "still used" check — a DIFFERENT plugin, PROJECT scope, same marketplace.
+        let checkReq = await feedNextRequest(t, index: 7)
+        XCTAssertEqual(checkReq["method"] as? String, "plugin.list")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(checkReq["id"] as! Int),"result":{"plugins":[{"id":"demo2","installPath":"/proj","scope":"project","enabled":true,"marketplace":"winter-examples"}]}}"#)
+
+        let refreshReq = await feedNextRequest(t, index: 8)
+        XCTAssertEqual(refreshReq["method"] as? String, "plugin.list")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(refreshReq["id"] as! Int),"result":{"plugins":[]}}"#)
+
+        await uninstallAction
+
+        let methods = t.sent.map { feedLineJSON($0)["method"] as? String }
+        XCTAssertFalse(methods.contains("plugin.marketplace.remove"),
+                       "a project-scope plugin from the same marketplace must keep it")
+    }
+
+    /// N2 (round 3, controller-required): a marketplace added OUTSIDE this app session (the `winter`
+    /// CLI, another client, or a previous app launch) is never removed on uninstall — this pane only
+    /// ever offers to remove a marketplace it itself created via `installFromFolder(_:)` THIS
+    /// session; `marketplacesAddedThisSession` starts empty on every fresh `PluginManagerModel`, so
+    /// nothing this test does populates it.
+    func testUninstallNeverRemovesAMarketplaceAddedOutsideThisSession() async throws {
+        let (client, t) = try await connectedClient()
+        let model = PluginManagerModel(client: client)
+
+        async let refreshAction: Void = model.refresh()
+        let refreshReq = await feedNextRequest(t, index: 1)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(refreshReq["id"] as! Int),"result":{"plugins":[{"id":"demo","installPath":"/p","scope":"user","enabled":true,"marketplace":"cli-market"}]}}"#)
+        await refreshAction
+
+        async let uninstallAction: Void = model.uninstall("demo@cli-market")
+        let uninstallReq = await feedNextRequest(t, index: 2)
+        XCTAssertEqual(uninstallReq["method"] as? String, "plugin.uninstall")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(uninstallReq["id"] as! Int),"result":{"ok":true,"spec":"demo@cli-market","scope":"user"}}"#)
+
+        // NOT the unfiltered "still used" check — straight to the trailing refresh, because
+        // `marketplacesAddedThisSession` never contained "cli-market" to begin with.
+        let trailingReq = await feedNextRequest(t, index: 3)
+        XCTAssertEqual(trailingReq["method"] as? String, "plugin.list")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(trailingReq["id"] as! Int),"result":{"plugins":[]}}"#)
+
+        await uninstallAction
+
+        XCTAssertEqual(t.sent.count, 4, "hello + refresh + uninstall + trailing refresh only — no unused-check, no marketplace.remove")
     }
 
     /// C1: a plugin whose `requiredConsents` is non-empty ALWAYS gets the sheet on a fresh install,
@@ -563,22 +841,23 @@ final class PluginManagerModelConsentTests: XCTestCase {
 
         async let action: Void = model.installFromFolder(dir)
 
-        let listReq = await feedNextRequest(t, index: 1)
+        await feedNoBareIdCollision(t)
+        let listReq = await feedNextRequest(t, index: 2)
         t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"marketplaces":[]}}"#)
-        let addReq = await feedNextRequest(t, index: 2)
+        let addReq = await feedNextRequest(t, index: 3)
         t.feed(#"{"jsonrpc":"2.0","id":\#(addReq["id"] as! Int),"result":{"ok":true,"marketplace":{"name":"winter-examples","source":"\#(dir.path)","kind":"directory","path":"\#(dir.path)"}}}"#)
-        let installReq = await feedNextRequest(t, index: 3)
+        let installReq = await feedNextRequest(t, index: 4)
         t.feed(#"{"jsonrpc":"2.0","id":\#(installReq["id"] as! Int),"result":{"ok":true,"plugin":{"id":"demo","installPath":"\#(dir.path)","scope":"user"}}}"#)
 
         // The post-install refresh reports the plugin ALREADY fully consented (fingerprint match).
-        await feedNextResult(t, index: 4, result: #"{"plugins":[\#(echoListingAlreadyConsented)]}"#)
+        await feedNextResult(t, index: 5, result: #"{"plugins":[\#(echoListingAlreadyConsented)]}"#)
 
         await action
 
         // Still opens the sheet, and never calls plugin.enable directly.
         XCTAssertEqual(model.consentSheet?.pluginId, "demo")
         XCTAssertTrue(model.consentSheet?.openedByInstall ?? false)
-        XCTAssertEqual(t.sent.count, 5, "hello + marketplace.list + marketplace.add + install + refresh — no plugin.enable")
+        XCTAssertEqual(t.sent.count, 6, "hello + bare-id-check + marketplace.list + marketplace.add + install + refresh — no plugin.enable")
     }
 
     /// M3: a failed post-install refresh must not fall through to opening a sheet or calling
@@ -591,21 +870,49 @@ final class PluginManagerModelConsentTests: XCTestCase {
 
         async let action: Void = model.installFromFolder(dir)
 
-        let listReq = await feedNextRequest(t, index: 1)
+        await feedNoBareIdCollision(t)
+        let listReq = await feedNextRequest(t, index: 2)
         t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"marketplaces":[]}}"#)
-        let addReq = await feedNextRequest(t, index: 2)
+        let addReq = await feedNextRequest(t, index: 3)
         t.feed(#"{"jsonrpc":"2.0","id":\#(addReq["id"] as! Int),"result":{"ok":true,"marketplace":{"name":"winter-examples","source":"\#(dir.path)","kind":"directory","path":"\#(dir.path)"}}}"#)
-        let installReq = await feedNextRequest(t, index: 3)
+        let installReq = await feedNextRequest(t, index: 4)
         t.feed(#"{"jsonrpc":"2.0","id":\#(installReq["id"] as! Int),"result":{"ok":true,"plugin":{"id":"demo","installPath":"\#(dir.path)","scope":"user"}}}"#)
 
-        let refreshReq = await feedNextRequest(t, index: 4)
+        let refreshReq = await feedNextRequest(t, index: 5)
         t.feed(#"{"jsonrpc":"2.0","id":\#(refreshReq["id"] as! Int),"error":{"code":-32000,"message":"daemon unavailable"}}"#)
 
         await action
 
         XCTAssertNil(model.consentSheet)
         XCTAssertEqual(model.errorText, "couldn't load plugins: daemon unavailable")
-        XCTAssertEqual(t.sent.count, 5, "no plugin.enable after a failed refresh")
+        XCTAssertEqual(t.sent.count, 6, "no plugin.enable after a failed refresh")
+    }
+
+    /// Minor (round 3): a SUCCESSFUL refresh that simply doesn't contain the spec just installed
+    /// must not return silently — it sets `errorText` rather than leaving no trace anything's wrong.
+    func testInstallFromFolderSetsErrorTextWhenTheSpecIsMissingAfterASuccessfulRefresh() async throws {
+        let (client, t) = try await connectedClient()
+        let model = PluginManagerModel(client: client)
+        let dir = try makeMarketplaceDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        async let action: Void = model.installFromFolder(dir)
+
+        await feedNoBareIdCollision(t)
+        let listReq = await feedNextRequest(t, index: 2)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"marketplaces":[]}}"#)
+        let addReq = await feedNextRequest(t, index: 3)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(addReq["id"] as! Int),"result":{"ok":true,"marketplace":{"name":"winter-examples","source":"\#(dir.path)","kind":"directory","path":"\#(dir.path)"}}}"#)
+        let installReq = await feedNextRequest(t, index: 4)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(installReq["id"] as! Int),"result":{"ok":true,"plugin":{"id":"demo","installPath":"\#(dir.path)","scope":"user"}}}"#)
+
+        // A SUCCESSFUL refresh, but it comes back with no row for "demo@winter-examples" at all.
+        await feedNextResult(t, index: 5, result: #"{"plugins":[]}"#)
+
+        await action
+
+        XCTAssertNil(model.consentSheet)
+        XCTAssertEqual(model.errorText, "installed demo@winter-examples but couldn't find it in the list afterward — try Refresh")
     }
 
     /// M1: the daemon's own refusal text surfaces verbatim, not a generic "try again".
@@ -617,9 +924,10 @@ final class PluginManagerModelConsentTests: XCTestCase {
 
         async let action: Void = model.installFromFolder(dir)
 
-        let listReq = await feedNextRequest(t, index: 1)
+        await feedNoBareIdCollision(t)
+        let listReq = await feedNextRequest(t, index: 2)
         t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"marketplaces":[]}}"#)
-        let addReq = await feedNextRequest(t, index: 2)
+        let addReq = await feedNextRequest(t, index: 3)
         t.feed(#"{"jsonrpc":"2.0","id":\#(addReq["id"] as! Int),"error":{"code":-32000,"message":"not a directory marketplace"}}"#)
 
         await action

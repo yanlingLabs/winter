@@ -18,8 +18,9 @@ import WinterProtocol
 // `RpcFailure(INVALID_PARAMS, message)` (`throwPluginManagerFailure`, ipc/server.ts), which surfaces
 // here as an ordinary thrown `RpcError`; callers catch it exactly like any other RPC failure rather
 // than switching on a decoded outcome case. `plugin.setConsent`/`shortcut.invoke`/`tile.action` are
-// the survivors of the old typed-union discipline (their wire shapes are unchanged by WS-21) — see
-// `PluginLifecycleOutcome`/`PluginPushOutcome` below.
+// the survivors of the old typed-union discipline — see `PluginSetConsentOutcome`/`PluginPushOutcome`
+// below. `plugin.setConsent`'s own wire shape is NOT frozen, though: fix round 3 added a third
+// outcome (`.staleDisclosure`) and a required `fingerprint` param, both part of a TOCTOU fix.
 
 /// claude's plugin scopes (methods.ts `PluginScopeSchema`): which settings tier carries
 /// `enabledPlugins` — `user` = `sdk/settings.json`, `project` = `<root>/.winter/settings.json`,
@@ -89,9 +90,16 @@ public struct PluginExtras: Equatable, Sendable {
     public let requiredConsents: [String]
     public let consented: [String]
     public let entry: PluginEntryInfo?
+    /// Fix round 3 (TOCTOU fix, contract update from L4): a fingerprint of the plugin's install
+    /// path + entry, as of THIS `plugin.list` row. `pluginSetConsent(spec:classes:fingerprint:)`
+    /// must be called with the SAME value the consent sheet was built from — the daemon refuses
+    /// (`.staleDisclosure`) when it no longer matches the plugin's current install, closing the
+    /// window where a plugin could change (a reinstall, an entry edit) between the sheet being
+    /// shown and the user confirming it.
+    public let fingerprint: String
 
     public init(tier: String, execPermission: Bool, tccPermissions: [String], hardwarePermissions: [String],
-               requiredConsents: [String], consented: [String], entry: PluginEntryInfo?) {
+               requiredConsents: [String], consented: [String], entry: PluginEntryInfo?, fingerprint: String) {
         self.tier = tier
         self.execPermission = execPermission
         self.tccPermissions = tccPermissions
@@ -99,6 +107,7 @@ public struct PluginExtras: Equatable, Sendable {
         self.requiredConsents = requiredConsents
         self.consented = consented
         self.entry = entry
+        self.fingerprint = fingerprint
     }
 
     /// Required classes not yet granted — what a consent sheet asks for and what
@@ -112,13 +121,19 @@ public struct PluginExtras: Equatable, Sendable {
 /// its manifest, filled by the daemon. `command` is capped at 500 characters server-side, and each
 /// plugin reports at most 100 entries. `nil`/`""` fields decode as `nil`, never an empty string, so
 /// a view can tell "not declared" from "declared empty" the same way the rest of this file does.
+///
+/// Fix round 3: `event`/`type` are `String?` now, not `String` — a malformed entry (either field
+/// missing) is no longer DROPPED at decode time (a client that silently drops a declaration it
+/// can't fully parse under-reports what actually runs, the exact class of bug the retired
+/// `manifestHooks`' own history warned against). It decodes as an entry with `nil` there instead,
+/// and the view renders it as "(unnamed)" rather than hiding it.
 public struct PluginHookEntry: Equatable, Sendable {
-    public let event: String
+    public let event: String?
     public let matcher: String?
-    public let type: String
+    public let type: String?
     public let command: String?
 
-    public init(event: String, matcher: String?, type: String, command: String?) {
+    public init(event: String?, matcher: String?, type: String?, command: String?) {
         self.event = event
         self.matcher = matcher
         self.type = type
@@ -163,12 +178,16 @@ public struct PluginListing: Equatable, Sendable {
     public var spec: String { "\(id)@\(marketplace)" }
 }
 
-/// Shared by `plugin.setConsent` — the ONE pre-WS-21 plugin RPC whose wire shape survives unchanged
-/// (spec §5.4: "the extras keep their own consents"): `{ok:true}` | `{code:"unknown_plugin"}`
-/// (methods.ts `PluginSetConsentResult`).
-public enum PluginLifecycleOutcome: Equatable, Sendable {
+/// `plugin.setConsent`'s result (fix round 3 — `PluginSetConsentResult` gained a third case as
+/// part of the TOCTOU fix, contract update from L4): `{ok:true}` | `{code:"unknown_plugin"}` |
+/// `{code:"stale_disclosure"}`. The daemon returns `.staleDisclosure` when the `fingerprint` a
+/// call named no longer matches the plugin's current install — the caller must refresh, rebuild
+/// its disclosure from the new `plugin.list` row, and ask again; it must NOT enable on this
+/// outcome (`PluginManagerModel.confirmConsent()`'s own handling).
+public enum PluginSetConsentOutcome: Equatable, Sendable {
     case ok
     case unknownPlugin
+    case staleDisclosure
 }
 
 /// Shared by `shortcut.invoke`/`tile.action` (methods.ts `PluginPushResult`) — the push either
@@ -301,11 +320,15 @@ extension WinterClient {
         .object(pairs.compactMapValues { $0 })
     }
 
-    /// `{code:"unknown_plugin"}` | `{ok:true}` decode shared by disable/remove/setConsent.
-    private func decodeLifecycleOutcome(_ r: JSONValue, method: String) throws -> PluginLifecycleOutcome {
+    /// `{code:"unknown_plugin"|"stale_disclosure"}` | `{ok:true}` decode for `plugin.setConsent`
+    /// (fix round 3: gained the `stale_disclosure` case — see `PluginSetConsentOutcome`'s own doc).
+    private func decodeSetConsentOutcome(_ r: JSONValue, method: String) throws -> PluginSetConsentOutcome {
         if let code = r["code"]?.stringValue {
-            if code == "unknown_plugin" { return .unknownPlugin }
-            throw RpcError(code: -3, message: "unknown code from server for \(method): \(code)")
+            switch code {
+            case "unknown_plugin": return .unknownPlugin
+            case "stale_disclosure": return .staleDisclosure
+            default: throw RpcError(code: -3, message: "unknown code from server for \(method): \(code)")
+            }
         }
         guard r["ok"]?.boolValue == true else {
             throw RpcError(code: -3, message: "invalid result from server for \(method)")
@@ -353,7 +376,11 @@ extension WinterClient {
     }
 
     private func decodePluginExtras(_ e: JSONValue?) -> PluginExtras? {
-        guard let e, let tier = e["tier"]?.stringValue else { return nil }
+        // Fix round 3: `fingerprint` is required, same posture as `tier` — an `extras` object
+        // without one can't back a consent sheet at all (there'd be nothing to call
+        // `pluginSetConsent(fingerprint:)` with), so it's treated as no extras rather than a
+        // partially-usable one.
+        guard let e, let tier = e["tier"]?.stringValue, let fingerprint = e["fingerprint"]?.stringValue else { return nil }
         let permissions = e["permissions"]
         var entry: PluginEntryInfo?
         if let entryObj = e["entry"], let command = entryObj["command"]?.stringValue {
@@ -366,20 +393,23 @@ extension WinterClient {
             hardwarePermissions: (permissions?["hardware"]?.arrayValue ?? []).compactMap { $0.stringValue },
             requiredConsents: (e["requiredConsents"]?.arrayValue ?? []).compactMap { $0.stringValue },
             consented: (e["consented"]?.arrayValue ?? []).compactMap { $0.stringValue },
-            entry: entry
+            entry: entry,
+            fingerprint: fingerprint
         )
     }
 
     /// Fix round 1: a plugin's `hooks` array, when the key is present at all — see
     /// `PluginListing.hooks`'s own doc for why `nil` (key absent) and `[]` (present, empty) must
-    /// stay distinct. A malformed ENTRY (no `event`/`type`) is dropped; the array's presence still
-    /// stands.
+    /// stay distinct — the daemon-L4 ruling this round: `[]` means none declared, a missing key
+    /// means unreadable. Fix round 3: a malformed ENTRY (no `event`/`type`) is no longer dropped —
+    /// every entry the array carries decodes to a row (`PluginHookEntry.event`/`.type` are
+    /// optional now), so a plugin's own count of "how many hooks run" is never silently
+    /// under-reported; the view renders a missing name as "(unnamed)" instead of hiding the row.
     private func decodePluginHooks(_ h: JSONValue?) -> [PluginHookEntry]? {
         guard let arr = h?.arrayValue else { return nil }
-        return arr.compactMap { entry -> PluginHookEntry? in
-            guard let event = entry["event"]?.stringValue, let type = entry["type"]?.stringValue else { return nil }
-            return PluginHookEntry(event: event, matcher: entry["matcher"]?.stringValue, type: type,
-                                   command: entry["command"]?.stringValue)
+        return arr.map { entry in
+            PluginHookEntry(event: entry["event"]?.stringValue, matcher: entry["matcher"]?.stringValue,
+                            type: entry["type"]?.stringValue, command: entry["command"]?.stringValue)
         }
     }
 
@@ -488,17 +518,19 @@ extension WinterClient {
         _ = try await request("plugin.marketplace.update", params: obj(["name": name.map { .string($0) }]))
     }
 
-    /// `plugin.setConsent {spec, classes}` (fix round 1: `spec` replaces the pre-round `name` param
-    /// — the daemon now binds consent to a fingerprint of the install path plus the entry, so it
-    /// needs the QUALIFIED `"<id>@<marketplace>"` to know which install a grant is for; a bare id
-    /// was ambiguous the moment two marketplaces installed the same plugin). Records consent
-    /// WITHOUT enabling — call `pluginEnable` AFTER this for a Tier-2 plugin so its hot-spawn sees
-    /// consent already granted (see `pluginEnable`'s own doc).
-    public func pluginSetConsent(spec: String, classes: [String]) async throws -> PluginLifecycleOutcome {
+    /// `plugin.setConsent {spec, classes, fingerprint}` (fix round 1: `spec` replaces the original
+    /// `name` param, since a bare id is ambiguous the moment two marketplaces install the same
+    /// plugin. Fix round 3: `fingerprint` added, closing a TOCTOU window — it must be the SAME
+    /// value the caller's `plugin.list` row (`PluginExtras.fingerprint`) had when it built the
+    /// consent disclosure being confirmed; the daemon refuses `.staleDisclosure` when the plugin's
+    /// current install no longer matches it, e.g. a reinstall or an entry edit landed in between).
+    /// Records consent WITHOUT enabling — call `pluginEnable` AFTER this for a Tier-2 plugin so its
+    /// hot-spawn sees consent already granted (see `pluginEnable`'s own doc).
+    public func pluginSetConsent(spec: String, classes: [String], fingerprint: String) async throws -> PluginSetConsentOutcome {
         let r = try await request("plugin.setConsent", params: obj([
-            "spec": .string(spec), "classes": .array(classes.map { .string($0) }),
+            "spec": .string(spec), "classes": .array(classes.map { .string($0) }), "fingerprint": .string(fingerprint),
         ]))
-        return try decodeLifecycleOutcome(r, method: "plugin.setConsent")
+        return try decodeSetConsentOutcome(r, method: "plugin.setConsent")
     }
 
     /// `plugin.restart {pluginId}` (final-review Fix 1 / wired here for Phase 4d-iii Task 2's

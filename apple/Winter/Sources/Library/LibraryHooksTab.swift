@@ -30,15 +30,45 @@ func libraryHooksListSubtitle(_ hooks: [PluginHookEntry]?) -> String {
     return "\(count) hook\(count == 1 ? "" : "s")"
 }
 
+/// PURE (fix round 3): replaces control characters and bidirectional text overrides/isolates
+/// (U+202A–U+202E — LRE/RLE/PDF/LRO/RLO — and U+2066–U+2069, the isolate family) with a visible
+/// `\u{XXXX}` escape, in every hook field this file renders. A plugin's `event`/`matcher`/`type`/
+/// `command` are attacker-controllable strings from `hooks.json` — an embedded RLO could redraw
+/// `evil.sh` as `hs.live`, or a stray newline/tab could break the `.lineLimit(1)` truncation this
+/// row depends on to stay one line — so every one of them is sanitized before it reaches either the
+/// truncated summary or the full-text tooltip, never just one of the two.
+func librarySanitizedHookField(_ s: String) -> String {
+    var out = ""
+    out.reserveCapacity(s.count)
+    for scalar in s.unicodeScalars {
+        switch scalar.value {
+        case 0x00...0x1F, 0x7F, 0x202A...0x202E, 0x2066...0x2069:
+            out += "\\u{\(String(scalar.value, radix: 16))}"
+        default:
+            out.unicodeScalars.append(scalar)
+        }
+    }
+    return out
+}
+
+/// PURE (fix round 3): a hook's `event`/`type`, sanitized, or `"(unnamed)"` when the daemon
+/// couldn't supply one — `PluginHookEntry.event`/`.type` are optional now precisely so a malformed
+/// entry is shown rather than silently dropped (see `WinterClient+Methods.swift`'s own doc on
+/// `decodePluginHooks`); this is where that entry gets a readable label instead of a missing one.
+private func libraryHookFieldOrUnnamed(_ s: String?) -> String {
+    guard let s, !s.isEmpty else { return "(unnamed)" }
+    return librarySanitizedHookField(s)
+}
+
 /// PURE: one hook's compact, one-line summary — the view truncates it with `.lineLimit(1)`; the
 /// full text (`libraryHookFullText`) is what the row's tooltip shows.
 func libraryHookSummaryLine(_ hook: PluginHookEntry) -> String {
-    var line = hook.event
-    if let matcher = hook.matcher, !matcher.isEmpty { line += " (\(matcher))" }
+    var line = libraryHookFieldOrUnnamed(hook.event)
+    if let matcher = hook.matcher, !matcher.isEmpty { line += " (\(librarySanitizedHookField(matcher)))" }
     if let command = hook.command, !command.isEmpty {
-        line += ": \(command)"
+        line += ": \(librarySanitizedHookField(command))"
     } else {
-        line += " — \(hook.type)"
+        line += " — \(libraryHookFieldOrUnnamed(hook.type))"
     }
     return line
 }
@@ -46,10 +76,10 @@ func libraryHookSummaryLine(_ hook: PluginHookEntry) -> String {
 /// PURE: one hook's full text, every field on its own line — for the tooltip a truncated summary
 /// line needs.
 func libraryHookFullText(_ hook: PluginHookEntry) -> String {
-    var lines = ["event: \(hook.event)"]
-    if let matcher = hook.matcher, !matcher.isEmpty { lines.append("matcher: \(matcher)") }
-    lines.append("type: \(hook.type)")
-    if let command = hook.command, !command.isEmpty { lines.append("command: \(command)") }
+    var lines = ["event: \(libraryHookFieldOrUnnamed(hook.event))"]
+    if let matcher = hook.matcher, !matcher.isEmpty { lines.append("matcher: \(librarySanitizedHookField(matcher))") }
+    lines.append("type: \(libraryHookFieldOrUnnamed(hook.type))")
+    if let command = hook.command, !command.isEmpty { lines.append("command: \(librarySanitizedHookField(command))") }
     return lines.joined(separator: "\n")
 }
 

@@ -503,7 +503,7 @@ final class MethodWrapperTests: XCTestCase {
     func testPluginListDecodesListingsWithAndWithoutExtras() async throws {
         let (client, t) = try await connected()
         let (req, plugins) = try await roundTrip(t, sentIndex: 1,
-            result: #"{"ok":true,"plugins":[{"id":"sample-echo","version":"1.2.0","installPath":"/plugins/sample-echo","scope":"user","enabled":true,"marketplace":"winter-examples","extras":{"tier":"platform","permissions":{"exec":true,"tcc":["accessibility"],"hardware":["battery"]},"requiredConsents":["exec","tcc","hardware"],"consented":["exec"],"entry":{"command":"node","args":["server.js"]}}},{"id":"legacy-plugin","installPath":"/plugins/legacy-plugin","scope":"user","enabled":false,"marketplace":"winter-legacy"}]}"#
+            result: #"{"ok":true,"plugins":[{"id":"sample-echo","version":"1.2.0","installPath":"/plugins/sample-echo","scope":"user","enabled":true,"marketplace":"winter-examples","extras":{"tier":"platform","permissions":{"exec":true,"tcc":["accessibility"],"hardware":["battery"]},"requiredConsents":["exec","tcc","hardware"],"consented":["exec"],"entry":{"command":"node","args":["server.js"]},"fingerprint":"fp-1"}},{"id":"legacy-plugin","installPath":"/plugins/legacy-plugin","scope":"user","enabled":false,"marketplace":"winter-legacy"}]}"#
         ) { try await client.pluginList() }
         XCTAssertEqual(req["method"] as? String, "plugin.list")
         XCTAssertEqual(plugins.count, 2)
@@ -526,6 +526,7 @@ final class MethodWrapperTests: XCTestCase {
         XCTAssertTrue(extras.needsConsent)
         XCTAssertEqual(extras.entry?.command, "node")
         XCTAssertEqual(extras.entry?.args, ["server.js"])
+        XCTAssertEqual(extras.fingerprint, "fp-1")
 
         let legacy = plugins[1]
         XCTAssertEqual(legacy.id, "legacy-plugin")
@@ -555,6 +556,24 @@ final class MethodWrapperTests: XCTestCase {
 
         XCTAssertEqual(plugins[1].hooks, [], "present-but-empty ⇒ []")
         XCTAssertNil(plugins[2].hooks, "key absent ⇒ nil")
+    }
+
+    /// Fix round 3: a hook entry with no `event`/`type` is kept, not dropped — under-reporting a
+    /// plugin's own declared hook count is worse than showing one with a missing name.
+    func testPluginListKeepsHookEntriesMissingEventOrType() async throws {
+        let (client, t) = try await connected()
+        let (_, plugins) = try await roundTrip(t, sentIndex: 1,
+            result: #"{"ok":true,"plugins":[{"id":"a","installPath":"/a","scope":"user","enabled":true,"marketplace":"m","hooks":[{"type":"command","command":"./no-event.sh"},{"event":"Stop"},{}]}]}"#
+        ) { try await client.pluginList() }
+
+        let hooks = try XCTUnwrap(plugins[0].hooks)
+        XCTAssertEqual(hooks.count, 3, "all three entries survive, none dropped")
+        XCTAssertNil(hooks[0].event)
+        XCTAssertEqual(hooks[0].type, "command")
+        XCTAssertEqual(hooks[1].event, "Stop")
+        XCTAssertNil(hooks[1].type)
+        XCTAssertNil(hooks[2].event)
+        XCTAssertNil(hooks[2].type)
     }
 
     /// Fix round 1 (M2): a row with a missing/unrecognized `scope` is DROPPED, never decoded as a
@@ -664,22 +683,29 @@ final class MethodWrapperTests: XCTestCase {
 
     /// Fix round 1: `plugin.setConsent`'s param is `spec` now (the qualified `"<id>@<marketplace>"`)
     /// — the daemon fingerprints consent by install path + entry, so a bare id can't name which
-    /// install a grant is for once two marketplaces install the same plugin.
-    func testPluginSetConsentSendsSpecAndDecodesOutcomes() async throws {
+    /// install a grant is for once two marketplaces install the same plugin. Fix round 3: gained a
+    /// required `fingerprint` param and a third outcome, `.staleDisclosure`.
+    func testPluginSetConsentSendsSpecAndFingerprintAndDecodesOutcomes() async throws {
         let (client, t) = try await connected()
         let (req1, ok) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true}"#) {
-            try await client.pluginSetConsent(spec: "sample-echo@winter-examples", classes: ["exec", "tcc"])
+            try await client.pluginSetConsent(spec: "sample-echo@winter-examples", classes: ["exec", "tcc"], fingerprint: "fp-1")
         }
         XCTAssertEqual(req1["method"] as? String, "plugin.setConsent")
         XCTAssertEqual((req1["params"] as? [String: Any])?["spec"] as? String, "sample-echo@winter-examples")
         XCTAssertNil((req1["params"] as? [String: Any])?["name"], "the retired name param must not still be sent")
         XCTAssertEqual((req1["params"] as? [String: Any])?["classes"] as? [String], ["exec", "tcc"])
+        XCTAssertEqual((req1["params"] as? [String: Any])?["fingerprint"] as? String, "fp-1")
         XCTAssertEqual(ok, .ok)
 
         let (_, unknown) = try await roundTrip(t, sentIndex: 2, result: #"{"code":"unknown_plugin"}"#) {
-            try await client.pluginSetConsent(spec: "ghost@nowhere", classes: ["exec"])
+            try await client.pluginSetConsent(spec: "ghost@nowhere", classes: ["exec"], fingerprint: "fp-2")
         }
         XCTAssertEqual(unknown, .unknownPlugin)
+
+        let (_, stale) = try await roundTrip(t, sentIndex: 3, result: #"{"code":"stale_disclosure"}"#) {
+            try await client.pluginSetConsent(spec: "sample-echo@winter-examples", classes: ["exec"], fingerprint: "fp-old")
+        }
+        XCTAssertEqual(stale, .staleDisclosure)
     }
 
     func testShortcutInvokeAndTileActionOutcomes() async throws {

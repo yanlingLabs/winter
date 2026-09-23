@@ -118,17 +118,30 @@ struct ConsentSheet: View {
         pluginConsentDisclosureLines(pluginId: state.pluginId, extras: state.extras)
     }
 
+    /// I2: this consent covers ONLY the background process below — a plugin's skills, hooks and
+    /// MCP servers are not gated on it at all (installing+enabling already loads those, spec §5.4).
+    /// Round 3 minor: "declining here turns the whole plugin off" is true ONLY when this sheet was
+    /// raised by an INSTALL (`state.openedByInstall`) — that's the one case where declining runs a
+    /// `pluginDisable` follow-up (`PluginManagerModel.consentSheetDismissed()`). An ordinary
+    /// `enable(_:)`-triggered sheet's plugin was never turned on in the first place; saying
+    /// "declining turns it off" there would claim an effect this sheet's Cancel button doesn't have.
+    private var introText: String {
+        var text = "This consent covers only the background process listed below."
+        if state.openedByInstall {
+            text += " Skills, hooks and MCP servers this plugin declares load when it's enabled, "
+                + "whether or not this process runs — declining here turns the whole plugin off."
+        } else {
+            text += " Skills, hooks and MCP servers this plugin declares load separately, when "
+                + "it's enabled."
+        }
+        return text
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("\(state.pluginId) requests consent")
                 .font(Typography.paneTitle)
-            // I2: this consent covers ONLY the background process below — a plugin's skills, hooks
-            // and MCP servers are not gated on it at all (installing+enabling already loads those,
-            // spec §5.4). Declining here (Cancel) turns the whole plugin back off, not just the
-            // process, so the two facts belong in the same sentence.
-            Text("This consent covers only the background process listed below. Skills, hooks and "
-                + "MCP servers this plugin declares load when it's enabled, whether or not this "
-                + "process runs — declining here turns the whole plugin off.")
+            Text(introText)
                 .font(Typography.label())
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -173,5 +186,13 @@ struct ConsentSheet: View {
         }
         .padding(20)
         .frame(width: 440)
+        // N1 (round 3): while `busy` (a `pluginSetConsent`/`pluginEnable` call is in flight for
+        // THIS sheet), interactive dismissal (Esc, a swipe-down, the sheet's own close chrome) is
+        // disabled outright — the Cancel/Grant buttons are already `.disabled(busy)` above, so this
+        // closes the one remaining way the sheet could disappear mid-RPC. Without it, an Esc
+        // landing while `confirmConsent()`'s network calls are still in flight could race its own
+        // eventual `pluginEnable` against `consentSheetDismissed()`'s `pluginDisable` follow-up —
+        // this makes that race physically unreachable rather than merely rare.
+        .interactiveDismissDisabled(busy)
     }
 }
