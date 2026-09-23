@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@yanlinglabs/winter-protocol";
@@ -573,5 +573,32 @@ describe("session.setDirs (working-directories T3)", () => {
   // The REAL wiring: a full daemon with a REAL AgentEngine (grantDeniedPrefixes: [winterHome]) —
   // proves session.setDirs reaches the actual dirGrant predicate, not a plausible-looking fake.
   // -------------------------------------------------------------------------------------------
+
+
+  // WS-21 round 3 (Important, part 3): a session's cwd is the transcript key both legs use — stored CANONICAL
+  // from now on at every door that sets it (`session.create`, `session.setCwd`; `session.setDirs` already
+  // wrote canonical paths), so a symlinked spelling never again keys a transcript apart from its realpath.
+  test("round 3: session.create and session.setCwd store the CANONICAL cwd (a symlinked spelling resolves)", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cwd-setter");
+    const base = fixtureBase();
+    const real = fixtureDir(base, "real");
+    const link = join(base, "link");
+    symlinkSync(real, link);
+    const created = await c.request(METHODS.sessionCreate, { scope: "global", cwd: link });
+    expect(created.error).toBeUndefined();
+    const sessionId = created.result.sessionId as string;
+    expect(store.meta(sessionId).cwd).toBe(realpathSync(real));
+    expect(store.dirs(sessionId)).toEqual([{ path: realpathSync(real), locked: false }]);
+    const other = fixtureDir(base, "other");
+    const otherLink = join(base, "other-link");
+    symlinkSync(other, otherLink);
+    const set = await c.request(METHODS.sessionSetCwd, { sessionId, cwd: otherLink });
+    expect(set.error).toBeUndefined();
+    expect(set.result.cwd).toBe(realpathSync(other));
+    expect(store.meta(sessionId).cwd).toBe(realpathSync(other));
+    c.close();
+  });
 
 });

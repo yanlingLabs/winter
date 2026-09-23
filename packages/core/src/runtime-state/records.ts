@@ -733,6 +733,20 @@ export class RuntimeSessionRecords {
     } catch { /* bounded: evidence, never a dependency */ }
   }
 
+  /**
+   * WS-21 round 3 (Important): re-point a session's transcript at the canonical cwd's key once its files
+   * moved there (`transcript-rekey.ts`) — `transcript_project_key` and `backend_root` together, guarded by
+   * the key the caller expects (a record another writer already moved is left alone). `true` when it wrote.
+   * The one writer of these two columns after `create`: Migration C's bulk step and the driver's lazy check
+   * both come here. `temp_project_key` is left as recorded (no reader).
+   */
+  rekeyTranscript(winterSessionId: string, fromKey: string, toKey: string, backendRoot: string): boolean {
+    return this.rs.db.run(
+      "UPDATE runtime_sessions SET transcript_project_key = ?, backend_root = ?, updated_at = ? WHERE winter_session_id = ? AND transcript_project_key = ?",
+      [toKey, backendRoot, this.now(), winterSessionId, fromKey],
+    ).changes > 0;
+  }
+
   noteQuarantinedRoot(root: string): void {
     try {
       this.rs.db.run("INSERT OR IGNORE INTO run_root_quarantine (root, recorded_at, detail_json) VALUES (?, ?, '{\"at\":\"exit\"}')", [root, this.now()]);

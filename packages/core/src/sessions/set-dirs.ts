@@ -1,5 +1,5 @@
 import type { SessionDirs } from "./dirs";
-import { canonicalizeDirPath } from "./dirs";
+import { canonicalSessionCwd, canonicalizeDirPath } from "./dirs";
 import type { ActivityRow } from "./activity";
 import { participatesInActivity } from "./activity";
 
@@ -140,7 +140,8 @@ export function setSessionDirs(
       // as a fresh path would (replace semantics, not insert). No denylist re-check: this path was
       // already checked when the entry was first added to the set.
       if (existingIdx > 0) {
-        const promoted = dirs[existingIdx]!;
+        // WS-21 round 3: written back CANONICAL (an entry stored under a legacy raw spelling), lock kept.
+        const promoted = { ...dirs[existingIdx]!, path: canonicalSessionCwd(dirs[existingIdx]!.path) };
         const rest = dirs.filter((_, i) => i !== existingIdx && i !== 0);
         const next: SessionDirs = [promoted, ...rest];
         deps.store.setDirsRaw(sessionId, next);

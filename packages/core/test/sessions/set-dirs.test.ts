@@ -199,6 +199,20 @@ describe("setSessionDirs — duplicate add is idempotent", () => {
 });
 
 describe("setSessionDirs — setPrimary dedupe-promote (whole-branch review I-1)", () => {
+  // WS-21 round 3: every primary setDirs writes is CANONICAL — a promoted entry stored under a legacy raw
+  // (symlinked) spelling is written back as its realpath, its lock state kept.
+  test("round 3: promoting an entry stored under a raw spelling writes it canonical, lock kept", () => {
+    const { store } = makeStore();
+    const id = store.createSession("global");
+    const base = fixtureBase();
+    const primary = join(base, "primary"); mkdirSync(primary);
+    const real = join(base, "real"); mkdirSync(real);
+    const link = join(base, "link"); symlinkSync(real, link);
+    store.setDirsRaw(id, [{ path: canonicalizeDirPath(primary), locked: false }, { path: link, locked: true }]);
+    const result = setSessionDirs(makeDeps(store), id, "setPrimary", real);
+    expect(result).toEqual({ ok: true, dirs: [{ path: canonicalizeDirPath(real), locked: true }] });
+  });
+
   test("setPrimary of the CURRENT primary (idx 0) is idempotent — ok, unchanged set, no write", () => {
     const { store } = makeStore();
     const id = store.createSession("global");

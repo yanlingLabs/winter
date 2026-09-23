@@ -16,7 +16,9 @@
 // this works regardless of import order and needs no dynamic `import()` gymnastics. It is undone in
 // `afterAll` so no other test file sharing this process sees a fake treated as real.
 import { afterAll, describe, expect, mock, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { transcriptProjectKey, WinterCompatibilitySessionStore } from "@yanlinglabs/winter-agent-sdk";
+import { storeHomeFor, storeProjectsDir } from "../../src/agent/paths";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installMockModuleTripwire } from "../mock-module-tripwire";
@@ -1118,6 +1120,55 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
       expect(gen.runtime?.official?.connectionEnv?.ANTHROPIC_PROFILE).toBeUndefined();
 
       w2.q().emit(init(resumed!.backendSessionId, { apiKeySource: "ANTHROPIC_API_KEY" }));
+      w2.q().emit(result());
+      await Bun.sleep(10);
+      await resumed!.end();
+    } finally {
+      w.close();
+    }
+  });
+
+  // WS-21 round 3 (Important): the official store key derives from the CANONICAL cwd (official-options.ts), so
+  // a 0.116 official session made in a symlinked cwd has its canonical transcript under the RAW key — the
+  // router's resume-vs-fresh check (`store.load` at the canonical key) would find nothing and start FRESH
+  // under the same backend id. `resume()` moves the files first; the restart's first generation is then
+  // handed the canonical cwd, and the store at that key holds the history.
+  test("round 3: a symlinked-cwd official session from the old layout resumes with its history (files moved, record re-pointed)", async () => {
+    const w = driverWorld();
+    try {
+      await writeCredentialMaterial(w.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
+      const real = realpathSync(mkdtempSync(join(tmpdir(), "winter-rekey-off-real-")));
+      const link = join(realpathSync(mkdtempSync(join(tmpdir(), "winter-rekey-off-link-"))), "proj");
+      symlinkSync(real, link);
+      const sid = w.store.createSession("t", { mode: "code", model: MODEL, cwd: link });
+      const session = await w.drivers.create(sid);
+      w.q().emit(init(session.backendSessionId, { apiKeySource: "ANTHROPIC_API_KEY" }));
+      w.q().emit(result());
+      await Bun.sleep(10);
+      w.q().end();
+      await Bun.sleep(10);
+      const id = session.backendSessionId;
+      const projects = storeProjectsDir(w.home);
+      const rawKey = transcriptProjectKey(link);
+      const canonKey = transcriptProjectKey(real);
+      expect(w.records.get(sid)!.transcriptProjectKey).toBe(canonKey);
+      // the 0.116 state: the record and the canonical transcript under the RAW key
+      expect(w.records.rekeyTranscript(sid, canonKey, rawKey, join(projects, rawKey))).toBe(true);
+      mkdirSync(join(projects, rawKey), { recursive: true });
+      writeFileSync(join(projects, rawKey, `${id}.jsonl`), '{"type":"user","uuid":"o-old","message":{"role":"user","content":"before"}}\n');
+
+      const w2 = driverWorld({ home: w.home, store: w.store, hub: w.hub, records: w.records, checkpoints: w.checkpoints, secrets: w.secrets });
+      const resumed = await w2.drivers.ensure(sid);
+      expect(resumed).toBeDefined();
+      expect(existsSync(join(projects, rawKey, `${id}.jsonl`))).toBe(false);
+      const record = w.records.get(sid)!;
+      expect([record.transcriptProjectKey, record.backendRoot]).toEqual([canonKey, join(projects, canonKey)]);
+      const opts = w2.capturedOptions[0] as unknown as { cwd: string; sessionId: string };
+      expect(opts.cwd).toBe(real);
+      expect(opts.sessionId).toBe(id);
+      const loaded = await new WinterCompatibilitySessionStore({ winterHome: storeHomeFor(w.home) }).load({ projectKey: transcriptProjectKey(opts.cwd), sessionId: id });
+      expect(loaded?.map((e) => e.uuid)).toEqual(["o-old"]);
+      w2.q().emit(init(id, { apiKeySource: "ANTHROPIC_API_KEY" }));
       w2.q().emit(result());
       await Bun.sleep(10);
       await resumed!.end();

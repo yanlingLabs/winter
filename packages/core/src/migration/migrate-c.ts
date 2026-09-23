@@ -13,7 +13,12 @@
 //     preflight → move-dirs → copy-files → split-settings → convert-plugins → runtime-state
 //     then `phase1-complete` — a NORMAL booting state; the half-migrated refusal is phase 1 incomplete
 //   phase 2 (the daemon's late site, after `createWinterRuntimeSdk`, before `startIpcServer`):
-//     reconcile-official-roots → archive → done
+//     reconcile-official-roots → rekey-transcripts → archive → done
+//
+// ROUND 3 (DECISION): the canonical-cwd re-key is a PHASE 2 step, AFTER the reconcile — never in phase 1.
+// The router judges each official working copy against the canonical file at the key the working copy
+// itself names (the key 0.116 wrote); moved away first, that file would read as absent, the whole working
+// copy would be "appended" into a NEW file at the raw key, and the session's history would be split in two.
 //
 // On a build whose router cannot reconcile, phase 1's preflight REFUSES when an official working copy
 // holds anything — so no real home ever migrates before the integrated build can finish it.
@@ -24,10 +29,12 @@ import { Database } from "bun:sqlite";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { randomBytes } from "node:crypto";
-import { SDK_COMPAT_LINKS, SDK_PERSISTENT_ENTRIES, sdkHomeFor } from "../agent/paths";
+import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
+import { SDK_COMPAT_LINKS, SDK_PERSISTENT_ENTRIES, canonicalCwd, sdkHomeFor } from "../agent/paths";
 import { downgradeRuntimeStateToV6, openRuntimeStateDb } from "../runtime-state/db";
 import { RuntimeLeases, type LeaseProbe } from "../runtime-state/leases";
 import { RuntimeSessionRecords } from "../runtime-state/records";
+import { moveTranscriptFiles, transcriptEntriesOf } from "../runtime-state/transcript-rekey";
 import type { RecoveryReport, RecoveryTranscriptOutcome } from "../runtime-sdk/run-home-contract";
 import { normalizeRecoveryReport, quarantinedBackendSessions } from "../runtime-sdk/run-home-support";
 import { DEAD_LEGACY_TOP_LEVEL_FILES } from "./dead-legacy-files";
@@ -35,10 +42,10 @@ import { LEGACY_INSTRUCTIONS_FILE } from "../legacy-names";
 import { settingsSplitMarkerPath, splitSettingsToSdk } from "./settings-split";
 
 export type MigrationCStep = "preflight" | "reconcile-official-roots" | "move-dirs" | "copy-files"
-  | "split-settings" | "convert-plugins" | "runtime-state" | "archive" | "done";
+  | "split-settings" | "convert-plugins" | "runtime-state" | "rekey-transcripts" | "archive" | "done";
 
 export const MIGRATION_C_PHASE1: readonly MigrationCStep[] = ["preflight", "move-dirs", "copy-files", "split-settings", "convert-plugins", "runtime-state"];
-export const MIGRATION_C_PHASE2: readonly MigrationCStep[] = ["reconcile-official-roots", "archive", "done"];
+export const MIGRATION_C_PHASE2: readonly MigrationCStep[] = ["reconcile-official-roots", "rekey-transcripts", "archive", "done"];
 
 export type MigrationCRefusalCode = "sdk_home_migration_required" | "sdk_home_migration_refused" | "sdk_home_half_migrated" | "nothing_to_resume" | "nothing_to_rollback";
 
@@ -70,6 +77,23 @@ export interface MigrationCManifest {
   /** Review I6: per root, the router's overall outcome and — from a per-transcript router — each
    *  transcript's own (`canonical-ahead` needs nothing; a `quarantined` one marks ITS session). */
   reconciled: { root: string; outcome: "clean" | "appended" | "quarantined" | "failed"; transcripts?: RecoveryTranscriptOutcome[] }[];
+  /** Round 3: the canonical-cwd re-key, per session — the INTENT is recorded (`pending`, with the names it
+   *  will move) BEFORE any file moves, then `moved`; a `collision`/`refused` moved nothing and marked the
+   *  session. Rollback moves back every recorded name that sits at `to` and not at `from`, and re-points
+   *  the record. Absent on a manifest written before the step existed. */
+  rekeyed?: MigrationCRekey[];
+}
+
+export interface MigrationCRekey {
+  sessionId: string;
+  backendId: string;
+  /** Transcript keys, under `sdk/projects`. */
+  from: string;
+  to: string;
+  /** This session's names at `from` when the intent was recorded (the transcript last). */
+  entries: string[];
+  outcome: "pending" | "moved" | "collision" | "refused";
+  reason?: string;
 }
 
 export function migrationCDir(home: string): string { return join(home, "migration", "c"); }
@@ -283,6 +307,83 @@ function sessionCwds(home: string): (sessionId: string) => string | undefined {
   } finally {
     try { db?.close(); } catch { /* ignore */ }
   }
+}
+
+/** The sessions index's cwd and first working directory per session, read-only — what each leg keys a
+ *  transcript by (the Winter leg the `cwd` column, the official leg `cwd ?? dirs[0]`). */
+function sessionPrimaries(home: string): (sessionId: string) => { cwd?: string; firstDir?: string } | undefined {
+  const path = join(home, "sessions", "index.db");
+  if (!existsSync(path)) return () => undefined;
+  let db: Database | undefined;
+  try {
+    db = new Database(path, { readonly: true });
+    const rows = db.query<{ session_id: string; cwd: string | null; dirs: string | null }, []>("SELECT session_id, cwd, dirs FROM sessions").all();
+    const map = new Map(rows.map((r) => {
+      let firstDir: string | undefined;
+      try { const d = JSON.parse(r.dirs ?? "[]") as { path?: unknown }[]; if (typeof d[0]?.path === "string") firstDir = d[0].path; } catch { /* unreadable: none */ }
+      return [r.session_id, { ...(r.cwd === null ? {} : { cwd: r.cwd }), ...(firstDir === undefined ? {} : { firstDir }) }] as const;
+    }));
+    return (id) => map.get(id);
+  } catch {
+    return () => undefined;
+  } finally {
+    try { db?.close(); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Round 3 (Important): the BULK canonical-cwd re-key — every session record whose recorded transcript key
+ * differs from the key its leg now looks under (the canonical cwd's) has its files moved there
+ * (`moveTranscriptFiles`: never overwriting, the transcript last) and its record re-pointed. Each intent is
+ * written to the manifest BEFORE its files move, so a crash is finished on resume and reversed on rollback;
+ * a collision moves nothing, marks the session `repair-required` and is logged. A session with no cwd keys
+ * by its temp dir, which is already a realpath — nothing to do. The driver repeats the check lazily at
+ * every resume for anything this step never saw.
+ */
+function rekeyTranscripts(home: string, m: MigrationCManifest, log: (line: string) => void): Record<string, unknown> {
+  if (!existsSync(join(home, "runtimes", "runtime-state.db"))) return { reason: "no runtime-state.db" };
+  const projects = join(sdkHomeFor(home), "projects");
+  const primaries = sessionPrimaries(home);
+  m.rekeyed ??= [];
+  let moved = 0, collisions = 0;
+  const rs = openRuntimeStateDb(home);
+  try {
+    const records = new RuntimeSessionRecords(rs);
+    const rows = rs.db.query<{ id: string; kind: string; backend: string; key: string }, []>(
+      "SELECT winter_session_id AS id, runtime_kind AS kind, backend_session_id AS backend, transcript_project_key AS key FROM runtime_sessions WHERE backend_session_id IS NOT NULL ORDER BY winter_session_id",
+    ).all();
+    for (const row of rows) {
+      let entry = m.rekeyed.find((e) => e.sessionId === row.id);
+      if (entry !== undefined && entry.outcome !== "pending") continue;
+      if (entry === undefined) {
+        const p = primaries(row.id);
+        const primary = row.kind === "claude-agent" ? (p?.cwd ?? p?.firstDir) : p?.cwd;
+        if (primary === undefined) continue;
+        const to = transcriptProjectKey(canonicalCwd(primary));
+        if (to === row.key) continue;
+        entry = { sessionId: row.id, backendId: row.backend, from: row.key, to, entries: transcriptEntriesOf(join(projects, row.key), row.backend), outcome: "pending" };
+        m.rekeyed.push(entry);
+        writeManifest(home, m);                 // the intent, BEFORE any file moves
+      }
+      const result = moveTranscriptFiles(projects, entry.backendId, entry.from, entry.to);
+      if (result.kind === "moved" || result.kind === "not-needed") {
+        records.rekeyTranscript(entry.sessionId, entry.from, entry.to, join(projects, entry.to));
+        entry.outcome = "moved";
+        moved++;
+      } else {
+        entry.outcome = result.kind;
+        if (result.kind === "refused") entry.reason = result.reason;
+        collisions++;
+        try { records.setTranscriptHealth(entry.sessionId, "repair-required"); } catch { /* bounded */ }
+        log(result.kind === "collision"
+          ? `migration C: transcript re-key collision for ${entry.sessionId} — both its recorded key and the canonical cwd's key hold it; nothing moved, marked repair-required`
+          : `migration C: transcript re-key for ${entry.sessionId} refused (${result.reason}); nothing moved, marked repair-required`);
+      }
+      writeManifest(home, m);
+    }
+  } finally { rs.close(); }
+  if (moved > 0) log(`migration C: ${moved} session transcript(s) re-keyed to the canonical cwd`);
+  return { moved, notMoved: collisions };
 }
 
 /**
@@ -513,6 +614,11 @@ export async function finishMigrationC(home: string, deps: Pick<MigrationCDeps, 
     record("reconcile-official-roots", m.reconciled.length === 0 ? "skipped" : "done", { roots: m.reconciled.length });
   }
 
+  if (!done("rekey-transcripts")) {
+    const detail = rekeyTranscripts(home, m, deps.log);
+    record("rekey-transcripts", (m.rekeyed ?? []).length === 0 ? "skipped" : "done", detail);
+  }
+
   if (!done("archive")) {
     const archive = join(m.archiveDir, "archive");
     const candidates = [
@@ -602,6 +708,29 @@ export async function rollbackMigrationC(home: string, deps: Pick<MigrationCDeps
     const from = join(home, a.to);
     const to = join(home, a.from);
     if (existsSync(from) && !existsSync(to)) { mkdirSync(dirname(to), { recursive: true }); renameSync(from, to); }
+  }
+  // rekey-transcripts → reversed (round 3): every recorded name that sits at `to` and not at `from` moves
+  // back (a name recorded BEFORE its move and absent from `to` then was provably this step's), and the record
+  // is re-pointed at the raw key — before the prefix reversal below carries it under <home>/projects.
+  const rekeyed = m.rekeyed ?? [];
+  if (rekeyed.length > 0) {
+    const projects = join(sdkHomeFor(home), "projects");
+    for (const e of [...rekeyed].reverse()) {
+      for (const name of [...e.entries].reverse()) {
+        const at = join(projects, e.to, name);
+        const back = join(projects, e.from, name);
+        if ((existsSync(at) || isSymlink(at)) && !existsSync(back) && !isSymlink(back)) {
+          mkdirSync(join(projects, e.from), { recursive: true, mode: 0o700 });
+          renameSync(at, back);
+        }
+      }
+    }
+    rawRuntimeState(home, (db) => {
+      for (const e of rekeyed) {
+        if (e.outcome !== "moved" && e.outcome !== "pending") continue;
+        db.run("UPDATE runtime_sessions SET transcript_project_key = ?, backend_root = ? WHERE winter_session_id = ? AND transcript_project_key = ?", [e.from, join(projects, e.from), e.sessionId, e.to]);
+      }
+    });
   }
   // runtime-state → the one rewrite reversed (`backend_root` back under <home>/projects)
   if (m.steps.some((st) => st.step === "runtime-state")) {

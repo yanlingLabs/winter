@@ -4,7 +4,9 @@
 // selection_json. The router's reconcile is a stub here (its real outcomes are L2's, proven at R.2).
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
+import { SessionStore } from "../../src/sessions/store";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -413,5 +415,111 @@ describe("rollback", () => {
     expect(migrationCState(home)).toMatchObject({ kind: "parsed", manifest: { status: "complete" } });
     const db = new Database(join(home, "runtimes", "runtime-state.db"), { readonly: true });
     try { expect(db.query<{ b: string }, []>("SELECT backend_root AS b FROM runtime_sessions WHERE winter_session_id='s_1'").get()!.b).toBe(join(home, "sdk", "projects", key)); } finally { db.close(); }
+  });
+});
+
+// WS-21 round 3 (Important): the BULK canonical-cwd re-key. A 0.116 session made in a symlinked cwd keeps
+// its transcript under the RAW cwd's key; both legs now look under the realpath's. Phase 2 moves every such
+// session's files (after the reconcile, which judges each working copy against the canonical file at the
+// key 0.116 wrote), re-points the record, records each move for rollback, and marks a collision.
+describe("round 3: the bulk canonical-cwd re-key", () => {
+  const BACKEND = "7c4f1c2e-aaaa-4bbb-8ccc-ddddeeeeffff";
+  const COLLIDING = "7c4f1c2e-1111-4bbb-8ccc-ddddeeeeffff";
+  function symlinkedFixture() {
+    const f = fixture();
+    const real = realpathSync(mkdtempSync(join(tmpdir(), "winter-migc-real-")));
+    const link = join(realpathSync(mkdtempSync(join(tmpdir(), "winter-migc-link-"))), "proj");
+    symlinkSync(real, link);
+    const rawKey = transcriptProjectKey(link);
+    const canonKey = transcriptProjectKey(real);
+    expect(rawKey).not.toBe(canonKey);
+    const store = new SessionStore(f.home);
+    const moving = store.createSession("t", { mode: "code", cwd: link });
+    const colliding = store.createSession("t", { mode: "code", cwd: link });
+    store.close();
+    write(join(f.home, "projects", rawKey, `${BACKEND}.jsonl`), '{"type":"user","uuid":"m1"}\n');
+    write(join(f.home, "projects", rawKey, `${BACKEND}.provider-state.jsonl`), "{}\n");
+    write(join(f.home, "projects", rawKey, BACKEND, "subagents", "agent-a.jsonl"), "{}\n");
+    write(join(f.home, "projects", rawKey, `${COLLIDING}.jsonl`), '{"type":"user","uuid":"c-old"}\n');
+    write(join(f.home, "projects", canonKey, `${COLLIDING}.jsonl`), '{"type":"user","uuid":"c-new"}\n');
+    const rs = openRuntimeStateDb(f.home);
+    for (const [sid, backend] of [[moving, BACKEND], [colliding, COLLIDING]] as const) {
+      rs.db.run(`INSERT INTO runtime_sessions (winter_session_id, runtime_kind, backend_session_id, provider_id, model_ref, backend_root, transcript_project_key, memory_project_key, temp_project_key,
+        transcript_health, compatibility_level, conformance_corpus_version, version_provenance, created_at, updated_at, state, selection_json)
+        VALUES (?, 'winter-agent', ?, 'deepseek', ?, ?, ?, ?, ?, 'clean', 'conversation', 'c1', 'recorded', 't', 't', 'idle', ?)`,
+        [sid, backend, OLD_TAG, join(f.home, "projects", rawKey), rawKey, rawKey, rawKey, JSON.stringify({ runtimeKind: "winter-agent", providerId: "deepseek", modelRef: OLD_TAG, family: "deepseek", authFamily: "api-key", reason: "r", decidedAt: "t" })]);
+    }
+    rs.close();
+    return { ...f, moving, colliding, rawKey, canonKey };
+  }
+  const row = (home: string, sid: string) => {
+    const rs = openRuntimeStateDb(home);
+    try { return rs.db.query<{ k: string; b: string; h: string }, [string]>("SELECT transcript_project_key AS k, backend_root AS b, transcript_health AS h FROM runtime_sessions WHERE winter_session_id = ?").get(sid)!; } finally { rs.close(); }
+  };
+
+  test("moves the transcript, sidecars and subagents to the canonical key, re-points the record, records the move — after the reconcile", async () => {
+    const { home, moving, rawKey, canonKey } = symlinkedFixture();
+    const m = await runMigrationC(home, deps({ reconcile: stubReconcile().reconcile }));
+    expect(m.status).toBe("complete");
+    const sdkProjects = join(home, "sdk", "projects");
+    expect(readFileSync(join(sdkProjects, canonKey, `${BACKEND}.jsonl`), "utf8")).toContain("m1");
+    expect(existsSync(join(sdkProjects, canonKey, `${BACKEND}.provider-state.jsonl`))).toBe(true);
+    expect(existsSync(join(sdkProjects, canonKey, BACKEND, "subagents", "agent-a.jsonl"))).toBe(true);
+    expect(existsSync(join(sdkProjects, rawKey, `${BACKEND}.jsonl`))).toBe(false);
+    expect(row(home, moving)).toMatchObject({ k: canonKey, b: join(sdkProjects, canonKey), h: "clean" });
+    const entry = m.rekeyed?.find((e) => e.sessionId === moving);
+    expect(entry).toMatchObject({ backendId: BACKEND, from: rawKey, to: canonKey, outcome: "moved" });
+    expect(entry!.entries.at(-1)).toBe(`${BACKEND}.jsonl`);
+    const steps = m.steps.map((s) => s.step);
+    expect(steps.indexOf("reconcile-official-roots")).toBeLessThan(steps.indexOf("rekey-transcripts"));
+    expect(steps.indexOf("rekey-transcripts")).toBeLessThan(steps.indexOf("archive"));
+    // the fixture's own sessions (no sessions-index cwd) and the Users-x-app key are untouched
+    expect(existsSync(join(sdkProjects, "-Users-x-app", "s-winter.jsonl"))).toBe(true);
+  });
+
+  test("a collision (both keys hold the transcript) moves nothing, marks the session repair-required and records it", async () => {
+    const { home, colliding, rawKey, canonKey } = symlinkedFixture();
+    const logs: string[] = [];
+    const m = await runMigrationC(home, deps({ reconcile: stubReconcile().reconcile, log: (l: string) => logs.push(l) }));
+    const sdkProjects = join(home, "sdk", "projects");
+    expect(readFileSync(join(sdkProjects, rawKey, `${COLLIDING}.jsonl`), "utf8")).toContain("c-old");
+    expect(readFileSync(join(sdkProjects, canonKey, `${COLLIDING}.jsonl`), "utf8")).toContain("c-new");
+    expect(row(home, colliding)).toMatchObject({ k: rawKey, h: "repair-required" });
+    expect(m.rekeyed?.find((e) => e.sessionId === colliding)).toMatchObject({ outcome: "collision" });
+    expect(logs.some((l) => l.includes("collision") && l.includes(colliding))).toBe(true);
+  });
+
+  test("rollback moves the files back under the raw key and re-points the record", async () => {
+    const { home, moving, colliding, rawKey, canonKey } = symlinkedFixture();
+    await runMigrationC(home, deps({ reconcile: stubReconcile().reconcile }));
+    await rollbackMigrationC(home, { log: () => {} });
+    expect(readFileSync(join(home, "projects", rawKey, `${BACKEND}.jsonl`), "utf8")).toContain("m1");
+    expect(existsSync(join(home, "projects", rawKey, BACKEND, "subagents", "agent-a.jsonl"))).toBe(true);
+    expect(existsSync(join(home, "projects", canonKey, `${BACKEND}.jsonl`))).toBe(false);
+    expect(row(home, moving)).toMatchObject({ k: rawKey, b: join(home, "projects", rawKey) });
+    // the collision: both files where they were (nothing had moved)
+    expect(readFileSync(join(home, "projects", rawKey, `${COLLIDING}.jsonl`), "utf8")).toContain("c-old");
+    expect(readFileSync(join(home, "projects", canonKey, `${COLLIDING}.jsonl`), "utf8")).toContain("c-new");
+    expect(row(home, colliding).k).toBe(rawKey);
+  });
+
+  test("a crash mid-step: an intent recorded before the move is finished on resume, never claimed twice", async () => {
+    const { home, moving, rawKey, canonKey } = symlinkedFixture();
+    const m1 = await runMigrationC(home, deps());   // phase 1 only (the official working copy waits for a door)
+    expect(m1.status).toBe("phase1-complete");
+    // the crash: the intent written and the sidecar moved, then nothing more
+    const sdkProjects = join(home, "sdk", "projects");
+    mkdirSync(join(sdkProjects, canonKey), { recursive: true });
+    renameSync(join(sdkProjects, rawKey, `${BACKEND}.provider-state.jsonl`), join(sdkProjects, canonKey, `${BACKEND}.provider-state.jsonl`));
+    const state = migrationCState(home);
+    if (state.kind !== "parsed") throw new Error("unreachable");
+    writeFileSync(migrationCManifestPath(home), JSON.stringify({ ...state.manifest, rekeyed: [{ sessionId: moving, backendId: BACKEND, from: rawKey, to: canonKey, entries: [BACKEND, `${BACKEND}.provider-state.jsonl`, `${BACKEND}.jsonl`], outcome: "pending" }] }));
+    const m2 = await finishMigrationC(home, { log: () => {}, reconcile: stubReconcile().reconcile });
+    expect(m2.rekeyed?.filter((e) => e.sessionId === moving)).toEqual([expect.objectContaining({ outcome: "moved" })]);
+    expect(existsSync(join(sdkProjects, canonKey, `${BACKEND}.jsonl`))).toBe(true);
+    expect(row(home, moving).k).toBe(canonKey);
+    await rollbackMigrationC(home, { log: () => {} });
+    expect(existsSync(join(home, "projects", rawKey, `${BACKEND}.provider-state.jsonl`))).toBe(true);
+    expect(existsSync(join(home, "projects", rawKey, `${BACKEND}.jsonl`))).toBe(true);
   });
 });

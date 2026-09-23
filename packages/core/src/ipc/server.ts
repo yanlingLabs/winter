@@ -60,6 +60,7 @@ import {
 import { createActivityEnforcement } from "../sessions/activity-enforcement";
 import { setSessionActivity, type SetActivityDeps } from "../sessions/set-activity";
 import { setSessionDirs, type SetDirsDeps } from "../sessions/set-dirs";
+import { canonicalSessionCwd } from "../sessions/dirs";
 import { reapEmptySessions } from "../sessions/reaper";
 import { filterRemoteStreamEvent } from "../sessions/remote-stream";
 import { foldPanelTabs } from "../panel/store";
@@ -1680,7 +1681,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // SP3.4: a remote (phone) caller can't browse this Mac's filesystem to pick a cwd — its
         // sessions default to the home directory (the same value session.dispatch uses). Scoped to
         // the remote role so local/harness callers keep today's semantics (omitted cwd stays unset).
-        const cwd = p.cwd ?? (socket.data.authedRole === "remote" ? homedir() : undefined);
+        // WS-21 round 3: stored CANONICAL — the cwd is the transcript key both legs use (`canonicalSessionCwd`).
+        const givenCwd = p.cwd ?? (socket.data.authedRole === "remote" ? homedir() : undefined);
+        const cwd = givenCwd === undefined ? undefined : canonicalSessionCwd(givenCwd);
         // Plan-immunity (2026-07-28, USER-REVISED design): a chat session's approvalPolicy is
         // ALWAYS the fixed internal "chat" policy (gate.ts's SessionApprovalPolicy) — COERCED here,
         // not rejected, regardless of whatever the caller sent (or omitted; `p.approvalPolicy`'s
@@ -1907,7 +1910,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // request that never named a model). `modelRef` stays unset (the dispatch singleton always
         // uses the live/boot default model).
         const sessionId = opts.store.createSession("global", {
-          cwd: homedir(), approvalPolicy: "auto", origin: "dispatch", mode: "dispatch",
+          cwd: canonicalSessionCwd(homedir()), approvalPolicy: "auto", origin: "dispatch", mode: "dispatch",
           ...(opts.winter !== undefined ? { runtimeKind: "winter-agent" as const } : {}),
         });
         if (opts.winter !== undefined) {
@@ -3364,8 +3367,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionSetCwd: {
         const p = parseParams(SessionSetCwdParams, params);
-        opts.store.setCwd(p.sessionId, p.cwd);
-        return { ok: true, cwd: p.cwd };
+        const cwd = canonicalSessionCwd(p.cwd); // WS-21 round 3: stored canonical, like session.create
+        opts.store.setCwd(p.sessionId, cwd);
+        return { ok: true, cwd };
       }
       case METHODS.trustDir: {
         const p = parseParams(TrustDirParams, params);
