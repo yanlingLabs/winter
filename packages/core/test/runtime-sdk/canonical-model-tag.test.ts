@@ -2,10 +2,10 @@
 // the catalog's renames at three parse layers — the live settings view, the runtime-state row decoder,
 // and the protocol request parse.
 //
-// The rule has a liveness guard (lane L1b's derivation: "never shadow a tag that still resolves"): the
-// pinned 0.0.20 catalog still has `deepseek/deepseek-v4-flash` as a live row and no `deepseek-flash`,
-// so against it the function is the identity. The refreshed catalog is stood in with
-// `setCatalogKeysForTests`.
+// The rule has a liveness guard (lane L1b's derivation: "never shadow a tag that still resolves"): a
+// catalog that still has `deepseek/deepseek-v4-flash` as a live row (0.0.20) makes the function the
+// identity. The linked catalog is the refreshed one (the old row gone, `deepseek-flash` live); the
+// 0.0.20 shape is stood in with `setCatalogKeysForTests`.
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,9 +16,8 @@ import { buildLiveModelResolver } from "../../src/providers/manager";
 import { startIpcServer } from "../../src/ipc/server";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
-import {
-  CATALOG_TAG_RENAMES_LOCAL, canonicalModelTag, canonicalModelTagWith, setCatalogKeysForTests,
-} from "../../src/runtime-sdk/model-tag";
+import { CATALOG_TAG_RENAMES } from "@yanlinglabs/winter-provider-catalog";
+import { canonicalModelTag, canonicalModelTagWith, setCatalogKeysForTests } from "../../src/runtime-sdk/model-tag";
 import { liveSettingsView, loadSettings, saveSettings, Settings } from "../../src/settings";
 import { openRuntimeStateDb } from "../../src/runtime-state/db";
 import { RuntimeSessionRecords } from "../../src/runtime-state/records";
@@ -32,8 +31,8 @@ const REFRESHED = ["deepseek/deepseek-flash", "deepseek-anthropic/deepseek-flash
 afterEach(() => setCatalogKeysForTests(undefined));
 
 describe("canonicalModelTag — the rule", () => {
-  test("the local copy is exactly the catalog's two DeepSeek renames", () => {
-    expect(CATALOG_TAG_RENAMES_LOCAL).toEqual({
+  test("the catalog's rename table is exactly its two DeepSeek renames", () => {
+    expect(CATALOG_TAG_RENAMES).toEqual({
       "deepseek/deepseek-v4-flash": "deepseek/deepseek-flash",
       "deepseek-anthropic/deepseek-v4-flash": "deepseek-anthropic/deepseek-flash",
     });
@@ -47,9 +46,15 @@ describe("canonicalModelTag — the rule", () => {
     expect(canonicalModelTagWith("codex-oauth/gpt-5.6-sol", renames, new Set([NEW]))).toBe("codex-oauth/gpt-5.6-sol");
   });
 
-  test("against the PINNED catalog it is the identity (deepseek-v4-flash is still a live row there)", () => {
+  test("against a 0.0.20-shaped catalog it is the identity (deepseek-v4-flash is still a live row there)", () => {
+    setCatalogKeysForTests([OLD, "deepseek-anthropic/deepseek-v4-flash", "deepseek/deepseek-v4-pro", "codex-oauth/gpt-5.6-sol"]);
     expect(canonicalModelTag(OLD)).toBe(OLD);
     expect(canonicalModelTag("deepseek-anthropic/deepseek-v4-flash")).toBe("deepseek-anthropic/deepseek-v4-flash");
+  });
+
+  test("against the LINKED catalog (refreshed: the old row gone) both dialects resolve to deepseek-flash", () => {
+    expect(canonicalModelTag(OLD)).toBe(NEW);
+    expect(canonicalModelTag("deepseek-anthropic/deepseek-v4-flash")).toBe("deepseek-anthropic/deepseek-flash");
   });
 
   test("against the refreshed catalog both DeepSeek dialects resolve to deepseek-flash", () => {
@@ -124,8 +129,13 @@ describe("layer 3 — the protocol request parse", () => {
     expect(typeof METHODS.sessionSetModel).toBe("string");
   });
 
-  test("against the pinned catalog the wire tag passes through unchanged", () => {
+  test("against a 0.0.20-shaped catalog the wire tag passes through unchanged", () => {
+    setCatalogKeysForTests([OLD, "deepseek-anthropic/deepseek-v4-flash", "codex-oauth/gpt-5.6-sol"]);
     expect(ModelTagSchema.parse(OLD)).toBe(OLD);
+  });
+
+  test("against the LINKED (refreshed) catalog the wire tag canonicalizes with no stand-in", () => {
+    expect(ModelTagSchema.parse(OLD)).toBe(NEW);
   });
 });
 

@@ -1,4 +1,4 @@
-import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
+import { CATALOG_TAG_RENAMES, loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { setWireModelTagCanonicalizer } from "@yanlinglabs/winter-protocol";
 
 /** WS-20: a model is ALWAYS a provider-qualified tag ("<providerId>/<modelId>") in code — the
@@ -139,18 +139,9 @@ export function facingNameOf(tag: ModelTag): string | undefined {
 // new spelling, so a rewrite is a downgrade hazard (r2 I5) — they are resolved through this ONE
 // function at three parse layers: the live settings view (`liveSettingsView`), the runtime-state row
 // decoder (`records.ts` `fromRow`, `sessions/store.ts`'s `model` column) and the protocol request parse
-// (`ModelTagSchema`'s transform, registered below).
-
-/**
- * The catalog's own `CATALOG_TAG_RENAMES` (lane L1b: derived from the refresh's reviewed exclusions and
- * the surviving rows' aliases). A LOCAL COPY of its two entries until the SDK that exports it is linked
- * (the pinned 0.0.20 catalog predates the rename); at integration this constant is replaced by the
- * catalog's import, in exactly this one place.
- */
-export const CATALOG_TAG_RENAMES_LOCAL: Readonly<Record<string, string>> = Object.freeze({
-  "deepseek/deepseek-v4-flash": "deepseek/deepseek-flash",
-  "deepseek-anthropic/deepseek-v4-flash": "deepseek-anthropic/deepseek-flash",
-});
+// (`ModelTagSchema`'s transform, registered below). The rename table is the catalog's own
+// `CATALOG_TAG_RENAMES` (lane L1b: derived from the refresh's reviewed exclusions and the surviving
+// rows' aliases, never hand-typed here).
 
 let liveKeysCache: ReadonlySet<string> | undefined;
 let liveKeysOverride: ReadonlySet<string> | undefined;
@@ -169,8 +160,8 @@ export function setCatalogKeysForTests(keys: Iterable<string> | undefined): void
 /**
  * The pure rule: `tag` renames to `renames[tag]` only when the OLD tag no longer resolves on its own
  * (L1b's "never shadow a tag that still resolves") AND the NEW one does (never rename into nothing). So
- * against the pinned 0.0.20 catalog — where `deepseek/deepseek-v4-flash` is still a live row and
- * `deepseek-flash` does not exist — this is the identity, and a working DeepSeek home is untouched.
+ * against a catalog that still carries the old row (0.0.20, where `deepseek/deepseek-v4-flash` is live
+ * and `deepseek-flash` does not exist) this is the identity, and a working DeepSeek home is untouched.
  */
 export function canonicalModelTagWith(tag: string, renames: Readonly<Record<string, string>>, liveKeys: ReadonlySet<string>): string {
   const to = renames[tag];
@@ -181,7 +172,7 @@ export function canonicalModelTagWith(tag: string, renames: Readonly<Record<stri
 /** A stored or wire model tag, canonicalized through the catalog's renames (see above). Never throws. */
 export function canonicalModelTag(tag: string): string {
   try {
-    return canonicalModelTagWith(tag, CATALOG_TAG_RENAMES_LOCAL, liveCatalogKeys());
+    return canonicalModelTagWith(tag, CATALOG_TAG_RENAMES, liveCatalogKeys());
   } catch {
     return tag;
   }
