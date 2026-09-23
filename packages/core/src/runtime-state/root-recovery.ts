@@ -10,7 +10,9 @@
 //                      a crashed (or `pending`) incarnation's (a Winter-leg one, whose `projects/` is a link
 //                      to the store, has no working copy and is just removed — review M1)
 //   3. staging roots   stale, unclaimed `claude-resume-*` directories (step 8's narrow sweep, deferred
-//                      here on a run-home build so it runs only after the reconcile — spec §3.8)
+//                      here on a run-home build so it runs only after the reconcile — spec §3.8) — and,
+//                      whatever their age, those this home's directory rows name as a crashed official
+//                      resume's observed root (round 3: a resume's working copy is there, not in its run folder)
 //
 //   clean | appended → deleted (`rm -rf`: links inside are removed, their targets untouched)
 //   quarantined      → the ROOT is left in place, KEPT and recorded in `run_root_quarantine` (never
@@ -217,6 +219,21 @@ export async function recoverRunRoots(deps: RootRecoveryDeps): Promise<RootRecov
       "SELECT DISTINCT active_local_write_root AS p FROM runtime_sessions WHERE active_local_write_root IS NOT NULL",
     ]) for (const r of deps.rs.db.query<{ p: string }, []>(q).all()) claimed.add(r.p);
   } catch { /* bounded: an unreadable claim set sweeps nothing below */ }
+  // Round 3 (the official-resume investigation): a resume's working copy is the wrapper's staging root, not
+  // the run folder the session recorded (whose `projects/` stays empty). The router records the root the
+  // child OBSERVED on this home's own directory row (`configDir`, WS-14 §6 rule 2 — cleared only after a
+  // verified cleanup): a staging root named there is a crashed generation of THIS home, nothing of which is
+  // live at boot, so it is reconciled now — never left to the 24 h stale rule, which exists for roots that
+  // may be another process's.
+  const recordedStaging = new Set<string>();
+  try {
+    for (const r of deps.rs.db.query<{ e: string }, []>("SELECT entry_json AS e FROM directory_entries").all()) {
+      try {
+        const configDir = (JSON.parse(r.e) as { configDir?: unknown }).configDir;
+        if (typeof configDir === "string" && isStagingRoot(configDir.replace(/\/+$/, ""))) recordedStaging.add(configDir.replace(/\/+$/, ""));
+      } catch { /* one unreadable row costs itself */ }
+    }
+  } catch { /* bounded: no rows read means the age rule alone, as before */ }
   let staging: string[] = [];
   try {
     staging = readdirSync(scanRoot, { withFileTypes: true })
@@ -228,7 +245,7 @@ export async function recoverRunRoots(deps: RootRecoveryDeps): Promise<RootRecov
     if ([...claimed].some((root) => root === dir || root.startsWith(`${dir}/`))) continue;
     let ageMs: number;
     try { ageMs = Date.now() - statSync(dir).mtimeMs; } catch { continue; }
-    if (ageMs < CLAUDE_RESUME_STALE_MS) continue;
+    if (ageMs < CLAUDE_RESUME_STALE_MS && !recordedStaging.has(dir)) continue;
     try {
       const outcome = await reconcileRoot(dir);
       if (outcome === "quarantined") { report.staging.quarantined++; quarantine(dir); continue; }
