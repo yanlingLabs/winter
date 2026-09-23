@@ -318,12 +318,15 @@ struct LibraryPluginConsentSheetHost: View {
 
     var body: some View {
         Color.clear
-            .sheet(item: $model.consentSheet) { sheet in
+            // Fix round 2 (I2): `onDismiss` is the single follow-up path for EVERY dismissal route
+            // (Cancel button, Esc, swipe) — see `PluginManagerView.swift`'s identical wiring and
+            // `PluginManagerModel.consentSheetDismissed()`'s own doc for why.
+            .sheet(item: $model.consentSheet, onDismiss: { Task { await model.consentSheetDismissed() } }) { sheet in
                 ConsentSheet(
                     state: sheet,
                     busy: model.busySpec == sheet.spec,
                     onConfirm: { Task { await model.confirmConsent() } },
-                    onCancel: { Task { await model.cancelConsent() } }
+                    onCancel: { model.consentSheet = nil }
                 )
             }
     }

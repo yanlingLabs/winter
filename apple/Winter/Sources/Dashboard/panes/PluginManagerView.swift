@@ -208,9 +208,28 @@ final class PluginManagerModel: ObservableObject {
     @Published var noticeText: String?
     /// The live consent sheet, seeded from EITHER trigger — an `enable(_:)` whose row's extras
     /// still have a pending class, or a successful `installFromFolder(_:)`. `PluginManagerView`
-    /// presents this via `.sheet(item:)`; setting it to `nil` (confirm/cancel, or a swipe-to-
-    /// dismiss) closes the sheet.
-    @Published var consentSheet: ConsentSheetState?
+    /// presents this via `.sheet(item:onDismiss:)`; setting it to `nil` (a click on the sheet's own
+    /// Cancel button, Esc, or a swipe-down) closes it and — via `onDismiss`, wired once at the
+    /// `.sheet` call site — always runs `consentSheetDismissed()` (fix round 2, I2), EXCEPT when
+    /// `confirmConsent()`'s own success path nils this (see `dismissHandledByConfirm` below).
+    @Published var consentSheet: ConsentSheetState? {
+        didSet {
+            // Fix round 2 (I2): keeps `lastConsentSheet` in sync with every non-nil assignment —
+            // by the time SwiftUI calls `onDismiss` for ANY dismissal route, this property has
+            // ALREADY gone back to `nil` (Apple's own documented ordering; reading `consentSheet`
+            // itself inside `onDismiss` is unsafe by design), so `consentSheetDismissed()` needs
+            // this shadow copy to know which sheet just closed and what to do about it.
+            if let consentSheet { lastConsentSheet = consentSheet }
+        }
+    }
+    /// See `consentSheet`'s own `didSet`. Cleared by `consentSheetDismissed()` once consumed.
+    private var lastConsentSheet: ConsentSheetState?
+    /// Set by `confirmConsent()`'s OWN success path, immediately before it nils `consentSheet` —
+    /// tells `consentSheetDismissed()` that THIS particular dismissal was a successful confirm,
+    /// already fully handled, and needs no follow-up. Every OTHER dismissal route (the sheet's
+    /// Cancel button, Esc, a swipe-down) leaves this `false`, so they all converge on the same
+    /// "treat as declined" behavior in `consentSheetDismissed()`.
+    private var dismissHandledByConfirm = false
     /// The plugin spec an in-flight action is currently running against — lets the view disable
     /// that row's buttons mid-action, same `revokingPath`-style single-flight posture as
     /// `TrustPane`.
@@ -494,6 +513,11 @@ final class PluginManagerModel: ObservableObject {
                 actionError = "\(sheet.pluginId) is no longer installed — couldn't record consent"
             } else {
                 _ = try await client.pluginEnable(spec: spec, scope: sheet.scope)
+                // Fix round 2 (I2): flagged BEFORE nil'ing — `onDismiss` (which this nil triggers,
+                // same as every other dismissal route) checks this first and no-ops for exactly
+                // this one case, so a successful confirm is never followed by the "declined"
+                // disable-and-notice `consentSheetDismissed()` runs for every other dismissal.
+                dismissHandledByConfirm = true
                 consentSheet = nil
             }
         } catch {
@@ -503,16 +527,28 @@ final class PluginManagerModel: ObservableObject {
         if let actionError { errorText = actionError }
     }
 
-    /// Dismisses without ever calling `pluginSetConsent`/`pluginEnable`. Fix round 1 (I2): when
-    /// the sheet was raised by an INSTALL (`installFromFolder`'s own trigger, `openedByInstall`),
-    /// the plugin landed ENABLED already (Contract B's `installPlugin`) — its skills, hooks and
-    /// MCP servers would otherwise keep loading even though the user just declined the Tier-2
-    /// process's consent. Cancelling there turns the plugin back off and leaves one explanatory
-    /// line. A sheet raised by an ordinary `enable(_:)` on an already-installed, already-disabled
-    /// row needs no such follow-up — cancelling it just leaves that row exactly as it was.
-    func cancelConsent() async {
-        guard let sheet = consentSheet else { return }
-        consentSheet = nil
+    /// Fix round 2 (I2): the SINGLE exit point for every sheet dismissal EXCEPT a successful
+    /// confirm — wired to `.sheet(item:onDismiss:)`'s `onDismiss`, which SwiftUI calls whenever
+    /// `consentSheet` goes back to `nil`, however that happened: a click on the sheet's own Cancel
+    /// button, Esc, or a swipe-down all converge here identically, because all three are, to
+    /// SwiftUI, the same "the item became nil" transition — there is no way (and no need) to tell
+    /// them apart. Only `confirmConsent()`'s own success path is different, and it opts out by
+    /// setting `dismissHandledByConfirm` before it nils `consentSheet`.
+    ///
+    /// When the sheet was raised by an INSTALL (`installFromFolder`'s own trigger,
+    /// `openedByInstall`), the plugin landed ENABLED already (Contract B's `installPlugin`) — its
+    /// skills, hooks and MCP servers would otherwise keep loading even though the user just
+    /// declined the Tier-2 process's consent, by whichever route. Disables it and leaves one
+    /// explanatory line. A sheet raised by an ordinary `enable(_:)` on an already-installed,
+    /// already-disabled row needs no such follow-up — dismissing it just leaves that row exactly
+    /// as it was.
+    func consentSheetDismissed() async {
+        guard !dismissHandledByConfirm else {
+            dismissHandledByConfirm = false
+            return
+        }
+        guard let sheet = lastConsentSheet else { return }
+        lastConsentSheet = nil
         guard sheet.openedByInstall else { return }
         busySpec = sheet.spec
         defer { busySpec = nil }
@@ -581,17 +617,19 @@ struct PluginManagerView: View {
         }
         // The GUI consent sheet — presented from BOTH triggers `model.consentSheet` can be set
         // from (`enable(_:)`'s pending-consent path, or a successful `installFromFolder(_:)`).
-        // Fix round 1 (I2): `onCancel` now runs an async follow-up (a cancelled INSTALL-triggered
-        // sheet disables the plugin — see `cancelConsent()`'s own doc) — a swipe/Esc dismiss nils
-        // `model.consentSheet` through SwiftUI's own `.sheet(item:)` binding WITHOUT calling
-        // `onCancel` at all, so that path does NOT run the disable follow-up. Left as a known gap
-        // (not in this fix round's scope): only the Cancel button's explicit click is covered.
-        .sheet(item: $model.consentSheet) { sheet in
+        // Fix round 2 (I2): `onDismiss` is the ONE follow-up path now — SwiftUI calls it for EVERY
+        // dismissal (the sheet's own Cancel button, Esc, or a swipe-down all nil `consentSheet`
+        // the same way, whether `onCancel` below does it explicitly or SwiftUI does it directly),
+        // so `onCancel` itself does nothing beyond clearing the binding; the actual "was this an
+        // install, does it need disabling" logic lives ONCE, in `consentSheetDismissed()` — see
+        // that method's own doc for how it tells a successful confirm's own dismissal apart from
+        // every other route.
+        .sheet(item: $model.consentSheet, onDismiss: { Task { await model.consentSheetDismissed() } }) { sheet in
             ConsentSheet(
                 state: sheet,
                 busy: model.busySpec == sheet.spec,
                 onConfirm: { Task { await model.confirmConsent() } },
-                onCancel: { Task { await model.cancelConsent() } }
+                onCancel: { model.consentSheet = nil }
             )
         }
     }
