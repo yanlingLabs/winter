@@ -1,34 +1,144 @@
 import Foundation
 import WinterProtocol
 
-// MARK: - Plugin lifecycle result types (Phase 4d-ii Task 3)
+// MARK: - Plugin lifecycle types (WS-21, spec §5.2: `winter plugin` = `claude plugin`, Contract B)
 //
-// Wire results for the 5 lifecycle RPCs + shortcut.invoke/tile.action are typed unions that never
-// throw for an EXPECTED outcome (methods.ts: PluginsInstallResult/PluginEnableResult/
-// PluginDisableResult/PluginRemoveResult/PluginSetConsentResult/PluginPushResult — same discipline
-// as HardwareRequestResult). Mapped here to Swift enums rather than thrown errors, so a caller can
-// switch exhaustively on an expected business outcome instead of catching for it; `RpcError` is
-// reserved for genuine protocol misuse (malformed/unrecognized result shape), mirroring how the
-// rest of this file throws `RpcError(code: -3, ...)` only for "the server sent nonsense".
+// The pre-WS-21 5 lifecycle RPCs (`plugins.install`/`plugin.enable{name,consent?}`/
+// `plugin.disable{name}`/`plugin.remove{name}`) are RETIRED. `plugin.enable`/`plugin.disable` keep
+// their METHOD NAMES but take a new, incompatible params shape (`{spec, scope, cwd?}`); `plugin.list`
+// replaces `plugins.list`, `plugin.install` (a scoped `{spec, scope, cwd?}`, never a bare folder path
+// — see `directoryMarketplacePluginNames`/`PluginManagerModel.installFromFolder` for the
+// marketplace.add-then-install two-step a folder needs) replaces `plugins.install`, and
+// `plugin.uninstall` replaces `plugin.remove`.
+//
+// None of `plugin.install`/`plugin.uninstall`/`plugin.enable`/`plugin.disable`/`plugin.update` wire
+// results are typed unions any more (methods.ts: `PluginInstallResult`/`PluginUninstallResult`/
+// `PluginSetEnabledResult`/`PluginUpdateResult` are bare `{ok:true, ...}` objects) — an expected
+// refusal (unknown plugin/marketplace, an unwritable settings file, …) is now a thrown
+// `RpcFailure(INVALID_PARAMS, message)` (`throwPluginManagerFailure`, ipc/server.ts), which surfaces
+// here as an ordinary thrown `RpcError`; callers catch it exactly like any other RPC failure rather
+// than switching on a decoded outcome case. `plugin.setConsent`/`shortcut.invoke`/`tile.action` are
+// the survivors of the old typed-union discipline (their wire shapes are unchanged by WS-21) — see
+// `PluginLifecycleOutcome`/`PluginPushOutcome` below.
 
-/// `plugins.install {source, name?}` result (methods.ts `PluginsInstallResult`).
-public enum PluginsInstallOutcome: Equatable, Sendable {
-    case ok(name: String, requiredConsents: [String], hasMcp: Bool, consentBlock: [String])
-    case invalidSource
-    case alreadyInstalled(name: String)
+/// claude's plugin scopes (methods.ts `PluginScopeSchema`): which settings tier carries
+/// `enabledPlugins` — `user` = `sdk/settings.json`, `project` = `<root>/.winter/settings.json`,
+/// `local` = `<root>/.winter/settings.local.json`. `project`/`local` need a `cwd` the daemon can
+/// resolve a project root from; every call below refuses typed (INVALID_PARAMS) without one.
+public enum PluginScope: String, Equatable, Sendable {
+    case user, project, local
 }
 
-/// `plugin.enable {name, consent?}` result (methods.ts `PluginEnableResult`) — the two-step
-/// consent flow: no/false `consent` with outstanding required classes returns `.needsConsent`
-/// (no mutation); re-calling with `consent: true` grants + enables, returning `.ok(status:)`.
-public enum PluginEnableOutcome: Equatable, Sendable {
-    case ok(status: String)
-    case needsConsent(requiredConsents: [String], consentBlock: [String])
-    case unknownPlugin
+/// Contract B `InstalledPlugin` (methods.ts `InstalledPluginSchema`) — the result of
+/// `plugin.install`/`plugin.update`. `installPath` is absolute and stable; NOT a
+/// `<home>/plugins/<name>` convention (a plugin can install anywhere a directory marketplace names).
+public struct InstalledPlugin: Equatable, Sendable {
+    public let id: String
+    public let version: String?
+    public let installPath: String
+    public let scope: PluginScope
+
+    public init(id: String, version: String?, installPath: String, scope: PluginScope) {
+        self.id = id
+        self.version = version
+        self.installPath = installPath
+        self.scope = scope
+    }
 }
 
-/// Shared by `plugin.disable`/`plugin.remove`/`plugin.setConsent` — all three wire results are
-/// `{ok:true}` | `{code:"unknown_plugin"}` (methods.ts).
+/// Contract B `MarketplaceInfo` (methods.ts `MarketplaceInfoSchema`). A `directory` marketplace is
+/// read IN PLACE (F15) — `path` IS the source, so removing/moving it breaks every plugin installed
+/// from it.
+public struct MarketplaceInfo: Equatable, Sendable {
+    public let name: String
+    public let source: String
+    public let kind: String
+    public let path: String
+
+    public init(name: String, source: String, kind: String, path: String) {
+        self.name = name
+        self.source = source
+        self.kind = kind
+        self.path = path
+    }
+}
+
+/// `winter-plugin.json`'s `entry` (spec §5.1: "tier, permissions, contributes.{...} and entry") —
+/// what the daemon's `PluginSupervisor` spawns for a Tier-2 (`platform`) plugin.
+public struct PluginEntryInfo: Equatable, Sendable {
+    public let command: String
+    public let args: [String]
+
+    public init(command: String, args: [String]) {
+        self.command = command
+        self.args = args
+    }
+}
+
+/// The Winter-only extras a `winter-plugin.json` declares (spec §5.1/§5.4), carried on
+/// `plugin.list`'s per-row `extras` — absent entirely for a plugin with no `winter-plugin.json` (an
+/// ordinary claude plugin, spec F15: "a manifest is optional"). `requiredConsents`/`consented` are
+/// coarse classes (`"exec"`/`"tcc"`/`"hardware"`, `agent/plugins.ts`'s own `CONSENT_CLASSES`) — NOT
+/// one entry per individual tcc/hardware permission; `tccPermissions`/`hardwarePermissions` below
+/// carry the individual names for disclosure text.
+public struct PluginExtras: Equatable, Sendable {
+    public let tier: String // "capability" | "platform"
+    public let execPermission: Bool
+    public let tccPermissions: [String]
+    public let hardwarePermissions: [String]
+    public let requiredConsents: [String]
+    public let consented: [String]
+    public let entry: PluginEntryInfo?
+
+    public init(tier: String, execPermission: Bool, tccPermissions: [String], hardwarePermissions: [String],
+               requiredConsents: [String], consented: [String], entry: PluginEntryInfo?) {
+        self.tier = tier
+        self.execPermission = execPermission
+        self.tccPermissions = tccPermissions
+        self.hardwarePermissions = hardwarePermissions
+        self.requiredConsents = requiredConsents
+        self.consented = consented
+        self.entry = entry
+    }
+
+    /// Required classes not yet granted — what a consent sheet asks for and what
+    /// `pluginSetConsent(classes:)` should be called with on confirm. Empty when nothing is
+    /// outstanding (no extras, no required classes, or everything already consented).
+    public var pendingConsents: [String] { requiredConsents.filter { !consented.contains($0) } }
+    public var needsConsent: Bool { !pendingConsents.isEmpty }
+}
+
+/// One `plugin.list` row — Contract B's `PluginListing` (`id`/`installPath`/`scope`/`enabled`/
+/// `marketplace`/`version`) plus the optional `extras` object the daemon merges on from
+/// `winter-plugin.json` (WS-21). `spec` is the qualified `"<id>@<marketplace>"` claude/Contract B
+/// use to name an install everywhere else (`plugin.install`/`.uninstall`/`.enable`/`.disable`'s own
+/// `spec` param) — `id` ALONE is not unique (two plugins can share a bare name across marketplaces).
+public struct PluginListing: Equatable, Sendable {
+    public let id: String
+    public let installPath: String
+    public let scope: PluginScope
+    public let enabled: Bool
+    public let marketplace: String
+    public let version: String?
+    public let extras: PluginExtras?
+
+    public init(id: String, installPath: String, scope: PluginScope, enabled: Bool, marketplace: String,
+               version: String?, extras: PluginExtras?) {
+        self.id = id
+        self.installPath = installPath
+        self.scope = scope
+        self.enabled = enabled
+        self.marketplace = marketplace
+        self.version = version
+        self.extras = extras
+    }
+
+    public var spec: String { "\(id)@\(marketplace)" }
+}
+
+/// Shared by `plugin.setConsent` — the ONE pre-WS-21 plugin RPC whose wire shape survives unchanged
+/// (spec §5.4: "the extras keep their own consents"): `{ok:true}` | `{code:"unknown_plugin"}`
+/// (methods.ts `PluginSetConsentResult`).
 public enum PluginLifecycleOutcome: Equatable, Sendable {
     case ok
     case unknownPlugin
@@ -57,27 +167,11 @@ public struct PluginContribEntry: Equatable, Sendable {
     public let provider: [String: JSONValue]?
 }
 
-/// One entry of a plugin's `manifestHooks` (2026-09-18) — a manifest's `contributes.hooks` line,
-/// mirrored field-for-field: `{event, command, timeoutMs?}` (`agent/plugin-manifest.ts`).
-///
-/// `event` is the RAW wire string, never an enum. The daemon's own schema is a closed four-value
-/// zod enum today (`session-start` | `pre-tool` | `post-tool` | `turn-end`), but a client that
-/// hard-fails on a fifth value a newer daemon adds is worse than one that shows its raw name —
-/// the same permissive posture every other decode in this file takes.
-///
-/// `timeoutMs` absent means the daemon's own default applies, which is a DIFFERENT fact from
-/// `0`, so it decodes to `nil` rather than to a number.
-public struct PluginManifestHook: Equatable, Sendable {
-    public let event: String
-    public let command: String
-    public let timeoutMs: Int?
-
-    public init(event: String, command: String, timeoutMs: Int?) {
-        self.event = event
-        self.command = command
-        self.timeoutMs = timeoutMs
-    }
-}
+// WS-21: `PluginManifestHook`/`manifestHooks` retired here — a plugin's hooks are claude-native
+// `hooks/hooks.json` content now (spec §5.1/§5.3), loaded by both runtimes directly. The narrowed
+// `WinterPluginManifest` (`agent/plugin-manifest.ts`) no longer carries `contributes.hooks` at all,
+// so no daemon build will ever send this field again — see `LibraryHooksTab.swift`'s own header for
+// what the Library's Hooks tab shows in its place.
 
 // MARK: - working-directories T8: a session's ordered working-directory set
 
@@ -207,73 +301,152 @@ extension WinterClient {
         return .ok
     }
 
-    /// `plugins.install {source, name?}` (Phase 4d-ii Task 2) — copies a local directory into the
-    /// daemon's plugins root, installed DISABLED + UNCONSENTED; the `.ok` case's
-    /// `requiredConsents`/`consentBlock` drive a consent sheet before `pluginEnable(consent:true)`.
-    public func pluginsInstall(source: String, name: String? = nil) async throws -> PluginsInstallOutcome {
-        let r = try await request("plugins.install", params: obj([
-            "source": .string(source), "name": name.map { .string($0) },
-        ]))
-        if let code = r["code"]?.stringValue {
-            switch code {
-            case "invalid_source": return .invalidSource
-            case "already_installed":
-                guard let n = r["name"]?.stringValue else {
-                    throw RpcError(code: -3, message: "invalid result from server for plugins.install")
-                }
-                return .alreadyInstalled(name: n)
-            default:
-                throw RpcError(code: -3, message: "unknown code from server for plugins.install: \(code)")
-            }
+    private func decodePluginScope(_ raw: String?) -> PluginScope {
+        raw.flatMap(PluginScope.init(rawValue:)) ?? .user
+    }
+
+    private func decodeInstalledPlugin(_ p: JSONValue?, method: String) throws -> InstalledPlugin {
+        guard let p, let id = p["id"]?.stringValue, let installPath = p["installPath"]?.stringValue else {
+            throw RpcError(code: -3, message: "invalid result from server for \(method)")
         }
-        guard let n = r["name"]?.stringValue else {
-            throw RpcError(code: -3, message: "invalid result from server for plugins.install")
+        return InstalledPlugin(id: id, version: p["version"]?.stringValue, installPath: installPath,
+                               scope: decodePluginScope(p["scope"]?.stringValue))
+    }
+
+    private func decodeMarketplaceInfo(_ m: JSONValue?, method: String) throws -> MarketplaceInfo {
+        guard let m, let name = m["name"]?.stringValue, let source = m["source"]?.stringValue,
+              let kind = m["kind"]?.stringValue, let path = m["path"]?.stringValue else {
+            throw RpcError(code: -3, message: "invalid result from server for \(method)")
         }
-        return .ok(
-            name: n,
-            requiredConsents: (r["requiredConsents"]?.arrayValue ?? []).compactMap { $0.stringValue },
-            hasMcp: r["hasMcp"]?.boolValue ?? false,
-            consentBlock: (r["consentBlock"]?.arrayValue ?? []).compactMap { $0.stringValue }
+        return MarketplaceInfo(name: name, source: source, kind: kind, path: path)
+    }
+
+    private func decodePluginExtras(_ e: JSONValue?) -> PluginExtras? {
+        guard let e, let tier = e["tier"]?.stringValue else { return nil }
+        let permissions = e["permissions"]
+        var entry: PluginEntryInfo?
+        if let entryObj = e["entry"], let command = entryObj["command"]?.stringValue {
+            entry = PluginEntryInfo(command: command, args: (entryObj["args"]?.arrayValue ?? []).compactMap { $0.stringValue })
+        }
+        return PluginExtras(
+            tier: tier,
+            execPermission: permissions?["exec"]?.boolValue ?? false,
+            tccPermissions: (permissions?["tcc"]?.arrayValue ?? []).compactMap { $0.stringValue },
+            hardwarePermissions: (permissions?["hardware"]?.arrayValue ?? []).compactMap { $0.stringValue },
+            requiredConsents: (e["requiredConsents"]?.arrayValue ?? []).compactMap { $0.stringValue },
+            consented: (e["consented"]?.arrayValue ?? []).compactMap { $0.stringValue },
+            entry: entry
         )
     }
 
-    /// `plugin.enable {name, consent?}` (Phase 4d-ii Task 2) — see `PluginEnableOutcome`.
-    public func pluginEnable(name: String, consent: Bool? = nil) async throws -> PluginEnableOutcome {
-        let r = try await request("plugin.enable", params: obj([
-            "name": .string(name), "consent": consent.map { .bool($0) },
+    private func decodePluginListing(_ p: JSONValue) -> PluginListing? {
+        guard let id = p["id"]?.stringValue, let installPath = p["installPath"]?.stringValue,
+              let enabled = p["enabled"]?.boolValue, let marketplace = p["marketplace"]?.stringValue else { return nil }
+        return PluginListing(
+            id: id, installPath: installPath, scope: decodePluginScope(p["scope"]?.stringValue),
+            enabled: enabled, marketplace: marketplace, version: p["version"]?.stringValue,
+            extras: decodePluginExtras(p["extras"])
+        )
+    }
+
+    /// `plugin.list {cwd?}` (WS-21) — every plugin `installed_plugins.json` records, `enabled`
+    /// resolved per its OWN scope (`user` always; `project`/`local` only when `cwd` is given and
+    /// resolves to a project root), with the daemon's `winter-plugin.json` read merged onto
+    /// `extras` when one exists. Replaces the retired `plugins.list`.
+    public func pluginList(cwd: String? = nil) async throws -> [PluginListing] {
+        let r = try await request("plugin.list", params: obj(["cwd": cwd.map { .string($0) }]))
+        return (r["plugins"]?.arrayValue ?? []).compactMap { decodePluginListing($0) }
+    }
+
+    /// `plugin.install {spec, scope, cwd?}` (WS-21) — `spec` is `"<plugin>[@<marketplace>]"`
+    /// (claude's default marketplace resolution when `@marketplace` is omitted and there is only
+    /// one candidate) and `scope` defaults to claude's own default, `user`. A bare LOCAL FOLDER is
+    /// NOT a valid `spec` — the daemon has no "read this marketplace before it's registered" RPC;
+    /// `installFromFolder`/`directoryMarketplacePluginNames` (`PluginManagerView.swift`) do
+    /// `pluginMarketplaceAdd` then this, exactly as `winter plugin install <folder>` does locally.
+    /// Throws (never a typed refusal) for an unknown/ambiguous spec — see this section's header.
+    public func pluginInstall(spec: String, scope: PluginScope = .user, cwd: String? = nil) async throws -> InstalledPlugin {
+        let r = try await request("plugin.install", params: obj([
+            "spec": .string(spec), "scope": .string(scope.rawValue), "cwd": cwd.map { .string($0) },
         ]))
-        if let code = r["code"]?.stringValue {
-            switch code {
-            case "needs_consent":
-                return .needsConsent(
-                    requiredConsents: (r["requiredConsents"]?.arrayValue ?? []).compactMap { $0.stringValue },
-                    consentBlock: (r["consentBlock"]?.arrayValue ?? []).compactMap { $0.stringValue }
-                )
-            case "unknown_plugin": return .unknownPlugin
-            default: throw RpcError(code: -3, message: "unknown code from server for plugin.enable: \(code)")
-            }
+        return try decodeInstalledPlugin(r["plugin"], method: "plugin.install")
+    }
+
+    /// `plugin.uninstall {spec, scope, cwd?}` (WS-21, Contract B's own name — replaces
+    /// `plugin.remove`) — unregisters the install record + `enabledPlugins` entry ONLY; a directory
+    /// marketplace is read in place (F15/spec §5.2), so this never deletes anything on disk.
+    public func pluginUninstall(spec: String, scope: PluginScope = .user, cwd: String? = nil) async throws -> (spec: String, scope: PluginScope) {
+        let r = try await request("plugin.uninstall", params: obj([
+            "spec": .string(spec), "scope": .string(scope.rawValue), "cwd": cwd.map { .string($0) },
+        ]))
+        guard let spec = r["spec"]?.stringValue, let scope = r["scope"]?.stringValue.flatMap(PluginScope.init(rawValue:)) else {
+            throw RpcError(code: -3, message: "invalid result from server for plugin.uninstall")
         }
-        guard let status = r["status"]?.stringValue else {
-            throw RpcError(code: -3, message: "invalid result from server for plugin.enable")
+        return (spec, scope)
+    }
+
+    private func decodeSetEnabledResult(_ r: JSONValue, method: String) throws -> (spec: String, scope: PluginScope, enabled: Bool) {
+        guard let spec = r["spec"]?.stringValue, let scope = r["scope"]?.stringValue.flatMap(PluginScope.init(rawValue:)),
+              let enabled = r["enabled"]?.boolValue else {
+            throw RpcError(code: -3, message: "invalid result from server for \(method)")
         }
-        return .ok(status: status)
+        return (spec, scope, enabled)
     }
 
-    /// `plugin.disable {name}` (Phase 4d-ii Task 2) — fresh-consent semantics: hot-stops any
-    /// running process AND strips the recorded consent (re-enabling requires consenting again).
-    public func pluginDisable(name: String) async throws -> PluginLifecycleOutcome {
-        let r = try await request("plugin.disable", params: obj(["name": .string(name)]))
-        return try decodeLifecycleOutcome(r, method: "plugin.disable")
+    /// `plugin.enable {spec, scope, cwd?}` (WS-21) — install+enable IS the consent for a plugin's
+    /// claude-native content (skills/`.mcp.json`/`hooks/hooks.json`, spec §5.4): there is no more
+    /// two-step `consent:true` retry. A Winter-only Tier-2 extra still needs `pluginSetConsent`
+    /// called BEFORE this — the daemon's hot-spawn (`hotApplyStart`) runs INSIDE this call's own
+    /// handler and reads consent synchronously, so calling `pluginSetConsent` after an `enable`
+    /// that already ran leaves the process unspawned until another `enable`/`plugin.restart`.
+    public func pluginEnable(spec: String, scope: PluginScope = .user, cwd: String? = nil) async throws -> (spec: String, scope: PluginScope, enabled: Bool) {
+        let r = try await request("plugin.enable", params: obj([
+            "spec": .string(spec), "scope": .string(scope.rawValue), "cwd": cwd.map { .string($0) },
+        ]))
+        return try decodeSetEnabledResult(r, method: "plugin.enable")
     }
 
-    /// `plugin.remove {name}` (Phase 4d-ii Task 2) — hot-stops, then strips settings/consent/dir.
-    public func pluginRemove(name: String) async throws -> PluginLifecycleOutcome {
-        let r = try await request("plugin.remove", params: obj(["name": .string(name)]))
-        return try decodeLifecycleOutcome(r, method: "plugin.remove")
+    /// `plugin.disable {spec, scope, cwd?}` (WS-21) — hot-stops any running Tier-2 process; consent
+    /// is orthogonal now (spec §5.4) and is NOT stripped by disabling.
+    public func pluginDisable(spec: String, scope: PluginScope = .user, cwd: String? = nil) async throws -> (spec: String, scope: PluginScope, enabled: Bool) {
+        let r = try await request("plugin.disable", params: obj([
+            "spec": .string(spec), "scope": .string(scope.rawValue), "cwd": cwd.map { .string($0) },
+        ]))
+        return try decodeSetEnabledResult(r, method: "plugin.disable")
     }
 
-    /// `plugin.setConsent {name, classes}` (Phase 4d-ii Task 2) — records consent WITHOUT
-    /// enabling; the common path is `pluginEnable(consent:true)` instead.
+    /// `plugin.update {spec}` (WS-21) — no scope: an install is updated in place, wherever it is.
+    public func pluginUpdate(spec: String) async throws -> InstalledPlugin {
+        let r = try await request("plugin.update", params: obj(["spec": .string(spec)]))
+        return try decodeInstalledPlugin(r["plugin"], method: "plugin.update")
+    }
+
+    /// `plugin.marketplace.add {source}` (WS-21) — `source` is a local directory path in this
+    /// build (no network; git/github/url sources throw `PluginManagerError`, surfaced as a thrown
+    /// `RpcError` here).
+    public func pluginMarketplaceAdd(source: String) async throws -> MarketplaceInfo {
+        let r = try await request("plugin.marketplace.add", params: obj(["source": .string(source)]))
+        return try decodeMarketplaceInfo(r["marketplace"], method: "plugin.marketplace.add")
+    }
+
+    public func pluginMarketplaceRemove(name: String) async throws {
+        _ = try await request("plugin.marketplace.remove", params: obj(["name": .string(name)]))
+    }
+
+    public func pluginMarketplaceList() async throws -> [MarketplaceInfo] {
+        let r = try await request("plugin.marketplace.list", params: .object([:]))
+        return (r["marketplaces"]?.arrayValue ?? []).compactMap { try? decodeMarketplaceInfo($0, method: "plugin.marketplace.list") }
+    }
+
+    /// `plugin.marketplace.update {name?}` — every known marketplace when `name` is omitted.
+    public func pluginMarketplaceUpdate(name: String? = nil) async throws {
+        _ = try await request("plugin.marketplace.update", params: obj(["name": name.map { .string($0) }]))
+    }
+
+    /// `plugin.setConsent {name, classes}` (unchanged by WS-21, spec §5.4) — `name` is the BARE
+    /// plugin id (not the qualified spec; the daemon resolves the spec itself via `livePlugins()`).
+    /// Records consent WITHOUT enabling — call `pluginEnable` AFTER this for a Tier-2 plugin so its
+    /// hot-spawn sees consent already granted (see `pluginEnable`'s own doc).
     public func pluginSetConsent(name: String, classes: [String]) async throws -> PluginLifecycleOutcome {
         let r = try await request("plugin.setConsent", params: obj([
             "name": .string(name), "classes": .array(classes.map { .string($0) }),
@@ -777,65 +950,10 @@ extension WinterClient {
         }
     }
 
-    /// `plugins.list` — extended (Phase 4d-ii Task 3) to decode `tier`/`requiredConsents`/
-    /// `consented`/`legacy`/`status` (methods.ts `PluginInfoSchema`), fields the wire has carried
-    /// since Phase 4a Task 3 / 4d-i Task 4 but this wrapper previously dropped on the floor. All
-    /// optional on the wire (older-shaped fixtures/servers) — `tier`/`status` decode to `nil`,
-    /// `requiredConsents`/`consented` decode to `[]`, `legacy` defaults to `false`, same
-    /// permissive-decode precedent as the original 5 fields above.
-    ///
-    /// Phase 4d-iii Task 2: `version` (also `PluginInfoSchema`, always optional on the wire — a
-    /// manifest need not declare one) added for the Dashboard's PluginManagerView row display.
-    /// Appended at the END of the tuple (not interleaved) so this stays purely additive — every
-    /// existing label-based access (`.name`, `.tier`, etc.) is unaffected by a tuple's field
-    /// POSITION, only unlabeled positional destructuring would break, and none exists in this repo
-    /// (grepped before adding).
-    /// 2026-09-18: `manifestHooks` (the plugin's declared `contributes.hooks`, in MANIFEST ORDER)
-    /// added, appended at the END for the same additive reason `version` was.
-    ///
-    /// **`nil` and `[]` are different answers and must never be collapsed.** The wire OMITS the
-    /// key for a plugin that declares no hook, and an older daemon omits it for every plugin
-    /// because its schema has no such field — so `nil` means "not told" and `[]` would mean "told:
-    /// none". Only the caller, looking across ALL rows, can tell those apart (if any row carries
-    /// the key, the daemon has the field), which is exactly why this decodes to an OPTIONAL and
-    /// never defaults to empty the way `skills`/`requiredConsents` do.
-    ///
-    /// Order is the wire's order, unregrouped: two hooks on the same event are two entries, and a
-    /// duplicate `(event, command)` pair is a manifest the daemon itself accepts — deduping here
-    /// would hide a real, running second hook.
-    public func pluginsList() async throws -> [(
-        name: String, skills: [String], hasMcp: Bool, mcpEnabled: Bool, disabled: Bool,
-        tier: String?, requiredConsents: [String], consented: [String], legacy: Bool, status: String?,
-        version: String?, manifestHooks: [PluginManifestHook]?
-    )] {
-        let r = try await request("plugins.list", params: .object([:]))
-        return (r["plugins"]?.arrayValue ?? []).compactMap { p in
-            guard let n = p["name"]?.stringValue else { return nil }
-            return (
-                n,
-                (p["skills"]?.arrayValue ?? []).compactMap { $0.stringValue },
-                p["hasMcp"]?.boolValue ?? false,
-                p["mcpEnabled"]?.boolValue ?? false,
-                p["disabled"]?.boolValue ?? false,
-                p["tier"]?.stringValue,
-                (p["requiredConsents"]?.arrayValue ?? []).compactMap { $0.stringValue },
-                (p["consented"]?.arrayValue ?? []).compactMap { $0.stringValue },
-                p["legacy"]?.boolValue ?? false,
-                p["status"]?.stringValue,
-                p["version"]?.stringValue,
-                p["manifestHooks"]?.arrayValue.map { hooks in
-                    // A malformed ENTRY (no event/command) is dropped; the ARRAY's presence still
-                    // stands, so the caller keeps reading "this daemon reports hooks".
-                    hooks.compactMap { h -> PluginManifestHook? in
-                        guard let event = h["event"]?.stringValue,
-                              let command = h["command"]?.stringValue else { return nil }
-                        return PluginManifestHook(event: event, command: command,
-                                                  timeoutMs: h["timeoutMs"]?.intValue)
-                    }
-                }
-            )
-        }
-    }
+    // WS-21: the old `plugins.list()` wrapper (Contract A `PluginInfoSchema`'s
+    // name/skills/hasMcp/mcpEnabled/disabled/tier/requiredConsents/consented/legacy/status/version/
+    // manifestHooks tuple) is retired along with the `plugins.list` RPC itself — see `pluginList(
+    // cwd:)`/`PluginListing` above, which replaces it over the new `plugin.list` RPC.
 
     // MARK: - Peripheral lease (provider side) + dashboard reads (Phase 2f)
 

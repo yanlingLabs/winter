@@ -2,119 +2,118 @@ import XCTest
 import WinterKit
 @testable import Winter
 
-/// Task 3 (4d-iii): `ConsentSheetState` — the PURE state machine backing the plugin install/enable
-/// consent sheet. No `WinterClient`, no SwiftUI — same "pure model, table-tested directly" posture
-/// as `PluginManagerModelTests`' coverage of `pluginRowDisplay`.
+/// WS-21 rewrite: `ConsentSheetState` — the PURE state machine backing the plugin install/enable
+/// consent sheet, now seeded from a `plugin.list` row's `PluginExtras` rather than a wire outcome's
+/// `consentBlock` string array. No `WinterClient`, no SwiftUI — same "pure model, table-tested
+/// directly" posture as `PluginManagerModelTests`' coverage of `pluginRowDisplay`.
 final class ConsentSheetStateTests: XCTestCase {
-    /// Deliberately odd content (empty line, leading/trailing whitespace, a long line) — the point
-    /// of these tests is that `ConsentSheetState` never reformats/truncates/reorders this, so the
-    /// fixture needs shapes a naive "trim + wrap" implementation would corrupt.
-    private let sampleBlock = [
-        "plugin demo requests:",
-        "  exec: mcp: node ./server.js --port 4000",
-        "  tcc: will request macOS permission: microphone",
-    ]
-
-    // MARK: - Construction from `plugin.enable`'s `.needsConsent(...)`
-
-    func testConstructsFromNeedsConsentOutcome() {
-        let outcome = PluginEnableOutcome.needsConsent(requiredConsents: ["exec", "tcc"], consentBlock: sampleBlock)
-        let state = ConsentSheetState(pluginName: "demo", needsConsent: outcome)
-        XCTAssertNotNil(state)
-        XCTAssertEqual(state?.pluginName, "demo")
-        XCTAssertEqual(state?.requiredConsents, ["exec", "tcc"])
-        XCTAssertEqual(state?.consentBlock, sampleBlock)
-        XCTAssertEqual(state?.decision, .pending)
+    private func extras(
+        tier: String = "platform",
+        exec: Bool = true,
+        tcc: [String] = ["microphone"],
+        hardware: [String] = [],
+        required: [String] = ["exec", "tcc"],
+        consented: [String] = []
+    ) -> PluginExtras {
+        PluginExtras(tier: tier, execPermission: exec, tccPermissions: tcc, hardwarePermissions: hardware,
+                    requiredConsents: required, consented: consented,
+                    entry: PluginEntryInfo(command: "node", args: ["./server.js", "--port", "4000"]))
     }
 
-    func testNilFromNonNeedsConsentEnableOutcomes() {
-        XCTAssertNil(ConsentSheetState(pluginName: "demo", needsConsent: .ok(status: "running")))
-        XCTAssertNil(ConsentSheetState(pluginName: "demo", needsConsent: .unknownPlugin))
+    // MARK: - Construction
+
+    func testConstructsWithPluginIdSpecScopeAndExtras() {
+        let e = extras()
+        let state = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user, extras: e)
+        XCTAssertEqual(state.pluginId, "demo")
+        XCTAssertEqual(state.spec, "demo@winter-examples")
+        XCTAssertEqual(state.scope, .user)
+        XCTAssertEqual(state.extras, e)
+        XCTAssertEqual(state.decision, .pending)
     }
 
-    // MARK: - Construction from `plugins.install`'s `.ok(...)`
-
-    func testConstructsFromInstallOkOutcome() {
-        let outcome = PluginsInstallOutcome.ok(name: "demo", requiredConsents: ["exec"], hasMcp: true, consentBlock: sampleBlock)
-        let state = ConsentSheetState(installOutcome: outcome)
-        XCTAssertNotNil(state)
-        XCTAssertEqual(state?.pluginName, "demo")
-        XCTAssertEqual(state?.requiredConsents, ["exec"])
-        XCTAssertEqual(state?.consentBlock, sampleBlock)
-        XCTAssertEqual(state?.decision, .pending)
-    }
-
-    /// Even a plugin needing zero consent classes still round-trips into a state (the header-only
-    /// `consentBlock` `buildConsentBlock` produces for that case) — `install` always shows the
-    /// sheet, since installs always land disabled server-side regardless of consent needs.
-    func testConstructsFromInstallOkOutcomeWithNoRequiredConsents() {
-        let outcome = PluginsInstallOutcome.ok(name: "no-consent-plugin", requiredConsents: [], hasMcp: false, consentBlock: ["plugin no-consent-plugin requests:"])
-        let state = ConsentSheetState(installOutcome: outcome)
-        XCTAssertNotNil(state)
-        XCTAssertEqual(state?.requiredConsents, [])
-        XCTAssertEqual(state?.consentBlock, ["plugin no-consent-plugin requests:"])
-    }
-
-    func testNilFromNonOkInstallOutcomes() {
-        XCTAssertNil(ConsentSheetState(installOutcome: .invalidSource))
-        XCTAssertNil(ConsentSheetState(installOutcome: .alreadyInstalled(name: "demo")))
-    }
-
-    // MARK: - Disclosure lines carried VERBATIM — no reformatting/truncation/reordering.
-
-    func testConsentBlockCarriedVerbatim() {
-        let odd = [
-            "",
-            "  leading and trailing whitespace preserved  ",
-            "a very very very long exec line that must not be truncated, wrapped, or summarized in any way whatsoever no matter how long it runs on for",
-        ]
-        let state = ConsentSheetState(pluginName: "demo", consentBlock: odd, requiredConsents: ["exec"])
-        XCTAssertEqual(state.consentBlock.count, odd.count)
-        for (got, want) in zip(state.consentBlock, odd) {
-            XCTAssertEqual(got, want)
-        }
+    func testPendingConsentsIsExtrasOwnPendingConsents() {
+        let e = extras(required: ["exec", "tcc", "hardware"], consented: ["exec"])
+        let state = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user, extras: e)
+        XCTAssertEqual(state.pendingConsents, ["tcc", "hardware"])
     }
 
     // MARK: - `confirm()`/`cancel()` state transitions
 
     func testStartsPending() {
-        let state = ConsentSheetState(pluginName: "demo", consentBlock: sampleBlock, requiredConsents: ["exec"])
+        let state = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user, extras: extras())
         XCTAssertEqual(state.decision, .pending)
     }
 
-    /// `confirm()` maps to "call `pluginEnable(name:consent:true)`" — this type only records the
-    /// intent; `PluginManagerModel.confirmConsent()` is what actually performs the call.
+    /// `confirm()` maps to "call `pluginSetConsent` then `pluginEnable`" — this type only records
+    /// the intent; `PluginManagerModel.confirmConsent()` is what actually performs the calls.
     func testConfirmTransitionsToConfirmed() {
-        var state = ConsentSheetState(pluginName: "demo", consentBlock: sampleBlock, requiredConsents: ["exec"])
+        var state = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user, extras: extras())
         state.confirm()
         XCTAssertEqual(state.decision, .confirmed)
     }
 
-    /// `cancel()` dismisses without enabling — a distinct terminal state from `.confirmed`.
+    /// `cancel()` dismisses without granting consent or enabling — a distinct terminal state from
+    /// `.confirmed`.
     func testCancelTransitionsToCancelled() {
-        var state = ConsentSheetState(pluginName: "demo", consentBlock: sampleBlock, requiredConsents: ["exec"])
+        var state = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user, extras: extras())
         state.cancel()
         XCTAssertEqual(state.decision, .cancelled)
     }
 
-    func testIdentifiableIdIsThePluginName() {
-        let state = ConsentSheetState(pluginName: "demo", consentBlock: sampleBlock, requiredConsents: [])
-        XCTAssertEqual(state.id, "demo")
+    func testIdentifiableIdIsTheQualifiedSpec() {
+        let state = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user, extras: extras())
+        XCTAssertEqual(state.id, "demo@winter-examples")
     }
 }
 
 // -----------------------------------------------------------------------------------------------
-// `locatePluginRoot` — Task 3's real-filesystem (not `WinterClient`) install helper. Directly
-// testable against a real temp directory rather than mocked (same posture as `CliLauncher`'s own
-// `wrapperInstallPath`/`ensureWrapper` tests elsewhere in this target).
+// `pluginConsentDisclosureLines` — the pure daemon-data → disclosure-lines mapping `ConsentSheet`
+// renders verbatim (`ConsentSheet.swift`). Sourced from `PluginExtras`' own fields (the daemon's
+// `winter-plugin.json` read), never fabricated or summarized — each declared permission gets its
+// own line.
 // -----------------------------------------------------------------------------------------------
 
-final class LocatePluginRootTests: XCTestCase {
+final class PluginConsentDisclosureLinesTests: XCTestCase {
+    func testListsTheEntryCommandWhenExecIsRequested() {
+        let e = PluginExtras(tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
+                             requiredConsents: ["exec"], consented: [],
+                             entry: PluginEntryInfo(command: "node", args: ["server.js", "--port", "4000"]))
+        let lines = pluginConsentDisclosureLines(pluginId: "demo", extras: e)
+        XCTAssertTrue(lines.contains("- run its own background process: node server.js --port 4000"))
+    }
+
+    func testListsEachTccAndHardwarePermissionOnItsOwnLine() {
+        let e = PluginExtras(tier: "platform", execPermission: false, tccPermissions: ["microphone", "camera"],
+                             hardwarePermissions: ["battery"], requiredConsents: ["tcc", "hardware"],
+                             consented: [], entry: nil)
+        let lines = pluginConsentDisclosureLines(pluginId: "demo", extras: e)
+        XCTAssertTrue(lines.contains("- will request macOS permission: microphone"))
+        XCTAssertTrue(lines.contains("- will request macOS permission: camera"))
+        XCTAssertTrue(lines.contains("- hardware access via Winter.app's helper: battery"))
+    }
+
+    func testOmitsTheExecLineWhenExecPermissionIsFalse() {
+        let e = PluginExtras(tier: "capability", execPermission: false, tccPermissions: [], hardwarePermissions: [],
+                             requiredConsents: [], consented: [], entry: nil)
+        let lines = pluginConsentDisclosureLines(pluginId: "demo", extras: e)
+        XCTAssertFalse(lines.contains { $0.contains("background process") })
+    }
+}
+
+// -----------------------------------------------------------------------------------------------
+// `directoryMarketplacePluginNames` — Task 3's real-filesystem (not `WinterClient`) install
+// helper, WS-21 rewrite (replaces `locatePluginRoot`'s winter-plugin.json/plugin.json sniffing
+// with a directory marketplace's own `.claude-plugin/marketplace.json`). Directly testable against
+// a real temp directory rather than mocked.
+// -----------------------------------------------------------------------------------------------
+
+final class DirectoryMarketplacePluginNamesTests: XCTestCase {
     private var tempDir: URL!
 
     override func setUpWithError() throws {
         tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("winter-locate-root-test-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("winter-marketplace-test-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
     }
 
@@ -122,109 +121,47 @@ final class LocatePluginRootTests: XCTestCase {
         try? FileManager.default.removeItem(at: tempDir)
     }
 
-    func testFindsManifestAtTopLevel() {
-        FileManager.default.createFile(
-            atPath: tempDir.appendingPathComponent("winter-plugin.json").path, contents: Data("{}".utf8)
-        )
-        XCTAssertEqual(locatePluginRoot(in: tempDir)?.standardizedFileURL.path, tempDir.standardizedFileURL.path)
+    private func writeManifest(_ json: String) throws {
+        let dir = tempDir.appendingPathComponent(".claude-plugin", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data(json.utf8).write(to: dir.appendingPathComponent("marketplace.json"))
     }
 
-    func testFindsLegacyManifestNameAtTopLevel() {
-        FileManager.default.createFile(
-            atPath: tempDir.appendingPathComponent("plugin.json").path, contents: Data("{}".utf8)
-        )
-        XCTAssertEqual(locatePluginRoot(in: tempDir)?.standardizedFileURL.path, tempDir.standardizedFileURL.path)
+    func testReadsPluginNamesFromTheManifest() throws {
+        try writeManifest(#"{"name":"winter-examples","plugins":[{"name":"battery-limiter","source":"./battery-limiter"},{"name":"sample-echo","source":"./sample-echo"}]}"#)
+        XCTAssertEqual(try directoryMarketplacePluginNames(at: tempDir), ["battery-limiter", "sample-echo"])
     }
 
-    func testFindsManifestInSingleTopLevelSubdirectory() throws {
-        let sub = tempDir.appendingPathComponent("demo-plugin", isDirectory: true)
-        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
-        FileManager.default.createFile(atPath: sub.appendingPathComponent("plugin.json").path, contents: Data("{}".utf8))
-
-        XCTAssertEqual(locatePluginRoot(in: tempDir)?.standardizedFileURL.path, sub.standardizedFileURL.path)
+    func testSinglePluginManifestReadsOneName() throws {
+        try writeManifest(#"{"name":"demo-mkt","plugins":[{"name":"demo","source":"."}]}"#)
+        XCTAssertEqual(try directoryMarketplacePluginNames(at: tempDir), ["demo"])
     }
 
-    func testNilWhenNoManifestAnywhere() {
-        XCTAssertNil(locatePluginRoot(in: tempDir))
-    }
-
-    func testNilWhenMultipleTopLevelSubdirectoriesAndNoTopLevelManifest() throws {
-        for name in ["a", "b"] {
-            try FileManager.default.createDirectory(
-                at: tempDir.appendingPathComponent(name, isDirectory: true), withIntermediateDirectories: true
-            )
+    func testThrowsWhenNoManifestExists() {
+        XCTAssertThrowsError(try directoryMarketplacePluginNames(at: tempDir)) { error in
+            XCTAssertTrue((error as? PluginFolderReadError)?.message.contains("no marketplace manifest there") ?? false)
         }
-        XCTAssertNil(locatePluginRoot(in: tempDir))
     }
 
-    // Fix wave 2: Finder's "Compress" zips a folder as `{PluginDir/..., __MACOSX/...}` — the
-    // most common way a Mac user makes a zip. `__MACOSX` and dot-prefixed entries (`.DS_Store`,
-    // `.git`) must not count as a second "top-level subdirectory" candidate.
-
-    func testFindsManifestInSingleSubdirectoryAlongsideMACOSXDir() throws {
-        let sub = tempDir.appendingPathComponent("PluginDir", isDirectory: true)
-        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
-        FileManager.default.createFile(
-            atPath: sub.appendingPathComponent("winter-plugin.json").path, contents: Data("{}".utf8)
-        )
-
-        let macosx = tempDir.appendingPathComponent("__MACOSX", isDirectory: true)
-        try FileManager.default.createDirectory(at: macosx, withIntermediateDirectories: true)
-        FileManager.default.createFile(
-            atPath: macosx.appendingPathComponent("._PluginDir").path, contents: Data()
-        )
-
-        XCTAssertEqual(locatePluginRoot(in: tempDir)?.standardizedFileURL.path, sub.standardizedFileURL.path)
+    func testThrowsOnMalformedManifest() throws {
+        let dir = tempDir.appendingPathComponent(".claude-plugin", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data("not json".utf8).write(to: dir.appendingPathComponent("marketplace.json"))
+        XCTAssertThrowsError(try directoryMarketplacePluginNames(at: tempDir))
     }
 
-    func testFindsManifestInSingleSubdirectoryAlongsideDotFile() throws {
-        let sub = tempDir.appendingPathComponent("PluginDir", isDirectory: true)
-        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
-        FileManager.default.createFile(
-            atPath: sub.appendingPathComponent("plugin.json").path, contents: Data("{}".utf8)
-        )
-
-        FileManager.default.createFile(
-            atPath: tempDir.appendingPathComponent(".DS_Store").path, contents: Data()
-        )
-
-        XCTAssertEqual(locatePluginRoot(in: tempDir)?.standardizedFileURL.path, sub.standardizedFileURL.path)
-    }
-
-    func testNilWhenOnlyMACOSXDirAndNoRealPluginDir() throws {
-        let macosx = tempDir.appendingPathComponent("__MACOSX", isDirectory: true)
-        try FileManager.default.createDirectory(at: macosx, withIntermediateDirectories: true)
-        FileManager.default.createFile(
-            atPath: macosx.appendingPathComponent("._something").path, contents: Data()
-        )
-
-        XCTAssertNil(locatePluginRoot(in: tempDir))
-    }
-
-    // Fix wave (Task 2 review, symlink guard): `fileExists` follows symlinks, so a manifest name
-    // that's actually a symlink (pointing anywhere on disk) would otherwise be accepted. The
-    // symlink's TARGET is a real file — `fileExists` on the manifest path is `true` either way, so
-    // this only exercises the guard (vs. a dangling symlink, where `fileExists` alone already
-    // returns `false` and the guard is never reached).
-    func testNilWhenManifestIsASymlink() throws {
-        let realFile = tempDir.appendingPathComponent("real-manifest.json")
-        FileManager.default.createFile(atPath: realFile.path, contents: Data("{}".utf8))
-        let manifestLink = tempDir.appendingPathComponent("winter-plugin.json")
-        try FileManager.default.createSymbolicLink(at: manifestLink, withDestinationURL: realFile)
-
-        XCTAssertNil(locatePluginRoot(in: tempDir))
+    func testDropsEntriesWithNoName() throws {
+        try writeManifest(#"{"name":"mkt","plugins":[{"source":"./a"},{"name":"b","source":"./b"}]}"#)
+        XCTAssertEqual(try directoryMarketplacePluginNames(at: tempDir), ["b"])
     }
 }
 
 // -----------------------------------------------------------------------------------------------
-// PluginManagerModel — the consent-sheet-driving methods (`enable`'s needsConsent path, `install`,
-// `confirmConsent`, `cancelConsent`). A SEPARATE `@MainActor` test class, same posture as
-// `PluginManagerModelAsyncTests` (`PluginManagerModelTests.swift`) — drives a real (actor)
-// `WinterClient` end-to-end via the same scripted-transport double
+// PluginManagerModel — the consent-sheet-driving methods (`enable`'s pending-consent path,
+// `installFromFolder`, `confirmConsent`, `cancelConsent`). A SEPARATE `@MainActor` test class,
+// same posture as `PluginManagerModelAsyncTests` (`PluginManagerModelTests.swift`) — drives a real
+// (actor) `WinterClient` end-to-end via the same scripted-transport double
 // (`FeedScriptedTransport`/`feedLineJSON`/`feedWaitUntil`, `SessionFeedTests.swift`, same target).
-// `PluginManagerModel` has no `PluginManagerClient` protocol seam (Task 2 didn't introduce one —
-// the concrete `WinterClient` is already mockable at the transport layer), so no new seam is
-// introduced here either.
 // -----------------------------------------------------------------------------------------------
 @MainActor
 final class PluginManagerModelConsentTests: XCTestCase {
@@ -239,53 +176,58 @@ final class PluginManagerModelConsentTests: XCTestCase {
         return (client, t)
     }
 
-    /// `enable`'s `.needsConsent` path opens the sheet (replacing Task 2's dead orange-banner-only
-    /// surfacing) — seeded verbatim from the server's `consentBlock`/`requiredConsents`.
-    func testNeedsConsentEnableOpensConsentSheet() async throws {
+    private let echoListing = #"{"id":"demo","installPath":"/p","scope":"user","enabled":true,"marketplace":"winter-examples","extras":{"tier":"platform","permissions":{"exec":true},"requiredConsents":["exec"],"consented":[]}}"#
+
+    /// `enable(_:)` on a row whose extras still have a pending class opens the sheet WITHOUT
+    /// calling `plugin.enable` at all — consent is a client-side decision off the already-loaded
+    /// row now, not a wire round trip.
+    func testEnableOnPendingConsentRowOpensSheetWithoutAnyEnableCall() async throws {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
 
-        async let action: Void = model.enable("demo")
-
+        async let refresh: Void = model.refresh()
         await feedWaitUntil { t.sent.count >= 2 }
-        let enableReq = feedLineJSON(t.sent[1])
-        t.feed(#"""
-        {"jsonrpc":"2.0","id":\#(enableReq["id"] as! Int),"result":{"code":"needs_consent","requiredConsents":["exec"],"consentBlock":["plugin demo requests:","  exec: mcp: node server.js"]}}
-        """#)
+        let listReq = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"plugins":[\#(echoListing)]}}"#)
+        await refresh
 
-        await feedWaitUntil { t.sent.count >= 3 }
-        let listReq = feedLineJSON(t.sent[2])
-        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"plugins":[]}}"#)
+        await model.enable("demo@winter-examples")
 
-        await action
-
-        XCTAssertEqual(model.consentSheet?.pluginName, "demo")
-        XCTAssertEqual(model.consentSheet?.requiredConsents, ["exec"])
-        XCTAssertEqual(model.consentSheet?.consentBlock, ["plugin demo requests:", "  exec: mcp: node server.js"])
-        // (Deleted `pendingConsent`'s own `?.name` assertion here, Task 2 review fix wave — it
-        // checked strictly less than the three `consentSheet` assertions immediately above, which
-        // already fully cover this outcome.)
+        XCTAssertEqual(t.sent.count, 2, "no plugin.enable sent — the sheet opens off already-loaded row data")
+        XCTAssertEqual(model.consentSheet?.pluginId, "demo")
+        XCTAssertEqual(model.consentSheet?.spec, "demo@winter-examples")
+        XCTAssertEqual(model.consentSheet?.pendingConsents, ["exec"])
     }
 
-    /// `confirmConsent()` re-calls `plugin.enable` with `consent:true` for the sheet's plugin —
-    /// on `.ok` the sheet dismisses and the list refreshes.
-    func testConfirmConsentCallsEnableWithConsentTrueAndDismisses() async throws {
+    /// `confirmConsent()` calls `plugin.setConsent` FIRST, then `plugin.enable` — the daemon's
+    /// `plugin.enable` handler hot-spawns synchronously and reads consent right then.
+    func testConfirmConsentCallsSetConsentThenEnableInOrderAndDismisses() async throws {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
-        model.consentSheet = ConsentSheetState(pluginName: "demo", consentBlock: ["plugin demo requests:"], requiredConsents: ["exec"])
+        let extras = PluginExtras(tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
+                                  requiredConsents: ["exec"], consented: [], entry: nil)
+        model.consentSheet = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user, extras: extras)
 
         async let action: Void = model.confirmConsent()
 
         await feedWaitUntil { t.sent.count >= 2 }
-        let enableReq = feedLineJSON(t.sent[1])
-        XCTAssertEqual(enableReq["method"] as? String, "plugin.enable")
-        let params = enableReq["params"] as? [String: Any]
-        XCTAssertEqual(params?["name"] as? String, "demo")
-        XCTAssertEqual(params?["consent"] as? Bool, true)
-        t.feed(#"{"jsonrpc":"2.0","id":\#(enableReq["id"] as! Int),"result":{"status":"running"}}"#)
+        let setConsentReq = feedLineJSON(t.sent[1])
+        XCTAssertEqual(setConsentReq["method"] as? String, "plugin.setConsent")
+        let setConsentParams = setConsentReq["params"] as? [String: Any]
+        XCTAssertEqual(setConsentParams?["name"] as? String, "demo")
+        XCTAssertEqual(setConsentParams?["classes"] as? [String], ["exec"])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(setConsentReq["id"] as! Int),"result":{"ok":true}}"#)
 
         await feedWaitUntil { t.sent.count >= 3 }
-        let listReq = feedLineJSON(t.sent[2])
+        let enableReq = feedLineJSON(t.sent[2])
+        XCTAssertEqual(enableReq["method"] as? String, "plugin.enable")
+        let enableParams = enableReq["params"] as? [String: Any]
+        XCTAssertEqual(enableParams?["spec"] as? String, "demo@winter-examples")
+        XCTAssertEqual(enableParams?["scope"] as? String, "user")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(enableReq["id"] as! Int),"result":{"ok":true,"spec":"demo@winter-examples","scope":"user","enabled":true}}"#)
+
+        await feedWaitUntil { t.sent.count >= 4 }
+        let listReq = feedLineJSON(t.sent[3])
         t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"plugins":[]}}"#)
 
         await action
@@ -294,12 +236,14 @@ final class PluginManagerModelConsentTests: XCTestCase {
         XCTAssertNil(model.errorText)
     }
 
-    /// `cancelConsent()` dismisses without ever calling `pluginEnable` — no RPC beyond the initial
-    /// handshake is ever sent.
-    func testCancelConsentDismissesWithoutEnabling() async throws {
+    /// `cancelConsent()` dismisses without ever calling `pluginSetConsent`/`pluginEnable` — no RPC
+    /// beyond the initial handshake is ever sent.
+    func testCancelConsentDismissesWithoutAnyCall() async throws {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
-        model.consentSheet = ConsentSheetState(pluginName: "demo", consentBlock: ["plugin demo requests:"], requiredConsents: ["exec"])
+        let extras = PluginExtras(tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
+                                  requiredConsents: ["exec"], consented: [], entry: nil)
+        model.consentSheet = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user, extras: extras)
 
         model.cancelConsent()
 
@@ -307,101 +251,89 @@ final class PluginManagerModelConsentTests: XCTestCase {
         XCTAssertEqual(t.sent.count, 1) // hello only
     }
 
-    /// Fix wave (Task 2 review, consent double-submit guard): a second `confirmConsent()` call
-    /// landing while the first is still in flight (its `plugin.enable` RPC not yet resolved) is a
-    /// no-op — `isConfirmingConsent` guards re-entry, so at most ONE `plugin.enable` RPC is ever
-    /// sent per grant, independent of the view's own `.disabled(busy)` on the button.
+    /// Fix wave (consent double-submit guard, carried through WS-21): a second `confirmConsent()`
+    /// call landing while the first is still in flight is a no-op.
     func testConfirmConsentIgnoresReentryWhileFirstCallInFlight() async throws {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
-        model.consentSheet = ConsentSheetState(pluginName: "demo", consentBlock: ["plugin demo requests:"], requiredConsents: ["exec"])
+        let extras = PluginExtras(tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
+                                  requiredConsents: ["exec"], consented: [], entry: nil)
+        model.consentSheet = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user, extras: extras)
 
         async let action1: Void = model.confirmConsent()
         async let action2: Void = model.confirmConsent()
 
         await feedWaitUntil { t.sent.count >= 2 }
-        let enableReq = feedLineJSON(t.sent[1])
-        XCTAssertEqual(enableReq["method"] as? String, "plugin.enable")
-        t.feed(#"{"jsonrpc":"2.0","id":\#(enableReq["id"] as! Int),"result":{"status":"running"}}"#)
+        let setConsentReq = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(setConsentReq["id"] as! Int),"result":{"ok":true}}"#)
 
         await feedWaitUntil { t.sent.count >= 3 }
-        let listReq = feedLineJSON(t.sent[2])
+        let enableReq = feedLineJSON(t.sent[2])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(enableReq["id"] as! Int),"result":{"ok":true,"spec":"demo@winter-examples","scope":"user","enabled":true}}"#)
+
+        await feedWaitUntil { t.sent.count >= 4 }
+        let listReq = feedLineJSON(t.sent[3])
         t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"plugins":[]}}"#)
 
         _ = await (action1, action2)
 
-        // hello + the ONE plugin.enable + its trailing plugins.list refresh — the second
-        // `confirmConsent()` call sent nothing at all.
-        XCTAssertEqual(t.sent.count, 3)
+        // hello + the ONE plugin.setConsent + the ONE plugin.enable + its trailing refresh — the
+        // second `confirmConsent()` call sent nothing at all.
+        XCTAssertEqual(t.sent.count, 4)
         XCTAssertNil(model.consentSheet)
     }
 
-    /// `install(source:)`'s `.ok` result opens the SAME sheet type — even a plugin needing zero
-    /// consent classes still gets one (the header-only `consentBlock`), since installs always land
-    /// disabled server-side and the sheet is also the "confirm enable" step.
-    func testInstallOkOpensConsentSheet() async throws {
+    /// `installFromFolder(_:)`'s success opens the SAME sheet type when the freshly-installed
+    /// plugin's extras still need consent.
+    func testInstallFromFolderOpensConsentSheetWhenExtrasNeedConsent() async throws {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
 
-        async let action: Void = model.install(source: "/tmp/some-plugin-dir")
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("winter-install-test-\(UUID().uuidString)", isDirectory: true)
+        let manifestDir = dir.appendingPathComponent(".claude-plugin", isDirectory: true)
+        try FileManager.default.createDirectory(at: manifestDir, withIntermediateDirectories: true)
+        try Data(#"{"name":"winter-examples","plugins":[{"name":"demo","source":"."}]}"#.utf8)
+            .write(to: manifestDir.appendingPathComponent("marketplace.json"))
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        async let action: Void = model.installFromFolder(dir)
 
         await feedWaitUntil { t.sent.count >= 2 }
-        let installReq = feedLineJSON(t.sent[1])
-        XCTAssertEqual(installReq["method"] as? String, "plugins.install")
-        let installParams = installReq["params"] as? [String: Any]
-        XCTAssertEqual(installParams?["source"] as? String, "/tmp/some-plugin-dir")
-        t.feed(#"{"jsonrpc":"2.0","id":\#(installReq["id"] as! Int),"result":{"ok":true,"name":"demo","requiredConsents":[],"hasMcp":false,"consentBlock":["plugin demo requests:"]}}"#)
+        let addReq = feedLineJSON(t.sent[1])
+        XCTAssertEqual(addReq["method"] as? String, "plugin.marketplace.add")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(addReq["id"] as! Int),"result":{"ok":true,"marketplace":{"name":"winter-examples","source":"\#(dir.path)","kind":"directory","path":"\#(dir.path)"}}}"#)
 
         await feedWaitUntil { t.sent.count >= 3 }
-        let listReq = feedLineJSON(t.sent[2])
-        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"plugins":[]}}"#)
+        let installReq = feedLineJSON(t.sent[2])
+        XCTAssertEqual(installReq["method"] as? String, "plugin.install")
+        XCTAssertEqual((installReq["params"] as? [String: Any])?["spec"] as? String, "demo@winter-examples")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(installReq["id"] as! Int),"result":{"ok":true,"plugin":{"id":"demo","installPath":"\#(dir.path)","scope":"user"}}}"#)
+
+        await feedWaitUntil { t.sent.count >= 4 }
+        let listReq = feedLineJSON(t.sent[3])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"plugins":[\#(echoListing)]}}"#)
 
         await action
 
-        XCTAssertEqual(model.consentSheet?.pluginName, "demo")
-        XCTAssertEqual(model.consentSheet?.consentBlock, ["plugin demo requests:"])
+        XCTAssertEqual(model.consentSheet?.pluginId, "demo")
+        XCTAssertEqual(model.consentSheet?.spec, "demo@winter-examples")
         XCTAssertNil(model.errorText)
     }
 
-    /// `.alreadyInstalled` surfaces via `errorText`, never opens a sheet.
-    func testInstallAlreadyInstalledSurfacesErrorTextNoSheet() async throws {
+    /// A folder with no `.claude-plugin/marketplace.json` is refused before any RPC is sent.
+    func testInstallFromFolderWithNoManifestSurfacesErrorTextNoRpc() async throws {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("winter-install-empty-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
 
-        async let action: Void = model.install(source: "/tmp/some-plugin-dir")
+        await model.installFromFolder(dir)
 
-        await feedWaitUntil { t.sent.count >= 2 }
-        let installReq = feedLineJSON(t.sent[1])
-        t.feed(#"{"jsonrpc":"2.0","id":\#(installReq["id"] as! Int),"result":{"code":"already_installed","name":"demo"}}"#)
-
-        await feedWaitUntil { t.sent.count >= 3 }
-        let listReq = feedLineJSON(t.sent[2])
-        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"plugins":[]}}"#)
-
-        await action
-
+        XCTAssertEqual(t.sent.count, 1, "hello only — no marketplace.add for an unreadable folder")
         XCTAssertNil(model.consentSheet)
-        XCTAssertEqual(model.errorText, "demo is already installed")
-    }
-
-    /// `.invalidSource` surfaces via `errorText`, never opens a sheet.
-    func testInstallInvalidSourceSurfacesErrorTextNoSheet() async throws {
-        let (client, t) = try await connectedClient()
-        let model = PluginManagerModel(client: client)
-
-        async let action: Void = model.install(source: "/tmp/not-a-plugin")
-
-        await feedWaitUntil { t.sent.count >= 2 }
-        let installReq = feedLineJSON(t.sent[1])
-        t.feed(#"{"jsonrpc":"2.0","id":\#(installReq["id"] as! Int),"result":{"code":"invalid_source"}}"#)
-
-        await feedWaitUntil { t.sent.count >= 3 }
-        let listReq = feedLineJSON(t.sent[2])
-        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"plugins":[]}}"#)
-
-        await action
-
-        XCTAssertNil(model.consentSheet)
-        XCTAssertEqual(model.errorText, "not a valid plugin source — no winter-plugin.json/plugin.json found")
+        XCTAssertNotNil(model.errorText)
     }
 }

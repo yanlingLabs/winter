@@ -283,8 +283,9 @@ func settingsSectionComingCopy(_ section: SettingsSection) -> String? {
     case .permissions:
         return "The policy a session runs under, the permission rules Winter remembers, and the "
             + "reviewer that reads a shell command before it runs. Today the policy is chosen per "
-            + "session in the composer; the rest is settings.json — permissions.allow for "
-            + "remembered rules, reviewer.enabled and reviewer.classes for the reviewer."
+            + "session in the composer; remembered rules live in sdk/settings.json (permissions."
+            + "allow, in claude's own format), and the reviewer is settings.json's reviewer.enabled "
+            + "and reviewer.classes."
     case .appearance:
         return "Light, dark, and anything else visual. There is nothing to set today — Winter "
             + "follows the system appearance and has no control of its own."
