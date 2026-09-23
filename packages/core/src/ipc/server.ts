@@ -2356,7 +2356,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // read their absent-block defaults (off / on respectively) when settings can't be loaded.
         let settings: Settings | null = null;
         if (opts.winterHome) {
-          try { settings = loadSettings(join(opts.winterHome, "settings.json")); } catch { settings = null; }
+          try { settings = liveSettingsView(loadSettings(join(opts.winterHome, "settings.json"))); } catch { settings = null; }
         }
         // The SAME table `session-driver.ts` passes every real session's `Options.disallowedTools`
         // through (`capabilityTools: WINTER_CAPABILITY_TOOLS`) — computed once per mode, not
@@ -2428,7 +2428,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         parseParams(VersionsGetParams, params);
         let settings: Settings | undefined;
         if (opts.winterHome) {
-          try { settings = loadSettings(join(opts.winterHome, "settings.json")); } catch { settings = undefined; }
+          try { settings = liveSettingsView(loadSettings(join(opts.winterHome, "settings.json"))); } catch { settings = undefined; }
         }
         const report = await diagnoseRuntimes({ execPath: process.execPath, home: opts.winterHome ?? homedir(), env: process.env, settings });
         return {
@@ -2492,7 +2492,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         parseParams(SettingsModelRolesParams, params);
         let settings: Settings | null = null;
         if (opts.winterHome) {
-          try { settings = loadSettings(join(opts.winterHome, "settings.json")); } catch { settings = null; }
+          try { settings = liveSettingsView(loadSettings(join(opts.winterHome, "settings.json"))); } catch { settings = null; }
         }
         // 2026-09-18: `problem` is merged in HERE, not inside `modelRolesFor`/`modelRoleInfo`
         // (settings.ts) — those stay pure `Settings -> …` readers with no fs/registry dependency;
@@ -2527,7 +2527,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           throw new RpcFailure(ERR.INVALID_PARAMS, err instanceof Error ? err.message : String(err));
         }
         saveSettings(settingsPath, next);
-        const roles = internalRoleProblemsFor(withProblemsForRoles(modelRolesFor(next, opts.boundProviderId?.(), opts.internalRouter?.view.snapshot()), opts.roleHealth), next, opts.internalRouter);
+        // WS-21 review M3: the file is written as stored; the answer reads it the way every live view does.
+        const nextView = liveSettingsView(next);
+        const roles = internalRoleProblemsFor(withProblemsForRoles(modelRolesFor(nextView, opts.boundProviderId?.(), opts.internalRouter?.view.snapshot()), opts.roleHealth), nextView, opts.internalRouter);
         return { ok: true, model: roles[p.role].model, roles };
       }
       // -----------------------------------------------------------------------------------------
