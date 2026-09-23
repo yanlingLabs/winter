@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { storeHomeFor } from "../src/agent/paths";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -148,8 +149,8 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
   // session can load it and why not, so no client presents an unloadable skill as usable.
   test("skills.list and skills.read say truthfully which skills a session can load, and why not", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-daemon-skills-"));
-    mkdirSync(join(home, "skills", "greet"), { recursive: true });
-    writeFileSync(join(home, "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nhi\n");
+    mkdirSync(join(storeHomeFor(home), "skills", "greet"), { recursive: true });
+    writeFileSync(join(storeHomeFor(home), "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nhi\n");
     mkdirSync(join(home, "plugins", "superpowers", "skills", "brainstorming"), { recursive: true });
     writeFileSync(join(home, "plugins", "superpowers", "skills", "brainstorming", "SKILL.md"), "---\nname: brainstorming\ndescription: Explore\n---\nx\n");
     mkdirSync(join(home, "plugins", "untrusted", "skills", "risky"), { recursive: true });
@@ -184,8 +185,8 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
 
   test("deleting a name that resolves to a non-self source (user root) -> INVALID_PARAMS, refused before touching self/", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-daemon-skills-"));
-    mkdirSync(join(home, "skills", "greet"), { recursive: true });
-    writeFileSync(join(home, "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nSay hello warmly.\n");
+    mkdirSync(join(storeHomeFor(home), "skills", "greet"), { recursive: true });
+    writeFileSync(join(storeHomeFor(home), "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nSay hello warmly.\n");
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     daemon = await startDaemon({ home, secrets, agentProvider: null });
     harnessToken = daemon.tokens.harness;
