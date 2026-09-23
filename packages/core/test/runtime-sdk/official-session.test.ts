@@ -168,7 +168,7 @@ interface Harness {
   types(): string[];
 }
 
-function harness(overrides: Partial<OfficialSessionDeps> = {}): Harness {
+function harness(overrides: Partial<OfficialSessionDeps> = {}, runtimeExtra: Record<string, unknown> = {}): Harness {
   const queries: FakeOfficialQuery[] = [];
   const capturedOptions: Array<Record<string, unknown>> = [];
   const events: SessionEvent[] = [];
@@ -198,6 +198,7 @@ function harness(overrides: Partial<OfficialSessionDeps> = {}): Harness {
     },
     trackQuery: (_sid: string, abort: AbortController, end: () => Promise<void>) => { tracked.push({ abort, end }); },
     untrack: () => { h.untracked++; },
+    ...runtimeExtra,
   } as unknown as WinterRuntimeSdk;
 
   const selection: RuntimeSelection = {
@@ -1308,5 +1309,65 @@ describe("D1-8 — the P9c-1/P10a assertions on a RESUMED official init", () => 
       expect(hasResume && hasSessionId).toBe(false);
       expect(hasSessionId).toBe(true); // the daemon's own half of the contract: always sessionId
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// WS-21 L3.3 (spec §3.1, §3.8): the official leg awaits its run home inside `open()`, passes it as
+// `runtime.runHome` beside the selection, drops the Winter-owned spool (the router refuses the pair),
+// and disposes it only when the router says `safe` (or `quarantined`) — never on a bare exit.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describe("WS-21: the official leg's run home", () => {
+  const stubRunHome = () => {
+    const disposed: string[] = [];
+    let n = 0;
+    const build = async () => {
+      const runId = `orun-${++n}`;
+      return {
+        runId, dir: `/h/cache/runs/${runId}`, sdkHome: "/h/sdk",
+        input: { home: "/h", mode: "code" as const, dispatchChild: false, leg: "official" as const, cwd: "/repo", trustedProjectRoot: null, gitRoot: null, mcpDisabled: [], reservedMcpServerNames: [], memoryDir: "/m" },
+        effectiveSettings: {},
+        report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [] },
+        dispose: async () => { disposed.push(runId); },
+      };
+    };
+    return { disposed, build, count: () => n };
+  };
+  const runtimeOf = (options: Record<string, unknown>) => options["runtime"] as { runHome?: { runId: string }; official?: { spool?: string } } | undefined;
+
+  test("open() passes runtime.runHome and names no spool beside it", async () => {
+    const rh = stubRunHome();
+    const h = harness({ runHome: rh.build });
+    await h.session.open();
+    expect(rh.count()).toBe(1);
+    expect(runtimeOf(h.capturedOptions[0]!)?.runHome?.runId).toBe("orun-1");
+    expect(runtimeOf(h.capturedOptions[0]!)?.official?.spool).toBeUndefined();
+    await h.session.end();
+  });
+
+  test("without a run home (router 0.0.11) the spool is named exactly as before and no runHome is sent", async () => {
+    const h = harness();
+    await h.session.open();
+    expect(runtimeOf(h.capturedOptions[0]!)?.runHome).toBeUndefined();
+    expect(runtimeOf(h.capturedOptions[0]!)?.official?.spool).toMatch(/runtimes\/claude-config$/);
+    await h.session.end();
+  });
+
+  for (const [outcome, expected] of [["safe", ["orun-1"]], ["quarantined", ["orun-1"]], ["pending", []], [undefined, []]] as const) {
+    test(`an ended incarnation's run home is ${expected.length ? "disposed" : "KEPT"} when the router says ${String(outcome)}`, async () => {
+      const rh = stubRunHome();
+      const h = harness({ runHome: rh.build }, { runHomeOutcome: () => outcome });
+      await h.session.open();
+      await h.session.end();
+      await Bun.sleep(30);
+      expect(rh.disposed).toEqual([...expected]);
+    });
+  }
+
+  test("a run home built for an open that then fails is disposed immediately", async () => {
+    const rh = stubRunHome();
+    const h = harness({ runHome: rh.build }, { sdk: { query: () => { throw new Error("run_home_required (simulated router refusal)"); } } });
+    await expect(h.session.open()).rejects.toThrow(/run_home_required/);
+    expect(rh.disposed).toEqual(["orun-1"]);
   });
 });

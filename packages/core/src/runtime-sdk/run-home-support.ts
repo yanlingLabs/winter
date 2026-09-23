@@ -18,16 +18,66 @@
 // is read from the module namespace once and cached. Tests pin either answer with the seam below and
 // must restore it.
 import * as routerModule from "@yanlinglabs/winter-runtime-sdk";
-
-/** The minimal shape the daemon feature-detects. L3.3 narrows the parameter and result to Contract A's
- *  `RunHomeInput`/`RunHome` (`run-home-contract.ts`). */
-export interface RouterWithRunHome {
-  buildRunHome: (input: never) => Promise<unknown>;
-}
+import type { RouterRunHomeHandle, RunHome, RunHomeInput, RunHomeOutcome } from "./run-home-contract";
 
 /** True when `router` (a module namespace or any object) exports a callable `buildRunHome`. */
-export function routerSupportsRunHome(router: unknown): router is RouterWithRunHome {
+export function routerSupportsRunHome(router: unknown): router is { buildRunHome: (i: RunHomeInput) => Promise<RunHome> } {
   return typeof router === "object" && router !== null && typeof (router as { buildRunHome?: unknown }).buildRunHome === "function";
+}
+
+/** The LINKED router's `buildRunHome`, or `undefined` when it does not export one (router 0.0.11).
+ *  Deliberately NOT affected by `setRunHomeSupportForTests`: a test that wants a builder injects a stub
+ *  through the session driver's deps; the production wiring never has one it cannot call. */
+export function linkedRunHomeBuilder(): ((input: RunHomeInput) => Promise<RunHome>) | undefined {
+  const linkedModule: unknown = routerModule;
+  if (!routerSupportsRunHome(linkedModule)) return undefined;
+  const build = linkedModule.buildRunHome;
+  return (input) => build(input);
+}
+
+/** A router handle's run-home members, when it has them (a run-home router's `createRuntimeSdk`). */
+export function runHomeHandleOf(sdk: unknown): RouterRunHomeHandle | undefined {
+  if (typeof sdk !== "object" || sdk === null) return undefined;
+  const h = sdk as Partial<RouterRunHomeHandle>;
+  return typeof h.runHomeOutcome === "function" && typeof h.reconcileRootForRecovery === "function" ? (h as RouterRunHomeHandle) : undefined;
+}
+
+/**
+ * THE INCARNATION-END DISPOSAL RULE (spec §3.8, r3), one function for both legs:
+ *  - `safe` → the router reconciled (or there was nothing to reconcile) — dispose the folder;
+ *  - `quarantined` → the router already copied the working copy to `<home>/cache/quarantine/` —
+ *    the folder is disposable too;
+ *  - `pending`/unknown → KEEP it: an exit the router has not settled is recovery's to reconcile
+ *    (`reconcileRootForRecovery` at the next boot), never a delete here.
+ * `winterLegSafe`: the Winter leg writes the canonical store directly and has no working copy, so a
+ * router that cannot answer (no outcome door) still makes its run home safe by construction; the
+ * official leg is never disposed without an answer.
+ */
+export async function settleRunHome(
+  runHome: RunHome,
+  outcome: RunHomeOutcome | undefined,
+  opts: { winterLegSafe: boolean; log?: (line: string) => void },
+): Promise<"disposed" | "kept"> {
+  const effective = outcome ?? (opts.winterLegSafe ? "safe" : "pending");
+  if (effective === "pending") {
+    opts.log?.(`run home ${runHome.runId} kept: the router has not settled its exit (recovery reconciles it)`);
+    return "kept";
+  }
+  try {
+    await runHome.dispose();
+  } catch (err) {
+    opts.log?.(`run home ${runHome.runId} could not be disposed (${(err as Error)?.name ?? "error"}) — the boot sweep retries`);
+    return "kept";
+  }
+  return "disposed";
+}
+
+/** A run home whose open FAILED is disposed at once (spec §3.8 r3: nothing ran on it). Never throws. */
+export async function disposeFailedRunHome(runHome: RunHome | undefined, log?: (line: string) => void): Promise<void> {
+  if (runHome === undefined) return;
+  try { await runHome.dispose(); } catch (err) {
+    log?.(`run home ${runHome.runId} of a failed open could not be disposed (${(err as Error)?.name ?? "error"}) — the boot sweep retries`);
+  }
 }
 
 const linked: boolean = routerSupportsRunHome(routerModule);

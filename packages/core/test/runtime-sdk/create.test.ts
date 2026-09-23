@@ -479,3 +479,27 @@ describe("dispose — G-14: every Query ends BEFORE the router disposes", () => 
     expect(lines).toEqual(["session late started during shutdown — aborting it immediately"]);
   });
 });
+
+// WS-21 L3.3 (spec §3.1): a router that applies run homes is created with `requireRunHome: true` and the
+// host's `runHomeFor` (its own cold-resume path) — ONLY when the host supplies one, which `daemon.ts`
+// does only when the linked router exports `buildRunHome`. On router 0.0.11 nothing changes.
+describe("createWinterRuntimeSdk — run homes (WS-21)", () => {
+  test("no runHomeFor: the router is created exactly as before (no requireRunHome, no runHomeFor)", async () => {
+    const { opts } = await build({}, undefined, () => Promise.resolve(undefined));
+    expect("requireRunHome" in opts).toBe(false);
+    expect("runHomeFor" in opts).toBe(false);
+  });
+
+  test("with runHomeFor: requireRunHome true and the builder handed through verbatim", async () => {
+    const runHomeFor = async () => { throw new Error("never called by construction"); };
+    const { opts } = await build({ runHomeFor }, undefined, () => Promise.resolve(undefined));
+    expect((opts as unknown as { requireRunHome?: boolean }).requireRunHome).toBe(true);
+    expect((opts as unknown as { runHomeFor?: unknown }).runHomeFor).toBe(runHomeFor);
+  });
+
+  test("runHomeOutcome / reconcileRootForRecovery answer undefined on a router without them (0.0.11)", async () => {
+    const { handle } = await build({}, undefined, () => Promise.resolve(undefined));
+    expect(handle.runHomeOutcome?.("any")).toBeUndefined();
+    expect(handle.reconcileRootForRecovery?.("/root")).toBeUndefined();
+  });
+});
