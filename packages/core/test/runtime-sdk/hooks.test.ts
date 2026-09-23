@@ -14,6 +14,7 @@ import { pendingDiffSessions, takeFileDiff } from "../../src/runtime-sdk/diff-at
 import { takeReviewerCleared } from "../../src/runtime-sdk/bridge-common";
 import { SHIPPED_DANGEROUS_DOMAINS } from "../../src/agent/dangerous-domains";
 import { escapeFloorHit, sessionHooksFor, type HookFacadeLike, type SessionHooksDeps } from "../../src/runtime-sdk/hooks";
+import { sandboxConfigFor } from "../../src/runtime-sdk/mode-options";
 
 const abortSignal = () => new AbortController().signal;
 
@@ -347,6 +348,37 @@ describe("sessionHooksFor — the escape control-plane floor", () => {
     ]) {
       const out = await run(deps, command);
       expect({ command, decision: decision(out) }).toEqual({ command, decision: "deny" });
+    }
+  });
+
+  test("whole-branch review: the reviewer's probes — permissions store, plugins, cache, agents, trust.json — denied under bypass AND auto", async () => {
+    const probes = [
+      "cp evil.json ~/lanec-floor-test-home/permissions/projects.json",
+      "cp -r x ~/lanec-floor-test-home/plugins/p/skills/evil",
+      "cp -r x $HOME/lanec-floor-test-home/cache/skill-plugins/p",
+      "echo x > ${WINTER_HOME}/cache/anything",
+      "cp evil.md ~/lanec-floor-test-home/agents/reviewer.md",
+      "cp evil.md /some/project/.winter/agents/helper.md",
+      `echo '{}' > ${HOME}/trust.json`,
+      "cd ~ && cp x lanec-floor-test-home/plugins/p/manifest.json",
+    ];
+    for (const policy of ["bypass", "auto"] as const) {
+      const deps: SessionHooksDeps = { ...baseDeps, home: HOME, policy: () => policy, reviewer: fakeReviewer("safe") };
+      for (const command of probes) {
+        expect({ policy, command, decision: decision(await run(deps, command)) }).toEqual({ policy, command, decision: "deny" });
+      }
+    }
+  });
+
+  test("the floor is DERIVED from the sandbox's own denyWrite — every entry of it is denied, literally and as ~", async () => {
+    const deps: SessionHooksDeps = { ...baseDeps, home: HOME, policy: () => "bypass" };
+    const denyWrite = sandboxConfigFor(HOME).filesystem?.denyWrite ?? [];
+    expect(denyWrite.length).toBeGreaterThan(0);
+    for (const dir of denyWrite) {
+      const tilde = dir.startsWith(homedir()) ? `~${dir.slice(homedir().length)}` : dir;
+      for (const spelled of [dir, tilde]) {
+        expect({ spelled, decision: decision(await run(deps, `cp x ${spelled}/f`)) }).toEqual({ spelled, decision: "deny" });
+      }
     }
   });
 

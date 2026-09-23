@@ -116,17 +116,60 @@ export function controlPlaneTargetForCall(
   toolName: string,
   input: unknown,
   cwd: string,
-): { path: string; canonical: string } | null {
+  fence?: HomeFence,
+): { path: string; canonical: string; home?: true } | null {
   if (!WRITE_CLASS_TOOL_NAMES.has(toolName)) return null;
   for (const p of writeTargetPathsIn(input)) {
-    const hit = controlPlaneFileTarget(p, cwd);
+    const hit = controlPlaneFileTarget(p, cwd) ?? (fence === undefined ? null : homeFenceTarget(p, cwd, fence));
     if (hit) return hit;
+  }
+  return null;
+}
+
+/**
+ * The home half of the fence (whole-branch review 2026-09-23, lane C): the SAME targets the Bash
+ * sandbox's `denyWrite` names, handed in by the caller as `home-fence.ts`'s `homeFenceFor(home)` —
+ * this file stays a leaf, which is why the list arrives as data. Before this, the write TOOLS were
+ * fenced only on the three filenames here, with the directories left to the deny rules alone, so the
+ * "two independent layers over one invariant" this file's doc claims held for the filenames only.
+ */
+export interface HomeFence {
+  /** Absolute directories: a target equal to one, or under one, is fenced. */
+  dirs: readonly string[];
+  /** Absolute files, matched exactly. */
+  files: readonly string[];
+  /** Path segments fenced wherever they appear (`.winter/agents/`). */
+  segments: readonly string[];
+}
+
+/** A write target the home fence covers, or `null`. Case-folded, and tested on the raw spelling AND
+ *  the canonical one (a symlink into a fenced dir, or `..` games), like `controlPlaneFileTarget`. */
+export function homeFenceTarget(path: string, cwd: string, fence: HomeFence): { path: string; canonical: string; home: true } | null {
+  if (!path) return null;
+  const raw = isAbsolute(path) ? resolve(path) : resolve(cwd || "/", path);
+  let canonical = raw;
+  try { canonical = canonicalizeForWrite(resolveLeafSymlinks(raw)); } catch { /* the raw spelling is still tested */ }
+  const canonDir = (d: string): string[] => {
+    const out = [resolve(d)];
+    try { out.push(canonicalizeForWrite(resolve(d))); } catch { /* not creatable/resolvable: the literal spelling stands */ }
+    return out.map((x) => x.toLowerCase());
+  };
+  const dirs = fence.dirs.flatMap(canonDir);
+  const files = fence.files.flatMap(canonDir);
+  for (const candidate of new Set([raw.toLowerCase(), canonical.toLowerCase()])) {
+    if (dirs.some((d) => candidate === d || candidate.startsWith(`${d}/`))) return { path, canonical, home: true };
+    if (files.includes(candidate)) return { path, canonical, home: true };
+    const withSlash = `${candidate}/`;
+    if (fence.segments.some((s) => withSlash.includes(`/${s.toLowerCase()}`))) return { path, canonical, home: true };
   }
   return null;
 }
 
 /** The message a fenced call hands back to the model — `engine.ts:4370`'s own text, with the tool
  *  named as the model called it. */
-export function controlPlaneDenialMessage(toolName: string, path: string): string {
+export function controlPlaneDenialMessage(toolName: string, path: string, home?: boolean): string {
+  if (home === true) {
+    return `cannot ${toolName} ${path}: Winter's own state (its runtimes, plugins, approved rules, cache, agent definitions and directory trust) is never written by a tool — only by Winter itself or by you`;
+  }
   return `cannot ${toolName} ${path}: the permission rules store can only be changed by answering an approval card (or editing it yourself)`;
 }
