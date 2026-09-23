@@ -89,6 +89,22 @@ function isDirectory(path: string): boolean {
   try { return statSync(path).isDirectory(); } catch { return false; }
 }
 
+/** Whether `<home>/plugins/<name>` (or any path under it) is a legacy PLUGIN this converter would
+ *  actually pick up. `convertLegacyPlugins`'s own discovery treats ANY real directory under
+ *  `<home>/plugins` as a candidate — a `winter-plugin.json` or a Tier-1 `plugin.json` is read if
+ *  present (`readLegacyManifest`), but NEITHER is required: a manifest-less directory still converts,
+ *  generating a fresh manifest from just its own name. Exported so Migration C's old-layout detection
+ *  (`migration/migrate-c.ts`'s `legacyPluginDirs`) can use the EXACT SAME predicate — reviewer round,
+ *  item 3 — instead of maintaining a second, driftable definition of "this counts as a legacy
+ *  plugin" (the one it had required a `winter-plugin.json`, so a home whose only legacy content was a
+ *  manifest-less or `plugin.json`-only plugin never migrated even though this converter would have
+ *  picked it up). Follows symlinks (`statSync`-based `isDirectory`, not `Dirent.isDirectory()`) for
+ *  the same reason finding 4's own discovery fix needed to — see this converter's own directory scan,
+ *  below, which uses this same function. */
+export function isLegacyPluginDir(path: string): boolean {
+  return isDirectory(path);
+}
+
 function readJsonIfPresent<T>(path: string): T | undefined {
   if (!existsSync(path)) return undefined;
   try { return JSON.parse(readFileSync(path, "utf8")) as T; } catch { return undefined; }
@@ -269,9 +285,18 @@ function legacyRequiredConsentClasses(m: LegacyWinterManifest, opts: { shipsSkil
 
 /** Whether `dir/skills` holds at least one skill directory — the same coarse signal
  *  `legacyRequiredConsentClasses`'s `shipsSkills` needs (a skill can run shell commands, so shipping
- *  one contributed to the pre-WS-21 exec requirement); never throws. */
+ *  one contributed to the pre-WS-21 exec requirement); never throws. Reviewer round, item 2: was
+ *  `Dirent.isDirectory()` (does NOT follow symlinks — reports the dirent's OWN type), so a skill
+ *  shipped as a symlinked directory (a shared skill package, for instance) was silently missed,
+ *  under-reporting `shipsSkills` and so under-reporting the exec requirement itself — a plugin that
+ *  DID ship a (symlinked) skill could convert enabled with no consent ever checked. Uses the same
+ *  `isDirectory` (`statSync`-based, follows symlinks) this converter's own directory scan and
+ *  `isLegacyPluginDir` already use. */
 function legacyShipsSkills(dir: string): boolean {
-  try { return readdirSync(join(dir, "skills"), { withFileTypes: true }).some((e) => e.isDirectory()); } catch { return false; }
+  try {
+    return readdirSync(join(dir, "skills"), { withFileTypes: true })
+      .some((e) => isDirectory(join(dir, "skills", e.name)));
+  } catch { return false; }
 }
 
 /** Whether a legacy consent record (the bare pre-fix `{exec?,tcc?,hardware?}` timestamp shape) held
@@ -362,14 +387,11 @@ export async function convertLegacyPlugins(home: string): Promise<ConvertLegacyP
   const result: ConvertLegacyPluginsResult = { converted: [], skipped: [] };
   let ids: string[] = [];
   try {
-    // Post-merge fix round, finding 4: `Dirent.isDirectory()` does NOT follow symlinks (it reports
-    // the dirent's OWN type, "symbolic link", never the target's) — a legacy plugin at
-    // `<home>/plugins/<id>` that is itself a symlink (a dev checkout linked in) would be silently
-    // dropped from the candidate list before `convertOnePlugin` (which DOES handle it correctly, see
-    // its own doc) ever got a chance to run. `isDirectory` below follows symlinks (`statSync`), so a
-    // symlinked plugin dir is admitted the same as a real one.
+    // Post-merge fix round, finding 4 / reviewer round, item 3: `isLegacyPluginDir` — the SAME
+    // predicate Migration C's old-layout detection now shares (see its own doc) — follows symlinks
+    // and requires no manifest at all (a manifest-less directory still converts, below).
     ids = readdirSync(legacyRoot, { withFileTypes: true })
-      .filter((e) => isDirectory(join(legacyRoot, e.name)))
+      .filter((e) => isLegacyPluginDir(join(legacyRoot, e.name)))
       .map((e) => e.name);
   } catch {
     return result; // no legacy plugins directory at all — nothing to convert
@@ -388,13 +410,27 @@ export async function convertLegacyPlugins(home: string): Promise<ConvertLegacyP
   // Post-merge fix round, minor 2 (promoted, Opus review): read the SAME `installed_plugins.json`
   // the registration loop below writes to, ONCE, before either loop — an id already installed under
   // THIS marketplace, whose install folder still exists, is left alone below (no copy, no
-  // re-registration). A missing/fresh `installed_plugins.json` reads back as no records at all
-  // (`listPlugins`'s own ENOENT degrade), so a first-ever run is unaffected.
-  const alreadyInstalled = new Set(
+  // re-registration, no enabled/consent touch — reviewer round, item 1's own carve-out below is the
+  // one deliberate exception to "no touch"). A missing/fresh `installed_plugins.json` reads back as
+  // no records at all (`listPlugins`'s own ENOENT degrade), so a first-ever run is unaffected. Keyed
+  // to the install PATH (not just presence) — reviewer round, item 1 needs it to recompute a
+  // fingerprint off the already-installed plugin without re-running `installPlugin`.
+  const alreadyInstalled = new Map(
     (await listPlugins(options))
       .filter((p) => p.marketplace === LEGACY_MARKETPLACE_NAME && isDirectory(p.installPath))
-      .map((p) => p.id),
+      .map((p) => [p.id, p.installPath] as const),
   );
+
+  // Read once, before either loop — reviewer round, item 1 needs it in the skip branch below (to
+  // re-derive `wasFullyConsented` and to check whether a qualified consent record already exists),
+  // not just in the registration loop it originally served alone.
+  const legacySettings = readLegacyPluginSettings(home);
+  const idToKey = new Map<string, string>();
+  // C1 fix round 2: a fingerprint per converted id, computed off the SAME `installed.installPath` +
+  // the freshly-written `winter-plugin.json` at that path (re-read via `loadManifest`, which this
+  // converter's own `convertOnePlugin` already wrote) — `rekeyConsents` below needs this to write a
+  // carried-forward consent record that reads as consented from the start (see its own doc).
+  const idToFingerprint = new Map<string, string>();
 
   const manifestEntries: Array<{ name: string; source: string }> = [];
   const okIds: string[] = [];
@@ -402,7 +438,44 @@ export async function convertLegacyPlugins(home: string): Promise<ConvertLegacyP
     const legacyDir = join(legacyRoot, id);
     if (!isDirectory(legacyDir)) continue;
     const targetDir = join(marketplaceDir, "plugins", id);
-    if (alreadyInstalled.has(id)) {
+    const spec = `${id}@${LEGACY_MARKETPLACE_NAME}`;
+    const existingInstallPath = alreadyInstalled.get(id);
+    if (existingInstallPath !== undefined) {
+      // Reviewer round, item 1 (Opus review): `installPlugin` (below, in the fresh-conversion path)
+      // defaults a brand-new install to enabled:true; the disable that corrects an UNCONSENTED
+      // plugin back to false is a SEPARATE call right after it. A crash between the two — or
+      // anywhere later in the registration loop, since `rekeyConsents` runs only ONCE, at the very
+      // end, over every id the loop processed — leaves the record + folder in place with the plugin
+      // still enabled and/or its qualified consent record never written, and minor 2's own "don't
+      // overwrite" (right below) would otherwise treat that half-finished state as fully done
+      // forever. Finish it here, on every resume that hits this skip path — not just a genuinely
+      // interrupted one: re-deriving `wasFullyConsented` and (re-)applying the disable when it's
+      // false is a safe no-op when the plugin was already correctly disabled, and adding the
+      // qualified record only when one is still missing is the same additive rule `rekeyConsents`
+      // already applies everywhere else.
+      const { manifest: legacyManifestForConsent } = readLegacyManifest(legacyDir);
+      const wasFullyConsented = legacyManifestForConsent === undefined || legacyConsentCovers(
+        legacySettings.consents[id],
+        legacyRequiredConsentClasses(legacyManifestForConsent, { shipsSkills: legacyShipsSkills(legacyDir) }),
+      );
+      try {
+        if (!wasFullyConsented) {
+          await setPluginEnabled(options, spec, "user", false);
+        }
+        if (legacySettings.consents[spec] === undefined) {
+          const { manifest } = loadManifest(existingInstallPath, id);
+          idToKey.set(id, spec);
+          idToFingerprint.set(id, pluginConsentFingerprint(existingInstallPath, {
+            entry: manifest?.entry,
+            tcc: manifest?.permissions?.tcc,
+            hardware: manifest?.permissions?.hardware,
+            requiredConsents: manifest ? requiredConsentClasses(manifest) : [],
+          }));
+        }
+      } catch {
+        // Best-effort: finishing a stranded half-conversion must never crash the whole run over it
+        // — the next resume tries again. The plugin is still correctly reported `skipped` below.
+      }
       // Don't overwrite: the folder from a PRIOR conversion is still there (a re-migration after a
       // rollback, most commonly) — the marketplace manifest still lists it (the folder is real and
       // unchanged), but nothing under it is touched and it never re-enters the registration loop.
@@ -430,13 +503,6 @@ export async function convertLegacyPlugins(home: string): Promise<ConvertLegacyP
 
   await addMarketplace(options, marketplaceDir);
 
-  const legacySettings = readLegacyPluginSettings(home);
-  const idToKey = new Map<string, string>();
-  // C1 fix round 2: a fingerprint per converted id, computed off the SAME `installed.installPath` +
-  // the freshly-written `winter-plugin.json` at that path (re-read via `loadManifest`, which this
-  // converter's own `convertOnePlugin` already wrote) — `rekeyConsents` below needs this to write a
-  // carried-forward consent record that reads as consented from the start (see its own doc).
-  const idToFingerprint = new Map<string, string>();
   for (const id of okIds) {
     const spec = `${id}@${LEGACY_MARKETPLACE_NAME}`;
     idToKey.set(id, spec);

@@ -93,12 +93,24 @@ describe("the old-layout definition (spec §8, r3)", () => {
     expect(isOldLayout(home)).toBe(true);
   });
 
-  test("a <home>/plugins dir with only a plugin.json (no winter-plugin.json) does NOT alone trigger old layout", () => {
+  // Reviewer round, item 3: convertLegacyPlugins's own discovery requires NO manifest at all -- a
+  // plugin.json-only (Tier-1 metadata) or fully manifest-less directory still converts (a fresh
+  // manifest is generated from just its own name). The old-layout check must count exactly what a
+  // real conversion run would pick up, via the SAME shared predicate (`isLegacyPluginDir`) -- so
+  // this now DOES trigger, flipped from the earlier (buggy) "does NOT alone trigger" expectation.
+  test("reviewer round, item 3: a <home>/plugins dir with only a plugin.json (no winter-plugin.json) DOES trigger old layout", () => {
     const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-migc-metaonly-")));
     mkdirSync(join(home, "sdk", "projects"), { recursive: true });
     mkdirSync(join(home, "plugins", "meta-only"), { recursive: true });
     writeFileSync(join(home, "plugins", "meta-only", "plugin.json"), JSON.stringify({ name: "Meta Only" }));
-    expect(isOldLayout(home)).toBe(false);
+    expect(isOldLayout(home)).toBe(true);
+  });
+
+  test("reviewer round, item 3: a <home>/plugins dir with NO manifest file at all (not even plugin.json) still triggers old layout", () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-migc-nomanifest-")));
+    mkdirSync(join(home, "sdk", "projects"), { recursive: true });
+    mkdirSync(join(home, "plugins", "bare"), { recursive: true }); // no winter-plugin.json, no plugin.json, nothing
+    expect(isOldLayout(home)).toBe(true);
   });
 
   test("an EMPTY <home>/plugins directory does not trigger old layout", () => {
@@ -106,6 +118,20 @@ describe("the old-layout definition (spec §8, r3)", () => {
     mkdirSync(join(home, "sdk", "projects"), { recursive: true });
     mkdirSync(join(home, "plugins"), { recursive: true });
     expect(isOldLayout(home)).toBe(false);
+  });
+
+  // Reviewer round, item 2: legacyPluginDirs (via isLegacyPluginDir) now follows symlinks -- was
+  // Dirent.isDirectory(), which reports a symlink entry's OWN type ("symbolic link"), never the
+  // target's, so a symlinked plugin folder (a dev checkout linked into <home>/plugins) was silently
+  // missed entirely.
+  test("reviewer round, item 2: a SYMLINKED plugin folder under <home>/plugins is old layout too", () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-migc-pluginsymlink-")));
+    mkdirSync(join(home, "sdk", "projects"), { recursive: true });
+    mkdirSync(join(home, "plugins"), { recursive: true });
+    const real = mkdtempSync(join(tmpdir(), "winter-migc-realplugin-"));
+    writeFileSync(join(real, "winter-plugin.json"), JSON.stringify({ id: "linked", tier: "capability" }));
+    symlinkSync(real, join(home, "plugins", "linked"));
+    expect(isOldLayout(home)).toBe(true);
   });
 });
 
