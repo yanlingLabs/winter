@@ -275,7 +275,7 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
     const res = await c.request(METHODS.skillsDelete, { name: "greet" });
     expect(res.error?.code).toBe(ERR.INVALID_PARAMS);
     expect(res.error?.message).toContain("only self-authored skills can be deleted");
-    expect(existsSync(join(home, "skills", "greet", "SKILL.md"))).toBe(true); // untouched
+    expect(existsSync(join(storeHomeFor(home), "skills", "greet", "SKILL.md"))).toBe(true); // untouched (where setup planted it)
     c.close();
   });
 
