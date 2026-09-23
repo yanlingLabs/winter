@@ -171,12 +171,13 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
     const listed = await c.request(METHODS.skillsList, {});
     expect(SkillsListResult.safeParse(listed.result).success).toBe(true);
     const byName = new Map<string, { loadsInSessions?: boolean; sessionNote?: string }>(listed.result.skills.map((s: { name: string }) => [s.name, s]));
-    expect(byName.get("superpowers:brainstorming")).toMatchObject({ loadsInSessions: true });
-    expect(byName.get("superpowers:brainstorming")!.sessionNote).toBeUndefined();
+    // WS-21 (L4 request 2): the legacy `<home>/plugins/*/skills` scan is gone (the plugin half of this
+    // list is lane L4's plugin manager), and on router 0.0.11 no tier reaches a child any more — on a
+    // run-home build the run folder carries the user/self/project tiers (`skills-ws21.test.ts`).
+    expect(byName.has("superpowers:brainstorming")).toBe(false);
+    expect(byName.has("untrusted:risky")).toBe(false);
     expect(byName.get("greet")).toMatchObject({ loadsInSessions: false });
-    expect(byName.get("greet")!.sessionNote).toContain("only plugin skills");
-    expect(byName.get("untrusted:risky")).toMatchObject({ loadsInSessions: false });
-    expect(byName.get("untrusted:risky")!.sessionNote).toContain('"exec" consent');
+    expect(byName.get("greet")!.sessionNote).toContain("no door");
 
     const read = await c.request(METHODS.skillsRead, { name: "greet" });
     expect(read.result.skill).toMatchObject({ name: "greet", loadsInSessions: false });

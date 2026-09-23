@@ -74,3 +74,24 @@ describe("SkillStore.list precedence", () => {
     }
   });
 });
+
+describe("sessionAvailability after the handover's retirement (L4 request 2)", () => {
+  test("a run-home build: user/self/project/builtin skills load in sessions (the run folder carries them)", () => {
+    setRunHomeSupportForTests(true);
+    try {
+      const store = new SkillStore({ winterHome: mkdtempSync(join(tmpdir(), "winter-sa-")), trust: { isTrusted: () => false } as never });
+      for (const source of ["user", "self", "project", "builtin"] as const) expect(store.sessionAvailability({ name: "x", source })).toEqual({ loadsInSessions: true });
+      expect(store.sessionAvailability({ name: "p:skill", source: "plugin" })).toEqual({ loadsInSessions: true });
+      expect(store.sessionAvailability({ name: "Bad Name:x", source: "plugin" }).loadsInSessions).toBe(false);
+    } finally { setRunHomeSupportForTests(undefined); }
+  });
+  test("router 0.0.11: they don't, and say why", () => {
+    setRunHomeSupportForTests(false);
+    try {
+      const store = new SkillStore({ winterHome: mkdtempSync(join(tmpdir(), "winter-sa-")), trust: { isTrusted: () => false } as never });
+      const r = store.sessionAvailability({ name: "x", source: "user" });
+      expect(r.loadsInSessions).toBe(false);
+      expect(r.sessionNote).toContain("no door");
+    } finally { setRunHomeSupportForTests(undefined); }
+  });
+});

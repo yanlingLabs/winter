@@ -9,7 +9,7 @@
 //   R1  the store's own log is what a resume re-pushes (`unconsumed` over `store.read`).
 import { describe, expect, test } from "bun:test";
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Options, Query } from "@yanlinglabs/winter-agent-sdk";
@@ -670,45 +670,18 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
     } finally { t.close(); }
   });
 
-  // B1 (2026-09-22): the dist session whose first `Skill` call answered `Available: (none)` with a
-  // `superpowers` plugin installed. The child's index is built from its Options alone
-  // (`settingSources: []`), so an installed plugin skill that is not in `Options.plugins` does not
-  // exist for it — this is the table half: `optionsFor` asks the daemon's SkillStore, LIVE, per
-  // incarnation, and only for a code session (chat/dispatch never had the Skill tool).
-  test("B1: an installed plugin skill reaches a CODE child's Options.plugins/skills; deny rules and chat/dispatch are honoured", async () => {
-    let skillStore: SkillStore | undefined;
-    const settings = { runtimes: { winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } } as unknown as Settings;
-    const t = table({ settings: () => settings, skills: { childSkillSurface: (input) => skillStore!.childSkillSurface(input) } });
+  // WS-21 (L4 request 2): the skills-only plugin-view handover (B1) is retired — the daemon hands a child
+  // no `Options.plugins`/`skills` on any build (the run folder carries skills; plugins load natively).
+  test("L4 request 2: an installed legacy plugin's skills are never handed to a child by the daemon", async () => {
+    const t = table({});
     try {
-      // WS-21: the deny rules live in `sdk/settings.json` (claude `Settings`), read live per incarnation.
-      updateSdkSettings(t.home, () => ({ permissions: { deny: ["Skill(superpowers:brainstorming)"] } }));
-      skillStore = new SkillStore({ winterHome: t.home, trust: new TrustStore(join(t.home, "trust.json")) });
-      for (const name of ["using-superpowers", "brainstorming"]) {
-        mkdirSync(join(t.home, "plugins", "superpowers", "skills", name), { recursive: true });
-        writeFileSync(join(t.home, "plugins", "superpowers", "skills", name, "SKILL.md"), `---\nname: ${name}\ndescription: ${name} skill\n---\nbody\n`);
-      }
-      const view = join(t.home, "cache", "skill-plugins", "superpowers");
-
-      const code = t.store.createSession("t", { mode: "code", model: "winter-test/echo", approvalPolicy: "ask" });
-      const session = await t.drivers.create(code);
-      expect(t.q().options.plugins).toEqual([{ type: "local", path: view, skipMcpDiscovery: true }]);
-      expect(t.q().options.skills).toEqual(["superpowers:using-superpowers"]);
-      expect(t.q().options.settingSources).toEqual([]);
-
-      // LIVE: lifting the deny rule reaches the next incarnation with no restart.
-      updateSdkSettings(t.home, (s) => ({ ...s, permissions: { deny: [] } }));
-      await t.drivers.evict(code);
-      await (await t.drivers.ensure(code))!.open();
-      expect([...(t.q().options.skills ?? [])].sort()).toEqual(["superpowers:brainstorming", "superpowers:using-superpowers"]);
-      await t.drivers.evict(code);
-
-      for (const mode of ["chat", "dispatch"] as const) {
-        const sid = t.store.createSession("t", { mode, model: "winter-test/echo" });
-        const s = await t.drivers.create(sid);
-        expect("plugins" in t.q().options).toBe(false);
-        expect("skills" in t.q().options).toBe(false);
-        await s.end();
-      }
+      mkdirSync(join(t.home, "plugins", "superpowers", "skills", "brainstorming"), { recursive: true });
+      writeFileSync(join(t.home, "plugins", "superpowers", "skills", "brainstorming", "SKILL.md"), "---\nname: brainstorming\ndescription: d\n---\nbody\n");
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", approvalPolicy: "ask" });
+      const session = await t.drivers.create(sid);
+      expect("plugins" in t.q().options).toBe(false);
+      expect("skills" in t.q().options).toBe(false);
+      expect(existsSync(join(t.home, "cache", "skill-plugins"))).toBe(false);
       await session.end();
     } finally { t.close(); }
   });
@@ -1212,7 +1185,6 @@ describe("WS-21: the driver stops building run-home inputs once a run home is ap
   const inputs: Partial<WinterLegDeps> = {
     extraMcpServers: () => ({ user_srv: { type: "stdio", command: "node" } }),
     persistedAllowRules: () => ["Bash(git status)"],
-    skills: { childSkillSurface: () => ({ plugins: [{ type: "local", path: "/v/sp" }], skills: ["sp:one"], officialDeny: [] }) },
   };
   const plantFiles = (home: string): void => {
     mkdirSync(join(home, "agents"), { recursive: true });
@@ -1239,8 +1211,9 @@ describe("WS-21: the driver stops building run-home inputs once a run home is ap
           expect(allow).toEqual(expect.arrayContaining(["Read", "Glob", "Grep"]));
         } else {
           expect(o.agents).toBeDefined();
-          expect(o.plugins).toEqual([{ type: "local", path: "/v/sp" }]);
-          expect(o.skills).toEqual(["sp:one"]);
+          // L4 request 2: no plugin views or skill names from the daemon on any build
+          expect("plugins" in o).toBe(false);
+          expect("skills" in o).toBe(false);
           expect(Object.keys(o.mcpServers ?? {})).toContain("user_srv");
           expect(allow).toEqual(expect.arrayContaining(["Bash(git status)", "Bash(npm test:*)"]));
         }

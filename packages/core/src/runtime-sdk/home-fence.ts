@@ -26,8 +26,8 @@ import { selfGrantDenyWrite } from "./mode-options";
  *  - `<home>/agents` — agent definitions are a permission-bearing surface (their `permissionMode`/
  *    `tools` are a grant); the write-tool deny rules fence it (`controlPlaneDenyRules`), the sandbox
  *    does not name it;
- *  - `<home>/cache` — wholesale: the skill-plugin views live there (`skillPluginViewsRoot`) and are
- *    loaded as local plugins by the next child, and nothing legitimate writes the cache through a tool.
+ *  - `<home>/cache` — wholesale: the run folders and the router's quarantine live there (WS-21), and
+ *    nothing legitimate writes the cache through a tool.
  */
 export function homeFencedDirs(home: string): string[] {
   // The sandbox's SELF-GRANT list — never its protected-path entries (review I7: those are a card for a
