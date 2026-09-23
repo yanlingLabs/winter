@@ -206,4 +206,18 @@ describe("review I7: protected paths vs Bash", () => {
       expect({ cmd, hit: escapeFloorHit(cmd, H) }).toEqual({ cmd, hit: undefined });
     }
   });
+  // Round 3, minor 4: the home's basename (`.winter`) is one of the floor's home spellings, so the WINTER.md
+  // needle matched EVERY project's `.winter/WINTER.md` — which the spec leaves ordinary. The needle is the
+  // home's own now: a full spelling of the home, or the bare basename only from the home's parent directory.
+  test("round 3, minor 4: a project's .winter/WINTER.md is ordinary; the home's own WINTER.md is still refused", () => {
+    for (const cmd of ["echo x > .winter/WINTER.md", "cp notes.md packages/app/.winter/WINTER.md", "cd /Users/x/proj && echo x >> .winter/WINTER.md"]) {
+      expect({ cmd, hit: escapeFloorHit(cmd, H, "/Users/x/proj") }).toEqual({ cmd, hit: undefined });
+    }
+    for (const [cmd, cwd] of [
+      [`echo x > ${H}/WINTER.md`, "/Users/x/proj"],
+      [`echo x > ${H}/sdk/WINTER.md`, "/Users/x/proj"],
+      ["echo x > .winter/WINTER.md", "/Users/x"],                  // run from the home's parent: it IS the home's
+      ["cd /Users/x && echo x > .winter/sdk/WINTER.md", "/Users/x/proj"],
+    ] as const) expect({ cmd, hit: escapeFloorHit(cmd, H, cwd) !== undefined }).toEqual({ cmd, hit: true });
+  });
 });
