@@ -200,6 +200,18 @@ export function fsRootAnchored(pathOrPattern: string): string {
 }
 
 /**
+ * Round 4, minor 4 — a filesystem PATH as a permission rule's gitignore-style pattern spells it, on BOTH
+ * legs: `[`, `]`, `*` and `\` backslash-escaped, so a home named `[wip] app` is that directory rather than
+ * a character class. `?` stays RAW: claude has no working escape for it, and over-matching is the safe
+ * direction for a deny. The router's `escapeRulePath`, character for character (its comment carries the
+ * measurement). Only the PATH parts of a rule go through here — the glob parts (`**`, `settings*.json`,
+ * `claude-resume-*`) are the rule's own.
+ */
+export function escapeRulePath(path: string): string {
+  return path.replace(/[[\]*\\]/g, (character) => `\\${character}`);
+}
+
+/**
  * **What CHAT is allowed to call**, by Winter name — the whole set, pinned as a literal.
  *
  * Chat is "conversation-with-a-memory": no filesystem, no shell, no repo (the shipped Chat Slice A
@@ -521,6 +533,8 @@ export const RUN_FOLDER_CONFIG_FILES = [".winter.json", ".claude.json", ".creden
 
 export function controlPlaneDenyRules(home: string): string[] {
   const writeTools = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+  // Round 4, minor 4: every literal PATH below is spelled with `escapeRulePath` (`lit`); glob parts are not.
+  const lit = escapeRulePath;
   // P8d-12 (WS-16 §10); Winter Phase 10b (D1-3, W18-9): the official leg's own SDK-parent staging
   // root — `claude-resume-<uuid>` directories the Claude Agent SDK stages a cross-generation resume
   // payload under, directly in the SYSTEM temp dir (never under `home`, which is why this rule
@@ -540,16 +554,16 @@ export function controlPlaneDenyRules(home: string): string[] {
   // asterisk: `packages/runtime/src/permissions/paths.ts`'s `globSegmentToRegexBody` compiles a
   // mid-segment `*` to `[^/]*`, so `<prefix>*` matches every `claude-resume-<uuid>` name and nothing
   // else — recorded so this form is not re-investigated.
-  const claudeResumeStaging = fsRootAnchored([join(tmpdir(), `${RESUME_STAGING_PREFIX}*`), "**"].join("/"));
+  const claudeResumeStaging = fsRootAnchored([join(lit(tmpdir()), `${RESUME_STAGING_PREFIX}*`), "**"].join("/"));
   const targets = [
     // Any project's control-plane files, at any depth — the project-INDEPENDENT invariant
     // (`controlPlaneFileTarget`'s own doc: "the agent must NEVER write ANY
     // `<any>/.winter/permissions.local.json`, whichever project owns it").
     ...[...CONTROL_PLANE_FILENAMES].sort().map((f) => fsRootAnchored(["**", ".winter", f].join("/"))),
     // The user's own global copies, whose parent is literally `<home>` rather than `<x>/.winter`.
-    ...[...CONTROL_PLANE_FILENAMES].sort().map((f) => fsRootAnchored(join(home, f))),
+    ...[...CONTROL_PLANE_FILENAMES].sort().map((f) => fsRootAnchored(lit(join(home, f)))),
     // The daemon's control plane: sockets, pid files, the runtime state db.
-    fsRootAnchored([join(home, "run"), "**"].join("/")),
+    fsRootAnchored([lit(join(home, "run")), "**"].join("/")),
     claudeResumeStaging,
     // HIGH (fix wave, pre-merge review, finding 2c): an agent DEFINITION file is itself a
     // permission-bearing surface (`agent-definitions.ts`'s own header: "an agent definition's
@@ -561,17 +575,17 @@ export function controlPlaneDenyRules(home: string): string[] {
     // time (`parseAgentDefinitionFile`) — this write fence and that strip are independent layers over
     // the same invariant, the same "two layers over one self-grant" posture `controlPlaneFileTarget`'s
     // own doc states for the host-side fence vs. the deny-rule fence.
-    fsRootAnchored([join(home, "agents"), "**"].join("/")),
+    fsRootAnchored([lit(join(home, "agents")), "**"].join("/")),
     fsRootAnchored(["**", ".winter", "agents", "**"].join("/")),
     // WS-21 (spec §7.1): the shared runtime home's self-grant files, on EVERY build — `sdk/settings.json`
     // (permissions, since L3.2) and `sdk/.winter.json` (the user's MCP servers: commands the next child
     // runs) live there whether or not the router applies run homes; `sdk/agents` is the user agent tier on
     // a run-home build (and fenced on the other too, where it is merely unused); `sdk/plugins` holds every
     // installed plugin (hooks, manifests) the runtimes load.
-    fsRootAnchored(join(sdkHomeFor(home), "settings.json")),
-    fsRootAnchored(join(sdkHomeFor(home), ".winter.json")),
-    fsRootAnchored([join(sdkHomeFor(home), "agents"), "**"].join("/")),
-    fsRootAnchored([join(sdkHomeFor(home), "plugins"), "**"].join("/")),
+    fsRootAnchored(lit(join(sdkHomeFor(home), "settings.json"))),
+    fsRootAnchored(lit(join(sdkHomeFor(home), ".winter.json"))),
+    fsRootAnchored([lit(join(sdkHomeFor(home), "agents")), "**"].join("/")),
+    fsRootAnchored([lit(join(sdkHomeFor(home), "plugins")), "**"].join("/")),
     // …and a project's own MCP server list and ANY settings tier (the spec's `settings*.json`), at any
     // depth, whichever project owns them — the same project-INDEPENDENT shape as the control-plane files.
     fsRootAnchored(["**", ".winter", "mcp.json"].join("/")),
@@ -580,35 +594,35 @@ export function controlPlaneDenyRules(home: string): string[] {
     // and generated config, which the next child LOADS — and the router's quarantine. (It first held the
     // retired skills-only plugin views.) Write-fenced only; the run folders' generated config files are
     // read-denied separately below.
-    fsRootAnchored([homeCacheDir(home), "**"].join("/")),
+    fsRootAnchored([lit(homeCacheDir(home)), "**"].join("/")),
     // Review M6 (2026-09-23): the runtime store, write-denied to the write TOOLS too. It was read-denied
     // (below) and in the Bash sandbox's `denyWrite`, but `Write(<home>/runtimes/bin/winter)` — rung 4
     // of `resolveWinterExecutable`'s ladder, code the NEXT spawn runs — had no rule against it, and a
     // saved `Edit` (→ `Edit` + `Write` in the child, `sdkAllowRulesFor`) would allow it natively.
-    fsRootAnchored([join(home, "runtimes"), "**"].join("/")),
+    fsRootAnchored([lit(join(home, "runtimes")), "**"].join("/")),
     // …and every INSTALLED plugin: a session must not plant a SKILL.md, a hook or a manifest into one.
     // Plugins are installed by the daemon's own lifecycle verbs, never by a tool.
-    fsRootAnchored([join(home, "plugins"), "**"].join("/")),
+    fsRootAnchored([lit(join(home, "plugins")), "**"].join("/")),
     // Review I2: the daemon's own record of rules approved "in this project" — applied to a child
     // WITHOUT a trust check (it cannot come from a repository), so writing it would be a self-grant.
-    fsRootAnchored([approvedProjectRulesDir(home), "**"].join("/")),
+    fsRootAnchored([lit(approvedProjectRulesDir(home)), "**"].join("/")),
     // Whole-branch review: the trust record (`TrustStore`, daemon.ts). Writing it trusts any project,
     // and a trusted project's in-repo allow rules and overlay then reach the child.
-    fsRootAnchored(trustRecordFile(home)),
+    fsRootAnchored(lit(trustRecordFile(home))),
   ];
   // Task 17: the engine's read tool denied `<home>/run` and `<home>/runtimes` (the runtime store,
   // 8a's model-denied directory); the Winter leg's read-class tools carry the same two denials.
   const readTools = ["Read", "Glob", "Grep"];
   const readTargets = [
-    fsRootAnchored([join(home, "run"), "**"].join("/")),
-    fsRootAnchored([join(home, "runtimes"), "**"].join("/")),
+    fsRootAnchored([lit(join(home, "run")), "**"].join("/")),
+    fsRootAnchored([lit(join(home, "runtimes")), "**"].join("/")),
     claudeResumeStaging,
     // WS-21 (spec §7.1, reads): the user's MCP servers (a stdio server's `env` may carry a key) and the
     // generated config of every run folder — its `.winter.json` copy of them, and the official child's
     // `.claude.json`/`.credentials.json`. A mid-segment `*` is a real wildcard on both matchers (see
     // `claudeResumeStaging` above). A staging root is read-denied whole already.
-    fsRootAnchored(join(sdkHomeFor(home), ".winter.json")),
-    ...RUN_FOLDER_CONFIG_FILES.map((f) => fsRootAnchored([homeCacheDir(home), "runs", "*", f].join("/"))),
+    fsRootAnchored(lit(join(sdkHomeFor(home), ".winter.json"))),
+    ...RUN_FOLDER_CONFIG_FILES.map((f) => fsRootAnchored([lit(homeCacheDir(home)), "runs", "*", f].join("/"))),
   ];
   return [...writeTools.flatMap((t) => targets.map((p) => `${t}(${p})`)), ...readTools.flatMap((t) => readTargets.map((p) => `${t}(${p})`))];
 }

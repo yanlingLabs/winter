@@ -43,8 +43,11 @@ export const PROJECT_DIR_NAME = ".winter";
  * `<dir>/**`), in the router's order: the four sdk item dirs, `sdk/WINTER.md`, then — for a trusted
  * project only — the four `.winter/` item dirs of every directory on the project walk from `walk.cwd`
  * (nearest first; L2 fix round 1, I2), or of the root alone when no walk is given. Built with the
- * daemon's own `fsRootAnchored` (ruling 2), so `["Edit","Write"] × this` is exactly the router's
- * `protectedPathRules(sdkHome, root, brand, walk)`.
+ * daemon's own `fsRootAnchored` (ruling 2).
+ *
+ * INTERNAL TARGETS, NEVER WRITTEN AS RULES (round 4, minor 4): the daemon's own gate reads these back to
+ * absolute paths (`targetsOf`) and compares paths, so they stay LITERAL — no `escapeRulePath`. The ask rules
+ * a child receives are the router's (`protectedPathRules`, any depth, every path escaped).
  */
 export function protectedPathsFor(home: string, trustedProjectRoot: string | null, walk?: { cwd: string; userHome?: string }): string[] {
   const sdk = sdkHomeFor(home);
