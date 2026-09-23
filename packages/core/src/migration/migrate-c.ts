@@ -284,11 +284,31 @@ export async function runMigrationC(home: string, deps: MigrationCDeps): Promise
     const at = now();
     const archiveDir = join(home, "migration", `c-${stamp(at)}`);
     mkdirSync(archiveDir, { recursive: true, mode: 0o700 });
+    // ── 1. preflight's backups, BEFORE the manifest exists: a backup that fails leaves no half-migrated
+    // home behind, only a typed refusal. Review I2: the store is opened READ-ONLY and copied with
+    // `VACUUM INTO`, so the backup is the pre-migration schema (a read-write open would run the v7
+    // rebuild first, and the "pre-migration" copy would already be v7).
+    let runtimeState: string | null = null;
+    if (existsSync(join(home, "runtimes", "runtime-state.db"))) {
+      try {
+        const rs = openRuntimeStateDb(home, { readonly: true });
+        try { runtimeState = rs.backup(archiveDir); } finally { rs.close(); }
+      } catch (err) {
+        throw new MigrationCRefused("sdk_home_migration_refused", `Migration C refused: runtime-state.db could not be backed up (${(err as Error).name}) — nothing was moved`);
+      }
+    }
     m = {
       schemaVersion: 1, home, startedAt: at.toISOString(), status: "in-progress", archiveDir, steps: [],
-      backups: { settings: null, runtimeState: null, sdkSettings: null, sdkGlobal: null, splitMarker: null },
+      backups: {
+        settings: backupFile(join(home, "settings.json"), archiveDir, "settings.json.bak"),
+        runtimeState,
+        sdkSettings: backupFile(join(sdkHomeFor(home), "settings.json"), archiveDir, "sdk-settings.json.bak"),
+        sdkGlobal: backupFile(join(sdkHomeFor(home), ".winter.json"), archiveDir, "sdk-winter.json.bak"),
+        splitMarker: backupFile(settingsSplitMarkerPath(home), archiveDir, "settings-split.json.bak"),
+      },
       moved: [], links: [], copied: [], archived: [], reconciled: [],
     };
+    m.steps.push({ step: "preflight", status: "done", at: now().toISOString() });
     writeManifest(home, m);
   }
   const done = (step: MigrationCStep): boolean => m.steps.some((s) => s.step === step);
@@ -296,20 +316,6 @@ export async function runMigrationC(home: string, deps: MigrationCDeps): Promise
     m.steps.push({ step, status, at: now().toISOString(), ...(detail === undefined ? {} : { detail }) });
     writeManifest(home, m);
   };
-
-  // ── 1. preflight: the backups (the refusals ran above, before the manifest existed) ─────────────
-  if (!done("preflight")) {
-    const dir = m.archiveDir;
-    m.backups.settings = backupFile(join(home, "settings.json"), dir, "settings.json.bak");
-    m.backups.sdkSettings = backupFile(join(sdkHomeFor(home), "settings.json"), dir, "sdk-settings.json.bak");
-    m.backups.sdkGlobal = backupFile(join(sdkHomeFor(home), ".winter.json"), dir, "sdk-winter.json.bak");
-    m.backups.splitMarker = backupFile(settingsSplitMarkerPath(home), dir, "settings-split.json.bak");
-    if (existsSync(join(home, "runtimes", "runtime-state.db"))) {
-      const rs = openRuntimeStateDb(home);
-      try { m.backups.runtimeState = rs.backup(dir); } finally { rs.close(); }
-    }
-    record("preflight", "done");
-  }
 
   // ── 3. move-dirs: same-volume renames into sdk/, a relative compatibility link at each old path ──
   if (!done("move-dirs")) {

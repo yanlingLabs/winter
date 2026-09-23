@@ -3,6 +3,7 @@
 // memory, provider-state, the moved settings keys, and a DeepSeek tag in provider.model, pins and
 // selection_json. The router's reconcile is a stub here (its real outcomes are L2's, proven at R.2).
 import { afterEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -112,6 +113,35 @@ describe("preflight", () => {
     const c = fixture();
     writeFileSync(join(c.home, "sdk", "settings.json"), "{}"); // what the settings doors write on any build is fine
     expect((await runMigrationC(c.home, deps())).status).toBe("phase1-complete");
+  });
+});
+
+/** An older build's store: `user_version` 6 and the v6 CHECK (no `run-folder`), rows kept. */
+function rewindToV6(home: string): void {
+  const db = new Database(join(home, "runtimes", "runtime-state.db"));
+  db.run("PRAGMA foreign_keys = OFF");
+  const sql = db.query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE type='table' AND name='runtime_sessions'").get()!.sql;
+  db.run(sql.replace("IN ('official-spool','sdk-resume-staging','run-folder')", "IN ('official-spool','sdk-resume-staging')").replace(/^CREATE TABLE "?runtime_sessions"?/, "CREATE TABLE runtime_sessions_old"));
+  db.run("INSERT INTO runtime_sessions_old SELECT * FROM runtime_sessions");
+  db.run("DROP TABLE runtime_sessions");
+  db.run("ALTER TABLE runtime_sessions_old RENAME TO runtime_sessions");
+  db.run("CREATE INDEX IF NOT EXISTS runtime_sessions_state ON runtime_sessions(state)");
+  db.run("DROP TABLE IF EXISTS run_root_quarantine");
+  db.run("PRAGMA user_version = 6");
+  db.close();
+}
+const userVersion = (path: string): number => {
+  const db = new Database(path, { readonly: true });
+  try { return db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version; } finally { db.close(); }
+};
+
+describe("review I2: the pre-migration backup is the pre-migration schema", () => {
+  test("a v6 store is backed up as v6 (read-only open, VACUUM INTO) — never bumped first", async () => {
+    const { home } = fixture();
+    rewindToV6(home);
+    const m = await runMigrationC(home, deps({ reconcile: stubReconcile().reconcile }));
+    expect(m.backups.runtimeState).not.toBeNull();
+    expect(userVersion(m.backups.runtimeState!)).toBe(6);
   });
 });
 
