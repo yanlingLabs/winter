@@ -213,6 +213,9 @@ describe("review I7: protected paths vs Bash", () => {
     for (const cmd of ["echo x > .winter/WINTER.md", "cp notes.md packages/app/.winter/WINTER.md", "cd /Users/x/proj && echo x >> .winter/WINTER.md"]) {
       expect({ cmd, hit: escapeFloorHit(cmd, H, "/Users/x/proj") }).toEqual({ cmd, hit: undefined });
     }
+    // from the home's parent, the bare spelling counts only as a word of its own — a project below it is not the home
+    expect(escapeFloorHit("echo x > proj/.winter/WINTER.md", H, "/Users/x")).toBeUndefined();
+    expect(escapeFloorHit("echo x > ./.winter/WINTER.md", H, "/Users/x")).toBeDefined();
     for (const [cmd, cwd] of [
       [`echo x > ${H}/WINTER.md`, "/Users/x/proj"],
       [`echo x > ${H}/sdk/WINTER.md`, "/Users/x/proj"],

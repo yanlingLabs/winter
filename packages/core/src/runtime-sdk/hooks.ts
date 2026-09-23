@@ -355,6 +355,12 @@ function homePrefixes(home: string, opts: { basename?: boolean } = {}): string[]
   return [...prefixes];
 }
 
+/** Does a word start at `at` in the normalised command (optionally after a leading `./`)? */
+function startsWord(c: string, at: number): boolean {
+  const boundary = (i: number): boolean => i <= 0 || /[\s;&|()<>=]/.test(c.charAt(i - 1));
+  return boundary(at) || (c.slice(at - 2, at) === "./" && boundary(at - 2));
+}
+
 /** Is `cwd` the home's parent directory (literally or through a link) — where the home's bare basename IS
  *  the home? `false` when either side is unknown. */
 function isHomeParent(cwd: string | undefined, home: string): boolean {
@@ -661,6 +667,8 @@ export function escapeFloorHit(command: string, home: string | undefined, cwd?: 
       for (const needle of [...PROTECTED_KIND_NAMES.map((k) => `${base}/${k}`), ...(instructionsNeedleHere ? [`${base}/winter.md`] : [])]) {
         for (let at = c.indexOf(needle); at >= 0; at = c.indexOf(needle, at + 1)) {
           if (at <= writeStart) continue;
+          // the bare basename names the home only as a word of its own (`proj/.winter/WINTER.md` is a project's)
+          if (!fullPrefixes.has(pre) && needle.endsWith("/winter.md") && !startsWord(c, at)) continue;
           const next = c.charAt(at + needle.length);
           if (next === "" || next === "/" || /[\s;&|()<>]/.test(next)) return "a protected path (skills, commands, rules, output styles or WINTER.md)";
         }
