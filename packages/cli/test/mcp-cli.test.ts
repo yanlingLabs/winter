@@ -156,6 +156,24 @@ describe("route functions (no daemon — direct sdk/.winter.json / .winter/mcp.j
     expect(config.projects?.[cwd]?.mcpServers?.["my-server"]).toEqual({ type: "stdio", command: "npx", args: ["my-mcp"] });
   });
 
+  // Post-merge round: mcp-cli.ts now keys local scope through core's own `localScopeKeyFor`
+  // (F17: canonical `git rev-parse --show-toplevel`), not a plain `realpathSync(cwd)` — the SAME
+  // rule the daemon's own run-home builder uses, so a CLI write and a daemon read of the same
+  // project can never land under two different keys. This is the one behavior a bare realpath
+  // could never give: called from a SUBDIRECTORY of a real repo, the key is the repo ROOT.
+  test("add (local scope) from a subdirectory of a real git repo keys sdk/.winter.json by the REPO ROOT, not the subdirectory", async () => {
+    const repoRoot = realpathSync(cwd);
+    if (Bun.spawnSync(["git", "init", "-q", repoRoot]).exitCode !== 0) throw new Error("git init failed — is git on PATH?");
+    const sub = join(repoRoot, "packages", "app");
+    mkdirSync(sub, { recursive: true });
+
+    const outcome = await runMcpAddRoute(["my-server", "npx", "my-mcp"], { cwd: sub, winterHome });
+    expect(outcome).toEqual({ ok: true, scope: "local", name: "my-server", transport: "stdio", root: repoRoot });
+    const config = readSdkGlobalConfig(winterHome);
+    expect(config.projects?.[repoRoot]?.mcpServers?.["my-server"]).toEqual({ type: "stdio", command: "npx", args: ["my-mcp"] });
+    expect(config.projects?.[sub]).toBeUndefined(); // never keyed by the subdirectory itself
+  });
+
   test("add --scope user writes sdk/.winter.json's top-level mcpServers, reports via:local", async () => {
     const outcome = await runMcpAddRoute(["-s", "user", "my-server", "npx", "my-mcp"], deps());
     expect(outcome).toEqual({ ok: true, scope: "user", name: "my-server", transport: "stdio", via: "local" });
