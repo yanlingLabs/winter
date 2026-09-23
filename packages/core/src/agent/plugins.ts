@@ -5,6 +5,7 @@ import { execPayloadLines, loadManifest, requiredConsentClasses, type WinterMani
 import type { HookRegistryPlugin } from "../plugins/hook-registry";
 import { sdkPluginsRoot } from "./paths";
 import { sdkEnabledPlugins } from "../settings";
+import { consentedClassesFor, pluginConsentFingerprint, type PluginConsentRecordV2 } from "../plugins/consent-fingerprint";
 
 export const PluginManifest = z.object({
   name: z.string().optional(), description: z.string().optional(),
@@ -28,9 +29,11 @@ export interface PluginInfo {
   tier?: "capability" | "platform";
   /** Consent classes ("exec"|"tcc"|"hardware") the manifest requires, per plugin-manifest.ts#requiredConsentClasses. [] for legacy plugins. */
   requiredConsents: string[];
-  /** Consent classes actually granted, filled from settings.plugins.consents[name] (a class counts
-   *  as consented when its key is present in the record, regardless of the timestamp value). []
-   *  when there's no consents dep or no record for this plugin. See consentComplete/pluginMcpEligible below. */
+  /** Consent classes actually granted, filled from settings.plugins.consents[spec]. WS-21 fix round
+   *  2 (C1): a class counts as consented only when the record is the NEW `{classes, fingerprint}`
+   *  shape AND its fingerprint matches this plugin's CURRENT install path + entry -- a legacy shape,
+   *  a stale fingerprint (a different install folder or an edited entry), or no record at all all
+   *  read as []. See `plugins/consent-fingerprint.ts`. */
   consented: string[];
   /** true when no valid winter-plugin.json was found (missing OR present-but-malformed) and the plugin loaded via the legacy plugin.json path. */
   legacy: boolean;
@@ -62,10 +65,10 @@ export interface PluginInfo {
   entry?: NonNullable<WinterManifest["entry"]>;
 }
 
-/** Consent record shape for one plugin: settings.plugins.consents[id] (settings.ts). */
-export type PluginConsentRecord = { exec?: number; tcc?: number; hardware?: number };
-
-const CONSENT_CLASSES = ["exec", "tcc", "hardware"] as const;
+/** Consent record shape for one plugin: settings.plugins.consents[spec] (settings.ts). WS-21 fix
+ *  round 2 (C1): `{classes, fingerprint}`, bound to the plugin's install path + entry at the moment
+ *  consent was granted -- see `plugins/consent-fingerprint.ts`'s own header for the full ruling. */
+export type PluginConsentRecord = PluginConsentRecordV2;
 
 // WS-21 (spec §5): claude's own `installed_plugins.json` V2 shape (F15) — the SAME shape
 // `plugins/sdk-plugin-api.ts` writes. Read here with `readFileSync` rather than that module's own
@@ -113,16 +116,18 @@ export class PluginStore {
       plugins?: { enabled?: string[]; disabled?: string[] };
       /** settings.plugins.consents — per-plugin-id consent records (Winter-only extras' consent,
        *  spec §5.4: "the extras keep their own consents"). Keyed by the SAME `"<name>@<marketplace>"`
-       *  spec `installed_plugins.json` uses. */
-      consents?: Record<string, PluginConsentRecord>;
+       *  spec `installed_plugins.json` uses. Typed `Record<string, unknown>` deliberately (C1, fix
+       *  round 2): a stored value may be a stale pre-fix record, so it is validated at the point of
+       *  use (`consentedClassesFor`), never trusted at this boundary. */
+      consents?: Record<string, unknown>;
       log?: (m: string) => void;
     },
   ) {}
 
-  private consentedClasses(key: string): string[] {
-    const record = this.deps.consents?.[key];
-    if (!record) return [];
-    return CONSENT_CLASSES.filter((c) => record[c] !== undefined);
+  /** WS-21 fix round 2 (C1): gated on `fingerprint` matching what the plugin's CURRENT install path
+   *  + entry hashes to -- see `plugins/consent-fingerprint.ts`'s own header. */
+  private consentedClasses(key: string, fingerprint: string): string[] {
+    return consentedClassesFor(this.deps.consents?.[key], fingerprint);
   }
 
   list(): PluginInfo[] {
@@ -147,17 +152,17 @@ export class PluginStore {
       let skills: string[] = [];
       try { skills = readdirSync(join(dir, "skills"), { withFileTypes: true }).filter((e) => e.isDirectory() && existsSync(join(dir, "skills", e.name, "SKILL.md"))).map((e) => e.name); } catch { /* no skills dir */ }
       const shared = { name, skills, hasMcp: false, mcpEnabled: enabled, disabled: isDisabled, installPath: dir, marketplace };
-      const consented = this.consentedClasses(key);
 
       const { manifest } = loadManifest(dir, name, this.deps.log);
       if (manifest) {
+        const fingerprint = pluginConsentFingerprint(dir, manifest.entry);
         out.push({
           ...shared,
           description: manifest.description,
           version: manifest.version ?? userRecord.version,
           tier: manifest.tier,
           requiredConsents: requiredConsentClasses(manifest),
-          consented,
+          consented: this.consentedClasses(key, fingerprint),
           legacy: false,
           hasManifestMcp: false,
           execPayload: execPayloadLines(manifest),
@@ -180,7 +185,7 @@ export class PluginStore {
         // A LEGACY (extras-less) plugin requires no consent class — enabling it (Contract B's
         // install+enable) is already the user's trust decision for its native content (spec §5.4).
         requiredConsents: [],
-        consented,
+        consented: this.consentedClasses(key, pluginConsentFingerprint(dir, undefined)),
         legacy: true,
         hasManifestMcp: false,
         execPayload: [],

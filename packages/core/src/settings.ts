@@ -419,16 +419,15 @@ export const Settings = z.object({
   plugins: z.object({
     enabled: z.array(z.string()).optional(),
     disabled: z.array(z.string()).optional(),
-    /** Per-plugin per-permission-class consent records (design spec §1): { [pluginId]: { exec?:
-     *  ts, tcc?: ts, hardware?: ts } }, timestamp = Date.now() at grant time. A class's presence
-     *  (not its value) is what counts as consented — see plugins.ts#consentComplete. `disable`
-     *  deletes a plugin's whole record (fresh-consent semantics, generalized from today's
-     *  enabled-strip). */
-    consents: z.record(z.string(), z.object({
-      exec: z.number().optional(),
-      tcc: z.number().optional(),
-      hardware: z.number().optional(),
-    })).optional(),
+    /** Per-plugin consent records, keyed by the qualified `"<name>@<marketplace>"` spec. WS-21 fix
+     *  round 2 (C1): `{classes: string[], fingerprint: string}`, bound to the plugin's install path
+     *  + entry at grant time (`plugins/consent-fingerprint.ts` has the full ruling) — superseding
+     *  the pre-fix `{exec?: ts, tcc?: ts, hardware?: ts}` per-class-timestamp shape. Typed
+     *  `z.unknown()` here, DELIBERATELY not validated against either shape: a pre-fix record must
+     *  still parse successfully (it is the CONSUMER, `consentedClassesFor`, that treats anything but
+     *  the new fingerprinted shape as "not consented" — never a zod rejection, which would rollback
+     *  the WHOLE settings file to keep-last-good over one stale plugin's consent record). */
+    consents: z.record(z.string(), z.unknown()).optional(),
     /** PluginSupervisor lifecycle overrides (Phase 4b Task 3, spec §3 — all four values are
      *  spec-defaulted when omitted: registration timeout 10s, backoff cap 60s, circuit 5
      *  failures/10min). The invoke timeout (default 60s) and the SIGTERM→SIGKILL kill grace (5s)

@@ -42,7 +42,9 @@
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sdkPluginsRoot, sdkHomeFor } from "../agent/paths";
+import { loadManifest } from "../agent/plugin-manifest";
 import { writeJsonAtomic } from "../sdk-files";
+import { pluginConsentFingerprint } from "./consent-fingerprint";
 import { addMarketplace, installPlugin, setPluginEnabled, type PluginManagerOptions } from "./sdk-plugin-api";
 
 const LEGACY_MARKETPLACE_NAME = "winter-legacy";
@@ -200,8 +202,16 @@ const CARRIED_LEGACY_CONSENT_CLASSES = ["tcc", "hardware"] as const;
  *  through the `Settings` schema (which could drop a field this converter doesn't know about). A
  *  no-op (never even opens the file for a write) when there is nothing to re-key. M5: atomic
  *  temp-then-rename (`writeJsonAtomic`, Contract C), the same write discipline every other file this
- *  module produces already uses — never a plain `writeFileSync`. */
-function rekeyConsents(home: string, idToKey: Map<string, string>): void {
+ *  module produces already uses — never a plain `writeFileSync`.
+ *
+ *  C1 fix round 2: a carried-forward record is now written FINGERPRINTED, `{classes, fingerprint}}`
+ *  (`plugins/consent-fingerprint.ts`) — the bare per-class-timestamp shape this converter used to
+ *  write would read back as NOT consented under the new gate (a deliberate rule for every OTHER
+ *  pre-fix record, but this converter runs AT conversion time, when it already knows exactly which
+ *  install path + entry the plugin converted to, so it can write a record that's valid from the
+ *  start rather than forcing a needless re-consent). `idToFingerprint` is built by the caller, off
+ *  the SAME converted `targetDir` + freshly-written `winter-plugin.json` each id ended up with. */
+function rekeyConsents(home: string, idToKey: Map<string, string>, idToFingerprint: Map<string, string>): void {
   const path = join(home, "settings.json");
   const raw = readJsonIfPresent<Record<string, unknown>>(path);
   if (!raw || typeof raw.plugins !== "object" || raw.plugins === null) return;
@@ -214,13 +224,14 @@ function rekeyConsents(home: string, idToKey: Map<string, string>): void {
     const key = idToKey.get(id);
     if (key === undefined) { rekeyed[id] = record; continue; }
     changed = true;
-    const carried: Record<string, unknown> = {};
+    const classes: string[] = [];
     if (record && typeof record === "object") {
       for (const cls of CARRIED_LEGACY_CONSENT_CLASSES) {
-        if ((record as Record<string, unknown>)[cls] !== undefined) carried[cls] = (record as Record<string, unknown>)[cls];
+        if ((record as Record<string, unknown>)[cls] !== undefined) classes.push(cls);
       }
     }
-    rekeyed[key] = carried;
+    const fingerprint = idToFingerprint.get(id) ?? "";
+    rekeyed[key] = { classes, fingerprint };
   }
   if (!changed) return;
   writeJsonAtomic(path, { ...raw, plugins: { ...plugins, consents: rekeyed } });
@@ -277,6 +288,11 @@ export async function convertLegacyPlugins(home: string): Promise<ConvertLegacyP
 
   const legacySettings = readLegacyPluginSettings(home);
   const idToKey = new Map<string, string>();
+  // C1 fix round 2: a fingerprint per converted id, computed off the SAME `installed.installPath` +
+  // the freshly-written `winter-plugin.json` at that path (re-read via `loadManifest`, which this
+  // converter's own `convertOnePlugin` already wrote) — `rekeyConsents` below needs this to write a
+  // carried-forward consent record that reads as consented from the start (see its own doc).
+  const idToFingerprint = new Map<string, string>();
   for (const id of okIds) {
     const spec = `${id}@${LEGACY_MARKETPLACE_NAME}`;
     idToKey.set(id, spec);
@@ -284,12 +300,14 @@ export async function convertLegacyPlugins(home: string): Promise<ConvertLegacyP
     try {
       const installed = await installPlugin(options, spec, "user");
       if (!enabled) await setPluginEnabled(options, spec, "user", false);
+      const { manifest } = loadManifest(installed.installPath, id);
+      idToFingerprint.set(id, pluginConsentFingerprint(installed.installPath, manifest?.entry));
       result.converted.push({ id, installPath: installed.installPath, enabled });
     } catch (err) {
       result.skipped.push({ id, reason: (err as Error).message });
     }
   }
 
-  rekeyConsents(home, idToKey);
+  rekeyConsents(home, idToKey, idToFingerprint);
   return result;
 }
