@@ -58,6 +58,8 @@ export interface OfficialSessionRecords {
   /** WS-21: a run folder the router quarantined at exit (kept; recorded for recovery and doctor). Optional:
    *  a test double need not implement it. */
   noteQuarantinedRoot?(root: string): void;
+  /** WS-21 review M6: the run folder this session runs in (`RuntimeSessionRecords.noteRunFolder`). */
+  noteRunFolder?(winterSessionId: string, dir: string | undefined, current?: string): void;
   /**
    * Fix round 2 (Defect 2, controller ruling): the SAME durable, monotonically-increasing
    * generation counter `WinterSession.open()` uses (`RuntimeSessionRecords.bumpGeneration`).
@@ -505,6 +507,7 @@ class OfficialSessionImpl implements OfficialSession {
       // refused session never leaves a folder behind; an open that fails from here to the iteration's
       // start disposes it at once (nothing ran on it, spec §3.8 r3).
       const runHome = this.deps.runHome === undefined ? undefined : await this.deps.runHome();
+      if (runHome !== undefined) this.deps.records?.noteRunFolder?.(this.sessionId, runHome.dir);
       let queryIssued: AbortController | undefined;
       try {
         // With a run home the router owns the child's config dir (its run folder, or the linked staging
@@ -591,21 +594,33 @@ class OfficialSessionImpl implements OfficialSession {
       } catch (err) {
         if (queryIssued === undefined) {
           await disposeFailedRunHome(runHome, (line) => this.log(line));
+          if (runHome !== undefined) this.deps.records?.noteRunFolder?.(this.sessionId, undefined, runHome.dir);
         } else {
           // Review M5: the query exists — end it, then dispose only on the router's `safe`; anything else
           // is left for boot recovery's reconcile (never a delete of a folder the router may still use).
           try { queryIssued.abort(); } catch { /* already aborted */ }
-          if (runHome !== undefined) {
-            await settleRunHome(runHome, this.deps.runtime.runHomeOutcome?.(runHome.runId), {
-              log: (line) => this.log(line),
-              onQuarantined: (dir) => this.deps.records?.noteQuarantinedRoot?.(dir),
-            });
-          }
+          if (runHome !== undefined) await this.settleRunHomeOf(runHome);
         }
         throw err;
       }
     })().finally(() => { this.opening = undefined; });
     return this.opening;
+  }
+
+  /**
+   * WS-21 (spec §3.8; reviews M5, M6): settle this session's run home by the router's outcome — disposed
+   * (and its record cleared) only on `safe`; a quarantined folder is kept, recorded, and its session marked
+   * `repair-required`; a pending one stays recorded for boot recovery.
+   */
+  private async settleRunHomeOf(runHome: RunHome): Promise<void> {
+    const settled = await settleRunHome(runHome, this.deps.runtime.runHomeOutcome?.(runHome.runId), {
+      log: (line) => this.log(line),
+      onQuarantined: (dir) => {
+        this.deps.records?.noteQuarantinedRoot?.(dir);
+        try { this.deps.records?.setTranscriptHealth(this.sessionId, "repair-required"); } catch { /* bounded */ }
+      },
+    });
+    if (settled === "disposed") this.deps.records?.noteRunFolder?.(this.sessionId, undefined, runHome.dir);
   }
 
   /**
@@ -758,10 +773,7 @@ class OfficialSessionImpl implements OfficialSession {
       // its exit reconcile (inside the router's spawn-proxy hook, with its own store) has run, or the
       // working copy was quarantined. `pending` (or no answer) keeps it for recovery.
       if (inc.runHome !== undefined) {
-        await settleRunHome(inc.runHome, this.deps.runtime.runHomeOutcome?.(inc.runHome.runId), {
-          log: (line) => this.log(line),
-          onQuarantined: (dir) => this.deps.records?.noteQuarantinedRoot?.(dir),
-        });
+        await this.settleRunHomeOf(inc.runHome);
       }
     }
   }

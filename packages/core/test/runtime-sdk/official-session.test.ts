@@ -1377,6 +1377,30 @@ describe("WS-21: the official leg's run home", () => {
     });
   }
 
+  // Review M6: a session whose run folder the router quarantined is `repair-required`, and a folder kept
+  // for recovery is RECORDED as the session's local-write root, so boot recovery knows whose it is.
+  test("a run folder is recorded against its session while it lives; a quarantined one marks repair-required", async () => {
+    for (const [outcome, disposed, recorded, repair] of [["safe", true, false, false], ["quarantined", false, true, true], ["pending", false, true, false]] as const) {
+      const rh = stubRunHome();
+      const notes: Array<string | undefined> = [];
+      const health: string[] = [];
+      const h = harness({
+        runHome: rh.build,
+        records: {
+          setTranscriptHealth: (_sid: string, v: string) => { health.push(v); },
+          noteRunFolder: (_sid: string, dir: string | undefined) => { notes.push(dir); },
+        } as never,
+      }, { runHomeOutcome: () => outcome });
+      await h.session.open();
+      expect(notes).toEqual(["/h/cache/runs/orun-1"]);
+      await h.session.end();
+      await Bun.sleep(30);
+      expect({ outcome, disposed: rh.disposed.length === 1 }).toEqual({ outcome, disposed });
+      expect({ outcome, recorded: notes[notes.length - 1] === "/h/cache/runs/orun-1" }).toEqual({ outcome, recorded });
+      expect({ outcome, repair: health.includes("repair-required") }).toEqual({ outcome, repair });
+    }
+  });
+
   test("a run home built for an open that then fails is disposed immediately", async () => {
     const rh = stubRunHome();
     const h = harness({ runHome: rh.build }, { sdk: { query: () => { throw new Error("run_home_required (simulated router refusal)"); } } });

@@ -716,6 +716,23 @@ export class RuntimeSessionRecords {
    * recorded so boot recovery never re-reconciles (and re-copies) it and `winter doctor` reports it.
    * Idempotent; a pre-v7 store (no table) is a no-op.
    */
+  /**
+   * WS-21 review M6: the run folder an incarnation of this session is running in, recorded as the session's
+   * local-write root (`run-folder`) for as long as it may hold a working copy — so boot recovery knows WHOSE
+   * folder it reconciles and can mark THAT session `repair-required` on a quarantine. `dir` undefined clears
+   * it, but only while it still names `current` (a later incarnation's record is never cleared by an
+   * earlier one's settle). Bounded: never throws.
+   */
+  noteRunFolder(winterSessionId: string, dir: string | undefined, current?: string): void {
+    try {
+      if (dir !== undefined) {
+        this.rs.db.run("UPDATE runtime_sessions SET active_local_write_root = ?, active_local_write_root_kind = 'run-folder', updated_at = ? WHERE winter_session_id = ?", [dir, this.now(), winterSessionId]);
+      } else if (current !== undefined) {
+        this.rs.db.run("UPDATE runtime_sessions SET active_local_write_root = NULL, active_local_write_root_kind = NULL, updated_at = ? WHERE winter_session_id = ? AND active_local_write_root = ?", [this.now(), winterSessionId, current]);
+      }
+    } catch { /* bounded: evidence, never a dependency */ }
+  }
+
   noteQuarantinedRoot(root: string): void {
     try {
       this.rs.db.run("INSERT OR IGNORE INTO run_root_quarantine (root, recorded_at, detail_json) VALUES (?, ?, '{\"at\":\"exit\"}')", [root, this.now()]);

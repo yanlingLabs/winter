@@ -160,6 +160,30 @@ describe("an exit-time quarantine (L2 fix round 1: kept, not disposed)", () => {
   });
 });
 
+describe("review M6: a run folder is recorded against its session", () => {
+  test("noteRunFolder records the folder; clearing only clears the folder it names", () => {
+    const w = world();
+    recordRoot(w.rs, "s_1", null as never, null as never);
+    const records = new RuntimeSessionRecords(w.rs);
+    records.noteRunFolder("s_1", "/h/cache/runs/a");
+    records.noteRunFolder("s_1", "/h/cache/runs/b");          // a later incarnation
+    records.noteRunFolder("s_1", undefined, "/h/cache/runs/a"); // the earlier one's settle: no-op
+    const row = () => w.rs.db.query<{ r: string | null; k: string | null }, []>("SELECT active_local_write_root AS r, active_local_write_root_kind AS k FROM runtime_sessions").get()!;
+    expect(row()).toEqual({ r: "/h/cache/runs/b", k: "run-folder" });
+    records.noteRunFolder("s_1", undefined, "/h/cache/runs/b");
+    expect(row()).toEqual({ r: null, k: null });
+  });
+
+  test("a recorded run folder the router quarantines at boot marks ITS session repair-required", async () => {
+    const w = world();
+    const dir = w.runFolder("q1");
+    recordRoot(w.rs, "s_9", dir, "run-folder");
+    await recoverRunRoots({ home: w.home, rs: w.rs, reconcile: stub({ [dir]: "quarantined" }).reconcile, claudeResumeScanRoot: w.scan });
+    expect(w.rs.db.query<{ h: string }, []>("SELECT transcript_health AS h FROM runtime_sessions WHERE winter_session_id = 's_9'").get()!.h).toBe("repair-required");
+    expect(existsSync(dir)).toBe(true);
+  });
+});
+
 describe("recoverRunRoots — recorded local-write roots (step 6)", () => {
   test("a recorded run-folder root: reconciled first; clean → deleted and the column cleared", async () => {
     const w = world();
