@@ -712,9 +712,10 @@ describe("daemon IPC", () => {
     expect(result.ok).toBe(true);
     // The writing-skills builtin (phase 5c) is always discovered, regardless of home — it ships
     // in-repo and is resolved relative to the module, not winterHome.
-    // Lane B (2026-09-22): + the truthful session-availability pair. WS-21 (L4 request 2): on router
-    // 0.0.11 no tier reaches a child any more (the plugin-view handover is retired), and it says so.
-    expect(result.skills).toEqual([{ name: "writing-skills", description: expect.any(String), source: "builtin", path: expect.any(String), loadsInSessions: false, sessionNote: expect.stringContaining("no door") }]);
+    // Lane B (2026-09-22): + the truthful session-availability pair. WS-21 (R.1 ruling 3): the linked
+    // router stages the user, self and trusted-project tiers into a run folder, never the builtin one, so
+    // the builtin still cannot load — and the note says why on this build.
+    expect(result.skills).toEqual([{ name: "writing-skills", description: expect.any(String), source: "builtin", path: expect.any(String), loadsInSessions: false, sessionNote: expect.stringContaining("aren't staged into a session's run folder") }]);
     c.close();
   });
 

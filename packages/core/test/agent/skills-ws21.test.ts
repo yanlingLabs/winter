@@ -76,11 +76,16 @@ describe("SkillStore.list precedence", () => {
 });
 
 describe("sessionAvailability after the handover's retirement (L4 request 2)", () => {
-  test("a run-home build: user/self/project/builtin skills load in sessions (the run folder carries them)", () => {
+  test("a run-home build: user/self/project skills load in sessions (the run folder carries them); builtin does not, and says why", () => {
     setRunHomeSupportForTests(true);
     try {
       const store = new SkillStore({ winterHome: mkdtempSync(join(tmpdir(), "winter-sa-")), trust: { isTrusted: () => false } as never });
-      for (const source of ["user", "self", "project", "builtin"] as const) expect(store.sessionAvailability({ name: "x", source })).toEqual({ loadsInSessions: true });
+      for (const source of ["user", "self", "project"] as const) expect(store.sessionAvailability({ name: "x", source })).toEqual({ loadsInSessions: true });
+      // R.1 ruling 3: the router stages sdk/skills, sdk/skills/self and trusted-project skills — never the
+      // daemon's own builtin tier, and neither runtime ships it.
+      const builtin = store.sessionAvailability({ name: "writing-skills", source: "builtin" });
+      expect(builtin.loadsInSessions).toBe(false);
+      expect(builtin.sessionNote).toContain("aren't staged into a session's run folder");
       expect(store.sessionAvailability({ name: "p:skill", source: "plugin" })).toEqual({ loadsInSessions: true });
       expect(store.sessionAvailability({ name: "Bad Name:x", source: "plugin" }).loadsInSessions).toBe(false);
     } finally { setRunHomeSupportForTests(undefined); }

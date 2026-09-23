@@ -250,12 +250,16 @@ export class SkillStore {
    * (`loadsInSessions`/`sessionNote`), so no surface calls a skill usable that no session can load.
    * Independent of `Skill(<name>)` deny rules, which `skills.list` reports on their own (`denied`).
    *
-   * WS-21: on a build whose router applies run homes, the run folder carries the user, self and trusted
-   * project skills (and the builtin tier stays the runtime's own) — they load in Code sessions. Before it
-   * (router 0.0.11), neither runtime has a door for bare-named host skills, and the old plugin-view
-   * handover is retired (L4 request 2), so no tier reaches a child. A `plugin` entry (lane L4's plugin
-   * half builds those) loads when its names pass the agent SDK's own jails. One argument — the plugin
-   * eligibility set it used to take is gone with the handover.
+   * WS-21: on a build whose router applies run homes, the run folder carries exactly the tiers the router
+   * stages (`run-home/items.ts`): the user tier (`sdk/skills`), the self tier (`sdk/skills/self`) and a
+   * TRUSTED project's `.winter/skills` (`skills.list` lists a project skill only for a trusted project) —
+   * those load in Code sessions. The BUILTIN tier (`packages/core/skills/`, shipped with the daemon) is
+   * staged by nobody: the router does not link it and neither runtime ships it, so it does not load, and
+   * says so (R.1 ruling 3; staging builtins into run homes is a follow-up — pre-WS-21 they did not load in
+   * sessions either). Before run homes (router 0.0.11), neither runtime has a door for bare-named host
+   * skills, and the old plugin-view handover is retired (L4 request 2), so no tier reaches a child. A
+   * `plugin` entry (lane L4's plugin half builds those) loads when its names pass the agent SDK's own
+   * jails. One argument — the plugin eligibility set it used to take is gone with the handover.
    */
   sessionAvailability(meta: Pick<SkillMeta, "name" | "source">): { loadsInSessions: boolean; sessionNote?: string } {
     if (meta.source === "plugin") {
@@ -266,7 +270,12 @@ export class SkillStore {
       }
       return { loadsInSessions: true };
     }
-    if (linkedRouterSupportsRunHome()) return { loadsInSessions: true };
+    if (linkedRouterSupportsRunHome()) {
+      if (meta.source === "builtin") {
+        return { loadsInSessions: false, sessionNote: "Built-in skills aren't staged into a session's run folder yet — a session can't load them." };
+      }
+      return { loadsInSessions: true };
+    }
     return { loadsInSessions: false, sessionNote: `${UNDELIVERABLE_TIER_LABEL[meta.source]} skills can't be loaded by a session on this build — its runtimes have no door for them.` };
   }
 
