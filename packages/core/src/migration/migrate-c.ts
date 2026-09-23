@@ -71,6 +71,9 @@ export interface MigrationCManifest {
   backups: { settings: string | null; runtimeState: string | null; sdkSettings: string | null; sdkGlobal: string | null; splitMarker: string | null };
   /** Relative to the home. */
   moved: { from: string; to: string }[];
+  /** Round 3, minor 3: the move-dirs rename in flight — written BEFORE the rename, cleared once `moved`
+   *  records it (checked: the old path gone, the target there). Only ever one. */
+  moving?: { from: string; to: string };
   links: string[];
   copied: string[];
   archived: { from: string; to: string }[];
@@ -447,6 +450,7 @@ export async function runMigrationC(home: string, deps: MigrationCDeps): Promise
 
   // ── 3. move-dirs: same-volume renames into sdk/, a relative compatibility link at each old path ──
   if (!done("move-dirs")) {
+    const inFlight = m.moving;                    // a crashed run's intent (minor 3), read once
     for (const [name, target] of SDK_COMPAT_LINKS) {
       const from = join(home, name);
       const to = join(home, target);
@@ -461,6 +465,10 @@ export async function runMigrationC(home: string, deps: MigrationCDeps): Promise
         writeManifest(home, m);
         continue;
       }
+      // Round 3, minor 3: a move is recorded only when it PROVABLY happened — the intent (`moving`) is
+      // written before the rename and the result checked after it. (The old "the target has files, so a
+      // crashed rename put them there" guess died with I1: the new build's own content may sit there.)
+      const intended = inFlight?.from === name;
       if (existsSync(from)) {
         if (existsSync(to)) {
           // bootstrap's empty placeholder gives way; anything with content means a resumed/partial run
@@ -468,18 +476,24 @@ export async function runMigrationC(home: string, deps: MigrationCDeps): Promise
           rmSync(to, { recursive: true, force: true });
         }
         mkdirSync(dirname(to), { recursive: true, mode: 0o700 });
+        m.moving = { from: name, to: target };
+        writeManifest(home, m);                    // the intent, before the rename
         renameSync(from, to);
+        if (existsSync(from) || !existsSync(to)) throw new MigrationCRefused("sdk_home_half_migrated", `the rename of ${from} into ${to} did not land — nothing more was moved; \`winter migrate --sdk-home --rollback\``);
         m.moved.push({ from: name, to: target });
+        delete m.moving;
         writeManifest(home, m);
       } else if (m.moved.some((mv) => mv.from === name)) {
         // renamed and recorded; the link is what a crash left undone
-      } else if (hasFiles(to)) {
-        // renamed, then a crash before the manifest said so: preflight proved `to` empty at the start,
-        // so its content can only be this move's
+      } else if (intended && existsSync(to)) {
+        // the intent was recorded, the old path is gone and the target is there: the rename landed and a
+        // crash came before the manifest said so
         m.moved.push({ from: name, to: target });
+        delete m.moving;
         writeManifest(home, m);
       } else {
-        continue;                                   // never existed: nothing to link
+        if (intended && m.moving?.from === name) { delete m.moving; writeManifest(home, m); }
+        continue;                                   // never existed (whatever the target holds is the new build's): nothing to link
       }
       symlinkSync(relative(home, to), from);
       m.links.push(name);
