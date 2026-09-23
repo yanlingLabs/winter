@@ -19,15 +19,15 @@ import IrohLib
 /// instead of failing loudly). A couple of short fixed sleeps ARE used, but only as a "settle" grace
 /// window to confirm NO further frame arrives — the same idiom `GatewayGateTests` already uses.
 ///
-/// Winter Phase 9a (P9a-11, Lane K): scenarios B, C, D are among the 13 tests `ci.yml`'s
-/// `WINTERKIT_SKIP` names by exact test — bisected to `ed6ebeca6c1fce175ef0e818361fb3662b38d6ca`
-/// (`session.dispatch`'s default mode now requires a resolvable `winter` executable this suite
-/// never provisions, which is what a `RealDaemon`-spawned daemon's `session.dispatch` needs); the
-/// resulting local connection close is what iroh-ffi reports to this scenario's own dialing peer
-/// as `IrohError { kind: Stream, message: "ConnectionLost(LocallyClosed)" }` — reproduced verbatim
-/// with `WINTER_RUNTIME_EXECUTABLE` unset. See `RealDaemon.waitForFirstLine`'s own doc comment for
-/// the full classification (scenario B passes once a real `winter` binary is available; C/D do
-/// not, for a second, independent cause documented there).
+/// Winter Phase 9a (P9a-11, Lane K): scenarios B, C, D were originally among the 13 tests
+/// `ci.yml`'s `WINTERKIT_SKIP` named by exact test — bisected to
+/// `ed6ebeca6c1fce175ef0e818361fb3662b38d6ca` (`session.dispatch`'s default mode now requires a
+/// resolvable `winter` executable, which `bun install` alone now provisions via the npm platform
+/// package — see `RealDaemon.waitForFirstLine`'s own doc comment for the full classification).
+/// Lane J (2026-09) fixed C and D: both seed a real, credential-less Winter-leg turn, whose
+/// genuine `agent_error`/`turn_completed` tail these scenarios' original "expect exactly N frames,
+/// then silence" assertions raced rather than waited for — see each scenario's own doc comment,
+/// and `collectUntilTurnsSettle`/`crossesRemoteGate` below.
 final class IrohE2ETests: XCTestCase {
 
     // MARK: - Shared setup
