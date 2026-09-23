@@ -78,7 +78,7 @@ import { DIFF_PATCH_MAX_BYTES, mintDiffId, writeDiff } from "../diffs/store";
 import type { HookResult } from "../plugins/hook-runner";
 import { attachFileDiff } from "./diff-attach";
 import { REVIEWER_ESCALATION_REASON, noteReviewerCleared } from "./bridge-common";
-import { ESCAPE_FENCED_FILENAMES, PROJECT_FENCED_SEGMENTS, homeFencedDirs, homeFencedFiles } from "./home-fence";
+import { ESCAPE_FENCED_FILENAMES, HOME_WRITE_ONLY_FENCED, PROJECT_FENCED_SEGMENTS, homeFencedDirs, homeFencedFiles } from "./home-fence";
 
 /** The subset of `plugins/hook-registry.ts`'s `HookFacade` this module depends on — injected
  *  rather than imported concretely so a fake can stand in for tests with no real plugin process
@@ -293,61 +293,155 @@ function pluginPostToolUseFailureHook(deps: SessionHooksDeps): HookCallback {
 // every permission mode (agent SDK 0.0.17 `permissions/evaluator.ts` ~1657).
 //
 // Conservative on purpose: a substring match on the control-plane filenames (plus `trust.json`), on
-// any `.winter/agents/`, and on every spelling of every fenced home path this file can predict — the
+// any `.winter/agents`, and on every spelling of every fenced home path this file can predict — the
 // literal home (and its realpath), `~`/`$HOME`/`${HOME}` for a home under the user's own,
-// `$WINTER_HOME`/`${WINTER_HOME}`, and `<home basename>/…` for a command that `cd`s there first —
-// compared case-insensitively (a default macOS volume is). A false
+// `$WINTER_HOME`/`${WINTER_HOME}`, `<home basename>/…`, and a relative path after a `cd` into the home —
+// over a normalised command (case, quotes, `//`, `/./`). `cache` and `plugins` are refused only in a
+// write-shaped position (review N1): the model reads and runs plugin skill content there. A false
 // positive costs a typed deny the model can route around by running the command sandboxed; a false
 // negative costs the floor. A command that builds the path at run time (`$(…)`, variables of its
 // own) is beyond any static check — the reviewer still judges what is left.
 
 /**
- * Every spelling of every fenced `<home>` path this check can predict, lowercased — the fenced dirs
- * and files come from `home-fence.ts`, i.e. from the SAME list the Bash sandbox's `denyWrite` carries
- * (whole-branch review 2026-09-23: the first cut named only `run`/`runtimes` and missed `plugins`,
- * `permissions`, `cache`, `agents` and `trust.json`). Each is spelled relative to every predictable
- * home prefix: the literal home and its realpath, `~`/`$HOME`/`${HOME}` for a home under the user's
- * own, `$WINTER_HOME`/`${WINTER_HOME}`, and the home's basename for a command that `cd`s first.
+ * The command as the floor reads it (whole-branch review N2): lowercased (a default macOS volume is
+ * case-insensitive), quotes stripped (`~/".winter"/…` is `~/.winter/…` to the shell), and `//`, `/./`
+ * and `<seg>/..` collapsed. Static on purpose — a path the command BUILDS at run time is beyond it.
  */
-function homeStateNeedles(home: string | undefined): string[] {
-  if (home === undefined || home.length === 0) return [];
-  const trimmed = home.replace(/\/+$/, "");
-  const homes = new Set<string>([trimmed]);
+export function normaliseEscapeCommand(command: string): string {
+  let c = command.toLowerCase().replace(/["']/g, "");
+  let prev: string;
+  do {
+    prev = c;
+    c = c.replace(/\/{2,}/g, "/")
+      .replace(/\/\.(?=\/|\s|$)/g, "")
+      .replace(/\/(?!\.\.(?:\/|\s|$))[^/\s]+\/\.\.(?=\/|\s|$)/g, "");
+  } while (c !== prev);
+  return c;
+}
+
+/**
+ * Every spelling of the home this check can predict, lowercased: the literal home and its realpath,
+ * `~`/`$HOME`/`${HOME}` for a home under the user's own, `$WINTER_HOME`/`${WINTER_HOME}`, and the
+ * home's basename (a command that `cd`s to its parent first).
+ */
+function homePrefixes(home: string): string[] {
+  const homes = new Set<string>([home]);
   try { homes.add(realpathSync(home).replace(/\/+$/, "")); } catch { /* not created yet: the literal spelling is the one a command could name */ }
-  const prefixes = new Set<string>(["$WINTER_HOME", "${WINTER_HOME}"]);
+  const prefixes = new Set<string>(["$winter_home", "${winter_home}"]);
   const userHome = homedir().replace(/\/+$/, "");
   for (const h of homes) {
-    prefixes.add(h);
+    prefixes.add(h.toLowerCase());
     if (userHome.length > 0 && h.startsWith(`${userHome}/`)) {
       const rest = h.slice(userHome.length);
-      for (const tilde of ["~", "$HOME", "${HOME}"]) prefixes.add(`${tilde}${rest}`);
+      for (const tilde of ["~", "$home", "${home}"]) prefixes.add(`${tilde}${rest}`.toLowerCase());
     }
     const base = basename(h);
-    if (base.length > 0) prefixes.add(base);
+    if (base.length > 0) prefixes.add(base.toLowerCase());
   }
-  // Each fenced path as it sits UNDER the home (`run`, `plugins`, `cache/skill-plugins`, `trust.json`…);
-  // one that lies outside it is matched by its own absolute spelling.
-  const rels = new Set<string>();
-  const absolutes = new Set<string>();
-  for (const p of [...homeFencedDirs(trimmed), ...homeFencedFiles(trimmed)]) {
-    const r = relative(trimmed, p);
-    if (r.length === 0 || r.startsWith("..") || isAbsolute(r)) absolutes.add(p); else rels.add(r);
+  return [...prefixes];
+}
+
+/** One fenced target as the floor matches it. `writeOnly` — the model is POINTED at content under it
+ *  to read and run (plugin skills), so only a write-shaped use is refused (review N1). */
+interface FloorNeedle { needle: string; writeOnly: boolean }
+
+/**
+ * Every fenced `<home>` path, spelled under every home prefix — the fenced dirs and files come from
+ * `home-fence.ts`, i.e. from the SAME list the Bash sandbox's `denyWrite` carries (whole-branch review
+ * 2026-09-23). A path lying outside the home is matched by its own absolute spelling.
+ */
+function floorNeedles(home: string): FloorNeedle[] {
+  const prefixes = homePrefixes(home);
+  const out = new Map<string, boolean>();
+  for (const p of [...homeFencedDirs(home), ...homeFencedFiles(home)]) {
+    const r = relative(home, p);
+    const writeOnly = HOME_WRITE_ONLY_FENCED.includes(r.split("/")[0] ?? "");
+    const spellings = r.length === 0 || r.startsWith("..") || isAbsolute(r)
+      ? [p.toLowerCase()]
+      : prefixes.map((pre) => `${pre}/${r}`.toLowerCase());
+    for (const n of spellings) out.set(n, (out.get(n) ?? true) && writeOnly);
   }
-  const needles = new Set<string>();
-  for (const pre of prefixes) for (const r of rels) needles.add(`${pre}/${r}`.toLowerCase());
-  for (const a of absolutes) needles.add(a.toLowerCase());
-  return [...needles];
+  return [...out].map(([needle, writeOnly]) => ({ needle, writeOnly }));
+}
+
+/**
+ * Relative words after a `cd`/`pushd`, rewritten against the directory the command moved to (review
+ * N2: `cd ~/.winter && cp x permissions/projects.json`). A `cd` to an absolute-looking target
+ * (`/`, `~`, `$…`) sets it; a relative one extends it; flags and `k=v` words are left alone. Conservative
+ * rather than exact: the command words themselves get the prefix too, which can only ADD matches.
+ */
+function expandAfterCd(c: string): string {
+  const parts = c.split(/(\s+|&&|\|\||;|\||&|\(|\))/);
+  let cwd: string | undefined;
+  let expectArg = false;
+  const out: string[] = [];
+  for (const part of parts) {
+    if (part === undefined || part.length === 0) continue;
+    if (/^\s+$/.test(part) || /^(&&|\|\||;|\||&|\(|\))$/.test(part)) { out.push(part); continue; }
+    if (expectArg) {
+      expectArg = false;
+      const arg = part.replace(/\/+$/, "");
+      cwd = /^[/~$]/.test(arg) || cwd === undefined ? arg : `${cwd}/${arg.replace(/^\.\//, "")}`;
+      out.push(part);
+      continue;
+    }
+    if (part === "cd" || part === "pushd") { expectArg = true; out.push(part); continue; }
+    if (cwd !== undefined && !/^[/~$-]/.test(part) && !part.includes("=")) {
+      out.push(`${cwd}/${part.replace(/^\.\//, "")}`);
+      continue;
+    }
+    out.push(part);
+  }
+  return normaliseEscapeCommand(out.join(""));
+}
+
+/** Programs that WRITE a path they are given (review N1) — conservative: `git`/`curl`/`tar` can write
+ *  into a directory they are pointed at, so they count too. Matched on a word's basename. */
+const ESCAPE_WRITE_VERBS: ReadonlySet<string> = new Set([
+  "cp", "mv", "ln", "rm", "rmdir", "unlink", "tee", "mkdir", "touch", "install", "rsync", "truncate", "dd",
+  "chmod", "chown", "curl", "wget", "git", "tar", "unzip", "ditto", "patch",
+]);
+
+/** Where the command's WRITE-shaped part begins: the first redirect operator, or the first word that
+ *  is a write verb — whichever comes first. `Infinity` for a command with neither. */
+function writeContextStart(c: string): number {
+  let start = c.indexOf(">");
+  if (start < 0) start = Infinity;
+  const words = /[^\s;&|()]+/g;
+  let m: RegExpExecArray | null;
+  while ((m = words.exec(c)) !== null) {
+    if (m.index >= start) break;
+    const word = m[0].slice(m[0].lastIndexOf("/") + 1);
+    if (ESCAPE_WRITE_VERBS.has(word)) { start = m.index; break; }
+  }
+  return start;
 }
 
 /**
  * What a sandbox escape's command names that the floor forbids, or `undefined`. Exported for the
  * tests; the hook below is its one production caller besides the reviewer's own skip.
+ *
+ * Two classes (review N1): paths the model may not even read (`run`, `runtimes`) and the self-grant
+ * stores (`permissions`, `agents`, `trust.json`, the control-plane filenames, any `.winter/agents`) are
+ * refused on ANY mention; `cache` and `plugins` — whose skill content the model is pointed at to read
+ * and execute — only in a write-shaped position (after a redirect or a write verb).
  */
 export function escapeFloorHit(command: string, home: string | undefined): string | undefined {
-  const c = command.toLowerCase();
+  const c = expandAfterCd(normaliseEscapeCommand(command));
   for (const name of ESCAPE_FENCED_FILENAMES) if (c.includes(name)) return name;
-  for (const seg of PROJECT_FENCED_SEGMENTS) if (c.includes(seg)) return `a project's ${seg} directory`;
-  for (const needle of homeStateNeedles(home)) if (c.includes(needle)) return "Winter's own state under its home";
+  for (const seg of PROJECT_FENCED_SEGMENTS) {
+    const bare = seg.replace(/\/+$/, "");
+    if (c.includes(bare)) return `a project's ${bare} directory`;
+  }
+  if (home === undefined || home.length === 0) return undefined;
+  const writeStart = writeContextStart(c);
+  for (const { needle, writeOnly } of floorNeedles(home.replace(/\/+$/, ""))) {
+    let at = c.indexOf(needle);
+    while (at >= 0) {
+      if (!writeOnly || at > writeStart) return "Winter's own state under its home";
+      at = c.indexOf(needle, at + 1);
+    }
+  }
   return undefined;
 }
 
