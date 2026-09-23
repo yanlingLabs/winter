@@ -19,15 +19,15 @@ import IrohLib
 /// instead of failing loudly). A couple of short fixed sleeps ARE used, but only as a "settle" grace
 /// window to confirm NO further frame arrives — the same idiom `GatewayGateTests` already uses.
 ///
-/// Winter Phase 9a (P9a-11, Lane K): scenarios B, C, D are among the 13 tests `ci.yml`'s
-/// `WINTERKIT_SKIP` names by exact test — bisected to `ed6ebeca6c1fce175ef0e818361fb3662b38d6ca`
-/// (`session.dispatch`'s default mode now requires a resolvable `winter` executable this suite
-/// never provisions, which is what a `RealDaemon`-spawned daemon's `session.dispatch` needs); the
-/// resulting local connection close is what iroh-ffi reports to this scenario's own dialing peer
-/// as `IrohError { kind: Stream, message: "ConnectionLost(LocallyClosed)" }` — reproduced verbatim
-/// with `WINTER_RUNTIME_EXECUTABLE` unset. See `RealDaemon.waitForFirstLine`'s own doc comment for
-/// the full classification (scenario B passes once a real `winter` binary is available; C/D do
-/// not, for a second, independent cause documented there).
+/// Winter Phase 9a (P9a-11, Lane K): scenarios B, C, D were originally among the 13 tests
+/// `ci.yml`'s `WINTERKIT_SKIP` named by exact test — bisected to
+/// `ed6ebeca6c1fce175ef0e818361fb3662b38d6ca` (`session.dispatch`'s default mode now requires a
+/// resolvable `winter` executable, which `bun install` alone now provisions via the npm platform
+/// package — see `RealDaemon.waitForFirstLine`'s own doc comment for the full classification).
+/// Lane J (2026-09) fixed C and D: both seed a real, credential-less Winter-leg turn, whose
+/// genuine `agent_error`/`turn_completed` tail these scenarios' original "expect exactly N frames,
+/// then silence" assertions raced rather than waited for — see each scenario's own doc comment,
+/// and `collectUntilTurnsSettle`/`crossesRemoteGate` below.
 final class IrohE2ETests: XCTestCase {
 
     // MARK: - Shared setup
@@ -85,6 +85,49 @@ final class IrohE2ETests: XCTestCase {
 
     private func decodeEvent(_ e: WireEnvelope) throws -> SessionEvent {
         try JSONDecoder().decode(SessionEvent.self, from: e.payload)
+    }
+
+    /// Lane J (2026-09), mirroring `GatewayGateTests`' own copy — this codebase's established
+    /// per-file convention for small test-only plumbing. Since `ed6ebeca6c1fce...` ("Dispatch on
+    /// the Winter leg") EVERY `session.send` spawns a real Winter-leg turn, and this suite seeds no
+    /// provider credential, so it synchronously (well under a second) emits `turn_started`,
+    /// `agent_error`, `turn_completed`. Waits (bounded) until `turnCompleted` has been observed
+    /// `turns` times for `sessionId` on `client` (already `attach()`ed to it), returning every
+    /// session event seen meanwhile, in order — lets a scenario settle past a turn's own async
+    /// tail before the next step (a reconnect, a "no more frames" check) races it.
+    private func collectUntilTurnsSettle(_ client: WinterClient, sessionId: String, turns: Int, timeout: TimeInterval = 5) async throws -> [SessionEvent] {
+        struct SettleTimeout: Error {}
+        return try await withThrowingTaskGroup(of: [SessionEvent].self) { group in
+            group.addTask {
+                var collected: [SessionEvent] = []
+                var completedSeen = 0
+                for await ev in client.events {
+                    guard case .session(let e) = ev, e.sessionId == sessionId else { continue }
+                    collected.append(e)
+                    if case .turnCompleted = e {
+                        completedSeen += 1
+                        if completedSeen >= turns { break }
+                    }
+                }
+                return collected
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                throw SettleTimeout()
+            }
+            let result = try await group.next()!
+            group.cancelAll()
+            return result
+        }
+    }
+
+    /// What a "remote"-role connection (the Gateway's own daemon client) actually receives — see
+    /// `GatewayGateTests.crossesRemoteGate`'s own doc comment for the full reasoning
+    /// (`turn_started` is in neither `HISTORY_EVENT_TYPES` nor `TRANSIENT_EVENT_TYPES`, so the
+    /// daemon's remote-stream gate drops it before broadcast; it never reaches the Gateway).
+    private func crossesRemoteGate(_ e: SessionEvent) -> Bool {
+        if case .turnStarted = e { return false }
+        return true
     }
 
     // MARK: - Scenario A: hello/resume (empty resumes) — helloAck first, session.list works
@@ -199,7 +242,15 @@ final class IrohE2ETests: XCTestCase {
             return XCTFail("session.dispatch must return a sessionId")
         }
         let afterAttach = try await live.attach(sessionId: sid, fromSeq: 0)
-        let seqM1 = try await live.send(sessionId: sid, text: "seed-m1")
+        _ = try await live.send(sessionId: sid, text: "seed-m1")
+        // Lane J: let the seed's real Winter-leg turn settle before dialing — this suite seeds no
+        // credential, so every send synchronously emits turn_started/agent_error/turn_completed
+        // (turn_started invisible to a phone by construction — `crossesRemoteGate`). `seedContent`
+        // is exactly what phone1's replay below should deliver; its last seq is the true settled
+        // watermark (not the raw `send()` return, which is only the user_message's own seq).
+        let seedContent = try await collectUntilTurnsSettle(live, sessionId: sid, turns: 1)
+            .filter { $0.seq > afterAttach && crossesRemoteGate($0) && !isHarnessNoise($0) }
+        let seedHighWater = seedContent.last?.seq ?? afterAttach
 
         // Same physical phone reconnects later in this scenario — one secret, one directory entry,
         // reused for BOTH dials (see `PhoneConn.dial`'s own doc comment on why a reconnect must
@@ -216,10 +267,14 @@ final class IrohE2ETests: XCTestCase {
         let ack1 = try await phone1.expectFrame()
         XCTAssertEqual(ack1.kind, .helloAck, "helloAck must precede the replay, even over real iroh")
         let hello1 = try JSONDecoder().decode(ServerHello.self, from: ack1.payload)
-        XCTAssertEqual(hello1.verdicts, [.replayBegin(sessionID: sid, fromSeq: afterAttach, highWatermark: seqM1)])
-        let replay1 = try await phone1.expectFrame()
-        XCTAssertEqual(replay1.kind, .event)
-        XCTAssertEqual(replay1.seq, seqM1)
+        XCTAssertEqual(hello1.verdicts, [.replayBegin(sessionID: sid, fromSeq: afterAttach, highWatermark: seedHighWater)])
+        var replay1: [SessionEvent] = []
+        for _ in seedContent {
+            let frame = try await phone1.expectFrame()
+            XCTAssertEqual(frame.kind, .event)
+            replay1.append(try decodeEvent(frame))
+        }
+        XCTAssertEqual(replay1, seedContent, "phone1's replay must match the seed's real, settled content exactly")
 
         // Drop the phone mid-stream.
         phone1.closeConnection()
@@ -257,33 +312,43 @@ final class IrohE2ETests: XCTestCase {
         let phone2 = try await PhoneConn.dial(listener: listener, secret: secret)
         defer { phone2.closeConnection(); phone2.closeDialer() }
         try await phone2.sendHello(clientInstanceID: "phone-c", resumes: [
-            StreamResume(sessionID: sid, streamID: sid, lastAppliedSeq: seqM1),
+            StreamResume(sessionID: sid, streamID: sid, lastAppliedSeq: seedHighWater),
         ])
         let seqGap = try await gapSeq
 
         let ack2 = try await phone2.expectFrame()
         XCTAssertEqual(ack2.kind, .helloAck, "helloAck must be the FIRST frame on reconnect too (G3, real transport)")
         let hello2 = try JSONDecoder().decode(ServerHello.self, from: ack2.payload)
-        XCTAssertEqual(hello2.verdicts, [.upToDate(sessionID: sid, highWatermark: seqM1)],
+        XCTAssertEqual(hello2.verdicts, [.upToDate(sessionID: sid, highWatermark: seedHighWater)],
                        "the gap message must NOT be visible to the reconnect's own attach — it must be a genuinely live, held event")
 
-        let gapFrame = try await phone2.expectFrame()
-        XCTAssertEqual(gapFrame.kind, .event)
-        XCTAssertEqual(gapFrame.seq, seqGap, "exactly the gap message, delivered as a held live event strictly after the ack")
-        let gapEvent = try decodeEvent(gapFrame)
-        guard case .userMessage(let gm) = gapEvent else {
-            return XCTFail("expected the gap user_message, got \(gapEvent)")
+        // The gap turn is equally real (this suite seeds no credential): `gap-m2`'s own
+        // turn_started/agent_error/turn_completed follow it live, exactly like the seed's did —
+        // settle it before checking for silence, or the "no further frame" check below just races
+        // its own tail (the actual cause of this scenario's flakiness/failure on main).
+        let gapContent = try await collectUntilTurnsSettle(live, sessionId: sid, turns: 1)
+            .filter { crossesRemoteGate($0) && !isHarnessNoise($0) }
+        var liveFrames: [SessionEvent] = []
+        for _ in gapContent {
+            let frame = try await phone2.expectFrame()
+            XCTAssertEqual(frame.kind, .event)
+            liveFrames.append(try decodeEvent(frame))
         }
+        XCTAssertEqual(liveFrames, gapContent, "the gap turn must be delivered live, unmodified, strictly after the ack")
+        guard case .userMessage(let gm) = liveFrames.first else {
+            return XCTFail("expected the gap user_message first, got \(String(describing: liveFrames.first))")
+        }
+        XCTAssertEqual(gm.seq, seqGap, "exactly the gap message, delivered as a held live event strictly after the ack")
         XCTAssertEqual(gm.text, "gap-m2")
-        XCTAssertFalse(isHarnessNoise(gapEvent))
+        XCTAssertFalse(isHarnessNoise(.userMessage(gm)))
 
-        // No dup of seqM1 (already delivered to phone1), and nothing more arrives at all — exactly
-        // these 2 frames for phone2.
+        // No dup of anything already delivered to phone1, and nothing more arrives at all — exactly
+        // helloAck + the gap turn's own settled content for phone2.
         do {
             let extra = try await phone2.readNext(timeout: 0.5)
-            XCTFail("expected no third frame — phone2 should see exactly [helloAck, gap event], got \(extra)")
+            XCTFail("expected no further frame — phone2 should see exactly [helloAck] + the gap turn's settled content, got \(extra)")
         } catch {
-            // Timed out waiting for a (nonexistent) third frame — expected.
+            // Timed out waiting for a (nonexistent) further frame — expected.
         }
 
         await live.close()
@@ -313,6 +378,9 @@ final class IrohE2ETests: XCTestCase {
         guard let sid = dispatchBody["result"]?["sessionId"]?.stringValue else {
             return XCTFail("session.dispatch must return a sessionId")
         }
+        // Lane J: attached early so `collectUntilTurnsSettle` below sees the whole live broadcast
+        // for this session, from a connection independent of either phone.
+        _ = try await verifier.attach(sessionId: sid, fromSeq: 0)
 
         try await phone1.sendRpcRequest(id: 2, method: "session.attach", params: .object([
             "sessionId": .string(sid), "fromSeq": .number(0),
@@ -335,6 +403,17 @@ final class IrohE2ETests: XCTestCase {
         let seq1 = try decodeBody(resp1)["result"]?["seq"]?.intValue
         XCTAssertEqual(seq1, m1.seq)
 
+        // Lane J: the FIRST "hi" is equally a real Winter-leg turn (this suite seeds no
+        // credential) — let it fully settle (turn_started/agent_error/turn_completed) BEFORE any
+        // idempotency check runs. Pre-fix, this scenario's `lastSeqBeforeResend`/`lastSeqAfterResend`
+        // comparison and its "no further frame" check both raced this turn's own async tail
+        // (its `agent_error`/`turn_completed` landing between the two `listSessions()` calls, or
+        // arriving on phone2 sometime after the resend's response) — a timing artifact, not a
+        // dedup failure. `firstTurnTail` is exactly the extra content phone2's OWN reconnect
+        // replay must now deliver, since it resumes at `m1.seq`.
+        let firstTurnSettled = try await collectUntilTurnsSettle(verifier, sessionId: sid, turns: 1)
+        let firstTurnTail = firstTurnSettled.filter { $0.seq > m1.seq && crossesRemoteGate($0) && !isHarnessNoise($0) }
+
         phone1.closeConnection()
 
         // Reconnect — SAME clientInstanceID (and SAME iroh identity/secret), so the gateway reuses
@@ -346,7 +425,19 @@ final class IrohE2ETests: XCTestCase {
             StreamResume(sessionID: sid, streamID: sid, lastAppliedSeq: m1.seq),
         ])
         let helloAck2 = try await phone2.expectFrame()
-        XCTAssertEqual(helloAck2.kind, .helloAck) // upToDate — nothing new happened
+        XCTAssertEqual(helloAck2.kind, .helloAck)
+
+        // The first turn had already settled before this dial, so the reconnect's own replay must
+        // now deliver its tail — drain it before anything else touches this connection, or it
+        // misaligns every `expectFrame()` call below (this WAS the "got \(extra)" / "Optional(8)"
+        // failure on main: that tail arriving live, mid-idempotency-check, instead).
+        var firstTurnReplay: [SessionEvent] = []
+        for _ in firstTurnTail {
+            let frame = try await phone2.expectFrame()
+            XCTAssertEqual(frame.kind, .event)
+            firstTurnReplay.append(try decodeEvent(frame))
+        }
+        XCTAssertEqual(firstTurnReplay, firstTurnTail, "the reconnect must replay the first turn's own settled tail, unmodified")
 
         // Baseline AFTER the reconnect's own re-attach (which mints its own `harness_detached` +
         // `harness_attached` housekeeping noise — unrelated to idempotency, filtered from the
