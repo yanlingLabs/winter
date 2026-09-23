@@ -44,8 +44,8 @@
 // downgraded, pre-WS-21 build's ability to read its own consent back after a rollback. The new build
 // reads only the qualified key (`PluginStore#list()`, `agent/plugins.ts`); an older, downgraded build
 // reads only the bare one — both coexist in the same file, neither ever reads the other's key.
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { join, sep } from "node:path";
 import { sdkPluginsRoot, sdkHomeFor } from "../agent/paths";
 import { loadManifest, requiredConsentClasses } from "../agent/plugin-manifest";
 import { writeJsonAtomic } from "../sdk-files";
@@ -120,14 +120,64 @@ function convertHooksJson(hooks: LegacyHook[]): Record<string, Array<{ hooks: Ar
   return out;
 }
 
+/** Post-merge fix round, finding 4 (Opus review, data safety): the first NESTED symlink under `dir`
+ *  (walked from `boundary`, a REAL — already `realpathSync`-resolved — directory) whose own resolved
+ *  target falls OUTSIDE `boundary`, as a display path, or `undefined` when every symlink found stays
+ *  inside it (including none at all). A dangling link (resolves nowhere) is not an escape — there is
+ *  nothing outside the boundary for it to reach. Bounded against symlink cycles via `visited` (real
+ *  paths already walked); an unreadable directory reports no escape from that branch (the COPY that
+ *  follows will surface the same unreadability on its own, as a normal conversion failure). */
+function findEscapingSymlink(dir: string, boundary: string, visited: Set<string> = new Set()): string | undefined {
+  let real: string;
+  try { real = realpathSync(dir); } catch { return undefined; }
+  if (visited.has(real)) return undefined;
+  visited.add(real);
+  let entries;
+  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return undefined; }
+  for (const e of entries) {
+    const full = join(dir, e.name);
+    if (e.isSymbolicLink()) {
+      let resolved: string;
+      try { resolved = realpathSync(full); } catch { continue; } // dangling — nowhere to escape to
+      if (resolved !== boundary && !resolved.startsWith(`${boundary}${sep}`)) return full;
+      if (isDirectory(full)) {
+        const nested = findEscapingSymlink(full, boundary, visited);
+        if (nested !== undefined) return nested;
+      }
+      continue;
+    }
+    if (e.isDirectory()) {
+      const nested = findEscapingSymlink(full, boundary, visited);
+      if (nested !== undefined) return nested;
+    }
+  }
+  return undefined;
+}
+
 /** Copies `<home>/plugins/<id>` into the converted plugin's install dir, then overlays the
  *  claude-shaped files this converter derives (`.claude-plugin/plugin.json`, `.mcp.json`,
  *  `hooks/hooks.json`, a narrowed `winter-plugin.json`) — the copy first so any file the legacy
  *  plugin already shipped that this converter has no opinion about (skills/, agents/, other assets)
- *  comes along unchanged. */
+ *  comes along unchanged.
+ *
+ *  Post-merge fix round, finding 4 (Opus review, data safety): `legacyDir` itself may be a SYMLINK
+ *  (a dev checkout linked into `<home>/plugins`, for instance) — the OLD `cpSync(legacyDir, ...)`
+ *  copied the link itself (Node's own default, `dereference:false`), so `targetDir` became a symlink
+ *  to the SAME external folder, and every write this function makes below (deleting the stale
+ *  manifests, writing the narrowed ones) landed THROUGH it, in the user's own folder. Now: dereference
+ *  the TOP-LEVEL link first (`realpathSync`, a no-op when it wasn't one), refuse typed when any
+ *  NESTED symlink inside points outside that resolved boundary (never write through one — the
+ *  caller's own try/catch reports this plugin `skipped`, with THIS message as the reason, and the
+ *  ORIGINAL `<home>/plugins/<id>` is never touched at all, not even read past this check), and copy
+ *  with `dereference:true` so the OUTPUT under `targetDir` is a plain, symlink-free real directory. */
 function convertOnePlugin(legacyDir: string, targetDir: string, id: string): void {
-  cpSync(legacyDir, targetDir, { recursive: true });
-  const { manifest, meta } = readLegacyManifest(legacyDir);
+  const realLegacyDir = realpathSync(legacyDir); // dereference the TOP-LEVEL link — a no-op when it wasn't one
+  const escaping = findEscapingSymlink(realLegacyDir, realLegacyDir);
+  if (escaping !== undefined) {
+    throw new Error(`${legacyDir}: a nested symlink (${escaping}) points outside the plugin's own folder — refusing to convert (never writing through a link that could reach files outside it)`);
+  }
+  cpSync(realLegacyDir, targetDir, { recursive: true, dereference: true });
+  const { manifest, meta } = readLegacyManifest(realLegacyDir);
 
   // The legacy `winter-plugin.json`/`plugin.json` themselves are superseded by the files below —
   // remove the stale copies so a reader never finds two conflicting manifests.
@@ -305,7 +355,15 @@ export async function convertLegacyPlugins(home: string): Promise<ConvertLegacyP
   const result: ConvertLegacyPluginsResult = { converted: [], skipped: [] };
   let ids: string[] = [];
   try {
-    ids = readdirSync(legacyRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+    // Post-merge fix round, finding 4: `Dirent.isDirectory()` does NOT follow symlinks (it reports
+    // the dirent's OWN type, "symbolic link", never the target's) — a legacy plugin at
+    // `<home>/plugins/<id>` that is itself a symlink (a dev checkout linked in) would be silently
+    // dropped from the candidate list before `convertOnePlugin` (which DOES handle it correctly, see
+    // its own doc) ever got a chance to run. `isDirectory` below follows symlinks (`statSync`), so a
+    // symlinked plugin dir is admitted the same as a real one.
+    ids = readdirSync(legacyRoot, { withFileTypes: true })
+      .filter((e) => isDirectory(join(legacyRoot, e.name)))
+      .map((e) => e.name);
   } catch {
     return result; // no legacy plugins directory at all — nothing to convert
   }
