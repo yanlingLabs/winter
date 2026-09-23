@@ -1629,12 +1629,10 @@ export async function startDaemon(opts: {
     log: (line) => console.error(`winter-leg: ${line}`),
     ...(opts.officialConnectionOverride === undefined ? {} : { officialConnectionOverride: opts.officialConnectionOverride }),
     // P8c integration Wirings 1 & 3 (P8c-14): lane 2's plan bridge and lane 3's hooks facade,
-    // built above. `hooksFor` reaches the official leg's `Options.hooks` today (session-driver.ts's
-    // `assembleOfficial`); the Winter-leg side of `planBridge`/`hooksFor.winter` has no consumer yet
-    // in this spine (`approval-bridge.ts` never reads `WinterLegDeps.planBridge`, and this file's
-    // own `optionsFor` never threads `hooksFor(...).winter` into `buildWinterOptions` at all) — both
-    // fields are still wired here because `WinterLegDeps` already declares the seam and the brief's
-    // wiring is this daemon.ts assignment, not the still-open lane-1 consumption (see report).
+    // built above. BOTH legs consume both: `hooksFor(...).official` becomes the official child's
+    // `Options.hooks` (session-driver.ts's `assembleOfficial`) and `hooksFor(...).winter` the Winter
+    // child's (its `optionsFor` → `buildWinterOptions`); `planBridge` answers `ExitPlanMode` through
+    // each leg's `CanUseToolDeps.planBridge` (the Winter leg's approval-bridge deps in `assemble`).
     planBridge,
     hooksFor,
   });
