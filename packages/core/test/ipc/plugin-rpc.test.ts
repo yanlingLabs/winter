@@ -108,13 +108,59 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
     expect(installRes.result).toEqual({ ok: true, plugin: { id: "p", installPath: mktDir, scope: "user" } });
 
     const listRes = await c.request(METHODS.pluginList, {});
-    expect(listRes.result).toEqual({ ok: true, plugins: [{ id: "p", installPath: mktDir, scope: "user", enabled: true, marketplace: "m" }] });
+    // I1 fix round 1: plugin.list now carries `extras` (winter-plugin.json's tier/permissions/
+    // requiredConsents/consented/entry) — the Mac app's consent UI (lane L5) needs them over RPC.
+    // `writeMarketplace`'s default fixture declares tier:"platform" + an entry point (no
+    // permissions), so requiredConsents derives ["exec"] and consented is [] (never consented here).
+    expect(listRes.result).toEqual({
+      ok: true,
+      plugins: [{
+        id: "p", installPath: mktDir, scope: "user", enabled: true, marketplace: "m",
+        extras: { tier: "platform", requiredConsents: ["exec"], consented: [], entry: { command: "bun", args: ["--version"] } },
+      }],
+    });
 
     // Written into Contract B's own files (sdk/plugins/installed_plugins.json + sdk/settings.json).
     const installed = JSON.parse(readFileSync(join(sdkPluginsRoot(home), "installed_plugins.json"), "utf8"));
     expect(installed.plugins["p@m"]).toHaveLength(1);
     const sdkSettings = JSON.parse(readFileSync(sdkSettingsPath(home), "utf8"));
     expect(sdkSettings.enabledPlugins["p@m"]).toBe(true);
+  });
+
+  test("plugin.list: extras is absent for a plugin with no winter-plugin.json", async () => {
+    const { c } = await boot();
+    const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-mkt-noextras-"));
+    mkdirSync(join(mktDir, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(mktDir, ".claude-plugin", "marketplace.json"), JSON.stringify({
+      name: "m", owner: { name: "test" }, plugins: [{ name: "p", source: "." }],
+    }));
+    // Deliberately no winter-plugin.json at mktDir.
+    await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+    await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+
+    const listRes = await c.request(METHODS.pluginList, {});
+    expect(listRes.result.plugins).toEqual([{ id: "p", installPath: mktDir, scope: "user", enabled: true, marketplace: "m" }]);
+    expect(listRes.result.plugins[0]).not.toHaveProperty("extras");
+  });
+
+  test("plugin.list: extras.consented reflects plugin.setConsent, and permissions carry through", async () => {
+    const { c } = await boot();
+    const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-mkt-consent-"));
+    writeMarketplace(mktDir, {
+      id: "p", tier: "capability",
+      permissions: { exec: true, tcc: ["accessibility"], hardware: ["battery"] },
+    });
+    await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+    await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+    await c.request(METHODS.pluginSetConsent, { name: "p", classes: ["exec", "tcc"] });
+
+    const listRes = await c.request(METHODS.pluginList, {});
+    expect(listRes.result.plugins[0].extras).toEqual({
+      tier: "capability",
+      permissions: { exec: true, tcc: ["accessibility"], hardware: ["battery"] },
+      requiredConsents: ["exec", "tcc", "hardware"],
+      consented: ["exec", "tcc"],
+    });
   });
 
   test("plugin.install on an unknown marketplace is refused typed (INVALID_PARAMS), nothing written", async () => {
@@ -221,7 +267,12 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
     expect(settings.enabledPlugins["p@m"]).toBe(true);
 
     const listRes = await c.request(METHODS.pluginList, { cwd: projectDir });
-    expect(listRes.result.plugins).toEqual([{ id: "p", installPath: mktDir, scope: "project", enabled: true, marketplace: "m" }]);
+    // I1: extras is scope-independent (plugins.consents lives in <home>/settings.json regardless
+    // of which sdk file the enabled flag is in) — a project-scope listing carries it too.
+    expect(listRes.result.plugins).toEqual([{
+      id: "p", installPath: mktDir, scope: "project", enabled: true, marketplace: "m",
+      extras: { tier: "platform", requiredConsents: ["exec"], consented: [], entry: { command: "bun", args: ["--version"] } },
+    }]);
   });
 
   test("project/local scope without cwd is refused typed", async () => {

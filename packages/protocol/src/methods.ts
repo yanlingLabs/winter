@@ -1426,10 +1426,27 @@ export const InstalledPluginSchema = z.object({
   installPath: z.string(),
   scope: PluginScopeSchema,
 });
+/** WS-21 fix round 1 (I1): `plugin.list`'s per-entry `extras` — winter-plugin.json's own fields,
+ *  the Mac app's consent UI (lane L5) needs over RPC (it has no filesystem access to read the
+ *  manifest itself). Absent when the plugin has no winter-plugin.json. This is a wire-shape
+ *  ADDITION scoped to `plugin.list`'s own result — `PluginListingSchema` is not reused anywhere
+ *  else (core/src/ipc/server.ts is its one producer). */
+export const PluginListingExtrasSchema = z.object({
+  tier: z.enum(["capability", "platform"]),
+  permissions: z.object({
+    exec: z.boolean().optional(),
+    tcc: z.array(z.string()).optional(),
+    hardware: z.array(z.string()).optional(),
+  }).optional(),
+  requiredConsents: z.array(z.enum(["exec", "tcc", "hardware"])),
+  consented: z.array(z.enum(["exec", "tcc", "hardware"])),
+  entry: z.object({ command: z.string(), args: z.array(z.string()).optional() }).optional(),
+});
 /** Contract B `PluginListing`. */
 export const PluginListingSchema = InstalledPluginSchema.extend({
   enabled: z.boolean(),
   marketplace: z.string(),
+  extras: PluginListingExtrasSchema.optional(),
 });
 /** Contract B `MarketplaceInfo`. A `directory` marketplace is read in place (`path` IS the source). */
 export const MarketplaceInfoSchema = z.object({
