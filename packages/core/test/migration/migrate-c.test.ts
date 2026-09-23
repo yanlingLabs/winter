@@ -358,8 +358,30 @@ describe("both phases", () => {
     const { home } = fixture();
     const root = join(home, "runtimes", "claude-config");
     const m = await runMigrationC(home, deps({ reconcile: async () => { throw new Error("run_home_link_refused"); } }));
-    expect(m.reconciled).toEqual([{ root, outcome: "failed" }]);
+    expect(m.reconciled).toEqual([{ root, outcome: "failed", reason: "Error" }]);
     expect(existsSync(join(m.archiveDir, "archive", "runtimes", "claude-config", "projects"))).toBe(true);
+  });
+
+  // Round 3, minor 7: a root whose reconcile THREW is archived unreconciled — so every session with a
+  // transcript under it (a subagent's included) is marked repair-required, not left looking clean.
+  test("round 3: a reconcile that throws marks every session with a transcript under that root repair-required", async () => {
+    const { home, key } = fixture();
+    write(join(home, "runtimes", "claude-config", "projects", key, "be-sub", "subagents", "agent-x.jsonl"), "{}\n");
+    const rs0 = openRuntimeStateDb(home);
+    rs0.db.run("UPDATE runtime_sessions SET backend_session_id = 's-official' WHERE winter_session_id = 's_2'");
+    rs0.db.run("UPDATE runtime_sessions SET backend_session_id = 'be-sub' WHERE winter_session_id = 's_1'");
+    rs0.db.run(`INSERT INTO runtime_sessions (winter_session_id, runtime_kind, backend_session_id, provider_id, model_ref, backend_root, transcript_project_key, memory_project_key, temp_project_key,
+      transcript_health, compatibility_level, conformance_corpus_version, version_provenance, created_at, updated_at, state, selection_json)
+      SELECT 's_3', runtime_kind, 'be-elsewhere', provider_id, model_ref, backend_root, transcript_project_key, memory_project_key, temp_project_key,
+      'clean', compatibility_level, conformance_corpus_version, version_provenance, created_at, updated_at, state, selection_json FROM runtime_sessions WHERE winter_session_id = 's_1'`);
+    rs0.close();
+    const logs: string[] = [];
+    await runMigrationC(home, deps({ reconcile: async () => { throw new Error("boom"); }, log: (l: string) => logs.push(l) }));
+    const rs = openRuntimeStateDb(home);
+    const health = (id: string) => rs.db.query<{ h: string }, [string]>("SELECT transcript_health AS h FROM runtime_sessions WHERE winter_session_id = ?").get(id)!.h;
+    expect([health("s_1"), health("s_2"), health("s_3")]).toEqual(["repair-required", "repair-required", "clean"]);
+    rs.close();
+    expect(logs.some((l) => l.includes("repair-required") && l.includes("s_2"))).toBe(true);
   });
 });
 
