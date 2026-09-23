@@ -505,6 +505,7 @@ class OfficialSessionImpl implements OfficialSession {
       // refused session never leaves a folder behind; an open that fails from here to the iteration's
       // start disposes it at once (nothing ran on it, spec §3.8 r3).
       const runHome = this.deps.runHome === undefined ? undefined : await this.deps.runHome();
+      let queryIssued: AbortController | undefined;
       try {
         // With a run home the router owns the child's config dir (its run folder, or the linked staging
         // dir on a resume) and REFUSES `runtime.official.spool` beside it — so the Winter-owned
@@ -559,6 +560,9 @@ class OfficialSessionImpl implements OfficialSession {
             runtime: { selection: this.deps.selection, sessionId: this.sessionId, official: officialInput, ...(runHome === undefined ? {} : { runHome }) },
           },
         });
+        // Review M5: once `query()` has RETURNED, the router has taken the run home (it records the
+        // outcome by run id), so a failure after this point may no longer dispose it unconditionally.
+        queryIssued = abort;
         if (!isOfficialQuery(routerQuery)) throw new Error(`the router opened ${this.sessionId} on the wrong leg (expected the official leg)`);
         // Phase 9c (P9c-1): the SAME settings `officialInputFor` just read (via this `inputDeps`
         // object's own `settings` field) — read once, here, so `run()`'s own assertion never
@@ -585,7 +589,19 @@ class OfficialSessionImpl implements OfficialSession {
         inc.done = this.run(inc);
         this.lastDone = inc.done;
       } catch (err) {
-        await disposeFailedRunHome(runHome, (line) => this.log(line));
+        if (queryIssued === undefined) {
+          await disposeFailedRunHome(runHome, (line) => this.log(line));
+        } else {
+          // Review M5: the query exists — end it, then dispose only on the router's `safe`; anything else
+          // is left for boot recovery's reconcile (never a delete of a folder the router may still use).
+          try { queryIssued.abort(); } catch { /* already aborted */ }
+          if (runHome !== undefined) {
+            await settleRunHome(runHome, this.deps.runtime.runHomeOutcome?.(runHome.runId), {
+              log: (line) => this.log(line),
+              onQuarantined: (dir) => this.deps.records?.noteQuarantinedRoot?.(dir),
+            });
+          }
+        }
         throw err;
       }
     })().finally(() => { this.opening = undefined; });

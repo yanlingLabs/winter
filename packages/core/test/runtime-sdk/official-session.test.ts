@@ -1383,4 +1383,21 @@ describe("WS-21: the official leg's run home", () => {
     await expect(h.session.open()).rejects.toThrow(/run_home_required/);
     expect(rh.disposed).toEqual(["orun-1"]);
   });
+
+  // Review M5: once `sdk.query()` has RETURNED, the router has taken the run home — a failure after that
+  // point aborts the query and disposes only on the router's `safe`, never unconditionally.
+  for (const [outcome, expected] of [["pending", []], [undefined, []], ["safe", ["orun-1"]]] as const) {
+    test(`a failure AFTER the query was created: aborted, and the folder ${expected.length ? "disposed (safe)" : `kept (${String(outcome)})`}`, async () => {
+      const rh = stubRunHome();
+      const aborted: boolean[] = [];
+      const h = harness({ runHome: rh.build }, {
+        // the query is created normally; the failure comes right after it (tracking the query throws)
+        trackQuery: (_sid: string, abort: AbortController) => { abort.signal.addEventListener("abort", () => aborted.push(true)); throw new Error("simulated failure after the query was created"); },
+        runHomeOutcome: () => outcome,
+      });
+      await expect(h.session.open()).rejects.toThrow(/after the query was created/);
+      expect(aborted).toEqual([true]);
+      expect(rh.disposed).toEqual([...expected]);
+    });
+  }
 });
