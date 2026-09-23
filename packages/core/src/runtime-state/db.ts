@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-export const RUNTIME_STATE_SCHEMA_VERSION = 6;
+export const RUNTIME_STATE_SCHEMA_VERSION = 7;
 
 export class RuntimeStateUnavailableError extends Error {
   constructor(public readonly path: string, public readonly reason: "missing" | "corrupt" | "newer-schema" | "unmigrated", cause?: unknown) {
@@ -23,7 +23,13 @@ export interface RuntimeStateDb { readonly path: string; readonly db: Database; 
 
 // Schema v1. Every column that holds a router-owned or product-owned JSON blob is named *_json;
 // opaque provider state never lands here (WS-16 §7).
-const MIGRATIONS: ReadonlyArray<{ version: number; up: (db: Database) => void }> = [
+const MIGRATIONS: ReadonlyArray<{
+  version: number;
+  up: (db: Database) => void;
+  /** Rebuilds a table other tables reference: the runner turns foreign keys OFF around the migration's
+   *  transaction (SQLite ignores the pragma inside one) and proves `foreign_key_check` no worse after. */
+  rebuildsParentTable?: true;
+}> = [
   { version: 1, up: (db) => {
     db.run(`CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
     db.run(`CREATE TABLE runtime_sessions (
@@ -181,7 +187,48 @@ const MIGRATIONS: ReadonlyArray<{ version: number; up: (db: Database) => void }>
       db.run(`ALTER TABLE memory_key_manifest ADD COLUMN undo_target TEXT CHECK (undo_target IS NULL OR undo_target IN ('planned', 'rolled-back'))`);
     }
   } },
+  // Schema v7 (WS-21 §3.8):
+  //
+  //  1. `active_local_write_root_kind` accepts the router's `run-folder` (a fresh official generation's
+  //     config dir IS its run folder). A CHECK cannot be altered in place, and `runtime_sessions` is the
+  //     PARENT of `runtime_generations`' foreign key — so this is SQLite's 12-step rebuild, not v4's
+  //     rename-the-old-table (a modern RENAME rewrites the child's REFERENCES to the renamed table, which
+  //     is then dropped): the new table is built under a temp name from the CURRENT `sqlite_master` text
+  //     (so every column an earlier migration ADDED comes along, in order), filled, the old one dropped
+  //     and the NEW one renamed into place. The runner holds foreign keys off around it
+  //     (`rebuildsParentTable`) and refuses to commit if `foreign_key_check` got worse.
+  //  2. `run_root_quarantine`: the roots boot recovery quarantined (the router preserved a copy under
+  //     `<home>/cache/quarantine/`). A listed root is kept on disk, never reconciled or swept again, and
+  //     reported by `winter doctor` — a quarantined root re-reconciled every boot would be copied again
+  //     every boot.
+  //
+  // Idempotent under the rewound-`user_version` fixture shape v5's comment describes: a table whose
+  // CHECK already names `run-folder` is left alone.
+  { version: 7, rebuildsParentTable: true, up: (db) => {
+    const row = db.query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE type='table' AND name='runtime_sessions'").get();
+    if (row && !row.sql.includes("'run-folder'")) {
+      const from = "IN ('official-spool','sdk-resume-staging')";
+      if (!row.sql.includes(from)) throw new Error("runtime_sessions: active_local_write_root_kind's CHECK is not the shape v7 expects");
+      const rebuilt = row.sql
+        .replace(from, "IN ('official-spool','sdk-resume-staging','run-folder')")
+        // A table an earlier rebuild renamed into place reads back QUOTED (`CREATE TABLE "runtime_sessions"`).
+        .replace(/^CREATE TABLE "?runtime_sessions"?(?=\s|\()/, "CREATE TABLE runtime_sessions_v7");
+      if (!rebuilt.startsWith("CREATE TABLE runtime_sessions_v7")) throw new Error("runtime_sessions: unexpected CREATE TABLE text");
+      db.run(`DROP TABLE IF EXISTS runtime_sessions_v7`);
+      db.run(rebuilt);
+      db.run(`INSERT INTO runtime_sessions_v7 SELECT * FROM runtime_sessions`);
+      db.run(`DROP TABLE runtime_sessions`);
+      db.run(`ALTER TABLE runtime_sessions_v7 RENAME TO runtime_sessions`);
+    }
+    db.run(`CREATE INDEX IF NOT EXISTS runtime_sessions_state ON runtime_sessions(state)`);
+    db.run(`CREATE TABLE IF NOT EXISTS run_root_quarantine (root TEXT PRIMARY KEY, recorded_at TEXT NOT NULL, detail_json TEXT NOT NULL DEFAULT '{}')`);
+  } },
 ];
+
+/** `PRAGMA foreign_key_check`'s row count — how many child rows point at no parent. */
+function foreignKeyViolations(db: Database): number {
+  return db.query("PRAGMA foreign_key_check").all().length;
+}
 
 // Fix round 1, finding (b): backup() can be called more than once per millisecond (two immediate
 // backups, or two db instances in the same process); a Date.toISOString() name alone collides and
@@ -235,7 +282,29 @@ export function openRuntimeStateDb(home: string, opts: { readonly?: boolean; cre
   // not "has the current version of it"; `schemaVersion()` reports the truth and the one reader
   // that cares (`doctor.ts`) says "unmigrated — the next daemon boot migrates it in place".
   if (opts.readonly && version() < 1) { opened.close(); throw new RuntimeStateUnavailableError(path, "unmigrated"); }
-  if (!opts.readonly) for (const m of MIGRATIONS) if (version() < m.version) opened.transaction(() => { m.up(opened); opened.run(`PRAGMA user_version = ${m.version}`); })();
+  if (!opts.readonly) {
+    for (const m of MIGRATIONS) {
+      if (version() >= m.version) continue;
+      if (!m.rebuildsParentTable) {
+        opened.transaction(() => { m.up(opened); opened.run(`PRAGMA user_version = ${m.version}`); })();
+        continue;
+      }
+      // SQLite's generalized ALTER TABLE procedure: keys off OUTSIDE the transaction (the pragma is a
+      // no-op inside one), the rebuild, then `foreign_key_check` — no worse than before — before commit.
+      opened.run("PRAGMA foreign_keys = OFF");
+      try {
+        opened.transaction(() => {
+          const before = foreignKeyViolations(opened);
+          m.up(opened);
+          const after = foreignKeyViolations(opened);
+          if (after > before) throw new Error(`runtime-state migration v${m.version} would break ${after - before} foreign key reference(s)`);
+          opened.run(`PRAGMA user_version = ${m.version}`);
+        })();
+      } finally {
+        opened.run("PRAGMA foreign_keys = ON");
+      }
+    }
+  }
   return {
     path, db: opened,
     schemaVersion: version,

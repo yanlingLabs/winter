@@ -47,7 +47,7 @@ export interface RuntimeSessionRecord {
   authRef?: string;
   backendRoot: string;
   activeLocalWriteRoot?: string;
-  activeLocalWriteRootKind?: "official-spool" | "sdk-resume-staging";
+  activeLocalWriteRootKind?: "official-spool" | "sdk-resume-staging" | "run-folder";
   effectiveTempDir?: string;
   transcriptProjectKey: string;
   memoryProjectKey: string;
@@ -136,7 +136,7 @@ export interface GenerationInput {
   runtimeKind: RuntimeKind;
   backendSessionId?: string;
   localWriteRoot?: string;
-  localWriteRootKind?: "official-spool" | "sdk-resume-staging";
+  localWriteRootKind?: "official-spool" | "sdk-resume-staging" | "run-folder";
   configDir?: string;
   startedAt?: string;
 }
@@ -150,7 +150,7 @@ export interface GenerationRow {
   endedAt?: string;
   endReason?: string;
   localWriteRoot?: string;
-  localWriteRootKind?: "official-spool" | "sdk-resume-staging";
+  localWriteRootKind?: "official-spool" | "sdk-resume-staging" | "run-folder";
   configDir?: string;
 }
 
