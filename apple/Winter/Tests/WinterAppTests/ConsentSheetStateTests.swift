@@ -299,6 +299,14 @@ final class PluginManagerModelConsentTests: XCTestCase {
 
         XCTAssertNil(model.consentSheet)
         XCTAssertNil(model.errorText)
+
+        // Fix round 2 (I2, "don't touch the confirm path"): a successful confirm still triggers
+        // SwiftUI's `onDismiss` in production (its own `consentSheet = nil` IS a dismissal) — this
+        // must NOT re-run the install-declined follow-up. `dismissHandledByConfirm` is what
+        // prevents it; simulating the `onDismiss` call here proves it holds.
+        await model.consentSheetDismissed()
+        XCTAssertEqual(t.sent.count, 4, "no extra plugin.disable/plugin.list after a successful confirm's own dismissal")
+        XCTAssertNil(model.noticeText)
     }
 
     /// C1: `confirmConsent()` grants EVERY class in `extras.requiredConsents`, not just
@@ -349,9 +357,13 @@ final class PluginManagerModelConsentTests: XCTestCase {
         XCTAssertEqual(model.errorText, "ghost is no longer installed — couldn't record consent")
     }
 
-    /// `cancelConsent()` for an ENABLE-triggered sheet (not an install) dismisses without ever
-    /// calling `pluginDisable` — no RPC beyond the initial handshake is sent.
-    func testCancelConsentOnAnEnableTriggeredSheetDismissesWithoutAnyCall() async throws {
+    /// Fix round 2 (I2): `consentSheetDismissed()` for an ENABLE-triggered sheet (not an install)
+    /// runs without ever calling `pluginDisable` — no RPC beyond the initial handshake is sent.
+    /// `model.consentSheet = nil` here stands in for EITHER the sheet's Cancel button (`onCancel`
+    /// is now just this same assignment, no model method) or a swipe/Esc (SwiftUI does the
+    /// identical assignment itself) — from the model's side the two are indistinguishable, which
+    /// is the whole point of routing both through the same `onDismiss` hook.
+    func testConsentSheetDismissedOnAnEnableTriggeredSheetSendsNoCall() async throws {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
         let extras = PluginExtras(tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
@@ -359,16 +371,19 @@ final class PluginManagerModelConsentTests: XCTestCase {
         model.consentSheet = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user,
                                                extras: extras, openedByInstall: false)
 
-        await model.cancelConsent()
+        model.consentSheet = nil
+        await model.consentSheetDismissed()
 
         XCTAssertNil(model.consentSheet)
         XCTAssertEqual(t.sent.count, 1) // hello only
         XCTAssertNil(model.noticeText)
     }
 
-    /// I2: `cancelConsent()` for an INSTALL-triggered sheet turns the plugin back off (a fresh
-    /// install lands enabled regardless of consent, spec §5.4) and leaves one explanatory line.
-    func testCancelConsentOnAnInstallTriggeredSheetDisablesAndShowsNotice() async throws {
+    /// I2: `consentSheetDismissed()` for an INSTALL-triggered sheet turns the plugin back off (a
+    /// fresh install lands enabled regardless of consent, spec §5.4) and leaves one explanatory
+    /// line — exercised here via the sheet's own Cancel button path (`onCancel`'s `consentSheet =
+    /// nil`, immediately followed by the `onDismiss` hook it triggers).
+    func testConsentSheetDismissedViaCancelButtonOnAnInstallTriggeredSheetDisablesAndShowsNotice() async throws {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
         let extras = PluginExtras(tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
@@ -376,7 +391,8 @@ final class PluginManagerModelConsentTests: XCTestCase {
         model.consentSheet = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user,
                                                extras: extras, openedByInstall: true)
 
-        async let action: Void = model.cancelConsent()
+        model.consentSheet = nil // `onCancel: { model.consentSheet = nil }`
+        async let action: Void = model.consentSheetDismissed() // the `onDismiss` this triggers
 
         let disableReq = await feedNextRequest(t, index: 1)
         XCTAssertEqual(disableReq["method"] as? String, "plugin.disable")
@@ -388,6 +404,36 @@ final class PluginManagerModelConsentTests: XCTestCase {
         await action
 
         XCTAssertNil(model.consentSheet)
+        XCTAssertEqual(model.noticeText, "Installed but turned off — enable it to review its permissions again.")
+    }
+
+    /// Controller-requested (I2 round 2): dismisses the sheet WITHOUT ever going through the
+    /// Cancel button/method — `model.consentSheet = nil` here is exactly what a swipe-down or Esc
+    /// does to the `.sheet(item:)` binding directly, bypassing `ConsentSheet`'s `onCancel` closure
+    /// entirely; `consentSheetDismissed()` is exactly what `.sheet(item:onDismiss:)`'s `onDismiss`
+    /// then calls. `pluginDisable` still fires — proving the follow-up is reachable from the
+    /// dismissal itself, not from any one button's call site.
+    func testDismissingWithoutCancelStillSendsPluginDisableForAnInstallTriggeredSheet() async throws {
+        let (client, t) = try await connectedClient()
+        let model = PluginManagerModel(client: client)
+        let extras = PluginExtras(tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
+                                  requiredConsents: ["exec"], consented: [], entry: nil)
+        model.consentSheet = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user,
+                                               extras: extras, openedByInstall: true)
+
+        // A swipe/Esc: SwiftUI nils the bound item directly — no `onCancel`, no "cancel" of any
+        // kind is ever invoked.
+        model.consentSheet = nil
+        async let action: Void = model.consentSheetDismissed()
+
+        let disableReq = await feedNextRequest(t, index: 1)
+        XCTAssertEqual(disableReq["method"] as? String, "plugin.disable")
+        XCTAssertEqual((disableReq["params"] as? [String: Any])?["spec"] as? String, "demo@winter-examples")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(disableReq["id"] as! Int),"result":{"ok":true,"spec":"demo@winter-examples","scope":"user","enabled":false}}"#)
+        await feedNextResult(t, index: 2, result: #"{"plugins":[]}"#)
+
+        await action
+
         XCTAssertEqual(model.noticeText, "Installed but turned off — enable it to review its permissions again.")
     }
 
