@@ -71,6 +71,11 @@ export interface MigrationCManifest {
   backups: { settings: string | null; runtimeState: string | null; sdkSettings: string | null; sdkGlobal: string | null; splitMarker: string | null };
   /** Relative to the home. */
   moved: { from: string; to: string }[];
+  /** Round 3, minor 2: on a ROLLED-BACK home, a compat target the new build had filled (a target the first
+   *  run only linked, which rollback leaves in place) beside an old directory the older build filled after
+   *  the rollback is moved aside into this migration's archive instead of refusing forever. Relative to the
+   *  home; recorded BEFORE the rename; rollback puts it back after the move-dirs reversal. */
+  displaced?: { from: string; to: string }[];
   /** Round 3, minor 3: the move-dirs rename in flight — written BEFORE the rename, cleared once `moved`
    *  records it (checked: the old path gone, the target there). Only ever one. */
   moving?: { from: string; to: string };
@@ -193,11 +198,14 @@ function legacyPluginDirs(home: string): string[] {
  * (The earlier "bootstrap only" rule left a rolled-back home refusing forever.)
  */
 function sdkPreflightProblem(home: string): string | undefined {
+  // Round 3, minor 2: a rolled-back home's collisions are displaced by move-dirs instead (see there).
+  if (existsSync(migrationCRolledBackPath(home))) return undefined;
   for (const [name, target] of SDK_COMPAT_LINKS) {
     const from = join(home, name);
     const to = join(home, target);
     if (isSymlink(from) || !hasFiles(from)) continue;
-    if (hasFiles(to)) return `${from} and ${to} both have content — resolve by hand, then \`winter migrate --sdk-home --resume\``;
+    // No manifest exists at preflight, so there is nothing to `--resume`: the remedy is the pair itself.
+    if (hasFiles(to)) return `${from} and ${to} both have content — merge them or move one aside by hand, then run \`winter migrate --sdk-home\` (or start Winter again)`;
   }
   return undefined;
 }
@@ -470,11 +478,23 @@ export async function runMigrationC(home: string, deps: MigrationCDeps): Promise
       // crashed rename put them there" guess died with I1: the new build's own content may sit there.)
       const intended = inFlight?.from === name;
       if (existsSync(from)) {
-        if (existsSync(to)) {
-          // bootstrap's empty placeholder gives way; anything with content means a resumed/partial run
-          if (hasFiles(to)) throw new MigrationCRefused("sdk_home_migration_refused", `${to} and ${from} both have content — resolve by hand, then \`winter migrate --sdk-home --resume\``);
-          rmSync(to, { recursive: true, force: true });
+        if (existsSync(to) && hasFiles(to)) {
+          if (!existsSync(migrationCRolledBackPath(home))) {
+            throw new MigrationCRefused("sdk_home_migration_refused", `${to} and ${from} both have content — resolve by hand, then \`winter migrate --sdk-home --resume\``);
+          }
+          // Round 3, minor 2: a rolled-back home — the new build's content in the target is moved aside into
+          // THIS migration's archive (recorded first; rollback restores it), never refused forever.
+          const dest = join(m.archiveDir, "displaced", target);
+          if (existsSync(dest) || isSymlink(dest)) throw new MigrationCRefused("sdk_home_half_migrated", `${to} has content and ${dest} is already taken — resolve by hand, then \`winter migrate --sdk-home --resume\``);
+          if (!(m.displaced ?? []).some((d) => d.from === target)) {
+            (m.displaced ??= []).push({ from: target, to: relative(home, dest) });
+            writeManifest(home, m);
+          }
+          mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
+          renameSync(to, dest);
+          deps.log(`migration C: ${to} (the new build's, beside ${from} after a rollback) moved aside to ${dest}`);
         }
+        if (existsSync(to)) rmSync(to, { recursive: true, force: true });   // bootstrap's empty placeholder gives way
         mkdirSync(dirname(to), { recursive: true, mode: 0o700 });
         m.moving = { from: name, to: target };
         writeManifest(home, m);                    // the intent, before the rename
@@ -781,6 +801,17 @@ export async function rollbackMigrationC(home: string, deps: Pick<MigrationCDeps
   for (const name of m.links) {
     const p = join(home, name);
     if (isSymlink(p)) unlinkSync(p);
+  }
+  // displaced (round 3, minor 2) → back in place, AFTER the move-dirs reversal vacated the target (only its
+  // empty placeholder is there then); a target that has content again is left alone, the copy kept.
+  for (const d of [...(m.displaced ?? [])].reverse()) {
+    const src = join(home, d.to);
+    const back = join(home, d.from);
+    if (!existsSync(src)) continue;
+    if (isSymlink(back) || hasFiles(back)) { deps.log(`migration C rollback: ${back} has content — the displaced copy stays at ${src}`); continue; }
+    rmSync(back, { recursive: true, force: true });
+    mkdirSync(dirname(back), { recursive: true, mode: 0o700 });
+    renameSync(src, back);
   }
   rmSync(migrationCCompletePath(home), { force: true });
   m.status = "rolled-back";

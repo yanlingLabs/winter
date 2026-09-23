@@ -8,7 +8,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 import { SessionStore } from "../../src/sessions/store";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative as relativeTo } from "node:path";
 import {
   MigrationCRefused, finishMigrationC, isOldLayout, migrationCCompletePath, migrationCManifestPath, migrationCState,
   planMigrationC, rollbackMigrationC, runMigrationC,
@@ -228,6 +228,44 @@ describe("review I1: a rolled-back home can migrate again", () => {
     writeFileSync(join(home, "sdk", "skills", "other", "SKILL.md"), "x");
     await expect(runMigrationC(home, deps())).rejects.toMatchObject({ code: "sdk_home_migration_refused" });
     expect(lstatSync(join(home, "projects", key)).isDirectory()).toBe(true);
+  });
+
+  // Round 3, minor 2: the preflight's hint named `--resume`, but at preflight there is no manifest to
+  // resume — the remedy is to resolve the pair by hand and run the migration again.
+  test("round 3: the preflight collision hint names the real remedy (no manifest exists yet to resume)", async () => {
+    const { home } = fixture();
+    mkdirSync(join(home, "sdk", "skills", "other"), { recursive: true });
+    writeFileSync(join(home, "sdk", "skills", "other", "SKILL.md"), "x");
+    const err = await runMigrationC(home, deps()).catch((e: Error) => e);
+    expect((err as Error).message).not.toContain("--resume");
+    expect((err as Error).message).toContain("by hand");
+    expect((err as Error).message).toContain("winter migrate --sdk-home");
+    expect(migrationCState(home)).toEqual({ kind: "absent" });
+  });
+
+  // Round 3, minor 2: after a rollback the older build writes into the old directory while the sdk/ side
+  // keeps what the new build wrote there (a target the first run only LINKED, so rollback left it) — a
+  // re-upgrade would refuse forever. On a rolled-back home the sdk/ side is DISPLACED into this migration's
+  // archive instead (recorded; rollback puts it back); anywhere else a collision still refuses.
+  test("round 3: a rolled-back home whose old dir AND sdk target both gained content re-migrates: the sdk side is displaced, and rollback restores it", async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-migc-displace-")));
+    mkdirSync(join(home, "sdk", "projects"), { recursive: true });
+    mkdirSync(join(home, "backups"), { recursive: true });               // an EMPTY old dir: linked, not moved
+    write(join(home, "skills", "s", "SKILL.md"), "x");                    // something to migrate
+    const first = await runMigrationC(home, deps({ reconcile: stubReconcile().reconcile }));
+    expect(first.moved.map((mv) => mv.from)).not.toContain("backups");
+    write(join(home, "sdk", "file-history", "new-session", "n.bak"), "new build");   // through the link
+    await rollbackMigrationC(home, { log: () => {} });
+    expect(existsSync(join(home, "sdk", "file-history", "new-session", "n.bak"))).toBe(true); // a link's target is never moved back
+    write(join(home, "backups", "old-session", "o.bak"), "old build");     // the older build, after the rollback
+    const again = await runMigrationC(home, deps({ reconcile: stubReconcile().reconcile }));
+    expect(again.status).toBe("complete");
+    expect(again.displaced).toEqual([{ from: "sdk/file-history", to: join(relativeTo(home, again.archiveDir), "displaced", "sdk", "file-history") }]);
+    expect(readFileSync(join(home, "sdk", "file-history", "old-session", "o.bak"), "utf8")).toBe("old build");
+    expect(readFileSync(join(again.archiveDir, "displaced", "sdk", "file-history", "new-session", "n.bak"), "utf8")).toBe("new build");
+    await rollbackMigrationC(home, { log: () => {} });
+    expect(readFileSync(join(home, "backups", "old-session", "o.bak"), "utf8")).toBe("old build");
+    expect(readFileSync(join(home, "sdk", "file-history", "new-session", "n.bak"), "utf8")).toBe("new build");
   });
 
   test("an EMPTY old dir beside a target with content is linked, not refused", async () => {
