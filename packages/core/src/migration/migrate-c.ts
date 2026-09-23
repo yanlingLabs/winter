@@ -84,7 +84,7 @@ export interface MigrationCManifest {
   archived: { from: string; to: string }[];
   /** Review I6: per root, the router's overall outcome and — from a per-transcript router — each
    *  transcript's own (`canonical-ahead` needs nothing; a `quarantined` one marks ITS session). */
-  reconciled: { root: string; outcome: "clean" | "appended" | "quarantined" | "failed"; transcripts?: RecoveryTranscriptOutcome[] }[];
+  reconciled: { root: string; outcome: "clean" | "appended" | "quarantined" | "failed"; transcripts?: RecoveryTranscriptOutcome[]; reason?: string }[];
   /** Round 3: the canonical-cwd re-key, per session — the INTENT is recorded (`pending`, with the names it
    *  will move) BEFORE any file moves, then `moved`; a `collision`/`refused` moved nothing and marked the
    *  session. Rollback moves back every recorded name that sits at `to` and not at `from`, and re-points
@@ -589,6 +589,25 @@ export async function runMigrationC(home: string, deps: MigrationCDeps): Promise
   return m;
 }
 
+/** Round 3, minor 7: the BACKEND session ids with a transcript under a working-copy root — the names under
+ *  `<root>/projects/<key>/`: `<id>.jsonl` and `<id>/` (subagents). Names only; never through a link. */
+function backendIdsUnder(root: string): string[] {
+  const ids = new Set<string>();
+  const projects = join(root, "projects");
+  if (isSymlink(root) || isSymlink(projects)) return [];
+  let keys: string[] = [];
+  try { keys = readdirSync(projects, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name); } catch { return []; }
+  for (const key of keys) {
+    try {
+      for (const e of readdirSync(join(projects, key), { withFileTypes: true })) {
+        if (e.isFile() && e.name.endsWith(".jsonl")) ids.add(e.name.slice(0, -".jsonl".length));
+        else if (e.isDirectory() && e.name !== "memory") ids.add(e.name);
+      }
+    } catch { /* bounded */ }
+  }
+  return [...ids];
+}
+
 /** Mark the Winter sessions owning these BACKEND session ids `repair-required`; returns the ones marked.
  *  Bounded: a store that will not open marks nothing (the manifest still records every transcript). */
 function markQuarantinedSessions(home: string, backendIds: readonly string[]): string[] {
@@ -645,8 +664,12 @@ export async function finishMigrationC(home: string, deps: Pick<MigrationCDeps, 
         // state) and `appended` need nothing more.
         const marked = markQuarantinedSessions(home, quarantinedBackendSessions(report));
         if (marked.length > 0) deps.log(`migration C: ${marked.length} session(s) marked repair-required (a quarantined transcript): ${marked.join(", ")}`);
-      } catch {
-        entry = { root, outcome: "failed" };
+      } catch (err) {
+        // Round 3, minor 7: the root is archived UNRECONCILED, so no transcript under it is proved — every
+        // session owning one (a subagent's included) is marked, never left looking clean.
+        entry = { root, outcome: "failed", reason: (err as { code?: string }).code ?? (err as Error).name };
+        const marked = markQuarantinedSessions(home, backendIdsUnder(root));
+        if (marked.length > 0) deps.log(`migration C: ${root} could not be reconciled — ${marked.length} session(s) with a transcript there marked repair-required: ${marked.join(", ")}`);
       }
       m.reconciled.push(entry);
       writeManifest(home, m);
