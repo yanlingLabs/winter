@@ -6,6 +6,8 @@ import type { QuestionBroker } from "../agent/questions";
 import type { PermissionGate, SessionApprovalPolicy } from "../agent/gate";
 import { parseRule } from "../agent/permission-rules";
 import type { Mode as SessionMode } from "../agent/tools/registry";
+import { repoRootFor } from "../agent/memory-dir";
+import { protectedPathsFor, protectedWriteDecision } from "./protected-paths";
 import { privateAddressRefusal } from "../agent/tools/web";
 import { gateClassFor, gateToolNameFor, WINTER_OWN_TOOL_NAMES } from "./tool-names";
 import { controlPlaneTargetForCall, controlPlaneDenialMessage } from "./control-plane";
@@ -601,6 +603,23 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
       log.info(`canUseTool: escalate session=${deps.sessionId} tool=${toolName} reason=${protectedPathEscalates ? "winter-protected-path" : "winter-ask-rule"}`);
       decision = "ask";
     }
+
+    // (5e) WS-21 (spec §7.2): A PROTECTED WRITE IS NEVER AUTO-ALLOWED, under any policy — `bypass`,
+    // `accept-edits` and `auto` included. The path fence hook (`hooks.ts` `pathFenceHook`) already answered
+    // `ask` for it, and the router pins the same set as flag-layer ask rules; this is the third layer, and
+    // it does not depend on either of them having reached this call (a PreToolUse `ask` that a runtime's own
+    // sensitive-file check swallowed arrives here as a plain request). Checked on the INPUT itself, never
+    // on `ctx.matchedAskRule`/`blockedPath`. Narrows only: a gate `deny` stays a deny; `dont-ask`, which
+    // declines everything it would card, declines this too; chat and dispatch reach (6)'s typed deny.
+    const protectedWrite = deps.home !== undefined && protectedWriteDecision(toolName, input, {
+      mode: "code", cwd: deps.cwd ?? "",
+      protected: protectedPathsFor(deps.home, deps.cwd && deps.projectTrusted?.() === true ? repoRootFor(deps.cwd) : null),
+    }) !== null;
+    if (protectedWrite && decision === "allow") {
+      log.info(`canUseTool: escalate session=${deps.sessionId} tool=${toolName} reason=protected-path`);
+      decision = "ask";
+    }
+    if (protectedWrite && decision === "ask" && policy === "dont-ask") decision = "deny";
 
     // (5d) THE PRIVATE-ADDRESS FLOOR (whole-branch review B1/M2). See `privateWebFetchTarget` for
     // what went wrong without it and why the judgement is the daemon's own.
