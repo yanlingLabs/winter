@@ -146,21 +146,19 @@ function legacyPluginDirs(home: string): string[] {
   } catch { return []; }
 }
 
-/** `sdk/` may hold only what bootstrap and the pre-migration doors create: the empty persistent dirs,
- *  `sdk/projects`, and the two files the settings/MCP doors write on any build. */
+/**
+ * Review I1: the one thing about `sdk/` that refuses the migration is a REAL COLLISION — a compat target
+ * (`SDK_COMPAT_LINKS`) that already has content while its old path is also a real directory with content.
+ * Anything else the new build wrote into `sdk/` (tasks, teams, agent memory, plugins, commands, a history
+ * file, a rolled-back home's leftovers) is no obstacle: move-dirs only ever renames into a compat target.
+ * (The earlier "bootstrap only" rule left a rolled-back home refusing forever.)
+ */
 function sdkPreflightProblem(home: string): string | undefined {
-  const sdk = sdkHomeFor(home);
-  let entries;
-  try { entries = readdirSync(sdk, { withFileTypes: true }); } catch { return undefined; }
-  const bootstrapDirs = new Set<string>(["projects", ...SDK_PERSISTENT_ENTRIES]);
-  const allowedFiles = new Set(["settings.json", ".winter.json"]);
-  for (const e of entries) {
-    if (e.isDirectory() && bootstrapDirs.has(e.name)) {
-      if (hasFiles(join(sdk, e.name))) return `${join(sdk, e.name)} already has content`;
-      continue;
-    }
-    if (!e.isDirectory() && allowedFiles.has(e.name)) continue;
-    return `${join(sdk, e.name)} is not something Migration C expects to find in ${sdk}`;
+  for (const [name, target] of SDK_COMPAT_LINKS) {
+    const from = join(home, name);
+    const to = join(home, target);
+    if (isSymlink(from) || !hasFiles(from)) continue;
+    if (hasFiles(to)) return `${from} and ${to} both have content — resolve by hand, then \`winter migrate --sdk-home --resume\``;
   }
   return undefined;
 }
@@ -319,6 +317,16 @@ export async function runMigrationC(home: string, deps: MigrationCDeps): Promise
       const from = join(home, name);
       const to = join(home, target);
       if (isSymlink(from)) continue;               // already a link (a resumed run, or never old)
+      if (existsSync(from) && !hasFiles(from)) {
+        // Review I1: an EMPTY old directory (bootstrap of an older build) — nothing to move; it gives way to
+        // the link, and whatever the new build already wrote into the target stays where it is.
+        rmSync(from, { recursive: true, force: true });
+        mkdirSync(to, { recursive: true, mode: 0o700 });
+        symlinkSync(relative(home, to), from);
+        m.links.push(name);
+        writeManifest(home, m);
+        continue;
+      }
       if (existsSync(from)) {
         if (existsSync(to)) {
           // bootstrap's empty placeholder gives way; anything with content means a resumed/partial run
