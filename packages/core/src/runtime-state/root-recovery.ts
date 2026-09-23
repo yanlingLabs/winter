@@ -45,7 +45,7 @@ export interface RootRecoveryDeps {
 
 export interface RootRecoveryReport {
   recorded: { clean: number; appended: number; quarantined: number; failed: number; missing: number; kept: number; skipped: number };
-  runFolders: { clean: number; appended: number; quarantined: number; failed: number; skipped: number; refused: number };
+  runFolders: { clean: number; appended: number; quarantined: number; failed: number; skipped: number; refused: number; noWorkingCopy: number };
   staging: { removed: number; quarantined: number; failed: number };
   /** Every root quarantined by THIS pass. */
   quarantinedRoots: string[];
@@ -61,6 +61,12 @@ export function quarantinedRunRoots(rs: RuntimeStateDb): { root: string; recorde
   }
 }
 
+/** Review M1: a Winter-leg run folder's `projects/` is a LINK to the store itself — there is no working
+ *  copy to reconcile (the router would compare the store with itself). Such a folder is just removed. */
+const hasNoWorkingCopy = (dir: string): boolean => {
+  try { return lstatSync(join(dir, "projects")).isSymbolicLink(); } catch { return false; }
+};
+
 const isRealDir = (p: string): boolean => {
   try { return lstatSync(p).isDirectory(); } catch { return false; }
 };
@@ -70,7 +76,7 @@ export async function recoverRunRoots(deps: RootRecoveryDeps): Promise<RootRecov
   const now = deps.now ?? (() => new Date().toISOString());
   const report: RootRecoveryReport = {
     recorded: { clean: 0, appended: 0, quarantined: 0, failed: 0, missing: 0, kept: 0, skipped: 0 },
-    runFolders: { clean: 0, appended: 0, quarantined: 0, failed: 0, skipped: 0, refused: 0 },
+    runFolders: { clean: 0, appended: 0, quarantined: 0, failed: 0, skipped: 0, refused: 0, noWorkingCopy: 0 },
     staging: { removed: 0, quarantined: 0, failed: 0 },
     quarantinedRoots: [],
   };
@@ -117,6 +123,13 @@ export async function recoverRunRoots(deps: RootRecoveryDeps): Promise<RootRecov
       log(`run-root recovery: recorded root is not a real directory (or lies behind a linked cache), left alone: ${row.root}`);
       continue;
     }
+    if (isRunFolder(row.root) && hasNoWorkingCopy(row.root)) {
+      if (remove(row.root)) {
+        report.recorded.clean++;
+        try { deps.rs.db.run("UPDATE runtime_sessions SET active_local_write_root = NULL, active_local_write_root_kind = NULL WHERE winter_session_id = ?", [row.id]); } catch { /* bounded */ }
+      } else report.recorded.failed++;
+      continue;
+    }
     try {
       const outcome = await deps.reconcile(row.root);
       if (outcome === "quarantined") {
@@ -149,6 +162,10 @@ export async function recoverRunRoots(deps: RootRecoveryDeps): Promise<RootRecov
       const dir = join(runsDir, e.name);
       if (handled.has(dir)) continue;
       if (!e.dir || !isRealDir(dir) || known.has(dir) || deps.isLive?.(dir) === true) { report.runFolders.skipped++; continue; }
+      if (hasNoWorkingCopy(dir)) {
+        if (remove(dir)) report.runFolders.noWorkingCopy++; else report.runFolders.failed++;
+        continue;
+      }
       try {
         const outcome = await deps.reconcile(dir);
         if (outcome === "quarantined") { report.runFolders.quarantined++; quarantine(dir); continue; }
@@ -198,7 +215,7 @@ export function rootRecoveryDetail(r: RootRecoveryReport): Record<string, number
     recordedClean: r.recorded.clean, recordedAppended: r.recorded.appended, recordedQuarantined: r.recorded.quarantined,
     recordedFailed: r.recorded.failed, recordedMissing: r.recorded.missing, recordedKept: r.recorded.kept,
     runFoldersClean: r.runFolders.clean, runFoldersAppended: r.runFolders.appended, runFoldersQuarantined: r.runFolders.quarantined,
-    runFoldersFailed: r.runFolders.failed, runFoldersSkipped: r.runFolders.skipped, runFoldersRefused: r.runFolders.refused,
+    runFoldersFailed: r.runFolders.failed, runFoldersSkipped: r.runFolders.skipped, runFoldersRefused: r.runFolders.refused, runFoldersNoWorkingCopy: r.runFolders.noWorkingCopy,
     stagingRemoved: r.staging.removed, stagingQuarantined: r.staging.quarantined, stagingFailed: r.staging.failed,
     quarantinedRoots: r.quarantinedRoots,
   };
