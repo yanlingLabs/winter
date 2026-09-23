@@ -701,6 +701,17 @@ export class RuntimeSessionRecords {
     );
   }
 
+  /**
+   * WS-21 (spec §3.8): a run folder the router QUARANTINED at an incarnation's exit — kept on disk, and
+   * recorded so boot recovery never re-reconciles (and re-copies) it and `winter doctor` reports it.
+   * Idempotent; a pre-v7 store (no table) is a no-op.
+   */
+  noteQuarantinedRoot(root: string): void {
+    try {
+      this.rs.db.run("INSERT OR IGNORE INTO run_root_quarantine (root, recorded_at, detail_json) VALUES (?, ?, '{\"at\":\"exit\"}')", [root, this.now()]);
+    } catch { /* bounded: evidence, never a dependency */ }
+  }
+
   setTranscriptHealth(winterSessionId: string, health: RuntimeSessionRecord["transcriptHealth"]): void {
     this.rs.transaction(() => {
       this.require(winterSessionId);

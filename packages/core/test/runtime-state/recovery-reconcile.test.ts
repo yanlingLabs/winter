@@ -15,6 +15,7 @@ import { openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state
 import { quarantinedRunRoots, recoverRunRoots } from "../../src/runtime-state/root-recovery";
 import { recoverRuntimeState } from "../../src/runtime-state/recovery";
 import { SessionStore } from "../../src/sessions/store";
+import { RuntimeSessionRecords } from "../../src/runtime-state/records";
 import { diagnoseRuntimeState } from "../../src/runtime-state/doctor";
 
 type Outcome = "clean" | "appended" | "quarantined";
@@ -126,6 +127,20 @@ describe("recoverRunRoots — the boot sweep of cache/runs/*", () => {
     await recoverRunRoots({ home: w.home, rs: w.rs, reconcile, isLive: (d) => d === a, claudeResumeScanRoot: w.scan });
     expect(seen).toEqual([]);
     expect(existsSync(a)).toBe(true);
+  });
+});
+
+describe("an exit-time quarantine (L2 fix round 1: kept, not disposed)", () => {
+  test("recorded by the session's records, then skipped by the boot sweep and reported", async () => {
+    const w = world();
+    const q = w.runFolder("exitq");
+    new RuntimeSessionRecords(w.rs).noteQuarantinedRoot(q);
+    new RuntimeSessionRecords(w.rs).noteQuarantinedRoot(q); // idempotent
+    const { reconcile, seen } = stub({});
+    await recoverRunRoots({ home: w.home, rs: w.rs, reconcile, claudeResumeScanRoot: w.scan });
+    expect(seen).toEqual([]);
+    expect(existsSync(q)).toBe(true);
+    expect(quarantinedRunRoots(w.rs).map((r) => r.root)).toEqual([q]);
   });
 });
 

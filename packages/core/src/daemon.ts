@@ -89,7 +89,7 @@ import { resolveAntExecutable } from "./runtime-sdk/bundle-layout";
 import { advisorReviewerFor, familyOfModel, officialLegDefaultSessionModel } from "./runtime-sdk/advisor-reviewer";
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
 import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
-import { linkedRouterSupportsRunHome, linkedRunHomeBuilder, runHomeHandleOf } from "./runtime-sdk/run-home-support";
+import { linkedRouterSupportsRunHome, linkedRunHomeBuilder, runHomeHandleOf, runHomeReportSummary } from "./runtime-sdk/run-home-support";
 import { recoverRunRoots, rootRecoveryDetail } from "./runtime-state/root-recovery";
 import { runHomeInputFor } from "./runtime-sdk/run-home-input";
 import { reservedMcpServerNames } from "./capabilities/names";
@@ -1232,6 +1232,10 @@ export async function startDaemon(opts: {
     build: async (input) => {
       const built = await runHomeBuilder(input);
       builtRunDirs.add(built.dir);
+      // Spec §8: what the builder did NOT do (skipped links, dropped MCP servers and imports,
+      // unconditional rules, agents not copied — L2 fix round 1's `skippedAgents`) is never silent.
+      const summary = runHomeReportSummary(built);
+      if (summary !== undefined) console.error(`runtime-sdk: ${summary}`);
       return built;
     },
     inputFor: (facts) => runHomeInputFor({

@@ -55,6 +55,9 @@ export interface OfficialInitFacts {
  *  Optional as a whole (a unit test hands in a counting fake or nothing). */
 export interface OfficialSessionRecords {
   setTranscriptHealth(winterSessionId: string, health: "repair-required"): void;
+  /** WS-21: a run folder the router quarantined at exit (kept; recorded for recovery and doctor). Optional:
+   *  a test double need not implement it. */
+  noteQuarantinedRoot?(root: string): void;
   /**
    * Fix round 2 (Defect 2, controller ruling): the SAME durable, monotonically-increasing
    * generation counter `WinterSession.open()` uses (`RuntimeSessionRecords.bumpGeneration`).
@@ -739,7 +742,10 @@ class OfficialSessionImpl implements OfficialSession {
       // its exit reconcile (inside the router's spawn-proxy hook, with its own store) has run, or the
       // working copy was quarantined. `pending` (or no answer) keeps it for recovery.
       if (inc.runHome !== undefined) {
-        await settleRunHome(inc.runHome, this.deps.runtime.runHomeOutcome?.(inc.runHome.runId), { winterLegSafe: false, log: (line) => this.log(line) });
+        await settleRunHome(inc.runHome, this.deps.runtime.runHomeOutcome?.(inc.runHome.runId), {
+          log: (line) => this.log(line),
+          onQuarantined: (dir) => this.deps.records?.noteQuarantinedRoot?.(dir),
+        });
       }
     }
   }

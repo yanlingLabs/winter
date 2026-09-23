@@ -9,6 +9,7 @@ import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CanUseTool } from "@yanlinglabs/winter-agent-sdk";
+import { RUN_HOME_DECIDED_OPTIONS } from "../../src/runtime-sdk/run-home-contract";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import { ContextAssembler } from "../../src/agent/context";
 import { TrustStore } from "../../src/agent/trust";
@@ -151,6 +152,19 @@ describe("buildWinterOptions", () => {
 
   // L2's contract: beside a run home the router REFUSES (`router_owned_variable`) — never overwrites —
   // any of its five variables in `Options.env`, so none may survive from anywhere.
+  // L2 fix round 1 (M1): beside a run home the router refuses (`run_home_option_refused`) a caller's
+  // `plugins`, `skills`, `agents`, `outputStyle` or `brand` — none may reach the Options, whatever the input.
+  test("flag ON: none of the options a run home decides are stated, even when the input carries them", () => {
+    const on = buildWinterOptions(winterInput({
+      runHomeApplied: true, outputStyle: "terse",
+      agents: { reviewer: { description: "d", prompt: "p" } } as never,
+      plugins: [{ type: "local", path: "/h/cache/skill-plugins/p" }] as never, skills: ["p:a"] as never,
+    })) as Record<string, unknown>;
+    for (const key of RUN_HOME_DECIDED_OPTIONS) expect(key in on).toBe(false);
+    const off = buildWinterOptions(winterInput({ outputStyle: "terse" })) as Record<string, unknown>;
+    expect(off.outputStyle).toBe("terse"); // today's behaviour without a run home
+  });
+
   test("flag ON: none of the five router-owned variables survive, even from a caller's env", () => {
     const owned = { WINTER_HOME: "/x", WINTER_STORE_HOME: "/x", WINTER_PLUGIN_CACHE_DIR: "/x", WINTER_PROVIDER_MANAGED_BY_HOST: "1", WINTER_DISABLE_CRON: "1" };
     const on = buildWinterOptions(winterInput({ runHomeApplied: true, env: owned }));
@@ -197,6 +211,7 @@ describe("officialInputFor", () => {
     expect(optionsOf(off).plugins).toBeDefined();
     expect("agents" in optionsOf(on)).toBe(false);
     expect("plugins" in optionsOf(on)).toBe(false);
+    for (const key of RUN_HOME_DECIDED_OPTIONS) expect(key in optionsOf(on)).toBe(false); // L2 fix round 1, M1
     expect(Object.keys(inputOf(on).mcpServers ?? {})).not.toContain("user_srv");
     const allowOn = optionsOf(on).settings!.permissions!.allow!;
     expect(allowOn).toEqual(expect.arrayContaining([...GLOBAL_READ_ALLOW_RULES]));
