@@ -30,6 +30,7 @@ import { readMigrationManifest } from "../migration/manifest";
 import { describeHomePristineness } from "../migration/migrate-b";
 import { MIGRATION_B_SECRET_NAMES } from "../auth/legacy-secret-names";
 import type { SecretStore } from "../auth/secret-store";
+import { storeProjectsDir } from "../agent/paths";
 
 export type FindingKind =
   | "db-missing"
@@ -289,7 +290,7 @@ export async function diagnoseRuntimeState(home: string): Promise<Finding[]> {
 
       // §15 "missing compatibility transcript" / §14's read-only-history row. EXISTENCE only.
       if (row.backend_session_id !== null && row.transcript_health !== "unsupported") {
-        const path = join(home, "projects", row.transcript_project_key, `${row.backend_session_id}.jsonl`);
+        const path = join(storeProjectsDir(home), row.transcript_project_key, `${row.backend_session_id}.jsonl`);
         if (!existsSync(path)) {
           findings.push({
             kind: "transcript-missing",
@@ -675,7 +676,7 @@ function relinkBackend(home: string, sessionId: string, backendSessionId: string
     if (owner && owner.winterSessionId !== sessionId) {
       return { applied: false, detail: `backend ${backendSessionId} is already mapped to ${owner.winterSessionId}` };
     }
-    const path = join(home, "projects", record.transcriptProjectKey, `${backendSessionId}.jsonl`);
+    const path = join(storeProjectsDir(home), record.transcriptProjectKey, `${backendSessionId}.jsonl`);
     if (!existsSync(path)) return { applied: false, detail: `no transcript for ${backendSessionId} at ${path}` };
     // A raw, guarded UPDATE rather than `transition`: relinking changes the MAPPING and must leave
     // the lifecycle state exactly where it was, and `ALLOWED_TRANSITIONS` has no self-edge — there

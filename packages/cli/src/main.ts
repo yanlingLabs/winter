@@ -2684,7 +2684,7 @@ if (import.meta.main) {
       break;
     }
 
-    const { WorkflowStore, TrustStore } = await import("@yanlinglabs/winter-core");
+    const { WorkflowStore, TrustStore, userWorkflowsDir } = await import("@yanlinglabs/winter-core");
     const home = resolveWinterHome();
     const store = new WorkflowStore({ winterHome: home, trust: new TrustStore(join(home, "trust.json")) });
     const cwd = process.cwd();
@@ -2729,7 +2729,7 @@ if (import.meta.main) {
         console.error((err as Error).message);
         process.exit(1);
       }
-      console.log(`${AQUA}saved${RESET} ${DIM}${action.name} → ${join(home, "workflows", `${action.name}.js`)}${RESET}`);
+      console.log(`${AQUA}saved${RESET} ${DIM}${action.name} → ${join(userWorkflowsDir(home), `${action.name}.js`)}${RESET}`);
       break;
     }
 

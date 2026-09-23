@@ -31,6 +31,7 @@ import {
   tagSession as sdkTagSession,
 } from "@yanlinglabs/winter-agent-sdk";
 import { CORE_BRAND } from "./brand";
+import { storeHomeFor } from "../agent/paths";
 
 /**
  * What a caller may still say. `SessionQueryOptions` is not exported by the SDK, and two of its
@@ -60,7 +61,7 @@ export interface WinterSessionFunctions {
  * temp dir in a test.
  *
  * Both bindings are applied by this function and neither is reachable past it: `winterHome` is
- * `home`, and `brand` is `CORE_BRAND`. A caller's `directory` still passes through — that is a
+ * this build's store home `storeHomeFor(home)` (WS-21), and `brand` is `CORE_BRAND`. A caller's `directory` still passes through — that is a
  * within-home hint, not a home.
  *
  * CLAUDE.md's standing rule still binds the CALLERS of `deleteSession`: a Winter session is never
@@ -69,8 +70,11 @@ export interface WinterSessionFunctions {
  * right home.
  */
 export function winterSessions(home: string): WinterSessionFunctions {
+  // WS-21: the store lives where this build's runtimes write it — `<home>/sdk` once the linked router
+  // applies run homes, `<home>` before that (`storeHomeFor`).
+  const storeHome = storeHomeFor(home);
   const at = (opts?: WinterSessionOptions): { directory?: string; winterHome: string; brand: typeof CORE_BRAND } =>
-    ({ ...opts, winterHome: home, brand: CORE_BRAND });
+    ({ ...opts, winterHome: storeHome, brand: CORE_BRAND });
   return {
     listSessions: (opts) => sdkListSessions(at(opts)),
     getSessionInfo: (sessionId, opts) => sdkGetSessionInfo(sessionId, at(opts)),
