@@ -280,17 +280,23 @@ jobs:
         working-directory: apple/WinterKit
         run: swift build
 
-      # Winter Phase 8d (ruling P8d-22): thirteen Iroh-transport tests fail on `main` with
-      # `IrohError ConnectionLost(LocallyClosed)` — reproduced UNSANDBOXED on main + only the
-      # waitForFirstLine fix, so they PREDATE 8d and were masked until now by the daemon-hello bug
-      # (P8d-19). They are skipped BY EXACT NAME — all thirteen, never a whole suite (a test added to
-      # IrohE2ETests/FakePhoneConformanceTests must run; GatewayGateTests' count test is the
-      # remote-allowlist drift tripwire). Classifying them (relay/iroh environment vs a real
-      # regression) is a P9 carry; remove this --skip when it lands.
+      # Winter Phase 8d (ruling P8d-22): thirteen Iroh-transport tests originally failed on `main`
+      # with `IrohError ConnectionLost(LocallyClosed)` (P9a-11, Lane K: bisected to
+      # `ed6ebeca6c1fce...`, "Dispatch on the Winter leg" — `session.dispatch`'s default mode
+      # needs a resolvable `winter` executable, which `bun install` alone now provisions via the
+      # npm platform package). Lane J (2026-09) fixed 4 of the remaining 5 by having the affected
+      # tests settle a credential-less Winter-leg turn's real `turn_started`/`agent_error`/
+      # `turn_completed` tail before asserting exact frame counts, instead of racing it (see those
+      # tests' own doc comments and `RealDaemon.waitForFirstLine`'s). `FakePhoneConformanceTests`'
+      # streaming test stays skipped: its `agentProvider` injection seam only feeds the daemon's
+      # OWN internal jobs now (titler/reviewer/dreamer/cleaner), never a real session turn, so its
+      # controlled-chunks/reasoning_item/oversized-chunk scenario cannot be exercised without a new
+      # `winter-test/*` double in the separate `winter-agent-sdk` repo (not checked out here) —
+      # genuine product/test-infra gap, not a stale assertion; do not remove this skip without that.
       - name: WinterKit — swift test (retry once — known socket-test flake class)
         working-directory: apple/WinterKit
         env:
-          WINTERKIT_SKIP: 'IrohE2ETests/(testScenarioC_ReconnectReplaysExactGapInOrderOverRealAsyncTransport|testScenarioD_IdempotentResendAcrossReconnectYieldsOneDaemonEffect)$|FakePhoneConformanceTests/(testStreamingDeltasReachThePhone_OpaqueStateDoesNot_AndAnOversizedEventDoesNotKillTheLink)$|GatewayGateTests/(testG1_UpToDateReachable_HonestWatermark_NoHarnessLeak|testR2_HelloAckReplayLiveStrictOrderUnderSuspendingSend)$'
+          WINTERKIT_SKIP: 'FakePhoneConformanceTests/(testStreamingDeltasReachThePhone_OpaqueStateDoesNot_AndAnOversizedEventDoesNotKillTheLink)$'
         run: swift test --skip "$WINTERKIT_SKIP" || (echo "::warning::WinterKit swift test failed once — retrying (known socket-test flake class)"; swift test --skip "$WINTERKIT_SKIP")
 
       # WS-19 Lane I: the THIRD kit the phone links (WinterProtocol + WinterSessionKit +

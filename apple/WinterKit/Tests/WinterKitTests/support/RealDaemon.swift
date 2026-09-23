@@ -299,6 +299,21 @@ struct RealDaemon {
     /// 5 need a `packages/core` fix (suppress turn-attempt noise for a fresh, credential-less
     /// dispatch-mode session used as a pure event-log seed, and/or restore an Winter-leg-honored
     /// `agentProvider`-equivalent test seam) that is out of WinterKit's scope.
+    ///
+    /// **Lane J update (2026-09):** the "second cause" is real and permanent (dispatch-mode's
+    /// `agent_error`+`turn_completed` noise is not going away — it is what a credential-less
+    /// Winter-leg turn honestly produces now), but it does not require a `packages/core` change: 4
+    /// of the 5 — `GatewayGateTests` G1/R2, `IrohE2ETests` scenarios C/D — were test-only fixes
+    /// (seed helpers now wait for a turn to settle before the next step, and assert exact equality
+    /// against the daemon's real, settled content instead of a hardcoded frame count; see each
+    /// test's own doc comment and `GatewayGateTests.collectUntilTurnsSettle`/`crossesRemoteGate`).
+    /// `FakePhoneConformanceTests`'s streaming test is the one still WAIVED: `agentProvider`
+    /// injection now feeds only the daemon's own internal jobs (titler/reviewer/dreamer/cleaner —
+    /// `daemon.ts`'s `if (agentProvider)` gate), never a real session turn, so its controlled
+    /// 6-chunk/reasoning_item/oversized-chunk scenario cannot be reproduced short of a new
+    /// `winter-test/*` double (`testProviderNameFor`, `packages/core/src/runtime-sdk/
+    /// session-driver.ts`) added in the separate `winter-agent-sdk` repo — out of this repo's edit
+    /// scope entirely, not just this lane's.
     private static func waitForFirstLine(
         process: Process, stdoutPath: String, stderrPath: String, timeoutSeconds: Double = 20
     ) async throws -> String {
