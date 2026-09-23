@@ -3,7 +3,7 @@ import { basename, join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SdkPluginConfig } from "@yanlinglabs/winter-agent-sdk";
 import type { TrustStore } from "./trust";
-import { skillPluginViewsRoot } from "./paths";
+import { homeCacheDir, skillPluginViewsRoot } from "./paths";
 import { skillDenyRule } from "../settings";
 
 // Phase 5c Task 3: `author?` mirrors T1's `author: winter` frontmatter stamp (writeSelf below) back
@@ -212,17 +212,24 @@ function removeEntryNoFollow(path: string): void {
 /**
  * The views root, made safe to work under — or `null` (with ONE log line) when it cannot be.
  *
- * `<home>/cache` is not write-fenced (only the views' own subtree is), so a session whose writable
- * roots include `<home>` could swap `cache` — or `cache/skill-plugins` — for a symlink to anywhere,
- * and every rebuild and prune would then run inside the target (review I1). Each level is made a
- * real directory first, and the result is then checked by REALPATH against the home's own: anything
- * other than `<realpath(home)>/cache/skill-plugins` means something moved underneath us, and this
- * spawn simply gets no plugin skills rather than a daemon that deletes through a link.
+ * A swapped `cache` — or `cache/skill-plugins` — pointing anywhere would have every rebuild and prune
+ * run inside the target (review I1). `<home>/cache` is write-fenced whole on both legs now (re-review
+ * M-a), but a user may have made it a link on purpose (a cache on another volume), so it is NEVER
+ * unlinked: a `cache` that is not a real directory refuses this spawn's handover instead. Below it,
+ * `skill-plugins` is the daemon's own and is made a real directory. The result is then checked by
+ * REALPATH against the home's own: anything other than `<realpath(home)>/cache/skill-plugins` means
+ * something moved underneath us, and this spawn simply gets no plugin skills rather than a daemon
+ * that deletes through a link.
  */
 function safeSkillPluginViewsRoot(winterHome: string): string | null {
   const root = skillPluginViewsRoot(winterHome);
   try {
-    ensureRealDirectory(join(winterHome, "cache"));
+    const cache = homeCacheDir(winterHome);
+    let st: ReturnType<typeof lstatSync> | undefined;
+    try { st = lstatSync(cache); } catch { /* absent */ }
+    if (st === undefined) mkdirSync(cache);
+    else if (st.isSymbolicLink()) throw new Error(`${cache} is a symbolic link (left as it is)`);
+    else if (!st.isDirectory()) throw new Error(`${cache} is not a directory (left as it is)`);
     ensureRealDirectory(root);
     const expected = join(realpathSync(winterHome), "cache", "skill-plugins");
     if (realpathSync(root) !== expected) throw new Error(`${root} resolves to ${realpathSync(root)}, not ${expected}`);

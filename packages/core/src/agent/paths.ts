@@ -13,7 +13,17 @@ import { isAbsolute, resolve, sep, dirname, basename, join } from "node:path";
  * skips `cache/**` (`migration/migrate-b.ts`).
  */
 export function skillPluginViewsRoot(winterHome: string): string {
-  return join(winterHome, "cache", "skill-plugins");
+  return join(homeCacheDir(winterHome), "skill-plugins");
+}
+
+/**
+ * `<home>/cache` — today used ONLY by the skill views above, and write-fenced WHOLE on both legs
+ * (re-review M-a: fencing just the views left the directories above them swappable for links).
+ * Because a user may deliberately make it a link (a cache on another volume), the daemon never
+ * unlinks it — a spawn that finds it a link gets no plugin skills (`agent/skills.ts`).
+ */
+export function homeCacheDir(winterHome: string): string {
+  return join(winterHome, "cache");
 }
 
 /**

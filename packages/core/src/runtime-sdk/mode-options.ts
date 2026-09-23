@@ -6,7 +6,7 @@ import type {
 } from "@yanlinglabs/winter-agent-sdk";
 import { RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
-import { approvedProjectRulesDir, skillPluginViewsRoot } from "../agent/paths";
+import { approvedProjectRulesDir, homeCacheDir } from "../agent/paths";
 import { parseRule } from "../agent/permission-rules";
 import { keychainService } from "../profile";
 import type { SessionApprovalPolicy } from "../agent/gate";
@@ -531,7 +531,9 @@ export function controlPlaneDenyRules(home: string): string[] {
     // so a file written here is a self-grant of the same class as the definitions above. Write-fenced
     // only: the views are deliberately READABLE, because a skill points the model at its own files.
     // The daemon also rebuilds each view before every spawn; this closes the window in between.
-    fsRootAnchored([skillPluginViewsRoot(home), "**"].join("/")),
+    // Re-review M-a: the WHOLE `<home>/cache` (only the views use it), so a write tool cannot swap the
+    // directories above the views for links either.
+    fsRootAnchored([homeCacheDir(home), "**"].join("/")),
     // Review M6 (2026-09-23): the runtime store, write-denied to the write TOOLS too. It was read-denied
     // (below) and in the Bash sandbox's `denyWrite`, but `Write(<home>/runtimes/bin/winter)` — rung 4
     // of `resolveWinterExecutable`'s ladder, code the NEXT spawn runs — had no rule against it, and a
@@ -762,10 +764,11 @@ export function sandboxConfigFor(home: string): SandboxSettingsConfig {
       // never its Bash sandbox's.
       // …and the skills-only plugin views (B1 follow-up): a Bash redirect planting a manifest with
       // command hooks there would be run by the next child — see `controlPlaneDenyRules`' matching
-      // entry. Write only; the views stay readable (a skill reads its own supporting files).
+      // entry. Write only; the views stay readable (a skill reads its own supporting files). The whole
+      // `<home>/cache` since re-review M-a — the directories above the views included.
       // …and every installed plugin (review M6) — same reason as the write-tool rule.
       // …and the daemon's approved-project-rules record (review I2) — a self-grant if writable.
-      denyWrite: [join(home, "run"), join(home, "runtimes"), skillPluginViewsRoot(home), join(home, "plugins"), approvedProjectRulesDir(home)],
+      denyWrite: [join(home, "run"), join(home, "runtimes"), homeCacheDir(home), join(home, "plugins"), approvedProjectRulesDir(home)],
       // The sole read denial Winter has ever had (CLAUDE.md: "the sole read denial is
       // `~/.winter/run`") — reads are otherwise deliberately unrestricted.
       // …plus `runtimes/` (8a: the runtime store is never model-readable — the engine's read tool
