@@ -150,13 +150,14 @@ export interface WinterSessionRecords {
   bumpGeneration(winterSessionId: string, input: { runtimeKind: "winter-agent"; backendSessionId: string }): { generation: number };
   endGeneration(winterSessionId: string, generation: number, endReason: string): void;
   transition(winterSessionId: string, to: RuntimeSessionState): unknown;
-  get(winterSessionId: string): { state: RuntimeSessionState; generation: number   /** WS-21: a run folder the router quarantined at exit (kept; recorded for recovery and doctor). Optional:
-   *  a test double need not implement it. */
-  noteQuarantinedRoot?(root: string): void;
-} | undefined;
+  get(winterSessionId: string): { state: RuntimeSessionState; generation: number } | undefined;
   /** WS-21: a run folder the router quarantined at exit (kept; recorded for recovery and doctor). Optional:
    *  a test double need not implement it. */
   noteQuarantinedRoot?(root: string): void;
+  /** WS-21 review M6: the run folder this session runs in (`RuntimeSessionRecords.noteRunFolder`). */
+  noteRunFolder?(winterSessionId: string, dir: string | undefined, current?: string): void;
+  /** WS-21 review M6: a quarantined run folder marks its session. */
+  setTranscriptHealth?(winterSessionId: string, health: "repair-required"): void;
 }
 
 export interface WinterSessionDeps {
@@ -586,6 +587,7 @@ class WinterSessionImpl implements WinterSession {
       // leaves one behind). An open that fails from here to the iteration's start disposes it at once —
       // nothing ran on it (spec §3.8 r3).
       const runHome = runHomeOf(options);
+      if (runHome !== undefined) this.deps.records?.noteRunFolder?.(this.sessionId, runHome.dir);
       let generation: number;
       let shape: WinterIncarnation;
       let queue: HostPromptQueue;
@@ -599,6 +601,7 @@ class WinterSessionImpl implements WinterSession {
         query = this.deps.runtime.sdk.query({ prompt: queue, options });
       } catch (err) {
         await disposeFailedRunHome(runHome, (line) => this.log(line));
+        if (runHome !== undefined) this.deps.records?.noteRunFolder?.(this.sessionId, undefined, runHome.dir);
         throw err;
       }
       // Daemon settings surface (2026-09-17 plan, item 3): best-effort, fire-and-forget — a
@@ -716,10 +719,15 @@ class WinterSessionImpl implements WinterSession {
       // WS-21 (spec §3.8; L2 fix round 1): the iteration is over (drained, closed or failed), which is
       // exactly when the router reports a Winter run home `safe` — dispose it only then.
       if (inc.runHome !== undefined) {
-        await settleRunHome(inc.runHome, this.deps.runtime.runHomeOutcome?.(inc.runHome.runId), {
+        const runHome = inc.runHome;
+        const settled = await settleRunHome(runHome, this.deps.runtime.runHomeOutcome?.(runHome.runId), {
           log: (line) => this.log(line),
-          onQuarantined: (dir) => this.deps.records?.noteQuarantinedRoot?.(dir),
+          onQuarantined: (dir) => {
+            this.deps.records?.noteQuarantinedRoot?.(dir);
+            try { this.deps.records?.setTranscriptHealth?.(this.sessionId, "repair-required"); } catch { /* bounded */ }
+          },
         });
+        if (settled === "disposed") this.deps.records?.noteRunFolder?.(this.sessionId, undefined, runHome.dir);
       }
     }
   }
