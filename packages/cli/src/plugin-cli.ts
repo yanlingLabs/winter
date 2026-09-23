@@ -1,5 +1,5 @@
 // `winter plugin` — CLI parity with `claude plugin` (WS-21 spec §5.2), over Contract B
-// (`@yanlinglabs/winter-core`'s `plugins/sdk-plugin-api.ts`). Same shape as `mcp-cli.ts`: main.ts owns
+// (`@yanlinglabs/winter-core`'s `plugins/plugin-manager.ts`). Same shape as `mcp-cli.ts`: main.ts owns
 // argv slicing + printing + `process.exit`; every exported `run*Route` function here IS the full
 // round trip (I/O via an injected `door` when the daemon answers, the adapter directly otherwise),
 // returning a plain outcome object main.ts renders and exits on.

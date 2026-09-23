@@ -142,7 +142,7 @@ import {
   addMarketplace, installPlugin, listMarketplaces, listPlugins, PluginManagerError, removeMarketplace,
   setPluginEnabled as setPluginEnabledOnAdapter, uninstallPlugin, updateMarketplace, updatePlugin,
   type PluginManagerOptions, type PluginScope as AdapterPluginScope,
-} from "../plugins/sdk-plugin-api";
+} from "../plugins/plugin-manager";
 import { loadManifest, requiredConsentClasses } from "../agent/plugin-manifest";
 import { pluginSkillsFor } from "../plugins/plugin-skills";
 import { sdkPluginsRoot, sdkSettingsPath } from "../agent/paths";
@@ -2685,7 +2685,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       // -----------------------------------------------------------------------------------------
       // WS-21 (spec §5.2): `winter plugin` = `claude plugin`, over Contract B
-      // (`plugins/sdk-plugin-api.ts`). Every result mirrors the adapter's own return shape verbatim
+      // (`plugins/plugin-manager.ts`). Every result mirrors the SDK's own return shape verbatim
       // (protocol/methods.ts's own header: "field for field — protocol never imports the SDK").
       // harness-role (same precedent the pre-WS-21 block noted: NOT one of the six plugin-role
       // verbs, so a plugin connection is role-rejected before dispatch, PLUGIN_ALLOWED_METHODS

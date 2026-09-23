@@ -43,7 +43,7 @@ const PLUGIN_SDK_ENTRY = join(import.meta.dir, "../../../plugin-sdk/src/index.ts
 /** The single directory marketplace these fixtures register every example plugin under — its own
  *  `.claude-plugin/marketplace.json` names each installed example by its `pluginId`, source `"."`
  *  (WS-21: a directory marketplace's plugin entries resolve relative to the marketplace root,
- *  `plugins/sdk-plugin-api.ts`'s own `resolvePluginSourcePath`; one marketplace per example keeps
+ *  the agent SDK's `resolveMarketplacePluginPath`; one marketplace per example keeps
  *  each fixture's `source` trivial). */
 const EXAMPLE_MARKETPLACE_PREFIX = "example-mkt-";
 

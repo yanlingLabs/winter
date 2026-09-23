@@ -1,6 +1,6 @@
 // WS-21 (spec §8 step 6): converts every plugin at the legacy `<home>/plugins/<id>` layout into a
 // claude-shaped install under `<home>/sdk/plugins/marketplaces/winter-legacy/plugins/<id>/`,
-// registered through the Contract B adapter (`plugins/sdk-plugin-api.ts`) as one directory
+// registered through Contract B (`plugins/plugin-manager.ts`) as one directory
 // marketplace ("winter-legacy") with one plugin entry per converted id.
 //
 // COPIES, NEVER MOVES: the legacy `<home>/plugins/<id>` directory is left exactly as it was — a
@@ -50,7 +50,7 @@ import { sdkPluginsRoot, sdkHomeFor } from "../agent/paths";
 import { loadManifest, requiredConsentClasses } from "../agent/plugin-manifest";
 import { writeJsonAtomic } from "../sdk-files";
 import { pluginConsentFingerprint } from "./consent-fingerprint";
-import { addMarketplace, installPlugin, listPlugins, setPluginEnabled, type PluginManagerOptions } from "./sdk-plugin-api";
+import { addMarketplace, installPlugin, listPlugins, setPluginEnabled, type PluginManagerOptions } from "./plugin-manager";
 
 const LEGACY_MARKETPLACE_NAME = "winter-legacy";
 

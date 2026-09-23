@@ -1,8 +1,8 @@
 // Post-merge round: installing/enabling/disabling a plugin at LOCAL scope writes
 // `<root>/.winter/settings.local.json` -- a personal overlay, never meant to be committed (claude
-// parity, F21). `plugins/sdk-plugin-api.ts#setEnabledInSettings` (the one shared write path
-// install/uninstall/enable/disable all funnel through) now calls `ensureGlobalGitExclude` right
-// after that write, exactly like `agent/saved-answers.ts` does for its own
+// parity, F21). `plugins/plugin-manager.ts` (the daemon's door onto the agent SDK's plugin API, which leaves F21 to
+// its host) calls `ensureGlobalGitExclude` right after every local-scope install/uninstall/enable/
+// disable, exactly like `agent/saved-answers.ts` does for its own
 // `.winter/settings.local.json` writes (L3's own precedent). `project` scope (`.winter/settings.json`,
 // team-shared, meant to be committed) and `user` scope (never touches the project's git tree at all)
 // must NOT trigger it.
@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LOCAL_SETTINGS_EXCLUDE } from "../../src/agent/git-exclude";
-import { addMarketplace, installPlugin, setPluginEnabled, uninstallPlugin, type PluginManagerOptions } from "../../src/plugins/sdk-plugin-api";
+import { addMarketplace, installPlugin, setPluginEnabled, uninstallPlugin, type PluginManagerOptions } from "../../src/plugins/plugin-manager";
 
 const tmp = (p: string): string => realpathSync(mkdtempSync(join(tmpdir(), p)));
 const ENV_KEYS = ["HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL"] as const;
@@ -64,7 +64,7 @@ async function registerOnePlugin(winterHome: string): Promise<{ options: PluginM
   return { options, spec: "p@m" };
 }
 
-describe("plugins/sdk-plugin-api.ts: local scope writes trigger ensureGlobalGitExclude, project/user never do", () => {
+describe("plugins/plugin-manager.ts: local scope writes trigger ensureGlobalGitExclude, project/user never do", () => {
   test("installPlugin at LOCAL scope (inside a git repo) appends the exclude pattern", async () => {
     const winterHome = tmp("winter-gitx-plugin-wh-");
     const root = repo();
