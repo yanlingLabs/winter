@@ -34,6 +34,15 @@ export function homeFencedDirs(home: string): string[] {
   return [...new Set([...fromSandbox, join(home, "agents"), join(home, "cache")])];
 }
 
+/**
+ * The fenced home subtrees the model is POINTED AT to read and execute — plugin skill content, and the
+ * skill-plugin views under `cache` (whole-branch review N1). The sandbox and the write-tool fence treat
+ * every fenced path alike (they only ever fence writes); the escape floor, which matches a command's
+ * text, refuses these two only in a write-shaped position, and every other fenced path on any mention.
+ * First path segment relative to `<home>`.
+ */
+export const HOME_WRITE_ONLY_FENCED: readonly string[] = ["cache", "plugins"];
+
 /** Fenced single FILES under `<home>` (absolute): the directory-trust store — writing it trusts a
  *  project, whose overlay then grants itself permissions. */
 export function homeFencedFiles(home: string): string[] {
