@@ -60,8 +60,10 @@ export function _clearRepoRootCacheForTests(): void {
  * /other/.git` would otherwise inherit `/other`'s approvals. So the resolved root is kept only when
  * it CONTAINS the cwd (the ordinary checkout, any subdirectory) or the cwd lies inside one of the
  * worktrees that common dir itself registers (`git worktree list`, read through `--git-dir`, so the
- * cwd's own `.git` file has no say in the listing). Anything else falls back to the cwd, with one log
- * line (memoized with the answer).
+ * cwd's own `.git` file has no say in the listing). Failing both, a submodule's own `core.worktree`
+ * and then the cwd's `--show-toplevel` (a `--separate-git-dir` checkout, re-review N3) are accepted
+ * only when they CONTAIN the cwd — a checkout root, never another project's. Anything else falls back
+ * to the cwd, with one log line (memoized with the answer).
  */
 export function repoRootFor(cwd: string): string {
   const key = canon(cwd);
@@ -78,10 +80,16 @@ export function repoRootFor(cwd: string): string {
         const candidate = dirname(commonDir);
         // Each extra git spawn only when the rung before it failed — an ordinary checkout pays none.
         let configured: string | null = null;
+        let toplevel: string | null = null;
         if (within(key, candidate) || registeredWorktrees(commonDir).some((wt) => within(key, wt))) root = candidate;
         // A submodule: its common dir is `<outer>/.git/modules/<name>`, and its own `core.worktree`
         // names the checkout — the submodule's one root from any depth inside it.
         else if ((configured = configuredWorktree(commonDir)) !== null && within(key, configured)) root = configured;
+        // Re-review N3: a `--separate-git-dir` checkout (git dir elsewhere, no `core.worktree`) — its
+        // own top, from `--show-toplevel`, accepted ONLY when it contains the cwd. A `.git` file can
+        // only make that the directory holding it, an ancestor of the cwd, so a forged one still
+        // borrows nothing: its root is its own directory, never the project its git dir belongs to.
+        else if ((toplevel = showToplevel(key)) !== null && within(key, toplevel)) root = toplevel;
         else console.error(`memory-dir: ${key}'s git dir resolves to ${commonDir}, which neither contains it nor registers it as a worktree — using the directory itself as its project root`);
       }
     }
@@ -95,6 +103,14 @@ export function repoRootFor(cwd: string): string {
 /** `path` is `dir` or lies beneath it (both canonical). */
 function within(path: string, dir: string): boolean {
   return path === dir || path.startsWith(dir.endsWith(sep) ? dir : dir + sep);
+}
+
+/** The cwd's own worktree top (`git rev-parse --show-toplevel`), canonical; `null` when git refuses. */
+function showToplevel(cwd: string): string | null {
+  const p = Bun.spawnSync(["git", "-C", cwd, "rev-parse", "--show-toplevel"]);
+  if (p.exitCode !== 0) return null;
+  const raw = p.stdout.toString("utf8").trim();
+  return raw ? canon(raw) : null;
 }
 
 /** `core.worktree` from `commonDir`'s OWN config (a submodule's checkout), canonical — relative
