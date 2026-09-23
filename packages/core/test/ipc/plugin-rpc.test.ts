@@ -270,6 +270,105 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
     });
   });
 
+  // Fix round 2 (new wire field for lane L5's Hooks tab): `plugin.list`'s top-level `hooks` — a
+  // claude-format plugin's hooks live in `hooks/hooks.json` (claude's own file, wrapped
+  // `{hooks:{<Event>:[{matcher?,hooks:[{type,command?}]}]}}`) and/or the claude manifest's own
+  // inline `hooks` field (the SAME inner shape, unwrapped) — read from BOTH, unlike `extras`
+  // (winter-plugin.json-only), because a plain claude plugin with no winter-plugin.json at all still
+  // carries hooks.
+  describe("hooks: plugin.list's top-level hooks field", () => {
+    test("reads hooks/hooks.json (claude's wrapped shape)", async () => {
+      const { c } = await boot();
+      const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-hooks-file-"));
+      writeMarketplace(mktDir, { id: "p", tier: "capability" });
+      mkdirSync(join(mktDir, "hooks"), { recursive: true });
+      writeFileSync(join(mktDir, "hooks", "hooks.json"), JSON.stringify({
+        hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "echo pre" }] }] },
+      }));
+      await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+      await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+
+      const listRes = await c.request(METHODS.pluginList, {});
+      expect(listRes.result.plugins[0].hooks).toEqual([
+        { event: "PreToolUse", matcher: "Bash", type: "command", command: "echo pre" },
+      ]);
+    });
+
+    test("reads the claude manifest's own inline hooks field (bare event map, no winter-plugin.json needed)", async () => {
+      const { c } = await boot();
+      const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-hooks-manifest-"));
+      mkdirSync(join(mktDir, ".claude-plugin"), { recursive: true });
+      writeFileSync(join(mktDir, ".claude-plugin", "marketplace.json"), JSON.stringify({
+        name: "m", owner: { name: "test" }, plugins: [{ name: "p", source: "." }],
+      }));
+      writeFileSync(join(mktDir, ".claude-plugin", "plugin.json"), JSON.stringify({
+        name: "p", hooks: { Stop: [{ hooks: [{ type: "command", command: "echo stop" }] }] },
+      }));
+      await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+      await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+
+      const listRes = await c.request(METHODS.pluginList, {});
+      expect(listRes.result.plugins[0].hooks).toEqual([{ event: "Stop", type: "command", command: "echo stop" }]);
+      expect(listRes.result.plugins[0]).not.toHaveProperty("extras"); // no winter-plugin.json at all
+    });
+
+    test("unions hooks/hooks.json and the manifest's inline hooks — load both", async () => {
+      const { c } = await boot();
+      const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-hooks-both-"));
+      mkdirSync(join(mktDir, ".claude-plugin"), { recursive: true });
+      writeFileSync(join(mktDir, ".claude-plugin", "marketplace.json"), JSON.stringify({
+        name: "m", owner: { name: "test" }, plugins: [{ name: "p", source: "." }],
+      }));
+      writeFileSync(join(mktDir, ".claude-plugin", "plugin.json"), JSON.stringify({
+        name: "p", hooks: { Stop: [{ hooks: [{ type: "command", command: "echo stop" }] }] },
+      }));
+      mkdirSync(join(mktDir, "hooks"), { recursive: true });
+      writeFileSync(join(mktDir, "hooks", "hooks.json"), JSON.stringify({
+        hooks: { PreToolUse: [{ hooks: [{ type: "command", command: "echo pre" }] }] },
+      }));
+      await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+      await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+
+      const listRes = await c.request(METHODS.pluginList, {});
+      expect(listRes.result.plugins[0].hooks).toEqual([
+        { event: "PreToolUse", type: "command", command: "echo pre" },
+        { event: "Stop", type: "command", command: "echo stop" },
+      ]);
+    });
+
+    test("a malformed hooks.json degrades to an absent hooks field, never throws", async () => {
+      const { c } = await boot();
+      const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-hooks-malformed-"));
+      writeMarketplace(mktDir, { id: "p", tier: "capability" });
+      mkdirSync(join(mktDir, "hooks"), { recursive: true });
+      writeFileSync(join(mktDir, "hooks", "hooks.json"), "{ not valid json");
+      await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+      await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+
+      const listRes = await c.request(METHODS.pluginList, {});
+      expect(listRes.result.plugins[0]).not.toHaveProperty("hooks");
+    });
+
+    test("caps at 100 entries and 500 characters per command", async () => {
+      const { c } = await boot();
+      const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-hooks-cap-"));
+      writeMarketplace(mktDir, { id: "p", tier: "capability" });
+      mkdirSync(join(mktDir, "hooks"), { recursive: true });
+      const longCommand = "x".repeat(600);
+      const groups = Array.from({ length: 150 }, (_, i) => ({
+        hooks: [{ type: "command", command: i === 0 ? longCommand : `echo ${i}` }],
+      }));
+      writeFileSync(join(mktDir, "hooks", "hooks.json"), JSON.stringify({ hooks: { PreToolUse: groups } }));
+      await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+      await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "user" });
+
+      const listRes = await c.request(METHODS.pluginList, {});
+      const hooks = listRes.result.plugins[0].hooks;
+      expect(hooks).toHaveLength(100);
+      expect(hooks[0].command).toBe("x".repeat(500));
+    });
+  });
+
   test("plugin.install on an unknown marketplace is refused typed (INVALID_PARAMS), nothing written", async () => {
     const { c } = await boot();
     const res = await c.request(METHODS.pluginInstall, { spec: "p@nope", scope: "user" });

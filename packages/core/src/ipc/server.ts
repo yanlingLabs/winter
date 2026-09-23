@@ -135,6 +135,7 @@ import { dispatchPinMessage } from "../agent/dispatch-config";
 // …) is retired here in favor of the Contract B adapter below.
 import { stripPluginConsents } from "../plugins/lifecycle";
 import { consentedClassesFor, pluginConsentFingerprint } from "../plugins/consent-fingerprint";
+import { pluginHooksFor } from "../plugins/plugin-hooks";
 import {
   addMarketplace, installPlugin, listMarketplaces, listPlugins, PluginManagerError, removeMarketplace,
   setPluginEnabled as setPluginEnabledOnAdapter, uninstallPlugin, updateMarketplace, updatePlugin,
@@ -2681,7 +2682,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         } catch { /* degrade to "nothing consented" rather than fail the whole list */ }
         const plugins = listed.map((entry) => {
           const extras = pluginExtrasFor(entry.installPath, entry.id, consents[`${entry.id}@${entry.marketplace}`]);
-          return extras ? { ...entry, extras } : entry;
+          // Fix round 2: `hooks` — a TOP-LEVEL sibling of `extras` (plugins/plugin-hooks.ts), read
+          // from `hooks/hooks.json` and the claude manifest's own inline `hooks` field regardless of
+          // whether this plugin has a winter-plugin.json at all.
+          const hooks = pluginHooksFor(entry.installPath);
+          return { ...entry, ...(extras ? { extras } : {}), ...(hooks ? { hooks } : {}) };
         });
         return { ok: true, plugins };
       }
