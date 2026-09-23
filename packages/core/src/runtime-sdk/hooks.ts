@@ -465,6 +465,20 @@ export function escapeFloorHit(command: string, home: string | undefined): strin
       at = c.indexOf(needle, at + 1);
     }
   }
+  // Review I7: the user tier's PROTECTED paths (spec §7.2), write-shaped — the shared runtime home's and
+  // the old/compat spelling at the home's top level (a link into `sdk/` on a migrated home, the store
+  // itself on router 0.0.11). A write tool gets a card for these; an unsandboxed command gets none.
+  for (const pre of homePrefixes(bareHome)) {
+    for (const base of [`${pre}/sdk`, pre]) {
+      for (const needle of [...PROTECTED_KIND_NAMES.map((k) => `${base}/${k}`), `${base}/winter.md`]) {
+        for (let at = c.indexOf(needle); at >= 0; at = c.indexOf(needle, at + 1)) {
+          if (at <= writeStart) continue;
+          const next = c.charAt(at + needle.length);
+          if (next === "" || next === "/" || /[\s;&|()<>]/.test(next)) return "a protected path (skills, commands, rules, output styles or WINTER.md)";
+        }
+      }
+    }
+  }
   // …and the runtimes' transcript store, `sdk/projects`, write-shaped and OUTSIDE each project's
   // `memory/` (the model's MEMDIR, which it maintains itself).
   for (const pre of homePrefixes(bareHome)) {
@@ -482,7 +496,14 @@ export function escapeFloorHit(command: string, home: string | undefined): strin
 
 /** WS-21 (spec §7.1): project files the escape floor refuses in a write-shaped position, matched on the
  *  normalised command. */
-const PROJECT_WRITE_FENCED: readonly RegExp[] = [/\.winter\/mcp\.json/g, /\.winter\/settings[^/\s;&|()<>]*\.json/g];
+const PROJECT_WRITE_FENCED: readonly RegExp[] = [
+  /\.winter\/mcp\.json/g,
+  /\.winter\/settings[^/\s;&|()<>]*\.json/g,
+  // Review I7: any project's protected item directories, at any depth (review C1's shape).
+  /\.winter\/(?:skills|commands|rules|output-styles)(?=\/|[\s;&|()<>]|$)/g,
+];
+/** The protected item directory names (spec §7.2), as the lowercased floor matches them. */
+const PROTECTED_KIND_NAMES: readonly string[] = ["skills", "commands", "rules", "output-styles"];
 const RESUME_STAGING_NEEDLE = "claude-resume-";
 
 export function escapeFloorDenial(hit: string): string {
