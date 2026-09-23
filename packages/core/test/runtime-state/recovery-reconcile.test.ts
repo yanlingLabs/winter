@@ -120,6 +120,22 @@ describe("recoverRunRoots — the boot sweep of cache/runs/*", () => {
     expect(existsSync(join(elsewhere, "runs", "x"))).toBe(true);
   });
 
+  test("review M1: a Winter-leg run folder (projects/ is a link to the store) has no working copy — removed, never reconciled", async () => {
+    const w = world();
+    const store = mkdtempSync(join(tmpdir(), "winter-rrr-store-"));
+    mkdirSync(join(store, "k"), { recursive: true });
+    writeFileSync(join(store, "k", "s.jsonl"), "{}\n");
+    const dir = join(w.runs, "winterleg");
+    mkdirSync(dir, { recursive: true });
+    symlinkSync(store, join(dir, "projects"));
+    const { reconcile, seen } = stub({});
+    const report = await recoverRunRoots({ home: w.home, rs: w.rs, reconcile, claudeResumeScanRoot: w.scan });
+    expect(seen).toEqual([]);
+    expect(existsSync(dir)).toBe(false);
+    expect(existsSync(join(store, "k", "s.jsonl"))).toBe(true); // the link removed, its target untouched
+    expect(report.runFolders.noWorkingCopy).toBe(1);
+  });
+
   test("a run folder this process built (live) is left alone", async () => {
     const w = world();
     const a = w.runFolder("live");
