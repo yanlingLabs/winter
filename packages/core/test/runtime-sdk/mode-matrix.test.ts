@@ -330,10 +330,10 @@ test("the control-plane deny rules cover the four write tools × the control-pla
     expect(deny).toContain(`${tool}(//**/.winter/settings*.json)`);
   }
   // The skill-plugin views stay READABLE: no read rule covers the cache wholesale. WS-21 (spec §7.1)
-  // read-denies exactly three generated config files per run folder, nothing else under it.
+  // read-denies exactly three generated config files per run folder, and (round 6) its `backups/`.
   for (const tool of ["Read", "Glob", "Grep"]) {
     const underCache = deny.filter((r) => r.startsWith(`${tool}(`) && r.includes("/cache"));
-    expect(underCache.sort()).toEqual([".claude.json", ".credentials.json", ".winter.json"].map((f) => `${tool}(//h/cache/runs/*/${f})`));
+    expect(underCache.sort()).toEqual([".claude.json", ".credentials.json", ".winter.json", "backups/**"].map((f) => `${tool}(//h/cache/runs/*/${f})`));
     expect(deny).toContain(`${tool}(//h/sdk/.winter.json)`);
   }
   // Task 17: + the engine's read-tool denials, carried: Read/Glob/Grep × { run/**, runtimes/** }
@@ -348,10 +348,16 @@ test("the control-plane deny rules cover the four write tools × the control-pla
   // from the router's own `RESUME_STAGING_PREFIX` (not a hand-typed duplicate) so this test fails if
   // `mode-options.ts` ever drifts from the router's own definition of a staging root's name.
   const claudeResumeTarget = `/${join(tmpdir(), `${RESUME_STAGING_PREFIX}*`, "**")}`;
-  for (const tool of ["Edit", "Write", "MultiEdit", "NotebookEdit", "Read", "Glob", "Grep"]) {
+  for (const tool of ["Edit", "Write", "MultiEdit", "NotebookEdit"]) {
     expect(deny).toContain(`${tool}(${claudeResumeTarget})`);
   }
-  expect(deny).toHaveLength(4 * 21 + 3 * 7);
+  // Round 6: READS of a staging root are fenced like a run folder's — its config files and `backups/`,
+  // never the whole root (a resumed generation's own large tool outputs live there and must be readable).
+  for (const tool of ["Read", "Glob", "Grep"]) {
+    expect(deny).not.toContain(`${tool}(${claudeResumeTarget})`);
+    for (const f of [".claude.json", ".credentials.json", ".winter.json", "backups/**"]) expect(deny).toContain(`${tool}(/${join(tmpdir(), `${RESUME_STAGING_PREFIX}*`)}/${f})`);
+  }
+  expect(deny).toHaveLength(4 * 21 + 3 * 11);
 });
 
 // Daemon settings surface batch 3 (item 2): `settings.permissions.deny` (Skill(<name>) toggles,
@@ -360,7 +366,7 @@ test("item 2 (WS-21): the user's sdk/settings.json deny rules (userDeny) are app
   const deny = buildWinterOptions(optionsInput({ home: "/h", userDeny: ["Skill(writing-skills)", "Agent(fork)"] })).permissions!.deny!;
   expect(deny.slice(-2)).toEqual(["Skill(writing-skills)", "Agent(fork)"]);
   // The fixed fence is untouched (same count this file's other test pins).
-  expect(deny).toHaveLength(4 * 21 + 3 * 7 + 2);
+  expect(deny).toHaveLength(4 * 21 + 3 * 11 + 2);
 });
 
 test("WS-21: a STALE settings.permissions.deny (a moved key) never reaches the child's deny list", () => {
@@ -371,7 +377,7 @@ test("WS-21: a STALE settings.permissions.deny (a moved key) never reaches the c
   });
   const deny = buildWinterOptions(optionsInput({ home: "/h", settings })).permissions!.deny!;
   expect(deny).not.toContain("Skill(stale)");
-  expect(deny).toHaveLength(4 * 21 + 3 * 7);
+  expect(deny).toHaveLength(4 * 21 + 3 * 11);
 });
 
 test("WS-21: the user's sdk/settings.json allow rules (userAllow) reach a code child verbatim — never re-translated", () => {
@@ -386,8 +392,8 @@ test("WS-21: the user's sdk/settings.json allow rules (userAllow) reach a code c
 test("item 2: an absent settings.permissions.deny changes nothing — byte-identical to before item 2", () => {
   const withNull = buildWinterOptions(optionsInput({ home: "/h", settings: null })).permissions!.deny!;
   const withUndefined = buildWinterOptions(optionsInput({ home: "/h" })).permissions!.deny!;
-  expect(withNull).toHaveLength(4 * 21 + 3 * 7);
-  expect(withUndefined).toHaveLength(4 * 21 + 3 * 7);
+  expect(withNull).toHaveLength(4 * 21 + 3 * 11);
+  expect(withUndefined).toHaveLength(4 * 21 + 3 * 11);
 });
 
 // Winter Phase 10b (D1-3, W18-9): a read of a `claude-resume-*` staging root is denied — proved
@@ -396,22 +402,20 @@ test("item 2: an absent settings.permissions.deny changes nothing — byte-ident
 // `isResumeStagingRoot` is the router's own recognition function for exactly this shape (used
 // elsewhere for staging-root cleanup/reconciliation); this test ties the two together so the SDK
 // deny rule and the router's own definition of a staging root can never silently disagree.
-test("W18-9: a real router-shaped claude-resume staging root is caught by the Read/Glob/Grep deny rule", () => {
+// Round 6: the READ rules name the staging root's config files and `backups/` (no longer the whole root —
+// the model reads its own large tool outputs there); the WRITE rules keep the whole root.
+test("W18-9: a real router-shaped claude-resume staging root is caught by the deny rules (reads: its config and backups; writes: all of it)", () => {
   const deny = buildWinterOptions(optionsInput({ home: "/h" })).permissions!.deny!;
   const root = resumeStagingRoot("9f2c1e40-0000-4000-8000-abcdefabcdef", tmpdir());
   expect(isResumeStagingRoot(root)).toBe(true); // the router agrees this IS a staging root
-  const fileInsideRoot = join(root, "projects", "some-project-key", "session.jsonl");
-  // The glob's `**` suffix covers arbitrary depth under the root — a model reading a specific
-  // transcript FILE inside the staging tree, not just the bare root directory, must be denied too.
-  const withinDeniedTree = fileInsideRoot.startsWith(`${root}/`);
-  expect(withinDeniedTree).toBe(true);
+  // The rules target `<tmpdir>/<prefix>*/…` — `root` (built with the SAME `tmpdir()` base) must fall under
+  // that prefix for every real staging directory the router creates, whatever uuid it happens to mint.
+  expect(root.startsWith(join(tmpdir(), RESUME_STAGING_PREFIX))).toBe(true);
+  const stagingGlob = join(tmpdir(), `${RESUME_STAGING_PREFIX}*`);
   for (const tool of ["Read", "Glob", "Grep"]) {
-    // The deny rule targets `<tmpdir>/<prefix>*/**` — `root` (built with the SAME `tmpdir()` base)
-    // must fall under it, which is exactly what the rule exists to guarantee for every real staging
-    // directory the router creates, whatever uuid it happens to mint.
-    expect(root.startsWith(join(tmpdir(), RESUME_STAGING_PREFIX))).toBe(true);
-    expect(deny).toContain(`${tool}(/${join(tmpdir(), `${RESUME_STAGING_PREFIX}*`, "**")})`);
+    for (const f of [".claude.json", ".credentials.json", ".winter.json", "backups/**"]) expect(deny).toContain(`${tool}(/${stagingGlob}/${f})`);
   }
+  for (const tool of ["Edit", "Write", "MultiEdit", "NotebookEdit"]) expect(deny).toContain(`${tool}(/${join(stagingGlob, "**")})`);
 });
 
 /**
@@ -465,7 +469,11 @@ test("every deny rule is //-anchored, and resolves to the fence target it names"
   expect(specs.has("//**/.winter/mcp.json")).toBe(true);
   expect(specs.has("//**/.winter/settings*.json")).toBe(true);
   for (const f of [".winter.json", ".claude.json", ".credentials.json"]) expect(specs.has(`/${join(home, "cache", "runs", "*", f)}`)).toBe(true);
-  expect(specs.size).toBe(24);                                       // (runtimes/** was already a READ target)
+  // Round 6: `backups/**` of every run folder and staging root, and a staging root's config files (reads).
+  expect(specs.has(`/${join(home, "cache", "runs", "*", "backups")}/**`)).toBe(true);
+  expect(specs.has(`/${join(tmpdir(), "claude-resume-*", "backups")}/**`)).toBe(true);
+  for (const f of [".winter.json", ".claude.json", ".credentials.json"]) expect(specs.has(`/${join(tmpdir(), "claude-resume-*", f)}`)).toBe(true);
+  expect(specs.size).toBe(29);                                       // (runtimes/** was already a READ target)
   // The two inert forms must never reappear.
   for (const s of specs) {
     expect({ s, singleSlashAbsolute: /^\/[^/]/.test(s) }).toEqual({ s, singleSlashAbsolute: false });

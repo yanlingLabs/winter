@@ -157,8 +157,8 @@ describe("reads: sdk/.winter.json and the run-folder/staging config files — ru
   test("deny rules", () => {
     expect(readRule(`/${H}/sdk/.winter.json`)).toBe(true);
     for (const f of [".winter.json", ".claude.json", ".credentials.json"]) expect(readRule(`/${H}/cache/runs/*/${f}`)).toBe(true);
-    // a staging root is read-denied whole already
-    expect(rules.some((r) => r.startsWith("Read(") && r.includes(`${RESUME_STAGING_PREFIX}*`))).toBe(true);
+    // round 6: a staging root's config files (and `backups/`) are read-denied — no longer the whole root
+    for (const f of [".winter.json", ".claude.json", ".credentials.json"]) expect(readRule(`/${join(tmpdir(), `${RESUME_STAGING_PREFIX}*`, f)}`)).toBe(true);
   });
   test("sandbox denyRead: sdk/.winter.json as a real path (the regex half has no SDK channel — DECISION 12)", () => {
     expect(sandboxConfigFor(H).filesystem!.denyRead).toContain(`${H}/sdk/.winter.json`);
@@ -264,5 +264,60 @@ describe("round 4, minor 4: glob metacharacters in the daemon's own rule paths",
     expect(writes.some((r) => gitignoreMatch(r, "/p/app/.winter/settings.local.json"))).toBe(true);
     // the old spelling (unescaped) is what failed: `[wip]` read as a one-character class
     expect(gitignoreMatch(`Write(//${home}/run/**)`, `${home}/run/core.sock`)).toBe(false);
+  });
+});
+
+// Round 6 (the router's measurement of what claude writes): claude saves a large tool output to
+// `<configDir>/projects/<key>/<sid>/tool-results/<id>.txt` and tells the model to `Read` it. A resumed
+// generation runs in a `claude-resume-*` staging root, which was read-denied WHOLE — so the model could not
+// read its own large outputs there. The read fence is narrowed to what needs protecting, as for run folders:
+// the generated config files and `backups/` (claude's `.claude.json.backup.*` copies — missed by the
+// run-folder rules until now). The WRITE fence on staging roots is unchanged.
+describe("round 6: staging roots and run folders — config files and backups/ read-denied, tool results readable", () => {
+  const glob = (rule: string, path: string): boolean => {
+    const pattern = rule.replace(/^[A-Za-z]+\(/, "").replace(/\)$/, "").replace(/^\/\//, "/");
+    let re = "";
+    for (let i = 0; i < pattern.length; i += 1) {
+      const c = pattern[i]!;
+      if (c === "\\" && i + 1 < pattern.length) { re += `\\${pattern[++i]!}`; continue; }
+      if (c === "*" && pattern[i + 1] === "*") { re += ".*"; i += 1; continue; }
+      if (c === "*") { re += "[^/]*"; continue; }
+      re += c.replace(/[.+?^${}()|[\]]/g, "\\$&");
+    }
+    return new RegExp(`^${re}$`).test(path);
+  };
+  const staging = join(tmpdir(), `${RESUME_STAGING_PREFIX}8f2a`);
+  const runFolder = `${H}/cache/runs/r1`;
+  const toolResult = join(staging, "projects", "k", "sid", "tool-results", "x.txt");
+  const deniedFor = (tool: string, path: string): boolean => rules.some((r) => r.startsWith(`${tool}(`) && glob(r, path));
+
+  test("deny rules: a tool result inside a staging root is readable; config files and backups are not, in both containers", () => {
+    for (const tool of ["Read", "Glob", "Grep"]) expect({ tool, denied: deniedFor(tool, toolResult) }).toEqual({ tool, denied: false });
+    for (const root of [staging, runFolder]) {
+      for (const f of [".claude.json", ".credentials.json", ".winter.json", "backups/.claude.json.backup.123"]) {
+        const target = `${root}/${f}`;
+        expect({ target, denied: deniedFor("Read", target) }).toEqual({ target, denied: true });
+      }
+    }
+  });
+  test("…and writes to the staging root stay denied (the whole root, as before)", () => {
+    for (const tool of ["Write", "Edit", "MultiEdit", "NotebookEdit"]) expect({ tool, denied: deniedFor(tool, toolResult) }).toEqual({ tool, denied: true });
+    expect(storeWriteDenial("Write", { file_path: toolResult }, { home: H })).toBeDefined();
+  });
+  test("the path fence hook agrees: a tool result reads, config and backups do not; a Grep rooted at a container root or its backups/ is refused", () => {
+    expect(protectedReadDenial("Read", { file_path: toolResult }, { home: H })).toBeUndefined();
+    expect(protectedReadDenial("Grep", { pattern: "x", path: join(staging, "projects") }, { home: H })).toBeUndefined();
+    for (const root of [staging, runFolder]) {
+      for (const f of [".claude.json", ".credentials.json", "backups/.claude.json.backup.123"]) {
+        expect({ f, root, denied: protectedReadDenial("Read", { file_path: `${root}/${f}` }, { home: H }) !== undefined }).toEqual({ f, root, denied: true });
+      }
+      expect(protectedReadDenial("Grep", { pattern: "x", path: root }, { home: H })).toBeDefined();
+      expect(protectedReadDenial("Grep", { pattern: "x", path: `${root}/backups` }, { home: H })).toBeDefined();
+      expect(protectedReadDenial("Glob", { pattern: "*", path: `${root}/backups` }, { home: H })).toBeDefined();
+    }
+  });
+  test("the Bash sandbox's denyRead names no staging root (it never did) and can express no per-root glob", () => {
+    const denyRead = sandboxConfigFor(H).filesystem!.denyRead!;
+    expect(denyRead.some((p) => p.includes(RESUME_STAGING_PREFIX))).toBe(false);
   });
 });
