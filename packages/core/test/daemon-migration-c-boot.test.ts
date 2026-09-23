@@ -111,6 +111,22 @@ describe("Migration C at boot (run-home router)", () => {
     expect((readSdkSettings(home) as Record<string, any>).permissions.allow).toEqual(["Bash(ls)"]);
   });
 
+  test("the dev profile's default home (~/.winter-dev, by homedirOverride) migrates the same way", async () => {
+    setRunHomeSupportForTests(true);
+    const prior = process.env.WINTER_PROFILE;
+    process.env.WINTER_PROFILE = "dev";
+    try {
+      const parent = parentDir();
+      const home = join(parent, ".winter-dev");
+      seedOldLayout(home);
+      daemon = await boot(home, parent);
+      expect(lstatSync(join(home, "projects")).isSymbolicLink()).toBe(true);
+      expect(migrationCState(home)).toMatchObject({ kind: "parsed", manifest: { status: "complete" } });
+    } finally {
+      if (prior === undefined) delete process.env.WINTER_PROFILE; else process.env.WINTER_PROFILE = prior;
+    }
+  });
+
   test("router 0.0.11 (no run homes): the old layout is left exactly as it is", async () => {
     setRunHomeSupportForTests(false);
     const parent = parentDir();
