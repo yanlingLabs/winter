@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, SkillsListResult, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startDaemon, type RunningDaemon } from "../src/daemon";
+import { setRunHomeSupportForTests } from "../src/runtime-sdk/run-home-support";
 import { startIpcServer } from "../src/ipc/server";
 import { SessionStore } from "../src/sessions/store";
 import { FileSecretStore } from "../src/auth/secret-store";
@@ -181,6 +182,46 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
     const read = await c.request(METHODS.skillsRead, { name: "greet" });
     expect(read.result.skill).toMatchObject({ name: "greet", loadsInSessions: false });
     c.close();
+  });
+
+  // Post-merge round ("flip your skills test"): the companion of the test above, on a build whose
+  // router DOES apply run homes -- agent/skills-ws21.test.ts already proves this at the
+  // SkillStore#sessionAvailability unit level (`setRunHomeSupportForTests(true)` -> user/self/
+  // project/builtin all loadsInSessions:true, "the run folder carries them"); this is that same
+  // flip proven end to end through the REAL skills.list/skills.read RPCs over the wire, not just the
+  // underlying store.
+  test("skills.list and skills.read report loadsInSessions:true for a user skill on a run-home-capable build", async () => {
+    // Old-layout tripwire (post-merge sweep): the override must flip BEFORE any file is seeded, so
+    // `storeHomeFor` resolves to `<home>/sdk/skills` from the start (Migration C's boot check --
+    // linkedRouterSupportsRunHome() && isOldLayout(home) -- refuses typed on a temp home that isn't
+    // the profile's default the moment ANY SDK_COMPAT_LINKS path, "skills" included, has content at
+    // the OLD top-level location once the router is considered linked).
+    setRunHomeSupportForTests(true);
+    try {
+      const home = mkdtempSync(join(tmpdir(), "winter-daemon-skills-runhome-"));
+      mkdirSync(join(storeHomeFor(home), "skills", "greet"), { recursive: true });
+      writeFileSync(join(storeHomeFor(home), "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nhi\n");
+      writeFileSync(join(home, "settings.json"), JSON.stringify({
+        schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
+      }));
+      const secrets = new FileSecretStore(join(home, "test-secrets"));
+      daemon = await startDaemon({ home, secrets, agentProvider: null });
+      harnessToken = daemon.tokens.harness;
+      const c = await TestClient.connect(daemon.socketPath);
+      await c.hello(harnessToken, "skills-tester-runhome");
+
+      const listed = await c.request(METHODS.skillsList, {});
+      expect(SkillsListResult.safeParse(listed.result).success).toBe(true);
+      const byName = new Map<string, { loadsInSessions?: boolean; sessionNote?: string }>(listed.result.skills.map((s: { name: string }) => [s.name, s]));
+      expect(byName.get("greet")).toMatchObject({ loadsInSessions: true });
+      expect(byName.get("greet")!.sessionNote).toBeUndefined(); // nothing to explain when it DOES load
+
+      const read = await c.request(METHODS.skillsRead, { name: "greet" });
+      expect(read.result.skill).toMatchObject({ name: "greet", loadsInSessions: true });
+      c.close();
+    } finally {
+      setRunHomeSupportForTests(undefined);
+    }
   });
 
   test("deleting a name that resolves to a non-self source (user root) -> INVALID_PARAMS, refused before touching self/", async () => {
