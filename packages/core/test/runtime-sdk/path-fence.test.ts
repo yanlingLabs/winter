@@ -42,13 +42,10 @@ describe("the path fence hook", () => {
     expect(decisionOf(await call(fenceOf({ home, cwd: root, mode: "code" }), "Edit", { file_path: `${home}/sdk/WINTER.md` }))).toBe("ask");
   });
 
-  test("the project tier follows trust LIVE", async () => {
-    let trusted = false;
-    const hook = fenceOf({ home, cwd: root, mode: "code", trustedProjectRoot: () => (trusted ? root : null) });
-    const input = { file_path: `${root}/.winter/rules/a.md` };
-    expect(decisionOf(await call(hook, "Write", input))).toBe("none");
-    trusted = true;
-    expect(decisionOf(await call(hook, "Write", input))).toBe("ask");
+  test("review C1: the project tier is protected whatever the trust, at any depth (it loads once trusted)", async () => {
+    const hook = fenceOf({ home, cwd: root, mode: "code", trustedProjectRoot: () => null });
+    expect(decisionOf(await call(hook, "Write", { file_path: `${root}/.winter/rules/a.md` }))).toBe("ask");
+    expect(decisionOf(await call(hook, "Write", { file_path: `${root}/packages/app/.winter/skills/x/SKILL.md` }))).toBe("ask");
   });
 
   test("sdk/projects is denied outside memory/; the memory directory is free", async () => {
@@ -124,8 +121,16 @@ describe("the bridge never auto-allows a protected write (spec §7.2, layer 3)",
     expect(child.approvals.list("s_1")).toHaveLength(0);
   });
 
-  test("an untrusted project's .winter/skills is not the protected tier (it is not loaded)", async () => {
-    expect((await bridge("bypass", { trusted: false }).canUse("Write", protectedInput, ctx()))?.behavior).toBe("allow");
+  test("review C1: at the repo root under bypass, a nested project dir's skill is a card, trusted or not", async () => {
+    for (const trusted of [true, false]) {
+      const { canUse, approvals } = bridge("bypass", { trusted });
+      const pending = canUse("Write", { file_path: join(root, "packages", "app", ".winter", "skills", "x", "SKILL.md"), content: "x" }, ctx());
+      await new Promise((r) => setTimeout(r, 10));
+      const listed = approvals.list("s_1");
+      expect(listed).toHaveLength(1);
+      approvals.resolve("s_1", listed[0]!.callId, false, "test");
+      expect((await pending)?.behavior).toBe("deny");
+    }
   });
 
   test("the sdk tier is protected whatever the project's trust", async () => {

@@ -2,9 +2,10 @@
 // enforced from one PreToolUse hook on both legs (`hooks.ts`'s `pathFenceHook`) plus the approval
 // bridge (`approval-bridge.ts` (5e)).
 //
-// PROTECTED (§7.2) — instructions the runtimes load into every future session: the trusted project's
-// `.winter/{skills,commands,rules,output-styles}/**`, `sdk/{skills,commands,rules,output-styles}/**` and
-// `sdk/WINTER.md`. A write is a card in code under every policy and a typed deny in chat and dispatch.
+// PROTECTED (§7.2) — instructions the runtimes load into every future session: ANY project's
+// `.winter/{skills,commands,rules,output-styles}/**` at any depth, trusted or not (review C1 — the spec
+// names the trusted project's; a later session loads a subdirectory's, and an untrusted project's once
+// trusted), `sdk/{skills,commands,rules,output-styles}/**` and `sdk/WINTER.md`. A write is a card in code under every policy and a typed deny in chat and dispatch.
 // Three layers at once: this hook's `ask`, the router's flag-layer `permissions.ask` rules (the same
 // set, `protectedPathRules`), and the bridge, which never auto-allows one.
 //
@@ -70,9 +71,20 @@ function targetsOf(rules: readonly string[]): { dirs: string[]; files: string[] 
   return { dirs, files };
 }
 
+/**
+ * Review C1: every project's protected item directories, as path SEGMENTS matched at ANY depth and
+ * regardless of trust — `<anything>/.winter/{skills,commands,rules,output-styles}/…`. The router loads the
+ * `.winter/` items of every directory on a LATER session's walk (a subdirectory the model writes into
+ * today, a sibling package, a project the user trusts tomorrow), so protecting only this session's walk
+ * left an auto-approved write that a later session loads. The same any-depth shape `PROJECT_FENCED_SEGMENTS`
+ * gives `.winter/agents`. (`protectedPathsFor` keeps the router's literal set — its ask rules are the
+ * router's to widen.)
+ */
+export const PROTECTED_PROJECT_SEGMENTS: readonly string[] = PROTECTED_ITEM_DIRS.map((kind) => `${PROJECT_DIR_NAME}/${kind}/`);
+
 /** The first protected path a write-class call names, raw spelling as the call gave it. */
 function protectedHit(input: unknown, cwd: string, rules: readonly string[]): string | undefined {
-  const fence = { ...targetsOf(rules), segments: [] as string[] };
+  const fence = { ...targetsOf(rules), segments: PROTECTED_PROJECT_SEGMENTS };
   for (const p of writeTargetPathsIn(input)) {
     if (homeFenceTarget(p, cwd, fence)) return p;
   }
@@ -88,7 +100,8 @@ export type ProtectedWriteDecision = { decision: "ask" } | { decision: "deny"; r
  * a code session: its `ask` reaches the bridge, whose never-prompt rule turns it into the typed deny.
  *
  * Matched case-folded on the raw AND the canonical spelling of both the target and each protected path
- * (a write through a link into `.winter/skills`, or a realpath'd home), like the control-plane fence.
+ * (a write through a link into `.winter/skills`, or a realpath'd home), like the control-plane fence —
+ * and, review C1, any project's `.winter/<kind>/` at any depth whatever `ctx.protected` names.
  */
 export function protectedWriteDecision(
   toolName: string,
