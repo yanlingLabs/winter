@@ -1944,6 +1944,27 @@ describe("registerHandoffParticipants: destination.confirmInit (m4 — the plan-
     };
   }
 
+  // WS-21 (L2 O-2): on the supported path the destination's open builds its run home and the router's
+  // door checks the durable row's leg (D13) — so the row must name the DESTINATION leg before the
+  // destination opens its generation. Verified here for both directions: at the moment `ensure()` (the
+  // destination open, where the run home is built) runs, the record already names the target leg.
+  for (const to of ["claude-agent", "winter-agent"] as const) {
+    test(`L2 O-2: the record names the destination leg (${to}) BEFORE the destination opens`, async () => {
+      await withRs(async (_rs, records) => {
+        seedRecord(records, "s1");
+        const seenAtOpen: string[] = [];
+        const opener = fakeWinterThatOpens();
+        const winter: WinterSessionDrivers = { ...opener, ensure: async (id) => { seenAtOpen.push(records.get(id)!.runtimeKind); return opener.ensure(id); } };
+        const destination = registerDestination(records, winter);
+        const built = destination({ projectKey: "pk", sessionId: "be-1" }, to);
+        const result = await built!.confirmInit({ backendSessionId: "be-1-new", selection: SELECTION(to) } as unknown as HandoffResumeTarget);
+        expect(result).toMatchObject({ ok: true });
+        expect(seenAtOpen.length).toBeGreaterThan(0);
+        expect(seenAtOpen.every((k) => k === to)).toBe(true);
+      });
+    });
+  }
+
   test("the session's state at PLAN time is unchanged at execute time: confirmInit SUCCEEDS (P8d-24)", async () => {
     // Round 1 found that `destinationRuntimeFor`'s patch call went through `transition(id,
     // fresh.state, patch)` — a SELF-transition, which `ALLOWED_TRANSITIONS` refuses for every one
