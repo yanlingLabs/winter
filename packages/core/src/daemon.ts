@@ -93,7 +93,7 @@ import { linkedRouterSupportsRunHome, linkedRunHomeBuilder, runHomeHandleOf, run
 import { recoverRunRoots, rootRecoveryDetail } from "./runtime-state/root-recovery";
 import { splitSettingsToSdk } from "./migration/settings-split";
 import { MigrationCRefused, finishMigrationC, isOldLayout, migrationCManifestPath, migrationCState, runMigrationC } from "./migration/migrate-c";
-import { runHomeInputFor } from "./runtime-sdk/run-home-input";
+import { localScopeKeyFor, runHomeInputFor } from "./runtime-sdk/run-home-input";
 import { reservedMcpServerNames } from "./capabilities/names";
 import { persistedAllowRulesFor, winterGateRulesFromSdk } from "./runtime-sdk/mode-options";
 import { configuredMcpServersFor } from "./runtime-sdk/external-mcp";
@@ -1804,7 +1804,7 @@ export async function startDaemon(opts: {
       settings,
       userMcpServers: sdkUserMcpServers(winterHome),
       // WS-21 (spec §4.4): the local scope, keyed by the session's canonical project root.
-      localMcpServers: session.cwd ? sdkLocalMcpServers(winterHome, repoRootFor(session.cwd)) : {},
+      localMcpServers: session.cwd ? sdkLocalMcpServers(winterHome, localScopeKeyFor(session.cwd)) : {},
       cwd: session.cwd, trusted: (dir) => trustStore.isTrusted(dir), log: (m) => console.error(m),
     }),
     // Daemon settings surface batch 3 (item 1): the SAME trust gate `extraMcpServers` above and
