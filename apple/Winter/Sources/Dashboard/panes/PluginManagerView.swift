@@ -812,7 +812,9 @@ struct PluginManagerView: View {
         let busy = model.busySpec == row.spec
         return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
-                Text(row.pluginId).font(Typography.control(.medium))
+                // Fix round 5: `pluginId` is marketplace-authored (untrusted) too — sanitized the
+                // same as the consent sheet's title/disclosure and the Hooks tab's own fields.
+                Text(librarySanitizedHookField(row.pluginId)).font(Typography.control(.medium))
                 tierBadge(row.tierBadge)
                 Text(row.version)
                     .font(Typography.captionMono())

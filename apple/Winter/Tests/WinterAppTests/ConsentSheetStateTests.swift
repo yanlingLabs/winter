@@ -145,6 +145,16 @@ final class PluginConsentDisclosureLinesTests: XCTestCase {
         XCTAssertTrue(lines.contains("- will request macOS permission: mic\\u{202e}rophone"))
         XCTAssertTrue(lines.contains("- hardware access via Winter.app's helper: bat\\u{7}tery"))
     }
+
+    /// Fix round 5 (controller-required): `pluginId` is untrusted too — it comes straight from the
+    /// marketplace file, the same trust boundary as the entry command/TCC/hardware strings above —
+    /// so the header line (and, by the same sanitizer, `ConsentSheet`'s title) must sanitize it too.
+    func testSanitizesThePluginIdInTheHeaderLine() {
+        let e = PluginExtras(tier: "platform", execPermission: false, tccPermissions: [], hardwarePermissions: [],
+                             requiredConsents: [], consented: [], entry: nil, fingerprint: "fp-1")
+        let lines = pluginConsentDisclosureLines(pluginId: "de\u{202E}mo", extras: e)
+        XCTAssertEqual(lines.first, "de\\u{202e}mo is asking for the following, on this Mac:")
+    }
 }
 
 // -----------------------------------------------------------------------------------------------

@@ -104,7 +104,10 @@ struct ConsentSheetState: Equatable, Identifiable {
 /// them verbatim in a monospaced, `textSelection(.enabled)` block a user is meant to actually read
 /// and trust.
 func pluginConsentDisclosureLines(pluginId: String, extras: PluginExtras) -> [String] {
-    var lines = ["\(pluginId) is asking for the following, on this Mac:"]
+    // Fix round 5: `pluginId` is untrusted too — it comes straight from the marketplace file
+    // (`marketplace.json`'s own `name`), same trust boundary as the entry command/TCC/hardware
+    // strings sanitized below.
+    var lines = ["\(librarySanitizedHookField(pluginId)) is asking for the following, on this Mac:"]
     // `execPermission` alone can be absent/false while `requiredConsents` still lists `"exec"`
     // (or an `entry` is declared without the daemon echoing `permissions.exec` back) — check all
     // three so a genuine exec request never renders as a bare, contentless header line.
@@ -160,7 +163,9 @@ struct ConsentSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("\(state.pluginId) requests consent")
+            // Fix round 5: sanitized — `pluginId` is marketplace-authored, same as the disclosure
+            // lines below it.
+            Text("\(librarySanitizedHookField(state.pluginId)) requests consent")
                 .font(Typography.paneTitle)
             // Fix round 4: the stale-disclosure notice lives ON the sheet (`state.notice`), not the
             // pane's general `errorText` — rendered at the top, above the intro copy, so it reads as
