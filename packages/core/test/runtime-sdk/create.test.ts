@@ -495,6 +495,8 @@ describe("createWinterRuntimeSdk — run homes (WS-21)", () => {
     const { opts } = await build({ runHomeFor }, undefined, () => Promise.resolve(undefined));
     expect((opts as unknown as { requireRunHome?: boolean }).requireRunHome).toBe(true);
     expect((opts as unknown as { runHomeFor?: unknown }).runHomeFor).toBe(runHomeFor);
+    // L2: `requireRunHome` also requires an explicit `handoff.winterHome` (the store then lives in `<home>/sdk`).
+    expect(opts.handoff?.winterHome).toBe(home);
   });
 
   test("runHomeOutcome / reconcileRootForRecovery answer undefined on a router without them (0.0.11)", async () => {

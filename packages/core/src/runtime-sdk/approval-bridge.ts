@@ -68,6 +68,13 @@ export interface CanUseToolDeps {
    *  fence. An absent/empty cwd resolves relative paths against `/`, which is the conservative
    *  reading (a relative target then cannot accidentally miss a real `.winter` parent). */
   cwd?: string;
+  /**
+   * WS-21 (spec §4.3): whether this session's project is TRUSTED. An "Allow … in this project" option is
+   * offered ONLY when it is — the answer is saved to the project's `.winter/settings.local.json`, a tier
+   * the runtimes read for a trusted project alone (`approval.respond` refuses it otherwise too). A live
+   * getter: trusting a project mid-session reaches the next card. Absent: offered as before.
+   */
+  projectTrusted?: () => boolean;
   /** Seven-valued (`gate.ts`'s `SessionApprovalPolicy`), not the six-valued wire `ApprovalPolicy`:
    *  `ipc/server.ts`'s create-time chat coercion persists the internal `"chat"` policy, and P8b-7
    *  makes that coercion the ONLY guard once the engine's turn-time re-assertion retires. A
@@ -756,9 +763,13 @@ async function raiseCard(
   // the single place that closes both halves: the respond handler resolves an `optionId` against the
   // options THIS record stored (an unknown id persists nothing), and `updatedPermissionsFor` reads
   // the same list. `undefined` is the plain approve/deny card every non-`bash` tool already gets.
-  const options = env.privateTarget !== undefined
+  const offered = env.privateTarget !== undefined
     ? undefined
     : approvalOptionsFromSuggestions(ctx.suggestions) ?? approvalOptionsFor({ name: gateToolName, argsJson });
+  // WS-21 (spec §4.3): "in this project" is offered only for a trusted project (see `projectTrusted`).
+  const options = offered === undefined || deps.projectTrusted === undefined || deps.projectTrusted()
+    ? offered
+    : offered.filter((o) => o.rule === undefined || (o.scope ?? "project") !== "project");
 
   const issuedAt = env.now();
   const expiresAt = issuedAt + NO_PARK_TIMEOUT_MS;

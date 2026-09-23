@@ -17,7 +17,7 @@ import { ensureOutdir } from "./sessions/outdir";
 import { writeDiff, type DiffHeader } from "./diffs/store";
 import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
-import { loadSettings, loadPermissionDirs, effortRefusalFor, hooksEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, pinsFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, sdkAllowRules, sdkAutoMemory, sdkOutputStyle, sdkUserMcpServers, withoutMovedKeys, type Settings } from "./settings";
+import { loadSettings, loadPermissionDirs, effortRefusalFor, hooksEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, pinsFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, sdkAllowRules, sdkAutoMemory, sdkLocalMcpServers, sdkOutputStyle, sdkUserMcpServers, withoutMovedKeys, type Settings } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
@@ -577,12 +577,11 @@ export async function startDaemon(opts: {
   // there is exactly one mtime cache per project cwd for the whole daemon).
   const projectSettings = new ProjectSettingsResolver({ base: () => settings, trust: trustStore });
   // Review I2 (lane B): the daemon's own record of rules the user approved "in this project" from a
-  // card (`<home>/permissions/projects.json`) — written by `approval.respond`, applied to children
-  // regardless of trust. Provider-independent, so built unconditionally.
+  // card (`<home>/permissions/projects.json`). WS-21: RETIRED as a store — nothing writes it any more (a
+  // card's "in this project" answer goes to the trusted project's `.winter/settings.local.json`,
+  // `agent/saved-answers.ts`); what an older build recorded is still READ (on a build whose router does
+  // not apply run homes), reported by `winter doctor` and moved by `winter migrate-project`.
   const approvedProjectRules = new ApprovedProjectRules({ winterHome });
-  // Re-review R1: its directory exists (0700, real) before any session runs, so a link cannot be
-  // planted there first; something already there that is not is refused, with one log line.
-  approvedProjectRules.prepare();
   // fix-wave B (I1): every per-project getter below resolves at the REPO ROOT, matching
   // `globalAllow`'s own `projectRoot` (engine.ts's `repoRootFor(cwd)`) — NOT the raw session cwd.
   // Before this, a SUBDIRECTORY session read a DIFFERENT `.winter/settings.json` than
@@ -1649,6 +1648,8 @@ export async function startDaemon(opts: {
     home: winterHome,
     // WS-21: every incarnation's run home, when the linked router applies them (see `runHomeDeps`).
     ...(runHomeDeps === undefined ? {} : { runHome: runHomeDeps }),
+    // WS-21 (spec §4.3): a card offers "in this project" only for a trusted project.
+    isTrusted: (dir) => trustStore.isTrusted(dir),
     profile: process.env.WINTER_PROFILE,
     settings: () => settings, // LIVE holder
     runtime: runtimeSdk,
@@ -1694,7 +1695,13 @@ export async function startDaemon(opts: {
     // the McpManager consults. `log`: the SAME one-stderr-line-per-name convention `McpManager`'s
     // own `log` dep already uses (below), for a project-scope entry that didn't validate.
     // WS-21: the user-scope servers moved to `sdk/.winter.json` (`sdkUserMcpServers`, read live).
-    extraMcpServers: (session) => configuredMcpServersFor({ settings, userMcpServers: sdkUserMcpServers(winterHome), cwd: session.cwd, trusted: (dir) => trustStore.isTrusted(dir), log: (m) => console.error(m) }),
+    extraMcpServers: (session) => configuredMcpServersFor({
+      settings,
+      userMcpServers: sdkUserMcpServers(winterHome),
+      // WS-21 (spec §4.4): the local scope, keyed by the session's canonical project root.
+      localMcpServers: session.cwd ? sdkLocalMcpServers(winterHome, repoRootFor(session.cwd)) : {},
+      cwd: session.cwd, trusted: (dir) => trustStore.isTrusted(dir), log: (m) => console.error(m),
+    }),
     // Daemon settings surface batch 3 (item 1): the SAME trust gate `extraMcpServers` above and
     // `agents.list`'s own handler (ipc/server.ts) both use — an untrusted `cwd` gets the empty scan
     // shape outright, never even reaching the filesystem read `loadProjectAgentDefinitions` would do.
@@ -2512,7 +2519,6 @@ export async function startDaemon(opts: {
     permissionRules,
     // Review I2 (lane B): the daemon's own record of "in this project" approvals — the SAME instance
     // the session drivers' saved-rules reader applies.
-    approvedProjectRules,
     dirs: sessionDirs,
     trust: trustStore,
     bg: bgRegistry,

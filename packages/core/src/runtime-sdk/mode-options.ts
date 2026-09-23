@@ -8,6 +8,7 @@ import { RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/win
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
 import { approvedProjectRulesDir, homeCacheDir, storeHomeFor, trustRecordFile } from "../agent/paths";
 import { parseRule } from "../agent/permission-rules";
+import { WINTER_ROUTER_OWNED_ENV } from "./run-home-contract";
 import { keychainService } from "../profile";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import type { Settings } from "../settings";
@@ -460,7 +461,9 @@ export function buildChildEnv(input: WinterOptionsInput): Record<string, string>
   // WS-21: on a run-home incarnation the ROUTER pins the home — `WINTER_HOME = runHome.dir` (and the
   // store, plugin-cache, provider-managed and cron variables), laid over this env — so none may come
   // from here, a caller's `input.env` included (the env allowlist refuses them anyway).
-  if (input.runHomeApplied === true) delete env.WINTER_HOME;
+  // Beside a run home the router REFUSES any of them in `Options.env` (`router_owned_variable`) rather
+  // than overwriting it — so every one is removed, whatever a caller put there.
+  if (input.runHomeApplied === true) for (const key of WINTER_ROUTER_OWNED_ENV) delete env[key];
   else env.WINTER_HOME = input.home;
   env.WINTER_PROFILE = input.profile ?? "";
   // The scripted in-process double (Winter map §11.6): selection is BY NAME, because a spawned or

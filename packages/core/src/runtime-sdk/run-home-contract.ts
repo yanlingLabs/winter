@@ -3,7 +3,8 @@
 // 0.0.11 that does not export them yet. DELETED ON INTEGRATION: once the linked router exports these
 // names, every import of this file switches to `@yanlinglabs/winter-runtime-sdk`.
 //
-// Types and constants only, mirrored field for field (L2's `types.ts` at 10946c9). The functions —
+// Types and constants only, mirrored field for field from L2's final Contract A (`ws21/router` at
+// 53784ad: `src/run-home/{types,errors}.ts`, the lane-L2 report's "final signatures"). The functions —
 // `buildRunHome`, `sdkHomeOf`, `fsRootAnchored`, `protectedPathRules` — are the router's; the daemon
 // reaches `buildRunHome` only through feature detection (`run-home-support.ts`), and uses its own
 // `fsRootAnchored` (`mode-options.ts`, ledger ruling 2).
@@ -14,8 +15,8 @@ export type RunMode = "code" | "dispatch" | "chat";
 /** Which runtime the generation runs on. `projects/` differs by leg (spec §3.3). */
 export type RunLeg = "winter" | "official";
 
-/** The brand fields the builder spells names from. Absent = the Winter SDK's own profile; a Winter
- *  daemon never passes it. */
+/** The brand fields the builder spells names from (`Pick<BrandProfile, …>` in the router). Absent = the
+ *  Winter SDK's own profile; a Winter daemon never passes it (the router refuses another brand's run home). */
 export interface RunHomeBrand {
   homeDirName: string;
   projectDirName: string;
@@ -69,6 +70,33 @@ export interface RunHome {
   /** `rm -rf <dir>`: links are removed, their targets untouched. The caller reconciles first. Idempotent. */
   dispose(): Promise<void>;
 }
+
+/** The item directories whose writes are protected (spec §7.2) — under `sdk/` and a trusted project's
+ *  `.winter/`. */
+export const PROTECTED_ITEM_DIRS = ["skills", "commands", "rules", "output-styles"] as const;
+
+/** `RunHomeError.code` (the router throws a `RunHomeError extends RuntimeSdkError`, synchronously, from
+ *  `query()`); the host forwards it as the JSON-RPC error's `data.code`. */
+export const RUN_HOME_ERROR_CODES = [
+  "run_home_required", "run_home_foreign", "run_home_leg_mismatch", "run_home_cwd_mismatch",
+  "run_home_brand_mismatch", "run_home_store_mismatch", "run_home_link_refused", "run_home_staging_not_bare",
+  "setting_sources_refused", "router_owned_variable", "run_home_for_missing", "loop_refused",
+] as const;
+export type RunHomeErrorCode = (typeof RUN_HOME_ERROR_CODES)[number];
+
+/** A `RunHomeError` (matched structurally — this lane links no router class of that name). */
+export function isRunHomeError(err: unknown): err is Error & { code: RunHomeErrorCode } {
+  if (!(err instanceof Error)) return false;
+  const code = (err as unknown as { code?: unknown }).code;
+  return typeof code === "string" && (RUN_HOME_ERROR_CODES as readonly string[]).includes(code);
+}
+
+/**
+ * The variables the ROUTER sets on the Winter leg when it applies a run home. Beside a run home each is
+ * REFUSED from the host's `Options.env` (`router_owned_variable`), not overwritten — so the daemon must
+ * never state one then.
+ */
+export const WINTER_ROUTER_OWNED_ENV = ["WINTER_HOME", "WINTER_STORE_HOME", "WINTER_PLUGIN_CACHE_DIR", "WINTER_PROVIDER_MANAGED_BY_HOST", "WINTER_DISABLE_CRON"] as const;
 
 /** Bumped when a field a host reads changes meaning. */
 export const RUN_HOME_CONTRACT_VERSION = 1;

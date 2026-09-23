@@ -89,7 +89,7 @@ import type { AgentRegistry } from "../agent/bg-agent-registry";
 import type { ContextAssembler } from "../agent/context";
 import type { SkillStore } from "../agent/skills";
 import { startWinterSession, unconsumedUserMessages, withRunHome, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
-import type { RunHome, RunHomeInput } from "./run-home-contract";
+import { isRunHomeError, type RunHome, type RunHomeErrorCode, type RunHomeInput } from "./run-home-contract";
 import type { RunHomeSessionFacts } from "./run-home-input";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import { startOfficialSession, type OfficialSession } from "./official-session";
@@ -107,7 +107,9 @@ export type WinterLegRefusalCode =
   | "claude_executable_unavailable"   // P8c-3: no `claude` binary resolves for an official-leg create
   | "runtime_selection_refused"       // P8c-14: the router's selectRuntime refused this session's model
   | "official_console_router_unsupported" // C1-interim: the pinned router cannot support the console auth arm yet
-  | "console_profile_missing"; // Winter Phase 10a fix wave (F3): the console arm's on-disk profile is missing
+  | "console_profile_missing" // Winter Phase 10a fix wave (F3): the console arm's on-disk profile is missing
+  // WS-21: a run-home router's refusal (`RunHomeError.code`), forwarded verbatim as `data.code`.
+  | RunHomeErrorCode;
 
 /**
  * P8c-14: the intersection of `WinterSession`'s and `OfficialSession`'s public members — everything
@@ -384,6 +386,12 @@ export interface WinterLegDeps {
     build: (input: RunHomeInput) => Promise<RunHome>;
     inputFor: (facts: RunHomeSessionFacts) => RunHomeInput;
   };
+  /**
+   * WS-21 (spec §4.3): the daemon's `TrustStore.isTrusted`. An approval card offers "Allow … in this
+   * project" only for a trusted project (the answer is saved to its `.winter/settings.local.json`, a tier
+   * the runtimes read for a trusted project alone). Absent (a test double): offered as before.
+   */
+  isTrusted?: (dir: string) => boolean;
 }
 
 export interface WinterSessionDrivers {
@@ -524,6 +532,8 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
 
     const canUseTool = canUseToolFor({
       sessionId, mode, origin: meta.origin, home, cwd,
+      // WS-21: "in this project" is offered only for a trusted project (live — trusting it reaches the next card).
+      ...(deps.isTrusted === undefined ? {} : { projectTrusted: () => deps.isTrusted!(cwd) }),
       // A getter: `session.setPolicy` mid-session is seen by the NEXT call (the engine re-reads too).
       policy: () => deps.store.meta(sessionId).approvalPolicy,
       approvals: deps.approvals, questions: deps.questions, gate: deps.gate,
@@ -1171,6 +1181,8 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         settings: deps.settings(),
         canUseToolDeps: {
           approvals: deps.approvals, questions: deps.questions, gate: deps.gate,
+          // WS-21: "in this project" is offered only for a trusted project (the same rule as the Winter leg).
+          ...(deps.isTrusted === undefined ? {} : { projectTrusted: () => deps.isTrusted!(capSession.cwd) }),
           emit: (event) => { deps.hub.append(sessionId, event); },
           home: deps.home, threadId: "main",
           ...(live.origin === undefined ? {} : { origin: live.origin }),
@@ -1400,6 +1412,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       if (err instanceof ClaudeExecutableUnavailable) throw new WinterLegRefusal("claude_executable_unavailable", err.message);
       if (err instanceof OfficialConsoleRouterUnsupported) throw new WinterLegRefusal("official_console_router_unsupported", err.message);
       if (err instanceof OfficialConsoleProfileMissing) throw new WinterLegRefusal("console_profile_missing", err.message);
+      if (isRunHomeError(err)) throw new WinterLegRefusal(err.code, err.message);
       throw new WinterLegRefusal("winter_leg_unavailable", `the official child for ${sessionId} could not be started (${err instanceof Error ? err.name : "unknown"})`);
     }
     return session;
@@ -1495,6 +1508,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     } catch (err) {
       drivers.delete(sessionId);
       if (err instanceof WinterLegRefusal) throw err;
+      if (isRunHomeError(err)) throw new WinterLegRefusal(err.code, err.message);
       throw new WinterLegRefusal("winter_leg_unavailable", `the winter child for ${sessionId} could not be started (${err instanceof Error ? err.name : "unknown"})`);
     }
     return session;

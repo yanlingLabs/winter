@@ -703,10 +703,13 @@ export function officialInputFor(
       sessionId: input.sessionId,
       ...(input.parentSessionId === undefined ? {} : { parentSessionId: input.parentSessionId }),
       base,
-      autoMemoryDirectory: autoMemoryDirectoryFor(input, deps.assembler, deps.home),
+      // WS-21 (L2's contract): beside a run home the router pins the memory directory itself (from
+      // `runHome.input.memoryDir`, the same value) and REFUSES `spool`/`stagingRoot` — the run folder is
+      // the config dir — so neither this leg's memory dir nor its Winter-owned spool is named then.
+      ...(deps.runHomeApplied === true ? {} : { autoMemoryDirectory: autoMemoryDirectoryFor(input, deps.assembler, deps.home) }),
       projectKey,
       sharedTempRoot,
-      ...(spool === undefined ? {} : { spool }),
+      ...(spool === undefined || deps.runHomeApplied === true ? {} : { spool }),
       mcpServers,
       ...(credentials.length === 0 ? {} : { credentials }),
       ...(Object.keys(connectionEnv).length === 0 ? {} : { connectionEnv }),

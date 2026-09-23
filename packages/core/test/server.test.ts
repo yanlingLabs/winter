@@ -11,7 +11,6 @@ import { TokenAuthority } from "../src/auth/tokens";
 import { PluginStore } from "../src/agent/plugins";
 import { ToolRegistry } from "../src/agent/tools/registry";
 import { ApprovalBroker } from "../src/agent/approvals";
-import { PermissionRules } from "../src/agent/permission-rules";
 import { PluginSupervisor } from "../src/plugins/supervisor";
 import { PluginContribRegistry } from "../src/plugins/contrib";
 import type { Provider, ProviderEvent } from "../src/providers/types";
@@ -366,23 +365,22 @@ describe("daemon IPC", () => {
   // for the duration (save/restore) so web_fetch never hits the real network.
 
   // Edge case called out explicitly by the brief: a rule-bearing optionId with NO usable project
-  // root (a null session cwd) must never hang or crash the respond — PermissionRules.append()
-  // throws RuleAppendError for scope "project" with no root, and the handler's try/catch must
-  // swallow it (log + still resolve). Unreachable through a REAL engine turn (a null-cwd session's
+  // root (a null session cwd) must never hang or crash the respond — WS-21: the handler refuses the
+  // save itself (`SavedAnswerRefused`, "no project directory") and its try/catch must swallow it
+  // (log + still resolve), writing nothing anywhere. Unreachable through a REAL engine turn (a null-cwd session's
   // turn() bails before any tool call — engine.ts's `if (!meta.cwd)` guard — so no approval_requested
   // with options ever fires for one in practice); exercised here at the bare-server level instead,
   // fabricating the pending entry directly against the broker to drive the server-side code path in
   // isolation, same "own SessionStore + TokenAuthority, no AgentEngine" shape as
   // remote-role.test.ts's bootPluginTestServer sibling below.
-  test("approval.respond: a rule-bearing optionId with no session cwd — RuleAppendError is caught, logged, and the approval still resolves", async () => {
+  test("approval.respond: a rule-bearing optionId with no session cwd — the refused save is logged, nothing is written, and the approval still resolves (WS-21)", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-approve-nocwd-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
     const tokens = await authority.ensureTokens();
     const broker = new ApprovalBroker();
-    const permissionRules = new PermissionRules({ globalAllow: () => undefined, winterHome: home });
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, broker, permissionRules });
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, broker, winterHome: home });
     try {
       const sessionId = store.createSession("global", { approvalPolicy: "ask" }); // no cwd at all
       const options = [{ id: "allow_project", label: 'Allow "Bash(git push:*)" in this project', rule: "Bash(git push:*)", scope: "project" as const }];
@@ -395,7 +393,9 @@ describe("daemon IPC", () => {
         const res = await c.request(METHODS.approvalRespond, { sessionId, callId: "c1", approved: true, optionId: "allow_project" });
         expect(res.result).toEqual({ ok: true, alreadyResolved: false });
         expect(errSpy).toHaveBeenCalled();
-        expect(errSpy.mock.calls.some((call) => String(call[0]).includes("failed to persist permission rule"))).toBe(true);
+        expect(errSpy.mock.calls.some((call) => String(call[0]).includes("was not saved") && String(call[0]).includes("no project directory"))).toBe(true);
+        expect(existsSync(join(home, "sdk", "settings.json"))).toBe(false);
+        expect(existsSync(join(home, "permissions"))).toBe(false);
       } finally {
         errSpy.mockRestore();
       }
@@ -776,7 +776,9 @@ describe("daemon IPC", () => {
     harnessToken = daemon.tokens.harness;
 
     const projectDir = realpathSync(mkdtempSync(join(tmpdir(), "winter-mcp-project-")));
-    writeFileSync(join(projectDir, ".mcp.json"), JSON.stringify({ mcpServers: { proj: { command: "bun", args: ["run", fixture] } } }));
+    // WS-21: the project MCP file is `<root>/.winter/mcp.json`.
+    mkdirSync(join(projectDir, ".winter"), { recursive: true });
+    writeFileSync(join(projectDir, ".winter", "mcp.json"), JSON.stringify({ mcpServers: { proj: { command: "bun", args: ["run", fixture] } } }));
 
     const c = await TestClient.connect(daemon.socketPath);
     await c.hello(harnessToken, "mcp-lister-project");
