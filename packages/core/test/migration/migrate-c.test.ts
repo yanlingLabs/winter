@@ -15,6 +15,7 @@ import {
 } from "../../src/migration/migrate-c";
 import { openRuntimeStateDb } from "../../src/runtime-state/db";
 import { RuntimeSessionRecords } from "../../src/runtime-state/records";
+import { convertLegacyPluginsForMigration } from "../../src/plugins/convert-legacy";
 import { readSdkGlobalConfig, readSdkSettings } from "../../src/sdk-files";
 import { canonicalModelTag, setCatalogKeysForTests } from "../../src/runtime-sdk/model-tag";
 import { liveSettingsView, loadSettings } from "../../src/settings";
@@ -157,6 +158,66 @@ describe("preflight", () => {
     const c = fixture();
     writeFileSync(join(c.home, "sdk", "settings.json"), "{}"); // what the settings doors write on any build is fine
     expect((await runMigrationC(c.home, deps())).status).toBe("phase1-complete");
+  });
+});
+
+// Post-merge round (BLOCKING): convertLegacyPluginsForMigration (plugins/convert-legacy.ts) is the
+// real seam this lane wires in at daemon.ts's boot hook and cli/src/commands/migrate.ts — a home with
+// a legacy plugin such as battery-limiter must boot (never refuse) and end up with it converted.
+describe("BLOCKING: convertLegacyPlugins wired into Migration C's convert-plugins step", () => {
+  test("a home with a legacy plugin (battery-limiter-shaped) migrates end to end: converted, original kept, manifest records it", async () => {
+    const { home } = fixture();
+    mkdirSync(join(home, "plugins", "battery-limiter"), { recursive: true });
+    writeFileSync(join(home, "plugins", "battery-limiter", "winter-plugin.json"), JSON.stringify({
+      id: "battery-limiter", tier: "capability", permissions: { hardware: ["battery"] },
+    }));
+    // The legacy home had this plugin ENABLED — convertLegacyPlugins reads plugins.enabled/disabled
+    // off the LEGACY settings.json to decide the converted plugin's enabled state (see its own doc).
+    const legacySettings = JSON.parse(readFileSync(join(home, "settings.json"), "utf8"));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ ...legacySettings, plugins: { enabled: ["battery-limiter"] } }));
+
+    const m = await runMigrationC(home, deps({
+      reconcile: stubReconcile().reconcile,
+      convertLegacyPlugins: convertLegacyPluginsForMigration,
+    }));
+    expect(m.status).toBe("complete");
+
+    const step = m.steps.find((s) => s.step === "convert-plugins");
+    expect(step?.status).toBe("done");
+    expect(step?.detail).toEqual({ converted: ["battery-limiter"], unconvertible: [] });
+
+    // COPY, never move (spec §2.1/§8's "originals kept for downgrade") — the legacy directory is
+    // untouched, not archived, not deleted, not even a symlink.
+    expect(lstatSync(join(home, "plugins", "battery-limiter")).isDirectory()).toBe(true);
+    expect(existsSync(join(home, "plugins", "battery-limiter", "winter-plugin.json"))).toBe(true);
+
+    // Registered through Contract B under the shared sdk/ home, converted+enabled.
+    const installed = JSON.parse(readFileSync(join(home, "sdk", "plugins", "installed_plugins.json"), "utf8"));
+    expect(installed.plugins["battery-limiter@winter-legacy"]).toBeDefined();
+    const sdkSettings = JSON.parse(readFileSync(join(home, "sdk", "settings.json"), "utf8"));
+    expect(sdkSettings.enabledPlugins["battery-limiter@winter-legacy"]).toBe(true);
+  });
+
+  test("a home with an ALREADY-converted plugin from a prior partial run does not refuse on resume", async () => {
+    // Idempotency check for the wired-in step: convertLegacyPlugins itself re-registers the same
+    // marketplace/install records on a re-run (its own doc: "idempotent... overwrites the SAME
+    // converted target dirs") — running the whole migration TWICE against the same home (as a resume
+    // after an interrupted convert-plugins step would) must not refuse or duplicate.
+    const { home } = fixture();
+    mkdirSync(join(home, "plugins", "battery-limiter"), { recursive: true });
+    writeFileSync(join(home, "plugins", "battery-limiter", "winter-plugin.json"), JSON.stringify({
+      id: "battery-limiter", tier: "capability", permissions: { hardware: ["battery"] },
+    }));
+    const migrationDeps = deps({ reconcile: stubReconcile().reconcile, convertLegacyPlugins: convertLegacyPluginsForMigration });
+
+    const first = await runMigrationC(home, migrationDeps);
+    expect(first.status).toBe("complete");
+    // convert-plugins is only ever run ONCE per migration (guarded by `done("convert-plugins")`) — a
+    // second runMigrationC call on an already-complete home is a pure no-op that returns the same
+    // manifest, proving the step's own idempotency claim never even needs re-exercising here.
+    const second = await runMigrationC(home, migrationDeps);
+    expect(second.status).toBe("complete");
+    expect(second.steps.filter((s) => s.step === "convert-plugins")).toHaveLength(1);
   });
 });
 

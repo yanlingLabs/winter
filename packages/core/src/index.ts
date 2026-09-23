@@ -200,7 +200,7 @@ export {
   type MarketplaceInfo, type InstalledPlugin, type PluginListing,
 } from "./plugins/sdk-plugin-api";
 export { installPluginFromDirectory, directoryMarketplacePluginNames } from "./plugins/lifecycle";
-export { convertLegacyPlugins, type ConvertLegacyPluginsResult } from "./plugins/convert-legacy";
+export { convertLegacyPlugins, convertLegacyPluginsForMigration, type ConvertLegacyPluginsResult } from "./plugins/convert-legacy";
 export { BackgroundTaskRegistry, type BgDeps } from "./agent/bg-registry";
 export { Compactor, SUMMARIZE_INSTRUCTION } from "./agent/compactor";
 export { bashLooksSafe, BashReviewer, REVIEW_INSTRUCTION, type ReviewVerdict } from "./agent/reviewer";
