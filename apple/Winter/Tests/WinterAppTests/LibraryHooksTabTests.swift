@@ -35,6 +35,42 @@ final class LibraryHooksTabTests: XCTestCase {
         XCTAssertEqual(librarySanitizedHookField("PreToolUse: Bash (npm test)"), "PreToolUse: Bash (npm test)")
     }
 
+    /// Fix round 4 (controller-required): NEL (U+0085, a C1 control) forces a line break exactly
+    /// like LF — left unescaped, it would hide the tail of a `.lineLimit(1)`-truncated command.
+    func testSanitizesNEL() {
+        XCTAssertEqual(librarySanitizedHookField("a\u{0085}b"), "a\\u{85}b")
+    }
+
+    /// Fix round 4 (controller-required): Unicode LINE SEPARATOR (U+2028) — the same line-break
+    /// risk as NEL, but outside the C0/C1 control blocks entirely, so it needs its own case.
+    func testSanitizesLineSeparator() {
+        XCTAssertEqual(librarySanitizedHookField("a\u{2028}b"), "a\\u{2028}b")
+    }
+
+    /// Fix round 4: PARAGRAPH SEPARATOR (U+2029), the LS's sibling.
+    func testSanitizesParagraphSeparator() {
+        XCTAssertEqual(librarySanitizedHookField("a\u{2029}b"), "a\\u{2029}b")
+    }
+
+    /// Fix round 4: the zero-width characters (space/non-joiner/joiner, word joiner, BOM-as-ZWNBSP)
+    /// can split a command into two look-alike halves or hide entirely inside an innocuous string.
+    func testSanitizesZeroWidthCharacters() {
+        let zeroWidths = "\u{200B}\u{200C}\u{200D}\u{2060}\u{FEFF}"
+        let sanitized = librarySanitizedHookField("a\(zeroWidths)b")
+        XCTAssertFalse(sanitized.unicodeScalars.contains { $0.value == 0x200B || $0.value == 0x200C
+            || $0.value == 0x200D || $0.value == 0x2060 || $0.value == 0xFEFF })
+        XCTAssertTrue(sanitized.hasPrefix("a\\u{"))
+        XCTAssertTrue(sanitized.hasSuffix("b"))
+    }
+
+    /// Fix round 4: the invisible directional marks (LRM, RLM, ALM) — one step short of the
+    /// override/isolate family already covered, but still an invisible spoofing primitive.
+    func testSanitizesBidiMarks() {
+        let marks = "\u{200E}\u{200F}\u{061C}"
+        let sanitized = librarySanitizedHookField("a\(marks)b")
+        XCTAssertFalse(sanitized.unicodeScalars.contains { $0.value == 0x200E || $0.value == 0x200F || $0.value == 0x061C })
+    }
+
     // MARK: libraryHooksEmptyText — `hooks: []` vs a missing/unreadable key
 
     func testEmptyArrayReadsAsNoHooksDeclared() {

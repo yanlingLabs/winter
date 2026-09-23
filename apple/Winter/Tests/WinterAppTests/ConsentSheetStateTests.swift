@@ -132,6 +132,19 @@ final class PluginConsentDisclosureLinesTests: XCTestCase {
         let lines = pluginConsentDisclosureLines(pluginId: "demo", extras: e)
         XCTAssertTrue(lines.contains("- run its own background process: node"))
     }
+
+    /// Fix round 4: `entry.command`/TCC/hardware strings are plugin-authored — the same
+    /// `librarySanitizedHookField` `LibraryHooksTab.swift` uses on a hook's own fields must run on
+    /// these too, since this sheet shows them verbatim, monospaced, and `textSelection(.enabled)`.
+    func testSanitizesTheEntryCommandAndTccAndHardwareStrings() {
+        let e = PluginExtras(tier: "platform", execPermission: true, tccPermissions: ["mic\u{202E}rophone"],
+                             hardwarePermissions: ["bat\u{0007}tery"], requiredConsents: ["exec"], consented: [],
+                             entry: PluginEntryInfo(command: "node\u{202E}", args: ["-e", "1"]), fingerprint: "fp-1")
+        let lines = pluginConsentDisclosureLines(pluginId: "demo", extras: e)
+        XCTAssertTrue(lines.contains("- run its own background process: node\\u{202e} -e 1"))
+        XCTAssertTrue(lines.contains("- will request macOS permission: mic\\u{202e}rophone"))
+        XCTAssertTrue(lines.contains("- hardware access via Winter.app's helper: bat\\u{7}tery"))
+    }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -433,12 +446,44 @@ final class PluginManagerModelConsentTests: XCTestCase {
 
         XCTAssertNotNil(model.consentSheet, "the sheet stays open on an unknownPlugin refusal")
         XCTAssertEqual(model.errorText, "ghost is no longer installed — couldn't record consent")
+        XCTAssertTrue(model.consentSheet?.pluginGone ?? false,
+                      "round 4: marked so a later dismissal skips a doomed pluginDisable call")
+    }
+
+    /// Fix round 4 (controller-required): after `.unknownPlugin`, DISMISSING the still-open sheet
+    /// must not try `pluginDisable` on a plugin the daemon already said doesn't exist — it would
+    /// just fail again, surfacing a confusing "installed X but couldn't turn it off". Skips the
+    /// call entirely and shows a plain, accurate message instead.
+    func testConsentSheetDismissedAfterUnknownPluginSkipsDisableAndShowsAPlainMessage() async throws {
+        let (client, t) = try await connectedClient()
+        let model = PluginManagerModel(client: client)
+        let extras = PluginExtras(tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
+                                  requiredConsents: ["exec"], consented: [], entry: nil, fingerprint: "fp-1")
+        model.consentSheet = ConsentSheetState(pluginId: "ghost", spec: "ghost@winter-examples", scope: .user,
+                                               extras: extras, openedByInstall: true)
+
+        async let action: Void = model.confirmConsent()
+        let setConsentReq = await feedNextRequest(t, index: 1)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(setConsentReq["id"] as! Int),"result":{"code":"unknown_plugin"}}"#)
+        let refreshReq = await feedNextRequest(t, index: 2)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(refreshReq["id"] as! Int),"result":{"plugins":[]}}"#)
+        await action
+        XCTAssertTrue(model.consentSheet?.pluginGone ?? false, "sanity: confirmConsent marked it")
+
+        // The user now dismisses the (still-open, still install-triggered) sheet.
+        model.consentSheet = nil
+        await model.consentSheetDismissed()
+
+        XCTAssertEqual(t.sent.count, 3, "hello + setConsent + refresh — NO plugin.disable")
+        XCTAssertEqual(model.errorText, "The plugin is no longer installed.")
+        XCTAssertNil(model.noticeText, "no 'turned off' notice for a plugin that was never disabled")
     }
 
     /// Contract update from L4 (round 3): `.staleDisclosure` (the `fingerprint` no longer matches —
     /// the plugin changed under the sheet, a TOCTOU the fingerprint exists to close) must NOT enable
     /// — it refreshes, rebuilds the sheet from the NEW disclosure, keeps it open, and shows the
-    /// "please review again" message.
+    /// "please review again" message. Round 4: that message lives ON the rebuilt sheet
+    /// (`consentSheet?.notice`), not the pane's `errorText` — it's rendered inside the sheet itself.
     func testConfirmConsentRebuildsTheSheetAndKeepsItOpenOnStaleDisclosure() async throws {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
@@ -464,7 +509,34 @@ final class PluginManagerModelConsentTests: XCTestCase {
         XCTAssertNotNil(model.consentSheet, "the sheet stays open")
         XCTAssertEqual(model.consentSheet?.extras.fingerprint, "fp-new", "rebuilt from the fresh disclosure, not the stale one")
         XCTAssertTrue(model.consentSheet?.openedByInstall ?? false, "carries the original trigger forward")
-        XCTAssertEqual(model.errorText, "This plugin changed while you were reviewing it — please review again.")
+        XCTAssertEqual(model.consentSheet?.notice, "This plugin changed while you were reviewing it — please review again.",
+                       "round 4: the notice lives ON the sheet now")
+        XCTAssertNil(model.errorText, "round 4: no longer the pane-level error — the sheet's own notice carries it")
+    }
+
+    /// Fix round 4 (controller-required): "keep the refresh error, so a failed refresh doesn't
+    /// overwrite it" — when the stale-disclosure branch's OWN `refresh()` call fails, that failure
+    /// (already in `errorText`, set by `refresh()` itself) must survive, not get overwritten by the
+    /// "please review again" notice.
+    func testConfirmConsentKeepsTheRefreshErrorWhenTheStaleDisclosureRebuildRefreshFails() async throws {
+        let (client, t) = try await connectedClient()
+        let model = PluginManagerModel(client: client)
+        let staleExtras = PluginExtras(tier: "platform", execPermission: true, tccPermissions: [], hardwarePermissions: [],
+                                       requiredConsents: ["exec"], consented: [], entry: nil, fingerprint: "fp-old")
+        model.consentSheet = ConsentSheetState(pluginId: "demo", spec: "demo@winter-examples", scope: .user,
+                                               extras: staleExtras, openedByInstall: true)
+
+        async let action: Void = model.confirmConsent()
+        let setConsentReq = await feedNextRequest(t, index: 1)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(setConsentReq["id"] as! Int),"result":{"code":"stale_disclosure"}}"#)
+        let refreshReq = await feedNextRequest(t, index: 2)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(refreshReq["id"] as! Int),"error":{"code":-32000,"message":"daemon unavailable"}}"#)
+
+        await action
+
+        XCTAssertEqual(model.errorText, "couldn't load plugins: daemon unavailable",
+                       "refresh()'s own error, not overwritten by the stale-disclosure notice")
+        XCTAssertNil(model.consentSheet?.notice, "no notice was ever attached — the rebuild never ran")
     }
 
     /// The stale-disclosure rebuild's OWN fallback: if the refresh no longer contains the plugin at
@@ -798,6 +870,49 @@ final class PluginManagerModelConsentTests: XCTestCase {
         let methods = t.sent.map { feedLineJSON($0)["method"] as? String }
         XCTAssertFalse(methods.contains("plugin.marketplace.remove"),
                        "a project-scope plugin from the same marketplace must keep it")
+    }
+
+    /// Fix round 4 (Important 1, controller-required): the SAME `spec` — `"<id>@<marketplace>"`
+    /// doesn't encode scope at all — at a DIFFERENT scope must still keep the marketplace. The
+    /// pre-round-4 `$0.spec != spec` clause wrongly excluded this row (identical spec string to
+    /// the just-uninstalled one), and would have removed the marketplace out from under it; the
+    /// unfiltered list is fetched AFTER `pluginUninstall` already returned, so the just-removed
+    /// record is gone from it on its own — no spec exclusion is needed at all.
+    func testUninstallKeepsTheMarketplaceWhenTheSamePluginIsAlsoInstalledAtProjectScope() async throws {
+        let (client, t) = try await connectedClient()
+        let model = PluginManagerModel(client: client)
+        let dir = try makeMarketplaceDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        async let installAction: Void = model.installFromFolder(dir)
+        await feedNoBareIdCollision(t)
+        let listReq = await feedNextRequest(t, index: 2)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"marketplaces":[]}}"#)
+        let addReq = await feedNextRequest(t, index: 3)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(addReq["id"] as! Int),"result":{"ok":true,"marketplace":{"name":"winter-examples","source":"\#(dir.path)","kind":"directory","path":"\#(dir.path)"}}}"#)
+        let installReq = await feedNextRequest(t, index: 4)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(installReq["id"] as! Int),"result":{"ok":true,"plugin":{"id":"demo","installPath":"\#(dir.path)","scope":"user"}}}"#)
+        await feedNextResult(t, index: 5, result: #"{"plugins":[\#(echoListing)]}"#)
+        await installAction
+
+        async let uninstallAction: Void = model.uninstall("demo@winter-examples")
+        let uninstallReq = await feedNextRequest(t, index: 6)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(uninstallReq["id"] as! Int),"result":{"ok":true,"spec":"demo@winter-examples","scope":"user"}}"#)
+
+        // The unfiltered "still used" check — the IDENTICAL spec "demo@winter-examples", but at
+        // project scope: a wholly separate installation record that just happens to share the same
+        // id+marketplace pair as the one just uninstalled.
+        let checkReq = await feedNextRequest(t, index: 7)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(checkReq["id"] as! Int),"result":{"plugins":[{"id":"demo","installPath":"/proj","scope":"project","enabled":true,"marketplace":"winter-examples"}]}}"#)
+
+        let refreshReq = await feedNextRequest(t, index: 8)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(refreshReq["id"] as! Int),"result":{"plugins":[]}}"#)
+
+        await uninstallAction
+
+        let methods = t.sent.map { feedLineJSON($0)["method"] as? String }
+        XCTAssertFalse(methods.contains("plugin.marketplace.remove"),
+                       "the same spec at a different scope must still keep the marketplace")
     }
 
     /// N2 (round 3, controller-required): a marketplace added OUTSIDE this app session (the `winter`
