@@ -36,7 +36,7 @@ import { join } from "node:path";
 import type { RuntimeStateDb } from "./db";
 import { RuntimeSessionRecords } from "./records";
 import { CLAUDE_RESUME_PREFIX, CLAUDE_RESUME_STALE_MS } from "./recovery";
-import type { RecoveryReport } from "../runtime-sdk/run-home-contract";
+import type { RecoveryReport } from "@yanlinglabs/winter-runtime-sdk";
 import { normalizeRecoveryReport, quarantinedBackendSessions } from "../runtime-sdk/run-home-support";
 
 /** The router's `reconcileRootForRecovery`: a per-transcript `RecoveryReport` (review I6), or — from an

@@ -91,7 +91,7 @@ import type { AgentRegistry } from "../agent/bg-agent-registry";
 import type { ContextAssembler } from "../agent/context";
 import type { SkillStore } from "../agent/skills";
 import { startWinterSession, unconsumedUserMessages, withRunHome, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
-import { isRunHomeError, type RunHome, type RunHomeErrorCode, type RunHomeFor, type RunHomeInput } from "./run-home-contract";
+import { RunHomeError, type RunHome, type RunHomeErrorCode, type RunHomeFor, type RunHomeInput } from "@yanlinglabs/winter-runtime-sdk";
 import type { RunHomeSessionFacts } from "./run-home-input";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import { startOfficialSession, type OfficialSession } from "./official-session";
@@ -1495,7 +1495,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       if (err instanceof ClaudeExecutableUnavailable) throw new WinterLegRefusal("claude_executable_unavailable", err.message);
       if (err instanceof OfficialConsoleRouterUnsupported) throw new WinterLegRefusal("official_console_router_unsupported", err.message);
       if (err instanceof OfficialConsoleProfileMissing) throw new WinterLegRefusal("console_profile_missing", err.message);
-      if (isRunHomeError(err)) throw new WinterLegRefusal(err.code, err.message);
+      if (err instanceof RunHomeError) throw new WinterLegRefusal(err.code, err.message);
       throw new WinterLegRefusal("winter_leg_unavailable", `the official child for ${sessionId} could not be started (${err instanceof Error ? err.name : "unknown"})`);
     }
     return session;
@@ -1591,7 +1591,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     } catch (err) {
       drivers.delete(sessionId);
       if (err instanceof WinterLegRefusal) throw err;
-      if (isRunHomeError(err)) throw new WinterLegRefusal(err.code, err.message);
+      if (err instanceof RunHomeError) throw new WinterLegRefusal(err.code, err.message);
       throw new WinterLegRefusal("winter_leg_unavailable", `the winter child for ${sessionId} could not be started (${err instanceof Error ? err.name : "unknown"})`);
     }
     return session;

@@ -29,7 +29,7 @@ import { attachOfficialSession, type OfficialSessionAttachHandle, type OfficialS
 // the two legs' "does the process actually die on end()" behaviour is one tuned constant, not two.
 import { WINTER_SESSION_END_GRACE_MS } from "./winter-session";
 import { splitTag } from "./model-tag";
-import type { RunHome } from "./run-home-contract";
+import type { RunHome } from "@yanlinglabs/winter-runtime-sdk";
 import { disposeFailedRunHome, settleRunHome } from "./run-home-support";
 
 /** Mirrors `winter-session.ts`'s own private `sleep` exactly (including the `unref` so a pending

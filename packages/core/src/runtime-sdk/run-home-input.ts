@@ -18,7 +18,7 @@ import { realpathSync } from "node:fs";
 import type { TrustStore } from "../agent/trust";
 import { assistantMemoryDirFor, memoryDirFor, repoRootFor } from "../agent/memory-dir";
 import { sdkAutoMemory, type Settings } from "../settings";
-import type { RunHomeInput, RunLeg, RunMode } from "./run-home-contract";
+import type { RunHomeInput, RunLeg, RunMode } from "@yanlinglabs/winter-runtime-sdk";
 
 export interface RunHomeInputDeps {
   /** The daemon's home. */

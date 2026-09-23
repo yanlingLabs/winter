@@ -2,7 +2,7 @@
 // legs apply when an incarnation ends.
 import { describe, expect, test } from "bun:test";
 import { disposeFailedRunHome, linkedRunHomeBuilder, routerSupportsRunHome, runHomeHandleOf, runHomeReportSummary, settleRunHome } from "../../src/runtime-sdk/run-home-support";
-import type { RunHome } from "../../src/runtime-sdk/run-home-contract";
+import type { RunHome } from "@yanlinglabs/winter-runtime-sdk";
 
 const stub = (onDispose: () => void, failDispose = false): RunHome => ({
   runId: "r1", dir: "/h/cache/runs/r1", sdkHome: "/h/sdk",
