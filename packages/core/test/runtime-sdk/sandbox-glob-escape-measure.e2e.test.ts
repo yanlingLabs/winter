@@ -178,12 +178,15 @@ describeWithWinterBinary("C-1 — the Winter-leg sandbox fence under a `[`-named
   // `.winter/<kind>` under a SUBDIRECTORY (a later session there loads it) through a path the Bash detector
   // cannot see — here python joins it from pieces. `childSandboxConfigFor` now carries
   // `<cwd>/**/.winter/<kind>` (a glob-shaped deny, a recursive regex on this runtime since round 11).
-  test("R.3 I-4: an assembled python write into <cwd>/pkg/.winter/rules does not land; <cwd>/pkg/notes.md lands", async () => {
-    const r = await run("plain app", true, () => `python3 -c "open('pkg/.win'+'ter/rules/x.md','w').write('x')"; echo x > pkg/notes.md; true`, {
-      mkdirs: ["pkg/.winter/rules"], probe: ["pkg/.winter/rules/x.md", "pkg/notes.md"],
-    });
-    console.error(`R.3 I-4 (winter): ${JSON.stringify(r.landed)}`);
+  test("R.3 I-4: an assembled python write into <cwd>/pkg/.winter/rules does not land; <cwd>/pkg/notes.md lands; the literal list is the control (ASSERTED)", async () => {
+    const script = () => `python3 -c "open('pkg/.win'+'ter/rules/x.md','w').write('x')"; echo x > pkg/notes.md; true`;
+    const bed = { mkdirs: ["pkg/.winter/rules"], probe: ["pkg/.winter/rules/x.md", "pkg/notes.md"] };
+    const r = await run("plain app", true, script, bed);
+    // R.3 re-review minor (a): the in-file control — the LITERAL list (no any-depth globs) lets the same write land.
+    const control = await run("plain app", false, script, bed);
+    console.error(`R.3 I-4 (winter): child ${JSON.stringify(r.landed)}; literal ${JSON.stringify(control.landed)}`);
     expect(r.landed).toEqual({ "pkg/.winter/rules/x.md": false, "pkg/notes.md": true });
+    expect(control.landed).toEqual({ "pkg/.winter/rules/x.md": true, "pkg/notes.md": true });
   }, 180_000);
 
   // The ancestor-rename bypass (`mv .winter .w2 && … && mv .w2 .winter`) is closed by claude's `Ch`

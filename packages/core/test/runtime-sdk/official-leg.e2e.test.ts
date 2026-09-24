@@ -42,6 +42,8 @@ import { createSqliteRuntimeDirectoryStore, openRuntimeStateDb } from "../../src
 import { processStartedAt } from "../../src/runtime-state/leases";
 import { buildChildAddress, buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
 import { officialConfigDirFor, type OfficialInputDeps, type OfficialSessionInput } from "../../src/runtime-sdk/official-options";
+import { childSandboxConfigFor, sandboxConfigFor } from "../../src/runtime-sdk/mode-options";
+import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk";
 import { startOfficialSession, type OfficialSession } from "../../src/runtime-sdk/official-session";
 import { createProjector, type CheckpointStore } from "../../src/projector";
 import { z } from "zod";
@@ -716,6 +718,50 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       expect(landed).toEqual({ rule: false, notes: true });
     });
   }, 60_000);
+
+  // R.3 re-review minor (a): the in-file CONTROL for the row above — the same assembled python write on the same
+  // real `claude`, its sandbox the daemon's list for the same project, once as the child is sent it
+  // (`childSandboxConfigFor`, with the any-depth globs) and once as the LITERAL list (`sandboxConfigFor`, none):
+  // the literal list must let the write LAND, or the row above would pass on a bed that writes nothing.
+  test("R.3 I-4 control: the same write LANDS under the literal list, and is stopped under the child's list", async () => {
+    const command = `python3 -c "open('pkg/.win'+'ter/rules/x.md','w').write('x')"; echo x > pkg/notes.md; true`;
+    const run = async (spelled: boolean): Promise<{ rule: boolean; notes: boolean }> => {
+      const turns: AnthropicTurnScript[] = [PLACEHOLDER_TURN("Bash", [JSON.stringify({ command })]), DONE_TURN];
+      return withAnthropicLoopback(turns, async (fake) => {
+        const root = realpathSync(mkdtempSync(join(tmpdir(), "p8c-official-e2e-i4c-")));
+        const home = join(root, "winter-home");
+        const cwd = join(root, "work");
+        const hermetic = hermeticOfficialHome("i4c");
+        for (const dir of [home, join(cwd, "pkg", ".winter", "rules"), join(root, "cfg"), join(hermetic.home, "tmp")]) mkdirSync(dir, { recursive: true });
+        const q = claudeQuery({
+          prompt: "run the command",
+          options: {
+            pathToClaudeCodeExecutable: claudeRuntimeForTests()!.executable,
+            model: LOOPBACK_MODEL_ID,
+            cwd,
+            settingSources: [],
+            settings: { sandbox: { ...(spelled ? childSandboxConfigFor(home, cwd) : sandboxConfigFor(home, cwd)) } },
+            maxTurns: 4,
+            canUseTool: async (_tool, input) => ({ behavior: "allow", updatedInput: input }),
+            env: {
+              HOME: hermetic.home, PATH: "/usr/bin:/bin:/usr/sbin:/sbin", TMPDIR: `${join(hermetic.home, "tmp")}/`, LANG: "en_US.UTF-8",
+              CLAUDE_CONFIG_DIR: join(root, "cfg"), ANTHROPIC_BASE_URL: fake.url, ANTHROPIC_API_KEY: "sk-ant-fake-i4-control-0000",
+              CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", DISABLE_AUTOUPDATER: "1", CLAUDE_CODE_MAX_RETRIES: "0",
+            },
+          },
+        });
+        for await (const m of q) if ((m as { type?: string }).type === "result") break;
+        const landed = { rule: existsSync(join(cwd, "pkg", ".winter", "rules", "x.md")), notes: existsSync(join(cwd, "pkg", "notes.md")) };
+        rmSync(root, { recursive: true, force: true });
+        return landed;
+      });
+    };
+    const literal = await run(false);
+    const spelled = await run(true);
+    console.warn(`[R.3 I-4 official-leg control] literal ${JSON.stringify(literal)}; child ${JSON.stringify(spelled)}`);
+    expect(literal).toEqual({ rule: true, notes: true });
+    expect(spelled).toEqual({ rule: false, notes: true });
+  }, 90_000);
 
   test("8d: additionalDisallowedTools is HONOURED by the real binary — a chat-mode session's system/init.tools never advertises Bash, a code-mode one does", async () => {
     const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
