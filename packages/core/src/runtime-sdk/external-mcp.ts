@@ -31,7 +31,7 @@ import { readFileSync, realpathSync } from "node:fs";
 import type { McpServerConfig } from "@yanlinglabs/winter-agent-sdk";
 import type { McpServerSettingsEntry, Settings } from "../settings";
 import { extractRawMcpServers, parseProjectMcpServers, projectMcpConfigPath } from "../agent/mcp/project-file";
-import { repoRootFor } from "../agent/memory-dir";
+import { projectScopeRootFor, projectScopeTrusted } from "./run-home-input";
 
 // The project `.mcp.json` schema/parser now lives in `../agent/mcp/project-file` — shared with
 // `agent/mcp/manager.ts`'s own reader and the CLI's `mcp add/remove --scope project`/`mcp get`
@@ -53,8 +53,8 @@ export interface ConfiguredMcpInput {
   /** WS-21: the LOCAL-scope servers for this session's project root (`sdkLocalMcpServers(home, root)`),
    *  read live by the caller. Not trust-gated: they are the user's own file, like the user scope. */
   localMcpServers?: Readonly<Record<string, McpServerSettingsEntry>>;
-  /** The session's cwd. WS-21: the project file is `<repoRootFor(cwd)>/.winter/mcp.json` — the project
-   *  ROOT, where the run home's builder reads it too. */
+  /** The session's cwd. WS-21: the project file is `<projectScopeRootFor(cwd)>/.winter/mcp.json` — the
+   *  project ROOT (a linked worktree's own top, R.3 residual), where the run home's builder reads it too. */
   cwd: string | undefined;
   /** `TrustStore.isTrusted` — an untrusted cwd contributes no project servers and is never read. */
   trusted: (dir: string) => boolean;
@@ -101,8 +101,9 @@ export function configuredMcpServersFor(input: ConfiguredMcpInput): Record<strin
   if (input.cwd !== undefined && input.cwd !== "") {
     let dir = input.cwd;
     try { dir = realpathSync(dir); } catch { /* the manager falls back to the given path too */ }
-    if (input.trusted(dir)) {
-      const root = repoRootFor(dir);
+    // R.3 residual: the project scope's root and trust (`projectScopeRootFor`/`projectScopeTrusted`).
+    if (projectScopeTrusted(dir, { isTrusted: input.trusted })) {
+      const root = projectScopeRootFor(dir);
       let extracted: ReturnType<typeof extractRawMcpServers>;
       try {
         const raw = (input.readFile ?? ((p: string) => readFileSync(p, "utf8")))(projectMcpConfigPath(root));

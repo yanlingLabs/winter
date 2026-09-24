@@ -3,8 +3,8 @@
 // supplies only what the folder cannot know by itself:
 //
 //   mode, dispatchChild, leg, cwd  the session's facts for THIS incarnation
-//   trustedProjectRoot             `projectTierRootFor(cwd)` — the cwd's own git top, a linked worktree's
-//                                  included (R.3 I-1) — when `projectTierTrusted(cwd)`, else null: no
+//   trustedProjectRoot             `projectScopeRootFor(cwd)` — the cwd's own git top, a linked worktree's
+//                                  included (R.3 I-1) — when `projectScopeTrusted(cwd)`, else null: no
 //                                  project tier at all for an untrusted project (Q1)
 //   gitRoot                        the canonical `git rev-parse --show-toplevel` (the local tier's
 //                                  anchor, F17), cached per cwd
@@ -58,7 +58,7 @@ export function runHomeInputFor(deps: RunHomeInputDeps, s: RunHomeSessionFacts):
     dispatchChild: s.dispatchChild,
     leg: s.leg,
     cwd: s.cwd,
-    trustedProjectRoot: projectTierTrusted(s.cwd, deps.trust) ? projectTierRootFor(s.cwd, deps.gitRootFor ?? gitRootFor) : null,
+    trustedProjectRoot: projectScopeTrusted(s.cwd, deps.trust) ? projectScopeRootFor(s.cwd, deps.gitRootFor ?? gitRootFor) : null,
     // The local tier's anchor — and, with `cwd`, the local MCP scope's key (`localScopeKeyFor` below is
     // the SAME rule, for every daemon-side reader and writer of that scope).
     gitRoot: (deps.gitRootFor ?? gitRootFor)(s.cwd),
@@ -66,36 +66,6 @@ export function runHomeInputFor(deps: RunHomeInputDeps, s: RunHomeSessionFacts):
     reservedMcpServerNames: [...deps.reservedMcpServerNames],
     memoryDir,
   };
-}
-
-/**
- * R.3 I-1 (controller ruling) — THE project root a run home loads the project tier from (its walk's top:
- * `WINTER.md`, rules, skills, commands, output styles, agents, the project settings and MCP list), and so
- * the root every fence that protects what the run home loads must use too (`project-walk.ts`: the two
- * cannot differ): the cwd's OWN git top (`gitRootFor`, claude's `git rev-parse --show-toplevel` — for a
- * linked worktree the worktree itself, never the main checkout `repoRootFor` follows it to, whose walk
- * from a worktree cwd is empty), accepted only when it CONTAINS the cwd (`repoRootFor`'s own re-review
- * M-b/N3 rule: a forged `.git` file borrows no other project's root); else `repoRootFor(cwd)` (outside
- * git: the cwd itself). Trust is a separate question — `projectTierTrusted`.
- */
-export function projectTierRootFor(cwd: string, gitRoot: (cwd: string) => string | null = gitRootFor): string {
-  const own = gitRoot(cwd);
-  if (own !== null) {
-    let at = cwd;
-    try { at = realpathSync(cwd); } catch { /* a vanished cwd: compare its spelling */ }
-    if (at === own || at.startsWith(own.endsWith(sep) ? own : own + sep)) return own;
-  }
-  return repoRootFor(cwd);
-}
-
-/**
- * R.3 I-1 (controller ruling): whether the cwd's project tier loads at all. The trust decision stays keyed
- * on `repoRootFor(cwd)` — a linked worktree of a trusted repository is trusted, and the approved-rules
- * store keeps its key — and a directory the user trusted by its own path (or under one) stays trusted.
- */
-export function projectTierTrusted(cwd: string, trust: Pick<TrustStore, "isTrusted">): boolean {
-  if (trust.isTrusted(cwd)) return true;
-  try { return trust.isTrusted(repoRootFor(cwd)); } catch { return false; }
 }
 
 const gitRoots = new Map<string, string | null>();
@@ -122,6 +92,17 @@ export function gitRootFor(cwd: string): string | null {
   return root;
 }
 
+// ── The two PROJECT-NAMED scopes' keys, side by side (R.3 I-1 + residual ruling) ─────────────────────
+//
+//   local    `localScopeKeyFor(cwd)`    `gitRootFor(cwd) ?? realpath(cwd)` — the router's `gitRoot ?? cwd`
+//   project  `projectScopeRootFor(cwd)` `gitRootFor(cwd)` when it contains the cwd, else `repoRootFor(cwd)`
+//
+// Both are the cwd's OWN git top (claude's `git rev-parse --show-toplevel`: a linked worktree's own top,
+// never the main checkout `repoRootFor` follows it to). Every daemon-side and CLI reader and writer of the
+// scope goes through its function. TRUST is neither: `projectScopeTrusted` keys it on the REPOSITORY
+// (`repoRootFor`), so a linked worktree of a trusted repo is trusted; `trust.json` and the retired
+// approved-rules record keep their `repoRootFor` keys.
+
 /**
  * Review I5 (controller ruling) — THE key of claude's LOCAL scope for a project: `sdk/.winter.json`'s
  * `projects[<key>]` (MCP servers) and the local settings tier's directory. Exactly what the run home reads:
@@ -134,6 +115,43 @@ export function localScopeKeyFor(cwd: string): string {
   const root = gitRootFor(cwd);
   if (root !== null) return root;
   try { return realpathSync(cwd); } catch { return cwd; }
+}
+
+/**
+ * R.3 I-1 + residual (controller rulings) — THE key of claude's PROJECT scope, `localScopeKeyFor`'s sibling:
+ * the root a run home loads the project tier from (its walk's top: `WINTER.md`, rules, skills, commands,
+ * output styles, agents, the project settings and MCP list) and where every project-scope reader and writer
+ * resolves it (`winter mcp … --scope project` and `mcp.*`, plugin `--scope project`, the daemon's project
+ * settings overlay, `.winter/mcp.json` readers, the skills walk) — and so the root every fence that protects
+ * what the run home loads uses too (`project-walk.ts`: the two cannot differ). The cwd's OWN git top
+ * (`gitRootFor`), accepted only when it CONTAINS the cwd (`repoRootFor`'s own re-review M-b/N3 rule: a forged
+ * `.git` file borrows no other project's root); else `repoRootFor(cwd)` (outside git: the cwd itself).
+ */
+export function projectScopeRootFor(cwd: string, gitRoot: (cwd: string) => string | null = gitRootFor): string {
+  const own = gitRoot(cwd);
+  if (own !== null) {
+    let at = cwd;
+    try { at = realpathSync(cwd); } catch { /* a vanished cwd: compare its spelling */ }
+    if (at === own || at.startsWith(own.endsWith(sep) ? own : own + sep)) return own;
+  }
+  return repoRootFor(cwd);
+}
+
+/**
+ * R.3 I-1 (controller ruling): whether the cwd's project tier loads at all. The trust decision stays keyed
+ * on `repoRootFor(cwd)` — a linked worktree of a trusted repository is trusted — and a directory the user
+ * trusted by its own path (or under one) stays trusted.
+ */
+export function projectScopeTrusted(cwd: string, trust: Pick<TrustStore, "isTrusted">): boolean {
+  if (trust.isTrusted(cwd)) return true;
+  try { return trust.isTrusted(repoRootFor(cwd)); } catch { return false; }
+}
+
+/** R.3 residual: `trust` as the project-scope readers see it — a `{ isTrusted }` whose answer for a project
+ *  ROOT is `projectScopeTrusted` (for a daemon-side reader that takes a trust store, e.g. the project
+ *  settings overlay). */
+export function projectScopeTrust(trust: Pick<TrustStore, "isTrusted">): Pick<TrustStore, "isTrusted"> {
+  return { isTrusted: (dir: string) => projectScopeTrusted(dir, trust) };
 }
 
 /** Test only: forget cached git roots. */

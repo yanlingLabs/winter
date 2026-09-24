@@ -12,7 +12,7 @@ import { EXA_API_KEY_SECRET } from "../agent/tools/search";
 import { approvedProjectRulesDir, homeCacheDir, sdkHomeFor, storeHomeFor, trustRecordFile } from "../agent/paths";
 import { repoRootFor } from "../agent/memory-dir";
 import { projectWalk } from "./project-walk";
-import { projectTierRootFor } from "./run-home-input";
+import { projectScopeRootFor, projectScopeTrusted } from "./run-home-input";
 import { parseRule } from "../agent/permission-rules";
 import { keychainService } from "../profile";
 import type { SessionApprovalPolicy } from "../agent/gate";
@@ -859,13 +859,41 @@ export function persistedAllowRulesFor(cwd: string, deps: {
    *  REGARDLESS of trust (review I2): a repository cannot forge it, and the Mac app never marks a
    *  project trusted, so gating it would make every Mac project's "in this project" answer a no-op. */
   approvedProjectRules?: (projectRoot: string) => readonly string[];
+  /** R.3 residual: the key the approved-rules record is looked up by, when it is not the project root —
+   *  that record keeps its `repoRootFor` key while the project scope moved to the cwd's own git top.
+   *  Absent: the project root. */
+  approvedRulesKeyOf?: (cwd: string) => string | null;
   isTrusted: (dir: string) => boolean;
 }): string[] {
   const root = deps.projectRootOf(cwd);
   const settingsAllow = deps.effectiveSettings(root)?.permissions?.allow ?? [];
-  const approved = root !== null && deps.approvedProjectRules !== undefined ? deps.approvedProjectRules(root) : [];
+  const approvedKey = deps.approvedRulesKeyOf === undefined ? root : deps.approvedRulesKeyOf(cwd);
+  const approved = approvedKey !== null && deps.approvedProjectRules !== undefined ? deps.approvedProjectRules(approvedKey) : [];
   const projectAllow = root !== null && deps.projectRules !== undefined && deps.isTrusted(root) ? deps.projectRules(root) : [];
   return [...new Set([...settingsAllow, ...approved, ...projectAllow])];
+}
+
+/**
+ * R.3 residual (controller ruling): the daemon's saved allow rules for a session cwd — `persistedAllowRulesFor`
+ * wired the way the project scope reads (`run-home-input.ts`'s scope helpers): the project overlay and
+ * `permissions.local.json` at `projectScopeRootFor(cwd)` (a linked worktree's own top), trusted per
+ * `projectScopeTrusted` (keyed on the repository), and the retired approved-rules record at its own
+ * `repoRootFor(cwd)` key (the ruling keeps that key).
+ */
+export function projectScopeAllowRulesFor(cwd: string, deps: {
+  effectiveSettings: (projectRoot: string | null) => Settings | null;
+  projectRules?: (projectRoot: string) => readonly string[];
+  approvedProjectRules?: (projectRoot: string) => readonly string[];
+  trust: { isTrusted(dir: string): boolean };
+}): string[] {
+  return persistedAllowRulesFor(cwd, {
+    projectRootOf: (c) => projectScopeRootFor(c),
+    approvedRulesKeyOf: (c) => repoRootFor(c),
+    effectiveSettings: deps.effectiveSettings,
+    ...(deps.projectRules === undefined ? {} : { projectRules: deps.projectRules }),
+    ...(deps.approvedProjectRules === undefined ? {} : { approvedProjectRules: deps.approvedProjectRules }),
+    isTrusted: (dir) => projectScopeTrusted(dir, deps.trust),
+  });
 }
 
 /**
@@ -902,20 +930,22 @@ export function protectedHomeDenyWrite(home: string): string[] {
 /** The project half of the sandbox's `denyWrite` (WS-21 §7.1/§7.2): for the cwd and — when they differ —
  *  its project roots, the `.winter/` MCP list, claude's two settings tiers, the agent definitions and the
  *  four protected item directories. Two roots: `repoRootFor` (the daemon-side project readers' root — for
- *  a linked worktree, the main checkout) and `projectTierRootFor` (R.3 I-1: the root a run home loads the
+ *  a linked worktree, the main checkout) and `projectScopeRootFor` (R.3 I-1: the root a run home loads the
  *  project tier from — for a linked worktree, the worktree's own top). */
 function projectSandboxDenyWrite(cwd: string): string[] {
   let root = cwd;
   try { root = repoRootFor(cwd); } catch { /* an unresolvable cwd: its own spelling is the only base */ }
+  // R.3 residual: `repoRootFor`'s root stays on this FENCE (a superset — a linked worktree's session keeps the
+  // main checkout's `.winter/` fenced too); every project-scope READER resolves `projectScopeRootFor` alone.
   let tierRoot = root;
-  try { tierRoot = projectTierRootFor(cwd); } catch { /* as above */ }
+  try { tierRoot = projectScopeRootFor(cwd); } catch { /* as above */ }
   const out: string[] = [];
   for (const base of new Set([cwd, root, tierRoot])) {
     for (const f of ["mcp.json", "settings.json", "settings.local.json", "agents", ...PROTECTED_ITEM_DIRS]) out.push(join(base, ".winter", f));
   }
   // …and the protected item directories of every directory BETWEEN the cwd and the run home's root (L2 fix
   // round 1, I2: a run home loads a nested project dir's items, so its protection covers the same walk —
-  // R.3 I-1: the walk the run home makes, up to `projectTierRootFor`). `$HOME` and above never.
+  // R.3 I-1: the walk the run home makes, up to `projectScopeRootFor`). `$HOME` and above never.
   for (const dir of projectWalk(cwd, tierRoot, homedir())) {
     for (const kind of PROTECTED_ITEM_DIRS) out.push(join(dir, ".winter", kind));
   }

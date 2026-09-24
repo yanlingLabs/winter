@@ -478,3 +478,29 @@ describe("rendering", () => {
     expect(renderMcpGetOutcome({ ok: true, found: false, name: "x" })).toBe('No MCP server found with name: "x"');
   });
 });
+
+// R.3 residual (controller ruling): `winter mcp add --scope project` writes at the cwd's own git top (a linked
+// worktree's own top, as claude's `--scope project` does and the run home reads), and its trust note is keyed
+// on the REPOSITORY (a worktree of a trusted repo is trusted).
+describe("R.3 residual: mcp --scope project from a linked worktree of a trusted repo", () => {
+  test("add writes the worktree's .winter/mcp.json and reports it trusted; get and remove find it there", async () => {
+    const main = realpathSync(mkdtempSync(join(tmpdir(), "winter-mcp-cli-r3p-main-")));
+    const git = (args: string[]) => expect(Bun.spawnSync(["git", "-C", main, ...args], { stdout: "ignore", stderr: "ignore" }).exitCode).toBe(0);
+    git(["init", "-q"]);
+    git(["-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "i"]);
+    const wt = join(realpathSync(mkdtempSync(join(tmpdir(), "winter-mcp-cli-r3p-wt-"))), "wt");
+    git(["worktree", "add", "-q", "-b", `r3p-${Math.random().toString(16).slice(2)}`, wt]);
+    const winterHome = realpathSync(mkdtempSync(join(tmpdir(), "winter-mcp-cli-r3p-home-")));
+    writeFileSync(join(winterHome, "trust.json"), JSON.stringify({ version: 1, trustedDirs: [main] }));
+    const deps: McpRouteDeps = { cwd: realpathSync(wt), winterHome };
+    const outcome = await runMcpAddRoute(["-s", "project", "wtsrv", "node", "srv.js"], deps);
+    expect(outcome).toEqual({ ok: true, scope: "project", name: "wtsrv", transport: "stdio", cwd: realpathSync(wt), trusted: true });
+    expect(Object.keys(JSON.parse(readFileSync(join(wt, ".winter", "mcp.json"), "utf8")).mcpServers)).toEqual(["wtsrv"]);
+    expect(await runMcpGetRoute(["wtsrv"], deps)).toMatchObject({ ok: true, found: true, scope: "project", cwd: realpathSync(wt) });
+    expect(await runMcpRemoveRoute(["-s", "project", "wtsrv"], deps)).toMatchObject({ ok: true, scope: "project", removed: true, cwd: realpathSync(wt) });
+    // from the MAIN checkout: its own file, trusted as before
+    const fromMain = await runMcpAddRoute(["-s", "project", "mainsrv", "node", "m.js"], { cwd: main, winterHome });
+    expect(fromMain).toEqual({ ok: true, scope: "project", name: "mainsrv", transport: "stdio", cwd: main, trusted: true });
+    expect(Object.keys(JSON.parse(readFileSync(join(main, ".winter", "mcp.json"), "utf8")).mcpServers)).toEqual(["mainsrv"]);
+  });
+});

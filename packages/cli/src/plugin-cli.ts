@@ -27,7 +27,7 @@ import {
   PluginManagerError,
   addMarketplace, installPlugin, listMarketplaces, listPlugins, removeMarketplace,
   setPluginEnabledScoped, uninstallPlugin, updateMarketplace, updatePlugin,
-  sdkPluginsRoot, sdkSettingsPath, repoRootFor, localScopeKeyFor,
+  sdkPluginsRoot, sdkSettingsPath, localScopeKeyFor, projectScopeRootFor,
   type PluginManagerOptions, type PluginManagerScope,
   type MarketplaceInfo, type InstalledPlugin, type PluginListing,
 } from "@yanlinglabs/winter-core";
@@ -80,10 +80,10 @@ export function pluginManagerOptionsFor(winterHome: string, cwd: string | undefi
     settingsPathFor: (scope) => {
       if (scope === "user") return sdkSettingsPath(winterHome);
       if (!cwd) throw new PluginManagerError(`plugin scope "${scope}" requires a project directory — run this from inside one`);
-      // R.3 I-2: the LOCAL tier is keyed where the run home reads it (`localScopeKeyFor`: a linked worktree's
-      // own top) — the same key the daemon path and `winter mcp` use; project stays `repoRootFor`.
+      // R.3 I-2 + residual: both project-named scopes are keyed where the run home reads them — the cwd's
+      // own git top (a linked worktree's own), `localScopeKeyFor` / `projectScopeRootFor`, as the daemon does.
       if (scope === "local") return resolve(localScopeKeyFor(cwd), ".winter", "settings.local.json");
-      return resolve(repoRootFor(cwd), ".winter", "settings.json");
+      return resolve(projectScopeRootFor(cwd), ".winter", "settings.json");
     },
   };
 }

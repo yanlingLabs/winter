@@ -6,7 +6,7 @@ import type { QuestionBroker } from "../agent/questions";
 import type { PermissionGate, SessionApprovalPolicy } from "../agent/gate";
 import { parseRule } from "../agent/permission-rules";
 import type { Mode as SessionMode } from "../agent/tools/registry";
-import { projectTierRootFor } from "./run-home-input";
+import { projectScopeRootFor } from "./run-home-input";
 import { protectedPathsFor, protectedWriteDecision } from "./protected-paths";
 import { bashProtectedWriteHit } from "./hooks";
 import { privateAddressRefusal } from "../agent/tools/web";
@@ -620,8 +620,8 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
       && bashProtectedWriteHit((input as Record<string, unknown>).command as string) !== undefined;
     const protectedWrite = protectedBashWrite || deps.home !== undefined && protectedWriteDecision(toolName, input, {
       mode: "code", cwd: deps.cwd ?? "",
-      // R.3 I-1: the walk's top is the run home's own project root (`projectTierRootFor`).
-      protected: protectedPathsFor(deps.home, deps.cwd && deps.projectTrusted?.() === true ? projectTierRootFor(deps.cwd) : null, { cwd: deps.cwd ?? "/" }),
+      // R.3 I-1: the walk's top is the run home's own project root (`projectScopeRootFor`).
+      protected: protectedPathsFor(deps.home, deps.cwd && deps.projectTrusted?.() === true ? projectScopeRootFor(deps.cwd) : null, { cwd: deps.cwd ?? "/" }),
     }) !== null;
     if (protectedWrite && decision === "allow") {
       log.info(`canUseTool: escalate session=${deps.sessionId} tool=${toolName} reason=protected-path`);
