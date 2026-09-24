@@ -31,6 +31,7 @@ import { sessionLegOf } from "../../src/runtime-sdk/leg";
 import { memoryDirFor } from "../../src/agent/memory-dir";
 import { disallowedToolsFor } from "../../src/runtime-sdk/mode-options";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
+import { storeProjectsDir } from "../../src/agent/paths";
 
 class TestClient {
   private decoder = new LineDecoder();
@@ -288,12 +289,12 @@ describeWithWinterBinary("code on the Winter leg — the built binary through a 
     rmSync(outside, { recursive: true, force: true });
   }, 60_000);
 
-  test("(m) file-based memory on the Winter leg: the child's Write into `<home>/projects/<key>/memory/` LANDS, no card under `auto` (the 0.0.4 carve-out)", async () => {
+  test("(m) file-based memory on the Winter leg: the child's Write into the store home's `projects/<key>/memory/` (sdk/projects) LANDS, no card under `auto` (the 0.0.4 carve-out)", async () => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-code-memdir-")));
     // The SAME derivation the daemon files this cwd under (`memoryKeyOf` → `memoryProjectKeyFor`;
-    // no `memory.directory` override, no relocation in this home).
+    // no `memory.directory` override, no relocation in this home). WS-21: the store home (`sdk/`).
     const memdir = memoryDirFor(cwd, { winterHome: home });
-    expect(memdir.startsWith(join(home, "projects") + "/")).toBe(true);
+    expect(memdir.startsWith(storeProjectsDir(home) + "/")).toBe(true);
     expect(memdir.endsWith("/memory")).toBe(true);
     mkdirSync(memdir, { recursive: true });
     const note = join(memdir, "fix-wave-note.md");

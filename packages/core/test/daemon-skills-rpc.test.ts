@@ -148,7 +148,12 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
   // Lane B (2026-09-22): only PLUGIN skills reach a session's runtime child. Every skill stays listed
   // — it exists, `skills.read` serves it — but `skills.list`/`skills.read` say, per skill, whether a
   // session can load it and why not, so no client presents an unloadable skill as usable.
-  test("skills.list and skills.read say truthfully which skills a session can load, and why not", async () => {
+  // R.1: this is the LEGACY branch's truth (router 0.0.11: no tier reaches a child), so it pins the support
+  // flag off before anything is seeded — on a run-home build a temp home with legacy `<home>/plugins`
+  // content is the old layout, which Migration C refuses at boot. The run-home truth is the next test.
+  test("skills.list and skills.read say truthfully which skills a session can load, and why not (legacy branch)", async () => {
+    setRunHomeSupportForTests(false);
+    try {
     const home = mkdtempSync(join(tmpdir(), "winter-daemon-skills-"));
     mkdirSync(join(storeHomeFor(home), "skills", "greet"), { recursive: true });
     writeFileSync(join(storeHomeFor(home), "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nhi\n");
@@ -182,6 +187,9 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
     const read = await c.request(METHODS.skillsRead, { name: "greet" });
     expect(read.result.skill).toMatchObject({ name: "greet", loadsInSessions: false });
     c.close();
+    } finally {
+      setRunHomeSupportForTests(undefined);
+    }
   });
 
   // Post-merge round ("flip your skills test"): the companion of the test above, on a build whose
@@ -215,6 +223,9 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
       const byName = new Map<string, { loadsInSessions?: boolean; sessionNote?: string }>(listed.result.skills.map((s: { name: string }) => [s.name, s]));
       expect(byName.get("greet")).toMatchObject({ loadsInSessions: true });
       expect(byName.get("greet")!.sessionNote).toBeUndefined(); // nothing to explain when it DOES load
+      // R.1 ruling 3: the builtin tier is staged into no run folder, so it does not load — and says why.
+      expect(byName.get("writing-skills")).toMatchObject({ loadsInSessions: false });
+      expect(byName.get("writing-skills")!.sessionNote).toContain("aren't staged into a session's run folder");
 
       const read = await c.request(METHODS.skillsRead, { name: "greet" });
       expect(read.result.skill).toMatchObject({ name: "greet", loadsInSessions: true });

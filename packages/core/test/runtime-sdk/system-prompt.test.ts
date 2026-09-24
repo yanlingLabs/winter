@@ -21,6 +21,7 @@ import { buildWinterOptions } from "../../src/runtime-sdk/mode-options";
 import { winterSystemPromptFor } from "../../src/runtime-sdk/system-prompt";
 import { SessionHub } from "../../src/sessions/hub";
 import { SessionStore } from "../../src/sessions/store";
+import { storeHomeFor } from "../../src/agent/paths";
 
 function world(style?: ResolvedStyle) {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-voice-")));
@@ -145,8 +146,10 @@ describe("winterSystemPromptFor — the engine's composed instructions, per mode
   // `skill_listing` attachment, so the daemon's own listing is gone from every mode — one listing.
   test("B1: no skill listing in any mode — the child's own `skill_listing` is the one the model sees", () => {
     const w = world();
-    mkdirSync(join(w.home, "skills", "greet"), { recursive: true });
-    writeFileSync(join(w.home, "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: GREET_SKILL_SENTINEL\n---\nhi\n");
+    // the user tier lives in the store home (`storeHomeFor`: `sdk/` on a run-home build) — seeded there, so the
+    // "not in the prompt" assertions below are about a skill the store really finds
+    mkdirSync(join(storeHomeFor(w.home), "skills", "greet"), { recursive: true });
+    writeFileSync(join(storeHomeFor(w.home), "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: GREET_SKILL_SENTINEL\n---\nhi\n");
     mkdirSync(join(w.home, "plugins", "superpowers", "skills", "brainstorming"), { recursive: true });
     writeFileSync(join(w.home, "plugins", "superpowers", "skills", "brainstorming", "SKILL.md"), "---\nname: brainstorming\ndescription: PLUGIN_SKILL_SENTINEL\n---\nx\n");
     for (const mode of ["chat", "dispatch", "code"] as const) {

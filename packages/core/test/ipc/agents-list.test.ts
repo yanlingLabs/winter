@@ -12,6 +12,7 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 import { SupportedAgentsCache } from "../../src/agent/supported-agents-cache";
 import { TrustStore } from "../../src/agent/trust";
+import { storeHomeFor } from "../../src/agent/paths";
 
 class TestClient {
   private decoder = new LineDecoder();
@@ -60,7 +61,7 @@ describe("agents.list", () => {
 
   async function boot(opts: { withAgentsDir?: boolean; supportedAgents?: SupportedAgentsCache; trust?: TrustStore } = {}) {
     const home = mkdtempSync(join(tmpdir(), "winter-agents-list-"));
-    if (opts.withAgentsDir) mkdirSync(join(home, "agents"), { recursive: true });
+    if (opts.withAgentsDir) mkdirSync(join(storeHomeFor(home), "agents"), { recursive: true });
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const secrets = new FileSecretStore(join(home, "secrets"));
@@ -87,16 +88,16 @@ describe("agents.list", () => {
 
   test("valid + rejected files are reported separately, each rejection with its own reason and path", async () => {
     const { home, socketPath, harnessToken } = await boot({ withAgentsDir: true });
-    writeFileSync(join(home, "agents", "reviewer.md"), ["---", "name: code-reviewer", "description: Reviews code", "model: sonnet", "---", "", "You review code."].join("\n"));
-    writeFileSync(join(home, "agents", "no-name.md"), ["---", "description: no name here", "---", "", "Body."].join("\n"));
+    writeFileSync(join(storeHomeFor(home), "agents", "reviewer.md"), ["---", "name: code-reviewer", "description: Reviews code", "model: sonnet", "---", "", "You review code."].join("\n"));
+    writeFileSync(join(storeHomeFor(home), "agents", "no-name.md"), ["---", "description: no name here", "---", "", "Body."].join("\n"));
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     const result = await c.request(METHODS.agentsList, {});
     expect(result.result.definitions).toEqual([
-      { name: "code-reviewer", description: "Reviews code", model: "sonnet", path: join(home, "agents", "reviewer.md"), tier: "user" },
+      { name: "code-reviewer", description: "Reviews code", model: "sonnet", path: join(storeHomeFor(home), "agents", "reviewer.md"), tier: "user" },
     ]);
     expect(result.result.rejected).toHaveLength(1);
-    expect(result.result.rejected[0].path).toBe(join(home, "agents", "no-name.md"));
+    expect(result.result.rejected[0].path).toBe(join(storeHomeFor(home), "agents", "no-name.md"));
     expect(result.result.rejected[0].reason).toContain('"name"');
     expect(result.result.rejected[0].tier).toBe("user");
     c.close();
@@ -108,7 +109,7 @@ describe("agents.list", () => {
     const cwd = mkdtempSync(join(tmpdir(), "winter-agents-list-project-"));
     trust.trust(cwd);
     const { home, socketPath, harnessToken } = await boot({ withAgentsDir: true, trust });
-    writeFileSync(join(home, "agents", "shared.md"), ["---", "name: shared", "description: from user", "---", "", "Body."].join("\n"));
+    writeFileSync(join(storeHomeFor(home), "agents", "shared.md"), ["---", "name: shared", "description: from user", "---", "", "Body."].join("\n"));
     mkdirSync(join(cwd, ".winter", "agents"), { recursive: true });
     writeFileSync(join(cwd, ".winter", "agents", "shared.md"), ["---", "name: shared", "description: from project", "---", "", "Body."].join("\n"));
     const c = await TestClient.connect(socketPath);
