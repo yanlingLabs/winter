@@ -94,7 +94,7 @@ import { recoverRunRoots, rootRecoveryDetail, type RootReconcile } from "./runti
 import { splitSettingsToSdk } from "./migration/settings-split";
 import { MigrationCRefused, finishMigrationC, isOldLayout, migrationCManifestPath, migrationCState, runMigrationC } from "./migration/migrate-c";
 import { convertLegacyPluginsForMigration } from "./plugins/convert-legacy";
-import { localScopeKeyFor, runHomeInputFor } from "./runtime-sdk/run-home-input";
+import { localScopeKeyFor, projectTierRootFor, projectTierTrusted, runHomeInputFor } from "./runtime-sdk/run-home-input";
 import { reservedMcpServerNames } from "./capabilities/names";
 import { persistedAllowRulesFor, winterGateRulesFromSdk } from "./runtime-sdk/mode-options";
 import { configuredMcpServersFor } from "./runtime-sdk/external-mcp";
@@ -1686,7 +1686,8 @@ export async function startDaemon(opts: {
       // tier is protected only while the project is trusted (read live, like every trust decision).
       mode: session.mode,
       cwd: session.cwd,
-      trustedProjectRoot: () => (trustStore.isTrusted(session.cwd) ? repoRootFor(session.cwd) : null),
+      // R.3 I-1: the SAME root and trust the run home's project tier uses (`runHomeInputFor`).
+      trustedProjectRoot: () => (projectTierTrusted(session.cwd, trustStore) ? projectTierRootFor(session.cwd) : null),
     });
   // ── P8c integration Wiring 2: the notification/schedule sinks (lane 2's `sinks.ts`, P8c-11) ────
   // `hub.addObserver` (Dispatch/Phase 7's existing fan-out of every appended event of EVERY

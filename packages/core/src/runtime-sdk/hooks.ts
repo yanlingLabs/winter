@@ -154,8 +154,9 @@ export interface SessionHooksDeps {
   /**
    * WS-21 (spec §7.1, §7.2) — the path fence (`pathFenceHook`). THIS session's mode (a protected write
    * is a card in code and a typed deny in chat and dispatch), its working directory (a relative target
-   * resolves against it) and, read LIVE per call, its TRUSTED project root (`repoRootFor(cwd)` when the
-   * cwd is trusted, else `null` — an untrusted project has no project tier to protect). Absent `mode`:
+   * resolves against it) and, read LIVE per call, its TRUSTED project root (`projectTierRootFor(cwd)` — the
+   * root the run home loads the project tier from, R.3 I-1 — when `projectTierTrusted(cwd)`, else `null`:
+   * an untrusted project has no project tier to protect). Absent `mode`:
    * the hook treats the session as code, the answer that raises a card rather than none.
    */
   mode?: SessionMode;
