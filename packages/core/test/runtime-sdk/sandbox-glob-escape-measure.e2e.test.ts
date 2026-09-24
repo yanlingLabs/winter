@@ -72,7 +72,7 @@ async function officialRun(spelled: boolean): Promise<{ python: boolean; redirec
         model: LOOPBACK_MODEL_ID,
         cwd,
         settingSources: [],
-        settings: { sandbox: spelled ? childSandboxConfigFor(daemonHome, project) : sandboxConfigFor(daemonHome, project) },
+        settings: { sandbox: { ...(spelled ? childSandboxConfigFor(daemonHome, project) : sandboxConfigFor(daemonHome, project)) } },
         maxTurns: 4,
         canUseTool: async (_tool, input) => ({ behavior: "allow", updatedInput: input }),
         env: {
