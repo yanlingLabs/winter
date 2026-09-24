@@ -7,7 +7,7 @@ import type {
 import {
   WINTER_BRAND, disableCronEnvName, envName, pluginCacheDirEnvName, providerManagedByHostEnvName, storeHomeEnvName,
 } from "@yanlinglabs/winter-agent-sdk";
-import { escapeRulePath, PROTECTED_ITEM_DIRS, RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
+import { escapeRulePath, escapeSandboxGlobPath, PROTECTED_ITEM_DIRS, RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
 import { approvedProjectRulesDir, homeCacheDir, sdkHomeFor, storeHomeFor, trustRecordFile } from "../agent/paths";
 import { repoRootFor } from "../agent/memory-dir";
@@ -996,6 +996,33 @@ export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSett
     // That is what the OFFICIAL leg does (it is claude), and what the Winter leg does since agent SDK
     // 0.0.20, which replaced RULING P3-J (every escape a mandatory interaction) with claude's rule,
     // behind claude's own write-target checks.
+  };
+}
+
+/**
+ * The SAME sandbox fence, spelled for the OFFICIAL leg's sandbox grammar (router 3279a1d, Contract A).
+ *
+ * claude treats a `sandbox.filesystem` entry holding any of `* ? [ ]` as a GLOB (rendered as a seatbelt
+ * regex, where a backslash is literal) — so under a home or project whose path holds a `[` (a directory
+ * named `[wip] app`), a raw `denyWrite` entry is a character class that misses the literal path and
+ * fences NOTHING (measured by the router). The router's `escapeSandboxGlobPath` spells the one escape that
+ * grammar honours (`[` → `[[]`); `*`/`?` have no spelling there and stay raw, which for a DENY is the
+ * wider, stricter form. Only deny lists are passed through it: this fence has no allow entries.
+ *
+ * The Winter leg keeps `sandboxConfigFor`'s literal paths (its sandbox renders `(subpath …)`, where a class
+ * spelling would name a path that does not exist), and so does every consumer that derives from the list
+ * (`home-fence.ts`'s escape floor compares real paths).
+ */
+export function officialSandboxConfigFor(home: string, cwd?: string | null): SandboxSettingsConfig {
+  const literal = sandboxConfigFor(home, cwd);
+  const fs = literal.filesystem ?? {};
+  return {
+    ...literal,
+    filesystem: {
+      ...fs,
+      ...(fs.denyWrite === undefined ? {} : { denyWrite: fs.denyWrite.map(escapeSandboxGlobPath) }),
+      ...(fs.denyRead === undefined ? {} : { denyRead: fs.denyRead.map(escapeSandboxGlobPath) }),
+    },
   };
 }
 

@@ -25,7 +25,7 @@ import type { CapabilityServerRecord } from "../capabilities";
 import { officialSubscriptionAuthEnabled, type Settings } from "../settings";
 import { canUseToolFor, type CanUseToolDeps } from "./approval-bridge";
 import { CORE_BRAND } from "./brand";
-import { GLOBAL_READ_ALLOW_RULES, permissionDenyRulesFor, disallowedToolsFor, sandboxConfigFor, sdkAllowRulesFor } from "./mode-options";
+import { GLOBAL_READ_ALLOW_RULES, permissionDenyRulesFor, disallowedToolsFor, officialSandboxConfigFor, sdkAllowRulesFor } from "./mode-options";
 import { officialCapabilityServersFor, type OfficialMcpModule } from "./official-capabilities";
 import { winterSystemPromptFor } from "./system-prompt";
 import { ClaudeExecutableUnavailable } from "./official-executable";
@@ -760,7 +760,8 @@ export function officialInputFor(
         // fence"): the official runtime's own `Settings.sandbox.filesystem.denyWrite`/`denyRead`
         // field names are IDENTICAL to Winter's `SandboxSettingsConfig` shape (both real DIRECTORY
         // paths, never globs — `sandboxConfigFor`'s own doc), so `sandboxConfigFor(home)` is reused
-        // with NO translation. `permissions.deny`'s `Tool(specifier)` grammar, however, is NOT the
+        // with ONE translation only: `officialSandboxConfigFor` spells a `[` for claude's sandbox glob
+        // grammar (router 3279a1d). `permissions.deny`'s `Tool(specifier)` grammar, however, is NOT the
         // same matcher as Winter's private reimplementation: the real CLI denied a target with
         // `controlPlaneDenyRules`'s `//`-anchored absolute forms UNCHANGED — no second anchoring
         // scheme was needed — confirmed by the same e2e denying a real `<home>/run/probe.txt` Read
@@ -794,7 +795,9 @@ export function officialInputFor(
             ...(deps.policy === "bypass" ? {} : { disableBypassPermissionsMode: "disable" as const }),
           },
           // `input.cwd`: the session's project agent definitions (`<cwd>/.winter/agents`) are fenced too.
-          sandbox: sandboxConfigFor(deps.home, input.cwd),
+          // Router 3279a1d: spelled for claude's SANDBOX glob grammar (`officialSandboxConfigFor`), so a
+          // `[`-named home or project is still fenced here; the Winter leg keeps the literal paths.
+          sandbox: officialSandboxConfigFor(deps.home, input.cwd),
         },
         // 0.0.17 / the 2026-09-18 ruling: `leg: "official"` is what keeps claude's OWN `WebFetch` and
         // `WebSearch` on this leg. The daemon used to disallow both in every mode (P8b-33) because
