@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { WorkflowStore } from "./store";
+import { userWorkflowsDir, WorkflowStore } from "./store";
 
 function tmp() { const d = join(process.env.WINTER_TEST_TMP ?? "/tmp", `wf_${Math.random().toString(36).slice(2)}`); mkdirSync(d, { recursive: true }); return d; }
 const wf = (name: string) => `export const meta = { name: "${name}", description: "does ${name}" };\nreturn 1;`;
@@ -20,9 +20,9 @@ test("project workflow resolves ONLY when the cwd is trusted; slug-guard rejects
 
 test("user workflow is found; project shadows user (closest-wins)", () => {
   const home = tmp(); const proj = tmp();
-  mkdirSync(join(home, "workflows"), { recursive: true });
+  mkdirSync(userWorkflowsDir(home), { recursive: true });
   mkdirSync(join(proj, ".winter", "workflows"), { recursive: true });
-  writeFileSync(join(home, "workflows", "t.js"), wf("t-user"));
+  writeFileSync(join(userWorkflowsDir(home), "t.js"), wf("t-user"));
   writeFileSync(join(proj, ".winter", "workflows", "t.js"), wf("t-proj"));
   const store = new WorkflowStore({ winterHome: home, trust: { isTrusted: () => true } });
   expect(store.resolve("t", proj)?.description).toBe("does t-proj");
@@ -43,9 +43,9 @@ test("save writes ~/.winter/workflows/<name>.js and rejects a bad slug", () => {
 
 test("SECURITY: a statement outside the meta block is never executed by list/resolve/read", () => {
   const home = tmp();
-  mkdirSync(join(home, "workflows"), { recursive: true });
+  mkdirSync(userWorkflowsDir(home), { recursive: true });
   writeFileSync(
-    join(home, "workflows", "pwned1.js"),
+    join(userWorkflowsDir(home), "pwned1.js"),
     'export const meta = { name: "pwned1", description: "y" };\nglobalThis.__WF_PWNED = true;\n',
   );
   delete (globalThis as Record<string, unknown>).__WF_PWNED;
@@ -61,9 +61,9 @@ test("SECURITY: a statement outside the meta block is never executed by list/res
 
 test("SECURITY: a side-effecting expression used as a meta field's value is never executed; description still extracts, no crash", () => {
   const home = tmp();
-  mkdirSync(join(home, "workflows"), { recursive: true });
+  mkdirSync(userWorkflowsDir(home), { recursive: true });
   writeFileSync(
-    join(home, "workflows", "pwned2.js"),
+    join(userWorkflowsDir(home), "pwned2.js"),
     'export const meta = { name: (globalThis.__WF_PWNED2 = true, "x"), description: "d" };\n',
   );
   delete (globalThis as Record<string, unknown>).__WF_PWNED2;
