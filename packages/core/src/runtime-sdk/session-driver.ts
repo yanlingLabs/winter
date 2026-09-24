@@ -66,6 +66,7 @@ import { providerFor, rowForTag, testProviderNameFor } from "./provider-selectio
 import { splitTag, UNSTATED_TAG, isModelTag, WINTER_TEST_PREFIX, type ModelTag } from "./model-tag";
 import { winterSessions } from "./sessions";
 import { canonicalCwd, storeProjectsDir } from "../agent/paths";
+import { linkedRouterSupportsRunHome } from "./run-home-support";
 import { WINTER_PEER_VERSIONS } from "./versions";
 import { winterSystemPromptFor } from "./system-prompt";
 import { dispatchEffortFor } from "../agent/dispatch-config";
@@ -570,6 +571,13 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
   const assertSpine = (): void => {
     if (deps.runtime === undefined) throw new WinterLegRefusal("winter_leg_unavailable", "the Winter runtime handle did not construct on this daemon (a packaging fault — see the boot log); sessions cannot be created until it does");
     if (deps.records === undefined || deps.checkpoints === undefined) throw new WinterLegRefusal("winter_leg_unavailable", "runtime-state is offline on this daemon; the Winter leg needs its records and checkpoints");
+    // R.1: on a run-home build every record and store path is under `sdk/` (`storeProjectsDir`), and only
+    // a run home points a child there — a driver table built WITHOUT run-home deps would launch children on
+    // `<home>` while recording `sdk/` transcript paths the child never writes. Refused, typed, before any
+    // record is written (production always wires both: `daemon.ts`'s `runHomeDeps`).
+    if (deps.runHome === undefined && linkedRouterSupportsRunHome()) {
+      throw new WinterLegRefusal("run_home_required", "this build applies per-run homes, but the session driver was constructed without run-home dependencies — no child can be launched on the layout its records name");
+    }
   };
 
   const assertAvailable = (mode: SessionMode): void => {
@@ -1629,6 +1637,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
   };
 
   const resume = async (sessionId: string): Promise<LegSession> => {
+    assertSpine();
     const recorded = recordOf(sessionId);
     const leg = sessionLegOf(recorded);
     // Round 3: the transcript is where the leg will look BEFORE it opens (synchronous — n7).
