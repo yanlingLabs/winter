@@ -219,7 +219,8 @@ describe("internalRoleEffortFor (titles.model / reviewer.model)", () => {
     const s = settingsOf({ roleEfforts: { "titles.model": "max" } });
     expect(internalRoleEffortFor(s, "titles.model", undefined, bound)).toBe("max");
     expect(internalRoleEffortFor(s, "titles.model", undefined, { providerId: "openai", model: "o4-mini" })).toBe("medium");
-    expect(internalRoleEffortFor(s, "titles.model", undefined, { providerId: "openai", model: "gpt-5.4" })).toBeUndefined();
+    // R.1: the no-vocabulary exemplar is gpt-4.1 (the refreshed catalog gave gpt-5.4 a vocabulary).
+    expect(internalRoleEffortFor(s, "titles.model", undefined, { providerId: "openai", model: "gpt-4.1" })).toBeUndefined();
   });
 
   test("a pin on the bound provider is the row; a pin on ANOTHER provider is not (it was refused) — and no log line is written here", () => {
