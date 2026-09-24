@@ -696,6 +696,27 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
     });
   }, 60_000);
 
+  // R.3 I-4 MEASURED on the real `claude`: the any-depth project fence rides this leg's flag settings too
+  // (`childSandboxConfigFor`'s `<cwd>/**/.winter/<kind>`, through the real `officialInputFor`). A sandboxed
+  // Bash at the project root joins `pkg/.winter/rules/x.md` from pieces (python — no static detector sees
+  // it) and must not plant it; the ordinary `pkg/notes.md` beside it must land.
+  test("R.3 I-4 MEASURED: an assembled python write into <cwd>/pkg/.winter/rules does not land; <cwd>/pkg/notes.md does", async () => {
+    const command = `python3 -c "open('pkg/.win'+'ter/rules/x.md','w').write('x')"; echo x > pkg/notes.md; true`;
+    const turns: AnthropicTurnScript[] = [PLACEHOLDER_TURN("Bash", [JSON.stringify({ command })]), DONE_TURN];
+    await withAnthropicLoopback(turns, async (fake) => {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto");
+      mkdirSync(join(w.cwd, "pkg", ".winter", "rules"), { recursive: true });
+      await w.session.send("run the command");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      const ran = w.events.some((e) => e.type === "tool_result");
+      const landed = { rule: existsSync(join(w.cwd, "pkg", ".winter", "rules", "x.md")), notes: existsSync(join(w.cwd, "pkg", "notes.md")) };
+      console.warn(`[R.3 I-4 official-leg] MEASURED: ran=${ran} ${JSON.stringify(landed)}`);
+      expect(ran).toBe(true);
+      expect(landed).toEqual({ rule: false, notes: true });
+    });
+  }, 60_000);
+
   test("8d: additionalDisallowedTools is HONOURED by the real binary — a chat-mode session's system/init.tools never advertises Bash, a code-mode one does", async () => {
     const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
     await withAnthropicLoopback([DONE_TURN], async (fake) => {

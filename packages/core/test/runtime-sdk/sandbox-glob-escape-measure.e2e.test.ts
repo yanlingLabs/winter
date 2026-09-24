@@ -96,12 +96,12 @@ describeWithWinterBinary("C-1 — the Winter-leg sandbox fence under a `[`-named
    *  and cwd — `childSandboxConfigFor` (what a spawn is sent) or, as the control, the literal
    *  `sandboxConfigFor`. The command writes into the protected `<cwd>/.winter/skills` twice (python, which
    *  the permission layer cannot see, and a redirect) and once into an ordinary cwd file. */
-  async function run(dirName: string, spelled: boolean, command?: (cwd: string) => string): Promise<{ python: boolean; redirect: boolean; notes: boolean; cwd: string; landedPaths: (rel: string) => boolean }> {
+  async function run(dirName: string, spelled: boolean, command?: (cwd: string) => string, bed: { mkdirs?: string[]; probe?: string[] } = {}): Promise<{ python: boolean; redirect: boolean; notes: boolean; cwd: string; landedPaths: (rel: string) => boolean; landed: Record<string, boolean> }> {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "winter-sbx-c1-w-")));
     const home = join(root, "home");
     const daemonHome = join(root, "winter-home");
     const cwd = join(root, dirName);
-    for (const dir of [home, join(home, "tmp"), daemonHome, join(cwd, ".winter", "skills", "x")]) mkdirSync(dir, { recursive: true });
+    for (const dir of [home, join(home, "tmp"), daemonHome, join(cwd, ".winter", "skills", "x"), ...(bed.mkdirs ?? []).map((d) => join(cwd, d))]) mkdirSync(dir, { recursive: true });
     const py = join(cwd, ".winter", "skills", "x", "SKILL.md");
     const redir = join(cwd, ".winter", "skills", "x", "r.md");
     const notes = join(cwd, "notes.md");
@@ -135,7 +135,9 @@ describeWithWinterBinary("C-1 — the Winter-leg sandbox fence under a `[`-named
         } as never,
       });
       for await (const m of q) if ((m as { type?: string }).type === "result") break;
-      return { python: existsSync(py), redirect: existsSync(redir), notes: existsSync(notes), cwd, landedPaths: (rel) => existsSync(join(cwd, rel)) };
+      // R.3: probed BEFORE the bed is removed below (a `landedPaths` read after `run` returns sees nothing).
+      const landed = Object.fromEntries((bed.probe ?? []).map((rel) => [rel, existsSync(join(cwd, rel))]));
+      return { python: existsSync(py), redirect: existsSync(redir), notes: existsSync(notes), cwd, landedPaths: (rel) => existsSync(join(cwd, rel)), landed };
     } finally {
       await fake.close();
       rmSync(root, { recursive: true, force: true });
@@ -150,6 +152,18 @@ describeWithWinterBinary("C-1 — the Winter-leg sandbox fence under a `[`-named
     console.error(`C-1 (winter): [wip] spelled ${JSON.stringify(view(spelled))}; [wip] literal ${JSON.stringify(view(literal))}; plain literal ${JSON.stringify(view(plain))}`);
     expect(view(spelled)).toEqual({ python: false, redirect: false, notes: true });
     expect(view(plain)).toEqual({ python: false, redirect: false, notes: true });
+  }, 180_000);
+
+  // R.3 I-4: the any-depth project fence. From a session at the project root, a sandboxed Bash could plant
+  // `.winter/<kind>` under a SUBDIRECTORY (a later session there loads it) through a path the Bash detector
+  // cannot see — here python joins it from pieces. `childSandboxConfigFor` now carries
+  // `<cwd>/**/.winter/<kind>` (a glob-shaped deny, a recursive regex on this runtime since round 11).
+  test("R.3 I-4: an assembled python write into <cwd>/pkg/.winter/rules does not land; <cwd>/pkg/notes.md lands", async () => {
+    const r = await run("plain app", true, () => `python3 -c "open('pkg/.win'+'ter/rules/x.md','w').write('x')"; echo x > pkg/notes.md; true`, {
+      mkdirs: ["pkg/.winter/rules"], probe: ["pkg/.winter/rules/x.md", "pkg/notes.md"],
+    });
+    console.error(`R.3 I-4 (winter): ${JSON.stringify(r.landed)}`);
+    expect(r.landed).toEqual({ "pkg/.winter/rules/x.md": false, "pkg/notes.md": true });
   }, 180_000);
 
   // The ancestor-rename bypass (`mv .winter .w2 && … && mv .w2 .winter`) is closed by claude's `Ch`

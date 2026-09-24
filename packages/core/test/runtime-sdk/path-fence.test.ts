@@ -288,6 +288,20 @@ describe("fix round 2: Bash writes under .winter/<kind>", () => {
     ]) expect({ cmd, hit: bashProtectedWriteHit(cmd) }).toEqual({ cmd, hit: undefined });
   });
 
+  // R.3 I-4: git's read subcommands still WRITE a file through `--output` (`git show`/`log`/`diff`/
+  // `format-patch`) — the flag is write-shaped whatever the subcommand.
+  test("R.3 I-4: a git --output=/--output target is a write, read subcommand or not", () => {
+    for (const cmd of [
+      "git show -s --format=%B --output=pkg/.winter/rules/x.md",
+      "git log -1 --output pkg/.winter/skills/x/SKILL.md",
+      "git -C sub diff --output=.winter/commands/c.md HEAD~1",
+      "cd pkg && git show HEAD:README.md --output=.winter/agents/a.md",
+    ]) expect({ cmd, hit: bashProtectedWriteHit(cmd) !== undefined }).toEqual({ cmd, hit: true });
+    for (const cmd of ["git show -s --output=notes.md", "git diff --output=/tmp/x.patch", "git log .winter/rules"]) {
+      expect({ cmd, hit: bashProtectedWriteHit(cmd) }).toEqual({ cmd, hit: undefined });
+    }
+  });
+
   test("the hook asks (both legs, sandboxed or not); a read gets no answer from it", async () => {
     const built = sessionHooksFor({ sessionId: "s_1", roots: ["/r"], home: "/Users/x/.winter", mode: "code" });
     const groups = (built.winter?.PreToolUse ?? []).filter((g: HookCallbackMatcher) => g.matcher === "Bash");

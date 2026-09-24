@@ -487,8 +487,12 @@ describe("officialInputFor — the control-plane fence (C1)", () => {
     const options = optionsFor("code", home);
     const settings = options.settings as { sandbox?: { filesystem?: { denyWrite?: string[] } } } | undefined;
     expect(settings?.sandbox).toEqual(childSandboxConfigFor(home, "/Users/x/repo"));
-    // No `[` anywhere in these paths, so the spelling changes nothing: the literal list, entry for entry.
-    expect(settings?.sandbox).toEqual(sandboxConfigFor(home, "/Users/x/repo"));
+    // No `[` anywhere in these paths, so the spelling changes nothing: the literal list, entry for entry —
+    // plus (R.3 I-4) the five any-depth `.winter/<kind>` globs for the cwd, which only the child's form has.
+    const literal = sandboxConfigFor(home, "/Users/x/repo");
+    const denyWrite = settings?.sandbox?.filesystem?.denyWrite ?? [];
+    expect(denyWrite.filter((e) => !e.includes("**"))).toEqual(literal.filesystem!.denyWrite!);
+    expect(denyWrite.filter((e) => e.includes("**"))).toEqual(["skills", "commands", "rules", "output-styles", "agents"].map((k) => `/Users/x/repo/**/.winter/${k}`));
     // Whole-branch review: the trust record and the session's project agent definitions are on it.
     expect(settings?.sandbox?.filesystem?.denyWrite).toContain(`${home}/trust.json`);
     expect(settings?.sandbox?.filesystem?.denyWrite).toContain("/Users/x/repo/.winter/agents");
@@ -509,7 +513,7 @@ describe("officialInputFor — the control-plane fence (C1)", () => {
     for (const entry of [...denyWrite, ...denyRead]) expect(entry.replace(/\[\[\]/g, "")).not.toContain("["); // every `[` spelled
     const literal = sandboxConfigFor(home, "/Users/x/repo").filesystem!;
     expect(literal.denyWrite).toContain("/Users/x/[wip] homes/.winter/trust.json"); // the real-path list: literal
-    expect(denyWrite.length).toBe(literal.denyWrite!.length);                        // same fence, entry for entry
+    expect(denyWrite.filter((e) => !e.includes("**")).length).toBe(literal.denyWrite!.length); // same fence, entry for entry (+ R.3 I-4's globs)
     // The Winter leg is sent the SAME spelled list.
     const winterSandbox = buildWinterOptions({
       mode: "code", policy: "ask", sessionId: "11111111-2222-3333-4444-555555555555", home, cwd: "/Users/x/repo",
@@ -530,6 +534,38 @@ describe("officialInputFor — the control-plane fence (C1)", () => {
     }).sandbox!.filesystem!.denyWrite!;
     expect(winterProject).toEqual(expect.arrayContaining(["/p/[[]a]b/.winter/agents", "/p/[[]a]b/.winter/skills", "/p/[[]a]b/.winter/settings.json"]));
     expect(winterProject).not.toContain("/p/[a]b/.winter/skills");
+  });
+
+  // R.3 I-4: sandboxed Bash could plant `.winter/<kind>` under a SUBDIRECTORY of the cwd (an assembled path
+  // or `git show --output=…` slips the Bash detector), and a later session there loads it. Both runtimes read
+  // a glob-shaped deny entry as a regex, so the spelled list carries the any-depth form: five entries per
+  // working directory (`<escaped dir>/**/.winter/<kind>`), on both legs; `sandboxConfigFor` stays literal.
+  test("R.3 I-4: both legs' sandbox carry `<dir>/**/.winter/<kind>` for the cwd and each extra working directory", () => {
+    const kinds = ["skills", "commands", "rules", "output-styles", "agents"];
+    const child = childSandboxConfigFor("/h", "/p/[a]b", ["/q/extra"]).filesystem!.denyWrite!;
+    for (const k of kinds) {
+      expect(child).toContain(`/p/[[]a]b/**/.winter/${k}`);
+      expect(child).toContain(`/q/extra/**/.winter/${k}`);
+    }
+    expect(child.filter((e) => e.includes("**"))).toHaveLength(10);
+    expect(sandboxConfigFor("/h", "/p/[a]b").filesystem!.denyWrite!.some((e) => e.includes("**"))).toBe(false);
+    // the official leg, from `OfficialSessionInput.extraDirs`
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", extraDirs: ["/Users/x/other"], spendEffort: undefined };
+    const result = officialInputFor(input, minimalDeps({ home: "/h" }));
+    if (!("input" in result)) throw new Error("officialInputFor refused");
+    const official = ((result.input.options as unknown as { settings: { sandbox: { filesystem: { denyWrite: string[] } } } }).settings.sandbox);
+    for (const k of kinds) {
+      expect(official.filesystem.denyWrite).toContain(`/Users/x/repo/**/.winter/${k}`);
+      expect(official.filesystem.denyWrite).toContain(`/Users/x/other/**/.winter/${k}`);
+    }
+    // …and the Winter spawn is sent the SAME list, from `WinterOptionsInput.extraDirs`
+    const winter = buildWinterOptions({
+      mode: "code", policy: "ask", sessionId: "11111111-2222-3333-4444-555555555555", home: "/h", cwd: "/Users/x/repo", extraDirs: ["/Users/x/other"],
+      credentials: { byProvider: {} }, spawn: { pathToClaudeCodeExecutable: "/opt/winter" },
+      canUseTool: (async () => ({ behavior: "allow" as const })) as CanUseTool, abort: new AbortController(),
+      baseEnv: { PATH: "/usr/bin", HOME: "/Users/x", TMPDIR: "/tmp", LANG: "en_US.UTF-8" },
+    } as WinterOptionsInput).sandbox;
+    expect(winter).toEqual(official as unknown as typeof winter);
   });
 
   test("additionalDisallowedTools is EXACTLY disallowedToolsFor(mode, {leg:\"official\"}) — claude's own web pair stays", () => {
