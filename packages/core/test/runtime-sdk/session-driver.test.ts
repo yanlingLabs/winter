@@ -532,7 +532,8 @@ describe("refusalForSelection — only credential-shaped reasons are re-describe
   test("the SAME keyless home, refused `slot-unservable`, DOES get Winter's actionable sentence — W19-7's own case", async () => {
     const t = table({}, { selectRuntimeFor: refusalOf("slot-unservable", "every candidate row … (configured: none)") });
     try {
-      const sid = t.store.createSession("t", { mode: "chat", model: "deepseek/deepseek-reasoner" });
+      // R.1: DeepSeek's live reasoning row (deepseek-reasoner left the catalog, V16).
+      const sid = t.store.createSession("t", { mode: "chat", model: "deepseek/deepseek-v4-pro" });
       let caught: unknown;
       try { await t.drivers.create(sid); } catch (err) { caught = err; }
       expect((caught as { reason?: string })?.reason).toBe("no-credential");
@@ -568,7 +569,7 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
       // (and what a daemon restart or an idle reap does anyway). `end()` alone leaves the driver in
       // the table, and `ensure` then hands it back without re-opening: the replay path needs an
       // EMPTY table, which is precisely the window N2 is about.
-      t.store.setModel(sid, "deepseek/deepseek-reasoner");
+      t.store.setModel(sid, "deepseek/deepseek-v4-pro"); // R.1: a LIVE DeepSeek row (reasoner left the catalog)
       await t.drivers.evict(sid);
       const spawnsBefore = t.queries.length;
 
@@ -584,11 +585,34 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
     } finally { t.close(); }
   });
 
+  // R.1 ruling 1: a model the catalog RETIRED with no rename (stored before the upgrade) is refused typed at
+  // the pre-turn gate — before any child, before the credential question (no key makes it runnable).
+  test("a retired catalog tag is refused typed before the turn (model-not-in-catalog), with no child and nothing consumed", async () => {
+    const t = table();
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const session = await t.drivers.create(sid);
+      await session.send("A", "cli");
+      const held = await session.send("B", "cli");
+      expect(held.queued).toBe(true);
+      t.store.setModel(sid, "deepseek/deepseek-reasoner"); // bypasses the RPC's catalog check, as a pre-upgrade row does
+      await t.drivers.evict(sid);
+      const spawnsBefore = t.queries.length;
+      let caught: unknown;
+      try { await t.drivers.ensure(sid); } catch (err) { caught = err; }
+      expect((caught as { code?: string })?.code).toBe("runtime_selection_refused");
+      expect((caught as { reason?: string })?.reason).toBe("model-not-in-catalog");
+      expect((caught as Error).message).toContain("no longer in this build's model catalog");
+      expect(t.queries.length).toBe(spawnsBefore);
+      expect(unconsumedUserMessages(t.store.read(sid))).toEqual(["B"]);
+    } finally { t.close(); }
+  });
+
   test("a fresh create with nothing owed never consults the gate on the open path", async () => {
     // The cost of N2 on the hot path is zero: `create()` opens with an empty log.
     const t = table();
     try {
-      const sid = t.store.createSession("t", { mode: "chat", model: "deepseek/deepseek-reasoner" });
+      const sid = t.store.createSession("t", { mode: "chat", model: "deepseek/deepseek-v4-pro" });
       const session = await t.drivers.create(sid);
       expect(t.queries.length).toBe(1);   // the child spawned; the gate had nothing to gate
       await session.end();
@@ -947,8 +971,9 @@ describe("role efforts on the runtime leg (pins.dispatch, and provider.model's d
   describe("pins.dispatch", () => {
     test("absent → DISPATCH_EFFORT mapped onto the pin's row, exactly as before", async () => {
       expect(await spawnedEffort(settingsOf({}), { mode: "dispatch" })).toBe("medium");
-      // The pre-existing mapping of the DEFAULT is untouched: a pin whose row has no `medium` and no default sends nothing.
-      expect(await spawnedEffort(settingsOf({ pins: { dispatch: "deepseek/deepseek-v4-flash" } }), { mode: "dispatch" })).toBeUndefined();
+      // The pre-existing mapping of the DEFAULT is untouched: a pin whose row has no `medium` maps onto the
+      // row's declared default (R.1: DeepSeek's refreshed row declares `high`; with none it sent nothing).
+      expect(await spawnedEffort(settingsOf({ pins: { dispatch: "deepseek/deepseek-flash" } }), { mode: "dispatch" })).toBe("high");
     });
 
     test("a stored effort the pin's model offers reaches Options.effort", async () => {
@@ -956,8 +981,10 @@ describe("role efforts on the runtime leg (pins.dispatch, and provider.model's d
     });
 
     test("a stored effort the pin's model does NOT offer is mapped or omitted — the coordinator still spawns", async () => {
-      // deepseek-v4-flash: none/low/high/max, no defaultEffort → a stored `xhigh` has nowhere to map.
-      expect(await spawnedEffort(settingsOf({ pins: { dispatch: "deepseek/deepseek-v4-flash" }, roleEfforts: { "pins.dispatch": "xhigh" } }), { mode: "dispatch" })).toBeUndefined();
+      // deepseek-flash: none/low/high/max → a stored `xhigh` maps onto the row's declared default (R.1: `high`).
+      expect(await spawnedEffort(settingsOf({ pins: { dispatch: "deepseek/deepseek-flash" }, roleEfforts: { "pins.dispatch": "xhigh" } }), { mode: "dispatch" })).toBe("high");
+      // A pin whose row declares NO vocabulary: omitted.
+      expect(await spawnedEffort(settingsOf({ pins: { dispatch: "openai/gpt-4.1" }, roleEfforts: { "pins.dispatch": "xhigh" } }), { mode: "dispatch" })).toBeUndefined();
       // anthropic/claude-opus-5 is not this leg's to run; openai/o4-mini (low/medium/high, default medium) is.
       expect(await spawnedEffort(settingsOf({ pins: { dispatch: "openai/o4-mini" }, roleEfforts: { "pins.dispatch": "max" } }), { mode: "dispatch" })).toBe("medium");
     });
@@ -1016,7 +1043,8 @@ describe("role efforts on the runtime leg (pins.dispatch, and provider.model's d
     test("a STALE own effort (left behind by a model switch) is not spent: the child is never handed a level its model refuses", async () => {
       // The field report: 'high' chosen on a reasoning model, then the session moved to a row with an
       // EMPTY vocabulary — the child refused the next turn typed. The level is treated as unset.
-      expect(await spawnedEffort(settingsOf({}), { mode: "code", model: "deepseek-anthropic/deepseek-reasoner", effort: "high" })).toBeUndefined();
+      // R.1: `zai/glm-5` is the live row with an EMPTY vocabulary (deepseek-anthropic/deepseek-reasoner left the catalog).
+      expect(await spawnedEffort(settingsOf({}), { mode: "code", model: "zai/glm-5", effort: "high" })).toBeUndefined();
       // ...and the implicit default takes over where the row has one to map onto.
       expect(await spawnedEffort(withDefault("max"), { mode: "code", model: "openai/o4-mini", effort: "galactic" })).toBe("medium");
       // A level the row DOES list is still spent verbatim.
@@ -1025,8 +1053,10 @@ describe("role efforts on the runtime leg (pins.dispatch, and provider.model's d
 
     test("it is IMPLICIT: mapped onto the session's own model's row, or omitted — never forced, never a refusal", async () => {
       expect(await spawnedEffort(withDefault("max"), { mode: "code", model: "openai/o4-mini" })).toBe("medium");
-      expect(await spawnedEffort(withDefault("medium"), { mode: "code", model: "deepseek/deepseek-v4-flash" })).toBeUndefined();
-      expect(await spawnedEffort(withDefault("high"), { mode: "code", model: "openai/gpt-5.4" })).toBeUndefined();
+      // R.1: DeepSeek's refreshed row declares a default (`high`), so an unlisted `medium` maps onto it…
+      expect(await spawnedEffort(withDefault("medium"), { mode: "code", model: "deepseek/deepseek-flash" })).toBe("high");
+      // …and a row with no vocabulary at all (gpt-4.1; the refresh gave gpt-5.4 one) is handed nothing.
+      expect(await spawnedEffort(withDefault("high"), { mode: "code", model: "openai/gpt-4.1" })).toBeUndefined();
     });
 
     test("dispatch is not a consumer of it: the coordinator runs its own role's effort, else DISPATCH_EFFORT", async () => {
