@@ -491,10 +491,13 @@ test("the deny rules do NOT fence the MEMDIR or $OUTDIR — both are agent-writa
   expect(deny.some((r) => r.includes("outputs"))).toBe(false);
 });
 
-test("the Bash sandbox names real DIRECTORIES, because its consumer renders seatbelt subpaths", () => {
-  // Review F8: `filesystem.denyWrite` entries become `(deny file-write* (subpath "<canon(p)>"))`
-  // (`sandbox/profile.ts:335`), so a glob like `**/.winter/permissions.local.json` or `/h/run/**`
-  // becomes a literal path that never exists and denies nothing.
+test("the Bash sandbox names real DIRECTORIES — plus, since R.3 I-4, the any-depth `.winter/<kind>` globs", () => {
+  // Review F8: a plain `filesystem.denyWrite` entry becomes `(deny file-write* (subpath "<canon(p)>"))`
+  // (`sandbox/profile.ts`), so the control-plane list stays REAL paths. R.3 I-4: F8's other half — "a glob
+  // becomes a literal path that never exists and denies nothing" — stopped holding at agent SDK round 11
+  // (`2a118c6`, claude's `Rt`): a glob-shaped entry renders as a recursive seatbelt REGEX on the Winter leg
+  // exactly as on claude (measured: `sandbox-glob-escape-measure.e2e.test.ts`'s R.3 I-4 row). So the
+  // child's list ends with the five `<cwd>/**/.winter/<kind>` entries, and those are its ONLY globs.
   const sb = buildWinterOptions(optionsInput({ home: "/h" })).sandbox!;
   expect(sb.enabled).toBe(true);
   // `runtimes` is on BOTH lists (2026-09-18). It was read-denied and write-allowed, which the
@@ -523,12 +526,15 @@ test("the Bash sandbox names real DIRECTORIES, because its consumer renders seat
     "/h/sdk/skills", "/h/sdk/commands", "/h/sdk/rules", "/h/sdk/output-styles", "/h/sdk/WINTER.md",
     "/repo/.winter/mcp.json", "/repo/.winter/settings.json", "/repo/.winter/settings.local.json", "/repo/.winter/agents",
     "/repo/.winter/skills", "/repo/.winter/commands", "/repo/.winter/rules", "/repo/.winter/output-styles",
+    // R.3 I-4: the any-depth project fence (child-only; `sandboxConfigFor`'s literal list has none).
+    "/repo/**/.winter/skills", "/repo/**/.winter/commands", "/repo/**/.winter/rules", "/repo/**/.winter/output-styles", "/repo/**/.winter/agents",
   ]);
   // CLAUDE.md: "the sole read denial is ~/.winter/run" — reads are otherwise unrestricted.
   // WS-21 (spec §7.1): + the user's MCP server list.
   expect(sb.filesystem!.denyRead).toEqual(["/h/run", "/h/runtimes", "/h/sdk/.winter.json"]);   // Task 17: runtimes/ is model-denied (8a)
   for (const p of [...sb.filesystem!.denyWrite!, ...sb.filesystem!.denyRead!]) {
-    expect({ p, glob: p.includes("*") }).toEqual({ p, glob: false });
+    const anyDepth = /^\/repo\/\*\*\/\.winter\/(?:skills|commands|rules|output-styles|agents)$/.test(p);
+    expect({ p, glob: p.includes("*") }).toEqual({ p, glob: anyDepth });
   }
   // `allowUnsandboxedCommands` is NOT set: it is consulted only together with `excludedCommands`
   // (`sandbox/spawn.ts:109,122`), which this config does not set, so `false` would be a no-op.
