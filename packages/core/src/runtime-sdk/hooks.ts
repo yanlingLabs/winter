@@ -310,7 +310,10 @@ function pluginPostToolUseFailureHook(deps: SessionHooksDeps): HookCallback {
 // any `.winter/agents`, and on every spelling of every fenced home path this file can predict — the
 // literal home (and its realpath), `~`/`$HOME`/`${HOME}` for a home under the user's own,
 // `$WINTER_HOME`/`${WINTER_HOME}`, `<home basename>/…`, and a relative path after a `cd` into the home —
-// over a normalised command (case, quotes, `//`, `/./`). `cache` and `plugins` are refused only in a
+// over a normalised command (case, quotes, `//`, `/./`). R.3 C-1: and the variables WS-21 exports into
+// every child — `$WINTER_STORE_HOME` (`<home>/sdk`), `$WINTER_PLUGIN_CACHE_DIR`/`$CLAUDE_CODE_PLUGIN_CACHE_DIR`
+// (`<home>/sdk/plugins`), `$CLAUDE_CONFIG_DIR` and the Winter child's own `$WINTER_HOME` (a run folder
+// under `<home>/cache`), braced or not. `cache` and `plugins` are refused only in a
 // write-shaped position (review N1): the model reads and runs plugin skill content there. A false
 // positive costs a typed deny the model can route around by running the command sandboxed; a false
 // negative costs the floor. A command that builds the path at run time (`$(…)`, variables of its
@@ -374,9 +377,32 @@ function isHomeParent(cwd: string | undefined, home: string): boolean {
 interface FloorNeedle { needle: string; writeOnly: boolean }
 
 /**
+ * R.3 C-1: the variables WS-21 exports into every child, which a child's Bash hands to its shell (the
+ * whole `process.env`), lowercased as the floor reads them. `$WINTER_STORE_HOME` is `<home>/sdk` — the
+ * shared runtime home, so a fenced `sdk/<x>` is also `$winter_store_home/<x>` (`floorNeedles`, and the
+ * protected-kind and transcript-store passes in `escapeFloorHit`).
+ */
+const STORE_HOME_VARIABLES: readonly string[] = ["$winter_store_home", "${winter_store_home}"];
+/**
+ * …and the variables that name a WRITE-ONLY fenced directory as a whole, refused in a write-shaped
+ * position and readable otherwise (plugin skills are read and run there): both plugin-cache variables
+ * (`<home>/sdk/plugins`), the official child's `CLAUDE_CONFIG_DIR` (its run folder, under `<home>/cache`,
+ * whose `skills/` entries link into `sdk/skills` and the trusted project's skills), and the Winter child's
+ * `WINTER_HOME` — which under a run home is ITS run folder, not the daemon's home (the router sets it to
+ * `runHome.dir`); every other `$winter_home` spelling above still reads it as the daemon's home, too.
+ */
+const WRITE_ONLY_DIR_VARIABLES: readonly string[] = [
+  "$winter_plugin_cache_dir", "${winter_plugin_cache_dir}",
+  "$claude_code_plugin_cache_dir", "${claude_code_plugin_cache_dir}",
+  "$claude_config_dir", "${claude_config_dir}",
+  "$winter_home", "${winter_home}",
+];
+
+/**
  * Every fenced `<home>` path, spelled under every home prefix — the fenced dirs and files come from
  * `home-fence.ts`, i.e. from the SAME list the Bash sandbox's `denyWrite` carries (whole-branch review
- * 2026-09-23). A path lying outside the home is matched by its own absolute spelling.
+ * 2026-09-23). A path lying outside the home is matched by its own absolute spelling; one under
+ * `<home>/sdk` also under the store variable (R.3 C-1).
  */
 function floorNeedles(home: string): FloorNeedle[] {
   const prefixes = homePrefixes(home);
@@ -387,9 +413,20 @@ function floorNeedles(home: string): FloorNeedle[] {
     const spellings = r.length === 0 || r.startsWith("..") || isAbsolute(r)
       ? [p.toLowerCase()]
       : prefixes.map((pre) => `${pre}/${r}`.toLowerCase());
+    // R.3 C-1: `$WINTER_STORE_HOME` already points at `<home>/sdk` — its spelling drops that segment.
+    if (r === "sdk" || r.startsWith("sdk/")) {
+      const storeRel = r.slice("sdk".length);
+      for (const pre of STORE_HOME_VARIABLES) spellings.push(`${pre}${storeRel}`.toLowerCase());
+    }
     for (const n of spellings) out.set(n, (out.get(n) ?? true) && writeOnly);
   }
   return [...out].map(([needle, writeOnly]) => ({ needle, writeOnly }));
+}
+
+/** Is the path text right after a home or store spelling (`/projects/<key>/memory…`, optionally under
+ *  `/sdk`) inside a project's MEMDIR — the one part of the transcript store the model maintains itself? */
+function isMemoryPathRest(rest: string, underSdk: boolean): boolean {
+  return (underSdk ? /^\/sdk\/projects\/[^/]+\/memory(\/|$)/ : /^\/projects\/[^/]+\/memory(\/|$)/).test(rest);
 }
 
 /**
@@ -754,17 +791,35 @@ export function escapeFloorHit(command: string, home: string | undefined, cwd?: 
       at = c.indexOf(needle, at + 1);
     }
   }
+  // R.3 C-1: a variable naming a write-only fenced directory as a whole (the plugin cache, a run folder) —
+  // refused in a write-shaped position, wherever under it the write lands. `$WINTER_HOMEDIR` is another
+  // variable (an unbraced name continues through `[a-z0-9_]`); the MEMDIR under the Winter child's run
+  // folder (`$WINTER_HOME/projects/<key>/memory`, a link into the store) stays the model's own.
+  for (const v of WRITE_ONLY_DIR_VARIABLES) {
+    for (let at = c.indexOf(v); at >= 0; at = c.indexOf(v, at + 1)) {
+      if (at <= writeStart) continue;
+      if (!v.endsWith("}") && /[a-z0-9_]/.test(c.charAt(at + v.length))) continue;
+      const rest = c.slice(at + v.length).split(/[\s;&|()<>]/, 1)[0] ?? "";
+      if ((v === "$winter_home" || v === "${winter_home}") && (isMemoryPathRest(rest, false) || isMemoryPathRest(rest, true))) continue;
+      return "Winter's own state under its home";
+    }
+  }
   // Review I7: the user tier's PROTECTED paths (spec §7.2), write-shaped — the shared runtime home's and
   // the old/compat spelling at the home's top level (a link into `sdk/` on a migrated home, the store
   // itself on router 0.0.11). A write tool gets a card for these; an unsandboxed command gets none.
   // Round 3, minor 4: the WINTER.md needle is the HOME's own — a project's `.winter/WINTER.md` is ordinary
   // (spec §7.2), and the home's bare basename (`.winter`) names a project's `.winter/` just as well. So the
   // bare spelling counts for WINTER.md only when the command runs from the home's parent directory.
-  const fullPrefixes = new Set(homePrefixes(bareHome, { basename: false }));
+  const fullPrefixes = new Set([...homePrefixes(bareHome, { basename: false }), ...STORE_HOME_VARIABLES]);
   const fromHomeParent = isHomeParent(cwd, bareHome);
-  for (const pre of homePrefixes(bareHome)) {
+  // R.3 C-1: the store variable already names `<home>/sdk`, so its one base is the variable itself.
+  const protectedBases: Array<{ pre: string; bases: string[] }> = [
+    ...homePrefixes(bareHome).map((pre) => ({ pre, bases: [`${pre}/sdk`, pre] })),
+    ...STORE_HOME_VARIABLES.map((pre) => ({ pre, bases: [pre] })),
+  ];
+  for (const { pre, bases } of protectedBases) {
     const instructionsNeedleHere = fullPrefixes.has(pre) || fromHomeParent;
-    for (const base of [`${pre}/sdk`, pre]) {
+    for (const base of bases) {
       for (const needle of [...PROTECTED_KIND_NAMES.map((k) => `${base}/${k}`), ...(instructionsNeedleHere ? [`${base}/winter.md`] : [])]) {
         for (let at = c.indexOf(needle); at >= 0; at = c.indexOf(needle, at + 1)) {
           if (at <= writeStart) continue;
@@ -779,9 +834,13 @@ export function escapeFloorHit(command: string, home: string | undefined, cwd?: 
   // …and the runtimes' transcript store, `sdk/projects`, write-shaped and OUTSIDE each project's
   // `memory/` (the model's MEMDIR, which it maintains itself).
   // Review M2: and under its compat-link spelling `<home>/projects` (a link into `sdk/projects` on a
-  // migrated home; the store itself on router 0.0.11).
-  for (const pre of homePrefixes(bareHome)) {
-    for (const needle of [`${pre}/sdk/projects`, `${pre}/projects`]) {
+  // migrated home; the store itself on router 0.0.11). R.3 C-1: and `$WINTER_STORE_HOME/projects`.
+  const storeNeedles: string[][] = [
+    ...homePrefixes(bareHome).map((pre) => [`${pre}/sdk/projects`, `${pre}/projects`]),
+    ...STORE_HOME_VARIABLES.map((pre) => [`${pre}/projects`]),
+  ];
+  for (const needles of storeNeedles) {
+    for (const needle of needles) {
       for (let at = c.indexOf(needle); at >= 0; at = c.indexOf(needle, at + 1)) {
         if (at <= writeStart) continue;
         const rest = c.slice(at + needle.length).split(/[\s;&|()<>]/, 1)[0] ?? "";
