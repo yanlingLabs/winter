@@ -43,7 +43,7 @@
  */
 import type { SecretStore } from "../auth/secret-store";
 import { credentialInventory } from "../runtime-sdk/keychain";
-import { implicitEffortFor, rowForTag } from "../runtime-sdk/provider-selection";
+import { internalEffortNoEscalationFor, rowForTag } from "../runtime-sdk/provider-selection";
 import { providerBaseUrlFor, REASONING_EFFORTS, type Settings } from "../settings";
 import { catalogApiEndpointFor, catalogApiEndpointRawFor, internalAdapterFor } from "./internal-adapters";
 import { credentialStoreOverSecretStore } from "./credential-store";
@@ -89,7 +89,8 @@ export function internalWireEffortFor(tag: string, effort: string | undefined): 
     return lowest;
   }
   if (rowForTag(tag) === undefined) return effort;
-  return implicitEffortFor(tag, effort);
+  // R.1 (controller ruling): never UP — a heavier row default is dropped, not sent.
+  return internalEffortNoEscalationFor(tag, effort);
 }
 
 const noneSubstitutedNoted = new Set<string>();

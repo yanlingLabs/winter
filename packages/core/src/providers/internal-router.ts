@@ -273,7 +273,7 @@ export function createInternalRouter(deps: {
     if (provider === null) {
       return { reason: "provider-unsupported", detail: `${providerDisplayName(providerId)} can't be used for Winter's own jobs yet`, tag };
     }
-    const wanted = effortToSpendForRole(settings, role, tag, CONSUMER_EFFORT[role]);
+    const wanted = effortToSpendForRole(settings, role, tag, CONSUMER_EFFORT[role], { neverEscalate: true });
     const effort = internalWireEffortFor(tag, wanted);
     return { provider, model: wireModelIdFor(providerId, model), tag, providerId, quota: quotaFor(providerId), ...(effort === undefined ? {} : { effort }) };
   };
@@ -362,7 +362,7 @@ export function staticInternalRouter(cfg: {
       // M-1 (review): through the SAME `internalWireEffortFor` production uses. ~16 test doubles run
       // this path, so it is what actually exercises the effort rule — a second, laxer spelling here
       // would mean the `"none"`/unmappable-tier behaviour was never under test at all.
-      const wanted = effortToSpendForRole(settings, role, effectiveTag, CONSUMER_EFFORT[role]);
+      const wanted = effortToSpendForRole(settings, role, effectiveTag, CONSUMER_EFFORT[role], { neverEscalate: true });
       const effort = internalWireEffortFor(effectiveTag, wanted);
       return { provider: cfg.provider, model, tag: effectiveTag, quota, providerId: (() => { try { return splitTag(effectiveTag).providerId; } catch { return cfg.provider.id; } })(), ...(effort === undefined ? {} : { effort }) };
     },
