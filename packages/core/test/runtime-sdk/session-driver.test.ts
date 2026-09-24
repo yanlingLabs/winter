@@ -1396,7 +1396,7 @@ describe("WS-21 round 3: the lazy canonical-cwd re-key at resume (Winter leg)", 
       const facts: import("../../src/runtime-sdk/run-home-input").RunHomeSessionFacts[] = [];
       const runHome: NonNullable<WinterLegDeps["runHome"]> = {
         inputFor: (f) => { facts.push(f); return { home: t.home, mode: f.mode, dispatchChild: f.dispatchChild, leg: f.leg, cwd: f.cwd, trustedProjectRoot: null, gitRoot: null, mcpDisabled: [], reservedMcpServerNames: [], memoryDir: "/m" }; },
-        build: async (input) => { built.push(input); return { runId: "cold-1", dir: "/h/cache/runs/cold-1", sdkHome: "/h/sdk", input, effectiveSettings: {}, report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [] }, dispose: async () => {} }; },
+        build: async (input) => { built.push(input); return { runId: "cold-1", dir: "/h/cache/runs/cold-1", sdkHome: "/h/sdk", input, effectiveSettings: {}, report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [], droppedRules: [] }, dispose: async () => {} }; },
       };
       const logs: string[] = [];
       const runHomeFor = coldResumeRunHomeFor({ home: t.home, store: t.store, records: t.records, runHome, log: (l) => logs.push(l) });

@@ -8,7 +8,7 @@ const stub = (onDispose: () => void, failDispose = false): RunHome => ({
   runId: "r1", dir: "/h/cache/runs/r1", sdkHome: "/h/sdk",
   input: { home: "/h", mode: "code", dispatchChild: false, leg: "official", cwd: "/c", trustedProjectRoot: null, gitRoot: null, mcpDisabled: [], reservedMcpServerNames: [], memoryDir: "/m" },
   effectiveSettings: {},
-  report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [] },
+  report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [], droppedRules: [] },
   dispose: async () => { onDispose(); if (failDispose) throw new Error("EBUSY"); },
 });
 
@@ -64,15 +64,16 @@ describe("runHomeReportSummary — what the builder did not do, for the daemon l
   test("empty report: nothing to say", () => {
     expect(runHomeReportSummary(stub(() => {}))).toBeUndefined();
   });
-  test("every field is named, skippedAgents included (L2 fix round 1)", () => {
+  test("every field is named, skippedAgents (L2 fix round 1) and droppedRules (router 3279a1d) included", () => {
     const rh = stub(() => {});
     rh.report = {
       skippedLinks: [{ path: "/p/a", reason: "outside-root" }], externalUserLinks: ["/u/x"],
       droppedMcpServers: [{ name: "srv", reason: "reserved-name" }], unconditionalRules: ["r.md"], droppedImports: ["../x.md"],
       skippedAgents: [{ path: "/h/sdk/agents/bad.md", reason: "unparseable" }],
+      droppedRules: [{ rule: "Edit(/out/**)", tier: "project", reason: "anchor holds ?" }],
     };
     const line = runHomeReportSummary(rh)!;
     expect(line).toContain("r1");
-    for (const bit of ["/p/a (outside-root)", "/u/x", "srv (reserved-name)", "r.md", "../x.md", "/h/sdk/agents/bad.md (unparseable)"]) expect(line).toContain(bit);
+    for (const bit of ["/p/a (outside-root)", "/u/x", "srv (reserved-name)", "r.md", "../x.md", "/h/sdk/agents/bad.md (unparseable)", "Edit(/out/**) [project] (anchor holds ?)"]) expect(line).toContain(bit);
   });
 });
