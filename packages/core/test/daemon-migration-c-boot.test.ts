@@ -9,15 +9,15 @@
 //
 // Every home is a mkdtemp; the default-home gate is driven by `homedirOverride` (P9c-15), never the real ~.
 import { afterEach, describe, expect, test } from "bun:test";
-import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 import { SessionStore } from "../src/sessions/store";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { startDaemon, type RunningDaemon } from "../src/daemon";
 import { FileSecretStore } from "../src/auth/secret-store";
 import { setRunHomeSupportForTests } from "../src/runtime-sdk/run-home-support";
-import { MigrationCRefused, migrationCCompletePath, migrationCState, runMigrationC } from "../src/migration/migrate-c";
+import { MigrationCRefused, migrationCCompletePath, migrationCManifestPath, migrationCState, runMigrationC } from "../src/migration/migrate-c";
 import { openRuntimeStateDb } from "../src/runtime-state/db";
 import { readSdkSettings } from "../src/sdk-files";
 
@@ -137,16 +137,23 @@ describe("Migration C at boot (run-home router)", () => {
     seedOldLayout(home);
     mkdirSync(join(home, "runtimes", "claude-config", "projects", "-Users-x-app"), { recursive: true });
     writeFileSync(join(home, "runtimes", "claude-config", "projects", "-Users-x-app", "s-official.jsonl"), '{"type":"user"}\n');
-    // phase 1 ran (the CLI, say); the linked router 0.0.11 has no reconcile door for phase 2
+    // phase 1 ran (the CLI, say); phase 2 then cannot finish. R.1: this rested on router 0.0.11 having no
+    // reconcile door; the linked router has one, and a reconcile that FAILS is absorbed by design (the root is
+    // archived and its sessions marked repair-required — L3 round 3, minor 7). What still stops phase 2 is a
+    // fault in phase 2 itself: here its manifest directory cannot be written, so no step can be recorded.
     const m = await runMigrationC(home, { log: () => {}, reconcileAvailable: true, probe: { alive: () => false, startedAt: () => "unknown" } });
     expect(m.status).toBe("phase1-complete");
-    for (let attempt = 0; attempt < 2; attempt++) { // the lock was released: a retry refuses the same way
-      let caught: unknown;
-      try { daemon = await boot(home, parent); } catch (err) { caught = err; }
-      expect((caught as MigrationCRefused).code).toBe("sdk_home_migration_refused");
-      expect((caught as Error).message).toContain("no session opens");
-      expect(existsSync(join(home, "run", "core.sock"))).toBe(false);
-    }
+    const manifestDir = dirname(migrationCManifestPath(home));
+    chmodSync(manifestDir, 0o500);
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) { // the lock was released: a retry refuses the same way
+        let caught: unknown;
+        try { daemon = await boot(home, parent); } catch (err) { caught = err; }
+        expect((caught as MigrationCRefused).code).toBe("sdk_home_migration_refused");
+        expect((caught as Error).message).toContain("no session opens");
+        expect(existsSync(join(home, "run", "core.sock"))).toBe(false);
+      }
+    } finally { chmodSync(manifestDir, 0o700); }
     expect(migrationCState(home)).toMatchObject({ kind: "parsed", manifest: { status: "phase1-complete" } });
   });
 

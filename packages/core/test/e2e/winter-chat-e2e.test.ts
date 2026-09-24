@@ -33,7 +33,7 @@
 //       `dist/winter` process survives this file; the POSITIVE half — the transcript lives under
 //       the TEMP home — is (d)'s
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync, type Stats } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync, type Stats } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -48,6 +48,9 @@ import { CHAT_ALLOWED_WINTER_TOOLS, buildWinterOptions, disallowedToolsFor } fro
 import type { ModelTag } from "../../src/runtime-sdk/model-tag";
 import { WINTER_ADVERTISED_MCP_TOOLS_0_0_4, WINTER_ADVERTISED_TOOLS_0_0_4_BASE } from "../../src/runtime-sdk/tool-names";
 import { createHostPromptQueue } from "../../src/runtime-sdk/prompt-queue";
+import { buildRunHome } from "@yanlinglabs/winter-runtime-sdk";
+import { runHomeInputFor } from "../../src/runtime-sdk/run-home-input";
+import { withRunHome } from "../../src/runtime-sdk/winter-session";
 import { WINTER_CAPABILITY_TOOLS } from "../../src/capabilities";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
 
@@ -547,16 +550,21 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     const handle = daemon!.runtimeSdk!;
     const sdk = handle.sdk;
     const sid = "s_tripwire_code";
-    const cwd = mkdtempSync(join(tmpdir(), "winter-tripwire-cwd-"));
+    // R.1: the daemon's router is a run-home router (`requireRunHome`), so a generation driven straight at it
+    // carries a run home the router's own builder made for this cwd — the canonical one it checks against.
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-tripwire-cwd-")));
     const caps = daemon!.buildSessionCapabilities({ sessionId: sid, mode: "code", cwd, roots: [cwd], tmpDir: cwd });
     const hook = handle.spawnHookFor("code");
     if (hook instanceof Error) throw hook;
     const abort = new AbortController();
-    const options: Options = buildWinterOptions({
+    const runHome = await buildRunHome(runHomeInputFor({
+      home, trust: { isTrusted: () => false }, settings: () => undefined, reservedMcpServerNames: Object.keys(caps), gitRootFor: () => null,
+    }, { mode: "code", dispatchChild: false, leg: "winter", cwd }));
+    const options: Options = withRunHome(buildWinterOptions({
       mode: "code", policy: "auto", sessionId: crypto.randomUUID(), home, cwd, model: "winter-test/echo" as ModelTag,
       credentials: { byProvider: {} }, spawn: hook, canUseTool: async () => ({ behavior: "deny", message: "tripwire" }), abort,
-      capabilityTools: WINTER_CAPABILITY_TOOLS, capabilities: caps,
-    });
+      capabilityTools: WINTER_CAPABILITY_TOOLS, capabilities: caps, runHomeApplied: true,
+    }), runHome);
     const queue = createHostPromptQueue();
     const q = sdk.query({ prompt: queue, options });
     let tools: string[] = [];
@@ -565,6 +573,8 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
         if (m.type === "system" && m.subtype === "init") { tools = m.tools ?? []; break; }
       }
     } finally { queue.close(); abort.abort(); }
+    await Bun.sleep(50);
+    await runHome.dispose();
     const codeCaps = Object.entries(caps).flatMap(([server, cfg]) =>
       (cfg as { instance: { listTools(): Array<{ name: string }> } }).instance.listTools().map((t) => `mcp__${server}__${t.name}`));
     // Agent SDK 0.0.17 advertises `WebFetch`/`WebSearch` in EVERY session (the 0.0.3 measurement the

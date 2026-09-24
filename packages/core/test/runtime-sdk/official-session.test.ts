@@ -53,6 +53,7 @@ import { SessionHub } from "../../src/sessions/hub";
 import { SessionStore } from "../../src/sessions/store";
 import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import { createWinterSessionDrivers } from "../../src/runtime-sdk/session-driver";
+import { recordedRunHomes } from "../helpers/run-homes";
 import {
   ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME,
   ANTHROPIC_CREDENTIAL_SECRET_NAME,
@@ -937,16 +938,20 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
       trackQuery: () => {},
       untrack: () => {},
     } as unknown as WinterRuntimeSdk;
+    // WS-21 (R.1): the production shape — real run homes (the router's own builder), recorded; a driver
+    // without run-home deps refuses `run_home_required` on this build.
+    const runHomes = recordedRunHomes(home);
     const drivers = createWinterSessionDrivers({
       home, settings: () => settings, runtime, records, checkpoints, store, hub, secrets,
       buildSessionCapabilities: () => ({}),
       approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(),
       rootsOf: () => [], tmpDirOf: () => home, outDirOf: () => home, memoryKeyOf: () => "k",
       log: () => {},
+      runHome: runHomes.deps,
     });
     const close = (): void => { try { store.close(); } catch { /* closed */ } try { rs?.close(); } catch { /* closed */ } };
     return {
-      home, store, hub, records, checkpoints, secrets, drivers, close, capturedOptions, queries,
+      home, store, hub, records, checkpoints, secrets, drivers, close, capturedOptions, queries, runHomes,
       q: () => queries[queries.length - 1]!,
     };
   }

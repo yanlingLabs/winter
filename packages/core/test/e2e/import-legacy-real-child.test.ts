@@ -32,6 +32,7 @@ import { importEngineEraSession } from "../../src/runtime-sdk/import-legacy";
 import { openRuntimeStateDb, RuntimeSessionRecords, backfillNativeSessions } from "../../src/runtime-state";
 import { sessionLegOf } from "../../src/runtime-sdk/leg";
 import { SessionStore } from "../../src/sessions/store";
+import { storeHomeFor } from "../../src/agent/paths";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
 
 interface ProtocolSdkMessage { type?: string; [k: string]: unknown }
@@ -82,6 +83,9 @@ describeWithWinterBinary("engine-era import — the REAL winter binary resumes t
             // Pre-rename this set two distinct env keys — the daemon's own home var, and WINTER_HOME (the SDK's
             // brand-derived home); the rename makes them the same key, so it is written once now.
             HOME: home, TMPDIR: home, WINTER_HOME: home,
+            // R.1: the import writes the transcript to the STORE home (`sdk/projects` on a run-home build);
+            // a child driven directly (no run home) is pointed at that store the way a run home would.
+            WINTER_STORE_HOME: storeHomeFor(home),
             WINTER_PROFILE: "test",
             WINTER_TEST_PROVIDER: "echo",
           },
@@ -111,7 +115,7 @@ describeWithWinterBinary("engine-era import — the REAL winter binary resumes t
       // (b) the on-disk transcript now holds the imported turn FIRST, then the new one, correctly
       // chain-linked — read back through the real compat store, never a fake.
       const { WinterCompatibilitySessionStore } = await import("@yanlinglabs/winter-agent-sdk");
-      const compat = new WinterCompatibilitySessionStore({ winterHome: home });
+      const compat = new WinterCompatibilitySessionStore({ winterHome: storeHomeFor(home) }); // the store the import wrote
       const projectKey = transcriptProjectKey(cwd);
       const entries = (await compat.load({ projectKey, sessionId: backendSessionId })) ?? [];
       const conversational = entries.filter((e) => e.type === "user" || e.type === "assistant");
