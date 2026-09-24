@@ -148,19 +148,53 @@ export function officialAuthArmFor(selection: { modelRef: string }): OfficialAut
 }
 
 /**
- * F1 (live gate, 2026-09-24): the model the official child is TOLD to run — the selection tag's bare
- * modelId (WS-20: the tag is provider-qualified, the wire id is not). One function, because two
+ * F1 follow-on: a Claude catalog row the official leg can name but Anthropic's API has no spelling for
+ * (`claude-3.7-sonnet`: both it and `claude-3-7-sonnet` are 404s, measured). Refused typed BEFORE the
+ * first turn — `runtime_selection_refused`, `data.reason: "no-wire-model"` — never run on another model.
+ */
+export class OfficialNoWireModel extends Error {
+  readonly code = "runtime_selection_refused" as const;
+  readonly reason = "no-wire-model" as const;
+  constructor(readonly modelRef: string) {
+    super(`the official leg has no wire id for ${modelRef}: Anthropic's API accepts no spelling of ${splitTag(modelRef).modelId}, dotted or dashed, and Winter never runs a different model in its place — choose another Claude model`);
+    this.name = "OfficialNoWireModel";
+  }
+}
+
+/** The providers whose wire is Anthropic's OWN API — the only ones the measured spelling rule below
+ *  covers. Any other provider that reaches this leg keeps its own catalog spelling, untouched. */
+const ANTHROPIC_WIRE_PROVIDERS: ReadonlySet<string> = new Set(["anthropic", "console"]);
+
+/** A family-first Claude id with a DOTTED version (`claude-haiku-4.5`, `claude-opus-4.8`). */
+const DOTTED_CLAUDE_VERSION_RE = /^(claude-[a-z]+)-(\d+)\.(\d+)$/;
+
+/**
+ * F1 (live gate, 2026-09-24): the model the official child is TOLD to run. One function, because two
  * places must agree on it: `officialInputFor` sends it on the flag-settings layer, and
- * `official-session.ts` holds the child's `system/init.model` to it.
+ * `official-session.ts` holds the child's `system/init.model` to it (claude reports the id it was sent).
  *
  * WHY THE FLAG-SETTINGS LAYER. MEASURED through a real daemon on the real 0.3.250 child: the router's
  * official door (0.0.11, and the WS-21 build) never forwards the query's top-level `Options.model` —
  * the child was spawned with no `--model` and no settings `model`, and ran claude's own default
  * (`claude-opus-5`) for a session recorded on `anthropic/claude-haiku-4.5`. `Options.settings` is the
  * door the router's own template names and measures for exactly this field.
+ *
+ * THE WIRE ID (F1 follow-on). The tag's bare modelId, except on Anthropic's own API
+ * (`ANTHROPIC_WIRE_PROVIDERS`), where the pinned catalog's upstream rows carry DOTTED ids the API does
+ * not accept. MEASURED against the real API (read-only `GET /v1/models/<id>`, 2026-09-24):
+ * `claude-haiku-4.5` and `claude-sonnet-4.6` are 404s, their dashed forms (`claude-haiku-4-5`,
+ * `claude-sonnet-4-6`, and `claude-opus-4-5`…`4-8`, `claude-sonnet-4-5`) are 200s. So a dotted version
+ * segment maps to its dashed id; a dated or already-dashed id passes through; any OTHER dotted id has no
+ * accepted spelling (`claude-3.7-sonnet`: dotted and dashed both 404) and refuses typed
+ * (`OfficialNoWireModel`). This mapping belongs in the catalog — the provider catalog should carry
+ * claude's wire id per row, and then this rule goes away.
  */
-export function officialWireModelFor(selection: { modelRef: string }): string {
-  return splitTag(selection.modelRef).modelId;
+export function officialWireModelFor(selection: { modelRef: string }): string | OfficialNoWireModel {
+  const { providerId, modelId } = splitTag(selection.modelRef);
+  if (!ANTHROPIC_WIRE_PROVIDERS.has(providerId) || !modelId.includes(".")) return modelId;
+  const dotted = DOTTED_CLAUDE_VERSION_RE.exec(modelId);
+  if (dotted === null) return new OfficialNoWireModel(selection.modelRef);
+  return `${dotted[1]}-${dotted[2]}-${dotted[3]}`;
 }
 
 /**
@@ -572,6 +606,9 @@ export interface OfficialInput {
    *  that field (disk is touched only by a caller actually about to spawn). `undefined` on the
    *  api-key arm (or when `officialAuthArm` was never threaded at all) — nothing to ensure. */
   anthropicConfigDirToEnsure?: string;
+  /** F1: the model this input tells the child to run (`officialWireModelFor`, already on
+   *  `input.options.settings.model`) — what `official-session.ts` holds `system/init.model` to. */
+  wireModel: string;
 }
 
 /**
@@ -581,9 +618,14 @@ export interface OfficialInput {
 export function officialInputFor(
   input: OfficialSessionInput,
   deps: OfficialInputDeps,
-): OfficialInput | ClaudeExecutableUnavailable | OfficialProjectKeyTooDeep | OfficialCredentialPlanRefused | OfficialConsoleRouterUnsupported | OfficialConsoleProfileMissing {
+): OfficialInput | ClaudeExecutableUnavailable | OfficialProjectKeyTooDeep | OfficialCredentialPlanRefused | OfficialConsoleRouterUnsupported | OfficialConsoleProfileMissing | OfficialNoWireModel {
   const executable = deps.claudeExecutableFor();
   if (executable instanceof ClaudeExecutableUnavailable) return executable;
+
+  // F1: the model this child will be told to run — or the typed refusal for a row with no wire spelling,
+  // before anything else is built.
+  const wireModel = officialWireModelFor(deps.selection);
+  if (wireModel instanceof OfficialNoWireModel) return wireModel;
 
   const projectKey = transcriptProjectKey(input.cwd);
   if (!isVendorCompliantProjectKey(projectKey)) return new OfficialProjectKeyTooDeep(input.cwd, projectKey);
@@ -715,6 +757,7 @@ export function officialInputFor(
 
   return {
     pathToClaudeCodeExecutable: executable.path,
+    wireModel,
     ...(officialAuthArm === "console" ? { anthropicConfigDirToEnsure: anthropicConfigDirFor(deps.home) } : {}),
     input: {
       sessionId: input.sessionId,
@@ -801,7 +844,7 @@ export function officialInputFor(
         settings: {
           // F1: the session's own model — see `officialWireModelFor`. Never the tag, never absent: a
           // child told no model runs the runtime's default, which is the silent substitution this closes.
-          model: officialWireModelFor(deps.selection),
+          model: wireModel,
           permissions: {
             // The SAME constant the Winter leg sends (`mode-options.ts`'s `GLOBAL_READ_ALLOW_RULES`,
             // whose doc carries the ruling and the deny-before-allow argument) — one list, two legs,

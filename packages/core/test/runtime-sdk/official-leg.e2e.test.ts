@@ -2034,18 +2034,23 @@ describeWithClaudeRuntime("the official leg through startDaemon + IPC (P8c-14)",
   // every request carried `claude-opus-5` — because the router's official door never forwards the
   // query's top-level `Options.model`. The model must reach the wire as the tag's bare modelId, and
   // the session must refuse typed rather than run anything else.
-  test("F1: the wire model IS the session's own model (the tag's bare modelId), never the runtime's default", async () => {
-    requests = [];
-    const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: "anthropic/claude-haiku-4-5-20251001" });
-    await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
-    await client.call(METHODS.sessionSend, { sessionId, text: "say hello" });
-    await client.waitFor((e) => (e.type === "turn_completed" || e.type === "agent_error") && e.sessionId === sessionId, 45_000);
-    const errors = client.events.filter((e) => e.sessionId === sessionId && e.type === "agent_error");
-    expect(errors).toEqual([]);
-    const models = requests.filter((r) => r.path === "/v1/messages").map((r) => r.model);
-    expect(models.length).toBeGreaterThan(0);
-    expect(new Set(models)).toEqual(new Set(["claude-haiku-4-5-20251001"]));
-  }, 60_000);
+  // F1 follow-on: a DOTTED catalog row goes out on its measured dashed wire id (`claude-haiku-4.5` is a
+  // 404 on Anthropic's API, `claude-haiku-4-5` a 200) — and the real child's init frame reports the id it
+  // was sent, so the session's init assertion passes on the mapped id.
+  for (const [tag, wire] of [["anthropic/claude-haiku-4-5-20251001", "claude-haiku-4-5-20251001"], ["anthropic/claude-haiku-4.5", "claude-haiku-4-5"]] as const) {
+    test(`F1: ${tag} goes out as ${wire} — the session's own model on its wire id, never the runtime's default`, async () => {
+      requests = [];
+      const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: tag });
+      await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+      await client.call(METHODS.sessionSend, { sessionId, text: "say hello" });
+      await client.waitFor((e) => (e.type === "turn_completed" || e.type === "agent_error") && e.sessionId === sessionId, 45_000);
+      const errors = client.events.filter((e) => e.sessionId === sessionId && e.type === "agent_error");
+      expect(errors).toEqual([]);
+      const models = requests.filter((r) => r.path === "/v1/messages").map((r) => r.model);
+      expect(models.length).toBeGreaterThan(0);
+      expect(new Set(models)).toEqual(new Set([wire]));
+    }, 60_000);
+  }
 
   test("session.interrupt on the official leg ends the turn, never a thrown error", async () => {
     (globalThis as { __setOfficialE2eScript?: (s: AnthropicTurnScript[]) => void }).__setOfficialE2eScript?.([

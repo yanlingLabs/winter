@@ -97,7 +97,7 @@ import { RunHomeError, type RunHome, type RunHomeErrorCode, type RunHomeFor, typ
 import { projectScopeTrusted, type RunHomeSessionFacts } from "./run-home-input";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import { startOfficialSession, type OfficialSession } from "./official-session";
-import { officialAuthArmFor, OfficialConsoleProfileMissing, OfficialConsoleRouterUnsupported, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
+import { officialAuthArmFor, OfficialConsoleProfileMissing, OfficialConsoleRouterUnsupported, OfficialNoWireModel, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
 import { readWinterTasks } from "./tasks-reader";
 
 export type WinterLegRefusalCode =
@@ -1525,6 +1525,8 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       if (err instanceof ClaudeExecutableUnavailable) throw new WinterLegRefusal("claude_executable_unavailable", err.message);
       if (err instanceof OfficialConsoleRouterUnsupported) throw new WinterLegRefusal("official_console_router_unsupported", err.message);
       if (err instanceof OfficialConsoleProfileMissing) throw new WinterLegRefusal("console_profile_missing", err.message);
+      // F1 follow-on: a Claude row with no wire spelling on Anthropic's API — typed, never a fallback.
+      if (err instanceof OfficialNoWireModel) throw new WinterLegRefusal(err.code, err.message, err.reason);
       if (err instanceof RunHomeError) throw new WinterLegRefusal(err.code, err.message);
       throw new WinterLegRefusal("winter_leg_unavailable", `the official child for ${sessionId} could not be started (${err instanceof Error ? err.name : "unknown"})`);
     }
@@ -1653,6 +1655,8 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       if (err instanceof ClaudeExecutableUnavailable) throw new WinterLegRefusal("claude_executable_unavailable", err.message);
       if (err instanceof OfficialConsoleRouterUnsupported) throw new WinterLegRefusal("official_console_router_unsupported", err.message);
       if (err instanceof OfficialConsoleProfileMissing) throw new WinterLegRefusal("console_profile_missing", err.message);
+      // F1 follow-on: a Claude row with no wire spelling on Anthropic's API — typed, never a fallback.
+      if (err instanceof OfficialNoWireModel) throw new WinterLegRefusal(err.code, err.message, err.reason);
       throw new WinterLegRefusal("winter_leg_unavailable", `the official child for ${sessionId} could not be resumed (${err instanceof Error ? err.name : "unknown"})`);
     }
     return session;
