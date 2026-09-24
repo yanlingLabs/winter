@@ -233,8 +233,20 @@ describe("review I7: protected paths vs Bash", () => {
 // parts (`**`, `settings*.json`, `claude-resume-*`) stay the rule's own. `gitignoreMatch` below emulates the
 // measured semantics: `\c` is a literal c, `[…]` a class, `**` any depth, `*`/`?` within one segment.
 describe("round 4, minor 4: glob metacharacters in the daemon's own rule paths", () => {
+  // claude's rule parse (router 3279a1d README, escapeRulePath's table): the content between the parens is
+  // unescaped ONCE — `\(`→`(`, `\)`→`)`, `\\`→`\` — before the gitignore layer reads it.
+  const ruleContentUnescape = (content: string): string => {
+    let out = "";
+    for (let i = 0; i < content.length; i += 1) {
+      const c = content[i]!;
+      const next = content[i + 1];
+      if (c === "\\" && (next === "(" || next === ")" || next === "\\")) { out += next; i += 1; continue; }
+      out += c;
+    }
+    return out;
+  };
   const gitignoreMatch = (rule: string, path: string): boolean => {
-    const pattern = rule.replace(/^[A-Za-z]+\(/, "").replace(/\)$/, "").replace(/^\/\//, "/");
+    const pattern = ruleContentUnescape(rule.replace(/^[A-Za-z]+\(/, "").replace(/\)$/, "")).replace(/^\/\//, "/");
     let re = "";
     for (let i = 0; i < pattern.length; i += 1) {
       const c = pattern[i]!;
@@ -247,12 +259,13 @@ describe("round 4, minor 4: glob metacharacters in the daemon's own rule paths",
     }
     return new RegExp(`^${re}$`).test(path);
   };
-  // R.1 ruling 2: the router's `escapeRulePath` (now imported, the one source). `[`, `]`, `*` escaped once
-  // and `?` raw are measured on both legs; the BACKSLASH spelling is the router's to make claude-correct
-  // (`rule-path-escape-measure.e2e.test.ts` measures it on both real binaries), so it is not pinned here.
-  test("escapeRulePath escapes [ ] * and leaves ? raw", () => {
-    expect(escapeRulePath("/u/[wip]*a?c")).toBe("/u/\\[wip\\]\\*a?c");
-    expect(escapeRulePath("/u/a\\b")).not.toBe("/u/a\\b"); // a backslash is escaped, never passed raw
+  // R.1 ruling 2: the router's `escapeRulePath` (imported, the one source). Router 3279a1d spells it as
+  // claude's rule-content escape over the gitignore escape: `[`, `]`, `*` doubly escaped, `(`/`)` triply,
+  // `\` fourfold, `?` raw (measured on real claude by `rule-path-escape-measure.e2e.test.ts`).
+  test("escapeRulePath escapes [ ] * ( ) \\ at both layers and leaves ? raw", () => {
+    expect(escapeRulePath("/u/[wip]*a?c")).toBe("/u/\\\\[wip\\\\]\\\\*a?c");
+    expect(escapeRulePath("/u/p (old)")).toBe("/u/p \\\\\\(old\\\\\\)");
+    expect(escapeRulePath("/u/a\\b")).toBe("/u/a\\\\\\\\b");
   });
   test("a home containing [x] still has its control-plane deny rules applied — glob parts intact", () => {
     const home = "/Users/x/[wip] homes/.winter";
@@ -269,6 +282,14 @@ describe("round 4, minor 4: glob metacharacters in the daemon's own rule paths",
     expect(writes.some((r) => gitignoreMatch(r, "/p/app/.winter/settings.local.json"))).toBe(true);
     // the old spelling (unescaped) is what failed: `[wip]` read as a one-character class
     expect(gitignoreMatch(`Write(//${home}/run/**)`, `${home}/run/core.sock`)).toBe(false);
+  });
+  test("a home containing parens and a backslash still has its control-plane deny rules applied", () => {
+    for (const home of ["/Users/x/p (old)/.winter", "/Users/x/a\\b/.winter"]) {
+      const writes = controlPlaneDenyRules(home).filter((r) => r.startsWith("Write("));
+      for (const target of [`${home}/run/core.sock`, `${home}/settings.json`, `${home}/trust.json`]) {
+        expect({ target, denied: writes.some((r) => gitignoreMatch(r, target)) }).toEqual({ target, denied: true });
+      }
+    }
   });
 });
 
