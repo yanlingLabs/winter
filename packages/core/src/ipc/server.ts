@@ -12,7 +12,7 @@ import {
   SessionSteerParams, SessionInterruptParams, SessionCompactParams, SkillsListParams, McpListParams, McpEnableParams, McpDisableParams,
   McpAddParams, McpRemoveParams, McpGetParams,
   SkillsReadParams, SkillsWriteParams, SkillsDeleteParams,
-  PluginsListParams, AskUserRespondParams, TaskListParams, PlanRespondParams, SessionSetPolicyParams,
+  AskUserRespondParams, TaskListParams, PlanRespondParams, SessionSetPolicyParams,
   SessionSetModelParams, SessionSetEffortParams, SessionSetActivityParams, SessionSetDirsParams,
   ThreadListParams, ThreadSendParams, AgentStopParams,
   PeripheralLeaseParams, PeripheralRenewParams, PeripheralReleaseParams, PeripheralAdvertiseParams,
@@ -21,7 +21,11 @@ import {
   PluginRegisterParams, ToolRegisterParams, ShortcutRegisterParams, TileUpdateParams,
   ProviderRegisterParams, PluginsContribParams, PluginToolResultParams, HardwareRequestParams, HardwareRespondParams,
   ShortcutInvokeParams, TileActionParams,
-  PluginsInstallParams, PluginEnableParams, PluginDisableParams, PluginRemoveParams, PluginSetConsentParams,
+  PluginSetConsentParams,
+  // WS-21 (spec §5.2, Contract B): `winter plugin` = `claude plugin`.
+  PluginInstallParams, PluginUninstallParams, PluginEnableScopedParams, PluginDisableScopedParams,
+  PluginUpdateParams, PluginListParams, PluginMarketplaceAddParams, PluginMarketplaceRemoveParams,
+  PluginMarketplaceListParams, PluginMarketplaceUpdateParams,
   RoutinesCreateParams, RoutinesListParams, RoutinesUpdateParams, RoutinesDeleteParams,
   MemoryListParams, MemoryReadParams, MemoryWriteParams, MemoryDeleteParams, MemoryAuditParams,
   ProviderConfigureParams,
@@ -60,6 +64,7 @@ import {
 import { createActivityEnforcement } from "../sessions/activity-enforcement";
 import { setSessionActivity, type SetActivityDeps } from "../sessions/set-activity";
 import { setSessionDirs, type SetDirsDeps } from "../sessions/set-dirs";
+import { canonicalSessionCwd } from "../sessions/dirs";
 import { reapEmptySessions } from "../sessions/reaper";
 import { filterRemoteStreamEvent } from "../sessions/remote-stream";
 import { foldPanelTabs } from "../panel/store";
@@ -83,8 +88,6 @@ import { parseModelTag, canonicalizeModelTag, splitTag, UNSTATED_TAG, type Model
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import type { ApprovalBroker } from "../agent/approvals";
 import type { PermissionRules } from "../agent/permission-rules";
-import type { ApprovedProjectRules } from "../agent/approved-project-rules";
-import { repoRootFor } from "../agent/memory-dir";
 import type { QuestionBroker } from "../agent/questions";
 import type { TaskStore } from "../agent/task-store";
 // P8c integration: widened from the concrete `PlanBroker` class (agent/plans.ts) to this
@@ -98,7 +101,7 @@ import type { BackgroundTaskRegistry } from "../agent/bg-registry";
 import type { SkillStore, SkillErrorKind } from "../agent/skills";
 import type { McpManager } from "../agent/mcp/manager";
 import { PluginStore, type PluginInfo } from "../agent/plugins";
-import { pluginSpawnEligible, hookRegistryPlugins } from "../agent/plugins";
+import { pluginSpawnEligible } from "../agent/plugins";
 import type { ToolRegistry } from "../agent/tools/registry";
 import type { PluginSupervisor, PluginConn, InvokeError, EligiblePlugin, SupervisorStatus } from "../plugins/supervisor";
 import type { PluginContribRegistry } from "../plugins/contrib";
@@ -112,8 +115,12 @@ import { modelCatalogWire } from "../providers/model-catalog-wire";
 import { withProblemsForRoles, type RoleHealthRegistry } from "../providers/role-health";
 import type { InternalRouter } from "../providers/internal-router";
 import { internalRoleProblemsFor } from "../providers/internal-role-problems";
-import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, readRawSettings } from "../settings";
-import { addUserMcpServer, removeUserMcpServer } from "../agent/mcp/mcp-write";
+import { catalogRoleProblemsFor } from "../providers/catalog-role-problems";
+import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, type McpServerSettingsEntry } from "../settings";
+import { addMcpServerInScope, mcpServerInScope, removeMcpServerInScope, type McpScope, type McpScopeTarget } from "../agent/mcp/mcp-write";
+import { saveAnswerEverywhere, saveAnswerInProject, SavedAnswerRefused } from "../agent/saved-answers";
+import { localScopeKeyFor, projectScopeRootFor, projectScopeTrusted } from "../runtime-sdk/run-home-input";
+import { readSdkGlobalConfig, SdkFileUnreadable, updateSdkSettings } from "../sdk-files";
 import { bypassAllowedAtSpawn, disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
 import { diagnoseRuntimes } from "../runtime-sdk/runtimes-doctor";
@@ -124,11 +131,21 @@ import {
   installedClaudeAgentSdkVersion, installedWinterRuntimeSdkVersion,
 } from "../runtime-sdk/versions";
 import { dispatchPinMessage } from "../agent/dispatch-config";
+// plugin.setConsent (spec §5.4, "the extras keep their own consents") still writes the daemon's own
+// `<home>/settings.json` `plugins.consents` — the one pre-WS-21 lifecycle export this block still
+// needs. Every other pre-WS-21 lifecycle export (installPluginFromDir, setPluginEnabled(Settings),
+// …) is retired here in favor of the Contract B adapter below.
+import { stripPluginConsents } from "../plugins/lifecycle";
+import { consentedClassesFor, pluginConsentFingerprint } from "../plugins/consent-fingerprint";
+import { pluginHooksFor } from "../plugins/plugin-hooks";
 import {
-  deriveInstallName, installPluginFromDir, missingConsents, buildConsentBlock, enableNotice, applyFreshPluginConsent,
-  setPluginEnabled, grantPluginConsents, removePluginFromSettings, removePluginDir, stripPluginConsents,
-  type InstallPluginResult,
-} from "../plugins/lifecycle";
+  addMarketplace, installPlugin, listMarketplaces, listPlugins, PluginManagerError, removeMarketplace,
+  setPluginEnabled as setPluginEnabledOnAdapter, uninstallPlugin, updateMarketplace, updatePlugin,
+  type PluginManagerOptions, type PluginScope as AdapterPluginScope,
+} from "../plugins/plugin-manager";
+import { loadManifest, requiredConsentClasses } from "../agent/plugin-manifest";
+import { pluginSkillsFor } from "../plugins/plugin-skills";
+import { sdkPluginsRoot, sdkSettingsPath } from "../agent/paths";
 
 interface ConnState {
   /** Chat Slice D task 2: a process-unique id for this socket, minted at `open`. The first key of
@@ -293,11 +310,10 @@ export interface IpcServerOptions {
   // tests, and any daemon with no agentProvider) makes a rule-bearing optionId a silent no-op —
   // same "typed no-op, never a crash" precedent as `broker`/`dirs`/etc below — since without an
   // engine there is no approval flow that could ever produce a rule-bearing optionId to persist.
+  //
+  // WS-21: `approval.respond` no longer writes through it (a card's saved answers go to claude's own
+  // locations, `agent/saved-answers.ts`); kept for the IPC paths that READ it.
   permissionRules?: PermissionRules;
-  /** Review I2 (lane B): the daemon's own record of rules approved "in this project"
-   *  (`agent/approved-project-rules.ts`), written alongside `permissionRules`' in-repo copy by
-   *  `approval.respond` — the one writer. Absent (a bare test server) = not recorded. */
-  approvedProjectRules?: ApprovedProjectRules;
   dirs?: SessionDirectories; // live allowed-roots per session; addDir/setCwd need it
   trust?: TrustStore;        // per-directory trust; session.create result + daemon.trustDir
   bg?: BackgroundTaskRegistry; // background bash tasks; bg.list/peek/kill/killAll
@@ -851,10 +867,38 @@ function resolveModelSelection(model: string, settings?: Settings): string {
 function liveSettingsFor(opts: { winterHome?: string }): Settings | undefined {
   if (!opts.winterHome) return undefined;
   try {
-    return loadSettings(join(opts.winterHome, "settings.json"));
+    // WS-21: never the moved keys (`withoutMovedKeys`) — their only doors are the `sdk…` readers.
+    return liveSettingsView(loadSettings(join(opts.winterHome, "settings.json")));
   } catch {
     return undefined;
   }
+}
+
+/** WS-21 (spec §4.4): the MCP doors speak claude's three scopes. `local` and `project` name a project,
+ *  so they need the caller's `cwd`. The local entry in `sdk/.winter.json` is keyed by `localScopeKeyFor`
+ *  (review I5 — exactly the run home's key); the project file lives at the project root the run home reads
+ *  it from (`projectScopeRootFor`, R.3 residual: a linked worktree's own top). Refused typed without a cwd. */
+function mcpScopeTarget(method: string, winterHome: string, p: { scope: McpScope; cwd?: string | undefined }): McpScopeTarget {
+  if (p.scope === "user") return { home: winterHome, scope: "user" };
+  if (p.cwd === undefined || p.cwd === "") {
+    throw new RpcFailure(ERR.INVALID_PARAMS, `${method}: the "${p.scope}" scope names a project — pass the project's cwd`, { code: "mcp_scope_needs_cwd" });
+  }
+  return { home: winterHome, scope: p.scope, root: p.scope === "local" ? localScopeKeyFor(p.cwd) : projectScopeRootFor(p.cwd) };
+}
+
+/** Which credential-shaped headers the read door dropped from ONE scope's servers in `sdk/.winter.json`
+ *  (names only). The project file forwards headers verbatim (claude parity), so it has none. */
+function strippedMcpHeaders(t: McpScopeTarget): Record<string, string[]> {
+  if (t.scope === "project") return {};
+  const config = structuredClone(readSdkGlobalConfig(t.home));
+  const servers = t.scope === "user" ? config.mcpServers : (t.root !== undefined ? config.projects?.[t.root]?.mcpServers : undefined);
+  return stripCredentialShapedMcpHeaders({ mcpServers: servers ?? {} });
+}
+
+/** An `SdkFileUnreadable` (the user's `sdk/` file does not parse) is reported as what it is, typed. */
+function sdkWriteFailure(err: unknown): RpcFailure {
+  if (err instanceof SdkFileUnreadable) return new RpcFailure(ERR.INVALID_PARAMS, err.message, { code: err.code });
+  return new RpcFailure(ERR.INVALID_PARAMS, (err as Error).message);
 }
 
 /** Maps a failed `PluginSupervisor.invoke()` result to the message a `throw new Error(...)` in
@@ -1377,30 +1421,113 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     try { return statSync(path).mtimeMs; } catch { return 0; } // missing file/dir -> key component 0
   }
 
-  /** The cache key: settings.json's mtime (every lifecycle write touches it) + the plugins dir's
-   *  mtime (install/remove touch it — enable/disable/setConsent don't, but they always write
-   *  settings.json, which is enough on its own to change this key). */
+  /** The cache key: WS-21 — the installed set lives in `sdk/plugins/installed_plugins.json`
+   *  (install/uninstall/update touch it) and the enabled set in `sdk/settings.json`'s
+   *  `enabledPlugins` (enable/disable touch it); `<home>/settings.json` still carries
+   *  `plugins.consents` (setConsent touches it). Three stats, not the pre-WS-21 two — none of the
+   *  new adapter's writes touch either `<home>/settings.json` or `<home>/plugins` any more. */
   function livePluginsCacheKey(winterHome: string): string {
-    return `${statMtimeOrZero(join(winterHome, "settings.json"))}:${statMtimeOrZero(join(winterHome, "plugins"))}`;
+    return [
+      statMtimeOrZero(join(sdkPluginsRoot(winterHome), "installed_plugins.json")),
+      statMtimeOrZero(sdkSettingsPath(winterHome)),
+      statMtimeOrZero(join(winterHome, "settings.json")),
+    ].join(":");
   }
 
-  /** Called at the end of every plugin-lifecycle RPC handler that mutates settings.json or the
-   *  plugins directory (pluginsInstall/pluginEnable/pluginDisable/pluginRemove/pluginSetConsent) —
+  /** Called at the end of every plugin-lifecycle RPC handler that mutates the installed set, the
+   *  enabled set, or `plugins.consents` (plugin.install/uninstall/enable/disable/update/setConsent) —
    *  see the mtime-aliasing note above for why this explicit invalidation exists alongside the
    *  mtime key rather than instead of it. */
   function invalidateLivePluginsCache(): void {
     livePluginsCache = null;
   }
 
-  /** Rebuilds `opts.hooks` (Phase 4f Task 2) off a FRESH `livePlugins()` read — called at every
-   *  point a plugin-lifecycle RPC below already calls `invalidateLivePluginsCache()`, so the two
-   *  never drift: whatever `livePlugins()` would now return, the hook registry reflects. A safe
-   *  no-op when `opts.hooks` or `opts.winterHome` is unset (most existing tests) — same "typed
-   *  no-op" precedent `hotApplyStart`/`hotApplyStop` already follow for a no-provider daemon. */
-  function rebuildHookRegistry(): void {
-    if (!opts.hooks || !opts.winterHome) return;
-    opts.hooks.rebuild(hookRegistryPlugins(livePlugins(), opts.winterHome));
+  /** WS-21: `PluginManagerOptions` for the plugin RPC block below — `pluginsRoot` is always
+   *  home-rooted (Contract B's install root never moves per scope); `settingsPathFor` resolves
+   *  which file THAT scope's `enabledPlugins` lives in. `user` needs no `cwd`; `project`/`local` do
+   *  (refused typed otherwise — the caller passes `cwd` on every scoped call, `p.cwd`). */
+  function pluginManagerOptionsFor(winterHome: string, cwd: string | undefined): PluginManagerOptions {
+    return {
+      pluginsRoot: sdkPluginsRoot(winterHome),
+      settingsPathFor: (scope: AdapterPluginScope): string => {
+        if (scope === "user") return sdkSettingsPath(winterHome);
+        if (!cwd) throw new RpcFailure(ERR.INVALID_PARAMS, `plugin scope "${scope}" requires cwd`);
+        // R.3 I-2 + residual: both project-named scopes are keyed where the run home reads them — the
+        // cwd's own git top (a linked worktree's own), `localScopeKeyFor` / `projectScopeRootFor`.
+        if (scope === "local") return join(localScopeKeyFor(cwd), ".winter", "settings.local.json");
+        return join(projectScopeRootFor(cwd), ".winter", "settings.json");
+      },
+    };
   }
+
+  /** The plugin name half of a `"<name>@<marketplace>"` spec — for `hotApplyStop`, which the
+   *  supervisor tracks by bare name (`hotApplyStart`'s own `config.id: info.name`). */
+  function pluginNameOfSpec(spec: string): string {
+    const at = spec.lastIndexOf("@");
+    return at > 0 ? spec.slice(0, at) : spec;
+  }
+
+  /** I1 fix round 1: `plugin.list`'s `extras` — winter-plugin.json's tier/permissions/entry plus
+   *  the SAME consent-completeness pair `agent/plugins.ts#PluginStore` computes (requiredConsents
+   *  from the manifest, consented from `<home>/settings.json`'s `plugins.consents`, keyed by the
+   *  qualified `"<id>@<marketplace>"` spec — the same key `plugin.setConsent` writes under). `undefined`
+   *  when the plugin has no winter-plugin.json (matches `PluginInfo.legacy`'s own "no manifest"
+   *  case). Scope-independent: `plugins.consents` is Winter's own daemon-level store (spec §4.1,
+   *  "stays"), not tied to which sdk file the enabled flag lives in, so this works the same for a
+   *  project/local-scope listing as it does for user scope.
+   *
+   *  C1 fix round 2: `consented` is gated on the stored record's fingerprint matching a FRESH one
+   *  computed off `installPath` + the plugin's WHOLE disclosure (entry, permissions.tcc/hardware,
+   *  requiredConsents) right now — the SAME gate `agent/plugins.ts#PluginStore` applies at
+   *  boot/enable time (`plugins/consent-fingerprint.ts`), so a folder swap under the same spec, an
+   *  edited entry, or a widened permission set under an already-consented class all read as
+   *  unconsented here too.
+   *
+   *  L5 re-review (TOCTOU): `fingerprint` itself is now ALSO returned over the wire — the disclosure
+   *  the caller is looking at, right now, which `plugin.setConsent` must echo back for the daemon to
+   *  confirm nothing changed between "the sheet was shown" and "the user clicked consent". */
+  function pluginExtrasFor(installPath: string, id: string, consentRecord: unknown): {
+    tier: "capability" | "platform";
+    permissions?: { exec?: boolean; tcc?: string[]; hardware?: string[] };
+    requiredConsents: Array<"exec" | "tcc" | "hardware">;
+    consented: Array<"exec" | "tcc" | "hardware">;
+    entry?: { command: string; args?: string[] };
+    fingerprint: string;
+  } | undefined {
+    const { manifest } = loadManifest(installPath, id);
+    if (!manifest) return undefined;
+    const requiredConsents = requiredConsentClasses(manifest);
+    const fingerprint = pluginConsentFingerprint(installPath, {
+      entry: manifest.entry, tcc: manifest.permissions?.tcc, hardware: manifest.permissions?.hardware, requiredConsents,
+    });
+    const consented = consentedClassesFor(consentRecord, fingerprint);
+    return {
+      tier: manifest.tier,
+      ...(manifest.permissions ? { permissions: manifest.permissions } : {}),
+      requiredConsents,
+      consented,
+      ...(manifest.entry ? { entry: { command: manifest.entry.command, ...(manifest.entry.args ? { args: manifest.entry.args } : {}) } } : {}),
+      fingerprint,
+    };
+  }
+
+  /** `PluginManagerError` (a typed, expected refusal — unknown marketplace/plugin, not installed,
+   *  an unwritable settings file, …) becomes `RpcFailure(INVALID_PARAMS, message)`; anything else
+   *  propagates unchanged — never swallowed. */
+  function throwPluginManagerFailure(err: unknown): never {
+    if (err instanceof PluginManagerError) throw new RpcFailure(ERR.INVALID_PARAMS, err.message);
+    throw err;
+  }
+
+  // Post-merge round (DECISION 22): `rebuildHookRegistry()` -- which fed the daemon's OWN
+  // HookRegistry (`opts.hooks`) with plugin-contributed hooks off `hookRegistryPlugins` -- and its
+  // three call sites in the plugin lifecycle RPCs below are retired. Plugin hooks reach a session's
+  // runtime child through the shared run folder and both SDKs natively now (spec §5.1/§5.3); the
+  // daemon's own `HookRegistry` never executed plugin hooks again after `pluginHooksEligible` was
+  // hardcoded `false` (WS-21) -- these calls were already dead (see the removed inline comments),
+  // and nothing else in the codebase ever calls `HookRegistry#rebuild()` (daemon.ts constructs
+  // `opts.hooks` but never rebuilds it), so the registry now holds no plugin hooks for the whole
+  // daemon lifetime, not just around these three RPCs.
 
   /** A fresh, settings-current view of installed plugins — unlike `opts.plugins` (its
    *  `enabled`/`disabled`/`consents` deps are a snapshot captured once at daemon boot and never
@@ -1448,7 +1575,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   function hotApplyStart(info: PluginInfo): SupervisorStatus | "na" {
     if (!pluginSpawnEligible(info)) return "na";
     if (!opts.supervisor || !opts.registry || !opts.winterHome) return "stopped";
-    const config: EligiblePlugin = { id: info.name, dir: join(opts.winterHome, "plugins", info.name), entry: info.entry! };
+    // WS-21: `info.installPath` — a plugin's real install path, straight off Contract B's own
+    // record, never the pre-WS-21 `<home>/plugins/<name>` convention (agent/plugins.ts's own doc).
+    const config: EligiblePlugin = { id: info.name, dir: info.installPath, entry: info.entry! };
     opts.supervisor.restart(config);
     return opts.supervisor.status(info.name);
   }
@@ -1651,7 +1780,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // SP3.4: a remote (phone) caller can't browse this Mac's filesystem to pick a cwd — its
         // sessions default to the home directory (the same value session.dispatch uses). Scoped to
         // the remote role so local/harness callers keep today's semantics (omitted cwd stays unset).
-        const cwd = p.cwd ?? (socket.data.authedRole === "remote" ? homedir() : undefined);
+        // WS-21 round 3: stored CANONICAL — the cwd is the transcript key both legs use (`canonicalSessionCwd`).
+        const givenCwd = p.cwd ?? (socket.data.authedRole === "remote" ? homedir() : undefined);
+        const cwd = givenCwd === undefined ? undefined : canonicalSessionCwd(givenCwd);
         // Plan-immunity (2026-07-28, USER-REVISED design): a chat session's approvalPolicy is
         // ALWAYS the fixed internal "chat" policy (gate.ts's SessionApprovalPolicy) — COERCED here,
         // not rejected, regardless of whatever the caller sent (or omitted; `p.approvalPolicy`'s
@@ -1739,7 +1870,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             rpcFromWinterRefusal(err);
           }
         }
-        const trusted = cwd ? (opts.trust?.isTrusted(cwd) ?? false) : false;
+        // R.3 re-review B-2: the project-scope trust rule (`projectScopeTrusted`), as the card and the save use.
+        const trusted = cwd && opts.trust ? projectScopeTrusted(cwd, opts.trust) : false;
         // Broadcast the session_created event to every authed harness (not just attachments —
         // a brand-new session has none) so other harnesses can offer to follow (spec §4.4).
         const created = opts.store.read(sessionId, 0)[0];
@@ -1878,7 +2010,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // request that never named a model). `modelRef` stays unset (the dispatch singleton always
         // uses the live/boot default model).
         const sessionId = opts.store.createSession("global", {
-          cwd: homedir(), approvalPolicy: "auto", origin: "dispatch", mode: "dispatch",
+          cwd: canonicalSessionCwd(homedir()), approvalPolicy: "auto", origin: "dispatch", mode: "dispatch",
           ...(opts.winter !== undefined ? { runtimeKind: "winter-agent" as const } : {}),
         });
         if (opts.winter !== undefined) {
@@ -2074,26 +2206,39 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.skillsList: {
         const p = parseParams(SkillsListParams, params);
-        if (!opts.skills) return { ok: true, skills: [] };
         // Batch 3 (item 2): overlay `denied`/`deniedBy` from the GLOBAL `settings.permissions.deny`
         // list — `liveSettingsFor` is the same "typed absence, never a crash" reader every other
         // opts.winterHome-gated path in this file uses. `skillDenyRule` is the ONE place the exact
         // `Skill(<name>)` string is spelled, shared with the writer (`setSkillDenied`, settings.ts)
         // so the two can never drift onto different strings for the same skill.
-        const denySet = new Set(liveSettingsFor(opts)?.permissions?.deny ?? []);
+        // WS-21: the deny list moved to `sdk/settings.json` (`sdkDenyRules`, read live).
+        const denySet = new Set(opts.winterHome ? sdkDenyRules(opts.winterHome) : []);
+        // Post-merge fix round, finding 3 (Opus review): the merge's own resolution of this handler
+        // assumed L3's `agent/skills.ts` rewrite now reads plugin skills itself — wrong. L3 DELETED
+        // `SkillStore`'s own plugin tier outright (it used to scan the retired `<home>/plugins`
+        // layout); `store.list()` returns no plugin-sourced entries at all any more, in either
+        // direction. `plugins/plugin-skills.ts#pluginSkillsFor` (its own header already said this)
+        // is still the ONE place the plugin half comes from, straight off Contract B's
+        // installed+enabled set — appended here, never filtered, since there is nothing left for
+        // `store.list()` to produce that would need filtering out.
+        if (!opts.skills) return { ok: true, skills: [] };
         const store = opts.skills;
-        // One live read of which plugins a session may load skills from (enabled + `exec` consent).
-        const eligible = store.sessionEligiblePlugins();
-        const skills = store.list({ cwd: p.cwd ?? null }).map((s) => {
+        const nonPluginSkills = store.list({ cwd: p.cwd ?? null }).map((s) => {
           const denied = denySet.has(skillDenyRule(s.name));
           // Lane B (2026-09-22): whether a session can load it at all — the SAME rule the runtime child
           // is handed its skills by (`SkillStore.sessionAvailability`), so a client never shows a skill
           // as usable that no session can load (today: only an enabled, consented plugin's skills, in a
           // Code session on either leg).
-          const withAvailability = { ...s, ...store.sessionAvailability(s, eligible) };
+          const withAvailability = { ...s, ...store.sessionAvailability(s) };
           return denied ? { ...withAvailability, denied: true, deniedBy: "settings" as const } : withAvailability;
         });
-        return { ok: true, skills };
+        const pluginSkills = opts.winterHome
+          ? (await pluginSkillsFor(pluginManagerOptionsFor(opts.winterHome, p.cwd))).map((s) => {
+              const denied = denySet.has(skillDenyRule(s.name));
+              return denied ? { ...s, denied: true, deniedBy: "settings" as const } : s;
+            })
+          : [];
+        return { ok: true, skills: [...nonPluginSkills, ...pluginSkills] };
       }
 
       // -----------------------------------------------------------------------------------------
@@ -2173,9 +2318,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // which by construction can no longer say what it removed) so a hand-edited header shows up
         // HERE even though `configuredMcpServersFor` never forwards it to either leg. NEVER the
         // header value, only its name — same posture as the boot-time log line this mirrors.
-        const strippedHeaders = opts.winterHome
-          ? stripCredentialShapedMcpHeaders(readRawSettings(join(opts.winterHome, "settings.json")) ?? {})
-          : {};
+        const strippedHeaders = opts.winterHome ? strippedMcpHeaders({ home: opts.winterHome, scope: "user" }) : {};
         const withStripped = <T extends { name: string }>(row: T): T | (T & { strippedHeaders: string[] }) => {
           const headers = strippedHeaders[row.name];
           return headers && headers.length > 0 ? { ...row, strippedHeaders: headers } : row;
@@ -2189,7 +2332,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // `tracked` at all and would otherwise vanish from this report entirely rather than reading
         // "disabled" — the same "reported, not silently absent" posture every other disabled entry
         // in this list already has.
-        const unmanaged = Object.entries(settings?.mcpServers ?? {})
+        const unmanaged = Object.entries(opts.winterHome ? sdkUserMcpServers(opts.winterHome) : {})
           .filter(([name, entry]) => (entry.type !== "stdio" || disabled.has(name)) && !trackedNames.has(name))
           .map(([name, entry]) => withStripped({
             name,
@@ -2229,62 +2372,59 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // CONFIGURED stdio user-tier shape is restartable this way (`stdioMcpServersFor`'s own
         // narrowing — the one shape `McpManager` can run at all); an HTTP/SSE or project `.mcp.json`
         // name is a no-op here, same as it always was for `mcp.enable`.
-        const cfg = stdioMcpServersFor(next)[p.name];
+        const cfg = stdioMcpServersFor(sdkUserMcpServers(opts.winterHome), next.mcp?.disabled)[p.name];
         if (cfg) await opts.mcp?.startOneUserServer(p.name, cfg);
         return { ok: true, name: p.name, enabled: true };
       }
       // -----------------------------------------------------------------------------------------
-      // `winter mcp add`/`add-json`/`remove` (CLI parity with `claude mcp add`/`remove`) — USER
-      // scope only; `mcp-cli.ts`'s own header explains why project scope (`<cwd>/.mcp.json`) is
-      // never RPC-routed at all. Both handlers delegate the actual "is this a valid write" decision
-      // to `agent/mcp/mcp-write.ts` (`addUserMcpServer`/`removeUserMcpServer`) — the SAME functions
-      // the CLI's no-daemon fallback calls, so the two write paths (daemon live vs. not) can never
-      // silently diverge on what they accept. Two DISTINCT failure shapes on add: a name-rule
-      // refusal (reserved namespace, already-exists) throws from `addUserMcpServer` itself; a
-      // schema refusal (the credential-shaped-header door, `refuseCredentialShapedHeaders`) throws
-      // from `saveSettings` one line later — both are caught here and reported as
-      // `ERR.INVALID_PARAMS`, never `ERR.INTERNAL`, since either one is the CALLER's input being
-      // wrong, not a server fault.
+      // `winter mcp add`/`add-json`/`remove` (CLI parity with `claude mcp add`/`remove`), over claude's
+      // three scopes (WS-21, `McpScopeSchema`). Both handlers delegate the actual "is this a valid
+      // write" decision to `agent/mcp/mcp-write.ts` — the name rule (reserved namespace, already-
+      // exists) and the entry schema (the credential-shaped-header refusal) both run before anything
+      // is written, and either is reported as `ERR.INVALID_PARAMS`, never `ERR.INTERNAL`: it is the
+      // CALLER's input being wrong, not a server fault. An unparseable `sdk/.winter.json` is refused
+      // typed (`sdk_file_unreadable`) and left untouched.
       // -----------------------------------------------------------------------------------------
       case METHODS.mcpAdd: {
         const p = parseParams(McpAddParams, params);
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "mcp.add is not available on this server (no winterHome configured)");
-        const settingsPath = join(opts.winterHome, "settings.json");
-        let next: Settings;
+        const target = mcpScopeTarget("mcp.add", opts.winterHome, p);
+        // WS-21 (spec §4.4): `user` → `sdk/.winter.json` `mcpServers`; `local` (the default) → its
+        // `projects[<root>].mcpServers`; `project` → `<root>/.winter/mcp.json`. The name rule, the
+        // no-silent-overwrite rule and the entry schema (credential-shaped headers refused in the user's
+        // own file) all run BEFORE anything is written (`addMcpServerInScope`).
+        let entry: { type: "stdio" | "http" | "sse" };
         try {
-          next = addUserMcpServer(loadSettings(settingsPath), p.name, p.entry);
+          entry = addMcpServerInScope(target, p.name, p.entry);
         } catch (err) {
-          throw new RpcFailure(ERR.INVALID_PARAMS, (err as Error).message);
+          throw sdkWriteFailure(err);
         }
-        try {
-          saveSettings(settingsPath, next);
-        } catch (err) {
-          throw new RpcFailure(ERR.INVALID_PARAMS, (err as Error).message);
-        }
-        // Mirrors `mcp.enable`'s own restart (symmetry, same rationale): a newly-added stdio user
-        // server must be usable on THIS incarnation's next turn, not just after a daemon restart —
-        // an http/sse entry has no in-daemon client (never started here either way), and a name
-        // ALSO listed in `mcp.disabled` is correctly excluded by `stdioMcpServersFor` (added, but
-        // stays stopped until enabled — `started: false` says so honestly).
+        // Mirrors `mcp.enable`'s own restart (symmetry, same rationale): a newly-added stdio USER server
+        // must be usable on THIS incarnation's next turn, not just after a daemon restart — the daemon's
+        // own registry runs user stdio servers only (a local or project server reaches each session's
+        // child through its own configuration), an http/sse entry has no in-daemon client, and a name
+        // ALSO listed in `mcp.disabled` stays stopped until enabled — `started: false` says so honestly.
         let started = false;
-        if (p.entry.type === "stdio") {
-          const cfg = stdioMcpServersFor(next)[p.name];
+        if (target.scope === "user" && entry.type === "stdio") {
+          const cfg = stdioMcpServersFor(sdkUserMcpServers(opts.winterHome), liveSettingsFor(opts)?.mcp?.disabled)[p.name];
           if (cfg) { await opts.mcp?.startOneUserServer(p.name, cfg); started = true; }
         }
-        return { ok: true, name: p.name, transport: p.entry.type, started };
+        return { ok: true, name: p.name, transport: entry.type, started, scope: p.scope };
       }
       case METHODS.mcpRemove: {
         const p = parseParams(McpRemoveParams, params);
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "mcp.remove is not available on this server (no winterHome configured)");
-        const settingsPath = join(opts.winterHome, "settings.json");
-        const { settings: next, removed } = removeUserMcpServer(loadSettings(settingsPath), p.name);
-        if (removed) {
-          saveSettings(settingsPath, next);
-          // Stop a live tracked instance now, same as `mcp.disable` — a removed server must not go
-          // on answering tool calls until the next daemon restart.
-          opts.mcp?.stopServer(p.name);
+        const target = mcpScopeTarget("mcp.remove", opts.winterHome, p);
+        let removed: boolean;
+        try {
+          removed = removeMcpServerInScope(target, p.name);
+        } catch (err) {
+          throw sdkWriteFailure(err);
         }
-        return { ok: true, name: p.name, removed };
+        // Stop a live tracked user instance now, same as `mcp.disable` — a removed server must not go on
+        // answering tool calls until the next daemon restart.
+        if (removed && target.scope === "user") opts.mcp?.stopServer(p.name);
+        return { ok: true, name: p.name, removed, scope: p.scope };
       }
       // -----------------------------------------------------------------------------------------
       // `winter mcp get <name>` — read-only, degrades to `found: false` rather than throwing on a
@@ -2292,22 +2432,22 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // posture `mcp.list` already has). Reports the FULL configured shape (`mcp.list` deliberately
       // does not — that RPC is a live-status listing, not a config reader) plus the same
       // `strippedHeaders` read-door correction `mcp.list` reports, computed the identical way (off
-      // the RAW file, never off the already-stripped `settings` value, which by construction can no
-      // longer say what it removed).
+      // the RAW file, never off the already-stripped parse, which by construction can no longer say
+      // what it removed).
       // -----------------------------------------------------------------------------------------
       case METHODS.mcpGet: {
         const p = parseParams(McpGetParams, params);
-        const settings = liveSettingsFor(opts);
-        const entry = settings?.mcpServers?.[p.name];
-        if (!entry) return { ok: true, name: p.name, found: false };
-        const disabled = new Set(settings?.mcp?.disabled ?? []);
-        const strippedHeaders = opts.winterHome
-          ? stripCredentialShapedMcpHeaders(readRawSettings(join(opts.winterHome, "settings.json")) ?? {})[p.name]
-          : undefined;
+        if (!opts.winterHome) return { ok: true, name: p.name, found: false, scope: p.scope };
+        const target = mcpScopeTarget("mcp.get", opts.winterHome, p);
+        const entry = mcpServerInScope(target, p.name) as McpServerSettingsEntry | undefined;
+        if (!entry) return { ok: true, name: p.name, found: false, scope: p.scope };
+        const disabled = new Set(liveSettingsFor(opts)?.mcp?.disabled ?? []);
+        const strippedHeaders = strippedMcpHeaders(target)[p.name];
         const base = {
           ok: true as const,
           name: p.name,
           found: true as const,
+          scope: p.scope,
           transport: entry.type,
           disabled: disabled.has(p.name),
           ...(strippedHeaders && strippedHeaders.length > 0 ? { strippedHeaders } : {}),
@@ -2331,7 +2471,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // read their absent-block defaults (off / on respectively) when settings can't be loaded.
         let settings: Settings | null = null;
         if (opts.winterHome) {
-          try { settings = loadSettings(join(opts.winterHome, "settings.json")); } catch { settings = null; }
+          try { settings = liveSettingsView(loadSettings(join(opts.winterHome, "settings.json"))); } catch { settings = null; }
         }
         // The SAME table `session-driver.ts` passes every real session's `Options.disallowedTools`
         // through (`capabilityTools: WINTER_CAPABILITY_TOOLS`) — computed once per mode, not
@@ -2403,7 +2543,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         parseParams(VersionsGetParams, params);
         let settings: Settings | undefined;
         if (opts.winterHome) {
-          try { settings = loadSettings(join(opts.winterHome, "settings.json")); } catch { settings = undefined; }
+          try { settings = liveSettingsView(loadSettings(join(opts.winterHome, "settings.json"))); } catch { settings = undefined; }
         }
         const report = await diagnoseRuntimes({ execPath: process.execPath, home: opts.winterHome ?? homedir(), env: process.env, settings });
         return {
@@ -2467,13 +2607,14 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         parseParams(SettingsModelRolesParams, params);
         let settings: Settings | null = null;
         if (opts.winterHome) {
-          try { settings = loadSettings(join(opts.winterHome, "settings.json")); } catch { settings = null; }
+          try { settings = liveSettingsView(loadSettings(join(opts.winterHome, "settings.json"))); } catch { settings = null; }
         }
         // 2026-09-18: `problem` is merged in HERE, not inside `modelRolesFor`/`modelRoleInfo`
         // (settings.ts) — those stay pure `Settings -> …` readers with no fs/registry dependency;
         // `withProblemsForRoles` is the wire-only augmentation (`providers/role-health.ts`'s own doc
         // comment explains the split).
-        return { ok: true, roles: internalRoleProblemsFor(withProblemsForRoles(modelRolesFor(settings, opts.boundProviderId?.(), opts.internalRouter?.view.snapshot()), opts.roleHealth), settings, opts.internalRouter) };
+        // R.1 ruling 1: a role naming a model the catalog retired says so, over every other note.
+        return { ok: true, roles: catalogRoleProblemsFor(internalRoleProblemsFor(withProblemsForRoles(modelRolesFor(settings, opts.boundProviderId?.(), opts.internalRouter?.view.snapshot()), opts.roleHealth), settings, opts.internalRouter)) };
       }
       // Daemon settings surface (2026-09-17 plan, item 4) — the ONE write door for all nine model
       // roles. LOCAL-ROLE ONLY. Mirrors `settings.setAdvisorModel`'s own handler shape exactly
@@ -2502,7 +2643,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           throw new RpcFailure(ERR.INVALID_PARAMS, err instanceof Error ? err.message : String(err));
         }
         saveSettings(settingsPath, next);
-        const roles = internalRoleProblemsFor(withProblemsForRoles(modelRolesFor(next, opts.boundProviderId?.(), opts.internalRouter?.view.snapshot()), opts.roleHealth), next, opts.internalRouter);
+        // WS-21 review M3: the file is written as stored; the answer reads it the way every live view does.
+        const nextView = liveSettingsView(next);
+        const roles = catalogRoleProblemsFor(internalRoleProblemsFor(withProblemsForRoles(modelRolesFor(nextView, opts.boundProviderId?.(), opts.internalRouter?.view.snapshot()), opts.roleHealth), nextView, opts.internalRouter));
         return { ok: true, model: roles[p.role].model, roles };
       }
       // -----------------------------------------------------------------------------------------
@@ -2535,29 +2678,167 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.settingsSetSkillDenied: {
         const p = parseParams(SettingsSetSkillDeniedParams, params);
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "settings.setSkillDenied is not available on this server (no winterHome configured)");
-        const settingsPath = join(opts.winterHome, "settings.json");
-        const settings = loadSettings(settingsPath);
-        const next = setSkillDenied(settings, p.name, p.denied);
-        saveSettings(settingsPath, next);
+        // WS-21: `permissions.deny` lives in `sdk/settings.json` (claude `Settings`) — the same file both
+        // runtimes read; `updateSdkSettings` is atomic and preserves every other key.
+        try {
+          updateSdkSettings(opts.winterHome, (s) => setSkillDenied(s, p.name, p.denied));
+        } catch (err) {
+          throw sdkWriteFailure(err);
+        }
         return { ok: true, name: p.name, denied: p.denied, rule: skillDenyRule(p.name) };
       }
-      case METHODS.pluginsList: {
-        parseParams(PluginsListParams, params);
-        // Phase 4d-i Task 4: enrich each entry with live PluginSupervisor runtime status. Kept
-        // HERE (the ipc handler, which has `opts.supervisor`) rather than in PluginStore.list()
-        // (agent/plugins.ts), which stays pure fs/settings with no supervisor coupling. Tier-2
-        // (pluginSpawnEligible — platform tier, entry present, enabled, consented) plugins get the
-        // real SupervisorStatus (defaulting to "stopped" when this plugin was never tracked by the
-        // supervisor at all, e.g. no agentProvider so no PluginSupervisor was even built); Tier-1
-        // (capability) and legacy plugins never run a process, so they always report "na".
-        // Phase 4d-ii Task 2: `livePlugins()` (not the boot-time-stale `opts.plugins` directly) so
-        // a `plugin.enable`/`disable`/`setConsent` this same connection just called is reflected
-        // immediately — see that helper's doc comment above.
-        const plugins = livePlugins().map((p) => ({
-          ...p,
-          status: pluginSpawnEligible(p) ? (opts.supervisor?.status(p.name) ?? "stopped") : ("na" as const),
-        }));
+      // -----------------------------------------------------------------------------------------
+      // WS-21 (spec §5.2): `winter plugin` = `claude plugin`, over Contract B
+      // (`plugins/plugin-manager.ts`). Every result mirrors the SDK's own return shape verbatim
+      // (protocol/methods.ts's own header: "field for field — protocol never imports the SDK").
+      // harness-role (same precedent the pre-WS-21 block noted: NOT one of the six plugin-role
+      // verbs, so a plugin connection is role-rejected before dispatch, PLUGIN_ALLOWED_METHODS
+      // above deliberately omits all of these). `pluginManagerOptionsFor` resolves `scope` to the
+      // settings file that scope's `enabledPlugins` lives in — `user` is always available; `project`/
+      // `local` need `cwd` (refused typed otherwise, the same "cwd required" shape `mcp.add`'s own
+      // project/local scopes use).
+      // -----------------------------------------------------------------------------------------
+      case METHODS.pluginList: {
+        const p = parseParams(PluginListParams, params);
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.list is not available on this server (no winterHome configured)");
+        const listed = await listPlugins(pluginManagerOptionsFor(opts.winterHome, p.cwd));
+        // I1 fix round 1: `extras` over the wire — lane L5's Mac app consent UI needs
+        // tier/permissions/requiredConsents/consented/entry, not just Contract B's bare listing.
+        let consents: Record<string, unknown> = {};
+        try {
+          consents = loadSettings(join(opts.winterHome, "settings.json")).plugins?.consents ?? {};
+        } catch { /* degrade to "nothing consented" rather than fail the whole list */ }
+        const plugins = listed.map((entry) => {
+          const extras = pluginExtrasFor(entry.installPath, entry.id, consents[`${entry.id}@${entry.marketplace}`]);
+          // Fix round 2: `hooks` — a TOP-LEVEL sibling of `extras` (plugins/plugin-hooks.ts), read
+          // from `hooks/hooks.json` and the claude manifest's own inline `hooks` field regardless of
+          // whether this plugin has a winter-plugin.json at all.
+          const hooks = pluginHooksFor(entry.installPath);
+          return { ...entry, ...(extras ? { extras } : {}), ...(hooks ? { hooks } : {}) };
+        });
         return { ok: true, plugins };
+      }
+      case METHODS.pluginInstall: {
+        const p = parseParams(PluginInstallParams, params);
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.install is not available on this server (no winterHome configured)");
+        try {
+          const plugin = await installPlugin(pluginManagerOptionsFor(opts.winterHome, p.cwd), p.spec, p.scope);
+          invalidateLivePluginsCache();
+          return { ok: true, plugin };
+        } catch (err) {
+          throwPluginManagerFailure(err);
+        }
+      }
+      case METHODS.pluginUninstall: {
+        const p = parseParams(PluginUninstallParams, params);
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.uninstall is not available on this server (no winterHome configured)");
+        const options = pluginManagerOptionsFor(opts.winterHome, p.cwd);
+        // I2 fix round 1: resolve BEFORE touching the supervisor — an uninstall of a scope this
+        // spec isn't installed in must refuse typed with NOTHING stopped (the old code called
+        // hotApplyStop unconditionally, before uninstallPlugin's own "is it installed there" check
+        // ever ran). `others` is every OTHER scope's current record for this exact spec, read
+        // before this call's own mutation — stopping the Tier-2 process is correct only when NONE
+        // of them still has it installed and enabled (a plugin's runtime is one process per bare
+        // name, spec's own F15 compound-key convention notwithstanding — see the lane report's own
+        // concerns note on this).
+        let stillLive = false;
+        try {
+          stillLive = (await listPlugins(options)).some((e) => e.enabled && e.scope !== p.scope && `${e.id}@${e.marketplace}` === p.spec);
+        } catch { /* best effort — an unreadable OTHER scope never blocks this uninstall */ }
+        try {
+          await uninstallPlugin(options, p.spec, p.scope);
+        } catch (err) {
+          throwPluginManagerFailure(err);
+        }
+        invalidateLivePluginsCache();
+        if (!stillLive) {
+          hotApplyStop(pluginNameOfSpec(p.spec));
+          // C1 fix round 2: the last scope of this spec is gone — its consent record must go too,
+          // or a later reinstall under the SAME spec (a different folder, spec's own scenario)
+          // would find a stale record whose fingerprint just happens to still be checked against
+          // fresh install-path/entry data. Fingerprint gating alone already covers a folder swap
+          // that keeps the OLD scope's record around; this covers the "nothing installed under this
+          // spec at all" case, where there is no install left to fingerprint against.
+          try {
+            const settingsPath = join(opts.winterHome, "settings.json");
+            saveSettings(settingsPath, stripPluginConsents(loadSettings(settingsPath), p.spec));
+          } catch { /* best effort — a consent-clear failure never unwinds the already-committed uninstall */ }
+        }
+        return { ok: true, spec: p.spec, scope: p.scope };
+      }
+      case METHODS.pluginEnable: {
+        const p = parseParams(PluginEnableScopedParams, params);
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.enable is not available on this server (no winterHome configured)");
+        try {
+          await setPluginEnabledOnAdapter(pluginManagerOptionsFor(opts.winterHome, p.cwd), p.spec, p.scope, true);
+        } catch (err) {
+          throwPluginManagerFailure(err);
+        }
+        invalidateLivePluginsCache();
+        // Tier-2 (platform, entry) hot-spawn — install+enable is itself the consent for a plugin's
+        // claude-native content (spec §5.4); it does not gate the entry process's own hot-start.
+        const info = livePlugins().find((pl) => `${pl.name}@${pl.marketplace}` === p.spec);
+        if (info) hotApplyStart(info);
+        return { ok: true, spec: p.spec, scope: p.scope, enabled: true };
+      }
+      case METHODS.pluginDisable: {
+        const p = parseParams(PluginDisableScopedParams, params);
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.disable is not available on this server (no winterHome configured)");
+        try {
+          await setPluginEnabledOnAdapter(pluginManagerOptionsFor(opts.winterHome, p.cwd), p.spec, p.scope, false);
+        } catch (err) {
+          throwPluginManagerFailure(err);
+        }
+        invalidateLivePluginsCache();
+        hotApplyStop(pluginNameOfSpec(p.spec));
+        return { ok: true, spec: p.spec, scope: p.scope, enabled: false };
+      }
+      case METHODS.pluginUpdate: {
+        const p = parseParams(PluginUpdateParams, params);
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.update is not available on this server (no winterHome configured)");
+        try {
+          const plugin = await updatePlugin(pluginManagerOptionsFor(opts.winterHome, undefined), p.spec);
+          invalidateLivePluginsCache();
+          return { ok: true, plugin };
+        } catch (err) {
+          throwPluginManagerFailure(err);
+        }
+      }
+      case METHODS.pluginMarketplaceAdd: {
+        const p = parseParams(PluginMarketplaceAddParams, params);
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.marketplace.add is not available on this server (no winterHome configured)");
+        try {
+          const marketplace = await addMarketplace(pluginManagerOptionsFor(opts.winterHome, undefined), p.source);
+          return { ok: true, marketplace };
+        } catch (err) {
+          throwPluginManagerFailure(err);
+        }
+      }
+      case METHODS.pluginMarketplaceRemove: {
+        const p = parseParams(PluginMarketplaceRemoveParams, params);
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.marketplace.remove is not available on this server (no winterHome configured)");
+        try {
+          await removeMarketplace(pluginManagerOptionsFor(opts.winterHome, undefined), p.name);
+          return { ok: true, name: p.name };
+        } catch (err) {
+          throwPluginManagerFailure(err);
+        }
+      }
+      case METHODS.pluginMarketplaceList: {
+        parseParams(PluginMarketplaceListParams, params);
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.marketplace.list is not available on this server (no winterHome configured)");
+        const marketplaces = await listMarketplaces(pluginManagerOptionsFor(opts.winterHome, undefined));
+        return { ok: true, marketplaces };
+      }
+      case METHODS.pluginMarketplaceUpdate: {
+        const p = parseParams(PluginMarketplaceUpdateParams, params);
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.marketplace.update is not available on this server (no winterHome configured)");
+        try {
+          await updateMarketplace(pluginManagerOptionsFor(opts.winterHome, undefined), p.name);
+          return { ok: true };
+        } catch (err) {
+          throwPluginManagerFailure(err);
+        }
       }
       case METHODS.approvalRespond: {
         const p = parseParams(ApprovalRespondParams, params);
@@ -2576,33 +2857,32 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             // client bug or protocol drift, not a crash: log once and fall through to the normal
             // resolve below (approved per p.approved, exactly as if optionId had been omitted).
             console.error(`approval.respond: unknown optionId ${JSON.stringify(p.optionId)} for session ${p.sessionId} call ${p.callId} — resolving with no rule persisted`);
-          } else if (option?.rule && p.approved && opts.permissionRules) {
-            // Persist the chosen rule. `approved:false` on a rule-bearing option must NEVER
-            // append — enforced by `p.approved` being part of THIS same condition, not a separate
-            // branch, so there is no path that persists a rule for a denied call. Wrapped in
-            // try/catch: `append()` throws RuleAppendError for scope "project" when there's no
-            // usable project root (a null session cwd, or one nested inside/equal to winterHome) —
-            // the approval outcome must never hang or fail on a persistence problem, so a failure
-            // here only logs; `resolve()` below still runs unconditionally either way.
-            const cwd = opts.store.meta(p.sessionId).cwd;
-            const projectRoot = cwd ? repoRootFor(cwd) : null;
-            // Review I2 (lane B): a PROJECT-scoped answer is ALSO recorded in the daemon's own
-            // `<home>/permissions/projects.json` — the copy a child applies whether or not the project
-            // is trusted, because only this path writes it (a repository cannot forge it). The in-repo
-            // `.winter/permissions.local.json` below is still written, and still applies only when the
-            // project is trusted. Recorded FIRST and separately, so a read-only repository or a
-            // refused in-repo write never loses the user's answer.
-            if ((option.scope ?? "project") === "project" && projectRoot !== null && opts.approvedProjectRules) {
-              try {
-                opts.approvedProjectRules.record(projectRoot, option.rule);
-              } catch (err) {
-                console.error(`approval.respond: failed to record the approved project rule ${JSON.stringify(option.rule)} for session ${p.sessionId}: ${(err as Error).message}`);
-              }
-            }
+          } else if (option?.rule && p.approved && opts.winterHome) {
+            // Persist the chosen rule. `approved:false` on a rule-bearing option must NEVER be saved —
+            // enforced by `p.approved` being part of THIS same condition, not a separate branch, so
+            // there is no path that persists a rule for a denied call. A refused save (an untrusted
+            // project, a planted link, a hand-edited file that does not parse, the Winter home itself)
+            // only logs: the approval outcome never hangs or fails on a persistence problem, and
+            // `resolve()` below still runs unconditionally either way.
+            //
+            // WS-21 (spec §4.3): claude's own locations, in claude's grammar — "everywhere" is
+            // `sdk/settings.json`, "in this project" is the TRUSTED project's `.winter/settings.local.json`
+            // at its canonical git root (then the global git exclude). The retired stores
+            // (`<home>/permissions/projects.json`, `.winter/permissions.local.json`) are not written.
+            const winterHome = opts.winterHome;
             try {
-              opts.permissionRules.append(option.rule, option.scope ?? "project", projectRoot);
+              if ((option.scope ?? "project") === "global") {
+                saveAnswerEverywhere(winterHome, option.rule);
+              } else {
+                const cwd = opts.store.meta(p.sessionId).cwd;
+                if (!cwd) throw new SavedAnswerRefused("the session has no project directory to save an \"in this project\" answer in");
+                const root = localScopeKeyFor(cwd); // review I5: the local tier's one key
+                // R.3 re-review B-2: the SAME trust the card offered this option under (`bridgeProjectTrustedFor`
+                // = `projectScopeTrusted`: a linked worktree of a trusted repo is trusted).
+                saveAnswerInProject({ root, winterHome, trusted: opts.trust ? projectScopeTrusted(cwd, opts.trust) : false }, option.rule);
+              }
             } catch (err) {
-              console.error(`approval.respond: failed to persist permission rule ${JSON.stringify(option.rule)} for session ${p.sessionId}: ${(err as Error).message}`);
+              console.error(`approval.respond: the rule ${JSON.stringify(option.rule)} for session ${p.sessionId} was not saved: ${(err as Error).message}`);
             }
           }
         }
@@ -3339,8 +3619,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionSetCwd: {
         const p = parseParams(SessionSetCwdParams, params);
-        opts.store.setCwd(p.sessionId, p.cwd);
-        return { ok: true, cwd: p.cwd };
+        const cwd = canonicalSessionCwd(p.cwd); // WS-21 round 3: stored canonical, like session.create
+        opts.store.setCwd(p.sessionId, cwd);
+        return { ok: true, cwd };
       }
       case METHODS.trustDir: {
         const p = parseParams(TrustDirParams, params);
@@ -3847,117 +4128,49 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
 
       // -----------------------------------------------------------------------------------------
-      // Plugin lifecycle (Phase 4d-ii Task 2): install/enable/disable/remove/setConsent applied
-      // HOT to the running daemon — the over-the-wire counterpart to the CLI's file-based,
-      // restart-to-apply `winter plugin ...` flow (plugin-cli.ts). harness-role (like
-      // `plugin.restart`/`plugins.list` above — no extra role check needed here); NOT any of the
-      // six plugin-role verbs, so a plugin connection is role-rejected before dispatch
-      // (PLUGIN_ALLOWED_METHODS above deliberately omits all five). Every result is a typed union
-      // — none of these ever throw for an expected outcome (unknown plugin, bad source, needs
-      // consent, already installed) — same discipline as `hardware.request`'s HardwareRequestResult
-      // above; a thrown RpcFailure(INTERNAL) is reserved for genuine server misconfiguration (no
-      // `winterHome` wired at all, which only an incomplete test harness would hit — `daemon.ts`
-      // always wires it).
+      // plugin.setConsent (spec §5.4: "the extras keep their own consents") — a Winter-only extra
+      // (the Tier-2 entry process, tcc, hardware) still needs the daemon's own consent record,
+      // separate from "installed+enabled" (which is the consent for a plugin's claude-native
+      // content, spec §5.4). `install`/`uninstall`/`enable`/`disable`/`update`/`list`/`marketplace.*`
+      // moved to the Contract B block above (`pluginManagerOptionsFor`); this is the one survivor,
+      // harness-role, same precedent (not a plugin-role verb).
+      //
+      // C2 fix round 2 (Opus review of L5): looked up by bare `p.name` before, so consent granted
+      // for `foo@B` could be recorded for a DIFFERENT `foo@A` that happened to resolve first out of
+      // `livePlugins()` — the param is now `spec` (the qualified `"<name>@<marketplace>"` compound
+      // key, `PluginSetConsentParams`), matched EXACTLY against every install's own `"<id>@<marketplace>"`
+      // — no ambiguity possible (R.3 I-3: across all scopes, not `livePlugins()`'s user scope alone).
+      //
+      // L5 re-review (TOCTOU): the caller now MUST echo back the `fingerprint` it saw in the
+      // `plugin.list` listing it displayed (`extras.fingerprint`) — the daemon recomputes the SAME
+      // fingerprint (`plugins/consent-fingerprint.ts`, off `info.installPath` + `info.entry`/
+      // `tccPermissions`/`hardwarePermissions`/`requiredConsents`, the plugin's WHOLE disclosure)
+      // right now and refuses `stale_disclosure`, writing nothing, when it no longer matches — the
+      // window between "the consent sheet was shown" and "the user clicked consent" is exactly where
+      // a plugin's files could change out from under the disclosure the user actually saw.
       // -----------------------------------------------------------------------------------------
-      case METHODS.pluginsInstall: {
-        const p = parseParams(PluginsInstallParams, params);
-        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugins.install is not available on this server (no winterHome configured)");
-        const pluginsRoot = join(opts.winterHome, "plugins");
-        let name: string;
-        try {
-          name = deriveInstallName(p.source, p.name);
-        } catch {
-          return { code: "invalid_source" };
-        }
-        let installed: InstallPluginResult;
-        try {
-          // Installs DISABLED + UNCONSENTED, never touches settings.json (installPluginFromDir's
-          // own contract) — the caller always gets requiredConsents/consentBlock back to drive a
-          // consent sheet before `plugin.enable {consent:true}` can let anything run.
-          installed = installPluginFromDir(p.source, name, pluginsRoot);
-        } catch (e) {
-          const message = (e as Error).message;
-          if (message.includes("already exists")) return { code: "already_installed", name };
-          return { code: "invalid_source" }; // no manifest, invalid/traversal name, unreadable source, ...
-        }
-        invalidateLivePluginsCache(); // installFromDir just created a new plugins/<name> dir
-        rebuildHookRegistry(); // harmless no-op here (installs disabled+unconsented, never hook-eligible) — mirrors every other lifecycle site for consistency
-        const info = livePlugins().find((pl) => pl.name === installed.name);
-        return {
-          ok: true,
-          name: installed.name,
-          requiredConsents: info?.requiredConsents ?? [],
-          hasMcp: info?.hasMcp ?? false,
-          consentBlock: info ? buildConsentBlock(info) : [`plugin ${installed.name} requests:`],
-        };
-      }
-      case METHODS.pluginEnable: {
-        const p = parseParams(PluginEnableParams, params);
-        const info = livePlugins().find((pl) => pl.name === p.name);
-        if (!info) return { code: "unknown_plugin" };
-        const missing = missingConsents(info.requiredConsents, info.consented);
-        if (missing.length > 0 && p.consent !== true) {
-          // No mutation — the caller shows this disclosure and re-calls with consent:true once
-          // the user agrees (the CLI's interactive `readLine` prompt, over the wire).
-          return { code: "needs_consent", requiredConsents: info.requiredConsents, consentBlock: buildConsentBlock(info) };
-        }
-        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.enable is not available on this server (no winterHome configured)");
-        const settingsPath = join(opts.winterHome, "settings.json");
-        const settings = p.consent === true
-          ? applyFreshPluginConsent(() => loadSettings(settingsPath), p.name, info.requiredConsents, Date.now())
-          : setPluginEnabled(loadSettings(settingsPath), p.name, true);
-        saveSettings(settingsPath, settings);
-        invalidateLivePluginsCache();
-        rebuildHookRegistry();
-        const updated = livePlugins().find((pl) => pl.name === p.name) ?? info;
-        // Lane B (2026-09-23): the no-consent disclosure (a legacy plugin that ships skills — a skill
-        // can run shell commands), for a client to show; absent when there is nothing to say.
-        const notice = enableNotice(info);
-        return { ok: true, status: hotApplyStart(updated), ...(notice.length > 0 ? { notice } : {}) };
-      }
-      case METHODS.pluginDisable: {
-        const p = parseParams(PluginDisableParams, params);
-        const info = livePlugins().find((pl) => pl.name === p.name);
-        if (!info) return { code: "unknown_plugin" };
-        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.disable is not available on this server (no winterHome configured)");
-        const settingsPath = join(opts.winterHome, "settings.json");
-        // Fresh-consent semantics on disable (matches the CLI's `winter plugin disable` and the
-        // design spec — lifecycle.ts's stripPluginConsents doc, settings.ts:38-40): re-enabling
-        // a disabled plugin must require consenting again, so strip its consent record here too.
-        saveSettings(settingsPath, stripPluginConsents(setPluginEnabled(loadSettings(settingsPath), p.name, false), p.name));
-        invalidateLivePluginsCache();
-        rebuildHookRegistry();
-        hotApplyStop(p.name);
-        return { ok: true };
-      }
-      case METHODS.pluginRemove: {
-        const p = parseParams(PluginRemoveParams, params);
-        const info = livePlugins().find((pl) => pl.name === p.name);
-        if (!info) return { code: "unknown_plugin" };
-        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.remove is not available on this server (no winterHome configured)");
-        hotApplyStop(p.name); // stop the running process BEFORE the directory backing it disappears
-        const pluginsRoot = join(opts.winterHome, "plugins");
-        const settingsPath = join(opts.winterHome, "settings.json");
-        // removePluginFromSettings strips both enabled/disabled list membership AND the plugin's
-        // whole consent record (it composes stripPluginConsents internally — see lifecycle.ts).
-        const settings = removePluginFromSettings(loadSettings(settingsPath), p.name);
-        removePluginDir(pluginsRoot, p.name); // containment-checked; a genuine fs failure here is
-        // NOT swallowed — it propagates as an INTERNAL error rather than silently persisting a
-        // "removed" settings state while the directory is still on disk.
-        saveSettings(settingsPath, settings);
-        invalidateLivePluginsCache();
-        rebuildHookRegistry();
-        return { ok: true };
-      }
       case METHODS.pluginSetConsent: {
         const p = parseParams(PluginSetConsentParams, params);
-        const info = livePlugins().find((pl) => pl.name === p.name);
-        if (!info) return { code: "unknown_plugin" };
+        // R.3 I-3: EVERY scope's installs of this spec — the same pass `plugin.list` makes (Contract B's
+        // `listPlugins`; with no cwd the project/local records still list, only their enabled state is
+        // unresolved) — never `livePlugins()`, which reports user scope only, so a plugin installed at
+        // project or local scope listed with a fingerprint yet could never be consented to.
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.setConsent is not available on this server (no winterHome configured)");
+        const installs = (await listPlugins(pluginManagerOptionsFor(opts.winterHome, undefined))).filter((e) => `${e.id}@${e.marketplace}` === p.spec);
+        if (installs.length === 0) return { code: "unknown_plugin" };
+        // The disclosure each install shows RIGHT NOW, computed exactly as `plugin.list`'s `extras` do (a
+        // plugin with no winter-plugin.json: as `PluginStore`'s legacy entry does). A spec installed at two
+        // scopes from different folders: the echoed fingerprint picks the one the user saw.
+        const fingerprint = installs
+          .map((e) => pluginExtrasFor(e.installPath, e.id, undefined)?.fingerprint ?? pluginConsentFingerprint(e.installPath, {}))
+          .find((f) => f === p.fingerprint);
+        if (fingerprint === undefined) return { code: "stale_disclosure" };
         const settingsPath = join(opts.winterHome, "settings.json");
-        saveSettings(settingsPath, grantPluginConsents(loadSettings(settingsPath), p.name, p.classes, Date.now()));
+        const classes = p.classes.filter((c): c is "exec" | "tcc" | "hardware" => c === "exec" || c === "tcc" || c === "hardware");
+        const settings = loadSettings(settingsPath);
+        const consents = { ...(settings.plugins?.consents ?? {}), [p.spec]: { classes, fingerprint } };
+        saveSettings(settingsPath, { ...settings, plugins: { ...settings.plugins, consents } });
         invalidateLivePluginsCache();
-        rebuildHookRegistry();
         return { ok: true };
       }
 

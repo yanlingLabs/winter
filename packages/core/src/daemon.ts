@@ -17,9 +17,9 @@ import { ensureOutdir } from "./sessions/outdir";
 import { writeDiff, type DiffHeader } from "./diffs/store";
 import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
-import { loadSettings, loadPermissionDirs, effortRefusalFor, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, pinsFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, type Settings } from "./settings";
+import { loadSettings, loadPermissionDirs, effortRefusalFor, hooksEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, pinsFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, sdkAllowRules, sdkAutoMemory, sdkLocalMcpServers, sdkOutputStyle, sdkUserMcpServers, liveSettingsView, type Settings } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
-import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor, repoRootFor } from "./agent/memory-dir";
+import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
 import { createRebindableProvider, internalModelFor, internalRoleEffortFor } from "./providers/manager";
 import { createInternalProviderView, staticInternalProviderView, type InternalProviderView } from "./providers/internal-view";
@@ -40,7 +40,8 @@ import { LspManager } from "./agent/lsp/manager";
 import { PermissionGate, type SessionApprovalPolicy } from "./agent/gate";
 import { PermissionRules } from "./agent/permission-rules";
 import { ApprovedProjectRules } from "./agent/approved-project-rules";
-import { trustRecordFile } from "./agent/paths";
+import { sdkGlobalConfigPath, sdkHomeFor, sdkSettingsPath, trustRecordFile } from "./agent/paths";
+import { forgetSdkFile, liveSdkGlobalConfig, liveSdkSettings, readSdkGlobalConfigDetailed, readSdkSettingsDetailed } from "./sdk-files";
 import { ApprovalBroker } from "./agent/approvals";
 import { QuestionBroker } from "./agent/questions";
 import { createPersistedChildren, type AgentRegistry } from "./agent/bg-agent-registry";
@@ -62,7 +63,7 @@ import { loadUserAgentDefinitions, loadProjectAgentDefinitions } from "./agent/a
 import { SupportedAgentsCache } from "./agent/supported-agents-cache";
 import { BackgroundTaskRegistry } from "./agent/bg-registry";
 import { sessionTmpDir } from "./agent/session-tmp";
-import { PluginStore, pluginMcpEligible, pluginSkillsEligible, pluginSpawnEligible, hookRegistryPlugins } from "./agent/plugins";
+import { PluginStore, pluginSpawnEligible } from "./agent/plugins";
 import { PluginSupervisor } from "./plugins/supervisor";
 import { PluginContribRegistry } from "./plugins/contrib";
 import { HookRegistry, HookFacade } from "./plugins/hook-registry";
@@ -78,7 +79,7 @@ import { mintPanelTab } from "./panel/open-tab";
 import { openRoutineStore } from "./routines/store";
 import { RoutineAuditLog } from "./routines/audit";
 import { makeApply } from "./settings-apply";
-import { SettingsWatcher } from "./settings-watcher";
+import { SettingsWatcher, watchViaParentDir } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { restampStep } from "./runtime-state/recovery";
 import { createWinterRuntimeSdk, describeLoadError, type WinterRuntimeSdk } from "./runtime-sdk/create";
@@ -87,8 +88,15 @@ import { createConsoleProfileBroker } from "./auth/console-profile-broker";
 import { resolveAntExecutable } from "./runtime-sdk/bundle-layout";
 import { advisorReviewerFor, familyOfModel, officialLegDefaultSessionModel } from "./runtime-sdk/advisor-reviewer";
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
-import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
-import { persistedAllowRulesFor } from "./runtime-sdk/mode-options";
+import { coldResumeRunHomeFor, createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
+import { linkedRouterSupportsRunHome, linkedRunHomeBuilder, runHomeHandleOf, runHomeReportSummary } from "./runtime-sdk/run-home-support";
+import { recoverRunRoots, rootRecoveryDetail, type RootReconcile } from "./runtime-state/root-recovery";
+import { splitSettingsToSdk } from "./migration/settings-split";
+import { MigrationCRefused, finishMigrationC, isOldLayout, migrationCManifestPath, migrationCState, runMigrationC } from "./migration/migrate-c";
+import { convertLegacyPluginsForMigration } from "./plugins/convert-legacy";
+import { localScopeKeyFor, projectScopeRootFor, projectScopeTrust, projectScopeTrusted, runHomeInputFor } from "./runtime-sdk/run-home-input";
+import { reservedMcpServerNames } from "./capabilities/names";
+import { projectScopeAllowRulesFor, winterGateRulesFromSdk } from "./runtime-sdk/mode-options";
 import { configuredMcpServersFor } from "./runtime-sdk/external-mcp";
 import { planBridgeFor, type PlanBridge } from "./runtime-sdk/plan-bridge";
 import { importEngineEraSession } from "./runtime-sdk/import-legacy";
@@ -340,6 +348,10 @@ export async function startDaemon(opts: {
    *  unless `WINTER_LOGIN_SHELL_PATH=off` (both test preloads set it). `false`: skipped. An object:
    *  the test seam (a fake runner and/or env to update). */
   loginShellPath?: LoginShellPathDeps | false;
+  /** TEST ONLY (WS-21 ordering contract): stands in for the router's `reconcileRootForRecovery` in the boot
+   *  sweep and in Migration C's phase 2 — when set it takes precedence over the linked router's own door, so
+   *  a test can observe the reconcile's ordering or make it fail. A production caller never sets it. */
+  runRootReconcileForTests?: RootReconcile;
 } = {}): Promise<RunningDaemon> {
   const startedAt = Date.now();
   const home = opts.home ?? resolveWinterHome();
@@ -371,6 +383,18 @@ export async function startDaemon(opts: {
   }
   if (manifestState.kind === "parsed" && manifestState.manifest.status === "in-progress") {
     throw new MigrationRefused("home_half_migrated", "migration: half-migrated home — run `winter migrate --resume` or `winter migrate --rollback`");
+  }
+  // WS-21 (spec §8): the same rule for Migration C — a phase 1 caught half-way (or a manifest that will not
+  // parse) refuses boot on every build until `winter migrate --sdk-home --resume` or `--rollback` runs.
+  // `phase1-complete` is NOT half-migrated: phase 2 finishes at this boot's late site.
+  const migrationC = migrationCState(home);
+  if (migrationC.kind === "unreadable" || (migrationC.kind === "parsed" && migrationC.manifest.status === "in-progress")) {
+    throw new MigrationCRefused("sdk_home_half_migrated", `migration C: half-migrated home (${migrationCManifestPath(home)}) — run \`winter migrate --sdk-home --resume\` or \`winter migrate --sdk-home --rollback\``);
+  }
+  // R.3 I-5: a rollback caught half-way (`rolling-back`, written before its first file moves) — the same
+  // door; booting would split transcripts between sdk/projects and a half-restored <home>/projects.
+  if (migrationC.kind === "parsed" && migrationC.manifest.status === "rolling-back") {
+    throw new MigrationCRefused("sdk_home_half_migrated", `migration C: a rollback of this home was interrupted (${migrationCManifestPath(home)}) — run \`winter migrate --sdk-home --rollback\` to finish it`);
   }
 
   const secrets = opts.secrets ?? new KeychainSecretStore();
@@ -461,6 +485,7 @@ export async function startDaemon(opts: {
   const deadLegacyLine = describeDeadLegacyFiles(findDeadLegacyFiles(home), home);
   if (deadLegacyLine !== undefined) console.error(deadLegacyLine);
 
+
   const authority = new TokenAuthority(secrets);
   const tokens = await authority.ensureTokens();
 
@@ -511,7 +536,9 @@ export async function startDaemon(opts: {
   try {
     // WS-20 (review round 2, M5): `persistMigration: true` — this boot hook, WITH presence in
     // hand, is the ONLY writer of a migrated v3 settings file (see `loadSettings`'s own doc).
-    settings = loadSettings(dirs.settingsPath, { presentProviders, persistMigration: true });
+    // WS-21: the live holder never carries the keys that moved to `sdk/` (`withoutMovedKeys`) — their
+    // only doors are the `sdk…` readers, so no reader here can see a stale copy kept for a downgrade.
+    settings = liveSettingsView(loadSettings(dirs.settingsPath, { presentProviders, persistMigration: true }));
     // Task 17: the engine leg no longer exists — a `winterLeg.<mode>: false` is accepted for one
     // release, reported here (and by settings-apply on a hot edit), never obeyed.
     for (const key of winterLegDisabledKeys(settings)) console.error(`settings: runtimes.winterLeg.${key} = false — the engine leg no longer exists; ignored`);
@@ -523,6 +550,34 @@ export async function startDaemon(opts: {
     console.error(`settings unavailable, agent disabled: ${(err as Error).message}`);
     settings = null;
   }
+
+  // ── WS-21 (spec §8): Migration C, phase 1 ──────────────────────────────────────────────────────
+  // Only on a build whose router applies run homes (on router 0.0.11 the old layout IS the layout).
+  // ORDER, four ways: after the lock (an idle live daemon holds no transcript lease — only the lock stops
+  // a second daemon renaming `projects/` under it); after the settings load (its v2→v3 persist is what
+  // the split reads); before the boot split below (so preflight's backups capture the pre-split state
+  // and the migration's own split step is the one that copies); before the runtime spine (backfill and
+  // recovery read the store and `backend_root`). The profile's default home migrates by itself; any
+  // other home in the old layout refuses boot until `winter migrate --sdk-home --home <dir>` runs. A
+  // preflight refusal refuses BOOT — the supported build must never start writing `sdk/projects` while
+  // `<home>/projects` still holds the store. Phase 2 runs at the late site, once the router exists.
+  if (linkedRouterSupportsRunHome() && isOldLayout(home)) {
+    try {
+      if (!isDefaultWinterHome(home, profile, opts.migration?.homedirOverride)) {
+        throw new MigrationCRefused("sdk_home_migration_required", `migration C: ${home} is in the old layout and is not the profile's default home — stop, then run \`winter migrate --sdk-home --home ${home}\``);
+      }
+      await runMigrationC(home, { log: (line) => console.error(line), reconcileAvailable: true, convertLegacyPlugins: convertLegacyPluginsForMigration });
+    } catch (err) {
+      try { store.close(); } catch { /* already closed: nothing to release */ }
+      lock.release();
+      throw err;
+    }
+  }
+
+  // WS-21 (spec §4.1, §8): the settings split — every boot, every home, every build (the runtime-facing
+  // keys are read from `sdk/` only since L3.2). Under the lock, before anything reads them. Once per key;
+  // never throws; `settings.json` itself is never written.
+  splitSettingsToSdk(home, { log: (line) => console.error(line) });
 
   // ── The runtime spine (P8a, WS-16) ────────────────────────────────────────────────────────────
   // Open `runtimes/runtime-state.db`, run §13's twelve recovery steps, catch the §17 backfill up,
@@ -539,6 +594,9 @@ export async function startDaemon(opts: {
     // WS-20 (review round 2, M5): threaded through to `migrateModelRefsToTags`'s own rule-5
     // tie-break — same presence this boot hook already computed for the settings migration above.
     presentProviders,
+    // WS-21 (spec §3.8): on a run-home router the claude staging sweep waits for the router's own
+    // reconcile (the late pass after `createWinterRuntimeSdk`, below) — nothing is deleted unreconciled.
+    ...(linkedRouterSupportsRunHome() ? { recovery: { deferClaudeResumeSweep: true } } : {}),
   });
   const runtime = runtimeStateOnline(runtimeState);
 
@@ -569,14 +627,13 @@ export async function startDaemon(opts: {
   // view of settings.json (today: the `permissionRules`/`dangerousDomainsAdded` getters further
   // down; later tasks convert more getters against this SAME instance, never a second one, so
   // there is exactly one mtime cache per project cwd for the whole daemon).
-  const projectSettings = new ProjectSettingsResolver({ base: () => settings, trust: trustStore });
+  const projectSettings = new ProjectSettingsResolver({ base: () => settings, trust: projectScopeTrust(trustStore) });
   // Review I2 (lane B): the daemon's own record of rules the user approved "in this project" from a
-  // card (`<home>/permissions/projects.json`) — written by `approval.respond`, applied to children
-  // regardless of trust. Provider-independent, so built unconditionally.
+  // card (`<home>/permissions/projects.json`). WS-21: RETIRED as a store — nothing writes it any more (a
+  // card's "in this project" answer goes to the trusted project's `.winter/settings.local.json`,
+  // `agent/saved-answers.ts`); what an older build recorded is still READ (on a build whose router does
+  // not apply run homes), reported by `winter doctor` and moved by `winter migrate-project`.
   const approvedProjectRules = new ApprovedProjectRules({ winterHome });
-  // Re-review R1: its directory exists (0700, real) before any session runs, so a link cannot be
-  // planted there first; something already there that is not is refused, with one log line.
-  approvedProjectRules.prepare();
   // fix-wave B (I1): every per-project getter below resolves at the REPO ROOT, matching
   // `globalAllow`'s own `projectRoot` (engine.ts's `repoRootFor(cwd)`) — NOT the raw session cwd.
   // Before this, a SUBDIRECTORY session read a DIFFERENT `.winter/settings.json` than
@@ -587,7 +644,11 @@ export async function startDaemon(opts: {
   // fail-OPEN (card-less) for any subdir session. `repoRootFor` is memoized per canon(cwd) (a git
   // spawn only on first sight of a dir) and falls back to the dir itself outside a git repo, so
   // this is perf-neutral and a non-repo cwd behaves exactly as before.
-  const projectRootOf = (cwd?: string | null): string | null => (cwd ? repoRootFor(cwd) : null);
+  // R.3 residual (controller ruling): the PROJECT scope's root is the cwd's own git top — a linked
+  // worktree's own `.winter/`, where the run home reads the project tier and `--scope project` writes
+  // (`projectScopeRootFor`, `localScopeKeyFor`'s sibling) — and the resolver above trusts it per
+  // `projectScopeTrust` (keyed on the repository, so a worktree of a trusted repo is trusted).
+  const projectRootOf = (cwd?: string | null): string | null => (cwd ? projectScopeRootFor(cwd) : null);
   // Critical 1 fix, whole-branch review (2026-07-28): the user-added half of the effective
   // dangerous-domain list, SAME live-settings shape engine.ts's own EngineConfig.dangerousDomainsAdded
   // getter (below) already used for the code-mode fetch approval-card floor — hoisted into ONE shared
@@ -617,7 +678,10 @@ export async function startDaemon(opts: {
   // project-supplied name escaping the output-styles dir) lives in OutputStyleStore.resolve — this is
   // just the name lookup.
   const outputStyleStore = new OutputStyleStore({ winterHome, trust: trustStore, legacySettings: () => settings });
-  const outputStyleFor = (cwd?: string | null): string | undefined => projectSettings.effective(projectRootOf(cwd ?? null))?.outputStyle;
+  // WS-21: a trusted project's overlay still wins (its `.winter/settings.json` `outputStyle`); the user
+  // tier moved to `sdk/settings.json` (`sdkOutputStyle`) — the live holder no longer carries one.
+  const outputStyleFor = (cwd?: string | null): string | undefined =>
+    projectSettings.effective(projectRootOf(cwd ?? null))?.outputStyle ?? sdkOutputStyle(winterHome);
   // CC-parity phase 3 (Workflows, Track C Task C2): built unconditionally, same "no engine
   // dependency" precedent as `outputStyleStore` just above — workflow.list's "saved" section and
   // workflow.run's by-name resolution work even on a no-agentProvider daemon (only launching a
@@ -639,28 +703,19 @@ export async function startDaemon(opts: {
   // but ALSO hot-rebuilt on lifecycle changes (unlike MCP servers today), matching Tier-2's
   // hotApplyStart/hotApplyStop precedent for "no restart needed" plugin changes.
   const hookRegistry = new HookRegistry();
-  // B1 (lane B): `disabled` is a LIVE getter over the reassignable `settings` holder, not a boot
-  // snapshot — the store now also decides which plugin skills a runtime child loads, per incarnation.
-  const skillStore = new SkillStore({
-    winterHome, trust: trustStore,
-    plugins: {
-      disabled: () => settings?.plugins?.disabled ?? [],
-      // Lane B (review, 2026-09-23): a plugin's skills reach a session (either leg) only when the user
-      // ENABLED it and granted its `exec` consent — a skill can run shell commands. Read LIVE from the
-      // settings holder (a fresh `PluginStore` over it, as `ipc/server.ts`'s own live plugin list does),
-      // so enabling/consenting reaches the next spawn with no restart.
-      sessionEligible: () => new Set(
-        new PluginStore({ winterHome, plugins: settings?.plugins, consents: settings?.plugins?.consents }).list()
-          .filter(pluginSkillsEligible).map((p) => p.name),
-      ),
-    },
-  });
+  // WS-21 (L4 request 2): the store lists the user, self, project and builtin tiers; a plugin's skills are
+  // claude-native content now (the runtimes load them, and `skills.list`'s plugin half is lane L4's).
+  const skillStore = new SkillStore({ winterHome, trust: trustStore });
   // File-based memory (MEMDIR, T1 — design doc `2026-07-15-file-based-memory-design.md`): a live
   // getter over the `settings` holder (assigned above; reassigned in place by the hot-settings
   // watcher below), read fresh by BOTH the write-root join (`sessionDirs`, just below) and the
   // assembler's injection — a `memory.enabled`/`memory.directory` edit applies to the session's
   // NEXT tool call / turn, no daemon restart, same shape as `hooksEnabledHot` further down.
-  const memoryEnabledHot = (): boolean => (settings ? memoryEnabledFrom(settings) : true);
+  // WS-21: `memory.enabled`/`memory.directory` moved to `sdk/settings.json` as claude's
+  // `autoMemoryEnabled`/`autoMemoryDirectory` (`sdkAutoMemory`, read live — an edit applies on the next
+  // read, no restart). Same default: ON unless explicitly false.
+  const memoryEnabledHot = (): boolean => sdkAutoMemory(winterHome).enabled;
+  const memoryDirectoryHot = (): string | undefined => sdkAutoMemory(winterHome).directory;
   // session-activity-hygiene T7 (spec §3): the session cleaner's own switch, on exactly the
   // `memoryEnabledHot` terms one line up — a live getter over the reassignable `settings` holder
   // (the settings watcher swaps a NEW object into that same binding), so a `cleaner.enabled` edit
@@ -674,8 +729,8 @@ export async function startDaemon(opts: {
   // moves the trees, and the next memory read has to follow them. Absent (no runtime store, or
   // nothing relocated) leaves the derivation exactly as it was.
   const memoryDirOf = (cwd: string): string =>
-    memoryDirFor(cwd, { winterHome, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) });
-  const memoryGlobalDirOf = (): string => globalMemoryDirFor({ winterHome, directory: settings?.memory?.directory });
+    memoryDirFor(cwd, { winterHome, directory: memoryDirectoryHot(), relocatedKey: (k) => runtime?.relocatedMemoryKey(k) });
+  const memoryGlobalDirOf = (): string => globalMemoryDirFor({ winterHome, directory: memoryDirectoryHot() });
   const assembler = new ContextAssembler({
     winterHome, trust: trustStore, skills: skillStore,
     memory: {
@@ -719,7 +774,7 @@ export async function startDaemon(opts: {
   // — so a mid-session `memory.enabled` false→true flip no longer waits for a restart either.
   if (memoryEnabledHot()) {
     try {
-      migrateMemoryStore({ winterHome, trust: trustStore, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) });
+      migrateMemoryStore({ winterHome, trust: trustStore, directory: memoryDirectoryHot(), relocatedKey: (k) => runtime?.relocatedMemoryKey(k) });
     } catch (err) {
       console.error(`memory migration skipped: ${(err as Error).message}`);
     }
@@ -952,6 +1007,10 @@ export async function startDaemon(opts: {
   // engine/registry exist to hot-apply against); declared here (function scope, outside the gate)
   // so the shutdown path past the gate's close can still stop() it regardless of agentProvider.
   let settingsWatcher: SettingsWatcher | null = null;
+  // WS-21: the two claude-format files in `sdk/`. Feature code reads them live (`sdk-files.ts`); these
+  // watchers add the same debounce + keep-last-good notification the settings watcher gives
+  // `settings.json`, for the one reaction a moved key still drives here (the memory importer).
+  const sdkWatchers: Array<SettingsWatcher<Record<string, unknown>>> = [];
   // P8b Task 16 HOISTED this out of the `if (agentProvider)` gate (it used to be built beside
   // `taskStore` inside it): the Winter leg's question bridge (`AskUserQuestion` → `question_asked`)
   // needs a broker whether or not an engine exists, and `ask_user.respond` must resolve into the
@@ -984,10 +1043,8 @@ export async function startDaemon(opts: {
   // `registry` const, which isn't in scope here) so it keeps behaving correctly either way — a safe
   // no-op via optional chaining while `sharedRegistry` is still null (no provider).
   const allPlugins = pluginStore.list();
-  // Boot-time hook-registry build (Phase 4f Task 2) — the SAME eligible-plugin projection
-  // (`hookRegistryPlugins`, agent/plugins.ts) ipc/server.ts's lifecycle RPCs use to rebuild this
-  // SAME `hookRegistry` instance hot, later, off a fresh `livePlugins()` read.
-  hookRegistry.rebuild(hookRegistryPlugins(allPlugins, winterHome));
+  // WS-21 (L4 request 2): no boot-time plugin hook build — a plugin's hooks are claude-native
+  // `hooks/hooks.json` content the runtimes load themselves (spec §5.1/§5.3).
   const pluginSupervisor = new PluginSupervisor({
     runDir: dirs.runDir,
     socketPath: dirs.socketPath,
@@ -996,9 +1053,14 @@ export async function startDaemon(opts: {
     onLog: (m) => console.error(m),
     onCircuitOpen: (id) => sharedRegistry?.unregisterByPrefix(`plugin__${id}__`),
   });
+  // L3's REQUEST #1: a Tier-2 plugin's spawn `dir` is its REAL install path (PluginInfo.installPath,
+  // straight off installed_plugins.json's own record) — WS-21's Contract B can install a plugin
+  // anywhere a directory marketplace's manifest names, so the old `<home>/plugins/<name>` convention
+  // no longer holds (it never matched a converted-legacy or freshly-installed plugin's actual
+  // location; only ever worked by coincidence for a hand-seeded fixture at that exact path).
   const spawnablePlugins = allPlugins
     .filter(pluginSpawnEligible)
-    .map((p) => ({ id: p.name, dir: join(winterHome, "plugins", p.name), entry: p.entry! }));
+    .map((p) => ({ id: p.name, dir: p.installPath, entry: p.entry! }));
   // Phase 4d-i Task 4: boot-time orphan-PID sweep, BEFORE startAll spawns the current set — a
   // plugin disabled or removed since the last run may have left its process running under a
   // stale <runDir>/plugins/<id>.pid; startAll/reclaimOrphans would never find it (they only look
@@ -1200,10 +1262,40 @@ export async function startDaemon(opts: {
    *  that key, so the keying must not be the driver's to get wrong). */
   const buildSessionCapabilities = (session: CapabilitySession): CapabilityServerRecord =>
     buildCapabilitiesFor(session, capabilityDeps);
+  // WS-21 (spec §3.1, Contract A): the per-run folder every incarnation awaits — ONLY when the linked
+  // router exports `buildRunHome` (feature detection; router 0.0.11 does not, and then nothing here is
+  // wired and every child launches exactly as before). The inputs are live: trust, `mcp.disabled`, the
+  // capability-server names and the relocation-aware MEMDIR are re-read for every incarnation.
+  const runHomeBuilder = linkedRunHomeBuilder();
+  // The run home itself is returned untouched — the router refuses one `buildRunHome` did not build.
+  const runHomeDeps: WinterLegDeps["runHome"] = runHomeBuilder === undefined ? undefined : {
+    build: async (input) => {
+      const built = await runHomeBuilder(input);
+      // Spec §8: what the builder did NOT do (skipped links, dropped MCP servers and imports,
+      // unconditional rules, agents not copied — L2 fix round 1's `skippedAgents`) is never silent.
+      const summary = runHomeReportSummary(built);
+      if (summary !== undefined) console.error(`runtime-sdk: ${summary}`);
+      return built;
+    },
+    inputFor: (facts) => runHomeInputFor({
+      home: winterHome,
+      trust: trustStore,
+      settings: () => settings,
+      reservedMcpServerNames: [...reservedMcpServerNames()],
+      memoryDirFor: (cwd) => memoryDirOf(cwd),
+    }, facts),
+  };
+
   try {
     runtimeSdk = await createWinterRuntimeSdk({
       home: winterHome,
       settings: () => settings, // LIVE holder, never a boot snapshot
+      // WS-21 (spec §3.1): a run-home router is created with `requireRunHome: true` and this builder
+      // for its OWN cold-resume path. Absent (router 0.0.11) — the router is created as before.
+      ...(runHomeDeps === undefined ? {} : {
+        // Round 4, minor 3: the cwd canonicalized and the lazy transcript re-key run, as at every `resume()`.
+        runHomeFor: coldResumeRunHomeFor({ home: winterHome, store, records: runtime?.records, runHome: runHomeDeps, log: (line) => console.error(`runtime-sdk: ${line}`) }),
+      }),
       secrets,
       directoryStore: runtime?.directory,
       // EMPTY ON PURPOSE (P8b-36) — this list is handle-wide and construction-time, which is
@@ -1316,6 +1408,70 @@ export async function startDaemon(opts: {
       console.error(`runtime-sdk: directory recovery failed (${(err as Error)?.name ?? "unknown"}) — messaging starts without it`);
       if (runtime?.lastRecovery.step10AttemptId !== undefined) {
         restampStep(runtime.db.db, runtime.lastRecovery.step10AttemptId, 10, "failed", { errorName: (err as Error)?.name ?? "unknown" });
+      }
+    }
+  }
+
+  // ── WS-21 (spec §3.8): §13 step 6 and the run-folder/staging sweeps, run late for the same reason ──
+  // `reconcileRootForRecovery` needs the router's own live store, so recorded local-write roots, leftover
+  // `<home>/cache/runs/*` folders and stale claude staging roots are reconciled HERE, before anything is
+  // deleted — clean/appended ones removed, quarantined ones kept, recorded and reported (`root-recovery.ts`).
+  // Only on a router that has the door (0.0.11 has not: step 6 stays skipped and step 8 sweeps as before).
+  // Still before `startIpcServer` and before any driver exists, so no incarnation — and no run folder of
+  // this process — can exist yet (review M8: the old "skip the folders this process built" set was always
+  // empty here); bounded — a failure costs the sweep.
+  const linkedRecovery = runtimeSdk === undefined ? undefined : runHomeHandleOf(runtimeSdk.sdk);
+  const routerRecovery: { reconcileRootForRecovery: RootReconcile } | undefined =
+    (opts.runRootReconcileForTests === undefined ? undefined : { reconcileRootForRecovery: opts.runRootReconcileForTests }) ?? linkedRecovery;
+  // Round 4 (review): the sweep runs BEFORE Migration C's phase 2. Phase 2 re-keys transcripts to the
+  // canonical cwd; a crashed official resume's staging root still holds its working copy at the key 0.116
+  // wrote, and swept AFTER the re-key the router would find no canonical file there and append the whole copy
+  // into an orphan — the session resuming without its tail. Safe: phase 1 already cleared every recorded
+  // `claude-config` row, so this sweep never touches the roots phase 2 reconciles (spec §8 step 2 puts the
+  // recorded `claude-resume-*` roots in the same reconcile, ahead of everything else).
+  if (routerRecovery !== undefined && runtime !== undefined) {
+    try {
+      const recovered = await recoverRunRoots({
+        home: winterHome,
+        rs: runtime.db,
+        reconcile: (root) => routerRecovery.reconcileRootForRecovery(root),
+        claudeResumeScanRoot: process.env.WINTER_CLAUDE_RESUME_SCAN_ROOT?.trim() || undefined,
+        log: (line) => console.error(`runtime-sdk: ${line}`),
+      });
+      const quarantined = recovered.quarantinedRoots.length;
+      if (quarantined > 0) console.error(`runtime-sdk: run-root recovery kept ${quarantined} quarantined root(s) — see \`winter doctor\``);
+      if (runtime.lastRecovery.step6AttemptId !== undefined) {
+        const failed = recovered.recorded.failed + recovered.runFolders.failed + recovered.staging.failed;
+        restampStep(runtime.db.db, runtime.lastRecovery.step6AttemptId, 6, failed === 0 ? "ok" : "partial", rootRecoveryDetail(recovered));
+      }
+    } catch (err) {
+      console.error(`runtime-sdk: run-root recovery failed (${(err as Error)?.name ?? "unknown"}) — the roots are left for the next boot`);
+      if (runtime.lastRecovery.step6AttemptId !== undefined) {
+        restampStep(runtime.db.db, runtime.lastRecovery.step6AttemptId, 6, "failed", { errorName: (err as Error)?.name ?? "unknown" });
+      }
+    }
+  }
+
+  // Migration C, phase 2 (spec §8 steps 2, 8, 9): the official working copies reconciled through the
+  // router's own door, then the archive and the done marker — BEFORE any driver or the socket exists. A
+  // home left `phase1-complete` must never open a session (its un-reconciled working copies would be
+  // resumed from a canonical store missing their tail), so a phase 2 that cannot finish REFUSES BOOT,
+  // typed, after closing what this boot opened; the next boot retries it.
+  {
+    const cState = migrationCState(home);
+    if (cState.kind === "parsed" && cState.manifest.status === "phase1-complete") {
+      try {
+        await finishMigrationC(home, {
+          log: (line) => console.error(line),
+          ...(routerRecovery === undefined ? {} : { reconcile: (root: string) => routerRecovery.reconcileRootForRecovery(root) }),
+        });
+      } catch (err) {
+        try { consoleBroker.stopRefresher(); consoleBroker.stopWatcher(); } catch { /* best effort */ }
+        try { await runtimeSdk?.dispose(); } catch { /* best effort */ }
+        try { await runtime?.close(); } catch { /* best effort */ }
+        try { store.close(); } catch { /* best effort */ }
+        lock.release();
+        throw new MigrationCRefused("sdk_home_migration_refused", `migration C: phase 2 could not finish (${(err as Error).message}) — no session opens until it does; the next boot retries it`);
       }
     }
   }
@@ -1535,6 +1691,12 @@ export async function startDaemon(opts: {
       // so the host-side floor hook, a Winter child's `Options.web.blockedDomains` and the daemon's
       // own `Search` are provably reading one list. `hooks.ts` unions the shipped half itself.
       dangerousDomainsAdded: () => dangerousDomainsAdded(session.cwd),
+      // WS-21 (spec §7.1/§7.2): the path fence — the mode decides card vs typed deny, and the project
+      // tier is protected only while the project is trusted (read live, like every trust decision).
+      mode: session.mode,
+      cwd: session.cwd,
+      // R.3 I-1: the SAME root and trust the run home's project tier uses (`runHomeInputFor`).
+      trustedProjectRoot: () => (projectScopeTrusted(session.cwd, trustStore) ? projectScopeRootFor(session.cwd) : null),
     });
   // ── P8c integration Wiring 2: the notification/schedule sinks (lane 2's `sinks.ts`, P8c-11) ────
   // `hub.addObserver` (Dispatch/Phase 7's existing fan-out of every appended event of EVERY
@@ -1600,6 +1762,10 @@ export async function startDaemon(opts: {
   const supportedAgentsCache = new SupportedAgentsCache();
   const winterDrivers: WinterSessionDrivers = createWinterSessionDrivers({
     home: winterHome,
+    // WS-21: every incarnation's run home, when the linked router applies them (see `runHomeDeps`).
+    ...(runHomeDeps === undefined ? {} : { runHome: runHomeDeps }),
+    // WS-21 (spec §4.3): a card offers "in this project" only for a trusted project.
+    isTrusted: (dir) => trustStore.isTrusted(dir),
     profile: process.env.WINTER_PROFILE,
     settings: () => settings, // LIVE holder
     runtime: runtimeSdk,
@@ -1615,36 +1781,41 @@ export async function startDaemon(opts: {
     outDirOf: (sid) => ensureOutdir(winterHome, sid),
     // The SAME relocation-aware derivation the live memory path uses (`memoryDirOf` above), so the
     // record names the directory the session actually reads.
-    memoryKeyOf: (cwd) => memoryProjectKeyFor(cwd, { winterHome, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) }),
+    memoryKeyOf: (cwd) => memoryProjectKeyFor(cwd, { winterHome, directory: memoryDirectoryHot(), relocatedKey: (k) => runtime?.relocatedMemoryKey(k) }),
     // Task 17 Step 0(a): the SAME assembler the engine's `turn()` composes its instructions with —
     // Winter's persona per mode, the `_assistant` bucket, the output style — so a Winter-leg session
     // speaks as Winter.
     assembler,
-    // B1 (lane B): the SAME SkillStore the assembler and `skills.*` read — the plugin skills a code
-    // child loads ride `Options.plugins`/`skills` from it (`SkillStore.childSkillSurface`).
-    skills: skillStore,
     // Lane B: the user's SAVED allow rules reach both legs' children — `settings.json`, a TRUSTED
     // project's overlay (the SAME `projectSettings` resolver, at the SAME repo root) and its
     // `permissions.local.json` (the SAME `permissionRules` store `approval.respond` writes, read only
     // when trusted). All live getters: a saved rule reaches the next incarnation, no restart.
-    persistedAllowRules: (cwd) => persistedAllowRulesFor(cwd, {
-      projectRootOf: (c) => projectRootOf(c),
+    persistedAllowRules: (cwd) => projectScopeAllowRulesFor(cwd, {
       effectiveSettings: (root) => projectSettings.effective(root),
       approvedProjectRules: (root) => approvedProjectRules.rulesFor(root),
       ...(permissionRules === undefined ? {} : { projectRules: (root: string) => permissionRules!.rulesFor(root).project }),
-      isTrusted: (dir) => trustStore.isTrusted(dir),
+      trust: trustStore,
     }),
     // Task 17 (P8b-15): Winter children land in the persisted roster (absent when the spine is offline).
     ...(bgAgents === undefined ? {} : { children: bgAgents }),
     onTurnSettled: (sid) => { signals.onTurnSettled?.(sid); },
     onSupportedAgents: (sid, agents) => supportedAgentsCache.observe(sid, agents),
     ...(titler === undefined ? {} : { titler }),
-    // Fix wave (review row 7): the user's `settings.mcpServers` and a TRUSTED project's `.mcp.json`
-    // reach the child under the registry's own keys (`mcp__<key>__<tool>`), any transport
+    // Fix wave (review row 7): the user's servers and a TRUSTED project's MCP file (WS-21: its
+    // `.winter/mcp.json`; the repo-root `.mcp.json` is no longer read) reach the child under the
+    // registry's own keys (`mcp__<key>__<tool>`), any transport
     // (stdio/http/sse). Read LIVE per incarnation from the same holder and the same `TrustStore`
     // the McpManager consults. `log`: the SAME one-stderr-line-per-name convention `McpManager`'s
     // own `log` dep already uses (below), for a project-scope entry that didn't validate.
-    extraMcpServers: (session) => configuredMcpServersFor({ settings, cwd: session.cwd, trusted: (dir) => trustStore.isTrusted(dir), log: (m) => console.error(m) }),
+    // WS-21: the user and local scopes live in `sdk/.winter.json` (`sdkUserMcpServers`/`sdkLocalMcpServers`,
+    // the local one keyed by `localScopeKeyFor`), read live; precedence local > project > user.
+    extraMcpServers: (session) => configuredMcpServersFor({
+      settings,
+      userMcpServers: sdkUserMcpServers(winterHome),
+      // WS-21 (spec §4.4): the local scope, keyed by the session's canonical project root.
+      localMcpServers: session.cwd ? sdkLocalMcpServers(winterHome, localScopeKeyFor(session.cwd)) : {},
+      cwd: session.cwd, trusted: (dir) => trustStore.isTrusted(dir), log: (m) => console.error(m),
+    }),
     // Daemon settings surface batch 3 (item 1): the SAME trust gate `extraMcpServers` above and
     // `agents.list`'s own handler (ipc/server.ts) both use — an untrusted `cwd` gets the empty scan
     // shape outright, never even reaching the filesystem read `loadProjectAgentDefinitions` would do.
@@ -1996,35 +2167,10 @@ export async function startDaemon(opts: {
     // fine, the spawned child connects to those itself) and must not start anything the user has
     // disabled (`settings.mcp.disabled`) — `stdioMcpServersFor` is the one filter both facts go
     // through (settings.ts).
-    await mcp.startAll(stdioMcpServersFor(settings));
-    // Plugin MCP servers start only with explicit settings consent (mcpEnabled = enabled &&
-    // !disabled); a plugin's skills are always live (SkillStore above), but its MCP/manifest
-    // content is the seam that needs the user opting in via settings.plugins.enabled AND,
-    // per-exec-class, a settings.plugins.consents record (pluginMcpEligible in agent/plugins.ts —
-    // legacy plugins have requiredConsents [] so this is unchanged for them; a manifest plugin
-    // with exec content that's enabled but unconsented is excluded here, logged below). The
-    // `!pluginMcpEligible(p)` on the right is the SAME eligibility predicate the enabledPlugins
-    // filter below uses — deriving it inline (e.g. hand-rolling !consentComplete(p)) would let the
-    // why-log drift out of sync with what actually gates MCP start; the left-hand guard just
-    // narrows the log to the "would be eligible if not for consent" case so we don't log for
-    // plugins that were never enabled or never carried MCP content in the first place.
-    for (const p of allPlugins) {
-      if (p.mcpEnabled && !p.disabled && (p.hasMcp || p.hasManifestMcp) && !pluginMcpEligible(p)) {
-        const missing = p.requiredConsents.filter((c) => !p.consented.includes(c));
-        console.error(`plugin ${p.name}: enabled but missing consent for ${missing.join(", ")} — MCP not started`);
-      }
-    }
-    // manifestServers (Task 4, spec §2: "mcpServers may now come from the manifest instead of
-    // .mcp.json ... manifest wins on conflict") comes straight off PluginInfo — PluginStore.list()
-    // already ran loadManifest once per plugin and carried contributes.mcpServers through as
-    // p.manifestServers (undefined for legacy plugins and manifest plugins with no mcpServers
-    // declared). Re-reading winter-plugin.json here would risk a manifest that read fine moments
-    // ago (hasManifestMcp true, gating eligibility) but fails to reparse on a second read —
-    // silently falling back to the legacy .mcp.json path without ever disclosing that switch.
-    const enabledPlugins = allPlugins
-      .filter(pluginMcpEligible)
-      .map((p) => ({ name: p.name, dir: join(winterHome, "plugins", p.name), manifestServers: p.manifestServers }));
-    await mcp.startPlugins(enabledPlugins);
+    await mcp.startAll(stdioMcpServersFor(sdkUserMcpServers(winterHome), settings?.mcp?.disabled));
+    // WS-21 (L4 request 2): a plugin's MCP servers are claude-native content now (its `.mcp.json`, or a
+    // claude manifest's own `mcpServers`), loaded by both runtimes themselves (spec §5.3) — the daemon no
+    // longer starts one.
 
     // Tier-2 platform plugins (Phase 4b Task 3, spec §3): PluginSupervisor owns process lifecycle
     // (spawn/registration timeout/crash backoff/circuit breaker/PID-file orphan reclaim) for every
@@ -2108,7 +2254,15 @@ export async function startDaemon(opts: {
     // value; `effective(null)` degrades to `settings` verbatim, so a null projectRoot (or an
     // untrusted/overlay-less one) reads byte-identically to the pre-Task-7 global-only getter.
     permissionRules = new PermissionRules({
-      globalAllow: (projectRoot) => projectSettings.effective(projectRoot)?.permissions?.allow ?? ["Computer"],
+      // WS-21: the "everywhere" rules moved to `sdk/settings.json` in claude's grammar; the gate reads
+      // them back in its own (`winterGateRulesFromSdk`, never wider), plus a trusted project's overlay.
+      // The `["Computer"]` default still applies only when NEITHER tier states `allow` at all.
+      globalAllow: (projectRoot) => {
+        const user = sdkAllowRules(winterHome);
+        const overlay = projectSettings.effective(projectRoot)?.permissions?.allow;
+        if (user === undefined && overlay === undefined) return ["Computer"];
+        return [...new Set([...winterGateRulesFromSdk(user ?? []), ...(overlay ?? [])])];
+      },
       winterHome,
     });
     // P8b Task 5, deliberately: `runtimeSdk` is NOT on this config. The engine never consumes the
@@ -2190,7 +2344,7 @@ export async function startDaemon(opts: {
     // engine to hot-apply against (same "agent disabled" boundary the rest of this gate follows).
     const apply = makeApply({
       // THE atomic swap — a single synchronous assignment, first thing every apply does (T4).
-      setLiveSettings: (s) => { settings = s; },
+      setLiveSettings: (s) => { settings = liveSettingsView(s); },
       registry,
       buildComputerService: (s) => new ComputerUseService({ broker: peripheral, heartbeatMs: s?.peripheral?.heartbeatMs }),
       registerComputer: (svc, s) => {
@@ -2230,7 +2384,10 @@ export async function startDaemon(opts: {
       // call reflects the settings loaded at THAT time. Failures are logged by settings-apply.ts's
       // own `.catch` (this closure just re-throws/returns whatever `migrateMemoryStore` does);
       // never touches/deletes the old store either way (memory-migrate.ts's own contract).
-      migrateMemory: () => { migrateMemoryStore({ winterHome, trust: trustStore, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) }); },
+      // WS-21: inert here — the live holder no longer carries `memory.enabled` (`withoutMovedKeys`), so
+      // `makeApply` never sees a flip. The live trigger is the `sdk/settings.json` watcher below, on
+      // claude's `autoMemoryEnabled`.
+      migrateMemory: () => { migrateMemoryStore({ winterHome, trust: trustStore, directory: memoryDirectoryHot(), relocatedKey: (k) => runtime?.relocatedMemoryKey(k) }); },
       // P8a Task 12: `runtimes.migrations.memoryKeys` flipped on a RUNNING daemon must migrate
       // without a restart (the project's standing no-restart-for-settings rule). The wiring's own
       // `schema_meta` marker is what keeps it a ONE-TIME relocation, so this is handed the new
@@ -2250,6 +2407,62 @@ export async function startDaemon(opts: {
       log: (msg) => console.error(`settings-watcher: ${msg}`),
     });
     settingsWatcher.start(settings);
+  }
+
+  // WS-21: `sdk/settings.json` and `sdk/.winter.json` — debounced, single-flight, keep-last-good, like
+  // `settings.json` above. Built unconditionally: a no-provider daemon still serves the `sdk/`-backed
+  // RPCs, and the reaction below needs no engine. `load` drops the cached parse first (so an in-place
+  // same-size edit within one mtime tick is still seen) and THROWS on an unparseable file, which the
+  // watcher turns into "keep the last good version" — the live readers already do the same on their own.
+  const loadSdkFileStrict = (path: string): Record<string, unknown> => {
+    forgetSdkFile(path);
+    const read = path === sdkSettingsPath(winterHome) ? readSdkSettingsDetailed(winterHome) : readSdkGlobalConfigDetailed(winterHome);
+    if (read.state === "invalid") throw new Error(`${path} is not a readable JSON object (${read.reason})`);
+    return read.state === "ok" ? read.value : {};
+  };
+  const sdkSettingsWatcher = new SettingsWatcher<Record<string, unknown>>({
+    path: sdkSettingsPath(winterHome),
+    load: loadSdkFileStrict,
+    // The memory importer's hot trigger moved with `memory.enabled`: it re-runs on exactly an
+    // `autoMemoryEnabled` false→true flip (claude's default is ON, so only an explicit `false` is off).
+    apply: (prev, next) => {
+      // …and the memory-key migration's decline moved with `memory.directory`: clearing (or setting)
+      // `autoMemoryDirectory` on a RUNNING daemon re-enters it with no restart, exactly as a
+      // `settings.json` change does (`runtime.applySettings` re-reads the override live).
+      if (prev?.autoMemoryDirectory !== next.autoMemoryDirectory && settings) runtime?.applySettings(settings);
+      const was = prev?.autoMemoryEnabled !== false;
+      const is = next.autoMemoryEnabled !== false;
+      if (!was && is) {
+        try {
+          migrateMemoryStore({ winterHome, trust: trustStore, directory: memoryDirectoryHot(), relocatedKey: (k) => runtime?.relocatedMemoryKey(k) });
+        } catch (err) {
+          console.error(`memory migration on hot-toggle failed (best-effort, will retry next boot): ${(err as Error).message}`);
+        }
+      }
+    },
+    watch: watchViaParentDir,
+    log: (msg) => console.error(`settings-watcher (sdk/settings.json): ${msg}`),
+  });
+  const sdkGlobalConfigWatcher = new SettingsWatcher<Record<string, unknown>>({
+    path: sdkGlobalConfigPath(winterHome),
+    load: loadSdkFileStrict,
+    apply: () => {},
+    watch: watchViaParentDir,
+    log: (msg) => console.error(`settings-watcher (sdk/.winter.json): ${msg}`),
+  });
+  const sdkWatcherStarts: Array<[SettingsWatcher<Record<string, unknown>>, () => Record<string, unknown>]> = [
+    [sdkSettingsWatcher, () => liveSdkSettings(winterHome)],
+    [sdkGlobalConfigWatcher, () => liveSdkGlobalConfig(winterHome)],
+  ];
+  for (const [w, current] of sdkWatcherStarts) {
+    try {
+      w.start(current()); // diff the first change against what the daemon booted with
+      sdkWatchers.push(w);
+    } catch (err) {
+      // A missing `sdk/` (it is created by the bootstrap, so this is a torn home) degrades to the live
+      // readers alone — every read still goes to the file; only the debounced reaction is lost.
+      console.error(`settings-watcher: could not watch ${sdkHomeFor(winterHome)} (${(err as Error).message}) — sdk/ files are still read live`);
+    }
   }
 
   // Scheduled routines (Phase 5 T2, design doc §2; `routineStore` itself hoisted above the
@@ -2395,7 +2608,6 @@ export async function startDaemon(opts: {
     permissionRules,
     // Review I2 (lane B): the daemon's own record of "in this project" approvals — the SAME instance
     // the session drivers' saved-rules reader applies.
-    approvedProjectRules,
     dirs: sessionDirs,
     trust: trustStore,
     bg: bgRegistry,
@@ -2566,6 +2778,7 @@ export async function startDaemon(opts: {
       // any in-flight spawn on the in-process (awaited) path.
       server.stop(); mcp?.stopAll(); lspManager?.killAllNow(); void lspManager?.stopAll(); pluginSupervisor.stopAll(); bgRegistry.killAll();
       settingsWatcher?.stop(); // closes the fs.watch handle on settings.json — no leaked watcher past shutdown
+      for (const w of sdkWatchers) w.stop();
       routineScheduler.stop(); routineStore.close(); // no orphan tick timer past drain
       dreamer?.stop(); // no orphan dream tick timer past shutdown (unref'd already, but never left running)
       consoleBroker.stopRefresher(); // Winter Phase 10a (fix round 1 item 2): no orphan bearer-refresh timer past shutdown (unref'd already, belt-and-braces)

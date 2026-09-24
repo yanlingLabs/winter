@@ -25,6 +25,7 @@ import { SessionHub } from "../../src/sessions/hub";
 import { SessionStore } from "../../src/sessions/store";
 import type { Settings } from "../../src/settings";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
+import { recordedRunHomes } from "../helpers/run-homes";
 
 const TINY_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
@@ -42,13 +43,21 @@ describeWithWinterBinary("item 10 probe: MCP image content through a capability 
     const checkpoints = new ProjectionCheckpoints(rs);
     const settings = { runtimes: { winterExecutable: bin, winterIdleTimeoutSec: 10 } } as unknown as Settings;
     const secrets = new FileSecretStore(join(home, "secrets.json"));
-    const runtime = await createWinterRuntimeSdk({ home, settings: () => settings, secrets, capabilities: [] });
+    // R.1: the production shape — a run-home router (`runHomeFor` → `requireRunHome`) and real run homes, so the
+    // child writes its transcript where the record says (`sdk/projects`).
+    const runHomes = recordedRunHomes(home);
+    const runtime = await createWinterRuntimeSdk({
+      home, settings: () => settings, secrets, capabilities: [],
+      runHomeFor: async (ctx) => runHomes.deps.build(runHomes.deps.inputFor({ mode: ctx.mode, dispatchChild: false, leg: ctx.leg, cwd: ctx.cwd })),
+    });
     const calls: Array<{ name: string; args: unknown }> = [];
     const drivers = createWinterSessionDrivers({
       home, settings: () => settings, runtime, records, checkpoints, store, hub, secrets,
-      buildSessionCapabilities: () => ({}),
-      // THE PROBE SERVER: named as the double expects; its one tool answers text + image.
-      extraMcpServers: () => ({
+      runHome: runHomes.deps,
+      // THE PROBE SERVER: named as the double expects; its one tool answers text + image. A capability
+      // server (the daemon's own, in-process) — on a run-home build configured servers come from the run
+      // folder, and only capability servers ride Options.mcpServers, which is exactly this probe's premise.
+      buildSessionCapabilities: () => ({
         t8mcpsdk: {
           type: "sdk", name: "t8mcpsdk",
           instance: {

@@ -25,7 +25,7 @@ import type { CapabilityServerRecord } from "../capabilities";
 import { officialSubscriptionAuthEnabled, type Settings } from "../settings";
 import { canUseToolFor, type CanUseToolDeps } from "./approval-bridge";
 import { CORE_BRAND } from "./brand";
-import { GLOBAL_READ_ALLOW_RULES, permissionDenyRulesFor, disallowedToolsFor, sandboxConfigFor, sdkAllowRulesFor } from "./mode-options";
+import { GLOBAL_READ_ALLOW_RULES, permissionDenyRulesFor, disallowedToolsFor, childSandboxConfigFor, sdkAllowRulesFor } from "./mode-options";
 import { officialCapabilityServersFor, type OfficialMcpModule } from "./official-capabilities";
 import { winterSystemPromptFor } from "./system-prompt";
 import { ClaudeExecutableUnavailable } from "./official-executable";
@@ -145,6 +145,56 @@ export type OfficialAuthFamily = "api-key" | "console";
  */
 export function officialAuthArmFor(selection: { modelRef: string }): OfficialAuthFamily {
   return splitTag(selection.modelRef).providerId === "console" ? "console" : "api-key";
+}
+
+/**
+ * F1 follow-on: a Claude catalog row the official leg can name but Anthropic's API has no spelling for
+ * (`claude-3.7-sonnet`: both it and `claude-3-7-sonnet` are 404s, measured). Refused typed BEFORE the
+ * first turn — `runtime_selection_refused`, `data.reason: "no-wire-model"` — never run on another model.
+ */
+export class OfficialNoWireModel extends Error {
+  readonly code = "runtime_selection_refused" as const;
+  readonly reason = "no-wire-model" as const;
+  constructor(readonly modelRef: string) {
+    super(`the official leg has no wire id for ${modelRef}: Anthropic's API accepts no spelling of ${splitTag(modelRef).modelId}, dotted or dashed, and Winter never runs a different model in its place — choose another Claude model`);
+    this.name = "OfficialNoWireModel";
+  }
+}
+
+/** The providers whose wire is Anthropic's OWN API — the only ones the measured spelling rule below
+ *  covers. Any other provider that reaches this leg keeps its own catalog spelling, untouched. */
+const ANTHROPIC_WIRE_PROVIDERS: ReadonlySet<string> = new Set(["anthropic", "console"]);
+
+/** A family-first Claude id with a DOTTED version (`claude-haiku-4.5`, `claude-opus-4.8`). */
+const DOTTED_CLAUDE_VERSION_RE = /^(claude-[a-z]+)-(\d+)\.(\d+)$/;
+
+/**
+ * F1 (live gate, 2026-09-24): the model the official child is TOLD to run. One function, because two
+ * places must agree on it: `officialInputFor` sends it on the flag-settings layer, and
+ * `official-session.ts` holds the child's `system/init.model` to it (claude reports the id it was sent).
+ *
+ * WHY THE FLAG-SETTINGS LAYER. MEASURED through a real daemon on the real 0.3.250 child: the router's
+ * official door (0.0.11, and the WS-21 build) never forwards the query's top-level `Options.model` —
+ * the child was spawned with no `--model` and no settings `model`, and ran claude's own default
+ * (`claude-opus-5`) for a session recorded on `anthropic/claude-haiku-4.5`. `Options.settings` is the
+ * door the router's own template names and measures for exactly this field.
+ *
+ * THE WIRE ID (F1 follow-on). The tag's bare modelId, except on Anthropic's own API
+ * (`ANTHROPIC_WIRE_PROVIDERS`), where the pinned catalog's upstream rows carry DOTTED ids the API does
+ * not accept. MEASURED against the real API (read-only `GET /v1/models/<id>`, 2026-09-24):
+ * `claude-haiku-4.5` and `claude-sonnet-4.6` are 404s, their dashed forms (`claude-haiku-4-5`,
+ * `claude-sonnet-4-6`, and `claude-opus-4-5`…`4-8`, `claude-sonnet-4-5`) are 200s. So a dotted version
+ * segment maps to its dashed id; a dated or already-dashed id passes through; any OTHER dotted id has no
+ * accepted spelling (`claude-3.7-sonnet`: dotted and dashed both 404) and refuses typed
+ * (`OfficialNoWireModel`). This mapping belongs in the catalog — the provider catalog should carry
+ * claude's wire id per row, and then this rule goes away.
+ */
+export function officialWireModelFor(selection: { modelRef: string }): string | OfficialNoWireModel {
+  const { providerId, modelId } = splitTag(selection.modelRef);
+  if (!ANTHROPIC_WIRE_PROVIDERS.has(providerId) || !modelId.includes(".")) return modelId;
+  const dotted = DOTTED_CLAUDE_VERSION_RE.exec(modelId);
+  if (dotted === null) return new OfficialNoWireModel(selection.modelRef);
+  return `${dotted[1]}-${dotted[2]}-${dotted[3]}`;
 }
 
 /**
@@ -367,7 +417,8 @@ export interface OfficialSessionInput {
   /** The effort this session SPENDS — `session-driver.ts`'s `spendEffortFor`, the same function the
    *  Winter leg's `Options.effort` comes from. Distinct from `effort` above (the RAW stored value,
    *  possibly Winter's `ultra` tier, which only the system prompt reads). `official-session.ts` puts
-   *  this on the query's top-level `Options.effort`, which the router forwards untouched.
+   *  this on the query's top-level `Options.effort` — which, MEASURED 2026-09-24 (F1), the router's
+   *  official door does not forward (an open router item; `model` now rides the flag settings instead).
    *
    *  Required-but-possibly-undefined for the same reason `primary` is: an optional field a
    *  construction site could forget is exactly how this leg came to send no effort at all. */
@@ -426,6 +477,12 @@ export interface OfficialInputDeps {
    *  by the SAME `sdkAllowRulesFor` (`mode-options.ts`) onto the flag-settings `permissions.allow`.
    *  Absent/empty ⇒ byte-identical to a session before this field existed. */
   persistedAllow?: readonly string[];
+  /** WS-21: the user's `sdk/settings.json` `permissions.allow` (`sdkAllowRules`) — already claude
+   *  grammar, forwarded verbatim (the same field, the same reason, as `WinterOptionsInput.userAllow`). */
+  userAllow?: readonly string[];
+  /** WS-21: the user's `sdk/settings.json` `permissions.deny` (`sdkDenyRules`) — the same list
+   *  `WinterOptionsInput.userDeny` carries, layered by the same `permissionDenyRulesFor`. */
+  userDeny?: readonly string[];
   /** Lane B (router 0.0.11): the skills-only plugin views `SkillStore.childSkillSurface` builds — the
    *  SAME ones the Winter leg's child gets, so enabled + `exec`-consented plugins only — forwarded to
    *  the router's `plugins` policy (`local`, absolute, `skipMcpDiscovery: true`; the router refuses the
@@ -436,6 +493,12 @@ export interface OfficialInputDeps {
    *  frontmatter name — claude names a plugin skill by its directory, so the settings rule alone
    *  would bind nothing on this leg. */
   skillDenyAliases?: readonly string[];
+  /** WS-21 (spec §6.1, L3.4): the router applies a run home to this incarnation — the same meaning as
+   *  `WinterOptionsInput.runHomeApplied`: no agents, no plugins, no configured MCP servers, no saved
+   *  allow rules and no instructions/output-style/project-memory text from here (the run folder carries
+   *  them); the capability servers, Winter's fixed allow rules, the deny floor, the sandbox and the
+   *  hooks stay. Absent/false: exactly as before. */
+  runHomeApplied?: boolean;
   /** Everything `officialBrokerFor`/`canUseToolFor` needs, MINUS the three fields this function
    *  fills from `OfficialSessionInput` itself (never let a caller's stale `sessionId`/`mode`/`cwd`
    *  silently win over the session actually being opened). */
@@ -543,6 +606,9 @@ export interface OfficialInput {
    *  that field (disk is touched only by a caller actually about to spawn). `undefined` on the
    *  api-key arm (or when `officialAuthArm` was never threaded at all) — nothing to ensure. */
   anthropicConfigDirToEnsure?: string;
+  /** F1: the model this input tells the child to run (`officialWireModelFor`, already on
+   *  `input.options.settings.model`) — what `official-session.ts` holds `system/init.model` to. */
+  wireModel: string;
 }
 
 /**
@@ -552,9 +618,14 @@ export interface OfficialInput {
 export function officialInputFor(
   input: OfficialSessionInput,
   deps: OfficialInputDeps,
-): OfficialInput | ClaudeExecutableUnavailable | OfficialProjectKeyTooDeep | OfficialCredentialPlanRefused | OfficialConsoleRouterUnsupported | OfficialConsoleProfileMissing {
+): OfficialInput | ClaudeExecutableUnavailable | OfficialProjectKeyTooDeep | OfficialCredentialPlanRefused | OfficialConsoleRouterUnsupported | OfficialConsoleProfileMissing | OfficialNoWireModel {
   const executable = deps.claudeExecutableFor();
   if (executable instanceof ClaudeExecutableUnavailable) return executable;
+
+  // F1: the model this child will be told to run — or the typed refusal for a row with no wire spelling,
+  // before anything else is built.
+  const wireModel = officialWireModelFor(deps.selection);
+  if (wireModel instanceof OfficialNoWireModel) return wireModel;
 
   const projectKey = transcriptProjectKey(input.cwd);
   if (!isVendorCompliantProjectKey(projectKey)) return new OfficialProjectKeyTooDeep(input.cwd, projectKey);
@@ -621,6 +692,7 @@ export function officialInputFor(
     ...(input.outDir === undefined ? {} : { outDir: input.outDir }),
     ...(input.extraDirs === undefined ? {} : { extraDirs: input.extraDirs }),
     ...(input.effort === undefined ? {} : { effort: input.effort }),
+    ...(deps.runHomeApplied === true ? { runHomeApplied: true } : {}),
   });
 
   // Batch 3 (item 3): configured servers FIRST, Winter's own capability servers LAST — the same
@@ -629,7 +701,7 @@ export function officialInputFor(
   // (the collision itself was already refused, typed, before this deps object was built).
   const mcpServers = deps.officialPeer === undefined
     ? {}
-    : { ...(deps.configuredMcpServers ?? {}), ...officialCapabilityServersFor(deps.capabilities, deps.officialPeer as unknown as OfficialMcpModule) };
+    : { ...(deps.runHomeApplied === true ? {} : (deps.configuredMcpServers ?? {})), ...officialCapabilityServersFor(deps.capabilities, deps.officialPeer as unknown as OfficialMcpModule) };
 
   const base: Record<string, string> = minimalOsEnvironment(env);
   // Phase 9c (P9c-1): defence in depth (see `FORBIDDEN_CHILD_ENV`'s own doc) — a no-op today given
@@ -685,15 +757,19 @@ export function officialInputFor(
 
   return {
     pathToClaudeCodeExecutable: executable.path,
+    wireModel,
     ...(officialAuthArm === "console" ? { anthropicConfigDirToEnsure: anthropicConfigDirFor(deps.home) } : {}),
     input: {
       sessionId: input.sessionId,
       ...(input.parentSessionId === undefined ? {} : { parentSessionId: input.parentSessionId }),
       base,
-      autoMemoryDirectory: autoMemoryDirectoryFor(input, deps.assembler, deps.home),
+      // WS-21 (L2's contract): beside a run home the router pins the memory directory itself (from
+      // `runHome.input.memoryDir`, the same value) and REFUSES `spool`/`stagingRoot` — the run folder is
+      // the config dir — so neither this leg's memory dir nor its Winter-owned spool is named then.
+      ...(deps.runHomeApplied === true ? {} : { autoMemoryDirectory: autoMemoryDirectoryFor(input, deps.assembler, deps.home) }),
       projectKey,
       sharedTempRoot,
-      ...(spool === undefined ? {} : { spool }),
+      ...(spool === undefined || deps.runHomeApplied === true ? {} : { spool }),
       mcpServers,
       ...(credentials.length === 0 ? {} : { credentials }),
       ...(Object.keys(connectionEnv).length === 0 ? {} : { connectionEnv }),
@@ -742,16 +818,19 @@ export function officialInputFor(
         //
         // MEASURED against the real 0.3.250 CLI (`official-leg.e2e.test.ts`, "C1: the control-plane
         // fence"): the official runtime's own `Settings.sandbox.filesystem.denyWrite`/`denyRead`
-        // field names are IDENTICAL to Winter's `SandboxSettingsConfig` shape (both real DIRECTORY
-        // paths, never globs — `sandboxConfigFor`'s own doc), so `sandboxConfigFor(home)` is reused
-        // with NO translation. `permissions.deny`'s `Tool(specifier)` grammar, however, is NOT the
+        // field names are IDENTICAL to Winter's `SandboxSettingsConfig` shape, so the daemon's one fence
+        // is reused, in the ONE spelling both legs are sent: `childSandboxConfigFor`, the literal
+        // `sandboxConfigFor` list with every `[` spelled `[[]`. Both runtimes read an entry holding
+        // `* ? [ ]` as a glob rendered as a seatbelt regex (claude's `Rt`; the Winter runtime since agent
+        // SDK round 11's port of it), so a raw `[`-named home or project would fence nothing on either
+        // (C-1). `permissions.deny`'s `Tool(specifier)` grammar, however, is NOT the
         // same matcher as Winter's private reimplementation: the real CLI denied a target with
         // `controlPlaneDenyRules`'s `//`-anchored absolute forms UNCHANGED — no second anchoring
         // scheme was needed — confirmed by the same e2e denying a real `<home>/run/probe.txt` Read
         // and a real `<home>/runtimes/` Write while an ordinary cwd file Read still succeeds.
         //
         // Batch 3 (item 2): `permissionDenyRulesFor` (not `controlPlaneDenyRules` directly) so this
-        // leg's deny list ALSO carries `settings.permissions.deny` (today's `Skill(<name>)` toggles)
+        // leg's deny list ALSO carries the user's deny rules (WS-21: `sdk/settings.json`, `userDeny`)
         // — the exact same combined list the Winter leg's `buildWinterOptions` now sends, never a
         // second copy that could drift.
         // HIGH (fix wave, pre-merge review, finding 2a): same rationale as `mode-options.ts`'s
@@ -763,6 +842,9 @@ export function officialInputFor(
         // D14/P8c-2), but a subagent DEFINITION's own `permissionMode: bypassPermissions` is a
         // separate lever this clamp closes regardless of that downgrade.
         settings: {
+          // F1: the session's own model — see `officialWireModelFor`. Never the tag, never absent: a
+          // child told no model runs the runtime's default, which is the silent substitution this closes.
+          model: wireModel,
           permissions: {
             // The SAME constant the Winter leg sends (`mode-options.ts`'s `GLOBAL_READ_ALLOW_RULES`,
             // whose doc carries the ruling and the deny-before-allow argument) — one list, two legs,
@@ -771,13 +853,17 @@ export function officialInputFor(
             // …then the user's SAVED rules, translated by the ONE translation the Winter leg uses
             // (`sdkAllowRulesFor`) — claude applies its own settings files' `permissions.allow`
             // natively; `settingSources: []` means this flag layer is the only way ours reach it.
-            ...(input.mode === "code" ? { allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...sdkAllowRulesFor(deps.persistedAllow ?? [])])] } : {}),
+            // WS-21: on a run-home incarnation the saved rules ride the run folder's own settings tiers.
+            ...(input.mode === "code" ? { allow: [...new Set([...GLOBAL_READ_ALLOW_RULES, ...(deps.runHomeApplied === true ? [] : [...(deps.userAllow ?? []), ...sdkAllowRulesFor(deps.persistedAllow ?? [])])])] } : {}),
             // …plus the claude-spelling aliases of any denied plugin skill (`skillDenyAliases`).
-            deny: [...permissionDenyRulesFor(deps.home, deps.settings), ...(deps.skillDenyAliases ?? [])],
+            deny: [...permissionDenyRulesFor(deps.home, deps.userDeny), ...(deps.skillDenyAliases ?? [])],
             ...(deps.policy === "bypass" ? {} : { disableBypassPermissionsMode: "disable" as const }),
           },
           // `input.cwd`: the session's project agent definitions (`<cwd>/.winter/agents`) are fenced too.
-          sandbox: sandboxConfigFor(deps.home, input.cwd),
+          // Spelled for the sandbox glob grammar both runtimes read (`childSandboxConfigFor`, C-1), so a
+          // `[`-named home or project is still fenced — the same list the Winter spawn is sent.
+          // R.3 I-4: with the any-depth `.winter/<kind>` fence for the cwd and every extra working directory.
+          sandbox: childSandboxConfigFor(deps.home, input.cwd, input.extraDirs ?? []),
         },
         // 0.0.17 / the 2026-09-18 ruling: `leg: "official"` is what keeps claude's OWN `WebFetch` and
         // `WebSearch` on this leg. The daemon used to disallow both in every mode (P8b-33) because
@@ -811,11 +897,11 @@ export function officialInputFor(
         // when empty, mirroring `mode-options.ts`'s own "empty is treated the same as absent" rule
         // for `Options.agents` (an explicit `{}` would tell the runtime "zero subagents are
         // defined" rather than "the host declared none").
-        ...(deps.agents !== undefined && Object.keys(deps.agents).length > 0 ? { agents: deps.agents } : {}),
+        ...(deps.runHomeApplied !== true && deps.agents !== undefined && Object.keys(deps.agents).length > 0 ? { agents: deps.agents } : {}),
         // Lane B (router 0.0.11): the enabled + consented plugins' skills-only views — the router's
         // `plugins` policy is the only way a plugin reaches this leg since 0.0.11 (it no longer names
         // `<cwd>/.winter` itself). Absent when there are none.
-        ...(deps.skillPlugins !== undefined && deps.skillPlugins.length > 0
+        ...(deps.runHomeApplied !== true && deps.skillPlugins !== undefined && deps.skillPlugins.length > 0
           ? { plugins: deps.skillPlugins.map((p) => ({ type: "local" as const, path: p.path, skipMcpDiscovery: true as const })) }
           : {}),
       } as RouterOfficialInput["options"],

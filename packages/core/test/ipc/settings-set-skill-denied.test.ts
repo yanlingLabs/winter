@@ -13,6 +13,7 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 import { Settings, saveSettings } from "../../src/settings";
 import { SkillStore } from "../../src/agent/skills";
+import { storeHomeFor } from "../../src/agent/paths";
 import { TrustStore } from "../../src/agent/trust";
 
 class TestClient {
@@ -63,8 +64,9 @@ describe("settings.setSkillDenied + skills.list denial overlay", () => {
   async function boot() {
     const home = mkdtempSync(join(tmpdir(), "winter-skill-denied-"));
     saveSettings(join(home, "settings.json"), Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } }));
-    mkdirSync(join(home, "skills", "my-skill"), { recursive: true });
-    writeFileSync(join(home, "skills", "my-skill", "SKILL.md"), "---\nname: my-skill\ndescription: a test skill\n---\n\nBody.");
+    // WS-21: the user tier lives in the store home (`storeHomeFor`: `<home>/sdk` on a run-home build).
+    mkdirSync(join(storeHomeFor(home), "skills", "my-skill"), { recursive: true });
+    writeFileSync(join(storeHomeFor(home), "skills", "my-skill", "SKILL.md"), "---\nname: my-skill\ndescription: a test skill\n---\n\nBody.");
     const trust = new TrustStore(join(home, "trust.json"));
     const skills = new SkillStore({ winterHome: home, trust });
     const store = new SessionStore(home);
@@ -95,8 +97,10 @@ describe("settings.setSkillDenied + skills.list denial overlay", () => {
     const setResult = await c.request(METHODS.settingsSetSkillDenied, { name: "my-skill", denied: true });
     expect(setResult.error).toBeUndefined();
     expect(setResult.result).toEqual({ ok: true, name: "my-skill", denied: true, rule: "Skill(my-skill)" });
-    const onDisk = JSON.parse(readFileSync(join(home, "settings.json"), "utf8"));
+    // WS-21: the rule lands in `sdk/settings.json` (claude `Settings`), never in `settings.json`.
+    const onDisk = JSON.parse(readFileSync(join(home, "sdk", "settings.json"), "utf8"));
     expect(onDisk.permissions.deny).toEqual(["Skill(my-skill)"]);
+    expect(JSON.parse(readFileSync(join(home, "settings.json"), "utf8")).permissions).toBeUndefined();
     const listResult = await c.request(METHODS.skillsList, {});
     const row = listResult.result.skills.find((s: any) => s.name === "my-skill");
     expect(row.denied).toBe(true);
@@ -117,10 +121,10 @@ describe("settings.setSkillDenied + skills.list denial overlay", () => {
     c.close();
   });
 
-  test("a rule written by hand in settings.json is reported, not overwritten by an unrelated toggle", async () => {
+  test("a rule written by hand in sdk/settings.json is reported, not overwritten by an unrelated toggle", async () => {
     const { home, socketPath, harnessToken } = await boot();
-    const current = JSON.parse(readFileSync(join(home, "settings.json"), "utf8"));
-    saveSettings(join(home, "settings.json"), Settings.parse({ ...current, permissions: { deny: ["Skill(my-skill)", "Agent(fork)"] } }));
+    mkdirSync(join(home, "sdk"), { recursive: true });
+    writeFileSync(join(home, "sdk", "settings.json"), JSON.stringify({ theme: "dark", permissions: { deny: ["Skill(my-skill)", "Agent(fork)"] } }));
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     // A hand-written rule is reported as denied without ever calling settings.setSkillDenied.
@@ -129,8 +133,9 @@ describe("settings.setSkillDenied + skills.list denial overlay", () => {
     expect(row.denied).toBe(true);
     // Toggling an UNRELATED skill on/off must never disturb the hand-written "Agent(fork)" entry.
     await c.request(METHODS.settingsSetSkillDenied, { name: "unrelated-skill", denied: true });
-    const onDisk = JSON.parse(readFileSync(join(home, "settings.json"), "utf8"));
+    const onDisk = JSON.parse(readFileSync(join(home, "sdk", "settings.json"), "utf8"));
     expect(onDisk.permissions.deny).toEqual(["Skill(my-skill)", "Agent(fork)", "Skill(unrelated-skill)"]);
+    expect(onDisk.theme).toBe("dark"); // every other key of the user's file survives
     c.close();
   });
 
@@ -143,7 +148,8 @@ describe("settings.setSkillDenied + skills.list denial overlay", () => {
   // saveSettings throw a raw zod dump on ANY write through this RPC. Exercised at the IPC layer
   // (not just settings.ts directly) so the whole request/response path is proven, not just the
   // pure transform.
-  test("succeeds against a v2-shaped settings.json on disk (BLOCKER)", async () => {
+  // WS-21: the RPC no longer writes settings.json at all, so a v2-shaped file is simply left alone.
+  test("succeeds against a v2-shaped settings.json on disk (BLOCKER), which it leaves untouched", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-skill-denied-v2-"));
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 2,
@@ -166,9 +172,8 @@ describe("settings.setSkillDenied + skills.list denial overlay", () => {
     const setResult = await c.request(METHODS.settingsSetSkillDenied, { name: "my-skill", denied: true });
     expect(setResult.error).toBeUndefined();
     expect(setResult.result).toEqual({ ok: true, name: "my-skill", denied: true, rule: "Skill(my-skill)" });
-    const onDisk = JSON.parse(readFileSync(join(home, "settings.json"), "utf8"));
-    expect(onDisk.provider).toEqual({ model: "codex-oauth/gpt-5.6-sol" }); // `type` dropped, no longer poisons the write
-    expect(onDisk.permissions.deny).toEqual(["Skill(my-skill)"]);
+    expect(JSON.parse(readFileSync(join(home, "settings.json"), "utf8")).schemaVersion).toBe(2);
+    expect(JSON.parse(readFileSync(join(home, "sdk", "settings.json"), "utf8")).permissions.deny).toEqual(["Skill(my-skill)"]);
     c.close();
   });
 });

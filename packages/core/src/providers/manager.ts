@@ -2,7 +2,7 @@ import { statSync } from "node:fs";
 import type { SecretStore } from "../auth/secret-store";
 import { readOpenAiApiKey } from "../auth/credential-material";
 import { OPENAI_API_KEY_SECRET } from "../auth/legacy-secret-names";
-import { effortToSpendForRole, loadSettings, providerBaseUrlFor, INTERNAL_PROVIDER_IDS, type Settings } from "../settings";
+import { effortToSpendForRole, liveSettingsView, loadSettings, providerBaseUrlFor, INTERNAL_PROVIDER_IDS, type Settings } from "../settings";
 import type { ModelInfo, Provider, ProviderEvent, TurnRequest } from "./types";
 import { createCodexOauthRuntimeProvider, createOpenAiCompatibleRuntimeProvider } from "./runtime-provider";
 import { QuotaManager, withQuota } from "./quota";
@@ -74,12 +74,13 @@ function resolveSelection(settings: Settings, providerId: string): LiveModelSele
  *  selection forever (no re-read possible without a path). `providerId` is the BOOT-time catalog
  *  id (`createProvider`'s own `providerId` local) — passed in rather than re-derived from each
  *  live read, because the provider IDENTITY is fixed at boot (this function's own doc comment). */
-function buildLiveModelResolver(
+export function buildLiveModelResolver(
   bootSettings: Settings,
   settingsPath: string | undefined,
   providerId: string,
 ): () => LiveModelSelection {
-  let lastGood = resolveSelection(bootSettings, providerId);
+  // WS-21 review M3: a stored tag canonicalizes on read (`liveSettingsView`), like every live holder.
+  let lastGood = resolveSelection(liveSettingsView(bootSettings), providerId);
   let cache: { key: number; value: LiveModelSelection } | null = null;
 
   return () => {
@@ -88,7 +89,7 @@ function buildLiveModelResolver(
     if (cache && cache.key === key) return cache.value;
     let settings: Settings;
     try {
-      settings = loadSettings(settingsPath);
+      settings = liveSettingsView(loadSettings(settingsPath));
     } catch {
       return lastGood; // read/parse failure — never throw into a turn, keep the last good value
     }
@@ -401,5 +402,5 @@ export function internalRoleEffortFor(
   bound: { providerId: string; model: string },
 ): string | undefined {
   const spent = pin !== undefined && splitTag(pin).providerId === bound.providerId ? pin : `${bound.providerId}/${bound.model}`;
-  return effortToSpendForRole(settings, role, spent, undefined);
+  return effortToSpendForRole(settings, role, spent, undefined, { neverEscalate: true }); // R.1: an internal job, never up
 }

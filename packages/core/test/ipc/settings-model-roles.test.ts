@@ -114,6 +114,31 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     c.close();
   });
 
+  // R.1 ruling 1: a tag the catalog RETIRED with no rename (`deepseek/deepseek-reasoner`, V16) stays a typed
+  // refusal — never a silent fallback to another model. The write door refuses it; a tag STORED before the
+  // upgrade surfaces as a derived `model-not-in-catalog` problem on every role that resolves to it.
+  test("a retired catalog tag: the write door refuses it, and a stored one surfaces model-not-in-catalog on every role it reaches", async () => {
+    const { socketPath, harnessToken } = await boot("deepseek/deepseek-reasoner", { internalCredentials: ["deepseek:default"] });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const res = await c.request(METHODS.settingsModelRoles, {});
+    for (const role of ["provider.model", "titles.model", "reviewer.model", "pins.dream", "pins.cleaner"]) {
+      const info = res.result.roles[role];
+      expect(info.model).toBe("deepseek/deepseek-reasoner");
+      expect(info.problem).toMatchObject({ reason: "model-not-in-catalog", model: "deepseek/deepseek-reasoner" });
+      expect(info.problem.detail).toContain("not in this build's model catalog");
+    }
+    // …and the note clears the moment the user picks a live model (derived, never persisted).
+    const fixed = await c.request(METHODS.settingsSetModelRole, { role: "provider.model", model: "deepseek/deepseek-v4-pro" });
+    expect(fixed.error).toBeUndefined();
+    expect(fixed.result.roles["provider.model"].problem).toBeNull();
+    // The write door never accepts the retired tag in the first place.
+    const refused = await c.request(METHODS.settingsSetModelRole, { role: "pins.dispatch", model: "deepseek/deepseek-reasoner" });
+    expect(refused.error?.code).toBe(-32602);
+    expect(refused.error?.message).toContain("no model in the pinned catalog");
+    c.close();
+  });
+
   test("every LIVE pin slot writes and clears", async () => {
     const { settingsPath, socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
@@ -291,9 +316,11 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     const { socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol", { internalCredentials: ["codex-oauth:default"] });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
+    // R.1: the retired spelling is accepted on the wire and canonicalized to DeepSeek's live row (the
+    // catalog's CATALOG_TAG_RENAMES, applied at the protocol parse).
     const set = await c.request(METHODS.settingsSetModelRole, { role: "pins.dream", model: "deepseek/deepseek-v4-flash" });
     expect(set.error).toBeUndefined();
-    expect(set.result.model).toBe("deepseek/deepseek-v4-flash");
+    expect(set.result.model).toBe("deepseek/deepseek-flash");
     const permittedProviderIds = set.result.roles["pins.dream"].permitted.map((p: any) => p.providerId);
     expect(permittedProviderIds).toContain("deepseek");
     // Never a Claude provider, whatever else is listed.
@@ -307,7 +334,7 @@ describe("settings.modelRoles / settings.setModelRole", () => {
   // (never written to role-health.json), so they clear themselves the moment the condition clears.
   // -------------------------------------------------------------------------------------------
   test("a DeepSeek default with a Codex credential: the internal roles have a real model, a picker and NO problem", async () => {
-    const { socketPath, harnessToken } = await boot("deepseek/deepseek-v4-flash", { internalCredentials: ["codex-oauth:default"] });
+    const { socketPath, harnessToken } = await boot("deepseek/deepseek-flash", { internalCredentials: ["codex-oauth:default"] });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     const res = await c.request(METHODS.settingsModelRoles, {});
@@ -325,17 +352,17 @@ describe("settings.modelRoles / settings.setModelRole", () => {
   });
 
   test("a DeepSeek default with a DeepSeek key: zero setup — the roles sit on the user's own model", async () => {
-    const { socketPath, harnessToken } = await boot("deepseek/deepseek-v4-flash", { internalCredentials: ["deepseek:default"] });
+    const { socketPath, harnessToken } = await boot("deepseek/deepseek-flash", { internalCredentials: ["deepseek:default"] });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     const res = await c.request(METHODS.settingsModelRoles, {});
-    expect(res.result.roles["titles.model"].model).toBe("deepseek/deepseek-v4-flash");
+    expect(res.result.roles["titles.model"].model).toBe("deepseek/deepseek-flash");
     expect(res.result.roles["titles.model"].problem).toBeNull();
     c.close();
   });
 
   test("no internal credential: every internal role reports no-internal-credential, with the logins that fix it", async () => {
-    const { socketPath, harnessToken } = await boot("deepseek/deepseek-v4-flash", { internalCredentials: [] });
+    const { socketPath, harnessToken } = await boot("deepseek/deepseek-flash", { internalCredentials: [] });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     const res = await c.request(METHODS.settingsModelRoles, {});
@@ -356,12 +383,12 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     const { socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol", { internalCredentials: ["codex-oauth:default"] });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
-    const set = await c.request(METHODS.settingsSetModelRole, { role: "pins.cleaner", model: "deepseek/deepseek-v4-flash" });
+    const set = await c.request(METHODS.settingsSetModelRole, { role: "pins.cleaner", model: "deepseek/deepseek-flash" });
     expect(set.error).toBeUndefined();
     const info = set.result.roles["pins.cleaner"];
     expect(info.problem?.reason).toBe("no-credential");
     expect(info.problem?.detail).toContain("DeepSeek");
-    expect(info.problem?.model).toBe("deepseek/deepseek-v4-flash");
+    expect(info.problem?.model).toBe("deepseek/deepseek-flash");
     // Its sibling roles are fine — a problem is per role, never daemon-wide.
     expect(set.result.roles["titles.model"].problem).toBeNull();
     c.close();
@@ -398,7 +425,7 @@ describe("settings.modelRoles / settings.setModelRole", () => {
   });
 
   test("storing a credential clears no-internal-credential on the very next read — no restart", async () => {
-    const { socketPath, harnessToken } = await boot("deepseek/deepseek-v4-flash", { internalCredentials: [] });
+    const { socketPath, harnessToken } = await boot("deepseek/deepseek-flash", { internalCredentials: [] });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     expect((await c.request(METHODS.settingsModelRoles, {})).result.roles["pins.dream"].problem?.reason).toBe("no-internal-credential");
@@ -406,7 +433,7 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     expect(set.error).toBeUndefined();
     const after = (await c.request(METHODS.settingsModelRoles, {})).result.roles["pins.dream"];
     expect(after.problem).toBeNull();
-    expect(after.model).toBe("deepseek/deepseek-v4-flash");
+    expect(after.model).toBe("deepseek/deepseek-flash");
     // …and removing it again makes them inert, cleanly.
     const removed = await c.request(METHODS.credentialRemove, { providerId: "deepseek" });
     expect(removed.error).toBeUndefined();
@@ -474,14 +501,14 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     const { socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol", { internalCredentials: ["codex-oauth:default"] });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
-    const set = await c.request(METHODS.settingsSetModelRole, { role: "reviewer.model", model: "deepseek/deepseek-v4-flash" });
+    const set = await c.request(METHODS.settingsSetModelRole, { role: "reviewer.model", model: "deepseek/deepseek-flash" });
     expect(set.error).toBeUndefined();
     const info = set.result.roles["reviewer.model"];
     // The role's own model is the pin, reported verbatim so the user can see and change it.
-    expect(info.model).toBe("deepseek/deepseek-v4-flash");
+    expect(info.model).toBe("deepseek/deepseek-flash");
     expect(info.problem?.reason).toBe("no-credential");
     expect(info.problem?.detail).toBe("no credential is stored for DeepSeek — reviewing on codex-oauth/gpt-5.6-terra meanwhile");
-    expect(info.problem?.model).toBe("deepseek/deepseek-v4-flash");
+    expect(info.problem?.model).toBe("deepseek/deepseek-flash");
     c.close();
   });
 
@@ -501,7 +528,7 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     const { socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol", { internalCredentials: ["codex-oauth:default"] });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
-    const set = await c.request(METHODS.settingsSetModelRole, { role: "titles.model", model: "deepseek/deepseek-v4-flash" });
+    const set = await c.request(METHODS.settingsSetModelRole, { role: "titles.model", model: "deepseek/deepseek-flash" });
     expect(set.error).toBeUndefined();
     const info = set.result.roles["titles.model"];
     expect(info.problem?.reason).toBe("no-credential");
@@ -520,7 +547,7 @@ describe("settings.modelRoles / settings.setModelRole", () => {
   });
 
   test("nothing to fall back to: the reviewer reports the structural refusal (the hook then allows)", async () => {
-    const { socketPath, harnessToken, settingsPath } = await boot("deepseek/deepseek-v4-flash", { internalCredentials: [] });
+    const { socketPath, harnessToken, settingsPath } = await boot("deepseek/deepseek-flash", { internalCredentials: [] });
     const raw = JSON.parse(readFileSync(settingsPath, "utf8"));
     writeFileSync(settingsPath, JSON.stringify({ ...raw, reviewer: { model: "anthropic/claude-opus-5" } }, null, 2));
     const c = await TestClient.connect(socketPath);
@@ -748,9 +775,9 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     // Two shapes of "no vocabulary", both refused, exactly as `session.setEffort` refuses them:
-    //   `openai/gpt-5.4`        — no `reasoning` block at all
+    //   `openai/gpt-4.1`        — no `reasoning` block at all (R.1: the refreshed catalog gave gpt-5.4 one)
     //   `agnes/agnes-2.0-flash` — a `reasoning` block with `efforts: []`
-    for (const model of ["openai/gpt-5.4", "agnes/agnes-2.0-flash"]) {
+    for (const model of ["openai/gpt-4.1", "agnes/agnes-2.0-flash"]) {
       for (const effort of ["high", "none"]) {
         const refused = await c.request(METHODS.settingsSetModelRole, { role: "pins.dispatch", model, effort });
         expect(refused.error).toBeDefined();
@@ -1016,10 +1043,11 @@ describe("settings.modelRoles / settings.setModelRole", () => {
   }
 
   test("setModelRole: {model:null, effort:X} is refused when the DEFAULT model declares no reasoning-effort vocabulary", async () => {
-    // openai/gpt-5.4 declares NO `reasoning` block at all (settings.test.ts's own `noBlock` case) —
-    // titles.model's unset default IS the literal provider.model tag, so this daemon's default model
-    // for the role has no vocabulary to validate the effort against.
-    const { socketPath, harnessToken } = await boot("openai/gpt-5.4");
+    // openai/gpt-4.1 declares NO `reasoning` block at all (settings.test.ts's own `noBlock` case; R.1: the
+    // refreshed catalog gave gpt-5.4 a vocabulary) — titles.model's unset default IS the literal
+    // provider.model tag, so this daemon's default model for the role has no vocabulary to validate the
+    // effort against.
+    const { socketPath, harnessToken } = await boot("openai/gpt-4.1");
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     const refused = await c.request(METHODS.settingsSetModelRole, { role: "titles.model", model: null, effort: "high" });

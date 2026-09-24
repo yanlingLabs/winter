@@ -24,8 +24,9 @@ import { PermissionRules } from "../../src/agent/permission-rules";
 import { TrustStore } from "../../src/agent/trust";
 import { ProjectSettingsResolver } from "../../src/project-settings";
 import { Settings } from "../../src/settings";
+import { projectScopeRootFor, projectScopeTrust } from "../../src/runtime-sdk/run-home-input";
 import {
-  buildWinterOptions, controlPlaneDenyRules, GLOBAL_READ_ALLOW_RULES, persistedAllowRulesFor, sdkAllowRulesFor,
+  buildWinterOptions, controlPlaneDenyRules, GLOBAL_READ_ALLOW_RULES, persistedAllowRulesFor, projectScopeAllowRulesFor, sdkAllowRulesFor,
   WEB_BUILTIN_ALLOW_RULES, type WinterOptionsInput,
 } from "../../src/runtime-sdk/mode-options";
 import { officialInputFor, type OfficialInputDeps, type OfficialSessionInput } from "../../src/runtime-sdk/official-options";
@@ -191,3 +192,47 @@ function minimalOfficialDeps(over: Partial<OfficialInputDeps>): OfficialInputDep
     ...over,
   };
 }
+
+// R.3 residual (controller ruling): the daemon's project-scope readers resolve the project at the cwd's OWN git
+// top (`projectScopeRootFor`: a linked worktree's own `.winter/`), with trust keyed on the REPOSITORY; the
+// retired approved-rules record keeps its `repoRootFor` key. The daemon builds exactly these two:
+// `new ProjectSettingsResolver({ trust: projectScopeTrust(trustStore) })` read at `projectScopeRootFor(cwd)`
+// (dangerous domains, output style, hooks, LSP, reviewer…) and `projectScopeAllowRulesFor`.
+describe("R.3 residual: the daemon's project-scope readers from a linked worktree of a trusted repo", () => {
+  function bed() {
+    const main = realDir("winter-r3p-allow-main-");
+    const git = (args: string[]) => expect(Bun.spawnSync(["git", "-C", main, ...args], { stdout: "ignore", stderr: "ignore" }).exitCode).toBe(0);
+    git(["init", "-q"]);
+    git(["-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "i"]);
+    const wt = join(realDir("winter-r3p-allow-wt-"), "wt");
+    git(["worktree", "add", "-q", "-b", `r3p-${Math.random().toString(16).slice(2)}`, wt]);
+    for (const [dir, rule] of [[main, "Bash(main-only)"], [wt, "Bash(wt-only)"]] as const) {
+      mkdirSync(join(dir, ".winter"), { recursive: true });
+      writeFileSync(join(dir, ".winter", "settings.json"), JSON.stringify({ permissions: { allow: [rule] } }));
+    }
+    const trust = new TrustStore(join(realDir("winter-r3p-allow-home-"), "trust.json"));
+    trust.trust(main);
+    const resolver = new ProjectSettingsResolver({ base: () => Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } }), trust: projectScopeTrust(trust) });
+    const allowFor = (cwd: string) => projectScopeAllowRulesFor(cwd, {
+      effectiveSettings: (root) => resolver.effective(root),
+      approvedProjectRules: (key) => (key === main ? ["Bash(approved)"] : []),
+      trust,
+    });
+    return { main, wt: realpathSync(wt), resolver, allowFor };
+  }
+
+  test("from the worktree: its OWN overlay (trusted through its repository) and the approved record at the repo key", () => {
+    const b = bed();
+    expect(b.resolver.effective(projectScopeRootFor(b.wt))?.permissions?.allow).toEqual(["Bash(wt-only)"]);
+    const rules = b.allowFor(b.wt);
+    expect(rules).toContain("Bash(wt-only)");
+    expect(rules).toContain("Bash(approved)");
+    expect(rules).not.toContain("Bash(main-only)");
+  });
+
+  test("from the MAIN checkout nothing changes", () => {
+    const b = bed();
+    expect(b.resolver.effective(projectScopeRootFor(b.main))?.permissions?.allow).toEqual(["Bash(main-only)"]);
+    expect(b.allowFor(b.main).sort()).toEqual(["Bash(approved)", "Bash(main-only)"]);
+  });
+});

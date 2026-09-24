@@ -96,6 +96,14 @@ export interface RecoveryDeps {
    * are unchanged either way; the detail says which happened.
    */
   indexAlreadyRecovered?: boolean;
+  /**
+   * WS-21 (spec §3.8): "the narrow `sweepClaudeResumeStaging` exception runs only after" the root has been
+   * reconciled — which needs the ROUTER's `reconcileRootForRecovery`, built after this sweep. Set (by the
+   * daemon, when the linked router applies run homes) to leave step 8's staging sweep to the late
+   * reconcile-then-delete pass (`root-recovery.ts`); step 8 then deletes nothing and says so. Absent
+   * (router 0.0.11): today's age-and-unclaimed sweep, unchanged.
+   */
+  deferClaudeResumeSweep?: boolean;
 }
 
 export interface RecoveryStepReport {
@@ -125,6 +133,9 @@ export interface RecoveryReport {
    * `winter doctor` reading a step that always says "skipped" on every boot.
    */
   step10AttemptId?: number;
+  /** WS-21: step 6's row when it was left `skipped` for the late router reconcile (`root-recovery.ts`),
+   *  which the daemon restamps the same way. */
+  step6AttemptId?: number;
 }
 
 /** §2's canonical ephemeral root. The numeric suffix is the ACTUAL uid, never a hard-coded value. */
@@ -217,6 +228,7 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
   // above the guard is a read whose failure rejects the promise. Zero until the sweep has counted.
   let sessionsSeen = 0;
   let step10AttemptId: number | undefined;
+  let step6AttemptId: number | undefined;
   const finish = (): RecoveryReport => ({
     startedAt,
     finishedAt: now(),
@@ -227,6 +239,7 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
     corrupt,
     ok: steps.every((s) => s.outcome !== "failed"),
     ...(step10AttemptId === undefined ? {} : { step10AttemptId }),
+    ...(step6AttemptId === undefined ? {} : { step6AttemptId }),
   });
 
   // Review r1 (Minor 4): the boundedness claim has to be TOTAL. The per-session guards cover every
@@ -435,7 +448,9 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
     {
       const hook = hooks.reconcileLocalWriteRoot;
       if (!hook) {
-        finishStep(6, "skipped", { reason: "8c" });
+        // WS-21: on a run-home build the reconcile needs the router handle, built after §13 — the daemon
+        // runs it late (`root-recovery.ts`) and restamps THIS row, exactly as it does step 10's.
+        step6AttemptId = finishStep(6, "skipped", { reason: "the router reconciles recorded roots at runtime-sdk construction, when it can" });
       } else {
         const tally = { ok: 0, "repair-required": 0, skipped: 0, failed: 0 };
         for (const id of ids("SELECT winter_session_id FROM runtime_sessions ORDER BY winter_session_id")) {
@@ -515,16 +530,19 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
       // is recorded in the SAME two columns the scan above already reads, under the SAME
       // `active_local_write_root`/`local_write_root` names — no second query needed.
       let claudeResumeRemoved = 0;
-      try {
-        claudeResumeRemoved = sweepClaudeResumeStaging(deps.claudeResumeScanRoot ?? tmpdir(), known);
-      } catch {
-        /* bounded: the staging sweep costs itself, never the rest of step 8 */
+      if (!deps.deferClaudeResumeSweep) {
+        try {
+          claudeResumeRemoved = sweepClaudeResumeStaging(deps.claudeResumeScanRoot ?? tmpdir(), known);
+        } catch {
+          /* bounded: the staging sweep costs itself, never the rest of step 8 */
+        }
       }
+      const sweep: Record<string, string> = deps.deferClaudeResumeSweep ? { claudeResumeSweep: "deferred" } : {};
       try {
         const { orphans } = await scan([...known]);
-        finishStep(8, "ok", { root: scanRoot, known: known.size, orphans, deleted: 0, claudeResumeRemoved });
+        finishStep(8, "ok", { root: scanRoot, known: known.size, orphans, deleted: 0, claudeResumeRemoved, ...sweep });
       } catch (e) {
-        finishStep(8, "skipped", { root: scanRoot, known: known.size, errorName: e instanceof Error ? e.name : "unknown", claudeResumeRemoved });
+        finishStep(8, "skipped", { root: scanRoot, known: known.size, errorName: e instanceof Error ? e.name : "unknown", claudeResumeRemoved, ...sweep });
       }
     }
 
@@ -588,12 +606,12 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
 /** WS-16 §10's own literal — repeated (not imported) in `runtime-sdk/mode-options.ts`'s
  *  `controlPlaneDenyRules`, which names this constant right back; the two subsystems this phase
  *  does not bridge with a shared module. */
-const CLAUDE_RESUME_PREFIX = "claude-resume-";
+export const CLAUDE_RESUME_PREFIX = "claude-resume-";
 
 /** A resume genuinely in flight is never this old — every drain/timeout window the router or the
  *  official leg itself imposes is far shorter. Anything past this age under the staging root is
  *  leaked, not live. */
-const CLAUDE_RESUME_STALE_MS = 24 * 60 * 60 * 1000;
+export const CLAUDE_RESUME_STALE_MS = 24 * 60 * 60 * 1000;
 
 /**
  * P8d-12 (WS-16 §10): sweep `claude-resume-*` staging directories — a DOCUMENTED, NARROW EXCEPTION
@@ -694,7 +712,7 @@ function defaultTempScan(scanRoot: string, known: string[]): { orphans: string[]
 export function restampStep(
   db: Database,
   attemptId: number,
-  step: 10,
+  step: 6 | 10,
   outcome: "ok" | "partial" | "failed" | "skipped",
   detail: Record<string, unknown>,
 ): void {

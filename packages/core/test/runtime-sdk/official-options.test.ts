@@ -12,6 +12,7 @@ import { installMockModuleTripwire } from "../mock-module-tripwire";
 import * as winterAgentSdk from "@yanlinglabs/winter-agent-sdk";
 import type { CanUseTool } from "@yanlinglabs/winter-agent-sdk";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
+import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { ContextAssembler } from "../../src/agent/context";
 import { PermissionGate } from "../../src/agent/gate";
@@ -20,7 +21,7 @@ import { SkillStore } from "../../src/agent/skills";
 import { TrustStore } from "../../src/agent/trust";
 import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { assistantMemoryDirFor, memoryDirFor } from "../../src/agent/memory-dir";
-import { buildWinterOptions, controlPlaneDenyRules, disallowedToolsFor, GLOBAL_READ_ALLOW_RULES, sandboxConfigFor, WEB_BUILTIN_ALLOW_RULES, type WinterOptionsInput } from "../../src/runtime-sdk/mode-options";
+import { buildWinterOptions, controlPlaneDenyRules, disallowedToolsFor, GLOBAL_READ_ALLOW_RULES, childSandboxConfigFor, sandboxConfigFor, WEB_BUILTIN_ALLOW_RULES, type WinterOptionsInput } from "../../src/runtime-sdk/mode-options";
 import { winterSystemPromptFor } from "../../src/runtime-sdk/system-prompt";
 import { Settings } from "../../src/settings";
 import {
@@ -36,7 +37,9 @@ import {
   officialConfigDirFor,
   officialInputFor,
   officialPermissionModeFor,
+  officialWireModelFor,
   OfficialConsoleProfileMissing,
+  OfficialNoWireModel,
   OfficialConsoleRouterUnsupported,
   OfficialProjectKeyTooDeep,
   type OfficialInputDeps,
@@ -44,6 +47,7 @@ import {
   type OfficialSessionInput,
 } from "../../src/runtime-sdk/official-options";
 import { CONSOLE_AUTH_ROUTER_MIN, REQUIRED_WINTER_RUNTIME_SDK, versionAtLeast } from "../../src/runtime-sdk/versions";
+import { storeProjectsDir } from "../../src/agent/paths";
 
 // ⚠️ Bun's `mock.module` overwrites properties on the ALREADY-LOADED module's own namespace object
 // IN PLACE (its own doc comment: "exports are overwritten") — so `winterAgentSdk.transcriptProjectKey`
@@ -216,7 +220,7 @@ describe("autoMemoryDirectoryFor", () => {
     const relocatedTo = "some-relocated-key";
     const assembler = realAssembler(home, { relocatedKey: () => relocatedTo });
     const input = base("code", cwd);
-    const expected = join(home, "projects", relocatedTo, "memory");
+    const expected = join(storeProjectsDir(home), relocatedTo, "memory"); // the store home: sdk/ on a run-home build
     expect(autoMemoryDirectoryFor(input, assembler, home)).toBe(expected);
     // and it actually MOVED the answer off the pre-relocation (OLD key) directory — the exact
     // failure mode P8b-17's own doc warns about: "the agent reads an empty directory at the old
@@ -481,14 +485,90 @@ describe("officialInputFor — the control-plane fence (C1)", () => {
     expect(official).not.toContain("WebSearch");
   });
 
-  test("settings.sandbox is EXACTLY sandboxConfigFor(home, cwd) — same real paths, no globs", () => {
+  test("settings.sandbox is EXACTLY childSandboxConfigFor(home, cwd) — sandboxConfigFor's real paths, spelled for the sandbox glob grammar", () => {
     const home = "/Users/x/.winter-test-home";
     const options = optionsFor("code", home);
     const settings = options.settings as { sandbox?: { filesystem?: { denyWrite?: string[] } } } | undefined;
-    expect(settings?.sandbox).toEqual(sandboxConfigFor(home, "/Users/x/repo"));
+    expect(settings?.sandbox).toEqual(childSandboxConfigFor(home, "/Users/x/repo"));
+    // No `[` anywhere in these paths, so the spelling changes nothing: the literal list, entry for entry —
+    // plus (R.3 I-4) the five any-depth `.winter/<kind>` globs for the cwd, which only the child's form has.
+    const literal = sandboxConfigFor(home, "/Users/x/repo");
+    const denyWrite = settings?.sandbox?.filesystem?.denyWrite ?? [];
+    expect(denyWrite.filter((e) => !e.includes("**"))).toEqual(literal.filesystem!.denyWrite!);
+    expect(denyWrite.filter((e) => e.includes("**"))).toEqual(["skills", "commands", "rules", "output-styles", "agents"].map((k) => `/Users/x/repo/**/.winter/${k}`));
     // Whole-branch review: the trust record and the session's project agent definitions are on it.
     expect(settings?.sandbox?.filesystem?.denyWrite).toContain(`${home}/trust.json`);
     expect(settings?.sandbox?.filesystem?.denyWrite).toContain("/Users/x/repo/.winter/agents");
+  });
+
+  // Router 3279a1d: claude reads a sandbox entry holding `[` as a GLOB, so a raw `[`-named home is a
+  // character class that fences nothing; it is spelled `[[]`. Agent SDK 5e37898: the Winter runtime reads
+  // the same grammar (measured by `sandbox-glob-escape-measure.e2e.test.ts`), so BOTH legs are sent the
+  // spelled list; `sandboxConfigFor` stays literal for the consumers that compare real paths.
+  test("a `[`-named home: BOTH legs' sandbox spell every `[` as `[[]`; sandboxConfigFor itself stays literal", () => {
+    const home = "/Users/x/[wip] homes/.winter";
+    const options = optionsFor("code", home);
+    const denyWrite = (options.settings as { sandbox?: { filesystem?: { denyWrite?: string[]; denyRead?: string[] } } }).sandbox!.filesystem!.denyWrite!;
+    const denyRead = (options.settings as { sandbox?: { filesystem?: { denyWrite?: string[]; denyRead?: string[] } } }).sandbox!.filesystem!.denyRead!;
+    expect(denyWrite).toContain("/Users/x/[[]wip] homes/.winter/trust.json");
+    expect(denyWrite).toContain("/Users/x/[[]wip] homes/.winter/run");
+    expect(denyRead).toContain("/Users/x/[[]wip] homes/.winter/run");
+    for (const entry of [...denyWrite, ...denyRead]) expect(entry.replace(/\[\[\]/g, "")).not.toContain("["); // every `[` spelled
+    const literal = sandboxConfigFor(home, "/Users/x/repo").filesystem!;
+    expect(literal.denyWrite).toContain("/Users/x/[wip] homes/.winter/trust.json"); // the real-path list: literal
+    expect(denyWrite.filter((e) => !e.includes("**")).length).toBe(literal.denyWrite!.length); // same fence, entry for entry (+ R.3 I-4's globs)
+    // The Winter leg is sent the SAME spelled list.
+    const winterSandbox = buildWinterOptions({
+      mode: "code", policy: "ask", sessionId: "11111111-2222-3333-4444-555555555555", home, cwd: "/Users/x/repo",
+      credentials: { byProvider: {} }, spawn: { pathToClaudeCodeExecutable: "/opt/winter" },
+      canUseTool: (async () => ({ behavior: "allow" as const })) as CanUseTool, abort: new AbortController(),
+      baseEnv: { PATH: "/usr/bin", HOME: "/Users/x", TMPDIR: "/tmp", LANG: "en_US.UTF-8" },
+    }).sandbox;
+    expect(winterSandbox).toEqual(childSandboxConfigFor(home, "/Users/x/repo"));
+    expect((options.settings as { sandbox?: unknown }).sandbox).toEqual(winterSandbox);
+    // …and a `[`-named PROJECT: its `.winter/agents` and protected item fences are spelled too (a lone `]`
+    // stays literal) — on the Winter spawn's `Options.sandbox` exactly as on the official flag settings.
+    expect(childSandboxConfigFor("/h", "/p/[a]b").filesystem!.denyWrite).toContain("/p/[[]a]b/.winter/agents");
+    const winterProject = buildWinterOptions({
+      mode: "code", policy: "ask", sessionId: "11111111-2222-3333-4444-555555555555", home: "/h", cwd: "/p/[a]b",
+      credentials: { byProvider: {} }, spawn: { pathToClaudeCodeExecutable: "/opt/winter" },
+      canUseTool: (async () => ({ behavior: "allow" as const })) as CanUseTool, abort: new AbortController(),
+      baseEnv: { PATH: "/usr/bin", HOME: "/Users/x", TMPDIR: "/tmp", LANG: "en_US.UTF-8" },
+    }).sandbox!.filesystem!.denyWrite!;
+    expect(winterProject).toEqual(expect.arrayContaining(["/p/[[]a]b/.winter/agents", "/p/[[]a]b/.winter/skills", "/p/[[]a]b/.winter/settings.json"]));
+    expect(winterProject).not.toContain("/p/[a]b/.winter/skills");
+  });
+
+  // R.3 I-4: sandboxed Bash could plant `.winter/<kind>` under a SUBDIRECTORY of the cwd (an assembled path
+  // or `git show --output=…` slips the Bash detector), and a later session there loads it. Both runtimes read
+  // a glob-shaped deny entry as a regex, so the spelled list carries the any-depth form: five entries per
+  // working directory (`<escaped dir>/**/.winter/<kind>`), on both legs; `sandboxConfigFor` stays literal.
+  test("R.3 I-4: both legs' sandbox carry `<dir>/**/.winter/<kind>` for the cwd and each extra working directory", () => {
+    const kinds = ["skills", "commands", "rules", "output-styles", "agents"];
+    const child = childSandboxConfigFor("/h", "/p/[a]b", ["/q/extra"]).filesystem!.denyWrite!;
+    for (const k of kinds) {
+      expect(child).toContain(`/p/[[]a]b/**/.winter/${k}`);
+      expect(child).toContain(`/q/extra/**/.winter/${k}`);
+    }
+    expect(child.filter((e) => e.includes("**"))).toHaveLength(10);
+    expect(sandboxConfigFor("/h", "/p/[a]b").filesystem!.denyWrite!.some((e) => e.includes("**"))).toBe(false);
+    // the official leg, from `OfficialSessionInput.extraDirs`
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", extraDirs: ["/Users/x/other"], spendEffort: undefined };
+    const result = officialInputFor(input, minimalDeps({ home: "/h" }));
+    if (!("input" in result)) throw new Error("officialInputFor refused");
+    const official = ((result.input.options as unknown as { settings: { sandbox: { filesystem: { denyWrite: string[] } } } }).settings.sandbox);
+    for (const k of kinds) {
+      expect(official.filesystem.denyWrite).toContain(`/Users/x/repo/**/.winter/${k}`);
+      expect(official.filesystem.denyWrite).toContain(`/Users/x/other/**/.winter/${k}`);
+    }
+    // …and the Winter spawn is sent the SAME list, from `WinterOptionsInput.extraDirs`
+    const winter = buildWinterOptions({
+      mode: "code", policy: "ask", sessionId: "11111111-2222-3333-4444-555555555555", home: "/h", cwd: "/Users/x/repo", extraDirs: ["/Users/x/other"],
+      credentials: { byProvider: {} }, spawn: { pathToClaudeCodeExecutable: "/opt/winter" },
+      canUseTool: (async () => ({ behavior: "allow" as const })) as CanUseTool, abort: new AbortController(),
+      baseEnv: { PATH: "/usr/bin", HOME: "/Users/x", TMPDIR: "/tmp", LANG: "en_US.UTF-8" },
+    } as WinterOptionsInput).sandbox;
+    expect(winter).toEqual(official as unknown as typeof winter);
   });
 
   test("additionalDisallowedTools is EXACTLY disallowedToolsFor(mode, {leg:\"official\"}) — claude's own web pair stays", () => {
@@ -541,6 +621,112 @@ describe("officialInputFor — disableBypassPermissionsMode (finding 2a)", () =>
 
   test("omitted (never 'disable') when the session's own policy is bypass", () => {
     expect(settingsPermissionsFor("bypass")?.disableBypassPermissionsMode).toBeUndefined();
+  });
+});
+
+// F1 (live gate, 2026-09-24): the session's model rides the FLAG-SETTINGS layer. MEASURED on the real
+// 0.3.250 child through a real daemon: the router's official door (0.0.11 and the WS-21 build alike)
+// never forwards the query's top-level `Options.model` — the child was spawned with no `--model` and no
+// settings `model`, so every official session ran claude's own default (`claude-opus-5`) whatever the
+// session asked for. `OptionsTemplatePolicy.settings` is the door the router's own template names and
+// measures (`test/official/runtime-options.test.ts`: "a session given `settings: { model: … }` … sent
+// that model on its first request"). The value is the tag's BARE modelId, never the provider-qualified tag.
+describe("officialInputFor — the session's model rides the flag-settings layer (F1)", () => {
+  function settingsModelFor(modelRef: string): unknown {
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
+    const base = minimalDeps();
+    const result = officialInputFor(input, minimalDeps({ selection: { ...base.selection, providerId: modelRef.slice(0, modelRef.indexOf("/")), modelRef } }));
+    if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
+    return ((result.input.options as unknown as Record<string, unknown>).settings as Record<string, unknown> | undefined)?.["model"];
+  }
+
+  test("settings.model is the selection tag's bare modelId", () => {
+    expect(settingsModelFor("anthropic/claude-sonnet-5")).toBe("claude-sonnet-5");
+    expect(settingsModelFor("anthropic/claude-haiku-4-5-20251001")).toBe("claude-haiku-4-5-20251001");
+    expect(settingsModelFor("console/claude-opus-5")).toBe("claude-opus-5");
+  });
+
+  test("officialWireModelFor is the one spelling the settings layer and the init assertion share", () => {
+    expect(settingsModelFor("anthropic/claude-haiku-4.5")).toBe(officialWireModelFor({ modelRef: "anthropic/claude-haiku-4.5" }) as string);
+  });
+});
+
+// F1 follow-on (2026-09-24): the WIRE id for every Claude row the official leg can run. The pinned
+// catalog carries 14 DOTTED rows (`anthropic/claude-haiku-4.5`, `…/claude-opus-4.8`, their `console/*`
+// twins) whose bare modelId Anthropic's API does not accept. MEASURED by the coordinator against the
+// real API with the user's key (read-only `GET /v1/models/<id>`):
+//   404: claude-haiku-4.5, claude-sonnet-4.6 ("Did you mean claude-sonnet-4-6?"), claude-3-7-sonnet, claude-3.7-sonnet
+//   200: claude-haiku-4-5 (→ claude-haiku-4-5-20251001), claude-opus-4-5 (→ claude-opus-4-5-20251101),
+//        claude-opus-4-6/4-7/4-8, claude-sonnet-4-5 (→ claude-sonnet-4-5-20250929), claude-sonnet-4-6,
+//        claude-opus-5, claude-sonnet-5, claude-fable-5, claude-fable-5-1, claude-haiku-4-5-20251001
+// So a dotted version segment maps to the dashed id; dated and already-dashed ids pass through; an id
+// with NO accepted spelling refuses typed before the first turn — never a fallback to another model.
+// The table is keyed by the bare modelId and is EXHAUSTIVE over the pinned catalog's anthropic/console
+// Claude rows: a new row fails this test until its wire id is measured and added here.
+describe("officialWireModelFor — the Claude wire id per catalog row (F1 follow-on)", () => {
+  const MEASURED_WIRE_ID: Readonly<Record<string, string>> = {
+    "claude-fable-5": "claude-fable-5",
+    "claude-fable-5-1": "claude-fable-5-1",
+    "claude-haiku-4-5-20251001": "claude-haiku-4-5-20251001",
+    "claude-haiku-4.5": "claude-haiku-4-5",
+    "claude-opus-4.5": "claude-opus-4-5",
+    "claude-opus-4.6": "claude-opus-4-6",
+    "claude-opus-4.7": "claude-opus-4-7",
+    "claude-opus-4.8": "claude-opus-4-8",
+    "claude-opus-5": "claude-opus-5",
+    "claude-sonnet-4.5": "claude-sonnet-4-5",
+    "claude-sonnet-4.6": "claude-sonnet-4-6",
+    "claude-sonnet-5": "claude-sonnet-5",
+  };
+  const ACCEPTED_BY_THE_API = new Set(["claude-haiku-4-5", "claude-opus-4-5", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-5", "claude-sonnet-5", "claude-fable-5", "claude-fable-5-1", "claude-haiku-4-5-20251001"]);
+  const claudeRows = loadCatalog().models.filter((row) => (row.providerId === "anthropic" || row.providerId === "console") && row.modelFamily === "claude");
+
+  test("the pinned catalog's anthropic/console Claude rows are the 24 this table was measured for", () => {
+    expect(claudeRows.map((row) => row.key).sort()).toEqual(
+      Object.keys(MEASURED_WIRE_ID).flatMap((id) => [`anthropic/${id}`, `console/${id}`]).sort(),
+    );
+  });
+
+  test("every row maps to its measured wire id, and every wire id is one the API answered 200 for", () => {
+    for (const row of claudeRows) {
+      const modelId = row.key.slice(row.key.indexOf("/") + 1);
+      const wire: unknown = officialWireModelFor({ modelRef: row.key });
+      expect({ row: row.key, wire }).toEqual({ row: row.key, wire: MEASURED_WIRE_ID[modelId] });
+      expect(ACCEPTED_BY_THE_API.has(wire as string)).toBe(true);
+    }
+  });
+
+  test("a dotted id with NO accepted spelling refuses typed — runtime_selection_refused, naming the model", () => {
+    for (const modelRef of ["anthropic/claude-3.7-sonnet", "console/claude-3.7-sonnet"]) {
+      const wire = officialWireModelFor({ modelRef });
+      expect(wire).toBeInstanceOf(OfficialNoWireModel);
+      const refusal = wire as OfficialNoWireModel;
+      expect(refusal.code).toBe("runtime_selection_refused");
+      expect(refusal.reason).toBe("no-wire-model");
+      expect(refusal.message).toContain(modelRef);
+      expect(refusal.message).toContain("no wire id");
+    }
+  });
+
+  test("officialInputFor refuses the same row before anything is built", () => {
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
+    const base = minimalDeps();
+    const result = officialInputFor(input, minimalDeps({ selection: { ...base.selection, providerId: "anthropic", modelRef: "anthropic/claude-3.7-sonnet" } }));
+    expect(result).toBeInstanceOf(OfficialNoWireModel);
+  });
+
+  test("officialInputFor reports the mapped id it sent, beside the settings layer that carries it", () => {
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
+    const base = minimalDeps();
+    const result = officialInputFor(input, minimalDeps({ selection: { ...base.selection, providerId: "console", modelRef: "console/claude-opus-4.8" } }));
+    if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
+    expect(result.wireModel).toBe("claude-opus-4-8");
+    expect(((result.input.options as unknown as Record<string, unknown>).settings as Record<string, unknown>)["model"]).toBe("claude-opus-4-8");
+  });
+
+  test("a provider whose wire is NOT Anthropic's own API keeps its own spelling (the measurement covers anthropic/console only)", () => {
+    expect(officialWireModelFor({ modelRef: "someproxy/claude-opus-4.8" })).toBe("claude-opus-4.8");
+    expect(officialWireModelFor({ modelRef: "someproxy/anthropic/claude-3.7-sonnet" })).toBe("anthropic/claude-3.7-sonnet");
   });
 });
 
@@ -1081,15 +1267,17 @@ describe("effectiveOfficialAuthFor (O6, provider.status; WS-20: presence alone)"
 // `options.settings.permissions.deny` too — `permissionDenyRulesFor` is the ONE function both
 // `buildWinterOptions` (mode-options.ts) and this leg's construction site call, so a divergence here
 // would mean the two legs enforce DIFFERENT deny lists for the identical settings.json.
-describe("officialInputFor — item 2: settings.permissions.deny reaches this leg too", () => {
+describe("officialInputFor — item 2: the user's deny rules reach this leg too", () => {
   test("a Skill(<name>) deny rule (or any hand-written rule) rides alongside the fixed control-plane fence", () => {
     const home = "/Users/x/.winter-test-home";
+    // WS-21: the user tier's deny rules are `sdk/settings.json` `permissions.deny` (`userDeny`); a stale
+    // copy on `settings` is never read.
     const settings = Settings.parse({
       schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },
-      permissions: { deny: ["Skill(writing-skills)", "Agent(fork)"] },
+      permissions: { deny: ["Skill(stale)"] },
     });
     const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
-    const result = officialInputFor(input, minimalDeps({ home, settings }));
+    const result = officialInputFor(input, minimalDeps({ home, settings, userDeny: ["Skill(writing-skills)", "Agent(fork)"] }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
     const deny = (result.input.options as { settings?: { permissions?: { deny?: string[] } } }).settings?.permissions?.deny ?? [];
     expect(deny).toEqual([...controlPlaneDenyRules(home), "Skill(writing-skills)", "Agent(fork)"]);

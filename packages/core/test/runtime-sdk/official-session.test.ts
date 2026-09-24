@@ -16,7 +16,9 @@
 // this works regardless of import order and needs no dynamic `import()` gymnastics. It is undone in
 // `afterAll` so no other test file sharing this process sees a fake treated as real.
 import { afterAll, describe, expect, mock, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { transcriptProjectKey, WinterCompatibilitySessionStore } from "@yanlinglabs/winter-agent-sdk";
+import { storeHomeFor, storeProjectsDir } from "../../src/agent/paths";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installMockModuleTripwire } from "../mock-module-tripwire";
@@ -51,6 +53,7 @@ import { SessionHub } from "../../src/sessions/hub";
 import { SessionStore } from "../../src/sessions/store";
 import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import { createWinterSessionDrivers } from "../../src/runtime-sdk/session-driver";
+import { recordedRunHomes } from "../helpers/run-homes";
 import {
   ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME,
   ANTHROPIC_CREDENTIAL_SECRET_NAME,
@@ -91,7 +94,12 @@ afterAll(() => {
 // ── the fake wire ────────────────────────────────────────────────────────────────────────────────
 
 type Frame = Record<string, unknown>;
-const init = (sessionId: string, extra: Frame = {}): Frame => ({ type: "system", subtype: "init", session_id: sessionId, model: "claude-test/echo", tools: ["AskUserQuestion"], ...extra });
+// F1: `official-session.ts` holds the init frame's `model` to the model the incarnation SENT (the
+// flag-settings `model`). A real child reports what it was told, so the fake does too: `SENT_MODEL` is
+// replaced, at `emit`, by the `runtime.official.options.settings.model` this query was opened with. A test
+// that wants a child running something else names that model explicitly.
+const SENT_MODEL = "<the model this query was sent>";
+const init = (sessionId: string, extra: Frame = {}): Frame => ({ type: "system", subtype: "init", session_id: sessionId, model: SENT_MODEL, tools: ["AskUserQuestion"], ...extra });
 const assistant = (text: string): Frame => ({ type: "assistant", message: { content: [{ type: "text", text }] } });
 const result = (extra: Frame = {}): Frame => ({ type: "result", subtype: "success", is_error: false, permission_denials: [], result: "", ...extra });
 /** M6a: the router's `OfficialSessionStoreError` frame shape (`official/errors.d.ts` §13.11). */
@@ -105,7 +113,11 @@ class FakeOfficialQuery {
   private readonly rejecters: Array<(e: unknown) => void> = [];
   private terminal: { done: true } | { error: unknown } | undefined;
 
-  constructor(prompt: AsyncIterable<string>) {
+  /** F1: the flag-settings `model` this query was opened with — what a real child would report. */
+  private readonly sentModel: unknown;
+
+  constructor(prompt: AsyncIterable<string>, options?: object) {
+    this.sentModel = (options as { runtime?: { official?: { options?: { settings?: Record<string, unknown> } } } } | undefined)?.runtime?.official?.options?.settings?.["model"];
     void (async () => {
       for await (const t of prompt) this.pushed.push(t);
       this.end();
@@ -113,6 +125,7 @@ class FakeOfficialQuery {
   }
 
   emit(frame: Frame): void {
+    if (frame["type"] === "system" && frame["subtype"] === "init" && frame["model"] === SENT_MODEL && typeof this.sentModel === "string") frame = { ...frame, model: this.sentModel };
     const w = this.waiters.shift();
     if (w !== undefined) { this.rejecters.shift(); w({ value: frame, done: false }); return; }
     this.buffer.push({ value: frame });
@@ -168,7 +181,7 @@ interface Harness {
   types(): string[];
 }
 
-function harness(overrides: Partial<OfficialSessionDeps> = {}): Harness {
+function harness(overrides: Partial<OfficialSessionDeps> = {}, runtimeExtra: Record<string, unknown> = {}): Harness {
   const queries: FakeOfficialQuery[] = [];
   const capturedOptions: Array<Record<string, unknown>> = [];
   const events: SessionEvent[] = [];
@@ -191,13 +204,14 @@ function harness(overrides: Partial<OfficialSessionDeps> = {}): Harness {
     sdk: {
       query: ({ prompt, options }: { prompt: AsyncIterable<string>; options: Record<string, unknown> }) => {
         capturedOptions.push(options);
-        const q = new FakeOfficialQuery(prompt);
+        const q = new FakeOfficialQuery(prompt, options);
         queries.push(q);
         return q as unknown;
       },
     },
     trackQuery: (_sid: string, abort: AbortController, end: () => Promise<void>) => { tracked.push({ abort, end }); },
     untrack: () => { h.untracked++; },
+    ...runtimeExtra,
   } as unknown as WinterRuntimeSdk;
 
   const selection: RuntimeSelection = {
@@ -775,6 +789,65 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
 // hand-typed "ANTHROPIC_API_KEY" string. Wiring a real console-arm session through `run()`'s own
 // assertion is `session-driver.ts`'s `RuntimeSelection.authFamily` plumbing (outside this lane's
 // file cluster) — carried; see the lane report.
+// F1 (live gate, 2026-09-24): "there is never a silent fallback to another model". MEASURED through a
+// real daemon: the router's official door dropped the query's top-level `Options.model`, the child ran
+// claude's own default (`claude-opus-5`) for a session recorded on `anthropic/claude-haiku-4.5`, and
+// nothing on this leg noticed. The model now rides the flag-settings layer, and the child's own
+// `system/init.model` is held to it — a child that reports any other model (or none) ends the session
+// typed before a turn runs, the same shape as the apiKeySource assertion above.
+describe("F1 — the child must run the model the session asked for", () => {
+  test("the model rides runtime.official.options.settings.model — the flag layer the router forwards", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    await h.settled();
+    const official = (h.capturedOptions[0]!["runtime"] as { official?: { options?: { settings?: Record<string, unknown> } } }).official;
+    expect(official?.options?.settings?.["model"]).toBe("echo");
+  });
+
+  test("init.model !== the model sent -> official_model_mismatch, before any turn runs", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { model: "claude-opus-5" }));
+    await h.settled();
+    const err = h.events.find((e) => e.type === "agent_error") as (SessionEvent & { code?: string; message?: string }) | undefined;
+    expect(err?.code).toBe("official_model_mismatch");
+    expect(err?.message).toContain("claude-opus-5");
+    expect(err?.message).toContain("echo");
+    expect(h.session.state).toBe("ended");
+    expect(h.types()).not.toContain("assistant_message");
+    expect(h.types()).not.toContain("turn_completed");
+    let caught: unknown;
+    try {
+      await h.session.send("too late");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(OfficialSessionEnded);
+  });
+
+  test("an init frame with no model at all is never read as a match", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    const { model: _dropped, ...noModel } = init(BACKEND_ID);
+    h.q().emit(noModel);
+    await h.settled();
+    const err = h.events.find((e) => e.type === "agent_error") as (SessionEvent & { code?: string }) | undefined;
+    expect(err?.code).toBe("official_model_mismatch");
+    expect(h.session.state).toBe("ended");
+  });
+
+  test("init.model === the model sent -> no refusal; the turn proceeds normally", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID));
+    h.q().emit(assistant("ok"));
+    h.q().emit(result());
+    await h.settled();
+    expect(h.events.some((e) => e.type === "agent_error")).toBe(false);
+    expect(h.types()).toContain("turn_completed");
+  });
+});
+
 describe("O3 — expectedApiKeySource / CONSOLE_API_KEY_SOURCE", () => {
   test("api-key arm expects the pinned ANTHROPIC_API_KEY — unchanged from P9c-1", () => {
     expect(expectedApiKeySource("api-key")).toBe("ANTHROPIC_API_KEY");
@@ -901,7 +974,7 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
   function driverWorld(existing?: {
     home: string; store: SessionStore; hub: SessionHub; records: RuntimeSessionRecords;
     checkpoints: ProjectionCheckpoints; secrets: FileSecretStore;
-  }) {
+  }, selected: { modelRef?: string } = {}) {
     const home = existing?.home ?? testHome();
     const store = existing?.store ?? new SessionStore(home);
     const hub = existing?.hub ?? new SessionHub(store);
@@ -912,7 +985,7 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
     // "auto" mode — no `runtimes.official.auth` pin — exactly the review's own scenario.
     const settings = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } });
     const officialSelection: RuntimeSelection = {
-      runtimeKind: "claude-agent", providerId: "anthropic", modelRef: MODEL,
+      runtimeKind: "claude-agent", providerId: "anthropic", modelRef: selected.modelRef ?? MODEL,
       family: "claude", authFamily: "api-key", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
     };
     const capturedOptions: CapturedOptions[] = [];
@@ -921,7 +994,7 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
       sdk: {
         query: ({ prompt, options }: { prompt: AsyncIterable<string>; options: CapturedOptions }) => {
           capturedOptions.push(options);
-          const q = new FakeOfficialQuery(prompt);
+          const q = new FakeOfficialQuery(prompt, options);
           queries.push(q);
           return q as unknown;
         },
@@ -934,16 +1007,20 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
       trackQuery: () => {},
       untrack: () => {},
     } as unknown as WinterRuntimeSdk;
+    // WS-21 (R.1): the production shape — real run homes (the router's own builder), recorded; a driver
+    // without run-home deps refuses `run_home_required` on this build.
+    const runHomes = recordedRunHomes(home);
     const drivers = createWinterSessionDrivers({
       home, settings: () => settings, runtime, records, checkpoints, store, hub, secrets,
       buildSessionCapabilities: () => ({}),
       approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(),
       rootsOf: () => [], tmpDirOf: () => home, outDirOf: () => home, memoryKeyOf: () => "k",
       log: () => {},
+      runHome: runHomes.deps,
     });
     const close = (): void => { try { store.close(); } catch { /* closed */ } try { rs?.close(); } catch { /* closed */ } };
     return {
-      home, store, hub, records, checkpoints, secrets, drivers, close, capturedOptions, queries,
+      home, store, hub, records, checkpoints, secrets, drivers, close, capturedOptions, queries, runHomes,
       q: () => queries[queries.length - 1]!,
     };
   }
@@ -1125,6 +1202,55 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
     }
   });
 
+  // WS-21 round 3 (Important): the official store key derives from the CANONICAL cwd (official-options.ts), so
+  // a 0.116 official session made in a symlinked cwd has its canonical transcript under the RAW key — the
+  // router's resume-vs-fresh check (`store.load` at the canonical key) would find nothing and start FRESH
+  // under the same backend id. `resume()` moves the files first; the restart's first generation is then
+  // handed the canonical cwd, and the store at that key holds the history.
+  test("round 3: a symlinked-cwd official session from the old layout resumes with its history (files moved, record re-pointed)", async () => {
+    const w = driverWorld();
+    try {
+      await writeCredentialMaterial(w.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
+      const real = realpathSync(mkdtempSync(join(tmpdir(), "winter-rekey-off-real-")));
+      const link = join(realpathSync(mkdtempSync(join(tmpdir(), "winter-rekey-off-link-"))), "proj");
+      symlinkSync(real, link);
+      const sid = w.store.createSession("t", { mode: "code", model: MODEL, cwd: link });
+      const session = await w.drivers.create(sid);
+      w.q().emit(init(session.backendSessionId, { apiKeySource: "ANTHROPIC_API_KEY" }));
+      w.q().emit(result());
+      await Bun.sleep(10);
+      w.q().end();
+      await Bun.sleep(10);
+      const id = session.backendSessionId;
+      const projects = storeProjectsDir(w.home);
+      const rawKey = transcriptProjectKey(link);
+      const canonKey = transcriptProjectKey(real);
+      expect(w.records.get(sid)!.transcriptProjectKey).toBe(canonKey);
+      // the 0.116 state: the record and the canonical transcript under the RAW key
+      expect(w.records.rekeyTranscript(sid, canonKey, rawKey, join(projects, rawKey))).toBe(true);
+      mkdirSync(join(projects, rawKey), { recursive: true });
+      writeFileSync(join(projects, rawKey, `${id}.jsonl`), '{"type":"user","uuid":"o-old","message":{"role":"user","content":"before"}}\n');
+
+      const w2 = driverWorld({ home: w.home, store: w.store, hub: w.hub, records: w.records, checkpoints: w.checkpoints, secrets: w.secrets });
+      const resumed = await w2.drivers.ensure(sid);
+      expect(resumed).toBeDefined();
+      expect(existsSync(join(projects, rawKey, `${id}.jsonl`))).toBe(false);
+      const record = w.records.get(sid)!;
+      expect([record.transcriptProjectKey, record.backendRoot]).toEqual([canonKey, join(projects, canonKey)]);
+      const opts = w2.capturedOptions[0] as unknown as { cwd: string; sessionId: string };
+      expect(opts.cwd).toBe(real);
+      expect(opts.sessionId).toBe(id);
+      const loaded = await new WinterCompatibilitySessionStore({ winterHome: storeHomeFor(w.home) }).load({ projectKey: transcriptProjectKey(opts.cwd), sessionId: id });
+      expect(loaded?.map((e) => e.uuid)).toEqual(["o-old"]);
+      w2.q().emit(init(id, { apiKeySource: "ANTHROPIC_API_KEY" }));
+      w2.q().emit(result());
+      await Bun.sleep(10);
+      await resumed!.end();
+    } finally {
+      w.close();
+    }
+  });
+
   // Winter Phase 10b (D1-8, I-4): "the child env NAMES after GPT -> Claude contain no codex/openai
   // names." `driverWorld()`'s own daemon `settings` is ALREADY `provider.type: "codex-oauth"` (its
   // definition above) while the session it creates is assembled on the Claude selection — exactly
@@ -1169,6 +1295,67 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
       for (const name of POLLUTED_NAMES) {
         if (prior[name] === undefined) delete process.env[name]; else process.env[name] = prior[name];
       }
+    }
+  });
+
+  // F1 follow-on: a DOTTED catalog row runs on its measured dashed wire id, end to end through the real
+  // driver — the flag-settings `model`, the top-level `model`, and the id the init frame is held to are
+  // one value — and a row with no accepted spelling refuses typed before any child is asked for.
+  test("F1: anthropic/claude-haiku-4.5 is sent as claude-haiku-4-5, and the init assertion holds the child to that", async () => {
+    const w = driverWorld(undefined, { modelRef: "anthropic/claude-haiku-4.5" });
+    try {
+      await writeCredentialMaterial(w.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
+      const sid = w.store.createSession("t", { mode: "code", model: "anthropic/claude-haiku-4.5" });
+      const session = await w.drivers.create(sid);
+      const sent = w.capturedOptions[0] as Record<string, unknown> & { runtime?: { official?: { options?: { settings?: Record<string, unknown> } } } };
+      expect(sent["model"]).toBe("claude-haiku-4-5");
+      expect(sent.runtime?.official?.options?.settings?.["model"]).toBe("claude-haiku-4-5");
+      w.q().emit(init(session.backendSessionId, { apiKeySource: "ANTHROPIC_API_KEY" })); // reports the id it was sent
+      w.q().emit(assistant("ok"));
+      w.q().emit(result());
+      await Bun.sleep(10);
+      expect(w.store.read(sid).filter((e) => e.type === "agent_error")).toEqual([]);
+      await session.end();
+    } finally {
+      w.close();
+    }
+  });
+
+  test("F1: a child reporting the UNMAPPED dotted id is a mismatch, never a pass", async () => {
+    const w = driverWorld(undefined, { modelRef: "anthropic/claude-haiku-4.5" });
+    try {
+      await writeCredentialMaterial(w.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
+      const sid = w.store.createSession("t", { mode: "code", model: "anthropic/claude-haiku-4.5" });
+      const session = await w.drivers.create(sid);
+      w.q().emit(init(session.backendSessionId, { apiKeySource: "ANTHROPIC_API_KEY", model: "claude-haiku-4.5" }));
+      await Bun.sleep(10);
+      const errors = w.store.read(sid).filter((e) => e.type === "agent_error") as Array<SessionEvent & { code?: string }>;
+      expect(errors.map((e) => e.code)).toEqual(["official_model_mismatch"]);
+    } finally {
+      w.close();
+    }
+  });
+
+  test("F1: a Claude id with no accepted wire spelling refuses runtime_selection_refused (no-wire-model) before any child is asked for", async () => {
+    const w = driverWorld(undefined, { modelRef: "anthropic/claude-3.7-sonnet" });
+    try {
+      await writeCredentialMaterial(w.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
+      // The stored model is a real row (so the driver consults the selector); the selector answers with
+      // the row that has no wire spelling — the case no pinned row exercises today.
+      const sid = w.store.createSession("t", { mode: "code", model: MODEL });
+      let caught: unknown;
+      try {
+        await w.drivers.create(sid);
+      } catch (e) {
+        caught = e;
+      }
+      expect((caught as { name?: string } | undefined)?.name).toBe("WinterLegRefusal");
+      expect((caught as { code?: string }).code).toBe("runtime_selection_refused");
+      expect((caught as { reason?: string }).reason).toBe("no-wire-model");
+      expect((caught as Error).message).toContain("anthropic/claude-3.7-sonnet");
+      expect(w.capturedOptions).toHaveLength(0);
+    } finally {
+      w.close();
     }
   });
 });
@@ -1309,4 +1496,118 @@ describe("D1-8 — the P9c-1/P10a assertions on a RESUMED official init", () => 
       expect(hasSessionId).toBe(true); // the daemon's own half of the contract: always sessionId
     }
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// WS-21 L3.3 (spec §3.1, §3.8): the official leg awaits its run home inside `open()`, passes it as
+// `runtime.runHome` beside the selection, drops the Winter-owned spool (the router refuses the pair),
+// and disposes it only when the router says `safe` — never on a bare exit, a quarantine or no answer.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+describe("WS-21: the official leg's run home", () => {
+  const stubRunHome = () => {
+    const disposed: string[] = [];
+    let n = 0;
+    const build = async () => {
+      const runId = `orun-${++n}`;
+      return {
+        runId, dir: `/h/cache/runs/${runId}`, sdkHome: "/h/sdk",
+        input: { home: "/h", mode: "code" as const, dispatchChild: false, leg: "official" as const, cwd: "/repo", trustedProjectRoot: null, gitRoot: null, mcpDisabled: [], reservedMcpServerNames: [], memoryDir: "/m" },
+        effectiveSettings: {},
+        report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [], droppedRules: [] },
+        dispose: async () => { disposed.push(runId); },
+      };
+    };
+    return { disposed, build, count: () => n };
+  };
+  const runtimeOf = (options: Record<string, unknown>) => options["runtime"] as { runHome?: { runId: string }; official?: { spool?: string } } | undefined;
+
+  test("open() passes runtime.runHome and names no spool beside it", async () => {
+    const rh = stubRunHome();
+    const h = harness({ runHome: rh.build });
+    await h.session.open();
+    expect(rh.count()).toBe(1);
+    expect(runtimeOf(h.capturedOptions[0]!)?.runHome?.runId).toBe("orun-1");
+    expect(runtimeOf(h.capturedOptions[0]!)?.official?.spool).toBeUndefined();
+    // L2: the router refuses a run home built for another cwd — `options.cwd` IS the run home's own.
+    expect(h.capturedOptions[0]!["cwd"]).toBe("/repo");
+    await h.session.end();
+  });
+
+  test("options.cwd is taken from the run home's input, never from a second read of the session", async () => {
+    const rh = stubRunHome();
+    const moved = async () => ({ ...(await rh.build()), input: { ...(await rh.build()).input, cwd: "/moved" } });
+    const h = harness({ runHome: moved });
+    await h.session.open();
+    expect(h.capturedOptions[0]!["cwd"]).toBe("/moved");
+    await h.session.end();
+  });
+
+  test("without a run home (router 0.0.11) the spool is named exactly as before and no runHome is sent", async () => {
+    const h = harness();
+    await h.session.open();
+    expect(runtimeOf(h.capturedOptions[0]!)?.runHome).toBeUndefined();
+    expect(runtimeOf(h.capturedOptions[0]!)?.official?.spool).toMatch(/runtimes\/claude-config$/);
+    await h.session.end();
+  });
+
+  // L2 fix round 1: dispose ONLY on `safe`. A quarantined folder is kept (the router copied its working
+  // copy; the daemon records it so recovery never re-reconciles it).
+  for (const [outcome, expected] of [["safe", ["orun-1"]], ["quarantined", []], ["pending", []], [undefined, []]] as const) {
+    test(`an ended incarnation's run home is ${expected.length ? "disposed" : "KEPT"} when the router says ${String(outcome)}`, async () => {
+      const rh = stubRunHome();
+      const h = harness({ runHome: rh.build }, { runHomeOutcome: () => outcome });
+      await h.session.open();
+      await h.session.end();
+      await Bun.sleep(30);
+      expect(rh.disposed).toEqual([...expected]);
+    });
+  }
+
+  // Review M6: a session whose run folder the router quarantined is `repair-required`, and a folder kept
+  // for recovery is RECORDED as the session's local-write root, so boot recovery knows whose it is.
+  test("a run folder is recorded against its session while it lives; a quarantined one marks repair-required", async () => {
+    for (const [outcome, disposed, recorded, repair] of [["safe", true, false, false], ["quarantined", false, true, true], ["pending", false, true, false]] as const) {
+      const rh = stubRunHome();
+      const notes: Array<string | undefined> = [];
+      const health: string[] = [];
+      const h = harness({
+        runHome: rh.build,
+        records: {
+          setTranscriptHealth: (_sid: string, v: string) => { health.push(v); },
+          noteRunFolder: (_sid: string, dir: string | undefined) => { notes.push(dir); },
+        } as never,
+      }, { runHomeOutcome: () => outcome });
+      await h.session.open();
+      expect(notes).toEqual(["/h/cache/runs/orun-1"]);
+      await h.session.end();
+      await Bun.sleep(30);
+      expect({ outcome, disposed: rh.disposed.length === 1 }).toEqual({ outcome, disposed });
+      expect({ outcome, recorded: notes[notes.length - 1] === "/h/cache/runs/orun-1" }).toEqual({ outcome, recorded });
+      expect({ outcome, repair: health.includes("repair-required") }).toEqual({ outcome, repair });
+    }
+  });
+
+  test("a run home built for an open that then fails is disposed immediately", async () => {
+    const rh = stubRunHome();
+    const h = harness({ runHome: rh.build }, { sdk: { query: () => { throw new Error("run_home_required (simulated router refusal)"); } } });
+    await expect(h.session.open()).rejects.toThrow(/run_home_required/);
+    expect(rh.disposed).toEqual(["orun-1"]);
+  });
+
+  // Review M5: once `sdk.query()` has RETURNED, the router has taken the run home — a failure after that
+  // point aborts the query and disposes only on the router's `safe`, never unconditionally.
+  for (const [outcome, expected] of [["pending", []], [undefined, []], ["safe", ["orun-1"]]] as const) {
+    test(`a failure AFTER the query was created: aborted, and the folder ${expected.length ? "disposed (safe)" : `kept (${String(outcome)})`}`, async () => {
+      const rh = stubRunHome();
+      const aborted: boolean[] = [];
+      const h = harness({ runHome: rh.build }, {
+        // the query is created normally; the failure comes right after it (tracking the query throws)
+        trackQuery: (_sid: string, abort: AbortController) => { abort.signal.addEventListener("abort", () => aborted.push(true)); throw new Error("simulated failure after the query was created"); },
+        runHomeOutcome: () => outcome,
+      });
+      await expect(h.session.open()).rejects.toThrow(/after the query was created/);
+      expect(aborted).toEqual([true]);
+      expect(rh.disposed).toEqual([...expected]);
+    });
+  }
 });

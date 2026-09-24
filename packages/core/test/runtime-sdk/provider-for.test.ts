@@ -24,8 +24,11 @@ describe("implicitEffortFor (2026-09-17: a pin's fixed tier is mapped onto the r
     expect(implicitEffortFor("alibaba-cn/deepseek-v4-flash", "medium")).toBeUndefined();
   });
   test("a row that lists other tiers falls back to its own defaultEffort or to nothing", () => {
-    const r = implicitEffortFor("deepseek/deepseek-v4-flash", "medium"); // vocabulary none/low/high/max, no medium
+    // R.1 (catalog refresh): DeepSeek's row is now `deepseek/deepseek-flash` (vocabulary none/low/high/max,
+    // no medium) and declares a default, `high`, which is what the tier falls back to.
+    const r = implicitEffortFor("deepseek/deepseek-flash", "medium");
     expect(r === undefined || ["none", "low", "high", "max"].includes(r)).toBe(true);
+    expect(r).toBe("high");
   });
   test("unknown rows and test doubles pass the tier through", () => {
     expect(implicitEffortFor("winter-test/echo", "medium")).toBe("medium");

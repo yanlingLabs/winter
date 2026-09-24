@@ -1,5 +1,5 @@
 import { test, expect, afterEach, jest } from "bun:test";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CanUseTool, PermissionResult, PermissionUpdate } from "@yanlinglabs/winter-agent-sdk";
@@ -14,6 +14,8 @@ import {
 } from "../../src/runtime-sdk/approval-bridge";
 import { gateToolNameFor } from "../../src/runtime-sdk/tool-names";
 import { planBridgeFor } from "../../src/runtime-sdk/plan-bridge";
+import { bridgeProjectTrustedFor } from "../../src/runtime-sdk/session-driver";
+import { TrustStore } from "../../src/agent/trust";
 
 const SESSION = "sess-1";
 const FIXED_NOW = 1_700_000_000_000;
@@ -815,4 +817,25 @@ test("ExitPlanMode with no planBridge configured falls through unchanged (exit_p
   const result = await h.canUse("ExitPlanMode", { plan: "x" }, requestCtx());
   expect(result).toEqual({ behavior: "allow", updatedInput: { plan: "x" } });
   expect(h.events).toHaveLength(0);
+});
+
+// R.3 I-1: the bridge's "in this project" option and its protected-path walk use the SAME trust the run home's
+// project tier uses (`projectScopeTrusted`): a linked worktree of a trusted repository is trusted. The driver
+// wires both legs' bridges through `bridgeProjectTrustedFor`.
+test("R.3 I-1: in a linked worktree of a TRUSTED repo the card offers \"in this project\"; an untrusted repo's worktree does not", () => {
+  const git = (args: string[], cwd: string) => expect(Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "ignore", stderr: "ignore" }).exitCode).toBe(0);
+  const repo = realpathSync(mkdtempSync(join(tmpdir(), "winter-bridge-i1-repo-")));
+  git(["init", "-q"], repo);
+  git(["-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "i"], repo);
+  const wt = join(realpathSync(mkdtempSync(join(tmpdir(), "winter-bridge-i1-wt-"))), "wt");
+  git(["worktree", "add", "-q", "-b", `i1-${Math.random().toString(16).slice(2)}`, wt], repo);
+  for (const trusted of [true, false]) {
+    const trust = new TrustStore(join(realpathSync(mkdtempSync(join(tmpdir(), "winter-bridge-i1-t-"))), "trust.json"));
+    if (trusted) trust.trust(repo);
+    const h = harness({ cwd: wt, projectTrusted: bridgeProjectTrustedFor((d) => trust.isTrusted(d), wt) });
+    void h.canUse("Bash", { command: "git push origin main" }, requestCtx());
+    const ids = (h.events[0] as { options: { id: string }[] }).options.map((o) => o.id);
+    expect({ trusted, project: ids.includes("allow_project") }).toEqual({ trusted, project: trusted });
+    h.approvals.resolve(SESSION, "tu1", false, "cleanup");
+  }
 });

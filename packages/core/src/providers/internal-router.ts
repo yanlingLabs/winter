@@ -41,6 +41,7 @@ import type { InternalProviderView } from "./internal-view";
 import { QuotaManager, withQuota } from "./quota";
 import type { SubscriptionQuotaSource } from "./role-health";
 import type { Provider } from "./types";
+import { isRetiredCatalogTag } from "./catalog-role-problems";
 
 /** The role union and its membership test live in `settings.ts` (`INTERNAL_JOB_ROLES`) beside the pure
  *  effective-tag rule both this module and the wire read — re-exported here so a consumer holding a
@@ -97,6 +98,13 @@ export function requireInternalWiring(what: string): never {
  *    already renders it.
  *  - `"no-internal-credential"` — NO eligible provider holds a credential at all, so there is nothing
  *    for a defaulted role to fall back to and every internal role is inert together.
+ *  - `"model-not-in-catalog"` (R.1 ruling 1, WS-21) — the role's tag (a pin, or the default rule's
+ *    answer) is a provider-qualified tag the linked catalog has no row for: a row a refresh RETIRED with
+ *    no rename (`deepseek/deepseek-reasoner`, V16), stored before the upgrade. No credential makes it
+ *    runnable, so it is judged before the credential (after the provider's eligibility), and treated exactly like any
+ *    other unrunnable pin (the reviewer falls back; titles/the dreamer/the cleaner stay inert with a
+ *    note). The same reason `settings.modelRoles` derives for a session-facing role
+ *    (`catalog-role-problems.ts`).
  *  - `"no-default-model"` (M-3) — a provider IS credentialed, but Winter will not CHOOSE a model on it:
  *    it declares no `terra`/`luna` family slot and it is not `settings.provider.model`'s own provider,
  *    so there is no model the user can be said to have picked. The fix is a pin, not a credential, so it
@@ -104,7 +112,7 @@ export function requireInternalWiring(what: string): never {
  *    the measurement that made guessing unacceptable.
  */
 export interface InternalRefusal {
-  reason: "provider-unsupported" | "no-credential" | "no-internal-credential" | "no-default-model";
+  reason: "provider-unsupported" | "no-credential" | "no-internal-credential" | "no-default-model" | "model-not-in-catalog";
   detail: string;
   /** The tag the refusal is ABOUT — the role's explicit pin, or `null` when the role has no pin and
    *  nothing to default onto. `role-health.ts`'s `problemFor` compares a note's model against the
@@ -153,8 +161,9 @@ export interface InternalRouter {
  * USER RULING 2026-09-19: `fallbackToDefault` is for `reviewer.model` AND NOTHING ELSE.
  *
  * A SAFETY job must not switch itself off because of a pin mistake. When the reviewer's EXPLICIT pin is
- * unrunnable — `provider-unsupported` (a pre-ruling Claude pin) or `no-credential` (pinned to a provider
- * whose key has not arrived; a state the write door deliberately admits) — the reviewer RUNS on the
+ * unrunnable — `provider-unsupported` (a pre-ruling Claude pin), `no-credential` (pinned to a provider
+ * whose key has not arrived; a state the write door deliberately admits) or `model-not-in-catalog` (a
+ * pin on a row the catalog retired, R.1 ruling 1) — the reviewer RUNS on the
  * answer an UNPINNED reviewer would get (the default rule's rungs 1-2), and the role's `problem` still
  * reports the pin's own issue with a "meanwhile" note saying what it is actually reviewing on
  * (`internal-role-problems.ts`). Only when the default rule has no answer either
@@ -245,6 +254,13 @@ export function createInternalRouter(deps: {
     if (!deps.view.eligible().has(providerId)) {
       return { reason: "provider-unsupported", detail: `${providerDisplayName(providerId)} can't be used for Winter's own jobs yet`, tag };
     }
+    // R.1 ruling 1: a tag with no catalog row can never run — judged after the provider (a provider Winter's
+    // jobs can never use is the more fundamental answer) and before the credential (no key would make it
+    // runnable). Never a silent substitute; the reviewer's fallback below is the user-ruled exception, and it
+    // reports this pin's own issue while it runs.
+    if (isRetiredCatalogTag(tag)) {
+      return { reason: "model-not-in-catalog", detail: `${tag} is not in this build's model catalog — pick another model for this job`, tag };
+    }
     if (!deps.view.credentialed().has(providerId)) {
       // NO self-heal here, and the reason is worth recording: this branch is reachable ONLY through an
       // EXPLICIT pin. Every rung of `preferredInternalProviderFor` tests `credentialed.has(id)`, so a
@@ -257,7 +273,7 @@ export function createInternalRouter(deps: {
     if (provider === null) {
       return { reason: "provider-unsupported", detail: `${providerDisplayName(providerId)} can't be used for Winter's own jobs yet`, tag };
     }
-    const wanted = effortToSpendForRole(settings, role, tag, CONSUMER_EFFORT[role]);
+    const wanted = effortToSpendForRole(settings, role, tag, CONSUMER_EFFORT[role], { neverEscalate: true });
     const effort = internalWireEffortFor(tag, wanted);
     return { provider, model: wireModelIdFor(providerId, model), tag, providerId, quota: quotaFor(providerId), ...(effort === undefined ? {} : { effort }) };
   };
@@ -304,7 +320,7 @@ export function createInternalRouter(deps: {
       // is what makes that a property of the router instead of a convention.
       if (role !== "reviewer.model") return first;
       if (explicitInternalRolePin(settings, role) === undefined) return first;
-      if (first.reason !== "provider-unsupported" && first.reason !== "no-credential") return first;
+      if (first.reason !== "provider-unsupported" && first.reason !== "no-credential" && first.reason !== "model-not-in-catalog") return first;
       const fallbackTag = internalRoleEffectiveTag(settings, role, deps.view.snapshot(), { ignoreExplicitPin: true });
       if (fallbackTag === null) return noTagRefusal(role, settings);
       const second = resolveTag(role, settings, fallbackTag);
@@ -346,7 +362,7 @@ export function staticInternalRouter(cfg: {
       // M-1 (review): through the SAME `internalWireEffortFor` production uses. ~16 test doubles run
       // this path, so it is what actually exercises the effort rule — a second, laxer spelling here
       // would mean the `"none"`/unmappable-tier behaviour was never under test at all.
-      const wanted = effortToSpendForRole(settings, role, effectiveTag, CONSUMER_EFFORT[role]);
+      const wanted = effortToSpendForRole(settings, role, effectiveTag, CONSUMER_EFFORT[role], { neverEscalate: true });
       const effort = internalWireEffortFor(effectiveTag, wanted);
       return { provider: cfg.provider, model, tag: effectiveTag, quota, providerId: (() => { try { return splitTag(effectiveTag).providerId; } catch { return cfg.provider.id; } })(), ...(effort === undefined ? {} : { effort }) };
     },

@@ -40,6 +40,8 @@ import { splitTag, WINTER_TEST_PREFIX } from "./model-tag";
 import { releaseAllHeld } from "./messaging";
 import { daemonResolveEndpoint } from "../providers/registry";
 import { WINTER_PEER_VERSIONS, REQUIRED_CLAUDE_AGENT_SDK } from "./versions";
+import type { RecoveryReport, RunHomeFor, RunHomeOutcome } from "@yanlinglabs/winter-runtime-sdk";
+import { runHomeHandleOf } from "./run-home-support";
 
 /**
  * P8c-1's own alias for the peer this daemon injects at `RuntimeSdkPeers.claude` — the router's own
@@ -150,6 +152,15 @@ export interface WinterRuntimeSdkDeps {
    * holds).
    */
   sessionPermissionClass?: (entry: RuntimeDirectoryEntry) => PermissionClassLabel | Promise<PermissionClassLabel>;
+  /**
+   * WS-21 (spec §3.1): present ONLY when the linked router applies run homes (`daemon.ts` passes it
+   * when `linkedRunHomeBuilder()` answers). The router is then created with `requireRunHome: true` —
+   * every generation without a run home is refused `run_home_required` — with this host builder for its
+   * OWN cold-resume path, and (L2's Contract A) with `handoff.winterHome` set, which `requireRunHome`
+   * needs (the handoff option is always stated with `deps.home`). Absent (router 0.0.11, every test
+   * double): the router is created exactly as before.
+   */
+  runHomeFor?: RunHomeFor;
   log?: (line: string) => void;
 }
 
@@ -296,6 +307,20 @@ export interface WinterRuntimeSdk {
    *  CONCURRENT second call awaits the first rather than returning early — its caller would
    *  otherwise close the stores a still-draining child is writing into. */
   dispose(): Promise<void>;
+  /**
+   * WS-21 (spec §3.8; L2 fix round 1): the router's verdict on one run home — `safe` (the ONLY outcome
+   * that disposes it), `quarantined` (its working copy was preserved under `<home>/cache/quarantine/`; the
+   * folder is kept, recorded, and its session marked `repair-required`), `pending` (not settled; kept for
+   * boot recovery). `undefined` when the linked router has no run homes (0.0.11) — optional so a test
+   * double need not implement it.
+   */
+  runHomeOutcome?(runId: string): RunHomeOutcome | undefined;
+  /**
+   * WS-21 (spec §3.8): the router's crash-recovery reconcile of one recorded root, through its own
+   * live store (it recomputes the claude-ready decorations first). `undefined` when the linked router
+   * has no such door (0.0.11) — recovery then keeps its pre-WS-21 behaviour. Optional for test doubles.
+   */
+  reconcileRootForRecovery?(root: string): Promise<RecoveryReport> | undefined;
 }
 
 /**
@@ -511,7 +536,10 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
           }),
     },
     ...advisorFrom(deps),
-  });
+    // WS-21 (spec §3.1): only when the linked router applies run homes. `RuntimeSdkOptions` of the
+    // published 0.0.11 does not declare these, hence the widening; an older router never sees them.
+    ...(deps.runHomeFor === undefined ? {} : ({ requireRunHome: true, runHomeFor: deps.runHomeFor } as Record<string, unknown>)),
+  } as RuntimeSdkOptions);
 
   // P8c handoff fix: the ONE construction `selectRuntimeFor` and `buildSelectionInput` both run —
   // factored out so the fresh-decision door (`selectRuntimeFor`) and the raw-data door
@@ -625,6 +653,12 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
     },
     untrack(sessionId: string): void {
       live.delete(sessionId);
+    },
+    runHomeOutcome(runId: string): RunHomeOutcome | undefined {
+      return runHomeHandleOf(sdk)?.runHomeOutcome(runId);
+    },
+    reconcileRootForRecovery(root: string): Promise<RecoveryReport> | undefined {
+      return runHomeHandleOf(sdk)?.reconcileRootForRecovery(root);
     },
     dispose(): Promise<void> {
       if (disposing !== undefined) return disposing;

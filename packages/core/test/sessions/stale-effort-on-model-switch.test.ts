@@ -8,7 +8,8 @@ import { effortRefusalFor } from "../../src/settings";
 // Field report 2026-09-19: pick an effort on a reasoning model, switch the session to
 // `deepseek-anthropic/deepseek-reasoner` (a catalog row with an EMPTY effort vocabulary), and the next
 // turn was refused by the child: "declares no effort vocabulary, so no effort level can be verified".
-const NO_VOCABULARY = "deepseek-anthropic/deepseek-reasoner";
+// R.1: the refreshed catalog removed that row; `zai/glm-5` is a live row with the same EMPTY vocabulary.
+const NO_VOCABULARY = "zai/glm-5";
 const WITH_LEVELS = "codex-oauth/gpt-5.6-terra";
 
 const stale = (effort: string, model: string, mode: string | undefined) => effortRefusalFor(effort, model, mode) !== undefined;

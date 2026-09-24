@@ -252,9 +252,10 @@ describe("Dreamer: the pins.dream role effort", () => {
     const mapped = await dreamOnce(settingsOf({ pins: { dream: "openai/o4-mini" }, roleEfforts: { "pins.dream": "max" } }));
     expect(mapped.model).toBe("o4-mini");
     expect(mapped.reasoningEffort).toBe("medium");
-    // gpt-5.4: no vocabulary → the request carries NO effort key at all (not DREAM_EFFORT: the user overrode it).
-    const omitted = await dreamOnce(settingsOf({ pins: { dream: "openai/gpt-5.4" }, roleEfforts: { "pins.dream": "high" } }));
-    expect(omitted.model).toBe("gpt-5.4");
+    // gpt-4.1: no vocabulary → the request carries NO effort key at all (not DREAM_EFFORT: the user overrode it).
+    // (R.1: the refreshed catalog gave gpt-5.4 a vocabulary, so the no-vocabulary exemplar is gpt-4.1.)
+    const omitted = await dreamOnce(settingsOf({ pins: { dream: "openai/gpt-4.1" }, roleEfforts: { "pins.dream": "high" } }));
+    expect(omitted.model).toBe("gpt-4.1");
     expect("reasoningEffort" in omitted).toBe(false);
   });
 

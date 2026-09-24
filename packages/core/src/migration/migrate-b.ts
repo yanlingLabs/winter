@@ -77,7 +77,7 @@ export function legacyHomeFor(profile: WinterProfile, env: NodeJS.ProcessEnv = p
   return join(homedir(), profile === "dev" ? LEGACY_DEV_HOME_DIR : LEGACY_HOME_DIR);
 }
 
-const BOOTSTRAP_TOP_LEVEL = new Set(["agents", "hooks", "logs", "memory", "outputs", "plugins", "projects", "run", "runtimes", "sessions", "skills"]);
+const BOOTSTRAP_TOP_LEVEL = new Set(["agents", "hooks", "logs", "memory", "outputs", "plugins", "projects", "run", "runtimes", "sessions", "skills", "sdk"]);
 
 /** P9c-16 (whole-branch review, Critical C2): named app-owned top-level directories the pristine
  *  check tolerates WITHOUT recursing into them at all — unlike `BOOTSTRAP_TOP_LEVEL`, their content

@@ -86,7 +86,7 @@ describe("A-5 part 1: the five-hop chain's prompt rule, against the REAL daemon 
     const resolve = daemonResolveEndpoint();
     return {
       claude: resolve({ providerId: "anthropic", modelKey: "anthropic/claude-sonnet-5", family: "anthropic" }),
-      deepseek: resolve({ providerId: "deepseek", modelKey: "deepseek/deepseek-reasoner", family: "deepseek" }),
+      deepseek: resolve({ providerId: "deepseek", modelKey: "deepseek/deepseek-v4-pro", family: "deepseek" }),
       glm: resolve({ providerId: "zai", modelKey: "zai/glm-5", family: "glm" }),
       gpt: resolve({ providerId: "openai", modelKey: "openai/gpt-5.6-sol", family: "openai" }),
     };
@@ -308,7 +308,7 @@ describeWithWinterBinary("A-5 part 2: the chain's LAST hop (gpt -> claude) promp
 // say so deliberately) and reported to the controller rather than asserted as correct.
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
-const CATALOG_DEEPSEEK_MODEL = "deepseek/deepseek-reasoner";
+const CATALOG_DEEPSEEK_MODEL = "deepseek/deepseek-v4-pro";
 /** The Claude turn's scripted thinking and its opaque signature — the text MUST carry as summary
  *  data, the signature MUST NOT appear in any request body anywhere. */
 const CLAUDE_THINKING = "claude was thinking here";
@@ -442,7 +442,7 @@ describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude
       expect(daemon!.winter!.legOf(sessionId)).toBe("winter");
       await client.call(METHODS.sessionSend, { sessionId, text: "hop 1, on deepseek" });
       await client.waitFor(() => turns() >= 2, 120_000);
-      expect(deepseek!.models).toContain("deepseek-reasoner");
+      expect(deepseek!.models).toContain("deepseek-v4-pro");
       const deepseekBody = deepseek!.bodies.at(-1)!;
       expect(outOfOrder(deepseekBody, ["hop 0, on claude", "hello from claude", "hop 1, on deepseek"])).toEqual([]);
       // (b) the Claude turn's thinking, carried as data with its own provenance — the lossy carriage

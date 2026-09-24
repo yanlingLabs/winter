@@ -5,6 +5,7 @@
 // that the store opens before anything can route on it, that recovery runs before the socket exists,
 // that the reaper's deletions reach the runtime tables, and that a corrupt store costs the daemon
 // its runtime routing and nothing else.
+import { storeProjectsDir } from "../../src/agent/paths";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { compatibilityKeys } from "@yanlinglabs/winter-agent-sdk";
@@ -189,7 +190,7 @@ describe("daemon wiring — the store opens and recovery runs before the socket 
       const records = new RuntimeSessionRecords(seed);
       records.create({
         winterSessionId: "s_prev", runtimeKind: "winter-agent", providerId: "codex-oauth", modelRef: "gpt-5.4",
-        backendRoot: join(home, "projects", "-prev"), transcriptProjectKey: "-prev", memoryProjectKey: "prev",
+        backendRoot: join(storeProjectsDir(home), "-prev"), transcriptProjectKey: "-prev", memoryProjectKey: "prev",
         tempProjectKey: "-prev", transcriptHealth: "unsupported", compatibilityLevel: "conversation",
         conformanceCorpusVersion: "legacy", versionProvenance: "legacy-unknown", capabilities: [],
         selection: { runtimeKind: "winter-agent", providerId: "codex-oauth", modelRef: "gpt-5.4", family: "legacy", authFamily: "custom", sdkVersion: "unknown", reason: "test", decidedAt: ISO() },
@@ -234,7 +235,7 @@ describe("daemon wiring — the runtime store is not readable by the model", () 
     });
   });
 
-  test("P8d-12 (WS-16 §10); Winter Phase 10b (D1-3, W18-9): the official leg's SDK-parent staging root (<tmpdir>/claude-resume-*) is denied to read AND write tools", async () => {
+  test("P8d-12 (WS-16 §10); Winter Phase 10b (D1-3, W18-9); round 6: the official leg's SDK-parent staging root (<tmpdir>/claude-resume-*) is denied to the write tools whole, and to the read tools its config files and backups/", async () => {
     await withTempHome(async (home) => {
       const { controlPlaneDenyRules } = await import("../../src/runtime-sdk/mode-options");
       const { tmpdir } = await import("node:os");
@@ -245,8 +246,12 @@ describe("daemon wiring — the runtime store is not readable by the model", () 
       // dir, never under `home` — a resume payload never lands under `~/.winter*`. Built from the
       // router's own `RESUME_STAGING_PREFIX`, not a hand-typed duplicate (D1-3).
       const wantSuffix = `/${join(tmpdir(), `${RESUME_STAGING_PREFIX}*`, "**")}`;
-      for (const tool of ["Read", "Glob", "Grep", "Edit", "Write", "MultiEdit", "NotebookEdit"]) {
+      for (const tool of ["Edit", "Write", "MultiEdit", "NotebookEdit"]) {
         expect(deny).toContain(`${tool}(${wantSuffix})`);
+      }
+      for (const tool of ["Read", "Glob", "Grep"]) {
+        expect(deny).not.toContain(`${tool}(${wantSuffix})`);
+        for (const f of [".claude.json", ".credentials.json", ".winter.json", "backups/**"]) expect(deny).toContain(`${tool}(/${join(tmpdir(), `${RESUME_STAGING_PREFIX}*`)}/${f})`);
       }
     });
   });
@@ -481,13 +486,13 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
     const sessionId = store.createSession("work", { cwd });
     store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: name, clientName: "test" });
     const oldKey = sanitizeProjectKey(repoRootFor(cwd));
-    mkdirSync(join(home, "projects", oldKey, "memory"), { recursive: true });
-    writeFileSync(join(home, "projects", oldKey, "memory", "MEMORY.md"), `# ${name}\n`);
+    mkdirSync(join(storeProjectsDir(home), oldKey, "memory"), { recursive: true });
+    writeFileSync(join(storeProjectsDir(home), oldKey, "memory", "MEMORY.md"), `# ${name}\n`);
     return { sessionId, cwd, oldKey, newKey: compatibilityKeys(cwd).memoryProjectKey };
   }
 
   const memoryBody = (home: string, key: string): string | undefined => {
-    const path = join(home, "projects", key, "memory", "MEMORY.md");
+    const path = join(storeProjectsDir(home), key, "memory", "MEMORY.md");
     return existsSync(path) ? readFileSync(path, "utf8") : undefined;
   };
 
@@ -513,7 +518,7 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
 
       // THE HALF-SWITCH THAT MUST NOT EXIST: the daemon's own memory lookup resolves to where the
       // tree now is, so the agent never reads an empty directory and never starts a second MEMORY.md.
-      expect(liveMemDir(home, rt, first.cwd)).toBe(join(home, "projects", first.newKey, "memory"));
+      expect(liveMemDir(home, rt, first.cwd)).toBe(join(storeProjectsDir(home), first.newKey, "memory"));
       expect(readFileSync(join(liveMemDir(home, rt, first.cwd), "MEMORY.md"), "utf8")).toBe("# alpha\n");
 
       // One-shot: nothing left to do, so the marker is written and a later boot re-plans nothing.
@@ -544,7 +549,7 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
         // The relocation is still known — it is read from the manifest at every boot, not from the
         // run that performed it, so the live path keeps finding the tree forever.
         expect(rt!.relocatedMemoryKey(first.oldKey)).toBe(first.newKey);
-        expect(liveMemDir(home, rt!, first.cwd)).toBe(join(home, "projects", first.newKey, "memory"));
+        expect(liveMemDir(home, rt!, first.cwd)).toBe(join(storeProjectsDir(home), first.newKey, "memory"));
       } finally {
         await rt?.close();
         store2.close();
@@ -566,7 +571,7 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
         expect(rt).toBeDefined();
         // Flag off: nothing is planned, nothing is said, and the live path is the plain derivation.
         expect(lines.some((l) => l.includes("memory-key"))).toBe(false);
-        expect(liveMemDir(home, rt!, first.cwd)).toBe(join(home, "projects", first.oldKey, "memory"));
+        expect(liveMemDir(home, rt!, first.cwd)).toBe(join(storeProjectsDir(home), first.oldKey, "memory"));
         const quiet = lines.length;
 
         live = settingsWith(true);
@@ -574,7 +579,7 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
         expect(lines.slice(quiet).filter((l) => l.includes("memory-key migration"))).toHaveLength(1);
         expect(memoryBody(home, first.newKey)).toBe("# alpha\n");
         expect(rt!.records.get(first.sessionId)!.memoryProjectKey).toBe(first.newKey);
-        expect(liveMemDir(home, rt!, first.cwd)).toBe(join(home, "projects", first.newKey, "memory"));
+        expect(liveMemDir(home, rt!, first.cwd)).toBe(join(storeProjectsDir(home), first.newKey, "memory"));
 
         // Every later settings change re-enters this path; it must not re-plan a finished migration.
         const after = lines.length;
@@ -589,11 +594,14 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
     });
   });
 
-  test("a home that pins settings.memory.directory is declined — nothing moves, and no marker forecloses it", async () => {
+  test("a home that pins the MEMDIR (sdk/settings.json autoMemoryDirectory) is declined — nothing moves, and no marker forecloses it", async () => {
     await withTempHome(async (home) => {
       const pinned = join(home, "my-memdir");
       mkdirSync(pinned, { recursive: true });
-      writeSettings(home, { memory: { directory: pinned }, runtimes: { migrations: { memoryKeys: true } } });
+      // WS-21: `memory.directory` moved to `sdk/settings.json` as claude's `autoMemoryDirectory`.
+      writeSettings(home, { runtimes: { migrations: { memoryKeys: true } } });
+      mkdirSync(join(home, "sdk"), { recursive: true });
+      writeFileSync(join(home, "sdk", "settings.json"), JSON.stringify({ autoMemoryDirectory: pinned }));
       const store = new SessionStore(home);
       const first = seedProject(home, store, "alpha");
       store.close();
@@ -623,8 +631,8 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
         backfillNativeSessions({ rs: rs0, store, home, providerId: "codex-oauth" });
         rs0.db.run("INSERT INTO memory_key_manifest (old_key, entry, new_key, status, planned_at, moved_at) VALUES (?, 'memory', ?, 'planned', ?, NULL)",
           [first.oldKey, first.newKey, ISO()]);
-        mkdirSync(join(home, "projects", first.newKey), { recursive: true });
-        renameSync(join(home, "projects", first.oldKey, "memory"), join(home, "projects", first.newKey, "memory"));
+        mkdirSync(join(storeProjectsDir(home), first.newKey), { recursive: true });
+        renameSync(join(storeProjectsDir(home), first.oldKey, "memory"), join(storeProjectsDir(home), first.newKey, "memory"));
       } finally {
         rs0.close();
       }
@@ -637,7 +645,7 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
       expect(manifestRows(rt)).toEqual([{ old_key: first.oldKey, entry: "memory", new_key: first.newKey, status: "moved" }]);
       expect(rt.records.get(first.sessionId)!.memoryProjectKey).toBe(first.newKey);
       expect(rt.relocatedMemoryKey(first.oldKey)).toBe(first.newKey);
-      expect(liveMemDir(home, rt, first.cwd)).toBe(join(home, "projects", first.newKey, "memory"));
+      expect(liveMemDir(home, rt, first.cwd)).toBe(join(storeProjectsDir(home), first.newKey, "memory"));
       expect(memoryBody(home, first.newKey)).toBe("# alpha\n");
       // Settled, so it is rollback-able — the state this manifest exists to guarantee.
       expect(marker(rt)).toBe(null); // and the migration itself was never run: no marker
@@ -652,8 +660,8 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
       const store = new SessionStore(home);
       const blocked = seedProject(home, store, "blocked");
       const fine = seedProject(home, store, "fine");
-      mkdirSync(join(home, "projects", blocked.newKey, "memory"), { recursive: true });
-      writeFileSync(join(home, "projects", blocked.newKey, "memory", "MEMORY.md"), "someone else's");
+      mkdirSync(join(storeProjectsDir(home), blocked.newKey, "memory"), { recursive: true });
+      writeFileSync(join(storeProjectsDir(home), blocked.newKey, "memory", "MEMORY.md"), "someone else's");
       const lines: string[] = [];
       const live = Settings.parse({ ...SETTINGS_BASE, runtimes: { migrations: { memoryKeys: true } } });
 
@@ -672,11 +680,11 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
         expect(lines.filter((l) => l.startsWith("memory-key migration refused"))).toHaveLength(1);
 
         // The user clears the obstruction and touches settings: no restart, and it completes.
-        rmSync(join(home, "projects", blocked.newKey, "memory"), { recursive: true, force: true });
+        rmSync(join(storeProjectsDir(home), blocked.newKey, "memory"), { recursive: true, force: true });
         rt!.applySettings(live);
         expect(memoryBody(home, blocked.newKey)).toBe("# blocked\n");
         expect(rt!.records.get(blocked.sessionId)!.memoryProjectKey).toBe(blocked.newKey);
-        expect(liveMemDir(home, rt!, blocked.cwd)).toBe(join(home, "projects", blocked.newKey, "memory"));
+        expect(liveMemDir(home, rt!, blocked.cwd)).toBe(join(storeProjectsDir(home), blocked.newKey, "memory"));
         expect(marker(rt!)).not.toBe(null);
       } finally {
         await rt?.close();
@@ -718,7 +726,7 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
         expect(committed).toHaveLength(1);
         const moved = [first, second].find((p) => p.oldKey === committed[0]!.old_key)!;
         expect(rt!.relocatedMemoryKey(moved.oldKey)).toBe(moved.newKey);
-        expect(liveMemDir(home, rt!, moved.cwd)).toBe(join(home, "projects", moved.newKey, "memory"));
+        expect(liveMemDir(home, rt!, moved.cwd)).toBe(join(storeProjectsDir(home), moved.newKey, "memory"));
         expect(existsSync(join(liveMemDir(home, rt!, moved.cwd), "MEMORY.md"))).toBe(true);
       } finally {
         await rt?.close();
@@ -794,7 +802,7 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
         expect(lines.some((l) => l.includes("memory-key migration failed"))).toBe(true);
         // The map is untouched and the live path still answers.
         expect(rt!.relocatedMemoryKey(first.oldKey)).toBeUndefined();
-        expect(liveMemDir(home, rt!, first.cwd)).toBe(join(home, "projects", first.oldKey, "memory"));
+        expect(liveMemDir(home, rt!, first.cwd)).toBe(join(storeProjectsDir(home), first.oldKey, "memory"));
       } finally {
         await rt?.close();
       }
@@ -839,7 +847,7 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
         // still answers — the alternative, an offline spine, answers `undefined` for every key too
         // AND costs every other runtime feature.
         expect(rt!.relocatedMemoryKey(first.oldKey)).toBeUndefined();
-        expect(liveMemDir(home, rt!, first.cwd)).toBe(join(home, "projects", first.oldKey, "memory"));
+        expect(liveMemDir(home, rt!, first.cwd)).toBe(join(storeProjectsDir(home), first.oldKey, "memory"));
       } finally {
         await rt?.close();
         store.close();
@@ -847,15 +855,22 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
     });
   });
 
-  test("clearing settings.memory.directory on a RUNNING daemon un-declines the migration — no restart", async () => {
+  test("clearing the MEMDIR override (sdk/settings.json autoMemoryDirectory) on a RUNNING daemon un-declines the migration — no restart", async () => {
     await withTempHome(async (home) => {
       const pinned = join(home, "my-memdir");
       mkdirSync(pinned, { recursive: true });
       const store = new SessionStore(home);
       const first = seedProject(home, store, "alpha");
       const lines: string[] = [];
-      const settingsWith = (directory?: string) =>
-        Settings.parse({ ...SETTINGS_BASE, ...(directory === undefined ? {} : { memory: { directory } }), runtimes: { migrations: { memoryKeys: true } } });
+      // WS-21: the override is claude's `autoMemoryDirectory` in `sdk/settings.json`, read live; the
+      // daemon's sdk watcher re-enters the migration (`applySettings`) when it changes.
+      const pinOverride = (directory?: string): void => {
+        mkdirSync(join(home, "sdk"), { recursive: true });
+        writeFileSync(join(home, "sdk", "settings.json"), JSON.stringify(directory === undefined ? {} : { autoMemoryDirectory: directory }));
+      };
+      const settingsWith = (_directory?: string) =>
+        Settings.parse({ ...SETTINGS_BASE, runtimes: { migrations: { memoryKeys: true } } });
+      pinOverride(pinned);
       let live = settingsWith(pinned);
 
       const state = await startRuntimeState({ home, store, settings: () => live, log: (l) => lines.push(l) });
@@ -870,11 +885,12 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
         expect(lines.filter((l) => l.includes("declined"))).toHaveLength(1);
 
         // The user clears the override. A decline is not an attempt, so this is answered LIVE.
+        pinOverride(undefined);
         live = settingsWith(undefined);
         rt!.applySettings(live);
         expect(memoryBody(home, first.newKey)).toBe("# alpha\n");
         expect(rt!.records.get(first.sessionId)!.memoryProjectKey).toBe(first.newKey);
-        expect(liveMemDir(home, rt!, first.cwd)).toBe(join(home, "projects", first.newKey, "memory"));
+        expect(liveMemDir(home, rt!, first.cwd)).toBe(join(storeProjectsDir(home), first.newKey, "memory"));
         expect(marker(rt!)).not.toBe(null);
       } finally {
         await rt?.close();

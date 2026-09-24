@@ -397,8 +397,8 @@ describe("Composer", () => {
 
   test("(j) history: ↑ recalls the newest entry, ↓ restores the in-progress draft", async () => {
     const path = historyPath();
-    appendHistory(path, { display: "older prompt", ts: 1, sessionId: "s1" });
-    appendHistory(path, { display: "newest prompt", ts: 2, sessionId: "s1" });
+    appendHistory(path, { display: "older prompt", pastedContents: {}, timestamp: 1, project: "", sessionId: "s1" });
+    appendHistory(path, { display: "newest prompt", pastedContents: {}, timestamp: 2, project: "", sessionId: "s1" });
 
     const submitted: string[] = [];
     const { stdin } = render(
@@ -433,7 +433,7 @@ describe("Composer", () => {
 
   test("(k) history: ↑ alone recalls and submits the newest entry verbatim", async () => {
     const path = historyPath();
-    appendHistory(path, { display: "recall me", ts: 1, sessionId: "s1" });
+    appendHistory(path, { display: "recall me", pastedContents: {}, timestamp: 1, project: "", sessionId: "s1" });
 
     const submitted: string[] = [];
     const { stdin } = render(
@@ -850,7 +850,7 @@ describe("Composer — slash-command completion menu (Phase 3d T2)", () => {
 
   test("(s) ↑/↓ move the bounded selection while the menu is open, never recalling history", async () => {
     const path = historyPath();
-    appendHistory(path, { display: "unrelated history entry", ts: 1, sessionId: "s1" });
+    appendHistory(path, { display: "unrelated history entry", pastedContents: {}, timestamp: 1, project: "", sessionId: "s1" });
 
     const { stdin, lastFrame } = render(
       <Composer
@@ -1081,7 +1081,7 @@ describe("Composer — slash-command completion menu (Phase 3d T2)", () => {
 
   test("(z) history ↑ is inert while the menu is open, and works again once it's closed", async () => {
     const path = historyPath();
-    appendHistory(path, { display: "recall me", ts: 1, sessionId: "s1" });
+    appendHistory(path, { display: "recall me", pastedContents: {}, timestamp: 1, project: "", sessionId: "s1" });
 
     const { stdin, lastFrame } = render(
       <Composer
@@ -1189,7 +1189,7 @@ describe("Composer — slash-command completion menu (Phase 3d T2)", () => {
 
   test("(ad) a zero-match query ('/zzz') never gates keys: ↑ recalls history as if no menu existed (T2 review item 2)", async () => {
     const path = historyPath();
-    appendHistory(path, { display: "recall me", ts: 1, sessionId: "s1" });
+    appendHistory(path, { display: "recall me", pastedContents: {}, timestamp: 1, project: "", sessionId: "s1" });
 
     const { stdin, lastFrame } = render(
       <Composer
@@ -1456,7 +1456,7 @@ describe("Composer — @-file mention menu (Phase 3d T3)", () => {
 
   test("(h) while the index is still building (fileIndex undefined): a disabled 'indexing…' row renders, and every key passes through", async () => {
     const path = historyPath();
-    appendHistory(path, { display: "recall me", ts: 1, sessionId: "s1" });
+    appendHistory(path, { display: "recall me", pastedContents: {}, timestamp: 1, project: "", sessionId: "s1" });
     const submitted: string[] = [];
 
     const { stdin, lastFrame } = render(
@@ -1577,7 +1577,7 @@ describe("Composer — @-file mention menu (Phase 3d T3)", () => {
 
   test("(l) ↑/↓ move the bounded selection while the file menu is open, never recalling history", async () => {
     const path = historyPath();
-    appendHistory(path, { display: "unrelated history entry", ts: 1, sessionId: "s1" });
+    appendHistory(path, { display: "unrelated history entry", pastedContents: {}, timestamp: 1, project: "", sessionId: "s1" });
 
     const { stdin, lastFrame } = render(
       <Composer

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, existsSync, statSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, existsSync, statSync, readFileSync, writeFileSync, lstatSync, mkdirSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { bootstrapWinterDir, resolveWinterHome } from "../src/winter-dir";
@@ -39,14 +39,44 @@ describe("bootstrapWinterDir", () => {
   test("creates the full directory layout", () => {
     const home = tmpHome();
     const dirs = bootstrapWinterDir(home);
-    for (const d of ["sessions", "memory", "skills/self", "agents", "plugins", "hooks", "logs", "run", "runtimes", "runtimes/backups", "runtimes/official-agent-spool", "runtimes/handoff-leases"]) {
+    for (const d of ["sessions", "memory", "logs", "run", "runtimes", "runtimes/backups", "runtimes/handoff-leases"]) {
       expect(existsSync(join(home, d))).toBe(true);
     }
     expect(dirs.runDir).toBe(join(home, "run"));
     expect(dirs.socketPath).toBe(join(home, "run", "core.sock"));
     expect(dirs.runtimesDir).toBe(join(home, "runtimes"));
     expect(dirs.runtimeStatePath).toBe(join(home, "runtimes", "runtime-state.db"));
-    expect(statSync(join(home, "runtimes", "official-agent-spool")).mode & 0o777).toBe(0o700);
+  });
+
+  // WS-21 (spec §8 bootstrap): a fresh home is never in the old layout. `sdk/` and claude's
+  // persistent set are created; the old-layout entries are not.
+  test("creates sdk/ (0700), its store and the persistent set; none of the old-layout entries", () => {
+    const home = tmpHome();
+    bootstrapWinterDir(home);
+    expect(statSync(join(home, "sdk")).mode & 0o777).toBe(0o700);
+    for (const d of ["sdk/projects", "sdk/file-history", "sdk/tasks", "sdk/teams", "sdk/agent-memory", "sdk/workflows"]) {
+      expect(statSync(join(home, d)).isDirectory()).toBe(true);
+    }
+    for (const d of ["skills", "agents", "plugins", "hooks", "runtimes/official-agent-spool"]) {
+      expect(existsSync(join(home, d))).toBe(false);
+    }
+  });
+
+  // No compatibility link is planted: the agent SDK's store refuses a symlink at <store>/projects on
+  // every append, so a link there would break every child still writing the old path.
+  test("plants no link at the old top-level paths", () => {
+    const home = tmpHome();
+    bootstrapWinterDir(home);
+    for (const d of ["projects", "backups", "skills", "agents", "workflows"]) expect(existsSync(join(home, d))).toBe(false);
+  });
+
+  test("an existing old-layout projects/ is left exactly as found (only Migration C moves data)", () => {
+    const home = tmpHome();
+    mkdirSync(join(home, "projects", "k"), { recursive: true });
+    writeFileSync(join(home, "projects", "k", "s.jsonl"), "{}\n");
+    bootstrapWinterDir(home);
+    expect(lstatSync(join(home, "projects")).isDirectory()).toBe(true);
+    expect(readFileSync(join(home, "projects", "k", "s.jsonl"), "utf8")).toBe("{}\n");
   });
 
   test("run dir is 0700", () => {

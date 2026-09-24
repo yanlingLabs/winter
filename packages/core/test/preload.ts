@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LEGACY_HOME_ENV } from "../src/legacy-names";
@@ -33,3 +33,13 @@ process.env.WINTER_KEYCHAIN_SERVICE = "com.winter.core.test-isolated";
 // agents) — this turns that off for every in-process boot AND every daemon subprocess a test spawns
 // (they inherit `process.env`). A test that exercises the resolution injects a fake runner instead.
 process.env.WINTER_LOGIN_SHELL_PATH = "off";
+// WS-21 (L3.5): saving an "in this project" answer appends to the user's GLOBAL git excludes, resolved
+// through `git config --global core.excludesfile` (claude parity, `agent/git-exclude.ts`). No test may
+// read or write the developer's real global git config, so every git a test (or a daemon it boots)
+// spawns sees a throwaway one — with a test identity, so a test's own `git commit` keeps working.
+{
+  const gitHome = mkdtempSync(join(tmpdir(), "winter-test-gitconfig-"));
+  const gitConfig = join(gitHome, ".gitconfig");
+  writeFileSync(gitConfig, "[user]\n\tname = winter-test\n\temail = winter-test@example.invalid\n");
+  process.env.GIT_CONFIG_GLOBAL = gitConfig;
+}

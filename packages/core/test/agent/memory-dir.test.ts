@@ -11,6 +11,7 @@ import {
   globalMemoryDirFor,
   _clearRepoRootCacheForTests,
 } from "../../src/agent/memory-dir";
+import { storeProjectsDir } from "../../src/agent/paths";
 
 function realDir(): string {
   return realpathSync(mkdtempSync(join(tmpdir(), "winter-memdir-")));
@@ -150,11 +151,11 @@ describe("memory-dir: sanitizeProjectKey", () => {
 describe("memory-dir: memoryDirFor", () => {
   beforeEach(() => _clearRepoRootCacheForTests());
 
-  test("computes ~/.winter/projects/<key>/memory for a repo cwd", () => {
+  test("computes the store home's projects/<key>/memory (sdk/projects on a run-home build) for a repo cwd", () => {
     const winterHome = realDir();
     const root = initRepo();
     const dir = memoryDirFor(root, { winterHome });
-    expect(dir).toBe(join(winterHome, "projects", sanitizeProjectKey(root), "memory"));
+    expect(dir).toBe(join(storeProjectsDir(winterHome), sanitizeProjectKey(root), "memory"));
   });
 
   test("a worktree and its main checkout share the SAME memory dir", () => {
@@ -169,7 +170,7 @@ describe("memory-dir: memoryDirFor", () => {
   test("non-repo cwd keys off the cwd itself", () => {
     const winterHome = realDir();
     const cwd = realDir();
-    expect(memoryDirFor(cwd, { winterHome })).toBe(join(winterHome, "projects", sanitizeProjectKey(cwd), "memory"));
+    expect(memoryDirFor(cwd, { winterHome })).toBe(join(storeProjectsDir(winterHome), sanitizeProjectKey(cwd), "memory"));
   });
 
   test("settings.memory.directory overrides the computed path entirely (absolute)", () => {
@@ -190,7 +191,7 @@ describe("memory-dir: memoryDirFor", () => {
   test("an empty/whitespace-only override is treated as absent", () => {
     const winterHome = realDir();
     const root = initRepo();
-    expect(memoryDirFor(root, { winterHome, directory: "   " })).toBe(join(winterHome, "projects", sanitizeProjectKey(root), "memory"));
+    expect(memoryDirFor(root, { winterHome, directory: "   " })).toBe(join(storeProjectsDir(winterHome), sanitizeProjectKey(root), "memory"));
   });
 
   test("does not create the directory (pure path computation)", () => {
@@ -221,7 +222,7 @@ describe("memory-dir: the relocation door (P8b-17)", () => {
     });
 
     expect(asked).toEqual([todaysKey]);
-    expect(dir).toBe(join(winterHome, "projects", "compat-key-64", "memory"));
+    expect(dir).toBe(join(storeProjectsDir(winterHome), "compat-key-64", "memory"));
   });
 
   test("a resolver that answers undefined leaves the derivation exactly as it was", () => {
@@ -235,7 +236,7 @@ describe("memory-dir: the relocation door (P8b-17)", () => {
     const root = initRepo();
     const opts = { winterHome, relocatedKey: (k: string) => (k === sanitizeProjectKey(root) ? "moved-here" : undefined) };
     expect(memoryProjectKeyFor(root, opts)).toBe("moved-here");
-    expect(memoryDirFor(root, opts)).toBe(join(winterHome, "projects", memoryProjectKeyFor(root, opts), "memory"));
+    expect(memoryDirFor(root, opts)).toBe(join(storeProjectsDir(winterHome), memoryProjectKeyFor(root, opts), "memory"));
   });
 
   test("the settings override still wins over a relocation — a pinned MEMDIR is never re-keyed", () => {
@@ -249,7 +250,7 @@ describe("memory-dir: the relocation door (P8b-17)", () => {
     const winterHome = realDir();
     // Deliberately a key no derivation from this path could produce: the record is the authority.
     expect(memoryDirForRecord({ memoryProjectKey: "some-compat-key" }, { winterHome })).toBe(
-      join(winterHome, "projects", "some-compat-key", "memory"),
+      join(storeProjectsDir(winterHome), "some-compat-key", "memory"),
     );
   });
 
@@ -264,9 +265,9 @@ describe("memory-dir: the relocation door (P8b-17)", () => {
 // importer (legacy USER-scope facts) and the memory.* RPC rewire (a cwd-less request) fall back
 // to — see memory-migrate.ts / ipc/server.ts's own doc comments.
 describe("memory-dir: globalMemoryDirFor", () => {
-  test("computes ~/.winter/projects/_global/memory", () => {
+  test("computes the store home's projects/_global/memory", () => {
     const winterHome = realDir();
-    expect(globalMemoryDirFor({ winterHome })).toBe(join(winterHome, "projects", "_global", "memory"));
+    expect(globalMemoryDirFor({ winterHome })).toBe(join(storeProjectsDir(winterHome), "_global", "memory"));
   });
 
   test("never collides with a real project's sanitized key", () => {
@@ -283,6 +284,6 @@ describe("memory-dir: globalMemoryDirFor", () => {
 
   test("an empty/whitespace-only override is treated as absent", () => {
     const winterHome = realDir();
-    expect(globalMemoryDirFor({ winterHome, directory: "  " })).toBe(join(winterHome, "projects", "_global", "memory"));
+    expect(globalMemoryDirFor({ winterHome, directory: "  " })).toBe(join(storeProjectsDir(winterHome), "_global", "memory"));
   });
 });

@@ -8,13 +8,14 @@ import { join } from "node:path";
 import {
   loadUserAgentDefinitions, loadProjectAgentDefinitions, mergeAgentDefinitionTiers, parseAgentDefinitionFile,
 } from "../../src/agent/agent-definitions";
+import { storeHomeFor } from "../../src/agent/paths";
 
 function tmpHome(): string {
   return mkdtempSync(join(tmpdir(), "winter-agent-defs-"));
 }
 
 function writeAgentFile(home: string, filename: string, content: string): void {
-  const dir = join(home, "agents");
+  const dir = join(storeHomeFor(home), "agents");
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, filename), content);
 }
@@ -197,8 +198,8 @@ describe("loadUserAgentDefinitions", () => {
 
   test("non-.md files are ignored entirely (not even a rejection)", () => {
     const home = tmpHome();
-    mkdirSync(join(home, "agents"), { recursive: true });
-    writeFileSync(join(home, "agents", "README.txt"), "not an agent file");
+    mkdirSync(join(storeHomeFor(home), "agents"), { recursive: true });
+    writeFileSync(join(storeHomeFor(home), "agents", "README.txt"), "not an agent file");
     const { definitions, rejected } = loadUserAgentDefinitions(home);
     expect(definitions).toEqual({});
     expect(rejected).toEqual([]);

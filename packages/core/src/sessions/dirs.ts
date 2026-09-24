@@ -29,6 +29,18 @@ function expandTilde(p: string): string {
 }
 
 /**
+ * WS-21 round 3: a session's cwd as STORED from now on — canonical, because it is the transcript key both
+ * legs use (the Winter child keys by `realpath(cwd)`, the official store key derives from the canonical
+ * cwd). `canonicalizeDirPath`, except that a spelling it refuses (relative) is kept as given: no door may
+ * turn an odd cwd into a crash. `session.create`, `session.dispatch`, `session.setCwd` and a promoted
+ * `session.setDirs` entry come through here; `SessionStore.createSession` itself still stores verbatim
+ * (its T6 contract, for the store's other writers).
+ */
+export function canonicalSessionCwd(cwd: string): string {
+  try { return canonicalizeDirPath(cwd); } catch { return cwd; }
+}
+
+/**
  * Canonicalizes a working-directory path so two different spellings of the same directory
  * compare equal — the T2 setter's dedup/lock/denylist checks all depend on this being stable and
  * deterministic.

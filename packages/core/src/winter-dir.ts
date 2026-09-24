@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { WinterProfile } from "./profile";
+import { SDK_PERSISTENT_ENTRIES, sdkHomeFor } from "./agent/paths";
 
 export interface WinterDirs {
   home: string;
@@ -37,12 +38,37 @@ export function isDefaultWinterHome(home: string, profile: WinterProfile, homedi
   return resolve(home) === resolve(defaultHome);
 }
 
-const SUBDIRS = ["sessions", "memory", "skills/self", "agents", "plugins", "hooks", "logs", "run", "runtimes", "runtimes/backups", "runtimes/official-agent-spool", "runtimes/handoff-leases"];
+// WS-21 (spec §8 bootstrap): `skills/self`, `agents`, `plugins`, `hooks` and
+// `runtimes/official-agent-spool` are no longer created — the first four live in `sdk/` now (or retired),
+// and the official leg's config dir is the router's per-run folder. A fresh home is therefore never in
+// the old layout (Migration C's definition: real `projects/` or `skills/` content).
+//
+// `runtimes/backups` is NOT the checkpoint dir: it is `runtime-state.db`'s own backup directory
+// (`runtime-state/db.ts`'s `backup()`), unrelated to the runtimes' file checkpoints.
+const SUBDIRS = ["sessions", "memory", "logs", "run", "runtimes", "runtimes/backups", "runtimes/handoff-leases"];
+
+/**
+ * WS-21: the shared runtime home. `sdk/` itself is 0700 (it holds `.winter.json`, whose MCP entries
+ * can carry headers); `sdk/projects` and claude's persistent set are pre-created so every run folder
+ * can link them (spec §3.3). Created on every build: on one whose router does not apply run homes yet,
+ * the runtime-facing directories stay at `<home>` (`storeHomeFor`), and these stay empty.
+ *
+ * No compatibility link is planted at `<home>/projects` (or anywhere): the agent SDK's store refuses a
+ * symlink at that level on every append, so a link there would break every child still writing the
+ * old path. Links are Migration C's, left only after it has moved the data on a run-home build.
+ */
+function bootstrapSdkHome(home: string): void {
+  const sdk = sdkHomeFor(home);
+  mkdirSync(sdk, { recursive: true, mode: 0o700 });
+  chmodSync(sdk, 0o700);
+  mkdirSync(join(sdk, "projects"), { recursive: true });
+  for (const entry of SDK_PERSISTENT_ENTRIES) mkdirSync(join(sdk, entry), { recursive: true });
+}
 
 export function bootstrapWinterDir(home: string = resolveWinterHome()): WinterDirs {
   for (const d of SUBDIRS) mkdirSync(join(home, d), { recursive: true });
   chmodSync(join(home, "run"), 0o700);
-  chmodSync(join(home, "runtimes", "official-agent-spool"), 0o700);
+  bootstrapSdkHome(home);
 
   const settingsPath = join(home, "settings.json");
   if (!existsSync(settingsPath)) {

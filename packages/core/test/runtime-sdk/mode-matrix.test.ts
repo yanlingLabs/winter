@@ -320,8 +320,22 @@ test("the control-plane deny rules cover the four write tools × the control-pla
     // be a place a session can plant a SKILL.md or a hook.
     expect(deny).toContain(`${tool}(//h/runtimes/**)`);
     expect(deny).toContain(`${tool}(//h/plugins/**)`);
+    // WS-21 (spec §7.1): the shared runtime home's self-grant files and stores, and a project's own MCP
+    // server list and any settings tier, at any depth.
+    expect(deny).toContain(`${tool}(//h/sdk/settings.json)`);
+    expect(deny).toContain(`${tool}(//h/sdk/.winter.json)`);
+    expect(deny).toContain(`${tool}(//h/sdk/agents/**)`);
+    expect(deny).toContain(`${tool}(//h/sdk/plugins/**)`);
+    expect(deny).toContain(`${tool}(//**/.winter/mcp.json)`);
+    expect(deny).toContain(`${tool}(//**/.winter/settings*.json)`);
   }
-  for (const tool of ["Read", "Glob", "Grep"]) expect(deny.some((r) => r.startsWith(`${tool}(`) && r.includes("/cache"))).toBe(false);
+  // The skill-plugin views stay READABLE: no read rule covers the cache wholesale. WS-21 (spec §7.1)
+  // read-denies exactly three generated config files per run folder, and (round 6) its `backups/`.
+  for (const tool of ["Read", "Glob", "Grep"]) {
+    const underCache = deny.filter((r) => r.startsWith(`${tool}(`) && r.includes("/cache"));
+    expect(underCache.sort()).toEqual([".claude.json", ".credentials.json", ".winter.json", "backups/**"].map((f) => `${tool}(//h/cache/runs/*/${f})`));
+    expect(deny).toContain(`${tool}(//h/sdk/.winter.json)`);
+  }
   // Task 17: + the engine's read-tool denials, carried: Read/Glob/Grep × { run/**, runtimes/** }
   for (const tool of ["Read", "Glob", "Grep"]) {
     expect(deny).toContain(`${tool}(//h/run/**)`);
@@ -334,31 +348,52 @@ test("the control-plane deny rules cover the four write tools × the control-pla
   // from the router's own `RESUME_STAGING_PREFIX` (not a hand-typed duplicate) so this test fails if
   // `mode-options.ts` ever drifts from the router's own definition of a staging root's name.
   const claudeResumeTarget = `/${join(tmpdir(), `${RESUME_STAGING_PREFIX}*`, "**")}`;
-  for (const tool of ["Edit", "Write", "MultiEdit", "NotebookEdit", "Read", "Glob", "Grep"]) {
+  for (const tool of ["Edit", "Write", "MultiEdit", "NotebookEdit"]) {
     expect(deny).toContain(`${tool}(${claudeResumeTarget})`);
   }
-  expect(deny).toHaveLength(4 * 15 + 3 * 3);
+  // Round 6: READS of a staging root are fenced like a run folder's — its config files and `backups/`,
+  // never the whole root (a resumed generation's own large tool outputs live there and must be readable).
+  for (const tool of ["Read", "Glob", "Grep"]) {
+    expect(deny).not.toContain(`${tool}(${claudeResumeTarget})`);
+    for (const f of [".claude.json", ".credentials.json", ".winter.json", "backups/**"]) expect(deny).toContain(`${tool}(/${join(tmpdir(), `${RESUME_STAGING_PREFIX}*`)}/${f})`);
+  }
+  expect(deny).toHaveLength(4 * 21 + 3 * 11);
 });
 
 // Daemon settings surface batch 3 (item 2): `settings.permissions.deny` (Skill(<name>) toggles,
 // or any hand-written rule) rides ALONGSIDE the fixed control-plane fence, never in place of it.
-test("item 2: settings.permissions.deny is appended after the fixed control-plane fence, verbatim", () => {
+test("item 2 (WS-21): the user's sdk/settings.json deny rules (userDeny) are appended after the fixed control-plane fence, verbatim", () => {
+  const deny = buildWinterOptions(optionsInput({ home: "/h", userDeny: ["Skill(writing-skills)", "Agent(fork)"] })).permissions!.deny!;
+  expect(deny.slice(-2)).toEqual(["Skill(writing-skills)", "Agent(fork)"]);
+  // The fixed fence is untouched (same count this file's other test pins).
+  expect(deny).toHaveLength(4 * 21 + 3 * 11 + 2);
+});
+
+test("WS-21: a STALE settings.permissions.deny (a moved key) never reaches the child's deny list", () => {
   const settings = Settings.parse({
     schemaVersion: 3 as const,
     provider: { model: "codex-oauth/gpt-5.6-sol" },
-    permissions: { deny: ["Skill(writing-skills)", "Agent(fork)"] },
+    permissions: { deny: ["Skill(stale)"] },
   });
   const deny = buildWinterOptions(optionsInput({ home: "/h", settings })).permissions!.deny!;
-  expect(deny.slice(-2)).toEqual(["Skill(writing-skills)", "Agent(fork)"]);
-  // The fixed fence is untouched (same count this file's other test pins).
-  expect(deny).toHaveLength(4 * 15 + 3 * 3 + 2);
+  expect(deny).not.toContain("Skill(stale)");
+  expect(deny).toHaveLength(4 * 21 + 3 * 11);
+});
+
+test("WS-21: the user's sdk/settings.json allow rules (userAllow) reach a code child verbatim — never re-translated", () => {
+  const allow = buildWinterOptions(optionsInput({ home: "/h", mode: "code", userAllow: ["Edit", "Bash(npm test:*)", "mcp__srv__tool"] })).permissions!.allow!;
+  expect(allow).toContain("Edit");
+  expect(allow).not.toContain("Write"); // a claude `Edit` alone is NOT widened to Edit + Write
+  expect(allow).toContain("Bash(npm test:*)");
+  expect(allow).toContain("mcp__srv__tool");
+  expect(buildWinterOptions(optionsInput({ home: "/h", mode: "chat", userAllow: ["Edit"] })).permissions!.allow).toBeUndefined();
 });
 
 test("item 2: an absent settings.permissions.deny changes nothing — byte-identical to before item 2", () => {
   const withNull = buildWinterOptions(optionsInput({ home: "/h", settings: null })).permissions!.deny!;
   const withUndefined = buildWinterOptions(optionsInput({ home: "/h" })).permissions!.deny!;
-  expect(withNull).toHaveLength(4 * 15 + 3 * 3);
-  expect(withUndefined).toHaveLength(4 * 15 + 3 * 3);
+  expect(withNull).toHaveLength(4 * 21 + 3 * 11);
+  expect(withUndefined).toHaveLength(4 * 21 + 3 * 11);
 });
 
 // Winter Phase 10b (D1-3, W18-9): a read of a `claude-resume-*` staging root is denied — proved
@@ -367,22 +402,20 @@ test("item 2: an absent settings.permissions.deny changes nothing — byte-ident
 // `isResumeStagingRoot` is the router's own recognition function for exactly this shape (used
 // elsewhere for staging-root cleanup/reconciliation); this test ties the two together so the SDK
 // deny rule and the router's own definition of a staging root can never silently disagree.
-test("W18-9: a real router-shaped claude-resume staging root is caught by the Read/Glob/Grep deny rule", () => {
+// Round 6: the READ rules name the staging root's config files and `backups/` (no longer the whole root —
+// the model reads its own large tool outputs there); the WRITE rules keep the whole root.
+test("W18-9: a real router-shaped claude-resume staging root is caught by the deny rules (reads: its config and backups; writes: all of it)", () => {
   const deny = buildWinterOptions(optionsInput({ home: "/h" })).permissions!.deny!;
   const root = resumeStagingRoot("9f2c1e40-0000-4000-8000-abcdefabcdef", tmpdir());
   expect(isResumeStagingRoot(root)).toBe(true); // the router agrees this IS a staging root
-  const fileInsideRoot = join(root, "projects", "some-project-key", "session.jsonl");
-  // The glob's `**` suffix covers arbitrary depth under the root — a model reading a specific
-  // transcript FILE inside the staging tree, not just the bare root directory, must be denied too.
-  const withinDeniedTree = fileInsideRoot.startsWith(`${root}/`);
-  expect(withinDeniedTree).toBe(true);
+  // The rules target `<tmpdir>/<prefix>*/…` — `root` (built with the SAME `tmpdir()` base) must fall under
+  // that prefix for every real staging directory the router creates, whatever uuid it happens to mint.
+  expect(root.startsWith(join(tmpdir(), RESUME_STAGING_PREFIX))).toBe(true);
+  const stagingGlob = join(tmpdir(), `${RESUME_STAGING_PREFIX}*`);
   for (const tool of ["Read", "Glob", "Grep"]) {
-    // The deny rule targets `<tmpdir>/<prefix>*/**` — `root` (built with the SAME `tmpdir()` base)
-    // must fall under it, which is exactly what the rule exists to guarantee for every real staging
-    // directory the router creates, whatever uuid it happens to mint.
-    expect(root.startsWith(join(tmpdir(), RESUME_STAGING_PREFIX))).toBe(true);
-    expect(deny).toContain(`${tool}(/${join(tmpdir(), `${RESUME_STAGING_PREFIX}*`, "**")})`);
+    for (const f of [".claude.json", ".credentials.json", ".winter.json", "backups/**"]) expect(deny).toContain(`${tool}(/${stagingGlob}/${f})`);
   }
+  for (const tool of ["Edit", "Write", "MultiEdit", "NotebookEdit"]) expect(deny).toContain(`${tool}(/${join(stagingGlob, "**")})`);
 });
 
 /**
@@ -428,7 +461,19 @@ test("every deny rule is //-anchored, and resolves to the fence target it names"
   expect(specs.has(`/${join(home, "plugins")}/**`)).toBe(true);    // M6: installed plugins
   expect(specs.has(`/${join(home, "permissions")}/**`)).toBe(true); // I2: the approved-project-rules record
   expect(specs.has(`/${join(home, "trust.json")}`)).toBe(true);     // whole-branch review: the trust record
-  expect(specs.size).toBe(15);                                       // (runtimes/** was already a READ target)
+  // WS-21 (spec §7.1): the shared runtime home's files and stores, a project's MCP list and settings
+  // tiers, and the generated config of every run folder (reads).
+  for (const t of [join(home, "sdk", "settings.json"), join(home, "sdk", ".winter.json"), `${join(home, "sdk", "agents")}/**`, `${join(home, "sdk", "plugins")}/**`]) {
+    expect(specs.has(`/${t}`)).toBe(true);
+  }
+  expect(specs.has("//**/.winter/mcp.json")).toBe(true);
+  expect(specs.has("//**/.winter/settings*.json")).toBe(true);
+  for (const f of [".winter.json", ".claude.json", ".credentials.json"]) expect(specs.has(`/${join(home, "cache", "runs", "*", f)}`)).toBe(true);
+  // Round 6: `backups/**` of every run folder and staging root, and a staging root's config files (reads).
+  expect(specs.has(`/${join(home, "cache", "runs", "*", "backups")}/**`)).toBe(true);
+  expect(specs.has(`/${join(tmpdir(), "claude-resume-*", "backups")}/**`)).toBe(true);
+  for (const f of [".winter.json", ".claude.json", ".credentials.json"]) expect(specs.has(`/${join(tmpdir(), "claude-resume-*", f)}`)).toBe(true);
+  expect(specs.size).toBe(29);                                       // (runtimes/** was already a READ target)
   // The two inert forms must never reappear.
   for (const s of specs) {
     expect({ s, singleSlashAbsolute: /^\/[^/]/.test(s) }).toEqual({ s, singleSlashAbsolute: false });
@@ -446,10 +491,13 @@ test("the deny rules do NOT fence the MEMDIR or $OUTDIR — both are agent-writa
   expect(deny.some((r) => r.includes("outputs"))).toBe(false);
 });
 
-test("the Bash sandbox names real DIRECTORIES, because its consumer renders seatbelt subpaths", () => {
-  // Review F8: `filesystem.denyWrite` entries become `(deny file-write* (subpath "<canon(p)>"))`
-  // (`sandbox/profile.ts:335`), so a glob like `**/.winter/permissions.local.json` or `/h/run/**`
-  // becomes a literal path that never exists and denies nothing.
+test("the Bash sandbox names real DIRECTORIES — plus, since R.3 I-4, the any-depth `.winter/<kind>` globs", () => {
+  // Review F8: a plain `filesystem.denyWrite` entry becomes `(deny file-write* (subpath "<canon(p)>"))`
+  // (`sandbox/profile.ts`), so the control-plane list stays REAL paths. R.3 I-4: F8's other half — "a glob
+  // becomes a literal path that never exists and denies nothing" — stopped holding at agent SDK round 11
+  // (`2a118c6`, claude's `Rt`): a glob-shaped entry renders as a recursive seatbelt REGEX on the Winter leg
+  // exactly as on claude (measured: `sandbox-glob-escape-measure.e2e.test.ts`'s R.3 I-4 row). So the
+  // child's list ends with the five `<cwd>/**/.winter/<kind>` entries, and those are its ONLY globs.
   const sb = buildWinterOptions(optionsInput({ home: "/h" })).sandbox!;
   expect(sb.enabled).toBe(true);
   // `runtimes` is on BOTH lists (2026-09-18). It was read-denied and write-allowed, which the
@@ -464,14 +512,29 @@ test("the Bash sandbox names real DIRECTORIES, because its consumer renders seat
   // control-plane files (the SDK's own profile covers those only under a home NAMED `.winter`), and
   // the session's project agent definitions (`<cwd>/.winter/agents`, the loader's one path —
   // `loadProjectAgentDefinitions`), which sandboxed Bash could otherwise write on the Winter leg.
+  // WS-21 (spec §7.1/§7.2): + the shared runtime home's self-grant files (a file is its own subpath) and
+  // stores, and — for the cwd and its project root (one path here: `/repo` is no repository) — the
+  // project's MCP list, both claude settings tiers, agents and the four protected item directories.
   expect(sb.filesystem!.denyWrite).toEqual([
     "/h/run", "/h/runtimes", "/h/cache", "/h/plugins", "/h/permissions", "/h/trust.json", "/h/agents",
-    "/h/permissions.local.json", "/h/settings.json", "/h/settings.local.json", "/repo/.winter/agents",
+    "/h/sdk/settings.json", "/h/sdk/.winter.json", "/h/sdk/agents", "/h/sdk/plugins",
+    "/h/permissions.local.json", "/h/settings.json", "/h/settings.local.json",
+    // review I7: the protected user tier (a separate list — the write TOOLS get a card, not this deny),
+    // for the shared runtime home and the store home this build loads from. R.1: on a run-home build the
+    // store home IS the shared runtime home (`sdk/`), so the list names it once (router 0.0.11 added the
+    // `<home>/…` duplicates of these five).
+    "/h/sdk/skills", "/h/sdk/commands", "/h/sdk/rules", "/h/sdk/output-styles", "/h/sdk/WINTER.md",
+    "/repo/.winter/mcp.json", "/repo/.winter/settings.json", "/repo/.winter/settings.local.json", "/repo/.winter/agents",
+    "/repo/.winter/skills", "/repo/.winter/commands", "/repo/.winter/rules", "/repo/.winter/output-styles",
+    // R.3 I-4: the any-depth project fence (child-only; `sandboxConfigFor`'s literal list has none).
+    "/repo/**/.winter/skills", "/repo/**/.winter/commands", "/repo/**/.winter/rules", "/repo/**/.winter/output-styles", "/repo/**/.winter/agents",
   ]);
   // CLAUDE.md: "the sole read denial is ~/.winter/run" — reads are otherwise unrestricted.
-  expect(sb.filesystem!.denyRead).toEqual(["/h/run", "/h/runtimes"]);   // Task 17: runtimes/ is model-denied (8a)
+  // WS-21 (spec §7.1): + the user's MCP server list.
+  expect(sb.filesystem!.denyRead).toEqual(["/h/run", "/h/runtimes", "/h/sdk/.winter.json"]);   // Task 17: runtimes/ is model-denied (8a)
   for (const p of [...sb.filesystem!.denyWrite!, ...sb.filesystem!.denyRead!]) {
-    expect({ p, glob: p.includes("*") }).toEqual({ p, glob: false });
+    const anyDepth = /^\/repo\/\*\*\/\.winter\/(?:skills|commands|rules|output-styles|agents)$/.test(p);
+    expect({ p, glob: p.includes("*") }).toEqual({ p, glob: anyDepth });
   }
   // `allowUnsandboxedCommands` is NOT set: it is consulted only together with `excludedCommands`
   // (`sandbox/spawn.ts:109,122`), which this config does not set, so `false` would be a no-op.

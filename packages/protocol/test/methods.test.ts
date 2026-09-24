@@ -46,9 +46,6 @@ import {
   SkillsDeleteParams,
   SkillsDeleteResult,
   McpServerStatusSchema,
-  PluginInfoSchema,
-  PluginsListParams,
-  PluginsListResult,
   ThreadInfoSchema,
   ThreadListParams,
   ThreadListResult,
@@ -401,66 +398,12 @@ describe("skills.read/write/delete schemas (Phase 5c Task 3)", () => {
   });
 });
 
-describe("plugins.list schema", () => {
-  test("plugins.list params/result + method string", () => {
-    expect(PluginsListParams.parse({})).toEqual({});
-    const info = PluginInfoSchema.parse({
-      name: "demo", description: "d", version: "0.1.0",
-      skills: ["greet"], hasMcp: true, mcpEnabled: false, disabled: false,
-    });
-    expect(info.name).toBe("demo");
-    // description/version are optional
-    expect(PluginInfoSchema.parse({ name: "bare", skills: [], hasMcp: false, mcpEnabled: false, disabled: false }).description).toBeUndefined();
-    const r = PluginsListResult.parse({ ok: true, plugins: [info] });
-    expect(r.plugins).toHaveLength(1);
-    expect(METHODS.pluginsList).toBe("plugins.list");
-  });
-
-  test("Phase 4a Task 3: consent-flow fields (tier/requiredConsents/consented/legacy/execPayload/tccPermissions/hardwarePermissions) round-trip", () => {
-    const info = PluginInfoSchema.parse({
-      name: "demo", skills: [], hasMcp: false, mcpEnabled: true, disabled: false,
-      tier: "platform", requiredConsents: ["exec", "tcc", "hardware"], consented: ["exec"], legacy: false,
-      execPayload: ["mcp: node server.js", "entry: node index.js"],
-      tccPermissions: ["accessibility"], hardwarePermissions: ["battery"],
-    });
-    expect(info).toMatchObject({
-      tier: "platform", requiredConsents: ["exec", "tcc", "hardware"], consented: ["exec"], legacy: false,
-      execPayload: ["mcp: node server.js", "entry: node index.js"],
-      tccPermissions: ["accessibility"], hardwarePermissions: ["battery"],
-    });
-  });
-
+// Post-merge round (L3 request #5): the pre-WS-21 "plugins.list schema" describe block (PluginInfoSchema,
+// PluginsListParams/Result) retired along with the schemas themselves — see methods.ts's own retirement
+// note just above where they used to live. plugin.list's current coverage is PluginListingSchema's own.
+describe("plugin schema: McpServerStatusSchema plugin-source widening", () => {
   test("McpServerStatusSchema.source is widened to include \"plugin\"", () => {
     expect(McpServerStatusSchema.parse({ name: "x", status: "connected", toolNames: [], source: "plugin" }).source).toBe("plugin");
-  });
-
-  test("Phase 4d-i Task 4: status is optional and accepts every SupervisorStatus value plus \"na\"", () => {
-    expect(PluginInfoSchema.parse({ name: "bare", skills: [], hasMcp: false, mcpEnabled: false, disabled: false }).status).toBeUndefined();
-    for (const status of ["starting", "running", "backoff", "circuit-open", "stopped", "na"] as const) {
-      expect(PluginInfoSchema.parse({ name: "demo", skills: [], hasMcp: false, mcpEnabled: true, disabled: false, status }).status).toBe(status);
-    }
-    expect(() => PluginInfoSchema.parse({ name: "demo", skills: [], hasMcp: false, mcpEnabled: true, disabled: false, status: "bogus" })).toThrow();
-  });
-
-  test("daemon settings surface item 1: manifestHooks mirrors WinterPluginManifest.contributes.hooks exactly, verbatim (no regrouping) — absent when omitted", () => {
-    // Absent entirely (legacy/no-hooks plugin, agent/plugins.ts's PluginInfo.manifestHooks shape).
-    expect(PluginInfoSchema.parse({ name: "bare", skills: [], hasMcp: false, mcpEnabled: false, disabled: false }).manifestHooks).toBeUndefined();
-    // Every declared hook event, and duplicate events for the same plugin both survive — the
-    // schema is a plain array mirror of plugin-manifest.ts's `contributes.hooks`, never regrouped
-    // or deduped by event.
-    const hooks = [
-      { event: "session-start", command: "notify.sh" },
-      { event: "pre-tool", command: "guard.sh", timeoutMs: 250 },
-      { event: "pre-tool", command: "guard2.sh" },
-      { event: "post-tool", command: "observe.sh" },
-      { event: "turn-end", command: "wrapup.sh" },
-    ] as const;
-    const info = PluginInfoSchema.parse({ name: "demo", skills: [], hasMcp: false, mcpEnabled: true, disabled: false, manifestHooks: hooks });
-    expect(info.manifestHooks).toEqual(hooks as unknown as typeof info.manifestHooks);
-    // Same door's own shape guards: an unknown event is refused, and a blank command is refused
-    // (the manifest schema's own `command: z.string().min(1)`).
-    expect(() => PluginInfoSchema.parse({ name: "demo", skills: [], hasMcp: false, mcpEnabled: true, disabled: false, manifestHooks: [{ event: "bogus", command: "x" }] })).toThrow();
-    expect(() => PluginInfoSchema.parse({ name: "demo", skills: [], hasMcp: false, mcpEnabled: true, disabled: false, manifestHooks: [{ event: "pre-tool", command: "" }] })).toThrow();
   });
 });
 
@@ -1536,5 +1479,66 @@ describe("SettingsSetSkillDeniedParams.name (Minor 5d)", () => {
     for (const name of ["my skill", "My-Skill", "a".repeat(65), ""]) {
       expect(SettingsSetSkillDeniedParams.safeParse({ name, denied: true }).success).toBe(false);
     }
+  });
+});
+
+// WS-21 (spec §4.4, §5.2): the MCP scopes and the `winter plugin` = `claude plugin` method schemas.
+describe("WS-21 method schemas", () => {
+  test("mcp.add/remove/get gain scope (default local) and an optional cwd", async () => {
+    const m = await import("../src/methods");
+    const entry = { type: "stdio" as const, command: "node" };
+    expect(m.McpAddParams.parse({ name: "x", entry }).scope).toBe("local");
+    expect(m.McpAddParams.parse({ name: "x", entry, scope: "user" }).scope).toBe("user");
+    expect(m.McpAddParams.parse({ name: "x", entry, scope: "project", cwd: "/r" }).cwd).toBe("/r");
+    expect(() => m.McpAddParams.parse({ name: "x", entry, scope: "global" })).toThrow();
+    expect(m.McpRemoveParams.parse({ name: "x" }).scope).toBe("local");
+    expect(m.McpGetParams.parse({ name: "x", scope: "project", cwd: "/r" }).scope).toBe("project");
+    expect(m.McpAddResult.parse({ ok: true, name: "x", transport: "stdio", started: false, scope: "local" }).scope).toBe("local");
+    expect(m.McpGetResult.parse({ ok: true, name: "x", found: false }).scope).toBeUndefined();
+  });
+
+  test("the plugin methods are named like claude's CLI verbs, and plugin.enable/disable keep their keys", async () => {
+    const { METHODS } = await import("../src/methods");
+    expect(METHODS.pluginInstall).toBe("plugin.install");
+    expect(METHODS.pluginUninstall).toBe("plugin.uninstall");
+    expect(METHODS.pluginEnable).toBe("plugin.enable");
+    expect(METHODS.pluginDisable).toBe("plugin.disable");
+    expect(METHODS.pluginUpdate).toBe("plugin.update");
+    expect(METHODS.pluginList).toBe("plugin.list");
+    expect(METHODS.pluginMarketplaceAdd).toBe("plugin.marketplace.add");
+    expect(METHODS.pluginMarketplaceRemove).toBe("plugin.marketplace.remove");
+    expect(METHODS.pluginMarketplaceList).toBe("plugin.marketplace.list");
+    expect(METHODS.pluginMarketplaceUpdate).toBe("plugin.marketplace.update");
+  });
+
+  test("plugin params mirror Contract B (spec + scope, default user)", async () => {
+    const m = await import("../src/methods");
+    expect(m.PluginInstallParams.parse({ spec: "fmt@local" })).toEqual({ spec: "fmt@local", scope: "user" });
+    expect(m.PluginUninstallParams.parse({ spec: "fmt@local", scope: "project", cwd: "/r" }).scope).toBe("project");
+    expect(m.PluginEnableScopedParams.parse({ spec: "fmt@local", scope: "local", cwd: "/r" }).scope).toBe("local");
+    expect(m.PluginDisableScopedParams.parse({ spec: "fmt@local" }).scope).toBe("user");
+    expect(() => m.PluginInstallParams.parse({ spec: "" })).toThrow();
+    expect(() => m.PluginInstallParams.parse({ spec: "x", scope: "managed" })).toThrow();
+    expect(m.PluginUpdateParams.parse({ spec: "fmt@local" }).spec).toBe("fmt@local");
+    expect(m.PluginListParams.parse({})).toEqual({});
+    expect(m.PluginMarketplaceAddParams.parse({ source: "/abs/dir" }).source).toBe("/abs/dir");
+    expect(m.PluginMarketplaceRemoveParams.parse({ name: "local" }).name).toBe("local");
+    expect(m.PluginMarketplaceListParams.parse({})).toEqual({});
+    expect(m.PluginMarketplaceUpdateParams.parse({})).toEqual({});
+  });
+
+  test("plugin results mirror Contract B's InstalledPlugin / PluginListing / MarketplaceInfo", async () => {
+    const m = await import("../src/methods");
+    const installed = { id: "fmt@local", version: "1.0.0", installPath: "/h/sdk/plugins/cache/local/fmt/1.0.0", scope: "user" as const };
+    expect(m.PluginInstallResult.parse({ ok: true, plugin: installed }).plugin).toEqual(installed);
+    expect(m.PluginUpdateResult.parse({ ok: true, plugin: { ...installed, version: undefined } }).plugin.id).toBe("fmt@local");
+    expect(m.PluginListResult.parse({ ok: true, plugins: [{ ...installed, enabled: true, marketplace: "local" }] }).plugins[0]!.enabled).toBe(true);
+    expect(() => m.PluginListResult.parse({ ok: true, plugins: [installed] })).toThrow(); // enabled/marketplace required
+    const market = { name: "local", source: "/abs/dir", kind: "directory" as const, path: "/abs/dir" };
+    expect(m.PluginMarketplaceAddResult.parse({ ok: true, marketplace: market }).marketplace).toEqual(market);
+    expect(m.PluginMarketplaceListResult.parse({ ok: true, marketplaces: [market] }).marketplaces).toHaveLength(1);
+    expect(() => m.MarketplaceInfoSchema.parse({ ...market, kind: "npm" })).toThrow();
+    expect(m.PluginSetEnabledResult.parse({ ok: true, spec: "fmt@local", scope: "user", enabled: false }).enabled).toBe(false);
+    expect(m.PluginUninstallResult.parse({ ok: true, spec: "fmt@local", scope: "user" }).scope).toBe("user");
   });
 });

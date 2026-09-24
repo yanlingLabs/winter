@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FileSecretStore, readMigrationManifest, type SecretStore } from "@yanlinglabs/winter-core";
+import { FileSecretStore, openRuntimeStateDb, readMigrationManifest, type SecretStore } from "@yanlinglabs/winter-core";
 import { runMigrateCommand, type MigrateCommandDeps } from "../src/commands/migrate";
 
 const dirs: string[] = [];
@@ -203,5 +203,118 @@ describe("winter migrate — --resume and --rollback", () => {
     const code = await runMigrateCommand(deps);
     expect(code).toBe(1);
     expect(asked).toBe(true);
+  });
+});
+
+// WS-21 L3.7 (spec §8): `winter migrate --sdk-home [--home <dir>] [--resume | --rollback | --status]`.
+describe("winter migrate --sdk-home (Migration C)", () => {
+  function oldLayoutHome(): string {
+    const home = join(tempDir(), "old");
+    mkdirSync(join(home, "projects", "-Users-x-app", "memory"), { recursive: true });
+    writeFileSync(join(home, "projects", "-Users-x-app", "s.jsonl"), '{"type":"user"}\n');
+    writeFileSync(join(home, "projects", "-Users-x-app", "memory", "MEMORY.md"), "- fact\n");
+    mkdirSync(join(home, "sdk", "projects"), { recursive: true });
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" }, outputStyle: "terse" }));
+    return home;
+  }
+
+  test("review I8: on a build whose router does not apply run homes, only --status and --rollback run", async () => {
+    const home = oldLayoutHome();
+    const run = baseDeps({ argv: ["--sdk-home", "--home", home, "--yes"], routerSupportsRunHome: () => false });
+    expect(await runMigrateCommand(run.deps)).toBe(1);
+    expect(run.errLines.join("\n")).toContain("cannot run a migrated home");
+    expect(lstatSync(join(home, "projects")).isSymbolicLink()).toBe(false);
+    const resume = baseDeps({ argv: ["--sdk-home", "--resume", "--home", home, "--yes"], routerSupportsRunHome: () => false });
+    expect(await runMigrateCommand(resume.deps)).toBe(1);
+    const status = baseDeps({ argv: ["--sdk-home", "--status", "--home", home], routerSupportsRunHome: () => false });
+    expect(await runMigrateCommand(status.deps)).toBe(0);
+    const rollback = baseDeps({ argv: ["--sdk-home", "--rollback", "--home", home, "--yes"], routerSupportsRunHome: () => false });
+    expect(await runMigrateCommand(rollback.deps)).toBe(0);
+  });
+
+  test("--status names a home that needs it, and never needs the daemon stopped", async () => {
+    const home = oldLayoutHome();
+    const { deps, lines } = baseDeps({ argv: ["--sdk-home", "--status", "--home", home], isDaemonLockHeld: () => true });
+    expect(await runMigrateCommand(deps)).toBe(0);
+    expect(lines.join("\n")).toContain("needed");
+  });
+
+  test("refuses while the daemon runs", async () => {
+    const home = oldLayoutHome();
+    const { deps, errLines } = baseDeps({ argv: ["--sdk-home", "--home", home, "--yes"], isDaemonLockHeld: () => true });
+    expect(await runMigrateCommand(deps)).toBe(1);
+    expect(errLines.join("\n")).toContain("stop it first");
+  });
+
+  test("migrates --home <dir> (nothing to reconcile: both phases), then --rollback puts it back", async () => {
+    const home = oldLayoutHome();
+    const run = baseDeps({ argv: ["--sdk-home", "--home", home, "--yes"], routerSupportsRunHome: () => true });
+    expect(await runMigrateCommand(run.deps)).toBe(0);
+    expect(run.lines.join("\n")).toContain("migration C: complete");
+    expect(lstatSync(join(home, "projects")).isSymbolicLink()).toBe(true);
+    expect(existsSync(join(home, "sdk", "projects", "-Users-x-app", "memory", "MEMORY.md"))).toBe(true);
+    const again = baseDeps({ argv: ["--sdk-home", "--home", home, "--yes"], routerSupportsRunHome: () => true });
+    expect(await runMigrateCommand(again.deps)).toBe(0);
+    expect(again.lines.join("\n")).toContain("nothing to migrate");
+    const back = baseDeps({ argv: ["--sdk-home", "--rollback", "--home", home, "--yes"] });
+    expect(await runMigrateCommand(back.deps)).toBe(0);
+    expect(lstatSync(join(home, "projects")).isDirectory()).toBe(true);
+    expect(lstatSync(join(home, "projects")).isSymbolicLink()).toBe(false);
+  });
+
+  // R.3 I-5: a rollback that crashes partway leaves `rolling-back`; --status says so, --resume and a plain
+  // run refuse naming --rollback, and --rollback run again finishes the job.
+  test("R.3 I-5: an interrupted --rollback is finished by --rollback; --resume and a plain run refuse", async () => {
+    const home = oldLayoutHome();
+    writeFileSync(join(home, "WINTER.md"), "# mine\n"); // copy-files has something to put back
+    const run = baseDeps({ argv: ["--sdk-home", "--home", home, "--yes"], routerSupportsRunHome: () => true });
+    expect(await runMigrateCommand(run.deps)).toBe(0);
+    const archiveDir = readdirSync(join(home, "migration")).filter((d) => d.startsWith("c-")).map((d) => join(home, "migration", d))[0]!;
+    writeFileSync(join(archiveDir, "rolled-back"), "in the way"); // a genuine I/O failure partway through
+    const crashed = baseDeps({ argv: ["--sdk-home", "--rollback", "--home", home, "--yes"] });
+    await expect(runMigrateCommand(crashed.deps)).rejects.toThrow();
+    const status = baseDeps({ argv: ["--sdk-home", "--status", "--home", home] });
+    expect(await runMigrateCommand(status.deps)).toBe(0);
+    expect(status.lines.join("\n")).toContain("migration C: rolling-back");
+    const resume = baseDeps({ argv: ["--sdk-home", "--resume", "--home", home, "--yes"], routerSupportsRunHome: () => true });
+    expect(await runMigrateCommand(resume.deps)).toBe(1);
+    expect(resume.errLines.join("\n")).toContain("--rollback");
+    const plain = baseDeps({ argv: ["--sdk-home", "--home", home, "--yes"], routerSupportsRunHome: () => true });
+    expect(await runMigrateCommand(plain.deps)).toBe(1);
+    expect(plain.errLines.join("\n")).toContain("--rollback");
+    rmSync(join(archiveDir, "rolled-back"));
+    const finish = baseDeps({ argv: ["--sdk-home", "--rollback", "--home", home, "--yes"] });
+    expect(await runMigrateCommand(finish.deps)).toBe(0);
+    expect(finish.lines.join("\n")).toContain("migration C: rolled-back");
+    expect(lstatSync(join(home, "projects")).isSymbolicLink()).toBe(false);
+    expect(existsSync(join(home, "projects", "-Users-x-app", "memory", "MEMORY.md"))).toBe(true);
+  });
+
+  test("a preflight refusal is printed and moves nothing", async () => {
+    const home = oldLayoutHome();
+    writeFileSync(join(home, "sdk", "projects", "stray.jsonl"), "x");
+    const { deps, errLines } = baseDeps({ argv: ["--sdk-home", "--home", home, "--yes"], routerSupportsRunHome: () => true });
+    expect(await runMigrateCommand(deps)).toBe(1);
+    expect(errLines.join("\n")).toContain("refused");
+    expect(lstatSync(join(home, "projects")).isSymbolicLink()).toBe(false);
+  });
+
+  test("review I3: --rollback on a home with no Migration C still steps a v7 store back to v6", async () => {
+    const home = join(tempDir(), "fresh");
+    mkdirSync(home, { recursive: true });
+    openRuntimeStateDb(home).close();
+    const { deps, lines } = baseDeps({ argv: ["--sdk-home", "--rollback", "--home", home, "--yes"] });
+    expect(await runMigrateCommand(deps)).toBe(0);
+    expect(lines.join("\n")).toContain("schema v6");
+    const again = baseDeps({ argv: ["--sdk-home", "--rollback", "--home", home, "--yes"] });
+    expect(await runMigrateCommand(again.deps)).toBe(0);
+    expect(again.lines.join("\n")).toContain("nothing to roll back");
+  });
+
+  test("--resume with nothing in flight refuses", async () => {
+    const home = oldLayoutHome();
+    const { deps, errLines } = baseDeps({ argv: ["--sdk-home", "--resume", "--home", home, "--yes"], routerSupportsRunHome: () => true });
+    expect(await runMigrateCommand(deps)).toBe(1);
+    expect(errLines.join("\n")).toContain("nothing to resume");
   });
 });

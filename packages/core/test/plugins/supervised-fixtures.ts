@@ -1,4 +1,5 @@
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { sdkPluginsRoot, sdkSettingsPath } from "../../src/agent/paths";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startIpcServer, type IpcServer } from "../../src/ipc/server";
@@ -16,6 +17,8 @@ import {
   type SupervisedProcess,
 } from "../../src/plugins/supervisor";
 import { PluginContribRegistry } from "../../src/plugins/contrib";
+import { pluginConsentFingerprint } from "../../src/plugins/consent-fingerprint";
+import { loadManifest, requiredConsentClasses } from "../../src/agent/plugin-manifest";
 import { AuditLog } from "../../src/peripheral/audit";
 import { PeripheralBroker } from "../../src/peripheral/broker";
 import { ProviderLink } from "../../src/peripheral/provider-link";
@@ -37,26 +40,61 @@ const EXAMPLES_DIR = join(import.meta.dir, "../../../../examples/sample-echo");
 const BATTERY_LIMITER_DIR = join(import.meta.dir, "../../../../examples/battery-limiter");
 const PLUGIN_SDK_ENTRY = join(import.meta.dir, "../../../plugin-sdk/src/index.ts");
 
-/** Copies an `examples/<name>` reference plugin into `<winterHome>/plugins/<pluginId>` and
- *  rewrites its `@yanlinglabs/winter-plugin-sdk` import to an absolute path (a bare copy has no `node_modules`
- *  of its own — see the module doc comment). Returns the installed directory. Shared by
- *  `installSampleEcho` and `installBatteryLimiter` below — identical rewrite, different source
- *  tree. */
+/** The single directory marketplace these fixtures register every example plugin under — its own
+ *  `.claude-plugin/marketplace.json` names each installed example by its `pluginId`, source `"."`
+ *  (WS-21: a directory marketplace's plugin entries resolve relative to the marketplace root,
+ *  the agent SDK's `resolveMarketplacePluginPath`; one marketplace per example keeps
+ *  each fixture's `source` trivial). */
+const EXAMPLE_MARKETPLACE_PREFIX = "example-mkt-";
+
+/** Copies an `examples/<name>` reference plugin into its own one-plugin directory marketplace under
+ *  `<winterHome>/`, rewrites its `@yanlinglabs/winter-plugin-sdk` import to an absolute path (a bare
+ *  copy has no `node_modules` of its own — see the module doc comment), and registers it directly in
+ *  Contract B's `sdk/plugins/installed_plugins.json` + `enabledPlugins` (WS-21: `PluginStore` now
+ *  reads the installed+enabled set from there, never a `<home>/plugins` scan — see
+ *  `agent/plugins.ts`'s own header). Returns the installed directory (== the marketplace root, `source: "."`).
+ *  Shared by `installSampleEcho`/`installBatteryLimiter` below — identical rewrite+registration,
+ *  different source tree. Synchronous (plain `node:fs`, not the async adapter) so every existing
+ *  call site in this fixture module and its callers stays synchronous too. */
 function installExample(srcDir: string, winterHome: string, pluginId: string): string {
-  const dest = join(winterHome, "plugins", pluginId);
+  const marketplaceName = `${EXAMPLE_MARKETPLACE_PREFIX}${pluginId}`;
+  const dest = join(winterHome, marketplaceName);
   cpSync(srcDir, dest, { recursive: true });
+  mkdirSync(join(dest, ".claude-plugin"), { recursive: true });
+  writeFileSync(join(dest, ".claude-plugin", "marketplace.json"), JSON.stringify({
+    name: marketplaceName, owner: { name: "test" }, plugins: [{ name: pluginId, source: "." }],
+  }));
   const indexPath = join(dest, "index.ts");
   const rewritten = readFileSync(indexPath, "utf8").replace(
     'from "@yanlinglabs/winter-plugin-sdk"',
     `from ${JSON.stringify(PLUGIN_SDK_ENTRY)}`,
   );
   writeFileSync(indexPath, rewritten);
+
+  const pluginsRoot = sdkPluginsRoot(winterHome);
+  mkdirSync(pluginsRoot, { recursive: true });
+  const knownMarketplacesPath = join(pluginsRoot, "known_marketplaces.json");
+  const knownMarketplaces = existsSync(knownMarketplacesPath) ? JSON.parse(readFileSync(knownMarketplacesPath, "utf8")) : {};
+  knownMarketplaces[marketplaceName] = { source: { source: "directory", path: dest }, installLocation: dest, lastUpdated: new Date().toISOString(), autoUpdate: false };
+  writeFileSync(knownMarketplacesPath, JSON.stringify(knownMarketplaces, null, 2));
+
+  const installedPath = join(pluginsRoot, "installed_plugins.json");
+  const installed = existsSync(installedPath) ? JSON.parse(readFileSync(installedPath, "utf8")) : { version: 2, plugins: {} };
+  installed.plugins[pluginSpecFor(pluginId)] = [{ scope: "user", installPath: dest, installedAt: new Date().toISOString() }];
+  writeFileSync(installedPath, JSON.stringify(installed, null, 2));
+
   return dest;
 }
 
-/** Copies `examples/sample-echo` into `<winterHome>/plugins/<pluginId>` and rewrites its
- *  `@yanlinglabs/winter-plugin-sdk` import to an absolute path (a bare copy has no `node_modules` of its own —
- *  see the module doc comment). Returns the installed directory. */
+/** The `"<name>@<marketplace>"` spec these fixtures use for `pluginId` — shared by `installExample`
+ *  (the record's key) and `writeAndLoadSettings` (the `enabledPlugins`/`plugins.consents` key), so
+ *  the two can never drift onto different keys for the same plugin. */
+function pluginSpecFor(pluginId: string): string {
+  return `${pluginId}@${EXAMPLE_MARKETPLACE_PREFIX}${pluginId}`;
+}
+
+/** Copies `examples/sample-echo` into its own directory marketplace under `winterHome` and
+ *  registers it (see `installExample`'s own doc). Returns the installed directory. */
 export function installSampleEcho(winterHome: string, pluginId: string): string {
   return installExample(EXAMPLES_DIR, winterHome, pluginId);
 }
@@ -98,26 +136,53 @@ export function realSpawn(cmd: string[], opts: { cwd: string; env: Record<string
   return Bun.spawn(cmd, { cwd: opts.cwd, env: opts.env, stdout: "ignore", stderr: "ignore", stdin: "ignore" });
 }
 
-/** Writes a real settings.json (installed + ENABLED + exec-CONSENTED — the exact state
- *  `pluginSpawnEligible` (agent/plugins.ts) requires before the real daemon would ever spawn a
- *  Tier-2 plugin) and loads it back through the real `loadSettings` pipeline. `opts.hardwareConsent`
- *  (Phase 4c Task 5, off by default — purely additive) also grants the "hardware" consent class,
- *  needed for `battery-limiter-e2e.test.ts`'s `pluginSpawnEligible`/`consentComplete` check to pass
- *  a manifest that declares `permissions.hardware: ["battery"]` (plugin-manifest.ts's
- *  `requiredConsentClasses` adds "hardware" to what a manifest like that requires). */
+/** Writes a real settings.json (exec-CONSENTED — `plugins.consents` stays in the daemon's OWN
+ *  `settings.json`, spec §4.1) AND `sdk/settings.json`'s `enabledPlugins` (Contract B's own carrier
+ *  for on/off, WS-21) — the exact state `pluginSpawnEligible` (agent/plugins.ts) requires before the
+ *  real daemon would ever spawn a Tier-2 plugin — then loads the former back through the real
+ *  `loadSettings` pipeline. `opts.hardwareConsent` (Phase 4c Task 5, off by default — purely
+ *  additive) also grants the "hardware" consent class, needed for `battery-limiter-e2e.test.ts`'s
+ *  `pluginSpawnEligible`/`consentComplete` check to pass a manifest that declares
+ *  `permissions.hardware: ["battery"]` (plugin-manifest.ts's `requiredConsentClasses` adds
+ *  "hardware" to what a manifest like that requires). Must run AFTER `installSampleEcho`/
+ *  `installBatteryLimiter` (needs `pluginId`'s own marketplace-qualified key, see `pluginSpecFor`). */
 export function writeAndLoadSettings(home: string, pluginId: string, opts?: { hardwareConsent?: boolean }): Settings {
-  const consent: { exec: number; hardware?: number } = { exec: Date.now() };
-  if (opts?.hardwareConsent) consent.hardware = Date.now();
+  const key = pluginSpecFor(pluginId);
+  const classes: string[] = ["exec"];
+  if (opts?.hardwareConsent) classes.push("hardware");
+  // C1 fix round 2: the record is now fingerprinted (`{classes, fingerprint}`), bound to the
+  // plugin's real install path — re-derived here off the SAME `EXAMPLE_MARKETPLACE_PREFIX`
+  // convention `installExample` uses for `dest` (this function's own doc: must run AFTER
+  // installSampleEcho/installBatteryLimiter, so that directory already exists).
+  //
+  // L5 re-review (full disclosure): the fingerprint now also covers the manifest's declared
+  // `permissions.tcc`/`permissions.hardware` + `requiredConsents` — sample-echo and battery-limiter
+  // declare DIFFERENT permissions (exec only vs exec+hardware:["battery"]), so this reads the REAL
+  // installed manifest (`loadManifest`, the SAME reader `agent/plugins.ts#PluginStore` uses) rather
+  // than assuming — the only way to stay correct for whichever example is actually installed here,
+  // independent of `opts.hardwareConsent` (which grants a CLASS; it never changes what the manifest
+  // itself declares as required).
+  const installPath = join(home, `${EXAMPLE_MARKETPLACE_PREFIX}${pluginId}`);
+  const { manifest } = loadManifest(installPath, pluginId);
+  const fingerprint = pluginConsentFingerprint(installPath, {
+    entry: manifest?.entry,
+    tcc: manifest?.permissions?.tcc,
+    hardware: manifest?.permissions?.hardware,
+    requiredConsents: manifest ? requiredConsentClasses(manifest) : [],
+  });
   writeFileSync(join(home, "settings.json"), JSON.stringify({
     schemaVersion: 3,
     provider: { model: "codex-oauth/gpt-5.4" }, // unused (nothing here constructs a real provider) but required by the settings schema
-    plugins: { enabled: [pluginId], consents: { [pluginId]: consent } },
+    plugins: { consents: { [key]: { classes, fingerprint } } },
   }));
+  writeFileSync(sdkSettingsPath(home), JSON.stringify({ enabledPlugins: { [key]: true } }));
   return loadSettings(join(home, "settings.json"));
 }
 
 /** The daemon's real Tier-2 spawn-eligibility pipeline (PluginStore#list -> pluginSpawnEligible),
- *  reduced to the `EligiblePlugin[]` shape `PluginSupervisor.startAll`/`reclaimOrphans` consume. */
+ *  reduced to the `EligiblePlugin[]` shape `PluginSupervisor.startAll`/`reclaimOrphans` consume.
+ *  `dir` comes straight off `PluginInfo.installPath` (WS-21: a plugin's real install path,
+ *  never a `<home>/plugins/<name>` convention — see `agent/plugins.ts`'s own doc). */
 export function buildSpawnablePlugins(home: string, settings: Settings): EligiblePlugin[] {
   const pluginStore = new PluginStore({
     winterHome: home, plugins: settings.plugins, consents: settings.plugins?.consents,
@@ -125,7 +190,7 @@ export function buildSpawnablePlugins(home: string, settings: Settings): Eligibl
   });
   return pluginStore.list()
     .filter(pluginSpawnEligible)
-    .map((p) => ({ id: p.name, dir: join(home, "plugins", p.name), entry: p.entry! }));
+    .map((p) => ({ id: p.name, dir: p.installPath, entry: p.entry! }));
 }
 
 export interface SupervisedInstance {

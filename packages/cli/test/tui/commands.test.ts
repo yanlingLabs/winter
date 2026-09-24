@@ -1120,14 +1120,15 @@ describe("B2 — /output-style (no args) opens the style picker when openChoice 
     expect(byValue.get("proactive")!.hint).toBeTruthy(); // the description rides as the hint
   });
 
-  test("onPick takes the SAME write path as `/output-style <name>`: settings.outputStyle set + the identical note", async () => {
+  test("onPick takes the SAME write path as `/output-style <name>`: sdk/settings.json outputStyle set + the identical note", async () => {
     const { client } = makeClient({});
     const requests: ChoiceRequest[] = [];
     const { ctx, notes } = makeCtx(client, { openChoice: (r) => requests.push(r) });
     await runCommand(ctx, "/output-style");
     await requests[0]!.onPick("explanatory");
     expect(notes).toEqual(["Output style set to: explanatory"]);
-    const settings = JSON.parse(readFileSync(join(home, "settings.json"), "utf8")) as { outputStyle?: string };
+    // WS-21: `outputStyle` moved to the shared runtime home's claude-format settings file.
+    const settings = JSON.parse(readFileSync(join(home, "sdk", "settings.json"), "utf8")) as { outputStyle?: string };
     expect(settings.outputStyle).toBe("explanatory");
   });
 
@@ -1160,10 +1161,10 @@ describe("/model switches the attached session (session.setModel) as well as the
     seed(); process.env.WINTER_HOME = home;
     const { client, calls } = makeClient({ setModel: () => ({}) });
     const { ctx, notes } = makeCtx(client, { sessionId: "s_live" });
-    await runCommand(ctx, "/model deepseek/deepseek-reasoner");
-    expect(calls.find((c) => c.method === "setModel")?.args).toEqual(["s_live", "deepseek/deepseek-reasoner", false]);
-    expect(notes.join("\n")).toMatch(/this session now runs deepseek-reasoner/);
-    expect(JSON.parse(readFileSync(settingsPath, "utf8")).provider.model).toBe("deepseek/deepseek-reasoner");
+    await runCommand(ctx, "/model deepseek/deepseek-v4-pro");
+    expect(calls.find((c) => c.method === "setModel")?.args).toEqual(["s_live", "deepseek/deepseek-v4-pro", false]);
+    expect(notes.join("\n")).toMatch(/this session now runs deepseek-v4-pro/);
+    expect(JSON.parse(readFileSync(settingsPath, "utf8")).provider.model).toBe("deepseek/deepseek-v4-pro");
   });
 
   test("a lossy cross-family refusal is reported with the --confirm door, and --confirm passes confirmLossy", async () => {
@@ -1171,19 +1172,19 @@ describe("/model switches the attached session (session.setModel) as well as the
     const refusal = Object.assign(new Error("handoff needs confirmation (code -32000)"), { rpc: { code: -32000, message: "handoff needs confirmation", data: { code: "handoff_confirmation_required", warnings: ["private reasoning cannot follow"] } } });
     const { client, calls } = makeClient({ setModel: (...args: unknown[]) => { if (args[2] !== true) throw refusal; return {}; } });
     const { ctx, notes } = makeCtx(client, { sessionId: "s_live" });
-    await runCommand(ctx, "/model deepseek/deepseek-reasoner");
+    await runCommand(ctx, "/model deepseek/deepseek-v4-pro");
     expect(notes.join("\n")).toMatch(/--confirm/);
     expect(notes.join("\n")).toMatch(/private reasoning cannot follow/);
-    await runCommand(ctx, "/model deepseek/deepseek-reasoner --confirm");
+    await runCommand(ctx, "/model deepseek/deepseek-v4-pro --confirm");
     expect(calls.filter((c) => c.method === "setModel").map((c) => c.args[2])).toEqual([false, true]);
-    expect(notes.join("\n")).toMatch(/this session now runs deepseek-reasoner/);
+    expect(notes.join("\n")).toMatch(/this session now runs deepseek-v4-pro/);
   });
 
   test("a deferred switch (turn running) says so", async () => {
     seed(); process.env.WINTER_HOME = home;
     const { client } = makeClient({ setModel: () => ({ deferred: true }) });
     const { ctx, notes } = makeCtx(client, { sessionId: "s_live" });
-    await runCommand(ctx, "/model deepseek/deepseek-reasoner");
+    await runCommand(ctx, "/model deepseek/deepseek-v4-pro");
     expect(notes.join("\n")).toMatch(/at the end of the running turn/);
   });
 });

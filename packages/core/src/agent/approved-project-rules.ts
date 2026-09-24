@@ -1,8 +1,15 @@
-import { chmodSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { approvedProjectRulesDir } from "./paths";
 
 /**
+ * WS-21 (spec §4.3): RETIRED AS A STORE — READ-ONLY NOW. A card's "in this project" answer is saved to
+ * the trusted project's `.winter/settings.local.json` (`agent/saved-answers.ts`), where both runtimes
+ * read it natively; nothing writes `<home>/permissions/projects.json` any more. What an older build
+ * recorded is still READ — by the saved-rules reader on a build whose router does not apply run homes,
+ * by `winter doctor` (which reports leftover entries) and by `winter migrate-project` (which moves them
+ * into the project's `.winter/settings.local.json`). Migration C archives the directory.
+ *
  * **The daemon's own record of the rules a user approved "in this project"** (review I2, 2026-09-23).
  *
  * The card's "Allow … in this project" option has always written `<projectRoot>/.winter/
@@ -24,15 +31,11 @@ import { approvedProjectRulesDir } from "./paths";
  * `ln -s`, then `rulesFor()` answered a planted `["Bash"]`). So before every read and write the
  * directory must be a real directory whose realpath is `<realpath(home)>/permissions`, and
  * `projects.json` is opened with `O_NOFOLLOW` and must be a regular file. Anything else reads as "no
- * rules" with ONE log line per condition, and `record` throws; nothing found there is ever removed —
- * it is left for the user. `prepare()` (daemon boot) creates the directory 0700 first, so there is
- * no window in which a link can be planted before the daemon's own directory exists.
+ * rules" with ONE log line per condition; nothing found there is ever removed — it is left for the
+ * user. (Before WS-21 the daemon created the directory 0700 at boot and wrote the record itself.)
  *
- * Shape: `{ "version": 1, "projects": { "<realpath of the root>": ["Bash(npm test)", …] } }`.
- * Writes are atomic (tmp + rename, the tmp created exclusively); a missing, malformed or oversized
- * file reads as "no rules" and is never rewritten from a bad parse (a later `record` starts from what
- * it can read, and a malformed file is left for the user rather than silently replaced). Never throws
- * from `rulesFor`.
+ * Shape: `{ "version": 1, "projects": { "<realpath of the root>": ["Bash(npm test)", …] } }`. A missing,
+ * malformed or oversized file reads as "no rules". Never throws from `rulesFor`.
  */
 export class ApprovedProjectRules {
   private cache: { mtimeMs: number; size: number; projects: Record<string, string[]> } | undefined;
@@ -46,56 +49,9 @@ export class ApprovedProjectRules {
     return join(approvedProjectRulesDir(this.deps.winterHome), "projects.json");
   }
 
-  /**
-   * Daemon boot: make `<home>/permissions` the daemon's own real 0700 directory before any session
-   * runs, so a link cannot be planted there first. Something already there that is not a real
-   * directory is NOT removed (it may be the user's) — it is refused, with one log line, and stays
-   * refused until it is. Never throws.
-   */
-  prepare(): void {
-    const dir = approvedProjectRulesDir(this.deps.winterHome);
-    try {
-      try { mkdirSync(dir, { mode: 0o700 }); } catch (err) { if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err; }
-      if (this.checkDir()) chmodSync(dir, 0o700);
-      this.refusal = undefined;
-    } catch (err) {
-      this.refuse(err);
-    }
-  }
-
   /** Every rule recorded for `projectRoot` (canonicalised), in the order they were approved. */
   rulesFor(projectRoot: string): string[] {
     return [...(this.read().projects[canonical(projectRoot)] ?? [])];
-  }
-
-  /**
-   * Record one approved rule for `projectRoot`. Deduped; atomic. Refuses (throws) when the existing
-   * file cannot be parsed, so a user's hand-edited-but-broken file is never overwritten with a
-   * one-rule replacement — the caller (`approval.respond`) logs that and still resolves the card —
-   * and when the directory or the file is not the daemon's own (R1).
-   */
-  record(projectRoot: string, rule: string): void {
-    const key = canonical(projectRoot);
-    // The control-plane guard `PermissionRules.append` enforces (whole-branch review, minor c): the
-    // home itself, or anything inside it (the MEMDIR, an outputs dir, …), is Winter's own state, never
-    // a project a rule can be approved "in".
-    const home = canonical(this.deps.winterHome);
-    if (key === home || key.startsWith(home.endsWith(sep) ? home : home + sep)) {
-      throw new Error(`refusing to record a project rule for ${key} — it is the Winter home itself or inside it (${home})`);
-    }
-    const current = this.readForWrite();
-    const rules = current.projects[key] ?? [];
-    if (rules.includes(rule)) return;
-    const next = { version: 1, projects: { ...current.projects, [key]: [...rules, rule] } };
-    const dir = approvedProjectRulesDir(this.deps.winterHome);
-    if (!this.checkDir()) {
-      try { mkdirSync(dir, { mode: 0o700 }); } catch (err) { if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err; }
-      if (!this.checkDir()) throw new Error(`${dir} could not be created`);
-    }
-    const tmp = `${this.file()}.${process.pid}.${Date.now()}.tmp`;
-    writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-    renameSync(tmp, this.file());
-    this.cache = undefined;
   }
 
   /**
@@ -134,14 +90,6 @@ export class ApprovedProjectRules {
     }
   }
 
-  private readForWrite(): { projects: Record<string, string[]> } {
-    if (!this.checkDir()) return { projects: {} };
-    const got = this.readFile(() => false);
-    if (got === "absent" || got === "cached") return { projects: {} };
-    if (got.parsed === null) throw new Error(`${this.file()} is not a readable approved-rules record — leaving it untouched`);
-    return { projects: got.parsed };
-  }
-
   /**
    * Open `projects.json` WITHOUT following a link (`O_NOFOLLOW`: a link there fails with ELOOP) and
    * require a regular file. `"absent"` when there is none; `"cached"` when `fresh(stat)` says the
@@ -172,7 +120,7 @@ export class ApprovedProjectRules {
     const reason = err instanceof Error ? err.message : String(err);
     if (this.refusal === reason) return;
     this.refusal = reason;
-    (this.deps.log ?? console.error)(`approved-project-rules: not using ${approvedProjectRulesDir(this.deps.winterHome)} — ${reason}; "Allow in this project" answers are neither applied nor recorded until it is the daemon's own directory again`);
+    (this.deps.log ?? console.error)(`approved-project-rules: not using ${approvedProjectRulesDir(this.deps.winterHome)} — ${reason}; the rules an older build recorded there are not applied until it is the daemon's own directory again`);
   }
 }
 

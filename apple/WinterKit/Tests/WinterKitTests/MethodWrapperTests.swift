@@ -495,77 +495,217 @@ final class MethodWrapperTests: XCTestCase {
 
     // MARK: - Phase 4d-ii Task 3: plugin lifecycle + contrib + shortcut/tile-action wrappers
 
-    func testPluginsInstallOutcomes() async throws {
+    // WS-21: `plugins.install`/`plugin.enable{name,consent?}`/`plugin.remove` are retired. The
+    // surviving `plugin.enable`/`plugin.disable` take a new `{spec, scope, cwd?}` shape and no
+    // longer decode a typed union — an expected refusal is a thrown `RpcFailure` now (see
+    // `WinterClient+Methods.swift`'s own header on this section).
+
+    func testPluginListDecodesListingsWithAndWithoutExtras() async throws {
         let (client, t) = try await connected()
+        let (req, plugins) = try await roundTrip(t, sentIndex: 1,
+            result: #"{"ok":true,"plugins":[{"id":"sample-echo","version":"1.2.0","installPath":"/plugins/sample-echo","scope":"user","enabled":true,"marketplace":"winter-examples","extras":{"tier":"platform","permissions":{"exec":true,"tcc":["accessibility"],"hardware":["battery"]},"requiredConsents":["exec","tcc","hardware"],"consented":["exec"],"entry":{"command":"node","args":["server.js"]},"fingerprint":"fp-1"}},{"id":"legacy-plugin","installPath":"/plugins/legacy-plugin","scope":"user","enabled":false,"marketplace":"winter-legacy"}]}"#
+        ) { try await client.pluginList() }
+        XCTAssertEqual(req["method"] as? String, "plugin.list")
+        XCTAssertEqual(plugins.count, 2)
 
-        let (req1, ok) = try await roundTrip(t, sentIndex: 1,
-            result: #"{"ok":true,"name":"sample-echo","requiredConsents":["network"],"hasMcp":false,"consentBlock":["plugin sample-echo requests:","- network access"]}"#
-        ) { try await client.pluginsInstall(source: "/tmp/sample-echo", name: "sample-echo") }
-        XCTAssertEqual(req1["method"] as? String, "plugins.install")
-        XCTAssertEqual((req1["params"] as? [String: Any])?["source"] as? String, "/tmp/sample-echo")
-        XCTAssertEqual((req1["params"] as? [String: Any])?["name"] as? String, "sample-echo")
-        XCTAssertEqual(ok, .ok(name: "sample-echo", requiredConsents: ["network"], hasMcp: false, consentBlock: ["plugin sample-echo requests:", "- network access"]))
+        let echo = plugins[0]
+        XCTAssertEqual(echo.id, "sample-echo")
+        XCTAssertEqual(echo.version, "1.2.0")
+        XCTAssertEqual(echo.scope, .user)
+        XCTAssertTrue(echo.enabled)
+        XCTAssertEqual(echo.marketplace, "winter-examples")
+        XCTAssertEqual(echo.spec, "sample-echo@winter-examples")
+        let extras = try XCTUnwrap(echo.extras)
+        XCTAssertEqual(extras.tier, "platform")
+        XCTAssertTrue(extras.execPermission)
+        XCTAssertEqual(extras.tccPermissions, ["accessibility"])
+        XCTAssertEqual(extras.hardwarePermissions, ["battery"])
+        XCTAssertEqual(extras.requiredConsents, ["exec", "tcc", "hardware"])
+        XCTAssertEqual(extras.consented, ["exec"])
+        XCTAssertEqual(extras.pendingConsents, ["tcc", "hardware"])
+        XCTAssertTrue(extras.needsConsent)
+        XCTAssertEqual(extras.entry?.command, "node")
+        XCTAssertEqual(extras.entry?.args, ["server.js"])
+        XCTAssertEqual(extras.fingerprint, "fp-1")
 
-        let (req2, invalid) = try await roundTrip(t, sentIndex: 2, result: #"{"code":"invalid_source"}"#) {
-            try await client.pluginsInstall(source: "/nonexistent")
-        }
-        XCTAssertNil((req2["params"] as? [String: Any])?["name"]) // omitted `name` param dropped, not sent as null
-        XCTAssertEqual(invalid, .invalidSource)
-
-        let (_, already) = try await roundTrip(t, sentIndex: 3, result: #"{"code":"already_installed","name":"sample-echo"}"#) {
-            try await client.pluginsInstall(source: "/tmp/sample-echo")
-        }
-        XCTAssertEqual(already, .alreadyInstalled(name: "sample-echo"))
+        let legacy = plugins[1]
+        XCTAssertEqual(legacy.id, "legacy-plugin")
+        XCTAssertNil(legacy.version)
+        XCTAssertFalse(legacy.enabled)
+        XCTAssertNil(legacy.extras, "no winter-plugin.json ⇒ no extras object at all")
+        XCTAssertNil(legacy.hooks, "hooks key absent ⇒ nil, not []")
     }
 
-    func testPluginEnableOutcomesIncludingNeedsConsent() async throws {
+    /// Fix round 1: `plugin.list`'s per-row `hooks` — `nil` (key absent) and `[]` (present, empty)
+    /// must decode to different things, same discipline the retired whole-list `manifestHooks`
+    /// used to need across rows, now scoped to one row.
+    func testPluginListDecodesHooksDistinguishingAbsentFromEmpty() async throws {
         let (client, t) = try await connected()
+        let (_, plugins) = try await roundTrip(t, sentIndex: 1,
+            result: #"{"ok":true,"plugins":[{"id":"a","installPath":"/a","scope":"user","enabled":true,"marketplace":"m","hooks":[{"event":"PreToolUse","matcher":"Bash","type":"command","command":"./deny.sh"},{"event":"Stop","type":"command"}]},{"id":"b","installPath":"/b","scope":"user","enabled":true,"marketplace":"m","hooks":[]},{"id":"c","installPath":"/c","scope":"user","enabled":true,"marketplace":"m"}]}"#
+        ) { try await client.pluginList() }
 
-        let (req1, needsConsent) = try await roundTrip(t, sentIndex: 1,
-            result: #"{"code":"needs_consent","requiredConsents":["network"],"consentBlock":["plugin sample-echo requests:","- network access"]}"#
-        ) { try await client.pluginEnable(name: "sample-echo") }
-        XCTAssertEqual(req1["method"] as? String, "plugin.enable")
-        XCTAssertNil((req1["params"] as? [String: Any])?["consent"])
-        XCTAssertEqual(needsConsent, .needsConsent(requiredConsents: ["network"], consentBlock: ["plugin sample-echo requests:", "- network access"]))
+        let hooksA = try XCTUnwrap(plugins[0].hooks)
+        XCTAssertEqual(hooksA.count, 2)
+        XCTAssertEqual(hooksA[0].event, "PreToolUse")
+        XCTAssertEqual(hooksA[0].matcher, "Bash")
+        XCTAssertEqual(hooksA[0].type, "command")
+        XCTAssertEqual(hooksA[0].command, "./deny.sh")
+        XCTAssertNil(hooksA[1].matcher)
+        XCTAssertNil(hooksA[1].command)
 
-        let (req2, ok) = try await roundTrip(t, sentIndex: 2, result: #"{"ok":true,"status":"running"}"#) {
-            try await client.pluginEnable(name: "sample-echo", consent: true)
+        XCTAssertEqual(plugins[1].hooks, [], "present-but-empty ⇒ []")
+        XCTAssertNil(plugins[2].hooks, "key absent ⇒ nil")
+    }
+
+    /// Fix round 3: a hook entry with no `event`/`type` is kept, not dropped — under-reporting a
+    /// plugin's own declared hook count is worse than showing one with a missing name.
+    func testPluginListKeepsHookEntriesMissingEventOrType() async throws {
+        let (client, t) = try await connected()
+        let (_, plugins) = try await roundTrip(t, sentIndex: 1,
+            result: #"{"ok":true,"plugins":[{"id":"a","installPath":"/a","scope":"user","enabled":true,"marketplace":"m","hooks":[{"type":"command","command":"./no-event.sh"},{"event":"Stop"},{}]}]}"#
+        ) { try await client.pluginList() }
+
+        let hooks = try XCTUnwrap(plugins[0].hooks)
+        XCTAssertEqual(hooks.count, 3, "all three entries survive, none dropped")
+        XCTAssertNil(hooks[0].event)
+        XCTAssertEqual(hooks[0].type, "command")
+        XCTAssertEqual(hooks[1].event, "Stop")
+        XCTAssertNil(hooks[1].type)
+        XCTAssertNil(hooks[2].event)
+        XCTAssertNil(hooks[2].type)
+    }
+
+    /// Fix round 1 (M2): a row with a missing/unrecognized `scope` is DROPPED, never decoded as a
+    /// silent `.user` guess — acting on the wrong settings tier is worse than acting on nothing.
+    func testPluginListDropsRowsWithMissingOrUnknownScope() async throws {
+        let (client, t) = try await connected()
+        let (_, plugins) = try await roundTrip(t, sentIndex: 1,
+            result: #"{"ok":true,"plugins":[{"id":"good","installPath":"/g","scope":"user","enabled":true,"marketplace":"m"},{"id":"no-scope","installPath":"/n","enabled":true,"marketplace":"m"},{"id":"bad-scope","installPath":"/b","scope":"workspace","enabled":true,"marketplace":"m"}]}"#
+        ) { try await client.pluginList() }
+        XCTAssertEqual(plugins.map(\.id), ["good"])
+    }
+
+    func testPluginListSendsCwdWhenGiven() async throws {
+        let (client, t) = try await connected()
+        let (req, _) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true,"plugins":[]}"#) {
+            try await client.pluginList(cwd: "/tmp/proj")
         }
-        XCTAssertEqual((req2["params"] as? [String: Any])?["consent"] as? Bool, true)
-        XCTAssertEqual(ok, .ok(status: "running"))
+        XCTAssertEqual((req["params"] as? [String: Any])?["cwd"] as? String, "/tmp/proj")
+    }
 
-        let (_, unknown) = try await roundTrip(t, sentIndex: 3, result: #"{"code":"unknown_plugin"}"#) {
-            try await client.pluginEnable(name: "ghost")
+    func testPluginInstallSendsSpecScopeCwdAndDecodesInstalledPlugin() async throws {
+        let (client, t) = try await connected()
+        let (req, plugin) = try await roundTrip(t, sentIndex: 1,
+            result: #"{"ok":true,"plugin":{"id":"sample-echo","version":"1.0.0","installPath":"/plugins/sample-echo","scope":"user"}}"#
+        ) { try await client.pluginInstall(spec: "sample-echo@winter-examples", scope: .user, cwd: "/tmp/proj") }
+        XCTAssertEqual(req["method"] as? String, "plugin.install")
+        let params = req["params"] as? [String: Any]
+        XCTAssertEqual(params?["spec"] as? String, "sample-echo@winter-examples")
+        XCTAssertEqual(params?["scope"] as? String, "user")
+        XCTAssertEqual(params?["cwd"] as? String, "/tmp/proj")
+        XCTAssertEqual(plugin, InstalledPlugin(id: "sample-echo", version: "1.0.0", installPath: "/plugins/sample-echo", scope: .user))
+    }
+
+    /// `plugin.install`/etc. no longer decode a typed refusal (see the section header) — an unknown
+    /// marketplace/spec is a thrown `RpcFailure`, surfaced here as an ordinary `RpcError`.
+    func testPluginInstallThrowsOnFailure() async throws {
+        let (client, t) = try await connected()
+        let err = try await roundTripError(t, sentIndex: 1, code: -32000, message: "marketplace \"ghost\" is not known — add it first") {
+            try await client.pluginInstall(spec: "x@ghost")
+        }
+        XCTAssertTrue(err is RpcError)
+    }
+
+    func testPluginUninstallDecodesSpecAndScope() async throws {
+        let (client, t) = try await connected()
+        let (req, result) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true,"spec":"sample-echo@winter-examples","scope":"user"}"#) {
+            try await client.pluginUninstall(spec: "sample-echo@winter-examples", scope: .user)
+        }
+        XCTAssertEqual(req["method"] as? String, "plugin.uninstall")
+        XCTAssertEqual(result.spec, "sample-echo@winter-examples")
+        XCTAssertEqual(result.scope, .user)
+    }
+
+    func testPluginEnableAndDisableSendScopedSpecAndDecodeEnabled() async throws {
+        let (client, t) = try await connected()
+        let (req1, enabled) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true,"spec":"sample-echo@winter-examples","scope":"user","enabled":true}"#) {
+            try await client.pluginEnable(spec: "sample-echo@winter-examples", scope: .user)
+        }
+        XCTAssertEqual(req1["method"] as? String, "plugin.enable")
+        XCTAssertEqual((req1["params"] as? [String: Any])?["spec"] as? String, "sample-echo@winter-examples")
+        XCTAssertTrue(enabled.enabled)
+
+        let (req2, disabled) = try await roundTrip(t, sentIndex: 2, result: #"{"ok":true,"spec":"sample-echo@winter-examples","scope":"user","enabled":false}"#) {
+            try await client.pluginDisable(spec: "sample-echo@winter-examples", scope: .user)
+        }
+        XCTAssertEqual(req2["method"] as? String, "plugin.disable")
+        XCTAssertFalse(disabled.enabled)
+    }
+
+    func testPluginUpdateSendsBareSpecNoScope() async throws {
+        let (client, t) = try await connected()
+        let (req, plugin) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true,"plugin":{"id":"sample-echo","installPath":"/plugins/sample-echo","scope":"user"}}"#) {
+            try await client.pluginUpdate(spec: "sample-echo@winter-examples")
+        }
+        XCTAssertEqual(req["method"] as? String, "plugin.update")
+        XCTAssertEqual((req["params"] as? [String: Any])?["spec"] as? String, "sample-echo@winter-examples")
+        XCTAssertNil((req["params"] as? [String: Any])?["scope"])
+        XCTAssertEqual(plugin.id, "sample-echo")
+    }
+
+    func testPluginMarketplaceAddRemoveListUpdate() async throws {
+        let (client, t) = try await connected()
+        let (req1, added) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true,"marketplace":{"name":"winter-examples","source":"/tmp/examples","kind":"directory","path":"/tmp/examples"}}"#) {
+            try await client.pluginMarketplaceAdd(source: "/tmp/examples")
+        }
+        XCTAssertEqual(req1["method"] as? String, "plugin.marketplace.add")
+        XCTAssertEqual(added.name, "winter-examples")
+        XCTAssertEqual(added.kind, "directory")
+
+        let (req2, _) = try await roundTrip(t, sentIndex: 2, result: #"{"ok":true,"name":"winter-examples"}"#) {
+            try await client.pluginMarketplaceRemove(name: "winter-examples")
+        }
+        XCTAssertEqual(req2["method"] as? String, "plugin.marketplace.remove")
+
+        let (req3, listed) = try await roundTrip(t, sentIndex: 3, result: #"{"ok":true,"marketplaces":[{"name":"winter-examples","source":"/tmp/examples","kind":"directory","path":"/tmp/examples"}]}"#) {
+            try await client.pluginMarketplaceList()
+        }
+        XCTAssertEqual(req3["method"] as? String, "plugin.marketplace.list")
+        XCTAssertEqual(listed.count, 1)
+
+        let (req4, _) = try await roundTrip(t, sentIndex: 4, result: #"{"ok":true}"#) {
+            try await client.pluginMarketplaceUpdate()
+        }
+        XCTAssertEqual(req4["method"] as? String, "plugin.marketplace.update")
+        XCTAssertNil((req4["params"] as? [String: Any])?["name"])
+    }
+
+    /// Fix round 1: `plugin.setConsent`'s param is `spec` now (the qualified `"<id>@<marketplace>"`)
+    /// — the daemon fingerprints consent by install path + entry, so a bare id can't name which
+    /// install a grant is for once two marketplaces install the same plugin. Fix round 3: gained a
+    /// required `fingerprint` param and a third outcome, `.staleDisclosure`.
+    func testPluginSetConsentSendsSpecAndFingerprintAndDecodesOutcomes() async throws {
+        let (client, t) = try await connected()
+        let (req1, ok) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true}"#) {
+            try await client.pluginSetConsent(spec: "sample-echo@winter-examples", classes: ["exec", "tcc"], fingerprint: "fp-1")
+        }
+        XCTAssertEqual(req1["method"] as? String, "plugin.setConsent")
+        XCTAssertEqual((req1["params"] as? [String: Any])?["spec"] as? String, "sample-echo@winter-examples")
+        XCTAssertNil((req1["params"] as? [String: Any])?["name"], "the retired name param must not still be sent")
+        XCTAssertEqual((req1["params"] as? [String: Any])?["classes"] as? [String], ["exec", "tcc"])
+        XCTAssertEqual((req1["params"] as? [String: Any])?["fingerprint"] as? String, "fp-1")
+        XCTAssertEqual(ok, .ok)
+
+        let (_, unknown) = try await roundTrip(t, sentIndex: 2, result: #"{"code":"unknown_plugin"}"#) {
+            try await client.pluginSetConsent(spec: "ghost@nowhere", classes: ["exec"], fingerprint: "fp-2")
         }
         XCTAssertEqual(unknown, .unknownPlugin)
-    }
 
-    func testPluginDisableRemoveSetConsentOutcomes() async throws {
-        let (client, t) = try await connected()
-
-        let (req1, disableOk) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true}"#) {
-            try await client.pluginDisable(name: "sample-echo")
+        let (_, stale) = try await roundTrip(t, sentIndex: 3, result: #"{"code":"stale_disclosure"}"#) {
+            try await client.pluginSetConsent(spec: "sample-echo@winter-examples", classes: ["exec"], fingerprint: "fp-old")
         }
-        XCTAssertEqual(req1["method"] as? String, "plugin.disable")
-        XCTAssertEqual(disableOk, .ok)
-
-        let (_, disableUnknown) = try await roundTrip(t, sentIndex: 2, result: #"{"code":"unknown_plugin"}"#) {
-            try await client.pluginDisable(name: "ghost")
-        }
-        XCTAssertEqual(disableUnknown, .unknownPlugin)
-
-        let (req3, removeOk) = try await roundTrip(t, sentIndex: 3, result: #"{"ok":true}"#) {
-            try await client.pluginRemove(name: "sample-echo")
-        }
-        XCTAssertEqual(req3["method"] as? String, "plugin.remove")
-        XCTAssertEqual(removeOk, .ok)
-
-        let (req4, setConsentOk) = try await roundTrip(t, sentIndex: 4, result: #"{"ok":true}"#) {
-            try await client.pluginSetConsent(name: "sample-echo", classes: ["network", "filesystem"])
-        }
-        XCTAssertEqual(req4["method"] as? String, "plugin.setConsent")
-        XCTAssertEqual((req4["params"] as? [String: Any])?["classes"] as? [String], ["network", "filesystem"])
-        XCTAssertEqual(setConsentOk, .ok)
+        XCTAssertEqual(stale, .staleDisclosure)
     }
 
     func testShortcutInvokeAndTileActionOutcomes() async throws {
@@ -613,34 +753,9 @@ final class MethodWrapperTests: XCTestCase {
         XCTAssertEqual(entries[1].provider?["ready"], .bool(true))
     }
 
-    func testPluginsListDecodesExtendedFields() async throws {
-        let (client, t) = try await connected()
-        let (req, plugins) = try await roundTrip(t, sentIndex: 1,
-            result: #"{"ok":true,"plugins":[{"name":"sample-echo","version":"1.2.0","skills":["echo"],"hasMcp":false,"mcpEnabled":false,"disabled":false,"tier":"platform","requiredConsents":["network"],"consented":["network"],"legacy":false,"status":"running"},{"name":"legacy-plugin","skills":[],"hasMcp":false,"mcpEnabled":false,"disabled":true}]}"#
-        ) { try await client.pluginsList() }
-        XCTAssertEqual(req["method"] as? String, "plugins.list")
-        XCTAssertEqual(plugins.count, 2)
-        XCTAssertEqual(plugins[0].name, "sample-echo")
-        XCTAssertEqual(plugins[0].version, "1.2.0")
-        XCTAssertEqual(plugins[0].tier, "platform")
-        XCTAssertEqual(plugins[0].requiredConsents, ["network"])
-        XCTAssertEqual(plugins[0].consented, ["network"])
-        XCTAssertFalse(plugins[0].legacy)
-        XCTAssertEqual(plugins[0].status, "running")
-
-        XCTAssertEqual(plugins[1].name, "legacy-plugin")
-        XCTAssertNil(plugins[1].version)
-        XCTAssertNil(plugins[1].tier)
-        XCTAssertEqual(plugins[1].requiredConsents, [])
-        XCTAssertEqual(plugins[1].consented, [])
-        XCTAssertFalse(plugins[1].legacy)
-        XCTAssertNil(plugins[1].status)
-
-        // 2026-09-18: this fixture is an OLDER daemon's shape — no `manifestHooks` anywhere — and
-        // it must decode as nil, not as []. See the wrapper's own doc for why the two differ.
-        XCTAssertNil(plugins[0].manifestHooks)
-        XCTAssertNil(plugins[1].manifestHooks)
-    }
+    // WS-21: this suite's replacement is `testPluginListDecodesListingsWithAndWithoutExtras` above
+    // (`plugin.list`'s `extras` object, not `PluginInfoSchema`'s flat tier/requiredConsents/
+    // consented/legacy/status fields, which no live RPC sends any more).
 
     /// Phase 4d-iii Task 2: `plugin.restart {pluginId}` — no typed outcome (the server throws a
     /// bare `RpcFailure` for an unknown id, which surfaces as a thrown `RpcError` here); the happy
@@ -1641,23 +1756,9 @@ extension MethodWrapperTests {
         do { _ = try await v; return nil } catch { return error }
     }
 
-    /// `plugins.list`'s `manifestHooks`: manifest ORDER, duplicates intact, and the key OMITTED
-    /// (not empty) for a plugin that declares none — which is why the decode is an optional.
-    func testPluginsListDecodesManifestHooksInOrderAndKeepsAbsenceDistinctFromEmpty() async throws {
-        let (client, t) = try await connected()
-        let (_, plugins) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true,"plugins":[ {"name":"demo","skills":[],"hasMcp":false,"mcpEnabled":false,"disabled":false, "manifestHooks":[{"event":"pre-tool","command":"./deny.sh","timeoutMs":500}, {"event":"post-tool","command":"./observe.sh"}, {"event":"pre-tool","command":"./deny.sh","timeoutMs":500}]}, {"name":"quiet","skills":[],"hasMcp":false,"mcpEnabled":false,"disabled":false}, {"name":"declared-none","skills":[],"hasMcp":false,"mcpEnabled":false,"disabled":false, "manifestHooks":[]} ]}"#) { try await client.pluginsList() }
-
-        let hooks = try XCTUnwrap(plugins[0].manifestHooks)
-        XCTAssertEqual(hooks.map(\.event), ["pre-tool", "post-tool", "pre-tool"],
-                       "manifest order, NOT regrouped by event")
-        XCTAssertEqual(hooks[0].command, "./deny.sh")
-        XCTAssertEqual(hooks[0].timeoutMs, 500)
-        XCTAssertNil(hooks[1].timeoutMs, "an absent timeout is the daemon's default, never 0")
-        XCTAssertEqual(hooks[2], hooks[0], "a duplicate entry survives as its own entry")
-
-        XCTAssertNil(plugins[1].manifestHooks, "key absent ⇒ not told")
-        XCTAssertEqual(plugins[2].manifestHooks, [], "key present but empty ⇒ told: declares none")
-    }
+    // WS-21: `manifestHooks` is retired — a plugin's hooks are claude-native `hooks/hooks.json`
+    // content now, never reported by `plugin.list`. See `WinterClient+Methods.swift`'s own note at
+    // the old `PluginManifestHook` struct's former location.
 
     /// `capabilities.list`: the exposure map, the deferred set, the always-true `enabled` for the
     /// six ungated keys, and `external`'s empty tool list (normal, not an error).
