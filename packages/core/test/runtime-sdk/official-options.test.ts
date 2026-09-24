@@ -519,8 +519,17 @@ describe("officialInputFor — the control-plane fence (C1)", () => {
     }).sandbox;
     expect(winterSandbox).toEqual(childSandboxConfigFor(home, "/Users/x/repo"));
     expect((options.settings as { sandbox?: unknown }).sandbox).toEqual(winterSandbox);
-    // …and a `[`-named PROJECT: its `.winter/agents` fence is spelled too (a lone `]` stays literal).
+    // …and a `[`-named PROJECT: its `.winter/agents` and protected item fences are spelled too (a lone `]`
+    // stays literal) — on the Winter spawn's `Options.sandbox` exactly as on the official flag settings.
     expect(childSandboxConfigFor("/h", "/p/[a]b").filesystem!.denyWrite).toContain("/p/[[]a]b/.winter/agents");
+    const winterProject = buildWinterOptions({
+      mode: "code", policy: "ask", sessionId: "11111111-2222-3333-4444-555555555555", home: "/h", cwd: "/p/[a]b",
+      credentials: { byProvider: {} }, spawn: { pathToClaudeCodeExecutable: "/opt/winter" },
+      canUseTool: (async () => ({ behavior: "allow" as const })) as CanUseTool, abort: new AbortController(),
+      baseEnv: { PATH: "/usr/bin", HOME: "/Users/x", TMPDIR: "/tmp", LANG: "en_US.UTF-8" },
+    }).sandbox!.filesystem!.denyWrite!;
+    expect(winterProject).toEqual(expect.arrayContaining(["/p/[[]a]b/.winter/agents", "/p/[[]a]b/.winter/skills", "/p/[[]a]b/.winter/settings.json"]));
+    expect(winterProject).not.toContain("/p/[a]b/.winter/skills");
   });
 
   test("additionalDisallowedTools is EXACTLY disallowedToolsFor(mode, {leg:\"official\"}) — claude's own web pair stays", () => {
