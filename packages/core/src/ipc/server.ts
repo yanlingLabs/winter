@@ -1453,8 +1453,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       settingsPathFor: (scope: AdapterPluginScope): string => {
         if (scope === "user") return sdkSettingsPath(winterHome);
         if (!cwd) throw new RpcFailure(ERR.INVALID_PARAMS, `plugin scope "${scope}" requires cwd`);
-        const root = repoRootFor(cwd);
-        return join(root, ".winter", scope === "local" ? "settings.local.json" : "settings.json");
+        // R.3 I-2: the LOCAL tier is keyed where the run home reads it (`localScopeKeyFor`: a linked
+        // worktree's own top), exactly as `mcp.*` and `approval.respond` key it; project stays `repoRootFor`.
+        if (scope === "local") return join(localScopeKeyFor(cwd), ".winter", "settings.local.json");
+        return join(repoRootFor(cwd), ".winter", "settings.json");
       },
     };
   }
