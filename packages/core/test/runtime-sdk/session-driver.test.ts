@@ -602,7 +602,7 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
       try { await t.drivers.ensure(sid); } catch (err) { caught = err; }
       expect((caught as { code?: string })?.code).toBe("runtime_selection_refused");
       expect((caught as { reason?: string })?.reason).toBe("model-not-in-catalog");
-      expect((caught as Error).message).toContain("no longer in this build's model catalog");
+      expect((caught as Error).message).toContain("not in this build's model catalog");
       expect(t.queries.length).toBe(spawnsBefore);
       expect(unconsumedUserMessages(t.store.read(sid))).toEqual(["B"]);
     } finally { t.close(); }
