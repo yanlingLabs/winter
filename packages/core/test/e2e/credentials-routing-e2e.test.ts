@@ -30,7 +30,7 @@ import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
 
 const SENTINEL = "WS19-SENTINEL-e2e-6d41af9c";
-const DEEPSEEK_MODEL = "deepseek/deepseek-reasoner";
+const DEEPSEEK_MODEL = "deepseek/deepseek-v4-pro"; // R.1: DeepSeek's live row (deepseek-reasoner left the catalog, V16)
 
 interface RpcErrorLike { rpc?: { message?: string; data?: { code?: string; reason?: string } } }
 
@@ -204,7 +204,7 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
     // for `openai` alone, so the real child refused before any request was made.
     const chat = fake!.requests.filter((r) => r.path.endsWith("/chat/completions"));
     expect(chat.length).toBeGreaterThan(0);
-    expect(JSON.parse(chat[0]!.body).model).toBe("deepseek-reasoner");
+    expect(JSON.parse(chat[0]!.body).model).toBe("deepseek-v4-pro");
     // The provider's own answer came back through the session, so this is a completed round trip,
     // not just an outbound request.
     expect(client.events.some((e) => e.type === "assistant_message" && JSON.stringify(e).includes("hello from the loopback provider"))).toBe(true);
