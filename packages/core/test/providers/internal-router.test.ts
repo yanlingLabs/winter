@@ -25,7 +25,7 @@ import { BashReviewer, ReviewerNoRunnableModel } from "../../src/agent/reviewer"
 import { internalRoleProblemsFor } from "../../src/providers/internal-role-problems";
 import { catalogRoleProblemsFor } from "../../src/providers/catalog-role-problems";
 import { withProblemsForRoles } from "../../src/providers/role-health";
-import { modelRolesFor } from "../../src/settings";
+import { effortToSpendForRole, modelRolesFor } from "../../src/settings";
 
 function secretsStore(): FileSecretStore {
   return new FileSecretStore(mkdtempSync(join(tmpdir(), "winter-internal-router-secrets-")));
@@ -102,7 +102,7 @@ describe("a DeepSeek default with only a DeepSeek key", () => {
     }
   });
 
-  test("every internal role resolves, and the dreamer's `medium` default is mapped onto the row rather than refused", async () => {
+  test("every internal role resolves, and the dreamer's `medium` default is dropped rather than refused or escalated", async () => {
     const secrets = secretsStore();
     await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-deepseek" });
     const router = await routerFor(secrets);
@@ -114,12 +114,12 @@ describe("a DeepSeek default with only a DeepSeek key", () => {
       expect(call.providerId).toBe("deepseek");
     }
     // The deepseek row's vocabulary is [none, low, high, max]: `medium` (the dreamer's constant) is not in
-    // it. Sending it verbatim is what the pinned runtime refuses `capability` for. R.1 (catalog refresh):
-    // the row now DECLARES a default (`high`), so `medium` maps onto it; before, with no default, it was
-    // dropped. No live row keeps a vocabulary without `medium` and without a default.
+    // it. Sending it verbatim is what the pinned runtime refuses `capability` for. The refreshed row DECLARES
+    // a default, `high` — HEAVIER than what the dreamer asked for — and an internal job never escalates
+    // (R.1 controller ruling, `internalEffortNoEscalationFor`): the request carries NO effort.
     const dream = router.resolve("pins.dream", settings);
     expect(isInternalRefusal(dream)).toBe(false);
-    if (!isInternalRefusal(dream)) expect(dream.effort).toBe("high");
+    if (!isInternalRefusal(dream)) expect(dream.effort).toBeUndefined();
     // `low` IS in that vocabulary, so the cleaner's constant survives.
     const cleaner = router.resolve("pins.cleaner", settings);
     if (!isInternalRefusal(cleaner)) expect(cleaner.effort).toBe("low");
@@ -558,14 +558,13 @@ describe("M-1 / D2 follow-up (2026-09-22): an explicit effort of `none`", () => 
     const none = router.resolve("pins.dream", settingsWith("codex-oauth/gpt-5.6-sol", { roleEfforts: { "pins.dream": "none" } }));
     if (isInternalRefusal(none)) throw new Error("expected a live call");
     expect(none.effort).toBe("low"); // gpt-5.6-terra's own lowest declared tier, not the provider's "medium" default
-    // …and the dreamer's own constant ("medium", not in this row's vocabulary at all) still takes the
-    // ORDINARY mapping on a deepseek row here — onto the row's declared default (R.1: `high`; the row had
-    // none before, and it was dropped) — unaffected by the `"none"` rule above, since "medium" is never
-    // `"none"`.
+    // …and the dreamer's own unmappable constant ("medium", not in this row's vocabulary at all) is still
+    // dropped on a deepseek row here — never escalated onto its heavier `high` default (R.1 controller
+    // ruling) — unaffected by the `"none"` rule above, since "medium" is never `"none"`.
     const ds = staticInternalRouter({ view, provider: fake, model: "deepseek-flash", tag: "deepseek/deepseek-flash" as never });
     const dream = ds.resolve("pins.dream", settingsWith("deepseek/deepseek-flash"));
     if (isInternalRefusal(dream)) throw new Error("expected a live call");
-    expect(dream.effort).toBe("high");
+    expect(dream.effort).toBeUndefined();
   });
 });
 
@@ -803,5 +802,36 @@ describe("R.1 ruling 1: a tag with no catalog row is an unrunnable pin", () => {
     expect(roles["reviewer.model"].problem?.detail).toContain("— reviewing on codex-oauth/gpt-5.6-terra meanwhile");
     // …and the session-facing overlay leaves that detail alone rather than replacing it.
     expect(catalogRoleProblemsFor(roles)["reviewer.model"].problem?.detail).toContain("meanwhile");
+  });
+});
+
+// R.1 (controller ruling): an internal job's effort is mapped onto its row but NEVER UP. A level the row
+// does not list falls back to the row's default only when that default is no heavier; otherwise nothing
+// is sent. Session turns (dispatch, a session's own default effort) keep the ordinary mapping.
+describe("R.1: internal jobs never escalate an effort onto a heavier row default", () => {
+  test("the wire rule: a heavier default is dropped, a lighter one still taken, a listed level kept", () => {
+    expect(internalWireEffortFor("deepseek/deepseek-flash", "medium")).toBeUndefined(); // default `high` is heavier
+    expect(internalWireEffortFor("deepseek/deepseek-flash", "xhigh")).toBe("high");     // default `high` is lighter
+    expect(internalWireEffortFor("deepseek/deepseek-flash", "low")).toBe("low");        // listed
+    expect(internalWireEffortFor("openai/o4-mini", "max")).toBe("medium");              // unchanged: a lighter default
+  });
+
+  test("a STORED role effort takes the same rule through the router (pins.dream `medium` on DeepSeek sends nothing)", async () => {
+    const secrets = secretsStore();
+    await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-deepseek" });
+    const router = await routerFor(secrets);
+    const settings = settingsWith("deepseek/deepseek-flash", { roleEfforts: { "pins.dream": "medium", "pins.cleaner": "max" } });
+    const dream = router.resolve("pins.dream", settings);
+    if (isInternalRefusal(dream)) throw new Error("expected a live call");
+    expect(dream.effort).toBeUndefined();
+    const cleaner = router.resolve("pins.cleaner", settings);
+    if (isInternalRefusal(cleaner)) throw new Error("expected a live call");
+    expect(cleaner.effort).toBe("max"); // listed: sent as stored
+  });
+
+  test("the session-turn rule is untouched: effortToSpendForRole without the flag still maps onto the row's default", () => {
+    const s = settingsWith("codex-oauth/gpt-5.6-sol", { roleEfforts: { "pins.dispatch": "medium" } });
+    expect(effortToSpendForRole(s, "pins.dispatch", "deepseek/deepseek-flash", undefined)).toBe("high");
+    expect(effortToSpendForRole(s, "pins.dispatch", "deepseek/deepseek-flash", undefined, { neverEscalate: true })).toBeUndefined();
   });
 });

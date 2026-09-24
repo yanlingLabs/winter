@@ -116,6 +116,26 @@ export function implicitEffortFor(tag: string, wanted: string): string | undefin
   return typeof fallback === "string" && vocab.includes(fallback) ? fallback : undefined;
 }
 
+/** Reasoning weight, lightest first — every level a catalog row's vocabulary or a role's effort carries. */
+const EFFORT_WEIGHT: readonly string[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/**
+ * R.1 (controller ruling): the INTERNAL jobs' mapping — `implicitEffortFor`, but NEVER UP. A role's effort
+ * the row does not list falls back to the row's `defaultEffort` only when that default is no heavier than
+ * what the role asked for (`o4-mini`'s `max` → its `medium` default, unchanged); a HEAVIER default (the
+ * refreshed DeepSeek rows declare `high`, so the dreamer's `medium` became `high`) is DROPPED instead and
+ * the request carries no effort — an internal job asked for that much reasoning, never more
+ * (CLAUDE.md: "an unmappable non-`none` effort is dropped"). Session turns keep `implicitEffortFor`.
+ * `"none"` never reaches this function (`internalWireEffortFor` and `effortToSpendForRole` rule it first).
+ */
+export function internalEffortNoEscalationFor(tag: string, wanted: string): string | undefined {
+  const mapped = implicitEffortFor(tag, wanted);
+  if (mapped === undefined || mapped === wanted) return mapped;
+  const asked = EFFORT_WEIGHT.indexOf(wanted);
+  const got = EFFORT_WEIGHT.indexOf(mapped);
+  return asked >= 0 && got >= 0 && got <= asked ? mapped : undefined;
+}
+
 /**
  * 2026-09-18: a row's DECLARED effort vocabulary, with the one distinction every consumer above this
  * line has been collapsing — `null` and `[]` are DIFFERENT catalog states and must stay so on any

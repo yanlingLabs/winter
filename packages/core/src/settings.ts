@@ -15,7 +15,7 @@ import { canonicalModelTag, facingNameToTag, isModelTag, splitTag, UNSTATED_TAG,
 // `implicitEffortFor`: the spend-time mapping of a STORED effort onto the row it is about to be sent
 // to (`effortToSpendForRole` below) — the same function the dispatch pin's fixed tier already goes
 // through, so a role effort and a code constant are mapped by one rule.
-import { effortVocabularyFor, implicitEffortFor, rowForTag } from "./runtime-sdk/provider-selection";
+import { effortVocabularyFor, implicitEffortFor, internalEffortNoEscalationFor, rowForTag } from "./runtime-sdk/provider-selection";
 // 2026-09-19 (the internal-jobs widening): the two catalog-derived inputs to
 // `internalEligibleProviderIds` below. `credentialInventory` is which providers this daemon can store
 // a credential for at all; `internalDrivableAdapterIds` is which adapter families the daemon's own
@@ -2403,6 +2403,9 @@ export function effortToSpendForRole(
   role: ModelRole,
   model: string,
   consumerDefault: string | undefined,
+  /** R.1 (controller ruling): the INTERNAL jobs pass this — a stored effort the row does not list never
+   *  maps UP onto a heavier row default (`internalEffortNoEscalationFor`); it is dropped instead. */
+  opts?: { neverEscalate?: boolean },
 ): string | undefined {
   if (!roleCarriesEffort(role)) return consumerDefault;
   const stored = roleEffortFor(settings, role);
@@ -2411,7 +2414,7 @@ export function effortToSpendForRole(
     if (rowForTag(model) === undefined) return stored;
     return (effortVocabularyFor(model) ?? []).length > 0 ? stored : undefined;
   }
-  return implicitEffortFor(model, stored);
+  return opts?.neverEscalate === true ? internalEffortNoEscalationFor(model, stored) : implicitEffortFor(model, stored);
 }
 
 /**

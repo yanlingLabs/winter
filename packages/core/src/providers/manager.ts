@@ -402,5 +402,5 @@ export function internalRoleEffortFor(
   bound: { providerId: string; model: string },
 ): string | undefined {
   const spent = pin !== undefined && splitTag(pin).providerId === bound.providerId ? pin : `${bound.providerId}/${bound.model}`;
-  return effortToSpendForRole(settings, role, spent, undefined);
+  return effortToSpendForRole(settings, role, spent, undefined, { neverEscalate: true }); // R.1: an internal job, never up
 }
