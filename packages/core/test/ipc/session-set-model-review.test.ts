@@ -18,7 +18,8 @@
 //   - the controller's OWN C1 addendum's literal "GPT -> DeepSeek -> GPT -> Claude" chain (it cannot
 //     even reach the first step).
 // Substituted below with the CLOSEST achievable real-wiring equivalents (two real, same-family,
-// differently-reasoning-capable OpenAI catalog rows: `openai/gpt-5.4`, no reasoning at all, and
+// differently-reasoning-capable OpenAI catalog rows: `openai/gpt-4.1`, no reasoning at all (R.1: this was
+// `gpt-5.4` until the catalog refresh gave it a vocabulary; `deepseek-reasoner` became `deepseek-v4-pro`), and
 // `openai/gpt-5.6-sol`, hidden reasoning) plus the SAME real-resolver/real-`classifySwitch` technique
 // `five-hop-chain-e2e.test.ts` already established for the literal DeepSeek/GLM pairing — never a
 // fixture that fakes `readableState`/`continuation`.
@@ -260,7 +261,7 @@ describeWithWinterBinary("A-7a: two OpenAI-family models never prompt on Winter"
     openaiFakeRef = openaiFake;
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 3,
-      provider: { model: "openai/gpt-5.4" },
+      provider: { model: "openai/gpt-4.1" },
       providers: { openai: { baseUrl: openaiFake.url } },
       runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
     }, null, 2));
@@ -281,7 +282,7 @@ describeWithWinterBinary("A-7a: two OpenAI-family models never prompt on Winter"
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("openai/gpt-5.4 -> openai/gpt-5.6-sol never prompts (sameFamily, real catalog facts)", async () => {
+  test("openai/gpt-4.1 -> openai/gpt-5.6-sol never prompts (sameFamily, real catalog facts)", async () => {
     const d = daemon!;
     if ("unavailable" in d.runtimeState) throw d.runtimeState.unavailable;
 
@@ -294,14 +295,14 @@ describeWithWinterBinary("A-7a: two OpenAI-family models never prompt on Winter"
     // through a real `setModel` first (measured: this exact test flaked when run alongside
     // `five-hop-chain-e2e.test.ts` in one invocation). Deriving the family from a REAL decision
     // (`selectRuntimeFor`) instead of a hardcoded literal makes the probe immune to that ordering.
-    const decidedA = await d.runtimeSdk!.selectRuntimeFor({ mode: "code", model: "openai/gpt-5.4" });
+    const decidedA = await d.runtimeSdk!.selectRuntimeFor({ mode: "code", model: "openai/gpt-4.1" });
     const decidedB = await d.runtimeSdk!.selectRuntimeFor({ mode: "code", model: "openai/gpt-5.6-sol" });
     if ("refused" in decidedA || "refused" in decidedB) throw new Error("both models must resolve for this probe");
     const resolve = daemonResolveEndpoint();
-    const a = resolve({ providerId: "openai", modelKey: "openai/gpt-5.4", family: decidedA.family });
+    const a = resolve({ providerId: "openai", modelKey: "openai/gpt-4.1", family: decidedA.family });
     const b = resolve({ providerId: "openai", modelKey: "openai/gpt-5.6-sol", family: decidedB.family });
     expect(sameFamily(a, b)).toBe(true);
-    const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: "openai/gpt-5.4" });
+    const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: "openai/gpt-4.1" });
     await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
     await client.call(METHODS.sessionSend, { sessionId, text: "one turn" });
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 45_000);
@@ -329,13 +330,13 @@ describe("A-7: same-leg loss, against the REAL daemon resolver (no fixture)", ()
   // cross-FILE ordering risk is not eliminated. Labeled here per that review's own instruction.
   test("gpt -> deepseek on Winter prompts (a hidden-reasoning source crossing families is warned-lossy)", () => {
     const gpt = resolve({ providerId: "openai", modelKey: "openai/gpt-5.6-sol", family: "openai" });
-    const deepseek = resolve({ providerId: "deepseek", modelKey: "deepseek/deepseek-reasoner", family: "deepseek" });
+    const deepseek = resolve({ providerId: "deepseek", modelKey: "deepseek/deepseek-v4-pro", family: "deepseek" });
     const c = classifySwitch(gpt, deepseek, {});
     expect(c.lossClass).toBe("warned-lossy");
   });
 
   test("deepseek -> GLM does not (exposedComplete asserted from complete exposed records)", () => {
-    const deepseek = resolve({ providerId: "deepseek", modelKey: "deepseek/deepseek-reasoner", family: "deepseek" });
+    const deepseek = resolve({ providerId: "deepseek", modelKey: "deepseek/deepseek-v4-pro", family: "deepseek" });
     const glm = resolve({ providerId: "zai", modelKey: "zai/glm-5", family: "glm" });
     expect(deepseek.readableState).toBe("full-exposed"); // the premise this case rests on
     const c = classifySwitch(deepseek, glm, { exposedComplete: true });
@@ -420,9 +421,9 @@ describeWithWinterBinary("A-7: a zero-turn session that switches families does n
 // (DeepSeek has no credential row); substituted with the closest achievable real-wiring equivalent
 // that exercises the IDENTICAL underlying worry — does a same-leg, same-family switch actually
 // update what the NEXT review reads as "from"? — using two real, same-family OpenAI rows that
-// differ specifically in whether they reason at all: `openai/gpt-5.4` (no reasoning; a move away
+// differ specifically in whether they reason at all: `openai/gpt-4.1` (no reasoning; a move away
 // from it is `lossless-native`) and `openai/gpt-5.6-sol` (hidden reasoning; a move away from it is
-// `warned-lossy`). If the review reads the STALE gpt-5.4 identity after the same-leg move to
+// `warned-lossy`). If the review reads the STALE gpt-4.1 identity after the same-leg move to
 // gpt-5.6-sol, the final gpt -> claude move would WRONGLY fail to prompt.
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 describeWithWinterBinary("C1: a same-leg switch must not leave the review reading a stale model", (winterBin) => {
@@ -439,7 +440,7 @@ describeWithWinterBinary("C1: a same-leg switch must not leave the review readin
     openaiFakeRef = openaiFake;
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 3,
-      provider: { model: "openai/gpt-5.4" },
+      provider: { model: "openai/gpt-4.1" },
       providers: { openai: { baseUrl: openaiFake.url } },
       runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
     }, null, 2));
@@ -465,16 +466,16 @@ describeWithWinterBinary("C1: a same-leg switch must not leave the review readin
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("gpt-5.4 -> gpt-5.6-sol (same-leg, silent) -> claude MUST prompt (the review must read gpt-5.6-sol, not the stale gpt-5.4)", async () => {
+  test("gpt-4.1 -> gpt-5.6-sol (same-leg, silent) -> claude MUST prompt (the review must read gpt-5.6-sol, not the stale gpt-4.1)", async () => {
     const d = daemon!;
     if ("unavailable" in d.runtimeState) throw d.runtimeState.unavailable;
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), "review-c1-cwd-")));
-    const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: "openai/gpt-5.4", cwd });
+    const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: "openai/gpt-4.1", cwd });
     await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
     await client.call(METHODS.sessionSend, { sessionId, text: "on the non-reasoning model" });
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 45_000);
 
-    // Step 1: gpt-5.4 -> gpt-5.6-sol, same family, same leg — must apply silently.
+    // Step 1: gpt-4.1 -> gpt-5.6-sol, same family, same leg — must apply silently.
     await client.call(METHODS.sessionSetModel, { sessionId, model: "openai/gpt-5.6-sol" }); // never throws
     expect(d.winter.legOf(sessionId)).toBe("winter");
     // A turn on the NEW model, so the review has a source turn to weigh under the NEW identity.
@@ -483,7 +484,7 @@ describeWithWinterBinary("C1: a same-leg switch must not leave the review readin
 
     // Step 2: gpt-5.6-sol -> claude, cross-runtime — MUST prompt (W18-21's own required behaviour).
     // GREEN since the D1 C1 fix (`5c09626d`): the review now reads gpt-5.6-sol's OWN fresh facts
-    // (hidden reasoning, warned-lossy), not the stale gpt-5.4 identity from before the same-leg move.
+    // (hidden reasoning, warned-lossy), not the stale gpt-4.1 identity from before the same-leg move.
     let caught: RpcErrorLike | undefined;
     try {
       await client.call(METHODS.sessionSetModel, { sessionId, model: "anthropic/claude-sonnet-5" });
@@ -613,12 +614,12 @@ describeWithWinterBinary("A-7: the LITERAL gpt -> deepseek (prompts) / deepseek 
     // HOP 1 — gpt -> deepseek. A hidden-reasoning source crossing to a foreign family: PROMPTS.
     let caught: RpcErrorLike | undefined;
     try {
-      await client.call(METHODS.sessionSetModel, { sessionId, model: "deepseek/deepseek-reasoner" });
+      await client.call(METHODS.sessionSetModel, { sessionId, model: "deepseek/deepseek-v4-pro" });
     } catch (err) { caught = err as RpcErrorLike; }
     expect(caught?.rpc?.data?.code).toBe("handoff_confirmation_required");
     expect((caught?.rpc?.data?.warnings?.length ?? 0)).toBeGreaterThan(0);
     // Confirmed, it goes through — same leg, so no runtime migration is involved at all.
-    await client.call(METHODS.sessionSetModel, { sessionId, model: "deepseek/deepseek-reasoner", confirmLossy: true });
+    await client.call(METHODS.sessionSetModel, { sessionId, model: "deepseek/deepseek-v4-pro", confirmLossy: true });
 
     // BODY-LEVEL (W18-19): the next turn reaches DeepSeek's own endpoint asking for its own id, AND
     // carries the conversation so far, in order. gpt is a HIDDEN-reasoning source, so there is no
@@ -626,7 +627,7 @@ describeWithWinterBinary("A-7: the LITERAL gpt -> deepseek (prompts) / deepseek 
     // confirmation above is where the user was told.
     await client.call(METHODS.sessionSend, { sessionId, text: "hop 1, on deepseek" });
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && client.events.filter((x) => x.type === "turn_completed").length >= 2, 90_000);
-    expect(deepseek!.models).toContain("deepseek-reasoner");
+    expect(deepseek!.models).toContain("deepseek-v4-pro");
     const deepseekBody = deepseek!.bodies.at(-1)!;
     expect(outOfOrder(deepseekBody, ["hop 0, on gpt", "hello from gpt", "hop 1, on deepseek"])).toEqual([]);
     expect(opaqueLeaks(deepseekBody)).toEqual([]);
