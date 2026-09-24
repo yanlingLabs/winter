@@ -16,10 +16,10 @@
 // both legs; a BACKSLASH needed claude's DOUBLE escape (its rule-content parse unescapes once before the
 // gitignore layer). R.1 ruling 2: the router's `escapeRulePath` (router 3279a1d) is claude's rule-content
 // escape over the gitignore escape — `\` → four, `[ ] *` → `\\x`, `( )` → `\\\x` — on BOTH legs, and the
-// daemon imports it. MEASURED at router 3279a1d: every name below is denied on the official leg. The
-// Winter leg reads that spelling only from agent SDK 6170adb on (claude's rule parse), so its rows are
-// `todo` until the SDK pin moves past it (run with `bun test --todo`); the grammar case pins claude's own
-// behaviour with hand-spelled rules, independent of `escapeRulePath`.
+// daemon imports it. MEASURED at router 3279a1d: every name below is denied on the official leg; and at
+// agent SDK 5e37898 (claude's rule-content parse, from 6170adb on) on the Winter leg too — the rows are
+// real assertions on both legs. The grammar case pins claude's own behaviour with hand-spelled rules,
+// independent of `escapeRulePath`.
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -80,10 +80,10 @@ describeWithWinterBinary("R.2 carry — escaped rule paths on the Winter leg", (
     }
   }
 
-  // `todo` until the SDK pin reaches 6170adb (claude's rule-content parse on the Winter leg; measured at
-  // dd9f17d: neither spelling denies there once the router escapes for claude). Then drop `.todo`.
+  // Real since the SDK pin reached 5e37898 (claude's rule-content parse on the Winter leg; at dd9f17d
+  // neither spelling denied once the router escaped for claude).
   for (const name of NAMES) {
-    test.todo(`${JSON.stringify(name)}: the ESCAPED rule denies the write (the raw spelling is recorded as the control)`, async () => {
+    test(`${JSON.stringify(name)}: the ESCAPED rule denies the write (the raw spelling is recorded as the control)`, async () => {
       const deniedEscaped = !(await writeUnder(name, true));
       const deniedRaw = !(await writeUnder(name, false));
       console.error(`R.2 rule-escape (winter) ${JSON.stringify(name)}: escaped rule denies=${deniedEscaped}; raw rule denies=${deniedRaw}`);
