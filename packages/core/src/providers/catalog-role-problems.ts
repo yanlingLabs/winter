@@ -50,7 +50,9 @@ export function catalogRoleProblemsFor<T extends { model: string | null; problem
   const out = {} as Record<ModelRole, T>;
   for (const role of Object.keys(roles) as ModelRole[]) {
     const info = roles[role];
-    if (info.model === null || !isRetiredCatalogTag(info.model)) {
+    // An internal-jobs role already carries this reason from the router (`internal-role-problems.ts`) —
+    // for the reviewer with its "reviewing on <tag> meanwhile" clause — which is left as it is.
+    if (info.model === null || !isRetiredCatalogTag(info.model) || info.problem?.reason === MODEL_NOT_IN_CATALOG) {
       out[role] = info;
       continue;
     }
