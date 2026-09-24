@@ -61,7 +61,7 @@
 // `hooksFor(session).official`, already wired at integration.
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import type {
   HookCallback, HookCallbackMatcher, HookJSONOutput, Options,
   PostToolUseFailureHookInput, PostToolUseHookInput, PreToolUseHookInput,
@@ -314,7 +314,9 @@ function pluginPostToolUseFailureHook(deps: SessionHooksDeps): HookCallback {
 // over a normalised command (case, quotes, `//`, `/./`). R.3 C-1: and the variables WS-21 exports into
 // every child — `$WINTER_STORE_HOME` (`<home>/sdk`), `$WINTER_PLUGIN_CACHE_DIR`/`$CLAUDE_CODE_PLUGIN_CACHE_DIR`
 // (`<home>/sdk/plugins`), `$CLAUDE_CONFIG_DIR` and the Winter child's own `$WINTER_HOME` (a run folder
-// under `<home>/cache`), braced or not. `cache` and `plugins` are refused only in a
+// under `<home>/cache`), braced or not. R.3 re-review B-1: and every command is also read with those variables (and
+// `$OUTDIR`) replaced by their absolute values, so a `..` after one — any depth, or through a `cd` chain —
+// lands on the literal path it names (`childPathVariableReadings`). `cache` and `plugins` are refused only in a
 // write-shaped position (review N1): the model reads and runs plugin skill content there. A false
 // positive costs a typed deny the model can route around by running the command sandboxed; a false
 // negative costs the floor. A command that builds the path at run time (`$(…)`, variables of its
@@ -778,6 +780,62 @@ function bashProtectedWriteHook(): HookCallback {
  * and execute — only in a write-shaped position (after a redirect or a write verb).
  */
 export function escapeFloorHit(command: string, home: string | undefined, cwd?: string): string | undefined {
+  // R.3 re-review B-1: the command as written, and once per reading of the child's path variables with each
+  // replaced by the absolute value the daemon knows — so `$WINTER_STORE_HOME/../agents`, `cd $OUTDIR &&
+  // cd ../..` and every other depth collapse into the literal-path checks below (the normaliser folds
+  // `<seg>/..` only after a `/`, which a variable lacks).
+  const texts = home === undefined || home.length === 0
+    ? [command]
+    : [command, ...childPathVariableReadings(home.replace(/\/+$/, "")).map((values) => substitutePathVariables(command, values))];
+  for (const text of new Set(texts)) {
+    const hit = escapeFloorHitIn(text, home, cwd);
+    if (hit !== undefined) return hit;
+  }
+  return undefined;
+}
+
+/**
+ * R.3 re-review B-1: the absolute values of the path variables a child's shell has, as the daemon knows them.
+ * Two readings of `WINTER_HOME` — under a run home it is the Winter child's run folder (`<home>/cache/runs/
+ * <run id>`; `CLAUDE_CONFIG_DIR` is the official child's), before one it was the daemon's home — and one of
+ * everything else: `WINTER_STORE_HOME` = `<home>/sdk`, both plugin-cache variables = `<home>/sdk/plugins`,
+ * `OUTDIR` = `<home>/outputs/<session id>` (the SDK's Bash has exported it since WS-12). A run id and a
+ * session id are placeholders: only their DEPTH matters to a `..`. A run folder's `projects` is a link into
+ * `sdk/projects` on the Winter leg, and the kernel resolves `..` physically, so `$WINTER_HOME/projects` reads
+ * as the store's (whose MEMDIRs stay the model's own).
+ */
+function childPathVariableReadings(home: string): Array<ReadonlyArray<readonly [string, string]>> {
+  const sdk = join(home, "sdk");
+  const runFolder = join(home, "cache", "runs", "_run_");
+  const common: Array<readonly [string, string]> = [
+    ["WINTER_STORE_HOME", sdk],
+    ["WINTER_PLUGIN_CACHE_DIR", join(sdk, "plugins")],
+    ["CLAUDE_CODE_PLUGIN_CACHE_DIR", join(sdk, "plugins")],
+    ["CLAUDE_CONFIG_DIR", runFolder],
+    ["OUTDIR", join(home, "outputs", "_session_")],
+  ];
+  return [
+    [["WINTER_HOME/projects", join(sdk, "projects")], ["WINTER_HOME", runFolder], ...common],
+    [["WINTER_HOME", home], ...common],
+  ];
+}
+
+/** Replace `$NAME` (not followed by another identifier character) and `${NAME}` — case-insensitively, as the
+ *  floor reads the rest — with `value`. A `NAME/sub` entry replaces `$NAME/sub` and `${NAME}/sub`. */
+function substitutePathVariables(command: string, values: ReadonlyArray<readonly [string, string]>): string {
+  let out = command;
+  for (const [name, value] of values) {
+    const slash = name.indexOf("/");
+    const variable = slash < 0 ? name : name.slice(0, slash);
+    const tail = slash < 0 ? "" : name.slice(slash).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(`\\$(?:\\{${variable}\\}|${variable}(?![A-Za-z0-9_]))${tail}${slash < 0 ? "" : "(?=/|$|[\\s;&|()<>\"'])"}`, "gi");
+    out = out.replace(pattern, () => value);
+  }
+  return out;
+}
+
+/** The floor's checks on ONE spelling of the command (`escapeFloorHit` runs them on every reading). */
+function escapeFloorHitIn(command: string, home: string | undefined, cwd?: string): string | undefined {
   const c = expandAfterCd(normaliseEscapeCommand(command));
   for (const name of ESCAPE_FENCED_FILENAMES) if (c.includes(name)) return name;
   for (const seg of PROJECT_FENCED_SEGMENTS) {
