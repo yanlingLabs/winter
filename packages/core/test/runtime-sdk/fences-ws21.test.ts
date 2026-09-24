@@ -369,3 +369,55 @@ describe("C-1: a `[wip]` home — the escape floor and the write-tool fence matc
     expect(controlPlaneTargetForCall("Write", { file_path: `${W}/sdk/agents/a.md` }, "/", homeFenceFor(W))).not.toBeNull();
   });
 });
+
+// R.3 C-1 (the whole-branch review): WS-21 exports new variables into every child — the Winter child gets
+// `WINTER_HOME=<home>/cache/runs/<id>` (its run folder), `WINTER_STORE_HOME=<home>/sdk` and
+// `WINTER_PLUGIN_CACHE_DIR=<home>/sdk/plugins`; the official child `CLAUDE_CONFIG_DIR=<run folder>` and
+// `CLAUDE_CODE_PLUGIN_CACHE_DIR=<home>/sdk/plugins`. A child's Bash hands its whole environment to the shell,
+// so a model can name every fenced store through them. The floor knows each spelling now.
+describe("R.3 C-1: the variables WS-21 exports into every child — the escape floor refuses them", () => {
+  test("a write-shaped use of each spelling is refused", () => {
+    for (const cmd of [
+      "echo x > $WINTER_STORE_HOME/agents/evil.md",
+      "echo x > ${WINTER_STORE_HOME}/agents/evil.md",
+      "echo x > $WINTER_STORE_HOME/skills/x/SKILL.md",
+      "echo x > ${WINTER_STORE_HOME}/skills/x/SKILL.md",
+      "cp r.md $WINTER_STORE_HOME/rules/r.md",
+      "echo hi >> $WINTER_STORE_HOME/WINTER.md",
+      "echo x >> $WINTER_STORE_HOME/projects/k/id.jsonl",
+      "echo x >> ${WINTER_STORE_HOME}/projects/k/id.jsonl",
+      "cd $WINTER_STORE_HOME && cp evil.md agents/x.md",
+      "echo '{}' > $WINTER_PLUGIN_CACHE_DIR/p/hooks/hooks.json",
+      "echo '{}' > ${WINTER_PLUGIN_CACHE_DIR}/p/hooks/hooks.json",
+      "echo '{}' > $WINTER_STORE_HOME/plugins/p/hooks/hooks.json",
+      "echo '{}' > $CLAUDE_CODE_PLUGIN_CACHE_DIR/p/hooks/hooks.json",
+      "echo '{}' > ${CLAUDE_CODE_PLUGIN_CACHE_DIR}/p/hooks/hooks.json",
+      "echo x > $CLAUDE_CONFIG_DIR/skills/foo/SKILL.md",
+      "echo x > ${CLAUDE_CONFIG_DIR}/skills/foo/SKILL.md",
+      "ln -sfn /tmp/evil $CLAUDE_CONFIG_DIR/agents",
+      // the Winter child's WINTER_HOME is its run folder, under `<home>/cache`
+      "echo x > $WINTER_HOME/anything",
+      "rm -rf ${WINTER_HOME}",
+      "ECHO X > $WINTER_STORE_HOME/AGENTS/EVIL.MD",
+    ]) expect({ cmd, hit: escapeFloorHit(cmd, H) !== undefined }).toEqual({ cmd, hit: true });
+  });
+  test("…and the any-mention stores stay refused on any mention under the store spelling", () => {
+    for (const cmd of ["ls $WINTER_STORE_HOME/agents", "cat ${WINTER_STORE_HOME}/agents/a.md"]) {
+      expect({ cmd, hit: escapeFloorHit(cmd, H) !== undefined }).toEqual({ cmd, hit: true });
+    }
+  });
+  test("reads, skill scripts and the memory directory stay allowed (as under $WINTER_HOME)", () => {
+    for (const cmd of [
+      "cat $WINTER_STORE_HOME/projects/k/x.jsonl",
+      "ls ${WINTER_STORE_HOME}/projects",
+      "echo note >> $WINTER_STORE_HOME/projects/k/memory/MEMORY.md",
+      "cat $WINTER_STORE_HOME/skills/a/SKILL.md",
+      "cat $WINTER_PLUGIN_CACHE_DIR/p/skills/x/SKILL.md",
+      "bash $CLAUDE_CODE_PLUGIN_CACHE_DIR/p/skills/x/run.sh",
+      "cat $CLAUDE_CONFIG_DIR/skills/foo/SKILL.md",
+      "bash $WINTER_HOME/skills/x/run.sh",
+      "echo note >> $WINTER_HOME/projects/k/memory/MEMORY.md",
+      "echo x > $WINTER_HOME_BACKUP/notes.md",
+    ]) expect({ cmd, hit: escapeFloorHit(cmd, H) }).toEqual({ cmd, hit: undefined });
+  });
+});

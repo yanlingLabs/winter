@@ -323,3 +323,33 @@ describe("fix round 2: Bash writes under .winter/<kind>", () => {
     expect((await mk("bypass").canUse("Bash", { command: "cat .winter/skills/x/SKILL.md" }, ctx()))?.behavior).toBe("allow");
   });
 });
+
+// R.3 C-1: the escape floor (the LAST Bash PreToolUse group, every policy, bypass included, both legs) knows
+// the variables WS-21 exports into every child — `$WINTER_STORE_HOME`, both plugin-cache variables,
+// `$CLAUDE_CONFIG_DIR` and the Winter child's own `$WINTER_HOME` (its run folder).
+describe("R.3 C-1: the escape floor under bypass — the child's own variables", () => {
+  const floor = () => {
+    const built = sessionHooksFor({ sessionId: "s_1", roots: ["/r"], home: "/Users/x/.winter", mode: "code", policy: () => "bypass" });
+    expect(built.official).toBe(built.winter);
+    const groups = (built.winter?.PreToolUse ?? []).filter((g: HookCallbackMatcher) => g.matcher === "Bash");
+    return groups[groups.length - 1]!.hooks[0]!;
+  };
+  const escape = async (command: string) => decisionOf(await call(floor(), "Bash", { command, dangerouslyDisableSandbox: true }));
+
+  test("a write-shaped escape through each variable is denied", async () => {
+    for (const cmd of [
+      "echo x > $WINTER_STORE_HOME/agents/evil.md",
+      "echo x > ${WINTER_STORE_HOME}/skills/x/SKILL.md",
+      "echo x >> $WINTER_STORE_HOME/projects/k/id.jsonl",
+      "echo '{}' > $WINTER_PLUGIN_CACHE_DIR/p/hooks/hooks.json",
+      "echo '{}' > ${CLAUDE_CODE_PLUGIN_CACHE_DIR}/p/hooks/hooks.json",
+      "echo x > $CLAUDE_CONFIG_DIR/skills/foo/SKILL.md",
+      "echo x > $WINTER_HOME/anything",
+    ]) expect({ cmd, decision: await escape(cmd) }).toEqual({ cmd, decision: "deny" });
+  });
+  test("a read-shaped mention passes the floor", async () => {
+    for (const cmd of ["cat $WINTER_STORE_HOME/projects/k/x.jsonl", "cat $WINTER_PLUGIN_CACHE_DIR/p/skills/x/SKILL.md", "cat $CLAUDE_CONFIG_DIR/skills/foo/SKILL.md"]) {
+      expect({ cmd, decision: await escape(cmd) }).toEqual({ cmd, decision: "none" });
+    }
+  });
+});
