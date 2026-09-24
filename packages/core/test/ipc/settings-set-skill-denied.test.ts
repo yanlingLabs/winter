@@ -13,6 +13,7 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 import { Settings, saveSettings } from "../../src/settings";
 import { SkillStore } from "../../src/agent/skills";
+import { storeHomeFor } from "../../src/agent/paths";
 import { TrustStore } from "../../src/agent/trust";
 
 class TestClient {
@@ -63,8 +64,9 @@ describe("settings.setSkillDenied + skills.list denial overlay", () => {
   async function boot() {
     const home = mkdtempSync(join(tmpdir(), "winter-skill-denied-"));
     saveSettings(join(home, "settings.json"), Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } }));
-    mkdirSync(join(home, "skills", "my-skill"), { recursive: true });
-    writeFileSync(join(home, "skills", "my-skill", "SKILL.md"), "---\nname: my-skill\ndescription: a test skill\n---\n\nBody.");
+    // WS-21: the user tier lives in the store home (`storeHomeFor`: `<home>/sdk` on a run-home build).
+    mkdirSync(join(storeHomeFor(home), "skills", "my-skill"), { recursive: true });
+    writeFileSync(join(storeHomeFor(home), "skills", "my-skill", "SKILL.md"), "---\nname: my-skill\ndescription: a test skill\n---\n\nBody.");
     const trust = new TrustStore(join(home, "trust.json"));
     const skills = new SkillStore({ winterHome: home, trust });
     const store = new SessionStore(home);

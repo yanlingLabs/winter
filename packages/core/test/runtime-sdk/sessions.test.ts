@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as wrappers from "../../src/runtime-sdk/sessions";
 import { winterSessions } from "../../src/runtime-sdk/sessions";
+import { storeProjectsDir } from "../../src/agent/paths";
 
 /** The nine, by name (`winter-agent-sdk/dist/index.d.ts:35`). */
 const NINE = [
@@ -40,11 +41,12 @@ afterEach(() => {
   for (const dir of [home, elsewhere, fakeHome]) rmSync(dir, { recursive: true, force: true });
 });
 
-/** A transcript where the SDK's own store keeps one: `<home>/projects/<key>/<id>.jsonl`. */
+/** A transcript where the SDK's own store keeps one: `<store home>/projects/<key>/<id>.jsonl` — the store
+ *  home is `storeHomeFor(home)` (WS-21: `<home>/sdk` on a run-home build). */
 function seed(root: string, projectKey: string, sessionId: string, text: string): void {
-  mkdirSync(join(root, "projects", projectKey), { recursive: true });
+  mkdirSync(join(storeProjectsDir(root), projectKey), { recursive: true });
   writeFileSync(
-    join(root, "projects", projectKey, `${sessionId}.jsonl`),
+    join(storeProjectsDir(root), projectKey, `${sessionId}.jsonl`),
     `${JSON.stringify({ type: "user", uuid: "u1", timestamp: "2026-09-11T00:00:00.000Z", text })}\n`,
   );
 }
@@ -59,7 +61,7 @@ describe("the G-13 wrapper", () => {
     expect(Object.keys(wrappers)).toEqual(["winterSessions"]);
   });
 
-  test("it reads <home>/projects — the Winter-branded path, in the home that was named", async () => {
+  test("it reads the store home's projects/ (sdk/projects on a run-home build) — in the home that was named", async () => {
     seed(home, "-tmp-alpha", "s_winter", "hello from winter");
     const sessions = winterSessions(home);
     const listed = await sessions.listSessions();
@@ -88,7 +90,7 @@ describe("the G-13 wrapper", () => {
     // The "user's home" transcript is invisible through every one of the nine.
     await expect(winterSessions(home).getSessionInfo("s_would_have_been_the_users")).rejects.toThrow();
     // And nothing wrote into it either.
-    expect(existsSync(join(fakeHome, ".winter", "projects", "-tmp-alpha", "s_winter.jsonl"))).toBe(false);
+    expect(existsSync(join(storeProjectsDir(join(fakeHome, ".winter")), "-tmp-alpha", "s_winter.jsonl"))).toBe(false);
   });
 
   // The BRAND half, which the home binding does not subsume: a Winter-branded call with this

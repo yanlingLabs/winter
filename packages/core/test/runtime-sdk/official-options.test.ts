@@ -44,6 +44,7 @@ import {
   type OfficialSessionInput,
 } from "../../src/runtime-sdk/official-options";
 import { CONSOLE_AUTH_ROUTER_MIN, REQUIRED_WINTER_RUNTIME_SDK, versionAtLeast } from "../../src/runtime-sdk/versions";
+import { storeProjectsDir } from "../../src/agent/paths";
 
 // ⚠️ Bun's `mock.module` overwrites properties on the ALREADY-LOADED module's own namespace object
 // IN PLACE (its own doc comment: "exports are overwritten") — so `winterAgentSdk.transcriptProjectKey`
@@ -216,7 +217,7 @@ describe("autoMemoryDirectoryFor", () => {
     const relocatedTo = "some-relocated-key";
     const assembler = realAssembler(home, { relocatedKey: () => relocatedTo });
     const input = base("code", cwd);
-    const expected = join(home, "projects", relocatedTo, "memory");
+    const expected = join(storeProjectsDir(home), relocatedTo, "memory"); // the store home: sdk/ on a run-home build
     expect(autoMemoryDirectoryFor(input, assembler, home)).toBe(expected);
     // and it actually MOVED the answer off the pre-relocation (OLD key) directory — the exact
     // failure mode P8b-17's own doc warns about: "the agent reads an empty directory at the old

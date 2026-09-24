@@ -13,6 +13,7 @@ import { RUN_HOME_DECIDED_OPTIONS } from "../../src/runtime-sdk/mode-options";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import { ContextAssembler } from "../../src/agent/context";
 import { TrustStore } from "../../src/agent/trust";
+import { storeHomeFor } from "../../src/agent/paths";
 import { SkillStore } from "../../src/agent/skills";
 import { OutputStyleStore } from "../../src/agent/output-styles";
 import { ApprovalBroker } from "../../src/agent/approvals";
@@ -43,8 +44,9 @@ function world() {
   writeFileSync(join(cwd, "WINTER.md"), MARK.projInstr);
   mkdirSync(join(cwd, ".winter", "rules"), { recursive: true });
   writeFileSync(join(cwd, ".winter", "rules", "r.md"), MARK.rule);
-  mkdirSync(join(home, "output-styles"), { recursive: true });
-  writeFileSync(join(home, "output-styles", "mine.md"), `---\nname: mine\ndescription: d\nkeep-coding-instructions: true\n---\n${MARK.style}`);
+  // the user tier of output styles is read from the store home (`storeHomeFor`: `sdk/` on a run-home build)
+  mkdirSync(join(storeHomeFor(home), "output-styles"), { recursive: true });
+  writeFileSync(join(storeHomeFor(home), "output-styles", "mine.md"), `---\nname: mine\ndescription: d\nkeep-coding-instructions: true\n---\n${MARK.style}`);
   const trust = new TrustStore(join(home, "trust.json"));
   trust.trust(cwd);
   const projMem = memoryDirFor(cwd, { winterHome: home });

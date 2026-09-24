@@ -517,9 +517,10 @@ test("the Bash sandbox names real DIRECTORIES, because its consumer renders seat
     "/h/sdk/settings.json", "/h/sdk/.winter.json", "/h/sdk/agents", "/h/sdk/plugins",
     "/h/permissions.local.json", "/h/settings.json", "/h/settings.local.json",
     // review I7: the protected user tier (a separate list — the write TOOLS get a card, not this deny),
-    // for the shared runtime home and the store home this build loads from (`<home>` on router 0.0.11)
+    // for the shared runtime home and the store home this build loads from. R.1: on a run-home build the
+    // store home IS the shared runtime home (`sdk/`), so the list names it once (router 0.0.11 added the
+    // `<home>/…` duplicates of these five).
     "/h/sdk/skills", "/h/sdk/commands", "/h/sdk/rules", "/h/sdk/output-styles", "/h/sdk/WINTER.md",
-    "/h/skills", "/h/commands", "/h/rules", "/h/output-styles", "/h/WINTER.md",
     "/repo/.winter/mcp.json", "/repo/.winter/settings.json", "/repo/.winter/settings.local.json", "/repo/.winter/agents",
     "/repo/.winter/skills", "/repo/.winter/commands", "/repo/.winter/rules", "/repo/.winter/output-styles",
   ]);
