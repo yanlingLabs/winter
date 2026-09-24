@@ -167,7 +167,7 @@ class TestClient {
 }
 
 describe("approval.respond saves through the WS-21 doors", () => {
-  async function world() {
+  async function world(sessionCwd?: (root: string) => string) {
     const home = tmp("winter-save-ipc-");
     const root = repo();
     const store = new SessionStore(home);
@@ -180,11 +180,11 @@ describe("approval.respond saves through the WS-21 doors", () => {
     const client = await TestClient.connect(socketPath);
     await client.request(METHODS.hello, { protocolVersion: PROTOCOL_VERSION, role: "harness", token: tokens.harness, clientName: "approver" });
     const answer = async (callId: string, option: { id: string; rule: string; scope: "project" | "global" }, approved: boolean) => {
-      const sessionId = store.createSession("global", { approvalPolicy: "ask", cwd: root });
+      const sessionId = store.createSession("global", { approvalPolicy: "ask", cwd: sessionCwd?.(root) ?? root });
       void broker.wait(sessionId, callId, 5000, { toolName: "bash", summary: "x", issuedAt: Date.now(), expiresAt: Date.now() + 5000, options: [{ ...option, label: "x" }] });
       return client.request(METHODS.approvalRespond, { sessionId, callId, approved, optionId: option.id });
     };
-    return { home, root, trust, answer, stop: () => { client.close(); server.stop(); store.close(); } };
+    return { home, root, trust, answer, client, stop: () => { client.close(); server.stop(); store.close(); } };
   }
 
   test("\"everywhere\" lands in sdk/settings.json (claude grammar)", async () => {
@@ -213,6 +213,45 @@ describe("approval.respond saves through the WS-21 doors", () => {
       const res = await w.answer("c3", { id: "allow_project", rule: "Bash(make:*)", scope: "project" }, true);
       expect(res.result).toEqual({ ok: true, alreadyResolved: false });
       expect(existsSync(join(w.root, ".winter"))).toBe(false);
+    } finally { w.stop(); }
+  });
+
+  // R.3 re-review B-2: in a linked worktree of a TRUSTED repo the card offers "in this project" (the bridge's
+  // trust is the run home's, keyed on the repository) — and the answer IS saved, into the worktree's own local
+  // tier (it used to be refused on a path-only trust check, logged, and approved once).
+  test("R.3 re-review B-2: \"in this project\" from a linked worktree of a TRUSTED repo → the WORKTREE's .winter/settings.local.json", async () => {
+    let wt = "";
+    const w = await world((root) => {
+      const git = (args: string[]) => expect(Bun.spawnSync(["git", "-C", root, ...args], { stdout: "ignore", stderr: "ignore", env: process.env }).exitCode).toBe(0);
+      git(["-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "i"]);
+      wt = join(tmp("winter-save-wt-"), "wt");
+      git(["worktree", "add", "-q", "-b", `r3p-${Math.random().toString(16).slice(2)}`, wt]);
+      wt = realpathSync(wt);
+      return wt;
+    });
+    try {
+      w.trust.trust(w.root);
+      await w.answer("c6", { id: "allow_project", rule: "Bash(make:*)", scope: "project" }, true);
+      expect(JSON.parse(readFileSync(join(wt, ".winter", "settings.local.json"), "utf8")).permissions.allow).toEqual(["Bash(make:*)"]);
+      expect(existsSync(join(w.root, ".winter", "settings.local.json"))).toBe(false);
+    } finally { w.stop(); }
+  });
+
+  // R.3 re-review B-2 (minor): `session.create` reports `trusted` with the SAME rule the card and the save use.
+  test("R.3 re-review B-2: session.create in a linked worktree of a TRUSTED repo reports trusted: true", async () => {
+    const w = await world();
+    const git = (args: string[]) => expect(Bun.spawnSync(["git", "-C", w.root, ...args], { stdout: "ignore", stderr: "ignore", env: process.env }).exitCode).toBe(0);
+    git(["-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "i"]);
+    const wtPath = join(tmp("winter-save-wt-"), "wt");
+    git(["worktree", "add", "-q", "-b", `r3b-${Math.random().toString(16).slice(2)}`, wtPath]);
+    const wt = realpathSync(wtPath);
+    try {
+      w.trust.trust(w.root);
+      const created = await w.client.request(METHODS.sessionCreate, { scope: "global", cwd: wt });
+      expect(created.error).toBeUndefined();
+      expect(created.result.trusted).toBe(true);
+      const untrustedDir = tmp("winter-save-plain-");
+      expect((await w.client.request(METHODS.sessionCreate, { scope: "global", cwd: untrustedDir })).result.trusted).toBe(false);
     } finally { w.stop(); }
   });
 
