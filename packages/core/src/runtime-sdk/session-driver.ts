@@ -67,6 +67,7 @@ import { splitTag, UNSTATED_TAG, isModelTag, WINTER_TEST_PREFIX, type ModelTag }
 import { winterSessions } from "./sessions";
 import { canonicalCwd, storeProjectsDir } from "../agent/paths";
 import { linkedRouterSupportsRunHome } from "./run-home-support";
+import { isRetiredCatalogTag } from "../providers/catalog-role-problems";
 import { WINTER_PEER_VERSIONS } from "./versions";
 import { winterSystemPromptFor } from "./system-prompt";
 import { dispatchEffortFor } from "../agent/dispatch-config";
@@ -1031,6 +1032,14 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       const settings = deps.settings();
       const model = mode === "dispatch" ? (live.model ?? pinsFor(settings).dispatch) : (live.model ?? settings?.provider?.model);
       if (model === undefined) return;
+      // R.1 ruling 1: a model the catalog RETIRED with no rename (a tag stored before the upgrade) is a
+      // typed refusal here, before any child — never a silent fallback to another model, and never the
+      // child's own mid-turn "not in provider's catalog" error. No key makes it runnable, so it is judged
+      // before the credential. The session's fix is `session.setModel`; the Roles pane shows the same fact
+      // as a `model-not-in-catalog` problem (`providers/catalog-role-problems.ts`).
+      if (isRetiredCatalogTag(model)) {
+        throw new WinterLegRefusal("runtime_selection_refused", `${model} is no longer in this build's model catalog — switch this session to another model`, "model-not-in-catalog");
+      }
       const selection = providerFor(model, deps.home);
       if (selection === undefined) return;
       const credentials = await credentialPresenceFrom(deps.secrets);

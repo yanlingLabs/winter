@@ -228,7 +228,7 @@ describe("models.catalog", () => {
     // `agentrouter/claude-opus-5` carries no `reasoning` block (472 of 618 rows are shaped like this
     // in catalog v3.8.50+winter.1). `openai/gpt-5.4` is a second one, and the tag the sibling
     // role-write tests already use.
-    for (const tag of ["agentrouter/claude-opus-5", "openai/gpt-5.4"]) {
+    for (const tag of ["agentrouter/claude-opus-5", "openai/gpt-4.1"]) { // R.1: gpt-5.4 has a vocabulary now
       const row = result.result.models.find((m: any) => m.tag === tag);
       expect(row).toBeDefined();
       expect(row.efforts).toBeNull();

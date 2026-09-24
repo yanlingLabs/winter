@@ -116,6 +116,7 @@ import { modelCatalogWire } from "../providers/model-catalog-wire";
 import { withProblemsForRoles, type RoleHealthRegistry } from "../providers/role-health";
 import type { InternalRouter } from "../providers/internal-router";
 import { internalRoleProblemsFor } from "../providers/internal-role-problems";
+import { catalogRoleProblemsFor } from "../providers/catalog-role-problems";
 import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, type McpServerSettingsEntry } from "../settings";
 import { addMcpServerInScope, mcpServerInScope, removeMcpServerInScope, type McpScope, type McpScopeTarget } from "../agent/mcp/mcp-write";
 import { saveAnswerEverywhere, saveAnswerInProject, SavedAnswerRefused } from "../agent/saved-answers";
@@ -2610,7 +2611,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // (settings.ts) — those stay pure `Settings -> …` readers with no fs/registry dependency;
         // `withProblemsForRoles` is the wire-only augmentation (`providers/role-health.ts`'s own doc
         // comment explains the split).
-        return { ok: true, roles: internalRoleProblemsFor(withProblemsForRoles(modelRolesFor(settings, opts.boundProviderId?.(), opts.internalRouter?.view.snapshot()), opts.roleHealth), settings, opts.internalRouter) };
+        // R.1 ruling 1: a role naming a model the catalog retired says so, over every other note.
+        return { ok: true, roles: catalogRoleProblemsFor(internalRoleProblemsFor(withProblemsForRoles(modelRolesFor(settings, opts.boundProviderId?.(), opts.internalRouter?.view.snapshot()), opts.roleHealth), settings, opts.internalRouter)) };
       }
       // Daemon settings surface (2026-09-17 plan, item 4) — the ONE write door for all nine model
       // roles. LOCAL-ROLE ONLY. Mirrors `settings.setAdvisorModel`'s own handler shape exactly
@@ -2641,7 +2643,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         saveSettings(settingsPath, next);
         // WS-21 review M3: the file is written as stored; the answer reads it the way every live view does.
         const nextView = liveSettingsView(next);
-        const roles = internalRoleProblemsFor(withProblemsForRoles(modelRolesFor(nextView, opts.boundProviderId?.(), opts.internalRouter?.view.snapshot()), opts.roleHealth), nextView, opts.internalRouter);
+        const roles = catalogRoleProblemsFor(internalRoleProblemsFor(withProblemsForRoles(modelRolesFor(nextView, opts.boundProviderId?.(), opts.internalRouter?.view.snapshot()), opts.roleHealth), nextView, opts.internalRouter));
         return { ok: true, model: roles[p.role].model, roles };
       }
       // -----------------------------------------------------------------------------------------
