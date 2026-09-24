@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SkillStore } from "../../src/agent/skills";
 import { TrustStore } from "../../src/agent/trust";
+import { storeHomeFor } from "../../src/agent/paths";
+import { setRunHomeSupportForTests } from "../../src/runtime-sdk/run-home-support";
 
 function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "winter-sk-"))); }
 function writeSkill(root: string, dir: string, name: string, desc: string, body: string) {
@@ -19,8 +21,8 @@ function setup() {
 describe("SkillStore", () => {
   test("user + self skills always listed; project skill listed ONLY when trusted (SECURITY)", () => {
     const { home, trust } = setup();
-    writeSkill(join(home, "skills"), "greet", "greet", "Say hi", "Say hello warmly.");
-    writeSkill(join(home, "skills", "self"), "note", "note", "Take notes", "Write notes.");
+    writeSkill(join(storeHomeFor(home), "skills"), "greet", "greet", "Say hi", "Say hello warmly.");
+    writeSkill(join(storeHomeFor(home), "skills", "self"), "note", "note", "Take notes", "Write notes.");
     const cwd = realDir();
     writeSkill(join(cwd, ".winter", "skills"), "proj", "proj-skill", "Project thing", "PROJECT_BODY");
     const s = new SkillStore({ winterHome: home, trust });
@@ -47,22 +49,41 @@ describe("SkillStore", () => {
     expect(s.load("cool:doit", { cwd: null })).toBeNull();
   });
 
-  test("name precedence project > user for the same bare name", () => {
+  // R.1: on a run-home build the list is what a run folder carries, with claude's clash rule (spec F8):
+  // the USER tier beats a trusted project's same-named skill (skills-ws21.test.ts pins the full walk). The
+  // pre-run-home order (project > user) is the legacy branch's, pinned below with the support flag off.
+  test("name precedence user > project for the same bare name (run-home build, claude's clash rule)", () => {
     const { home, trust } = setup();
-    writeSkill(join(home, "skills"), "dup", "dup", "user version", "USER_DUP");
+    writeSkill(join(storeHomeFor(home), "skills"), "dup", "dup", "user version", "USER_DUP");
     const cwd = realDir();
     writeSkill(join(cwd, ".winter", "skills"), "dup", "dup", "project version", "PROJECT_DUP");
     trust.trust(cwd);
     const s = new SkillStore({ winterHome: home, trust });
     const dup = s.list({ cwd }).filter((m) => m.name === "dup");
     expect(dup.length).toBe(1);
-    expect(dup[0]!.source).toBe("project");
-    expect(s.load("dup", { cwd })!.body).toContain("PROJECT_DUP");
+    expect(dup[0]!.source).toBe("user");
+    expect(s.load("dup", { cwd })!.body).toContain("USER_DUP");
+  });
+
+  test("name precedence project > user for the same bare name (legacy branch, router 0.0.11)", () => {
+    setRunHomeSupportForTests(false);
+    try {
+      const { home, trust } = setup();
+      writeSkill(join(storeHomeFor(home), "skills"), "dup", "dup", "user version", "USER_DUP");
+      const cwd = realDir();
+      writeSkill(join(cwd, ".winter", "skills"), "dup", "dup", "project version", "PROJECT_DUP");
+      trust.trust(cwd);
+      const s = new SkillStore({ winterHome: home, trust });
+      const dup = s.list({ cwd }).filter((m) => m.name === "dup");
+      expect(dup.length).toBe(1);
+      expect(dup[0]!.source).toBe("project");
+      expect(s.load("dup", { cwd })!.body).toContain("PROJECT_DUP");
+    } finally { setRunHomeSupportForTests(undefined); }
   });
 
   test("body cap + frontmatter stripped", () => {
     const { home, trust } = setup();
-    writeSkill(join(home, "skills"), "big", "big", "big skill", "x".repeat(40000));
+    writeSkill(join(storeHomeFor(home), "skills"), "big", "big", "big skill", "x".repeat(40000));
     const s = new SkillStore({ winterHome: home, trust, caps: { bodyBytes: 32768 } });
     const body = s.load("big", { cwd: null })!.body;
     expect(body).not.toContain("---"); // frontmatter stripped
@@ -72,10 +93,10 @@ describe("SkillStore", () => {
 
   test("malformed / no-name / directory-SKILL.md skills are skipped, never throw", () => {
     const { home, trust } = setup();
-    mkdirSync(join(home, "skills", "nofm", "SKILL.md"), { recursive: true }); // a DIRECTORY named SKILL.md
-    mkdirSync(join(home, "skills", "noname"), { recursive: true });
-    writeFileSync(join(home, "skills", "noname", "SKILL.md"), "no frontmatter here"); // no name/description
-    writeSkill(join(home, "skills"), "ok", "ok", "fine", "OK_BODY");
+    mkdirSync(join(storeHomeFor(home), "skills", "nofm", "SKILL.md"), { recursive: true }); // a DIRECTORY named SKILL.md
+    mkdirSync(join(storeHomeFor(home), "skills", "noname"), { recursive: true });
+    writeFileSync(join(storeHomeFor(home), "skills", "noname", "SKILL.md"), "no frontmatter here"); // no name/description
+    writeSkill(join(storeHomeFor(home), "skills"), "ok", "ok", "fine", "OK_BODY");
     const s = new SkillStore({ winterHome: home, trust });
     expect(() => s.list({ cwd: null })).not.toThrow();
     // Filtered to source !== "builtin": see comment above on the first test in this file.
@@ -103,7 +124,7 @@ describe("SkillStore", () => {
       expect(m?.description).toBe("Do a thing");
       expect(s.load("my-skill", { cwd: null })!.body).toContain("Step one. Step two.");
 
-      const raw = readFileSync(join(home, "skills", "self", "my-skill", "SKILL.md"), "utf8");
+      const raw = readFileSync(join(storeHomeFor(home), "skills", "self", "my-skill", "SKILL.md"), "utf8");
       expect(raw).toContain("author: winter");
     });
 
@@ -161,7 +182,7 @@ describe("SkillStore", () => {
         expect(del.ok).toBe(false);
         if (!del.ok) expect(del.kind).toBe("invalid");
       }
-      expect(existsSync(join(home, "skills", "self"))).toBe(false); // no fs side effect from any rejected name
+      expect(existsSync(join(storeHomeFor(home), "skills", "self"))).toBe(false); // no fs side effect from any rejected name
     });
 
     test("author-spoof attempt via body frontmatter injection does NOT override the store's stamp", async () => {
@@ -171,7 +192,7 @@ describe("SkillStore", () => {
       const res = await s.writeSelf({ name: "my-skill", description: "real desc", body: spoofBody });
       expect(res.ok).toBe(true);
 
-      const raw = readFileSync(join(home, "skills", "self", "my-skill", "SKILL.md"), "utf8");
+      const raw = readFileSync(join(storeHomeFor(home), "skills", "self", "my-skill", "SKILL.md"), "utf8");
       expect(raw).toContain("author: winter"); // the store's own stamp, first in the file
 
       const listed = s.list({ cwd: null });
@@ -192,7 +213,7 @@ describe("SkillStore", () => {
 
     test("a user-root skill of the same name SHADOWS the builtin in list precedence", () => {
       const { home, trust } = setup();
-      writeSkill(join(home, "skills"), "writing-skills", "writing-skills", "user override", "USER_OVERRIDE_BODY");
+      writeSkill(join(storeHomeFor(home), "skills"), "writing-skills", "writing-skills", "user override", "USER_OVERRIDE_BODY");
       const s = new SkillStore({ winterHome: home, trust });
 
       const matches = s.list({ cwd: null }).filter((m) => m.name === "writing-skills");
