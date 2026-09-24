@@ -1950,7 +1950,9 @@ describeWithClaudeRuntime("the official leg through startDaemon + IPC (P8c-14)",
   let client: TestClient;
   let fakeUrl = "";
   let fakeClose: (() => Promise<void>) | undefined;
-  let requests: Array<{ path: string; headers: Record<string, string> }> = [];
+  // F1: `model` is the `/v1/messages` body's own `model` — the ONE place the model the child actually
+  // ran is visible (a transcript's `message.model` is whatever the endpoint answered).
+  let requests: Array<{ path: string; headers: Record<string, string>; model?: string }> = [];
 
   const WINTER_BIN = process.env.WINTER_RUNTIME_EXECUTABLE ?? join(import.meta.dir, "../../../../dist/winter");
 
@@ -1976,7 +1978,9 @@ describeWithClaudeRuntime("the official leg through startDaemon + IPC (P8c-14)",
       routes: [{
         path: "*",
         handler: async (_req, recorded) => {
-          requests.push({ path: recorded.path, headers: recorded.headers });
+          let model: string | undefined;
+          if (recorded.path === "/v1/messages") { try { model = (JSON.parse(recorded.body) as { model?: unknown }).model as string | undefined; } catch { /* not JSON: no model */ } }
+          requests.push({ path: recorded.path, headers: recorded.headers, ...(typeof model === "string" ? { model } : {}) });
           if (responseDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, responseDelayMs));
           if (recorded.path === "/v1/messages" && recorded.method === "POST") return anthropicFake.anthropicTurnResponse(script[0]!);
           return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
@@ -2024,6 +2028,23 @@ describeWithClaudeRuntime("the official leg through startDaemon + IPC (P8c-14)",
     expect(kinds).toContain("assistant_message");
     expect(kinds).toContain("turn_completed");
     expect(requests.some((r) => r.path === "/v1/messages" && (r.headers["x-api-key"] !== undefined || r.headers["authorization"] !== undefined))).toBe(true);
+  }, 60_000);
+
+  // F1 (live gate, 2026-09-24): a session recorded on a Claude tag ran claude's OWN default model —
+  // every request carried `claude-opus-5` — because the router's official door never forwards the
+  // query's top-level `Options.model`. The model must reach the wire as the tag's bare modelId, and
+  // the session must refuse typed rather than run anything else.
+  test("F1: the wire model IS the session's own model (the tag's bare modelId), never the runtime's default", async () => {
+    requests = [];
+    const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: "anthropic/claude-haiku-4-5-20251001" });
+    await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+    await client.call(METHODS.sessionSend, { sessionId, text: "say hello" });
+    await client.waitFor((e) => (e.type === "turn_completed" || e.type === "agent_error") && e.sessionId === sessionId, 45_000);
+    const errors = client.events.filter((e) => e.sessionId === sessionId && e.type === "agent_error");
+    expect(errors).toEqual([]);
+    const models = requests.filter((r) => r.path === "/v1/messages").map((r) => r.model);
+    expect(models.length).toBeGreaterThan(0);
+    expect(new Set(models)).toEqual(new Set(["claude-haiku-4-5-20251001"]));
   }, 60_000);
 
   test("session.interrupt on the official leg ends the turn, never a thrown error", async () => {

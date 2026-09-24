@@ -36,6 +36,7 @@ import {
   officialConfigDirFor,
   officialInputFor,
   officialPermissionModeFor,
+  officialWireModelFor,
   OfficialConsoleProfileMissing,
   OfficialConsoleRouterUnsupported,
   OfficialProjectKeyTooDeep,
@@ -618,6 +619,34 @@ describe("officialInputFor — disableBypassPermissionsMode (finding 2a)", () =>
 
   test("omitted (never 'disable') when the session's own policy is bypass", () => {
     expect(settingsPermissionsFor("bypass")?.disableBypassPermissionsMode).toBeUndefined();
+  });
+});
+
+// F1 (live gate, 2026-09-24): the session's model rides the FLAG-SETTINGS layer. MEASURED on the real
+// 0.3.250 child through a real daemon: the router's official door (0.0.11 and the WS-21 build alike)
+// never forwards the query's top-level `Options.model` — the child was spawned with no `--model` and no
+// settings `model`, so every official session ran claude's own default (`claude-opus-5`) whatever the
+// session asked for. `OptionsTemplatePolicy.settings` is the door the router's own template names and
+// measures (`test/official/runtime-options.test.ts`: "a session given `settings: { model: … }` … sent
+// that model on its first request"). The value is the tag's BARE modelId, never the provider-qualified tag.
+describe("officialInputFor — the session's model rides the flag-settings layer (F1)", () => {
+  function settingsModelFor(modelRef: string): unknown {
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
+    const base = minimalDeps();
+    const result = officialInputFor(input, minimalDeps({ selection: { ...base.selection, providerId: modelRef.slice(0, modelRef.indexOf("/")), modelRef } }));
+    if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
+    return ((result.input.options as unknown as Record<string, unknown>).settings as Record<string, unknown> | undefined)?.["model"];
+  }
+
+  test("settings.model is the selection tag's bare modelId", () => {
+    expect(settingsModelFor("anthropic/claude-sonnet-5")).toBe("claude-sonnet-5");
+    expect(settingsModelFor("anthropic/claude-haiku-4-5-20251001")).toBe("claude-haiku-4-5-20251001");
+    expect(settingsModelFor("console/claude-opus-5")).toBe("claude-opus-5");
+  });
+
+  test("officialWireModelFor is that same split — the one spelling the settings layer and the init assertion share", () => {
+    expect(officialWireModelFor({ modelRef: "anthropic/claude-haiku-4.5" })).toBe("claude-haiku-4.5");
+    expect(settingsModelFor("anthropic/claude-haiku-4.5")).toBe(officialWireModelFor({ modelRef: "anthropic/claude-haiku-4.5" }));
   });
 });
 

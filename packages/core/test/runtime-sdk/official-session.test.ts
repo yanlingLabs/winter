@@ -94,7 +94,12 @@ afterAll(() => {
 // ── the fake wire ────────────────────────────────────────────────────────────────────────────────
 
 type Frame = Record<string, unknown>;
-const init = (sessionId: string, extra: Frame = {}): Frame => ({ type: "system", subtype: "init", session_id: sessionId, model: "claude-test/echo", tools: ["AskUserQuestion"], ...extra });
+// F1: `official-session.ts` holds the init frame's `model` to the model the incarnation SENT (the
+// flag-settings `model`). A real child reports what it was told, so the fake does too: `SENT_MODEL` is
+// replaced, at `emit`, by the `runtime.official.options.settings.model` this query was opened with. A test
+// that wants a child running something else names that model explicitly.
+const SENT_MODEL = "<the model this query was sent>";
+const init = (sessionId: string, extra: Frame = {}): Frame => ({ type: "system", subtype: "init", session_id: sessionId, model: SENT_MODEL, tools: ["AskUserQuestion"], ...extra });
 const assistant = (text: string): Frame => ({ type: "assistant", message: { content: [{ type: "text", text }] } });
 const result = (extra: Frame = {}): Frame => ({ type: "result", subtype: "success", is_error: false, permission_denials: [], result: "", ...extra });
 /** M6a: the router's `OfficialSessionStoreError` frame shape (`official/errors.d.ts` §13.11). */
@@ -108,7 +113,11 @@ class FakeOfficialQuery {
   private readonly rejecters: Array<(e: unknown) => void> = [];
   private terminal: { done: true } | { error: unknown } | undefined;
 
-  constructor(prompt: AsyncIterable<string>) {
+  /** F1: the flag-settings `model` this query was opened with — what a real child would report. */
+  private readonly sentModel: unknown;
+
+  constructor(prompt: AsyncIterable<string>, options?: object) {
+    this.sentModel = (options as { runtime?: { official?: { options?: { settings?: Record<string, unknown> } } } } | undefined)?.runtime?.official?.options?.settings?.["model"];
     void (async () => {
       for await (const t of prompt) this.pushed.push(t);
       this.end();
@@ -116,6 +125,7 @@ class FakeOfficialQuery {
   }
 
   emit(frame: Frame): void {
+    if (frame["type"] === "system" && frame["subtype"] === "init" && frame["model"] === SENT_MODEL && typeof this.sentModel === "string") frame = { ...frame, model: this.sentModel };
     const w = this.waiters.shift();
     if (w !== undefined) { this.rejecters.shift(); w({ value: frame, done: false }); return; }
     this.buffer.push({ value: frame });
@@ -194,7 +204,7 @@ function harness(overrides: Partial<OfficialSessionDeps> = {}, runtimeExtra: Rec
     sdk: {
       query: ({ prompt, options }: { prompt: AsyncIterable<string>; options: Record<string, unknown> }) => {
         capturedOptions.push(options);
-        const q = new FakeOfficialQuery(prompt);
+        const q = new FakeOfficialQuery(prompt, options);
         queries.push(q);
         return q as unknown;
       },
@@ -779,6 +789,65 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
 // hand-typed "ANTHROPIC_API_KEY" string. Wiring a real console-arm session through `run()`'s own
 // assertion is `session-driver.ts`'s `RuntimeSelection.authFamily` plumbing (outside this lane's
 // file cluster) — carried; see the lane report.
+// F1 (live gate, 2026-09-24): "there is never a silent fallback to another model". MEASURED through a
+// real daemon: the router's official door dropped the query's top-level `Options.model`, the child ran
+// claude's own default (`claude-opus-5`) for a session recorded on `anthropic/claude-haiku-4.5`, and
+// nothing on this leg noticed. The model now rides the flag-settings layer, and the child's own
+// `system/init.model` is held to it — a child that reports any other model (or none) ends the session
+// typed before a turn runs, the same shape as the apiKeySource assertion above.
+describe("F1 — the child must run the model the session asked for", () => {
+  test("the model rides runtime.official.options.settings.model — the flag layer the router forwards", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    await h.settled();
+    const official = (h.capturedOptions[0]!["runtime"] as { official?: { options?: { settings?: Record<string, unknown> } } }).official;
+    expect(official?.options?.settings?.["model"]).toBe("echo");
+  });
+
+  test("init.model !== the model sent -> official_model_mismatch, before any turn runs", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { model: "claude-opus-5" }));
+    await h.settled();
+    const err = h.events.find((e) => e.type === "agent_error") as (SessionEvent & { code?: string; message?: string }) | undefined;
+    expect(err?.code).toBe("official_model_mismatch");
+    expect(err?.message).toContain("claude-opus-5");
+    expect(err?.message).toContain("echo");
+    expect(h.session.state).toBe("ended");
+    expect(h.types()).not.toContain("assistant_message");
+    expect(h.types()).not.toContain("turn_completed");
+    let caught: unknown;
+    try {
+      await h.session.send("too late");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(OfficialSessionEnded);
+  });
+
+  test("an init frame with no model at all is never read as a match", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    const { model: _dropped, ...noModel } = init(BACKEND_ID);
+    h.q().emit(noModel);
+    await h.settled();
+    const err = h.events.find((e) => e.type === "agent_error") as (SessionEvent & { code?: string }) | undefined;
+    expect(err?.code).toBe("official_model_mismatch");
+    expect(h.session.state).toBe("ended");
+  });
+
+  test("init.model === the model sent -> no refusal; the turn proceeds normally", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID));
+    h.q().emit(assistant("ok"));
+    h.q().emit(result());
+    await h.settled();
+    expect(h.events.some((e) => e.type === "agent_error")).toBe(false);
+    expect(h.types()).toContain("turn_completed");
+  });
+});
+
 describe("O3 — expectedApiKeySource / CONSOLE_API_KEY_SOURCE", () => {
   test("api-key arm expects the pinned ANTHROPIC_API_KEY — unchanged from P9c-1", () => {
     expect(expectedApiKeySource("api-key")).toBe("ANTHROPIC_API_KEY");
@@ -925,7 +994,7 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
       sdk: {
         query: ({ prompt, options }: { prompt: AsyncIterable<string>; options: CapturedOptions }) => {
           capturedOptions.push(options);
-          const q = new FakeOfficialQuery(prompt);
+          const q = new FakeOfficialQuery(prompt, options);
           queries.push(q);
           return q as unknown;
         },

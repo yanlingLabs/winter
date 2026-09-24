@@ -148,6 +148,22 @@ export function officialAuthArmFor(selection: { modelRef: string }): OfficialAut
 }
 
 /**
+ * F1 (live gate, 2026-09-24): the model the official child is TOLD to run — the selection tag's bare
+ * modelId (WS-20: the tag is provider-qualified, the wire id is not). One function, because two
+ * places must agree on it: `officialInputFor` sends it on the flag-settings layer, and
+ * `official-session.ts` holds the child's `system/init.model` to it.
+ *
+ * WHY THE FLAG-SETTINGS LAYER. MEASURED through a real daemon on the real 0.3.250 child: the router's
+ * official door (0.0.11, and the WS-21 build) never forwards the query's top-level `Options.model` —
+ * the child was spawned with no `--model` and no settings `model`, and ran claude's own default
+ * (`claude-opus-5`) for a session recorded on `anthropic/claude-haiku-4.5`. `Options.settings` is the
+ * door the router's own template names and measures for exactly this field.
+ */
+export function officialWireModelFor(selection: { modelRef: string }): string {
+  return splitTag(selection.modelRef).modelId;
+}
+
+/**
  * Winter Phase 10a (P10a-2): the child-env contribution for ONE auth arm, on top of
  * `minimalOsEnvironment`'s allowlist and the `FORBIDDEN_CHILD_ENV` strip — never a substitute for
  * either. The console arm sets exactly `ANTHROPIC_PROFILE` + `ANTHROPIC_CONFIG_DIR` (P10a-2: "one
@@ -367,7 +383,8 @@ export interface OfficialSessionInput {
   /** The effort this session SPENDS — `session-driver.ts`'s `spendEffortFor`, the same function the
    *  Winter leg's `Options.effort` comes from. Distinct from `effort` above (the RAW stored value,
    *  possibly Winter's `ultra` tier, which only the system prompt reads). `official-session.ts` puts
-   *  this on the query's top-level `Options.effort`, which the router forwards untouched.
+   *  this on the query's top-level `Options.effort` — which, MEASURED 2026-09-24 (F1), the router's
+   *  official door does not forward (an open router item; `model` now rides the flag settings instead).
    *
    *  Required-but-possibly-undefined for the same reason `primary` is: an optional field a
    *  construction site could forget is exactly how this leg came to send no effort at all. */
@@ -782,6 +799,9 @@ export function officialInputFor(
         // D14/P8c-2), but a subagent DEFINITION's own `permissionMode: bypassPermissions` is a
         // separate lever this clamp closes regardless of that downgrade.
         settings: {
+          // F1: the session's own model — see `officialWireModelFor`. Never the tag, never absent: a
+          // child told no model runs the runtime's default, which is the silent substitution this closes.
+          model: officialWireModelFor(deps.selection),
           permissions: {
             // The SAME constant the Winter leg sends (`mode-options.ts`'s `GLOBAL_READ_ALLOW_RULES`,
             // whose doc carries the ruling and the deny-before-allow argument) — one list, two legs,
