@@ -16,6 +16,16 @@ describe("sdkHomeDoctorLines", () => {
     expect(sdkHomeDoctorLines(tmpHome())).toEqual(["sdk home: the shared runtime home layout (no migration needed)"]);
   });
 
+  test("R.3 I-5: a home whose rollback was interrupted says so, and names --rollback (never --resume)", () => {
+    const home = tmpHome();
+    mkdirSync(join(home, "migration", "c"), { recursive: true });
+    writeFileSync(join(home, "migration", "c", "manifest.json"), JSON.stringify({ schemaVersion: 1, status: "rolling-back", steps: [], moved: [], links: [], copied: [], archived: [], reconciled: [], archiveDir: join(home, "migration", "c-x") }));
+    const first = sdkHomeDoctorLines(home)[0]!;
+    expect(first).toContain("rollback was interrupted");
+    expect(first).toContain("--rollback");
+    expect(first).not.toContain("--resume");
+  });
+
   test("an old-layout home names the way forward", () => {
     const home = tmpHome();
     mkdirSync(join(home, "projects", "k"), { recursive: true });

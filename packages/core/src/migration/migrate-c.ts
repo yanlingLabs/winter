@@ -65,7 +65,9 @@ export interface MigrationCManifest {
   home: string;
   startedAt: string;
   finishedAt?: string;
-  status: "in-progress" | "phase1-complete" | "complete" | "rolled-back";
+  /** R.3 I-5: `rolling-back` — a rollback began (written before its first file moves) and has not finished;
+   *  boot refuses it like `in-progress`, and only `--rollback` goes on from it. */
+  status: "in-progress" | "phase1-complete" | "complete" | "rolling-back" | "rolled-back";
   /** `migration/c-<ts>/` — backups, archives and the untranslated-rules file. */
   archiveDir: string;
   steps: MigrationCStepRecord[];
@@ -105,6 +107,9 @@ export interface MigrationCRekey {
   outcome: "pending" | "moved" | "collision" | "refused";
   reason?: string;
 }
+
+/** R.3 I-5: why a home caught mid-rollback refuses everything but `--rollback`. */
+const INTERRUPTED_ROLLBACK = "a Migration C rollback was interrupted — run `winter migrate --sdk-home --rollback` to finish it";
 
 export function migrationCDir(home: string): string { return join(home, "migration", "c"); }
 export function migrationCManifestPath(home: string): string { return join(migrationCDir(home), "manifest.json"); }
@@ -296,6 +301,7 @@ export function migrationCPreflightProblem(home: string, deps: Pick<MigrationCDe
 export async function planMigrationC(home: string, deps?: Pick<MigrationCDeps, "reconcileAvailable" | "convertLegacyPlugins" | "probe">): Promise<{ needed: boolean; steps: MigrationCStep[]; refusal?: string }> {
   const state = migrationCState(home);
   if (state.kind === "parsed" && state.manifest.status === "complete") return { needed: false, steps: [] };
+  if (state.kind === "parsed" && state.manifest.status === "rolling-back") return { needed: true, steps: [], refusal: INTERRUPTED_ROLLBACK };
   if (state.kind === "parsed" && (state.manifest.status === "in-progress" || state.manifest.status === "phase1-complete")) {
     const done = new Set(state.manifest.steps.map((s) => s.step));
     return { needed: true, steps: [...MIGRATION_C_PHASE1, ...MIGRATION_C_PHASE2].filter((s) => !done.has(s)) };
@@ -445,11 +451,21 @@ function rekeyTranscripts(home: string, m: MigrationCManifest, log: (line: strin
 export function recordLazyRekey(home: string, entry: MigrationCRekey): void {
   try {
     const state = migrationCState(home);
-    if (state.kind !== "parsed" || state.manifest.status === "rolled-back") return;
+    if (state.kind !== "parsed" || state.manifest.status === "rolled-back" || state.manifest.status === "rolling-back") return;
     const m = state.manifest;
     const list = (m.rekeyed ??= []);
-    const at = list.findIndex((e) => e.sessionId === entry.sessionId && e.from === entry.from && e.to === entry.to && e.outcome === "pending");
-    if (at >= 0) list[at] = entry; else list.push(entry);
+    // R.3 I-5: THE session's entry for this move, whatever its outcome — matching only `pending` appended a
+    // fresh entry at every resume of a session whose collision persists. Replacing it never loses what a
+    // rollback needs: the names are the union (a re-resume after a move whose record could not be
+    // re-pointed finds nothing left at `from`), and a `moved` entry is never downgraded to a collision or a
+    // refusal (its files sit at `to`; `pending` keeps rollback's record re-point, as `moved` does).
+    const at = list.findIndex((e) => e.sessionId === entry.sessionId && e.from === entry.from && e.to === entry.to);
+    if (at < 0) list.push(entry);
+    else {
+      const prev = list[at]!;
+      const keepMoved = prev.outcome === "moved" && entry.outcome !== "moved" && entry.outcome !== "pending";
+      list[at] = { ...(keepMoved ? prev : entry), entries: [...new Set([...prev.entries, ...entry.entries])] };
+    }
     writeManifest(home, m);
   } catch { /* bounded */ }
 }
@@ -462,6 +478,8 @@ export async function runMigrationC(home: string, deps: MigrationCDeps): Promise
   const now = deps.now ?? (() => new Date());
   const state = migrationCState(home);
   if (state.kind === "unreadable") throw new MigrationCRefused("sdk_home_half_migrated", `${migrationCManifestPath(home)} does not parse — move it aside or run \`winter migrate --sdk-home --rollback\``);
+  // R.3 I-5: never resume the MIGRATION onto a half-rolled-back home — only the rollback goes on from here.
+  if (state.kind === "parsed" && state.manifest.status === "rolling-back") throw new MigrationCRefused("sdk_home_half_migrated", INTERRUPTED_ROLLBACK);
   let m: MigrationCManifest;
   if (state.kind === "parsed" && state.manifest.status !== "rolled-back") {
     m = state.manifest;
@@ -806,10 +824,12 @@ function rawRuntimeState(home: string, fn: (db: Database) => void): void {
  * Put the home back in the old layout: everything Migration C did, undone — EXCEPT the step-2 reconcile
  * appends, which stay in the canonical transcripts (lines that were already the session's own).
  *
- * DECISION 15 — never revert what the USER did after the migration. The migration never writes
- * `settings.json` and only ever rewrote `backend_root` in runtime-state, so rollback reverses exactly
- * that one rewrite instead of restoring the preflight backups over the live files (which would drop every
- * post-upgrade settings edit, generation, handoff and quarantine row). The sdk files the split filled are
+ * DECISION 15 — never revert what the USER did after the migration. The migration's only write to
+ * `settings.json` is `convert-plugins`' consent re-key (`rekeyConsents`: each converted plugin's
+ * `plugins.consents` record re-keyed and re-fingerprinted — a consent the user already gave, kept valid),
+ * and it only ever rewrote `backend_root` in runtime-state, so rollback reverses exactly that one rewrite
+ * and never touches `settings.json`, instead of restoring the preflight backups over the live files (which
+ * would drop every post-upgrade settings edit, generation, handoff and quarantine row). The sdk files the split filled are
  * left (an older build never reads them, and they hold the user's post-upgrade answers); the copies
  * `copy-files` made are moved into the archive, never deleted. The preflight backups stay under
  * `archiveDir` for an operator. The daemon must be stopped (the CLI checks the lock).
@@ -835,6 +855,15 @@ export async function rollbackMigrationC(home: string, deps: Pick<MigrationCDeps
     schema = downgradeRuntimeStateToV6(home);
   } catch (err) {
     throw new MigrationCRefused("sdk_home_migration_refused", `Migration C rollback refused: runtime-state.db cannot step back to schema v6 (${(err as { reason?: string }).reason ?? (err as Error).name}) — nothing was restored`);
+  }
+  // R.3 I-5: `rolling-back` BEFORE the first file moves, so a crash anywhere below leaves a manifest boot
+  // refuses (`sdk_home_half_migrated`, like `in-progress`) instead of a `complete` one over a half-restored
+  // home. After the schema step on purpose: that step is the gate that refuses with NOTHING undone, and a
+  // refusal there must leave the status as it was. Every step below is re-runnable (each checks what is
+  // where before it moves anything), so `--rollback` simply runs again from the top.
+  if (m.status !== "rolling-back") {
+    m.status = "rolling-back";
+    writeManifest(home, m);
   }
   // archive → back in place (reverse order)
   for (const a of [...m.archived].reverse()) {

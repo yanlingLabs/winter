@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileSecretStore, openRuntimeStateDb, readMigrationManifest, type SecretStore } from "@yanlinglabs/winter-core";
@@ -260,6 +260,34 @@ describe("winter migrate --sdk-home (Migration C)", () => {
     expect(await runMigrateCommand(back.deps)).toBe(0);
     expect(lstatSync(join(home, "projects")).isDirectory()).toBe(true);
     expect(lstatSync(join(home, "projects")).isSymbolicLink()).toBe(false);
+  });
+
+  // R.3 I-5: a rollback that crashes partway leaves `rolling-back`; --status says so, --resume and a plain
+  // run refuse naming --rollback, and --rollback run again finishes the job.
+  test("R.3 I-5: an interrupted --rollback is finished by --rollback; --resume and a plain run refuse", async () => {
+    const home = oldLayoutHome();
+    writeFileSync(join(home, "WINTER.md"), "# mine\n"); // copy-files has something to put back
+    const run = baseDeps({ argv: ["--sdk-home", "--home", home, "--yes"], routerSupportsRunHome: () => true });
+    expect(await runMigrateCommand(run.deps)).toBe(0);
+    const archiveDir = readdirSync(join(home, "migration")).filter((d) => d.startsWith("c-")).map((d) => join(home, "migration", d))[0]!;
+    writeFileSync(join(archiveDir, "rolled-back"), "in the way"); // a genuine I/O failure partway through
+    const crashed = baseDeps({ argv: ["--sdk-home", "--rollback", "--home", home, "--yes"] });
+    await expect(runMigrateCommand(crashed.deps)).rejects.toThrow();
+    const status = baseDeps({ argv: ["--sdk-home", "--status", "--home", home] });
+    expect(await runMigrateCommand(status.deps)).toBe(0);
+    expect(status.lines.join("\n")).toContain("migration C: rolling-back");
+    const resume = baseDeps({ argv: ["--sdk-home", "--resume", "--home", home, "--yes"], routerSupportsRunHome: () => true });
+    expect(await runMigrateCommand(resume.deps)).toBe(1);
+    expect(resume.errLines.join("\n")).toContain("--rollback");
+    const plain = baseDeps({ argv: ["--sdk-home", "--home", home, "--yes"], routerSupportsRunHome: () => true });
+    expect(await runMigrateCommand(plain.deps)).toBe(1);
+    expect(plain.errLines.join("\n")).toContain("--rollback");
+    rmSync(join(archiveDir, "rolled-back"));
+    const finish = baseDeps({ argv: ["--sdk-home", "--rollback", "--home", home, "--yes"] });
+    expect(await runMigrateCommand(finish.deps)).toBe(0);
+    expect(finish.lines.join("\n")).toContain("migration C: rolled-back");
+    expect(lstatSync(join(home, "projects")).isSymbolicLink()).toBe(false);
+    expect(existsSync(join(home, "projects", "-Users-x-app", "memory", "MEMORY.md"))).toBe(true);
   });
 
   test("a preflight refusal is printed and moves nothing", async () => {

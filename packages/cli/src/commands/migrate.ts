@@ -72,6 +72,7 @@ function printMigrationCSummary(m: MigrationCManifest, log: (line: string) => vo
   if (m.reconciled.length > 0) log(`  reconciled: ${m.reconciled.map((r) => `${r.root} (${r.outcome})`).join(", ")}`);
   if (m.archived.length > 0) log(`  archived under ${m.archiveDir}: ${m.archived.length} item(s)`);
   if (m.status === "phase1-complete") log("  the official working copies are reconciled — and the migration finished — at the next daemon boot");
+  if (m.status === "rolling-back") log("  a rollback was interrupted — run `winter migrate --sdk-home --rollback` to finish it");
 }
 
 /**
@@ -128,6 +129,11 @@ async function runMigrateSdkHome(deps: MigrateCommandDeps, yes: boolean): Promis
     }
     if (deps.argv.includes("--resume")) {
       const state = migrationCState(home);
+      if (state.kind === "parsed" && state.manifest.status === "rolling-back") {
+        // R.3 I-5: only the rollback goes on from a half-rolled-back home.
+        deps.error(`winter migrate --sdk-home --resume: a Migration C rollback of ${home} was interrupted — run \`winter migrate --sdk-home --rollback\` to finish it`);
+        return 1;
+      }
       if (state.kind !== "parsed" || (state.manifest.status !== "in-progress" && state.manifest.status !== "phase1-complete")) {
         deps.error(`winter migrate --sdk-home --resume: nothing to resume in ${home}`);
         return 1;
