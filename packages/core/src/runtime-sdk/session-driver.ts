@@ -1036,9 +1036,11 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // typed refusal here, before any child — never a silent fallback to another model, and never the
       // child's own mid-turn "not in provider's catalog" error. No key makes it runnable, so it is judged
       // before the credential. The session's fix is `session.setModel`; the Roles pane shows the same fact
-      // as a `model-not-in-catalog` problem (`providers/catalog-role-problems.ts`).
+      // as a `model-not-in-catalog` problem (`providers/catalog-role-problems.ts`). Any OTHER off-catalog
+      // tag gets the same answer, earlier and typed: the daemon never sets the child's
+      // `provider.allowUnlisted`, so the child refused every unlisted model anyway.
       if (isRetiredCatalogTag(model)) {
-        throw new WinterLegRefusal("runtime_selection_refused", `${model} is no longer in this build's model catalog — switch this session to another model`, "model-not-in-catalog");
+        throw new WinterLegRefusal("runtime_selection_refused", `${model} is not in this build's model catalog — switch this session to another model`, "model-not-in-catalog");
       }
       const selection = providerFor(model, deps.home);
       if (selection === undefined) return;

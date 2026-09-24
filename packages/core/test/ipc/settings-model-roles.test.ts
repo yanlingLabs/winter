@@ -126,7 +126,7 @@ describe("settings.modelRoles / settings.setModelRole", () => {
       const info = res.result.roles[role];
       expect(info.model).toBe("deepseek/deepseek-reasoner");
       expect(info.problem).toMatchObject({ reason: "model-not-in-catalog", model: "deepseek/deepseek-reasoner" });
-      expect(info.problem.detail).toContain("no longer in this build's model catalog");
+      expect(info.problem.detail).toContain("not in this build's model catalog");
     }
     // …and the note clears the moment the user picks a live model (derived, never persisted).
     const fixed = await c.request(METHODS.settingsSetModelRole, { role: "provider.model", model: "deepseek/deepseek-v4-pro" });

@@ -61,7 +61,7 @@ export function catalogRoleProblemsFor<T extends { model: string | null; problem
       ...info,
       problem: {
         reason: MODEL_NOT_IN_CATALOG,
-        detail: `${info.model} is no longer in this build's model catalog — pick another model for this role`,
+        detail: `${info.model} is not in this build's model catalog — pick another model for this role`,
         model: info.model,
         at: firstSeenAt,
       },
