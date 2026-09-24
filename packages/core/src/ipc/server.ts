@@ -119,7 +119,7 @@ import { catalogRoleProblemsFor } from "../providers/catalog-role-problems";
 import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, type McpServerSettingsEntry } from "../settings";
 import { addMcpServerInScope, mcpServerInScope, removeMcpServerInScope, type McpScope, type McpScopeTarget } from "../agent/mcp/mcp-write";
 import { saveAnswerEverywhere, saveAnswerInProject, SavedAnswerRefused } from "../agent/saved-answers";
-import { localScopeKeyFor, projectScopeRootFor } from "../runtime-sdk/run-home-input";
+import { localScopeKeyFor, projectScopeRootFor, projectScopeTrusted } from "../runtime-sdk/run-home-input";
 import { readSdkGlobalConfig, SdkFileUnreadable, updateSdkSettings } from "../sdk-files";
 import { bypassAllowedAtSpawn, disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
@@ -1870,7 +1870,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             rpcFromWinterRefusal(err);
           }
         }
-        const trusted = cwd ? (opts.trust?.isTrusted(cwd) ?? false) : false;
+        // R.3 re-review B-2: the project-scope trust rule (`projectScopeTrusted`), as the card and the save use.
+        const trusted = cwd && opts.trust ? projectScopeTrusted(cwd, opts.trust) : false;
         // Broadcast the session_created event to every authed harness (not just attachments —
         // a brand-new session has none) so other harnesses can offer to follow (spec §4.4).
         const created = opts.store.read(sessionId, 0)[0];
@@ -2876,7 +2877,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
                 const cwd = opts.store.meta(p.sessionId).cwd;
                 if (!cwd) throw new SavedAnswerRefused("the session has no project directory to save an \"in this project\" answer in");
                 const root = localScopeKeyFor(cwd); // review I5: the local tier's one key
-                saveAnswerInProject({ root, winterHome, trusted: opts.trust?.isTrusted(cwd) ?? false }, option.rule);
+                // R.3 re-review B-2: the SAME trust the card offered this option under (`bridgeProjectTrustedFor`
+                // = `projectScopeTrusted`: a linked worktree of a trusted repo is trusted).
+                saveAnswerInProject({ root, winterHome, trusted: opts.trust ? projectScopeTrusted(cwd, opts.trust) : false }, option.rule);
               }
             } catch (err) {
               console.error(`approval.respond: the rule ${JSON.stringify(option.rule)} for session ${p.sessionId} was not saved: ${(err as Error).message}`);
