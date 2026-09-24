@@ -348,9 +348,9 @@ export async function startDaemon(opts: {
    *  unless `WINTER_LOGIN_SHELL_PATH=off` (both test preloads set it). `false`: skipped. An object:
    *  the test seam (a fake runner and/or env to update). */
   loginShellPath?: LoginShellPathDeps | false;
-  /** TEST ONLY (WS-21 ordering contract): the router's `reconcileRootForRecovery`, for a test whose linked
-   *  router (0.0.11) has none — used only when the router handle lacks the door. A production caller never
-   *  sets it. */
+  /** TEST ONLY (WS-21 ordering contract): stands in for the router's `reconcileRootForRecovery` in the boot
+   *  sweep and in Migration C's phase 2 — when set it takes precedence over the linked router's own door, so
+   *  a test can observe the reconcile's ordering or make it fail. A production caller never sets it. */
   runRootReconcileForTests?: RootReconcile;
 } = {}): Promise<RunningDaemon> {
   const startedAt = Date.now();
@@ -1412,8 +1412,8 @@ export async function startDaemon(opts: {
   // this process — can exist yet (review M8: the old "skip the folders this process built" set was always
   // empty here); bounded — a failure costs the sweep.
   const linkedRecovery = runtimeSdk === undefined ? undefined : runHomeHandleOf(runtimeSdk.sdk);
-  const routerRecovery: { reconcileRootForRecovery: RootReconcile } | undefined = linkedRecovery
-    ?? (opts.runRootReconcileForTests === undefined ? undefined : { reconcileRootForRecovery: opts.runRootReconcileForTests });
+  const routerRecovery: { reconcileRootForRecovery: RootReconcile } | undefined =
+    (opts.runRootReconcileForTests === undefined ? undefined : { reconcileRootForRecovery: opts.runRootReconcileForTests }) ?? linkedRecovery;
   // Round 4 (review): the sweep runs BEFORE Migration C's phase 2. Phase 2 re-keys transcripts to the
   // canonical cwd; a crashed official resume's staging root still holds its working copy at the key 0.116
   // wrote, and swept AFTER the re-key the router would find no canonical file there and append the whole copy

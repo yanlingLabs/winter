@@ -499,9 +499,16 @@ describe("createWinterRuntimeSdk — run homes (WS-21)", () => {
     expect(opts.handoff?.winterHome).toBe(home);
   });
 
-  test("runHomeOutcome / reconcileRootForRecovery answer undefined on a router without them (0.0.11)", async () => {
-    const { handle } = await build({}, undefined, () => Promise.resolve(undefined));
-    expect(handle.runHomeOutcome?.("any")).toBeUndefined();
-    expect(handle.reconcileRootForRecovery?.("/root")).toBeUndefined();
+  // R.1: this used to pin router 0.0.11 (both answers undefined). The linked router now HAS both doors, and
+  // the handle forwards them: an unknown run id is `pending` (never `safe` — nothing is disposed on a
+  // guess), and a recovery reconcile of a root with nothing in it reports `clean`.
+  test("runHomeOutcome / reconcileRootForRecovery forward the linked router's own doors (a run-home router)", async () => {
+    const runHomeFor = async () => { throw new Error("never called by these doors"); };
+    const { handle } = await build({ runHomeFor }, undefined, () => Promise.resolve(undefined));
+    expect(handle.runHomeOutcome?.("an-unknown-run")).toBe("pending");
+    const root = mkdtempSync(join(tmpdir(), "winter-create-recover-"));
+    const report = await handle.reconcileRootForRecovery?.(root);
+    expect(report?.outcome).toBe("clean");
+    expect(report?.transcripts).toEqual([]);
   });
 });
