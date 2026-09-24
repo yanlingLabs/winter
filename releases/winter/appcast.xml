@@ -193,5 +193,38 @@
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
       <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.116.0/Winter-0.116.0.zip" sparkle:edSignature="fmSNktWwW6qKVrR4dBoKONgugC++XmqjOPcdUrmDpXuiEW5aBOSrxy82M9EmI+Q7PJdC3bF+3cdMjGL8NSp4CQ==" length="508649998" type="application/octet-stream"/>
     </item>
+      <item>
+      <title>0.117.0</title>
+      <description><![CDATA[<p>Winter agent SDK 0.0.22 · Claude Agent SDK 0.3.250</p>
+<h2>Winter models and Claude share one setup</h2>
+<ul>
+  <li><strong>One home for both runtimes.</strong> Skills, agents, commands, output styles, plugins, MCP servers and settings now live in <code>~/.winter/sdk</code>, in Claude Code's own format, and every session reads them the same way whether it runs a Winter model or Claude. Your own skills and a trusted project's skills now reach sessions.</li>
+  <li><strong>Your existing setup moves over by itself.</strong> The first launch migrates <code>~/.winter</code> into the new layout, keeps backups under <code>~/.winter/migration</code>, and leaves links at the old paths. A home in a custom location migrates with <code>winter migrate --sdk-home</code>, which also offers <code>--status</code>, <code>--resume</code> and <code>--rollback</code>.</li>
+  <li><strong>Both runtimes read one project folder</strong>, the project's <code>.winter/</code>, and only once you trust the project. Claude sessions never read a repository's <code>.claude/</code>, <code>CLAUDE.md</code> or <code>.mcp.json</code>. A linked git worktree loads its own <code>.winter/</code>, and trust follows the repository it belongs to.</li>
+  <li><strong>Plugins use Claude Code's format.</strong> <code>winter plugin install &lt;folder&gt;</code> installs from a local marketplace, and a plugin's skills and hooks work on both runtimes. Winter-only extras live in <code>winter-plugin.json</code>.</li>
+  <li><strong>MCP servers work at all three scopes:</strong> <code>winter mcp</code> adds them at local, project or user scope, and a session's MCP tools are offered to the model from its first turn. A session may take up to 2 seconds longer to start its first turn while configured MCP servers connect, the same as Claude Code.</li>
+</ul>
+<h2>Claude sessions</h2>
+<ul>
+  <li><strong>The model you pick is the model that runs.</strong> Every Claude session used to run Claude's default model whatever was selected; the chosen model and effort now reach it, and a session refuses to start if Claude reports a different model.</li>
+  <li><strong>Shell commands return their output.</strong> In a project without a <code>.claude</code> folder, a sandboxed command could end the turn before the model saw what it printed.</li>
+  <li><strong>Switching from Claude to another model works after parallel tool calls.</strong> The first reply on the new model used to be refused by the provider.</li>
+</ul>
+<h2>Security</h2>
+<ul>
+  <li>The sandbox's protections hold for projects and homes whose path contains <code>[</code>, <code>]</code>, <code>*</code> or <code>?</code>.</li>
+  <li>Sandboxed commands can no longer create or change a project's <code>.winter/</code> skills, rules, commands, output styles or agents, at any depth, and commands that leave the sandbox cannot reach Winter's own state through the paths it gives sessions.</li>
+  <li>A project's rules can no longer pull in files from outside the project, and a repository can no longer choose the Claude session's permission mode or model.</li>
+</ul>
+<h2>Models</h2>
+<ul>
+  <li><code>deepseek/deepseek-reasoner</code> is no longer in the catalog. A session that used it asks you to pick another model.</li>
+  <li>Claude models with a dotted version (for example <code>anthropic/claude-haiku-4.5</code>) now reach Anthropic under the name its API accepts.</li>
+</ul>]]></description>
+      <sparkle:version>0.117.0</sparkle:version>
+      <sparkle:shortVersionString>0.117.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.117.0/Winter-0.117.0.zip" sparkle:edSignature="pXDKOWYrKt3ojScb4eIFcHuKoRFHypeik1weS6xvJTYZ/oHP9ajfTZjz2E1RXu2cZnsvXQkmBeJTKF/3EQp9CA==" length="508929228" type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>
