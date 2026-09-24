@@ -6,11 +6,12 @@
 // covered in packages/core's test/plugins/ws21-plugins.test.ts and test/ipc/plugin-rpc.test.ts;
 // this file does not re-prove it.
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ensurePluginScope,
+  pluginManagerOptionsFor,
   revokePluginTokenBestEffort,
   runPluginInstallRoute,
   runPluginListRoute,
@@ -40,6 +41,21 @@ describe("ensurePluginScope", () => {
   });
   test("an unrecognized scope is refused typed", () => {
     expect(ensurePluginScope("nope").kind).toBe("invalid");
+  });
+});
+
+// R.3 I-2: the no-daemon path writes the LOCAL scope where the run home reads it (`localScopeKeyFor`, a linked
+// worktree's own top) — never `repoRootFor`'s main checkout. The project scope is unchanged.
+describe("pluginManagerOptionsFor — the local scope's file", () => {
+  test("from a linked worktree, local is the worktree's .winter/settings.local.json", () => {
+    const repo = realpathSync(mkdtempSync(join(tmpdir(), "winter-cli-i2-repo-")));
+    const git = (args: string[], cwd: string) => expect(Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "ignore", stderr: "ignore" }).exitCode).toBe(0);
+    git(["init", "-q"], repo);
+    git(["-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "i"], repo);
+    const wt = join(realpathSync(mkdtempSync(join(tmpdir(), "winter-cli-i2-wt-"))), "wt");
+    git(["worktree", "add", "-q", "-b", `i2-${Math.random().toString(16).slice(2)}`, wt], repo);
+    const opts = pluginManagerOptionsFor(mkdtempSync(join(tmpdir(), "winter-cli-i2-home-")), wt);
+    expect(opts.settingsPathFor("local")).toBe(join(wt, ".winter", "settings.local.json"));
   });
 });
 

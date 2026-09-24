@@ -7,7 +7,7 @@
 // enable/disable/update/list/marketplace.*), role-rejection, and scope resolution, with a FAKE
 // supervisor spawn (no real OS process) — same split precedent server.test.ts's own header notes.
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@yanlinglabs/winter-protocol";
@@ -715,6 +715,29 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
       },
       hooks: [],
     }]);
+  });
+
+  // R.3 I-2: the LOCAL scope is keyed like every other local-tier reader and writer (`localScopeKeyFor`: a
+  // linked worktree's OWN top, the run home's `gitRoot ?? cwd`), never `repoRootFor`, which follows a worktree
+  // to its main checkout — where the run home never reads it.
+  test("R.3 I-2: local scope from a linked worktree writes the WORKTREE's .winter/settings.local.json", async () => {
+    const { c } = await boot();
+    const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-mkt-"));
+    writeMarketplace(mktDir);
+    await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+    const repo = realpathSync(mkdtempSync(join(tmpdir(), "winter-plugin-i2-repo-")));
+    const git = (args: string[], cwd: string) => expect(Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "ignore", stderr: "ignore" }).exitCode).toBe(0);
+    git(["init", "-q"], repo);
+    git(["-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "i"], repo);
+    const wt = join(realpathSync(mkdtempSync(join(tmpdir(), "winter-plugin-i2-wt-"))), "wt");
+    git(["worktree", "add", "-q", "-b", `i2-${Math.random().toString(16).slice(2)}`, wt], repo);
+
+    const installRes = await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "local", cwd: wt });
+    expect(installRes.result?.ok).toBe(true);
+    expect(JSON.parse(readFileSync(join(wt, ".winter", "settings.local.json"), "utf8")).enabledPlugins["p@m"]).toBe(true);
+    expect(existsSync(join(repo, ".winter", "settings.local.json"))).toBe(false);
+    const listRes = await c.request(METHODS.pluginList, { cwd: wt });
+    expect(listRes.result.plugins.map((p: { scope: string; enabled: boolean }) => [p.scope, p.enabled])).toEqual([["local", true]]);
   });
 
   test("project/local scope without cwd is refused typed", async () => {
