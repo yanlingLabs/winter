@@ -9,11 +9,12 @@
 //   R1  the store's own log is what a resume re-pushes (`unconsumed` over `store.read`).
 import { describe, expect, test } from "bun:test";
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { storeHomeFor, storeProjectsDir } from "../../src/agent/paths";
 import { Database } from "bun:sqlite";
 import { migrationCManifestPath, migrationCState, rollbackMigrationC } from "../../src/migration/migrate-c";
 import { setRunHomeSupportForTests } from "../../src/runtime-sdk/run-home-support";
+import { recordedRunHomes } from "../helpers/run-homes";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Options, Query } from "@yanlinglabs/winter-agent-sdk";
@@ -89,7 +90,11 @@ class FakeQuery {
 
 const result = (): Frame => ({ type: "result", subtype: "success", is_error: false, permission_denials: [], result: "" });
 
-function table(overrides: Partial<WinterLegDeps> = {}, runtimeExtra: Record<string, unknown> = {}, wrapSdk?: (sdk: ReturnType<typeof createRuntimeSdk>) => ReturnType<typeof createRuntimeSdk>) {
+function table(overrides: Partial<WinterLegDeps> = {}, runtimeExtra: Record<string, unknown> = {}, wrapSdk?: (sdk: ReturnType<typeof createRuntimeSdk>) => ReturnType<typeof createRuntimeSdk>, opts: { legacyRouter?: boolean; runHomes?: Parameters<typeof recordedRunHomes>[1] } = {}) {
+  // `legacyRouter`: the PRE-run-home branch (router 0.0.11) the daemon still keeps behind its feature
+  // detection — the support flag pinned false, a router without `requireRunHome`, and no run-home deps.
+  // Dead once R.4 pins a run-home router for good; kept only for the tests of that branch.
+  if (opts.legacyRouter === true) setRunHomeSupportForTests(false);
   const home = mkdtempSync(join(tmpdir(), "winter-table-"));
   const store = new SessionStore(home);
   const hub = new SessionHub(store);
@@ -104,6 +109,9 @@ function table(overrides: Partial<WinterLegDeps> = {}, runtimeExtra: Record<stri
     brand: CORE_BRAND,
     directoryStore: createInMemoryRuntimeDirectoryStore(),
     handoff: { winterHome: home },
+    // WS-21: the production shape — a run-home router (`create.ts` passes this whenever run homes are wired);
+    // its store is the shared runtime home, the only store a run home may be applied against.
+    ...(opts.legacyRouter === true ? {} : { requireRunHome: true }),
   });
   const tracked: string[] = [];
   const runtime = {
@@ -118,6 +126,10 @@ function table(overrides: Partial<WinterLegDeps> = {}, runtimeExtra: Record<stri
   } as unknown as WinterRuntimeSdk;
   const settings = { runtimes: { winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } } as unknown as Settings;
   const logs: string[] = [];
+  // WS-21 (R.1): the production shape — REAL run homes (the router's own `buildRunHome`), recorded. A test
+  // that wants the pre-run-home path passes `runHome: undefined` AND pins `setRunHomeSupportForTests(false)`
+  // (router 0.0.11); without the pin the driver refuses `run_home_required` (its guard).
+  const runHomes = recordedRunHomes(home, opts.runHomes);
   const drivers = createWinterSessionDrivers({
     home, settings: () => settings, runtime, records, checkpoints, store, hub,
     secrets: new FileSecretStore(join(home, "secrets.json")),
@@ -126,10 +138,14 @@ function table(overrides: Partial<WinterLegDeps> = {}, runtimeExtra: Record<stri
     rootsOf: () => [], tmpDirOf: () => home, outDirOf: () => home, memoryKeyOf: () => "k",
     idleTimeoutMs: () => 60_000, endGraceMs: 20,
     log: (line) => { logs.push(line); },
+    ...(opts.legacyRouter === true ? {} : { runHome: runHomes.deps }),
     ...overrides,
   });
-  const close = (): void => { try { store.close(); } catch { /* closed */ } try { rs.close(); } catch { /* closed */ } rmSync(home, { recursive: true, force: true }); };
-  return { home, store, hub, records, drivers, queries, tracked, logs, close, q: () => queries[queries.length - 1]! };
+  const close = (): void => {
+    try { store.close(); } catch { /* closed */ } try { rs.close(); } catch { /* closed */ } rmSync(home, { recursive: true, force: true });
+    if (opts.legacyRouter === true) setRunHomeSupportForTests(undefined);
+  };
+  return { home, store, hub, records, drivers, queries, tracked, logs, runHomes, close, q: () => queries[queries.length - 1]! };
 }
 
 describe("createWinterSessionDrivers — the table", () => {
@@ -152,8 +168,10 @@ describe("createWinterSessionDrivers — the table", () => {
   // path (not just `buildWinterOptions` in isolation, mode-matrix.test.ts's job) — a real
   // `<home>/agents/*.md` file, written to the driver table's own `home` BEFORE the session is
   // created, reaches the child's `Options.agents` verbatim.
-  test("item 3: a real <home>/agents/*.md file reaches the child's Options.agents", async () => {
-    const t = table();
+  // R.1: `Options.agents` is the LEGACY branch's delivery (router 0.0.11); on a run-home build the router
+  // copies `sdk/agents/*.md` into the run folder instead (the next test, and the APPLIED case below).
+  test("item 3 (legacy branch): a real <home>/agents/*.md file reaches the child's Options.agents", async () => {
+    const t = table({}, {}, undefined, { legacyRouter: true });
     try {
       mkdirSync(join(t.home, "agents"), { recursive: true });
       writeFileSync(
@@ -163,6 +181,23 @@ describe("createWinterSessionDrivers — the table", () => {
       const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
       const session = await t.drivers.create(sid);
       expect(t.q().options.agents).toEqual({ "code-reviewer": { description: "Reviews code for bugs", prompt: "You review code." } });
+      await session.end();
+    } finally { t.close(); }
+  });
+
+  test("item 3 (run home): a real sdk/agents/*.md reaches the child through its run folder, never Options.agents", async () => {
+    const t = table();
+    try {
+      mkdirSync(join(storeHomeFor(t.home), "agents"), { recursive: true });
+      writeFileSync(
+        join(storeHomeFor(t.home), "agents", "reviewer.md"),
+        ["---", "name: code-reviewer", "description: Reviews code for bugs", "---", "", "You review code."].join("\n"),
+      );
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const session = await t.drivers.create(sid);
+      expect(t.q().options.agents).toBeUndefined();
+      const dir = join(t.runHomes.built[0]!.dir, "agents");
+      expect(readdirSync(dir).map((f) => readFileSync(join(dir, f), "utf8")).some((body) => body.includes("name: code-reviewer") && body.includes("You review code."))).toBe(true);
       await session.end();
     } finally { t.close(); }
   });
@@ -300,11 +335,33 @@ describe("createWinterSessionDrivers — the table", () => {
     } finally { t.close(); }
   });
 
-  test("fix wave (review row 7): configured MCP servers ride the session's Options.mcpServers beside the capability servers; a daemon-owned name collides → a TYPED refusal naming it, no child", async () => {
+  // R.1: on a run-home build the configured servers ride the run folder's generated `.winter.json` (the router
+  // drops a daemon-owned name there, `reserved-name`); the legacy branch below is router 0.0.11's delivery.
+  test("row 7 (run home): configured MCP servers ride the run folder, never Options.mcpServers; a daemon-owned name is dropped and reported", async () => {
+    // the table's run-home builder is told the capability-server names, as daemon.ts's is
+    const t = table({
+      buildSessionCapabilities: () => ({ "winter__browser": { type: "sdk", name: "winter__browser", instance: {} } }),
+      extraMcpServers: () => ({ never_read: { type: "stdio", command: "never" } }),
+    }, {}, undefined, { runHomes: { reservedMcpServerNames: ["winter__browser"] } });
+    try {
+      mkdirSync(storeHomeFor(t.home), { recursive: true });
+      writeFileSync(join(storeHomeFor(t.home), ".winter.json"), JSON.stringify({ mcpServers: { fake: { type: "stdio", command: "bun", args: ["run", "fake.ts"] }, winter__browser: { type: "stdio", command: "evil" } } }));
+      const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-row7-")));
+      const session = await t.drivers.create(t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd }));
+      expect(Object.keys(t.q().options.mcpServers ?? {})).toEqual(["winter__browser"]); // the capability server only
+      const runHome = t.runHomes.built[0]!;
+      const generated = JSON.parse(readFileSync(join(runHome.dir, ".winter.json"), "utf8")) as { mcpServers?: Record<string, unknown> };
+      expect(Object.keys(generated.mcpServers ?? {}).sort()).toEqual(["fake"]);
+      expect(runHome.report.droppedMcpServers).toEqual([{ name: "winter__browser", reason: "reserved-name" }]);
+      await session.end();
+    } finally { t.close(); }
+  });
+
+  test("fix wave (review row 7, legacy branch): configured MCP servers ride the session's Options.mcpServers beside the capability servers; a daemon-owned name collides → a TYPED refusal naming it, no child", async () => {
     const t = table({
       buildSessionCapabilities: () => ({ "winter__browser": { type: "sdk", name: "winter__browser", instance: {} } }),
       extraMcpServers: (session) => ({ fake: { type: "stdio", command: "bun", args: ["run", "fake.ts", session.cwd] } }),
-    });
+    }, {}, undefined, { legacyRouter: true });
     try {
       const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd: "/repo" });
       const session = await t.drivers.create(sid);
@@ -317,7 +374,7 @@ describe("createWinterSessionDrivers — the table", () => {
     const c = table({
       buildSessionCapabilities: () => ({ "winter__browser": { type: "sdk", name: "winter__browser", instance: {} } }),
       extraMcpServers: () => ({ "winter__browser": { type: "stdio", command: "evil" } }),
-    });
+    }, {}, undefined, { legacyRouter: true });
     try {
       spawnsBefore.push(c.queries.length);
       const sid = c.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd: "/repo" });
@@ -757,10 +814,13 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
 
   // Lane B (2026-09-22): the user's SAVED allow rules reach the child — read through the dep at every
   // incarnation (so a rule saved mid-session lands at the next one), translated onto `permissions.allow`.
-  test("saved allow rules ride a CODE child's Options.permissions.allow, read live per incarnation", async () => {
+  // R.1: the LEGACY branch's delivery. On a run-home build saved rules reach the child through the run
+  // folder's settings tiers and `Options.permissions.allow` carries only Winter's fixed rules — the APPLIED
+  // case of "the driver stops building run-home inputs" asserts both halves of that.
+  test("saved allow rules ride a CODE child's Options.permissions.allow, read live per incarnation (legacy branch)", async () => {
     let saved: string[] = ["Bash(gh repo:*)"];
     const seenCwds: string[] = [];
-    const t = table({ persistedAllowRules: (cwd) => { seenCwds.push(cwd); return saved; } });
+    const t = table({ persistedAllowRules: (cwd) => { seenCwds.push(cwd); return saved; } }, {}, undefined, { legacyRouter: true });
     try {
       const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", approvalPolicy: "ask" });
       await t.drivers.create(sid);
@@ -996,28 +1056,11 @@ describe("role efforts on the runtime leg (pins.dispatch, and provider.model's d
 // injected through `WinterLegDeps.runHome`, and `sdk.query` is observed directly (0.0.11 strips
 // `runtime` before the peer, as a run-home router applies it).
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-describe("WS-21: run homes on the Winter leg (stubbed router builder)", () => {
-  function stubRunHomes() {
-    const built: import("@yanlinglabs/winter-runtime-sdk").RunHomeInput[] = [];
-    const disposed: string[] = [];
-    const facts: import("../../src/runtime-sdk/run-home-input").RunHomeSessionFacts[] = [];
-    const runHome: NonNullable<WinterLegDeps["runHome"]> = {
-      inputFor: (f) => {
-        facts.push(f);
-        return { home: "/h", mode: f.mode, dispatchChild: f.dispatchChild, leg: f.leg, cwd: f.cwd, trustedProjectRoot: null, gitRoot: null, mcpDisabled: [], reservedMcpServerNames: [], memoryDir: "/m" };
-      },
-      build: async (input) => {
-        built.push(input);
-        const runId = `run-${built.length}`;
-        return {
-          runId, dir: `/h/cache/runs/${runId}`, sdkHome: "/h/sdk", input, effectiveSettings: {},
-          report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [] },
-          dispose: async () => { disposed.push(runId); },
-        };
-      },
-    };
-    return { built, disposed, facts, runHome };
-  }
+describe("WS-21: run homes on the Winter leg (the router's real buildRunHome, recorded)", () => {
+  // R.1: these used to stub the builder with hand-built `RunHome` objects; a real run-home router refuses
+  // those (`run_home_foreign` — it points a child only at a folder `buildRunHome` built). Every case now
+  // records the calls and delegates to the router's own builder (`test/helpers/run-homes.ts`), and a
+  // disposal is observed as the run folder being gone.
   const querySpy = () => {
     const calls: Array<{ options: Options & { runtime?: { runHome?: { runId: string } } } }> = [];
     let failNext = false;
@@ -1033,9 +1076,9 @@ describe("WS-21: run homes on the Winter leg (stubbed router builder)", () => {
     });
     return { calls, wrap, failOnce: () => { failNext = true; } };
   };
-  const settle = async (disposed: string[], n: number): Promise<void> => {
+  const settle = async (disposed: () => string[], n: number): Promise<void> => {
     const until = Date.now() + 2000;
-    while (disposed.length < n && Date.now() < until) await Bun.sleep(5);
+    while (disposed().length < n && Date.now() < until) await Bun.sleep(5);
   };
 
   // WS-21 (L2 O-1): the Winter child keys its transcript by realpath(cwd) while the router keys by the cwd
@@ -1043,35 +1086,34 @@ describe("WS-21: run homes on the Winter leg (stubbed router builder)", () => {
   // transcript under a key the child never wrote. The daemon hands BOTH the canonical path: RunHomeInput.cwd,
   // Options.cwd and the recorded transcript key / backend root.
   test("L2 O-1: a symlinked cwd reaches the run home, Options.cwd and the record as its realpath", async () => {
-    const rh = stubRunHomes();
     const spy = querySpy();
-    const t = table({ runHome: rh.runHome }, {}, spy.wrap);
+    const t = table({}, {}, spy.wrap);
     try {
       const real = realpathSync(mkdtempSync(join(tmpdir(), "winter-o1-real-")));
       const link = join(realpathSync(mkdtempSync(join(tmpdir(), "winter-o1-link-"))), "proj");
       symlinkSync(real, link);
       const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd: link });
       await t.drivers.create(sid);
-      expect(rh.built[0]!.cwd).toBe(real);
+      expect(t.runHomes.inputs[0]!.cwd).toBe(real);
       expect(spy.calls[0]!.options.cwd).toBe(real);
       const record = t.records.get(sid)!;
       expect(record.transcriptProjectKey).toBe(transcriptProjectKey(real));
-      expect(record.backendRoot.endsWith(transcriptProjectKey(real))).toBe(true);
+      expect(record.backendRoot).toBe(join(storeProjectsDir(t.home), transcriptProjectKey(real)));
     } finally { t.close(); }
   });
 
   test("optionsFor awaits buildRunHome and passes the result as options.runtime.runHome", async () => {
-    const rh = stubRunHomes();
     const spy = querySpy();
-    const t = table({ runHome: rh.runHome }, {}, spy.wrap);
+    const t = table({}, {}, spy.wrap);
     try {
       const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
       const session = await t.drivers.create(sid);
-      expect(rh.built).toHaveLength(1);
+      expect(t.runHomes.built).toHaveLength(1);
       expect(spy.calls).toHaveLength(1);
-      expect(spy.calls[0]!.options.runtime?.runHome?.runId).toBe("run-1");
-      expect(rh.built[0]!.leg).toBe("winter");
-      expect(rh.built[0]!.cwd).toBe(spy.calls[0]!.options.cwd!); // the router refuses a run home for another cwd
+      expect(spy.calls[0]!.options.runtime?.runHome?.runId).toBe(t.runHomes.built[0]!.runId);
+      expect(t.runHomes.inputs[0]!.leg).toBe("winter");
+      expect(t.runHomes.inputs[0]!.cwd).toBe(spy.calls[0]!.options.cwd!); // the router refuses a run home for another cwd
+      expect(existsSync(t.runHomes.built[0]!.dir)).toBe(true);           // a real folder under <home>/cache/runs
       // L3.4: the router applies the run home, so it — not the daemon — pins the home and the sources.
       expect("WINTER_HOME" in (spy.calls[0]!.options.env ?? {})).toBe(false);
       expect(spy.calls[0]!.options.settingSources).toEqual(["user"]);
@@ -1079,126 +1121,129 @@ describe("WS-21: run homes on the Winter leg (stubbed router builder)", () => {
     } finally { t.close(); }
   });
 
-  test("a router without buildRunHome (no runHome dep) builds nothing and keeps WINTER_HOME and settingSources: []", async () => {
+  // The pre-run-home branch (router 0.0.11), still behind the daemon's feature detection until R.4.
+  test("a router without buildRunHome (no runHome dep; the legacy branch) builds nothing and keeps WINTER_HOME and settingSources: []", async () => {
     const spy = querySpy();
-    const t = table({}, {}, spy.wrap);
+    const t = table({}, {}, spy.wrap, { legacyRouter: true });
     try {
       const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", approvalPolicy: "ask" });
       const session = await t.drivers.create(sid);
       expect("runtime" in spy.calls[0]!.options).toBe(false);
       expect(spy.calls[0]!.options.env?.WINTER_HOME).toBe(t.home);
       expect(spy.calls[0]!.options.settingSources).toEqual([]);
+      expect(t.runHomes.built).toHaveLength(0);
       await session.end();
     } finally { t.close(); }
   });
 
+  test("R.1 guard: on a run-home build, a driver table with NO run-home deps refuses typed and records nothing", async () => {
+    const t = table({ runHome: undefined });
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const err = await t.drivers.create(sid).then(() => undefined, (e: unknown) => e as { code?: string });
+      expect(err?.code).toBe("run_home_required");
+      expect(t.records.get(sid)).toBeUndefined();
+      expect(t.queries).toHaveLength(0);
+    } finally { t.close(); }
+  });
+
   test("the session facts: mode, dispatchChild (origin dispatch-child), workdir-less", async () => {
-    const rh = stubRunHomes();
-    const t = table({ runHome: rh.runHome });
+    const t = table();
     try {
       const chat = await t.drivers.create(t.store.createSession("t", { mode: "chat", model: "winter-test/echo" }));
       const child = await t.drivers.create(t.store.createSession("t", { mode: "code", model: "winter-test/echo", approvalPolicy: "ask", origin: "dispatch-child" }));
-      expect(rh.facts.map((f) => [f.mode, f.dispatchChild, f.leg])).toEqual([["chat", false, "winter"], ["code", true, "winter"]]);
-      expect(rh.facts[1]!.workdirLess).toBe(true); // no cwd, no dirs: the session tmp dir
+      expect(t.runHomes.facts.map((f) => [f.mode, f.dispatchChild, f.leg])).toEqual([["chat", false, "winter"], ["code", true, "winter"]]);
+      expect(t.runHomes.facts[1]!.workdirLess).toBe(true); // no cwd, no dirs: the session tmp dir
       await chat.end();
       await child.end();
     } finally { t.close(); }
   });
 
   test("EVERY incarnation path builds a fresh run home: create, resume after an idle end, eviction and replacement", async () => {
-    const rh = stubRunHomes();
     const spy = querySpy();
-    const t = table({ runHome: rh.runHome }, {}, spy.wrap);
+    const t = table({}, {}, spy.wrap);
     try {
       const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
       const session = await t.drivers.create(sid);                       // create
-      expect(rh.built).toHaveLength(1);
+      expect(t.runHomes.built).toHaveLength(1);
       await session.end();                                               // the incarnation ends (resumable)…
       await (await t.drivers.ensure(sid))!.open();                        // …resume
-      expect(rh.built).toHaveLength(2);
+      expect(t.runHomes.built).toHaveLength(2);
       await t.drivers.evict(sid);                                         // eviction (a credential write, a
       await (await t.drivers.ensure(sid))!.open();                        //  policy switch across bypass,
-      expect(rh.built).toHaveLength(3);                                   //  a cross-family model switch)
+      expect(t.runHomes.built).toHaveLength(3);                           //  a cross-family model switch)
       t.store.setModel(sid, "winter-test/tooluse");                       // a model change while parked…
       await t.drivers.evict(sid);
       await (await t.drivers.ensure(sid))!.open();                        // …reaches the next incarnation
-      expect(rh.built).toHaveLength(4);
+      expect(t.runHomes.built).toHaveLength(4);
       expect(new Set(spy.calls.map((c) => c.options.runtime?.runHome?.runId)).size).toBe(4); // never reused
       await t.drivers.evict(sid);
     } finally { t.close(); }
   });
 
   test("an ended incarnation's run home is disposed once the router says safe (after the query drained or closed)", async () => {
-    const rh = stubRunHomes();
     let ended = false;
     // L2 fix round 1 (M6): the router reports a Winter run home `pending` while the child runs and `safe`
-    // once the query finished, was closed or failed — the stub answers the same way.
-    const t = table({ runHome: rh.runHome }, { runHomeOutcome: () => (ended ? "safe" : "pending") });
+    // once the query finished, was closed or failed — the stand-in answers the same way.
+    const t = table({}, { runHomeOutcome: () => (ended ? "safe" : "pending") });
     try {
       const session = await t.drivers.create(t.store.createSession("t", { mode: "chat", model: "winter-test/echo" }));
-      expect(rh.disposed).toEqual([]);
+      expect(t.runHomes.disposed()).toEqual([]);
       ended = true;
       await session.end();
-      await settle(rh.disposed, 1);
-      expect(rh.disposed).toEqual(["run-1"]);
+      await settle(t.runHomes.disposed, 1);
+      expect(t.runHomes.disposed()).toEqual([t.runHomes.built[0]!.runId]);
     } finally { t.close(); }
   });
 
   test("pending, quarantined and no answer all KEEP the folder — dispose only on safe (L2 fix round 1)", async () => {
-    for (const [outcome, expected] of [["pending", []], ["quarantined", []], [undefined, []]] as const) {
-      const rh = stubRunHomes();
-      const t = table({ runHome: rh.runHome }, { runHomeOutcome: () => outcome });
+    for (const outcome of ["pending", "quarantined", undefined] as const) {
+      const t = table({}, { runHomeOutcome: () => outcome });
       try {
         const session = await t.drivers.create(t.store.createSession("t", { mode: "chat", model: "winter-test/echo" }));
         await session.end();
-        await settle(rh.disposed, expected.length);
-        await Bun.sleep(20);
-        expect(rh.disposed).toEqual([...expected]);
+        await Bun.sleep(40);
+        expect(t.runHomes.built).toHaveLength(1);
+        expect(t.runHomes.disposed()).toEqual([]);
+        expect(existsSync(t.runHomes.built[0]!.dir)).toBe(true);
       } finally { t.close(); }
     }
   });
 
   test("a run home built for an open that then FAILS is disposed immediately", async () => {
-    const rh = stubRunHomes();
     const spy = querySpy();
-    const t = table({ runHome: rh.runHome }, {}, spy.wrap);
+    const t = table({}, {}, spy.wrap);
     try {
       const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
       spy.failOnce();
       // The router's typed refusal is forwarded verbatim as the refusal's code (→ `data.code`).
       const err = await t.drivers.create(sid).then(() => undefined, (e: unknown) => e as { code?: string });
       expect(err?.code).toBe("run_home_required");
-      expect(rh.built).toHaveLength(1);
-      expect(rh.disposed).toEqual(["run-1"]);
+      expect(t.runHomes.built).toHaveLength(1);
+      expect(t.runHomes.disposed()).toEqual([t.runHomes.built[0]!.runId]);
     } finally { t.close(); }
   });
 });
 
 // WS-21 L3.4 (spec §6.1): with a run home applied, the driver hands the child none of the inputs the run
-// folder carries — the same planted world, with and without a (stubbed) run-home router.
+// folder carries — the same planted world, with a real run-home router and on the legacy (0.0.11) branch.
 describe("WS-21: the driver stops building run-home inputs once a run home is applied", () => {
-  const stubBuilder: NonNullable<WinterLegDeps["runHome"]> = {
-    inputFor: (f) => ({ home: "/h", mode: f.mode, dispatchChild: f.dispatchChild, leg: f.leg, cwd: f.cwd, trustedProjectRoot: null, gitRoot: null, mcpDisabled: [], reservedMcpServerNames: [], memoryDir: "/m" }),
-    build: async (input) => ({
-      runId: "r", dir: "/h/cache/runs/r", sdkHome: "/h/sdk", input, effectiveSettings: {},
-      report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [] },
-      dispose: async () => {},
-    }),
-  };
   // The inputs a daemon wires, and the files it reads them from (the user agent, the sdk allow rule).
   const inputs: Partial<WinterLegDeps> = {
     extraMcpServers: () => ({ user_srv: { type: "stdio", command: "node" } }),
     persistedAllowRules: () => ["Bash(git status)"],
   };
   const plantFiles = (home: string): void => {
-    mkdirSync(join(home, "agents"), { recursive: true });
-    writeFileSync(join(home, "agents", "reviewer.md"), ["---", "name: code-reviewer", "description: Reviews code", "---", "", "You review code."].join("\n"));
+    // `storeHomeFor`: `sdk/` on a run-home build (where the router reads the user tier), `<home>` on the
+    // legacy branch (where the daemon reads it itself).
+    mkdirSync(join(storeHomeFor(home), "agents"), { recursive: true });
+    writeFileSync(join(storeHomeFor(home), "agents", "reviewer.md"), ["---", "name: code-reviewer", "description: Reviews code", "---", "", "You review code."].join("\n"));
     updateSdkSettings(home, () => ({ permissions: { allow: ["Bash(npm test:*)"] } }));
   };
 
   for (const applied of [false, true]) {
-    test(`run home ${applied ? "APPLIED: none of them" : "not applied: all of them, as today"}`, async () => {
-      const t = table({ ...inputs, ...(applied ? { runHome: stubBuilder } : {}) });
+    test(`run home ${applied ? "APPLIED: none of them — the run folder carries them instead" : "not applied (the legacy branch): all of them"}`, async () => {
+      const t = table(inputs, {}, undefined, { legacyRouter: !applied });
       try {
         plantFiles(t.home);
         const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", approvalPolicy: "ask" });
@@ -1213,6 +1258,11 @@ describe("WS-21: the driver stops building run-home inputs once a run home is ap
           expect(allow).not.toContain("Bash(git status)");
           expect(allow).not.toContain("Bash(npm test:*)");
           expect(allow).toEqual(expect.arrayContaining(["Read", "Glob", "Grep"]));
+          // …because the run folder the child runs in carries them: the user agent (copied) and the user's
+          // own sdk/settings.json allow rule (the folder's user tier).
+          const runHome = t.runHomes.built[0]!;
+          expect(readdirSync(join(runHome.dir, "agents")).some((f) => readFileSync(join(runHome.dir, "agents", f), "utf8").includes("name: code-reviewer"))).toBe(true);
+          expect(JSON.stringify(runHome.effectiveSettings)).toContain("Bash(npm test:*)");
         } else {
           expect(o.agents).toBeDefined();
           // L4 request 2: no plugin views or skill names from the daemon on any build
