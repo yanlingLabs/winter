@@ -758,10 +758,12 @@ export function officialInputFor(
         //
         // MEASURED against the real 0.3.250 CLI (`official-leg.e2e.test.ts`, "C1: the control-plane
         // fence"): the official runtime's own `Settings.sandbox.filesystem.denyWrite`/`denyRead`
-        // field names are IDENTICAL to Winter's `SandboxSettingsConfig` shape (both real DIRECTORY
-        // paths, never globs — `sandboxConfigFor`'s own doc), so `sandboxConfigFor(home)` is reused
-        // with ONE translation only: `childSandboxConfigFor` spells a `[` for the sandbox glob grammar
-        // (router 3279a1d; the Winter leg is sent the same spelling since agent SDK 5e37898). `permissions.deny`'s `Tool(specifier)` grammar, however, is NOT the
+        // field names are IDENTICAL to Winter's `SandboxSettingsConfig` shape, so the daemon's one fence
+        // is reused, in the ONE spelling both legs are sent: `childSandboxConfigFor`, the literal
+        // `sandboxConfigFor` list with every `[` spelled `[[]`. Both runtimes read an entry holding
+        // `* ? [ ]` as a glob rendered as a seatbelt regex (claude's `Rt`; the Winter runtime since agent
+        // SDK round 11's port of it), so a raw `[`-named home or project would fence nothing on either
+        // (C-1). `permissions.deny`'s `Tool(specifier)` grammar, however, is NOT the
         // same matcher as Winter's private reimplementation: the real CLI denied a target with
         // `controlPlaneDenyRules`'s `//`-anchored absolute forms UNCHANGED — no second anchoring
         // scheme was needed — confirmed by the same e2e denying a real `<home>/run/probe.txt` Read
@@ -795,8 +797,8 @@ export function officialInputFor(
             ...(deps.policy === "bypass" ? {} : { disableBypassPermissionsMode: "disable" as const }),
           },
           // `input.cwd`: the session's project agent definitions (`<cwd>/.winter/agents`) are fenced too.
-          // Router 3279a1d: spelled for claude's SANDBOX glob grammar (`childSandboxConfigFor`), so a
-          // `[`-named home or project is still fenced here — the same list the Winter leg is sent.
+          // Spelled for the sandbox glob grammar both runtimes read (`childSandboxConfigFor`, C-1), so a
+          // `[`-named home or project is still fenced — the same list the Winter spawn is sent.
           sandbox: childSandboxConfigFor(deps.home, input.cwd),
         },
         // 0.0.17 / the 2026-09-18 ruling: `leg: "official"` is what keeps claude's OWN `WebFetch` and

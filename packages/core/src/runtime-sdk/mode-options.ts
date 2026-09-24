@@ -917,11 +917,13 @@ export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSett
   return {
     enabled: true,
     filesystem: {
-      // REAL DIRECTORY PATHS, not globs (review F8). Every entry is rendered as a seatbelt
-      // **subpath** — `(deny file-write* (subpath "<canon(p)>"))`, `sandbox/profile.ts:335` — so a
-      // glob like `**/.winter/permissions.local.json` or `<home>/run/**` becomes a literal path that
-      // never exists and denies nothing. A subpath denies a real directory and everything under it,
-      // which is the only shape this consumer has.
+      // REAL PATHS, never globs (review F8) — this list is LITERAL, and is never handed to a child
+      // as-is: a spawn gets `childSandboxConfigFor`'s spelling of it (below). A plain entry is
+      // rendered as a seatbelt **subpath** — `(deny file-write* (subpath "<canon(p)>"))` — which
+      // denies a real directory and everything under it. Since agent SDK round 11 (`2a118c6`, claude's
+      // `Rt`: `splitDenyPathsByGlobShape`) an entry holding `* ? [ ]` is rendered as a REGEX instead, on
+      // the Winter leg exactly as on claude — so a real path that merely CONTAINS `[` (a `[wip] app`
+      // project) must be spelled for that grammar before it reaches either runtime.
       //
       // What that means for the three control-plane FILENAMES: they cannot be expressed here at all
       // (a subpath is a directory, and denying `<x>/.winter` wholesale would take the MEMDIR with
@@ -959,7 +961,7 @@ export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSett
       // project agent definitions the daemon loads for it (`loadProjectAgentDefinitions(cwd)` reads
       // exactly `<cwd>/.winter/agents`): sandboxed Bash on the Winter leg could write that directory,
       // which the write TOOLS were already denied (`**/.winter/agents/**`). An any-depth form is not
-      // expressible here (subpaths only), and only this one path is ever loaded.
+      // expressible here (real paths only), and only this one path is ever loaded.
       //
       // WS-21 (spec §7.1): the shared runtime home's self-grant files and stores — `sdk/settings.json`,
       // `sdk/.winter.json` (files: a subpath of a file path is that file), `sdk/agents`, `sdk/plugins` —
@@ -981,8 +983,8 @@ export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSett
       // …plus `runtimes/` (8a: the runtime store is never model-readable — the engine's read tool
       // carried this denial; on the Winter leg the sandbox and the Read/Glob/Grep deny rules do).
       // …plus (WS-21 §7.1) `sdk/.winter.json`. The run folders' generated config files are a
-      // regex row in the spec, and neither SDK's sandbox takes a regex (string subpaths only): the deny
-      // rules and the path fence hook carry them (DECISION 12).
+      // regex row in the spec, which this real-path list does not express: the deny rules and the path
+      // fence hook carry them (DECISION 12).
       denyRead: [join(home, "run"), join(home, "runtimes"), join(sdkHomeFor(home), ".winter.json")],
     },
     // `allowUnsandboxedCommands` is deliberately NOT set. It is consulted only together with
@@ -1000,24 +1002,21 @@ export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSett
 }
 
 /**
- * The SAME sandbox fence, spelled for the sandbox glob grammar BOTH runtimes now read — what a child is
- * actually sent, on either leg.
+ * The SAME sandbox fence, spelled for the sandbox glob grammar BOTH runtimes read — what a child is sent,
+ * on either leg (the Winter spawn below, `official-options.ts`'s flag settings).
  *
- * claude treats a `sandbox.filesystem` entry holding any of `* ? [ ]` as a GLOB (rendered as a seatbelt
- * regex, where a backslash is literal) — so under a home or project whose path holds a `[` (a directory
- * named `[wip] app`), a raw `denyWrite` entry is a character class that misses the literal path and
- * fences NOTHING (measured by the router, 3279a1d). The router's `escapeSandboxGlobPath` spells the one
- * escape that grammar honours (`[` → `[[]`); `*`/`?` have no spelling there and stay raw, which for a
- * DENY is the wider, stricter form. Only deny lists are passed through it: this fence has no allow entries.
- *
- * The Winter leg reads the same grammar since agent SDK 5e37898 (claude's `Li`/`Rt` port: a glob-shaped
- * deny renders as an SBPL regex clause). MEASURED on the built binary
- * (`sandbox-glob-escape-measure.e2e.test.ts`): a raw `[wip] app` deny let a sandboxed Bash write through,
- * the spelled one held. So both legs get this spelling — the router README's "the Winter leg keeps it
- * literal" predates that SDK change.
+ * Why both legs (C-1, the R.3 SDK review): both runtimes read a `sandbox.filesystem` entry holding any of
+ * `* ? [ ]` as a GLOB and render it as a seatbelt REGEX, not a `(subpath …)` — claude always has (`Rt`),
+ * and the Winter runtime since agent SDK round 11 (`2a118c6`, `splitDenyPathsByGlobShape`, claude's `Rt`
+ * port). So under a home or project whose path holds a `[` (a directory named `[wip] app`), a raw deny
+ * entry is a character class that misses the literal path and fences NOTHING: measured on both real
+ * binaries (`sandbox-glob-escape-measure.e2e.test.ts`) — a sandboxed write into the raw-denied directory
+ * lands, into the spelled one it does not. The router's `escapeSandboxGlobPath` spells the one escape that
+ * grammar honours (`[` → `[[]`); `*`/`?` have no spelling there and stay raw, which for a DENY is the
+ * wider, stricter form. Only the deny lists are spelled: this fence has no allow entries.
  *
  * `sandboxConfigFor` stays the LITERAL list: every consumer that compares real paths derives from it
- * (`home-fence.ts`'s escape floor), never from this spelled form.
+ * (`home-fence.ts` → the escape floor's static text match and the write-tool fence), never from this form.
  */
 export function childSandboxConfigFor(home: string, cwd?: string | null): SandboxSettingsConfig {
   const literal = sandboxConfigFor(home, cwd);
@@ -1168,8 +1167,9 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
       deny: permissionDenyRulesFor(input.home, input.userDeny),
       disableBypassPermissionsMode: !bypassAllowedAtSpawn(input.policy),
     },
-    // Spelled for the sandbox glob grammar (`childSandboxConfigFor`): the Winter runtime reads a `[` in an
-    // entry as a glob since agent SDK 5e37898, so a literal `[`-named home or project would fence nothing.
+    // Spelled for the sandbox glob grammar (`childSandboxConfigFor`, C-1): the Winter runtime reads an entry
+    // holding `[` as a glob since agent SDK round 11, so the literal list under a `[`-named home or project
+    // would fence nothing.
     sandbox: childSandboxConfigFor(input.home, input.cwd),
     // Agent SDK 0.0.16 defaults a spawn to BACKGROUND (claude's own default), which means a finished
     // child re-enters the model on a turn NOBODY PUSHED — a second `system/init`, an assistant
