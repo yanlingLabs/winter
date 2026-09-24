@@ -1000,20 +1000,26 @@ export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSett
 }
 
 /**
- * The SAME sandbox fence, spelled for the OFFICIAL leg's sandbox grammar (router 3279a1d, Contract A).
+ * The SAME sandbox fence, spelled for the sandbox glob grammar BOTH runtimes now read — what a child is
+ * actually sent, on either leg.
  *
  * claude treats a `sandbox.filesystem` entry holding any of `* ? [ ]` as a GLOB (rendered as a seatbelt
  * regex, where a backslash is literal) — so under a home or project whose path holds a `[` (a directory
  * named `[wip] app`), a raw `denyWrite` entry is a character class that misses the literal path and
- * fences NOTHING (measured by the router). The router's `escapeSandboxGlobPath` spells the one escape that
- * grammar honours (`[` → `[[]`); `*`/`?` have no spelling there and stay raw, which for a DENY is the
- * wider, stricter form. Only deny lists are passed through it: this fence has no allow entries.
+ * fences NOTHING (measured by the router, 3279a1d). The router's `escapeSandboxGlobPath` spells the one
+ * escape that grammar honours (`[` → `[[]`); `*`/`?` have no spelling there and stay raw, which for a
+ * DENY is the wider, stricter form. Only deny lists are passed through it: this fence has no allow entries.
  *
- * The Winter leg keeps `sandboxConfigFor`'s literal paths (its sandbox renders `(subpath …)`, where a class
- * spelling would name a path that does not exist), and so does every consumer that derives from the list
- * (`home-fence.ts`'s escape floor compares real paths).
+ * The Winter leg reads the same grammar since agent SDK 5e37898 (claude's `Li`/`Rt` port: a glob-shaped
+ * deny renders as an SBPL regex clause). MEASURED on the built binary
+ * (`sandbox-glob-escape-measure.e2e.test.ts`): a raw `[wip] app` deny let a sandboxed Bash write through,
+ * the spelled one held. So both legs get this spelling — the router README's "the Winter leg keeps it
+ * literal" predates that SDK change.
+ *
+ * `sandboxConfigFor` stays the LITERAL list: every consumer that compares real paths derives from it
+ * (`home-fence.ts`'s escape floor), never from this spelled form.
  */
-export function officialSandboxConfigFor(home: string, cwd?: string | null): SandboxSettingsConfig {
+export function childSandboxConfigFor(home: string, cwd?: string | null): SandboxSettingsConfig {
   const literal = sandboxConfigFor(home, cwd);
   const fs = literal.filesystem ?? {};
   return {
@@ -1162,7 +1168,9 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
       deny: permissionDenyRulesFor(input.home, input.userDeny),
       disableBypassPermissionsMode: !bypassAllowedAtSpawn(input.policy),
     },
-    sandbox: sandboxConfigFor(input.home, input.cwd),
+    // Spelled for the sandbox glob grammar (`childSandboxConfigFor`): the Winter runtime reads a `[` in an
+    // entry as a glob since agent SDK 5e37898, so a literal `[`-named home or project would fence nothing.
+    sandbox: childSandboxConfigFor(input.home, input.cwd),
     // Agent SDK 0.0.16 defaults a spawn to BACKGROUND (claude's own default), which means a finished
     // child re-enters the model on a turn NOBODY PUSHED — a second `system/init`, an assistant
     // stream and its own `result`, with no `user` frame. The projector opens a turn only from
