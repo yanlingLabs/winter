@@ -8,10 +8,12 @@
 // (literal) list is the control, and R.3 I-6 ASSERTS it — its writes land (the gap the spelling closes).
 //
 // The Winter leg (C-1, the R.3 SDK review): since agent SDK round 11 (`2a118c6`, claude's `Rt` port) the
-// Winter runtime reads the same grammar. Measured with the daemon's OWN deny list for a `[wip] app`
-// project: `childSandboxConfigFor` stops a python and a redirect write into `.winter/skills` while an
-// ordinary cwd write lands; the literal `sandboxConfigFor` list (the recorded control) lets them through.
-// That is why the daemon sends the spelled list on both legs.
+// Winter runtime reads the same grammar, which is why the daemon sends the spelled list on both legs.
+// Since SDK round 17 (`bfecbfb`) the Winter runtime ALSO fences `<cwd>/**/.winter/{skills,rules,
+// output-styles,commands,agents}` on its own, whatever the daemon sends — so on this leg a `.winter/skills`
+// write is blocked even under the literal list, and the literal-list CONTROL moved to a target only the
+// daemon's list protects: a `[`-named daemon HOME (`<cwd>/[wip] home`) and writes into its `permissions/`
+// and `run/`. The official leg's control stays on `.winter/skills` (claude has no `.winter` cover).
 //
 // Same hermetic beds as the sibling measurements. GATED by `describeWithClaudeRuntime` /
 // `describeWithWinterBinary`.
@@ -113,10 +115,12 @@ describeWithWinterBinary("C-1 — the Winter-leg sandbox fence under a `[`-named
    *  and cwd — `childSandboxConfigFor` (what a spawn is sent) or, as the control, the literal
    *  `sandboxConfigFor`. The command writes into the protected `<cwd>/.winter/skills` twice (python, which
    *  the permission layer cannot see, and a redirect) and once into an ordinary cwd file. */
-  async function run(dirName: string, spelled: boolean, command?: (cwd: string) => string, bed: { mkdirs?: string[]; probe?: string[] } = {}): Promise<{ python: boolean; redirect: boolean; notes: boolean; landed: Record<string, boolean> }> {
+  async function run(dirName: string, spelled: boolean, command?: (cwd: string) => string, bed: { mkdirs?: string[]; probe?: string[]; daemonHomeInCwd?: string } = {}): Promise<{ python: boolean; redirect: boolean; notes: boolean; landed: Record<string, boolean> }> {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "winter-sbx-c1-w-")));
     const home = join(root, "home");
-    const daemonHome = join(root, "winter-home");
+    // `daemonHomeInCwd`: the daemon's home INSIDE the cwd (a sandboxed write outside the cwd is refused by the
+    // runtime's own write roots whatever the deny list says, so a control there could never land).
+    const daemonHome = bed.daemonHomeInCwd === undefined ? join(root, "winter-home") : join(root, dirName, bed.daemonHomeInCwd);
     const cwd = join(root, dirName);
     for (const dir of [home, join(home, "tmp"), daemonHome, join(cwd, ".winter", "skills", "x"), ...(bed.mkdirs ?? []).map((d) => join(cwd, d))]) mkdirSync(dir, { recursive: true });
     const py = join(cwd, ".winter", "skills", "x", "SKILL.md");
@@ -161,7 +165,7 @@ describeWithWinterBinary("C-1 — the Winter-leg sandbox fence under a `[`-named
     }
   }
 
-  test("`[wip] app`: the spelled fence stops the python and the redirect write into .winter/skills; notes.md lands; the literal list is the recorded control (ASSERTED)", async () => {
+  test("`[wip] app`: the spelled fence stops the python and the redirect write into .winter/skills; notes.md lands", async () => {
     const spelled = await run("[wip] app", true);
     const literal = await run("[wip] app", false);
     const plain = await run("plain app", false);
@@ -169,9 +173,23 @@ describeWithWinterBinary("C-1 — the Winter-leg sandbox fence under a `[`-named
     console.error(`C-1 (winter): [wip] spelled ${JSON.stringify(view(spelled))}; [wip] literal ${JSON.stringify(view(literal))}; plain literal ${JSON.stringify(view(plain))}`);
     expect(view(spelled)).toEqual({ python: false, redirect: false, notes: true });
     expect(view(plain)).toEqual({ python: false, redirect: false, notes: true });
-    // R.3 I-6: the control is ASSERTED — the literal list under `[wip] app` lets both writes through (at SDK
-    // 5e37898; round 17's native `.winter` cover will stop them, and this line with it — a pin-dependent control).
-    expect(view(literal)).toEqual({ python: true, redirect: true, notes: true });
+    // SDK round 17 (`bfecbfb`): the runtime's own `<cwd>/**/.winter/skills` cover holds even under the literal
+    // list (at SDK 5e37898 these writes LANDED — the old control). The control lives in the next test now.
+    expect(view(literal)).toEqual({ python: false, redirect: false, notes: true });
+  }, 180_000);
+
+  // The literal-list CONTROL, on a target only the DAEMON's list protects (SDK round 17 made `.winter/<kind>`
+  // the runtime's own): a daemon home named `[wip] home` inside the cwd, and writes into its `permissions/`
+  // (the approved-rules store) and `run/` (the control plane). Spelled, both are stopped; literal, the `[wip]`
+  // entries are character classes that miss the real path and both writes land (ASSERTED — the gap C-1 closes).
+  test("a `[wip] home`: the spelled fence stops writes into <home>/permissions and <home>/run; the literal list lets them land (the control, ASSERTED)", async () => {
+    const script = (cwd: string) => `python3 -c "open('${join(cwd, "[wip] home", "permissions", "x")}','w').write('x')"; echo x > '${join(cwd, "[wip] home", "run", "x")}'; echo x > notes.md; true`;
+    const bed = { daemonHomeInCwd: "[wip] home", mkdirs: ["[wip] home/permissions", "[wip] home/run"], probe: ["[wip] home/permissions/x", "[wip] home/run/x", "notes.md"] };
+    const spelled = await run("work", true, script, bed);
+    const literal = await run("work", false, script, bed);
+    console.error(`C-1 (winter, [wip] home): spelled ${JSON.stringify(spelled.landed)}; literal ${JSON.stringify(literal.landed)}`);
+    expect(spelled.landed).toEqual({ "[wip] home/permissions/x": false, "[wip] home/run/x": false, "notes.md": true });
+    expect(literal.landed).toEqual({ "[wip] home/permissions/x": true, "[wip] home/run/x": true, "notes.md": true });
   }, 180_000);
 
   // R.3 I-4: the any-depth project fence. From a session at the project root, a sandboxed Bash could plant
@@ -182,17 +200,20 @@ describeWithWinterBinary("C-1 — the Winter-leg sandbox fence under a `[`-named
     const script = () => `python3 -c "open('pkg/.win'+'ter/rules/x.md','w').write('x')"; echo x > pkg/notes.md; true`;
     const bed = { mkdirs: ["pkg/.winter/rules"], probe: ["pkg/.winter/rules/x.md", "pkg/notes.md"] };
     const r = await run("plain app", true, script, bed);
-    // R.3 re-review minor (a): the in-file control — the LITERAL list (no any-depth globs) lets the same write land.
-    const control = await run("plain app", false, script, bed);
-    console.error(`R.3 I-4 (winter): child ${JSON.stringify(r.landed)}; literal ${JSON.stringify(control.landed)}`);
+    // R.3 re-review minor (a) added the literal list as an in-file control (at SDK 5e37898 the write LANDED under
+    // it). SDK round 17 (`bfecbfb`, the runtime's own cwd-anchored `<cwd>/**/.winter/<kind>/**` cover) now stops
+    // it on this leg whatever the daemon sends, so the daemon's any-depth glob is defence in depth here; its
+    // literal-list control that still lands is the official leg's (`official-leg.e2e.test.ts`, R.3 I-4).
+    const literal = await run("plain app", false, script, bed);
+    console.error(`R.3 I-4 (winter): child ${JSON.stringify(r.landed)}; literal ${JSON.stringify(literal.landed)}`);
     expect(r.landed).toEqual({ "pkg/.winter/rules/x.md": false, "pkg/notes.md": true });
-    expect(control.landed).toEqual({ "pkg/.winter/rules/x.md": true, "pkg/notes.md": true });
+    expect(literal.landed).toEqual({ "pkg/.winter/rules/x.md": false, "pkg/notes.md": true });
   }, 180_000);
 
-  // The ancestor-rename bypass (`mv .winter .w2 && … && mv .w2 .winter`) is closed by claude's `Ch`
-  // only for `.claude`-shaped entries; the Winter runtime's cover for `.winter` lands in SDK round 17.
-  // Needs the round-17 binary — do not assert it before the SDK pin carries it.
-  test.todo("`[wip] app`: the ancestor-rename probe cannot plant .winter/skills/x/SKILL.md (needs the SDK round-17 binary)", async () => {
+  // The ancestor-rename bypass (`mv .winter .w2 && … && mv .w2 .winter`): claude's `Ch` closes it only for
+  // `.claude`-shaped entries; the Winter runtime's cover for `.winter` is SDK round 17's. RED against the SDK
+  // 5e37898 binary (this row was a `todo` then: the file WAS planted); asserted since the pin carries round 17.
+  test("`[wip] app`: the ancestor-rename probe cannot plant .winter/skills/x/SKILL.md (SDK round 17)", async () => {
     // R.3 I-6: probed before the bed is removed (the old `landedPaths` read ran after it, so it read false always).
     const r = await run("[wip] app", true, () => "mv .winter .w2 && mkdir -p .w2/skills/x && echo > .w2/skills/x/SKILL.md && mv .w2 .winter; echo x > notes.md; true", { probe: [".winter/skills/x/SKILL.md", "notes.md"] });
     expect(r.landed).toEqual({ ".winter/skills/x/SKILL.md": false, "notes.md": true });
