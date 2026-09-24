@@ -61,20 +61,20 @@ describe("the eligible set", () => {
 describe("a DeepSeek default with only a DeepSeek key", () => {
   test("the titler really calls the DeepSeek adapter on the user's own default model", async () => {
     const fake = await openaiChatFake.startOpenAiChatFake({
-      scenarios: { "deepseek-v4-flash": () => openaiChatFake.chatStream({ text: ["Fix Login Flow"], finishReason: "stop", usage: { prompt: 9, completion: 3 } }) },
+      scenarios: { "deepseek-flash": () => openaiChatFake.chatStream({ text: ["Fix Login Flow"], finishReason: "stop", usage: { prompt: 9, completion: 3 } }) },
     });
     try {
       const secrets = secretsStore();
       await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-deepseek" });
       const router = await routerFor(secrets, { testBackendUrl: (id) => (id === "deepseek" ? fake.url : undefined) });
-      const settings = settingsWith("deepseek/deepseek-v4-flash");
+      const settings = settingsWith("deepseek/deepseek-flash");
 
       const call = router.resolve("titles.model", settings);
       expect(isInternalRefusal(call)).toBe(false);
       if (isInternalRefusal(call)) return;
       expect(call.providerId).toBe("deepseek");
-      expect(String(call.tag)).toBe("deepseek/deepseek-v4-flash");
-      expect(call.model).toBe("deepseek-v4-flash");
+      expect(String(call.tag)).toBe("deepseek/deepseek-flash");
+      expect(call.model).toBe("deepseek-flash");
 
       const home = mkdtempSync(join(tmpdir(), "winter-internal-router-home-"));
       const store = new SessionStore(home);
@@ -91,29 +91,30 @@ describe("a DeepSeek default with only a DeepSeek key", () => {
 
       expect(store.getTitle(sessionId)).toBe("Fix Login Flow");
       expect(fake.requests.length).toBe(1);
-      expect(openaiChatFake.chatModelOf(fake.requests[0]!)).toBe("deepseek-v4-flash");
+      expect(openaiChatFake.chatModelOf(fake.requests[0]!)).toBe("deepseek-flash");
     } finally {
       await fake.close();
     }
   });
 
-  test("every internal role resolves, and the dreamer's `medium` default is dropped rather than refused", async () => {
+  test("every internal role resolves, and the dreamer's `medium` default is mapped onto the row rather than refused", async () => {
     const secrets = secretsStore();
     await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-deepseek" });
     const router = await routerFor(secrets);
-    const settings = settingsWith("deepseek/deepseek-v4-flash");
+    const settings = settingsWith("deepseek/deepseek-flash");
     for (const role of ["titles.model", "reviewer.model", "pins.dream", "pins.cleaner"] as const) {
       const call = router.resolve(role, settings);
       expect(isInternalRefusal(call)).toBe(false);
       if (isInternalRefusal(call)) continue;
       expect(call.providerId).toBe("deepseek");
     }
-    // The deepseek row's vocabulary is [none, low, high, max]: `medium` (the dreamer's constant) is not
-    // in it and the row declares no default, so the request must carry NO effort. Sending it verbatim
-    // is what the pinned runtime refuses `capability` for.
+    // The deepseek row's vocabulary is [none, low, high, max]: `medium` (the dreamer's constant) is not in
+    // it. Sending it verbatim is what the pinned runtime refuses `capability` for. R.1 (catalog refresh):
+    // the row now DECLARES a default (`high`), so `medium` maps onto it; before, with no default, it was
+    // dropped. No live row keeps a vocabulary without `medium` and without a default.
     const dream = router.resolve("pins.dream", settings);
     expect(isInternalRefusal(dream)).toBe(false);
-    if (!isInternalRefusal(dream)) expect(dream.effort).toBeUndefined();
+    if (!isInternalRefusal(dream)) expect(dream.effort).toBe("high");
     // `low` IS in that vocabulary, so the cleaner's constant survives.
     const cleaner = router.resolve("pins.cleaner", settings);
     if (!isInternalRefusal(cleaner)) expect(cleaner.effort).toBe("low");
@@ -125,7 +126,7 @@ describe("a DeepSeek default with a Codex OAuth login", () => {
     const secrets = secretsStore();
     await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at", refreshToken: "rt" });
     const router = await routerFor(secrets);
-    const call = router.resolve("titles.model", settingsWith("deepseek/deepseek-v4-flash"));
+    const call = router.resolve("titles.model", settingsWith("deepseek/deepseek-flash"));
     expect(isInternalRefusal(call)).toBe(false);
     if (isInternalRefusal(call)) return;
     expect(call.providerId).toBe("codex-oauth");
@@ -188,7 +189,7 @@ describe("no internal credential at all", () => {
   test("every internal role reports no-internal-credential and nothing throws", async () => {
     const secrets = secretsStore();
     const router = await routerFor(secrets);
-    const settings = settingsWith("deepseek/deepseek-v4-flash");
+    const settings = settingsWith("deepseek/deepseek-flash");
     for (const role of ["titles.model", "reviewer.model", "pins.dream", "pins.cleaner"] as const) {
       const call = router.resolve(role, settings);
       expect(isInternalRefusal(call)).toBe(true);
@@ -204,12 +205,12 @@ describe("no internal credential at all", () => {
     const secrets = secretsStore();
     await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at" });
     const router = await routerFor(secrets);
-    const settings = settingsWith("codex-oauth/gpt-5.6-sol", { pins: { dream: "deepseek/deepseek-v4-flash" } });
+    const settings = settingsWith("codex-oauth/gpt-5.6-sol", { pins: { dream: "deepseek/deepseek-flash" } });
     const call = router.resolve("pins.dream", settings);
     expect(isInternalRefusal(call)).toBe(true);
     if (!isInternalRefusal(call)) return;
     expect(call.reason).toBe("no-credential");
-    expect(String(call.tag)).toBe("deepseek/deepseek-v4-flash");
+    expect(String(call.tag)).toBe("deepseek/deepseek-flash");
   });
 });
 
@@ -220,7 +221,7 @@ describe("hot transitions", () => {
     const view = createInternalProviderView({ secrets, log: (m) => lines.push(m) });
     await view.refresh();
     const router = createInternalRouter({ view, secrets });
-    const settings = settingsWith("deepseek/deepseek-v4-flash");
+    const settings = settingsWith("deepseek/deepseek-flash");
 
     expect(isInternalRefusal(router.resolve("titles.model", settings))).toBe(true);
     await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-deepseek" });
@@ -239,7 +240,7 @@ describe("hot transitions", () => {
     await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-deepseek" });
     await view.refresh();
     const router = createInternalRouter({ view, secrets });
-    const settings = settingsWith("deepseek/deepseek-v4-flash");
+    const settings = settingsWith("deepseek/deepseek-flash");
     expect(isInternalRefusal(router.resolve("pins.dream", settings))).toBe(false);
 
     await clearCredentialMaterial(secrets, "deepseek:default");
@@ -262,7 +263,7 @@ describe("hot transitions", () => {
     await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-deepseek" });
     await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-openai" });
     const router = await routerFor(secrets);
-    const first = router.resolve("titles.model", settingsWith("deepseek/deepseek-v4-flash"));
+    const first = router.resolve("titles.model", settingsWith("deepseek/deepseek-flash"));
     const second = router.resolve("titles.model", settingsWith("openai/gpt-5.6-luna"));
     if (!isInternalRefusal(first)) expect(first.providerId).toBe("deepseek");
     if (!isInternalRefusal(second)) expect(second.providerId).toBe("openai");
@@ -275,7 +276,7 @@ describe("hot transitions", () => {
     await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-deepseek" });
     await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-openai" });
     const router = await routerFor(secrets);
-    const base = settingsWith("deepseek/deepseek-v4-flash");
+    const base = settingsWith("deepseek/deepseek-flash");
     const pinned = setModelRole(base, "pins.dream", "openai/gpt-5.6-terra");
     const dream = router.resolve("pins.dream", pinned);
     const titles = router.resolve("titles.model", pinned);
@@ -287,9 +288,9 @@ describe("hot transitions", () => {
     const secrets = secretsStore();
     await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-deepseek" });
     const router = await routerFor(secrets);
-    const a = router.resolve("titles.model", settingsWith("deepseek/deepseek-v4-flash"));
-    const b = router.resolve("titles.model", settingsWith("deepseek/deepseek-v4-flash"));
-    const c = router.resolve("titles.model", settingsWith("deepseek/deepseek-v4-flash", { providers: { deepseek: { baseUrl: "https://proxy.example/v1" } } }));
+    const a = router.resolve("titles.model", settingsWith("deepseek/deepseek-flash"));
+    const b = router.resolve("titles.model", settingsWith("deepseek/deepseek-flash"));
+    const c = router.resolve("titles.model", settingsWith("deepseek/deepseek-flash", { providers: { deepseek: { baseUrl: "https://proxy.example/v1" } } }));
     if (isInternalRefusal(a) || isInternalRefusal(b) || isInternalRefusal(c)) throw new Error("expected three live calls");
     expect(a.provider).toBe(b.provider); // cached across identical reads
     expect(c.provider).not.toBe(a.provider); // rebuilt on the override
@@ -301,7 +302,7 @@ describe("hot transitions", () => {
     const view = createInternalProviderView({ secrets, log: () => {} });
     await view.refresh();
     const router = createInternalRouter({ view, secrets });
-    const settings = settingsWith("deepseek/deepseek-v4-flash");
+    const settings = settingsWith("deepseek/deepseek-flash");
     const before = router.resolve("titles.model", settings);
     await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-2" });
     await view.refresh();
@@ -395,7 +396,7 @@ describe("B-1: the snapshot self-heals from an out-of-band credential write", ()
     const view = createInternalProviderView({ secrets, log: () => {}, now: () => clock });
     await view.refresh();
     const router = createInternalRouter({ view, secrets });
-    const settings = settingsWith("deepseek/deepseek-v4-flash");
+    const settings = settingsWith("deepseek/deepseek-flash");
 
     // Inert, and the refusal asked for a background probe.
     expect(isInternalRefusal(router.resolve("titles.model", settings))).toBe(true);
@@ -444,7 +445,7 @@ describe("B-1: the snapshot self-heals from an out-of-band credential write", ()
     const perProbe = reads;
     expect(perProbe).toBeGreaterThan(0);
     const router = createInternalRouter({ view, secrets: counting });
-    const settings = settingsWith("deepseek/deepseek-v4-flash");
+    const settings = settingsWith("deepseek/deepseek-flash");
     for (let i = 0; i < 50; i += 1) router.resolve("titles.model", settings);
     await Bun.sleep(40);
     // ONE probe for 50 refused calls, not 50.
@@ -465,7 +466,7 @@ describe("B-1: the snapshot self-heals from an out-of-band credential write", ()
     await view.refresh();
     const afterSeed = reads;
     const router = createInternalRouter({ view, secrets: counting });
-    const pinned = settingsWith("codex-oauth/gpt-5.6-sol", { pins: { dream: "deepseek/deepseek-v4-flash" } });
+    const pinned = settingsWith("codex-oauth/gpt-5.6-sol", { pins: { dream: "deepseek/deepseek-flash" } });
     const call = router.resolve("pins.dream", pinned);
     await Bun.sleep(40);
     expect(isInternalRefusal(call)).toBe(true);
@@ -495,10 +496,10 @@ describe("M-1 / D2 follow-up (2026-09-22): an explicit effort of `none`", () => 
     const secrets = secretsStore();
     await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-deepseek" });
     const router = await routerFor(secrets);
-    // `deepseek/deepseek-v4-flash`'s vocabulary is [none, low, high, max] — `"none"` IS one of its own
+    // `deepseek/deepseek-flash`'s vocabulary is [none, low, high, max] — `"none"` IS one of its own
     // declared tiers (27 rows in the pinned catalog carry it this way), but the controller's ruling
     // scoped the fix to rows that DON'T declare `"none"`: this case is deliberately UNCHANGED.
-    const settings = settingsWith("deepseek/deepseek-v4-flash", { roleEfforts: { "pins.dream": "none" } });
+    const settings = settingsWith("deepseek/deepseek-flash", { roleEfforts: { "pins.dream": "none" } });
     const call = router.resolve("pins.dream", settings);
     if (isInternalRefusal(call)) throw new Error("expected a live call");
     expect(call.effort).toBeUndefined();
@@ -552,13 +553,14 @@ describe("M-1 / D2 follow-up (2026-09-22): an explicit effort of `none`", () => 
     const none = router.resolve("pins.dream", settingsWith("codex-oauth/gpt-5.6-sol", { roleEfforts: { "pins.dream": "none" } }));
     if (isInternalRefusal(none)) throw new Error("expected a live call");
     expect(none.effort).toBe("low"); // gpt-5.6-terra's own lowest declared tier, not the provider's "medium" default
-    // …and the dreamer's own unmappable constant ("medium", not in this row's vocabulary at all) is
-    // still dropped on a deepseek row here — unaffected by the `"none"` rule above, since "medium" is
-    // never `"none"`.
-    const ds = staticInternalRouter({ view, provider: fake, model: "deepseek-v4-flash", tag: "deepseek/deepseek-v4-flash" as never });
-    const dream = ds.resolve("pins.dream", settingsWith("deepseek/deepseek-v4-flash"));
+    // …and the dreamer's own constant ("medium", not in this row's vocabulary at all) still takes the
+    // ORDINARY mapping on a deepseek row here — onto the row's declared default (R.1: `high`; the row had
+    // none before, and it was dropped) — unaffected by the `"none"` rule above, since "medium" is never
+    // `"none"`.
+    const ds = staticInternalRouter({ view, provider: fake, model: "deepseek-flash", tag: "deepseek/deepseek-flash" as never });
+    const dream = ds.resolve("pins.dream", settingsWith("deepseek/deepseek-flash"));
     if (isInternalRefusal(dream)) throw new Error("expected a live call");
-    expect(dream.effort).toBeUndefined();
+    expect(dream.effort).toBe("high");
   });
 });
 
@@ -570,7 +572,7 @@ describe("M-2: one quota ledger per provider", () => {
     const router = await routerFor(secrets);
     const settings = settingsWith("codex-oauth/gpt-5.6-sol", {
       titles: { model: "codex-oauth/gpt-5.6-terra" },
-      pins: { dream: "deepseek/deepseek-v4-flash" },
+      pins: { dream: "deepseek/deepseek-flash" },
     });
     const codex = router.resolve("titles.model", settings);
     const deepseek = router.resolve("pins.dream", settings);
@@ -592,7 +594,7 @@ describe("M-2: one quota ledger per provider", () => {
     await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at" });
     await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-deepseek" });
     const router = await routerFor(secrets);
-    const settings = settingsWith("codex-oauth/gpt-5.6-sol", { pins: { dream: "deepseek/deepseek-v4-flash" } });
+    const settings = settingsWith("codex-oauth/gpt-5.6-sol", { pins: { dream: "deepseek/deepseek-flash" } });
     router.resolve("pins.dream", settings);   // deepseek's ledger exists FIRST
     router.resolve("titles.model", settings); // then codex's
     const codexLedger = router.quotaFor("codex-oauth");
@@ -621,9 +623,9 @@ describe("M-3: Winter never guesses a model on a provider the user did not choos
     const secrets = secretsStore();
     await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-deepseek" });
     const router = await routerFor(secrets);
-    const call = router.resolve("titles.model", settingsWith("deepseek/deepseek-v4-flash"));
+    const call = router.resolve("titles.model", settingsWith("deepseek/deepseek-flash"));
     if (isInternalRefusal(call)) throw new Error(`refused: ${call.reason}`);
-    expect(String(call.tag)).toBe("deepseek/deepseek-v4-flash");
+    expect(String(call.tag)).toBe("deepseek/deepseek-flash");
   });
 
   test("the fallback only ever considers codex-oauth/openai — never an alphabetical third party", async () => {
@@ -664,7 +666,7 @@ describe("the reviewer's pin fallback", () => {
   }
 
   test("pinned to an UNCREDENTIALED provider: reviews on the codex default, carrying the pin's own issue", async () => {
-    const { router, settings } = await codexHome("deepseek/deepseek-v4-flash");
+    const { router, settings } = await codexHome("deepseek/deepseek-flash");
     const call = router.resolve("reviewer.model", settings, { fallbackToDefault: true });
     expect(isInternalRefusal(call)).toBe(false);
     if (isInternalRefusal(call)) return;
@@ -673,7 +675,7 @@ describe("the reviewer's pin fallback", () => {
     // The pin's issue rides along so the wire can still report it.
     expect(call.pinRefusal?.reason).toBe("no-credential");
     expect(call.pinRefusal?.detail).toBe("no credential is stored for DeepSeek");
-    expect(String(call.pinRefusal?.tag)).toBe("deepseek/deepseek-v4-flash");
+    expect(String(call.pinRefusal?.tag)).toBe("deepseek/deepseek-flash");
   });
 
   test("pinned to anthropic/*: same — reviews on the default, pin reported as provider-unsupported", async () => {
@@ -697,15 +699,15 @@ describe("the reviewer's pin fallback", () => {
   test("no fallback available: the structural refusal stands (this is the hook's allow() path)", async () => {
     const secrets = secretsStore();
     const router = await routerFor(secrets); // nothing credentialed at all
-    const settings = settingsWith("deepseek/deepseek-v4-flash", { reviewer: { model: "anthropic/claude-opus-5" } });
+    const settings = settingsWith("deepseek/deepseek-flash", { reviewer: { model: "anthropic/claude-opus-5" } });
     const call = router.resolve("reviewer.model", settings, { fallbackToDefault: true });
     expect(isInternalRefusal(call)).toBe(true);
     if (isInternalRefusal(call)) expect(call.reason).toBe("no-internal-credential");
   });
 
   test("THE ASYMMETRY: titles/dreamer/cleaner never fall back, even when asked the same way", async () => {
-    const { router, settings } = await codexHome("deepseek/deepseek-v4-flash");
-    const pinnedEverywhere = { ...settings, titles: { model: "deepseek/deepseek-v4-flash" as never }, pins: { dream: "deepseek/deepseek-v4-flash" as never, cleaner: "deepseek/deepseek-v4-flash" as never } };
+    const { router, settings } = await codexHome("deepseek/deepseek-flash");
+    const pinnedEverywhere = { ...settings, titles: { model: "deepseek/deepseek-flash" as never }, pins: { dream: "deepseek/deepseek-flash" as never, cleaner: "deepseek/deepseek-flash" as never } };
     for (const role of ["titles.model", "pins.dream", "pins.cleaner"] as const) {
       // Even WITH the option set — nothing passes it for these roles, and it would change nothing if it did,
       // because the option is only consulted for a refusal and these stay refused by design.

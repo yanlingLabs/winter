@@ -288,7 +288,8 @@ describe("SessionTitler: the titles.model role effort", () => {
     // Pinned to o4-mini (low/medium/high, default medium): `max` maps onto the row's default.
     expect((await liveTitler(settingsOf({ titles: { model: "openai/o4-mini" }, roleEfforts: { "titles.model": "max" } })).title()).reasoningEffort).toBe("medium");
     // Pinned to a row with no vocabulary: omitted.
-    const t = liveTitler(settingsOf({ titles: { model: "openai/gpt-5.4" }, roleEfforts: { "titles.model": "high" } }));
+    // R.1: the no-vocabulary exemplar is gpt-4.1 (the refreshed catalog gave gpt-5.4 a vocabulary).
+    const t = liveTitler(settingsOf({ titles: { model: "openai/gpt-4.1" }, roleEfforts: { "titles.model": "high" } }));
     expect("reasoningEffort" in (await t.title())).toBe(false);
     expect(t.provider.requests).toHaveLength(1);
   });

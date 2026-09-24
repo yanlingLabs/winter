@@ -1247,8 +1247,9 @@ describe("SessionCleaner: the pins.cleaner role effort", () => {
     const mapped = await judgeOnce(settingsOf({ pins: { cleaner: "openai/o4-mini" }, roleEfforts: { "pins.cleaner": "xhigh" } }));
     expect(mapped.model).toBe("o4-mini");
     expect(mapped.reasoningEffort).toBe("medium"); // the row's own defaultEffort
-    const omitted = await judgeOnce(settingsOf({ pins: { cleaner: "openai/gpt-5.4" }, roleEfforts: { "pins.cleaner": "high" } }));
-    expect(omitted.model).toBe("gpt-5.4");
+    // R.1: the no-vocabulary exemplar is gpt-4.1 (the refreshed catalog gave gpt-5.4 a vocabulary).
+    const omitted = await judgeOnce(settingsOf({ pins: { cleaner: "openai/gpt-4.1" }, roleEfforts: { "pins.cleaner": "high" } }));
+    expect(omitted.model).toBe("gpt-4.1");
     expect("reasoningEffort" in omitted).toBe(false);
   });
 

@@ -222,7 +222,8 @@ describe("BashReviewer: the reviewer.model role effort", () => {
     const mapped = liveReviewer(settingsOf({ reviewer: { model: "openai/o4-mini" }, roleEfforts: { "reviewer.model": "xhigh" } }));
     expect(await mapped.reviewer.review({ command: "ls" })).toEqual({ verdict: "safe", reason: "ok" });
     expect(mapped.p.requests[0]!.reasoningEffort).toBe("medium");
-    const omitted = liveReviewer(settingsOf({ reviewer: { model: "openai/gpt-5.4" }, roleEfforts: { "reviewer.model": "high" } }));
+    // R.1: the no-vocabulary exemplar is gpt-4.1 (the refreshed catalog gave gpt-5.4 a vocabulary).
+    const omitted = liveReviewer(settingsOf({ reviewer: { model: "openai/gpt-4.1" }, roleEfforts: { "reviewer.model": "high" } }));
     expect(await omitted.reviewer.review({ command: "ls" })).toEqual({ verdict: "safe", reason: "ok" });
     expect("reasoningEffort" in omitted.p.requests[0]!).toBe(false);
   });

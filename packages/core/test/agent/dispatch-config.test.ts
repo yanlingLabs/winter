@@ -12,7 +12,9 @@ describe("dispatchEffortFor", () => {
   test("nothing stored → DISPATCH_EFFORT, mapped onto the row as it has been since 2026-09-17", () => {
     expect(dispatchEffortFor(settingsOf({}), "codex-oauth/gpt-5.6-terra")).toBe(DISPATCH_EFFORT);
     expect(dispatchEffortFor(null, "codex-oauth/gpt-5.6-terra")).toBe(DISPATCH_EFFORT);
-    expect(dispatchEffortFor(settingsOf({}), "deepseek/deepseek-v4-flash")).toBeUndefined(); // no `medium`, no default
+    // R.1 (catalog refresh): DeepSeek's row lists none/low/high/max and now DECLARES a default (`high`), so
+    // `medium` maps onto it; no live row lists a vocabulary without `medium` AND without a default any more.
+    expect(dispatchEffortFor(settingsOf({}), "deepseek/deepseek-flash")).toBe("high");
     expect(dispatchEffortFor(settingsOf({}), "winter-test/echo")).toBe(DISPATCH_EFFORT);
   });
 
@@ -20,7 +22,7 @@ describe("dispatchEffortFor", () => {
     const s = settingsOf({ roleEfforts: { "pins.dispatch": "xhigh" } });
     expect(dispatchEffortFor(s, "codex-oauth/gpt-5.6-terra")).toBe("xhigh");
     expect(dispatchEffortFor(s, "openai/o4-mini")).toBe("medium");
-    expect(dispatchEffortFor(s, "openai/gpt-5.4")).toBeUndefined();
+    expect(dispatchEffortFor(s, "openai/gpt-4.1")).toBeUndefined(); // a row with no reasoning vocabulary at all
   });
 
   test("only ITS role's effort: the daemon's default effort and the other roles' are not dispatch's", () => {
@@ -36,7 +38,7 @@ describe("dispatchPinMessage", () => {
 
   test("a stored role effort → names what is actually SPENT on the live pin", () => {
     expect(dispatchPinMessage(settingsOf({ roleEfforts: { "pins.dispatch": "high" } }))).toBe("dispatch runs a fixed model: codex-oauth/gpt-5.6-terra at high");
-    expect(dispatchPinMessage(settingsOf({ pins: { dispatch: "openai/gpt-5.4" }, roleEfforts: { "pins.dispatch": "high" } })))
-      .toBe("dispatch runs a fixed model: openai/gpt-5.4 at its provider's default effort");
+    expect(dispatchPinMessage(settingsOf({ pins: { dispatch: "openai/gpt-4.1" }, roleEfforts: { "pins.dispatch": "high" } })))
+      .toBe("dispatch runs a fixed model: openai/gpt-4.1 at its provider's default effort");
   });
 });

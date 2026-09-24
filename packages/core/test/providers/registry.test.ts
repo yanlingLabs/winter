@@ -60,7 +60,9 @@ describe("daemonResolveEndpoint", () => {
     const resolve = daemonResolveEndpoint();
     // DeepSeek's reasoning is documented as fully exposed (`reasoning_content`) — W18-15/W18-19's own
     // "DeepSeek (complete exposed)" premise. Without a real registry this reads back "none".
-    const endpoint = resolve({ providerId: "deepseek", modelKey: "deepseek/deepseek-reasoner", family: "deepseek" });
+    // R.1: `deepseek-reasoner` left the refreshed catalog (V16: unmapped); `deepseek-v4-pro` is DeepSeek's
+    // live reasoning row with the same documented complete-exposed reasoning.
+    const endpoint = resolve({ providerId: "deepseek", modelKey: "deepseek/deepseek-v4-pro", family: "deepseek" });
     expect(endpoint.readableState).not.toBe("none");
   });
 
@@ -90,7 +92,7 @@ describe("D1-6: the pre-flight review, against the daemon's REAL resolveEndpoint
   const resolve = daemonResolveEndpoint();
 
   test("DeepSeek (complete exposed) -> GLM is silent (lossless-portable, no prompt)", () => {
-    const from = resolve({ providerId: "deepseek", modelKey: "deepseek/deepseek-reasoner", family: "deepseek" });
+    const from = resolve({ providerId: "deepseek", modelKey: "deepseek/deepseek-v4-pro", family: "deepseek" }); // R.1: reasoner left the catalog
     // 0.0.10's catalog carries no reasoning evidence for zai/GLM rows at all (resume note's own
     // note) — the silence here must hold on the SOURCE's own complete-exposed facts, never on the
     // destination happening to have matching evidence.
@@ -102,7 +104,7 @@ describe("D1-6: the pre-flight review, against the daemon's REAL resolveEndpoint
     const sidecarRecords: ProviderStateRecord[] = [
       {
         type: "provider_state", uuid: "sc1", timestamp: new Date().toISOString(), sessionId: "s_test",
-        anchorUuid: "a1", provider: "deepseek", model: "deepseek/deepseek-reasoner", family: "deepseek",
+        anchorUuid: "a1", provider: "deepseek", model: "deepseek/deepseek-v4-pro", family: "deepseek",
         itemIndex: 0, kind: "summary", payload: { text: "reasoning: 2+2=4", material: "exposed", complete: true },
       },
     ];
