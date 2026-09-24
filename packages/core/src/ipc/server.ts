@@ -4153,11 +4153,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // `listPlugins`; with no cwd the project/local records still list, only their enabled state is
         // unresolved) — never `livePlugins()`, which reports user scope only, so a plugin installed at
         // project or local scope listed with a fingerprint yet could never be consented to.
-        const installs = opts.winterHome === undefined
-          ? []
-          : (await listPlugins(pluginManagerOptionsFor(opts.winterHome, undefined))).filter((e) => `${e.id}@${e.marketplace}` === p.spec);
-        if (installs.length === 0) return { code: "unknown_plugin" };
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.setConsent is not available on this server (no winterHome configured)");
+        const installs = (await listPlugins(pluginManagerOptionsFor(opts.winterHome, undefined))).filter((e) => `${e.id}@${e.marketplace}` === p.spec);
+        if (installs.length === 0) return { code: "unknown_plugin" };
         // The disclosure each install shows RIGHT NOW, computed exactly as `plugin.list`'s `extras` do (a
         // plugin with no winter-plugin.json: as `PluginStore`'s legacy entry does). A spec installed at two
         // scopes from different folders: the echoed fingerprint picks the one the user saw.
