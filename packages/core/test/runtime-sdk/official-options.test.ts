@@ -20,7 +20,7 @@ import { SkillStore } from "../../src/agent/skills";
 import { TrustStore } from "../../src/agent/trust";
 import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { assistantMemoryDirFor, memoryDirFor } from "../../src/agent/memory-dir";
-import { buildWinterOptions, controlPlaneDenyRules, disallowedToolsFor, GLOBAL_READ_ALLOW_RULES, sandboxConfigFor, WEB_BUILTIN_ALLOW_RULES, type WinterOptionsInput } from "../../src/runtime-sdk/mode-options";
+import { buildWinterOptions, controlPlaneDenyRules, disallowedToolsFor, GLOBAL_READ_ALLOW_RULES, officialSandboxConfigFor, sandboxConfigFor, WEB_BUILTIN_ALLOW_RULES, type WinterOptionsInput } from "../../src/runtime-sdk/mode-options";
 import { winterSystemPromptFor } from "../../src/runtime-sdk/system-prompt";
 import { Settings } from "../../src/settings";
 import {
@@ -482,14 +482,34 @@ describe("officialInputFor — the control-plane fence (C1)", () => {
     expect(official).not.toContain("WebSearch");
   });
 
-  test("settings.sandbox is EXACTLY sandboxConfigFor(home, cwd) — same real paths, no globs", () => {
+  test("settings.sandbox is EXACTLY officialSandboxConfigFor(home, cwd) — sandboxConfigFor's real paths, spelled for claude's sandbox grammar", () => {
     const home = "/Users/x/.winter-test-home";
     const options = optionsFor("code", home);
     const settings = options.settings as { sandbox?: { filesystem?: { denyWrite?: string[] } } } | undefined;
+    expect(settings?.sandbox).toEqual(officialSandboxConfigFor(home, "/Users/x/repo"));
+    // No `[` anywhere in these paths, so the spelling changes nothing: the literal list, entry for entry.
     expect(settings?.sandbox).toEqual(sandboxConfigFor(home, "/Users/x/repo"));
     // Whole-branch review: the trust record and the session's project agent definitions are on it.
     expect(settings?.sandbox?.filesystem?.denyWrite).toContain(`${home}/trust.json`);
     expect(settings?.sandbox?.filesystem?.denyWrite).toContain("/Users/x/repo/.winter/agents");
+  });
+
+  // Router 3279a1d: claude reads a sandbox entry holding `[` as a GLOB, so a raw `[`-named home is a
+  // character class that fences nothing; the official leg spells it `[[]`, the Winter leg keeps it literal.
+  test("a `[`-named home: the OFFICIAL leg's sandbox spells every `[` as `[[]`; the Winter leg's stays literal", () => {
+    const home = "/Users/x/[wip] homes/.winter";
+    const options = optionsFor("code", home);
+    const denyWrite = (options.settings as { sandbox?: { filesystem?: { denyWrite?: string[]; denyRead?: string[] } } }).sandbox!.filesystem!.denyWrite!;
+    const denyRead = (options.settings as { sandbox?: { filesystem?: { denyWrite?: string[]; denyRead?: string[] } } }).sandbox!.filesystem!.denyRead!;
+    expect(denyWrite).toContain("/Users/x/[[]wip] homes/.winter/trust.json");
+    expect(denyWrite).toContain("/Users/x/[[]wip] homes/.winter/run");
+    expect(denyRead).toContain("/Users/x/[[]wip] homes/.winter/run");
+    for (const entry of [...denyWrite, ...denyRead]) expect(entry.replace(/\[\[\]/g, "")).not.toContain("["); // every `[` spelled
+    const literal = sandboxConfigFor(home, "/Users/x/repo").filesystem!;
+    expect(literal.denyWrite).toContain("/Users/x/[wip] homes/.winter/trust.json"); // the Winter leg: literal
+    expect(denyWrite.length).toBe(literal.denyWrite!.length);                        // same fence, entry for entry
+    // …and a `[`-named PROJECT: its `.winter/agents` fence is spelled too (a lone `]` stays literal).
+    expect(officialSandboxConfigFor("/h", "/p/[a]b").filesystem!.denyWrite).toContain("/p/[[]a]b/.winter/agents");
   });
 
   test("additionalDisallowedTools is EXACTLY disallowedToolsFor(mode, {leg:\"official\"}) — claude's own web pair stays", () => {
