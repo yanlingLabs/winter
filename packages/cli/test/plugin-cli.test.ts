@@ -57,6 +57,22 @@ describe("pluginManagerOptionsFor — the local scope's file", () => {
     const opts = pluginManagerOptionsFor(mkdtempSync(join(tmpdir(), "winter-cli-i2-home-")), wt);
     expect(opts.settingsPathFor("local")).toBe(join(wt, ".winter", "settings.local.json"));
   });
+
+  // R.3 residual (controller ruling): the PROJECT scope is the worktree's own top too (claude's `--scope
+  // project` writes at the cwd's git top-level; the run home reads the project tier there). From the main
+  // checkout both scopes stay where they were.
+  test("R.3 residual: from a linked worktree, project is the worktree's .winter/settings.json; from main, main's", () => {
+    const repo = realpathSync(mkdtempSync(join(tmpdir(), "winter-cli-r3p-repo-")));
+    const git = (args: string[], cwd: string) => expect(Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "ignore", stderr: "ignore" }).exitCode).toBe(0);
+    git(["init", "-q"], repo);
+    git(["-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "i"], repo);
+    const wt = join(realpathSync(mkdtempSync(join(tmpdir(), "winter-cli-r3p-wt-"))), "wt");
+    git(["worktree", "add", "-q", "-b", `r3p-${Math.random().toString(16).slice(2)}`, wt], repo);
+    const home = mkdtempSync(join(tmpdir(), "winter-cli-r3p-home-"));
+    expect(pluginManagerOptionsFor(home, wt).settingsPathFor("project")).toBe(join(wt, ".winter", "settings.json"));
+    expect(pluginManagerOptionsFor(home, repo).settingsPathFor("project")).toBe(join(repo, ".winter", "settings.json"));
+    expect(pluginManagerOptionsFor(home, repo).settingsPathFor("local")).toBe(join(repo, ".winter", "settings.local.json"));
+  });
 });
 
 describe("no-daemon path (the adapter directly)", () => {

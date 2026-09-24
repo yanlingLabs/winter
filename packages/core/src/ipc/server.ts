@@ -88,7 +88,6 @@ import { parseModelTag, canonicalizeModelTag, splitTag, UNSTATED_TAG, type Model
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import type { ApprovalBroker } from "../agent/approvals";
 import type { PermissionRules } from "../agent/permission-rules";
-import { repoRootFor } from "../agent/memory-dir";
 import type { QuestionBroker } from "../agent/questions";
 import type { TaskStore } from "../agent/task-store";
 // P8c integration: widened from the concrete `PlanBroker` class (agent/plans.ts) to this
@@ -120,7 +119,7 @@ import { catalogRoleProblemsFor } from "../providers/catalog-role-problems";
 import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, type McpServerSettingsEntry } from "../settings";
 import { addMcpServerInScope, mcpServerInScope, removeMcpServerInScope, type McpScope, type McpScopeTarget } from "../agent/mcp/mcp-write";
 import { saveAnswerEverywhere, saveAnswerInProject, SavedAnswerRefused } from "../agent/saved-answers";
-import { localScopeKeyFor } from "../runtime-sdk/run-home-input";
+import { localScopeKeyFor, projectScopeRootFor } from "../runtime-sdk/run-home-input";
 import { readSdkGlobalConfig, SdkFileUnreadable, updateSdkSettings } from "../sdk-files";
 import { bypassAllowedAtSpawn, disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
@@ -877,14 +876,14 @@ function liveSettingsFor(opts: { winterHome?: string }): Settings | undefined {
 
 /** WS-21 (spec §4.4): the MCP doors speak claude's three scopes. `local` and `project` name a project,
  *  so they need the caller's `cwd`. The local entry in `sdk/.winter.json` is keyed by `localScopeKeyFor`
- *  (review I5 — exactly the run home's key); the project file lives at the trusted project root the run
- *  home reads it from (`repoRootFor`). Refused typed without a cwd. */
+ *  (review I5 — exactly the run home's key); the project file lives at the project root the run home reads
+ *  it from (`projectScopeRootFor`, R.3 residual: a linked worktree's own top). Refused typed without a cwd. */
 function mcpScopeTarget(method: string, winterHome: string, p: { scope: McpScope; cwd?: string | undefined }): McpScopeTarget {
   if (p.scope === "user") return { home: winterHome, scope: "user" };
   if (p.cwd === undefined || p.cwd === "") {
     throw new RpcFailure(ERR.INVALID_PARAMS, `${method}: the "${p.scope}" scope names a project — pass the project's cwd`, { code: "mcp_scope_needs_cwd" });
   }
-  return { home: winterHome, scope: p.scope, root: p.scope === "local" ? localScopeKeyFor(p.cwd) : repoRootFor(p.cwd) };
+  return { home: winterHome, scope: p.scope, root: p.scope === "local" ? localScopeKeyFor(p.cwd) : projectScopeRootFor(p.cwd) };
 }
 
 /** Which credential-shaped headers the read door dropped from ONE scope's servers in `sdk/.winter.json`
@@ -1453,10 +1452,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       settingsPathFor: (scope: AdapterPluginScope): string => {
         if (scope === "user") return sdkSettingsPath(winterHome);
         if (!cwd) throw new RpcFailure(ERR.INVALID_PARAMS, `plugin scope "${scope}" requires cwd`);
-        // R.3 I-2: the LOCAL tier is keyed where the run home reads it (`localScopeKeyFor`: a linked
-        // worktree's own top), exactly as `mcp.*` and `approval.respond` key it; project stays `repoRootFor`.
+        // R.3 I-2 + residual: both project-named scopes are keyed where the run home reads them — the
+        // cwd's own git top (a linked worktree's own), `localScopeKeyFor` / `projectScopeRootFor`.
         if (scope === "local") return join(localScopeKeyFor(cwd), ".winter", "settings.local.json");
-        return join(repoRootFor(cwd), ".winter", "settings.json");
+        return join(projectScopeRootFor(cwd), ".winter", "settings.json");
       },
     };
   }

@@ -17,6 +17,7 @@ import { ToolRegistry } from "../../src/agent/tools/registry";
 import { TrustStore } from "../../src/agent/trust";
 import { configuredMcpServersFor } from "../../src/runtime-sdk/external-mcp";
 import { localScopeKeyFor, runHomeInputFor } from "../../src/runtime-sdk/run-home-input";
+import { buildRunHome } from "@yanlinglabs/winter-runtime-sdk";
 
 const tmp = (p: string): string => realpathSync(mkdtempSync(join(tmpdir(), p)));
 
@@ -207,5 +208,73 @@ describe("review I5: localScopeKeyFor", () => {
       expect(Object.keys(sdkLocalMcpServers(home, localScopeKeyFor(wt)))).toEqual(["wtsrv"]);
       c.close();
     } finally { server.stop(); store.close(); }
+  });
+});
+
+// R.3 residual (controller ruling): the PROJECT scope is the cwd's own git top — a linked worktree's own top,
+// what claude's `--scope project` writes at and the run home reads the project tier from — for every
+// project-scope reader and writer; trust stays keyed on `repoRootFor(cwd)` (a worktree of a trusted repo is
+// trusted). From the main checkout nothing changes.
+describe("R.3 residual: MCP project scope from a linked worktree of a trusted repo", () => {
+  let stop: (() => void) | undefined;
+  afterEach(() => { stop?.(); stop = undefined; });
+
+  function bed() {
+    const main = tmp("winter-r3p-main-");
+    const git = (...args: string[]) => expect(Bun.spawnSync(["git", "-C", main, ...args], { stdout: "ignore", stderr: "ignore" }).exitCode).toBe(0);
+    git("init", "-q");
+    git("-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "i");
+    const wt = join(tmp("winter-r3p-wtparent-"), "wt");
+    git("worktree", "add", "-q", "-b", `r3p-${Math.random().toString(16).slice(2)}`, wt);
+    const home = tmp("winter-r3p-home-");
+    mkdirSync(join(home, "sdk"), { recursive: true });
+    saveSettings(join(home, "settings.json"), Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } }));
+    const trust = new TrustStore(join(home, "trust.json"));
+    trust.trust(main);
+    return { main, wt: realpathSync(wt), home, trust };
+  }
+  async function serve(home: string, trust: TrustStore) {
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets")));
+    const tokens = await authority.ensureTokens();
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets: new FileSecretStore(join(home, "s2")), trust, mcp: new McpManager({ registry: new ToolRegistry(), trust }) });
+    const c = await TestClient.connect(socketPath);
+    await c.request(METHODS.hello, { protocolVersion: PROTOCOL_VERSION, role: "harness", token: tokens.harness, clientName: "cli" });
+    stop = () => { c.close(); server.stop(); store.close(); };
+    return c;
+  }
+  /** Every MCP server name a BUILT run home for `cwd` hands its child (`<run>/.winter.json`). */
+  async function runHomeServers(home: string, trust: TrustStore, cwd: string): Promise<string[]> {
+    const rh = await buildRunHome(runHomeInputFor({ home, trust, settings: () => null, reservedMcpServerNames: [] }, { mode: "code", dispatchChild: false, leg: "winter", cwd }));
+    try {
+      const config = JSON.parse(readFileSync(join(rh.dir, ".winter.json"), "utf8")) as { mcpServers?: Record<string, unknown>; projects?: Record<string, { mcpServers?: Record<string, unknown> }> };
+      return [...new Set([...Object.keys(config.mcpServers ?? {}), ...Object.values(config.projects ?? {}).flatMap((p) => Object.keys(p.mcpServers ?? {}))])].sort();
+    } finally { await rh.dispose(); }
+  }
+  const stdio = { type: "stdio" as const, command: "node", args: ["srv.js"] };
+
+  test("mcp.add --scope project writes the WORKTREE's .winter/mcp.json, and the worktree's built run home lists the server", async () => {
+    const b = bed();
+    const c = await serve(b.home, b.trust);
+    expect((await c.request(METHODS.mcpAdd, { name: "wtsrv", entry: stdio, scope: "project", cwd: b.wt })).result?.ok).toBe(true);
+    expect(Object.keys(JSON.parse(readFileSync(join(b.wt, ".winter", "mcp.json"), "utf8")).mcpServers)).toEqual(["wtsrv"]);
+    expect(existsSync(join(b.main, ".winter", "mcp.json"))).toBe(false);
+    expect((await c.request(METHODS.mcpGet, { name: "wtsrv", scope: "project", cwd: b.wt })).result.found).toBe(true);
+    expect(await runHomeServers(b.home, b.trust, b.wt)).toContain("wtsrv");
+    // the daemon's own reader of the project tier (a session with no run home) reads the same file
+    expect(Object.keys(configuredMcpServersFor({ settings: null, cwd: b.wt, trusted: (d) => b.trust.isTrusted(d) }))).toEqual(["wtsrv"]);
+    expect((await c.request(METHODS.mcpRemove, { name: "wtsrv", scope: "project", cwd: b.wt })).result.removed).toBe(true);
+  });
+
+  test("from the MAIN checkout nothing changes: its own .winter/mcp.json, its own run home", async () => {
+    const b = bed();
+    const c = await serve(b.home, b.trust);
+    expect((await c.request(METHODS.mcpAdd, { name: "mainsrv", entry: stdio, scope: "project", cwd: b.main })).result?.ok).toBe(true);
+    expect(Object.keys(JSON.parse(readFileSync(join(b.main, ".winter", "mcp.json"), "utf8")).mcpServers)).toEqual(["mainsrv"]);
+    expect(existsSync(join(b.wt, ".winter", "mcp.json"))).toBe(false);
+    expect(await runHomeServers(b.home, b.trust, b.main)).toContain("mainsrv");
+    expect(await runHomeServers(b.home, b.trust, b.wt)).not.toContain("mainsrv");
+    expect(Object.keys(configuredMcpServersFor({ settings: null, cwd: b.main, trusted: (d) => b.trust.isTrusted(d) }))).toEqual(["mainsrv"]);
   });
 });

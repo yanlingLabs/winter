@@ -3,20 +3,20 @@ import { join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { TrustStore } from "./trust";
 import { storeHomeFor } from "./paths";
-import { repoRootFor } from "./memory-dir";
+import { projectScopeRootFor, projectScopeTrusted } from "../runtime-sdk/run-home-input";
 import { linkedRouterSupportsRunHome } from "../runtime-sdk/run-home-support";
 import { homedir } from "node:os";
 
 /**
- * WS-21 (spec §3.4.2): the trusted project's `.winter/skills` dirs from `cwd` up to the repo root
- * (`repoRootFor`), NEAREST first, never above `$HOME` — the walk the router's run-home builder makes,
+ * WS-21 (spec §3.4.2): the trusted project's `.winter/skills` dirs from `cwd` up to the project root
+ * (`projectScopeRootFor`, R.3 residual: a linked worktree's own top), NEAREST first, never above `$HOME` — the walk the router's run-home builder makes,
  * so `skills.list` names the same winners the run folder links.
  */
 function projectSkillDirsNearestFirst(cwd: string): string[] {
   let dir: string;
   try { dir = realpathSync(cwd); } catch { dir = cwd; }
   let root: string;
-  try { root = repoRootFor(dir); } catch { root = dir; }
+  try { root = projectScopeRootFor(dir); } catch { root = dir; }
   let home: string;
   try { home = realpathSync(homedir()); } catch { home = homedir(); }
   const out: string[] = [];
@@ -197,7 +197,7 @@ export class SkillStore {
    */
   private discover(cwd: string | null): ScannedSkill[] {
     const all: ScannedSkill[] = [];
-    const trustedProject = cwd !== null && this.trust.isTrusted(cwd);
+    const trustedProject = cwd !== null && projectScopeTrusted(cwd, this.trust);
     // WS-21: user and self skills live in the store home (`storeHomeFor`: `<home>/sdk/skills` on a
     // run-home build, `<home>/skills` before it).
     const userAndSelf = (): void => {

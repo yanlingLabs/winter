@@ -820,7 +820,7 @@ test("ExitPlanMode with no planBridge configured falls through unchanged (exit_p
 });
 
 // R.3 I-1: the bridge's "in this project" option and its protected-path walk use the SAME trust the run home's
-// project tier uses (`projectTierTrusted`): a linked worktree of a trusted repository is trusted. The driver
+// project tier uses (`projectScopeTrusted`): a linked worktree of a trusted repository is trusted. The driver
 // wires both legs' bridges through `bridgeProjectTrustedFor`.
 test("R.3 I-1: in a linked worktree of a TRUSTED repo the card offers \"in this project\"; an untrusted repo's worktree does not", () => {
   const git = (args: string[], cwd: string) => expect(Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "ignore", stderr: "ignore" }).exitCode).toBe(0);

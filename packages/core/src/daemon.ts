@@ -19,7 +19,7 @@ import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
 import { loadSettings, loadPermissionDirs, effortRefusalFor, hooksEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, pinsFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, sdkAllowRules, sdkAutoMemory, sdkLocalMcpServers, sdkOutputStyle, sdkUserMcpServers, liveSettingsView, type Settings } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
-import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor, repoRootFor } from "./agent/memory-dir";
+import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
 import { createRebindableProvider, internalModelFor, internalRoleEffortFor } from "./providers/manager";
 import { createInternalProviderView, staticInternalProviderView, type InternalProviderView } from "./providers/internal-view";
@@ -94,9 +94,9 @@ import { recoverRunRoots, rootRecoveryDetail, type RootReconcile } from "./runti
 import { splitSettingsToSdk } from "./migration/settings-split";
 import { MigrationCRefused, finishMigrationC, isOldLayout, migrationCManifestPath, migrationCState, runMigrationC } from "./migration/migrate-c";
 import { convertLegacyPluginsForMigration } from "./plugins/convert-legacy";
-import { localScopeKeyFor, projectTierRootFor, projectTierTrusted, runHomeInputFor } from "./runtime-sdk/run-home-input";
+import { localScopeKeyFor, projectScopeRootFor, projectScopeTrust, projectScopeTrusted, runHomeInputFor } from "./runtime-sdk/run-home-input";
 import { reservedMcpServerNames } from "./capabilities/names";
-import { persistedAllowRulesFor, winterGateRulesFromSdk } from "./runtime-sdk/mode-options";
+import { projectScopeAllowRulesFor, winterGateRulesFromSdk } from "./runtime-sdk/mode-options";
 import { configuredMcpServersFor } from "./runtime-sdk/external-mcp";
 import { planBridgeFor, type PlanBridge } from "./runtime-sdk/plan-bridge";
 import { importEngineEraSession } from "./runtime-sdk/import-legacy";
@@ -627,7 +627,7 @@ export async function startDaemon(opts: {
   // view of settings.json (today: the `permissionRules`/`dangerousDomainsAdded` getters further
   // down; later tasks convert more getters against this SAME instance, never a second one, so
   // there is exactly one mtime cache per project cwd for the whole daemon).
-  const projectSettings = new ProjectSettingsResolver({ base: () => settings, trust: trustStore });
+  const projectSettings = new ProjectSettingsResolver({ base: () => settings, trust: projectScopeTrust(trustStore) });
   // Review I2 (lane B): the daemon's own record of rules the user approved "in this project" from a
   // card (`<home>/permissions/projects.json`). WS-21: RETIRED as a store — nothing writes it any more (a
   // card's "in this project" answer goes to the trusted project's `.winter/settings.local.json`,
@@ -644,7 +644,11 @@ export async function startDaemon(opts: {
   // fail-OPEN (card-less) for any subdir session. `repoRootFor` is memoized per canon(cwd) (a git
   // spawn only on first sight of a dir) and falls back to the dir itself outside a git repo, so
   // this is perf-neutral and a non-repo cwd behaves exactly as before.
-  const projectRootOf = (cwd?: string | null): string | null => (cwd ? repoRootFor(cwd) : null);
+  // R.3 residual (controller ruling): the PROJECT scope's root is the cwd's own git top — a linked
+  // worktree's own `.winter/`, where the run home reads the project tier and `--scope project` writes
+  // (`projectScopeRootFor`, `localScopeKeyFor`'s sibling) — and the resolver above trusts it per
+  // `projectScopeTrust` (keyed on the repository, so a worktree of a trusted repo is trusted).
+  const projectRootOf = (cwd?: string | null): string | null => (cwd ? projectScopeRootFor(cwd) : null);
   // Critical 1 fix, whole-branch review (2026-07-28): the user-added half of the effective
   // dangerous-domain list, SAME live-settings shape engine.ts's own EngineConfig.dangerousDomainsAdded
   // getter (below) already used for the code-mode fetch approval-card floor — hoisted into ONE shared
@@ -1692,7 +1696,7 @@ export async function startDaemon(opts: {
       mode: session.mode,
       cwd: session.cwd,
       // R.3 I-1: the SAME root and trust the run home's project tier uses (`runHomeInputFor`).
-      trustedProjectRoot: () => (projectTierTrusted(session.cwd, trustStore) ? projectTierRootFor(session.cwd) : null),
+      trustedProjectRoot: () => (projectScopeTrusted(session.cwd, trustStore) ? projectScopeRootFor(session.cwd) : null),
     });
   // ── P8c integration Wiring 2: the notification/schedule sinks (lane 2's `sinks.ts`, P8c-11) ────
   // `hub.addObserver` (Dispatch/Phase 7's existing fan-out of every appended event of EVERY
@@ -1786,12 +1790,11 @@ export async function startDaemon(opts: {
     // project's overlay (the SAME `projectSettings` resolver, at the SAME repo root) and its
     // `permissions.local.json` (the SAME `permissionRules` store `approval.respond` writes, read only
     // when trusted). All live getters: a saved rule reaches the next incarnation, no restart.
-    persistedAllowRules: (cwd) => persistedAllowRulesFor(cwd, {
-      projectRootOf: (c) => projectRootOf(c),
+    persistedAllowRules: (cwd) => projectScopeAllowRulesFor(cwd, {
       effectiveSettings: (root) => projectSettings.effective(root),
       approvedProjectRules: (root) => approvedProjectRules.rulesFor(root),
       ...(permissionRules === undefined ? {} : { projectRules: (root: string) => permissionRules!.rulesFor(root).project }),
-      isTrusted: (dir) => trustStore.isTrusted(dir),
+      trust: trustStore,
     }),
     // Task 17 (P8b-15): Winter children land in the persisted roster (absent when the spine is offline).
     ...(bgAgents === undefined ? {} : { children: bgAgents }),

@@ -94,7 +94,7 @@ import type { ContextAssembler } from "../agent/context";
 import type { SkillStore } from "../agent/skills";
 import { startWinterSession, unconsumedUserMessages, withRunHome, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
 import { RunHomeError, type RunHome, type RunHomeErrorCode, type RunHomeFor, type RunHomeInput } from "@yanlinglabs/winter-runtime-sdk";
-import { projectTierTrusted, type RunHomeSessionFacts } from "./run-home-input";
+import { projectScopeTrusted, type RunHomeSessionFacts } from "./run-home-input";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import { startOfficialSession, type OfficialSession } from "./official-session";
 import { officialAuthArmFor, OfficialConsoleProfileMissing, OfficialConsoleRouterUnsupported, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
@@ -458,11 +458,12 @@ export function sessionPermissionClassFor(deps: {
 }
 
 /** R.3 I-1: the approval bridge's `projectTrusted` for a session cwd — the SAME trust the run home's
- *  project tier uses (`projectTierTrusted`: the cwd's own trust, or its repository's — a linked worktree of
- *  a trusted repo is trusted, and an "in this project" answer keeps `repoRootFor`'s key), read live per call.
- *  It gates both the card's "in this project" option and the bridge's protected-path walk. */
+ *  project tier uses (`projectScopeTrusted`: the cwd's own trust, or its repository's — a linked worktree of
+ *  a trusted repo is trusted), read live per call. It gates both the card's "in this project" option and the
+ *  bridge's protected-path walk; `approval.respond` saves the answer under the same trust, into the local
+ *  tier at `localScopeKeyFor(cwd)` (a linked worktree's own top). */
 export function bridgeProjectTrustedFor(isTrusted: (dir: string) => boolean, cwd: string): () => boolean {
-  return () => projectTierTrusted(cwd, { isTrusted });
+  return () => projectScopeTrusted(cwd, { isTrusted });
 }
 
 /** The driver's three child moments → the persisted roster's doors. `agentId` = `threadId` = the

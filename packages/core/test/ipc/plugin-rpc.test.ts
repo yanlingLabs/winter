@@ -20,6 +20,9 @@ import { PluginSupervisor } from "../../src/plugins/supervisor";
 import { sdkPluginsRoot, sdkSettingsPath } from "../../src/agent/paths";
 import { pluginConsentFingerprint } from "../../src/plugins/consent-fingerprint";
 import { HookRegistry } from "../../src/plugins/hook-registry";
+import { buildRunHome } from "@yanlinglabs/winter-runtime-sdk";
+import { runHomeInputFor } from "../../src/runtime-sdk/run-home-input";
+import { TrustStore } from "../../src/agent/trust";
 
 class TestClient {
   private decoder = new LineDecoder();
@@ -767,6 +770,57 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
       expect((await c.request(METHODS.pluginSetConsent, { spec: "q@m", classes: ["exec"], fingerprint })).result).toEqual({ code: "unknown_plugin" });
     });
   }
+
+  // R.3 residual (controller ruling): the PROJECT scope is the cwd's own git top (a linked worktree's own
+  // top — what the run home reads the project tier from); trust stays keyed on the repository.
+  describe("R.3 residual: plugin project scope from a linked worktree of a trusted repo", () => {
+    function worktreeBed(home: string) {
+      const main = realpathSync(mkdtempSync(join(tmpdir(), "winter-plugin-r3p-main-")));
+      const git = (args: string[]) => expect(Bun.spawnSync(["git", "-C", main, ...args], { stdout: "ignore", stderr: "ignore" }).exitCode).toBe(0);
+      git(["init", "-q"]);
+      git(["-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "i"]);
+      const wt = join(realpathSync(mkdtempSync(join(tmpdir(), "winter-plugin-r3p-wt-"))), "wt");
+      git(["worktree", "add", "-q", "-b", `r3p-${Math.random().toString(16).slice(2)}`, wt]);
+      const trust = new TrustStore(join(home, "trust.json"));
+      trust.trust(main);
+      return { main, wt: realpathSync(wt), trust };
+    }
+    /** `enabledPlugins` as a BUILT run home for `cwd` hands its child (its effective, merged settings). */
+    async function runHomeEnabled(home: string, trust: TrustStore, cwd: string): Promise<Record<string, unknown>> {
+      const rh = await buildRunHome(runHomeInputFor({ home, trust, settings: () => null, reservedMcpServerNames: [] }, { mode: "code", dispatchChild: false, leg: "winter", cwd }));
+      try { return (rh.effectiveSettings["enabledPlugins"] ?? {}) as Record<string, unknown>; } finally { await rh.dispose(); }
+    }
+
+    test("plugin.install/enable --scope project writes the WORKTREE's .winter/settings.json; its run home enables the plugin", async () => {
+      const { home, c } = await boot();
+      const b = worktreeBed(home);
+      const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-mkt-r3p-"));
+      writeMarketplace(mktDir);
+      await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+      expect((await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "project", cwd: b.wt })).result?.ok).toBe(true);
+      expect(JSON.parse(readFileSync(join(b.wt, ".winter", "settings.json"), "utf8")).enabledPlugins["p@m"]).toBe(true);
+      expect(existsSync(join(b.main, ".winter", "settings.json"))).toBe(false);
+      await c.request(METHODS.pluginDisable, { spec: "p@m", scope: "project", cwd: b.wt });
+      expect(JSON.parse(readFileSync(join(b.wt, ".winter", "settings.json"), "utf8")).enabledPlugins["p@m"]).toBe(false);
+      await c.request(METHODS.pluginEnable, { spec: "p@m", scope: "project", cwd: b.wt });
+      expect((await runHomeEnabled(home, b.trust, b.wt))["p@m"]).toBe(true);
+      const listed = (await c.request(METHODS.pluginList, { cwd: b.wt })).result.plugins;
+      expect(listed.map((e: { scope: string; enabled: boolean }) => [e.scope, e.enabled])).toEqual([["project", true]]);
+    });
+
+    test("from the MAIN checkout nothing changes: its own .winter/settings.json and run home", async () => {
+      const { home, c } = await boot();
+      const b = worktreeBed(home);
+      const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-mkt-r3p-"));
+      writeMarketplace(mktDir);
+      await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+      expect((await c.request(METHODS.pluginInstall, { spec: "p@m", scope: "project", cwd: b.main })).result?.ok).toBe(true);
+      expect(JSON.parse(readFileSync(join(b.main, ".winter", "settings.json"), "utf8")).enabledPlugins["p@m"]).toBe(true);
+      expect(existsSync(join(b.wt, ".winter", "settings.json"))).toBe(false);
+      expect((await runHomeEnabled(home, b.trust, b.main))["p@m"]).toBe(true);
+      expect((await runHomeEnabled(home, b.trust, b.wt))["p@m"]).toBeUndefined();
+    });
+  });
 
   test("project/local scope without cwd is refused typed", async () => {
     const { c } = await boot();

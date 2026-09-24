@@ -75,6 +75,34 @@ describe("SkillStore.list precedence", () => {
   });
 });
 
+// R.3 residual (controller ruling): `skills.list` walks where the run home walks — from the cwd up to the cwd's
+// OWN git top (a linked worktree's own top), trust keyed on the repository.
+describe("R.3 residual: skills.list from a linked worktree of a trusted repo", () => {
+  test("the worktree's own project skills are listed (from its top and from inside it); the main checkout's are not", () => {
+    setRunHomeSupportForTests(true);
+    const home = tmp("winter-skills21-r3p-h-");
+    const main = tmp("winter-skills21-r3p-main-");
+    const git = (args: string[]) => expect(Bun.spawnSync(["git", "-C", main, ...args], { stdout: "ignore", stderr: "ignore" }).exitCode).toBe(0);
+    git(["init", "-q"]);
+    git(["-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "i"]);
+    const wt = join(tmp("winter-skills21-r3p-wt-"), "wt");
+    git(["worktree", "add", "-q", "-b", `r3p-${Math.random().toString(16).slice(2)}`, wt]);
+    writeSkill(join(wt, ".winter", "skills"), "wtskill", "the worktree's own");
+    writeSkill(join(main, ".winter", "skills"), "mainskill", "the main checkout's");
+    const nested = join(wt, "pkg");
+    mkdirSync(nested, { recursive: true });
+    const trust = new TrustStore(join(home, "trust.json"));
+    trust.trust(main);
+    for (const cwd of [wt, nested]) {
+      const names = new SkillStore({ winterHome: home, trust }).list({ cwd }).map((x) => x.name);
+      expect({ cwd, wt: names.includes("wtskill"), main: names.includes("mainskill") }).toEqual({ cwd, wt: true, main: false });
+    }
+    // from the MAIN checkout nothing changes
+    const fromMain = new SkillStore({ winterHome: home, trust }).list({ cwd: main }).map((x) => x.name);
+    expect({ main: fromMain.includes("mainskill"), wt: fromMain.includes("wtskill") }).toEqual({ main: true, wt: false });
+  });
+});
+
 describe("sessionAvailability after the handover's retirement (L4 request 2)", () => {
   test("a run-home build: user/self/project skills load in sessions (the run folder carries them); builtin does not, and says why", () => {
     setRunHomeSupportForTests(true);
