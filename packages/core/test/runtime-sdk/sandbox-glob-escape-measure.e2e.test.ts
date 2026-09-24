@@ -197,4 +197,14 @@ describeWithWinterBinary("C-1 — the Winter-leg sandbox fence under a `[`-named
     const r = await run("[wip] app", true, () => "mv .winter .w2 && mkdir -p .w2/skills/x && echo > .w2/skills/x/SKILL.md && mv .w2 .winter; echo x > notes.md; true", { probe: [".winter/skills/x/SKILL.md", "notes.md"] });
     expect(r.landed).toEqual({ ".winter/skills/x/SKILL.md": false, "notes.md": true });
   }, 180_000);
+
+  // R.3 re-review minor (b): the NESTED form of the rename bypass — a `.winter` built under another name in a
+  // SUBDIRECTORY and renamed into place (`mkdir -p pkg/.w/rules && … && mv pkg/.w pkg/.winter`): the any-depth
+  // glob fences `pkg/.winter/rules`, but a rename of an unfenced directory INTO that name is the known
+  // rename-fence follow-up (the same gap as the ancestor-rename row above; SDK round 17's cover is for the
+  // cwd's own `.winter`). Needs the binary that closes it — do not assert it before.
+  test.todo("the nested-rename probe cannot plant pkg/.winter/rules/x.md (the known rename-fence follow-up)", async () => {
+    const r = await run("plain app", true, () => "mkdir -p pkg/.w/rules && echo x > pkg/.w/rules/x.md && mv pkg/.w pkg/.winter; echo x > notes.md; true", { mkdirs: ["pkg"], probe: ["pkg/.winter/rules/x.md", "notes.md"] });
+    expect(r.landed).toEqual({ "pkg/.winter/rules/x.md": false, "notes.md": true });
+  }, 180_000);
 });
