@@ -1,6 +1,6 @@
 // WS-21 L3.3 (spec §3.1, §3.7; Contract A): the per-generation inputs the daemon hands `buildRunHome`.
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runHomeInputFor, gitRootFor, _clearGitRootCacheForTests, type RunHomeInputDeps } from "../../src/runtime-sdk/run-home-input";
@@ -125,18 +125,25 @@ describe("runHomeInputFor", () => {
 // empty, so none of the worktree's own items loaded). The TRUST decision stays keyed on `repoRootFor(cwd)`:
 // a linked worktree of a trusted repo is trusted.
 describe("R.3 I-1: a linked worktree's run home loads the worktree's own project tier", () => {
-  /** Every file a built run home's `rules/` resolves to. */
-  async function builtRuleTargets(home: string, trust: TrustStore, cwd: string): Promise<{ root: string | null; rules: string[] }> {
+  /** Every entry of a built run home's `rules/`: its file name and its CONTENT. Router 0c62337 COPIES the
+   *  project rules into the run home (a snapshot, `project--.winter--rules--<name>`) instead of linking
+   *  them, so an entry's realpath is the run folder's own; which rule loaded is told by name and content. */
+  async function builtRuleTargets(home: string, trust: TrustStore, cwd: string): Promise<{ root: string | null; rules: { name: string; content: string }[] }> {
     const input = runHomeInputFor({ home, trust, settings: () => null, reservedMcpServerNames: [...reservedMcpServerNames()] }, { mode: "code", dispatchChild: false, leg: "winter", cwd });
     const rh = await buildRunHome(input);
     try {
       const dir = join(rh.dir, "rules");
-      const rules = existsSync(dir) ? readdirSync(dir).map((f) => realpathSync(join(dir, f))) : [];
+      const rules = existsSync(dir) ? readdirSync(dir).map((f) => ({ name: f, content: readFileSync(join(dir, f), "utf8") })) : [];
       return { root: input.trustedProjectRoot, rules };
     } finally {
       await rh.dispose();
     }
   }
+  const WT_RULE = "# the worktree's own rule\n";
+  const MAIN_RULE = "# the main checkout's rule\n";
+  /** Whether the built rules carry the worktree's (or the main checkout's) rule — by file name AND content. */
+  const has = (rules: { name: string; content: string }[], file: string, content: string): boolean =>
+    rules.some((r) => r.name.endsWith(file) && r.content === content);
   function worktreeBed(): { repo: string; wt: string; home: string; wtRule: string; mainRule: string } {
     const repo = initRepo();
     const wt = join(tmp("winter-rhi-wt-"), "wt");
@@ -144,8 +151,8 @@ describe("R.3 I-1: a linked worktree's run home loads the worktree's own project
     for (const base of [repo, wt]) mkdirSync(join(base, ".winter", "rules"), { recursive: true });
     const wtRule = join(wt, ".winter", "rules", "wt-rule.md");
     const mainRule = join(repo, ".winter", "rules", "main-rule.md");
-    writeFileSync(wtRule, "# the worktree's own rule\n");
-    writeFileSync(mainRule, "# the main checkout's rule\n");
+    writeFileSync(wtRule, WT_RULE);
+    writeFileSync(mainRule, MAIN_RULE);
     const home = tmp("winter-rhi-h-");
     mkdirSync(join(home, "sdk"), { recursive: true });
     return { repo, wt: real(wt), home, wtRule: real(wtRule), mainRule: real(mainRule) };
@@ -157,8 +164,9 @@ describe("R.3 I-1: a linked worktree's run home loads the worktree's own project
     trust.trust(b.repo);
     const built = await builtRuleTargets(b.home, trust, b.wt);
     expect(built.root).toBe(b.wt);
-    expect(built.rules).toContain(b.wtRule);
-    expect(built.rules).not.toContain(b.mainRule);
+    expect(has(built.rules, "wt-rule.md", WT_RULE)).toBe(true);
+    expect(has(built.rules, "main-rule.md", MAIN_RULE)).toBe(false);
+    expect(built.rules.some((r) => r.content === MAIN_RULE)).toBe(false);
   });
 
   test("…from a directory inside the worktree too (the walk reaches the worktree's top)", async () => {
@@ -169,7 +177,8 @@ describe("R.3 I-1: a linked worktree's run home loads the worktree's own project
     trust.trust(b.repo);
     const built = await builtRuleTargets(b.home, trust, nested);
     expect(built.root).toBe(b.wt);
-    expect(built.rules).toContain(b.wtRule);
+    expect(has(built.rules, "wt-rule.md", WT_RULE)).toBe(true);
+    expect(built.rules.some((r) => r.content === MAIN_RULE)).toBe(false);
   });
 
   test("a worktree trusted by its OWN path (the review's measurement): its rules load, not the main checkout's", async () => {
@@ -178,8 +187,9 @@ describe("R.3 I-1: a linked worktree's run home loads the worktree's own project
     trust.trust(b.wt);
     const built = await builtRuleTargets(b.home, trust, b.wt);
     expect(built.root).toBe(b.wt);
-    expect(built.rules).toContain(b.wtRule);
-    expect(built.rules).not.toContain(b.mainRule);
+    expect(has(built.rules, "wt-rule.md", WT_RULE)).toBe(true);
+    expect(has(built.rules, "main-rule.md", MAIN_RULE)).toBe(false);
+    expect(built.rules.some((r) => r.content === MAIN_RULE)).toBe(false);
   });
 
   test("a linked worktree of an UNTRUSTED repo gets no project tier at all", async () => {
