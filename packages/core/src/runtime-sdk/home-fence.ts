@@ -32,6 +32,7 @@ import { selfGrantDenyWrite } from "./mode-options";
 export function homeFencedDirs(home: string): string[] {
   // The sandbox's SELF-GRANT list — never its protected-path entries (review I7: those are a card for a
   // write tool, and this list is the write-tool fence's hard deny).
+  // LITERAL real paths, never `childSandboxConfigFor`'s `[[]` glob spelling (C-1): both consumers compare real paths.
   const fromSandbox = selfGrantDenyWrite(home);
   return [...new Set([...fromSandbox, join(home, "agents"), join(home, "cache")])];
 }
