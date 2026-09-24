@@ -391,6 +391,11 @@ export async function startDaemon(opts: {
   if (migrationC.kind === "unreadable" || (migrationC.kind === "parsed" && migrationC.manifest.status === "in-progress")) {
     throw new MigrationCRefused("sdk_home_half_migrated", `migration C: half-migrated home (${migrationCManifestPath(home)}) — run \`winter migrate --sdk-home --resume\` or \`winter migrate --sdk-home --rollback\``);
   }
+  // R.3 I-5: a rollback caught half-way (`rolling-back`, written before its first file moves) — the same
+  // door; booting would split transcripts between sdk/projects and a half-restored <home>/projects.
+  if (migrationC.kind === "parsed" && migrationC.manifest.status === "rolling-back") {
+    throw new MigrationCRefused("sdk_home_half_migrated", `migration C: a rollback of this home was interrupted (${migrationCManifestPath(home)}) — run \`winter migrate --sdk-home --rollback\` to finish it`);
+  }
 
   const secrets = opts.secrets ?? new KeychainSecretStore();
 

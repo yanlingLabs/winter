@@ -102,6 +102,21 @@ describe("Migration C at boot (run-home router)", () => {
     expect((caught as MigrationCRefused).code).toBe("sdk_home_half_migrated");
   });
 
+  // R.3 I-5: a rollback that crashed partway leaves `rolling-back` (written before its first file moves) —
+  // the same door as `in-progress`, and the remedy it names is the rollback, never a resume.
+  test("R.3 I-5: a home whose rollback was interrupted refuses sdk_home_half_migrated, naming --rollback", async () => {
+    const parent = parentDir();
+    const home = join(parent, "rolling-back");
+    mkdirSync(join(home, "migration", "c"), { recursive: true });
+    writeFileSync(join(home, "migration", "c", "manifest.json"), JSON.stringify({ schemaVersion: 1, status: "rolling-back", steps: [], moved: [], links: [], copied: [], archived: [], reconciled: [] }));
+    let caught: unknown;
+    try { daemon = await boot(home, parent); } catch (err) { caught = err; }
+    expect(caught).toBeInstanceOf(MigrationCRefused);
+    expect((caught as MigrationCRefused).code).toBe("sdk_home_half_migrated");
+    expect((caught as Error).message).toContain("--rollback");
+    expect((caught as Error).message).not.toContain("--resume");
+  });
+
   test("a fresh temp home seeded with settings boots, and the split copies the moved keys", async () => {
     setRunHomeSupportForTests(true);
     const parent = parentDir();

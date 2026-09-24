@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join, relative as relativeTo } from "node:path";
 import {
   MigrationCRefused, finishMigrationC, isOldLayout, migrationCCompletePath, migrationCManifestPath, migrationCState,
-  planMigrationC, rollbackMigrationC, runMigrationC,
+  planMigrationC, recordLazyRekey, rollbackMigrationC, runMigrationC,
 } from "../../src/migration/migrate-c";
 import { openRuntimeStateDb } from "../../src/runtime-state/db";
 import { RuntimeSessionRecords } from "../../src/runtime-state/records";
@@ -686,6 +686,65 @@ describe("rollback", () => {
     expect(migrationCState(home)).toMatchObject({ kind: "parsed", manifest: { status: "complete" } });
     const db = new Database(join(home, "runtimes", "runtime-state.db"), { readonly: true });
     try { expect(db.query<{ b: string }, []>("SELECT backend_root AS b FROM runtime_sessions WHERE winter_session_id='s_1'").get()!.b).toBe(join(home, "sdk", "projects", key)); } finally { db.close(); }
+  });
+});
+
+// R.3 I-5: a rollback used to change the manifest (and drop COMPLETE) only at its very END, and boot refuses
+// only `in-progress` or an unreadable manifest — so a crash partway left a `complete` manifest over a
+// half-restored home, and the new build booted on it (new writes to sdk/projects, restored data under
+// <home>/projects: transcripts split). The rollback now writes `rolling-back` before its first file moves.
+describe("R.3 I-5: an interrupted rollback is guarded", () => {
+  test("a crash partway leaves `rolling-back`; resume and plan refuse typed; re-running the rollback finishes it", async () => {
+    const { home, key } = fixture();
+    const m = await runMigrationC(home, deps({ reconcile: stubReconcile().reconcile }));
+    expect(m.status).toBe("complete");
+    expect(m.archived.length).toBeGreaterThan(0);
+    expect(m.copied.length).toBeGreaterThan(0);
+    // A genuine I/O failure partway: the copy-files reversal cannot create `<archive>/rolled-back` — AFTER
+    // the archive restore's renames have run.
+    writeFileSync(join(m.archiveDir, "rolled-back"), "in the way");
+    await expect(rollbackMigrationC(home, { log: () => {} })).rejects.toThrow();
+    expect(existsSync(join(home, m.archived[0]!.from))).toBe(true); // files DID move before the crash
+    expect(migrationCState(home)).toMatchObject({ kind: "parsed", manifest: { status: "rolling-back" } });
+    await expect(runMigrationC(home, deps({ reconcile: stubReconcile().reconcile }))).rejects.toMatchObject({ code: "sdk_home_half_migrated" });
+    expect((await planMigrationC(home)).refusal).toContain("--rollback");
+    // …and the rollback is re-runnable from where it stopped
+    rmSync(join(m.archiveDir, "rolled-back"));
+    const done = await rollbackMigrationC(home, { log: () => {} });
+    expect(done.status).toBe("rolled-back");
+    expect(migrationCState(home)).toEqual({ kind: "absent" });
+    expect(lstatSync(join(home, "projects")).isSymbolicLink()).toBe(false);
+    expect(readFileSync(join(home, "projects", key, "memory", "MEMORY.md"), "utf8")).toBe("- remembers\n");
+    expect(existsSync(join(m.archiveDir, "rolled-back", "sdk", "WINTER.md"))).toBe(true);
+    expect(isOldLayout(home)).toBe(true);
+  });
+
+  // `recordLazyRekey` appended a FRESH entry at every resume of a session with a persistent collision (it
+  // matched only `pending` entries, and each resume ends `collision`). It matches the session's existing
+  // entry for the same move now, whatever its outcome — without dropping a name a rollback moves back.
+  test("recordLazyRekey: two resumes of a colliding session leave ONE entry", async () => {
+    const { home } = fixture();
+    await runMigrationC(home, deps({ reconcile: stubReconcile().reconcile }));
+    const intent = { sessionId: "s_c", backendId: "b-c", from: "-raw", to: "-canon", entries: ["b-c.jsonl"] };
+    for (let resume = 0; resume < 2; resume += 1) {
+      recordLazyRekey(home, { ...intent, outcome: "pending" });
+      recordLazyRekey(home, { ...intent, outcome: "collision" });
+    }
+    const state = migrationCState(home);
+    expect(state.kind === "parsed" ? state.manifest.rekeyed?.filter((e) => e.sessionId === "s_c") : undefined).toEqual([{ ...intent, outcome: "collision" }]);
+  });
+
+  test("recordLazyRekey: a moved entry keeps the names it moved when a later resume records the same move with none", async () => {
+    const { home } = fixture();
+    await runMigrationC(home, deps({ reconcile: stubReconcile().reconcile }));
+    const intent = { sessionId: "s_m", backendId: "b-m", from: "-raw", to: "-canon" };
+    recordLazyRekey(home, { ...intent, entries: ["b-m", "b-m.jsonl"], outcome: "pending" });
+    recordLazyRekey(home, { ...intent, entries: ["b-m", "b-m.jsonl"], outcome: "moved" });
+    // the record could not be re-pointed, so the next resume sees the old key again — its files are gone
+    recordLazyRekey(home, { ...intent, entries: [], outcome: "pending" });
+    recordLazyRekey(home, { ...intent, entries: [], outcome: "moved" });
+    const state = migrationCState(home);
+    expect(state.kind === "parsed" ? state.manifest.rekeyed?.filter((e) => e.sessionId === "s_m") : undefined).toEqual([{ ...intent, entries: ["b-m", "b-m.jsonl"], outcome: "moved" }]);
   });
 });
 
