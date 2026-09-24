@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { ContextAssembler } from "../../src/agent/context";
 import { TrustStore } from "../../src/agent/trust";
 import { SkillStore } from "../../src/agent/skills";
+import { storeHomeFor } from "../../src/agent/paths";
 
 function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "winter-ctx-"))); }
 function setup() {
@@ -132,8 +133,8 @@ describe("ContextAssembler", () => {
   test("capability index lists discovered skills; loadedSkills injects the body", () => {
     const { home, trust } = setup(); // existing helper: temp winterHome + TrustStore
     // write a user skill
-    mkdirSync(join(home, "skills", "haiku"), { recursive: true });
-    writeFileSync(join(home, "skills", "haiku", "SKILL.md"), "---\nname: haiku\ndescription: Respond in haiku\n---\nHAIKU_BODY_ONLY_HERE\n");
+    mkdirSync(join(storeHomeFor(home), "skills", "haiku"), { recursive: true });
+    writeFileSync(join(storeHomeFor(home), "skills", "haiku", "SKILL.md"), "---\nname: haiku\ndescription: Respond in haiku\n---\nHAIKU_BODY_ONLY_HERE\n");
     const skills = new SkillStore({ winterHome: home, trust });
     const a = new ContextAssembler({ winterHome: home, trust, skills });
     const idx = a.assemble({ cwd: null });
@@ -172,8 +173,8 @@ describe("ContextAssembler", () => {
   test("mixed resolution: resolved skills injected, unresolved dropped (no empty header)", () => {
     const { home, trust } = setup();
     // set up the haiku skill
-    mkdirSync(join(home, "skills", "haiku"), { recursive: true });
-    writeFileSync(join(home, "skills", "haiku", "SKILL.md"), "---\nname: haiku\ndescription: Respond in haiku\n---\nHAIKU_BODY_ONLY_HERE\n");
+    mkdirSync(join(storeHomeFor(home), "skills", "haiku"), { recursive: true });
+    writeFileSync(join(storeHomeFor(home), "skills", "haiku", "SKILL.md"), "---\nname: haiku\ndescription: Respond in haiku\n---\nHAIKU_BODY_ONLY_HERE\n");
     const skills = new SkillStore({ winterHome: home, trust });
     const a = new ContextAssembler({ winterHome: home, trust, skills });
 
