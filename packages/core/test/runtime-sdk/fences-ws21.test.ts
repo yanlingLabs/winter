@@ -5,9 +5,9 @@
 //   escape floor `escapeFloorHit(command, home)` — any mention, or write-shaped only
 //   hook         the path fence (`protected-paths.ts`; driven end to end in `path-fence.test.ts`)
 //
-// The table's "real path + regex denyRead" for the run-folder files has no regex channel in either
-// SDK's `SandboxSettingsConfig` (string subpaths only); the rule and hook layers carry that row
-// (DECISION 12 / SPEC CONCERN in the lane report).
+// The table's "real path + regex denyRead" for the run-folder files is not expressed in the daemon's
+// real-path sandbox list; the rule and hook layers carry that row (DECISION 12 / SPEC CONCERN in the
+// lane report).
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -345,5 +345,27 @@ describe("round 6: staging roots and run folders — config files and backups/ r
   test("the Bash sandbox's denyRead names no staging root (it never did) and can express no per-root glob", () => {
     const denyRead = sandboxConfigFor(H).filesystem!.denyRead!;
     expect(denyRead.some((p) => p.includes(RESUME_STAGING_PREFIX))).toBe(false);
+  });
+});
+
+// C-1 (R.3 SDK review): a child's sandbox gets `childSandboxConfigFor`'s `[[]` glob spelling, but the
+// escape floor and the write-tool fence compare REAL paths — they keep the literal list (`home-fence.ts`),
+// so a `[`-named home is still fenced when a command or a tool names it the way it is really spelled.
+describe("C-1: a `[wip]` home — the escape floor and the write-tool fence match the LITERAL path", () => {
+  const W = "/Users/x/[wip] homes/.winter";
+  test("the escape floor matches the literal `[wip]` spelling in a command (quoted or not)", () => {
+    expect(escapeFloorHit(`echo x > '${W}/trust.json'`, W)).toBeDefined();
+    expect(escapeFloorHit(`ls "${W}/run"`, W)).toBeDefined();
+    expect(escapeFloorHit(`cp a.md "${W}/sdk/agents/"`, W)).toBeDefined();
+    expect(escapeFloorHit(`cd "${W}" && cat settings.json`, W)).toBeDefined();
+    // an ordinary path beside the home is not fenced
+    expect(escapeFloorHit(`echo x > "/Users/x/[wip] homes/notes.md"`, W)).toBeUndefined();
+  });
+  test("the fence lists themselves carry no glob spelling", () => {
+    for (const p of [...homeFencedDirs(W), ...homeFenceFor(W).files]) expect(p).not.toContain("[[]");
+  });
+  test("the write-tool fence denies a Write to the literal `[wip]` path", () => {
+    expect(controlPlaneTargetForCall("Write", { file_path: `${W}/trust.json` }, "/", homeFenceFor(W))).not.toBeNull();
+    expect(controlPlaneTargetForCall("Write", { file_path: `${W}/sdk/agents/a.md` }, "/", homeFenceFor(W))).not.toBeNull();
   });
 });
