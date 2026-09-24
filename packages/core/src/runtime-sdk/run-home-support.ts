@@ -113,10 +113,12 @@ export function runHomeReportSummary(runHome: RunHome): string | undefined {
   if (r.droppedImports.length > 0) parts.push(`@imports dropped (outside the project): ${r.droppedImports.join(", ")}`);
   const skippedAgents = r.skippedAgents ?? [];
   if (skippedAgents.length > 0) parts.push(`agents not copied: ${skippedAgents.map((a) => `${a.path} (${a.reason})`).join(", ")}`);
-  // Router 3279a1d: rules the builder DROPPED rather than widen (an allow re-anchored under an anchor holding
-  // `?`; on the official leg a sandbox allow whose anchor holds `*`/`?`).
+  // Router 3279a1d: entries the builder DROPPED — rules it would not widen (an allow re-anchored under an
+  // anchor holding `?`; on the official leg a sandbox allow whose anchor holds `*`/`?`) and, since the
+  // router's fix round, settings too (a project tier's escalating `defaultMode`, `fallbackModel` at any
+  // tier, model-routing keys from the project/local tiers, out-of-root rule imports) — so a neutral label.
   const droppedRules = r.droppedRules ?? [];
-  if (droppedRules.length > 0) parts.push(`rules dropped rather than widened: ${droppedRules.map((d) => `${d.rule} [${d.tier}] (${d.reason})`).join(", ")}`);
+  if (droppedRules.length > 0) parts.push(`run-home entries dropped by the router: ${droppedRules.map((d) => `${d.rule} [${d.tier}] (${d.reason})`).join(", ")}`);
   return parts.length === 0 ? undefined : `run home ${runHome.runId}: ${parts.join("; ")}`;
 }
 

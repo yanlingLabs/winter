@@ -76,4 +76,18 @@ describe("runHomeReportSummary — what the builder did not do, for the daemon l
     expect(line).toContain("r1");
     for (const bit of ["/p/a (outside-root)", "/u/x", "srv (reserved-name)", "r.md", "../x.md", "/h/sdk/agents/bad.md (unparseable)", "Edit(/out/**) [project] (anchor holds ?)"]) expect(line).toContain(bit);
   });
+
+  // The router's `droppedRules` also carries SETTINGS drops now (a project tier's escalating `defaultMode`,
+  // `fallbackModel` at any tier, model-routing keys from project/local tiers, out-of-root rule imports), so
+  // the label names the entries neutrally rather than calling them rules "dropped rather than widened".
+  test("droppedRules is labelled neutrally — settings drops ride it too", () => {
+    const rh = stub(() => {});
+    rh.report = {
+      skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [],
+      droppedRules: [{ rule: "defaultMode", tier: "project", reason: "escalates" }],
+    };
+    const line = runHomeReportSummary(rh)!;
+    expect(line).toContain("run-home entries dropped by the router: defaultMode [project] (escalates)");
+    expect(line).not.toContain("rather than widened");
+  });
 });
