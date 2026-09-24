@@ -22,13 +22,12 @@ import { MAIN_THREAD, ProjectorRefusedError, classifyThrown, createProjector, ty
 import type { WinterRuntimeSdk, SessionMode } from "./create";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import { officialSubscriptionAuthEnabled } from "../settings";
-import { ensureOfficialConfigDir, OfficialConsoleProfileMissing, OfficialConsoleRouterUnsupported, OfficialCredentialPlanRefused, officialInputFor, officialPermissionModeFor, OfficialProjectKeyTooDeep, type OfficialInputDeps, type OfficialPermissionMode, type OfficialSessionInput } from "./official-options";
+import { ensureOfficialConfigDir, OfficialConsoleProfileMissing, OfficialConsoleRouterUnsupported, OfficialCredentialPlanRefused, officialInputFor, officialPermissionModeFor, OfficialProjectKeyTooDeep, officialWireModelFor, type OfficialInputDeps, type OfficialPermissionMode, type OfficialSessionInput } from "./official-options";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import { attachOfficialSession, type OfficialSessionAttachHandle, type OfficialSessionAttachment } from "./messaging";
 // P10a-h: the SAME grace window `WinterSession.end()` races against — reused, not reinvented, so
 // the two legs' "does the process actually die on end()" behaviour is one tuned constant, not two.
 import { WINTER_SESSION_END_GRACE_MS } from "./winter-session";
-import { splitTag } from "./model-tag";
 import type { RunHome } from "@yanlinglabs/winter-runtime-sdk";
 import { disposeFailedRunHome, settleRunHome } from "./run-home-support";
 
@@ -231,6 +230,22 @@ export class OfficialAuthSourceRefused extends Error {
 }
 
 /**
+ * F1 (live gate, 2026-09-24): "there is never a silent fallback to another model". The child's own
+ * `system/init.model` must be the model this incarnation TOLD it to run (`officialWireModelFor`, sent on
+ * the flag-settings layer) — anything else, a missing field included, ends the session before any turn
+ * runs, through the SAME `agent_error` + `end()` shape `OfficialAuthSourceRefused` uses. MEASURED before
+ * this existed: a child spawned with no model ran the runtime's own default (`claude-opus-5`) for a
+ * session recorded on a haiku tag, and nothing on this leg noticed.
+ */
+export class OfficialModelMismatch extends Error {
+  readonly code = "official_model_mismatch" as const;
+  constructor(readonly reported: string, readonly expected: string) {
+    super(`the official runtime reported model ${reported}, not the ${expected} this session asked it to run; Winter never runs a different model silently, so this session refuses before any turn runs`);
+    this.name = "OfficialModelMismatch";
+  }
+}
+
+/**
  * Winter Phase 10a (O3, P10a-3/P10a-7 M1, MEASURED 2026-09-13): the console profile's own
  * `system/init.apiKeySource` value, measured at the keyboard against the real runtime with a
  * planted `user_oauth` profile (`auth status` reported `{loggedIn:true, authMethod:"oauth_token"}`).
@@ -317,6 +332,9 @@ interface Incarnation {
    *  actually decided (a `session.setPolicy`-style live re-read races nothing here: both reads
    *  happen inside the same `open()` call, one turn of the event loop apart). */
   subscriptionAuthEnabled: boolean;
+  /** F1: the model THIS incarnation told the child to run (`officialWireModelFor`) — what `run()` holds
+   *  the child's `system/init.model` to. */
+  wireModel: string;
 }
 
 const isExpectedEndError = (err: unknown): boolean => {
@@ -514,6 +532,9 @@ class OfficialSessionImpl implements OfficialSession {
         // dir on a resume) and REFUSES `runtime.official.spool` beside it — so the Winter-owned
         // `claude-config` spool is neither named nor created. Without one: exactly as before.
         const officialInput: RouterOfficialInput = runHome === undefined ? built.input : withoutSpool(built.input);
+        // F1: the one wire model this incarnation sends (the settings layer `officialInputFor` just built
+        // from the same `inputDeps.selection`) and holds the child's init frame to.
+        const wireModel = officialWireModelFor(inputDeps.selection);
         // Phase 9c (P9c-1): create/harden the Winter-owned config dir NOW — the one point in this
         // leg's whole lifecycle that is an actual spawn against a real `WINTER_HOME`, as opposed to
         // `officialInputFor`'s own pure path computation (see `ensureOfficialConfigDir`'s own doc for
@@ -546,13 +567,16 @@ class OfficialSessionImpl implements OfficialSession {
             cwd: runHome?.input.cwd ?? this.deps.sessionInput().cwd,
             // WS-20: `selection.modelRef` is a TAG — the official leg's own wire model is the BARE
             // modelId half, split at this boundary (explicit; see L3.5's measurement note).
-            model: splitTag(this.deps.selection.modelRef).modelId,
+            // F1: MEASURED, the router's official door does not forward this top-level field — the
+            // model reaches the child on the flag-settings layer (`officialInputFor`), and `run()`
+            // holds `system/init.model` to it. Kept here, the SAME value, for a router that forwards it.
+            model: wireModel,
             pathToClaudeCodeExecutable: built.pathToClaudeCodeExecutable,
-            // The session's effort, as a TOP-LEVEL option — the only place the official runtime reads
-            // one (`Options.effort`, the pinned sdk.d.ts), and one the router forwards untouched. Until
-            // 2026-09-18 this leg set none, so `session.setEffort` was a no-op on every Claude model;
-            // see `session-driver.ts`'s `spendEffortFor`, which both legs now share. Absent = the
-            // runtime's own default, exactly as before.
+            // The session's effort, as a TOP-LEVEL option (`Options.effort`, the pinned sdk.d.ts). Until
+            // 2026-09-18 this leg set none; see `session-driver.ts`'s `spendEffortFor`, which both legs
+            // now share. Absent = the runtime's own default. OPEN (F1, measured 2026-09-24): the router's
+            // official door does NOT forward this field (the same door that dropped `model` above), so
+            // the child still runs its default effort — a router item, not yet fixed on this side.
             ...(this.deps.sessionInput().spendEffort === undefined ? {} : { effort: this.deps.sessionInput().spendEffort }),
             // WS-16 §6: force the vendor to use OUR pre-allocated backend uuid on a fresh start —
             // `Options.sessionId` (must be a valid UUID; carried, never checked, for a RESUME, which
@@ -572,7 +596,7 @@ class OfficialSessionImpl implements OfficialSession {
         // re-fetches settings independently and can never disagree with what THIS spawn was actually
         // built against.
         const subscriptionAuthEnabled = officialSubscriptionAuthEnabled(inputDeps.settings, inputDeps.officialSubscriptionAuthApproved);
-        const inc: Incarnation = { stream, projector, query: routerQuery, abort, sawInit: false, done: Promise.resolve(), subscriptionAuthEnabled, ...(runHome === undefined ? {} : { runHome }) };
+        const inc: Incarnation = { stream, projector, query: routerQuery, abort, sawInit: false, done: Promise.resolve(), subscriptionAuthEnabled, wireModel, ...(runHome === undefined ? {} : { runHome }) };
         this.inc = inc;
         // m7: `resumed` is honest about THIS instance's own history — generation 1 is a fresh start,
         // every later one (a prior incarnation ended `resumable`, e.g. an unexpected crash rather than
@@ -713,6 +737,15 @@ class OfficialSessionImpl implements OfficialSession {
               void this.end();
               continue;
             }
+          }
+          // F1: the child must be running the model this incarnation told it to — every family, every
+          // arm. An absent `model` is never read as a match (the same rule as `apiKeySource` above).
+          const reportedModel = typeof msg.model === "string" ? msg.model : "unknown";
+          if (reportedModel !== inc.wireModel) {
+            const err = new OfficialModelMismatch(reportedModel, inc.wireModel);
+            this.safeAppend({ type: "agent_error", sessionId: this.sessionId, threadId: MAIN_THREAD, message: err.message, code: err.code });
+            void this.end();
+            continue;
           }
           this.initFacts = {
             ...(reportedId === undefined ? {} : { sessionId: reportedId }),
