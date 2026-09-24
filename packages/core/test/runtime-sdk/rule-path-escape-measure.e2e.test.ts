@@ -12,13 +12,14 @@
 //     flag-settings layer (`settings.permissions.deny`, the daemon's own official-leg carrier).
 // `acceptEdits` plus an allowing `canUseTool`: nothing but the deny rule can stop the write.
 //
-// MEASURED (R.2, SDK dd9f17d / router 7ac222a / claude 0.3.250): `[`, `]` and `*` escaped once match
-// literally on BOTH legs. A BACKSLASH did not: the Winter leg matched the router's single escape (`\\`),
-// claude matches only a DOUBLE escape (`\\\\` — its rule-content parse unescapes once before the
-// gitignore layer sees the pattern). R.1 ruling 2: the router makes `escapeRulePath` emit the claude-correct
-// spelling on both legs and the SDK ports claude's unescape; the daemon imports the router's function. The
-// official-leg backslash case is `todo` until those pins land (run it with `bun test --todo`); the grammar
-// case pins claude's own behaviour, independent of `escapeRulePath`.
+// MEASURED (R.2, SDK dd9f17d / router 7ac222a / claude 0.3.250): `[`, `]` and `*` escaped once matched on
+// both legs; a BACKSLASH needed claude's DOUBLE escape (its rule-content parse unescapes once before the
+// gitignore layer). R.1 ruling 2: the router's `escapeRulePath` (router 3279a1d) is claude's rule-content
+// escape over the gitignore escape — `\` → four, `[ ] *` → `\\x`, `( )` → `\\\x` — on BOTH legs, and the
+// daemon imports it. MEASURED at router 3279a1d: every name below is denied on the official leg. The
+// Winter leg reads that spelling only from agent SDK 6170adb on (claude's rule parse), so its rows are
+// `todo` until the SDK pin moves past it (run with `bun test --todo`); the grammar case pins claude's own
+// behaviour with hand-spelled rules, independent of `escapeRulePath`.
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -51,8 +52,9 @@ function denyRules(dir: string, escaped: boolean | "single" | "double"): string[
   return [`Edit(${pattern})`, `Write(${pattern})`];
 }
 
-/** `[`, `]` and `*` in one name; the backslash in its own, so a leg that cannot take one is told apart. */
-const NAMES = ["r[1]*x", "b\\x"] as const;
+/** `[`, `]` and `*` in one name; the backslash in its own, so a leg that cannot take one is told apart;
+ *  and parens (router 3279a1d's table escapes them at both layers). */
+const NAMES = ["r[1]*x", "b\\x", "p (old)"] as const;
 
 describeWithWinterBinary("R.2 carry — escaped rule paths on the Winter leg", (bin) => {
   async function writeUnder(name: string, escaped: boolean): Promise<boolean> {
@@ -78,8 +80,10 @@ describeWithWinterBinary("R.2 carry — escaped rule paths on the Winter leg", (
     }
   }
 
+  // `todo` until the SDK pin reaches 6170adb (claude's rule-content parse on the Winter leg; measured at
+  // dd9f17d: neither spelling denies there once the router escapes for claude). Then drop `.todo`.
   for (const name of NAMES) {
-    test(`${JSON.stringify(name)}: the ESCAPED rule denies the write (the raw spelling is recorded as the control)`, async () => {
+    test.todo(`${JSON.stringify(name)}: the ESCAPED rule denies the write (the raw spelling is recorded as the control)`, async () => {
       const deniedEscaped = !(await writeUnder(name, true));
       const deniedRaw = !(await writeUnder(name, false));
       console.error(`R.2 rule-escape (winter) ${JSON.stringify(name)}: escaped rule denies=${deniedEscaped}; raw rule denies=${deniedRaw}`);
@@ -137,19 +141,14 @@ describeWithClaudeRuntime("R.2 carry — escaped rule paths on the official leg"
     }
   }
 
-  test(`${JSON.stringify(NAMES[0])}: the ESCAPED rule denies the write (the raw spelling is recorded as the control)`, async () => {
-    const deniedEscaped = !(await writeUnder(NAMES[0], true));
-    const deniedRaw = !(await writeUnder(NAMES[0], false));
-    console.error(`R.2 rule-escape (official) ${JSON.stringify(NAMES[0])}: escaped rule denies=${deniedEscaped}; raw rule denies=${deniedRaw}`);
-    expect(deniedEscaped).toBe(true);
-  }, 60_000);
-
-  // R.1 ruling 2: `todo` until the router's claude-correct `escapeRulePath` is pinned (then drop `.todo`).
-  test.todo(`${JSON.stringify(NAMES[1])}: the ESCAPED rule denies the write`, async () => {
-    const deniedEscaped = !(await writeUnder(NAMES[1], true));
-    console.error(`R.2 rule-escape (official) ${JSON.stringify(NAMES[1])}: escaped rule denies=${deniedEscaped}`);
-    expect(deniedEscaped).toBe(true);
-  }, 60_000);
+  for (const name of NAMES) {
+    test(`${JSON.stringify(name)}: the ESCAPED rule denies the write (the raw spelling is recorded as the control)`, async () => {
+      const deniedEscaped = !(await writeUnder(name, true));
+      const deniedRaw = !(await writeUnder(name, false));
+      console.error(`R.2 rule-escape (official) ${JSON.stringify(name)}: escaped rule denies=${deniedEscaped}; raw rule denies=${deniedRaw}`);
+      expect(deniedEscaped).toBe(true);
+    }, 60_000);
+  }
 
   test(`${JSON.stringify(NAMES[1])}: claude's grammar — a backslash needs a DOUBLE escape (a single one does not match)`, async () => {
     const deniedSingle = !(await writeUnder(NAMES[1], "single"));
@@ -161,8 +160,7 @@ describeWithClaudeRuntime("R.2 carry — escaped rule paths on the official leg"
 });
 
 describe("the bed's own premise", () => {
-  test("the directory names carry every character escapeRulePath escapes", () => {
-    expect(escapeRulePath(NAMES[0])).toBe("r\\[1\\]\\*x");
-    expect(escapeRulePath(NAMES[1])).not.toBe(NAMES[1]);
+  test("the directory names carry characters escapeRulePath escapes", () => {
+    for (const name of NAMES) expect(escapeRulePath(name)).not.toBe(name);
   });
 });
