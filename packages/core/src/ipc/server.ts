@@ -4136,8 +4136,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // C2 fix round 2 (Opus review of L5): looked up by bare `p.name` before, so consent granted
       // for `foo@B` could be recorded for a DIFFERENT `foo@A` that happened to resolve first out of
       // `livePlugins()` — the param is now `spec` (the qualified `"<name>@<marketplace>"` compound
-      // key, `PluginSetConsentParams`), matched EXACTLY against `livePlugins()`'s own `"<name>@
-      // <marketplace>"` — no ambiguity possible.
+      // key, `PluginSetConsentParams`), matched EXACTLY against every install's own `"<id>@<marketplace>"`
+      // — no ambiguity possible (R.3 I-3: across all scopes, not `livePlugins()`'s user scope alone).
       //
       // L5 re-review (TOCTOU): the caller now MUST echo back the `fingerprint` it saw in the
       // `plugin.list` listing it displayed (`extras.fingerprint`) — the daemon recomputes the SAME
@@ -4149,13 +4149,22 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // -----------------------------------------------------------------------------------------
       case METHODS.pluginSetConsent: {
         const p = parseParams(PluginSetConsentParams, params);
-        const info = livePlugins().find((pl) => `${pl.name}@${pl.marketplace}` === p.spec);
-        if (!info) return { code: "unknown_plugin" };
+        // R.3 I-3: EVERY scope's installs of this spec — the same pass `plugin.list` makes (Contract B's
+        // `listPlugins`; with no cwd the project/local records still list, only their enabled state is
+        // unresolved) — never `livePlugins()`, which reports user scope only, so a plugin installed at
+        // project or local scope listed with a fingerprint yet could never be consented to.
+        const installs = opts.winterHome === undefined
+          ? []
+          : (await listPlugins(pluginManagerOptionsFor(opts.winterHome, undefined))).filter((e) => `${e.id}@${e.marketplace}` === p.spec);
+        if (installs.length === 0) return { code: "unknown_plugin" };
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.setConsent is not available on this server (no winterHome configured)");
-        const fingerprint = pluginConsentFingerprint(info.installPath, {
-          entry: info.entry, tcc: info.tccPermissions, hardware: info.hardwarePermissions, requiredConsents: info.requiredConsents,
-        });
-        if (fingerprint !== p.fingerprint) return { code: "stale_disclosure" };
+        // The disclosure each install shows RIGHT NOW, computed exactly as `plugin.list`'s `extras` do (a
+        // plugin with no winter-plugin.json: as `PluginStore`'s legacy entry does). A spec installed at two
+        // scopes from different folders: the echoed fingerprint picks the one the user saw.
+        const fingerprint = installs
+          .map((e) => pluginExtrasFor(e.installPath, e.id, undefined)?.fingerprint ?? pluginConsentFingerprint(e.installPath, {}))
+          .find((f) => f === p.fingerprint);
+        if (fingerprint === undefined) return { code: "stale_disclosure" };
         const settingsPath = join(opts.winterHome, "settings.json");
         const classes = p.classes.filter((c): c is "exec" | "tcc" | "hardware" => c === "exec" || c === "tcc" || c === "hardware");
         const settings = loadSettings(settingsPath);
