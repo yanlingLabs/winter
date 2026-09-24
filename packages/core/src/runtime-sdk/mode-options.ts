@@ -265,6 +265,9 @@ export interface WinterOptionsInput {
   home: string;
   profile?: string;
   cwd: string;
+  /** R.3 I-4: the session's OTHER working directories (every `dirs` row but the primary) — each gets the
+   *  sandbox's any-depth `.winter/<kind>` fence (`childSandboxConfigFor`), as the cwd does. */
+  extraDirs?: readonly string[];
   /** The session's `$OUTDIR` (`<home>/outputs/<sessionId>`, already created). Sent as
    *  `Options.outputsDir`, which the agent SDK makes writable for the Bash sandbox and carves out of
    *  its protected winter-home floor; absent ⇒ no outputs directory is named. */
@@ -966,8 +969,10 @@ export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSett
       // a home NAMED `.winter`, and claude's not at all). And, when the session's cwd is known, the
       // project agent definitions the daemon loads for it (`loadProjectAgentDefinitions(cwd)` reads
       // exactly `<cwd>/.winter/agents`): sandboxed Bash on the Winter leg could write that directory,
-      // which the write TOOLS were already denied (`**/.winter/agents/**`). An any-depth form is not
-      // expressible here (real paths only), and only this one path is ever loaded.
+      // which the write TOOLS were already denied (`**/.winter/agents/**`). This literal list names only that
+      // real path; the ANY-DEPTH form (`<cwd>/**/.winter/{skills,commands,rules,output-styles,agents}`, for
+      // every working directory) is glob-shaped, so it rides `childSandboxConfigFor` alone (R.3 I-4) — both
+      // runtimes render a glob-shaped deny as a recursive regex.
       //
       // WS-21 (spec §7.1): the shared runtime home's self-grant files and stores — `sdk/settings.json`,
       // `sdk/.winter.json` (files: a subpath of a file path is that file), `sdk/agents`, `sdk/plugins` —
@@ -989,8 +994,10 @@ export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSett
       // …plus `runtimes/` (8a: the runtime store is never model-readable — the engine's read tool
       // carried this denial; on the Winter leg the sandbox and the Read/Glob/Grep deny rules do).
       // …plus (WS-21 §7.1) `sdk/.winter.json`. The run folders' generated config files are a
-      // regex row in the spec, which this real-path list does not express: the deny rules and the path
-      // fence hook carry them (DECISION 12).
+      // regex row in the spec, which this LITERAL real-path list does not express (a glob-shaped entry
+      // would be expressible in `childSandboxConfigFor`'s form since both runtimes read the glob grammar —
+      // R.3 I-4 — but that row is not added there): the deny rules and the path fence hook carry them
+      // (DECISION 12).
       denyRead: [join(home, "run"), join(home, "runtimes"), join(sdkHomeFor(home), ".winter.json")],
     },
     // `allowUnsandboxedCommands` is deliberately NOT set. It is consulted only together with
@@ -1024,18 +1031,32 @@ export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSett
  * `sandboxConfigFor` stays the LITERAL list: every consumer that compares real paths derives from it
  * (`home-fence.ts` → the escape floor's static text match and the write-tool fence), never from this form.
  */
-export function childSandboxConfigFor(home: string, cwd?: string | null): SandboxSettingsConfig {
+export function childSandboxConfigFor(home: string, cwd?: string | null, extraDirs: readonly string[] = []): SandboxSettingsConfig {
   const literal = sandboxConfigFor(home, cwd);
   const fs = literal.filesystem ?? {};
+  // R.3 I-4: the ANY-DEPTH project fence — `<dir>/**/.winter/<kind>` for the five kinds a later session
+  // loads (the protected item dirs and the agent definitions), for the cwd and each extra working
+  // directory. A glob-shaped deny renders as a recursive regex on both runtimes (`**/` matches zero or
+  // more directories, so it covers `<dir>/.winter/<kind>` itself too), which the literal real-path list
+  // cannot say: without it a sandboxed Bash at a repo root could plant `pkg/.winter/rules/x.md` through a
+  // path the Bash detector cannot see (an assembled path, `git … --output=`), and a later session in
+  // `pkg` loads it. The directory is spelled for the glob grammar (`escapeSandboxGlobPath`); the tail is
+  // the glob's own. Child-only: the literal list feeds the fences that compare real paths.
+  const anyDepth = [...new Set([...(cwd ? [cwd] : []), ...extraDirs])]
+    .flatMap((dir) => ANY_DEPTH_PROJECT_KINDS.map((kind) => `${escapeSandboxGlobPath(dir)}/**/.winter/${kind}`));
   return {
     ...literal,
     filesystem: {
       ...fs,
-      ...(fs.denyWrite === undefined ? {} : { denyWrite: fs.denyWrite.map(escapeSandboxGlobPath) }),
+      ...(fs.denyWrite === undefined ? {} : { denyWrite: [...new Set([...fs.denyWrite.map(escapeSandboxGlobPath), ...anyDepth])] }),
       ...(fs.denyRead === undefined ? {} : { denyRead: fs.denyRead.map(escapeSandboxGlobPath) }),
     },
   };
 }
+
+/** R.3 I-4: the `.winter/` kinds a later session loads from ANY directory on its walk — the four protected
+ *  item dirs and the agent definitions. */
+const ANY_DEPTH_PROJECT_KINDS: readonly string[] = [...PROTECTED_ITEM_DIRS, "agents"];
 
 /**
  * Every capability tool NOT exposed to this mode, plus — for chat — the Winter built-ins chat
@@ -1176,7 +1197,7 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     // Spelled for the sandbox glob grammar (`childSandboxConfigFor`, C-1): the Winter runtime reads an entry
     // holding `[` as a glob since agent SDK round 11, so the literal list under a `[`-named home or project
     // would fence nothing.
-    sandbox: childSandboxConfigFor(input.home, input.cwd),
+    sandbox: childSandboxConfigFor(input.home, input.cwd, input.extraDirs),
     // Agent SDK 0.0.16 defaults a spawn to BACKGROUND (claude's own default), which means a finished
     // child re-enters the model on a turn NOBODY PUSHED — a second `system/init`, an assistant
     // stream and its own `result`, with no `user` frame. The projector opens a turn only from

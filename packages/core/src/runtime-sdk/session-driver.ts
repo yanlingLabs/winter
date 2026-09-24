@@ -919,6 +919,8 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         home,
         profile: deps.profile,
         cwd,
+        // R.3 I-4: the other working directories get the sandbox's any-depth `.winter/<kind>` fence too.
+        extraDirs,
         outputsDir: deps.outDirOf(sessionId),
         model,
         credentials,

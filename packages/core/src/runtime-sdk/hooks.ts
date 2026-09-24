@@ -492,9 +492,11 @@ function writeContextStart(c: string): number {
 /**
  * Fix round 2 (controller ruling on SPEC CONCERN D): the protected item directories and agent definitions
  * of ANY project, at ANY depth and whatever its trust — `.winter/{skills,commands,rules,output-styles,
- * agents}` — as the TARGET of a write in a Bash command, sandboxed or not. The seatbelt cannot fence these
- * off this session's walk (it takes real subpaths only, and a later session in a sibling package loads
- * them). Returns the segment named, or `undefined`.
+ * agents}` — as the TARGET of a write in a Bash command, sandboxed or not. A later session in a sibling
+ * package loads them. Returns the segment named, or `undefined`. (R.3 I-4: the child's sandbox now fences
+ * them at any depth under every working directory too — `childSandboxConfigFor`'s glob-shaped any-depth
+ * `.winter/<kind>` entries — which covers the writes this static detector cannot see; this card stays for
+ * everything the seatbelt does not bind: an escape, and a directory outside the working directories.)
  *
  * Round 3, minor 10 — JUDGED PER SHELL SEGMENT (split on `;`, `&&`, `||`, `|`, `&` and newlines on the RAW
  * text, never inside quotes; a `cd`/`pushd` carried across segments), so a read after a redirect or a write
@@ -699,9 +701,17 @@ function segmentWriteTargets(seg: string): string[] {
       return [...targets, ...rest];
     }
     if (verb === "git") {
+      // R.3 I-4: `--output=<file>`/`--output <file>` writes that file whatever the subcommand (`git show`,
+      // `log` and `diff` read otherwise) — judged before the read-subcommand exemption below.
+      const outputs: string[] = [];
+      for (let j = 0; j < rest.length; j += 1) {
+        const w = rest[j]!;
+        if (w.startsWith("--output=")) outputs.push(w.slice("--output=".length));
+        else if (w === "--output" && rest[j + 1] !== undefined) outputs.push(rest[j + 1]!);
+      }
       let j = 0;
       while (j < rest.length && rest[j]!.startsWith("-")) j += /^-[cC]$/.test(rest[j]!) ? 2 : 1;   // `-C dir`, `-c k=v`
-      if (GIT_READ_SUBCOMMANDS.has(rest[j] ?? "")) return targets;
+      if (GIT_READ_SUBCOMMANDS.has(rest[j] ?? "")) return [...targets, ...outputs];
       return [...targets, ...rest];
     }
     if (DESTINATION_VERBS.has(verb)) {

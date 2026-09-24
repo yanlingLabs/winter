@@ -799,7 +799,8 @@ export function officialInputFor(
           // `input.cwd`: the session's project agent definitions (`<cwd>/.winter/agents`) are fenced too.
           // Spelled for the sandbox glob grammar both runtimes read (`childSandboxConfigFor`, C-1), so a
           // `[`-named home or project is still fenced — the same list the Winter spawn is sent.
-          sandbox: childSandboxConfigFor(deps.home, input.cwd),
+          // R.3 I-4: with the any-depth `.winter/<kind>` fence for the cwd and every extra working directory.
+          sandbox: childSandboxConfigFor(deps.home, input.cwd, input.extraDirs ?? []),
         },
         // 0.0.17 / the 2026-09-18 ruling: `leg: "official"` is what keeps claude's OWN `WebFetch` and
         // `WebSearch` on this leg. The daemon used to disallow both in every mode (P8b-33) because

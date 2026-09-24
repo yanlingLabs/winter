@@ -613,7 +613,8 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     // on `ctx.matchedAskRule`/`blockedPath`. Narrows only: a gate `deny` stays a deny; `dont-ask`, which
     // declines everything it would card, declines this too; chat and dispatch reach (6)'s typed deny.
     // Fix round 2: …and a Bash command writing under any `.winter/{skills,commands,rules,output-styles,
-    // agents}` (the path-fence Bash hook's own detector) — the seatbelt cannot fence those off the walk.
+    // agents}` (the path-fence Bash hook's own detector) — a card for what the child's sandbox does not bind
+    // (R.3 I-4: its any-depth `<dir>/**/.winter/<kind>` fence covers the working directories themselves).
     const protectedBashWrite = classificationName === "bash" && typeof input === "object" && input !== null
       && typeof (input as Record<string, unknown>).command === "string"
       && bashProtectedWriteHit((input as Record<string, unknown>).command as string) !== undefined;
