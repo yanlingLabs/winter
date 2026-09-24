@@ -740,6 +740,34 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
     expect(listRes.result.plugins.map((p: { scope: string; enabled: boolean }) => [p.scope, p.enabled])).toEqual([["local", true]]);
   });
 
+  // R.3 I-3: consent resolved through the USER-scope-only `livePlugins()`, so a plugin installed only at
+  // project or local scope listed with a valid `extras.fingerprint` but consenting to it answered
+  // `unknown_plugin` — the consent sheet could never be completed (fail-closed). It is looked up across
+  // every scope now, with the same pass `plugin.list` makes.
+  for (const scope of ["project", "local"] as const) {
+    test(`R.3 I-3: consent for a ${scope}-scope plugin is recorded, and the sheet's fingerprint matches`, async () => {
+      const { c } = await boot();
+      const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-mkt-i3-"));
+      writeMarketplace(mktDir);
+      await c.request(METHODS.pluginMarketplaceAdd, { source: mktDir });
+      const projectDir = realpathSync(mkdtempSync(join(tmpdir(), "winter-plugin-i3-project-")));
+      expect((await c.request(METHODS.pluginInstall, { spec: "p@m", scope, cwd: projectDir })).result?.ok).toBe(true);
+
+      const sheet = (await c.request(METHODS.pluginList, { cwd: projectDir })).result.plugins[0];
+      expect(sheet.scope).toBe(scope);
+      const fingerprint = sheet.extras.fingerprint;
+      expect(fingerprint).toBe(pluginConsentFingerprint(mktDir, { entry: { command: "bun", args: ["--version"] }, requiredConsents: ["exec"] }));
+
+      const res = await c.request(METHODS.pluginSetConsent, { spec: "p@m", classes: ["exec"], fingerprint });
+      expect(res.result).toEqual({ ok: true });
+      expect((await c.request(METHODS.pluginList, { cwd: projectDir })).result.plugins[0].extras.consented).toEqual(["exec"]);
+      // …and a stale disclosure is still refused, writing nothing
+      expect((await c.request(METHODS.pluginSetConsent, { spec: "p@m", classes: ["exec"], fingerprint: "stale" })).result).toEqual({ code: "stale_disclosure" });
+      // …and a spec installed nowhere is still unknown
+      expect((await c.request(METHODS.pluginSetConsent, { spec: "q@m", classes: ["exec"], fingerprint })).result).toEqual({ code: "unknown_plugin" });
+    });
+  }
+
   test("project/local scope without cwd is refused typed", async () => {
     const { c } = await boot();
     const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-mkt-"));
