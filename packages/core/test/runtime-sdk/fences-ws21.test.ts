@@ -421,3 +421,25 @@ describe("R.3 C-1: the variables WS-21 exports into every child — the escape f
     ]) expect({ cmd, hit: escapeFloorHit(cmd, H) }).toEqual({ cmd, hit: undefined });
   });
 });
+
+// R.3 I-1: a run home loads a linked worktree's OWN project tier (its root is the worktree's top now), so the
+// sandbox protects the same walk — `project-walk.ts`'s invariant: what a run home LOADS and what the fences
+// PROTECT cannot differ.
+describe("R.3 I-1: a linked worktree — the sandbox protects the walk up to the worktree's own top", () => {
+  test("from a directory inside a linked worktree, the worktree top's protected dirs are denied", () => {
+    const repo = realpathSync(mkdtempSync(join(tmpdir(), "winter-fences-i1-repo-")));
+    const g = (args: string[], cwd: string) => expect(Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "ignore", stderr: "ignore" }).exitCode).toBe(0);
+    g(["init", "-q"], repo);
+    g(["-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "i"], repo);
+    const wt = join(realpathSync(mkdtempSync(join(tmpdir(), "winter-fences-i1-wt-"))), "wt");
+    g(["worktree", "add", "-q", "-b", `i1-${Math.random().toString(16).slice(2)}`, wt], repo);
+    const cwd = join(wt, "pkg");
+    mkdirSync(cwd, { recursive: true });
+    const w = sandboxConfigFor(H, cwd).filesystem!.denyWrite!;
+    for (const kind of ["skills", "commands", "rules", "output-styles"]) {
+      expect(w).toContain(join(wt, ".winter", kind));
+      expect(w).toContain(join(cwd, ".winter", kind));
+    }
+    for (const f of ["mcp.json", "settings.json", "settings.local.json", "agents"]) expect(w).toContain(join(wt, ".winter", f));
+  });
+});

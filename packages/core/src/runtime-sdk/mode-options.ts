@@ -12,6 +12,7 @@ import { EXA_API_KEY_SECRET } from "../agent/tools/search";
 import { approvedProjectRulesDir, homeCacheDir, sdkHomeFor, storeHomeFor, trustRecordFile } from "../agent/paths";
 import { repoRootFor } from "../agent/memory-dir";
 import { projectWalk } from "./project-walk";
+import { projectTierRootFor } from "./run-home-input";
 import { parseRule } from "../agent/permission-rules";
 import { keychainService } from "../profile";
 import type { SessionApprovalPolicy } from "../agent/gate";
@@ -895,19 +896,24 @@ export function protectedHomeDenyWrite(home: string): string[] {
   return out;
 }
 
-/** The project half of the sandbox's `denyWrite` (WS-21 §7.1/§7.2): for the cwd and — when it differs —
- *  its project root (`repoRootFor`, the root every project-tier reader uses), the `.winter/` MCP list,
- *  claude's two settings tiers, the agent definitions and the four protected item directories. */
+/** The project half of the sandbox's `denyWrite` (WS-21 §7.1/§7.2): for the cwd and — when they differ —
+ *  its project roots, the `.winter/` MCP list, claude's two settings tiers, the agent definitions and the
+ *  four protected item directories. Two roots: `repoRootFor` (the daemon-side project readers' root — for
+ *  a linked worktree, the main checkout) and `projectTierRootFor` (R.3 I-1: the root a run home loads the
+ *  project tier from — for a linked worktree, the worktree's own top). */
 function projectSandboxDenyWrite(cwd: string): string[] {
   let root = cwd;
   try { root = repoRootFor(cwd); } catch { /* an unresolvable cwd: its own spelling is the only base */ }
+  let tierRoot = root;
+  try { tierRoot = projectTierRootFor(cwd); } catch { /* as above */ }
   const out: string[] = [];
-  for (const base of new Set([cwd, root])) {
+  for (const base of new Set([cwd, root, tierRoot])) {
     for (const f of ["mcp.json", "settings.json", "settings.local.json", "agents", ...PROTECTED_ITEM_DIRS]) out.push(join(base, ".winter", f));
   }
-  // …and the protected item directories of every directory BETWEEN them (L2 fix round 1, I2: a run home
-  // loads a nested project dir's items, so its protection covers the same walk). `$HOME` and above never.
-  for (const dir of projectWalk(cwd, root, homedir())) {
+  // …and the protected item directories of every directory BETWEEN the cwd and the run home's root (L2 fix
+  // round 1, I2: a run home loads a nested project dir's items, so its protection covers the same walk —
+  // R.3 I-1: the walk the run home makes, up to `projectTierRootFor`). `$HOME` and above never.
+  for (const dir of projectWalk(cwd, tierRoot, homedir())) {
     for (const kind of PROTECTED_ITEM_DIRS) out.push(join(dir, ".winter", kind));
   }
   return [...new Set(out)];

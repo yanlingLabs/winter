@@ -1,12 +1,14 @@
 // WS-21 L3.3 (spec §3.1, §3.7; Contract A): the per-generation inputs the daemon hands `buildRunHome`.
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runHomeInputFor, gitRootFor, _clearGitRootCacheForTests, type RunHomeInputDeps } from "../../src/runtime-sdk/run-home-input";
 import { assistantMemoryDirFor, memoryDirFor, repoRootFor, _clearRepoRootCacheForTests } from "../../src/agent/memory-dir";
 import { CAPABILITY_SERVER_KEYS, reservedMcpServerNames } from "../../src/capabilities/names";
 import type { Settings } from "../../src/settings";
+import { buildRunHome } from "@yanlinglabs/winter-runtime-sdk";
+import { TrustStore } from "../../src/agent/trust";
 
 const real = (p: string): string => realpathSync(p);
 const tmp = (prefix: string): string => real(mkdtempSync(join(tmpdir(), prefix)));
@@ -114,5 +116,85 @@ describe("runHomeInputFor", () => {
     const input = runHomeInputFor(deps(), { mode: "code", dispatchChild: false, leg: "winter", cwd: "/x" });
     for (const key of CAPABILITY_SERVER_KEYS) expect(input.reservedMcpServerNames).toContain(`winter__${key}`);
     expect(input.reservedMcpServerNames).toContain("winter");
+  });
+});
+
+// R.3 I-1 (controller ruling): the run home's project root is the cwd's OWN git top (`gitRootFor`, what
+// claude's `git rev-parse --show-toplevel` gives) — for a linked worktree, the worktree, never the main
+// checkout `repoRootFor` follows it to (the router's walk from a worktree cwd up to the main checkout was
+// empty, so none of the worktree's own items loaded). The TRUST decision stays keyed on `repoRootFor(cwd)`:
+// a linked worktree of a trusted repo is trusted.
+describe("R.3 I-1: a linked worktree's run home loads the worktree's own project tier", () => {
+  /** Every file a built run home's `rules/` resolves to. */
+  async function builtRuleTargets(home: string, trust: TrustStore, cwd: string): Promise<{ root: string | null; rules: string[] }> {
+    const input = runHomeInputFor({ home, trust, settings: () => null, reservedMcpServerNames: [...reservedMcpServerNames()] }, { mode: "code", dispatchChild: false, leg: "winter", cwd });
+    const rh = await buildRunHome(input);
+    try {
+      const dir = join(rh.dir, "rules");
+      const rules = existsSync(dir) ? readdirSync(dir).map((f) => realpathSync(join(dir, f))) : [];
+      return { root: input.trustedProjectRoot, rules };
+    } finally {
+      await rh.dispose();
+    }
+  }
+  function worktreeBed(): { repo: string; wt: string; home: string; wtRule: string; mainRule: string } {
+    const repo = initRepo();
+    const wt = join(tmp("winter-rhi-wt-"), "wt");
+    git(["worktree", "add", "-q", "-b", `wt-${Math.random().toString(16).slice(2)}`, wt], repo);
+    for (const base of [repo, wt]) mkdirSync(join(base, ".winter", "rules"), { recursive: true });
+    const wtRule = join(wt, ".winter", "rules", "wt-rule.md");
+    const mainRule = join(repo, ".winter", "rules", "main-rule.md");
+    writeFileSync(wtRule, "# the worktree's own rule\n");
+    writeFileSync(mainRule, "# the main checkout's rule\n");
+    const home = tmp("winter-rhi-h-");
+    mkdirSync(join(home, "sdk"), { recursive: true });
+    return { repo, wt: real(wt), home, wtRule: real(wtRule), mainRule: real(mainRule) };
+  }
+
+  test("a linked worktree of a TRUSTED repo: the project root is the worktree, and its own .winter/rules load", async () => {
+    const b = worktreeBed();
+    const trust = new TrustStore(join(b.home, "trust.json"));
+    trust.trust(b.repo);
+    const built = await builtRuleTargets(b.home, trust, b.wt);
+    expect(built.root).toBe(b.wt);
+    expect(built.rules).toContain(b.wtRule);
+    expect(built.rules).not.toContain(b.mainRule);
+  });
+
+  test("…from a directory inside the worktree too (the walk reaches the worktree's top)", async () => {
+    const b = worktreeBed();
+    const nested = join(b.wt, "pkg");
+    mkdirSync(nested, { recursive: true });
+    const trust = new TrustStore(join(b.home, "trust.json"));
+    trust.trust(b.repo);
+    const built = await builtRuleTargets(b.home, trust, nested);
+    expect(built.root).toBe(b.wt);
+    expect(built.rules).toContain(b.wtRule);
+  });
+
+  test("a worktree trusted by its OWN path (the review's measurement): its rules load, not the main checkout's", async () => {
+    const b = worktreeBed();
+    const trust = new TrustStore(join(b.home, "trust.json"));
+    trust.trust(b.wt);
+    const built = await builtRuleTargets(b.home, trust, b.wt);
+    expect(built.root).toBe(b.wt);
+    expect(built.rules).toContain(b.wtRule);
+    expect(built.rules).not.toContain(b.mainRule);
+  });
+
+  test("a linked worktree of an UNTRUSTED repo gets no project tier at all", async () => {
+    const b = worktreeBed();
+    const built = await builtRuleTargets(b.home, new TrustStore(join(b.home, "trust.json")), b.wt);
+    expect(built.root).toBeNull();
+    expect(built.rules).toEqual([]);
+  });
+
+  test("an ordinary checkout is unchanged: the root is the repo top, from a nested cwd", () => {
+    const repo = initRepo();
+    const nested = join(repo, "a");
+    mkdirSync(nested, { recursive: true });
+    const trust = new TrustStore(join(tmp("winter-rhi-t-"), "trust.json"));
+    trust.trust(repo);
+    expect(runHomeInputFor(deps({ trust }), { mode: "code", dispatchChild: false, leg: "winter", cwd: nested }).trustedProjectRoot).toBe(repo);
   });
 });
