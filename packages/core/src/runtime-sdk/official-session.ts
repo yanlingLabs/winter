@@ -22,7 +22,7 @@ import { MAIN_THREAD, ProjectorRefusedError, classifyThrown, createProjector, ty
 import type { WinterRuntimeSdk, SessionMode } from "./create";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import { officialSubscriptionAuthEnabled } from "../settings";
-import { ensureOfficialConfigDir, OfficialConsoleProfileMissing, OfficialConsoleRouterUnsupported, OfficialCredentialPlanRefused, officialInputFor, officialPermissionModeFor, OfficialProjectKeyTooDeep, officialWireModelFor, type OfficialInputDeps, type OfficialPermissionMode, type OfficialSessionInput } from "./official-options";
+import { ensureOfficialConfigDir, OfficialConsoleProfileMissing, OfficialConsoleRouterUnsupported, OfficialCredentialPlanRefused, officialInputFor, OfficialNoWireModel, officialPermissionModeFor, OfficialProjectKeyTooDeep, type OfficialInputDeps, type OfficialPermissionMode, type OfficialSessionInput } from "./official-options";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import { attachOfficialSession, type OfficialSessionAttachHandle, type OfficialSessionAttachment } from "./messaging";
 // P10a-h: the SAME grace window `WinterSession.end()` races against — reused, not reinvented, so
@@ -520,7 +520,7 @@ class OfficialSessionImpl implements OfficialSession {
       await this.lastDone;
       const inputDeps = await this.deps.inputDeps();
       const built = officialInputFor(this.deps.sessionInput(), inputDeps);
-      if (built instanceof ClaudeExecutableUnavailable || built instanceof OfficialProjectKeyTooDeep || built instanceof OfficialCredentialPlanRefused || built instanceof OfficialConsoleRouterUnsupported || built instanceof OfficialConsoleProfileMissing) throw built;
+      if (built instanceof ClaudeExecutableUnavailable || built instanceof OfficialProjectKeyTooDeep || built instanceof OfficialCredentialPlanRefused || built instanceof OfficialConsoleRouterUnsupported || built instanceof OfficialConsoleProfileMissing || built instanceof OfficialNoWireModel) throw built;
       // WS-21 (spec §3.1): the run home for THIS incarnation — built after every refusal above, so a
       // refused session never leaves a folder behind; an open that fails from here to the iteration's
       // start disposes it at once (nothing ran on it, spec §3.8 r3).
@@ -532,9 +532,10 @@ class OfficialSessionImpl implements OfficialSession {
         // dir on a resume) and REFUSES `runtime.official.spool` beside it — so the Winter-owned
         // `claude-config` spool is neither named nor created. Without one: exactly as before.
         const officialInput: RouterOfficialInput = runHome === undefined ? built.input : withoutSpool(built.input);
-        // F1: the one wire model this incarnation sends (the settings layer `officialInputFor` just built
-        // from the same `inputDeps.selection`) and holds the child's init frame to.
-        const wireModel = officialWireModelFor(inputDeps.selection);
+        // F1: the one wire model this incarnation sends (`officialInputFor` computed it once and put it on
+        // the settings layer — the MAPPED id, e.g. `claude-haiku-4-5` for a dotted row) and holds the
+        // child's init frame to.
+        const wireModel = built.wireModel;
         // Phase 9c (P9c-1): create/harden the Winter-owned config dir NOW — the one point in this
         // leg's whole lifecycle that is an actual spawn against a real `WINTER_HOME`, as opposed to
         // `officialInputFor`'s own pure path computation (see `ensureOfficialConfigDir`'s own doc for

@@ -974,7 +974,7 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
   function driverWorld(existing?: {
     home: string; store: SessionStore; hub: SessionHub; records: RuntimeSessionRecords;
     checkpoints: ProjectionCheckpoints; secrets: FileSecretStore;
-  }) {
+  }, selected: { modelRef?: string } = {}) {
     const home = existing?.home ?? testHome();
     const store = existing?.store ?? new SessionStore(home);
     const hub = existing?.hub ?? new SessionHub(store);
@@ -985,7 +985,7 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
     // "auto" mode — no `runtimes.official.auth` pin — exactly the review's own scenario.
     const settings = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } });
     const officialSelection: RuntimeSelection = {
-      runtimeKind: "claude-agent", providerId: "anthropic", modelRef: MODEL,
+      runtimeKind: "claude-agent", providerId: "anthropic", modelRef: selected.modelRef ?? MODEL,
       family: "claude", authFamily: "api-key", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
     };
     const capturedOptions: CapturedOptions[] = [];
@@ -1295,6 +1295,67 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
       for (const name of POLLUTED_NAMES) {
         if (prior[name] === undefined) delete process.env[name]; else process.env[name] = prior[name];
       }
+    }
+  });
+
+  // F1 follow-on: a DOTTED catalog row runs on its measured dashed wire id, end to end through the real
+  // driver — the flag-settings `model`, the top-level `model`, and the id the init frame is held to are
+  // one value — and a row with no accepted spelling refuses typed before any child is asked for.
+  test("F1: anthropic/claude-haiku-4.5 is sent as claude-haiku-4-5, and the init assertion holds the child to that", async () => {
+    const w = driverWorld(undefined, { modelRef: "anthropic/claude-haiku-4.5" });
+    try {
+      await writeCredentialMaterial(w.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
+      const sid = w.store.createSession("t", { mode: "code", model: "anthropic/claude-haiku-4.5" });
+      const session = await w.drivers.create(sid);
+      const sent = w.capturedOptions[0] as Record<string, unknown> & { runtime?: { official?: { options?: { settings?: Record<string, unknown> } } } };
+      expect(sent["model"]).toBe("claude-haiku-4-5");
+      expect(sent.runtime?.official?.options?.settings?.["model"]).toBe("claude-haiku-4-5");
+      w.q().emit(init(session.backendSessionId, { apiKeySource: "ANTHROPIC_API_KEY" })); // reports the id it was sent
+      w.q().emit(assistant("ok"));
+      w.q().emit(result());
+      await Bun.sleep(10);
+      expect(w.store.read(sid).filter((e) => e.type === "agent_error")).toEqual([]);
+      await session.end();
+    } finally {
+      w.close();
+    }
+  });
+
+  test("F1: a child reporting the UNMAPPED dotted id is a mismatch, never a pass", async () => {
+    const w = driverWorld(undefined, { modelRef: "anthropic/claude-haiku-4.5" });
+    try {
+      await writeCredentialMaterial(w.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
+      const sid = w.store.createSession("t", { mode: "code", model: "anthropic/claude-haiku-4.5" });
+      const session = await w.drivers.create(sid);
+      w.q().emit(init(session.backendSessionId, { apiKeySource: "ANTHROPIC_API_KEY", model: "claude-haiku-4.5" }));
+      await Bun.sleep(10);
+      const errors = w.store.read(sid).filter((e) => e.type === "agent_error") as Array<SessionEvent & { code?: string }>;
+      expect(errors.map((e) => e.code)).toEqual(["official_model_mismatch"]);
+    } finally {
+      w.close();
+    }
+  });
+
+  test("F1: a Claude id with no accepted wire spelling refuses runtime_selection_refused (no-wire-model) before any child is asked for", async () => {
+    const w = driverWorld(undefined, { modelRef: "anthropic/claude-3.7-sonnet" });
+    try {
+      await writeCredentialMaterial(w.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
+      // The stored model is a real row (so the driver consults the selector); the selector answers with
+      // the row that has no wire spelling — the case no pinned row exercises today.
+      const sid = w.store.createSession("t", { mode: "code", model: MODEL });
+      let caught: unknown;
+      try {
+        await w.drivers.create(sid);
+      } catch (e) {
+        caught = e;
+      }
+      expect((caught as { name?: string } | undefined)?.name).toBe("WinterLegRefusal");
+      expect((caught as { code?: string }).code).toBe("runtime_selection_refused");
+      expect((caught as { reason?: string }).reason).toBe("no-wire-model");
+      expect((caught as Error).message).toContain("anthropic/claude-3.7-sonnet");
+      expect(w.capturedOptions).toHaveLength(0);
+    } finally {
+      w.close();
     }
   });
 });

@@ -12,6 +12,7 @@ import { installMockModuleTripwire } from "../mock-module-tripwire";
 import * as winterAgentSdk from "@yanlinglabs/winter-agent-sdk";
 import type { CanUseTool } from "@yanlinglabs/winter-agent-sdk";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
+import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { ContextAssembler } from "../../src/agent/context";
 import { PermissionGate } from "../../src/agent/gate";
@@ -38,6 +39,7 @@ import {
   officialPermissionModeFor,
   officialWireModelFor,
   OfficialConsoleProfileMissing,
+  OfficialNoWireModel,
   OfficialConsoleRouterUnsupported,
   OfficialProjectKeyTooDeep,
   type OfficialInputDeps,
@@ -644,9 +646,87 @@ describe("officialInputFor — the session's model rides the flag-settings layer
     expect(settingsModelFor("console/claude-opus-5")).toBe("claude-opus-5");
   });
 
-  test("officialWireModelFor is that same split — the one spelling the settings layer and the init assertion share", () => {
-    expect(officialWireModelFor({ modelRef: "anthropic/claude-haiku-4.5" })).toBe("claude-haiku-4.5");
-    expect(settingsModelFor("anthropic/claude-haiku-4.5")).toBe(officialWireModelFor({ modelRef: "anthropic/claude-haiku-4.5" }));
+  test("officialWireModelFor is the one spelling the settings layer and the init assertion share", () => {
+    expect(settingsModelFor("anthropic/claude-haiku-4.5")).toBe(officialWireModelFor({ modelRef: "anthropic/claude-haiku-4.5" }) as string);
+  });
+});
+
+// F1 follow-on (2026-09-24): the WIRE id for every Claude row the official leg can run. The pinned
+// catalog carries 14 DOTTED rows (`anthropic/claude-haiku-4.5`, `…/claude-opus-4.8`, their `console/*`
+// twins) whose bare modelId Anthropic's API does not accept. MEASURED by the coordinator against the
+// real API with the user's key (read-only `GET /v1/models/<id>`):
+//   404: claude-haiku-4.5, claude-sonnet-4.6 ("Did you mean claude-sonnet-4-6?"), claude-3-7-sonnet, claude-3.7-sonnet
+//   200: claude-haiku-4-5 (→ claude-haiku-4-5-20251001), claude-opus-4-5 (→ claude-opus-4-5-20251101),
+//        claude-opus-4-6/4-7/4-8, claude-sonnet-4-5 (→ claude-sonnet-4-5-20250929), claude-sonnet-4-6,
+//        claude-opus-5, claude-sonnet-5, claude-fable-5, claude-fable-5-1, claude-haiku-4-5-20251001
+// So a dotted version segment maps to the dashed id; dated and already-dashed ids pass through; an id
+// with NO accepted spelling refuses typed before the first turn — never a fallback to another model.
+// The table is keyed by the bare modelId and is EXHAUSTIVE over the pinned catalog's anthropic/console
+// Claude rows: a new row fails this test until its wire id is measured and added here.
+describe("officialWireModelFor — the Claude wire id per catalog row (F1 follow-on)", () => {
+  const MEASURED_WIRE_ID: Readonly<Record<string, string>> = {
+    "claude-fable-5": "claude-fable-5",
+    "claude-fable-5-1": "claude-fable-5-1",
+    "claude-haiku-4-5-20251001": "claude-haiku-4-5-20251001",
+    "claude-haiku-4.5": "claude-haiku-4-5",
+    "claude-opus-4.5": "claude-opus-4-5",
+    "claude-opus-4.6": "claude-opus-4-6",
+    "claude-opus-4.7": "claude-opus-4-7",
+    "claude-opus-4.8": "claude-opus-4-8",
+    "claude-opus-5": "claude-opus-5",
+    "claude-sonnet-4.5": "claude-sonnet-4-5",
+    "claude-sonnet-4.6": "claude-sonnet-4-6",
+    "claude-sonnet-5": "claude-sonnet-5",
+  };
+  const ACCEPTED_BY_THE_API = new Set(["claude-haiku-4-5", "claude-opus-4-5", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-5", "claude-sonnet-5", "claude-fable-5", "claude-fable-5-1", "claude-haiku-4-5-20251001"]);
+  const claudeRows = loadCatalog().models.filter((row) => (row.providerId === "anthropic" || row.providerId === "console") && row.modelFamily === "claude");
+
+  test("the pinned catalog's anthropic/console Claude rows are the 24 this table was measured for", () => {
+    expect(claudeRows.map((row) => row.key).sort()).toEqual(
+      Object.keys(MEASURED_WIRE_ID).flatMap((id) => [`anthropic/${id}`, `console/${id}`]).sort(),
+    );
+  });
+
+  test("every row maps to its measured wire id, and every wire id is one the API answered 200 for", () => {
+    for (const row of claudeRows) {
+      const modelId = row.key.slice(row.key.indexOf("/") + 1);
+      const wire: unknown = officialWireModelFor({ modelRef: row.key });
+      expect({ row: row.key, wire }).toEqual({ row: row.key, wire: MEASURED_WIRE_ID[modelId] });
+      expect(ACCEPTED_BY_THE_API.has(wire as string)).toBe(true);
+    }
+  });
+
+  test("a dotted id with NO accepted spelling refuses typed — runtime_selection_refused, naming the model", () => {
+    for (const modelRef of ["anthropic/claude-3.7-sonnet", "console/claude-3.7-sonnet"]) {
+      const wire = officialWireModelFor({ modelRef });
+      expect(wire).toBeInstanceOf(OfficialNoWireModel);
+      const refusal = wire as OfficialNoWireModel;
+      expect(refusal.code).toBe("runtime_selection_refused");
+      expect(refusal.reason).toBe("no-wire-model");
+      expect(refusal.message).toContain(modelRef);
+      expect(refusal.message).toContain("no wire id");
+    }
+  });
+
+  test("officialInputFor refuses the same row before anything is built", () => {
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
+    const base = minimalDeps();
+    const result = officialInputFor(input, minimalDeps({ selection: { ...base.selection, providerId: "anthropic", modelRef: "anthropic/claude-3.7-sonnet" } }));
+    expect(result).toBeInstanceOf(OfficialNoWireModel);
+  });
+
+  test("officialInputFor reports the mapped id it sent, beside the settings layer that carries it", () => {
+    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
+    const base = minimalDeps();
+    const result = officialInputFor(input, minimalDeps({ selection: { ...base.selection, providerId: "console", modelRef: "console/claude-opus-4.8" } }));
+    if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
+    expect(result.wireModel).toBe("claude-opus-4-8");
+    expect(((result.input.options as unknown as Record<string, unknown>).settings as Record<string, unknown>)["model"]).toBe("claude-opus-4-8");
+  });
+
+  test("a provider whose wire is NOT Anthropic's own API keeps its own spelling (the measurement covers anthropic/console only)", () => {
+    expect(officialWireModelFor({ modelRef: "someproxy/claude-opus-4.8" })).toBe("claude-opus-4.8");
+    expect(officialWireModelFor({ modelRef: "someproxy/anthropic/claude-3.7-sonnet" })).toBe("anthropic/claude-3.7-sonnet");
   });
 });
 
