@@ -3,8 +3,9 @@
 //
 // claude reads a `sandbox.filesystem` entry holding any of `* ? [ ]` as a GLOB (a seatbelt regex), so a
 // raw `[wip] app` entry is a character class that misses the literal directory. `childSandboxConfigFor`
-// spells it `[[]wip] app`. Measured with a sandboxed Bash write into the fenced directory: the spelled
-// entry must stop it; the raw entry is recorded as the control (the gap the spelling closes).
+// spells it `[[]wip] app`. Measured with the daemon's OWN list for a `[wip] app` project: the spelled list
+// must stop a python and a redirect write into `.winter/skills` while an ordinary cwd write lands; the raw
+// (literal) list is the control, and R.3 I-6 ASSERTS it — its writes land (the gap the spelling closes).
 //
 // The Winter leg (C-1, the R.3 SDK review): since agent SDK round 11 (`2a118c6`, claude's `Rt` port) the
 // Winter runtime reads the same grammar. Measured with the daemon's OWN deny list for a `[wip] app`
@@ -21,21 +22,33 @@ import { join } from "node:path";
 import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { query as winterQuery } from "@yanlinglabs/winter-agent-sdk";
 import { anthropicFake, startFake } from "@yanlinglabs/winter-provider-conformance";
-import { escapeSandboxGlobPath } from "@yanlinglabs/winter-runtime-sdk";
 import { childSandboxConfigFor, sandboxConfigFor } from "../../src/runtime-sdk/mode-options";
 import { claudeRuntimeForTests, describeWithClaudeRuntime, LOOPBACK_MODEL_ID } from "../helpers/claude-runtime";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
 
-async function sandboxedWriteLands(spelled: boolean): Promise<{ landed: boolean; messages: string[] }> {
+/** One sandboxed Bash turn on the real `claude`, its sandbox the daemon's OWN fence for a `[wip] app` project (inside a plain cwd — see below) —
+ *  `childSandboxConfigFor` (what the official leg is sent) or, as the recorded control, the literal
+ *  `sandboxConfigFor`. R.3 I-6: the same three writes as the Winter block — into the protected
+ *  `<cwd>/.winter/skills` twice (python, which the permission layer cannot see, and a redirect) and once into
+ *  an ordinary cwd file that MUST land (the proof the Bash call ran at all). */
+async function officialRun(spelled: boolean): Promise<{ python: boolean; redirect: boolean; notes: boolean; messages: string[] }> {
   const bed = claudeRuntimeForTests();
   if (bed === undefined) throw new Error("unreachable: the suite is skipped without a bed");
   const root = realpathSync(mkdtempSync(join(tmpdir(), "winter-sbx-glob-")));
   const home = join(root, "home");
   const cfg = join(root, "cfg");
-  const cwd = join(root, "cwd");
-  const fenced = join(cwd, "[wip] app");
-  for (const dir of [home, cfg, cwd, fenced, join(home, "tmp")]) mkdirSync(dir, { recursive: true });
-  const target = join(fenced, "f.txt");
+  const daemonHome = join(root, "winter-home");
+  // The `[wip] app` project sits INSIDE a plain cwd. MEASURED (R.3 I-6): claude cannot write anything into
+  // a cwd whose own path holds `[` — with no deny list at all, python, a redirect and `notes.md` all fail
+  // (its own allow entry for the cwd is read as a glob too) — so a bed whose cwd IS `[wip] app` reads
+  // "nothing landed" for every fence and would pass vacuously. The Winter runtime writes such a cwd fine.
+  const project = join(root, "work", "[wip] app");
+  const cwd = join(root, "work");
+  for (const dir of [home, cfg, daemonHome, join(home, "tmp"), join(project, ".winter", "skills", "x")]) mkdirSync(dir, { recursive: true });
+  const py = join(project, ".winter", "skills", "x", "SKILL.md");
+  const redir = join(project, ".winter", "skills", "x", "r.md");
+  const notes = join(project, "notes.md");
+  const command = `python3 -c "open('${py}','w').write('x')"; echo x > '${redir}'; echo x > '${notes}'; true`;
   let served = false;
   const fake = await startFake({
     routes: [{
@@ -44,7 +57,7 @@ async function sandboxedWriteLands(spelled: boolean): Promise<{ landed: boolean;
         if (!(recorded.path === "/v1/messages" && recorded.method === "POST")) return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
         if (!served && !recorded.body.includes("tool_result")) {
           served = true;
-          return anthropicFake.anthropicTurnResponse({ blocks: [{ type: "tool_use", id: "call_bash_1", name: "Bash", jsonChunks: [JSON.stringify({ command: `echo measured > '${target}'`, description: "write into the fenced dir" })] }], stopReason: "tool_use" });
+          return anthropicFake.anthropicTurnResponse({ blocks: [{ type: "tool_use", id: "call_bash_1", name: "Bash", jsonChunks: [JSON.stringify({ command, description: "write into the project" })] }], stopReason: "tool_use" });
         }
         return anthropicFake.anthropicTurnResponse({ blocks: [{ type: "text", chunks: ["done"] }], stopReason: "end_turn" });
       },
@@ -53,13 +66,13 @@ async function sandboxedWriteLands(spelled: boolean): Promise<{ landed: boolean;
   const messages: string[] = [];
   try {
     const q = query({
-      prompt: "write the file you were scripted to write",
+      prompt: "run the command you were scripted to run",
       options: {
         pathToClaudeCodeExecutable: bed.executable,
         model: LOOPBACK_MODEL_ID,
         cwd,
         settingSources: [],
-        settings: { sandbox: { enabled: true, filesystem: { denyWrite: [spelled ? escapeSandboxGlobPath(fenced) : fenced] } } },
+        settings: { sandbox: spelled ? childSandboxConfigFor(daemonHome, project) : sandboxConfigFor(daemonHome, project) },
         maxTurns: 4,
         canUseTool: async (_tool, input) => ({ behavior: "allow", updatedInput: input }),
         env: {
@@ -75,20 +88,24 @@ async function sandboxedWriteLands(spelled: boolean): Promise<{ landed: boolean;
       messages.push(m.subtype === undefined ? m.type : `${m.type}/${m.subtype}`);
       if (m.type === "result") break;
     }
-    return { landed: existsSync(target), messages };
+    return { python: existsSync(py), redirect: existsSync(redir), notes: existsSync(notes), messages };
   } finally {
     await fake.close();
     rmSync(root, { recursive: true, force: true });
   }
 }
 
-describeWithClaudeRuntime("router 3279a1d — the official-leg sandbox fence under a `[`-named directory", () => {
-  test("the escapeSandboxGlobPath-spelled denyWrite stops a sandboxed Bash write; the raw spelling is the recorded control", async () => {
-    const spelled = await sandboxedWriteLands(true);
-    const raw = await sandboxedWriteLands(false);
-    console.error(`sandbox glob escape (official): spelled deny -> write landed=${spelled.landed}; raw deny -> write landed=${raw.landed}; ${spelled.messages.join(",")}`);
-    expect(spelled.landed).toBe(false);
-  }, 90_000);
+describeWithClaudeRuntime("router 3279a1d — the official-leg sandbox fence under a `[`-named project (the daemon's own deny list)", () => {
+  test("the spelled fence stops the python and the redirect write into .winter/skills; notes.md lands; the literal list's writes land (the recorded control, ASSERTED)", async () => {
+    const spelled = await officialRun(true);
+    const literal = await officialRun(false);
+    const view = (r: { python: boolean; redirect: boolean; notes: boolean }) => ({ python: r.python, redirect: r.redirect, notes: r.notes });
+    console.error(`sandbox glob escape (official): spelled ${JSON.stringify(view(spelled))}; literal ${JSON.stringify(view(literal))}; ${spelled.messages.join(",")}`);
+    expect(view(spelled)).toEqual({ python: false, redirect: false, notes: true });
+    // R.3 I-6: the control is ASSERTED, not logged — a broken bed (the Bash call never running) would read
+    // "nothing landed" everywhere and pass the line above vacuously.
+    expect(view(literal)).toEqual({ python: true, redirect: true, notes: true });
+  }, 180_000);
 });
 
 describeWithWinterBinary("C-1 — the Winter-leg sandbox fence under a `[`-named project (the daemon's own deny list)", (bin) => {
@@ -96,7 +113,7 @@ describeWithWinterBinary("C-1 — the Winter-leg sandbox fence under a `[`-named
    *  and cwd — `childSandboxConfigFor` (what a spawn is sent) or, as the control, the literal
    *  `sandboxConfigFor`. The command writes into the protected `<cwd>/.winter/skills` twice (python, which
    *  the permission layer cannot see, and a redirect) and once into an ordinary cwd file. */
-  async function run(dirName: string, spelled: boolean, command?: (cwd: string) => string, bed: { mkdirs?: string[]; probe?: string[] } = {}): Promise<{ python: boolean; redirect: boolean; notes: boolean; cwd: string; landedPaths: (rel: string) => boolean; landed: Record<string, boolean> }> {
+  async function run(dirName: string, spelled: boolean, command?: (cwd: string) => string, bed: { mkdirs?: string[]; probe?: string[] } = {}): Promise<{ python: boolean; redirect: boolean; notes: boolean; landed: Record<string, boolean> }> {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "winter-sbx-c1-w-")));
     const home = join(root, "home");
     const daemonHome = join(root, "winter-home");
@@ -137,14 +154,14 @@ describeWithWinterBinary("C-1 — the Winter-leg sandbox fence under a `[`-named
       for await (const m of q) if ((m as { type?: string }).type === "result") break;
       // R.3: probed BEFORE the bed is removed below (a `landedPaths` read after `run` returns sees nothing).
       const landed = Object.fromEntries((bed.probe ?? []).map((rel) => [rel, existsSync(join(cwd, rel))]));
-      return { python: existsSync(py), redirect: existsSync(redir), notes: existsSync(notes), cwd, landedPaths: (rel) => existsSync(join(cwd, rel)), landed };
+      return { python: existsSync(py), redirect: existsSync(redir), notes: existsSync(notes), landed };
     } finally {
       await fake.close();
       rmSync(root, { recursive: true, force: true });
     }
   }
 
-  test("`[wip] app`: the spelled fence stops the python and the redirect write into .winter/skills; notes.md lands; the literal list is the recorded control", async () => {
+  test("`[wip] app`: the spelled fence stops the python and the redirect write into .winter/skills; notes.md lands; the literal list is the recorded control (ASSERTED)", async () => {
     const spelled = await run("[wip] app", true);
     const literal = await run("[wip] app", false);
     const plain = await run("plain app", false);
@@ -152,6 +169,9 @@ describeWithWinterBinary("C-1 — the Winter-leg sandbox fence under a `[`-named
     console.error(`C-1 (winter): [wip] spelled ${JSON.stringify(view(spelled))}; [wip] literal ${JSON.stringify(view(literal))}; plain literal ${JSON.stringify(view(plain))}`);
     expect(view(spelled)).toEqual({ python: false, redirect: false, notes: true });
     expect(view(plain)).toEqual({ python: false, redirect: false, notes: true });
+    // R.3 I-6: the control is ASSERTED — the literal list under `[wip] app` lets both writes through (at SDK
+    // 5e37898; round 17's native `.winter` cover will stop them, and this line with it — a pin-dependent control).
+    expect(view(literal)).toEqual({ python: true, redirect: true, notes: true });
   }, 180_000);
 
   // R.3 I-4: the any-depth project fence. From a session at the project root, a sandboxed Bash could plant
@@ -170,7 +190,8 @@ describeWithWinterBinary("C-1 — the Winter-leg sandbox fence under a `[`-named
   // only for `.claude`-shaped entries; the Winter runtime's cover for `.winter` lands in SDK round 17.
   // Needs the round-17 binary — do not assert it before the SDK pin carries it.
   test.todo("`[wip] app`: the ancestor-rename probe cannot plant .winter/skills/x/SKILL.md (needs the SDK round-17 binary)", async () => {
-    const r = await run("[wip] app", true, () => "mv .winter .w2 && mkdir -p .w2/skills/x && echo > .w2/skills/x/SKILL.md && mv .w2 .winter; true");
-    expect(r.landedPaths(".winter/skills/x/SKILL.md")).toBe(false);
+    // R.3 I-6: probed before the bed is removed (the old `landedPaths` read ran after it, so it read false always).
+    const r = await run("[wip] app", true, () => "mv .winter .w2 && mkdir -p .w2/skills/x && echo > .w2/skills/x/SKILL.md && mv .w2 .winter; echo x > notes.md; true", { probe: [".winter/skills/x/SKILL.md", "notes.md"] });
+    expect(r.landed).toEqual({ ".winter/skills/x/SKILL.md": false, "notes.md": true });
   }, 180_000);
 });
