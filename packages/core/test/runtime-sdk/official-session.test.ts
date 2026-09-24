@@ -1383,7 +1383,7 @@ describe("WS-21: the official leg's run home", () => {
         runId, dir: `/h/cache/runs/${runId}`, sdkHome: "/h/sdk",
         input: { home: "/h", mode: "code" as const, dispatchChild: false, leg: "official" as const, cwd: "/repo", trustedProjectRoot: null, gitRoot: null, mcpDisabled: [], reservedMcpServerNames: [], memoryDir: "/m" },
         effectiveSettings: {},
-        report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [] },
+        report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [], droppedRules: [] },
         dispose: async () => { disposed.push(runId); },
       };
     };

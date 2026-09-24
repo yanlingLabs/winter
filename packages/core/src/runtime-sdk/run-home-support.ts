@@ -100,8 +100,8 @@ export async function settleRunHome(
 
 /**
  * What a run home's builder did NOT do, as one log line (spec §8: surfaced, never silent) — every
- * `RunHome.report` field, `skippedAgents` included (L2 fix round 1). Paths, server names and reasons
- * only. `undefined` for a report with nothing in it.
+ * `RunHome.report` field, `skippedAgents` (L2 fix round 1) and `droppedRules` (router 3279a1d) included.
+ * Paths, server names, rules and reasons only. `undefined` for a report with nothing in it.
  */
 export function runHomeReportSummary(runHome: RunHome): string | undefined {
   const r = runHome.report;
@@ -113,6 +113,10 @@ export function runHomeReportSummary(runHome: RunHome): string | undefined {
   if (r.droppedImports.length > 0) parts.push(`@imports dropped (outside the project): ${r.droppedImports.join(", ")}`);
   const skippedAgents = r.skippedAgents ?? [];
   if (skippedAgents.length > 0) parts.push(`agents not copied: ${skippedAgents.map((a) => `${a.path} (${a.reason})`).join(", ")}`);
+  // Router 3279a1d: rules the builder DROPPED rather than widen (an allow re-anchored under an anchor holding
+  // `?`; on the official leg a sandbox allow whose anchor holds `*`/`?`).
+  const droppedRules = r.droppedRules ?? [];
+  if (droppedRules.length > 0) parts.push(`rules dropped rather than widened: ${droppedRules.map((d) => `${d.rule} [${d.tier}] (${d.reason})`).join(", ")}`);
   return parts.length === 0 ? undefined : `run home ${runHome.runId}: ${parts.join("; ")}`;
 }
 
