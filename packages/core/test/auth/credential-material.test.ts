@@ -114,7 +114,12 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     // 0.0.17 → 0.0.20 (the dist-session parity fixes; 0.0.18 and 0.0.19 were tagged but never
     // published): `git diff v0.0.17 v0.0.20 -- packages/runtime/src/provider/keychain-store.ts` came
     // back EMPTY (0 lines); the mirror stands unchanged.
-    expect(pkg.version).toBe("0.0.20");
+    //
+    // 0.0.20 → 0.0.22 (WS-21, the shared ~/.winter/sdk home; 0.0.21 was tagged but its release CI
+    // failed on pre-existing, unrelated defects and was never published): `git diff v0.0.20 v0.0.22
+    // -- packages/runtime/src/provider/keychain-store.ts` came back EMPTY (0 lines); the mirror
+    // stands unchanged.
+    expect(pkg.version).toBe("0.0.22");
   });
 
 

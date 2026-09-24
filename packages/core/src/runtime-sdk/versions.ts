@@ -11,8 +11,26 @@ import claudeAgentSdkManifest from "@anthropic-ai/claude-agent-sdk/package.json"
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.20";
-/** Bumped to 0.0.11 (lane B, 2026-09-23): the router no longer names `<cwd>/.winter` as a local plugin
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.22";
+/** Bumped to 0.0.22 (R.4, WS-21 publish, 2026-09-24): the shared `~/.winter/sdk` default home and
+ *  `$WINTER_STORE_HOME`, plugins in claude's own format (`hooks.json`, directory marketplaces,
+ *  `resolvesWithinPluginRoot`), an MCP tool list rebuilt per request with claude's up-to-2s
+ *  first-turn connect wait and an unoffered-tool refusal, recursive subagent scope, and (SDK round 24)
+ *  `mapChatMessages` merging consecutive same-role assistant entries so chat-completions-shaped
+ *  providers (DeepSeek, zai, OpenRouter, …) accept a turn after a parallel-tool-call batch. Tagged
+ *  v0.0.21 first; that release's CI run failed on pre-existing, unrelated test/build defects (no
+ *  behavioural change), so the fixed build published as v0.0.22 instead — v0.0.21 was never
+ *  published and this pin skips straight to it. */
+/** Bumped to 0.0.13 (R.4, WS-21 publish, 2026-09-24): 0.0.12 raised the router's own SDK peer floor
+ *  to `>=0.0.21 <0.1.0` and shipped the SV-12/F2 fix — a claude turn's parallel tool-call batch is
+ *  spliced back together by `tool_use_id` (siblings, then results after the batch's last assistant
+ *  entry) in both `rebuildProviderMessages` and `switchFactsFor`, so a same-session Claude → GPT
+ *  switch after a parallel-tool-call turn no longer reaches the provider with an unanswered call —
+ *  plus a `deepseek/deepseek-reasoner` catalog rename fix. 0.0.12 was tagged but its release CI
+ *  failed on a timing-dependent control (a test asserting claude's own scheduler behaviour, not a
+ *  containment failure) and was never published; 0.0.13 loosens that control only and republishes
+ *  the same behavioural content — this pin skips 0.0.12 straight to it.
+ *  Bumped to 0.0.11 (lane B, 2026-09-23): the router no longer names `<cwd>/.winter` as a local plugin
  *  on the official leg — measured by its own tests, a cloned repository's `hooks/hooks.json` ran on a
  *  Code session's first prompt through it, with no trust decision anywhere — and gained
  *  `OptionsTemplatePolicy.plugins`, through which the daemon hands the SAME skills-only plugin views the
@@ -29,7 +47,7 @@ export const REQUIRED_WINTER_AGENT_SDK = "0.0.20";
  *  Readonly<Record<string, unknown>>` — the router-package wall `official-options.ts`'s own comment
  *  on `OfficialInputDeps.agents` used to name (a router version this low has no field to forward the
  *  daemon's merged subagent definitions through) is CLOSED as of that pin. */
-export const REQUIRED_WINTER_RUNTIME_SDK = "0.0.11";
+export const REQUIRED_WINTER_RUNTIME_SDK = "0.0.13";
 /** P8c-3/versions: the official peer is pinned EXACT (`"0.3.250"` in package.json, no `^`) — the
  *  ladder's package door and the router's own `assertVersionMatrix` both key off this string
  *  matching the installed wrapper's manifest, never a range. */
