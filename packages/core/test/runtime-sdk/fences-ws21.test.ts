@@ -443,3 +443,39 @@ describe("R.3 I-1: a linked worktree — the sandbox protects the walk up to the
     for (const f of ["mcp.json", "settings.json", "settings.local.json", "agents"]) expect(w).toContain(join(wt, ".winter", f));
   });
 });
+
+// R.3 re-review B-1: `..` after a variable. The normaliser collapses `/<seg>/..` only when a `/` precedes the
+// segment, which a variable lacks, so `$WINTER_STORE_HOME/../agents` (and `$OUTDIR/../../agents` — the SDK's
+// Bash has exported OUTDIR, `<home>/outputs/<sid>`, since WS-12) reached the home's fenced paths unseen. The
+// floor now also reads each command with the path variables a child's shell has replaced by the absolute
+// values the daemon knows, so every `..` depth and `cd` chain falls into the literal-path checks.
+describe("R.3 re-review B-1: `..` after a child's path variable reaches no fenced path", () => {
+  test("each measured row is refused", () => {
+    for (const cmd of [
+      "echo x > $WINTER_STORE_HOME/../agents/evil.md",
+      "echo x > ${WINTER_STORE_HOME}/../agents/evil.md",
+      "echo x > $WINTER_STORE_HOME/../skills/x/SKILL.md",
+      "cp evil $WINTER_STORE_HOME/../runtimes/bin/winter",
+      "echo x > $WINTER_STORE_HOME/../run/daemon.pid",
+      "echo '{}' > $WINTER_STORE_HOME/../permissions/projects.json",
+      "cd $WINTER_STORE_HOME/.. && echo x > agents/evil.md",
+      "cd $WINTER_STORE_HOME && cd .. && echo x > agents/evil.md",
+      "echo x > $OUTDIR/../../agents/evil.md",
+      "echo x > ${OUTDIR}/../../agents/evil.md",
+      "cd $OUTDIR && cd ../.. && cp evil.json permissions/projects.json",
+      // …and the other variables, every depth
+      "cat $WINTER_PLUGIN_CACHE_DIR/../../runtimes/x",
+      "cat $WINTER_HOME/../../../runtimes/anthropic-config/profile.json",
+      "cat $CLAUDE_CONFIG_DIR/../../../run/core.sock",
+      "echo x > $CLAUDE_CODE_PLUGIN_CACHE_DIR/../agents/evil.md",
+    ]) expect({ cmd, hit: escapeFloorHit(cmd, H) !== undefined }).toEqual({ cmd, hit: true });
+  });
+  test("writes inside OUTDIR, and reads through the variables, stay allowed", () => {
+    for (const cmd of [
+      "echo x > $OUTDIR/notes.md",
+      "cp report.md ${OUTDIR}/report.md",
+      "cat $OUTDIR/../../sdk/skills/a/SKILL.md",
+      "ls $WINTER_STORE_HOME/../outputs",
+    ]) expect({ cmd, hit: escapeFloorHit(cmd, H) }).toEqual({ cmd, hit: undefined });
+  });
+});
