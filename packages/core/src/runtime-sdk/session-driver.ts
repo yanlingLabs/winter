@@ -94,7 +94,7 @@ import type { ContextAssembler } from "../agent/context";
 import type { SkillStore } from "../agent/skills";
 import { startWinterSession, unconsumedUserMessages, withRunHome, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
 import { RunHomeError, type RunHome, type RunHomeErrorCode, type RunHomeFor, type RunHomeInput } from "@yanlinglabs/winter-runtime-sdk";
-import type { RunHomeSessionFacts } from "./run-home-input";
+import { projectTierTrusted, type RunHomeSessionFacts } from "./run-home-input";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import { startOfficialSession, type OfficialSession } from "./official-session";
 import { officialAuthArmFor, OfficialConsoleProfileMissing, OfficialConsoleRouterUnsupported, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
@@ -457,6 +457,14 @@ export function sessionPermissionClassFor(deps: {
   };
 }
 
+/** R.3 I-1: the approval bridge's `projectTrusted` for a session cwd — the SAME trust the run home's
+ *  project tier uses (`projectTierTrusted`: the cwd's own trust, or its repository's — a linked worktree of
+ *  a trusted repo is trusted, and an "in this project" answer keeps `repoRootFor`'s key), read live per call.
+ *  It gates both the card's "in this project" option and the bridge's protected-path walk. */
+export function bridgeProjectTrustedFor(isTrusted: (dir: string) => boolean, cwd: string): () => boolean {
+  return () => projectTierTrusted(cwd, { isTrusted });
+}
+
 /** The driver's three child moments → the persisted roster's doors. `agentId` = `threadId` = the
  *  spawning `tool_use.id` (the cross-lane contract `capability-parity.test.ts` pins). No `name`:
  *  Winter children are addressed by id, and two children may share a description. */
@@ -639,7 +647,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     const canUseTool = canUseToolFor({
       sessionId, mode, origin: meta.origin, home, cwd,
       // WS-21: "in this project" is offered only for a trusted project (live — trusting it reaches the next card).
-      ...(deps.isTrusted === undefined ? {} : { projectTrusted: () => deps.isTrusted!(cwd) }),
+      ...(deps.isTrusted === undefined ? {} : { projectTrusted: bridgeProjectTrustedFor(deps.isTrusted, cwd) }),
       // A getter: `session.setPolicy` mid-session is seen by the NEXT call (the engine re-reads too).
       policy: () => deps.store.meta(sessionId).approvalPolicy,
       approvals: deps.approvals, questions: deps.questions, gate: deps.gate,
@@ -1284,7 +1292,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         canUseToolDeps: {
           approvals: deps.approvals, questions: deps.questions, gate: deps.gate,
           // WS-21: "in this project" is offered only for a trusted project (the same rule as the Winter leg).
-          ...(deps.isTrusted === undefined ? {} : { projectTrusted: () => deps.isTrusted!(capSession.cwd) }),
+          ...(deps.isTrusted === undefined ? {} : { projectTrusted: bridgeProjectTrustedFor(deps.isTrusted, capSession.cwd) }),
           emit: (event) => { deps.hub.append(sessionId, event); },
           home: deps.home, threadId: "main",
           ...(live.origin === undefined ? {} : { origin: live.origin }),
