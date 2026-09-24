@@ -12,6 +12,9 @@ export interface MigrateProjectCommandDeps {
   /** `process.argv.slice(3)` — everything after `winter migrate-project`. */
   argv: string[];
   cwd: string;
+  /** WS-21: the Winter home whose old approved-rules record ("Allow … in this project" answers) is folded
+   *  into the project's `.winter/settings.local.json`. Absent: that step is not planned. */
+  home?: string;
   log: (line: string) => void;
   error: (line: string) => void;
   confirm: (prompt: string) => Promise<boolean>;
@@ -19,6 +22,10 @@ export interface MigrateProjectCommandDeps {
 
 function printPlan(plan: ProjectMigrationPlan, log: (line: string) => void): void {
   for (const step of plan.steps) {
+    if (step.method === "merge") {
+      log(`  + ${step.to}: ${step.rules?.length ?? 0} saved rule(s) from ${step.from} (claude grammar; never wider)`);
+      continue;
+    }
     log(`  - ${step.from} -> ${step.to} (${step.method})`);
   }
   for (const change of plan.settingsChanges) {
@@ -35,7 +42,7 @@ export async function runMigrateProjectCommand(deps: MigrateProjectCommandDeps):
 
   let plan: ProjectMigrationPlan;
   try {
-    plan = planProjectMigration(dir);
+    plan = planProjectMigration(dir, deps.home === undefined ? {} : { winterHome: deps.home });
   } catch (err) {
     if (err instanceof ProjectMigrationRefused) {
       deps.error(`winter migrate-project: ${err.message}`);
@@ -58,7 +65,8 @@ export async function runMigrateProjectCommand(deps: MigrateProjectCommandDeps):
   }
 
   try {
-    runProjectMigration(plan);
+    const { skippedRules } = runProjectMigration(plan);
+    if (skippedRules.length > 0) deps.log(`winter migrate-project: ${skippedRules.length} saved rule(s) have no claude spelling that is not wider, and were left out: ${skippedRules.join(", ")}`);
   } catch (err) {
     if (err instanceof ProjectMigrationRefused) {
       deps.error(`winter migrate-project: ${err.message}`);

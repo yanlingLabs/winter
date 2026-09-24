@@ -517,7 +517,7 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
           runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => sameLegSelection) }), // deepseek stays on Winter — same leg
           settings: () => ({ runtimes: { handoff: { crossRuntime: false } } }) as unknown as Settings,
         }),
-        "s1", "deepseek/deepseek-reasoner", false,
+        "s1", "deepseek/deepseek-v4-pro", false,
       );
       expect(out).toEqual({ kind: "same-runtime", decided: sameLegSelection });
       expect(reviewCalled).toBe(true);
@@ -667,7 +667,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
       const runtime = fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => sameLegSelection) }); // deepseek stays on Winter
       const refused = await planAndApplySwitch(
         deps({ records, runtime, barrier: fakeBarrierWithReview(review) }),
-        "s1", "deepseek/deepseek-reasoner", false,
+        "s1", "deepseek/deepseek-v4-pro", false,
       );
       expect(refused).toEqual({ kind: "confirmation_required", warnings: ["reasoning state may be lost"], portable: ["the visible conversation"] });
 
@@ -675,7 +675,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
       // model change (barrier.plan()/execute() are never reached for a same-leg switch at all).
       const confirmed = await planAndApplySwitch(
         deps({ records, runtime, barrier: fakeBarrierWithReview(review) }),
-        "s1", "deepseek/deepseek-reasoner", true,
+        "s1", "deepseek/deepseek-v4-pro", true,
       );
       expect(confirmed).toEqual({ kind: "same-runtime", decided: sameLegSelection });
     });
@@ -690,19 +690,19 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
   test("C1: GPT -> DeepSeek (same leg, confirmed) leaves the record on DeepSeek; DeepSeek -> GPT then leaves it on GPT", async () => {
     await withRs(async (_rs, records) => {
       seedRecord(records, "s1"); // persisted: winter-agent, providerId "p", modelRef "m"
-      const DEEPSEEK = { ...SELECTION("winter-agent"), providerId: "deepseek", modelRef: "deepseek/deepseek-reasoner", family: "deepseek" };
+      const DEEPSEEK = { ...SELECTION("winter-agent"), providerId: "deepseek", modelRef: "deepseek/deepseek-v4-pro", family: "deepseek" };
       const GPT = { ...SELECTION("winter-agent"), providerId: "openai", modelRef: "openai/gpt-5.6-sol", family: "openai" };
       const runtime = fakeRuntime({
-        selectRuntimeFor: freshOnlySelector((model) => (model === "deepseek/deepseek-reasoner" ? DEEPSEEK : GPT)),
+        selectRuntimeFor: freshOnlySelector((model) => (model === "deepseek/deepseek-v4-pro" ? DEEPSEEK : GPT)),
       });
       const barrier = fakeBarrierWithReview({ prompt: false });
       const d = deps({ records, runtime, barrier });
 
-      const toDeepseek = await planAndApplySwitch(d, "s1", "deepseek/deepseek-reasoner", false);
+      const toDeepseek = await planAndApplySwitch(d, "s1", "deepseek/deepseek-v4-pro", false);
       expect(toDeepseek).toEqual({ kind: "same-runtime", decided: DEEPSEEK });
       const afterDeepseek = records.get("s1")!;
       expect(afterDeepseek.providerId).toBe("deepseek");
-      expect(afterDeepseek.modelRef).toBe("deepseek/deepseek-reasoner");
+      expect(afterDeepseek.modelRef).toBe("deepseek/deepseek-v4-pro");
       expect(afterDeepseek.selection).toEqual(DEEPSEEK);
 
       const toGpt = await planAndApplySwitch(d, "s1", "openai/gpt-5.6-sol", false);
@@ -792,7 +792,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
             reviewSwitch: async () => { reviewCalled = true; throw new Error("not reached — no sessionKey means reviewSwitch is never called"); },
           },
         }),
-        "s1", "deepseek/deepseek-reasoner", false,
+        "s1", "deepseek/deepseek-v4-pro", false,
       );
       expect(out).toEqual({ kind: "same-runtime" });
       expect(reviewCalled).toBe(false);
@@ -1445,7 +1445,7 @@ describe("planAndApplySwitch: a throwing reviewSwitch fails safe as a prompt, ne
             barrier: fakeBarrierWhoseReviewThrows(err),
             log: (line) => logs.push(line),
           }),
-          "s1", "deepseek/deepseek-reasoner", false,
+          "s1", "deepseek/deepseek-v4-pro", false,
         );
       } catch (e) {
         caught = e;
@@ -1453,7 +1453,7 @@ describe("planAndApplySwitch: a throwing reviewSwitch fails safe as a prompt, ne
       expect(caught).toBeUndefined(); // never a rejection
       expect(out).toEqual({
         kind: "confirmation_required",
-        warnings: ["Winter couldn't check what carries over to deepseek/deepseek-reasoner. The conversation carries over; reasoning private to the current model may not."],
+        warnings: ["Winter couldn't check what carries over to deepseek/deepseek-v4-pro. The conversation carries over; reasoning private to the current model may not."],
         portable: [],
       });
       // Logged ONCE, naming the error CLASS only — never `.message` (which could carry payload
@@ -1479,7 +1479,7 @@ describe("planAndApplySwitch: a throwing reviewSwitch fails safe as a prompt, ne
           runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => sameLegSelection) }),
           barrier: fakeBarrierWhoseReviewThrows(new Error("transient store error")),
         }),
-        "s1", "deepseek/deepseek-reasoner", true,
+        "s1", "deepseek/deepseek-v4-pro", true,
       );
       // A same-leg change proceeds as an ordinary same-runtime model change once "confirmed" —
       // barrier.plan()/execute() are never reached for a same-leg switch at all.
@@ -1498,7 +1498,7 @@ describe("planAndApplySwitch: a throwing reviewSwitch fails safe as a prompt, ne
           barrier: fakeBarrierWhoseReviewThrows("a bare string throw"),
           log: (line) => logs.push(line),
         }),
-        "s1", "deepseek/deepseek-reasoner", false,
+        "s1", "deepseek/deepseek-v4-pro", false,
       );
       expect(out.kind).toBe("confirmation_required");
       expect(logs[0]).toContain("unknown");
@@ -1700,10 +1700,10 @@ describe("item 6: a same-leg PROVIDER change replaces the live child", () => {
         deps({
           records,
           winter: { ...winter, evict: async (id: string) => { evicted.push(id); } },
-          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-reasoner")) }),
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-v4-pro")) }),
           barrier: { plan: async () => { throw new Error("not reached — same leg"); }, execute: async () => { throw new Error("not reached"); }, reviewSwitch: async () => ({ prompt: false }) },
         }),
-        "s1", "deepseek/deepseek-reasoner", false,
+        "s1", "deepseek/deepseek-v4-pro", false,
       );
       expect(out.kind).toBe("same-runtime");
       expect(evicted).toEqual(["s1"]);
@@ -1725,7 +1725,7 @@ describe("item 6: a same-leg PROVIDER change replaces the live child", () => {
           runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("p", "p/other-model")) }),
           barrier: { plan: async () => { throw new Error("not reached — same leg"); }, execute: async () => { throw new Error("not reached"); }, reviewSwitch: async () => ({ prompt: false }) },
         }),
-        "s1", "deepseek/deepseek-reasoner", false,
+        "s1", "deepseek/deepseek-v4-pro", false,
       );
       expect(out.kind).toBe("same-runtime");
       expect(evicted).toEqual([]);
@@ -1743,10 +1743,10 @@ describe("item 6: a same-leg PROVIDER change replaces the live child", () => {
         deps({
           records,
           winter: { ...winter, evict: async (id: string) => { evicted.push(id); } },
-          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-reasoner")) }),
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-v4-pro")) }),
           barrier: { plan: async () => { throw new Error("not reached — same leg"); }, execute: async () => { throw new Error("not reached"); }, reviewSwitch: async () => ({ prompt: false }) },
         }),
-        "s1", "deepseek/deepseek-reasoner", false,
+        "s1", "deepseek/deepseek-v4-pro", false,
       );
       expect(out.kind).toBe("same-runtime");
       expect(evicted).toEqual([]);   // the reply never waited, and the turn was never cut short
@@ -1774,10 +1774,10 @@ describe("item 6: a same-leg PROVIDER change replaces the live child", () => {
         deps({
           records: failingRecords,
           winter: { ...winter, evict: async (id: string) => { evicted.push(id); } },
-          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-reasoner")) }),
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-v4-pro")) }),
           barrier: { plan: async () => { throw new Error("not reached — same leg"); }, execute: async () => { throw new Error("not reached"); }, reviewSwitch: async () => ({ prompt: false }) },
         }),
-        "s1", "deepseek/deepseek-reasoner", false,
+        "s1", "deepseek/deepseek-v4-pro", false,
       );
       expect(out.kind).toBe("same-runtime");
       expect(evicted).toEqual([]);
@@ -1795,10 +1795,10 @@ describe("item 6: a same-leg PROVIDER change replaces the live child", () => {
         deps({
           records,
           winter: { ...winter, evict: async (id: string) => { evicted.push(id); } },
-          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-reasoner")) }),
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-v4-pro")) }),
           barrier: { plan: async () => { throw new Error("not reached — same leg"); }, execute: async () => { throw new Error("not reached"); }, reviewSwitch: async () => ({ prompt: false }) },
         }),
-        "s1", "deepseek/deepseek-reasoner", false,
+        "s1", "deepseek/deepseek-v4-pro", false,
       );
       expect(out.kind).toBe("same-runtime");
       expect(evicted).toEqual([]);
@@ -1942,6 +1942,27 @@ describe("registerHandoffParticipants: destination.confirmInit (m4 — the plan-
       endAll: never,
       evictCalls,
     };
+  }
+
+  // WS-21 (L2 O-2): on the supported path the destination's open builds its run home and the router's
+  // door checks the durable row's leg (D13) — so the row must name the DESTINATION leg before the
+  // destination opens its generation. Verified here for both directions: at the moment `ensure()` (the
+  // destination open, where the run home is built) runs, the record already names the target leg.
+  for (const to of ["claude-agent", "winter-agent"] as const) {
+    test(`L2 O-2: the record names the destination leg (${to}) BEFORE the destination opens`, async () => {
+      await withRs(async (_rs, records) => {
+        seedRecord(records, "s1");
+        const seenAtOpen: string[] = [];
+        const opener = fakeWinterThatOpens();
+        const winter: WinterSessionDrivers = { ...opener, ensure: async (id) => { seenAtOpen.push(records.get(id)!.runtimeKind); return opener.ensure(id); } };
+        const destination = registerDestination(records, winter);
+        const built = destination({ projectKey: "pk", sessionId: "be-1" }, to);
+        const result = await built!.confirmInit({ backendSessionId: "be-1-new", selection: SELECTION(to) } as unknown as HandoffResumeTarget);
+        expect(result).toMatchObject({ ok: true });
+        expect(seenAtOpen.length).toBeGreaterThan(0);
+        expect(seenAtOpen.every((k) => k === to)).toBe(true);
+      });
+    });
   }
 
   test("the session's state at PLAN time is unchanged at execute time: confirmInit SUCCEEDS (P8d-24)", async () => {

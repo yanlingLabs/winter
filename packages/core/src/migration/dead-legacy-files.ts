@@ -7,8 +7,10 @@
 // `packages/*/src` or `apple/*`, and `git log -S` finds none of these names ever added to this repo
 // — they predate it. The agent SDK's only `mcp.json` reader is the PROJECT file
 // `<cwd>/.winter/mcp.json`, gated on `settingSources` including `project` (the daemon passes `[]`).
-// MCP servers come from `settings.json → mcpServers` and a trusted project's `.mcp.json`
-// (`daemon.ts`'s `configuredMcpServersFor`, `runtime-sdk/external-mcp.ts`, `agent/mcp/manager.ts`).
+// WS-21: MCP servers come from the shared runtime home's `sdk/.winter.json` (claude's user and local
+// scopes, `winter mcp add`) and a trusted project's `.winter/mcp.json` (the repo-root `.mcp.json` is no
+// longer read) — `runtime-sdk/external-mcp.ts`, `agent/mcp/manager.ts`. Migration C archives these files
+// (`migrate-c.ts`'s archive step); until then they are only named.
 // `app-state.json` (150 MB on the user's machine) is NOT the `app-state/` directory, which the Mac
 // app does use (`migrate-b.ts`'s `TOLERATED_APP_OWNED_TOP_LEVEL`).
 //
@@ -73,5 +75,5 @@ export function describeDeadLegacyFiles(found: readonly DeadLegacyFile[], home: 
   const base = `legacy files: ${home} holds ${names} — copied from the legacy home and not read by Winter (left untouched)`;
   if (mcp === undefined) return base;
   const n = mcp.mcpServers!;
-  return `${base}; mcp.json declares ${n} MCP server${n === 1 ? "" : "s"} that ${n === 1 ? "is" : "are"} NOT loaded — MCP servers belong under settings.json → mcpServers (or, in a trusted project, its .mcp.json)`;
+  return `${base}; mcp.json declares ${n} MCP server${n === 1 ? "" : "s"} that ${n === 1 ? "is" : "are"} NOT loaded — add one with \`winter mcp add\` (it lands in sdk/.winter.json), or, for a trusted project, in its .winter/mcp.json`;
 }

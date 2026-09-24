@@ -479,3 +479,36 @@ describe("dispose — G-14: every Query ends BEFORE the router disposes", () => 
     expect(lines).toEqual(["session late started during shutdown — aborting it immediately"]);
   });
 });
+
+// WS-21 L3.3 (spec §3.1): a router that applies run homes is created with `requireRunHome: true` and the
+// host's `runHomeFor` (its own cold-resume path) — ONLY when the host supplies one, which `daemon.ts`
+// does only when the linked router exports `buildRunHome`. On router 0.0.11 nothing changes.
+describe("createWinterRuntimeSdk — run homes (WS-21)", () => {
+  test("no runHomeFor: the router is created exactly as before (no requireRunHome, no runHomeFor)", async () => {
+    const { opts } = await build({}, undefined, () => Promise.resolve(undefined));
+    expect("requireRunHome" in opts).toBe(false);
+    expect("runHomeFor" in opts).toBe(false);
+  });
+
+  test("with runHomeFor: requireRunHome true and the builder handed through verbatim", async () => {
+    const runHomeFor = async () => { throw new Error("never called by construction"); };
+    const { opts } = await build({ runHomeFor }, undefined, () => Promise.resolve(undefined));
+    expect((opts as unknown as { requireRunHome?: boolean }).requireRunHome).toBe(true);
+    expect((opts as unknown as { runHomeFor?: unknown }).runHomeFor).toBe(runHomeFor);
+    // L2: `requireRunHome` also requires an explicit `handoff.winterHome` (the store then lives in `<home>/sdk`).
+    expect(opts.handoff?.winterHome).toBe(home);
+  });
+
+  // R.1: this used to pin router 0.0.11 (both answers undefined). The linked router now HAS both doors, and
+  // the handle forwards them: an unknown run id is `pending` (never `safe` — nothing is disposed on a
+  // guess), and a recovery reconcile of a root with nothing in it reports `clean`.
+  test("runHomeOutcome / reconcileRootForRecovery forward the linked router's own doors (a run-home router)", async () => {
+    const runHomeFor = async () => { throw new Error("never called by these doors"); };
+    const { handle } = await build({ runHomeFor }, undefined, () => Promise.resolve(undefined));
+    expect(handle.runHomeOutcome?.("an-unknown-run")).toBe("pending");
+    const root = mkdtempSync(join(tmpdir(), "winter-create-recover-"));
+    const report = await handle.reconcileRootForRecovery?.(root);
+    expect(report?.outcome).toBe("clean");
+    expect(report?.transcripts).toEqual([]);
+  });
+});

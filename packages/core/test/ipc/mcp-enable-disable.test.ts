@@ -6,7 +6,7 @@
 // needed here (that flip, against a REAL stdio server the manager started at boot, is covered in
 // server.test.ts's own mcp.list tests, which already spawn a fixture process).
 import { afterEach, describe, expect, test, spyOn } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@yanlinglabs/winter-protocol";
@@ -64,10 +64,20 @@ describe("mcp.enable / mcp.disable / mcp.list settings overlay", () => {
   let stop: (() => void) | undefined;
   afterEach(() => { stop?.(); stop = undefined; });
 
+  // WS-21: the user-scope servers live in `sdk/.winter.json`; a fixture's `mcpServers` is written
+  // there (and `mcp.disabled`, which stayed, into `settings.json`).
+  function writeUserServers(home: string, servers: unknown): void {
+    if (servers === undefined) return;
+    mkdirSync(join(home, "sdk"), { recursive: true });
+    writeFileSync(join(home, "sdk", ".winter.json"), JSON.stringify({ mcpServers: servers }, null, 2));
+  }
+
   async function boot(settingsOverride?: Record<string, unknown>, mcpOverride?: McpManager) {
     const home = mkdtempSync(join(tmpdir(), "winter-mcp-enable-"));
     const base = { schemaVersion: 3 as const, provider: { model: "codex-oauth/gpt-5.6-sol" } };
-    saveSettings(join(home, "settings.json"), Settings.parse({ ...base, ...settingsOverride }));
+    const { mcpServers, ...rest } = settingsOverride ?? {};
+    saveSettings(join(home, "settings.json"), Settings.parse({ ...base, ...rest }));
+    writeUserServers(home, mcpServers);
     const trust = new TrustStore(join(home, "trust.json"));
     // A bare McpManager with NOTHING started — this file never spawns a real child process (see
     // header); `mcp.list`'s stdio/"connected" path is exercised elsewhere.
@@ -87,7 +97,9 @@ describe("mcp.enable / mcp.disable / mcp.list settings overlay", () => {
   // way this shape reaches disk at all. Otherwise identical wiring to `boot()` above.
   async function bootRaw(rawSettings: Record<string, unknown>) {
     const home = mkdtempSync(join(tmpdir(), "winter-mcp-header-strip-"));
-    writeFileSync(join(home, "settings.json"), JSON.stringify(rawSettings, null, 2));
+    const { mcpServers, ...rest } = rawSettings;
+    writeFileSync(join(home, "settings.json"), JSON.stringify(rest, null, 2));
+    writeUserServers(home, mcpServers);
     const trust = new TrustStore(join(home, "trust.json"));
     const mcp = new McpManager({ registry: new ToolRegistry(), trust });
     const store = new SessionStore(home);
@@ -170,7 +182,7 @@ describe("mcp.enable / mcp.disable / mcp.list settings overlay", () => {
   // `mcp.list` must report a stripped-header reason on the row, and the header VALUE must appear
   // nowhere: not in the row, not anywhere else in the serialized RPC result, not in any captured
   // stderr line.
-  test("mcp.list reports strippedHeaders for a server whose credential-shaped header loadSettings dropped — the header VALUE leaks nowhere", async () => {
+  test("mcp.list reports strippedHeaders for a server whose credential-shaped header the sdk/.winter.json read door dropped — the header VALUE leaks nowhere", async () => {
     const SENTINEL = "Bearer sk-SENTINEL-mcp-list-leak-check";
     const { socketPath, harnessToken } = await bootRaw({
       schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" },

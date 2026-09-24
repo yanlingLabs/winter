@@ -106,7 +106,7 @@ describe("internalProviderNote", () => {
     expect(internalProviderNote("codex-oauth/gpt-5.6-terra")).toBeUndefined();
     expect(internalProviderNote("openai/gpt-5.6")).toBeUndefined();
     // 2026-09-19: DeepSeek is eligible now, so choosing it says nothing — the jobs simply follow it.
-    expect(internalProviderNote("deepseek/deepseek-v4-flash")).toBeUndefined();
+    expect(internalProviderNote("deepseek/deepseek-flash")).toBeUndefined();
   });
 
   test("a heads-up for a provider Winter's own jobs cannot be driven over — never a refusal, never 'inert'", () => {
@@ -180,9 +180,11 @@ describe("modelDisplayWithHint", () => {
 
 describe("validateEffort against the model's row (2026-09-17)", () => {
   test("a row with a vocabulary accepts its members and none, refuses the rest", () => {
-    expect(validateEffort("high", "deepseek/deepseek-v4-flash")).toBeUndefined();
-    expect(validateEffort("none", "deepseek/deepseek-v4-flash")).toBeUndefined();
-    expect(validateEffort("medium", "deepseek/deepseek-v4-flash")).toMatch(/not supported by deepseek-v4-flash/);
+    // R.1: DeepSeek's `deepseek-v4-flash` row was renamed `deepseek-flash` in the refreshed catalog (same
+    // none/low/high/max vocabulary).
+    expect(validateEffort("high", "deepseek/deepseek-flash")).toBeUndefined();
+    expect(validateEffort("none", "deepseek/deepseek-flash")).toBeUndefined();
+    expect(validateEffort("medium", "deepseek/deepseek-flash")).toMatch(/not supported by deepseek-flash/);
   });
   test("a row with no vocabulary refuses every effort with a 'takes no reasoning effort' message", () => {
     expect(validateEffort("medium", "alibaba-cn/deepseek-v4-flash")).toMatch(/takes no reasoning effort/);

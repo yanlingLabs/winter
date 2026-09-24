@@ -86,6 +86,7 @@ import { compatibilityKeys } from "@yanlinglabs/winter-agent-sdk";
 import { existsSync, mkdirSync, readdirSync, renameSync, rmdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { repoRootFor, sanitizeProjectKey } from "../../agent/memory-dir";
+import { storeProjectsDir } from "../../agent/paths";
 import type { SessionStore } from "../../sessions/store";
 import type { RuntimeStateDb } from "../db";
 import { RuntimeSessionRecords } from "../records";
@@ -315,7 +316,8 @@ function isDirectory(fs: MemoryKeyFs, path: string): boolean {
   }
 }
 
-const projectsDir = (home: string): string => join(home, "projects");
+// WS-21: the store (and every project's memory) lives in this build's store home (`storeHomeFor`).
+const projectsDir = (home: string): string => storeProjectsDir(home);
 const projectDir = (home: string, key: string): string => join(projectsDir(home), key);
 const entryPath = (home: string, key: string, entry: string): string => join(projectDir(home, key), entry);
 

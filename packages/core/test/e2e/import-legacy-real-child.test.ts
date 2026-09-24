@@ -23,7 +23,7 @@
 // see `test/ipc/session-send-import.test.ts` for that door's own logic, proved with a fake driver
 // table.
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { query, transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
@@ -32,6 +32,7 @@ import { importEngineEraSession } from "../../src/runtime-sdk/import-legacy";
 import { openRuntimeStateDb, RuntimeSessionRecords, backfillNativeSessions } from "../../src/runtime-state";
 import { sessionLegOf } from "../../src/runtime-sdk/leg";
 import { SessionStore } from "../../src/sessions/store";
+import { storeHomeFor } from "../../src/agent/paths";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
 
 interface ProtocolSdkMessage { type?: string; [k: string]: unknown }
@@ -39,7 +40,9 @@ interface ProtocolSdkMessage { type?: string; [k: string]: unknown }
 describeWithWinterBinary("engine-era import — the REAL winter binary resumes the converted transcript", (bin) => {
   test("import then resume: no refusal, and the imported turns lead the new one on disk", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-import-e2e-home-"));
-    const cwd = mkdtempSync(join(tmpdir(), "winter-import-e2e-cwd-"));
+    // WS-21 (L2 O-1): the daemon hands the child — and keys the imported transcript by — the CANONICAL cwd
+    // (`canonicalCwd`); this test drives the child directly, so it spawns it the same way.
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-import-e2e-cwd-")));
     try {
       // ── Build an engine-era session exactly the way a pre-8b daemon would have left one ──────
       const store = new SessionStore(home);
@@ -80,6 +83,9 @@ describeWithWinterBinary("engine-era import — the REAL winter binary resumes t
             // Pre-rename this set two distinct env keys — the daemon's own home var, and WINTER_HOME (the SDK's
             // brand-derived home); the rename makes them the same key, so it is written once now.
             HOME: home, TMPDIR: home, WINTER_HOME: home,
+            // R.1: the import writes the transcript to the STORE home (`sdk/projects` on a run-home build);
+            // a child driven directly (no run home) is pointed at that store the way a run home would.
+            WINTER_STORE_HOME: storeHomeFor(home),
             WINTER_PROFILE: "test",
             WINTER_TEST_PROVIDER: "echo",
           },
@@ -109,7 +115,7 @@ describeWithWinterBinary("engine-era import — the REAL winter binary resumes t
       // (b) the on-disk transcript now holds the imported turn FIRST, then the new one, correctly
       // chain-linked — read back through the real compat store, never a fake.
       const { WinterCompatibilitySessionStore } = await import("@yanlinglabs/winter-agent-sdk");
-      const compat = new WinterCompatibilitySessionStore({ winterHome: home });
+      const compat = new WinterCompatibilitySessionStore({ winterHome: storeHomeFor(home) }); // the store the import wrote
       const projectKey = transcriptProjectKey(cwd);
       const entries = (await compat.load({ projectKey, sessionId: backendSessionId })) ?? [];
       const conversational = entries.filter((e) => e.type === "user" || e.type === "assistant");

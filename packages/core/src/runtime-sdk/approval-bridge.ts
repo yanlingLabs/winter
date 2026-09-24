@@ -6,6 +6,9 @@ import type { QuestionBroker } from "../agent/questions";
 import type { PermissionGate, SessionApprovalPolicy } from "../agent/gate";
 import { parseRule } from "../agent/permission-rules";
 import type { Mode as SessionMode } from "../agent/tools/registry";
+import { projectScopeRootFor } from "./run-home-input";
+import { protectedPathsFor, protectedWriteDecision } from "./protected-paths";
+import { bashProtectedWriteHit } from "./hooks";
 import { privateAddressRefusal } from "../agent/tools/web";
 import { gateClassFor, gateToolNameFor, WINTER_OWN_TOOL_NAMES } from "./tool-names";
 import { controlPlaneTargetForCall, controlPlaneDenialMessage } from "./control-plane";
@@ -68,6 +71,13 @@ export interface CanUseToolDeps {
    *  fence. An absent/empty cwd resolves relative paths against `/`, which is the conservative
    *  reading (a relative target then cannot accidentally miss a real `.winter` parent). */
   cwd?: string;
+  /**
+   * WS-21 (spec §4.3): whether this session's project is TRUSTED. An "Allow … in this project" option is
+   * offered ONLY when it is — the answer is saved to the project's `.winter/settings.local.json`, a tier
+   * the runtimes read for a trusted project alone (`approval.respond` refuses it otherwise too). A live
+   * getter: trusting a project mid-session reaches the next card. Absent: offered as before.
+   */
+  projectTrusted?: () => boolean;
   /** Seven-valued (`gate.ts`'s `SessionApprovalPolicy`), not the six-valued wire `ApprovalPolicy`:
    *  `ipc/server.ts`'s create-time chat coercion persists the internal `"chat"` policy, and P8b-7
    *  makes that coercion the ONLY guard once the engine's turn-time re-assertion retires. A
@@ -595,6 +605,30 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
       decision = "ask";
     }
 
+    // (5e) WS-21 (spec §7.2): A PROTECTED WRITE IS NEVER AUTO-ALLOWED, under any policy — `bypass`,
+    // `accept-edits` and `auto` included. The path fence hook (`hooks.ts` `pathFenceHook`) already answered
+    // `ask` for it, and the router pins the same set as flag-layer ask rules; this is the third layer, and
+    // it does not depend on either of them having reached this call (a PreToolUse `ask` that a runtime's own
+    // sensitive-file check swallowed arrives here as a plain request). Checked on the INPUT itself, never
+    // on `ctx.matchedAskRule`/`blockedPath`. Narrows only: a gate `deny` stays a deny; `dont-ask`, which
+    // declines everything it would card, declines this too; chat and dispatch reach (6)'s typed deny.
+    // Fix round 2: …and a Bash command writing under any `.winter/{skills,commands,rules,output-styles,
+    // agents}` (the path-fence Bash hook's own detector) — a card for what the child's sandbox does not bind
+    // (R.3 I-4: its any-depth `<dir>/**/.winter/<kind>` fence covers the working directories themselves).
+    const protectedBashWrite = classificationName === "bash" && typeof input === "object" && input !== null
+      && typeof (input as Record<string, unknown>).command === "string"
+      && bashProtectedWriteHit((input as Record<string, unknown>).command as string) !== undefined;
+    const protectedWrite = protectedBashWrite || deps.home !== undefined && protectedWriteDecision(toolName, input, {
+      mode: "code", cwd: deps.cwd ?? "",
+      // R.3 I-1: the walk's top is the run home's own project root (`projectScopeRootFor`).
+      protected: protectedPathsFor(deps.home, deps.cwd && deps.projectTrusted?.() === true ? projectScopeRootFor(deps.cwd) : null, { cwd: deps.cwd ?? "/" }),
+    }) !== null;
+    if (protectedWrite && decision === "allow") {
+      log.info(`canUseTool: escalate session=${deps.sessionId} tool=${toolName} reason=protected-path`);
+      decision = "ask";
+    }
+    if (protectedWrite && decision === "ask" && policy === "dont-ask") decision = "deny";
+
     // (5d) THE PRIVATE-ADDRESS FLOOR (whole-branch review B1/M2). See `privateWebFetchTarget` for
     // what went wrong without it and why the judgement is the daemon's own.
     //
@@ -756,9 +790,13 @@ async function raiseCard(
   // the single place that closes both halves: the respond handler resolves an `optionId` against the
   // options THIS record stored (an unknown id persists nothing), and `updatedPermissionsFor` reads
   // the same list. `undefined` is the plain approve/deny card every non-`bash` tool already gets.
-  const options = env.privateTarget !== undefined
+  const offered = env.privateTarget !== undefined
     ? undefined
     : approvalOptionsFromSuggestions(ctx.suggestions) ?? approvalOptionsFor({ name: gateToolName, argsJson });
+  // WS-21 (spec §4.3): "in this project" is offered only for a trusted project (see `projectTrusted`).
+  const options = offered === undefined || deps.projectTrusted === undefined || deps.projectTrusted()
+    ? offered
+    : offered.filter((o) => o.rule === undefined || (o.scope ?? "project") !== "project");
 
   const issuedAt = env.now();
   const expiresAt = issuedAt + NO_PARK_TIMEOUT_MS;

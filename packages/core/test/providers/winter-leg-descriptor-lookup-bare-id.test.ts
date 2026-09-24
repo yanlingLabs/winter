@@ -79,7 +79,8 @@ describe("D1: the daemon's own provider selection is correct", () => {
     // Confirms the daemon-facing contract (`providerFor` + the registry's own `resolve()`) is sound;
     // the bug below is strictly downstream of a CORRECTLY resolved provider.
     const catalog = loadCatalog();
-    const deepseek = catalog.models.find((m) => m.key === "deepseek/deepseek-v4-flash");
+    // R.1 (catalog refresh): DeepSeek's `deepseek-v4-flash` row now lives at `deepseek/deepseek-flash`.
+    const deepseek = catalog.models.find((m) => m.key === "deepseek/deepseek-flash");
     expect(deepseek?.providerId).toBe("deepseek");
     expect(deepseek?.reasoning?.efforts).toEqual(["none", "low", "high", "max"]);
   });
@@ -99,8 +100,10 @@ describe("D1: the Winter-leg SDK's shared-adapter descriptor lookup is provider-
     // block), so a deepseek session's effort "max" was refused with alibaba-cn's name in the text.
     const catalog = loadCatalog();
     const lookup = descriptorLookupForAdapter(catalog, "winter.openai-chat-completions");
+    // R.1: under `deepseek` the old id is the alias of DeepSeek's renamed row — still DeepSeek's own row,
+    // never alibaba-cn's.
     const deepseek = lookup("deepseek-v4-flash", "deepseek");
-    expect(deepseek?.key).toBe("deepseek/deepseek-v4-flash");
+    expect(deepseek?.key).toBe("deepseek/deepseek-flash");
     expect(deepseek?.reasoning?.efforts).toContain("max");
     expect(noVocabularyReason(deepseek, "max")).toBeUndefined();
 

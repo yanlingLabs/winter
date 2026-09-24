@@ -1,14 +1,37 @@
-/** Disk-backed prompt history (Phase 3c Task 3) — one JSON line per submitted/steered/cleared
- *  entry at `~/.winter/history.jsonl` by default (the composer injects the path; tests always pass
- *  a temp file so nothing here ever touches a real `~/.winter`). Every read/write is best-effort:
- *  a missing file, an unwritable directory, or a corrupt line degrades to "no history" rather than
- *  crashing the TUI — prompt history is a convenience, never load-bearing. */
+/** Disk-backed prompt history (Phase 3c Task 3; WS-21: claude's own format and location) — one JSON
+ *  line per submitted/steered/cleared entry at `<home>/sdk/history.jsonl` by default (the composer
+ *  injects the path via `historyPathFor`; tests always pass a temp file so nothing here ever
+ *  touches a real `~/.winter`). Every read/write is best-effort: a missing file, an unwritable
+ *  directory, or a corrupt line degrades to "no history" rather than crashing the TUI — prompt
+ *  history is a convenience, never load-bearing.
+ *
+ *  WS-21 (spec §2.2): entries move to claude's own history-entry shape —
+ *  `{display, pastedContents, timestamp, project, sessionId}` — written by `sdk/history.jsonl`'s
+ *  one producer, the Winter CLI TUI (spec's own table). `appendHistory` always writes the NEW
+ *  shape; `loadHistory` reads a file that may hold a MIX of old lines (`{display, ts, sessionId}`,
+ *  pre-WS-21) and new ones — both shapes carry `display`/`sessionId` under the same names, so no
+ *  parsing branch is needed for those; `timestamp`/`ts` and `pastedContents`/`project` are never
+ *  read back by this module (append-order on disk is what `loadHistory` relies on, not either
+ *  field), so an old line degrades to "no pastedContents/project", never a parse failure. */
 
 import { appendFileSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { sdkHomeFor } from "@yanlinglabs/winter-core";
 
+/** `<home>/sdk/history.jsonl` — claude's own history-file location (spec §2.2). The Winter CLI
+ *  TUI's composer is the one producer; tests always pass a temp path directly instead. */
+export function historyPathFor(home: string): string {
+  return join(sdkHomeFor(home), "history.jsonl");
+}
+
+/** Claude's own history-entry shape (pinned reference, F9: `{display, pastedContents, timestamp,
+ *  project, sessionId?}`) — `pastedContents` is always `{}` from this CLI (Winter has no paste-
+ *  tracking of its own yet); `project` is the session's cwd at submit time. */
 export interface HistoryEntry {
   display: string;
-  ts: number;
+  pastedContents: Record<string, unknown>;
+  timestamp: number;
+  project: string;
   sessionId: string;
 }
 
@@ -26,7 +49,10 @@ export function appendHistory(path: string, entry: HistoryEntry): void {
 /** Loads up to `max` (default 100) prompt strings, THIS session's entries first (newest-first
  *  within each group), then every other session's (also newest-first). Tolerates a missing file
  *  (returns `[]`) and tolerates corrupt/malformed lines (skips them) — one bad line never sinks the
- *  rest of the file. */
+ *  rest of the file. Reads BOTH the pre-WS-21 shape (`{display, ts, sessionId}`) and the new one
+ *  (`{display, pastedContents, timestamp, project, sessionId}`) — only `display`/`sessionId` are
+ *  ever read back, and those two field names are unchanged across the rename, so no shape-specific
+ *  branch is needed here. */
 export function loadHistory(path: string, sessionId: string, max = 100): string[] {
   let raw: string;
   try {

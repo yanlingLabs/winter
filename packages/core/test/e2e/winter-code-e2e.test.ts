@@ -31,6 +31,7 @@ import { sessionLegOf } from "../../src/runtime-sdk/leg";
 import { memoryDirFor } from "../../src/agent/memory-dir";
 import { disallowedToolsFor } from "../../src/runtime-sdk/mode-options";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
+import { storeProjectsDir } from "../../src/agent/paths";
 
 class TestClient {
   private decoder = new LineDecoder();
@@ -123,12 +124,14 @@ describeWithWinterBinary("code on the Winter leg — the built binary through a 
       schemaVersion: 2,
       provider: { type: "openai-compatible", model: "winter-test/tooluse", baseUrl: "http://127.0.0.1:9/v1" },
       computerUse: { enabled: true },
-      // fix wave (review row 7): a configured user MCP server — the repo's fake stdio server — must
-      // reach the child (case (n)). The daemon's own McpManager starts a copy for the shared
-      // registry too; the child spawns its own from the forwarded config.
-      mcpServers: { fake: { command: "bun", args: ["run", MCP_FIXTURE] } },
       runtimes: { winterExecutable: bin, winterLeg: { code: true }, winterIdleTimeoutSec: 10 },
     }, null, 2));
+    // fix wave (review row 7): a configured user MCP server — the repo's fake stdio server — must
+    // reach the child (case (n)). The daemon's own McpManager starts a copy for the shared registry
+    // too; the child spawns its own from the forwarded config. WS-21: the user scope is
+    // `sdk/.winter.json` (claude's `.claude.json` shape).
+    mkdirSync(join(home, "sdk"), { recursive: true });
+    writeFileSync(join(home, "sdk", ".winter.json"), JSON.stringify({ mcpServers: { fake: { command: "bun", args: ["run", MCP_FIXTURE] } } }, null, 2));
   };
 
   async function createCode(model: string, cwd: string, policy = "ask"): Promise<string> {
@@ -286,12 +289,12 @@ describeWithWinterBinary("code on the Winter leg — the built binary through a 
     rmSync(outside, { recursive: true, force: true });
   }, 60_000);
 
-  test("(m) file-based memory on the Winter leg: the child's Write into `<home>/projects/<key>/memory/` LANDS, no card under `auto` (the 0.0.4 carve-out)", async () => {
+  test("(m) file-based memory on the Winter leg: the child's Write into the store home's `projects/<key>/memory/` (sdk/projects) LANDS, no card under `auto` (the 0.0.4 carve-out)", async () => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-code-memdir-")));
     // The SAME derivation the daemon files this cwd under (`memoryKeyOf` → `memoryProjectKeyFor`;
-    // no `memory.directory` override, no relocation in this home).
+    // no `memory.directory` override, no relocation in this home). WS-21: the store home (`sdk/`).
     const memdir = memoryDirFor(cwd, { winterHome: home });
-    expect(memdir.startsWith(join(home, "projects") + "/")).toBe(true);
+    expect(memdir.startsWith(storeProjectsDir(home) + "/")).toBe(true);
     expect(memdir.endsWith("/memory")).toBe(true);
     mkdirSync(memdir, { recursive: true });
     const note = join(memdir, "fix-wave-note.md");
@@ -313,7 +316,7 @@ describeWithWinterBinary("code on the Winter leg — the built binary through a 
     rmSync(cwd, { recursive: true, force: true });
   }, 60_000);
 
-  test("(n) a configured user MCP server (settings.mcpServers) reaches the child: THE CHILD spawns the forwarded stdio server", async () => {
+  test("(n) a configured user MCP server (sdk/.winter.json) reaches the child: THE CHILD spawns the forwarded stdio server", async () => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-code-mcp-")));
     const before = new Set(winterChildren(bin));
     const sid = await createCode("echo", cwd, "auto");

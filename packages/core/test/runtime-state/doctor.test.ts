@@ -11,6 +11,7 @@ import { diagnoseRuntimeState, latestRecoveryAttempts, repairRuntimeState, type 
 import { restampStep } from "../../src/runtime-state/recovery";
 import { SessionStore } from "../../src/sessions/store";
 import { ISO, withTempHome } from "./support";
+import { storeProjectsDir } from "../../src/agent/paths";
 
 const UUID = "11111111-2222-4333-8444-555555555555";
 const OTHER_UUID = "99999999-8888-4777-8666-555555555555";
@@ -33,7 +34,7 @@ const newRecord = (home: string, id: string, over: Partial<NewRuntimeSessionReco
   runtimeKind: "winter-agent",
   providerId: "openai",
   modelRef: "gpt-5.6-sol",
-  backendRoot: join(home, "projects", "-tmp-work"),
+  backendRoot: join(storeProjectsDir(home), "-tmp-work"),
   transcriptProjectKey: "-tmp-work",
   memoryProjectKey: "-tmp-work",
   tempProjectKey: "-tmp-work",
@@ -86,10 +87,10 @@ const seedProductSession = (home: string, opts: { cwd?: string } = {}): string =
   }
 };
 
-const transcriptPath = (home: string, uuid: string): string => join(home, "projects", "-tmp-work", `${uuid}.jsonl`);
+const transcriptPath = (home: string, uuid: string): string => join(storeProjectsDir(home), "-tmp-work", `${uuid}.jsonl`);
 
 const writeTranscript = (home: string, uuid: string): void => {
-  mkdirSync(join(home, "projects", "-tmp-work"), { recursive: true });
+  mkdirSync(join(storeProjectsDir(home), "-tmp-work"), { recursive: true });
   writeFileSync(transcriptPath(home, uuid), "");
 };
 
@@ -933,8 +934,8 @@ describe("memory-keys-migration finding + memory-keys-rollback repair (P8d-11)",
    *  at all: those are exhaustively covered by `memory-keys.test.ts`, and this file's own job is
    *  `doctor.ts`'s wiring (the finding's counts, the repair's door, the daemon-lock gate above). */
   function seedMovedEntry(home: string, oldKey: string, newKey: string, entry = "memory"): void {
-    mkdirSync(join(home, "projects", newKey, entry), { recursive: true });
-    writeFileSync(join(home, "projects", newKey, entry, "MEMORY.md"), "alpha");
+    mkdirSync(join(storeProjectsDir(home), newKey, entry), { recursive: true });
+    writeFileSync(join(storeProjectsDir(home), newKey, entry, "MEMORY.md"), "alpha");
     withDb(home, (rs) => {
       rs.db.run(
         "INSERT INTO memory_key_manifest (old_key, entry, new_key, status, planned_at, moved_at, record_ids) VALUES (?, ?, ?, 'moved', ?, ?, '[]')",
@@ -971,8 +972,8 @@ describe("memory-keys-migration finding + memory-keys-rollback repair (P8d-11)",
       const result = await repairRuntimeState(home, { kind: "memory-keys-rollback" });
       expect(result.applied).toBe(true);
       expect(result.detail).toContain("1 entrie(s) rolled back");
-      expect(existsSync(join(home, "projects", "old-b", "memory", "MEMORY.md"))).toBe(true);
-      expect(existsSync(join(home, "projects", "new-b", "memory"))).toBe(false);
+      expect(existsSync(join(storeProjectsDir(home), "old-b", "memory", "MEMORY.md"))).toBe(true);
+      expect(existsSync(join(storeProjectsDir(home), "new-b", "memory"))).toBe(false);
 
       const again = await repairRuntimeState(home, { kind: "memory-keys-rollback" });
       expect(again).toEqual({ applied: false, detail: "no relocated memory-key entries to roll back" });

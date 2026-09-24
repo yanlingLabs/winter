@@ -60,7 +60,7 @@ import {
   wordRight,
   type InputState,
 } from "./input-model";
-import { appendHistory, loadHistory, makeHistoryNav } from "./history-store";
+import { appendHistory, historyPathFor, loadHistory, makeHistoryNav } from "./history-store";
 import { COMMANDS, filterCommands, parseSlashInput } from "./commands";
 import { CompletionMenu, MAX_MENU_ROWS } from "./completion-menu";
 import { fuzzyMatch } from "./file-index";
@@ -94,7 +94,8 @@ const ansi = new Chalk({ level: 3 });
 function defaultHistoryPath(): string {
   // P9b-12: routed through the resolver (mirrors `main.ts`'s `socketPath()`) rather than
   // hardcoding `~/.winter` — a `WINTER_HOME` override must move this file with everything else.
-  return join(resolveWinterHome(), "history.jsonl");
+  // WS-21 (spec §2.2): claude's own location, `sdk/history.jsonl`.
+  return historyPathFor(resolveWinterHome());
 }
 
 /** Phase 3d T2 — pure predicate: is the `/`-slash-command menu open for this `InputState`, and if
@@ -174,8 +175,12 @@ export interface ComposerProps {
    *  defaults to "" (the App threads through its real sessionId; tests may omit it entirely since
    *  the priority behavior itself is covered at the history-store level). */
   sessionId?: string;
-  /** Injectable history file location (tests pass a temp path); defaults to `~/.winter/history.jsonl`. */
+  /** Injectable history file location (tests pass a temp path); defaults to
+   *  `~/.winter/sdk/history.jsonl` (WS-21). */
   historyPath?: string;
+  /** WS-21 (spec §2.2): the history entry's `project` field (claude's own history shape) — the
+   *  session's cwd. Optional; defaults to "" (tests may omit it, same precedent as `sessionId`). */
+  project?: string;
   /** Fires on the FIRST esc press against non-empty text ("Esc again to clear"); a later task wires
    *  this into the footer's hint line. Optional so existing call sites need no changes. */
   onHint?: (hint: string) => void;
@@ -265,6 +270,7 @@ export function Composer({
   nowMs,
   sessionId = "",
   historyPath,
+  project = "",
   onHint,
   onStateChange,
   onScrollTop,
@@ -536,7 +542,7 @@ export function Composer({
         // Precedence #3: idle + non-empty text — double-esc-to-clear, timed off the `nowMs` prop
         // (never Date.now here).
         if (lastEscMs !== null && nowMs - lastEscMs <= DOUBLE_ESC_WINDOW_MS) {
-          appendHistory(effectiveHistoryPath, { display: state.text, ts: nowMs, sessionId });
+          appendHistory(effectiveHistoryPath, { display: state.text, pastedContents: {}, timestamp: nowMs, project, sessionId });
           setState({ text: "", cursor: 0 });
           setLastEscMs(null);
         } else {
@@ -565,14 +571,14 @@ export function Composer({
           // App's onRunCommand) is what actually tells known from unknown and produces the
           // "Unknown command" note — this composer only decides WHETHER to run vs. complete.
           onRunCommand?.(text);
-          appendHistory(effectiveHistoryPath, { display: text, ts: nowMs, sessionId });
+          appendHistory(effectiveHistoryPath, { display: text, pastedContents: {}, timestamp: nowMs, project, sessionId });
           setState({ text: "", cursor: 0 });
           setLastEscMs(null);
           return;
         }
         if (running) onSteer(text);
         else onSubmit(text);
-        appendHistory(effectiveHistoryPath, { display: text, ts: nowMs, sessionId });
+        appendHistory(effectiveHistoryPath, { display: text, pastedContents: {}, timestamp: nowMs, project, sessionId });
         setState({ text: "", cursor: 0 });
         setLastEscMs(null); // a fresh line resets the double-esc window
         return;

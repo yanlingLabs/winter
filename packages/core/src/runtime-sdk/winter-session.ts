@@ -92,6 +92,24 @@ import type { attachWinterSession, WinterSessionAttachHandle, WinterSessionAttac
 import { createHostPromptQueue, type HostPromptQueue } from "./prompt-queue";
 import { permissionModeFor } from "./mode-options";
 import type { SessionApprovalPolicy } from "../agent/gate";
+import type { RunHome } from "@yanlinglabs/winter-runtime-sdk";
+import { disposeFailedRunHome, settleRunHome } from "./run-home-support";
+
+/**
+ * WS-21 (spec §3.1): the per-run folder an incarnation's `Options` carry as `runtime.runHome` — the
+ * router's Winter overload reads it there (`query({ prompt, options: { ...options, runtime: { runHome } } })`).
+ * `optionsFor` puts it there when the linked router applies run homes; absent otherwise.
+ */
+export function runHomeOf(options: Options): RunHome | undefined {
+  const runtime = (options as { runtime?: { runHome?: RunHome } }).runtime;
+  return runtime?.runHome;
+}
+
+/** `options` with `runtime.runHome` set — the one spelling of the attach point (Contract A). */
+export function withRunHome(options: Options, runHome: RunHome): Options {
+  const runtime = (options as { runtime?: Record<string, unknown> }).runtime;
+  return { ...options, runtime: { ...(runtime ?? {}), runHome } } as Options;
+}
 
 export type WinterSessionState = "live" | "resumable" | "ended";
 
@@ -133,6 +151,13 @@ export interface WinterSessionRecords {
   endGeneration(winterSessionId: string, generation: number, endReason: string): void;
   transition(winterSessionId: string, to: RuntimeSessionState): unknown;
   get(winterSessionId: string): { state: RuntimeSessionState; generation: number } | undefined;
+  /** WS-21: a run folder the router quarantined at exit (kept; recorded for recovery and doctor). Optional:
+   *  a test double need not implement it. */
+  noteQuarantinedRoot?(root: string): void;
+  /** WS-21 review M6: the run folder this session runs in (`RuntimeSessionRecords.noteRunFolder`). */
+  noteRunFolder?(winterSessionId: string, dir: string | undefined, current?: string): void;
+  /** WS-21 review M6: a quarantined run folder marks its session. */
+  setTranscriptHealth?(winterSessionId: string, health: "repair-required"): void;
 }
 
 export interface WinterSessionDeps {
@@ -335,6 +360,8 @@ interface Incarnation extends WinterIncarnation {
   projector: Projector;
   query: Query;
   done: Promise<void>;
+  /** WS-21: the run home this incarnation runs on (settled when it ends), when the router applies them. */
+  runHome: RunHome | undefined;
   attachment: WinterSessionAttachHandle | undefined;
   /** Frames seen — a child that never reached init is a spawn failure, not a turn failure. */
   sawInit: boolean;
@@ -556,11 +583,27 @@ class WinterSessionImpl implements WinterSession {
       const resume = await this.deps.hasTranscript();
       // Options FIRST: a refused executable throws here and leaves NO generation row behind it.
       const options = await this.deps.options({ resume, abort });
-      const generation = this.deps.records?.bumpGeneration(this.sessionId, { runtimeKind: "winter-agent", backendSessionId: this.backendSessionId }).generation ?? this.gen + 1;
-      const shape: WinterIncarnation = { generation, resume, abort };
-      const queue = (this.deps.queue ?? createHostPromptQueue)();
-      const projector = this.deps.projector(shape);
-      const query = this.deps.runtime.sdk.query({ prompt: queue, options });
+      // WS-21: the run home `optionsFor` built for THIS incarnation (built last, so a refusal above never
+      // leaves one behind). An open that fails from here to the iteration's start disposes it at once —
+      // nothing ran on it (spec §3.8 r3).
+      const runHome = runHomeOf(options);
+      if (runHome !== undefined) this.deps.records?.noteRunFolder?.(this.sessionId, runHome.dir);
+      let generation: number;
+      let shape: WinterIncarnation;
+      let queue: HostPromptQueue;
+      let projector: Projector;
+      let query: Query;
+      try {
+        generation = this.deps.records?.bumpGeneration(this.sessionId, { runtimeKind: "winter-agent", backendSessionId: this.backendSessionId }).generation ?? this.gen + 1;
+        shape = { generation, resume, abort };
+        queue = (this.deps.queue ?? createHostPromptQueue)();
+        projector = this.deps.projector(shape);
+        query = this.deps.runtime.sdk.query({ prompt: queue, options });
+      } catch (err) {
+        await disposeFailedRunHome(runHome, (line) => this.log(line));
+        if (runHome !== undefined) this.deps.records?.noteRunFolder?.(this.sessionId, undefined, runHome.dir);
+        throw err;
+      }
       // Daemon settings surface (2026-09-17 plan, item 3): best-effort, fire-and-forget — a
       // rejection (a torn/aborted child before this resolves) must never affect `open()` itself,
       // which is why this is neither awaited nor placed before `this.inc = inc` below. See
@@ -578,7 +621,7 @@ class WinterSessionImpl implements WinterSession {
           /* best-effort only */
         }
       }
-      const inc: Incarnation = { ...shape, queue, projector, query, attachment: undefined, sawInit: false, done: Promise.resolve() };
+      const inc: Incarnation = { ...shape, queue, projector, query, attachment: undefined, sawInit: false, done: Promise.resolve(), runHome };
       this.inc = inc;
       this.gen = generation;
       this.resumedValue = resume;
@@ -673,6 +716,19 @@ class WinterSessionImpl implements WinterSession {
       this.recordState(ended === "ended" ? "failed" : "exited");
       if (this.inc === inc) this.inc = undefined;
       this.stateValue = ended ?? "resumable";
+      // WS-21 (spec §3.8; L2 fix round 1): the iteration is over (drained, closed or failed), which is
+      // exactly when the router reports a Winter run home `safe` — dispose it only then.
+      if (inc.runHome !== undefined) {
+        const runHome = inc.runHome;
+        const settled = await settleRunHome(runHome, this.deps.runtime.runHomeOutcome?.(runHome.runId), {
+          log: (line) => this.log(line),
+          onQuarantined: (dir) => {
+            this.deps.records?.noteQuarantinedRoot?.(dir);
+            try { this.deps.records?.setTranscriptHealth?.(this.sessionId, "repair-required"); } catch { /* bounded */ }
+          },
+        });
+        if (settled === "disposed") this.deps.records?.noteRunFolder?.(this.sessionId, undefined, runHome.dir);
+      }
     }
   }
 

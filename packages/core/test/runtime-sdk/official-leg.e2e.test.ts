@@ -42,6 +42,8 @@ import { createSqliteRuntimeDirectoryStore, openRuntimeStateDb } from "../../src
 import { processStartedAt } from "../../src/runtime-state/leases";
 import { buildChildAddress, buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
 import { officialConfigDirFor, type OfficialInputDeps, type OfficialSessionInput } from "../../src/runtime-sdk/official-options";
+import { childSandboxConfigFor, sandboxConfigFor } from "../../src/runtime-sdk/mode-options";
+import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk";
 import { startOfficialSession, type OfficialSession } from "../../src/runtime-sdk/official-session";
 import { createProjector, type CheckpointStore } from "../../src/projector";
 import { z } from "zod";
@@ -695,6 +697,71 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       rmSync(outsideDir, { recursive: true, force: true });
     });
   }, 60_000);
+
+  // R.3 I-4 MEASURED on the real `claude`: the any-depth project fence rides this leg's flag settings too
+  // (`childSandboxConfigFor`'s `<cwd>/**/.winter/<kind>`, through the real `officialInputFor`). A sandboxed
+  // Bash at the project root joins `pkg/.winter/rules/x.md` from pieces (python — no static detector sees
+  // it) and must not plant it; the ordinary `pkg/notes.md` beside it must land.
+  test("R.3 I-4 MEASURED: an assembled python write into <cwd>/pkg/.winter/rules does not land; <cwd>/pkg/notes.md does", async () => {
+    const command = `python3 -c "open('pkg/.win'+'ter/rules/x.md','w').write('x')"; echo x > pkg/notes.md; true`;
+    const turns: AnthropicTurnScript[] = [PLACEHOLDER_TURN("Bash", [JSON.stringify({ command })]), DONE_TURN];
+    await withAnthropicLoopback(turns, async (fake) => {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto");
+      mkdirSync(join(w.cwd, "pkg", ".winter", "rules"), { recursive: true });
+      await w.session.send("run the command");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      const ran = w.events.some((e) => e.type === "tool_result");
+      const landed = { rule: existsSync(join(w.cwd, "pkg", ".winter", "rules", "x.md")), notes: existsSync(join(w.cwd, "pkg", "notes.md")) };
+      console.warn(`[R.3 I-4 official-leg] MEASURED: ran=${ran} ${JSON.stringify(landed)}`);
+      expect(ran).toBe(true);
+      expect(landed).toEqual({ rule: false, notes: true });
+    });
+  }, 60_000);
+
+  // R.3 re-review minor (a): the in-file CONTROL for the row above — the same assembled python write on the same
+  // real `claude`, its sandbox the daemon's list for the same project, once as the child is sent it
+  // (`childSandboxConfigFor`, with the any-depth globs) and once as the LITERAL list (`sandboxConfigFor`, none):
+  // the literal list must let the write LAND, or the row above would pass on a bed that writes nothing.
+  test("R.3 I-4 control: the same write LANDS under the literal list, and is stopped under the child's list", async () => {
+    const command = `python3 -c "open('pkg/.win'+'ter/rules/x.md','w').write('x')"; echo x > pkg/notes.md; true`;
+    const run = async (spelled: boolean): Promise<{ rule: boolean; notes: boolean }> => {
+      const turns: AnthropicTurnScript[] = [PLACEHOLDER_TURN("Bash", [JSON.stringify({ command })]), DONE_TURN];
+      return withAnthropicLoopback(turns, async (fake) => {
+        const root = realpathSync(mkdtempSync(join(tmpdir(), "p8c-official-e2e-i4c-")));
+        const home = join(root, "winter-home");
+        const cwd = join(root, "work");
+        const hermetic = hermeticOfficialHome("i4c");
+        for (const dir of [home, join(cwd, "pkg", ".winter", "rules"), join(root, "cfg"), join(hermetic.home, "tmp")]) mkdirSync(dir, { recursive: true });
+        const q = claudeQuery({
+          prompt: "run the command",
+          options: {
+            pathToClaudeCodeExecutable: claudeRuntimeForTests()!.executable,
+            model: LOOPBACK_MODEL_ID,
+            cwd,
+            settingSources: [],
+            settings: { sandbox: { ...(spelled ? childSandboxConfigFor(home, cwd) : sandboxConfigFor(home, cwd)) } },
+            maxTurns: 4,
+            canUseTool: async (_tool, input) => ({ behavior: "allow", updatedInput: input }),
+            env: {
+              HOME: hermetic.home, PATH: "/usr/bin:/bin:/usr/sbin:/sbin", TMPDIR: `${join(hermetic.home, "tmp")}/`, LANG: "en_US.UTF-8",
+              CLAUDE_CONFIG_DIR: join(root, "cfg"), ANTHROPIC_BASE_URL: fake.url, ANTHROPIC_API_KEY: "sk-ant-fake-i4-control-0000",
+              CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", DISABLE_AUTOUPDATER: "1", CLAUDE_CODE_MAX_RETRIES: "0",
+            },
+          },
+        });
+        for await (const m of q) if ((m as { type?: string }).type === "result") break;
+        const landed = { rule: existsSync(join(cwd, "pkg", ".winter", "rules", "x.md")), notes: existsSync(join(cwd, "pkg", "notes.md")) };
+        rmSync(root, { recursive: true, force: true });
+        return landed;
+      });
+    };
+    const literal = await run(false);
+    const spelled = await run(true);
+    console.warn(`[R.3 I-4 official-leg control] literal ${JSON.stringify(literal)}; child ${JSON.stringify(spelled)}`);
+    expect(literal).toEqual({ rule: true, notes: true });
+    expect(spelled).toEqual({ rule: false, notes: true });
+  }, 90_000);
 
   test("8d: additionalDisallowedTools is HONOURED by the real binary — a chat-mode session's system/init.tools never advertises Bash, a code-mode one does", async () => {
     const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
@@ -1883,7 +1950,9 @@ describeWithClaudeRuntime("the official leg through startDaemon + IPC (P8c-14)",
   let client: TestClient;
   let fakeUrl = "";
   let fakeClose: (() => Promise<void>) | undefined;
-  let requests: Array<{ path: string; headers: Record<string, string> }> = [];
+  // F1: `model` is the `/v1/messages` body's own `model` — the ONE place the model the child actually
+  // ran is visible (a transcript's `message.model` is whatever the endpoint answered).
+  let requests: Array<{ path: string; headers: Record<string, string>; model?: string }> = [];
 
   const WINTER_BIN = process.env.WINTER_RUNTIME_EXECUTABLE ?? join(import.meta.dir, "../../../../dist/winter");
 
@@ -1909,7 +1978,9 @@ describeWithClaudeRuntime("the official leg through startDaemon + IPC (P8c-14)",
       routes: [{
         path: "*",
         handler: async (_req, recorded) => {
-          requests.push({ path: recorded.path, headers: recorded.headers });
+          let model: string | undefined;
+          if (recorded.path === "/v1/messages") { try { model = (JSON.parse(recorded.body) as { model?: unknown }).model as string | undefined; } catch { /* not JSON: no model */ } }
+          requests.push({ path: recorded.path, headers: recorded.headers, ...(typeof model === "string" ? { model } : {}) });
           if (responseDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, responseDelayMs));
           if (recorded.path === "/v1/messages" && recorded.method === "POST") return anthropicFake.anthropicTurnResponse(script[0]!);
           return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
@@ -1958,6 +2029,28 @@ describeWithClaudeRuntime("the official leg through startDaemon + IPC (P8c-14)",
     expect(kinds).toContain("turn_completed");
     expect(requests.some((r) => r.path === "/v1/messages" && (r.headers["x-api-key"] !== undefined || r.headers["authorization"] !== undefined))).toBe(true);
   }, 60_000);
+
+  // F1 (live gate, 2026-09-24): a session recorded on a Claude tag ran claude's OWN default model —
+  // every request carried `claude-opus-5` — because the router's official door never forwards the
+  // query's top-level `Options.model`. The model must reach the wire as the tag's bare modelId, and
+  // the session must refuse typed rather than run anything else.
+  // F1 follow-on: a DOTTED catalog row goes out on its measured dashed wire id (`claude-haiku-4.5` is a
+  // 404 on Anthropic's API, `claude-haiku-4-5` a 200) — and the real child's init frame reports the id it
+  // was sent, so the session's init assertion passes on the mapped id.
+  for (const [tag, wire] of [["anthropic/claude-haiku-4-5-20251001", "claude-haiku-4-5-20251001"], ["anthropic/claude-haiku-4.5", "claude-haiku-4-5"]] as const) {
+    test(`F1: ${tag} goes out as ${wire} — the session's own model on its wire id, never the runtime's default`, async () => {
+      requests = [];
+      const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: tag });
+      await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+      await client.call(METHODS.sessionSend, { sessionId, text: "say hello" });
+      await client.waitFor((e) => (e.type === "turn_completed" || e.type === "agent_error") && e.sessionId === sessionId, 45_000);
+      const errors = client.events.filter((e) => e.sessionId === sessionId && e.type === "agent_error");
+      expect(errors).toEqual([]);
+      const models = requests.filter((r) => r.path === "/v1/messages").map((r) => r.model);
+      expect(models.length).toBeGreaterThan(0);
+      expect(new Set(models)).toEqual(new Set([wire]));
+    }, 60_000);
+  }
 
   test("session.interrupt on the official leg ends the turn, never a thrown error", async () => {
     (globalThis as { __setOfficialE2eScript?: (s: AnthropicTurnScript[]) => void }).__setOfficialE2eScript?.([

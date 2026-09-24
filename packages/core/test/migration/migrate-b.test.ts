@@ -335,6 +335,17 @@ describe("isPristineHome (Step 3, P9c-10)", () => {
     expect(isPristineHome(home)).toBe(true);
   });
 
+  // WS-21: the bootstrap now creates `sdk/` (0700) with `sdk/projects` and claude's persistent set.
+  test("an otherwise-empty WS-21 sdk/ bootstrap tree is still pristine; a file inside it is not", () => {
+    const home = tempDir();
+    for (const d of ["sdk/projects", "sdk/file-history", "sdk/tasks", "sdk/teams", "sdk/agent-memory", "sdk/workflows"]) {
+      mkdirSync(join(home, d), { recursive: true });
+    }
+    expect(isPristineHome(home)).toBe(true);
+    writeFileSync(join(home, "sdk", "settings.json"), "{}");
+    expect(isPristineHome(home)).toBe(false);
+  });
+
   test("false once a file exists inside a bootstrap-set dir", () => {
     const home = tempDir();
     mkdirSync(join(home, "sessions"), { recursive: true });

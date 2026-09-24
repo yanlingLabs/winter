@@ -10,6 +10,7 @@ import { join } from "node:path";
 import {
   OutputStyleStore, TrustStore, loadSettings, resolveWinterHome, saveSettings,
   setOutputStyle, setProviderModel, setReasoningEffort, setAdvisorModel, parseModelTag,
+  sdkOutputStyle, updateSdkSettings,
 } from "@yanlinglabs/winter-core";
 import type { Settings } from "@yanlinglabs/winter-core";
 import { METHODS, SyncConfigModel } from "@yanlinglabs/winter-protocol";
@@ -272,10 +273,9 @@ async function runOutputStyle(ctx: CommandCtx, argText: string): Promise<void> {
   }
 
   const home = resolveWinterHome();
-  const settingsPath = join(home, "settings.json");
-  const settings = loadSettings(settingsPath);
+  // WS-21: `outputStyle` lives in `sdk/settings.json` (claude `Settings`).
   const store = new OutputStyleStore({ winterHome: home, trust: new TrustStore(join(home, "trust.json")) });
-  const current = settings.outputStyle ?? "default";
+  const current = sdkOutputStyle(home) ?? "default";
 
   if (action.action === "list") {
     const styles = store.list(ctx.cwd);
@@ -299,7 +299,7 @@ async function runOutputStyle(ctx: CommandCtx, argText: string): Promise<void> {
     ctx.appendNote(`Unknown output style: ${action.name}\nAvailable: ${store.list(ctx.cwd).map((s) => s.name).join(", ")}`);
     return;
   }
-  saveSettings(settingsPath, setOutputStyle(settings, action.name));
+  updateSdkSettings(home, (s) => setOutputStyle(s, action.name));
   ctx.appendNote(`Output style set to: ${action.name}`);
 }
 
@@ -308,14 +308,12 @@ async function runOutputStyle(ctx: CommandCtx, argText: string): Promise<void> {
  *  identical confirmation note). */
 function applyOutputStylePick(ctx: CommandCtx, name: string): void {
   const home = resolveWinterHome();
-  const settingsPath = join(home, "settings.json");
-  const settings = loadSettings(settingsPath);
   const store = new OutputStyleStore({ winterHome: home, trust: new TrustStore(join(home, "trust.json")) });
   if (!store.resolve(name, ctx.cwd)) {
     ctx.appendNote(`Unknown output style: ${name}\nAvailable: ${store.list(ctx.cwd).map((s) => s.name).join(", ")}`);
     return;
   }
-  saveSettings(settingsPath, setOutputStyle(settings, name));
+  updateSdkSettings(home, (s) => setOutputStyle(s, name));
   ctx.appendNote(`Output style set to: ${name}`);
 }
 

@@ -1,9 +1,9 @@
 // Fix wave (whole-branch review row 7): Winter's CONFIGURED MCP servers, forwarded to a Winter child.
 //
-// Two sources, the same two `McpManager` starts for the daemon's shared registry (`agent/mcp/
-// manager.ts`): the user's `settings.mcpServers` (source "user") and a TRUSTED project's
-// `<cwd>/.mcp.json` (source "project", trust-gated exactly as `McpManager.ensureProject` gates it —
-// an untrusted directory contributes nothing, and nothing is read from it). Daemon settings surface
+// The sources (WS-21: see the paragraph below for the current three): originally the user's
+// `settings.mcpServers` (source "user") and a TRUSTED project's MCP file (source "project", trust-gated
+// exactly as `McpManager.ensureProject` gates it — an untrusted directory contributes nothing, and
+// nothing is read from it). The repo-root `.mcp.json` named in the history below is no longer read. Daemon settings surface
 // batch 3 (item 3b) widened the USER side (`settings.mcpServers`) to accept the HTTP/SSE shapes both
 // SDKs' `Options.mcpServers` support; a later parity fix (controller-directed) widened the PROJECT
 // side to match — `.mcp.json` now accepts stdio/http/sse too, PER ENTRY (`parseProjectMcpServers`,
@@ -20,15 +20,18 @@
 // per live session — recorded in the fix-wave report as the cost of this door for stdio; unchanged
 // for HTTP/SSE, which were never proxied through the daemon to begin with.
 //
-// PRECEDENCE mirrors the registry: user servers were started first there and project tools with a
-// colliding name were skipped, so here a user server shadows a same-keyed project server. Neither
-// may shadow a daemon-owned `winter__<key>` server — that is `assertNoCapabilityCollision`'s job at
-// the driver, which refuses the SESSION (typed) rather than choose.
+// WS-21 (spec §3.4.5, §4.4): THREE sources, claude's scopes — the LOCAL servers for this project
+// (`sdk/.winter.json` `projects[<root>].mcpServers`, the caller's `localMcpServers`), a TRUSTED project's
+// `<root>/.winter/mcp.json` (the repo-root `.mcp.json` is no longer read), and the USER servers
+// (`sdk/.winter.json` `mcpServers`). PRECEDENCE is claude's: local > project > user. None may shadow a
+// daemon-owned `winter__<key>` server — that is `assertNoCapabilityCollision`'s job at the driver, which
+// refuses the SESSION (typed) rather than choose. (This is the pre-run-home path: once the router applies
+// run homes, the run folder's `.winter.json` carries the same fold and the daemon hands over none.)
 import { readFileSync, realpathSync } from "node:fs";
-import { join } from "node:path";
 import type { McpServerConfig } from "@yanlinglabs/winter-agent-sdk";
 import type { McpServerSettingsEntry, Settings } from "../settings";
-import { extractRawMcpServers, parseProjectMcpServers } from "../agent/mcp/project-file";
+import { extractRawMcpServers, parseProjectMcpServers, projectMcpConfigPath } from "../agent/mcp/project-file";
+import { projectScopeRootFor, projectScopeTrusted } from "./run-home-input";
 
 // The project `.mcp.json` schema/parser now lives in `../agent/mcp/project-file` — shared with
 // `agent/mcp/manager.ts`'s own reader and the CLI's `mcp add/remove --scope project`/`mcp get`
@@ -42,10 +45,16 @@ import { extractRawMcpServers, parseProjectMcpServers } from "../agent/mcp/proje
 // session) the moment any single entry — an http/sse one, most commonly — didn't fit.
 
 export interface ConfiguredMcpInput {
-  /** THE LIVE settings (a getter's answer, never a boot snapshot). */
+  /** THE LIVE settings (a getter's answer, never a boot snapshot) — read for `mcp.disabled` only. */
   settings: Settings | null | undefined;
-  /** The session's cwd — where `.mcp.json` is looked for (the manager's own rule: `<cwd>/.mcp.json`,
-   *  not the repo root). */
+  /** WS-21: the USER-scope servers — `sdk/.winter.json` `mcpServers` (`sdkUserMcpServers`), read live
+   *  by the caller. They moved out of `settings.json`; absent ⇒ none. */
+  userMcpServers?: Readonly<Record<string, McpServerSettingsEntry>>;
+  /** WS-21: the LOCAL-scope servers for this session's project root (`sdkLocalMcpServers(home, root)`),
+   *  read live by the caller. Not trust-gated: they are the user's own file, like the user scope. */
+  localMcpServers?: Readonly<Record<string, McpServerSettingsEntry>>;
+  /** The session's cwd. WS-21: the project file is `<projectScopeRootFor(cwd)>/.winter/mcp.json` — the
+   *  project ROOT (a linked worktree's own top, R.3 residual), where the run home's builder reads it too. */
   cwd: string | undefined;
   /** `TrustStore.isTrusted` — an untrusted cwd contributes no project servers and is never read. */
   trusted: (dir: string) => boolean;
@@ -87,35 +96,36 @@ function toMcpServerConfig(entry: McpServerSettingsEntry): McpServerConfig {
  *  "absent, not a present-but-inert entry" posture every other disable switch in this codebase
  *  takes. */
 export function configuredMcpServersFor(input: ConfiguredMcpInput): Record<string, McpServerConfig> {
-  const out: Record<string, McpServerConfig> = {};
   const disabled = new Set(input.settings?.mcp?.disabled ?? []);
+  const project: Record<string, McpServerConfig> = {};
   if (input.cwd !== undefined && input.cwd !== "") {
     let dir = input.cwd;
     try { dir = realpathSync(dir); } catch { /* the manager falls back to the given path too */ }
-    if (input.trusted(dir)) {
+    // R.3 residual: the project scope's root and trust (`projectScopeRootFor`/`projectScopeTrusted`).
+    if (projectScopeTrusted(dir, { isTrusted: input.trusted })) {
+      const root = projectScopeRootFor(dir);
       let extracted: ReturnType<typeof extractRawMcpServers>;
       try {
-        const raw = (input.readFile ?? ((p: string) => readFileSync(p, "utf8")))(join(dir, ".mcp.json"));
+        const raw = (input.readFile ?? ((p: string) => readFileSync(p, "utf8")))(projectMcpConfigPath(root));
         extracted = extractRawMcpServers(JSON.parse(raw));
       } catch {
         extracted = undefined; // missing file, unreadable, or malformed JSON → nothing from the project, unchanged
       }
       if (extracted) {
         const { servers, skipped } = parseProjectMcpServers(extracted.servers);
-        for (const { name, reason } of skipped) input.log?.(`mcp: project server '${name}' (${dir}) skipped — ${reason}`);
+        for (const { name, reason } of skipped) input.log?.(`mcp: project server '${name}' (${root}) skipped — ${reason}`);
         // THE CHILD speaks stdio/http/sse directly (this file's own header) — every valid entry,
         // whichever transport, is forwarded via the SAME `toMcpServerConfig` a user-scope entry
         // goes through below.
-        for (const [name, entry] of Object.entries(servers)) {
-          if (!disabled.has(name)) out[name] = toMcpServerConfig(entry);
-        }
+        for (const [name, entry] of Object.entries(servers)) project[name] = toMcpServerConfig(entry);
       }
     }
   }
-  // User servers LAST so they shadow a same-keyed project server (the registry's precedence).
-  for (const [name, sc] of Object.entries(input.settings?.mcpServers ?? {})) {
-    if (disabled.has(name)) continue;
-    out[name] = toMcpServerConfig(sc);
-  }
+  const out: Record<string, McpServerConfig> = {};
+  // claude's precedence, lowest first so a later tier overwrites: user < project < local.
+  for (const [name, sc] of Object.entries(input.userMcpServers ?? {})) out[name] = toMcpServerConfig(sc);
+  Object.assign(out, project);
+  for (const [name, sc] of Object.entries(input.localMcpServers ?? {})) out[name] = toMcpServerConfig(sc);
+  for (const name of disabled) delete out[name];
   return out;
 }

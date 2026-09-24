@@ -121,7 +121,11 @@ describe("N-3: the wire model id", () => {
   test("resolves through the provider-scoped descriptor, so a shared bare id cannot pick the wrong row", () => {
     // `deepseek-v4-flash` exists under several providers on the shared chat-completions adapter; the
     // scoped lookup is what keeps each one on its own row (see this module's header for the measurement).
-    expect(wireModelIdFor("deepseek", "deepseek-v4-flash")).toBe("deepseek-v4-flash");
+    // R.1 (catalog refresh): DeepSeek's OWN row is now `deepseek-flash`, and the old id is its alias — so
+    // the same bare id answers DeepSeek's renamed row under `deepseek`, and alibaba-cn's own row there.
+    expect(wireModelIdFor("deepseek", "deepseek-v4-flash")).toBe("deepseek-flash");
+    expect(wireModelIdFor("deepseek", "deepseek-flash")).toBe("deepseek-flash");
+    expect(wireModelIdFor("alibaba-cn", "deepseek-v4-flash")).toBe("deepseek-v4-flash");
     // A tag whose bare half the provider does not serve falls through verbatim rather than inventing one.
     expect(wireModelIdFor("deepseek", "not-a-real-model")).toBe("not-a-real-model");
   });

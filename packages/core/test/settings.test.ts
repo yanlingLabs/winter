@@ -1108,7 +1108,7 @@ describe("setModelRole: the catalog-membership check", () => {
   test("an internal-jobs role accepts an eligible provider with no credential stored yet", () => {
     const info = modelRoleInfo(base, "titles.model", "openai", { credentialed: new Set(["codex-oauth"]) });
     expect(info.constraint).toBe("internal-provider");
-    const notYetCredentialed = "deepseek/deepseek-v4-flash";
+    const notYetCredentialed = "deepseek/deepseek-flash"; // R.1: DeepSeek's live row (v4-flash was renamed)
     // Listed as permitted (the picker offers it; `models.catalog` carries the credential state beside it).
     expect(info.permitted.some((p) => p.models.includes(tag(notYetCredentialed)))).toBe(true);
     expect(setModelRole(base, "titles.model", notYetCredentialed).titles?.model).toBe(tag(notYetCredentialed));
@@ -1188,8 +1188,8 @@ describe("role reasoning efforts (roleEfforts / roleEffortFor / roleAcceptsClien
   test("modelRoleInfo: efforts carries the CURRENT model's vocabulary, with null and [] kept apart", () => {
     // A row with a vocabulary, in the catalog's own order and with no "none" prepended.
     expect(modelRoleInfo(base, "provider.model").efforts).toEqual(["low", "medium", "high", "xhigh", "max"]);
-    // A row with NO `reasoning` block at all.
-    const noBlock = setModelRole(base, "provider.model", "openai/gpt-5.4");
+    // A row with NO `reasoning` block at all (R.1: gpt-4.1 — the refreshed catalog gave gpt-5.4 a vocabulary).
+    const noBlock = setModelRole(base, "provider.model", "openai/gpt-4.1");
     expect(modelRoleInfo(noBlock, "provider.model").efforts).toBeNull();
     // A row WITH a `reasoning` block whose vocabulary is empty — a different fact, a different answer.
     const emptyVocab = setModelRole(base, "pins.dispatch", "agnes/agnes-2.0-flash");
@@ -1220,7 +1220,7 @@ describe("role reasoning efforts (roleEfforts / roleEffortFor / roleAcceptsClien
   });
 
   test("ANY effort is refused on a real catalog row that declares no vocabulary — both shapes of it", () => {
-    for (const model of ["openai/gpt-5.4", "agnes/agnes-2.0-flash"]) {
+    for (const model of ["openai/gpt-4.1", "agnes/agnes-2.0-flash"]) { // R.1: gpt-4.1 is the no-block row now
       for (const effort of ["high", "none"]) {
         expect(() => setModelRole(base, "pins.dispatch", model, effort)).toThrow(/declares no reasoning-effort vocabulary/);
       }
@@ -1261,10 +1261,12 @@ describe("role reasoning efforts (roleEfforts / roleEffortFor / roleAcceptsClien
       // The model moved under the stored effort (the write door allows that on purpose).
       // o4-mini lists low/medium/high with defaultEffort medium: `max` maps onto the row's default.
       expect(effortToSpendForRole(withEffort("pins.dream", "max"), "pins.dream", "openai/o4-mini", "medium")).toBe("medium");
-      // deepseek-v4-flash lists none/low/high/max and declares NO default: `medium` has nowhere to map.
-      expect(effortToSpendForRole(withEffort("pins.dispatch", "medium"), "pins.dispatch", "deepseek/deepseek-v4-flash", "medium")).toBeUndefined();
+      // deepseek-flash lists none/low/high/max (no `medium`): R.1 — the refreshed row declares a default,
+      // `high`, so `medium` maps onto it (the old deepseek-v4-flash row declared none and it was omitted; no
+      // live row keeps that shape).
+      expect(effortToSpendForRole(withEffort("pins.dispatch", "medium"), "pins.dispatch", "deepseek/deepseek-flash", "medium")).toBe("high");
       // A row with no vocabulary at all: omitted — NOT the consumer's "low", which the user overrode.
-      expect(effortToSpendForRole(withEffort("pins.cleaner", "high"), "pins.cleaner", "openai/gpt-5.4", "low")).toBeUndefined();
+      expect(effortToSpendForRole(withEffort("pins.cleaner", "high"), "pins.cleaner", "openai/gpt-4.1", "low")).toBeUndefined();
       // No catalog row (a harness double, a BYO endpoint's own id): passed through, implicitEffortFor's posture.
       expect(effortToSpendForRole(withEffort("pins.dispatch", "high"), "pins.dispatch", "winter-test/echo", "medium")).toBe("high");
     });
@@ -1275,7 +1277,7 @@ describe("role reasoning efforts (roleEfforts / roleEffortFor / roleAcceptsClien
       expect(effortToSpendForRole(withEffort("pins.dream", "none"), "pins.dream", "codex-oauth/gpt-5.6-terra", "medium")).toBe("none");
       expect(effortToSpendForRole(withEffort("pins.dream", "none"), "pins.dream", "winter-test/echo", "medium")).toBe("none");
       // …and a row with no vocabulary takes no effort of any kind, "none" included.
-      expect(effortToSpendForRole(withEffort("pins.dream", "none"), "pins.dream", "openai/gpt-5.4", "medium")).toBeUndefined();
+      expect(effortToSpendForRole(withEffort("pins.dream", "none"), "pins.dream", "openai/gpt-4.1", "medium")).toBeUndefined();
     });
 
     test("runtimes.advisorModel carries no effort: a stale stored value is inert, the read offers no control, the write refuses", () => {
@@ -1403,7 +1405,10 @@ describe("loadPermissionDirs trust gating", () => {
     const home = mkdtempSync(join(tmpdir(), "winter-tg-home-"));
     const project = mkdtempSync(join(tmpdir(), "winter-tg-proj-"));
     mkdirSync(join(project, ".winter"), { recursive: true });
-    wf(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, permissions: { additionalDirectories: ["/opt/user-dir"] } }));
+    // WS-21: the user tier is `sdk/settings.json`; a stale copy left in `settings.json` is never read.
+    wf(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, permissions: { additionalDirectories: ["/opt/stale-dir"] } }));
+    mkdirSync(join(home, "sdk"), { recursive: true });
+    wf(join(home, "sdk", "settings.json"), JSON.stringify({ permissions: { additionalDirectories: ["/opt/user-dir"] } }));
     wf(join(project, ".winter", "settings.json"), JSON.stringify({ permissions: { additionalDirectories: ["/opt/committed-dir"] } }));       // committed → trust-gated
     wf(join(project, ".winter", "settings.local.json"), JSON.stringify({ permissions: { additionalDirectories: ["/opt/local-dir"] } }));    // fix-wave A2: local is ALSO trust-gated now (a repo can force-commit one)
     return { home, project };
@@ -1412,7 +1417,8 @@ describe("loadPermissionDirs trust gating", () => {
   test("UNtrusted project: BOTH committed settings.json and settings.local.json are IGNORED; only user-global still applies (fix-wave A2: gitignore is not a trust boundary)", () => {
     const { home, project } = scaffold();
     const dirs = loadPermissionDirs(home, project, false);
-    expect(dirs).toContain("/opt/user-dir");    // user global — always
+    expect(dirs).toContain("/opt/user-dir");    // user global (sdk/settings.json) — always
+    expect(dirs).not.toContain("/opt/stale-dir"); // WS-21: the moved key's stale copy is ignored
     expect(dirs).not.toContain("/opt/local-dir");     // local — gated out when untrusted too
     expect(dirs).not.toContain("/opt/committed-dir"); // committed — gated out when untrusted
   });
