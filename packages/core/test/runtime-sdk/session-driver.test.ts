@@ -910,7 +910,9 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
     } finally { t.close(); }
   });
 
-  test("an `exa` change leaves an OFFICIAL-leg session alone — that leg is sent no `web` block at all", async () => {
+  // WS-23: no live child runs on the official leg any more, but the filter is still the LEG — a session
+  // whose record says anything other than `winter` is not a child the key reached.
+  test("an `exa` change leaves a session not on the Winter leg alone", async () => {
     const t = table({});
     try {
       const acted = await evictSessionsForCredential({
@@ -1427,3 +1429,5 @@ describe("WS-21 round 3: the lazy canonical-cwd re-key at resume (Winter leg)", 
     } finally { again.close(); t.close(); }
   });
 });
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════

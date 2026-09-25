@@ -12,7 +12,8 @@ import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 import { Settings, saveSettings } from "../../src/settings";
-import { REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK, REQUIRED_CLAUDE_AGENT_SDK } from "../../src/runtime-sdk/versions";
+import { REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK } from "../../src/runtime-sdk/versions";
+import { VersionsGetResult } from "@yanlinglabs/winter-protocol";
 
 class TestClient {
   private decoder = new LineDecoder();
@@ -73,7 +74,7 @@ describe("versions.get", () => {
     return { home, socketPath, harnessToken: tokens.harness };
   }
 
-  test("full shape: core, pins (the three REQUIRED_* constants verbatim), installed, official", async () => {
+  test("full shape: core, pins (the REQUIRED_* constants verbatim), installed, bundle", async () => {
     const { socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
@@ -82,33 +83,37 @@ describe("versions.get", () => {
     const r = result.result;
     expect(r.ok).toBe(true);
     expect(r.core).toBe("test-core-version");
+    // WS-23: the Winter pins only — the retired official leg's `claudeAgentSdk` pin is gone.
     expect(r.pins).toEqual({
       winterAgentSdk: REQUIRED_WINTER_AGENT_SDK,
       winterRuntimeSdk: REQUIRED_WINTER_RUNTIME_SDK,
-      claudeAgentSdk: REQUIRED_CLAUDE_AGENT_SDK,
     });
     // The wrapper's own SDK_VERSION is always reported (no optional-peer story on this leg).
     expect(typeof r.installed.winterAgentSdk).toBe("string");
     expect(r.installed.winterAgentSdk.length).toBeGreaterThan(0);
     // Every OTHER installed field is independently optional — present or absent, never a throw.
-    for (const key of ["winterRuntimeSdk", "claudeAgentSdk", "winterExecutable", "claudeExecutable"]) {
+    for (const key of ["winterRuntimeSdk", "winterExecutable"]) {
       expect(["string", "object", "undefined"]).toContain(typeof r.installed[key]);
     }
-    // `official` is either the full staged VERSIONS.json shape or null — never an error either way,
-    // and in this dev/test checkout there is no staged bundle, so it must be null.
-    expect(r.official).toBeNull();
+    expect("claudeAgentSdk" in r.installed).toBe(false);
+    expect("claudeExecutable" in r.installed).toBe(false);
+    // `bundle` is either the staged records or null — never an error either way, and in this
+    // dev/test checkout nothing is staged, so it must be null. The retired `official` key is gone.
+    expect(r.bundle).toBeNull();
+    expect("official" in r).toBe(false);
+    // The reply satisfies the wire schema the app decodes against.
+    expect(VersionsGetResult.safeParse(r).success).toBe(true);
     c.close();
   });
 
-  test("a missing winter/claude executable resolution never throws — reported as absent fields, not an error", async () => {
+  test("a missing winter executable resolution never throws — reported as an absent field, not an error", async () => {
     const { socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     const result = await c.request(METHODS.versionsGet, {});
     // This dev/test checkout has no bundle-relative runtimes; the call must still succeed —
     // `diagnoseRuntimes` never throws by construction (its own header comment), and a resolution
-    // miss for either leg is reported by simply omitting `installed.winterExecutable`/
-    // `installed.claudeExecutable`, never a thrown RPC error.
+    // miss is reported by simply omitting `installed.winterExecutable`, never a thrown RPC error.
     expect(result.error).toBeUndefined();
     expect(result.result.ok).toBe(true);
     c.close();
@@ -128,7 +133,7 @@ describe("versions.get", () => {
     const result = await c.request(METHODS.versionsGet, {});
     expect(result.error).toBeUndefined();
     expect(result.result.ok).toBe(true);
-    expect(result.result.official).toBeNull();
+    expect(result.result.bundle).toBeNull();
     c.close();
   });
 

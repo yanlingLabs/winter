@@ -25,6 +25,12 @@
 //
 // ROLLBACK restores everything except the step-2 reconcile appends, which stay in the canonical
 // transcripts: they are lines that were already the session's own.
+//
+// WS-23: the official `claude` leg is retired and writes no working copy any more. The step-2 reconcile
+// STAYS, deliberately: a home that skipped every WS-21 release still carries the 0.116-era copies
+// (`runtimes/claude-config`, `runtimes/official-agent-spool`), and their tails may be ahead of the
+// canonical transcripts — archiving them unreconciled would drop turns the sessions already had. The
+// router keeps `reconcileRootForRecovery` for exactly this and for boot recovery.
 import { Database } from "bun:sqlite";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
@@ -212,7 +218,8 @@ function stagingRootsPresent(scanRoot: string): boolean {
   try { return readdirSync(scanRoot, { withFileTypes: true }).some((e) => e.isDirectory() && e.name.startsWith("claude-resume-")); } catch { return false; }
 }
 
-/** The official leg's working-copy roots phase 2 reconciles (never recorded in runtime-state). */
+/** The retired official leg's working-copy roots phase 2 reconciles (never recorded in runtime-state;
+ *  nothing writes them since WS-23 — they exist only on a home that has not migrated yet). */
 function officialRoots(home: string): string[] {
   return [join(home, "runtimes", "claude-config"), join(home, "runtimes", "official-agent-spool")];
 }

@@ -1,48 +1,20 @@
-// Phase 8d Task 3.1 (P8d-8) — D30 on the OFFICIAL leg: the router's own `advisor.resolveReviewer`
-// (`RuntimeSdkOptions.advisor`, `create.ts`) is a SINGLE, whole-router-handle `ReviewerResolver`
-// (`() => ResolvedReviewer | undefined`, `@yanlinglabs/winter-agent-sdk/tools`) — the router forwards
-// it to whichever official-leg session's standing "advisor" tool fires, with NO session context in
-// the call itself (the resolver's own signature takes nothing). `resolveReviewer` therefore reads
-// EVERYTHING it needs from live closures: `settings()` for the hot `runtimes.advisorModel` override,
-// and `sessionModel()` for the D30 per-family default when that setting is unset.
+// Phase 8d Task 3.1 (P8d-8) — D30: the advisor's per-family DEFAULT model. A Winter session's
+// advisor is configured per-session through `Options.advisor.model` (`mode-options.ts`/
+// `session-driver.ts`) — the spawned `winter` child resolves the reviewer's own PROVIDER itself (it
+// reads the Keychain itself), so the daemon only ever states the target MODEL, and `d30DefaultModel`
+// below is the table it states it from when `runtimes.advisorModel` is unset.
 //
-// THE WINTER LEG DOES NOT USE THIS FILE. Its own advisor is configured per-session through
-// `Options.advisor.model` (`mode-options.ts`/`session-driver.ts`) — the spawned `winter` child
-// resolves its OWN reviewer PROVIDER internally (it reads the Keychain itself), so Winter only ever
-// states the WINTER leg's target MODEL id, never builds a provider for it. `d30DefaultModel` below is
-// the ONE shared piece both legs need (the family→model table), so the two can never state two
-// different defaults for the same family.
-//
-// KNOWN LIMIT (documented, not silently accepted): because the router's `advisor.resolveReviewer` is
-// ONE function shared by every official-leg session in this daemon process, `sessionModel()` cannot
-// disambiguate between two CONCURRENT official-leg sessions on different models when
-// `runtimes.advisorModel` is unset — the same shape `winter-agent-sdk`'s own R-6c-28 limitation
-// documents for its settings cascade ("this SDK resolves settings once … the version only moves when
-// a host hands down a new view"). This is a non-issue TODAY: the official leg only ever serves
-// Claude-family models (D13-2 routes every Claude-family, Anthropic-protocol, credentialed model
-// straight to it), so the D30 default for every official-leg session is always "Claude family ->
-// fable" regardless of which session asked — `sessionModel()`'s "else the session's own model" arm is
-// unreachable until a non-Claude model can run on this leg. Recorded as a carry for that day, not a
-// bug today.
-import type { AdvisorReviewer, AdvisorReviewerRequest, AdvisorReviewerTurn, ReviewerResolver } from "@yanlinglabs/winter-agent-sdk/tools";
+// WS-23: this file also built the retired official leg's advisor — a daemon-side `ReviewerResolver`
+// the router handed that leg's standing advisor tool, with its own OpenAI and Anthropic reviewer
+// providers. That half is gone with the leg; the family table is what remains.
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
-import { createAnthropicMessagesAdapter, OPENAI_API_BASE_URL } from "@yanlinglabs/winter-provider-runtime";
-import type { ProviderContext } from "@yanlinglabs/winter-provider-runtime";
-import type { SecretStore } from "../auth/secret-store";
-import { readCredentialMaterial, CREDENTIAL_MATERIAL_NAMES } from "../auth/credential-material";
-import { createCodexOauthRuntimeProvider, createOpenAiCompatibleRuntimeProvider } from "../providers/runtime-provider";
-import type { Provider, TurnInputItem } from "../providers/types";
-import { credentialStoreOverSecretStore } from "../providers/credential-store";
-import { winterOptionsFromSettings, providerBaseUrlFor, type Settings } from "../settings";
-import { ANTHROPIC_CREDENTIAL_SECRET_NAME, credentialRefFor } from "./keychain";
 import { facingNameToTag, splitTag, type ModelTag } from "./model-tag";
 
 /** Which of Winter's three D30-relevant families a catalog-recognised model belongs to. `"other"` is
  *  every family the pinned catalog has that is neither the OpenAI ("gpt") nor the Claude ("claude")
- *  family — Gemini/Grok/DeepSeek/etc. — for which 8d states no provider-runtime mapping (see
- *  `buildReviewerFor`'s own doc): the D30 table's own third rung, "else the session's own model", is
- *  what such a family falls through to, and if THAT model is also not openai/claude the resolver
- *  answers `undefined` rather than inventing a fourth provider adapter this phase does not need. */
+ *  family — Gemini/Grok/DeepSeek/etc. — for which D30 states no default: the table's own third rung,
+ *  "else the session's own model", is what such a family falls through to (`d30DefaultModel` answers
+ *  `undefined`, and the child's own default is the session's model). */
 export type AdvisorFamily = "openai" | "claude" | "other";
 
 /** A catalog row's `key`/`upstreamId`/`canonicalModelId`/alias match, same lookup
@@ -71,37 +43,7 @@ function firstSlotNameOfFamily(familyId: "gpt" | "claude"): string | undefined {
 }
 
 /**
- * Review fix F1: `advisorReviewerFor`'s `sessionModel` deriving the D30 default is only correct when
- * it reports THIS resolver's own family — and the ONE caller of this resolver (`daemon.ts`, feeding
- * `RuntimeSdkOptions.advisor` for the OFFICIAL leg) has a single, deployment-wide instance serving
- * every official-leg session, which by D13-2 is ALWAYS Claude-family (Anthropic-protocol, credentialed
- * Claude models route straight to this leg; no other family can land here at all). Wiring
- * `sessionModel` to `settings.provider.model` — the WINTER leg's own default-provider model, which on
- * a Codex/OpenAI-primary install is an openai-family model — therefore fed `d30DefaultModel` the WRONG
- * family and silently resolved an OpenAI reviewer for a Claude-only leg. This is the fix: a
- * `sessionModel` for this ONE known-Claude-only caller that reports the Claude family unconditionally,
- * never reading `settings.provider` at all. (The "else the session's own model" rung of D30's table
- * stays reachable for a FUTURE non-Claude-family official-leg session — see this module's own header
- * — this export just states the one thing this deployment can promise TODAY: every session on this
- * leg is Claude-family, so its placeholder session-model IS a Claude-family model, unconditionally.)
- */
-// WS-20: `d30DefaultModel` now needs a TAG (it splits the provider off the front, never a bare
-// canonical id) — this placeholder asserts the Claude family through the "anthropic" arm, the
-// default/common one; `d30DefaultModel`'s own "no cross-provider fallback" rule means a session
-// actually running on "console" instead still resolves correctly IF console serves the same slot
-// (it mirrors every anthropic Claude row, L1's own Task), and falls through to no override
-// otherwise — never a wrong-provider tag reaching a reviewer call.
-export function officialLegDefaultSessionModel(): ModelTag | undefined {
-  // `facingNameToTag`, not a hand-composed `anthropic/${canonicalId}` string: the catalog's
-  // normaliser can rewrite an id between its row `key` and its `canonicalModelId` (e.g. the fable
-  // row's key is `anthropic/claude-fable-5-1` but its canonicalModelId is `claude-fable-5.1`), so
-  // only a real catalog lookup is guaranteed to produce a tag that matches an actual row.
-  return facingNameToTag("anthropic", firstSlotNameOfFamily("claude") ?? "");
-}
-
-/**
- * D30's table, shared by both legs so they can never state two different defaults for the same
- * family: unset -> a gpt session's reviewer is family slot 1 ("astra"), a claude session's is
+ * D30's table: unset -> a gpt session's reviewer is family slot 1 ("astra"), a claude session's is
  * family slot 1 ("fable") — WS-13c §9's own ranked slot 1.
  *
  * WS-20: the answer is now the SAME PROVIDER's own tag for that slot (`facingNameToTag`), never a
@@ -122,201 +64,4 @@ export function d30DefaultModel(sessionTag: string | undefined): ModelTag | unde
   if (family === "openai") return facingNameToTag(providerId, firstSlotNameOfFamily("gpt") ?? "");
   if (family === "claude") return facingNameToTag(providerId, firstSlotNameOfFamily("claude") ?? "");
   return undefined;
-}
-
-/** `AdvisorReviewerRequest.messages` -> one non-streaming text turn, for the OpenAI-family Winter
- *  `Provider` shape (`providers/types.ts`'s `TurnInputItem`/`ProviderEvent`) — the SAME shape
- *  `agent/reviewer.ts`'s `BashReviewer` already drives, reused here rather than re-derived. Never
- *  streams (WS-06 §4/R6-G: "an auxiliary generation never emits stream_events" is the router's OWN
- *  rule for its reviewer backend; Winter's side of that is simply never surfacing partial deltas). */
-async function generateOverWinterProvider(provider: Provider, model: string, input: AdvisorReviewerRequest): Promise<AdvisorReviewerTurn> {
-  const turnInput: TurnInputItem[] = input.messages.map((m) => ({ type: "message", role: m.role === "tool" ? "assistant" : m.role, content: m.content }));
-  let text = "";
-  for await (const ev of provider.streamTurn({ model, input: turnInput, tools: [] })) {
-    if (ev.type === "text_delta") text += ev.delta;
-    else if (ev.type === "error") throw new Error(`advisor reviewer provider error (${ev.code})`);
-  }
-  return { kind: "text", text };
-}
-
-/**
- * `targetModel` is the D30-reported canonical id (e.g. `gpt-6-astra`) — what `ResolvedReviewer.model`
- * states to the caller. The WIRE call is a SEPARATE concern: `createOpenAiCompatibleRuntimeProvider`
- * forwards an arbitrary model string verbatim (`manager.ts`'s own doc: "openai-compatible has no
- * allowlist — arbitrary API models are legitimate there"), so `targetModel` is sent as-is on that
- * branch. `createCodexOauthRuntimeProvider`'s backend, by contrast, only accepts its OWN verified
- * slugs (`CODEX_MODELS` — `manager.ts`'s `resolveSelection` falls an unrecognised configured slug
- * back to `DEFAULT_CODEX_MODEL` for exactly this reason), and 8d has no canonical-id -> Codex-native
- * slug table — so the codex-oauth branch sends `DEFAULT_CODEX_MODEL` on the wire while still
- * REPORTING `targetModel` as the resolved reviewer's `model`. Documented simplification, not a typo:
- * a future D30 slot-to-adapter-id table (the SDK's own `resolveSlotToProvider`, WS-13c §4) is the
- * real fix and is out of this lane's scope.
- */
-// WS-20 (review round 2, nit b): the OLD version tried codex-oauth material FIRST, unconditionally,
-// for EVERY openai-family target — so an `openai/*` tag with a real OpenAI key present, on a home
-// that ALSO happened to have codex-oauth material stored, silently reviewed through the WRONG
-// provider with a HARDCODED model id ("gpt-5.6-sol"), ignoring `targetModel` entirely. `providerId`
-// (the target tag's OWN provider, `splitTag(targetModel).providerId` at the call site) now gates
-// this explicitly: codex-oauth material is read ONLY for a `codex-oauth/*` target; every other
-// openai-family provider (plain `openai/*`, or any other GPT-dialect catalog provider) goes straight
-// to the openai-compatible branch with the tag's own `targetModel`, never a hardcoded substitute.
-function openAiFamilyReviewer(secrets: SecretStore, settings: () => Settings | undefined, targetModel: string, providerId: string): AdvisorReviewer {
-  return {
-    async generate(input: AdvisorReviewerRequest): Promise<AdvisorReviewerTurn> {
-      if (providerId === "codex-oauth") {
-        const material = await readCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth);
-        if (material !== null) {
-          // WS-20 (whole-branch review nit): the tag's OWN model id goes on the wire — the arm used to
-          // inline the deleted `DEFAULT_CODEX_MODEL` ("gpt-5.6-sol"), so a `codex-oauth/gpt-5.6-terra`
-          // advisor tag silently ran Sol.
-          return generateOverWinterProvider(createCodexOauthRuntimeProvider(secrets), targetModel, input);
-        }
-        throw new Error("advisor reviewer: codex-oauth credential material is missing for a codex-oauth/* target");
-      }
-      // WS-20 L3.4: `provider.type`/`provider.baseUrl` no longer exist on `ProviderSettings` — the
-      // BYO endpoint lives at `providers.openai.baseUrl` (`providerBaseUrlFor`) regardless of which
-      // provider is active.
-      const baseUrl = providerBaseUrlFor(settings(), "openai") ?? OPENAI_API_BASE_URL;
-      return generateOverWinterProvider(createOpenAiCompatibleRuntimeProvider(secrets, baseUrl), targetModel, input);
-    },
-  };
-}
-
-/**
- * The Claude-family reviewer, over the SAME `anthropic:default` credential-material record the
- * official leg's own credential plan already reads (`keychain.ts`'s `ANTHROPIC_CREDENTIAL_SECRET_NAME`
- * — NO new credential kind, per P8d-8). Built directly on
- * `@yanlinglabs/winter-provider-runtime`'s Anthropic Messages adapter rather than through
- * `providers/runtime-provider.ts` (that module has no Anthropic export today, and it is Lane 2's file
- * in 8d — this is a small, self-contained adapter local to the advisor's own concern, never a second,
- * independently-drifting copy of `RuntimeBackedProvider`).
- */
-function claudeFamilyReviewer(secrets: SecretStore, targetModel: string, connectionOverride?: () => { anthropicBaseUrl?: string } | undefined): AdvisorReviewer {
-  const adapter = createAnthropicMessagesAdapter();
-  const ref = credentialRefFor("anthropic");
-  // P8d-17: TEST-ONLY (never a production `daemon.ts` wiring, never an ambient env var — the same
-  // "a value only a test constructs" spirit as `official-options.ts`'s own `officialConnectionOverride`
-  // and the Winter leg's `winter-test/<name>` double). `local: true` is required for the loopback
-  // baseUrl to pass provider-runtime's own endpoint policy (the SAME reason
-  // `createOpenAiCompatibleRuntimeProvider`'s own header states for its identical declaration).
-  const override = connectionOverride?.();
-  const context: ProviderContext = {
-    connection: { providerId: "anthropic", ...(override?.anthropicBaseUrl === undefined ? {} : { baseUrl: override.anthropicBaseUrl, local: true }) },
-    credentials: credentialStoreOverSecretStore(secrets),
-    authRef: ref ?? { kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME },
-    stallTimeoutMs: 60_000,
-    log: () => {},
-  };
-  return {
-    async generate(input: AdvisorReviewerRequest): Promise<AdvisorReviewerTurn> {
-      const model = targetModel;
-      let text = "";
-      for await (const ev of adapter.streamTurn({ model, messages: input.messages.map((m) => ({ role: m.role, content: m.content })) }, context)) {
-        if (ev.type === "text_delta") text += ev.text;
-        else if (ev.type === "error") throw new Error(`advisor reviewer provider error (${ev.error.code})`);
-      }
-      return { kind: "text", text };
-    },
-  };
-}
-
-/**
- * `advisorReviewerFor` (Interfaces block) — the ONE `ReviewerResolver` `create.ts` passes as
- * `RuntimeSdkOptions.advisor.resolveReviewer`, ALWAYS (never conditional on the setting — the
- * no-restart rule lives inside this closure, not at the call site).
- *
- * SYNCHRONOUS BY CONTRACT (`ReviewerResolver = () => ResolvedReviewer | undefined`): this function
- * decides WHETHER a reviewer resolves and WHICH model it reports WITHOUT a live Keychain read —
- * credential PRESENCE is checked against `credentialPresenceCache`'s sync, background-refreshed
- * snapshot (review fix F3), and a family with no configured credential reports `undefined` here,
- * exactly like the SDK's own `resolveReviewer` does for its "nothing to ask" case — never a throw.
- * The credential's actual VALUE is still read (and the HTTP-capable provider actually built) only
- * inside the returned `AdvisorReviewer.generate()`, which IS async — so a credential that was present
- * at `resolveReviewer()` time but goes missing (or was a cold-cache false-negative promoted to
- * true moments later) before `generate()` runs is WS-06 §4's ordinary "reviewer unavailable" tool
- * error, never a crash; presence here is a snapshot, not a lock (matching the SDK's own R6-G note on
- * `credentialEpoch`).
- */
-/**
- * Review fix F3: a SYNCHRONOUS "is this credential material present" cache, refreshed in the
- * background — the same "a synchronous answer over an asynchronous fact" shape
- * `winter-agent-sdk`'s own `production-wiring.ts`/`session-provider.ts` uses for its identical
- * credential-gate problem (`credentialPresent`, read during the M5 diagnosis). `ReviewerResolver` is
- * pinned SYNCHRONOUS (`() => ResolvedReviewer | undefined`), so a real Keychain read cannot happen
- * inside `resolveReviewer()` itself — this cache is what lets the resolver answer `undefined` for a
- * family with no configured credential WITHOUT ever awaiting inside the call.
- *
- * COLD-START HONESTY: a name probed for the first time answers `false` (absent) synchronously and
- * fires a background probe; the NEXT call after that probe lands reads the real answer. This can
- * under-report "present" for one call right after this resolver is first built (or after a fresh
- * material write) — recorded rather than hidden, and it fails toward "no reviewer" (WS-06 §4's own
- * safe default), never toward inventing a provider for a credential that turns out absent.
- */
-function credentialPresenceCache(secrets: SecretStore): (name: string) => boolean {
-  const cache = new Map<string, boolean>();
-  const inFlight = new Set<string>();
-  const refresh = (name: string): void => {
-    if (inFlight.has(name)) return;
-    inFlight.add(name);
-    void readCredentialMaterial(secrets, name)
-      .then((m) => cache.set(name, m !== null))
-      .catch(() => cache.set(name, false))
-      .finally(() => inFlight.delete(name));
-  };
-  return (name: string): boolean => {
-    refresh(name);
-    return cache.get(name) ?? false;
-  };
-}
-
-export function advisorReviewerFor(deps: {
-  settings: () => Settings | undefined;
-  secrets: SecretStore;
-  familyOf: (model: string) => AdvisorFamily;
-  sessionModel: () => string | undefined;
-  /**
-   * P8d-17 (controller ruling): TEST-ONLY (never a production `daemon.ts` wiring, never an ambient
-   * env var — mirrors `official-options.ts`'s own `officialConnectionOverride` pattern). Redirects the
-   * Claude-family reviewer's own HTTP call at a loopback Anthropic fake, so a real official-leg
-   * session's `advisor` tool call can be proven to reach a scripted reviewer end to end.
-   */
-  connectionOverride?: () => { anthropicBaseUrl?: string } | undefined;
-}): ReviewerResolver {
-  const hasCredential = credentialPresenceCache(deps.secrets);
-  return () => {
-    const explicit = winterOptionsFromSettings(deps.settings()).advisorModel;
-    const targetModel = explicit ?? d30DefaultModel(deps.sessionModel());
-    if (targetModel === undefined) return undefined;
-    const family = deps.familyOf(targetModel);
-    // WS-20: `targetModel` is a TAG (reported verbatim as `ResolvedReviewer.model`) — the internal
-    // `Provider`/adapter wire calls inside `openAiFamilyReviewer`/`claudeFamilyReviewer` speak bare
-    // model ids, split from the tag once, right at this boundary.
-    const wireModel = (() => { try { return splitTag(targetModel).modelId; } catch { return targetModel; } })();
-    // WS-20 (review round 2, nit b): the tag's OWN provider — `openAiFamilyReviewer` needs this to
-    // gate codex-oauth material to a `codex-oauth/*` target only (never tried for a plain `openai/*`
-    // one, regardless of what other credential material this home happens to have stored).
-    const targetProviderId = (() => { try { return splitTag(targetModel).providerId; } catch { return "openai"; } })();
-    // Review fix F3: "no credential for the target family" is `undefined`, checked HERE (sync, from
-    // the cache above) — never inside `generate()`, and never a live Keychain read in this function.
-    //
-    // WS-20 (review round 2, nit b follow-up): checked against the TARGET's own provider now, not
-    // "either credential in the family" — the OLD `codexOauth || openai` check would resolve a
-    // reviewer for a `codex-oauth/*` target on an openai-only-credentialed home, which then throws
-    // inside `generate()` the moment it actually runs (`openAiFamilyReviewer`'s own provider gate).
-    // Answering `undefined` HERE for that case is the correct F3 behavior: no credential for what
-    // this target actually needs.
-    if (family === "openai") {
-      const hasNeededCredential = targetProviderId === "codex-oauth"
-        ? hasCredential(CREDENTIAL_MATERIAL_NAMES.codexOauth)
-        : hasCredential(CREDENTIAL_MATERIAL_NAMES.openai);
-      if (!hasNeededCredential) return undefined;
-      return { provider: openAiFamilyReviewer(deps.secrets, deps.settings, wireModel, targetProviderId), model: targetModel };
-    }
-    if (family === "claude") {
-      if (!hasCredential(ANTHROPIC_CREDENTIAL_SECRET_NAME)) return undefined;
-      return { provider: claudeFamilyReviewer(deps.secrets, wireModel, deps.connectionOverride), model: targetModel };
-    }
-    // "other": 8d states no provider-runtime mapping for a third family (see this module's header).
-    return undefined;
-  };
 }

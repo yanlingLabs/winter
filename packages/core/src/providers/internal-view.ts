@@ -21,7 +21,7 @@
  *
  * ONE LOG LINE PER CHANGE, never per call: `refresh()` compares the new set against the old and
  * narrates only a difference (the same "one line per settings change, not a one-time transition" rule
- * `officialSubscriptionAuthFlagInert` follows).
+ * `retiredRuntimeSettingKeys` follows).
  */
 import type { SecretStore } from "../auth/secret-store";
 import { INTERNAL_JOBS_LOGIN_HINT as LOGIN_HINT } from "./internal-login-hint";

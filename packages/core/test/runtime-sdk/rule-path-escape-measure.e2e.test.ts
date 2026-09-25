@@ -1,36 +1,28 @@
-// WS-21 R.2 carry (L3 round 4, minor 4) — do the daemon's BACKSLASH-ESCAPED rule paths match on BOTH real
-// binaries at the integrated versions?
+// WS-21 R.2 carry (L3 round 4, minor 4) — do the daemon's BACKSLASH-ESCAPED rule paths match on the real
+// `winter` binary at the integrated versions?
 //
 // Every literal path the daemon writes into a permission rule goes through `escapeRulePath` (`[`, `]`,
-// `*`, `\` backslash-escaped; `?` raw), because both legs read rule paths as gitignore-style patterns
-// now (SV-6). A home or project named `r[1]*\x` must therefore be matched LITERALLY by the escaped rule
-// — and, as the control, NOT by the raw spelling, whose `[1]` is a character class. This measures the
-// deny side (the one the daemon relies on for its fences) with a real Write on each leg:
-//   - Winter: the built `winter` binary (`WINTER_RUNTIME_EXECUTABLE`), the `winter-test/laneb` double
-//     (one Write to the path its prompt names), `Options.permissions.deny`;
-//   - official: the pinned `claude` binary against the Anthropic loopback fake, the rules in the
-//     flag-settings layer (`settings.permissions.deny`, the daemon's own official-leg carrier).
-// `acceptEdits` plus an allowing `canUseTool`: nothing but the deny rule can stop the write.
+// `*`, `\` backslash-escaped; `?` raw), because the runtime reads rule paths as gitignore-style patterns
+// (SV-6). A home or project named `r[1]*\x` must therefore be matched LITERALLY by the escaped rule — and,
+// as the control, NOT by the raw spelling, whose `[1]` is a character class. This measures the deny side
+// (the one the daemon relies on for its fences) with a real Write: the built `winter` binary
+// (`WINTER_RUNTIME_EXECUTABLE`), the `winter-test/laneb` double (one Write to the path its prompt names),
+// `Options.permissions.deny`. `acceptEdits` plus an allowing `canUseTool`: nothing but the deny rule can
+// stop the write.
 //
-// MEASURED (R.2, SDK dd9f17d / router 7ac222a / claude 0.3.250): `[`, `]` and `*` escaped once matched on
-// both legs; a BACKSLASH needed claude's DOUBLE escape (its rule-content parse unescapes once before the
-// gitignore layer). R.1 ruling 2: the router's `escapeRulePath` (router 3279a1d) is claude's rule-content
-// escape over the gitignore escape — `\` → four, `[ ] *` → `\\x`, `( )` → `\\\x` — on BOTH legs, and the
-// daemon imports it. MEASURED at router 3279a1d: every name below is denied on the official leg; and at
-// agent SDK 5e37898 (claude's rule-content parse, from 6170adb on) on the Winter leg too — the rows are
-// real assertions on both legs. The grammar case pins claude's own behaviour with hand-spelled rules,
-// independent of `escapeRulePath`.
+// MEASURED at agent SDK 5e37898 (claude's rule-content parse, from 6170adb on): every name below is denied
+// on the Winter leg — the rows are real assertions. (WS-23: the official-leg half of this measurement —
+// the pinned `claude` binary, and claude's own double-backslash grammar case — is gone with that leg; the
+// router's `escapeRulePath` is still claude's rule-content escape over the gitignore escape, which is the
+// grammar the Winter runtime reads.)
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { query as winterQuery } from "@yanlinglabs/winter-agent-sdk";
-import { query as claudeQuery, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { anthropicFake, startFake } from "@yanlinglabs/winter-provider-conformance";
 import { escapeRulePath } from "@yanlinglabs/winter-runtime-sdk";
 import { fsRootAnchored } from "../../src/runtime-sdk/mode-options";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
-import { claudeRuntimeForTests, describeWithClaudeRuntime, LOOPBACK_MODEL_ID } from "../helpers/claude-runtime";
 
 /** A directory whose NAME needs escaping (`name`), and the file a Write targets inside it. The session's
  *  cwd is a plain sibling: claude refuses a working directory whose name holds a backslash ("Can't access
@@ -90,73 +82,6 @@ describeWithWinterBinary("R.2 carry — escaped rule paths on the Winter leg", (
       expect(deniedEscaped).toBe(true);
     }, 60_000);
   }
-});
-
-describeWithClaudeRuntime("R.2 carry — escaped rule paths on the official leg", () => {
-  async function writeUnder(name: string, escaped: boolean | "single" | "double"): Promise<boolean> {
-    const runtime = claudeRuntimeForTests();
-    if (runtime === undefined) throw new Error("unreachable: the suite is skipped without a bed");
-    const b = bed("winter-rule-escape-o-", name);
-    const cfg = join(b.root, "cfg");
-    mkdirSync(cfg, { recursive: true });
-    let served = false;
-    const fake = await startFake({
-      routes: [{
-        path: "*",
-        handler: async (_req, recorded) => {
-          if (!(recorded.path === "/v1/messages" && recorded.method === "POST")) return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
-          if (!served && !recorded.body.includes("tool_result")) {
-            served = true;
-            return anthropicFake.anthropicTurnResponse({ blocks: [{ type: "tool_use", id: "call_write_1", name: "Write", jsonChunks: [JSON.stringify({ file_path: b.target, content: "escape measurement\n" })] }], stopReason: "tool_use" });
-          }
-          return anthropicFake.anthropicTurnResponse({ blocks: [{ type: "text", chunks: ["done"] }], stopReason: "end_turn" });
-        },
-      }],
-    });
-    try {
-      const q = claudeQuery({
-        prompt: "write the file you were scripted to write",
-        options: {
-          pathToClaudeCodeExecutable: runtime.executable,
-          model: LOOPBACK_MODEL_ID,
-          cwd: b.cwd,
-          permissionMode: "acceptEdits",
-          settingSources: [],
-          settings: { permissions: { deny: denyRules(b.dir, escaped) } },
-          maxTurns: 4,
-          canUseTool: async (_tool, input) => ({ behavior: "allow", updatedInput: input }),
-          env: {
-            HOME: b.home, USER: "winter-measure", LOGNAME: "winter-measure", SHELL: "/bin/zsh", LANG: "en_US.UTF-8",
-            TMPDIR: `${join(b.home, "tmp")}/`, PATH: "/usr/bin:/bin:/usr/sbin:/sbin", CLAUDE_CONFIG_DIR: cfg,
-            ANTHROPIC_BASE_URL: fake.url, ANTHROPIC_API_KEY: "sk-ant-fake-rule-escape-measurement-0000",
-            CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", DISABLE_AUTOUPDATER: "1", CLAUDE_CODE_MAX_RETRIES: "0",
-          },
-        },
-      });
-      for await (const m of q as AsyncIterable<SDKMessage>) if ((m as { type: string }).type === "result") break;
-      return existsSync(b.target);
-    } finally {
-      await fake.close();
-      rmSync(b.root, { recursive: true, force: true });
-    }
-  }
-
-  for (const name of NAMES) {
-    test(`${JSON.stringify(name)}: the ESCAPED rule denies the write (the raw spelling is recorded as the control)`, async () => {
-      const deniedEscaped = !(await writeUnder(name, true));
-      const deniedRaw = !(await writeUnder(name, false));
-      console.error(`R.2 rule-escape (official) ${JSON.stringify(name)}: escaped rule denies=${deniedEscaped}; raw rule denies=${deniedRaw}`);
-      expect(deniedEscaped).toBe(true);
-    }, 60_000);
-  }
-
-  test(`${JSON.stringify(NAMES[1])}: claude's grammar — a backslash needs a DOUBLE escape (a single one does not match)`, async () => {
-    const deniedSingle = !(await writeUnder(NAMES[1], "single"));
-    const deniedDouble = !(await writeUnder(NAMES[1], "double"));
-    console.error(`R.2 rule-escape (official) ${JSON.stringify(NAMES[1])}: single escape denies=${deniedSingle}; double escape denies=${deniedDouble}`);
-    expect(deniedSingle).toBe(false);
-    expect(deniedDouble).toBe(true);
-  }, 60_000);
 });
 
 describe("the bed's own premise", () => {

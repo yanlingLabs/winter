@@ -267,7 +267,7 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     // measurement `WINTER_ADVERTISED_TOOLS_0_0_4_BASE` records predates them), and the 2026-09-18
     // ruling gives chat `WebFetch` plus — only with no Exa key stored — `WebSearch`. This daemon's
     // throwaway Keychain service holds no Exa key, so both are expected here.
-    const disallowed = new Set(disallowedToolsFor("chat", { leg: "winter", exaKeyPresent: false }));
+    const disallowed = new Set(disallowedToolsFor("chat", { exaKeyPresent: false }));
     const expected = [...new Set([
       ...WINTER_ADVERTISED_TOOLS_0_0_4_BASE, ...WINTER_ADVERTISED_MCP_TOOLS_0_0_4, "WebFetch", "WebSearch", ...chatCaps,
     ])].filter((t) => !disallowed.has(t)).sort();

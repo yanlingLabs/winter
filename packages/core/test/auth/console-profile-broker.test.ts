@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { readCredentialMaterial, writeCredentialMaterial } from "../../src/auth/credential-material";
 import { credentialStoreOverSecretStore } from "../../src/providers/credential-store";
-import { anthropicConfigDirFor, ANTHROPIC_PROFILE_NAME } from "../../src/runtime-sdk/official-options";
+import { anthropicConfigDirFor, ANTHROPIC_PROFILE_NAME } from "../../src/runtime-sdk/anthropic-paths";
 import { ANTHROPIC_CREDENTIAL_SECRET_NAME, ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
 import {
   CONSOLE_BROKER_UNAVAILABLE_REASON,

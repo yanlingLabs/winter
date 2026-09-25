@@ -1,6 +1,6 @@
 import { TRANSIENT_EVENT_TYPES, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import {
-  MAIN_THREAD, asApiRetryFrame, asAssistantFrame, asInitFrame, asMirrorErrorFrame, asResultFrame, asStreamEventFrame,
+  MAIN_THREAD, asApiRetryFrame, asAssistantFrame, asInitFrame, asResultFrame, asStreamEventFrame,
   asUserFrame, assistantText, deltaText, hasToolResults, threadIdOf, toolCalls, toolResults, userText,
 } from "./conversation";
 import {
@@ -288,12 +288,11 @@ class ProjectorImpl implements Projector {
   }
 
   /**
-   * Only the Winter leg holds a mid-turn push's `turn_started` (C2). The OFFICIAL leg's child is
-   * claude, which folds a message that arrives mid-turn INTO the running turn (a `queued_command`
+   * Only the Winter leg holds a mid-turn push's `turn_started` (C2). The retired official leg's child
+   * was claude, which folds a message that arrives mid-turn INTO the running turn (a `queued_command`
    * attachment at the next tool round — no terminal of its own), so a held announcement there would
-   * be released by a terminal that is not its own and leave a `turn_started` no `turn_completed`
-   * ever follows. That leg keeps the push-time announcement (its steer accounting is its own carry,
-   * `official-session.ts`'s "UNMEASURED" note).
+   * have been released by a terminal that is not its own. A projector built with any other
+   * `runtimeKind` keeps the push-time announcement; since WS-23 the driver builds none.
    */
   private get holdsTurnStarts(): boolean { return (this.deps.runtimeKind ?? "winter-agent") === "winter-agent"; }
   get lastResultAt(): string | undefined { return this.resultAt; }
@@ -344,23 +343,6 @@ class ProjectorImpl implements Projector {
         // whole-ledger baselines are untouched: they sum every row, which a switch does not reset.
         if (this.totals !== undefined) this.totals = { ...this.totals, main: 0, mainExact: true };
       }
-    }
-
-    // ── the official leg's mirror error (P8c-11 / Task 2.2, provisional shape — see
-    // `asMirrorErrorFrame`'s doc comment) — never persisted, never broadcast; the ONE side effect
-    // the batch carries besides the two event sinks. `sanitizeDetail` is the same opaque-marker
-    // filter `errors.ts` uses for `agent_error.message`: a mirror failure can in principle name a
-    // provider payload, and this log line is not the session JSONL.
-    // No `claimed`/checkpoint guard here (review r1, minor): the flag this sets is idempotent —
-    // re-marking an already `"repair-required"` record a second time on a replay changes nothing
-    // — and the wire shape itself is provisional (see `asMirrorErrorFrame`'s doc comment). Revisit
-    // once the real recorded shape lands, in case it turns out NOT idempotent to re-apply.
-    const mirrorError = asMirrorErrorFrame(msg);
-    if (mirrorError !== undefined) {
-      this.deps.log.warn?.("[projector] the official leg reported a mirror error — this session's transcript health is repair-required", {
-        sessionId: this.deps.sessionId, ...(sanitizeDetail(mirrorError.detail) !== undefined ? { detail: sanitizeDetail(mirrorError.detail) } : {}),
-      });
-      return { persist: [], broadcast: [], transcriptHealth: "repair-required" };
     }
 
     const claim = (sourceId: string, produce: () => ProjectedEvent[]): ProjectedBatch => this.claimed(sourceId, produce);

@@ -384,8 +384,8 @@ export interface CredentialEvictionDeps {
    *
    * Needed for a TOOL key rather than a provider credential: the Exa key is not in any session's
    * durable record, so `providerOf` cannot answer "is this session affected". The leg can — the key
-   * reaches a child only through the WINTER leg's `Options.web.search.authRef` (the official leg is
-   * sent no `web` block at all, because claude owns its own web tools).
+   * reaches a child only through the WINTER leg's `Options.web.search.authRef`. (WS-23: every live
+   * child is a Winter one now; a legacy `official` record has no live child until it is adopted.)
    */
   legOf?(sessionId: string): "engine" | "winter" | "official" | undefined;
   /**
@@ -431,8 +431,7 @@ export interface CredentialEvictionDeps {
  * withholds `WebSearch` from chat/dispatch when the daemon's `Search` can work). Both are fixed at
  * spawn, so adding or removing the key changed nothing for a live session: chat would keep a `Search`
  * that 401s and no `WebSearch` to fall back on. Every Winter-leg child is therefore replaced,
- * resumably, exactly as a provider credential's are. The official leg is untouched: it is sent no
- * `web` block at all.
+ * resumably, exactly as a provider credential's are.
  *
  * `web-search` (the legacy Brave key) still evicts nothing — no child's `Options` names it.
  *
