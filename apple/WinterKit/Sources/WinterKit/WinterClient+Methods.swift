@@ -1837,7 +1837,7 @@ public struct WinterCapability: Equatable, Sendable {
     }
 }
 
-/// A resolved runtime binary (`versions.get`'s `installed.winterExecutable`/`.claudeExecutable`).
+/// A resolved runtime binary (`versions.get`'s `installed.winterExecutable`).
 ///
 /// **There is no version here, by nature, not by omission**: the `winter` binary has no version
 /// flag, so the only true facts about it are WHERE it is and WHICH resolver rung answered
@@ -1859,33 +1859,32 @@ public struct VersionsExecutable: Equatable, Sendable {
 /// setting, a dev checkout, a home-local binary) and is a thing to SHOW, never an error to raise.
 ///
 /// Every field is independently optional: `pins`/`installed` are decoded as plain string maps so a
-/// fourth pin a later daemon adds arrives intact instead of being dropped by a fixed struct, and
-/// `official` is `nil` when no Release bundle is staged — a normal state on every dev machine.
+/// pin a later daemon adds arrives intact instead of being dropped by a fixed struct, and `bundle` is
+/// `nil` when no Release bundle is staged — a normal state on every dev machine.
+///
+/// WS-23: the official `claude` runtime is retired, so there is no `claudeExecutable` and no
+/// `claudeAgentSdk` pin; the bundle block is `bundle` (`{ runtimes?, ant? }`), no longer `official`.
 public struct VersionsSnapshot: Equatable, Sendable {
     /// The daemon's own version (`VERSION`).
     public let core: String?
-    /// Compile-time pins, keyed as the wire keys them (`winterAgentSdk`, `winterRuntimeSdk`,
-    /// `claudeAgentSdk`).
+    /// Compile-time pins, keyed as the wire keys them (`winterAgentSdk`, `winterRuntimeSdk`).
     public let pins: [String: String]
     /// Actually-resolved SDK versions, same keys. Only the STRING-valued entries land here; the
-    /// two executable objects are split out below because they carry no version at all.
+    /// executable object is split out below because it carries no version at all.
     public let installed: [String: String]
     public let winterExecutable: VersionsExecutable?
-    public let claudeExecutable: VersionsExecutable?
-    /// The staged Release bundle's own block, kept OPAQUE: its shape is the daemon's and no
-    /// surface reads it yet, so decoding it into named fields would be inventing a contract.
-    /// `nil` when nothing is staged.
-    public let official: [String: JSONValue]?
+    /// The staged Release bundle's own block (`{ runtimes?, ant? }` — the runtimes record and ant's
+    /// own), kept OPAQUE: its shape is the daemon's and no surface reads it yet, so decoding it into
+    /// named fields would be inventing a contract. `nil` when nothing is staged.
+    public let bundle: [String: JSONValue]?
 
     public init(core: String?, pins: [String: String], installed: [String: String],
-                winterExecutable: VersionsExecutable?, claudeExecutable: VersionsExecutable?,
-                official: [String: JSONValue]?) {
+                winterExecutable: VersionsExecutable?, bundle: [String: JSONValue]?) {
         self.core = core
         self.pins = pins
         self.installed = installed
         self.winterExecutable = winterExecutable
-        self.claudeExecutable = claudeExecutable
-        self.official = official
+        self.bundle = bundle
     }
 }
 
@@ -2066,14 +2065,13 @@ extension WinterClient {
         return VersionsSnapshot(
             core: r["core"]?.stringValue,
             pins: strings(r["pins"]),
-            // `compactMapValues { $0.stringValue }` also does the splitting: the two executable
-            // entries are OBJECTS, so they simply don't land in the string map.
+            // `compactMapValues { $0.stringValue }` also does the splitting: the executable entry is
+            // an OBJECT, so it simply doesn't land in the string map.
             installed: strings(installed),
             winterExecutable: executable(installed?["winterExecutable"]),
-            claudeExecutable: executable(installed?["claudeExecutable"]),
             // An explicit `null` decodes to `.null`, whose `objectValue` is nil — the same answer
             // as an absent key, which is what "no Release bundle staged" means either way.
-            official: r["official"]?.objectValue
+            bundle: r["bundle"]?.objectValue
         )
     }
 
