@@ -73,6 +73,8 @@ async function boot(store: SessionStore, home: string, outcome: PlanSwitchOutcom
 const cases: Array<{ name: string; outcome: PlanSwitchOutcome; expectWrite: boolean; expectedCode?: string }> = [
   { name: "same-runtime", outcome: { kind: "same-runtime" }, expectWrite: true },
   { name: "refused", outcome: { kind: "refused", code: "runtime_selection_refused", detail: "no credential" }, expectWrite: false, expectedCode: "runtime_selection_refused" },
+  // WS-23: a legacy claude-agent record that could not be adopted onto the Winter leg.
+  { name: "refused (legacy adoption)", outcome: { kind: "refused", code: "legacy_session_migration_refused", detail: "cannot move", reason: "transcript-collision" }, expectWrite: false, expectedCode: "legacy_session_migration_refused" },
   { name: "confirmation_required", outcome: { kind: "confirmation_required", warnings: ["lossy"], portable: ["deepseek"] }, expectWrite: false, expectedCode: "handoff_confirmation_required" },
 ];
 
@@ -106,6 +108,24 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
       }
     });
   }
+
+  // WS-23: the refusal's own `reason` travels as `data.reason` beside `data.code`.
+  test("a refusal's reason reaches error.data.reason", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-setmodel-handoff-reason-"));
+    const store = new SessionStore(home);
+    const sessionId = store.createSession("global");
+    const { server, c: client } = await boot(store, home, { kind: "refused", code: "legacy_session_migration_refused", detail: "cannot move", reason: "repair-required" });
+    try {
+      const res = await client.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/sonnet" });
+      expect(res.error?.data).toEqual({ code: "legacy_session_migration_refused", reason: "repair-required" });
+      expect(store.meta(sessionId).model).toBeUndefined();
+    } finally {
+      client.close();
+      server.stop();
+      store.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════
   // Winter Phase 10b (D1 fix round 3) — THE 1c INVARIANT.

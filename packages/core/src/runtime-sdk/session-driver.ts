@@ -106,6 +106,12 @@ export type WinterLegRefusalCode =
   | "winter_session_ended"            // the driver said the store refused it for good
   | "not_supported_on_winter_leg"     // `session.compact` (SDK 0.0.4 carry)
   | "runtime_selection_refused"       // P8c-14: the router's selectRuntime refused this session's model
+  // WS-23 (ruling R2): a session recorded on the retired official leg (`runtimeKind: "claude-agent"`)
+  // could not be moved onto the Winter leg at its resume — its transcript collided with another copy at
+  // the Winter key, or is already marked `repair-required`. `data.reason` says which. Nothing is moved
+  // or opened, and the record keeps naming the old leg, so the next resume refuses the same way until
+  // the transcript is repaired.
+  | "legacy_session_migration_refused"
   // WS-21: a run-home router's refusal (`RunHomeError.code`), forwarded verbatim as `data.code`.
   | RunHomeErrorCode;
 
@@ -385,10 +391,22 @@ export interface WinterSessionDrivers {
   /** One HEADLESS turn (routines, the -p path): the session's driver (created for a session that
    *  has no record yet, resumed otherwise), `send`, then wait until nothing is in flight. */
   runTurn(sessionId: string, text: string, clientName: string): Promise<void>;
-  /** A live driver, or a resumed one when the record says "winter"; undefined ⇒ no transcript to
-   *  resume (an engine-era or record-less session — the IPC layer refuses typed). A record the retired
-   *  official leg wrote is refused typed at resume (`session_predates_winter_leg`). */
+  /** A live driver, or a resumed one when the record says "winter" — or "official", which is adopted
+   *  onto the Winter leg first (`adoptLegacyRecord`); undefined ⇒ no transcript to resume (an
+   *  engine-era or record-less session — the IPC layer refuses typed). */
   ensure(sessionId: string): Promise<LegSession | undefined>;
+  /**
+   * WS-23 (ruling R2): move a record the retired official leg wrote (`runtimeKind: "claude-agent"`)
+   * onto the Winter leg, WITHOUT opening anything — the transcript re-keyed to the Winter cwd key, then
+   * `runtimeKind`/`selection` rewritten. The same step `resume()` runs first; `session.setModel` calls it
+   * too, so a model change on a not-yet-resumed legacy session lands on a Winter record rather than
+   * being refused for disagreeing with one. Returns the (possibly re-read) record; a record that is not
+   * a legacy one comes back untouched. Throws a typed `WinterLegRefusal`
+   * (`legacy_session_migration_refused`) and moves nothing on a collision or a `repair-required`
+   * transcript. SYNCHRONOUS — sqlite and same-volume renames only — so `ensure()`'s no-await window
+   * holds. Optional so a test double need not implement it.
+   */
+  adoptLegacyRecord?(sessionId: string): RuntimeSessionRecord | undefined;
   /** The session was DELETED (the reaper, the cleaner): end its child (bounded) and forget the
    *  driver — a live child never outlives its session (the reaper's 600 s grace is shorter than
    *  the 900 s idle timer). Never throws. */
@@ -598,6 +616,77 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     let cwd: string;
     try { cwd = winterCwdOf(sessionId, deps.store.meta(sessionId).cwd); } catch { return record; }
     return rekeyTranscriptToCwd({ home: deps.home, records: deps.records, log }, sessionId, record, cwd);
+  };
+
+  /**
+   * WS-23 (ruling R2) — THE LAZY ADOPTION of a record the retired official leg wrote. See
+   * `WinterSessionDrivers.adoptLegacyRecord` for the contract; the WHY of each step:
+   *
+   *  - Nothing new is needed to READ the history. The Winter runtime resumes transcripts the `claude`
+   *    binary wrote (it reads claude's entry shapes), and a resume needs only the transcript file and a
+   *    lease, never a Winter producer record — the same file the retired handoff barrier reused
+   *    unchanged when it moved a session between the two legs.
+   *  - `repair-required` refuses BEFORE anything moves: that flag means the canonical transcript is
+   *    not proven (a quarantined working copy, an earlier collision), and opening a Winter child on it
+   *    would append to a history nobody has reconciled.
+   *  - The re-key runs next, and a collision (both keys hold the session) or a refused move leaves the
+   *    record marked `repair-required` by `rekeyTranscriptToCwd` — refused here too, with the record
+   *    still naming `claude-agent`, so every later resume refuses the same way rather than opening on
+   *    whichever copy the Winter key happens to hold.
+   *  - Only then are `runtimeKind`/`selection` rewritten — the same two fields (plus the credential
+   *    locator) the retired handoff's `confirmInit` patched when a session moved legs. Provider, model,
+   *    family and auth family are the session's own and carry over verbatim: a `console/*` record stays
+   *    a Console session, and whether its credential can serve a turn is `beforeTurn`'s typed question,
+   *    exactly as for any Winter session.
+   *  - A `claude-oauth` selection is refused: that credential family never routed to the Winter runtime
+   *    (D28), and claude.ai subscription auth never shipped, so no such record should exist — but if one
+   *    does, a typed refusal is the only honest answer.
+   *
+   * SYNCHRONOUS — sqlite and same-volume renames — so `ensure()`'s no-await window (see `resume()`) holds.
+   */
+  const adoptLegacyRecord = (sessionId: string): RuntimeSessionRecord | undefined => {
+    const record = recordOf(sessionId);
+    const records = deps.records;
+    if (record === undefined || records === undefined || record.runtimeKind !== "claude-agent" || record.backendSessionId === undefined) return record;
+    const refuse = (reason: string, why: string): never => {
+      log(`legacy session ${sessionId} not adopted onto the Winter leg (${reason})`);
+      throw new WinterLegRefusal(
+        "legacy_session_migration_refused",
+        `session ${sessionId} was created on the retired official Claude runtime and cannot move to Winter's runtime: ${why}`,
+        reason,
+      );
+    };
+    if (record.selection.authFamily === "claude-oauth") {
+      refuse("claude-oauth", "it was authorised with a Claude subscription login, which Winter's runtime does not use — start a new session");
+    }
+    if (record.transcriptHealth === "repair-required") {
+      refuse("repair-required", "its transcript is marked repair-required, so its history is not proven — run `winter doctor`");
+    }
+    rekeyForCanonicalCwd(sessionId, record);
+    const moved = recordOf(sessionId);
+    if (moved === undefined) return undefined;
+    if (moved.transcriptHealth === "repair-required") {
+      refuse("transcript-collision", "its transcript could not be moved to the key Winter reads it from (another copy is already there, or the move was refused) — run `winter doctor`");
+    }
+    const authRef = credentialRefFor(moved.selection.providerId, deps.home);
+    try {
+      records.patch(sessionId, moved.state, {
+        runtimeKind: "winter-agent",
+        selection: {
+          ...moved.selection,
+          runtimeKind: "winter-agent",
+          sdkVersion,
+          engineVersion: sdkVersion,
+          reason: "adopted onto the Winter runtime at its next resume: the official claude runtime this session was created on is retired (WS-23)",
+          decidedAt: new Date().toISOString(),
+        },
+        authRef: authRef?.kind === "keychain" ? `keychain:${authRef.account}` : undefined,
+      });
+    } catch (err) {
+      throw new WinterLegRefusal("winter_leg_unavailable", `the runtime record for ${sessionId} could not be moved to the Winter leg (${err instanceof Error ? err.name : "unknown"})`);
+    }
+    log(`legacy session ${sessionId} adopted onto the Winter leg (${moved.selection.providerId}, transcript kept)`);
+    return recordOf(sessionId);
   };
 
   /** The facts every incarnation of a session needs, assembled once per driver. */
@@ -1276,7 +1365,10 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
    */
   const resume = async (sessionId: string): Promise<LegSession> => {
     assertSpine();
-    const recorded = recordOf(sessionId);
+    // WS-23 (R2): a record the retired official leg wrote is adopted onto the Winter leg first — its
+    // transcript re-keyed, its runtime kind and selection rewritten — or refused typed, having moved
+    // nothing (`adoptLegacyRecord`). Synchronous, like everything up to `drivers.set` (n7).
+    const recorded = sessionLegOf(recordOf(sessionId)) === "official" ? adoptLegacyRecord(sessionId) : recordOf(sessionId);
     const leg = sessionLegOf(recorded);
     // Round 3: the transcript is where the child will look BEFORE it opens (synchronous — n7).
     const record = recorded !== undefined && leg === "winter" ? rekeyForCanonicalCwd(sessionId, recorded) : recorded;
@@ -1297,14 +1389,15 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     return session;
   };
 
-  /** P8c-14: a leg the table can resume a driver on — `official` included, so a record the retired
-   *  official leg wrote reaches `resume()`'s typed refusal rather than a fresh `create()` (WS-23). */
+  /** P8c-14: a leg the table can resume a driver on — `official` included, because `resume()` adopts
+   *  such a record onto the Winter leg before it opens (WS-23). */
   const isResumableLeg = (leg: SessionLeg | undefined): boolean => leg === "winter" || leg === "official";
 
   return {
     legForNewSession: legForNew,
     legOf: (sessionId) => sessionLegOf(recordOf(sessionId)),
     advisorProviderOf: (sessionId) => (drivers.has(sessionId) ? advisorProviders.get(sessionId) : undefined),
+    adoptLegacyRecord,
     assertAvailable,
     create,
     get: (sessionId) => drivers.get(sessionId),

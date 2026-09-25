@@ -6,8 +6,8 @@
 // WS-23: the official `claude` leg is retired, so no switch crosses runtimes — the cross-runtime half
 // of this file (the handoff barrier's plan/execute, the deferred execution, `confirmInit`, the
 // zero-turn re-selection, the `crossRuntime` fence) went with the code it tested. What stays is the
-// pre-flight review and the same-runtime record patch, plus one WS-23 addition: `crossRuntime` is
-// inert.
+// pre-flight review and the same-runtime record patch, plus the two WS-23 additions: a record the
+// retired leg wrote is adopted onto the Winter leg first, and `crossRuntime` is inert.
 //
 // Fix wave (M1): `planAndApplySwitch` reads the REAL pinned catalog (`rowForTag`, never faked) for
 // its own bail-out #4 — so every case below that means to REACH the fake selector uses a real catalog
@@ -20,7 +20,7 @@ import type { RuntimeDirectoryEntry, RuntimeSelection, SelectionAlternative, Ses
 import { modelLabelFor, planAndApplySwitch, renderNoCredentialHint, type HandoffDeps, type SwitchReviewer } from "../../src/runtime-sdk/handoff";
 import { openRuntimeStateDb, RuntimeSessionRecords } from "../../src/runtime-state";
 import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
-import type { LegSession, WinterSessionDrivers } from "../../src/runtime-sdk/session-driver";
+import { WinterLegRefusal, type LegSession, type WinterSessionDrivers } from "../../src/runtime-sdk/session-driver";
 import type { Settings } from "../../src/settings";
 
 async function withRs<T>(fn: (rs: ReturnType<typeof openRuntimeStateDb>, records: RuntimeSessionRecords) => Promise<T> | T): Promise<T> {
@@ -101,12 +101,13 @@ function freshOnlySelector(forModel: (model: string | undefined) => RuntimeSelec
   };
 }
 
-function fakeWinter(opts: { live?: LegSession }): WinterSessionDrivers {
+function fakeWinter(opts: { live?: LegSession; adoptLegacyRecord?: WinterSessionDrivers["adoptLegacyRecord"] }): WinterSessionDrivers {
   const never = (): never => { throw new Error("not reached by this test"); };
   return {
     legForNewSession: () => "winter", legOf: never, assertAvailable: () => {},
     create: never, get: () => opts.live, runTurn: never, ensure: never,
     evict: async () => {}, list: () => [], endAll: never,
+    ...(opts.adoptLegacyRecord === undefined ? {} : { adoptLegacyRecord: opts.adoptLegacyRecord }),
   };
 }
 
@@ -224,6 +225,68 @@ describe("WS-23: runtimes.handoff.crossRuntime is inert", () => {
       });
     });
   }
+});
+
+// WS-23 (ruling R2): a session the retired official leg created is adopted onto the Winter leg
+// BEFORE the switch is decided — the same step its next resume takes — or the switch is refused with
+// the adoption's own typed refusal and nothing written.
+describe("WS-23: a legacy claude-agent record is adopted before the switch", () => {
+  test("the record is adopted first, then reviewed and patched — and the 1c invariant holds (runtimeKind winter-agent)", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1", "claude-agent");
+      const adopted: string[] = [];
+      const adopt: WinterSessionDrivers["adoptLegacyRecord"] = (sessionId) => {
+        adopted.push(sessionId);
+        const current = records.get(sessionId)!;
+        records.patch(sessionId, current.state, { runtimeKind: "winter-agent", selection: { ...current.selection, runtimeKind: "winter-agent" } });
+        return records.get(sessionId);
+      };
+      const decided = { ...SELECTION("winter-agent"), providerId: "openai", modelRef: "openai/gpt-5.6-sol", family: "gpt" };
+      const out = await planAndApplySwitch(
+        deps({
+          records,
+          winter: fakeWinter({ adoptLegacyRecord: adopt }),
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => decided) }),
+          barrier: fakeReviewer({ prompt: false }),
+        }),
+        "s1", "openai/gpt-5.6-sol", false,
+      );
+      expect(adopted).toEqual(["s1"]);
+      expect(out).toEqual({ kind: "same-runtime", decided });
+      const after = records.get("s1")!;
+      expect(after.runtimeKind).toBe("winter-agent");
+      expect(after.selection).toEqual(decided);
+      expect(after.providerId).toBe("openai");
+    });
+  });
+
+  test("an adoption refusal is the switch's refusal — typed, with its reason, and nothing is decided or written", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1", "claude-agent");
+      let selectorCalled = false;
+      const out = await planAndApplySwitch(
+        deps({
+          records,
+          winter: fakeWinter({ adoptLegacyRecord: () => { throw new WinterLegRefusal("legacy_session_migration_refused", "cannot move to Winter's runtime: collision", "transcript-collision"); } }),
+          runtime: fakeRuntime({ selectRuntimeFor: async () => { selectorCalled = true; return SELECTION("winter-agent"); } }),
+        }),
+        "s1", "openai/gpt-5.6-sol", false,
+      );
+      expect(out).toEqual({ kind: "refused", code: "legacy_session_migration_refused", detail: "cannot move to Winter's runtime: collision", reason: "transcript-collision" });
+      expect(selectorCalled).toBe(false);
+      expect(records.get("s1")!.runtimeKind).toBe("claude-agent");
+    });
+  });
+
+  test("any other throw from the adoption is not swallowed", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1", "claude-agent");
+      await expect(planAndApplySwitch(
+        deps({ records, winter: fakeWinter({ adoptLegacyRecord: () => { throw new Error("boom"); } }) }),
+        "s1", "openai/gpt-5.6-sol", false,
+      )).rejects.toThrow("boom");
+    });
+  });
 });
 
 // Winter Phase 10b (D1-6, W18-20/W18-21): the ONE pre-flight review runs for every provider/model

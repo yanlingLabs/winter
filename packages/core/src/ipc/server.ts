@@ -521,10 +521,11 @@ class RpcFailure extends Error { constructor(public code: number, message: strin
 function rpcFromWinterRefusal(err: unknown): never {
   if (err instanceof WinterLegRefusal) {
     // Client-actionable refusals, in the same shape as `session_predates_winter_leg` (the caller can
-    // fix its own input — configure a credential, pick a servable model) rather than a
-    // daemon-internal fault.
+    // fix its own input — configure a credential, pick a servable model, repair a transcript) rather
+    // than a daemon-internal fault. WS-23: `legacy_session_migration_refused` is a session the retired
+    // official leg created whose transcript cannot move to the Winter leg as it stands.
     const invalid = err.code === "session_predates_winter_leg" || err.code === "not_supported_on_winter_leg"
-      || err.code === "runtime_selection_refused";
+      || err.code === "runtime_selection_refused" || err.code === "legacy_session_migration_refused";
     // WS-19 (W19-7): `reason` is additive beside `code` — one `runtime_selection_refused` covers
     // several distinct situations, and `"no-credential"` is the one a client should render as "you
     // have no key for <provider>" rather than "the model could not be selected". Same `data.reason`
@@ -3014,14 +3015,17 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           model = resolveModelSelection(model, liveSettingsFor(opts));
         }
         // Winter Phase 8c (Task 4.1) / 10b / WS-23: `planAndApplySwitch` runs the pre-flight review and
-        // keeps the durable record in step.
+        // keeps the durable record in step (adopting a record the retired official leg wrote first).
         // `same-runtime` still wants the ordinary store write below; `refused`/`confirmation_required`
         // stop here, typed, with NOTHING written — the caller's model preference never took effect.
         if (opts.handoff !== undefined) {
           const outcome = await opts.handoff.planAndApplySwitch(p.sessionId, model, p.confirmLossy ?? false);
           switch (outcome.kind) {
             case "refused":
-              throw new RpcFailure(ERR.INVALID_PARAMS, outcome.detail, { code: outcome.code });
+              throw new RpcFailure(ERR.INVALID_PARAMS, outcome.detail, {
+                code: outcome.code,
+                ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+              });
             case "confirmation_required":
               // Winter Phase 10b (D1-4/D1-6, W18-23): `portable` is additive in the error data —
               // filled from the router's own `reviewSwitch` classification (D1-6). Never "runtime" in

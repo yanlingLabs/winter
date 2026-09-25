@@ -11,9 +11,13 @@
 // between the Winter runtime and the official `claude` leg through the router's handoff barrier
 // (WS-05 §12's eight steps: drain, stage, validate, confirm the destination's init, defer past a
 // running turn, re-select a zero-turn session). With the official leg retired every model runs on
-// the Winter runtime, so a switch never changes runtime and all of that is gone. The SAME-RUNTIME
-// review and its record patch (below) survive, unchanged in behaviour; a record the official leg
-// wrote is one of the early bail-outs — it has no Winter selection to compare against.
+// the Winter runtime, so a switch never changes runtime and all of that is gone. Two survivors:
+//
+//   - the SAME-RUNTIME review and its record patch (below), unchanged in behaviour;
+//   - a session the official leg created is ADOPTED onto the Winter leg before anything else runs
+//     (`WinterSessionDrivers.adoptLegacyRecord`, the same step `resume()` takes) — otherwise its record
+//     would keep naming `claude-agent` and the 1c invariant in `ipc/server.ts` would refuse every
+//     model change on it until the session happened to resume.
 //
 // `settings.runtimes.handoff.crossRuntime` fenced the cross-runtime move. It is still ACCEPTED in a
 // settings file (so an existing one keeps loading) and reported once per settings change as inert
@@ -196,7 +200,9 @@ export type PlanSwitchOutcome =
   // `winter-test/*` double, an off-catalog model) that never touch the router at all. `ipc/server.ts`
   // uses it to hold the 8a record to the 1c invariant before it writes `meta.model`.
   | { kind: "same-runtime"; decided?: RuntimeSelection }
-  | { kind: "refused"; code: "runtime_selection_refused"; detail: string }
+  // `reason` (WS-23): the refusal's own sub-classification, carried to `error.data.reason` — set for
+  // `legacy_session_migration_refused`, whose `reason` says which of its refusals fired.
+  | { kind: "refused"; code: "runtime_selection_refused" | "legacy_session_migration_refused"; detail: string; reason?: string }
   // Winter Phase 10b (D1-6, W18-22): `portable` names what the pre-flight review found still carries
   // (`SwitchClassification.portable`) — additive alongside `warnings`, `[]` when the review itself is
   // unreachable or found nothing portable to name.
@@ -247,7 +253,7 @@ export function modelLabelFor(model: string): string {
 }
 
 /**
- * The whole decision: ask the router for the destination selection, run the
+ * The whole decision: adopt a legacy record, ask the router for the destination selection, run the
  * pre-flight review, and — when nothing needs confirming — patch the record to the destination.
  *
  * `model === null` (clearing an override) never triggers a decision: nothing about clearing a stored
@@ -255,11 +261,30 @@ export function modelLabelFor(model: string): string {
  */
 export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, model: string | null, confirmLossy: boolean): Promise<PlanSwitchOutcome> {
   if (model === null) return { kind: "same-runtime" };
-  const record = deps.records.get(sessionId);
+  let record = deps.records.get(sessionId);
+  // WS-23 (R2): a record the retired official leg wrote moves onto the Winter leg FIRST — transcript
+  // re-keyed, runtime kind and selection rewritten — exactly as its next resume would do it. A refusal
+  // there (a collision, a transcript already marked for repair) is this switch's refusal too: the
+  // model preference is not written onto a session that cannot run.
+  if (sessionLegOf(record) === "official" && deps.winter.adoptLegacyRecord !== undefined) {
+    try {
+      record = deps.winter.adoptLegacyRecord(sessionId);
+    } catch (err) {
+      const refusal = err as { code?: unknown; message?: unknown; reason?: unknown };
+      if (refusal?.code === "legacy_session_migration_refused") {
+        return {
+          kind: "refused",
+          code: "legacy_session_migration_refused",
+          detail: String(refusal.message),
+          ...(typeof refusal.reason === "string" ? { reason: refusal.reason } : {}),
+        };
+      }
+      throw err;
+    }
+  }
   const currentLeg = sessionLegOf(record);
-  if (record === undefined || currentLeg === "engine" || currentLeg === "official" || currentLeg === undefined) {
-    // Nothing recorded, an engine-era row, or a row the retired official leg wrote: a decision has
-    // nothing to compare against.
+  if (record === undefined || currentLeg === "engine" || currentLeg === undefined) {
+    // Nothing recorded, or an engine-era row: a decision has nothing to compare against.
     // `session.setModel`'s caller keeps its own ordinary (store-write-only) behaviour for this case.
     return { kind: "same-runtime" };
   }
