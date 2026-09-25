@@ -24,7 +24,7 @@ import {
   verifyVersionsJsonAgainstPins,
 } from "./release-lib";
 import { sha256File } from "./stage-runtimes";
-import { REQUIRED_CLAUDE_AGENT_SDK, REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK } from "../packages/core/src/runtime-sdk/versions";
+import { REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK } from "../packages/core/src/runtime-sdk/versions";
 
 describe("preflight", () => {
   test("every check passing -> ok with no failures", () => {
@@ -116,10 +116,8 @@ describe("appcastItem", () => {
 });
 
 describe("embeddedRuntimesDescriptionLine (P8d-2)", () => {
-  test("names both pinned SDK versions", () => {
-    expect(embeddedRuntimesDescriptionLine({ winterAgentSdk: REQUIRED_WINTER_AGENT_SDK, officialSdk: REQUIRED_CLAUDE_AGENT_SDK })).toBe(
-      `Winter agent SDK ${REQUIRED_WINTER_AGENT_SDK} · Claude Agent SDK ${REQUIRED_CLAUDE_AGENT_SDK}`,
-    );
+  test("names the pinned Winter agent SDK — and, since WS-23, no official runtime", () => {
+    expect(embeddedRuntimesDescriptionLine({ winterAgentSdk: REQUIRED_WINTER_AGENT_SDK })).toBe(`Winter agent SDK ${REQUIRED_WINTER_AGENT_SDK}`);
   });
 });
 
@@ -197,12 +195,12 @@ describe("releaseNotesHtml (2026-09-17 settings-surface plan, item 9)", () => {
     for (const file of files) {
       const version = file.replace(/\.md$/, "");
       const description = appcastDescription({
-        versionLine: embeddedRuntimesDescriptionLine({ winterAgentSdk: REQUIRED_WINTER_AGENT_SDK, officialSdk: REQUIRED_CLAUDE_AGENT_SDK }),
+        versionLine: embeddedRuntimesDescriptionLine({ winterAgentSdk: REQUIRED_WINTER_AGENT_SDK }),
         version,
         notesMarkdown: readFileSync(join(notesDir, file), "utf8"),
       });
       // The P8d-2 line is still there verbatim, first, and the notes follow it.
-      expect(description.startsWith(`<p>Winter agent SDK ${REQUIRED_WINTER_AGENT_SDK} · Claude Agent SDK ${REQUIRED_CLAUDE_AGENT_SDK}</p>\n`)).toBe(true);
+      expect(description.startsWith(`<p>Winter agent SDK ${REQUIRED_WINTER_AGENT_SDK}</p>\n`)).toBe(true);
       expect(description.length).toBeGreaterThan(200);
       // release.ts validates the whole feed with xmllint; do the same for one item here, since a
       // CDATA or entity mistake in the rendered notes is exactly what would only surface there.
@@ -255,39 +253,39 @@ describe("appcastDescription (item 9)", () => {
   });
 });
 
-describe("verifyVersionsJsonAgainstPins (P8d-2's claude gate, pure half)", () => {
+describe("verifyVersionsJsonAgainstPins (P8d-2's runtimes-record gate, pure half)", () => {
   const sha = "a".repeat(64);
   const goodVersionsJson = JSON.stringify({
-    schema: 1,
+    schema: 2,
     winterAgentSdk: REQUIRED_WINTER_AGENT_SDK,
     winterRuntimeSdk: REQUIRED_WINTER_RUNTIME_SDK,
-    officialSdk: REQUIRED_CLAUDE_AGENT_SDK,
-    claudeCode: "2.1.250",
-    checksums: { winterPreSign: sha, claude: sha },
+    checksums: { winterPreSign: sha },
     stagedAt: "2026-09-12T00:00:00Z",
   });
 
-  test("a valid record whose recorded claude checksum matches the actual binary -> ok", () => {
-    const r = verifyVersionsJsonAgainstPins({ versionsJsonText: goodVersionsJson, claudeSha256: sha });
+  test("a valid schema-2 record that matches this build's pins -> ok, record returned", () => {
+    const r = verifyVersionsJsonAgainstPins({ versionsJsonText: goodVersionsJson });
     expect(r.ok).toBe(true);
     expect(r.failures).toEqual([]);
-    expect(r.versions?.officialSdk).toBe(REQUIRED_CLAUDE_AGENT_SDK);
+    expect(r.versions?.winterAgentSdk).toBe(REQUIRED_WINTER_AGENT_SDK);
   });
 
-  test("a checksum mismatch fails, names both hashes, but still returns the parsed record", () => {
-    const wrongSha = "b".repeat(64);
-    const r = verifyVersionsJsonAgainstPins({ versionsJsonText: goodVersionsJson, claudeSha256: wrongSha });
+  test("a pre-WS-23 schema-1 record (the claude-official shape) fails by name, versions omitted", () => {
+    const legacy = JSON.stringify({ schema: 1, winterAgentSdk: REQUIRED_WINTER_AGENT_SDK, winterRuntimeSdk: REQUIRED_WINTER_RUNTIME_SDK, officialSdk: "0.3.250", claudeCode: "2.1.250", checksums: { winterPreSign: sha, claude: sha }, stagedAt: "2026-09-12T00:00:00Z" });
+    const r = verifyVersionsJsonAgainstPins({ versionsJsonText: legacy });
     expect(r.ok).toBe(false);
-    expect(r.failures[0]).toContain(sha);
-    expect(r.failures[0]).toContain(wrongSha);
-    expect(r.versions).toBeDefined();
+    expect(r.versions).toBeUndefined();
+    expect(r.failures[0]).toContain("schema 1");
   });
 
   test("unparseable or pin-mismatched VERSIONS.json fails via the SAME gate the executable ladder uses, versions omitted", () => {
-    const r = verifyVersionsJsonAgainstPins({ versionsJsonText: "{not json", claudeSha256: sha });
+    const r = verifyVersionsJsonAgainstPins({ versionsJsonText: "{not json" });
     expect(r.ok).toBe(false);
     expect(r.versions).toBeUndefined();
     expect(r.failures[0]).toContain("VERSIONS.json");
+    const mismatched = verifyVersionsJsonAgainstPins({ versionsJsonText: JSON.stringify({ ...JSON.parse(goodVersionsJson), winterRuntimeSdk: "0.0.999" }) });
+    expect(mismatched.ok).toBe(false);
+    expect(mismatched.failures[0]).toContain("0.0.999");
   });
 });
 
@@ -295,16 +293,19 @@ describe("verifyAntEmbed (Winter Phase 10a, Task L3's ant CONTENT-IDENTITY gate,
   const antSha = "c".repeat(64);
   const antBinarySha = "d".repeat(64);
   const goodAntVersionsJson = JSON.stringify({ ant: { tag: "v1.32.0", asset: "ant_1.32.0_macos_arm64.zip", sha256: antSha, binarySha256: antBinarySha } });
+  // WS-23: the staged side is ant's OWN record now (`runtimes/ant/VERSIONS.json`), no longer a
+  // `checksums.ant` field on the claude record.
+  const stagedAnt = (preSign: string, tag = "v1.32.0"): string => JSON.stringify({ schema: 1, tag, checksums: { antPreSign: preSign }, stagedAt: "2026-09-25T00:00:00Z" });
 
   test("the STAGED pre-sign sha256 matches VERSIONS.json's committed binarySha256 pin -> ok, pin returned", () => {
-    const r = verifyAntEmbed({ versionsJsonText: goodAntVersionsJson, stagedAntPreSignSha256: antBinarySha });
+    const r = verifyAntEmbed({ versionsJsonText: goodAntVersionsJson, stagedAntVersionsText: stagedAnt(antBinarySha) });
     expect(r.ok).toBe(true);
     expect(r.failures).toEqual([]);
     expect(r.pin).toEqual({ tag: "v1.32.0", asset: "ant_1.32.0_macos_arm64.zip", sha256: antSha, binarySha256: antBinarySha });
   });
 
   test("a mismatch fails, names both hashes and the pinned tag, but still returns the parsed pin", () => {
-    const r = verifyAntEmbed({ versionsJsonText: goodAntVersionsJson, stagedAntPreSignSha256: "e".repeat(64) });
+    const r = verifyAntEmbed({ versionsJsonText: goodAntVersionsJson, stagedAntVersionsText: stagedAnt("e".repeat(64)) });
     expect(r.ok).toBe(false);
     expect(r.failures[0]).toContain(antBinarySha);
     expect(r.failures[0]).toContain("e".repeat(64));
@@ -312,15 +313,24 @@ describe("verifyAntEmbed (Winter Phase 10a, Task L3's ant CONTENT-IDENTITY gate,
     expect(r.pin).toBeDefined();
   });
 
-  test("an undefined staged pre-sign hash (staged VERSIONS.json carries no checksums.ant) is a named failure, never a silent pass — pin still returned", () => {
-    const r = verifyAntEmbed({ versionsJsonText: goodAntVersionsJson, stagedAntPreSignSha256: undefined });
+  test("no staged ant record at all (a pre-WS-23 bundle) is a named failure, never a silent pass — pin still returned", () => {
+    const r = verifyAntEmbed({ versionsJsonText: goodAntVersionsJson, stagedAntVersionsText: undefined });
     expect(r.ok).toBe(false);
-    expect(r.failures[0]).toContain("checksums.ant");
+    expect(r.failures[0]).toContain("runtimes/ant/VERSIONS.json");
     expect(r.pin).toBeDefined();
   });
 
+  test("a staged record that does not parse, or names another tag, fails by name", () => {
+    const bad = verifyAntEmbed({ versionsJsonText: goodAntVersionsJson, stagedAntVersionsText: JSON.stringify({ schema: 1, tag: "v1.32.0", checksums: { antPreSign: "nope" }, stagedAt: "x" }) });
+    expect(bad.ok).toBe(false);
+    expect(bad.failures[0]).toContain("antPreSign");
+    const otherTag = verifyAntEmbed({ versionsJsonText: goodAntVersionsJson, stagedAntVersionsText: stagedAnt(antBinarySha, "v1.31.0") });
+    expect(otherTag.ok).toBe(false);
+    expect(otherTag.failures[0]).toContain("v1.31.0");
+  });
+
   test("unparseable or missing 'ant' VERSIONS.json entry fails via parseAntPin, pin omitted", () => {
-    const r = verifyAntEmbed({ versionsJsonText: "{not json", stagedAntPreSignSha256: antBinarySha });
+    const r = verifyAntEmbed({ versionsJsonText: "{not json", stagedAntVersionsText: stagedAnt(antBinarySha) });
     expect(r.ok).toBe(false);
     expect(r.pin).toBeUndefined();
     expect(r.failures[0]).toContain("VERSIONS.json");
@@ -775,12 +785,10 @@ describe("row16IdentityCheck (P9a-8: the STRONG checksum-equality path)", () => 
   const sha = (b: string) => b.repeat(64);
   const goodVersionsJson = (overrides: Record<string, unknown> = {}) =>
     JSON.stringify({
-      schema: 1,
+      schema: 2,
       winterAgentSdk: REQUIRED_WINTER_AGENT_SDK,
       winterRuntimeSdk: REQUIRED_WINTER_RUNTIME_SDK,
-      officialSdk: REQUIRED_CLAUDE_AGENT_SDK,
-      claudeCode: "2.1.250",
-      checksums: { winterPreSign: sha("a"), claude: sha("b") },
+      checksums: { winterPreSign: sha("a") },
       stagedAt: "2026-09-12T00:00:00Z",
       winterSource: "platform-package",
       ...overrides,
@@ -800,7 +808,7 @@ describe("row16IdentityCheck (P9a-8: the STRONG checksum-equality path)", () => 
     const pkgPath = tempFile("the installed platform package's own winter bytes\n");
     const embeddedSha = sha256File(pkgPath); // the embed is byte-identical to what's installed
     const r = row16IdentityCheck({
-      versionsJsonText: goodVersionsJson({ checksums: { winterPreSign: embeddedSha, claude: sha("b") } }),
+      versionsJsonText: goodVersionsJson({ checksums: { winterPreSign: embeddedSha } }),
       platformPackageBinPath: pkgPath,
       embeddedPreSignSha256: embeddedSha,
     });
@@ -812,7 +820,7 @@ describe("row16IdentityCheck (P9a-8: the STRONG checksum-equality path)", () => 
     const installedSha = sha256File(pkgPath);
     const staleEmbeddedSha = sha("f"); // whatever was embedded at a prior staging time
     const r = row16IdentityCheck({
-      versionsJsonText: goodVersionsJson({ checksums: { winterPreSign: staleEmbeddedSha, claude: sha("b") } }),
+      versionsJsonText: goodVersionsJson({ checksums: { winterPreSign: staleEmbeddedSha } }),
       platformPackageBinPath: pkgPath,
       embeddedPreSignSha256: staleEmbeddedSha,
     });
@@ -834,12 +842,10 @@ describe("row16IdentityCheck (P9a-8: the STRONG checksum-equality path)", () => 
 
   test("WEAK (absent winterSource, an 8d-era bundle) behaves identically to explicit checkout-build", () => {
     const text = JSON.stringify({
-      schema: 1,
+      schema: 2,
       winterAgentSdk: REQUIRED_WINTER_AGENT_SDK,
       winterRuntimeSdk: REQUIRED_WINTER_RUNTIME_SDK,
-      officialSdk: REQUIRED_CLAUDE_AGENT_SDK,
-      claudeCode: "2.1.250",
-      checksums: { winterPreSign: sha("a"), claude: sha("b") },
+      checksums: { winterPreSign: sha("a") },
       stagedAt: "2026-09-12T00:00:00Z",
       // no winterSource field at all
     });

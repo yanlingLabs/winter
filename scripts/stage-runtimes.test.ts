@@ -1,14 +1,13 @@
 // Winter Phase 8d (P8d-1..3) — `stage-runtimes.ts` with FAKE binaries in a mkdtemp dir. Never
-// touches a real `winter`/`claude` build: `winterPath`/`claudeBinaryPath` bypass `buildWinter()`
-// and `resolveInstalledClaudeBinary()` entirely, and `getClaudeVersion` bypasses spawning the
-// (non-executable) fake `claude` file — the version step is injectable by design.
+// touches a real `winter` build: `winterPath` bypasses `buildWinter()` entirely. WS-23: no `claude`
+// binary is staged any more, and the record is schema 2.
 import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assertMachOArm64, buildVersionsJson, parseClaudeVersionOutput, sha256File, stageRuntimes } from "./stage-runtimes";
+import { assertMachOArm64, buildVersionsJson, sha256File, stageRuntimes } from "./stage-runtimes";
 import { parseVersionsJson } from "../packages/core/src/runtime-sdk/bundle-layout";
-import { REQUIRED_CLAUDE_AGENT_SDK, REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK } from "../packages/core/src/runtime-sdk/versions";
+import { REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK } from "../packages/core/src/runtime-sdk/versions";
 
 const temps: string[] = [];
 afterAll(() => { for (const d of temps) rmSync(d, { recursive: true, force: true }); });
@@ -28,102 +27,59 @@ function fakeMachOArm64(): Buffer {
   return Buffer.concat([header, Buffer.from("...rest of a real winter binary would follow...")]);
 }
 
-describe("parseClaudeVersionOutput (M1 shape)", () => {
-  test("extracts the leading version token", () => {
-    expect(parseClaudeVersionOutput("2.1.250 (Claude Code)\n")).toBe("2.1.250");
-  });
-  test("a bare version with no trailer still parses", () => {
-    expect(parseClaudeVersionOutput("2.1.250")).toBe("2.1.250");
-  });
-  test("empty output throws rather than returning garbage", () => {
-    expect(() => parseClaudeVersionOutput("   \n")).toThrow(/could not parse/);
-  });
-});
-
 describe("buildVersionsJson (P8d-3)", () => {
   test("stamps this build's own pins, never a re-typed literal", () => {
-    const v = buildVersionsJson({ claudeCode: "2.1.250", winterPreSignSha256: "a".repeat(64), claudeSha256: "b".repeat(64), now: new Date("2026-09-12T00:00:00Z") });
+    const v = buildVersionsJson({ winterPreSignSha256: "a".repeat(64), now: new Date("2026-09-12T00:00:00Z") });
     expect(v).toEqual({
-      schema: 1,
+      schema: 2,
       winterAgentSdk: REQUIRED_WINTER_AGENT_SDK,
       winterRuntimeSdk: REQUIRED_WINTER_RUNTIME_SDK,
-      officialSdk: REQUIRED_CLAUDE_AGENT_SDK,
-      claudeCode: "2.1.250",
-      checksums: { winterPreSign: "a".repeat(64), claude: "b".repeat(64) },
+      checksums: { winterPreSign: "a".repeat(64) },
       stagedAt: "2026-09-12T00:00:00.000Z",
     });
   });
   test("round-trips through parseVersionsJson (the ladder's own gate) without throwing", () => {
-    const v = buildVersionsJson({ claudeCode: "2.1.250", winterPreSignSha256: "a".repeat(64), claudeSha256: "b".repeat(64) });
+    const v = buildVersionsJson({ winterPreSignSha256: "a".repeat(64) });
     expect(parseVersionsJson(JSON.stringify(v))).toEqual(v);
   });
 });
 
-describe("stageRuntimes (fake binaries, mkdtemp — no real winter/claude build)", () => {
-  test("writes the P8d-1 layout, byte-copies both binaries mode 0755, and VERSIONS.json parses clean", async () => {
+describe("stageRuntimes (fake binaries, mkdtemp — no real winter build)", () => {
+  test("writes the P8d-1 layout, byte-copies winter mode 0755, and VERSIONS.json parses clean — no claude-official/ (WS-23)", async () => {
     const srcDir = tempDir("stage-runtimes-src-");
     const winterSrc = join(srcDir, "winter-fake");
-    const claudeSrc = join(srcDir, "claude-fake");
     writeFileSync(winterSrc, "fake winter binary bytes\n");
-    writeFileSync(claudeSrc, "fake claude binary bytes\n");
 
     const out = tempDir("stage-runtimes-out-");
-    const result = await stageRuntimes({
-      out,
-      winterPath: winterSrc,
-      claudeBinaryPath: claudeSrc,
-      getClaudeVersion: () => "2.1.250",
-    });
+    const result = await stageRuntimes({ out, winterPath: winterSrc });
 
     // Layout
     expect(result.winterPath).toBe(join(out, "winter"));
-    expect(result.claudePath).toBe(join(out, "claude-official", "claude"));
-    expect(result.versionsPath).toBe(join(out, "claude-official", "VERSIONS.json"));
+    expect(result.versionsPath).toBe(join(out, "VERSIONS.json"));
     expect(existsSync(result.winterPath)).toBe(true);
-    expect(existsSync(result.claudePath)).toBe(true);
     expect(existsSync(result.versionsPath)).toBe(true);
+    expect(existsSync(join(out, "claude-official"))).toBe(false);
 
-    // Byte-identical copies
+    // Byte-identical copy
     expect(readFileSync(result.winterPath, "utf8")).toBe("fake winter binary bytes\n");
-    expect(readFileSync(result.claudePath, "utf8")).toBe("fake claude binary bytes\n");
 
     // mode 0755
     expect(statSync(result.winterPath).mode & 0o777).toBe(0o755);
-    expect(statSync(result.claudePath).mode & 0o777).toBe(0o755);
 
-    // VERSIONS.json: this build's pins, real checksums, and it parses through the ladder's own gate.
-    expect(result.versions.claudeCode).toBe("2.1.250");
+    // VERSIONS.json: this build's pins, the real checksum, and it parses through the ladder's own gate.
+    expect(result.versions.schema).toBe(2);
     expect(result.versions.checksums.winterPreSign).toBe(sha256File(result.winterPath));
-    expect(result.versions.checksums.claude).toBe(sha256File(result.claudePath));
     const onDisk = JSON.parse(readFileSync(result.versionsPath, "utf8"));
     expect(onDisk).toEqual(result.versions);
     expect(parseVersionsJson(readFileSync(result.versionsPath, "utf8"))).toEqual(result.versions);
   });
-
-  test("no claude binary resolvable (no path, no injected resolver hit) refuses with a clear message, never a silent skip", async () => {
-    const srcDir = tempDir("stage-runtimes-src2-");
-    const winterSrc = join(srcDir, "winter-fake");
-    writeFileSync(winterSrc, "fake winter binary bytes\n");
-    const out = tempDir("stage-runtimes-out2-");
-    await expect(
-      stageRuntimes({ out, winterPath: winterSrc, resolveClaudeBinary: () => undefined }),
-    ).rejects.toThrow(/no claude binary found/);
-  });
-
-  // P9a-8: winterSource — a fake claude resolver throughout (never the real dual-createRequire
-  // chain) so every test below is about the WINTER ladder in isolation.
-  const fakeClaudeSrc = (dir: string): string => {
-    const p = join(dir, "claude-fake");
-    writeFileSync(p, "fake claude binary bytes\n");
-    return p;
-  };
 
   test("winterPath given, no winterSource -> defaults to checkout-build (the historical meaning of an already-built path)", async () => {
     const srcDir = tempDir("stage-runtimes-ws1-src-");
     const winterSrc = join(srcDir, "winter-fake");
     writeFileSync(winterSrc, "fake winter binary bytes\n");
     const out = tempDir("stage-runtimes-ws1-out-");
-    const result = await stageRuntimes({ out, winterPath: winterSrc, claudeBinaryPath: fakeClaudeSrc(srcDir), getClaudeVersion: () => "2.1.250" });
+    const result = await stageRuntimes({ out, winterPath: winterSrc });
     expect(result.versions.winterSource).toBe("checkout-build");
   });
 
@@ -132,7 +88,7 @@ describe("stageRuntimes (fake binaries, mkdtemp — no real winter/claude build)
     const winterSrc = join(srcDir, "winter-fake");
     writeFileSync(winterSrc, "fake winter binary bytes\n");
     const out = tempDir("stage-runtimes-ws2-out-");
-    const result = await stageRuntimes({ out, winterPath: winterSrc, winterSource: "platform-package", claudeBinaryPath: fakeClaudeSrc(srcDir), getClaudeVersion: () => "2.1.250" });
+    const result = await stageRuntimes({ out, winterPath: winterSrc, winterSource: "platform-package" });
     expect(result.versions.winterSource).toBe("platform-package");
   });
 
@@ -144,8 +100,6 @@ describe("stageRuntimes (fake binaries, mkdtemp — no real winter/claude build)
     const result = await stageRuntimes({
       out,
       resolveWinterPackage: () => ({ binPath: pkgBin, version: REQUIRED_WINTER_AGENT_SDK }),
-      claudeBinaryPath: fakeClaudeSrc(srcDir),
-      getClaudeVersion: () => "2.1.250",
     });
     expect(result.versions.winterSource).toBe("platform-package");
     expect(readFileSync(result.winterPath).equals(fakeMachOArm64())).toBe(true);
@@ -157,7 +111,7 @@ describe("stageRuntimes (fake binaries, mkdtemp — no real winter/claude build)
     writeFileSync(pkgBin, fakeMachOArm64());
     const out = tempDir("stage-runtimes-ws4-out-");
     await expect(
-      stageRuntimes({ out, resolveWinterPackage: () => ({ binPath: pkgBin, version: "9.9.9" }), claudeBinaryPath: fakeClaudeSrc(srcDir), getClaudeVersion: () => "2.1.250" }),
+      stageRuntimes({ out, resolveWinterPackage: () => ({ binPath: pkgBin, version: "9.9.9" }) }),
     ).rejects.toThrow(/mixed pair is not the pinned artifact/);
   });
 
@@ -171,8 +125,6 @@ describe("stageRuntimes (fake binaries, mkdtemp — no real winter/claude build)
         out,
         resolveWinterPackage: () => ({ binPath: pkgBin, version: REQUIRED_WINTER_AGENT_SDK }),
         checkWinterMachO: (p) => assertMachOArm64(p), // the REAL checker, on a deliberately fake file
-        claudeBinaryPath: fakeClaudeSrc(srcDir),
-        getClaudeVersion: () => "2.1.250",
       }),
     ).rejects.toThrow(/not a 64-bit Mach-O binary/);
   });
@@ -191,8 +143,6 @@ describe("stageRuntimes (fake binaries, mkdtemp — no real winter/claude build)
         out,
         resolveWinterPackage: () => undefined,
         buildWinterFn: async () => { buildWinterFnCalled += 1; return winterSrc; },
-        claudeBinaryPath: fakeClaudeSrc(srcDir),
-        getClaudeVersion: () => "2.1.250",
       });
       expect(buildWinterFnCalled).toBe(1);
       expect(result.versions.winterSource).toBe("checkout-build");
@@ -214,8 +164,6 @@ describe("stageRuntimes (fake binaries, mkdtemp — no real winter/claude build)
       winterSource: "checkout-build",
       resolveWinterPackage: () => { packageDoorConsulted = true; return { binPath: "/should/not/be/used", version: REQUIRED_WINTER_AGENT_SDK }; },
       buildWinterFn: async () => winterSrc,
-      claudeBinaryPath: fakeClaudeSrc(srcDir),
-      getClaudeVersion: () => "2.1.250",
     });
     expect(packageDoorConsulted).toBe(false);
     expect(result.versions.winterSource).toBe("checkout-build");
@@ -230,8 +178,6 @@ describe("stageRuntimes (fake binaries, mkdtemp — no real winter/claude build)
         out,
         winterSource: "platform-package",
         resolveWinterPackage: () => undefined,
-        claudeBinaryPath: fakeClaudeSrc(srcDir),
-        getClaudeVersion: () => "2.1.250",
       }),
     ).rejects.toThrow(/platform-package was requested explicitly but.*not installed/);
   });

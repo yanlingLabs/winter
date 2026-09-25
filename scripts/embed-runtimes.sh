@@ -6,29 +6,27 @@
 # this one has a real gate).
 #
 # What it does, in order:
-#   1. Release-only — same skip shape as "Embed winter-core": a Debug build never embeds either
+#   1. Release-only — same skip shape as "Embed winter-core": a Debug build never embeds a
 #      runtime (CLAUDE.md's dev/dist split), so a missing binary there is expected, not an error.
 #   2. Stages the P8d-1 layout DIRECTLY into the app bundle: `bun run runtimes:stage --out
 #      <bundle>/Contents/Resources/runtimes` — the SAME script `stage-runtimes.test.ts` and
-#      `bun run runtimes:stage` exercise directly, so there is exactly one place either binary is
-#      ever copied from source into a destination.
+#      `bun run runtimes:stage` exercise directly, so there is exactly one place `winter` is ever
+#      copied from source into a destination. It writes `winter` and `runtimes/VERSIONS.json`.
 #   3. Re-signs ONLY `winter` with the app's own team identity (`--identifier com.winter.runtime
 #      --options runtime --timestamp`) — a stable identifier (not bun's own ad-hoc one, which
 #      changes every build) so the Keychain ACL survives rebuilds, same reasoning as "Embed
 #      winter-core"'s own re-sign.
-#   4. VERIFIES (never re-signs — P8d-2) the vendored `claude` binary is exactly the pinned,
-#      Anthropic-signed artifact: `codesign --verify --strict`, plus a `codesign -dvv` grep for
-#      `TeamIdentifier=Q6L2SF6YDW` and `runtime` in the flags. FAILS THE BUILD on any mismatch —
-#      this is the earliest point a re-signed, corrupted, or wrong-pin `claude` can be caught,
-#      before it ever reaches release.ts's own (necessarily late) gate.
+#   4. (WS-23: the step that verified the vendored `claude` binary is gone with the official leg —
+#      nothing under `runtimes/claude-official/` is staged any more.)
 #   5. Winter Phase 10a (P10a-4/P10a-5, Task L3, fix round 2): stages `runtimes/ant/ant` from the
 #      vendored `vendor/ant/<tag>/ant` (`scripts/fetch-ant.ts`, tag read from the repo-root
 #      VERSIONS.json's `ant` pin), computes its sha256 IMMEDIATELY (before signing — the same
-#      "pre-sign hash" shape as `winter`'s own `checksums.winterPreSign`) and RECORDS it into the
-#      staged `claude-official/VERSIONS.json`'s `checksums.ant` field, THEN re-signs it with the
-#      SAME stable-identifier shape as `winter` above (`--identifier com.winter.ant`) — NOT
-#      claude's "verify untouched" shape, since L1's licence finding (MIT,
-#      github.com/anthropics/anthropic-cli) permits Winter to redistribute + re-sign it. FAILS THE
+#      "pre-sign hash" shape as `winter`'s own `checksums.winterPreSign`) and RECORDS it in ant's
+#      OWN record, `runtimes/ant/VERSIONS.json` (`{ schema: 1, tag, checksums: { antPreSign },
+#      stagedAt }` — WS-23; it used to ride the claude record as `checksums.ant`), THEN re-signs it
+#      with the SAME stable-identifier shape as `winter` above (`--identifier com.winter.ant`) — L1's
+#      licence finding (MIT, github.com/anthropics/anthropic-cli) permits Winter to redistribute and
+#      re-sign it. FAILS THE
 #      BUILD if the vendored file is missing (never a silent skip of an optional runtime the
 #      release ships) or if the re-sign doesn't land the expected identifier. release.ts reads the
 #      RECORDED pre-sign hash (never a re-hash of the vendor source, and never the post-sign
@@ -42,11 +40,7 @@
 #     EXPANDED_CODE_SIGN_IDENTITY=- scripts/embed-runtimes.sh
 # — an ad-hoc identity (`-`) is EXPLICITLY ALLOWED here: this is the standalone build-phase proof,
 # not the release gate (release.ts's own signing checks require a real Developer ID team identity;
-# see its TEAM_ID-pinned `assertSigned`). The claude-verify step (4) runs against whatever the
-# REAL platform package resolves to on this machine — it is skipped, with a printed reason, when
-# that optional package is not installed, UNLESS WINTER_CLAUDE_REQUIRE_RUNTIME=1 is set, in which
-# case a missing package is a hard failure (the same CI-honesty shape
-# `test/helpers/claude-runtime.ts` already uses for the official-leg test suite).
+# see its TEAM_ID-pinned `assertSigned`).
 # WINTER_STAGE_ANT_PATH is the ant-staging equivalent of WINTER_STAGE_RUNTIME_PATH below — a narrow
 # TEST SEAM ONLY, overriding where the `ant` binary is copied from instead of the VERSIONS.json-
 # pinned `vendor/ant/<tag>/ant`. A real Release build NEVER sets this.
@@ -74,18 +68,16 @@ fi
 ( cd "${REPO_ROOT}" && bun run runtimes:stage "${STAGE_ARGS[@]}" )
 
 WINTER="${DEST}/winter"
-CLAUDE="${DEST}/claude-official/claude"
 
-if [ ! -f "${WINTER}" ] || [ ! -f "${CLAUDE}" ]; then
-  echo "error: runtimes:stage reported success but ${WINTER} / ${CLAUDE} are missing" >&2
+if [ ! -f "${WINTER}" ] || [ ! -f "${DEST}/VERSIONS.json" ]; then
+  echo "error: runtimes:stage reported success but ${WINTER} / ${DEST}/VERSIONS.json are missing" >&2
   exit 1
 fi
 
 # --- Step 3: re-sign winter with a STABLE identifier (P8d-2) --------------------------------
 # A2 (2026-09-22): plus exactly the JIT entitlement (scripts/bun-jit.entitlements). `winter` is a
 # bun (JavaScriptCore) binary; under the hardened runtime without allow-jit it runs JIT-less (no
-# SharedArrayBuffer, ~5x slower) — the same fault that kept the official peer from loading in
-# winter-core. The entitlement is not part of the designated requirement (identifier + team), so the
+# SharedArrayBuffer, ~5x slower). The entitlement is not part of the designated requirement (identifier + team), so the
 # Keychain ACL keyed on com.winter.runtime is unaffected. `ant` (Go, Step 5) needs none.
 codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --identifier com.winter.runtime --options runtime --timestamp --entitlements "${SCRIPT_DIR}/bun-jit.entitlements" "${WINTER}"
 
@@ -99,24 +91,6 @@ WINTER_ENTS="$(codesign -d --entitlements - --xml "${WINTER}" 2>/dev/null || tru
 if ! echo "${WINTER_ENTS}" | grep -q "com.apple.security.cs.allow-jit"; then
   echo "error: winter re-sign did not land the allow-jit entitlement (scripts/bun-jit.entitlements):" >&2
   echo "${WINTER_ENTS}" >&2
-  exit 1
-fi
-
-# --- Step 4: VERIFY (never re-sign) the vendored claude — P8d-2 ------------------------------
-if ! codesign --verify --strict "${CLAUDE}"; then
-  echo "error: codesign --verify --strict failed on the embedded claude binary at ${CLAUDE} — it is not a valid, untampered Developer ID signature" >&2
-  exit 1
-fi
-
-CLAUDE_DVV="$(codesign -dvv "${CLAUDE}" 2>&1 || true)"
-if ! echo "${CLAUDE_DVV}" | grep -q "TeamIdentifier=Q6L2SF6YDW"; then
-  echo "error: embedded claude at ${CLAUDE} is not signed by TeamIdentifier=Q6L2SF6YDW (Anthropic PBC):" >&2
-  echo "${CLAUDE_DVV}" >&2
-  exit 1
-fi
-if ! echo "${CLAUDE_DVV}" | grep -q "flags=.*runtime"; then
-  echo "error: embedded claude at ${CLAUDE} does not carry the hardened-runtime flag:" >&2
-  echo "${CLAUDE_DVV}" >&2
   exit 1
 fi
 
@@ -137,7 +111,7 @@ mkdir -p "$(dirname "${ANT}")"
 cp "${ANT_SRC}" "${ANT}"
 chmod 755 "${ANT}"
 
-# --- Pre-sign hash (Winter Phase 10a, fix round 2): computed and RECORDED into the staged
+# --- Pre-sign hash (Winter Phase 10a, fix round 2): computed and RECORDED into ant's own
 # VERSIONS.json IMMEDIATELY after the copy, BEFORE codesign mutates the file — the exact same
 # "hash before signing" shape as `winter`'s own `checksums.winterPreSign` (P8d-2). release.ts reads
 # THIS recorded value (never the vendor/ant/<tag>/ant source, and never a re-hash of the post-sign
@@ -145,19 +119,13 @@ chmod 755 "${ANT}"
 # below is the git-committed, pinned one — closing the gap where a tampered/swapped staged file,
 # re-signed under a legitimate identity, would otherwise pass unnoticed.
 ANT_PRESIGN_SHA256="$(shasum -a 256 "${ANT}" | awk '{print $1}')"
-ANT_VERSIONS_JSON="${DEST}/claude-official/VERSIONS.json"
-if [ ! -f "${ANT_VERSIONS_JSON}" ]; then
-  echo "error: ${ANT_VERSIONS_JSON} is missing — Step 2's runtimes:stage should have written it" >&2
-  exit 1
-fi
+ANT_VERSIONS_JSON="${DEST}/ant/VERSIONS.json"
 bun -e '
-  const path = process.argv[1];
-  const sha = process.argv[2];
+  const [path, tag, sha] = process.argv.slice(1);
   const fs = require("node:fs");
-  const v = JSON.parse(fs.readFileSync(path, "utf8"));
-  v.checksums.ant = sha;
-  fs.writeFileSync(path, JSON.stringify(v, null, 2) + "\n");
-' "${ANT_VERSIONS_JSON}" "${ANT_PRESIGN_SHA256}"
+  const record = { schema: 1, tag, checksums: { antPreSign: sha }, stagedAt: new Date().toISOString() };
+  fs.writeFileSync(path, JSON.stringify(record, null, 2) + "\n");
+' "${ANT_VERSIONS_JSON}" "${ANT_TAG}" "${ANT_PRESIGN_SHA256}"
 
 codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --identifier com.winter.ant --options runtime --timestamp "${ANT}"
 
@@ -168,4 +136,4 @@ if ! echo "${ANT_DVV}" | grep -q "^Identifier=com.winter.ant$"; then
   exit 1
 fi
 
-echo "runtimes embedded + verified: winter re-signed (Identifier=com.winter.runtime), claude verified untouched (TeamIdentifier=Q6L2SF6YDW, hardened runtime), ant re-signed (Identifier=com.winter.ant)"
+echo "runtimes embedded + verified: winter re-signed (Identifier=com.winter.runtime), ant re-signed (Identifier=com.winter.ant)"

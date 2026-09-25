@@ -21,7 +21,8 @@
  *      the static argv route in packages/cli/src/main.ts, beside `__workflow-worker`.
  *   5. Parse the one JSON line it prints; assert `ok`, `online`, `userVersion` ===
  *      RUNTIME_STATE_SCHEMA_VERSION, that `dbPath` is inside the temp home, and (A2) that the
- *      router handle constructed (`runtimeSdk`) and the official peer loaded (`officialPeer`).
+ *      router handle constructed (`runtimeSdk`). WS-23: the official peer is no longer loaded, and
+ *      the probe reports no `officialPeer` at all.
  *   6. Re-take the real-home signature and assert it is UNCHANGED — a probe that quietly fell back
  *      to `resolveWinterHome()` would otherwise pass every other assertion here.
  *   7. `rm -rf` the temp home — in a `finally`, on the failure paths too (the tokens the probe
@@ -156,11 +157,11 @@ async function main(): Promise<void> {
   // `apple/Winter/project.yml`'s "Embed winter-core" re-signs with `--options runtime` (the hardened
   // runtime notarization requires) and `--entitlements scripts/bun-jit.entitlements`. Under the
   // hardened runtime WITHOUT `com.apple.security.cs.allow-jit`, JavaScriptCore runs JIT-less and
-  // `SharedArrayBuffer` does not exist — `@anthropic-ai/claude-agent-sdk`'s `sdk.mjs` touches it at
-  // module top level, so the official peer failed to import in every shipped daemon
-  // (`ReferenceError`), while an UNSIGNED compile (what this gate used to run) has the JIT and could
-  // never see it. An ad-hoc identity (`-`) reproduces the runtime posture exactly (measured: the
-  // same ReferenceError without the entitlement, the peer loads with it).
+  // `SharedArrayBuffer` does not exist — the retired official peer's `sdk.mjs` touched it at module
+  // top level and failed to import in every shipped daemon (`ReferenceError`), while an UNSIGNED
+  // compile (what this gate used to run) has the JIT and could never see it. An ad-hoc identity
+  // (`-`) reproduces the runtime posture exactly, so the router handle is still proven to construct
+  // on the binary as the Release app signs it.
   const signedDir = mkdtempSync(join(tmpdir(), "winter-runtime-state-bin-"));
   const probeBinary = join(signedDir, "winter-core");
   copyFileSync(DIST_BINARY, probeBinary);
@@ -252,8 +253,8 @@ async function main(): Promise<void> {
       ["the probe used a FileSecretStore, never the Keychain (tokens landed under the temp home)", existsSync(join(tmpHome, "probe-secrets"))],
       // A2: the runtime handle itself — a `RuntimeSdkVersionError`/bad brand takes BOTH legs down.
       ["result.runtimeSdk === true (the router handle constructed on the Release-signed binary)", result.runtimeSdk === true],
-      // A2: the official peer loaded under the hardened runtime AND was declared to the router.
-      ["result.officialPeer === true (@anthropic-ai/claude-agent-sdk loaded and declared, hardened runtime + JIT entitlement)", result.officialPeer === true],
+      // WS-23: the official peer is retired — the probe no longer loads or reports it.
+      ["result carries no officialPeer (WS-23)", !("officialPeer" in result)],
       ["probe exited 0", exitCode === 0],
       ...untouched.map(([dir, ok]) => [`${dir}: same files, same runtime-state.db user_version`, ok] as [string, boolean]),
     ];
@@ -271,9 +272,7 @@ async function main(): Promise<void> {
         "is the 8a carry itself failing; (c) userVersion 0 -> the migrations did not run; (d) a real " +
         "home changed -> the probe resolved a home instead of reading WINTER_HOME, which is the one " +
         "failure this script must never let through; (e) runtimeSdk false -> grep the stderr above for " +
-        "`winter runtime sdk unavailable` (a peer the router cannot version, a bad brand); (f) " +
-        "officialPeer false -> grep it for `the official peer ... did not load` (a missing JIT " +
-        "entitlement reads `ReferenceError: SharedArrayBuffer is not defined`) or `could not be established`."
+        "`winter runtime sdk unavailable` (a peer the router cannot version, a bad brand)."
       );
     }
 
