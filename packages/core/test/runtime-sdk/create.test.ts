@@ -14,6 +14,7 @@ import { RUNTIME_SHUTDOWN_DRAIN_MS } from "../../src/runtime-state/wiring";
 import { buildCoreBrand, CORE_BRAND } from "../../src/runtime-sdk/brand";
 import { createWinterRuntimeSdk, SHUTDOWN_QUERY_GRACE_MS, type WinterRuntimeSdk, type WinterRuntimeSdkDeps } from "../../src/runtime-sdk/create";
 import { WinterExecutableUnavailable } from "../../src/runtime-sdk/executable";
+import { EmbeddedRuntimeUnavailable, type EmbeddedSessionHost } from "../../src/runtime-sdk/embedded";
 import { WINTER_PEER_VERSIONS, REQUIRED_CLAUDE_AGENT_SDK } from "../../src/runtime-sdk/versions";
 import type { Settings } from "../../src/settings";
 
@@ -311,14 +312,29 @@ describe("createWinterRuntimeSdk — the advisor (P8d-8: ALWAYS an advisor key, 
   });
 });
 
+/** WS-23: a stand-in for the daemon's embedded host — records what it was asked to spawn, spawns nothing. */
+function recordingEmbeddedHost(): EmbeddedSessionHost & { spawned: unknown[] } {
+  const spawned: unknown[] = [];
+  return {
+    spawned,
+    spawn(options) {
+      spawned.push(options);
+      throw new Error("recordingEmbeddedHost spawns nothing");
+    },
+    live: () => [],
+    shutdown: async () => {},
+  };
+}
+
 describe("spawnHookFor — P8b-1's one topology site", () => {
   test("an explicit WINTER_RUNTIME_EXECUTABLE that is missing on disk ⇒ the typed refusal, never a throw and never a fallback", async () => {
     // P9a fix wave (M1 class): "nothing configured" is no longer a refusal in a tree where the
     // platform package is installed (the ladder's last rung finds it), so the deterministic refusal
     // is an explicit path that does not exist — P8b-2 says an explicit path never falls through.
+    // WS-23: asked of CODE — the one mode that still resolves a binary.
     process.env.WINTER_RUNTIME_EXECUTABLE = join(home, "missing-winter");
     const { handle } = await build();
-    const hook = handle.spawnHookFor("chat");
+    const hook = handle.spawnHookFor("code");
     expect(hook).toBeInstanceOf(WinterExecutableUnavailable);
     expect((hook as WinterExecutableUnavailable).code).toBe("winter_executable_unavailable");
     // It names what it looked at, so a user can see where to drop the binary.
@@ -343,21 +359,44 @@ describe("spawnHookFor — P8b-1's one topology site", () => {
     process.env.WINTER_RUNTIME_EXECUTABLE = envBin;
 
     const { handle } = await build();
-    expect(handle.spawnHookFor("dispatch")).toEqual({ pathToClaudeCodeExecutable: envBin });
+    expect(handle.spawnHookFor("code")).toEqual({ pathToClaudeCodeExecutable: envBin });
 
     settings = withRuntimes({ retention: { deliveriesDays: 30, nameLeasesDays: 7 }, migrations: { memoryKeys: false }, winterLeg: { chat: false, dispatch: false, code: false }, winterExecutable: settingBin, winterIdleTimeoutSec: 900 });
     // Same handle, no rebuild, no restart.
-    expect(handle.spawnHookFor("dispatch")).toEqual({ pathToClaudeCodeExecutable: settingBin });
+    expect(handle.spawnHookFor("code")).toEqual({ pathToClaudeCodeExecutable: settingBin });
   });
 
-  test("every mode resolves the same binary in 8b (the topology is one decision, not three)", async () => {
+  test("WS-23: chat and dispatch are EMBEDDED — the host's workerProcess, and no binary is resolved for them at all", async () => {
+    // A binary that does not exist: were chat/dispatch still resolving the ladder, this would refuse.
+    process.env.WINTER_RUNTIME_EXECUTABLE = join(home, "missing-winter");
+    const embedded = recordingEmbeddedHost();
+    const { handle } = await build({ embedded });
+    for (const mode of ["chat", "dispatch"] as const) {
+      const hook = handle.spawnHookFor(mode);
+      expect(hook).not.toBeInstanceOf(Error);
+      const spawnHook = hook as { pathToClaudeCodeExecutable: string; spawnClaudeCodeProcess?: (o: unknown) => unknown };
+      expect(spawnHook.pathToClaudeCodeExecutable).toBe("winter-embedded");
+      expect(typeof spawnHook.spawnClaudeCodeProcess).toBe("function");
+      // The hook IS the host's spawn: what query() hands it goes straight to the embedded host.
+      const options = { command: "winter-embedded", args: ["--run", "--config-json", "{}"], cwd: home, env: {} };
+      expect(() => spawnHook.spawnClaudeCodeProcess!(options)).toThrow("recordingEmbeddedHost spawns nothing");
+    }
+    expect(embedded.spawned).toHaveLength(2);
+    // Code keeps the binary ladder — and so still refuses the missing binary.
+    expect(handle.spawnHookFor("code")).toBeInstanceOf(WinterExecutableUnavailable);
+  });
+
+  test("WS-23: chat and dispatch with NO embedded host refuse typed — never a fallback to the spawned binary", async () => {
     const bin = join(home, "winter-bin");
     writeFileSync(bin, "#!/bin/sh\n");
     process.env.WINTER_RUNTIME_EXECUTABLE = bin;
     const { handle } = await build();
-    for (const mode of ["chat", "dispatch", "code"] as const) {
-      expect(handle.spawnHookFor(mode)).toEqual({ pathToClaudeCodeExecutable: bin });
+    for (const mode of ["chat", "dispatch"] as const) {
+      const hook = handle.spawnHookFor(mode);
+      expect(hook).toBeInstanceOf(EmbeddedRuntimeUnavailable);
+      expect((hook as EmbeddedRuntimeUnavailable).code).toBe("embedded_runtime_unavailable");
     }
+    expect(handle.spawnHookFor("code")).toEqual({ pathToClaudeCodeExecutable: bin });
   });
 });
 
