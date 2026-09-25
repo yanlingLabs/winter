@@ -3,7 +3,7 @@
 // package's `embedded-worker-entry.ts`) on `winter-test/*` doubles and temp homes; no binary, no
 // network, no Keychain.
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { query, SDK_VERSION, type SdkMessage } from "@yanlinglabs/winter-agent-sdk";
@@ -12,6 +12,7 @@ import {
   COMPILED_EMBEDDED_WORKER_ENTRY,
   createEmbeddedSessionHost,
   EMBEDDED_SHUTDOWN_BUDGET_MS,
+  EMBEDDED_TERMINATE_WAIT_MS,
   EmbeddedRuntimeUnavailable,
   embeddedVersionCheck,
   embeddedWorkerEntry,
@@ -21,6 +22,9 @@ import {
   runtimeWorkflowWorkerCommand,
 } from "../../src/runtime-sdk/embedded";
 import { SHUTDOWN_QUERY_GRACE_MS } from "../../src/runtime-sdk/create";
+import { embeddedProbeHomeRefusal, runEmbeddedProbe } from "../../src/runtime-sdk/embedded-probe";
+import type { EmbeddedLifecycleEvent } from "../../src/runtime-sdk/embedded";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { RUNTIME_SHUTDOWN_DRAIN_MS } from "../../src/runtime-state";
 import { REQUIRED_WINTER_AGENT_SDK } from "../../src/runtime-sdk/versions";
 
@@ -101,7 +105,8 @@ describe("the shutdown budget", () => {
   test("query grace + the embedded drain + the runtime-state drain still fit the app's 5.0 s graceful exit", () => {
     // `daemon.ts`'s `stop()` runs the three in sequence; past 5.0 s the app SIGKILLs the daemon and the
     // lock/socket are left behind (P8b-32). Editing any of the three trips this.
-    expect(SHUTDOWN_QUERY_GRACE_MS + EMBEDDED_SHUTDOWN_BUDGET_MS + RUNTIME_SHUTDOWN_DRAIN_MS).toBeLessThan(5000);
+    // M-2: including the post-terminate wait for stragglers to close.
+    expect(SHUTDOWN_QUERY_GRACE_MS + EMBEDDED_SHUTDOWN_BUDGET_MS + EMBEDDED_TERMINATE_WAIT_MS + RUNTIME_SHUTDOWN_DRAIN_MS).toBeLessThan(5000);
   });
 });
 
@@ -167,4 +172,74 @@ describe("createEmbeddedSessionHost — workerProcess() over a real Worker", () 
     // The second spawn saw BOTH Workers live at once.
     expect(seenLive.at(-1)!.sort()).toEqual([...ids].sort());
   }, 30_000);
+});
+
+describe("review round 1", () => {
+  test("I-2: a second incarnation of one session KILLS the first and its engine starts only after the first Worker closed", async () => {
+    const events: EmbeddedLifecycleEvent[] = [];
+    const host = createEmbeddedSessionHost({ onLifecycle: (e) => events.push(e) });
+    const sessionId = crypto.randomUUID();
+    const cwd = temp("cwd");
+    const env = sessionEnv();
+    // Incarnation 1: a hanging turn, left running — the state a wrapper that threw early leaves behind.
+    const first = drain(query({ prompt: "hang please", options: { model: "winter-test/hang", sessionId, cwd, env, spawnClaudeCodeProcess: (o) => host.spawn(o) } })).catch((e: unknown) => e);
+    const t0 = Date.now();
+    while (host.live().length === 0 && Date.now() - t0 < 5000) await Bun.sleep(20);
+    await Bun.sleep(400);
+    expect(host.live()).toEqual([sessionId]);
+    // Incarnation 2, same backend session, while 1 is still running.
+    const second = await drain(query({ prompt: "again", options: { model: "winter-test/echo", sessionId, cwd, env, spawnClaudeCodeProcess: (o) => host.spawn(o) } }));
+    expect(resultOf(second)?.subtype).toBe("success");
+    await first;
+    // The order the host saw, for this one session: start(1), exited(1), start(2), exited(2) — never
+    // start(2) while 1 was still live.
+    const t1 = Date.now();
+    while (events.length < 4 && Date.now() - t1 < 5000) await Bun.sleep(20);
+    expect(events.map((e) => `${e.event}:${e.worker}`)).toEqual(["start:1", "exited:1", "start:2", "exited:2"]);
+    let running = 0;
+    for (const e of events) {
+      running += e.event === "start" ? 1 : -1;
+      expect(running).toBeLessThanOrEqual(1);
+    }
+  }, 30_000);
+
+  describe("I-3: the embedded probe refuses a live home, typed, before writing anything", () => {
+    test("either profile's default home is refused, however it is spelled", () => {
+      const fakeHome = temp("fake-user");
+      for (const name of [".winter", ".winter-dev", ".winter/", "./.winter-dev"]) {
+        expect(embeddedProbeHomeRefusal(join(fakeHome, name), { homedirFn: () => fakeHome })).toContain("default Winter home");
+      }
+    });
+
+    test("a populated home outside the temp root is refused; an empty one, or one under the temp root, is allowed", () => {
+      const tmpRoot = temp("tmp-root");
+      const populated = temp("populated");
+      writeFileSync(join(populated, "settings.json"), "{}");
+      const empty = temp("empty");
+      expect(embeddedProbeHomeRefusal(populated, { tmpRoot })).toContain("never on a populated home");
+      expect(embeddedProbeHomeRefusal(empty, { tmpRoot })).toBeUndefined();
+      expect(embeddedProbeHomeRefusal(join(tmpRoot, "absent-home"), { tmpRoot })).toBeUndefined();
+      const underTmp = join(tmpRoot, "gate-home");
+      mkdirSync(underTmp);
+      writeFileSync(join(underTmp, "x"), "");
+      expect(embeddedProbeHomeRefusal(underTmp, { tmpRoot })).toBeUndefined();
+    });
+
+    test("runEmbeddedProbe refuses with code probe_home_refused and writes NOTHING (a fake default home, a fake populated one)", async () => {
+      const fakeHome = temp("fake-user");
+      const liveDefault = join(fakeHome, ".winter-dev");
+      mkdirSync(liveDefault);
+      writeFileSync(join(liveDefault, "settings.json"), "LIVE");
+      const r1 = await runEmbeddedProbe({ home: liveDefault, homedirFn: () => fakeHome });
+      expect(r1).toMatchObject({ ok: false, code: "probe_home_refused" });
+      const populated = temp("populated");
+      writeFileSync(join(populated, "settings.json"), "LIVE");
+      const r2 = await runEmbeddedProbe({ home: populated, tmpRoot: temp("other-tmp") });
+      expect(r2).toMatchObject({ ok: false, code: "probe_home_refused" });
+      for (const h of [liveDefault, populated]) {
+        expect(readFileSync(join(h, "settings.json"), "utf8")).toBe("LIVE");
+        expect(existsSync(join(h, "probe-secrets"))).toBe(false);
+      }
+    });
+  });
 });

@@ -131,11 +131,16 @@ export function embeddedVersionCheck(versions: EmbeddedVersions = LINKED_EMBEDDE
  * How long `stop()` gives the embedded Workers, AFTER `runtimeSdk.dispose()` has ended every tracked
  * session, before it `terminate()`s the stragglers and closes the stores. Arithmetic, as
  * `SHUTDOWN_QUERY_GRACE_MS` is: the three sequential budgets must fit `DaemonSupervisor.gracefulExitTimeout`
- * (5.0 s) — 300 (query grace) + 600 (this) + 3500 (the runtime-state drain) = 4400 < 5000, asserted
+ * (5.0 s) — 300 (query grace) + 600 (this) + 250 (`EMBEDDED_TERMINATE_WAIT_MS`) + 3500 (the runtime-state
+ * drain) = 4650 < 5000, asserted
  * in `embedded.test.ts`. An ordinary embedded session has already finished by the time this starts
  * (the abort is milliseconds); the budget exists for one that cannot answer.
  */
 export const EMBEDDED_SHUTDOWN_BUDGET_MS = 600;
+
+/** After the budget, how long `shutdown()` waits for the terminated stragglers to close — part of the
+ *  same arithmetic (WS-23 review M-2): 300 + 600 + 250 + 3500 = 4650 < 5000. */
+export const EMBEDDED_TERMINATE_WAIT_MS = 250;
 
 /** The daemon's registry of live embedded sessions — one per daemon, owned by `daemon.ts`. */
 export interface EmbeddedSessionHost {
@@ -154,8 +159,18 @@ export interface EmbeddedSessionHost {
   shutdown(budgetMs?: number): Promise<void>;
 }
 
+/** What `onLifecycle` observes: a Worker's engine was released (`start` sent), or the Worker closed. */
+export interface EmbeddedLifecycleEvent {
+  backendSessionId: string;
+  event: "start" | "exited";
+  /** Which Worker, in spawn order — so a test can pair each `start` with its own `exited`. */
+  worker: number;
+}
+
 export interface EmbeddedSessionHostDeps {
   log?: (line: string) => void;
+  /** Observer for tests (WS-23 review I-2): every engine start and every Worker close, in order. */
+  onLifecycle?: (event: EmbeddedLifecycleEvent) => void;
   /** Test seams; production derives both from `isCompiledDaemon()`. */
   workerEntry?: string;
   workflowWorkerCommand?: () => EmbeddedWorkflowWorkerCommand;
@@ -184,19 +199,45 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 export function createEmbeddedSessionHost(deps: EmbeddedSessionHostDeps = {}): EmbeddedSessionHost {
   const log = deps.log ?? ((): void => {});
   const live = new Map<EmbeddedWorkerProcess, string>();
+  // WS-23 review I-2: the NEWEST Worker per backend session. Every Worker shares this process's pid,
+  // so the transcript lease (pid-stamped, same-pid re-entrant) cannot keep two incarnations of one
+  // session apart; this map is what does. The wrapper can end an iteration WITHOUT the Worker having
+  // ended (a `ProtocolDecodeError` on an oversized frame throws out of `query()` while the engine is
+  // still finishing its turn), after which `WinterSession.open()` resumes at once.
+  const newest = new Map<string, EmbeddedWorkerProcess>();
+  let spawned = 0;
   let shuttingDown: Promise<void> | undefined;
 
   const workerProcess = (options: SpawnRuntimeOptions): EmbeddedWorkerProcess => {
     const sessionId = sessionIdOf(options.args);
+    const worker = ++spawned;
+    const prior = newest.get(sessionId);
+    // A live predecessor is KILLED (aborted: its engine unwinds and returns) and the new Worker's
+    // engine is HELD until that predecessor has closed — never two engines on one transcript.
+    const predecessorExited = prior !== undefined && prior.state !== "closed" ? prior.exited : undefined;
+    if (predecessorExited !== undefined) {
+      log(`embedded session ${sessionId}: a new incarnation arrived while the previous Worker was still running — ending it before the new one starts`);
+      prior!.kill();
+    }
     const proc = spawnEmbeddedWorker({
       workerEntry: deps.workerEntry ?? embeddedWorkerEntry(),
       spawn: options,
       workflowWorkerCommand: (deps.workflowWorkerCommand ?? runtimeWorkflowWorkerCommand)(),
       killGraceMs: deps.killGraceMs ?? EMBEDDED_KILL_GRACE_MS,
+      ...(predecessorExited !== undefined ? { startAfter: predecessorExited } : {}),
     });
     live.set(proc, sessionId);
+    newest.set(sessionId, proc);
+    const onLifecycle = deps.onLifecycle;
+    if (onLifecycle !== undefined) {
+      // Registered AFTER spawnEmbeddedWorker's own continuation, so `start` is reported once it is sent.
+      if (predecessorExited === undefined) onLifecycle({ backendSessionId: sessionId, event: "start", worker });
+      else void predecessorExited.then(() => onLifecycle({ backendSessionId: sessionId, event: "start", worker }));
+    }
     void proc.exited.then((exit) => {
       live.delete(proc);
+      if (newest.get(sessionId) === proc) newest.delete(sessionId);
+      onLifecycle?.({ backendSessionId: sessionId, event: "exited", worker });
       // One line for an abnormal end only — an ordinary session ends 0 on every idle reap. The code
       // and signal are all this says: the Worker's stderr reaches the wrapper's `stderr` option, never
       // this log (it can carry a provider's error text).
@@ -230,7 +271,7 @@ export function createEmbeddedSessionHost(deps: EmbeddedSessionHostDeps = {}): E
         log(`${stragglers.length} embedded session(s) did not end within ${budgetMs} ms of shutdown — terminating`);
         for (const p of stragglers) p.terminate();
         // `terminate()` closes a Worker in milliseconds (measured ~50 ms even mid-spin); bounded anyway.
-        await Promise.race([all, sleep(250)]);
+        await Promise.race([all, sleep(EMBEDDED_TERMINATE_WAIT_MS)]);
       })().catch(() => {});
       return shuttingDown;
     },

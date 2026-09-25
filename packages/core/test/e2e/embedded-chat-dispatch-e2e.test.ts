@@ -274,3 +274,103 @@ describe("chat and dispatch run embedded — a Worker per session inside a real 
     expect(existsSync(join(home, "cache", "quarantine"))).toBe(false);
   }, 30_000);
 });
+
+// WS-23 review round 1 (I-2, M-3): two failure shapes, each on its own daemon so a fixture Worker entry
+// or a lifecycle observer never touches the daemon above.
+describe("embedded sessions under failure — a real daemon", () => {
+  async function bootWith(embeddedHost: NonNullable<Parameters<typeof startDaemon>[0]>["embeddedHost"]): Promise<{ home: string; daemon: RunningDaemon; client: TestClient; rt: RuntimeStateWiring }> {
+    const home = mkdtempSync(join(tmpdir(), "winter-embedded-failure-e2e-"));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({
+      schemaVersion: 3,
+      provider: { model: "winter-test/echo" },
+      runtimes: { winterExecutable: join(home, "no-such-winter-binary"), winterIdleTimeoutSec: 10 },
+    }));
+    const daemon = await startDaemon({ home, secrets: new FileSecretStore(join(home, "test-secrets")), agentProvider: null, embeddedHost });
+    if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
+    const client = await TestClient.connect(daemon.socketPath);
+    await client.hello(daemon.tokens.harness, "e2e");
+    return { home, daemon, client, rt: daemon.runtimeState };
+  }
+  async function teardown(ctx: { home: string; daemon: RunningDaemon; client: TestClient }): Promise<void> {
+    ctx.client.close();
+    await ctx.daemon.stop();
+    rmSync(ctx.home, { recursive: true, force: true });
+  }
+
+  test("an oversized frame (past the wrapper's 1 MiB maxBufferSize) is delivered WHOLE embedded — no ProtocolDecodeError on this topology", async () => {
+    // Evidence for the review's I-2 premise: `maxBufferSize` bounds only an UNTERMINATED carry, and
+    // the bridge posts every frame as one chunk, so a >1 MiB line never trips it (a pipe's 64 KiB
+    // reads would). The overlap hazard itself is proved by the next test, through a garbled line.
+    const ctx = await bootWith({});
+    try {
+      const { client, daemon } = ctx;
+      const { sessionId: sid } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "chat", model: "winter-test/reflect" });
+      await client.call(METHODS.sessionAttach, { sessionId: sid, fromSeq: 0 });
+      await client.call(METHODS.sessionSend, { sessionId: sid, text: "x".repeat(1_200_000) });
+      await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sid, 30_000);
+      const log = daemon.sessions.read(sid);
+      expect(log.filter((e) => e.type === "agent_error")).toEqual([]);
+      const reply = log.find((e) => e.type === "assistant_message") as { text?: string } | undefined;
+      expect((reply?.text ?? "").length).toBeGreaterThan(1_048_576);
+    } finally {
+      await teardown(ctx);
+    }
+  }, 60_000);
+
+  test("I-2: the wrapper throws mid-turn with the engine still alive; the resume KILLS it and never runs a second engine beside it", async () => {
+    const events: Array<{ backendSessionId: string; event: "start" | "exited"; worker: number }> = [];
+    const ctx = await bootWith({ workerEntry: join(import.meta.dir, "..", "fixtures", "embedded-garble-worker.ts"), onLifecycle: (e) => events.push(e) });
+    try {
+      const { client, daemon } = ctx;
+      const { sessionId: sid } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "chat", model: "winter-test/hang" });
+      await client.call(METHODS.sessionAttach, { sessionId: sid, fromSeq: 0 });
+      await client.call(METHODS.sessionSend, { sessionId: sid, text: "hang please" });
+      // The wrapper refuses the non-frame line: the iteration ends typed, the driver goes resumable…
+      await client.waitFor((e) => e.type === "agent_error" && e.sessionId === sid, 30_000);
+      const driver = daemon.winter.get(sid)!;
+      const t0 = Date.now();
+      while (driver.state === "live" && Date.now() - t0 < 5000) await Bun.sleep(20);
+      expect(driver.state).toBe("resumable");
+      // …while its engine is STILL running (a hang turn never ends on its own).
+      const backend = ctx.rt.records.get(sid)!.backendSessionId!;
+      await Bun.sleep(300);
+      expect(daemon.embedded.live()).toEqual([backend]);
+      // The resume: a second incarnation of the same backend session.
+      await client.call(METHODS.sessionSetModel, { sessionId: sid, model: "winter-test/echo" });
+      const evCount = client.events.length;
+      await client.call(METHODS.sessionSend, { sessionId: sid, text: "again" });
+      await client.waitFor((e) => client.events.indexOf(e) >= evCount && e.type === "turn_completed" && e.sessionId === sid, 30_000);
+      const mine = events.filter((e) => e.backendSessionId === backend);
+      // start(1) … exited(1) strictly before start(2): never two engines on one transcript.
+      expect(mine.map((e) => `${e.event}:${e.worker}`).slice(0, 3)).toEqual(["start:1", "exited:1", "start:2"]);
+      let running = 0;
+      for (const e of mine) {
+        running += e.event === "start" ? 1 : -1;
+        expect(running).toBeLessThanOrEqual(1);
+      }
+    } finally {
+      await teardown(ctx);
+    }
+  }, 60_000);
+
+  test("M-3: a Worker that crashes MID-TURN ends the session typed (agent_error), the daemon survives, and the session is resumable", async () => {
+    const ctx = await bootWith({ workerEntry: join(import.meta.dir, "..", "fixtures", "embedded-crash-worker.ts") });
+    try {
+      const { client, daemon } = ctx;
+      const { sessionId: sid } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "chat", model: "winter-test/hang" });
+      await client.call(METHODS.sessionAttach, { sessionId: sid, fromSeq: 0 });
+      await client.call(METHODS.sessionSend, { sessionId: sid, text: "hang please" });
+      const err = await client.waitFor((e) => e.type === "agent_error" && e.sessionId === sid, 30_000);
+      expect(typeof (err as { code?: unknown }).code).toBe("string");
+      const driver = daemon.winter.get(sid)!;
+      const t0 = Date.now();
+      while (driver.state === "live" && Date.now() - t0 < 5000) await Bun.sleep(20);
+      expect(driver.state).toBe("resumable");
+      expect(daemon.embedded.live()).toEqual([]);
+      // The daemon is alive and answering.
+      expect(await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "chat", model: "winter-test/echo" })).toHaveProperty("sessionId");
+    } finally {
+      await teardown(ctx);
+    }
+  }, 60_000);
+});
