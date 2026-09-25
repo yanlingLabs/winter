@@ -728,7 +728,7 @@ describe("sessionHooksFor — the dangerous-domain floor on WebSearch", () => {
   });
 
   test("the model's own blocked_domains are kept and the floor is unioned in, deduped case-insensitively", async () => {
-    const out = await searchVerdict({ query: "q", blocked_domains: ["ads.example", "PASTEBIN.COM"] });
+    const out = await searchVerdict({ query: "qq", blocked_domains: ["ads.example", "PASTEBIN.COM"] });
     const blocked = updatedInputOf(out)!["blocked_domains"] as string[];
     expect(blocked.slice(0, FLOOR_SIZE)).toEqual([...SHIPPED_DANGEROUS_DOMAINS]); // the floor first
     expect(blocked.slice(FLOOR_SIZE)).toEqual(["ads.example"]); // the model's own, minus its duplicate of a floor entry
@@ -736,39 +736,39 @@ describe("sessionHooksFor — the dangerous-domain floor on WebSearch", () => {
   });
 
   test("a call already carrying exactly the floor is left alone (no pointless transform)", async () => {
-    expect(await searchVerdict({ query: "q", blocked_domains: [...SHIPPED_DANGEROUS_DOMAINS] })).toEqual({});
+    expect(await searchVerdict({ query: "qq", blocked_domains: [...SHIPPED_DANGEROUS_DOMAINS] })).toEqual({});
   });
 
   test("allowed_domains: floor entries are removed and blocked_domains is NEVER added (the two are mutually exclusive)", async () => {
-    const out = await searchVerdict({ query: "q", allowed_domains: ["docs.example", "pastebin.com", "raw.paste.ee"] });
-    expect(updatedInputOf(out)).toEqual({ query: "q", allowed_domains: ["docs.example"] });
+    const out = await searchVerdict({ query: "qq", allowed_domains: ["docs.example", "pastebin.com", "raw.paste.ee"] });
+    expect(updatedInputOf(out)).toEqual({ query: "qq", allowed_domains: ["docs.example"] });
     expect(updatedInputOf(out)!["blocked_domains"]).toBeUndefined();
   });
 
   test("allowed_domains with nothing left after the floor is DENIED with the same fixed refusal", async () => {
-    const out = await searchVerdict({ query: "q", allowed_domains: ["pastebin.com", "ngrok.io"] });
+    const out = await searchVerdict({ query: "qq", allowed_domains: ["pastebin.com", "ngrok.io"] });
     expect(denialReason(out)).toContain("pastebin.com matches the blocked entry pastebin.com");
     expect(updatedInputOf(out)).toBeUndefined();
   });
 
   test("the denied allow-list entry is named in its NORMALIZED form — a model-written value never reaches the refusal raw", async () => {
-    const out = await searchVerdict({ query: "q", allowed_domains: ["  *.RAW.PasteBin.COM.  "] });
+    const out = await searchVerdict({ query: "qq", allowed_domains: ["  *.RAW.PasteBin.COM.  "] });
     expect(denialReason(out)).toContain("raw.pastebin.com matches the blocked entry pastebin.com");
     expect(denialReason(out)).not.toContain("*.");
   });
 
   test("an allow-list clear of the floor is untouched", async () => {
-    expect(await searchVerdict({ query: "q", allowed_domains: ["docs.example", "example.org"] })).toEqual({});
+    expect(await searchVerdict({ query: "qq", allowed_domains: ["docs.example", "example.org"] })).toEqual({});
   });
 
   test("the transform carries ONLY the three declared keys — an invented key is dropped, not smuggled into a schema-validated transform", async () => {
-    const out = await searchVerdict({ query: "q", max_results: 40, __proto__: { polluted: true } });
+    const out = await searchVerdict({ query: "qq", max_results: 40, __proto__: { polluted: true } });
     expect(Object.keys(updatedInputOf(out)!).sort()).toEqual(["blocked_domains", "query"]);
   });
 
   test("over the SDK's 1,000-entry list cap the floor goes first and the model's tail is dropped, rather than refusing the call", async () => {
     const own = Array.from({ length: 1200 }, (_, i) => `noise${i}.example`);
-    const blocked = updatedInputOf(await searchVerdict({ query: "q", blocked_domains: own }))!["blocked_domains"] as string[];
+    const blocked = updatedInputOf(await searchVerdict({ query: "qq", blocked_domains: own }))!["blocked_domains"] as string[];
     expect(blocked.length).toBe(1000);
     expect(blocked.slice(0, FLOOR_SIZE)).toEqual([...SHIPPED_DANGEROUS_DOMAINS]);
   });
@@ -781,8 +781,8 @@ describe("sessionHooksFor — the dangerous-domain floor on WebSearch", () => {
     // `undefined || null -> absent`, so standing down on it would leave a call the tool runs
     // unfiltered with no floor on it.
     for (const input of [
-      { query: "q", blocked_domains: [] }, { query: "q", blocked_domains: ["", "  "] },
-      { query: "q", allowed_domains: [] }, { query: "q", blocked_domains: null }, { query: "q", allowed_domains: null },
+      { query: "qq", blocked_domains: [] }, { query: "qq", blocked_domains: ["", "  "] },
+      { query: "qq", allowed_domains: [] }, { query: "qq", blocked_domains: null }, { query: "qq", allowed_domains: null },
     ]) {
       const blocked = updatedInputOf(await searchVerdict(input))!["blocked_domains"] as string[];
       expect(blocked.slice(0, FLOOR_SIZE), JSON.stringify(input)).toEqual([...SHIPPED_DANGEROUS_DOMAINS]);
@@ -797,12 +797,12 @@ describe("sessionHooksFor — the dangerous-domain floor on WebSearch", () => {
   // error naming what the model actually got wrong.
   test("a WRONG-TYPED domain list passes through UNTRANSFORMED, so the tool's own refusal is what the model sees", async () => {
     for (const input of [
-      { query: "q", blocked_domains: "pastebin.com" },
-      { query: "q", blocked_domains: [null, 3] },
-      { query: "q", blocked_domains: ["ok.example", 7] },
-      { query: "q", allowed_domains: "docs.example" },
-      { query: "q", allowed_domains: [{}] },
-      { query: "q", allowed_domains: ["docs.example"], blocked_domains: 5 },
+      { query: "qq", blocked_domains: "pastebin.com" },
+      { query: "qq", blocked_domains: [null, 3] },
+      { query: "qq", blocked_domains: ["ok.example", 7] },
+      { query: "qq", allowed_domains: "docs.example" },
+      { query: "qq", allowed_domains: [{}] },
+      { query: "qq", allowed_domains: ["docs.example"], blocked_domains: 5 },
     ]) {
       const out = await searchVerdict(input);
       expect(updatedInputOf(out), JSON.stringify(input)).toBeUndefined();
@@ -811,11 +811,20 @@ describe("sessionHooksFor — the dangerous-domain floor on WebSearch", () => {
     }
   });
 
-  test("hostile input shapes never throw and still carry the floor where there is a call to carry it on", async () => {
+  test("hostile input shapes never throw -- and with no query there is no search to carry the floor on, so the floor stands down (WS-23 fix round 2)", async () => {
     for (const shape of [null, [], "a string", 7]) {
-      const out = await searchVerdict(shape);
-      expect(Object.keys(updatedInputOf(out)!)).toEqual(["blocked_domains"]);
+      expect(await searchVerdict(shape)).toEqual({});
     }
+  });
+
+  // WS-23 fix round 2: the agent SDK now DENIES a schema-invalid `updatedInput` whatever the original
+  // was, and this floor copies `query` verbatim -- so it stands down on a missing/short query and the
+  // tool reports its own error, instead of the model's typo becoming a policy denial.
+  test("a missing, non-string or one-character query gets NO rewrite (the tool's own 'Missing query' answers it)", async () => {
+    for (const input of [{ query: "x" }, { query: 42, blocked_domains: ["a.com"] }, { blocked_domains: ["pastebin.com"] }, { query: "" }]) {
+      expect(await searchVerdict(input)).toEqual({});
+    }
+    expect(updatedInputOf(await searchVerdict({ query: "xy" }))).toMatchObject({ query: "xy" });
   });
 });
 

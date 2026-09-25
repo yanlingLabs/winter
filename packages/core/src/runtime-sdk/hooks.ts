@@ -1342,6 +1342,13 @@ function webSearchFloorHook(deps: SessionHooksDeps): HookCallback {
     // Nothing is lost by standing down: the call cannot search at all, and FETCHING anything it could
     // have surfaced still goes through `webFetchFloorHook` on both legs.
     if (wrongTypedDomainList(record["allowed_domains"]) || wrongTypedDomainList(record["blocked_domains"])) return allow();
+    // WS-23 (hooks fix round 2): the same stand-down for a MISSING or too-short `query`. The agent SDK
+    // now validates a hook's `updatedInput` against the tool's schema and DENIES an invalid one
+    // whatever the original was, and this floor copies `query` verbatim -- so a rewrite of
+    // `{query: "x"}` would turn the model's own typo into a policy denial it cannot act on. With no
+    // query there is no search to filter; the tool's own "Missing query" is the right answer.
+    const query = record["query"];
+    if (typeof query !== "string" || query.length < 2) return allow();
     const allowed = domainList(record["allowed_domains"]);
 
     if (allowed !== undefined) {
