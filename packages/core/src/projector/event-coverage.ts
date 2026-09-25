@@ -136,6 +136,10 @@ export const SUBAGENT_TRANSCRIPT_INCLUDE = {
   panel_tab_activated: false,
   panel_tab_navigated: false,
   panel_command: false,
+  // WS-23: a hook's notice is for the HUMAN (a blocked prompt's reason, a hook's `systemMessage`);
+  // the model already received whatever a hook meant it to see, as context. Kept out of a child's
+  // model-greppable transcript for the same reason the transcript filter fails closed at all.
+  hook_notice: false,
 } satisfies Record<SessionEvent["type"], boolean>;
 
 /**
@@ -170,6 +174,9 @@ export const PROJECTED_EVENT_COVERAGE = {
   tool_result: true, // `user` frames carrying `tool_result` blocks
   turn_completed: true, // the terminal `result`, `contextTokens` from its usage
   agent_error: true, // an `is_error` result (Task 11 refines the code per WS-14 §13 class)
+  // WS-23: `system/informational` (a hook's notice), and a `result` whose `terminal_reason` is
+  // `hook_stopped` when no notice already carried that stop's reason (`index.ts`).
+  hook_notice: true,
   // `user_message` is produced ONLY as a pass-through: a `user` text frame that the host's own
   // push queue does not account for (an inbound agent-message delivery rendered into the child's
   // input). The ordinary path is the HOST appending `user_message` before it pushes (P8b-5), and
