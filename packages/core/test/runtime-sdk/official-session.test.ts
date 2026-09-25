@@ -1051,7 +1051,9 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
     const w = driverWorld();
     try {
       await writeCredentialMaterial(w.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
-      const sid = w.store.createSession("t", { mode: "code", model: MODEL });
+      // SDK 0.0.23 gave `claude-fable-5` (MODEL) its documented effort vocabulary, so the row that takes
+      // none is now the dated Haiku row, which still declares no reasoning block (capture (J) parity).
+      const sid = w.store.createSession("t", { mode: "code", model: "anthropic/claude-haiku-4-5-20251001" });
       w.store.setEffort(sid, "high");
       await w.drivers.create(sid);
       expect(w.capturedOptions).toHaveLength(1);

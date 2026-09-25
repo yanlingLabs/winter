@@ -1987,7 +1987,9 @@ export function permittedProviders(filterProviderIds?: ReadonlySet<string>): Arr
     if (p.risk.class === "blocked") continue;
     if (p.scope !== "llm") continue;
     if (filterProviderIds !== undefined && !filterProviderIds.has(p.id)) continue;
-    const models = catalog.models.filter((m) => m.providerId === p.id && m.status !== "blocked").map((m) => m.key as ModelTag);
+    // `deprecated` (SDK 0.0.23: a vendor-retired row) is never offered either — it still resolves for a
+    // stored tag, but nothing here may name it as a fresh choice.
+    const models = catalog.models.filter((m) => m.providerId === p.id && m.status !== "blocked" && m.status !== "deprecated").map((m) => m.key as ModelTag);
     if (models.length === 0) continue;
     out.push({ providerId: p.id, displayName: p.displayName, models });
   }
@@ -2380,10 +2382,9 @@ export function roleCarriesEffort(role: ModelRole): boolean {
  *     user's intent (measured 2026-09-22: `"medium"` on `codex-oauth/gpt-5.6-luna`, timing out the
  *     cleaner). So since 2026-09-22 `internalWireEffortFor` sends a reasoning row that lacks a `"none"`
  *     tier its LOWEST declared effort instead; a row with no vocabulary still sends nothing, and a row
- *     that lists `"none"` still has it dropped (unmeasured). SDK CARRY — the catalog omits `"none"` from
- *     vocabularies whose endpoints demonstrably accept it (`openai/gpt-5.6-terra`'s own live-probe
- *     `sourceRef` records that it is), so either the catalog lists it or `mapEffort` grows a sanctioned
- *     "send no reasoning block".
+ *     that lists `"none"` is SENT `"none"` (SDK 0.0.23/0.0.24 settled the former SDK CARRY: the catalog now
+ *     lists a literal `"none"` exactly where the vendor documents one for the adapter's dialect — the
+ *     metered GPT-5.x/6 rows among them — and dropped the undocumented one on DeepSeek's chat rows).
  *
  *  3. ANY OTHER LEVEL -> `implicitEffortFor(model, stored)`: sent when the row lists it, else the row's
  *     own default, else omitted. NEVER a refusal and never a throw — the write door validated the

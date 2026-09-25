@@ -11,7 +11,15 @@ import claudeAgentSdkManifest from "@anthropic-ai/claude-agent-sdk/package.json"
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.22";
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.24";
+/** Bumped to 0.0.24 (2026-09-25; 0.0.23 was published the same day but never pinned here): 0.0.23's
+ *  first-party provider/model catalog refresh — 213 providers, 1000
+ *  models, 22 families (China-region and plan/dialect twins as separate providers, GPT-6 Sol/Luna,
+ *  Opus 5.5, Xiaomi MiMo, Tencent TokenHub, the Meta Model API, …); the `gpt` family's sol/luna slots
+ *  move to GPT-6 and the `claude` opus slot (+ `opus` alias) to Opus 5.5 — plus 0.0.24's audit fixes and
+ *  the Winter-leg Anthropic adapter fix (effort via `output_config.effort` + adaptive thinking on Claude 4.5+,
+ *  per-row thinking/tool_choice rewrites, the block-binding opt-in on Opus 5.5 / Fable 5.1, and dotted
+ *  Claude ids sent as their dashed wire id). */
 /** Bumped to 0.0.22 (R.4, WS-21 publish, 2026-09-24): the shared `~/.winter/sdk` default home and
  *  `$WINTER_STORE_HOME`, plugins in claude's own format (`hooks.json`, directory marketplaces,
  *  `resolvesWithinPluginRoot`), an MCP tool list rebuilt per request with claude's up-to-2s

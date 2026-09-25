@@ -497,17 +497,19 @@ describe("M-1 / D2 follow-up (2026-09-22): an explicit effort of `none`", () => 
     expect(call.effort).not.toBe("medium");
   });
 
-  test("a row whose vocabulary already lists \"none\" keeps today's drop — its adapter wire handling of \"none\" is unmeasured, out of scope here", async () => {
+  test("a row whose vocabulary LISTS \"none\" is sent \"none\"; one that does not gets its lowest tier (SDK 0.0.24)", async () => {
+    // SDK 0.0.23/0.0.24 settled the SDK CARRY: the catalog lists a literal "none" only where the vendor
+    // documents one for the adapter's dialect, so a listed "none" is sent rather than dropped to the
+    // provider's own (higher) default. DeepSeek's chat dialect documents low/high/max only (the audit
+    // dropped its undocumented "none"), so a role asking for "none" there gets its lowest tier, "low".
     const secrets = secretsStore();
     await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-deepseek" });
     const router = await routerFor(secrets);
-    // `deepseek/deepseek-flash`'s vocabulary is [none, low, high, max] — `"none"` IS one of its own
-    // declared tiers (27 rows in the pinned catalog carry it this way), but the controller's ruling
-    // scoped the fix to rows that DON'T declare `"none"`: this case is deliberately UNCHANGED.
     const settings = settingsWith("deepseek/deepseek-flash", { roleEfforts: { "pins.dream": "none" } });
     const call = router.resolve("pins.dream", settings);
     if (isInternalRefusal(call)) throw new Error("expected a live call");
-    expect(call.effort).toBeUndefined();
+    expect(call.effort).toBe("low");
+    expect(internalWireEffortFor("openai/gpt-5.6-luna", "none")).toBe("none");
   });
 
   test("the dist case, verbatim: codex-oauth/gpt-5.6-luna with role effort \"none\" sends its lowest declared effort", () => {
@@ -515,6 +517,9 @@ describe("M-1 / D2 follow-up (2026-09-22): an explicit effort of `none`", () => 
     // dist log's cleaner timeout ran on (`[cleaner] judgment failed ... judgment timed out`,
     // `pins.cleaner` pinned to `codex-oauth/gpt-5.6-luna`, `roleEfforts: {"pins.cleaner": "none"}`).
     expect(internalWireEffortFor("codex-oauth/gpt-5.6-luna", "none")).toBe("low");
+    // SDK 0.0.23: a row that LISTS "none" (OpenAI's metered GPT-5.6 rows document it) is sent "none",
+    // never dropped to the provider's own (higher) default.
+    expect(internalWireEffortFor("openai/gpt-5.6-luna", "none")).toBe("none");
   });
 
   test("the dist case through the router: pins.cleaner on gpt-5.6-luna with effort \"none\" resolves to \"low\", never \"medium\"", async () => {

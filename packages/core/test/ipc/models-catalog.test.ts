@@ -264,8 +264,11 @@ describe("models.catalog", () => {
     // `"none"` is Winter's own unset, deliberately absent from the catalog — `sync.config`'s picker
     // prepends it as a UI convention; this surface carries catalog truth.
     expect(opus.efforts).not.toContain("none");
-    // …and `defaultEffort` is independently optional: this row declares a vocabulary but no default.
-    expect(opus.defaultEffort).toBeNull();
+    // …and `defaultEffort` is independently optional: SDK 0.0.23 gave Opus 5 its documented default
+    // (`high`), so the vocabulary-but-no-default row is now Sonnet 4.5 (a budget ladder, thinking off by default).
+    const sonnet45 = result.result.models.find((m: any) => m.tag === "anthropic/claude-sonnet-4.5");
+    expect(sonnet45.efforts.length).toBeGreaterThan(0);
+    expect(sonnet45.defaultEffort).toBeNull();
     // A row that DOES declare one carries it verbatim, and it is a member of its own vocabulary.
     const terra = result.result.models.find((m: any) => m.tag === "codex-oauth/gpt-5.6-terra");
     expect(terra.defaultEffort).toBe("medium");
