@@ -1431,3 +1431,161 @@ describe("WS-21 round 3: the lazy canonical-cwd re-key at resume (Winter leg)", 
 });
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
+// WS-23 (ruling R2) — a record the retired official leg wrote is ADOPTED onto the Winter leg at its
+// next resume: its transcript re-keyed to the Winter cwd key, its runtime kind and selection
+// rewritten, then the child opens on the SAME transcript file (the Winter runtime reads claude's
+// entry shapes). A collision or an already-`repair-required` transcript refuses typed and moves
+// nothing, with the record still naming `claude-agent`, so every later resume refuses the same way.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+describe("WS-23: a legacy claude-agent record is adopted onto the Winter leg at resume", () => {
+  /** Two entries in the shape the `claude` binary writes (`message.model` on the assistant entry). */
+  const claudeTranscript = (id: string, cwd: string): string => [
+    { type: "user", uuid: "u-claude-1", parentUuid: null, sessionId: id, cwd, version: "2.1.250", timestamp: "2026-09-20T10:00:00.000Z", message: { role: "user", content: "remember the word PAPAYA" } },
+    { type: "assistant", uuid: "a-claude-1", parentUuid: "u-claude-1", sessionId: id, cwd, version: "2.1.250", timestamp: "2026-09-20T10:00:01.000Z", message: { id: "msg_legacy_1", type: "message", role: "assistant", model: "claude-sonnet-5", content: [{ type: "text", text: "Noted: PAPAYA." }], stop_reason: "end_turn", usage: { input_tokens: 10, output_tokens: 3 } } },
+  ].map((e) => JSON.stringify(e)).join("\n") + "\n";
+
+  type Legacy = { provider: "anthropic" | "console"; authFamily?: "api-key" | "console-profile" | "claude-oauth"; cwdless?: boolean; health?: "clean" | "repair-required" };
+  /** A session exactly as the official leg left it: the store row, a `claude-agent` record keyed by
+   *  the cwd THAT leg used (the `cwd` column, else `dirs[0]`), and claude's own transcript there. */
+  function legacySession(t: ReturnType<typeof table>, opts: Legacy) {
+    const workdir = realpathSync(mkdtempSync(join(tmpdir(), "winter-legacy-cwd-")));
+    const model = `${opts.provider}/claude-sonnet-5`;
+    const sid = opts.cwdless === true
+      ? t.store.createSession("t", { mode: "code", model })
+      : t.store.createSession("t", { mode: "code", model, cwd: workdir });
+    if (opts.cwdless === true) t.store.setDirsRaw(sid, [{ path: workdir, locked: false }]);
+    const id = crypto.randomUUID();
+    const officialKey = transcriptProjectKey(workdir);
+    const projects = storeProjectsDir(t.home);
+    mkdirSync(join(projects, officialKey), { recursive: true });
+    writeFileSync(join(projects, officialKey, `${id}.jsonl`), claudeTranscript(id, workdir));
+    t.records.create({
+      winterSessionId: sid, runtimeKind: "claude-agent", backendSessionId: id,
+      providerId: opts.provider, modelRef: model, authRef: "keychain:anthropic:default",
+      backendRoot: join(projects, officialKey), effectiveTempDir: t.home,
+      transcriptProjectKey: officialKey, memoryProjectKey: "k", tempProjectKey: officialKey,
+      transcriptDialect: "claude-code-jsonl", transcriptHealth: opts.health ?? "clean", compatibilityLevel: "agent-state",
+      conformanceCorpusVersion: "unverified", versionProvenance: "recorded", sdkVersion: "0.3.250", engineVersion: "0.3.250",
+      providerCatalogVersion: "t", providerAdapterVersion: "unstated", capabilities: ["message", "resume"],
+      selection: {
+        runtimeKind: "claude-agent", providerId: opts.provider, modelRef: model, family: "claude",
+        authFamily: opts.authFamily ?? (opts.provider === "console" ? "console-profile" : "api-key"),
+        sdkVersion: "0.3.250", reason: "D13-2", decidedAt: "2026-09-20T10:00:00.000Z",
+      },
+    });
+    t.records.transition(sid, "ready");
+    return { sid, id, workdir, officialKey, projects };
+  }
+
+  test("an api-key record resumes on the Winter leg and keeps its history: same transcript file, record rewritten", async () => {
+    const t = table();
+    try {
+      const { sid, id, workdir, officialKey, projects } = legacySession(t, { provider: "anthropic" });
+      expect(t.drivers.legOf(sid)).toBe("official");
+      const resumed = (await t.drivers.ensure(sid))!;
+      const record = t.records.get(sid)!;
+      expect(record.runtimeKind).toBe("winter-agent");
+      expect(record.selection).toMatchObject({ runtimeKind: "winter-agent", providerId: "anthropic", modelRef: "anthropic/claude-sonnet-5", family: "claude", authFamily: "api-key", sdkVersion: WINTER_PEER_VERSIONS.winterAgentSdk });
+      expect(record.selection.reason).toContain("WS-23");
+      expect([record.providerId, record.modelRef, record.authRef]).toEqual(["anthropic", "anthropic/claude-sonnet-5", "keychain:anthropic:default"]);
+      expect(record.transcriptHealth).toBe("clean");
+      expect(t.drivers.legOf(sid)).toBe("winter");
+      // The child RESUMES the same backend transcript — never a fresh one — in the same cwd.
+      const opts = t.q().options;
+      expect(opts.resume).toBe(id);
+      expect(opts.cwd).toBe(workdir);
+      // …and that transcript is exactly where the child looks, with claude's own entries in it.
+      expect(transcriptProjectKey(opts.cwd!)).toBe(officialKey);
+      const loaded = await new winter.WinterCompatibilitySessionStore({ winterHome: storeHomeFor(t.home) }).load({ projectKey: officialKey, sessionId: id });
+      expect(loaded?.map((e) => e.uuid)).toEqual(["u-claude-1", "a-claude-1"]);
+      expect(readFileSync(join(projects, officialKey, `${id}.jsonl`), "utf8")).toContain("remember the word PAPAYA");
+      expect(t.logs.some((l) => l.includes("adopted onto the Winter leg") && l.includes(sid))).toBe(true);
+      await resumed.end();
+    } finally { t.close(); }
+  });
+
+  test("a console record resumes: provider, model and auth family carry over verbatim", async () => {
+    const t = table();
+    try {
+      const { sid, id } = legacySession(t, { provider: "console" });
+      const resumed = (await t.drivers.ensure(sid))!;
+      const record = t.records.get(sid)!;
+      expect(record.runtimeKind).toBe("winter-agent");
+      expect(record.selection).toMatchObject({ runtimeKind: "winter-agent", providerId: "console", modelRef: "console/claude-sonnet-5", authFamily: "console-profile" });
+      expect(t.q().options.resume).toBe(id);
+      await resumed.end();
+    } finally { t.close(); }
+  });
+
+  test("a cwd-less record (keyed by its first working directory on the official leg) moves to the Winter key and resumes there", async () => {
+    const t = table();
+    try {
+      const { sid, id, officialKey, projects } = legacySession(t, { provider: "anthropic", cwdless: true });
+      const winterKey = transcriptProjectKey(realpathSync(t.home)); // the table's `tmpDirOf` is the home
+      expect(winterKey).not.toBe(officialKey);
+      const resumed = (await t.drivers.ensure(sid))!;
+      expect(existsSync(join(projects, officialKey, `${id}.jsonl`))).toBe(false);
+      expect(readFileSync(join(projects, winterKey, `${id}.jsonl`), "utf8")).toContain("remember the word PAPAYA");
+      const record = t.records.get(sid)!;
+      expect([record.runtimeKind, record.transcriptProjectKey]).toEqual(["winter-agent", winterKey]);
+      expect(t.q().options.resume).toBe(id);
+      await resumed.end();
+    } finally { t.close(); }
+  });
+
+  test("a collision refuses typed, moves nothing and opens nothing — and keeps refusing on the next resume", async () => {
+    const t = table();
+    try {
+      const { sid, id, officialKey, projects } = legacySession(t, { provider: "anthropic", cwdless: true });
+      const winterKey = transcriptProjectKey(realpathSync(t.home));
+      mkdirSync(join(projects, winterKey), { recursive: true });
+      writeFileSync(join(projects, winterKey, `${id}.jsonl`), '{"type":"user","uuid":"u-other"}\n');
+      const first = await t.drivers.ensure(sid).then(() => undefined, (e: unknown) => e);
+      expect(first).toMatchObject({ name: "WinterLegRefusal", code: "legacy_session_migration_refused", reason: "transcript-collision" });
+      expect(t.queries).toHaveLength(0);
+      expect(readFileSync(join(projects, officialKey, `${id}.jsonl`), "utf8")).toContain("PAPAYA");
+      expect(readFileSync(join(projects, winterKey, `${id}.jsonl`), "utf8")).toContain("u-other");
+      const record = t.records.get(sid)!;
+      expect([record.runtimeKind, record.transcriptHealth, record.transcriptProjectKey]).toEqual(["claude-agent", "repair-required", officialKey]);
+      // The record still names the old leg and is now marked: the next resume refuses the same way.
+      const second = await t.drivers.ensure(sid).then(() => undefined, (e: unknown) => e);
+      expect(second).toMatchObject({ code: "legacy_session_migration_refused", reason: "repair-required" });
+      expect(t.queries).toHaveLength(0);
+    } finally { t.close(); }
+  });
+
+  test("a transcript already marked repair-required refuses typed before anything moves", async () => {
+    const t = table();
+    try {
+      const { sid, id, officialKey, projects } = legacySession(t, { provider: "anthropic", cwdless: true, health: "repair-required" });
+      const refused = await t.drivers.ensure(sid).then(() => undefined, (e: unknown) => e);
+      expect(refused).toMatchObject({ code: "legacy_session_migration_refused", reason: "repair-required" });
+      expect(existsSync(join(projects, officialKey, `${id}.jsonl`))).toBe(true);
+      expect(t.records.get(sid)!.runtimeKind).toBe("claude-agent");
+      expect(t.queries).toHaveLength(0);
+    } finally { t.close(); }
+  });
+
+  test("a claude.ai subscription (claude-oauth) record refuses typed — that credential never served the Winter runtime", async () => {
+    const t = table();
+    try {
+      const { sid } = legacySession(t, { provider: "anthropic", authFamily: "claude-oauth" });
+      const refused = await t.drivers.ensure(sid).then(() => undefined, (e: unknown) => e);
+      expect(refused).toMatchObject({ code: "legacy_session_migration_refused", reason: "claude-oauth" });
+      expect(t.records.get(sid)!.runtimeKind).toBe("claude-agent");
+      expect(t.queries).toHaveLength(0);
+    } finally { t.close(); }
+  });
+
+  test("adoptLegacyRecord alone moves the record without opening a child; a Winter record comes back untouched", async () => {
+    const t = table();
+    try {
+      const { sid } = legacySession(t, { provider: "anthropic" });
+      const adopted = t.drivers.adoptLegacyRecord!(sid);
+      expect(adopted?.runtimeKind).toBe("winter-agent");
+      expect(t.queries).toHaveLength(0);
+      const again = t.drivers.adoptLegacyRecord!(sid);
+      expect(again).toEqual(adopted);
+    } finally { t.close(); }
+  });
+});
