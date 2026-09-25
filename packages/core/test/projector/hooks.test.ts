@@ -92,12 +92,13 @@ describe("projector/hooks: observed, never persisted", () => {
     expect(UNPERSISTED_KINDS.length).toBe(unpersisted.length + 4 + 1);
   });
 
-  test("the coverage map gains NOTHING from these families — no variant was invented for them (P8b-21)", () => {
-    // There is no `hook_*` SessionEvent and 8b adds none; inventing one would re-enter the full
-    // seven-step protocol checklist, Swift side included.
+  test("the coverage map gains nothing from these families — the hook LIFECYCLE rows stay unpersisted (P8b-21); WS-23's hook_notice is the SDK's informational frame, not a hook_* row", () => {
+    // There is still no `hook_started`/`hook_response` SessionEvent. `hook_notice` (WS-23) projects
+    // `system/informational` and a `hook_stopped` terminal -- a notice for the human, added through
+    // the full protocol checklist -- and none of the families listed above.
     const produced = Object.entries(PROJECTED_EVENT_COVERAGE).filter(([, v]) => v === true).map(([k]) => k).sort();
     expect(produced).toEqual([
-      "agent_error", "assistant_delta", "assistant_message", "provider_retry", "task_updated", "thread_completed",
+      "agent_error", "assistant_delta", "assistant_message", "hook_notice", "provider_retry", "task_updated", "thread_completed",
       "thread_started", "tool_call", "tool_result", "turn_completed", "turn_started", "user_message",
     ]);
   });
