@@ -264,6 +264,21 @@ export interface TerminalInput {
    * which spawns or searches.
    */
   sawSharedRowActivity?: boolean;
+  /**
+   * WS-23: a `system/informational` frame with `prevent_continuation` was already projected this
+   * turn -- the runtime's own announcement of the stop, naming the hook that raised it. A
+   * `hook_stopped` terminal then adds no second notice; without one, the terminal's own `result`
+   * text is the only place the reason survives, and it is projected as the notice.
+   */
+  stopAlreadyAnnounced?: boolean;
+}
+
+/** WS-23: the bound on a `hook_notice.text` (the schema's own `max`), with a visible marker when cut. */
+export const HOOK_NOTICE_MAX_CHARS = 12_000;
+export function boundHookNoticeText(text: string): string {
+  if (text.length <= HOOK_NOTICE_MAX_CHARS) return text;
+  const marker = "\n[…truncated]";
+  return text.slice(0, HOOK_NOTICE_MAX_CHARS - marker.length) + marker;
 }
 
 export interface TerminalOutput { events: ProjectedEvent[]; totals: UsageTotals | undefined; stopReason: "end_turn" | "aborted" | "error" }
@@ -300,6 +315,14 @@ export function projectTerminal(input: TerminalInput): TerminalOutput {
   const stopReason: "end_turn" | "aborted" | "error" = interrupted ? "aborted" : isError ? "error" : "end_turn";
 
   const events: ProjectedEvent[] = [];
+  // WS-23: a turn a HOOK stopped (`continue: false`, or a blocked prompt) is not an error -- it ends
+  // as `end_turn` -- but its reason is the one thing the user needs to see, so it is projected as a
+  // `hook_notice` unless the runtime's own notice already carried it this turn.
+  const hookStopped = (result as { terminal_reason?: unknown }).terminal_reason === "hook_stopped";
+  if (hookStopped && input.stopAlreadyAnnounced !== true) {
+    const reason = typeof result.result === "string" ? result.result.trim() : "";
+    events.push({ type: "hook_notice", sessionId, threadId, text: boundHookNoticeText(reason.length > 0 ? `Stopped by a hook: ${reason}` : "Stopped by a hook."), level: "warning", stopsTurn: true });
+  }
   if (isError) {
     // ONE DISTINCT CODE PER CLASS (digest item 20 / WS-14 §13) — `errors.ts` reads `subtype`,
     // `terminal_reason`, `api_error_status` and the 11-member provider taxonomy, in that order of
