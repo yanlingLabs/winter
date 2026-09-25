@@ -1997,19 +1997,22 @@ export function permittedProviders(filterProviderIds?: ReadonlySet<string>): Arr
 }
 
 /**
- * USER RULING 2026-09-19: Winter's OWN background jobs — session titles, the bash safety reviewer,
- * the dreamer and the session cleaner — never run on a FIRST-PARTY CLAUDE provider. "claude models
- * run through anthropic which has its own reviewer anyway": the official leg exists for Claude, and
- * a Winter-internal job that borrowed an Anthropic credential would be spending a subscription/
- * Console entitlement on work the user never asked for.
+ * WS-23 (the Winter-only pivot, 2026-09-25): the REMAINING first-party Claude rows Winter's own
+ * background jobs never run on. `anthropic` (the API-key row) is GONE from this list — every
+ * model, Claude included, now runs on the Winter agent SDK, so the 2026-09-19 premise ("Claude
+ * runs through Anthropic's own runtime, which brings its own reviewer") no longer holds and an
+ * Anthropic key is an ordinary token-priced credential for titles, the bash reviewer, the dreamer
+ * and the cleaner.
  *
- * The three ids, and why each is here: `anthropic` (the API-key row), `console` (the Console-profile
- * row) and `cc` (reserved for the claude.ai subscription arm, `runtime-sdk/create.ts`'s tag prefixes).
- * This is an exclusion by PROVIDER ID, deliberately NOT by adapter family — a third-party provider
- * that merely speaks the Anthropic dialect (`deepseek-anthropic`, `zai-anthropic`, `kimi-coding`, …)
- * is an ordinary token-priced vendor and stays eligible.
+ * `console` stays: it has no credential SLOT in the derived inventory (`console-profile` is not an
+ * api-key kind, so `isInScopeApiKeyProvider` excludes it by construction) and the SDK adapter's
+ * console-OAuth headers are a parallel lane's pending work — so even a named slot could not
+ * produce a correct internal call today. `cc` stays: reserved for the subscription arm this daemon
+ * does not serve. This is an exclusion by PROVIDER ID, deliberately NOT by adapter family — a
+ * third-party provider that merely speaks the Anthropic dialect (`deepseek-anthropic`,
+ * `zai-anthropic`, `kimi-coding`, …) is an ordinary token-priced vendor and stays eligible.
  */
-export const CLAUDE_FIRST_PARTY_PROVIDER_IDS = ["anthropic", "console", "cc"] as const;
+export const CLAUDE_FIRST_PARTY_PROVIDER_IDS = ["console", "cc"] as const;
 
 /**
  * A LIVE snapshot of which providers this home actually holds credential material for, threaded
@@ -2041,7 +2044,11 @@ let memoisedInternalEligible: ReadonlySet<string> | undefined;
  * Four conditions, each for its own reason:
  *  1. the provider is an ordinary model-role candidate at all — `permittedProviders()`'s own floor
  *     (`scope === "llm"`, `risk.class !== "blocked"`), reused rather than restated;
- *  2. it is not a first-party Claude provider (`CLAUDE_FIRST_PARTY_PROVIDER_IDS`, the user's ruling);
+ *  2. it is not a remaining first-party Claude row (`CLAUDE_FIRST_PARTY_PROVIDER_IDS` — WS-23: only
+ *     `console`/`cc`; `anthropic` rejoined the eligible set when every model moved onto the Winter
+ *     SDK). Note `console` ALSO fails condition 3 (no derived slot), so this exclusion is the
+ *     belt to that condition's suspenders — and what keeps the refusal reason `provider-unsupported`
+ *     rather than a downstream build failure;
  *  3. this daemon has a credential SLOT for it — a row in `credentialInventory()`. That inventory is
  *     itself catalog-derived and already excludes every `requiresUserEndpoint` row (`azure-ai`, `oci`
  *     — whose shipped endpoint is a placeholder host), every local-none row and every cloud-
@@ -2079,8 +2086,9 @@ export function internalEligibleProviderIds(): ReadonlySet<string> {
  * provider wins whenever it is eligible AND credentialed, so a DeepSeek user with a DeepSeek key gets
  * titles on DeepSeek with ZERO setup. Only when the session default's provider cannot serve these
  * jobs (a Claude default, or an eligible provider with no key stored yet) does this fall to
- * `internalProviderPreferenceOrder()`'s first credentialed member — never to Claude, which is not in
- * the eligible set at all.
+ * `internalProviderPreferenceOrder()`'s first credentialed member. `console`/`cc` are never in the
+ * eligible set at all, so no rung can land on them; `anthropic` (WS-23) is an ordinary member —
+ * a Claude-only home with an Anthropic key gets rung 1 on its own provider, below.
  *
  * `undefined` means "nothing runnable": every internal role then reports `no-internal-credential`
  * (`providers/internal-router.ts`) and the jobs are inert — one log line per change, never per call.
@@ -2692,7 +2700,7 @@ function assertInternalJobRoleTag(tag: string, role: InternalJobRole): void {
   throw new TypeError(
     `${role}: Winter's own background jobs can't run on ${display}. ` +
       (claude
-        ? `Claude models run through Anthropic's own runtime, which brings its own reviewer — so titles, the bash safety reviewer, the dreamer and the session cleaner never borrow an Anthropic credential. `
+        ? `Console and subscription Claude rows have no internal-calls credential path on this daemon (console's bearer slot serves sessions, not the internal provider, and the subscription arm is reserved) — so titles, the bash safety reviewer, the dreamer and the session cleaner never borrow one. `
         : `Winter has no way to drive that provider for its own calls (its credential shape or its API family is not one the daemon can use). `) +
       `Pick a model from the providers \`settings.modelRoles\` reports as \`permitted\` for this role, or clear the pin (model: null) to use the default.`,
   );
@@ -2738,10 +2746,12 @@ export function setModelRole(settings: Settings, role: ModelRole, model?: string
         `never be used. Pass model: null to clear a value stored before the retirement.`,
     );
   }
-  // 2026-09-19 (the internal-jobs widening): an internal-jobs role may only name a provider Winter's
-  // own background calls can actually be driven over. Refused on the PERMANENT facts only — a
-  // first-party Claude provider (the user's own ruling: those run through the official leg, which has
-  // its own reviewer) or an adapter family the daemon cannot drive — never on the situational one.
+  // 2026-09-19 (the internal-jobs widening), narrowed WS-23: an internal-jobs role may only
+  // name a provider Winter's own background calls can actually be driven over. Refused on the
+  // PERMANENT facts only — a remaining first-party Claude row (`console`/`cc`, which have no
+  // internal-calls credential path) or an adapter family the daemon cannot drive — never on the
+  // situational one. (`anthropic` rejoined the admittable set in WS-23: its API key is an ordinary
+  // token-priced credential now that every model runs on the Winter SDK.)
   // An ELIGIBLE provider with no key stored yet is ACCEPTED: that is precisely the case
   // `assertCatalogBackedTag`'s own doc says a write must not refuse ("a provider the user is about to
   // bind"), and the role reports `no-credential` on its `problem` until the key arrives.
