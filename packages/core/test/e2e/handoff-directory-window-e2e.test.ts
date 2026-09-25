@@ -330,9 +330,9 @@ describeWithWinterBinary("the runtime-directory window: a session WITH turns", (
 //
 // WS-20 retires this whole axis: `runtimes.official.auth` is deleted, and "console" is no longer
 // an auth-mode toggle on the "anthropic" provider — it is its own catalog provider id
-// (`console/claude-sonnet-5`, a DIFFERENT tag than `anthropic/claude-sonnet-5`), and
-// `credentialRefFor("console", home)` returns `undefined` unconditionally (the console arm reads
-// an ON-DISK profile file, never a Keychain account) — see keychain.ts's own `credentialRefFor`.
+// (`console/claude-sonnet-5`, a DIFFERENT tag than `anthropic/claude-sonnet-5`). WS-23 names its
+// session credential explicitly (`credentialRefFor("console", home)` → `keychain:anthropic:console`,
+// the broker's bearer slot) — see keychain.ts's own `credentialRefFor`.
 // There is no more "same provider, two possible accounts" ambiguity for the two writers to
 // disagree about, so this test's specific claim (`authRef === "keychain:anthropic:console"`) can
 // no longer be true under any settings/model combination. The daemon.ts `home`-wiring fix itself
@@ -347,8 +347,8 @@ describeWithWinterBinary("MINOR 4: the daemon's own handoff wiring carries WINTE
 
     // WS-20: skipped, not fixed — see the header comment above. The "console" auth arm is no
     // longer a settings toggle on the "anthropic" provider; it is its own catalog provider
-    // ("console/claude-sonnet-5") whose credentialRefFor is unconditionally `undefined` (an
-    // on-disk profile, never a Keychain account), so there is no more "which account" ambiguity
+    // ("console/claude-sonnet-5") whose session credential WS-23 names explicitly
+    // (`keychain:anthropic:console`), so there is no more "which account" ambiguity
     // for this test to distinguish.
     test.skip("a zero-turn re-selection onto an Anthropic model records the CONSOLE account, not the default one", async () => {
       const cwd = realpathSync(mkdtempSync(join(tmpdir(), "dirwin-authref-cwd-")));

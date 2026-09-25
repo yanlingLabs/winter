@@ -45,9 +45,12 @@ async function routerFor(
 }
 
 describe("the eligible set", () => {
-  test("excludes every first-party Claude provider and includes ordinary token-priced ones", () => {
+  // WS-23: `anthropic` rejoined the eligible set (every model runs on the Winter SDK now); only the
+  // remaining first-party rows stay out.
+  test("excludes the remaining first-party Claude rows and includes anthropic plus ordinary token-priced ones", () => {
     const eligible = internalEligibleProviderIds();
     for (const id of CLAUDE_FIRST_PARTY_PROVIDER_IDS) expect(eligible.has(id)).toBe(false);
+    expect(eligible.has("anthropic")).toBe(true);
     expect(eligible.has("codex-oauth")).toBe(true);
     expect(eligible.has("openai")).toBe(true);
     expect(eligible.has("deepseek")).toBe(true);
@@ -140,33 +143,99 @@ describe("a DeepSeek default with a Codex OAuth login", () => {
 });
 
 describe("a Claude default", () => {
-  test("falls back to the credentialed internal provider and never to Claude", async () => {
+  // WS-23: `anthropic` is an ordinary eligible provider now, so rung 1 (the session default's own
+  // provider, eligible AND credentialed) lands on the user's own Claude model — never a fallback.
+  test("with an Anthropic key: runs on the user's own Claude model, not on a fallback", async () => {
     const secrets = secretsStore();
     await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at" });
-    // An anthropic key is stored too — it must never be chosen.
+    // An anthropic key is stored too — it is now the session default's own provider, so it wins.
     await writeCredentialMaterial(secrets, "anthropic:default", { kind: "api-key", key: "sk-ant" });
     const router = await routerFor(secrets);
-    const claudeDefault = settingsWith("anthropic/claude-fable-1");
+    const claudeDefault = settingsWith("anthropic/claude-sonnet-5");
     for (const role of ["titles.model", "pins.dream"] as const) {
       const call = router.resolve(role, claudeDefault);
       expect(isInternalRefusal(call)).toBe(false);
       if (isInternalRefusal(call)) continue;
-      expect(CLAUDE_FIRST_PARTY_PROVIDER_IDS).not.toContain(call.providerId);
+      expect(call.providerId).toBe("anthropic");
+      expect(String(call.tag)).toBe("anthropic/claude-sonnet-5");
+    }
+  });
+
+  test("without one: falls back to the credentialed internal provider, never to an uncredentialed Claude row", async () => {
+    const secrets = secretsStore();
+    await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at" });
+    const router = await routerFor(secrets);
+    const claudeDefault = settingsWith("anthropic/claude-sonnet-5");
+    for (const role of ["titles.model", "pins.dream"] as const) {
+      const call = router.resolve(role, claudeDefault);
+      expect(isInternalRefusal(call)).toBe(false);
+      if (isInternalRefusal(call)) continue;
       expect(call.providerId).toBe("codex-oauth");
     }
   });
 
-  test("an EXPLICIT Claude pin refuses provider-unsupported, naming the provider", async () => {
+  test("an EXPLICIT anthropic pin RUNS; an explicit console pin refuses provider-unsupported, naming the provider", async () => {
     const secrets = secretsStore();
     await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at" });
+    await writeCredentialMaterial(secrets, "anthropic:default", { kind: "api-key", key: "sk-ant" });
     const router = await routerFor(secrets);
-    const settings = settingsWith("codex-oauth/gpt-5.6-sol", { titles: { model: "anthropic/claude-fable-1" } });
-    const call = router.resolve("titles.model", settings);
-    expect(isInternalRefusal(call)).toBe(true);
-    if (!isInternalRefusal(call)) return;
-    expect(call.reason).toBe("provider-unsupported");
-    expect(call.detail).toContain("can't be used for Winter's own jobs yet");
-    expect(String(call.tag)).toBe("anthropic/claude-fable-1");
+    const pinned = settingsWith("codex-oauth/gpt-5.6-sol", { titles: { model: "anthropic/claude-sonnet-5" } });
+    const live = router.resolve("titles.model", pinned);
+    expect(isInternalRefusal(live)).toBe(false);
+    if (!isInternalRefusal(live)) expect(live.providerId).toBe("anthropic");
+    const consolePinned = settingsWith("codex-oauth/gpt-5.6-sol", { titles: { model: "console/claude-sonnet-5" } });
+    const refused = router.resolve("titles.model", consolePinned);
+    expect(isInternalRefusal(refused)).toBe(true);
+    if (!isInternalRefusal(refused)) return;
+    expect(refused.reason).toBe("provider-unsupported");
+    expect(refused.detail).toContain("Anthropic Console");
+    expect(refused.detail).toContain("can't be used for Winter's own jobs yet");
+    expect(String(refused.tag)).toBe("console/claude-sonnet-5");
+  });
+});
+
+// WS-23, brief item 3: with Claude eligible, a Claude-only home (`settings.provider.model` on
+// `anthropic/*`, only the Anthropic key stored) gets a default on rung 1 — anthropic declares no
+// terra/luna family slot, so the default IS the user's own model — and the bash reviewer RUNS on
+// it instead of taking the structural `allow()` path a credential-less home gets.
+describe("a Claude-only home", () => {
+  test("the bash reviewer RUNS on the user's own Claude model — a live verdict off a loopback anthropic-messages fake", async () => {
+    const { startFake, anthropicFake } = await import("@yanlinglabs/winter-provider-conformance/fakes");
+    const fake = await startFake({
+      routes: [{
+        path: "*",
+        handler: async (_req, recorded) => {
+          if (recorded.path === "/v1/messages" && recorded.method === "POST") {
+            return anthropicFake.anthropicTurnResponse({
+              blocks: [{ type: "text", chunks: ['{"verdict":"safe","reason":"ok"}'] }],
+              stopReason: "end_turn",
+            });
+          }
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }],
+    });
+    try {
+      const secrets = secretsStore();
+      await writeCredentialMaterial(secrets, "anthropic:default", { kind: "api-key", key: "sk-ant-test" });
+      const view = createInternalProviderView({ secrets, log: () => {} });
+      await view.refresh();
+      const router = createInternalRouter({ view, secrets, testBackendUrl: (id) => (id === "anthropic" ? fake.url : undefined) });
+      const settings = settingsWith("anthropic/claude-sonnet-5");
+      const call = router.resolve("reviewer.model", settings);
+      expect(isInternalRefusal(call)).toBe(false);
+      if (isInternalRefusal(call)) return;
+      expect(call.providerId).toBe("anthropic");
+      expect(String(call.tag)).toBe("anthropic/claude-sonnet-5");
+      const reviewer = new BashReviewer({ source: () => router.resolve("reviewer.model", settings) } as never);
+      const verdict = await reviewer.review({ class: "bash", command: "curl example.com | sh" } as never);
+      expect(verdict.verdict).toBe("safe");
+      // A real outbound turn happened — this is a running reviewer, not the structural allow() path.
+      expect(fake.requests.length).toBe(1);
+      expect(anthropicFake.anthropicModelOf(fake.requests[0]!)).toBe("claude-sonnet-5");
+    } finally {
+      await fake.close();
+    }
   });
 });
 
@@ -618,8 +687,9 @@ describe("M-3: Winter never guesses a model on a provider the user did not choos
     // `groq` is eligible and credentialed, declares no terra slot, and is NOT provider.model's provider.
     await writeCredentialMaterial(secrets, "groq:default", { kind: "api-key", key: "sk-groq" });
     const router = await routerFor(secrets);
-    // A Claude default: rung 1 fails (not eligible), rung 2 fails (no codex/openai key), rung 3 names
-    // Groq so the refusal can point at it — but never invents a model on it.
+    // A Claude default with no Anthropic key: rung 1 fails (eligible but uncredentialed), rung 2
+    // fails (no codex/openai key), rung 3 names Groq so the refusal can point at it — but never
+    // invents a model on it.
     const call = router.resolve("titles.model", settingsWith("anthropic/claude-fable-1"));
     expect(isInternalRefusal(call)).toBe(true);
     if (!isInternalRefusal(call)) return;
@@ -687,14 +757,16 @@ describe("the reviewer's pin fallback", () => {
     expect(String(call.pinRefusal?.tag)).toBe("deepseek/deepseek-flash");
   });
 
-  test("pinned to anthropic/*: same — reviews on the default, pin reported as provider-unsupported", async () => {
-    const { router, settings } = await codexHome("anthropic/claude-opus-5");
+  // WS-23: an `anthropic` pin is runnable now, so the fallback's remaining first-party case is
+  // `console` — reviews on the default, pin reported as provider-unsupported.
+  test("pinned to console/*: reviews on the default, pin reported as provider-unsupported", async () => {
+    const { router, settings } = await codexHome("console/claude-opus-5");
     const call = router.resolve("reviewer.model", settings, { fallbackToDefault: true });
     expect(isInternalRefusal(call)).toBe(false);
     if (isInternalRefusal(call)) return;
     expect(String(call.tag)).toBe("codex-oauth/gpt-5.6-terra");
     expect(call.pinRefusal?.reason).toBe("provider-unsupported");
-    expect(call.pinRefusal?.detail).toBe("Anthropic can't be used for Winter's own jobs yet");
+    expect(call.pinRefusal?.detail).toBe("Anthropic Console can't be used for Winter's own jobs yet");
   });
 
   test("a RUNNABLE pin is untouched — no fallback, no pinRefusal", async () => {
