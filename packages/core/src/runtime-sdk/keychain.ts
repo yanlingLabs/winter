@@ -176,10 +176,10 @@ export function credentialInventory(): readonly CredentialSlot[] {
     // Fix wave 3 (M-B): a SECOND row for the SAME "anthropic" provider — registers the console
     // account in the seam's "known accounts" set (`keychainSeamFromSecretStore`'s `known` set below)
     // and makes `credentialPresenceFrom`'s presence probe see a console-only install as present, so
-    // `providerSelectionFor` still picks "anthropic" as a candidate. `credentialRefFor` below never
-    // reaches this row via the generic `.find()` lookup for "anthropic" — it special-cases that
-    // provider id and picks the actual account itself (`officialAuthFamilyFor`-driven), so this row's
-    // own ORDER relative to the row above never matters for that path.
+    // `providerSelectionFor` still picks "anthropic" as a candidate. `credentialRefFor` special-cases
+    // "console" to THIS row (WS-23) and resolves "anthropic" via the generic `.find()` below, which
+    // lands on the api-key row first — so this row's own ORDER relative to the row above matters for
+    // neither path, but both rows must stay here.
     { provider: "anthropic", secretName: ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, kind: "keychain" },
   ];
   const already = new Set(head.map((s) => s.provider));
@@ -308,13 +308,24 @@ export function keychainSeamFromSecretStore(store: SecretStore, home?: string): 
  * WS-20: the arm is no longer decided HERE — a model is always a provider-qualified tag, so the
  * caller already names `"anthropic"` or `"console"` as two SEPARATE providers (the tag's own
  * prefix), and this function just looks up each one's fixed inventory row like every other
- * provider. `console` has NO Keychain slot at all (its `authKinds` is `console-profile`, not
- * `api-key` — `isInScopeApiKeyProvider` excludes it from the derived inventory by construction);
- * its presence is the on-disk profile file, checked at spawn time
- * (`official-options.ts`'s `console_profile_missing` gate), never a `CredentialRef`.
+ * provider.
+ *
+ * WS-23 (the Winter-only pivot, 2026-09-25): `console` names the console broker's OWN bearer slot
+ * (`anthropic:console`, refreshed off `ant auth print-credentials` by `console-profile-broker.ts`)
+ * — the official `claude` leg that used to read the on-disk profile is gone, and the Winter child
+ * needs a credential locator like every other provider (`session-provider.ts:643` in the SDK
+ * refuses a turn with no credential). The slot holds `{kind:"bearer", token}` material, which the
+ * child's `coerceMaterial` accepts and the SDK's anthropic-messages adapter sends as the console
+ * arm's OAuth headers (that adapter half is a parallel lane's work; this function only names the
+ * slot). PRESENCE is still the on-disk profile file, checked at spawn time
+ * (`official-options.ts`'s `console_profile_missing` gate) and by `credentialPresentProbe` below —
+ * never `CredentialPresence.byProvider`, whose `"anthropic"` key conflates the two accounts.
  */
 export function credentialRefFor(provider: string, home?: string): CredentialRef | undefined {
-  if (provider === "console") return undefined;
+  // WS-23: `console` is special-cased to the broker's bearer slot (see the doc above) — it is the
+  // one provider whose slot is filed under a DIFFERENT catalog id, because the derived inventory
+  // only derives api-key rows and the broker's account predates the `console` catalog row.
+  if (provider === "console") return { kind: "keychain", account: ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, home) };
   const slot = WINTER_CREDENTIAL_INVENTORY.find((s) => s.provider === provider);
   if (!slot) return undefined;
   return { kind: "keychain", account: slot.secretName, service: keychainService(undefined, home) };
