@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
-import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeStateProbe, runRuntimesProbe, resolveWinterProfile, splitTag, sdkLocalMcpServers } from "@yanlinglabs/winter-core";
+import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeWorkflowWorker, RUNTIME_WORKFLOW_WORKER_ARG, runRuntimeStateProbe, runRuntimesProbe, runEmbeddedProbe, resolveWinterProfile, splitTag, sdkLocalMcpServers } from "@yanlinglabs/winter-core";
 import type { CredentialRow, SecretStore, Settings } from "@yanlinglabs/winter-core";
 import { METHODS, type ApprovalPolicy, type Task } from "@yanlinglabs/winter-protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
@@ -1368,6 +1368,14 @@ export async function runLogoutOpenAiRoute(
 // Guarded so `main.ts` can be imported (e.g. by tests, for INIT_PROMPT/runTurnSession) without
 // executing the CLI — import.meta.main is true only when this file is the entry point.
 if (import.meta.main) {
+  // WS-23: the RUNTIME's workflow worker (COMPILED path) — an embedded chat/dispatch session's Workflow
+  // tool spawns `<winter-core> __runtime-workflow-worker --bridge` under the seatbelt
+  // (`runtime-sdk/embedded.ts`'s `runtimeWorkflowWorkerCommand`). POSITIONAL, like the probes below
+  // (review F-11), and checked FIRST: it is a different program from the daemon's own
+  // `__workflow-worker` below, with a different bridge.
+  if (process.argv[2] === RUNTIME_WORKFLOW_WORKER_ARG) {
+    await runRuntimeWorkflowWorker();
+  }
   // Workflow worker subprocess (COMPILED path): the daemon self-spawns `<winter-core> __workflow-worker`
   // already wrapped in sandbox-exec; THIS process is the sandboxed worker. Route straight to the entry
   // and never fall through to daemon-connect / TUI. (In dev/test the runtime spawns the entry .ts
@@ -1410,6 +1418,15 @@ if (import.meta.main) {
   // relies on for the identical reason.
   if (process.argv[2] === "__runtimes-probe") {
     const result = await runRuntimesProbe({ execPath: process.execPath, home: resolveWinterHome(), env: process.env });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    process.exit(result.ok ? 0 : 1);
+  }
+  // WS-23: the compiled-binary EMBEDDED probe (`scripts/verify-embedded-compiled.ts`) — one chat turn
+  // through a real daemon on a temp WINTER_HOME with a FileSecretStore, the session in a Bun Worker
+  // built from the second compile entrypoint. Same argv[2] shape and the same WINTER_HOME rule as
+  // `__runtime-state-probe` (it refuses without one; it never touches a real home or the Keychain).
+  if (process.argv[2] === "__embedded-probe") {
+    const result = await runEmbeddedProbe({ home: process.env.WINTER_HOME });
     process.stdout.write(`${JSON.stringify(result)}\n`);
     process.exit(result.ok ? 0 : 1);
   }

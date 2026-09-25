@@ -18,6 +18,7 @@
     "verify:workflow": "bun run scripts/verify-workflow-compiled.ts",
     "verify:runtime-state": "bun run scripts/verify-runtime-state-compiled.ts",
     "verify:runtimes": "bun run scripts/verify-runtimes-compiled.ts",
+    "verify:embedded": "bun run scripts/verify-embedded-compiled.ts",
     "typecheck:core": "tsc --noEmit -p packages/core",
     "typecheck:protocol": "tsc --noEmit -p packages/protocol",
     "verify:office-agent": "bun run scripts/office-agent-gate.ts",
