@@ -83,7 +83,7 @@ import { SettingsWatcher, watchViaParentDir } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { restampStep } from "./runtime-state/recovery";
 import { createWinterRuntimeSdk, describeLoadError, type WinterRuntimeSdk } from "./runtime-sdk/create";
-import { createEmbeddedSessionHost, embeddedVersionCheck, EMBEDDED_SHUTDOWN_BUDGET_MS, type EmbeddedSessionHost } from "./runtime-sdk/embedded";
+import { createEmbeddedSessionHost, embeddedVersionCheck, EMBEDDED_SHUTDOWN_BUDGET_MS, type EmbeddedSessionHost, type EmbeddedSessionHostDeps } from "./runtime-sdk/embedded";
 import { ClaudeExecutableUnavailable } from "./runtime-sdk/official-executable";
 import { createConsoleProfileBroker } from "./auth/console-profile-broker";
 import { resolveAntExecutable } from "./runtime-sdk/bundle-layout";
@@ -334,6 +334,9 @@ export async function startDaemon(opts: {
   /** TEST ONLY (fix round 1, M2) — threaded straight into `WinterLegDeps.officialConnectionOverride`;
    *  a production caller never sets this. See that field's own doc for why it exists at all. */
   officialConnectionOverride?: WinterLegDeps["officialConnectionOverride"];
+  /** TEST ONLY (WS-23 review round 1): extra deps for the embedded-session host — a fixture Worker entry,
+   *  or the `onLifecycle` observer a test uses to prove no two engines ever overlap on one session. */
+  embeddedHost?: Omit<EmbeddedSessionHostDeps, "log">;
   /**
    * Phase 9c Migration B (WS-16 §18) — TEST SEAM for the boot hook below. Passing this object AT
    * ALL is what turns migration on for a caller that ALSO supplies its own `secrets`: without it, a
@@ -1298,7 +1301,7 @@ export async function startDaemon(opts: {
   // Worker each (`runtime-sdk/embedded.ts`). Owned HERE rather than by the runtime handle, because
   // `stop()` must drain it after `runtimeSdk.dispose()` and before the stores close (a Worker's last
   // frames still pass through the session store and `runtime-state.db` on the way out).
-  const embeddedSessions = createEmbeddedSessionHost({ log: (line) => console.error(`runtime-sdk: ${line}`) });
+  const embeddedSessions = createEmbeddedSessionHost({ ...(opts.embeddedHost ?? {}), log: (line) => console.error(`runtime-sdk: ${line}`) });
   // The version lock, said ONCE at boot: every embedded session re-checks it at `spawnHookFor` and
   // refuses typed (`embedded_runtime_unavailable`); this line is where an operator finds out why.
   {
