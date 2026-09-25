@@ -83,6 +83,7 @@ import { SettingsWatcher, watchViaParentDir } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { restampStep } from "./runtime-state/recovery";
 import { createWinterRuntimeSdk, describeLoadError, type WinterRuntimeSdk } from "./runtime-sdk/create";
+import { createEmbeddedSessionHost, embeddedVersionCheck, EMBEDDED_SHUTDOWN_BUDGET_MS, type EmbeddedSessionHost } from "./runtime-sdk/embedded";
 import { ClaudeExecutableUnavailable } from "./runtime-sdk/official-executable";
 import { createConsoleProfileBroker } from "./auth/console-profile-broker";
 import { resolveAntExecutable } from "./runtime-sdk/bundle-layout";
@@ -150,6 +151,12 @@ export interface RunningDaemon {
    */
   runtimeSdk: WinterRuntimeSdk | undefined;
   /**
+   * WS-23: the embedded-session host — chat and dispatch Workers. Exposed for the same reason
+   * `winter` is: a test that boots a REAL daemon observes which sessions have a live Worker here (an
+   * embedded session has no pid to `kill -0`), rather than off a mirror it built itself.
+   */
+  embedded: EmbeddedSessionHost;
+  /**
    * P8b Task 5: THE SessionStore this daemon opened — the same instance `stop()` closes.
    *
    * Exposed for the same reason `registry` is: `store.close()` moved onto `stop()`'s ASYNC tail
@@ -190,7 +197,8 @@ export interface RunningDaemon {
    *      watcher, the routine scheduler/store, the dreamer. All of this has happened when `stop()`
    *      RETURNS, exactly as it always has.
    *   2. `runtimeSdk.dispose()` — every live Winter session ends (bounded by
-   *      `SHUTDOWN_QUERY_GRACE_MS`), then the router's own dispose. ASYNC.
+   *      `SHUTDOWN_QUERY_GRACE_MS`), then the router's own dispose; then (WS-23) the embedded host's
+   *      Workers drain (bounded by `EMBEDDED_SHUTDOWN_BUDGET_MS`, then `terminate()`). ASYNC.
    *   3. `store.close()` — the session store. NO LONGER SYNCHRONOUS when a Winter handle exists: a
    *      draining child appends its last events through it, so it must outlive step 2.
    *   4. `runtime.close()` — the §16 deletion drain (bounded) and `runtime-state.db`, which step 2's
@@ -1286,9 +1294,22 @@ export async function startDaemon(opts: {
     }, facts),
   };
 
+  // WS-23 (ruling R1): the ONE host for chat/dispatch sessions embedded in this process — one Bun
+  // Worker each (`runtime-sdk/embedded.ts`). Owned HERE rather than by the runtime handle, because
+  // `stop()` must drain it after `runtimeSdk.dispose()` and before the stores close (a Worker's last
+  // frames still pass through the session store and `runtime-state.db` on the way out).
+  const embeddedSessions = createEmbeddedSessionHost({ log: (line) => console.error(`runtime-sdk: ${line}`) });
+  // The version lock, said ONCE at boot: every embedded session re-checks it at `spawnHookFor` and
+  // refuses typed (`embedded_runtime_unavailable`); this line is where an operator finds out why.
+  {
+    const lock = embeddedVersionCheck();
+    if (lock !== undefined) console.error(`runtime-sdk: embedded runtime refused — ${lock.message}`);
+  }
+
   try {
     runtimeSdk = await createWinterRuntimeSdk({
       home: winterHome,
+      embedded: embeddedSessions,
       settings: () => settings, // LIVE holder, never a boot snapshot
       // WS-21 (spec §3.1): a run-home router is created with `requireRunHome: true` and this builder
       // for its OWN cold-resume path. Absent (router 0.0.11) — the router is created as before.
@@ -2764,6 +2785,7 @@ export async function startDaemon(opts: {
     registry: sharedRegistry,
     runtimeState,
     runtimeSdk,
+    embedded: embeddedSessions,
     sessions: store,
     buildSessionCapabilities,
     winter: winterDrivers,
@@ -2808,9 +2830,17 @@ export async function startDaemon(opts: {
       //
       // The failure of one session's teardown is not the daemon's: `dispose()` bounds each `end()`
       // and swallows rejections, and this `.catch` is the belt for anything it did not.
+      // WS-23: and the embedded Workers END before the stores close too — `dispose()` above has already
+      // ended (then aborted) every tracked session, so an ordinary Worker has closed by now; this bounds
+      // a straggler (`EMBEDDED_SHUTDOWN_BUDGET_MS`, then `terminate()`). Its iteration's tail writes the
+      // generation's end into `runtime-state.db`, which is why this is not left to process exit.
       const winterDone = runtimeSdk === undefined
         ? undefined
-        : runtimeSdk.dispose().catch((err: unknown) => { console.error(`runtime-sdk: dispose failed: ${(err as Error)?.name ?? "unknown"}`); });
+        : runtimeSdk.dispose()
+          .catch((err: unknown) => { console.error(`runtime-sdk: dispose failed: ${(err as Error)?.name ?? "unknown"}`); })
+          .then(() => embeddedSessions.shutdown(EMBEDDED_SHUTDOWN_BUDGET_MS))
+          // One macrotask for the iterations whose stdout just ended to run their `finally` blocks.
+          .then(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
       const closeRest = (): void | Promise<void> => {
         store.close();
         if (!runtime) { lock.release(); return; }
