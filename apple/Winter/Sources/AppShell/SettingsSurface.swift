@@ -223,7 +223,7 @@ func settingsSectionSubtitle(_ section: SettingsSection) -> String {
 /// capability servers, and this app's own sources before it was written down, and several things
 /// the briefs for these pages assumed turned out not to be true, so the copy says what IS true:
 ///
-/// - the Claude runtime's sign-in is NOT a setting (`runtimes.official.auth` was removed in WS-20);
+/// - a Claude model's sign-in is NOT a setting (`runtimes.official.auth` was removed in WS-20);
 ///   it follows the model tag's own prefix, and `.runtimes` says so;
 /// - the summon hotkey is NOT edited anywhere — it is a fixed Hyper-Space. What the library's
 ///   Plugins tab edits is the shortcuts PLUGINS declare, and `.shortcuts` separates the two;
@@ -270,12 +270,10 @@ func settingsSectionComingCopy(_ section: SettingsSection) -> String? {
     case .appshots:
         return "Appshots are coming in a later release."
     case .runtimes:
-        return "Which winter and claude binaries sessions run on, and whether changing a Code "
-            + "session's model may cross from one to the other. Today that is settings.json only: "
-            + "runtimes.winterExecutable, runtimes.claudeExecutable, runtimes.antExecutable and "
-            + "runtimes.handoff.crossRuntime. How the Claude runtime signs in is not a setting at "
-            + "all — it follows the model you choose: anthropic/ uses the API key, console/ the "
-            + "Console login."
+        return "Which winter binary sessions run on, and which ant binary the Console login uses. "
+            + "Today that is settings.json only: runtimes.winterExecutable and "
+            + "runtimes.antExecutable. How a Claude model signs in is not a setting at all — it "
+            + "follows the model you choose: anthropic/ uses the API key, console/ the Console login."
     case .sessions:
         return "Whether new chats are named from their first exchange, and whether the purge "
             + "retires stale chats nobody came back to. Today: titles.enabled and cleaner.enabled "

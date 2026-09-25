@@ -376,31 +376,32 @@ final class UpdatesPanelTests: XCTestCase {
         XCTAssertEqual(presenter.status, .readyToInstall(version: "0.115.0", hold: .busy))
     }
 
-    // MARK: - versions.get → the three SDK rows (2026-09-18)
+    // MARK: - versions.get → the SDK rows (2026-09-18; WS-23 dropped the Claude agent SDK row)
 
     /// The mapper's names must match `pendingSdkComponents`' EXACTLY — `installedComponents` swaps
     /// by name, so a near-miss appends nothing and silently leaves the row pending.
     func testSdkRowsCarryBothNumbersAndKeepTheirExactNames() {
         let rows = sdkInstalledComponents(VersionsSnapshot(
             core: "0.114.4",
+            // An older daemon's `claudeAgentSdk` pin is simply not a row any more (WS-23).
             pins: ["winterAgentSdk": "0.0.16", "winterRuntimeSdk": "0.0.8", "claudeAgentSdk": "0.3.250"],
-            installed: ["winterAgentSdk": "0.0.16", "claudeAgentSdk": "0.3.249"],
-            winterExecutable: nil, claudeExecutable: nil, official: nil))
+            installed: ["winterAgentSdk": "0.0.15", "claudeAgentSdk": "0.3.249"],
+            winterExecutable: nil, bundle: nil))
 
         XCTAssertEqual(rows.map(\.name), pendingSdkComponents.map(\.name),
                        "these names ARE the swap key in installedComponents")
-        XCTAssertEqual(installedComponentValue(rows[0]), "0.0.16")
+        XCTAssertFalse(rows.contains { $0.name.contains("Claude") })
         // A pin/installed disagreement shows BOTH numbers, quietly — it is a normal consequence of
         // the resolver's rungs, never an error state.
-        XCTAssertEqual(installedComponentValue(rows[2]), "0.3.249 (pinned 0.3.250)")
-        XCTAssertTrue(installedComponentIsOffPin(rows[2]))
+        XCTAssertEqual(installedComponentValue(rows[0]), "0.0.15 (pinned 0.0.16)")
+        XCTAssertTrue(installedComponentIsOffPin(rows[0]))
         // Not reported ⇒ the pin alone, never the pin echoed back as if it were measured.
         XCTAssertNil(rows[1].installed)
         XCTAssertEqual(installedComponentValue(rows[1]), "pinned 0.0.8")
 
         let table = installedComponents(winter: "0.114.4", chromium: nil, sdk: rows)
-        XCTAssertEqual(table.count, 5)
-        XCTAssertEqual(installedComponentValue(table[4]), "0.3.249 (pinned 0.3.250)",
+        XCTAssertEqual(table.count, 4)
+        XCTAssertEqual(installedComponentValue(table[2]), "0.0.15 (pinned 0.0.16)",
                        "the daemon's rows replace the pending ones in place")
     }
 
@@ -410,8 +411,8 @@ final class UpdatesPanelTests: XCTestCase {
         let rows = sdkInstalledComponents(VersionsSnapshot(
             core: nil, pins: [:], installed: [:],
             winterExecutable: VersionsExecutable(path: "/tmp/dist/winter", source: "env"),
-            claudeExecutable: nil, official: nil))
-        XCTAssertEqual(rows.count, 3)
+            bundle: nil))
+        XCTAssertEqual(rows.count, 2)
         XCTAssertTrue(rows.allSatisfy(installedComponentIsPending))
         XCTAssertEqual(installedComponentValue(rows[0]), "the daemon didn't report this one")
         XCTAssertFalse(rows.contains { $0.name.lowercased().contains("executable") })

@@ -17,8 +17,9 @@ import Foundation
 // THE CONTRACT THIS PARSES (measured against every `<description>` `scripts/release-lib.ts`'s
 // `appcastDescription`/`releaseNotesHtml` has ever produced, all ten shipped releases):
 //
-// - the first element is always `<p>Winter agent SDK x · Claude Agent SDK y</p>`, verbatim and
-//   first — metadata, rendered as the quiet subtitle rather than as body copy;
+// - the first element is always the embedded-runtime line — `<p>Winter agent SDK x · Claude Agent
+//   SDK y</p>` through 0.117.0, `<p>Winter agent SDK x</p>` since WS-23 retired the official
+//   runtime — verbatim and first: metadata, rendered as the quiet subtitle rather than as body copy;
 // - then the notes: `p`, `h2`, `ul`/`li`, `pre`/`code`, inline `code`, `strong` (`h1`/`h3` are
 //   supported by the generator and unused so far; handled anyway);
 // - entities are exactly `&amp;`, `&lt;`, `&gt;` — the wider set below is cheap insurance against a
