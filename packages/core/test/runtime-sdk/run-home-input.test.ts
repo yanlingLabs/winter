@@ -57,11 +57,11 @@ describe("runHomeInputFor", () => {
     const repo = initRepo();
     const nested = join(repo, "a", "b");
     mkdirSync(nested, { recursive: true });
-    const input = runHomeInputFor(deps({ trust: { isTrusted: () => true } }), { mode: "code", dispatchChild: false, leg: "official", cwd: nested });
+    const input = runHomeInputFor(deps({ trust: { isTrusted: () => true } }), { mode: "code", dispatchChild: false, leg: "winter", cwd: nested });
     expect(input.trustedProjectRoot).toBe(repoRootFor(nested));
     expect(input.trustedProjectRoot).toBe(repo);
     expect(input.gitRoot).toBe(repo);
-    expect(input.leg).toBe("official");
+    expect(input.leg).toBe("winter"); // WS-23: the only leg
   });
 
   test("outside a repository gitRoot is null", () => {

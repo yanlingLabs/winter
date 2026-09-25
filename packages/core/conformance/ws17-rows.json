@@ -165,10 +165,10 @@
         {
           "repo": "winter",
           "file": "scripts/embed-runtimes.sh",
-          "contains": "VERIFY (never re-sign)"
+          "contains": "nothing under `runtimes/claude-official/` is staged"
         }
       ],
-      "note": "The router's proof is scoped to its own distribution (the pinned package, its bundle, or a vendored copy — never tracked; the OPTIONAL peer named in a REACHABLE declaration is rejected). Separately, by the user's P9c-1 ruling: the Winter DISTRIBUTION (the `@yanlinglabs/winter-agent-sdk*` packages) carries no all-rights-reserved artifact, while the APP embeds the unmodified `claude` binary under Anthropic's published permission — `scripts/embed-runtimes.sh` VERIFIES (never re-signs) that embedded binary's Developer ID signature and hardened-runtime flag before every Release build."
+      "note": "The router's proof is scoped to its own distribution (the pinned package, its bundle, or a vendored copy — never tracked). Separately, by the user's P9c-1 ruling: the Winter DISTRIBUTION (the `@yanlinglabs/winter-agent-sdk*` packages) carries no all-rights-reserved artifact. WS-23: the app no longer embeds Anthropic's `claude` binary at all — `scripts/embed-runtimes.sh` stages only `winter` and `ant` (MIT, re-signed), and nothing under `runtimes/claude-official/`."
     },
     {
       "row": 14,
