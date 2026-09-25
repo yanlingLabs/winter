@@ -4,18 +4,17 @@
 // CONFIGURATION=Release, EXPANDED_CODE_SIGN_IDENTITY=- (ad-hoc — this is the build-phase proof,
 // not release.ts's own gate, which requires a real Developer ID team identity).
 //
-// The claude-verify step needs the REAL @anthropic-ai/claude-agent-sdk platform package (an
-// optional dependency bun install may or may not have resolved on this machine/arch) — SKIP with a
-// printed reason when it is absent, UNLESS WINTER_CLAUDE_REQUIRE_RUNTIME=1, in which case that is a
-// hard failure (the same CI-honesty shape `test/helpers/claude-runtime.ts` already uses).
+// WS-23: the step that verified the vendored `claude` binary is gone with the official leg, so this
+// proof no longer depends on the claude platform package; it pins that nothing under
+// `runtimes/claude-official/` is staged, and that `ant`'s checksum lands in ant's own record.
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveClaudeAgentSdkPackageDir } from "../packages/core/src/runtime-sdk/official-executable";
 import { parseAntPin } from "./fetch-ant";
+import { parseAntVersionsJson, parseVersionsJson } from "../packages/core/src/runtime-sdk/bundle-layout";
 
 const SCRIPT = join(import.meta.dir, "embed-runtimes.sh");
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -35,14 +34,6 @@ function pinnedVendoredAnt(): string | undefined {
   }
 }
 
-function claudePlatformAvailable(): boolean {
-  try {
-    return resolveClaudeAgentSdkPackageDir() !== undefined;
-  } catch {
-    return false;
-  }
-}
-
 describe("embed-runtimes.sh (P8d-1/P8d-2 postCompileScript body, standalone)", () => {
   test("CONFIGURATION != Release skips immediately — no other env required, exit 0", () => {
     const r = spawnSync("bash", [SCRIPT], { encoding: "utf8", env: { ...process.env, CONFIGURATION: "Debug" } });
@@ -50,18 +41,11 @@ describe("embed-runtimes.sh (P8d-1/P8d-2 postCompileScript body, standalone)", (
     expect(r.stdout).toContain("skip runtimes embed (non-Release)");
   });
 
-  test("Release: stages the P8d-1 layout, re-signs winter+ant with a stable identifier, and verifies the REAL claude binary untouched", () => {
+  test("Release: stages the P8d-1 layout and re-signs winter+ant with a stable identifier — no claude-official/ at all (WS-23)", () => {
     if (!existsSync(PINNED_DIST_WINTER)) {
       // Not a skip: the working rules name this exact pinned binary as always available for
       // tests in this lane's worktree — its absence is itself a setup problem worth failing on.
       throw new Error(`this test needs the pinned dist/winter at ${PINNED_DIST_WINTER} (never rebuild it — see the brief's working rules)`);
-    }
-    if (!claudePlatformAvailable()) {
-      if (process.env.WINTER_CLAUDE_REQUIRE_RUNTIME === "1") {
-        throw new Error("WINTER_CLAUDE_REQUIRE_RUNTIME=1 and the @anthropic-ai/claude-agent-sdk platform package is not installed on this machine");
-      }
-      console.log("SKIP: @anthropic-ai/claude-agent-sdk platform package not installed on this machine/arch — cannot exercise the claude verify step here");
-      return;
     }
 
     const builtProducts = mkdtempSync(join(tmpdir(), "embed-runtimes-"));
@@ -90,9 +74,11 @@ describe("embed-runtimes.sh (P8d-1/P8d-2 postCompileScript body, standalone)", (
 
       const dest = join(builtProducts, "Winter.app", "Contents", "Resources", "runtimes");
       expect(existsSync(join(dest, "winter"))).toBe(true);
-      expect(existsSync(join(dest, "claude-official", "claude"))).toBe(true);
-      expect(existsSync(join(dest, "claude-official", "VERSIONS.json"))).toBe(true);
+      expect(existsSync(join(dest, "VERSIONS.json"))).toBe(true);
       expect(existsSync(join(dest, "ant", "ant"))).toBe(true);
+      expect(existsSync(join(dest, "ant", "VERSIONS.json"))).toBe(true);
+      // WS-23: the official runtime is not embedded.
+      expect(existsSync(join(dest, "claude-official"))).toBe(false);
 
       // winter: re-signed with the stable identifier, ad-hoc identity accepted (this is the
       // build-phase proof, not release.ts's real-team-identity gate).
@@ -106,25 +92,24 @@ describe("embed-runtimes.sh (P8d-1/P8d-2 postCompileScript body, standalone)", (
       expect(csKeys(join(dest, "winter"))).toEqual(["com.apple.security.cs.allow-jit"]);
       expect(csKeys(join(dest, "ant", "ant"))).toEqual([]);
 
-      // claude: untouched, still verifies as the real Anthropic-signed artifact.
-      const claudeVerify = spawnSync("codesign", ["--verify", "--strict", join(dest, "claude-official", "claude")], { encoding: "utf8" });
-      expect(claudeVerify.status).toBe(0);
-      const claudeDvv = spawnSync("codesign", ["-dvv", join(dest, "claude-official", "claude")], { encoding: "utf8" });
-      expect(`${claudeDvv.stdout}${claudeDvv.stderr}`).toContain("TeamIdentifier=Q6L2SF6YDW");
-
-      // ant: RE-SIGNED (unlike claude) with Winter's own stable identifier, same shape as winter.
+      // ant: RE-SIGNED with Winter's own stable identifier, same shape as winter.
       const antDvv = spawnSync("codesign", ["-dvv", join(dest, "ant", "ant")], { encoding: "utf8" });
       expect(`${antDvv.stdout}${antDvv.stderr}`).toContain("Identifier=com.winter.ant");
       expect(readFileSync(join(dest, "ant", "ant"), "utf8")).toBe("#!/bin/sh\necho fixture-ant\n");
       const antMode = statSync(join(dest, "ant", "ant")).mode & 0o777;
       expect(antMode).toBe(0o755);
 
-      // Fix round 2: the staged VERSIONS.json's checksums.ant is the PRE-SIGN hash — computed on
-      // the fixture's bytes BEFORE codesign mutated the file — so it must equal a fresh hash of
-      // the ORIGINAL fixture content, never of the (now re-signed, different) file at dest.
-      const stagedVersions = JSON.parse(readFileSync(join(dest, "claude-official", "VERSIONS.json"), "utf8")) as { checksums: { ant?: string } };
+      // Fix round 2 / WS-23: ant's own record carries the PRE-SIGN hash — computed on the fixture's
+      // bytes BEFORE codesign mutated the file — so it must equal a fresh hash of the ORIGINAL
+      // fixture content, never of the (now re-signed, different) file at dest. It parses through
+      // the daemon's own reader, and the runtimes record carries no ant field.
+      const antRecord = parseAntVersionsJson(readFileSync(join(dest, "ant", "VERSIONS.json"), "utf8"));
       const expectedPreSignSha256 = createHash("sha256").update(readFileSync(antFixture)).digest("hex");
-      expect(stagedVersions.checksums.ant).toBe(expectedPreSignSha256);
+      expect(antRecord.checksums.antPreSign).toBe(expectedPreSignSha256);
+      expect(antRecord.tag).toBe(parseAntPin(readFileSync(VERSIONS_JSON_PATH, "utf8")).tag);
+      const runtimesRecord = parseVersionsJson(readFileSync(join(dest, "VERSIONS.json"), "utf8"));
+      expect(runtimesRecord.schema).toBe(2);
+      expect(Object.keys(runtimesRecord.checksums)).toEqual(["winterPreSign"]);
 
       expect(r.stdout).toContain("runtimes embedded + verified");
       expect(r.stdout).toContain("ant re-signed (Identifier=com.winter.ant)");
@@ -136,7 +121,7 @@ describe("embed-runtimes.sh (P8d-1/P8d-2 postCompileScript body, standalone)", (
 
   test("a missing vendored ant fails the build loudly, naming the fetch command — never a silent skip", () => {
     if (!existsSync(PINNED_DIST_WINTER)) {
-      // The winter/claude staging step runs BEFORE the ant step and would fail first on a
+      // The winter staging step runs BEFORE the ant step and would fail first on a
       // machine without this — this test is specifically about the ant-missing message, so skip
       // rather than assert a different failure reason.
       console.log("SKIP: no pinned dist/winter available to reach the ant staging step in this environment");
@@ -176,10 +161,6 @@ describe("embed-runtimes.sh (P8d-1/P8d-2 postCompileScript body, standalone)", (
     if (!existsSync(PINNED_DIST_WINTER)) {
       throw new Error(`this test needs the pinned dist/winter at ${PINNED_DIST_WINTER} (never rebuild it — see the brief's working rules)`);
     }
-    if (!claudePlatformAvailable()) {
-      console.log("SKIP: @anthropic-ai/claude-agent-sdk platform package not installed on this machine/arch");
-      return;
-    }
     const builtProducts = mkdtempSync(join(tmpdir(), "embed-runtimes-real-ant-"));
     try {
       const r = spawnSync("bash", [SCRIPT], {
@@ -203,9 +184,9 @@ describe("embed-runtimes.sh (P8d-1/P8d-2 postCompileScript body, standalone)", (
 
       // Fix round 2: the staged pre-sign hash matches the REAL vendored file's own sha256 (the
       // vendored file itself is never mutated by this script — only the staged bundle copy is).
-      const stagedVersions = JSON.parse(readFileSync(join(dest, "claude-official", "VERSIONS.json"), "utf8")) as { checksums: { ant?: string } };
+      const antRecord = parseAntVersionsJson(readFileSync(join(dest, "ant", "VERSIONS.json"), "utf8"));
       const expectedPreSignSha256 = createHash("sha256").update(readFileSync(vendoredAnt)).digest("hex");
-      expect(stagedVersions.checksums.ant).toBe(expectedPreSignSha256);
+      expect(antRecord.checksums.antPreSign).toBe(expectedPreSignSha256);
     } finally {
       rmSync(builtProducts, { recursive: true, force: true });
     }

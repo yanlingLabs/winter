@@ -6,7 +6,7 @@
 // content-identity chain for `ant` — `verifyAntEmbed` against the STAGED pre-sign hash (never the
 // vendor source alone, and never a re-hash of the post-sign embedded file) PLUS a real
 // `codesign --verify --strict` + `Identifier=com.winter.ant` check on the embedded copy itself —
-// in the same place and the same way the pre-existing winter/claude embedded-runtime checks run.
+// in the same place and the same way the pre-existing winter embedded-runtime check runs.
 // A future edit that silently drops, weakens, or reorders the wiring fails a test instead of only
 // ever being caught by a human re-reading a 1300+ line script during a real release.
 import { describe, expect, test } from "bun:test";
@@ -23,12 +23,12 @@ describe("release.ts wires the full ant content-identity chain into the embedded
     expect(source).toMatch(/import\s*\{[^}]*\bparseAntPin\b[^}]*\}\s*from\s*"\.\/fetch-ant"/);
   });
 
-  test("asserts the embedded ant binary's TeamIdentifier/timestamp via the SAME generic assertSigned() winter uses (never claude's separate 'verify untouched' shape)", () => {
+  test("asserts the embedded ant binary's TeamIdentifier/timestamp via the SAME generic assertSigned() winter uses", () => {
     expect(source).toContain("assertSigned(embeddedAntPath");
   });
 
-  test("calls verifyAntEmbed with the repo-root VERSIONS.json text and the STAGED pre-sign hash (embeddedVersions.checksums.ant) — never a hash of the vendor source or the post-sign embedded file — and fails the release on a bad result", () => {
-    expect(source).toMatch(/verifyAntEmbed\(\{\s*versionsJsonText:\s*rootVersionsJsonText,\s*stagedAntPreSignSha256:\s*embeddedVersions\.checksums\.ant\s*\}\)/);
+  test("calls verifyAntEmbed with the repo-root VERSIONS.json text and ant's STAGED record (runtimes/ant/VERSIONS.json, WS-23) — never a hash of the vendor source or the post-sign embedded file — and fails the release on a bad result", () => {
+    expect(source).toMatch(/verifyAntEmbed\(\{\s*versionsJsonText:\s*rootVersionsJsonText,\s*stagedAntVersionsText:\s*existsSync\(embeddedAntVersionsPath\)\s*\?\s*readFileSync\(embeddedAntVersionsPath,\s*"utf8"\)\s*:\s*undefined,?\s*\}\)/);
     expect(source).toMatch(/if \(!antEmbedCheck\.ok\)\s*\{\s*fail\(/);
   });
 
@@ -75,25 +75,25 @@ describe("release.ts wires the full ant content-identity chain into the embedded
     expect(source).toContain("bun run scripts/fetch-ant.ts");
   });
 
-  test("documents that the root VERSIONS.json (the ant vendoring pin) is a different file from the staged runtimes/claude-official/VERSIONS.json", () => {
-    expect(source).toContain("runtimes/claude-official/VERSIONS.json");
+  test("documents that the root VERSIONS.json (the ant vendoring pin) is a different file from the staged runtimes/ant/VERSIONS.json", () => {
+    expect(source).toContain("runtimes/ant/VERSIONS.json");
     expect(source.toLowerCase()).toContain("different file");
   });
 
-  test("the ant gate (vendor check -> staged-hash check -> embedded codesign check) sits AFTER the claude embedded-runtime check and BEFORE the Row 16 winter-source section — the same sequence position as the winter/claude checks it mirrors", () => {
-    const claudeGateIdx = source.indexOf("Embedded runtimes verified: winter re-signed");
+  test("the ant gate (vendor check -> staged-hash check -> embedded codesign check) sits AFTER the winter embedded-runtime check and BEFORE the Row 16 winter-source section — the same sequence position as the winter check it mirrors", () => {
+    const winterGateIdx = source.indexOf("Embedded runtimes verified: winter re-signed");
     const antAssertSignedIdx = source.indexOf("assertSigned(embeddedAntPath");
     const antStagedCheckIdx = source.indexOf("verifyAntEmbed({");
     const antCodesignVerifyIdx = source.indexOf('codesign --verify --strict "${embeddedAntPath}"');
     const row16Idx = source.indexOf("Row 16 STRONG (P9a-8)");
-    for (const idx of [claudeGateIdx, antAssertSignedIdx, antStagedCheckIdx, antCodesignVerifyIdx, row16Idx]) expect(idx).toBeGreaterThan(-1);
-    expect(antAssertSignedIdx).toBeGreaterThan(claudeGateIdx);
+    for (const idx of [winterGateIdx, antAssertSignedIdx, antStagedCheckIdx, antCodesignVerifyIdx, row16Idx]) expect(idx).toBeGreaterThan(-1);
+    expect(antAssertSignedIdx).toBeGreaterThan(winterGateIdx);
     expect(antStagedCheckIdx).toBeGreaterThan(antAssertSignedIdx);
     expect(antCodesignVerifyIdx).toBeGreaterThan(antStagedCheckIdx);
     expect(antCodesignVerifyIdx).toBeLessThan(row16Idx);
   });
 
-  test("ant is RE-SIGNED like winter (not verified-untouched like claude) — HARDENING_PINS enrolls it in the same no-entitlements-relaxation posture", () => {
+  test("ant is RE-SIGNED like winter — HARDENING_PINS enrolls it in the same no-entitlements-relaxation posture", () => {
     expect(source).toContain('{ path: embeddedAntPath, label: "ant (embedded runtime)", expect: [] }');
   });
 
@@ -105,7 +105,10 @@ assertSigned(embeddedAntPath, "ant (embedded runtime)");
 if (vendoredAntSha256 !== antPin.binarySha256) {
   fail("stale vendor");
 }
-const antEmbedCheck = verifyAntEmbed({ versionsJsonText: rootVersionsJsonText, stagedAntPreSignSha256: embeddedVersions.checksums.ant });
+const antEmbedCheck = verifyAntEmbed({
+  versionsJsonText: rootVersionsJsonText,
+  stagedAntVersionsText: existsSync(embeddedAntVersionsPath) ? readFileSync(embeddedAntVersionsPath, "utf8") : undefined,
+});
 if (!antEmbedCheck.ok) {
   fail("x");
 }
@@ -119,7 +122,7 @@ if (!antDvv.includes("Identifier=com.winter.ant")) {
 `;
     expect(fixture).toMatch(/import\s*\{[^}]*verifyAntEmbed[^}]*\}\s*from\s*"\.\/release-lib"/);
     expect(fixture).toContain("assertSigned(embeddedAntPath");
-    expect(fixture).toMatch(/verifyAntEmbed\(\{\s*versionsJsonText:\s*rootVersionsJsonText,\s*stagedAntPreSignSha256:\s*embeddedVersions\.checksums\.ant\s*\}\)/);
+    expect(fixture).toMatch(/verifyAntEmbed\(\{\s*versionsJsonText:\s*rootVersionsJsonText,\s*stagedAntVersionsText:\s*existsSync\(embeddedAntVersionsPath\)\s*\?\s*readFileSync\(embeddedAntVersionsPath,\s*"utf8"\)\s*:\s*undefined,?\s*\}\)/);
     expect(fixture).toMatch(/if \(!antEmbedCheck\.ok\)\s*\{\s*fail\(/);
     expect(fixture).toMatch(/if \(!existsSync\(vendoredAntPath\)\)\s*\{\s*fail\(/);
     expect(fixture).toMatch(/vendoredAntSha256 !== antPin\.binarySha256/);
@@ -130,9 +133,8 @@ if (!antDvv.includes("Identifier=com.winter.ant")) {
 
 // A2 (2026-09-22): the bun-compiled binaries Winter signs itself carry EXACTLY the JIT entitlement.
 // Under the hardened runtime without `com.apple.security.cs.allow-jit`, JavaScriptCore runs JIT-less:
-// `SharedArrayBuffer` does not exist (so `@anthropic-ai/claude-agent-sdk`'s top-level
-// `new SharedArrayBuffer(4)` threw `ReferenceError` and the official leg never loaded in any shipped
-// daemon) and everything else runs ~5x slower (measured: 228 ms -> 1179 ms on one loop+JSON bench;
+// `SharedArrayBuffer` does not exist (the retired official peer's top-level `new SharedArrayBuffer(4)`
+// threw `ReferenceError` in every shipped daemon on exactly that) and everything else runs ~5x slower (measured: 228 ms -> 1179 ms on one loop+JSON bench;
 // 206 ms with the entitlement). The signing sites and the release gate's expectation must agree, so
 // all of them are pinned here against the ONE entitlements file.
 describe("A2: winter-core is signed with the bun JIT entitlement, and the release gate expects exactly that", () => {

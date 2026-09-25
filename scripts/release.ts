@@ -119,10 +119,6 @@ import { buildWinter } from "./build-winter";
 import { resolveInstalledWinterPackage } from "./stage-runtimes";
 import { createHash } from "node:crypto";
 
-// Winter Phase 8d (P8d-2): Anthropic's team identity on the embedded, UNMODIFIED `claude` binary —
-// NEVER Winter's own TEAM_ID below (claude is verified, never re-signed). Controller measurement M1.
-const CLAUDE_TEAM_ID = "Q6L2SF6YDW";
-
 const TEAM_ID = "37N77U9RSZ";
 const NOTARY_PROFILE = "norma-notary";
 const APPLE_DIR = join(ROOT, "apple", "Winter");
@@ -396,9 +392,9 @@ try {
 // ---------------------------------------------------------------------------
 // 2b. Ensure the vendored `ant` binary is present BEFORE the build (fix wave, F5). NOTE: the
 //     repo-root `VERSIONS.json` read here (the `ant` vendoring pin — tag/asset/sha256/binarySha256)
-//     is a DIFFERENT file from the STAGED `runtimes/claude-official/VERSIONS.json` this same script
-//     verifies post-build (`verifyVersionsJsonAgainstPins`/`verifyAntEmbed`, below) — the former is
-//     this checkout's pin, the latter is what a specific build actually staged.
+//     is a DIFFERENT file from the STAGED `runtimes/ant/VERSIONS.json` this same script verifies
+//     post-build (`verifyAntEmbed`, below) — the former is this checkout's pin, the latter is what a
+//     specific build actually staged.
 //
 //     `embed-runtimes.sh` (the Xcode build's own postCompileScript, invoked by section 3's
 //     `xcodebuild` below) hard-fails immediately if `vendor/ant/<tag>/ant` is missing, so a missing
@@ -526,7 +522,9 @@ for (const target of nestedSparkleHelpers) {
   if (existsSync(target)) assertSigned(target, `Sparkle.framework nested helper (${target.split("/").pop()})`);
 }
 
-// --- Winter Phase 8d: the two embedded runtimes (P8d-1/P8d-2) --------------
+// --- Winter Phase 8d: the embedded runtimes (P8d-1/P8d-2) -----------------
+// WS-23: the official `claude` runtime is no longer embedded; `winter` and `ant` are, each re-signed
+// under Winter's own team identity, each with its own staged record.
 // `winter` is embed-time RE-SIGNED under Winter's own team identity (embed-runtimes.sh) — it fits
 // `assertSigned`'s existing generic check (TeamIdentifier=TEAM_ID + a secure timestamp) exactly,
 // same as winter-core/WinterHelper above.
@@ -534,47 +532,23 @@ const embeddedRuntimesDir = join(app, "Contents", "Resources", "runtimes");
 const embeddedWinterPath = join(embeddedRuntimesDir, "winter");
 assertSigned(embeddedWinterPath, "winter (embedded runtime)");
 
-// `claude` is embedded UNMODIFIED (P8d-2: never re-signed, never patched) — it does NOT fit
-// `assertSigned`'s generic check, which asserts WINTER'S OWN team identity; this binary is signed by
-// Anthropic (CLAUDE_TEAM_ID), and the checks that matter for an untouched vendor artifact are
-// different: a real, unbroken Developer ID signature (`--verify --strict`, not just "some
-// TeamIdentifier + timestamp field is present"), THAT specific team, and — the check `assertSigned`
-// has no equivalent of — that the bytes actually shipped are the exact ones `VERSIONS.json`
-// recorded at staging time (a stale or swapped embed could carry a perfectly valid Anthropic
-// signature while still not being the pinned artifact this release means to ship).
-const embeddedClaudePath = join(embeddedRuntimesDir, "claude-official", "claude");
-const embeddedVersionsPath = join(embeddedRuntimesDir, "claude-official", "VERSIONS.json");
-if (!existsSync(embeddedClaudePath)) fail(`claude (embedded runtime) not found at ${embeddedClaudePath} — build did not embed it as expected`);
-try {
-  sh(`codesign --verify --strict "${embeddedClaudePath}"`);
-} catch {
-  fail(`codesign --verify --strict failed on the embedded claude at ${embeddedClaudePath} — not a valid, untampered Developer ID signature`);
-}
-const claudeDvv = probe(`codesign -dvv "${embeddedClaudePath}" 2>&1`).stdout;
-if (!claudeDvv.includes(`TeamIdentifier=${CLAUDE_TEAM_ID}`)) {
-  fail(`claude (embedded runtime): expected TeamIdentifier=${CLAUDE_TEAM_ID} (Anthropic PBC) — this binary must be embedded UNMODIFIED, never re-signed:\n${claudeDvv}`);
-}
-if (!/flags=.*runtime/.test(claudeDvv)) {
-  fail(`claude (embedded runtime): missing the hardened-runtime flag:\n${claudeDvv}`);
-}
-if (!existsSync(embeddedVersionsPath)) fail(`VERSIONS.json not found at ${embeddedVersionsPath} — the embedded claude has no accompanying pin record`);
-const embeddedClaudeSha256 = createHash("sha256").update(readFileSync(embeddedClaudePath)).digest("hex");
-const versionsCheck = verifyVersionsJsonAgainstPins({
-  versionsJsonText: readFileSync(embeddedVersionsPath, "utf8"),
-  claudeSha256: embeddedClaudeSha256,
-});
+// The runtimes record (`runtimes/VERSIONS.json`, schema 2): it must parse and match this build's
+// pins. Its `winterPreSign` checksum is what the row-16 gates below compare.
+const embeddedVersionsPath = join(embeddedRuntimesDir, "VERSIONS.json");
+if (!existsSync(embeddedVersionsPath)) fail(`VERSIONS.json not found at ${embeddedVersionsPath} — the embedded winter has no accompanying pin record`);
+const versionsCheck = verifyVersionsJsonAgainstPins({ versionsJsonText: readFileSync(embeddedVersionsPath, "utf8") });
 if (!versionsCheck.ok) {
-  fail(`${embeddedVersionsPath} failed the pin/checksum gate:\n  ${versionsCheck.failures.join("\n  ")}`);
+  fail(`${embeddedVersionsPath} failed the pin gate:\n  ${versionsCheck.failures.join("\n  ")}`);
 }
 const embeddedVersions = versionsCheck.versions!;
-console.log(`Embedded runtimes verified: winter re-signed (TeamIdentifier=${TEAM_ID}), claude untouched (TeamIdentifier=${CLAUDE_TEAM_ID}, hardened runtime, checksum matches VERSIONS.json).`);
+console.log(`Embedded runtimes verified: winter re-signed (TeamIdentifier=${TEAM_ID}), VERSIONS.json matches this build's pins.`);
 
-// --- Winter Phase 10a (P10a-4/P10a-5, Task L3, fix round 2): the THIRD embedded runtime — ant ---
+
+// --- Winter Phase 10a (P10a-4/P10a-5, Task L3, fix round 2): the second embedded runtime — ant ---
 // `ant` is embed-time RE-SIGNED under Winter's own team identity (embed-runtimes.sh, --identifier
 // com.winter.ant) — it fits `assertSigned`'s existing generic check (TeamIdentifier + secure
-// timestamp), same as `winter` above (never claude's "verify untouched" shape — L1's licence
-// finding (MIT, github.com/anthropics/anthropic-cli) is what permits Winter to redistribute +
-// re-sign it).
+// timestamp), same as `winter` above (L1's licence finding — MIT,
+// github.com/anthropics/anthropic-cli — is what permits Winter to redistribute + re-sign it).
 const embeddedAntPath = join(embeddedRuntimesDir, "ant", "ant");
 assertSigned(embeddedAntPath, "ant (embedded runtime)");
 
@@ -599,8 +573,8 @@ if (vendoredAntSha256 !== antPin.binarySha256) {
 // local checkout's vendor/ directory (measured: `codesign --remove-signature` does NOT restore a
 // Go binary's original pre-sign bytes — it produced a copy ~256KB smaller than the real vendored
 // ant, so "strip the signature back off and re-hash the embedded file" is not viable here):
-//   (a) `verifyAntEmbed` compares the STAGED pre-sign hash embed-runtimes.sh recorded into
-//       `embeddedVersions.checksums.ant` (computed on the STAGED Contents/Resources/runtimes/ant/ant,
+//   (a) `verifyAntEmbed` compares the STAGED pre-sign hash embed-runtimes.sh recorded in ant's own
+//       `runtimes/ant/VERSIONS.json` (computed on the STAGED Contents/Resources/runtimes/ant/ant,
 //       immediately after the copy, before signing — never a re-hash of the vendor source or the
 //       post-sign embedded file) against the git-committed `ant.binarySha256` pin: proves the file
 //       embed-runtimes.sh SIGNED is the pinned one.
@@ -610,7 +584,11 @@ if (vendoredAntSha256 !== antPin.binarySha256) {
 //       under a legitimate identity, would otherwise pass unnoticed). `assertSigned` above already
 //       covers TeamIdentifier/timestamp; this adds the strict verify and the SPECIFIC identifier,
 //       naming exactly which re-sign step this must have gone through.
-const antEmbedCheck = verifyAntEmbed({ versionsJsonText: rootVersionsJsonText, stagedAntPreSignSha256: embeddedVersions.checksums.ant });
+const embeddedAntVersionsPath = join(embeddedRuntimesDir, "ant", "VERSIONS.json");
+const antEmbedCheck = verifyAntEmbed({
+  versionsJsonText: rootVersionsJsonText,
+  stagedAntVersionsText: existsSync(embeddedAntVersionsPath) ? readFileSync(embeddedAntVersionsPath, "utf8") : undefined,
+});
 if (!antEmbedCheck.ok) {
   fail(`ant (embedded runtime) failed the pin/checksum gate:\n  ${antEmbedCheck.failures.join("\n  ")}`);
 }
@@ -857,11 +835,9 @@ const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
   // under `verify:runtime-state`, the seatbelted workflow worker) — not a copy of anyone else's list.
   // Bun's own guide recommends five (allow-jit, allow-unsigned-executable-memory,
   // disable-executable-page-protection, allow-dyld-environment-variables, disable-library-validation:
-  // `bun-types/docs/guides/runtime/codesign-macos-executable.mdx:36-45`), and the pinned `claude`
-  // binary carries allow-jit, allow-unsigned-executable-memory, disable-library-validation plus the
-  // apple-events and audio-input keys. The extra two `cs.*` memory/library relaxations exist for
-  // `bun:ffi` and native `.node` addons; nothing bundled into winter-core (core, cli, protocol, the
-  // agent/runtime SDK wrappers, the claude SDK, provider-runtime, unpdf) or into the agent SDK's own
+  // `bun-types/docs/guides/runtime/codesign-macos-executable.mdx:36-45`). The extra two `cs.*`
+  // memory/library relaxations exist for `bun:ffi` and native `.node` addons; nothing bundled into
+  // winter-core (core, cli, protocol, the agent/runtime SDK wrappers, provider-runtime, unpdf) or into the agent SDK's own
   // sources imports `bun:ffi` or loads a `.node` addon, so they would widen the surface for nothing.
   // A future FFI/addon dependency must revisit this pin with evidence, not by widening it blind.
   { path: join(app, "Contents", "Resources", "winter-core"), label: "winter-core", expect: [JIT] },
@@ -871,10 +847,7 @@ const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
   // array, and that probe's own comment for why.
   { path: join(app, "Contents", "MacOS", "WinterOfficeHelper"), label: "WinterOfficeHelper", expect: [] },
   // Winter Phase 8d (P8d-2) — `winter` is re-signed at embed time under Winter's own team identity
-  // (embed-runtimes.sh), same posture as winter-core/WinterHelper above. `claude` is deliberately
-  // NOT enrolled here: it is embedded UNMODIFIED (Anthropic's own signature, never re-signed), so
-  // this entitlements-relaxation check — which only has an opinion about code THIS repo signs —
-  // does not apply to it; its identity/checksum are verified separately, above this array.
+  // (embed-runtimes.sh), same posture as winter-core/WinterHelper above.
   // A2 (2026-09-22): `winter` is a bun binary too (measured `Bun v1.4.2` in the shipped runtime) —
   // exactly `allow-jit`, for the same measured reason as winter-core above (embed-runtimes.sh passes
   // `scripts/bun-jit.entitlements`). `ant` below is Go and stays at none.
@@ -882,8 +855,7 @@ const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
   // Winter Phase 10a (P10a-4/P10a-5, Task L3 fix round 1) — `ant` joins `winter` above: it too is
   // re-signed at embed time under Winter's own team identity (embed-runtimes.sh, --identifier
   // com.winter.ant) — but it is a Go binary with no JIT, so unlike `winter` it gets NO relaxation
-  // at all (the A2 entitlement is bun-specific). `claude`'s own
-  // reasoning above (embedded unmodified, out of scope for THIS array) does not apply here.
+  // at all (the A2 entitlement is bun-specific).
   { path: embeddedAntPath, label: "ant (embedded runtime)", expect: [] },
   // panel-cef Task 6a: the GPU helper joined the Renderer. Chromium routes the GPU process to the
   // `(GPU)` bundle only when it needs the JIT-capable variant — SwiftShader — which a Mac with a
@@ -1257,7 +1229,7 @@ const item = appcastItem({
   // the signing checks above already verified — never re-typed. Item 9 keeps that line first and
   // appends `releases/notes/<version>.md` as HTML (already proven to render, in section 2a).
   description: appcastDescription({
-    versionLine: embeddedRuntimesDescriptionLine({ winterAgentSdk: embeddedVersions.winterAgentSdk, officialSdk: embeddedVersions.officialSdk }),
+    versionLine: embeddedRuntimesDescriptionLine({ winterAgentSdk: embeddedVersions.winterAgentSdk }),
     version,
     notesMarkdown,
   }),
