@@ -862,3 +862,112 @@ describe("sessionHooksFor — the floor's wiring, ordering and both legs", () =>
     expect(denialReason((await groupFor(built.winter?.PreToolUse, "WebFetch").hooks[0]!(input, "t1", { signal: abortSignal() })) as Record<string, unknown>)).toContain("pastebin.com");
   });
 });
+
+// ── WS-23: the floors FAIL CLOSED ──────────────────────────────────────────────────────────────
+//
+// Driven through the exact callbacks `sessionHooksFor(...).winter` hands the agent SDK (the object
+// the child's hook bridge invokes, by positional id), with a HOSTILE `tool_input` whose every read
+// throws -- the realistic way a floor's own code throws mid-evaluation. Before WS-23 each of these
+// threw out of the callback; the child's wrapper answered `hook_threw` and the SDK runner let the
+// call proceed (inv-hooks-mcp A4).
+describe("sessionHooksFor — WS-23: a floor that throws DENIES, and every floor group is marked fail-closed", () => {
+  const HOME = join(homedir(), "ws23-failclosed-test-home"); // never created: every floor here is lexical until it throws
+  const hostile = (): unknown =>
+    new Proxy(
+      {},
+      {
+        get() { throw new Error("hostile tool_input"); },
+        has() { throw new Error("hostile tool_input"); },
+        ownKeys() { throw new Error("hostile tool_input"); },
+        getOwnPropertyDescriptor() { throw new Error("hostile tool_input"); },
+      },
+    );
+  const decision = (out: unknown) => (out as { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string } }).hookSpecificOutput;
+  const fire = (group: HookCallbackMatcher, index: number, toolName: string) =>
+    group.hooks[index]!(preInput({ tool_name: toolName, tool_input: hostile(), tool_use_id: "tx" }), "tx", { signal: abortSignal() });
+  const failClosedOf = (group: HookCallbackMatcher) => (group as HookCallbackMatcher & { failClosed?: boolean }).failClosed;
+  const silenceLog = <T>(fn: () => Promise<T>): Promise<T> => {
+    const original = console.error;
+    console.error = () => {};
+    return fn().finally(() => { console.error = original; });
+  };
+
+  test("the sandbox-escape floor and the protected-path Bash fence deny on a throw", async () => {
+    const { winter } = sessionHooksFor({ ...baseDeps, home: HOME });
+    const floor = winter!.PreToolUse!.filter((g) => g.matcher === "Bash").at(-1)!;
+    for (const index of [0, 1]) {
+      const out = decision(await silenceLog(() => fire(floor, index, "Bash")));
+      expect(out?.permissionDecision).toBe("deny");
+      expect(out?.permissionDecisionReason).toContain("fails closed");
+      expect(out?.permissionDecisionReason).not.toContain("hostile tool_input"); // the error NAME is logged, the message never echoed
+    }
+  });
+
+  test("the path fence denies on a throw", async () => {
+    const { winter } = sessionHooksFor({ ...baseDeps, home: HOME, cwd: "/tmp" });
+    const fence = winter!.PreToolUse!.filter((g) => g.matcher === undefined).at(-1)!;
+    expect(decision(await silenceLog(() => fire(fence, 0, "Write")))?.permissionDecision).toBe("deny");
+  });
+
+  test("both dangerous-domain floors deny on a throw", async () => {
+    const { winter } = sessionHooksFor(baseDeps);
+    for (const tool of ["WebFetch", "WebSearch"]) {
+      const group = groupFor(winter?.PreToolUse, tool);
+      expect(decision(await silenceLog(() => fire(group, 0, tool)))?.permissionDecision).toBe("deny");
+    }
+  });
+
+  test("the reviewer's OUTER code denies on a throw; its designed transient failure still escalates with ask", async () => {
+    const throwingPolicy = sessionHooksFor({ ...baseDeps, reviewer: { review: async () => ({ verdict: "safe", reason: "" }) } as unknown as BashReviewer, policy: () => { throw new Error("settings torn"); } });
+    const outer = decision(await silenceLog(() => groupFor(throwingPolicy.winter?.PreToolUse, "Bash").hooks[0]!(preInput({ tool_name: "Bash", tool_input: { command: "rm -rf build" }, tool_use_id: "t1" }), "t1", { signal: abortSignal() })));
+    expect(outer?.permissionDecision).toBe("deny");
+    const transient = sessionHooksFor({ ...baseDeps, reviewer: { review: async () => { throw new Error("timeout"); } } as unknown as BashReviewer, policy: () => "auto" });
+    const inner = decision(await groupFor(transient.winter?.PreToolUse, "Bash").hooks[0]!(preInput({ tool_name: "Bash", tool_input: { command: "rm -rf build" }, tool_use_id: "t2" }), "t2", { signal: abortSignal() }));
+    expect(inner?.permissionDecision).toBe("ask");
+  });
+
+  test("every floor group carries failClosed: true (the SDK-side opt-in for timeouts / malformed answers); observers and the plugin gate do not", () => {
+    const { winter } = sessionHooksFor({ ...baseDeps, home: HOME, reviewer: { review: async () => ({ verdict: "safe", reason: "" }) } as unknown as BashReviewer, lsp: () => undefined });
+    const pre = winter!.PreToolUse!;
+    const bash = pre.filter((g) => g.matcher === "Bash");
+    expect(bash.map(failClosedOf)).toEqual([true, true]); // reviewer, escape floor
+    expect(failClosedOf(groupFor(pre, "WebFetch"))).toBe(true);
+    expect(failClosedOf(groupFor(pre, "WebSearch"))).toBe(true);
+    const unmatched = pre.filter((g) => g.matcher === undefined);
+    expect(unmatched.map(failClosedOf)).toEqual([undefined, true]); // plugin gate, path fence
+    for (const tool of ["Edit", "Write", "NotebookEdit"]) expect(failClosedOf(groupFor(pre, tool))).toBeUndefined(); // fileDiff snapshots
+    for (const g of [...(winter!.PostToolUse ?? []), ...(winter!.PostToolUseFailure ?? [])]) expect(failClosedOf(g)).toBeUndefined();
+  });
+
+  test("a floor that does NOT throw is unchanged by the wrapper (a normal allow stays an allow)", async () => {
+    const { winter } = sessionHooksFor(baseDeps);
+    const out = await groupFor(winter?.PreToolUse, "WebFetch").hooks[0]!(preInput({ tool_name: "WebFetch", tool_input: { url: "https://example.org/" }, tool_use_id: "t3" }), "t3", { signal: abortSignal() });
+    expect(out).toEqual({});
+  });
+});
+
+// WS-23 (brief item 4): the SDK now DELIVERS a PostToolUse `additionalContext` to the model, so this
+// hook's output is live. Pinned here is exactly what the SDK receives from the callback; the
+// end-to-end check (the text inside the model's next request) runs after the SDK release.
+describe("sessionHooksFor — WS-23: diagnostics-after-edit hands the SDK a PostToolUse additionalContext", () => {
+  test("a fake LSP's diagnostics come back as { hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext } }", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hooks-diag-ws23-"));
+    try {
+      writeFileSync(join(root, "a.ts"), "const x = 1;\n");
+      const fakeLsp = {
+        clientFor: async () => ({ diagnostics: async () => [{ line: 0, character: 6, severity: 1, message: "'x' is declared but its value is never read." }] }),
+      } as unknown as LspManager;
+      const { winter } = sessionHooksFor({ ...baseDeps, roots: [root], lsp: () => fakeLsp });
+      const group = groupFor(winter?.PostToolUse, "Edit");
+      const out = await group.hooks[0]!(postInput({ tool_name: "Edit", tool_input: { file_path: "a.ts" }, tool_response: "edited", cwd: root, tool_use_id: "t1" }), "t1", { signal: abortSignal() });
+      expect(out).toEqual({
+        hookSpecificOutput: {
+          hookEventName: "PostToolUse",
+          additionalContext: "diagnostics (1 errors, 0 warnings):\na.ts:1:7 error 'x' is declared but its value is never read.",
+        },
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
