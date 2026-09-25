@@ -858,11 +858,11 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
     } finally { t.close(); }
   });
 
-  // Review M2 (2026-09-23), narrowed WS-23 fix round 1: the advisor pin follows the
+  // Review M2 (2026-09-23), extended WS-23 fix round 1 addendum: the advisor pin follows the
   // `pins.research` digest rule in full — an off-catalog pin, and a cross-provider pin whose
-  // credential has no Keychain locator at all, fall back to the family default too. (`console/*`
-  // USED to be the locator-less case; since WS-23 it names the broker's bearer slot for sessions
-  // and is excluded EXPLICITLY instead — the test below proves the drop survives stored material.)
+  // credential has no Keychain locator, fall back to the family default too. `console/*` is covered
+  // in BOTH slot states: empty (the old locator-less case) and POPULATED with broker material (the
+  // exclusion is explicit — a stored bearer must not start stating the pin).
   test("M2: an off-catalog advisor pin, or a cross-provider pin with no credential locator, falls back to the D30 default", async () => {
     for (const pin of ["openai/no-such-model-anywhere", "console/claude-fable-5-1"]) {
       const settings = { runtimes: { advisorModel: pin, winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } } as unknown as Settings;
@@ -875,6 +875,18 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
         await s.end();
       } finally { t.close(); }
     }
+    // WS-23 R1 addendum: the console pin with a POPULATED broker slot still falls back — the
+    // exclusion is explicit, not locator-absence. (The loop above covers the empty slot.)
+    const settings = { runtimes: { advisorModel: "console/claude-fable-5-1", winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } } as unknown as Settings;
+    const t = table({ settings: () => settings });
+    try {
+      await new FileSecretStore(join(t.home, "secrets.json")).set("anthropic:console", JSON.stringify({ kind: "bearer", token: "console-bearer-test" }));
+      const sid = t.store.createSession("t", { mode: "code", model: "openai/gpt-5.6-sol", approvalPolicy: "ask" });
+      const s = await t.drivers.create(sid);
+      expect(t.q().options.advisor).toEqual({ model: "openai/gpt-6-astra", authRef: expect.objectContaining({ account: "openai:default" }) });
+      expect(t.logs.some((l) => l.includes("runtimes.advisorModel"))).toBe(true);
+      await s.end();
+    } finally { t.close(); }
   });
 
   // WS-23 fix round 1: `credentialRefFor("console")` names the broker's bearer slot for SESSIONS,
