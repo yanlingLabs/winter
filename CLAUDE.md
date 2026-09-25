@@ -80,7 +80,7 @@ Two traps: a plain `winter` is the DIST CLI and, on a dead socket, auto-launches
 WINTER_RUNTIME_EXECUTABLE="$PWD/../../dist/winter" WINTER_HOME=~/.winter-dev WINTER_PROFILE=dev bun src/main.ts daemon run
 ```
 
-A spawned `winter` child (code sessions) reads the daemon's Keychain items itself, so macOS asks for consent once per credential item per binary identity; an embedded chat/dispatch session reads them in-process as `winter-core`, the binary that created them, and never prompts — click "Always Allow", or the turn hangs until the CLI's stall watchdog fires (`WINTER_TURN_STALL_MS`, default 180 s). `build:winter --sign <identity>` (or `$WINTER_RUNTIME_SIGN_IDENTITY`) re-signs with the stable identifier `com.winter.runtime` so that ACL survives rebuilds; the npm binary is ad-hoc signed and re-prompts whenever `bun install` changes its bytes.
+A spawned `winter` child (code sessions) reads the daemon's Keychain items itself, so macOS asks for consent once per credential item per binary identity — click "Always Allow", or the turn hangs until the CLI's stall watchdog fires (`WINTER_TURN_STALL_MS`, default 180 s). An embedded chat/dispatch session reads them in-process as `winter-core`, the binary that created them, and never prompts. `build:winter --sign <identity>` (or `$WINTER_RUNTIME_SIGN_IDENTITY`) re-signs with the stable identifier `com.winter.runtime` so that ACL survives rebuilds; the npm binary is ad-hoc signed and re-prompts whenever `bun install` changes its bytes.
 
 ## Architecture
 

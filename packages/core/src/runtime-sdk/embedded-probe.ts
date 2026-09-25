@@ -19,8 +19,10 @@
 //
 // Reached ONLY by `scripts/verify-embedded-compiled.ts` through the static `__embedded-probe` argv
 // route in `packages/cli/src/main.ts` (beside `__runtime-state-probe`).
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve, sep } from "node:path";
+import { isDefaultWinterHome } from "../winter-dir";
 import { ConnWriter, LineDecoder, METHODS, PROTOCOL_VERSION, encodeLine, type SessionEvent, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { FileSecretStore } from "../auth/secret-store";
 import { startDaemon, type RunningDaemon } from "../daemon";
@@ -38,7 +40,42 @@ export type EmbeddedProbeResult =
       /** How many embedded Workers the host still listed after `stop()` resolved (must be 0). */
       workersAfterStop: number;
     }
-  | { ok: false; error: string };
+  | { ok: false; error: string; code?: "probe_home_refused" };
+
+/**
+ * WS-23 review I-3: the homes this probe will EVER write into. It writes `<home>/settings.json` and a
+ * secrets directory before booting a daemon there, so on a live home it would overwrite the user's
+ * settings — which that home's running daemon then applies live. Refused, typed, BEFORE anything is
+ * written:
+ *   - either profile's DEFAULT home (`~/.winter`, `~/.winter-dev`), however it is spelled — the
+ *     `winter-dev` wrapper exports `WINTER_HOME=~/.winter-dev`, so one stray invocation would hit it;
+ *   - any other home that is neither ABSENT/EMPTY nor under the temp root (`os.tmpdir()`, realpath'd):
+ *     a gate home is a fresh `mkdtemp`, and nothing else has any business here.
+ * `homedirFn`/`tmpRoot` exist for the hermetic test only.
+ */
+export function embeddedProbeHomeRefusal(home: string, opts: { homedirFn?: () => string; tmpRoot?: string } = {}): string | undefined {
+  const homedirFn = opts.homedirFn ?? homedir;
+  for (const profile of ["dist", "dev"] as const) {
+    if (isDefaultWinterHome(home, profile, homedirFn)) return `refusing ${home}: it is the ${profile} profile's default Winter home, and the probe overwrites settings.json`;
+  }
+  const real = (p: string): string => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return resolve(p);
+    }
+  };
+  const tmpRoot = real(opts.tmpRoot ?? tmpdir());
+  const underTmp = real(home).startsWith(tmpRoot + sep);
+  let empty: boolean;
+  try {
+    empty = !existsSync(home) || readdirSync(home).length === 0;
+  } catch {
+    empty = false;
+  }
+  if (!underTmp && !empty) return `refusing ${home}: the probe only runs on an empty home or one under the temp root (${tmpRoot}), never on a populated home`;
+  return undefined;
+}
 
 type RpcReply = { result?: unknown; error?: { code: number; message: string; data?: unknown } };
 
@@ -87,9 +124,14 @@ async function connect(socketPath: string): Promise<{ call<T>(method: string, pa
   };
 }
 
-export async function runEmbeddedProbe(input: { home: string | undefined }): Promise<EmbeddedProbeResult> {
+export async function runEmbeddedProbe(input: { home: string | undefined; homedirFn?: () => string; tmpRoot?: string }): Promise<EmbeddedProbeResult> {
   if (!input.home) return { ok: false, error: "WINTER_HOME is required (the probe never touches a real home)" };
   const home = input.home;
+  const refusal = embeddedProbeHomeRefusal(home, {
+    ...(input.homedirFn !== undefined ? { homedirFn: input.homedirFn } : {}),
+    ...(input.tmpRoot !== undefined ? { tmpRoot: input.tmpRoot } : {}),
+  });
+  if (refusal !== undefined) return { ok: false, code: "probe_home_refused", error: refusal };
   writeFileSync(
     join(home, "settings.json"),
     JSON.stringify({
