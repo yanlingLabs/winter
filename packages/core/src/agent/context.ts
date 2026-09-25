@@ -251,8 +251,8 @@ export class ContextAssembler {
   /** The ONE memory-directory decision — `assemble()`'s own MEMDIR section (below) is the first
    *  caller, but it is deliberately a PUBLIC method so a second producer can ask the identical
    *  question and get the identical answer, rather than re-deriving it by hand and drifting. That
-   *  drift already happened once: the official (`claude`) leg's `autoMemoryDirectoryFor`
-   *  (`runtime-sdk/official-options.ts`) used to recompute this from scratch via the bare
+   *  drift already happened once: the retired official (`claude`) leg's `autoMemoryDirectoryFor`
+   *  used to recompute this from scratch via the bare
    *  `memoryDirFor`/`assistantMemoryDirFor` free functions in `memory-dir.ts`, which dropped
    *  `settings.memory.directory` (the user's relocation override), the WS-16 §17 memory-key
    *  relocation (`relocatedKey`), and `workdirLess` — so the official leg's child could be told to

@@ -137,7 +137,7 @@ describe("capabilities.list", () => {
     // tools, which only a Winter child ever sees). This test daemon has no Exa key in its throwaway
     // Keychain service, so the handler's live probe answers `false` — spelled here rather than
     // defaulted, since the default is the opposite (`true`, the narrower surface).
-    const exposure = { leg: "winter" as const, exaKeyPresent: false };
+    const exposure = { exaKeyPresent: false };
     const disallowed = {
       code: new Set(disallowedToolsFor("code", exposure, WINTER_CAPABILITY_TOOLS)),
       dispatch: new Set(disallowedToolsFor("dispatch", exposure, WINTER_CAPABILITY_TOOLS)),

@@ -1,7 +1,10 @@
 // Winter Phase 10b (Lane D2, task D2-3) — spec WS-18 §9's A-6 (no credential), A-7 (same-leg loss),
 // A-7a (same family, silent), plus the controller's own C1 addendum item (a same-leg model change
-// must not leave the pre-flight review reading a STALE recorded model before a later cross-runtime
-// move).
+// must not leave the pre-flight review reading a STALE recorded model before a later family change).
+//
+// WS-23: every model runs on the Winter runtime now, Claude included — the cases below that used the
+// official `claude` leg (Sonnet -> Opus, gpt -> claude) run Claude on Winter, against an Anthropic
+// loopback fake reached through `settings.providers.anthropic.baseUrl`.
 //
 // STRUCTURAL FINDING (2026-09-14, test fix round 1 — same root cause `five-hop-chain-e2e.test.ts`
 // documents in full depth, including the DEEPER attempt: review-lane-d2.md's own suggested
@@ -49,7 +52,9 @@ import { renderNoCredentialHint } from "../../src/runtime-sdk/handoff";
 import { daemonResolveEndpoint } from "../../src/providers/registry";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
 import { carriesReasoning, opaqueLeaks, outOfOrder } from "../helpers/carriage";
-import { claudeRuntimeForTests, describeWithClaudeRuntime, type AnthropicTurnScript } from "../helpers/claude-runtime";
+import type { anthropicFake as AnthropicFakeModule } from "@yanlinglabs/winter-provider-conformance";
+
+type AnthropicTurnScript = Parameters<typeof AnthropicFakeModule.anthropicTurnResponse>[0];
 
 interface RpcErrorLike { rpc?: { message?: string; data?: { code?: string; warnings?: string[]; portable?: string[]; reason?: string } } }
 
@@ -113,16 +118,13 @@ describe("A-6a: the no-credential hint never names an SDK or runtime (pure funct
     // the end-to-end shape cannot be constructed; `renderNoCredentialHint` is the REAL, exported
     // pure function `planAndApplySwitch` itself calls for this exact case — exercised directly with
     // an alternatives list shaped like a real no-credential refusal would carry.
-    const hint = renderNoCredentialHint(
-      [{ providerId: "openrouter", authKind: "api-key", label: "OpenRouter" }],
-      { subscriptionEnabled: false },
-    );
+    const hint = renderNoCredentialHint([{ providerId: "openrouter", authKind: "api-key", label: "OpenRouter" }]);
     expect(hint).toContain("OpenRouter");
     expect(hint).not.toMatch(/\bSDK\b|\bruntime\b|Claude Agent|Winter Agent|winter-agent|claude-agent/i);
   });
 
   test("no doors at all renders a hint naming no provider, still never an SDK/runtime", () => {
-    const hint = renderNoCredentialHint([], { subscriptionEnabled: false });
+    const hint = renderNoCredentialHint([]);
     expect(hint.length).toBeGreaterThan(0);
     expect(hint).not.toMatch(/\bSDK\b|\bruntime\b|Claude Agent|Winter Agent/i);
   });
@@ -144,7 +146,7 @@ describeWithWinterBinary("A-6b: no credential at all -> runtime_selection_refuse
       schemaVersion: 3,
       provider: { model: "openai/gpt-5.6-sol" },
       providers: { openai: { baseUrl: openaiFake.url } },
-      runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
+      runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60 },
     }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-test-a6b" });
@@ -188,7 +190,7 @@ describeWithWinterBinary("A-6b: no credential at all -> runtime_selection_refuse
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // A-7a — same family never prompts.
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-describeWithClaudeRuntime("A-7a: Sonnet -> Opus (official) never prompts", () => {
+describeWithWinterBinary("A-7a: Sonnet -> Opus (both on the Winter runtime) never prompts", (winterBin) => {
   let home: string;
   let daemon: RunningDaemon | undefined;
   let client: TestClient;
@@ -210,14 +212,12 @@ describeWithClaudeRuntime("A-7a: Sonnet -> Opus (official) never prompts", () =>
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 3,
       provider: { model: "winter-test/unused" },
-      runtimes: { claudeExecutable: claudeRuntimeForTests()!.executable, handoff: { crossRuntime: true } },
+      providers: { anthropic: { baseUrl: fakeServer.url } },
+      runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60 },
     }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-test-a7a" });
-    daemon = await startDaemon({
-      home, secrets, agentProvider: null,
-      officialConnectionOverride: () => ({ explicitConnectionEnv: { ANTHROPIC_BASE_URL: fakeServer.url }, authFamily: "custom" }),
-    });
+    daemon = await startDaemon({ home, secrets, agentProvider: null });
     if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
     client = await TestClient.connect(daemon.socketPath);
     await client.hello(daemon.tokens.harness, "e2e");
@@ -232,18 +232,20 @@ describeWithClaudeRuntime("A-7a: Sonnet -> Opus (official) never prompts", () =>
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("Sonnet -> Opus applies silently (same family, official leg unaffected)", async () => {
+  test("Sonnet -> Opus applies silently (same family), and the Claude session is on the Winter leg throughout", async () => {
     const d = daemon!;
     if ("unavailable" in d.runtimeState) throw d.runtimeState.unavailable;
     const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: "anthropic/claude-sonnet-5" });
     await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
-    expect(d.winter.legOf(sessionId)).toBe("official");
+    // WS-23: a Claude model in Code mode with an Anthropic key is a Winter-leg session.
+    expect(d.winter.legOf(sessionId)).toBe("winter");
     await client.call(METHODS.sessionSend, { sessionId, text: "one turn on sonnet" });
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 45_000);
 
-    // Same family, same leg -> `same-runtime`, applied with NO error and NO prompt.
+    // Same family -> no prompt, applied with NO error.
     await client.call(METHODS.sessionSetModel, { sessionId, model: "anthropic/claude-opus-5" });
-    expect(d.winter.legOf(sessionId)).toBe("official"); // never moved runtimes
+    expect(d.winter.legOf(sessionId)).toBe("winter");
+    expect(d.runtimeState.records.get(sessionId)?.modelRef).toBe("anthropic/claude-opus-5");
   }, 60_000);
 });
 
@@ -263,7 +265,7 @@ describeWithWinterBinary("A-7a: two OpenAI-family models never prompt on Winter"
       schemaVersion: 3,
       provider: { model: "openai/gpt-4.1" },
       providers: { openai: { baseUrl: openaiFake.url } },
-      runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
+      runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60 },
     }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-test-a7a-gpt" });
@@ -368,17 +370,15 @@ describeWithWinterBinary("A-7: a zero-turn session that switches families does n
     });
     anthropicFakeClose = () => fakeServer.close();
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "openai-compatible", model: "openai/gpt-5.6-sol", baseUrl: openaiFake.url },
-      runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
+      schemaVersion: 3,
+      provider: { model: "openai/gpt-5.6-sol" },
+      providers: { openai: { baseUrl: openaiFake.url }, anthropic: { baseUrl: fakeServer.url } },
+      runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60 },
     }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-test-a7-zero" });
     await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-test-a7-zero-anthropic" });
-    daemon = await startDaemon({
-      home, secrets, agentProvider: null,
-      officialConnectionOverride: () => ({ explicitConnectionEnv: { ANTHROPIC_BASE_URL: fakeServer.url }, authFamily: "custom" }),
-    });
+    daemon = await startDaemon({ home, secrets, agentProvider: null });
     if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
     client = await TestClient.connect(daemon.socketPath);
     await client.hello(daemon.tokens.harness, "e2e");
@@ -416,7 +416,7 @@ describeWithWinterBinary("A-7: a zero-turn session that switches families does n
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // Controller addendum item 1 (C1) — a same-leg model change must not leave the pre-flight review
-// reading a STALE recorded model before a later cross-runtime move. DEVIATION (documented in this
+// reading a STALE recorded model before a later family change. DEVIATION (documented in this
 // file's header): the coordinator's own "GPT -> DeepSeek -> GPT -> Claude" chain is unreachable
 // (DeepSeek has no credential row); substituted with the closest achievable real-wiring equivalent
 // that exercises the IDENTICAL underlying worry — does a same-leg, same-family switch actually
@@ -442,7 +442,7 @@ describeWithWinterBinary("C1: a same-leg switch must not leave the review readin
       schemaVersion: 3,
       provider: { model: "openai/gpt-4.1" },
       providers: { openai: { baseUrl: openaiFake.url } },
-      runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
+      runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60 },
     }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-test-c1" });
@@ -482,7 +482,8 @@ describeWithWinterBinary("C1: a same-leg switch must not leave the review readin
     await client.call(METHODS.sessionSend, { sessionId, text: "on the reasoning model now" });
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && client.events.filter((ev) => ev.type === "turn_completed").length >= 2, 45_000);
 
-    // Step 2: gpt-5.6-sol -> claude, cross-runtime — MUST prompt (W18-21's own required behaviour).
+    // Step 2: gpt-5.6-sol -> claude, a family change (on the Winter runtime since WS-23) — MUST
+    // prompt (W18-21's own required behaviour).
     // GREEN since the D1 C1 fix (`5c09626d`): the review now reads gpt-5.6-sol's OWN fresh facts
     // (hidden reasoning, warned-lossy), not the stale gpt-4.1 identity from before the same-leg move.
     let caught: RpcErrorLike | undefined;
@@ -580,7 +581,7 @@ describeWithWinterBinary("A-7: the LITERAL gpt -> deepseek (prompts) / deepseek 
       provider: { model: "openai/gpt-5.6-sol" },
       // W19-6 — the ONLY thing pointing these providers anywhere. No daemon-side endpoint table.
       providers: { openai: { baseUrl: openaiFakeRef.url }, deepseek: { baseUrl: `${deepseek.fake.url}/v1` }, zai: { baseUrl: `${zai.fake.url}/v1` } },
-      runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
+      runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60 },
     }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-test-a7-openai" });
@@ -670,7 +671,7 @@ describeWithWinterBinary("A-7a: ONE canonical model on TWO providers switches SI
       schemaVersion: 3,
       provider: { model: "openai/gpt-4.1" },
       providers: { openai: { baseUrl: openaiFakeRef.url }, openrouter: { baseUrl: `${openrouter.fake.url}/v1` } },
-      runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
+      runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60 },
     }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-test-a7a-openai" });

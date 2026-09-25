@@ -9,12 +9,14 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
+import { writeCredentialMaterial } from "../../src/auth/credential-material";
+import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
 import { DEFAULT_DELIVERIES_DAYS, DEFAULT_NAME_LEASES_DAYS } from "../../src/runtime-state/retention";
 import { RUNTIME_SHUTDOWN_DRAIN_MS } from "../../src/runtime-state/wiring";
 import { buildCoreBrand, CORE_BRAND } from "../../src/runtime-sdk/brand";
 import { createWinterRuntimeSdk, SHUTDOWN_QUERY_GRACE_MS, type WinterRuntimeSdk, type WinterRuntimeSdkDeps } from "../../src/runtime-sdk/create";
 import { WinterExecutableUnavailable } from "../../src/runtime-sdk/executable";
-import { WINTER_PEER_VERSIONS, REQUIRED_CLAUDE_AGENT_SDK } from "../../src/runtime-sdk/versions";
+import { WINTER_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
 import type { Settings } from "../../src/settings";
 
 const DAY_MS = 86_400_000;
@@ -66,21 +68,12 @@ function deps(extra: Partial<WinterRuntimeSdkDeps> = {}): WinterRuntimeSdkDeps {
 async function build(
   extra: Partial<WinterRuntimeSdkDeps> = {},
   grace?: number,
-  // P8c-1: `undefined` (the default) means "let the real optional peer resolve" — this dev
-  // environment has `@anthropic-ai/claude-agent-sdk` installed, so most tests exercise the REAL
-  // import. A test of the Winter-only shape injects `() => Promise.resolve(undefined)` explicitly.
-  officialPeer?: () => Promise<unknown>,
-  // M4's test seam: a fake "installed version" string, to drive the version guard without an
-  // actually-mismatched node_modules tree.
-  installedClaudeAgentSdkVersion?: () => string | undefined,
 ): Promise<{ handle: WinterRuntimeSdk; opts: RuntimeSdkOptions; disposeOrder: string[] }> {
   const { createRuntimeSdk } = await import("@yanlinglabs/winter-runtime-sdk");
   const disposeOrder: string[] = [];
   let captured: RuntimeSdkOptions | undefined;
   const handle = await createWinterRuntimeSdk(deps(extra), {
     ...(grace === undefined ? {} : { grace }),
-    ...(officialPeer === undefined ? {} : { officialPeer: officialPeer as () => Promise<never> }),
-    ...(installedClaudeAgentSdkVersion === undefined ? {} : { installedClaudeAgentSdkVersion }),
     createRuntimeSdk: (opts) => {
       captured = opts;
       const real = createRuntimeSdk(opts);
@@ -117,102 +110,46 @@ describe("createWinterRuntimeSdk — the options it hands the router", () => {
     expect(opts.brand!.presetName).toBe("winter_code");
   });
 
-  test("a Winter-only host (the official peer fails to load): no claude peer, Winter unaffected (P8b-4)", async () => {
-    const lines: string[] = [];
-    const { opts, handle } = await build({ log: (line) => lines.push(line) }, undefined, () => Promise.reject(new Error("boom")));
-    expect(opts.peers.winter).toBeDefined();
-    expect(opts.peers.claude).toBeUndefined();
-    expect("claude" in opts.peers).toBe(false);
-    // No longer an identity check (M4: peerVersions is now built fresh so `claudeAgentSdk` can be
-    // omitted independently of the module-level constant) — the winterAgentSdk VALUE still matches.
-    expect(opts.peerVersions?.winterAgentSdk).toBe(WINTER_PEER_VERSIONS.winterAgentSdk);
-    // `vendoredOfficialRuntime` is independent of the peer MODULE import (it is the executable
-    // ladder, `official-executable.ts`) — a failed peer import must not disturb it either way.
-    expect(await handle.officialPeer()).toBeUndefined();
-    expect(lines.some((l) => l.includes("official peer"))).toBe(true);
+  // WS-23: the official `claude` leg is retired — the router is handed the Winter peer alone, and none
+  // of the options that configured the other leg (its executable, its credential seam, its policy, its
+  // capability-schema bridge, its advisor resolver, its handoff participants).
+  test("WS-23: the Winter peer alone — no claude peer, no official options, nothing for the other leg", async () => {
+    const { opts } = await build();
+    expect(Object.keys(opts.peers)).toEqual(["winter"]);
+    expect(opts.peerVersions).toEqual({ winterAgentSdk: WINTER_PEER_VERSIONS.winterAgentSdk });
+    const loose = opts as unknown as Record<string, unknown>;
+    for (const key of ["vendoredOfficialRuntime", "official", "toInputShape", "advisor", "keychain"]) expect(key in loose).toBe(false);
+    expect(Object.keys(opts.handoff ?? {}).sort()).toEqual(["resolveEndpoint", "winterHome"]);
   });
 
-  test("the official peer present (P8c-1): peers.claude passed, hasClaudePeer true, host-declared claudeAgentSdk version", async () => {
-    const { opts, handle } = await build();
-    // This dev/test environment has the real optional dependency installed — exercised for real.
-    expect(opts.peers.claude).toBeDefined();
-    expect(opts.peerVersions?.claudeAgentSdk).toBe(REQUIRED_CLAUDE_AGENT_SDK);
-    expect(await handle.officialPeer()).toBe(opts.peers.claude);
+  test("WS-23: a Claude catalog model with an Anthropic key selects the Winter runtime, in Code mode too", async () => {
+    // A real key in this temp home's file store: before WS-23 this exact input routed Code mode to
+    // the official leg (D13-2). With the peer declared absent, the router's own rule sends it to Winter.
+    const secrets = new FileSecretStore(secretsDir);
+    await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-ant-test" });
+    const { handle } = await build({ secrets });
+    const decided = await handle.selectRuntimeFor({ mode: "code", model: "anthropic/claude-sonnet-5" });
+    if ("refused" in decided) throw new Error(`selection refused: ${decided.reason}`);
+    expect(decided.runtimeKind).toBe("winter-agent");
+    expect(decided.providerId).toBe("anthropic");
+    expect(decided.modelRef).toBe("anthropic/claude-sonnet-5");
   });
 
-  test("M4: an installed @anthropic-ai/claude-agent-sdk version that does NOT match REQUIRED_CLAUDE_AGENT_SDK -- official leg unavailable, Winter unaffected", async () => {
-    const lines: string[] = [];
-    const { opts, handle } = await build({ log: (line) => lines.push(line) }, undefined, undefined, () => "0.3.999-not-the-pin");
-    expect(opts.peers.winter).toBeDefined();
-    expect(opts.peers.claude).toBeUndefined();
-    expect(opts.peerVersions?.claudeAgentSdk).toBeUndefined();
-    expect(opts.peerVersions?.winterAgentSdk).toBe(WINTER_PEER_VERSIONS.winterAgentSdk);
-    expect(await handle.officialPeer()).toBeUndefined();
-    expect(lines.some((l) => l.includes("0.3.999-not-the-pin") && l.includes(REQUIRED_CLAUDE_AGENT_SDK))).toBe(true);
-  });
-
-  test("M4: no installed version at all (the optional peer genuinely absent) does not trip the version guard", async () => {
-    const { opts } = await build({}, undefined, () => Promise.resolve(undefined), () => undefined);
-    expect(opts.peers.claude).toBeUndefined();
-    expect(opts.peerVersions?.claudeAgentSdk).toBeUndefined();
-  });
-
-  test("A2: a LOADED peer whose version cannot be established is dropped — the router never sees peers.claude without a declared version", async () => {
-    // The compiled `$bunfs` shape: the import succeeds, but no manifest can be resolved at runtime.
-    // Forwarding `peers.claude` with `claudeAgentSdk: undefined` makes the router's version matrix
-    // throw `RuntimeSdkVersionError` at construction — and that kills the WHOLE handle, the Winter
-    // leg included. It must degrade to "the official leg is unavailable" instead.
-    const lines: string[] = [];
-    const { opts, handle } = await build({ log: (line) => lines.push(line) }, undefined, undefined, () => undefined);
-    expect(opts.peers.winter).toBeDefined();
-    expect(opts.peers.claude).toBeUndefined();
-    expect(opts.peerVersions?.claudeAgentSdk).toBeUndefined();
-    expect(await handle.officialPeer()).toBeUndefined();
-    expect(lines.some((l) => l.includes("version") && l.includes("official leg is unavailable"))).toBe(true);
-  });
-
-  test("A2: a failed peer import logs the error MESSAGE — one line, bounded", async () => {
-    const lines: string[] = [];
-    const long = `SharedArrayBuffer is not defined\n${"x".repeat(2_000)}`;
-    await build({ log: (line) => lines.push(line) }, undefined, () => Promise.reject(new ReferenceError(long)));
-    const line = lines.find((l) => l.includes("official peer"));
-    expect(line).toBeDefined();
-    expect(line).toContain("ReferenceError: SharedArrayBuffer is not defined");
-    expect(line!.includes("\n")).toBe(false);
-    expect(line!.length).toBeLessThan(400);
-  });
-
-  test("the official permission class is forwarded to both adapters when declared", async () => {
+  test("the Winter permission class is forwarded when declared — and only the Winter adapter's", async () => {
     const sessionPermissionClass = () => "unknown" as const;
     const { opts } = await build({ sessionPermissionClass });
     expect(opts.messaging?.messaging?.winter?.permissionClass).toBe(sessionPermissionClass);
-    expect(opts.messaging?.messaging?.official?.permissionClass).toBe(sessionPermissionClass);
+    expect(Object.keys(opts.messaging?.messaging ?? {})).toEqual(["winter"]);
   });
 
-  test("the official policy: remoteConfig deny, permissionMode default, never bypassPermissions", async () => {
-    const { opts } = await build();
-    expect(opts.official?.env?.remoteConfig).toBe("deny");
-    expect(opts.official?.permissionMode).toBe("default");
-  });
-
-  test("claudeExecutableFor() re-resolves live (hot settings, same posture as spawnHookFor)", async () => {
-    const { handle } = await build();
-    const first = handle.claudeExecutableFor();
-    // No setting/env configured and no bundle sibling in this test's execPath — the package door
-    // is what this environment actually has installed, so either shape is legitimate; the call
-    // must never throw.
-    expect(first === undefined ? true : typeof first).not.toBe("undefined");
-  });
-
-  test("the keychain seam, the directory store, [] capabilities and the daemon's own home", async () => {
+  test("the directory store, [] capabilities and the daemon's own home", async () => {
     const store = createInMemoryRuntimeDirectoryStore();
     const { opts } = await build({ directoryStore: store });
-    expect(typeof opts.keychain.read).toBe("function");
     expect(opts.directoryStore).toBe(store);
     expect(opts.capabilities).toEqual([]);
     // §1.6: the seams must resolve under the daemon's home, not `resolveWinterHome()`'s default.
     expect(opts.handoff?.winterHome).toBe(home);
-    // C-14: no official permission class until 8c.
+    // No permission class declared ⇒ no messaging-policy block at all.
     expect(opts.messaging?.messaging).toBeUndefined();
   });
 
@@ -221,7 +158,7 @@ describe("createWinterRuntimeSdk — the options it hands the router", () => {
   // is memoised (`providers/registry.test.ts` pins that), so identity equality proves it is genuinely
   // THIS module's resolver reaching the router, not a fresh/different function that merely behaves
   // similarly.
-  test("D1-6: HandoffBarrierDeps.resolveEndpoint is the daemon's own registry-backed resolver", async () => {
+  test("D1-6: the review's resolveEndpoint is the daemon's own registry-backed resolver", async () => {
     const { daemonResolveEndpoint } = await import("../../src/providers/registry");
     const { opts } = await build();
     expect(opts.handoff?.resolveEndpoint).toBe(daemonResolveEndpoint());
@@ -278,36 +215,6 @@ describe("createWinterRuntimeSdk — retention (G-12)", () => {
     settings = withRuntimes({ ...wide, retention: { deliveriesDays: 30, nameLeasesDays: 1 } });
     await handle.sdk.directory.recover();
     expect(await store.names.lookup("alpha")).toHaveLength(0); // same handle, narrowed window: gone
-  });
-});
-
-describe("createWinterRuntimeSdk — the advisor (P8d-8: ALWAYS an advisor key, never conditional)", () => {
-  test("no advisorReviewer wired ⇒ the advisor key IS still present, and its resolver answers undefined", async () => {
-    settings = null;
-    const { opts } = await build();
-    expect("advisor" in opts).toBe(true);
-    expect(opts.advisor).toBeDefined();
-    expect(opts.advisor?.resolveReviewer()).toBeUndefined();
-  });
-
-  test("a wired advisorReviewer is delegated to VERBATIM, on every call — no round-tripping through settings.runtimes.advisorModel here (that precedence now lives in advisor-reviewer.ts)", async () => {
-    settings = withRuntimes({ retention: { deliveriesDays: 30, nameLeasesDays: 7 }, migrations: { memoryKeys: false }, winterLeg: { chat: false, dispatch: false, code: false }, winterIdleTimeoutSec: 900 });
-    const generate = async (): Promise<{ kind: string }> => ({ kind: "text" });
-    let live = "winter-test/echo";
-    const { opts } = await build({ advisorReviewer: () => ({ provider: { generate }, model: live }) });
-    expect(opts.advisor).toBeDefined();
-    expect(opts.advisor?.resolveReviewer()).toEqual({ provider: { generate }, model: "winter-test/echo" });
-
-    // Hot: `deps.advisorReviewer` is called fresh every time, so whatever IT reads live (settings,
-    // in `advisor-reviewer.ts`'s real implementation) reaches the router with no restart.
-    live = "winter-test/other";
-    expect(opts.advisor?.resolveReviewer()?.model).toBe("winter-test/other");
-  });
-
-  test("with no reviewer wired the resolver answers undefined — never a throw", async () => {
-    settings = withRuntimes({ retention: { deliveriesDays: 30, nameLeasesDays: 7 }, migrations: { memoryKeys: false }, winterLeg: { chat: false, dispatch: false, code: false }, advisorModel: "winter-test/echo", winterIdleTimeoutSec: 900 });
-    const { opts } = await build();
-    expect(opts.advisor?.resolveReviewer()).toBeUndefined();
   });
 });
 
@@ -485,14 +392,14 @@ describe("dispose — G-14: every Query ends BEFORE the router disposes", () => 
 // does only when the linked router exports `buildRunHome`. On router 0.0.11 nothing changes.
 describe("createWinterRuntimeSdk — run homes (WS-21)", () => {
   test("no runHomeFor: the router is created exactly as before (no requireRunHome, no runHomeFor)", async () => {
-    const { opts } = await build({}, undefined, () => Promise.resolve(undefined));
+    const { opts } = await build();
     expect("requireRunHome" in opts).toBe(false);
     expect("runHomeFor" in opts).toBe(false);
   });
 
   test("with runHomeFor: requireRunHome true and the builder handed through verbatim", async () => {
     const runHomeFor = async () => { throw new Error("never called by construction"); };
-    const { opts } = await build({ runHomeFor }, undefined, () => Promise.resolve(undefined));
+    const { opts } = await build({ runHomeFor });
     expect((opts as unknown as { requireRunHome?: boolean }).requireRunHome).toBe(true);
     expect((opts as unknown as { runHomeFor?: unknown }).runHomeFor).toBe(runHomeFor);
     // L2: `requireRunHome` also requires an explicit `handoff.winterHome` (the store then lives in `<home>/sdk`).
@@ -504,7 +411,7 @@ describe("createWinterRuntimeSdk — run homes (WS-21)", () => {
   // guess), and a recovery reconcile of a root with nothing in it reports `clean`.
   test("runHomeOutcome / reconcileRootForRecovery forward the linked router's own doors (a run-home router)", async () => {
     const runHomeFor = async () => { throw new Error("never called by these doors"); };
-    const { handle } = await build({ runHomeFor }, undefined, () => Promise.resolve(undefined));
+    const { handle } = await build({ runHomeFor });
     expect(handle.runHomeOutcome?.("an-unknown-run")).toBe("pending");
     const root = mkdtempSync(join(tmpdir(), "winter-create-recover-"));
     const report = await handle.reconcileRootForRecovery?.(root);

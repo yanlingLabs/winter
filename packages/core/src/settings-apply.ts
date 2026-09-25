@@ -1,5 +1,5 @@
 import type { Settings } from "./settings";
-import { memoryEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, computerUseEnabledFrom, lspEnabledFrom } from "./settings";
+import { memoryEnabledFrom, retiredRuntimeSettingKeys, winterLegDisabledKeys, winterOptionsFromSettings, computerUseEnabledFrom, lspEnabledFrom } from "./settings";
 import { retentionFromSettings } from "./runtime-state/retention";
 import type { ToolRegistry } from "./agent/tools/registry";
 import type { ComputerUseService } from "./agent/computer-use";
@@ -201,7 +201,7 @@ export function makeApply(deps: SettingsApplyDeps): (prev: Settings | null, next
    * P8b Task 15: the router's PLAIN-VALUE options, which a running daemon cannot simply re-read.
    *
    * Surface map §8.3 is the reason this diff exists at all. `createRuntimeSdk` takes `brand`,
-   * `retention`, `advisor` and `official.env` as VALUES at construction, while the inbound-policy
+   * `retention` as VALUES at construction, while the inbound-policy
    * hooks are functions and therefore hot by construction. A value that a setting can change has
    * only two honest answers: a getter the router calls, or a documented "this reaches new sessions".
    * This function is where that decision is stated for each key, once:
@@ -262,12 +262,14 @@ export function makeApply(deps: SettingsApplyDeps): (prev: Settings | null, next
     // is reported here (and at boot) and never obeyed.
     const disabled = winterLegDisabledKeys(next);
     if (disabled.length > 0) log(`runtimes.winterLeg.{${disabled.join(",")}} = false: the engine leg no longer exists; ignored (every session runs on the Winter leg)`);
-    // Pre-release hardening (P9c-1 amendment): the settings flag alone can no longer widen the
-    // official leg's subscription posture — reported here (and at boot) so a hand-set/migrated
-    // `true` is never a silent no-op, same "accepted, logged, ignored" posture as winterLeg above.
-    if (officialSubscriptionAuthFlagInert(next)) log("runtimes.official.subscriptionAuth = true: inert until Anthropic approves subscription auth for the official leg (P9c-1); the per-session apiKeySource assertion and Winter-owned config dir stay in force");
+    // WS-23: the retired official leg's keys are accepted and ignored. Boot reports the ones a home
+    // carries; this reports a change of that set, once, so a hand-set key is never a silent no-op and
+    // an unrelated settings edit never re-narrates one already reported.
+    const retired = retiredRuntimeSettingKeys(next);
+    if (retired.length > 0 && retired.join(",") !== retiredRuntimeSettingKeys(prev).join(",")) {
+      log(`${retired.join(", ")}: the official claude runtime was retired (every model runs on the Winter runtime); ignored`);
+    }
     if (before.winterExecutable !== after.winterExecutable) log("runtimes.winterExecutable changed — it takes effect for new sessions");
-    if (before.claudeExecutable !== after.claudeExecutable) log("runtimes.claudeExecutable changed — it takes effect for new sessions on the official leg");
     if (before.advisorModel !== after.advisorModel) log("runtimes.advisorModel changed — it takes effect for new sessions");
     if (before.idleTimeoutSec !== after.idleTimeoutSec) log("runtimes.winterIdleTimeoutSec changed — it takes effect for new sessions");
   }
