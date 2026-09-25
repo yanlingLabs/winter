@@ -7,7 +7,7 @@
 // (`runtime-sdk/embedded.ts`), observed through `daemon.embedded` by their backend session ids. That
 // contrast is the proof that no binary is involved, and why this file needs no WINTER_RUNTIME_EXECUTABLE.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@yanlinglabs/winter-protocol";
@@ -134,6 +134,9 @@ describe("chat and dispatch run embedded — a Worker per session inside a real 
     const driver = daemon!.winter.get(sid)!;
     expect(driver.state).toBe("live");
     expect(driver.init?.sessionId).toBe(backend);
+    // The Worker runs on a router-built per-run folder (WS-21), exactly as a spawned child does — the
+    // disposal check at the end of this file is only meaningful because this is not empty.
+    expect(readdirSync(join(home, "cache", "runs")).length).toBeGreaterThan(0);
     // The chat surface is the same one a spawned child advertised: WebFetch, never Bash.
     expect(driver.init?.tools).toContain("WebFetch");
     expect(driver.init?.tools).not.toContain("Bash");
@@ -165,6 +168,17 @@ describe("chat and dispatch run embedded — a Worker per session inside a real 
     expect(turnKinds(log).slice(-4)).toEqual(["user_message", "turn_started", "assistant_message", "turn_completed"]);
     // Dispatch strips no built-ins: the Worker's session advertises Bash, which runs from the daemon's process.
     expect(daemon!.winter.get(sid)?.init?.tools).toContain("Bash");
+    // ...and it RUNS: the `lanec` double's `echo` goes through the real Bash tool, spawned by the
+    // Worker thread on the Worker's env (what the router laid on `Options.env`) — a PATH-less or
+    // home-less Worker env would fail here, not in a unit test.
+    await daemon!.winter.get(sid)?.end();
+    daemon!.sessions.setModel(sid, "winter-test/lanec");
+    await sendAndSettle(sid, "run the shell");
+    const shellLog = daemon!.sessions.read(sid);
+    const lastResult = shellLog.filter((e) => e.type === "tool_result").at(-1);
+    expect(lastResult).toBeDefined();
+    expect(JSON.stringify(lastResult)).toContain("winter-t8-lanec");
+    expect(shellLog.filter((e) => e.type === "agent_error")).toEqual([]);
   }, 30_000);
 
   test("end() ends the Worker; the next send starts a NEW Worker that resumes the SAME backend session", async () => {
@@ -247,4 +261,16 @@ describe("chat and dispatch run embedded — a Worker per session inside a real 
     expect(daemon!.winter.get(sid)?.init?.sessionId).toBe(backend);
     expect(daemon!.embedded.live()).toContain(backend);
   }, 60_000);
+
+  test("WS-21 × WS-23: once every Worker has ended, every per-run folder was judged safe and disposed — none quarantined", async () => {
+    // The router reports a Winter run home `safe` when the iteration ends; a Worker-run session must
+    // reach that verdict exactly as a spawned child does, or its folder is kept (and quarantined) silently.
+    client.close();
+    const stopping = daemon!.stop();
+    daemon = undefined;
+    await stopping;
+    const runs = join(home, "cache", "runs");
+    expect(existsSync(runs) ? readdirSync(runs) : []).toEqual([]);
+    expect(existsSync(join(home, "cache", "quarantine"))).toBe(false);
+  }, 30_000);
 });
