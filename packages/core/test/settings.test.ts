@@ -1100,11 +1100,12 @@ describe("setModelRole: the catalog-membership check", () => {
   // The membership test is the CATALOG, deliberately not the role's own `permitted` set: existence and
   // present-tense usability are different questions, and clients already receive `constraint`.
   //
-  // 2026-09-19 SPLIT: for an internal-jobs role that now has two answers, on the situational/permanent
-  // line. An ELIGIBLE provider with no credential stored yet is still accepted — it is exactly the
-  // "a provider the user is about to bind" case this test was written for. A PERMANENTLY ineligible one
-  // (a first-party Claude row, or an adapter family the daemon cannot drive) is refused at the door,
-  // because no future credential makes it runnable.
+  // 2026-09-19 SPLIT, narrowed WS-23: for an internal-jobs role that now has two answers, on the
+  // situational/permanent line. An ELIGIBLE provider with no credential stored yet is still accepted
+  // — it is exactly the "a provider the user is about to bind" case this test was written for. A
+  // PERMANENTLY ineligible one (a remaining first-party Claude row — `console`/`cc` — or an adapter
+  // family the daemon cannot drive) is refused at the door, because no future credential makes it
+  // runnable. (`anthropic` rejoined the eligible set in WS-23, so it is accepted here.)
   test("an internal-jobs role accepts an eligible provider with no credential stored yet", () => {
     const info = modelRoleInfo(base, "titles.model", "openai", { credentialed: new Set(["codex-oauth"]) });
     expect(info.constraint).toBe("internal-provider");
@@ -1114,9 +1115,13 @@ describe("setModelRole: the catalog-membership check", () => {
     expect(setModelRole(base, "titles.model", notYetCredentialed).titles?.model).toBe(tag(notYetCredentialed));
   });
 
-  test("an internal-jobs role REFUSES a first-party Claude provider, and says why", () => {
-    expect(() => setModelRole(base, "titles.model", "anthropic/claude-sonnet-5")).toThrow(/can't run on Anthropic/);
-    expect(() => setModelRole(base, "pins.dream", "anthropic/claude-sonnet-5")).toThrow(/its own reviewer/);
+  // WS-23: `anthropic` is an ordinary eligible provider now (every model runs on the Winter
+  // SDK), so an internal-jobs role accepts it — while the remaining first-party rows stay refused.
+  test("an internal-jobs role ACCEPTS anthropic and still REFUSES console/cc, saying why", () => {
+    expect(setModelRole(base, "titles.model", "anthropic/claude-sonnet-5").titles?.model).toBe(tag("anthropic/claude-sonnet-5"));
+    expect(setModelRole(base, "pins.dream", "anthropic/claude-sonnet-5").pins?.dream).toBe(tag("anthropic/claude-sonnet-5"));
+    expect(() => setModelRole(base, "titles.model", "console/claude-sonnet-5")).toThrow(/can't run on Anthropic Console/);
+    expect(() => setModelRole(base, "pins.dream", "console/claude-sonnet-5")).toThrow(/no internal-calls credential path/);
     // `pins.dispatch` is an `"any"` role routed through the runtime SDK — untouched by the gate.
     expect(setModelRole(base, "pins.dispatch", "anthropic/claude-sonnet-5").pins?.dispatch).toBe(tag("anthropic/claude-sonnet-5"));
   });
