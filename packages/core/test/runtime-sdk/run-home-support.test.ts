@@ -6,7 +6,7 @@ import type { RunHome } from "@yanlinglabs/winter-runtime-sdk";
 
 const stub = (onDispose: () => void, failDispose = false): RunHome => ({
   runId: "r1", dir: "/h/cache/runs/r1", sdkHome: "/h/sdk",
-  input: { home: "/h", mode: "code", dispatchChild: false, leg: "official", cwd: "/c", trustedProjectRoot: null, gitRoot: null, mcpDisabled: [], reservedMcpServerNames: [], memoryDir: "/m" },
+  input: { home: "/h", mode: "code", dispatchChild: false, leg: "winter", cwd: "/c", trustedProjectRoot: null, gitRoot: null, mcpDisabled: [], reservedMcpServerNames: [], memoryDir: "/m" },
   effectiveSettings: {},
   report: { skippedLinks: [], externalUserLinks: [], droppedMcpServers: [], unconditionalRules: [], droppedImports: [], skippedAgents: [], droppedRules: [] },
   dispose: async () => { onDispose(); if (failDispose) throw new Error("EBUSY"); },
