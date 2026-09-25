@@ -64,11 +64,17 @@ export {
   type ModelTag,
 } from "./runtime-sdk/model-tag";
 export { runWorkflowSubprocess } from "./workflows/subprocess-entry";
+// WS-23: the RUNTIME's workflow worker (an embedded chat/dispatch session's Workflow tool), reached by
+// the CLI's positional `__runtime-workflow-worker` route — the same static-barrel shape as above.
+export { runRuntimeWorkflowWorker } from "./runtime-sdk/runtime-workflow-worker-entry";
+export { RUNTIME_WORKFLOW_WORKER_ARG } from "./runtime-sdk/embedded";
 // P8b-18: reached only by the CLI's static `__runtime-state-probe` argv route, which imports it
 // from THIS barrel — the same shape `runWorkflowSubprocess` above uses, and the only shape that
 // survives `bun build --compile` (a dynamic import keyed on a string does not resolve in $bunfs).
 export { runRuntimeStateProbe, type RuntimeStateProbeResult } from "./runtime-state/probe";
 export { runRuntimesProbe, type RuntimesProbeResult } from "./runtime-sdk/runtimes-probe";
+// WS-23: reached only by the CLI's static `__embedded-probe` argv route (`scripts/verify-embedded-compiled.ts`).
+export { runEmbeddedProbe, type EmbeddedProbeResult } from "./runtime-sdk/embedded-probe";
 export { diagnoseRuntimes, type RuntimesReport } from "./runtime-sdk/runtimes-doctor";
 export { RUNTIME_BUNDLE_LAYOUT, bundleRuntimePath, parseVersionsJson, type VersionsJson, type RuntimeBundleEntry } from "./runtime-sdk/bundle-layout";
 export { WorkflowRuntime, type WorkflowRuntimeDeps, type WorkflowRuntimeEvent, type WorkflowLaunch } from "./workflows/runtime";
