@@ -406,6 +406,8 @@ func activityGlyphAndLabel(_ item: ActivityItem) -> (glyph: String, label: Strin
         return (entered ? "⛿" : "⟲", detail)
     case .interaction(let record):
         return ("⚠", record.summary)
+    case .notice(let text):
+        return ("ⓘ", text)
     }
 }
 
