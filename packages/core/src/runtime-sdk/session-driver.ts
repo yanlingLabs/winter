@@ -49,7 +49,7 @@ import { moveTranscriptFiles, transcriptEntriesOf } from "../runtime-state/trans
 import { recordLazyRekey } from "../migration/migrate-c";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
-import { DEFAULT_PROVIDER, effortRefusalFor, effortToSpendForRole, officialSubscriptionAuthEnabled, ownProviderFor, pinsFor, providerBaseUrlFor, sdkAllowRules, sdkDenyRules, winterOptionsFromSettings, type Settings } from "../settings";
+import { CLAUDE_FIRST_PARTY_PROVIDER_IDS, DEFAULT_PROVIDER, effortRefusalFor, effortToSpendForRole, officialSubscriptionAuthEnabled, ownProviderFor, pinsFor, providerBaseUrlFor, sdkAllowRules, sdkDenyRules, winterOptionsFromSettings, type Settings } from "../settings";
 import { d30DefaultModel } from "./advisor-reviewer";
 import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
 import type { WinterRuntimeSdk, SessionMode } from "./create";
@@ -852,7 +852,14 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // — whether the pin runs there (its `authRef` names that slot) or fell back because the slot was
         // empty (the key is what it waits for). An off-catalog pin is not recorded: no key fixes it.
         if (crossProvider && rowForTag(pinnedAdvisor) !== undefined) advisorProviders.set(sessionId, advisorProviderId);
-        const advisorRef = crossProvider ? credentialRefFor(advisorProviderId, deps.home) : undefined;
+        // WS-23 fix round 1: `console` is excluded EXPLICITLY here, symmetric with
+        // `CLAUDE_FIRST_PARTY_PROVIDER_IDS` — `credentialRefFor("console")` names the broker's
+        // bearer slot for SESSIONS, but the SDK adapter cannot send console OAuth headers yet, so
+        // stating a console advisor would refuse every advisor call. This lifts after the Console
+        // live gate passes.
+        const advisorRef = crossProvider && !(CLAUDE_FIRST_PARTY_PROVIDER_IDS as readonly string[]).includes(advisorProviderId)
+          ? credentialRefFor(advisorProviderId, deps.home)
+          : undefined;
         const why = rowForTag(pinnedAdvisor) === undefined ? `names ${JSON.stringify(pinnedAdvisor)}, which no model in the pinned catalog carries`
           : !crossProvider ? undefined
             : advisorRef === undefined ? `names ${advisorProviderId}, whose credential this door cannot name (a console login lives in an \`ant\` profile)`
@@ -889,7 +896,13 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // api-key slot off as present and every WebFetch would then refuse typed on an empty item
       // (`refMaterialPresent`'s own doc). One extra read, only when an explicit pin differs from the
       // session's own model, which is the rare case.
-      const digestRef = digestProviderId === undefined || researchPin === model ? undefined : credentialRefFor(digestProviderId, deps.home);
+      // WS-23 fix round 1: the same explicit `console` exclusion as the advisor pin above,
+      // symmetric with `CLAUDE_FIRST_PARTY_PROVIDER_IDS` — the bearer slot serves sessions, not
+      // the digest route, until the Console live gate passes.
+      const digestRef = digestProviderId === undefined || researchPin === model ||
+          (CLAUDE_FIRST_PARTY_PROVIDER_IDS as readonly string[]).includes(digestProviderId)
+        ? undefined
+        : credentialRefFor(digestProviderId, deps.home);
       const digestUsable = await refMaterialPresent(deps.secrets, digestRef);
       // AND the tag must actually BE a catalog row (whole-branch review M1). This is the one check
       // whose absence WITHDREW THE TOOL: the child advertises `WebFetch` only while its digest model
