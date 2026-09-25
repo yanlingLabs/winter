@@ -369,6 +369,23 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     c.close();
   });
 
+  // WS-23 R1 addendum: a Claude-only home — `anthropic/*` default, only the Anthropic key stored.
+  // `anthropic` is an ordinary eligible provider now, so every internal role sits on the user's own
+  // Claude model with no problem (rung 1: eligible AND credentialed; anthropic declares no
+  // terra/luna slot, so the default is `provider.model` itself).
+  test("a Claude-only home: zero setup — all four internal roles sit on the user's own Claude model, problem null", async () => {
+    const { socketPath, harnessToken } = await boot("anthropic/claude-sonnet-5", { internalCredentials: ["anthropic:default"] });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const res = await c.request(METHODS.settingsModelRoles, {});
+    for (const role of ["titles.model", "reviewer.model", "pins.dream", "pins.cleaner"]) {
+      const info = res.result.roles[role];
+      expect(info.model).toBe("anthropic/claude-sonnet-5");
+      expect(info.problem).toBeNull();
+    }
+    c.close();
+  });
+
   test("no internal credential: every internal role reports no-internal-credential, with the logins that fix it", async () => {
     const { socketPath, harnessToken } = await boot("deepseek/deepseek-flash", { internalCredentials: [] });
     const c = await TestClient.connect(socketPath);

@@ -839,9 +839,10 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // makes every `advisor` call a typed refusal, while the family default keeps the tool working.
       // The pin is therefore not stated, and the D30 default is (one line naming the setting), when:
       //   - it names no catalog row (`rowForTag`: a hand-edited settings file can hold any tag shape);
-      //   - it is cross-provider and that provider has NO Keychain locator (a `console/*` login lives
-      //     in an `ant` profile the advisor route never sees — stating it would send no `authRef` and
-      //     let the child fall back to the brand's own Keychain lookup, the M7 hazard);
+      //   - it is cross-provider and excluded from this route (`console`/`cc`: `console` names the
+      //     broker's bearer slot for sessions — unstatable here until the SDK sends console OAuth
+      //     headers — and `cc` names no slot at all; stating nothing avoids the M7 hazard, the
+      //     child's fallback to the brand's own Keychain lookup);
       //   - it is cross-provider and that provider's slot is EMPTY.
       // A same-provider pin needs no probe: the session's own turn cannot run without that credential.
       advisorProviders.delete(sessionId);
@@ -862,7 +863,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
           : undefined;
         const why = rowForTag(pinnedAdvisor) === undefined ? `names ${JSON.stringify(pinnedAdvisor)}, which no model in the pinned catalog carries`
           : !crossProvider ? undefined
-            : advisorRef === undefined ? `names ${advisorProviderId}, whose credential this door cannot name (a console login lives in an \`ant\` profile)`
+            : advisorRef === undefined ? `names ${advisorProviderId}, whose credential this route cannot state (an excluded first-party login, or a provider with no Keychain slot)`
               : !(await refMaterialPresent(deps.secrets, advisorRef)) ? `names ${advisorProviderId}, whose credential slot is empty`
                 : undefined;
         if (why !== undefined) {
@@ -871,7 +872,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         }
       }
       // 2026-09-18 (user ruling): `pins.research` is `WebFetch`'s PAGE-DIGEST model. Read LIVE here
-      // like every other per-incarnation value, and DROPPED — rather than stated — in the three cases
+      // like every other per-incarnation value, and DROPPED — rather than stated — in the cases
       // where stating it would make every `WebFetch` call in the session a typed refusal (the SDK
       // never silently falls back to the session's model for a STATED digest model, deliberately):
       //
@@ -883,6 +884,8 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       //                             the tool works.
       //   the session's own tag     nothing to state: that IS the SDK's default (`buildWinterOptions`
       //                             drops this one itself, since it holds both tags).
+      //   an excluded first-party login (`console`/`cc` — the bearer slot serves sessions, not the
+      //                             digest route, until the Console live gate passes).
       //
       // Logged once per incarnation when it is dropped for a reason the user could act on, naming the
       // setting — a pin that silently does nothing is exactly what `runtimes.advisorModel`'s own
@@ -922,7 +925,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         log(`pins.research: ${
           researchPin === UNSTATED_TAG ? "resolves to no known slot for this daemon's own provider"
             : digestOffCatalog ? `names ${JSON.stringify(researchPin)}, which no model in the pinned catalog carries`
-              : digestRef === undefined ? `names ${digestProviderId ?? "a provider"} whose credential this door cannot name (a console login lives in an \`ant\` profile, which a digest route never sees)`
+              : digestRef === undefined ? `names ${digestProviderId ?? "a provider"} whose credential this route cannot state (an excluded first-party login, or a provider with no Keychain slot)`
                 : `names ${digestProviderId}, whose credential slot is empty`
         } — WebFetch will digest pages on this session's own model instead`);
       }
