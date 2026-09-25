@@ -677,11 +677,17 @@ describe("officialWireModelFor — the Claude wire id per catalog row (F1 follow
     "claude-sonnet-4.5": "claude-sonnet-4-5",
     "claude-sonnet-4.6": "claude-sonnet-4-6",
     "claude-sonnet-5": "claude-sonnet-5",
+    // SDK 0.0.23 (2026-09-25): Opus 5.5, already dashed, passes through. The API answered 200 for
+    // `claude-opus-5-5` in the 0.0.24 Anthropic-adapter live gate (2026-09-25).
+    "claude-opus-5-5": "claude-opus-5-5",
   };
-  const ACCEPTED_BY_THE_API = new Set(["claude-haiku-4-5", "claude-opus-4-5", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-5", "claude-sonnet-5", "claude-fable-5", "claude-fable-5-1", "claude-haiku-4-5-20251001"]);
+  const ACCEPTED_BY_THE_API = new Set(["claude-opus-5-5", "claude-haiku-4-5", "claude-opus-4-5", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-5", "claude-sonnet-5", "claude-fable-5", "claude-fable-5-1", "claude-haiku-4-5-20251001"]);
+  /** Wire ids taken from Anthropic's own models overview but not yet answered by a live 200 — kept apart so
+   *  "measured" keeps meaning measured. Move an id to ACCEPTED_BY_THE_API once a probe answers it. */
+  const DOCUMENTED_NOT_MEASURED = new Set<string>();
   const claudeRows = loadCatalog().models.filter((row) => (row.providerId === "anthropic" || row.providerId === "console") && row.modelFamily === "claude");
 
-  test("the pinned catalog's anthropic/console Claude rows are the 24 this table was measured for", () => {
+  test("the pinned catalog's anthropic/console Claude rows are the 26 this table covers", () => {
     expect(claudeRows.map((row) => row.key).sort()).toEqual(
       Object.keys(MEASURED_WIRE_ID).flatMap((id) => [`anthropic/${id}`, `console/${id}`]).sort(),
     );
@@ -692,7 +698,7 @@ describe("officialWireModelFor — the Claude wire id per catalog row (F1 follow
       const modelId = row.key.slice(row.key.indexOf("/") + 1);
       const wire: unknown = officialWireModelFor({ modelRef: row.key });
       expect({ row: row.key, wire }).toEqual({ row: row.key, wire: MEASURED_WIRE_ID[modelId] });
-      expect(ACCEPTED_BY_THE_API.has(wire as string)).toBe(true);
+      expect(ACCEPTED_BY_THE_API.has(wire as string) || DOCUMENTED_NOT_MEASURED.has(wire as string)).toBe(true);
     }
   });
 

@@ -692,7 +692,9 @@ export const NO_PROVIDER = "none";
  *  shared array through it. */
 export function effortsForModel(tag: string): string[] {
   const efforts = effortVocabularyFor(tag) ?? [];
-  return efforts.length > 0 ? ["none", ...efforts] : [];
+  // SDK 0.0.23 lists a literal "none" on rows whose endpoint accepts one (the GPT-5.x/6 rows, …): the
+  // picker's own leading "none" (Winter's unset) must not appear twice.
+  return efforts.length > 0 ? ["none", ...efforts.filter((e) => e !== "none")] : [];
 }
 
 /** The WINTER-LEVEL effort tiers this daemon offers (provider-correctness T5) — `sync.config`'s

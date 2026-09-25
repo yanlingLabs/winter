@@ -82,7 +82,9 @@ describe("D1: the daemon's own provider selection is correct", () => {
     // R.1 (catalog refresh): DeepSeek's `deepseek-v4-flash` row now lives at `deepseek/deepseek-flash`.
     const deepseek = catalog.models.find((m) => m.key === "deepseek/deepseek-flash");
     expect(deepseek?.providerId).toBe("deepseek");
-    expect(deepseek?.reasoning?.efforts).toEqual(["none", "low", "high", "max"]);
+    // SDK 0.0.24: DeepSeek's chat dialect documents reasoning_effort low/high/max only, so the audit
+    // dropped the undocumented literal "none" (thinking is disabled via `thinking.type`, not an effort).
+    expect(deepseek?.reasoning?.efforts).toEqual(["low", "high", "max"]);
   });
 });
 

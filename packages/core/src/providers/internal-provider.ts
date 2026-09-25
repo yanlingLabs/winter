@@ -71,19 +71,23 @@ export function internalWireEffortFor(tag: string, effort: string | undefined): 
   //
   // The rule, in full, scoped precisely to what was measured and asked for (controller ruling,
   // 2026-09-22): a row with NO declared vocabulary at all takes no effort setting, so nothing is
-  // sent (unchanged). A row whose vocabulary already lists `"none"` itself is UNCHANGED too — some
-  // catalog rows genuinely carry it as a real tier (e.g. `crof/deepseek-v4-flash`'s
-  // `[none, low, medium, high, max]`, 27 rows total measured against the pinned catalog), and how the
-  // adapter wire-handles a row that already declares `"none"` is a separate, unmeasured question this
-  // fix does not touch — it still drops, exactly as before. ONLY the remaining case changes: a row
+  // sent (unchanged). A row whose vocabulary already lists `"none"` itself is sent `"none"` (SDK 0.0.23,
+  // below). The remaining case: a row
   // that DOES reason but declares no `"none"` tier of its own now gets its OWN LOWEST declared effort
   // (`REASONING_EFFORTS`' canonical low-to-high order, this module's header) rather than dropping the
   // field and letting the provider's own (higher) default apply. `REASONING_EFFORTS.find(...)` always
   // finds a match on this path — verified against the full pinned catalog, every `reasoning.efforts`
   // value across every row is one of its members.
+  // SDK 0.0.23 (2026-09-25) settled the "SDK CARRY" below (settings.ts): the catalog now lists a literal
+  // `"none"` exactly where the vendor documents one for the dialect the adapter speaks (the GPT-5.x/6
+  // rows, grok-4.3, glm-5.2, qwen3.8, …; the audit dropped DeepSeek chat's undocumented one), and the
+  // adapter's `mapEffort` accepts any member of the row's own vocabulary. So a row that lists `"none"`
+  // is now SENT `"none"` — dropping it let the provider's own (higher) default apply, which is exactly
+  // the 2026-09-22 timeout-storm shape this function exists to prevent.
   if (effort === "none") {
     const vocab = rowForTag(tag)?.reasoning?.efforts ?? [];
-    if (vocab.length === 0 || vocab.includes("none")) return undefined;
+    if (vocab.length === 0) return undefined;
+    if (vocab.includes("none")) return "none";
     const lowest = REASONING_EFFORTS.find((e) => vocab.includes(e));
     if (lowest !== undefined) noteNoneSubstitutedOnce(tag, lowest);
     return lowest;

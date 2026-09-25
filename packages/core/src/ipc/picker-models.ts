@@ -43,6 +43,8 @@ export function pickerModels(deps: { credentials: CredentialPresence; home: stri
     if (!credentialPresent(provider.id)) continue;
     for (const row of catalog.models) {
       if (row.providerId !== provider.id) continue;
+      // A vendor-retired row (`deprecated`, SDK 0.0.23) still resolves for a stored tag but is never offered.
+      if (row.status === "blocked" || row.status === "deprecated") continue;
       const tag = row.key as ModelTag;
       out.push({
         id: tag,
