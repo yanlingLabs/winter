@@ -855,6 +855,9 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
     } else if (e.type === "hook_notice" && e.threadId === "main") {
       // WS-23: one dim line -- why a prompt was blocked or a hook stopped the turn.
       emit(`${DIM}hook: ${String(e.text).split("\n").filter((l: string) => l.length > 0).join(" — ")}${RESET}\n`);
+    } else if (e.type === "continuity_warning" && e.threadId === "main") {
+      // WS-23 review r1 I-3: one dim line -- what a model switch lost, or a summary before one.
+      emit(`${DIM}note: ${String(e.text).split("\n").filter((l: string) => l.length > 0).join(" — ")}${RESET}\n`);
     } else if (e.type === "agent_error") {
       console.error(`agent error: ${e.message}`);
     } else if (e.type === "turn_completed" && e.threadId === "main") {

@@ -93,7 +93,7 @@ function mergedAgentDefinitions(
 import type { AgentRegistry } from "../agent/bg-agent-registry";
 import type { ContextAssembler } from "../agent/context";
 import type { SkillStore } from "../agent/skills";
-import { startWinterSession, unconsumedUserMessages, withRunHome, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
+import { startWinterSession, unconsumedUserMessages, withRunHome, type CompactOptions, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
 import { RunHomeError, type RunHome, type RunHomeErrorCode, type RunHomeFor, type RunHomeInput } from "@yanlinglabs/winter-runtime-sdk";
 import { projectScopeTrusted, type RunHomeSessionFacts } from "./run-home-input";
 import { readWinterTasks } from "./tasks-reader";
@@ -175,7 +175,12 @@ export interface LegSession {
   send(text: string, clientName?: string): Promise<{ seq: number; queued: boolean }>;
   steer(text: string, clientName?: string): Promise<{ seq: number; injected: boolean }>;
   interrupt(): Promise<{ wasRunning: boolean }>;
-  compact(): Promise<never>;
+  /** WS-23 (reasoning-state): compact the live child now, on its own model -- see `WinterSession.compact`. */
+  compact(opts?: CompactOptions): Promise<{ retainedCount: number }>;
+  /** WS-23 review r1 I-5: hold what arrives for the TARGET while a provider switch replaces this
+   *  child -- see `WinterSession.beginHandoff`. Optional so a test double need not implement it. */
+  beginHandoff?(work: () => Promise<void>): Promise<{ heldTurns: number }>;
+  readonly handoffPending?: boolean;
   setModel(model?: string): Promise<void>;
   setPolicy(policy: SessionApprovalPolicy): Promise<void>;
   end(): Promise<void>;

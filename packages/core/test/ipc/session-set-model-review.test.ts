@@ -330,11 +330,13 @@ describe("A-7: same-leg loss, against the REAL daemon resolver (no fixture)", ()
   // resolves these SAME model ids with a DIFFERENT (real) family — even though each `resolve(...)`
   // call below already lives inside its own `test()` body (never at describe/module scope), the
   // cross-FILE ordering risk is not eliminated. Labeled here per that review's own instruction.
-  test("gpt -> deepseek on Winter prompts (a hidden-reasoning source crossing families is warned-lossy)", () => {
+  // WS-23 (reasoning-state, user decision 9): A-7's pairing no longer prompts -- GPT's reasoning stays in
+  // the sidecar for GPT (a switch back replays it) -- while what the target cannot represent still does.
+  test("gpt -> deepseek on Winter: silent over reasoning (WS-23), and prompts over a compaction the fit check will run", () => {
     const gpt = resolve({ providerId: "openai", modelKey: "openai/gpt-5.6-sol", family: "openai" });
     const deepseek = resolve({ providerId: "deepseek", modelKey: "deepseek/deepseek-v4-pro", family: "deepseek" });
-    const c = classifySwitch(gpt, deepseek, {});
-    expect(c.lossClass).toBe("warned-lossy");
+    expect(classifySwitch(gpt, deepseek, {}).lossClass).toBe("lossless-portable");
+    expect(classifySwitch(gpt, deepseek, { compaction: { estimatedTokens: 900_000, window: 128_000 } }).lossClass).toBe("warned-lossy");
   });
 
   test("deepseek -> GLM does not (exposedComplete asserted from complete exposed records)", () => {

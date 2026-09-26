@@ -25,7 +25,6 @@ describe("projector/hooks: observed, never persisted", () => {
     ["system/model_refusal_no_fallback", { type: "system", subtype: "model_refusal_no_fallback", trigger: "refusal", original_model: "a", request_id: "r", api_refusal_explanation: "SECRET_REFUSAL_PROSE" }],
     ["system/reasoning_summary", { type: "system", subtype: "reasoning_summary", text: "SECRET_REASONING_TEXT", provider: "p", model: "m" }],
     ["system/model_switch", { type: "system", subtype: "model_switch", reason: "fallback", from_model: "a", to_model: "b", provider: "p" }],
-    ["system/continuity_warning", { type: "system", subtype: "continuity_warning", warning: "provider_state_missing", detail: "SECRET_CONTINUITY_DETAIL", anchor_uuid: "u" }],
     ["system/permission_denied", { type: "system", subtype: "permission_denied", tool_name: "Write", tool_use_id: "t1", decision_reason_type: "mode", message: "denied", session_id: "s", uuid: "u" }],
     ["system/local_command_output", { type: "system", subtype: "local_command_output", content: "SECRET_COMMAND_OUTPUT", uuid: "u", session_id: "s" }],
     ["system/background_tasks_changed", { type: "system", subtype: "background_tasks_changed", tasks: [], uuid: "u", session_id: "s" }],
@@ -88,8 +87,9 @@ describe("projector/hooks: observed, never persisted", () => {
     for (const kind of ["system/task_started", "system/task_progress", "system/task_updated", "system/task_notification"]) {
       expect({ kind, known: isKnownUnpersistedKind(kind) }).toEqual({ kind, known: true });
     }
-    // +1: `system/api_retry` stays a KNOWN kind for the log allowlist even though it now projects a transient.
-    expect(UNPERSISTED_KINDS.length).toBe(unpersisted.length + 4 + 1);
+    // +2: `system/api_retry` (projects a transient) and `system/continuity_warning` (persisted since WS-23
+    // review r1 I-3) stay KNOWN kinds for the log allowlist.
+    expect(UNPERSISTED_KINDS.length).toBe(unpersisted.length + 4 + 2);
   });
 
   test("the coverage map gains nothing from these families — the hook LIFECYCLE rows stay unpersisted (P8b-21); WS-23's hook_notice is the SDK's informational frame, not a hook_* row", () => {
@@ -98,7 +98,7 @@ describe("projector/hooks: observed, never persisted", () => {
     // the full protocol checklist -- and none of the families listed above.
     const produced = Object.entries(PROJECTED_EVENT_COVERAGE).filter(([, v]) => v === true).map(([k]) => k).sort();
     expect(produced).toEqual([
-      "agent_error", "assistant_delta", "assistant_message", "hook_notice", "provider_retry", "task_updated", "thread_completed",
+      "agent_error", "assistant_delta", "assistant_message", "continuity_warning", "hook_notice", "provider_retry", "task_updated", "thread_completed",
       "thread_started", "tool_call", "tool_result", "turn_completed", "turn_started", "user_message",
     ]);
   });

@@ -140,6 +140,9 @@ export const SUBAGENT_TRANSCRIPT_INCLUDE = {
   // the model already received whatever a hook meant it to see, as context. Kept out of a child's
   // model-greppable transcript for the same reason the transcript filter fails closed at all.
   hook_notice: false,
+  // WS-23 review r1 I-3: a continuity warning is for the HUMAN (what a switch or a failed write lost);
+  // the model continues from the conversation itself. Kept out of a child's model-greppable transcript.
+  continuity_warning: false,
 } satisfies Record<SessionEvent["type"], boolean>;
 
 /**
@@ -177,6 +180,8 @@ export const PROJECTED_EVENT_COVERAGE = {
   // WS-23: `system/informational` (a hook's notice), and a `result` whose `terminal_reason` is
   // `hook_stopped` when no notice already carried that stop's reason (`index.ts`).
   hook_notice: true,
+  // WS-23 review r1 I-3: the runtime's `system/continuity_warning` frame, all but the three resume-time kinds (`index.ts`).
+  continuity_warning: true,
   // `user_message` is produced ONLY as a pass-through: a `user` text frame that the host's own
   // push queue does not account for (an inbound agent-message delivery rendered into the child's
   // input). The ordinary path is the HOST appending `user_message` before it pushes (P8b-5), and
