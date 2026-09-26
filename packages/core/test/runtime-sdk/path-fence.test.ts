@@ -422,11 +422,63 @@ describe("Bash writes through an existing link to a protected directory", () => 
       "cp /etc/hosts s/new.md", "tee s/new.md < /etc/hosts", "mv /tmp/a s/b", `echo x > ${work}/abs/y.md`,
       "echo x > S/X/SKILL.MD", "sed -i '' s/a/b/ s/x/SKILL.md", "bash -c 'echo x > s/y.md'",
     ]) expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) !== undefined }).toEqual({ cmd, hit: true });
-    // The documented limit: a write through a HARD link made earlier names nothing protected (the `ln` that
-    // made it is the card, above).
+    // Fix round 2 (N-2): a write through a HARD link made earlier is judged by its inode.
     writeFileSync(join(root, ".winter", "skills", "x", "SKILL.md"), "hi");
     linkSync(join(root, ".winter", "skills", "x", "SKILL.md"), join(work, "hard.md"));
-    expect(bashProtectedWriteHit("echo x > hard.md", { cwd: work })).toBeUndefined();
+    for (const cmd of ["echo x > hard.md", "cp /etc/hosts hard.md", "sed -i '' s/a/b/ hard.md", "tee hard.md"]) {
+      expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) }).toEqual({ cmd, hit: ".winter/skills" });
+    }
+  });
+
+  // Fix round 2 (the reviewer's probe3/probe4).
+  test("a cd that fails leaves the shell where it was: every place it could stand is judged", () => {
+    const { work } = project();
+    mkdirSync(join(work, "sub"));
+    for (const cmd of [
+      "cd nope; cd s; echo x > y.md",
+      "cd /nonexistent; cd s; echo x > y.md",
+      "cd nope || true; echo x > s/y.md",
+      "cd sub 2>/dev/null; cd s; echo x > y.md",
+    ]) expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) }).toEqual({ cmd, hit: ".winter/skills" });
+    expect(bashProtectedWriteHit("cd nope; echo x > notes.md", { cwd: work })).toBeUndefined();
+  });
+
+  test("hard links: cp -l / -al sources are judged; an existing hard link is judged by inode; an unrelated one is quiet", () => {
+    const { root, work } = project();
+    mkdirSync(join(root, ".winter", "skills", "x"), { recursive: true });
+    writeFileSync(join(root, ".winter", "skills", "x", "SKILL.md"), "hi");
+    for (const cmd of ["cp -l ../.winter/skills/x/SKILL.md foo.md", "cp -al ../.winter/skills bk", "cp --link s/x/SKILL.md foo.md"]) {
+      expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) !== undefined }).toEqual({ cmd, hit: true });
+    }
+    expect(bashProtectedWriteHit("cp -L ../notes/a.md b.md", { cwd: work })).toBeUndefined(); // -L dereferences, it links nothing
+    // A hard link that is NOT a protected file (node_modules-style) stays quiet.
+    writeFileSync(join(work, "plain.md"), "p");
+    linkSync(join(work, "plain.md"), join(work, "plain2.md"));
+    expect(bashProtectedWriteHit("echo x > plain2.md", { cwd: work })).toBeUndefined();
+    // The store's own sdk/skills, when the Winter home is known.
+    const home = real("winter-link-home-");
+    mkdirSync(join(home, "sdk", "skills", "k"), { recursive: true });
+    writeFileSync(join(home, "sdk", "skills", "k", "SKILL.md"), "k");
+    linkSync(join(home, "sdk", "skills", "k", "SKILL.md"), join(work, "store-hard.md"));
+    expect(bashProtectedWriteHit("echo x > store-hard.md", { cwd: work, home })).toBe("sdk/skills");
+  });
+
+  test("$PWD / ${PWD} / $HOME expand; >| is a redirect; dd writes its of=; an escaped slash is a slash", () => {
+    const { work } = project();
+    for (const cmd of [
+      "echo x > $PWD/s/y.md", "echo x > \"${PWD}/s/y.md\"", "cd s && echo x > $PWD/y.md",
+      "echo x >| s/y.md", "echo x >| ../.winter/skills/y.md", "dd if=/etc/hosts of=s/y.md", "echo x > s\\/y.md",
+    ]) expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) !== undefined }).toEqual({ cmd, hit: true });
+    expect(bashProtectedWriteHit("dd if=../.winter/skills/x of=/tmp/copy", { cwd: work })).toBeUndefined(); // a read
+    expect(bashProtectedWriteHit(`echo x > $HOME/${"no-such-dir-ws24"}/y.md`, { cwd: work })).toBeUndefined();
+  });
+
+  test("an in-place sed's SCRIPT is not a path (no walk through a link named `s`)", () => {
+    const { work } = project();
+    writeFileSync(join(work, "notes.md"), "a");
+    expect(bashProtectedWriteHit("sed -i '' s/a/b/ notes.md", { cwd: work })).toBeUndefined();
+    expect(bashProtectedWriteHit("sed -i -e s/a/b/ notes.md", { cwd: work })).toBeUndefined();
+    expect(bashProtectedWriteHit("sed -i '' s/a/b/ s/x/SKILL.md", { cwd: work })).toBe(".winter/skills");
   });
 
   test("the bridge (third layer) resolves a relative link from its session cwd: bypass → card, dispatch → deny", async () => {

@@ -621,7 +621,7 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     // fence — this layer is the one that holds when a hook's `ask` never reached it.
     const protectedBashWrite = classificationName === "bash" && typeof input === "object" && input !== null
       && typeof (input as Record<string, unknown>).command === "string"
-      && bashProtectedWriteHit((input as Record<string, unknown>).command as string, deps.cwd ? { cwd: deps.cwd } : {}) !== undefined;
+      && bashProtectedWriteHit((input as Record<string, unknown>).command as string, { ...(deps.cwd ? { cwd: deps.cwd } : {}), ...(deps.home !== undefined ? { home: deps.home } : {}) }) !== undefined;
     const protectedWrite = protectedBashWrite || deps.home !== undefined && protectedWriteDecision(toolName, input, {
       mode: "code", cwd: deps.cwd ?? "",
       // R.3 I-1: the walk's top is the run home's own project root (`projectScopeRootFor`).
