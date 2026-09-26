@@ -792,6 +792,8 @@ describe("item 6: a same-leg PROVIDER change replaces the live child", () => {
       expect(await run(false)).toEqual({ kind: "confirmation_required", warnings: ["too large"], portable: ["the recent conversation as it is, and a summary of the older part"], fit: { fits: false, estimatedTokens: 612_000, window: 128_000 } });
       expect(calls).toEqual([]);
       expect((await run(true)).kind).toBe("same-runtime");
+      // The reply does not wait for the compaction (callers time out long before one ends); it runs, then the evict.
+      await Bun.sleep(20);
       expect(calls).toEqual(["compact", "evict"]);
     });
   });
@@ -818,6 +820,7 @@ describe("item 6: a same-leg PROVIDER change replaces the live child", () => {
         "s1", "deepseek/deepseek-v4-pro", true,
       );
       expect(out.kind).toBe("same-runtime");
+      await Bun.sleep(20);
       expect(calls).toEqual(["compact", "evict"]);
       expect(logs.some((l) => l.includes("could not compact on its source model") && l.includes("WinterRpcError"))).toBe(true);
     });
