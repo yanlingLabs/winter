@@ -553,6 +553,11 @@ function writeContextStart(c: string): number {
  * protected directories (`ProtectedInodes`); a `cd` that could fail is judged both ways (a real shell stays
  * put); `$PWD`/`${PWD}` and `$HOME`/`${HOME}` at the start of a target are expanded.
  *
+ * BOUNDS, EVERY ONE FAIL-CLOSED (fix round 3) — reaching one answers `BASH_WRITE_CHECK_BOUND.*`, a card (a
+ * deny where nobody can answer), never a pass: 64 candidate working directories (six `cd`s in full; the
+ * session's own cwd and the all-took chain are always kept), 2,000 judgments per call across every nested
+ * `bash -c`/`eval` level (nesting itself stops at four), and the hard-link scan's budget (`ProtectedInodes`).
+ *
  * THE LIMITATION, the escape floor's own: a static match on the normalised text (case folded, quotes
  * stripped, `//`/`/./`/`..` collapsed, `cd` tracked), plus the links that exist on disk WHEN THE CALL IS
  * JUDGED. A path the command ASSEMBLES at run time (`$(…)`, its own variables — `d=.winter; touch
@@ -567,7 +572,8 @@ function writeContextStart(c: string): number {
  * path-fence hook bind what this cannot see.
  */
 export function bashProtectedWriteHit(command: string, opts: { cwd?: string; home?: string } = {}): string | undefined {
-  return protectedWriteHitIn(command, opts.cwd, 0, opts.home);
+  const ctx: HitContext = { sessionCwd: opts.cwd, inodes: new ProtectedInodes(opts.cwd, opts.home), work: 0 };
+  return protectedWriteHitIn(command, ctx, 0, [{ norm: undefined, raw: undefined }]);
 }
 
 /** `cd`/`pushd`'s next working directory, from its argument, relative to the one carried so far. */
@@ -587,24 +593,42 @@ function rawSpelling(command: string): string {
 /** WS-24 fix round 2 (N-1): one place the shell may be standing — the normalised and the raw spelling of a
  *  cwd carried from the command's `cd`s (`undefined` = the session's own cwd). */
 interface CwdCandidate { norm: string | undefined; raw: string | undefined }
-/** At most this many candidate working directories are carried through a command's `cd`s. */
-const MAX_CWD_CANDIDATES = 16;
+/** At most this many candidate working directories are carried through a command's `cd`s (6 `cd`s in full). */
+const MAX_CWD_CANDIDATES = 64;
+/** At most this many target judgments (and nested-command parses) per call, across every `bash -c` level. */
+const MAX_JUDGMENTS = 2_000;
 
-function protectedWriteHitIn(command: string, sessionCwd: string | undefined, depth: number, home?: string): string | undefined {
+/** WS-24 fix round 3: the answers the check gives when it reaches one of its bounds — FAIL CLOSED, a card (a
+ *  deny where nobody can answer), never a silent pass. Phrased to read after "Bash writes under …". */
+export const BASH_WRITE_CHECK_BOUND = {
+  cwds: "a path this check cannot pin down (too many working directories to judge)",
+  work: "a path this check cannot pin down (too much to judge in one command)",
+  inodes: "a hard-linked file this check could not rule out (too many protected files to compare)",
+} as const;
+
+/** One call's shared state, across its nested `bash -c`/`eval` levels (fix round 3, minor 1): the work budget
+ *  and ONE inode index. */
+interface HitContext { sessionCwd: string | undefined; inodes: ProtectedInodes; work: number }
+
+function protectedWriteHitIn(command: string, ctx: HitContext, depth: number, start: CwdCandidate[]): string | undefined {
   // WS-24 fix round 2 (N-1): a `cd` can FAIL, and a real shell then stays where it was — `cd nope; cd s; echo x
   // > y.md` writes under `s`. So every place the shell could be standing is carried (each `cd` either took or
-  // did not), bounded, and a target is judged from each of them.
-  let cwds: CwdCandidate[] = [{ norm: undefined, raw: undefined }];
-  const inodes = new ProtectedInodes(sessionCwd, home);
+  // did not), and a target is judged from each of them. Fix round 3: BOUNDED FAIL-CLOSED — the session's own
+  // cwd and the chain where every `cd` took are always kept; once any OTHER candidate had to be dropped, a
+  // write is answered with a card (`BASH_WRITE_CHECK_BOUND.cwds`), never judged from a partial set.
+  const sessionCwd = ctx.sessionCwd;
+  let cwds: CwdCandidate[] = start;
+  let allTook: CwdCandidate = start[0] ?? { norm: undefined, raw: undefined };
+  let overflowed = false;
   for (const raw of shellSegments(command)) {
+    if (++ctx.work > MAX_JUDGMENTS) return BASH_WRITE_CHECK_BOUND.work;
     // Round 5: a shell's `-c` string, `eval`'s argument and the same inside `find -exec` are COMMANDS — each
-    // judged as one of its own (from the cwd carried so far), before its quotes are blanked as text below.
+    // judged as one of its own, from EVERY place the shell may be standing (the whole set, passed once —
+    // fix round 3: not one recursion per candidate).
     if (depth < 4) {
       for (const nested of nestedCommandStrings(shellWords(raw))) {
-        for (const c of cwds) {
-          const hit = protectedWriteHitIn(c.norm === undefined ? nested : `cd ${c.norm}; ${nested}`, sessionCwd, depth + 1, home);
-          if (hit !== undefined) return hit;
-        }
+        const hit = protectedWriteHitIn(nested, ctx, depth + 1, cwds);
+        if (hit !== undefined) return hit;
       }
     }
     const trimmed = (t: string): string => t.replace(/^[\s({]+/, "").replace(/[\s)}]+$/, "");
@@ -614,14 +638,21 @@ function protectedWriteHitIn(command: string, sessionCwd: string | undefined, de
     const words = seg.split(/\s+/);
     if (words[0] === "cd" || words[0] === "pushd") {
       const rawArg = rawSeg.split(/\s+/)[1];
+      const took = (c: CwdCandidate): CwdCandidate => ({ norm: nextCwd(c.norm, words[1]), raw: nextCwd(c.raw, rawArg) });
+      allTook = took(allTook);
       const next: CwdCandidate[] = [];
       const seen = new Set<string>();
-      const add = (c: CwdCandidate): void => {
+      const add = (c: CwdCandidate, mustKeep = false): void => {
         const key = `${c.norm ?? "\0"}|${c.raw ?? "\0"}`;
-        if (!seen.has(key) && next.length < MAX_CWD_CANDIDATES) { seen.add(key); next.push(c); }
+        if (seen.has(key)) return;
+        if (!mustKeep && next.length >= MAX_CWD_CANDIDATES - 2) { overflowed = true; return; }
+        seen.add(key);
+        next.push(c);
       };
-      for (const c of cwds) add({ norm: nextCwd(c.norm, words[1]), raw: nextCwd(c.raw, rawArg) }); // the cd took…
-      for (const c of cwds) add(c);                                                                 // …or it failed
+      add(allTook, true);                                   // the chain where every cd took
+      add({ norm: undefined, raw: undefined }, true);       // the session's own cwd (every cd failed)
+      for (const c of cwds) add(took(c));                   // this cd took…
+      for (const c of cwds) add(c);                         // …or it failed
       cwds = next;
       continue;
     }
@@ -630,6 +661,7 @@ function protectedWriteHitIn(command: string, sessionCwd: string | undefined, de
       return at === undefined || /^[/~$]/.test(t) ? t : `${at}/${t.replace(/^\.\//, "")}`;
     };
     const judge = (path: string, raw: boolean): string | undefined => {
+      if (++ctx.work > MAX_JUDGMENTS) return BASH_WRITE_CHECK_BOUND.work;
       if (!raw) {
         const m = PROTECTED_BASH_TARGET.exec(path);
         if (m !== null) return m[0];
@@ -639,22 +671,28 @@ function protectedWriteHitIn(command: string, sessionCwd: string | undefined, de
       const r = physical === undefined ? null : PROTECTED_BASH_TARGET.exec(physical.toLowerCase());
       if (r !== null) return r[0];
       // WS-24 fix round 2 (N-2): a HARD link to a protected file — the same inode under another name.
-      return physical === undefined ? undefined : inodes.hit(physical);
+      return physical === undefined ? undefined : ctx.inodes.hit(physical);
     };
     // WS-24 fix round 2 (N-2): `cp -l`/`--link` (and `-al`) makes hard links to its SOURCES — judged like `ln`'s.
     const linkSources = cpLinkOperands(raw);
-    for (const c of cwds) {
-      for (const target of [...segmentWriteTargets(seg), ...linkSources.norm]) {
+    const normTargets = [...segmentWriteTargets(seg), ...linkSources.norm];
+    const rawTargets = [...segmentWriteTargets(rawSeg), ...linkSources.raw];
+    // Past the cap only the two kept candidates are exact: judge them (a real hit names its directory), then
+    // answer the bound for the ones that were dropped.
+    const judged = overflowed ? cwds.slice(0, 2) : cwds;
+    for (const c of judged) {
+      for (const target of normTargets) {
         const hit = judge(under(c.norm, target), false);
         if (hit !== undefined) return hit;
       }
       // WS-24 fix round 1 (I-1): and each target as the shell spells it, its `..` walked physically from the
       // links it climbs out of (`rawSpelling`).
-      for (const target of [...segmentWriteTargets(rawSeg), ...linkSources.raw]) {
+      for (const target of rawTargets) {
         const hit = judge(under(c.raw, target), true);
         if (hit !== undefined) return hit;
       }
     }
+    if (overflowed && (normTargets.length > 0 || rawTargets.length > 0)) return BASH_WRITE_CHECK_BOUND.cwds;
   }
   return undefined;
 }
@@ -692,24 +730,39 @@ function cpLinkOperands(raw: string): { norm: string[]; raw: string[] } {
  * output-styles}` when the Winter home is known — so a write to a file that is the SAME INODE as one of them
  * (a hard link, `hard.md`) is judged as a write there. Only consulted for a target that exists as a regular
  * file with more than one link (`nlink > 1`), so an ordinary write never scans anything; a hard-linked file
- * that matches nothing protected (node_modules' own) stays quiet. Built lazily, once per command, bounded.
+ * that matches nothing protected (node_modules' own) stays quiet. Built lazily, once per command (shared by
+ * its nested `bash -c` levels). BOUNDED FAIL-CLOSED (fix round 3): the store's `sdk/` kinds are scanned
+ * first; 50,000 entries, 0.5 s and a depth of 12 bound the rest, and a scan a bound cut short answers an
+ * unmatched hard link with a card (`BASH_WRITE_CHECK_BOUND.inodes`) rather than a pass.
  */
+let inodeScanBudget = 50_000;
+/** Test seam: the hard-link scan's entry budget (a >50,000-file tree is too slow to build in a unit test). */
+export function _setInodeScanBudgetForTests(n: number | undefined): void { inodeScanBudget = n ?? 50_000; }
+
 class ProtectedInodes {
   private readonly byInode = new Map<string, string>();
   private readonly scanned = new Set<string>();
-  private budget = 5_000;
+  /** Entries left to visit — 50,000 stats is ~0.1 s — and a wall-clock bound beside it (a slow volume). */
+  private budget = inodeScanBudget;
+  private deadline: number | undefined;
+  /** Set when a bound cut a scan short: an unmatched hard link can then not be ruled out. */
+  private exhausted = false;
   constructor(private readonly sessionCwd: string | undefined, private readonly home: string | undefined) {}
 
   hit(physical: string): string | undefined {
     let st: ReturnType<typeof statSync>;
     try { st = statSync(physical); } catch { return undefined; }
     if (!st.isFile() || st.nlink < 2) return undefined;
-    if (this.sessionCwd !== undefined) this.scanWalk(this.sessionCwd);
-    this.scanWalk(dirname(physical));
+    this.deadline ??= Date.now() + 500;
+    // Fix round 3 (F-2): the store's small, fixed kinds FIRST, so a huge project tree cannot spend the budget
+    // before them; then the walks.
     if (this.home !== undefined) {
       for (const kind of ["skills", "commands", "rules", "output-styles"]) this.scanDir(join(this.home, "sdk", kind), `sdk/${kind}`, 0);
     }
-    return this.byInode.get(`${st.dev}:${st.ino}`);
+    if (this.sessionCwd !== undefined) this.scanWalk(this.sessionCwd);
+    this.scanWalk(dirname(physical));
+    // FAIL CLOSED: a bound reached with no match means this link could still be one of the files not visited.
+    return this.byInode.get(`${st.dev}:${st.ino}`) ?? (this.exhausted ? BASH_WRITE_CHECK_BOUND.inodes : undefined);
   }
 
   private scanWalk(from: string): void {
@@ -725,12 +778,13 @@ class ProtectedInodes {
   }
 
   private scanDir(dir: string, label: string, depth: number): void {
-    if (depth > 8 || this.budget <= 0 || this.scanned.has(dir)) return;
+    if (this.scanned.has(dir)) return;
+    if (depth > 12 || this.budget <= 0 || Date.now() > (this.deadline ?? Infinity)) { this.exhausted = true; return; }
     this.scanned.add(dir);
     let entries: import("node:fs").Dirent[];
     try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const e of entries) {
-      if (--this.budget <= 0) return;
+      if (--this.budget <= 0) { this.exhausted = true; return; }
       const p = join(dir, e.name);
       if (e.isDirectory()) { this.scanDir(p, label, depth + 1); continue; }
       if (!e.isFile()) continue;
