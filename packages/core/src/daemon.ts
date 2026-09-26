@@ -113,6 +113,20 @@ import { describeDeadLegacyFiles, findDeadLegacyFiles } from "./migration/dead-l
 
 export { CORE_VERSION } from "./version";
 
+/**
+ * The `additionalDirectories` a session whose primary working directory is `primary` is granted: the user
+ * tier (`sdk/settings.json`) plus, when its project is trusted, the project's committed and local tiers.
+ *
+ * WS-24: the project tiers are read at the project SCOPE root (`projectScopeRootFor`: the cwd's own git
+ * top, a linked worktree's own — where `winter plugin|mcp --scope project|local` write them and a run home
+ * reads them), trusted when the REPOSITORY is (`projectScopeTrusted`). It used to be `<primary>/.winter/…`
+ * gated on the primary's own path, which a worktree of a trusted repo (not itself in `trust.json`), or a
+ * session in a subdirectory, never matched.
+ */
+export function sessionPermissionDirs(home: string, primary: string, trust: Pick<TrustStore, "isTrusted">): string[] {
+  return loadPermissionDirs(home, projectScopeRootFor(primary), projectScopeTrusted(primary, trust));
+}
+
 export interface RunningDaemon {
   socketPath: string;
   // `remote` (SP2a Task 1): ensureTokens() already mints/returns it (auth/tokens.ts's
@@ -853,7 +867,7 @@ export async function startDaemon(opts: {
       }
       return roots;
     }
-    roots.push(...loadPermissionDirs(winterHome, primary, trustStore.isTrusted(primary)));
+    roots.push(...sessionPermissionDirs(winterHome, primary, trustStore));
     // T1 write-root join (design doc: "the tmpDir pattern" — a plain, ungated, auto-provisioned
     // root, mirroring how `sessionTmpDir` needs no user approval either): whenever file-based
     // memory is enabled, the session's MEMDIR joins the SAME write-fence `roots` the `write`/`edit`
