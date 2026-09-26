@@ -420,6 +420,23 @@ describe("projector: contextTokens under a QUALIFIED ledger (SDK 0.0.17, P-B1)",
     })) as TC[];
     expect(out[0]).toMatchObject({ contextTokens: 900 });
   });
+
+  // WS-24: a SUBAGENT's forwarded model_switch (SDK 0.0.28's `parent_tool_use_id`) is the child's model.
+  test("a subagent's `system/model_switch` leaves the main row alone", () => {
+    const { projector } = makeProjector();
+    accept(projector, qualifiedInit("gpt-5.6-terra", "codex-oauth"));
+    accept(projector, assistantText("one"));
+    accept(projector, result({ modelUsage: { "codex-oauth/gpt-5.6-terra": row(1000, 20) } }));
+    accept(projector, {
+      type: "system", subtype: "model_switch", reason: "set_model", parent_tool_use_id: "toolu_child",
+      from_model: "codex-oauth/gpt-5.6-terra", to_model: "anthropic/claude-opus-5", provider: "anthropic",
+    } as never);
+    accept(projector, assistantText("two"));
+    const out = accept(projector, result({
+      modelUsage: { "codex-oauth/gpt-5.6-terra": row(1700, 35), "anthropic/claude-opus-5": row(900, 30) },
+    })) as TC[];
+    expect(out[0]).toMatchObject({ contextTokens: 700 }); // still the main (codex) row's delta
+  });
 });
 
 describe("projector: contextTokens and the tools that SHARE the main row (0.0.17, P-B1 item 3)", () => {
