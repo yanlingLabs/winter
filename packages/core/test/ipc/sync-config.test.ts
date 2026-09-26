@@ -533,24 +533,54 @@ describe("sync.config model catalogue (provider-correctness T3, WS-20)", () => {
     }
   });
 
-  // WS-24 (pickers lane): `toolCalling: "none"` rows never reach a SESSION picker — a Winter session
-  // of any mode always offers tools, so a session started on one of these rows could never work
-  // (WS-23 hardened the Responses adapters to omit tools for them entirely). `openrouter` is a real,
-  // CREDENTIALED-here provider whose own catalog rows are a genuine MIX: ten `native` rows plus
-  // `openrouter/openrouter/auto`, whose `toolCalling` is `"none"` — so this proves selective
-  // filtering, not merely "an all-toolless provider serves nothing" (already covered by the
-  // credential-presence tests above for a different reason).
-  test("pickerModels() excludes toolCalling:none rows, even from a provider whose OTHER rows are offered", async () => {
+  // WS-24 (pickers lane, fix round 1): `pickerModels()` excludes a row exactly when
+  // `toolsRefusedFor()` (`runtime-sdk/provider-selection.ts`) says a real turn's tools would be
+  // refused on it — NOT whenever the catalog's bare `toolCalling` is non-`"native"`. The first cut
+  // conflated the two and hid ~470 working rows on the OpenAI-shaped families; these three cases
+  // pin the corrected boundary directly against real catalog rows.
+  test("pickerModels() hides an anthropic-family toolCalling:none row (a real turn there throws)", async () => {
     const secrets = new FakeSecretStore();
-    await writeCredentialMaterial(secrets, "openrouter:default", { kind: "api-key", key: "sk-or-test" });
+    await writeCredentialMaterial(secrets, "zai-anthropic:default", { kind: "api-key", key: "sk-zai-test" });
     const { credentialPresenceFrom } = await import("../../src/runtime-sdk/keychain");
     const credentials = await credentialPresenceFrom(secrets);
-    const home = mkdtempSync(join(tmpdir(), "winter-picker-models-toolcalling-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-picker-models-anthropic-family-"));
     const models = pickerModels({ credentials, home });
-    const openrouterIds = models.filter((m) => m.providerId === "openrouter").map((m) => m.id);
-    expect(openrouterIds).not.toContain("openrouter/openrouter/auto");
-    expect(openrouterIds.length).toBeGreaterThan(0); // the provider's native rows are still offered
-    expect(openrouterIds).toContain("openrouter/openai/gpt-5.6-sol");
+    const ids = models.filter((m) => m.providerId === "zai-anthropic").map((m) => m.id);
+    // `zai-anthropic/glm-5` is `toolCalling: "none"` at `confidence: "unknown"` on the
+    // `winter.anthropic-messages` adapter — one of the four families that actually THROWS on a
+    // non-native row asking for tools, so it stays hidden.
+    expect(ids).not.toContain("zai-anthropic/glm-5");
+    // `zai-anthropic/glm-5.3` is `toolCalling: "native"` (`official-doc`/`declared`) — still offered.
+    expect(ids).toContain("zai-anthropic/glm-5.3");
+  });
+
+  test("pickerModels() still offers a chat-completions toolCalling:none row at confidence:unknown — that family sends tools regardless", async () => {
+    const secrets = new FakeSecretStore();
+    await writeCredentialMaterial(secrets, "groq:default", { kind: "api-key", key: "sk-groq-test" });
+    const { credentialPresenceFrom } = await import("../../src/runtime-sdk/keychain");
+    const credentials = await credentialPresenceFrom(secrets);
+    const home = mkdtempSync(join(tmpdir(), "winter-picker-models-chat-completions-"));
+    const models = pickerModels({ credentials, home });
+    const ids = models.filter((m) => m.providerId === "groq").map((m) => m.id);
+    // `toolCalling: "none"` at `confidence: "unknown"` — the catalog's fail-closed placeholder for a
+    // capability upstream never stated, not a measured denial — and `groq`'s adapter
+    // (`winter.openai-chat-completions`) sends tools regardless of what the field says.
+    expect(ids).toContain("groq/openai/gpt-oss-120b");
+  });
+
+  test("pickerModels() hides a Responses-family row whose non-native evidence IS confidently stated", async () => {
+    const secrets = new FakeSecretStore();
+    await writeCredentialMaterial(secrets, "xai:default", { kind: "api-key", key: "sk-xai-test" });
+    const { credentialPresenceFrom } = await import("../../src/runtime-sdk/keychain");
+    const credentials = await credentialPresenceFrom(secrets);
+    const home = mkdtempSync(join(tmpdir(), "winter-picker-models-confident-"));
+    const models = pickerModels({ credentials, home });
+    const ids = models.filter((m) => m.providerId === "xai").map((m) => m.id);
+    // xAI's adapter (`winter.openai-responses`) does not gate on `toolCalling` at all, but this row's
+    // evidence is `official-doc`/`declared` ("multi-agent limitations: … function calling
+    // unsupported") — a real fact about the model, not the catalog's fail-closed guess, so it is
+    // hidden regardless of adapter.
+    expect(ids).not.toContain("xai/grok-4.20-multi-agent-0309");
   });
 });
 
