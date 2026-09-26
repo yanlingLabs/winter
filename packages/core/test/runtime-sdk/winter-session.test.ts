@@ -591,6 +591,16 @@ describe("WS-23 review r1: the idle clock during a compaction (M-4), and the han
     expect(h.timers.armed.map((t) => t.ms)).toEqual([50]);
   });
 
+  test("I-3: a compaction's announcement is in the transcript before the compaction runs; only the SDK's own options reach the control", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.settled();
+    await h.session.compact({ announce: { warning: "switch_compaction", text: "summarizing before the switch" } });
+    expect(seen(h, "continuity_warning")).toMatchObject([{ threadId: "main", warning: "switch_compaction", text: "summarizing before the switch" }]);
+    expect(h.q().compactions).toEqual([undefined]);
+  });
+
   test("I-5: a send during a pending handoff reaches the log, never the SOURCE child; the work's end reports it held", async () => {
     const h = harness();
     await h.session.open();

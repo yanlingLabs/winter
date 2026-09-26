@@ -324,7 +324,7 @@ export interface WinterSession {
    * `WinterLegUnsupported` when there is no live child, or its SDK has no compaction control; never a
    * silent no-op.
    */
-  compact(opts?: { customInstructions?: string }): Promise<{ retainedCount: number }>;
+  compact(opts?: CompactOptions): Promise<{ retainedCount: number }>;
   /**
    * WS-23 (reasoning-state, review r1 I-5): the switch to ANOTHER provider has been applied to the record,
    * and `work` (compact on the source if asked, wait for the idle boundary, evict) replaces this child.
@@ -354,6 +354,13 @@ export interface WinterSession {
    *  or ended; when the incarnation ends with a turn open, at that end). A headless caller's
    *  "run one turn" = `send` then `idle`. */
   idle(): Promise<void>;
+}
+
+/** `WinterSession.compact`'s options: the SDK control's own, plus a continuity warning to show first. */
+export interface CompactOptions {
+  customInstructions?: string;
+  /** Review r1 I-3: appended to the log as a `continuity_warning` before the compaction runs. */
+  announce?: { warning: string; text: string };
 }
 
 /** A driver operation the Winter leg cannot perform. Carried to the RPC layer as `data.code`. */
@@ -529,16 +536,20 @@ class WinterSessionImpl implements WinterSession {
     return { wasRunning: true };
   }
 
-  async compact(opts?: { customInstructions?: string }): Promise<{ retainedCount: number }> {
+  async compact(opts?: CompactOptions): Promise<{ retainedCount: number }> {
     const compact = this.stateValue === "live" ? this.inc?.query.compact : undefined;
     if (compact === undefined || this.inc === undefined) throw new WinterLegUnsupported("session.compact");
+    // Review r1 I-3: what the caller announces reaches the transcript BEFORE the compaction starts.
+    if (opts?.announce !== undefined) {
+      this.safeAppend({ type: "continuity_warning", sessionId: this.sessionId, threadId: MAIN_THREAD, warning: opts.announce.warning.slice(0, 64), text: opts.announce.text.slice(0, 4_000) });
+    }
     // Review r1 M-4: no turn is in flight during a compaction, so the idle clock would otherwise run --
     // and end the child mid-compaction, leaving the target to compact a second time. Held off for the
     // compaction's whole length, re-armed after it.
     this.compacting++;
     this.clearIdleTimer();
     try {
-      return await compact.call(this.inc.query, opts);
+      return await compact.call(this.inc.query, opts?.customInstructions !== undefined ? { customInstructions: opts.customInstructions } : undefined);
     } finally {
       this.compacting--;
       if (this.compacting === 0 && this.inFlight === 0) this.armIdleTimer();
