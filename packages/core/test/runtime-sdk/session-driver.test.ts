@@ -1675,4 +1675,34 @@ describe("WS-23: a legacy claude-agent record is adopted onto the Winter leg at 
       await resumed.end();
     } finally { t.close(); }
   });
+
+  test("fix round 2 — a move-refused session: the repair refuses honestly while the obstruction stands (no false success, no loop), then succeeds once it is removed", async () => {
+    const t = table();
+    const tmpDirOf = (): string => t.home;
+    try {
+      const { sid, id, projects } = legacySession(t, { provider: "anthropic", cwdless: true });
+      const winterKey = transcriptProjectKey(realpathSync(t.home));
+      const elsewhere = mkdtempSync(join(tmpdir(), "winter-legacy-link-"));
+      symlinkSync(elsewhere, join(projects, winterKey));
+      expect(await t.drivers.ensure(sid).then(() => undefined, (e: unknown) => e)).toMatchObject({ reason: "transcript-move-refused" });
+      expect((await diagnoseRuntimeState(t.home, { tmpDirOf })).some((f) => f.kind === "legacy-adoption-blocked" && f.winterSessionId === sid)).toBe(true);
+
+      // THE LOOP THE REVIEW REPRODUCED: this used to clear the flag and report success, and the next
+      // resume refused again. Now it refuses, names the cause, and leaves the session blocked.
+      const blocked = await repairRuntimeState(t.home, { kind: "adopt-legacy-session", winterSessionId: sid }, { store: t.store, tmpDirOf });
+      expect(blocked.applied).toBe(false);
+      expect(blocked.detail).toContain("symbolic link");
+      expect(blocked.detail).toContain(join(projects, winterKey));
+      expect(t.records.get(sid)!.transcriptHealth).toBe("repair-required");
+      expect(await t.drivers.ensure(sid).then(() => undefined, (e: unknown) => e)).toMatchObject({ reason: "repair-required" });
+
+      // The user removes the link, as told: the repair now succeeds and the session resumes.
+      rmSync(join(projects, winterKey));
+      expect((await repairRuntimeState(t.home, { kind: "adopt-legacy-session", winterSessionId: sid }, { store: t.store, tmpDirOf })).applied).toBe(true);
+      const resumed = (await t.drivers.ensure(sid))!;
+      expect(readFileSync(join(projects, winterKey, `${id}.jsonl`), "utf8")).toContain("PAPAYA");
+      expect(t.records.get(sid)!.runtimeKind).toBe("winter-agent");
+      await resumed.end();
+    } finally { t.close(); }
+  });
 });

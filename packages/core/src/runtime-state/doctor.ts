@@ -35,7 +35,7 @@ import { quarantinedRunRoots } from "./root-recovery";
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 import { canonicalCwd } from "../agent/paths";
 import { sessionTmpDir } from "../agent/session-tmp";
-import { transcriptEntriesOf } from "./transcript-rekey";
+import { transcriptEntriesOf, transcriptMoveObstruction } from "./transcript-rekey";
 
 export type FindingKind =
   | "db-missing"
@@ -684,6 +684,15 @@ function adoptLegacySession(home: string, sessionId: string, keep: "recorded" | 
         }
       }
       moved = `; the ${keep === "recorded" ? "canonical-key" : "recorded-key"} copy (${done.length} file(s)) was moved to ${destination}`;
+    }
+    // Fix round 2: the next resume MOVES the transcript to the key Winter reads it from. If that move
+    // would be refused (a link in the way, a destination outside the store), clearing the flag would
+    // only report success and send the user round the same refusal again — so refuse, with the cause.
+    if (places.recordedKey !== places.canonicalKey && transcriptEntriesOf(join(places.projects, places.recordedKey), backend).length > 0) {
+      const obstruction = transcriptMoveObstruction(places.projects, places.recordedKey, places.canonicalKey);
+      if (obstruction !== undefined) {
+        return { applied: false, detail: `${sessionId} stays blocked: its transcript must move from ${join(places.projects, places.recordedKey)} to ${join(places.projects, places.canonicalKey)}, and that move would be refused — ${obstruction}. Remove or fix that path, then run this repair again` };
+      }
     }
     records.setTranscriptHealth(sessionId, "clean");
     return { applied: true, detail: `${sessionId}: repair-required cleared${moved}; its next resume adopts it onto the Winter runtime` };
