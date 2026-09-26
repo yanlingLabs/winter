@@ -1,13 +1,29 @@
 import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { SessionStore } from "./store";
 
-/** The 10 persisted, phone-foldable event types history is allowed to return. Allowlist, never a
+/** The 12 persisted, phone-foldable event types history is allowed to return. Allowlist, never a
  *  denylist: an unknown future type stays out until deliberately added — and adding one REQUIRES
  *  re-checking the per-event cap covers its large strings (capJson bounds strings at ANY depth,
  *  which is what admitted question_asked's nested options[].description). `reasoning_item` (opaque
  *  encrypted_content), harness_attached/detached, lifecycle, checkpoint, workflow_*, plugin/lease
  *  events are excluded by construction. assistant_delta is transient (never on disk) and so can
- *  never appear here either. */
+ *  never appear here either.
+ *
+ *  `hook_notice` and `continuity_warning` (WS-24, lane `phone`) were held out of this set at WS-23
+ *  time pending confirmation that an OLD phone -- one still on the PINNED WinterProtocol kit tag
+ *  that predates these two variants -- can survive receiving them. It can, by construction, not by
+ *  luck: the phone's own transport (`WinterSessionKit.WinterSessionClient.decode`,
+ *  apple/WinterKit/Sources/WinterSessionKit/WinterSessionClient.swift:792-795, and the type's own
+ *  doc comment on `HistoryPage`, SessionModels.swift:29-32) decodes every event OPAQUELY as
+ *  `SessionEvent.JSONValue`, never through the strict `SessionEvent` enum -- so an unrecognized
+ *  `type` string can never throw there regardless of what cases an old kit's Discriminator knows.
+ *  The seq/cursor bookkeeping (`WinterSessionClient.applyEvent`, same file:723-748) treats the
+ *  unrecognized event exactly like any other persisted one (advances the cursor -- correct, since it
+ *  really did consume a daemon seq). The one place these come to a stop is the phone's own transcript
+ *  fold (`norma-ios` `Winter/Code/Transcript.swift`'s `TranscriptBuilder.apply`, `default: break` at
+ *  the end of its switch on `type`) -- an unrecognized type is silently skipped, never rendered,
+ *  never a crash, never a dropped connection. So no kit/capability gate is needed here: both types
+ *  are safe to allow the moment this file does, on old phones and new alike. */
 export const HISTORY_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<SessionEvent["type"]>([
   "user_message",
   "assistant_message",
@@ -19,15 +35,15 @@ export const HISTORY_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<Se
   "agent_error",
   "question_asked",
   "question_resolved",
-  // DELIBERATELY ABSENT (WS-23): `hook_notice` -- a hook's blocked-prompt reason / stop notice. The
-  // phone decodes through a PINNED WinterProtocol kit tag that has no case for it, so it would round-
-  // trip as an unknown event at best. FOLLOW-UP: once a kit tag carries `SessionEvent.hookNotice`
-  // (and the iOS project bumps to it), add it here -- `text` is capped at 12,000 characters, well
-  // inside this file's per-event string cap -- and it reaches REMOTE_STREAM_EVENT_TYPES by the spread.
-  // DELIBERATELY ABSENT (WS-23 review r1 I-3), for the same reason: `continuity_warning` -- what a model
-  // switch could not carry across, a summary before a switch, reasoning state that could not be saved.
-  // FOLLOW-UP: add it here with `hook_notice` once a kit tag carries `SessionEvent.continuityWarning`
-  // (`text` is capped at 4,000 characters, `warning` at 64).
+  // WS-24 lane `phone`: `hook_notice` -- a hook's blocked-prompt reason / stop notice. `text` is
+  // capped at 12,000 characters by the schema, well inside this file's per-event string cap, and it
+  // reaches REMOTE_STREAM_EVENT_TYPES by the spread. See this constant's own doc comment above for
+  // why an old phone survives seeing it with no gate.
+  "hook_notice",
+  // WS-24 lane `phone` (WS-23 review r1 I-3): `continuity_warning` -- what a model switch could not
+  // carry across, a summary before a switch, reasoning state that could not be saved. `text` is
+  // capped at 4,000 characters, `warning` at 64 -- both inside this file's per-event string cap.
+  "continuity_warning",
 ]);
 
 /** Truncates `value` to `cap` UTF-8 bytes (backed off to a char boundary) plus a deterministic

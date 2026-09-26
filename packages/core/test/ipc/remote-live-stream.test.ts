@@ -408,7 +408,10 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
     // 22 → 24 (Winter Phase 10a O5, P10a-6: provider_login_progress/provider_login_finished — via
     // the transients; both are SYSTEM_SESSION_ID-scoped like plugin_tile_updated, so this is a
     // reach-the-wire proof, never an endorsement of phone-side rendering).
-    expect(REMOTE_STREAM_EVENT_TYPES.size).toBe(25);
+    // 24 → 25 (that count predates this file's own last edit) → 27 (WS-24 lane `phone`:
+    // hook_notice/continuity_warning — via HISTORY_EVENT_TYPES, which grew 10 → 12; confirmed safe
+    // for an old phone with no capability gate, see history.ts's own doc comment).
+    expect(REMOTE_STREAM_EVENT_TYPES.size).toBe(27);
     // The one exclusion the whole first half of this file is about.
     expect(REMOTE_STREAM_EVENT_TYPES.has("reasoning_item" as SessionEvent["type"])).toBe(false);
     // ...and the ones that would have quietly reverted the phone-client streaming fix.
