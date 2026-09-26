@@ -524,8 +524,11 @@ function rpcFromWinterRefusal(err: unknown): never {
     // fix its own input — configure a credential, pick a servable model, repair a transcript) rather
     // than a daemon-internal fault. WS-23: `legacy_session_migration_refused` is a session the retired
     // official leg created whose transcript cannot move to the Winter leg as it stands.
+    // `session_cwd_unavailable`: the session's own working directory is gone — the user restores it
+    // or starts a new session, so it is theirs to fix, not a daemon fault.
     const invalid = err.code === "session_predates_winter_leg" || err.code === "not_supported_on_winter_leg"
-      || err.code === "runtime_selection_refused" || err.code === "legacy_session_migration_refused";
+      || err.code === "runtime_selection_refused" || err.code === "legacy_session_migration_refused"
+      || err.code === "session_cwd_unavailable";
     // WS-19 (W19-7): `reason` is additive beside `code` — one `runtime_selection_refused` covers
     // several distinct situations, and `"no-credential"` is the one a client should render as "you
     // have no key for <provider>" rather than "the model could not be selected". Same `data.reason`
@@ -3827,13 +3830,18 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             // WS-23 live-gate fix: the bearer is now what `console` sessions and Winter's own jobs READ,
             // and the refresher's seed refresh writes it asynchronously — so ONE refresh is awaited
             // first (the CLI door's own sequence: `refreshBearer()`, then a refresher), and the
-            // children are replaced and the jobs' view re-probed only once the material has landed.
+            // children are replaced and the jobs' view re-probed ONLY when that refresh reports the
+            // material landed. A failed one re-probes nothing: the view would snapshot Console as
+            // absent right before the refresher's retry writes it. That retry lands the bearer on its
+            // own backoff; sessions read the slot at their next turn, and the jobs' view heals itself
+            // (`refreshSoon` on a refused internal call, and once per dreamer tick).
             if (result.ok) {
               const broker = opts.consoleBroker;
               void (async () => {
-                try { await broker?.refreshBearer(); } catch { /* the refresher below retries on its own backoff */ }
+                let landed = false;
+                try { landed = (await broker?.refreshBearer())?.ok === true; } catch { /* the refresher below retries on its own backoff */ }
                 broker?.startRefresher();
-                await afterConsoleCredentialChange();
+                if (landed) await afterConsoleCredentialChange();
               })();
             }
           })

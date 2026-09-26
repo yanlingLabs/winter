@@ -279,6 +279,22 @@ describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", (
     c.close();
   });
 
+  test("a login whose first refresh FAILS starts the refresher but re-probes nothing — Console is never snapshotted absent right before the retry lands it", async () => {
+    const { socketPath, harnessToken, calls } = await boot({
+      refreshBearer: async () => { calls.push("refreshBearer"); return { ok: false, reason: "ant_executable_unavailable" }; },
+    }, { consoleSessions: ["s_console"] });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    await c.request(METHODS.providerLogin, { provider: "anthropic", kind: "console" });
+    await waitFor(() => calls.includes("startRefresher"));
+    // Give the (skipped) follow-up every chance to have run before asserting its absence.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(calls).toContain("refreshBearer");
+    expect(calls).not.toContain("evict:s_console");
+    expect(calls).not.toContain("viewRefresh");
+    c.close();
+  });
+
   test("a failed login broadcasts provider_login_finished {ok:false, reason}", async () => {
     const { socketPath, harnessToken, calls } = await boot({
       login: async () => ({ submitCode: async () => {}, done: Promise.resolve({ ok: false, reason: "exit_code_1" }) }),
