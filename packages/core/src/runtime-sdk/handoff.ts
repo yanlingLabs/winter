@@ -206,7 +206,27 @@ export type PlanSwitchOutcome =
   // Winter Phase 10b (D1-6, W18-22): `portable` names what the pre-flight review found still carries
   // (`SwitchClassification.portable`) — additive alongside `warnings`, `[]` when the review itself is
   // unreachable or found nothing portable to name.
-  | { kind: "confirmation_required"; warnings: string[]; portable: string[] };
+  //
+  // WS-23 (reasoning-state, decision 9): `fit` is the review's verdict on whether the conversation fits
+  // the target (`reviewModelSwitch`'s `{fits, estimatedTokens, window}`), present whenever the target's
+  // row declares a window -- so a client can say, beside the warnings, that a compaction will run.
+  | { kind: "confirmation_required"; warnings: string[]; portable: string[]; fit?: SwitchFit };
+
+/** WS-23 (reasoning-state): the review's fit verdict, as the daemon carries it. */
+export interface SwitchFit {
+  fits: boolean;
+  estimatedTokens: number;
+  window: number;
+}
+
+/**
+ * WS-23: the fit fields off a review. Read structurally: the router's `SwitchReview` type gains them with
+ * the SDK that computes them, and a review from an older one simply has none.
+ */
+function fitOf(review: SwitchReview): SwitchFit | undefined {
+  const r = review as SwitchReview & { fits?: unknown; estimatedTokens?: unknown; window?: unknown };
+  return typeof r.fits === "boolean" && typeof r.estimatedTokens === "number" && typeof r.window === "number" ? { fits: r.fits, estimatedTokens: r.estimatedTokens, window: r.window } : undefined;
+}
 
 /** The console door's label — the router's own for the `anthropic`/`console-profile` alternative, used
  *  for a `console` row too (whose router label is its bare id) so the one door renders once. */
@@ -342,15 +362,25 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
   // recognises, and no `deps.barrier` override).
   const sessionKey = sessionKeyFor(record);
   const reviewer = reviewerFor(deps);
-  /** The generic fail-safe review (fix round 1's MAJOR): unreviewable ⇒ PROMPT, never silent. */
+  /**
+   * The generic fail-safe review (fix round 1's MAJOR): unreviewable ⇒ PROMPT, never silent.
+   *
+   * WS-23 (reasoning-state, decision 9): the prose names what the review would have checked -- whether the
+   * conversation fits the new model and whether it holds anything that model cannot read -- and no longer
+   * suggests the current model's reasoning is lost: it stays with that model in any case.
+   */
   const unreviewablePrompt = (): SwitchReview => ({
     prompt: true,
     classification: {
       lossClass: "warned-lossy",
-      warnings: [`Winter couldn't check what carries over to ${modelLabelFor(model)}. The conversation carries over; reasoning private to the current model may not.`],
+      warnings: [`Winter couldn't check whether this conversation fits ${modelLabelFor(model)}, or holds anything it can't read. The conversation carries over as it is; if it is too large, the current model will summarize its older part first.`],
       portable: [],
     },
   });
+  // WS-23 (decision 5): the review said the conversation does not fit the target -- a provider-changing
+  // switch below then asks the live child to compact on its SOURCE model before it is replaced.
+  let compactOnSource = false;
+  let sourceFit: { estimatedTokens?: number; window?: number } | undefined;
   if (sessionKey !== undefined && reviewer !== undefined) {
     let review: SwitchReview;
     try {
@@ -379,13 +409,17 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
         review = unreviewablePrompt();
       }
     }
+    const fit = fitOf(review);
     if (review.prompt && !confirmLossy) {
       return {
         kind: "confirmation_required",
         warnings: review.classification?.warnings ?? [],
         portable: review.classification?.portable ?? [],
+        ...(fit !== undefined ? { fit } : {}),
       };
     }
+    compactOnSource = fit?.fits === false;
+    sourceFit = fit;
   }
   // Fix round 2 (C1, belt-and-braces): keep the 8a record's identity columns in step with an APPLIED
   // family change (gpt -> deepseek) — without this a switch away from the family the session was
@@ -439,15 +473,63 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
   // D1 round-4 review N2: GATED ON THE RECORD HAVING MOVED. When the patch above threw, the record
   // still names the OLD provider and `ipc/server.ts` refuses the whole switch; evicting anyway would
   // throw away a perfectly good child for a switch that never happened.
+  //
+  // WS-23 (reasoning-state, decision 5): WHEN THE CONVERSATION DOES NOT FIT THE TARGET, the child being
+  // replaced COMPACTS FIRST, on its own (source) model -- the user's rule: the model being left pays for
+  // the summary. The new incarnation then resumes from the compacted transcript. A compaction that
+  // fails (nothing to fold, the source refused) is logged and the switch goes ahead: the target's own
+  // fit check then compacts on the target, its summarizer bounded to what the target can read.
   if (recordMoved && providerBeforeSwitch !== undefined && providerBeforeSwitch !== decided.providerId) {
     const liveChild = deps.winter.get(sessionId);
     if (liveChild !== undefined) {
+      const compactFirst = async (): Promise<void> => {
+        if (!compactOnSource) return;
+        try {
+          // Review r1 I-3: the user is TOLD, in the transcript, that a summary replaces the older part of
+          // what the new model continues from (the in-runtime path's `switch_compaction` warning; the
+          // compaction control emits none of its own). Counts and model ids only.
+          const size = sourceFit?.estimatedTokens !== undefined ? `This conversation (about ${sourceFit.estimatedTokens} tokens) is larger than` : "This conversation is larger than";
+          const window = sourceFit?.window !== undefined ? ` (a ${sourceFit.window}-token window)` : "";
+          const announce = `${size} ${modelLabelFor(model)} can hold${window}, so the current model is summarizing its older part before the switch. The most recent exchanges carry over as they are.`;
+          const { retainedCount } = await liveChild.compact({ announce: { warning: "switch_compaction", text: announce } });
+          deps.log?.(`handoff: ${sessionId} compacted on its source model before the provider switch (${retainedCount} messages kept) — the conversation did not fit ${modelLabelFor(model)}`);
+        } catch (err) {
+          deps.log?.(`handoff: ${sessionId} could not compact on its source model before the provider switch (${err instanceof Error ? err.name : "unknown"}) — the new model's own fit check compacts instead`);
+        }
+      };
+      // Review r1 I-5: the switch is confirmed and the record names the new provider, so from here on
+      // the TARGET answers. While the source finishes its turn and/or compacts, what the user sends is
+      // held (logged, not pushed -- `WinterSession.beginHandoff`); once the child is replaced, the
+      // session is resumed on the new provider at once to answer it.
+      const handOff = (work: () => Promise<void>): void => {
+        const held = liveChild.beginHandoff !== undefined ? liveChild.beginHandoff(work) : work().then(() => ({ heldTurns: 0 }));
+        void held.then(
+          async ({ heldTurns }) => {
+            if (heldTurns === 0) return;
+            deps.log?.(`handoff: ${sessionId} — ${heldTurns} message(s) sent during the switch now run on ${modelLabelFor(model)}`);
+            await deps.winter.ensure(sessionId);
+          },
+        ).catch((err: unknown) => {
+          deps.log?.(`handoff: ${sessionId} could not resume on its new provider for the messages held during the switch (${err instanceof Error ? err.name : "unknown"}) — they stay owed in the log for the next send`);
+        });
+      };
       if (liveChild.turnRunning === true) {
         deps.log?.(`handoff: ${sessionId} changed provider (${providerBeforeSwitch} -> ${decided.providerId}) while a turn was running — the child will be replaced at the next idle boundary`);
-        void liveChild.idle().then(
-          () => deps.winter.evict(sessionId),
-          () => { /* the session ended before settling — nothing left to replace */ },
-        );
+        handOff(async () => {
+          await liveChild.idle();
+          await compactFirst();
+          await deps.winter.evict(sessionId);
+        });
+      } else if (compactOnSource) {
+        // NOT awaited: a compaction can take tens of seconds, and `session.setModel`'s callers time out
+        // far sooner (the Mac client's default is 5 s) -- the switch has already been applied to the
+        // record. A message sent while the source compacts is held for the target (I-5, above).
+        deps.log?.(`handoff: ${sessionId} changed provider (${providerBeforeSwitch} -> ${decided.providerId}) and does not fit the new model — compacting on the source model, then replacing its child`);
+        handOff(async () => {
+          await compactFirst();
+          await liveChild.idle();
+          await deps.winter.evict(sessionId);
+        });
       } else {
         deps.log?.(`handoff: ${sessionId} changed provider (${providerBeforeSwitch} -> ${decided.providerId}) — replacing its child so the next turn spawns against the new endpoint`);
         await deps.winter.evict(sessionId);

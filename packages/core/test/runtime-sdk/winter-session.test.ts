@@ -95,6 +95,9 @@ class FakeQuery {
     if (this.interruptEndsChild) this.fail(named("AbortError", "query aborted: runtime process killed"));
   }
   async setModel(model?: string): Promise<void> { this.models.push(model); }
+  /** WS-23 (reasoning-state): the SDK's `compact` control -- recorded, answering what a real compaction kept. */
+  readonly compactions: Array<{ customInstructions?: string } | undefined> = [];
+  async compact(opts?: { customInstructions?: string }): Promise<{ retainedCount: number }> { this.compactions.push(opts); return { retainedCount: 7 }; }
   async setPermissionMode(mode: string): Promise<void> { this.modes.push(mode); }
 }
 
@@ -552,13 +555,91 @@ describe("startWinterSession — one incarnation", () => {
     }
   });
 
-  test("compact is a typed refusal; setModel reaches a live child and is a no-op while resumable", async () => {
+  // WS-23 (reasoning-state, decision 5): `compact` reaches a LIVE child's `Query.compact` (the SDK's
+  // `compact` control) -- what the handoff calls before a provider switch the target cannot hold -- and
+  // stays a typed refusal with no live child to ask.
+  test("compact reaches a live child and is a typed refusal while resumable; setModel reaches a live child and is a no-op while resumable", async () => {
     const h = harness();
     await expect(h.session.compact()).rejects.toMatchObject({ code: "not_supported_on_winter_leg" });
+    await h.session.open();
+    await expect(h.session.compact()).resolves.toEqual({ retainedCount: 7 });
+    expect(h.q().compactions).toEqual([undefined]);
+    await h.session.end();
     await h.session.setModel("gpt-5.6-terra");   // resumable: nothing to tell
     await h.session.open();
     await h.session.setModel("gpt-5.6-luna");
     expect(h.q().models).toEqual(["gpt-5.6-luna"]);
+  });
+});
+
+describe("WS-23 review r1: the idle clock during a compaction (M-4), and the handoff hold (I-5)", () => {
+  test("M-4: the idle timer is cleared for a compaction's whole length and re-armed after it", async () => {
+    const h = harness({ idleTimeoutMs: 50 });
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.settled();
+    expect(h.timers.armed.map((t) => t.ms)).toEqual([50]);
+    let finish: (() => void) | undefined;
+    h.q().compact = () => new Promise((resolve) => { finish = () => resolve({ retainedCount: 2 }); });
+    const compaction = h.session.compact();
+    await h.settled();
+    expect(h.timers.armed).toEqual([]);              // nothing can end the child mid-compaction
+    h.timers.fire();
+    expect(h.session.state).toBe("live");
+    finish!();
+    await expect(compaction).resolves.toEqual({ retainedCount: 2 });
+    expect(h.timers.armed.map((t) => t.ms)).toEqual([50]);
+  });
+
+  test("I-3: a compaction's announcement is in the transcript before the compaction runs; only the SDK's own options reach the control", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.settled();
+    await h.session.compact({ announce: { warning: "switch_compaction", text: "summarizing before the switch" } });
+    expect(seen(h, "continuity_warning")).toMatchObject([{ threadId: "main", warning: "switch_compaction", text: "summarizing before the switch" }]);
+    expect(h.q().compactions).toEqual([undefined]);
+  });
+
+  test("I-5: a send during a pending handoff reaches the log, never the SOURCE child; the work's end reports it held", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.settled();
+    let finish: (() => void) | undefined;
+    const held = h.session.beginHandoff(() => new Promise<void>((resolve) => { finish = resolve; }));
+    expect(h.session.handoffPending).toBe(true);
+    await expect(h.session.send("for the new model", "cli")).resolves.toMatchObject({ queued: true });
+    await expect(h.session.steer("and this", "cli")).resolves.toMatchObject({ injected: false });
+    h.session.deliver("a delivery");
+    await h.settled();
+    expect(h.q().pushed).toEqual([]);
+    expect(seen(h, "turn_started")).toEqual([]);
+    expect(unconsumedUserMessages(h.events)).toEqual(["for the new model", "and this", "a delivery"]);
+    await h.session.end();                            // the work evicts the child, as the handoff does
+    finish!();
+    await expect(held).resolves.toEqual({ heldTurns: 3 });
+    expect(h.session.handoffPending).toBe(false);
+    // The next incarnation (the target's) pushes what was held, in order.
+    await h.session.open();
+    await h.settled();
+    expect(h.q().pushed).toEqual(["for the new model"]);
+  });
+
+  test("I-5: texts queued behind the running turn before the switch wait for the target too", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.settled();
+    await h.session.send("running", "cli");
+    await h.session.send("queued before the switch", "cli");
+    const held = h.session.beginHandoff(async () => { await h.session.idle(); await h.session.end(); });
+    h.q().emit(result());
+    await expect(held).resolves.toEqual({ heldTurns: 1 });
+    expect(h.queries[0]!.pushed).toEqual(["running"]);
+    await h.session.open();
+    await h.settled();
+    expect(h.q().pushed).toEqual(["queued before the switch"]);
   });
 });
 

@@ -242,13 +242,15 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
     const home = mkdtempSync(join(tmpdir(), "winter-setmodel-handoff-portable-"));
     const store = new SessionStore(home);
     const sessionId = store.createSession("global");
-    const { server, c } = await boot(store, home, { kind: "confirmation_required", warnings: ["lossy"], portable: ["deepseek", "GLM"] });
+    // WS-23 (reasoning-state): `fit` ({fits, estimatedTokens, window}) rides the data too, when the review computed one.
+    const { server, c } = await boot(store, home, { kind: "confirmation_required", warnings: ["lossy"], portable: ["deepseek", "GLM"], fit: { fits: false, estimatedTokens: 300_000, window: 128_000 } });
     try {
       const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/sonnet" });
       expect(res.error).toBeDefined();
       expect(res.error.data?.code).toBe("handoff_confirmation_required");
       expect(res.error.data?.warnings).toEqual(["lossy"]);
       expect(res.error.data?.portable).toEqual(["deepseek", "GLM"]);
+      expect(res.error.data?.fit).toEqual({ fits: false, estimatedTokens: 300_000, window: 128_000 });
       // Never names an SDK or runtime (R-10b-4) — this outcome now also fires for a same-leg
       // family change, which never moves a runtime at all.
       expect(res.error.message).not.toMatch(/\bruntime\b/i);

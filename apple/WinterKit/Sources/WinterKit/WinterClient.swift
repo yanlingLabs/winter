@@ -305,6 +305,7 @@ extension SessionEvent {
         case .toolReview(let v): return v.seq
         case .notificationRequested(let v): return v.seq
         case .hookNotice(let v): return v.seq
+        case .continuityWarning(let v): return v.seq
         case .childUpdate(let v): return v.seq
         case .workflowStarted(let v): return v.seq
         case .workflowProgress(let v): return v.seq
@@ -364,6 +365,7 @@ extension SessionEvent {
         case .toolReview(let v): return v.sessionId
         case .notificationRequested(let v): return v.sessionId
         case .hookNotice(let v): return v.sessionId
+        case .continuityWarning(let v): return v.sessionId
         case .childUpdate(let v): return v.sessionId
         case .workflowStarted(let v): return v.sessionId
         case .workflowProgress(let v): return v.sessionId

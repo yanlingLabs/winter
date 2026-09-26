@@ -11,7 +11,7 @@ import { createEchoWindow, type EchoWindow } from "./dedupe";
 import { classifyThrown, sanitizeDetail } from "./errors";
 import { isKnownUnpersistedKind, kindOf, summarize } from "./hooks";
 import { isQuestionTool } from "./questions";
-import { boundHookNoticeText, projectTerminal, sharesMainLedgerRow, totalsOf, turnUsageOf, type MainModelKey, type UsageTotals } from "./terminal";
+import { boundContinuityWarningText, boundHookNoticeText, projectTerminal, sharesMainLedgerRow, totalsOf, turnUsageOf, type MainModelKey, type UsageTotals } from "./terminal";
 import { hostToolNameFor } from "../runtime-sdk/tool-names";
 import { ProjectorRefusedError } from "./types";
 import type { CheckpointStore, ProjectedBatch, ProjectedEvent, Projector, ProjectorDeps, ProjectorRefusal, ProtocolSdkMessage } from "./types";
@@ -125,6 +125,9 @@ function mainModelKeyFrom(init: Record<string, unknown>): MainModelKey | undefin
   if (key === undefined && model === undefined) return undefined;
   return { ...(key === undefined ? {} : { key }), ...(model === undefined ? {} : { modelId: model }) };
 }
+
+/** Review r2: `continuity_warning` kinds re-emitted on every resume -- logged, never shown (see the projector's branch). */
+const RESUME_TIME_CONTINUITY_WARNINGS: ReadonlySet<string> = new Set(["provider_state_missing", "provider_state_deleted", "sidecar_unreadable"]);
 
 class ProjectorImpl implements Projector {
   private readonly checkpoint: CheckpointStore;
@@ -367,6 +370,29 @@ class ProjectorImpl implements Projector {
       const uuid = typeof m.uuid === "string" && m.uuid.length > 0 ? m.uuid : `${this.turnIndex}:${this.roundIndex}:${content.length}`;
       return claim(`hn:${uuid}`, () => [
         { type: "hook_notice", sessionId: this.deps.sessionId, threadId, text: boundHookNoticeText(content), level, ...(stopsTurn ? { stopsTurn: true } : {}) },
+      ]);
+    }
+
+    // WS-23 review r1 I-3: `system/continuity_warning` -- what the conversation lost, or what Winter did to
+    // it (a lossy switch, a summary before a switch to a smaller model, reasoning state that could not
+    // be saved, a resume-time loss). The user must SEE it: persisted as `continuity_warning` on its
+    // thread, keyed by the frame's uuid so a replay appends it once. `detail` is the runtime's own prose
+    // about counts and model ids -- bounded, and still never logged.
+    if (kindOf(msg) === "system/continuity_warning") {
+      const m = msg as Record<string, unknown>;
+      const text = typeof m.detail === "string" ? m.detail.trim() : "";
+      const warning = typeof m.warning === "string" && m.warning.length > 0 ? m.warning.slice(0, 64) : "";
+      // Review r2: the three RESUME-TIME kinds stay log-only. The runtime re-emits them with a fresh uuid
+      // on every incarnation (`continuation-attach.ts`), so a session with an origin-less anchor -- every
+      // adopted legacy session -- would gain the same line each time an idle child is resumed.
+      if (text.length === 0 || warning.length === 0 || RESUME_TIME_CONTINUITY_WARNINGS.has(warning)) {
+        this.logSkipped(msg);
+        return EMPTY_BATCH();
+      }
+      const threadId = threadIdOf(m as { parent_tool_use_id?: string | null });
+      const uuid = typeof m.uuid === "string" && m.uuid.length > 0 ? m.uuid : `${this.turnIndex}:${this.roundIndex}:${warning}:${text.length}`;
+      return claim(`cw:${uuid}`, () => [
+        { type: "continuity_warning", sessionId: this.deps.sessionId, threadId, warning, text: boundContinuityWarningText(text) },
       ]);
     }
 
@@ -835,7 +861,8 @@ class ProjectorImpl implements Projector {
    * `hooks.ts`'s PER-FAMILY FIELD ALLOWLIST — a type, a subtype and a handful of named scalars.
    * Never `JSON.stringify(msg)`: `system/reasoning_summary` carries a foreign model's reasoning
    * text, `model_refusal_*` carries an explanation §4.7 marks display-only and never to be parsed,
-   * and `continuity_warning.detail` is prose about identity. None of it is cleared for a log line.
+   * and `continuity_warning.detail` is prose about identity (persisted for the user since WS-23 r1, never
+   * logged). None of it is cleared for a log line.
    * One line per distinct kind keeps a 429 storm from filling the log.
    */
   private logSkipped(msg: ProtocolSdkMessage): void {

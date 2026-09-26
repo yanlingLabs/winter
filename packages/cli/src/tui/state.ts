@@ -602,6 +602,13 @@ function reduceCore(s: TuiState, e: WireEvent, nowMs: number): TuiState {
       return { ...s, committed: [...s.committed, { kind: "note", text }] };
     }
 
+    // WS-23 review r1 I-3: a continuity warning (what a model switch lost, a summary before one,
+    // reasoning state that could not be saved) -- one note line, same class as the hook notice.
+    case "continuity_warning": {
+      const text = `note: ${str(e.text).split("\n").filter((l) => l.length > 0).join(" — ")}`;
+      return { ...s, committed: [...s.committed, { kind: "note", text }] };
+    }
+
     case "agent_error": {
       // main.ts:659 sends this to console.error (stderr), not the pinned block — but the Ink app
       // has no separate stderr surface, so its content becomes a committed note here (same wording).

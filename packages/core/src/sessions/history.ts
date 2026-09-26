@@ -24,6 +24,10 @@ export const HISTORY_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<Se
   // trip as an unknown event at best. FOLLOW-UP: once a kit tag carries `SessionEvent.hookNotice`
   // (and the iOS project bumps to it), add it here -- `text` is capped at 12,000 characters, well
   // inside this file's per-event string cap -- and it reaches REMOTE_STREAM_EVENT_TYPES by the spread.
+  // DELIBERATELY ABSENT (WS-23 review r1 I-3), for the same reason: `continuity_warning` -- what a model
+  // switch could not carry across, a summary before a switch, reasoning state that could not be saved.
+  // FOLLOW-UP: add it here with `hook_notice` once a kit tag carries `SessionEvent.continuityWarning`
+  // (`text` is capped at 4,000 characters, `warning` at 64).
 ]);
 
 /** Truncates `value` to `cap` UTF-8 bytes (backed off to a char boundary) plus a deterministic
