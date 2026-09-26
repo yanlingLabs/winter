@@ -1079,9 +1079,18 @@ export async function startDaemon(opts: {
   // anywhere a directory marketplace's manifest names, so the old `<home>/plugins/<name>` convention
   // no longer holds (it never matched a converted-legacy or freshly-installed plugin's actual
   // location; only ever worked by coincidence for a hand-seeded fixture at that exact path).
+  // WS-24: keyed by the plugin's SPEC (`"<name>@<marketplace>"`), not its bare name — see
+  // `plugins/supervisor.ts`'s header ("THE KEY").
   const spawnablePlugins = allPlugins
     .filter(pluginSpawnEligible)
-    .map((p) => ({ id: p.name, dir: p.installPath, entry: p.entry! }));
+    .map((p) => ({ id: p.spec, dir: p.installPath, entry: p.entry! }));
+  // WS-24: a token a pre-WS-24 core minted under a plugin's BARE name can no longer name a plugin this
+  // supervisor runs (ids are specs now) — revoked, so a leftover process holding one cannot authenticate
+  // as it. A bare name some install really uses as its whole spec is left alone.
+  {
+    const specs = new Set(allPlugins.map((p) => p.spec));
+    for (const p of allPlugins) if (!specs.has(p.name)) store.revokePluginToken(p.name);
+  }
   // Phase 4d-i Task 4: boot-time orphan-PID sweep, BEFORE startAll spawns the current set — a
   // plugin disabled or removed since the last run may have left its process running under a
   // stale <runDir>/plugins/<id>.pid; startAll/reclaimOrphans would never find it (they only look

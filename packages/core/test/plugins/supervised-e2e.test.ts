@@ -27,8 +27,9 @@ describe("supervised e2e: sample-echo (real Bun child process)", () => {
   test(
     "real child registers within the timeout, echo round-trips through registry.execute with the real child's pid, tile lands in the contrib registry, and teardown leaves no orphan process",
     async () => {
-      const pluginId = "sample-echo";
-      srv = await bootSupervisedServer(pluginId);
+      srv = await bootSupervisedServer("sample-echo");
+      // WS-24: a live plugin is named by its spec ("<name>@<marketplace>") everywhere the daemon keys it.
+      const pluginId = srv.spec;
 
       // 1. Registration: the real `bun index.ts` child connects, hellos as role "plugin", and
       // calls plugin.register — the supervisor status flips out of "starting" into "running".

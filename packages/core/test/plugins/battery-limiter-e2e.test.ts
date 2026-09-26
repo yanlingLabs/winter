@@ -10,6 +10,7 @@ import {
   waitFor,
   writeAndLoadSettings,
   type SupervisedInstance,
+  pluginSpecFor,
 } from "./supervised-fixtures";
 
 /**
@@ -119,10 +120,11 @@ describe("battery-limiter ctx.hardware round-trip (real Bun child process, scrip
   test(
     "set_charge_limit round-trips through a real child's ctx.hardware() to a scripted provider and back; get_charge_limit too; tile starts \"unknown\"",
     async () => {
-      const pluginId = "battery-limiter";
+      const pluginName = "battery-limiter";
+      const pluginId = pluginSpecFor(pluginName); // WS-24: live plugins are keyed by their spec
       const home = mkdtempSync(join(tmpdir(), "winter-battery-limiter-e2e-"));
-      installBatteryLimiter(home, pluginId);
-      const settings = writeAndLoadSettings(home, pluginId, { hardwareConsent: true });
+      installBatteryLimiter(home, pluginName);
+      const settings = writeAndLoadSettings(home, pluginName, { hardwareConsent: true });
       const socketPath = join(home, "core.sock");
 
       const spawnable = buildSpawnablePlugins(home, settings);

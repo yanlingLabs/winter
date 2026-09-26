@@ -17,6 +17,7 @@ import {
   writeAndLoadSettings,
   writePidFile,
   type SupervisedInstance,
+  pluginSpecFor,
 } from "./supervised-fixtures";
 
 /**
@@ -64,8 +65,9 @@ describe("4b gate: kill-9 mid-call recovery", () => {
   test(
     "sleep{ms:5000} kill -9 mid-call -> typed 'crashed during sleep' isError + status backoff -> short-backoff restart -> echo round-trips on a NEW pid",
     async () => {
-      const pluginId = "sample-echo";
-      srv = await bootSupervisedServer(pluginId, {
+      const pluginName = "sample-echo";
+      const pluginId = pluginSpecFor(pluginName); // WS-24: live plugins are keyed by their spec
+      srv = await bootSupervisedServer(pluginName, {
         // registrationTimeoutMs stays generous (the FIRST real spawn+register must succeed
         // reliably) — only the backoff cap is shortened, so the post-crash restart is fast without
         // racing the initial boot.
@@ -133,10 +135,11 @@ describe("4b gate: circuit breaker (5 real crashes)", () => {
   test(
     "5 rapid REAL-child crashes trip the circuit; no 6th spawn attempt ever follows; tools unregistered",
     async () => {
-      const pluginId = "sample-echo";
+      const pluginName = "sample-echo";
+      const pluginId = pluginSpecFor(pluginName); // WS-24: live plugins are keyed by their spec
       const home = mkdtempSync(join(tmpdir(), "winter-gate-4b-circuit-"));
-      installSampleEcho(home, pluginId);
-      const settings = writeAndLoadSettings(home, pluginId);
+      installSampleEcho(home, pluginName);
+      const settings = writeAndLoadSettings(home, pluginName);
       const socketPath = join(home, "core.sock");
       const spawnable = buildSpawnablePlugins(home, settings);
 
@@ -206,10 +209,11 @@ describe("4b gate: orphan reclaim across a simulated core restart", () => {
   test(
     "a live, PID-verified child spawned by instance A re-registers against a fresh instance B (same runDir/socketPath) — the SAME OS process, never respawned",
     async () => {
-      const pluginId = "sample-echo";
+      const pluginName = "sample-echo";
+      const pluginId = pluginSpecFor(pluginName); // WS-24: live plugins are keyed by their spec
       const home = mkdtempSync(join(tmpdir(), "winter-gate-4b-reclaim-"));
-      installSampleEcho(home, pluginId);
-      const settings = writeAndLoadSettings(home, pluginId);
+      installSampleEcho(home, pluginName);
+      const settings = writeAndLoadSettings(home, pluginName);
       const socketPath = join(home, "core.sock");
       const spawnable = buildSpawnablePlugins(home, settings);
 
@@ -294,10 +298,11 @@ describe("4b gate: orphan reclaim across a simulated core restart", () => {
   test(
     "a dead pid's abandoned file is cleaned up by a fresh instance's reclaim — never adopted, no signal sent to anything",
     async () => {
-      const pluginId = "sample-echo-dead";
+      const pluginName = "sample-echo-dead";
+      const pluginId = pluginSpecFor(pluginName); // WS-24: live plugins are keyed by their spec
       const home = mkdtempSync(join(tmpdir(), "winter-gate-4b-reclaim-dead-"));
-      const dir = installSampleEcho(home, pluginId);
-      const settings = writeAndLoadSettings(home, pluginId);
+      const dir = installSampleEcho(home, pluginName);
+      const settings = writeAndLoadSettings(home, pluginName);
       const socketPath = join(home, "core.sock");
       const spawnable = buildSpawnablePlugins(home, settings);
 

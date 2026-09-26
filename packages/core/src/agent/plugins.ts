@@ -21,9 +21,14 @@ export interface PluginInfo {
    *  call site (`daemon.ts`'s `spawnablePlugins` builder) still hardcoding the old convention. */
   installPath: string;
   /** WS-21: the marketplace this plugin installed from (`installed_plugins.json`'s own compound key
-   *  is `"<name>@<marketplace>"`, F15) — callers that need to write a qualified spec back (consent
-   *  records, `setPluginEnabled`) use `${name}@${marketplace}` rather than re-deriving it. */
+   *  is `"<name>@<marketplace>"`, F15). */
   marketplace: string;
+  /** WS-24: the plugin's IDENTITY — `installed_plugins.json`'s own key, `"<name>@<marketplace>"`,
+   *  verbatim (never rebuilt from `name`/`marketplace`, which cannot tell a key with no `@` from one
+   *  with an empty marketplace). Consent records, `setPluginEnabled` and — since WS-24 — the Tier-2
+   *  supervisor, the plugin's token, its connection and its tools are all keyed by it: the bare `name`
+   *  is not unique across marketplaces, so two marketplaces' same-named plugins collided on it. */
+  spec: string;
   /** winter-plugin.json tier, when a valid manifest was found. undefined for legacy (plugin.json-only) plugins. */
   tier?: "capability" | "platform";
   /** Consent classes ("exec"|"tcc"|"hardware") the manifest requires, per plugin-manifest.ts#requiredConsentClasses. [] for legacy plugins. */
@@ -134,7 +139,11 @@ export class PluginStore {
       const isDisabled = !enabled;
       let skills: string[] = [];
       try { skills = readdirSync(join(dir, "skills"), { withFileTypes: true }).filter((e) => e.isDirectory() && existsSync(join(dir, "skills", e.name, "SKILL.md"))).map((e) => e.name); } catch { /* no skills dir */ }
-      const shared = { name, skills, hasMcp: false, mcpEnabled: enabled, disabled: isDisabled, installPath: dir, marketplace };
+      const shared = { name, spec: key, skills, hasMcp: false, mcpEnabled: enabled, disabled: isDisabled, installPath: dir, marketplace };
+      // The spec names the plugin's tools (`plugin__<spec>__<tool>`), and a tool name is split back on the
+      // FIRST `__` after that prefix (`daemon.ts`'s `pluginToolNameParts`): a `__` in the marketplace half
+      // would misattribute them, as one in the name always could (`plugin-manifest.ts`'s own warning).
+      if (marketplace.includes("__")) this.deps.log?.(`plugin ${key}: marketplace name contains "__" — its tools' names cannot be split back to this plugin reliably; consider renaming the marketplace`);
 
       const { manifest } = loadManifest(dir, name, this.deps.log);
       if (manifest) {

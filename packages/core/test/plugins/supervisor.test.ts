@@ -1046,3 +1046,37 @@ describe("restart() (manual restart rider)", () => {
     expect(supervisor.status(p.id)).toBe("starting");
   });
 });
+
+// WS-24: the supervisor is keyed by a plugin's SPEC ("<name>@<marketplace>"), so two marketplaces'
+// same-named plugins are two runtimes, and what a bare-name-keyed core left behind is swept, never adopted.
+describe("keyed by spec (WS-24)", () => {
+  test("two marketplaces' same-named plugins are two runtimes with their own PID files and tokens", () => {
+    const { supervisor, dir, mints, calls } = makeSupervisor();
+    supervisor.startAll([fakePlugin({ id: "p@m1", dir: "/plugins/m1/p" }), fakePlugin({ id: "p@m2", dir: "/plugins/m2/p" })]);
+    expect(supervisor.trackedIds().sort()).toEqual(["p@m1", "p@m2"]);
+    expect(calls.map((c) => c.opts.env.WINTER_PLUGIN_ID).sort()).toEqual(["p@m1", "p@m2"]);
+    expect(mints.length).toBe(2);
+    expect(existsSync(join(dir, "plugins", "p@m1.pid"))).toBe(true);
+    expect(existsSync(join(dir, "plugins", "p@m2.pid"))).toBe(true);
+    supervisor.stop("p@m1");
+    expect(supervisor.status("p@m1")).toBe("stopped");
+    expect(supervisor.status("p@m2")).toBe("starting");
+    supervisor.stopAll();
+  });
+
+  test("a bare-name PID file a pre-WS-24 core left is swept (verified -> terminated), never adopted under the spec", () => {
+    const signals: Array<{ pid: number; sig: string }> = [];
+    const { supervisor, dir, calls } = makeSupervisor({
+      isAlivePid: (pid) => pid === 515_151,
+      signalPid: (pid, sig) => signals.push({ pid, sig }),
+    });
+    writeOrphanPidFile(dir, "p", 515_151); // the old key: the bare name
+    supervisor.sweepOrphans(["p@m1"]);
+    expect(signals).toEqual([{ pid: 515_151, sig: "SIGTERM" }]);
+    expect(existsSync(join(dir, "plugins", "p.pid"))).toBe(false);
+    supervisor.startAll([fakePlugin({ id: "p@m1" })]);
+    expect(calls).toHaveLength(1); // spawned fresh under its spec
+    expect(supervisor.status("p@m1")).toBe("starting");
+    supervisor.stopAll();
+  });
+});

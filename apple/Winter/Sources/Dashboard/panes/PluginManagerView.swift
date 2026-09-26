@@ -14,10 +14,10 @@ import UniformTypeIdentifiers
 //
 // IDENTITY: a row's `id`/`spec` is the QUALIFIED `"<plugin>@<marketplace>"` Contract B and claude
 // both use to name an install (`PluginListing.spec`) — NOT the bare plugin id, which is not unique
-// across marketplaces. `plugin.restart{pluginId}` is the one call that still takes the bare id
-// (`PluginRowDisplay.pluginId`); `plugin.setConsent` takes the qualified `spec` (fix round 1) plus
-// a `fingerprint` (fix round 3) — see `hasAmbiguousBareId`'s own doc for what's left that still
-// cares about a bare-id collision.
+// across marketplaces. WS-24: `plugin.restart{pluginId}` takes the qualified `spec` too (the daemon's
+// plugin supervisor is keyed by it); `plugin.setConsent` takes the `spec` (fix round 1) plus a
+// `fingerprint` (fix round 3) — see `hasAmbiguousBareId`'s own doc for why that guard is now only
+// conservative.
 //
 // STATUS: WS-21 retired the daemon's own supervisor-status merge into `plugin.list` — there is no
 // live "starting"/"backoff"/"circuit-open" signal on the wire any more, only `enabled`. The
@@ -282,11 +282,10 @@ final class PluginManagerModel: ObservableObject {
     /// (`.user`-scope) plugin shares `id` — e.g. the same plugin installed from two different
     /// marketplaces. `plugin.setConsent` is no longer ambiguous by itself (it takes the qualified
     /// `spec` — since round 1 — plus a `fingerprint` the daemon checks against the exact install,
-    /// since round 3), so this guard's remaining reason to exist is `plugin.restart{pluginId}`,
-    /// which IS still keyed by the bare id/first-match daemon-side (`PluginSupervisor`,
-    /// `agent/plugins.ts`'s own doc on the collision this implies) — acting on a `restart` when two
-    /// installs share a bare id is genuinely ambiguous, refused rather than guessed at, mirroring
-    /// the existing "this folder lists N plugins" refusal `installFromFolder` already gives.
+    /// since round 3). WS-24: `plugin.restart` is spec-keyed too now (`restart` sends the spec, and
+    /// the daemon's `PluginSupervisor` is keyed by it), so no call this pane makes is ambiguous any
+    /// more and this guard is only CONSERVATIVE — it still refuses a bare-id collision rather than
+    /// act on one of two same-named installs; retiring it is a follow-up, not a correctness need.
     /// `enable(_:)` keeps this guard too even though ITS own downstream calls are all spec-keyed
     /// now — a plugin it enables may later need `restart`, and refusing the ambiguity up front, at
     /// the one place a user is most likely to first encounter it, reads better than only surfacing
@@ -441,7 +440,8 @@ final class PluginManagerModel: ObservableObject {
         defer { busySpec = nil }
         var actionError: String?
         do {
-            try await client.pluginRestart(name: listing.id)
+            // WS-24: the spec — the daemon's supervisor is keyed by it, not the bare id.
+            try await client.pluginRestart(name: spec)
         } catch {
             actionError = "couldn't restart \(spec): \(daemonMessage(error))"
         }
