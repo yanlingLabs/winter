@@ -596,6 +596,45 @@ final class WinterSessionClientTests: XCTestCase {
                        "persisted events still advance the cursor")
     }
 
+    /// WS-24 lane `phone`, item 1: `hook_notice`/`continuity_warning` just joined the daemon's
+    /// `HISTORY_EVENT_TYPES`/`REMOTE_STREAM_EVENT_TYPES` allowlists (packages/core/src/sessions/
+    /// history.ts, remote-stream.ts). Neither is in `SessionEvent.transientTypes` (both are
+    /// persisted, replayed transcript rows, not broadcast-only), so on THIS client they must take
+    /// the ordinary persisted path — deduped and cursor-advancing exactly like `assistant_message` —
+    /// never the transient bypass. This is what makes them safe for an OLD phone with no capability
+    /// gate: nothing about this client's live/replay handling is type-aware beyond that one set
+    /// membership test (`isTransient`, keyed on the wire `type` string), so a phone that has never
+    /// heard of either variant still advances its cursor correctly and simply fails to render the
+    /// row (its own transcript fold's `default: break` — see history.ts's own doc comment for the
+    /// full chain of evidence).
+    func testHookNoticeAndContinuityWarningTakeTheOrdinaryPersistedPathNotTheTransientOne() async throws {
+        let conn = ScriptedRemoteConn()
+        let cursors = InMemoryCursorStore()
+        let client = makeClient(conn: conn, cursors: cursors)
+        let (events, evTask) = drain(client.events)
+        defer { evTask.cancel() }
+
+        conn.enqueueInbound(helloAckFrame(verdicts: [.upToDate(sessionID: "s1", highWatermark: 0)]))
+        _ = try await client.handshake(resumes: [StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 0)])
+
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 1, type: "hook_notice",
+                                       extra: ["threadId": .string("main"), "text": .string("a hook stopped this turn"), "level": .string("warning")]))
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 1, type: "hook_notice",
+                                       extra: ["threadId": .string("main"), "text": .string("a hook stopped this turn"), "level": .string("warning")])) // replay dup: dropped
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 2, type: "continuity_warning",
+                                       extra: ["threadId": .string("main"), "warning": .string("model_switch_lossy"), "text": .string("reasoning state did not carry over")]))
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 3, type: "assistant_message")) // barrier
+
+        try await waitUntil({ self.types(events.items).count >= 3 }, "the barrier event")
+        XCTAssertEqual(types(events.items), ["hook_notice", "continuity_warning", "assistant_message"],
+                       "the duplicate hook_notice at seq 1 is deduped, same as any other persisted type")
+        XCTAssertEqual(seqs(events.items), [1, 2, 3])
+        XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 3,
+                       "both new variants advance the cursor like any other persisted event")
+        XCTAssertEqual(events.items[0].json["level"]?.stringValue, "warning")
+        XCTAssertEqual(events.items[1].json["warning"]?.stringValue, "model_switch_lossy")
+    }
+
     // MARK: - T7: the replay hold parks transients too — for ORDER — but never counts them
 
     /// **The ordering the phone's transcript depends on, pinned so it cannot be "optimised" away.**
@@ -1076,6 +1115,46 @@ final class WinterSessionClientTests: XCTestCase {
         XCTAssertEqual(page.envelopes[0].kind, .event)
         XCTAssertEqual(page.hasMore, true)
         XCTAssertEqual(page.oldestSeq, 43)
+    }
+
+    /// WS-24 lane `phone`, item 3: a `session.history` page now legitimately carries `hook_notice`/
+    /// `continuity_warning` rows (the daemon allowlists both — packages/core/src/sessions/
+    /// history.ts). This client decodes them the same opaque way as every other event
+    /// (`SessionEnvelope.json`), so no client-side change was needed to "surface" them — they were
+    /// always reachable the moment the daemon started sending them. Pinned here as the caller-facing
+    /// proof: their fields (`text`/`level`/`warning`) read back exactly as sent.
+    func testHistoryDecodesHookNoticeAndContinuityWarningRows() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore())
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+
+        let call = Task { try await client.history(sessionID: "s1") }
+        let out = try await waitOutbound(conn, count: 2)
+        let id = outboundPayload(decodeOutbound(out[1]))["id"]!.intValue!
+
+        let events = SessionEvent.JSONValue.array([
+            .object([
+                "type": .string("hook_notice"), "sessionId": .string("s1"), "seq": .number(10),
+                "threadId": .string("main"), "text": .string("a hook stopped this turn"), "level": .string("warning"),
+            ]),
+            .object([
+                "type": .string("continuity_warning"), "sessionId": .string("s1"), "seq": .number(11),
+                "threadId": .string("main"), "warning": .string("reasoning_state_unsaved"), "text": .string("this turn's reasoning could not be saved"),
+            ]),
+        ])
+        conn.enqueueInbound(rpcResponseFrame(id: id, result: .object([
+            "events": events, "hasMore": .bool(false), "oldestSeq": .number(10),
+        ])))
+
+        let page = try await call.value
+        XCTAssertEqual(page.envelopes.map(\.seq), [10, 11])
+        XCTAssertEqual(page.envelopes[0].json["type"]?.stringValue, "hook_notice")
+        XCTAssertEqual(page.envelopes[0].json["text"]?.stringValue, "a hook stopped this turn")
+        XCTAssertEqual(page.envelopes[0].json["level"]?.stringValue, "warning")
+        XCTAssertEqual(page.envelopes[1].json["type"]?.stringValue, "continuity_warning")
+        XCTAssertEqual(page.envelopes[1].json["warning"]?.stringValue, "reasoning_state_unsaved")
+        XCTAssertEqual(page.envelopes[1].json["text"]?.stringValue, "this turn's reasoning could not be saved")
     }
 
     func testHistoryOmitsBeforeSeqAndLimitWhenNil() async throws {
