@@ -586,6 +586,19 @@ export class PluginSupervisor {
     return [...this.runtimes.keys()];
   }
 
+  /** WS-24: the ONE tracked spec whose name half is `name`, or `undefined` (none, or ambiguous — two
+   *  marketplaces' same-named plugins). A shortcut binding the Mac saved before WS-24 names the plugin by
+   *  its bare id (`shortcut.invoke`/`tile.action`'s `pluginId`); `pushToPlugin` resolves it through this so
+   *  an existing binding keeps firing, and refuses (as unknown) only when the bare name is ambiguous. */
+  private uniqueSpecNamed(name: string): string | undefined {
+    if (name.includes("@")) return undefined;
+    const named = [...this.runtimes.keys()].filter((id) => {
+      const at = id.lastIndexOf("@");
+      return at > 0 && id.slice(0, at) === name;
+    });
+    return named.length === 1 ? named[0] : undefined;
+  }
+
   // -----------------------------------------------------------------------------------------
   // Registration / connection lifecycle (Task 4 calls these from ipc/server.ts).
   // -----------------------------------------------------------------------------------------
@@ -632,7 +645,7 @@ export class PluginSupervisor {
    *  `{code:"not_connected"}` when it IS tracked but isn't currently "running" with a live `conn`,
    *  or the live conn's own `push()` reports the socket already dead; `{ok:true}` once handed off. */
   pushToPlugin(pluginId: string, event: NewSessionEvent): { ok: true } | { code: "not_connected" } | { code: "unknown_plugin" } {
-    const rt = this.runtimes.get(pluginId);
+    const rt = this.runtimes.get(pluginId) ?? this.runtimes.get(this.uniqueSpecNamed(pluginId) ?? "");
     if (!rt) return { code: "unknown_plugin" };
     if (rt.status !== "running" || !rt.conn) return { code: "not_connected" };
     return rt.conn.push(event) ? { ok: true } : { code: "not_connected" };

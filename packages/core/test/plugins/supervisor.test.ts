@@ -1080,3 +1080,18 @@ describe("keyed by spec (WS-24)", () => {
     supervisor.stopAll();
   });
 });
+
+describe("pushToPlugin resolves a pre-WS-24 bare id (a saved shortcut binding) to its one spec", () => {
+  test("unique bare name -> delivered to the spec's connection; ambiguous -> unknown_plugin", () => {
+    const { supervisor } = makeSupervisor();
+    supervisor.startAll([fakePlugin({ id: "p@m1" })]);
+    const conn = fakeConn();
+    expect(supervisor.notifyRegistered("p@m1", conn)).toBe(true);
+    const event = { type: "shortcut_invoke", sessionId: "p@m1", threadId: "main", shortcutId: "go" } as never;
+    expect(supervisor.pushToPlugin("p", event)).toEqual({ ok: true });
+    expect(conn.pushed).toHaveLength(1);
+    supervisor.startAll([fakePlugin({ id: "p@m2" })]);
+    expect(supervisor.pushToPlugin("p", event)).toEqual({ code: "unknown_plugin" });
+    supervisor.stopAll();
+  });
+});
