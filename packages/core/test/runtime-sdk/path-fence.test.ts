@@ -9,7 +9,7 @@ import { ApprovalBroker } from "../../src/agent/approvals";
 import { QuestionBroker } from "../../src/agent/questions";
 import { PermissionGate, type SessionApprovalPolicy } from "../../src/agent/gate";
 import { canUseToolFor, type BridgeLogger } from "../../src/runtime-sdk/approval-bridge";
-import { bashProtectedWriteHit, sessionHooksFor, type SessionHooksDeps } from "../../src/runtime-sdk/hooks";
+import { BASH_WRITE_CHECK_BOUND, _setInodeScanBudgetForTests, bashProtectedWriteHit, sessionHooksFor, type SessionHooksDeps } from "../../src/runtime-sdk/hooks";
 
 const real = (p: string): string => realpathSync(mkdtempSync(join(tmpdir(), p)));
 const silent: BridgeLogger = { info: () => {}, error: () => {} };
@@ -471,6 +471,60 @@ describe("Bash writes through an existing link to a protected directory", () => 
     ]) expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) !== undefined }).toEqual({ cmd, hit: true });
     expect(bashProtectedWriteHit("dd if=../.winter/skills/x of=/tmp/copy", { cwd: work })).toBeUndefined(); // a read
     expect(bashProtectedWriteHit(`echo x > $HOME/${"no-such-dir-ws24"}/y.md`, { cwd: work })).toBeUndefined();
+  });
+
+  // Fix round 3: every bound fails CLOSED (the reviewer's probe6/probe7).
+  test("the cwd cap: five failed cds then a link write is caught; past the cap a write is a card, never a pass", () => {
+    const { work } = project();
+    const cds = (n: number): string => Array.from({ length: n }, (_, i) => `cd n${i}`).join("; ");
+    for (const n of [3, 4, 5, 6]) expect({ n, hit: bashProtectedWriteHit(`${cds(n)}; echo x > s/y.md`, { cwd: work }) }).toEqual({ n, hit: ".winter/skills" });
+    // 8 cds: the session cwd is still judged exactly (it hits here)…
+    expect(bashProtectedWriteHit(`${cds(8)}; echo x > s/y.md`, { cwd: work })).toBe(".winter/skills");
+    // …and a write the kept candidates do not settle is the bound's card.
+    expect(bashProtectedWriteHit(`${cds(8)}; echo x > zz/y.md`, { cwd: work })).toBe(BASH_WRITE_CHECK_BOUND.cwds);
+    // A successful chain of cds (the all-took chain) is always exact.
+    mkdirSync(join(work, "a", "b", "c", "d", "e"), { recursive: true });
+    expect(bashProtectedWriteHit(`cd a; cd b; cd c; cd d; cd e; cd /; cd ${work}; echo x > s/y.md`, { cwd: work })).toBe(".winter/skills");
+    // Controls: an ordinary multi-cd command with no protected write stays quiet.
+    expect(bashProtectedWriteHit("cd packages/core && bun test; cd ../cli && echo x > out.txt; cd - ; echo y > skills/notes.md", { cwd: work })).toBeUndefined();
+  });
+
+  test("the nesting/work cap: deep bash -c nesting is bounded in time and never passes silently", () => {
+    const { work } = project();
+    const cds = (n: number): string => Array.from({ length: n }, (_, i) => `cd n${i}`).join("; ");
+    const nest = (d: number): string => (d === 0 ? "echo x > zz/y.md" : `bash -c "${cds(4)}; ${nest(d - 1).replace(/"/g, '\\"')}"`);
+    for (const d of [1, 2, 3]) {
+      const t0 = performance.now();
+      const hit = bashProtectedWriteHit(`${cds(4)}; ${nest(d)}`, { cwd: work });
+      expect(performance.now() - t0).toBeLessThan(2_000);
+      expect(hit).toBe(BASH_WRITE_CHECK_BOUND.cwds);
+    }
+    // Many targets in one command: the work cap answers with its card.
+    const many = Array.from({ length: 1_200 }, (_, i) => `echo x > f${i}.md`).join("; ");
+    expect(bashProtectedWriteHit(many, { cwd: work })).toBe(BASH_WRITE_CHECK_BOUND.work);
+  });
+
+  test("the hard-link scan: the store's sdk/ kinds are scanned first; an exhausted budget with no match is a card", () => {
+    const { root, work } = project();
+    const home = real("winter-link-budget-home-");
+    mkdirSync(join(home, "sdk", "skills", "k"), { recursive: true });
+    writeFileSync(join(home, "sdk", "skills", "k", "SKILL.md"), "k");
+    mkdirSync(join(root, ".winter", "skills", "big"), { recursive: true });
+    for (let i = 0; i < 300; i += 1) writeFileSync(join(root, ".winter", "skills", "big", `f${i}`), "");
+    linkSync(join(home, "sdk", "skills", "k", "SKILL.md"), join(work, "h2.md"));
+    writeFileSync(join(work, "plain.md"), "p");
+    linkSync(join(work, "plain.md"), join(work, "plain2.md"));
+    _setInodeScanBudgetForTests(100);
+    try {
+      // sdk first: found before the big project tree spends the budget.
+      expect(bashProtectedWriteHit("echo x > h2.md", { cwd: work, home })).toBe("sdk/skills");
+      // An unrelated hard link, budget exhausted by the project tree: it cannot be ruled out — a card.
+      expect(bashProtectedWriteHit("echo x > plain2.md", { cwd: work, home })).toBe(BASH_WRITE_CHECK_BOUND.inodes);
+    } finally {
+      _setInodeScanBudgetForTests(undefined);
+    }
+    // With the real budget the same unrelated hard link is quiet.
+    expect(bashProtectedWriteHit("echo x > plain2.md", { cwd: work, home })).toBeUndefined();
   });
 
   test("an in-place sed's SCRIPT is not a path (no walk through a link named `s`)", () => {
