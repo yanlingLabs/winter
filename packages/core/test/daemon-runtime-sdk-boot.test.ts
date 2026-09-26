@@ -75,7 +75,7 @@ describe("daemon boot — the Winter handle", () => {
     });
   });
 
-  test("spawnHookFor on a real daemon refuses in the typed way when no binary is configured", async () => {
+  test("spawnHookFor on a real daemon refuses code in the typed way when no binary is configured; chat and dispatch are embedded", async () => {
     await withTempHome(async (home) => {
       const before = process.env.WINTER_RUNTIME_EXECUTABLE;
       // P9a fix wave (M1 class): a dev checkout now HAS a winter on the ladder's last rung (the
@@ -85,10 +85,19 @@ describe("daemon boot — the Winter handle", () => {
       process.env.WINTER_RUNTIME_EXECUTABLE = join(home, "missing-winter");
       try {
         const d = await boot(home);
-        const hook = d.runtimeSdk?.spawnHookFor("chat");
+        // WS-23: asked of CODE — chat and dispatch run embedded and resolve no binary (below).
+        const hook = d.runtimeSdk?.spawnHookFor("code");
         // The refusal — never a throw, and never a silent fallback to another binary.
         expect(hook).toBeInstanceOf(Error);
         expect((hook as { code?: string }).code).toBe("winter_executable_unavailable");
+        // ...while chat and dispatch, on the SAME daemon with the SAME missing binary, get the
+        // embedded host's spawn: the real daemon wires `embedded` into the handle.
+        for (const mode of ["chat", "dispatch"] as const) {
+          const embedded = d.runtimeSdk?.spawnHookFor(mode) as { pathToClaudeCodeExecutable?: string; spawnClaudeCodeProcess?: unknown } | Error | undefined;
+          expect(embedded).not.toBeInstanceOf(Error);
+          expect((embedded as { spawnClaudeCodeProcess?: unknown }).spawnClaudeCodeProcess).toBeInstanceOf(Function);
+        }
+        expect(d.embedded.live()).toEqual([]);
       } finally {
         if (before === undefined) delete process.env.WINTER_RUNTIME_EXECUTABLE;
         else process.env.WINTER_RUNTIME_EXECUTABLE = before;
