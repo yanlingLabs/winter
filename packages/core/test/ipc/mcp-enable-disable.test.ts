@@ -16,7 +16,6 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 import { Settings, saveSettings } from "../../src/settings";
 import { McpManager } from "../../src/agent/mcp/manager";
-import { ToolRegistry } from "../../src/agent/tools/registry";
 import { TrustStore } from "../../src/agent/trust";
 
 class TestClient {
@@ -81,7 +80,7 @@ describe("mcp.enable / mcp.disable / mcp.list settings overlay", () => {
     const trust = new TrustStore(join(home, "trust.json"));
     // A bare McpManager with NOTHING started — this file never spawns a real child process (see
     // header); `mcp.list`'s stdio/"connected" path is exercised elsewhere.
-    const mcp = mcpOverride ?? new McpManager({ registry: new ToolRegistry(), trust });
+    const mcp = mcpOverride ?? new McpManager({ trust });
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const secrets = new FileSecretStore(join(home, "secrets"));
@@ -101,7 +100,7 @@ describe("mcp.enable / mcp.disable / mcp.list settings overlay", () => {
     writeFileSync(join(home, "settings.json"), JSON.stringify(rest, null, 2));
     writeUserServers(home, mcpServers);
     const trust = new TrustStore(join(home, "trust.json"));
-    const mcp = new McpManager({ registry: new ToolRegistry(), trust });
+    const mcp = new McpManager({ trust });
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const secrets = new FileSecretStore(join(home, "secrets"));

@@ -2340,11 +2340,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         } catch (err) {
           throw sdkWriteFailure(err);
         }
-        // Mirrors `mcp.enable`'s own restart (symmetry, same rationale): a newly-added stdio USER server
-        // must be usable on THIS incarnation's next turn, not just after a daemon restart — the daemon's
-        // own registry runs user stdio servers only (a local or project server reaches each session's
+        // Mirrors `mcp.enable`'s own re-probe (symmetry, same rationale): a newly-added stdio USER server
+        // reports a real status on the very next `mcp.list`, never after a daemon restart — the daemon's
+        // status probe (`McpManager`, WS-24: it connects, lists and closes; each session's child connects
+        // its own copy) covers user stdio servers only (a local or project server reaches each session's
         // child through its own configuration), an http/sse entry has no in-daemon client, and a name
-        // ALSO listed in `mcp.disabled` stays stopped until enabled — `started: false` says so honestly.
+        // ALSO listed in `mcp.disabled` is not probed until enabled — `started: false` says so honestly.
         let started = false;
         if (target.scope === "user" && entry.type === "stdio") {
           const cfg = stdioMcpServersFor(sdkUserMcpServers(opts.winterHome), liveSettingsFor(opts)?.mcp?.disabled)[p.name];
