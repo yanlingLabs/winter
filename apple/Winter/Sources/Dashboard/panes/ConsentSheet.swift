@@ -128,6 +128,37 @@ func pluginConsentDisclosureLines(pluginId: String, extras: PluginExtras) -> [St
     return lines
 }
 
+/// PURE: the consent sheet's intro paragraph. Table-tested in `ConsentSheetStateTests`.
+///
+/// I2: this consent covers ONLY the background process below — a plugin's skills, hooks and MCP
+/// servers are not gated on it at all (installing+enabling already loads those, spec §5.4).
+/// Round 3 minor: "declining here turns the whole plugin off" is true ONLY when this sheet was
+/// raised by an INSTALL (`openedByInstall`) — that's the one case where declining runs a
+/// `pluginDisable` follow-up (`PluginManagerModel.consentSheetDismissed()`). An ordinary
+/// `enable(_:)`-triggered sheet's plugin was never turned on in the first place; saying "declining
+/// turns it off" there would claim an effect this sheet's Cancel button doesn't have.
+///
+/// WS-24: the daemon starts a plugin's background process only for a USER-scope install — it is one
+/// daemon-wide process (tiles, shortcuts, hardware) with no project to scope it to — so a sheet for a
+/// project- or local-scope install that declares one says plainly that granting consent here does not
+/// start it (the daemon's `plugin.list` says the same as `extras.entryNote`). This pane
+/// lists user scope only today, so the clause is for any surface that later shows those rows.
+func pluginConsentIntroText(scope: PluginScope, hasEntry: Bool, openedByInstall: Bool) -> String {
+    var text = "This consent covers only the background process listed below."
+    if openedByInstall {
+        text += " Skills, hooks and MCP servers this plugin declares load when it's enabled, "
+            + "whether or not this process runs — declining here turns the whole plugin off."
+    } else {
+        text += " Skills, hooks and MCP servers this plugin declares load separately, when "
+            + "it's enabled."
+    }
+    if hasEntry && scope != .user {
+        text += " Winter runs this background process only when the plugin is installed for your "
+            + "user; at \(scope.rawValue) scope it is not started."
+    }
+    return text
+}
+
 struct ConsentSheet: View {
     let state: ConsentSheetState
     /// Fix wave (Task 2 review, consent double-submit guard): true while `confirmConsent()` is
@@ -142,23 +173,9 @@ struct ConsentSheet: View {
         pluginConsentDisclosureLines(pluginId: state.pluginId, extras: state.extras)
     }
 
-    /// I2: this consent covers ONLY the background process below — a plugin's skills, hooks and
-    /// MCP servers are not gated on it at all (installing+enabling already loads those, spec §5.4).
-    /// Round 3 minor: "declining here turns the whole plugin off" is true ONLY when this sheet was
-    /// raised by an INSTALL (`state.openedByInstall`) — that's the one case where declining runs a
-    /// `pluginDisable` follow-up (`PluginManagerModel.consentSheetDismissed()`). An ordinary
-    /// `enable(_:)`-triggered sheet's plugin was never turned on in the first place; saying
-    /// "declining turns it off" there would claim an effect this sheet's Cancel button doesn't have.
     private var introText: String {
-        var text = "This consent covers only the background process listed below."
-        if state.openedByInstall {
-            text += " Skills, hooks and MCP servers this plugin declares load when it's enabled, "
-                + "whether or not this process runs — declining here turns the whole plugin off."
-        } else {
-            text += " Skills, hooks and MCP servers this plugin declares load separately, when "
-                + "it's enabled."
-        }
-        return text
+        pluginConsentIntroText(scope: state.scope, hasEntry: state.extras.entry != nil,
+                               openedByInstall: state.openedByInstall)
     }
 
     var body: some View {

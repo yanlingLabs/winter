@@ -1464,6 +1464,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     };
   }
 
+  /** WS-24: `plugin.list`'s `extras.entryNote` for a project/local-scope row with an entry (see that handler). */
+  const PROJECT_SCOPE_ENTRY_NOTE = "Winter runs this plugin's background process only when it is installed for your user (user scope). At project or local scope the process is not started; the plugin's skills, hooks and MCP servers still load in the sessions that enable it.";
+
   /** `PluginManagerError` (a typed, expected refusal — unknown marketplace/plugin, not installed,
    *  an unwritable settings file, …) becomes `RpcFailure(INVALID_PARAMS, message)`; anything else
    *  propagates unchanged — never swallowed. */
@@ -2655,7 +2658,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           consents = loadSettings(join(opts.winterHome, "settings.json")).plugins?.consents ?? {};
         } catch { /* degrade to "nothing consented" rather than fail the whole list */ }
         const plugins = listed.map((entry) => {
-          const extras = pluginExtrasFor(entry.installPath, entry.id, consents[`${entry.id}@${entry.marketplace}`]);
+          const found = pluginExtrasFor(entry.installPath, entry.id, consents[`${entry.id}@${entry.marketplace}`]);
+          // WS-24: the Tier-2 entry process is ONE daemon-wide process (tiles, shortcuts, hardware) with no
+          // session or project to scope it to, so the supervisor starts it only for a USER-scope install —
+          // both at boot (`PluginStore` lists user scope) and on `plugin.enable` (`livePlugins()`, user scope).
+          // Starting it per project would still leave its tools, tiles and hardware access daemon-wide; a
+          // project/local row that declares one says so here, instead of reading as consented-and-running.
+          const extras = found?.entry !== undefined && entry.scope !== "user" ? { ...found, entryNote: PROJECT_SCOPE_ENTRY_NOTE } : found;
           // Fix round 2: `hooks` — a TOP-LEVEL sibling of `extras` (plugins/plugin-hooks.ts), read
           // from `hooks/hooks.json` and the claude manifest's own inline `hooks` field regardless of
           // whether this plugin has a winter-plugin.json at all.
