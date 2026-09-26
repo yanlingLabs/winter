@@ -100,11 +100,14 @@ describe("A-5 part 1: the five-hop chain's prompt rule, against the REAL daemon 
     expect(endpoints.glm.readableState).toBe("full-exposed");
   });
 
-  test("claude -> deepseek PROMPTS (a native/summary-only source crossing to a foreign family is warned-lossy)", () => {
+  // WS-23 (reasoning-state, user decision 9): Claude's signed thinking stays in the sidecar for Claude and
+  // replays on the hop back, so crossing to DeepSeek is no longer a prompt; unreadable media still is.
+  test("claude -> deepseek is SILENT over reasoning (WS-23: kept for Claude), and prompts over media DeepSeek cannot read", () => {
     const endpoints = endpointsFresh();
     const c = classifySwitch(endpoints.claude, endpoints.deepseek, {});
-    expect(c.lossClass).toBe("warned-lossy");
-    expect(c.warnings.length).toBeGreaterThan(0);
+    expect(c.lossClass).toBe("lossless-portable");
+    expect(c.warnings).toEqual([]);
+    expect(classifySwitch(endpoints.claude, endpoints.deepseek, { unreadableMedia: 2 }).lossClass).toBe("warned-lossy");
   });
 
   test("deepseek -> GLM is SILENT (complete exposed reasoning carries unmodified)", () => {

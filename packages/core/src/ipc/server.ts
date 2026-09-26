@@ -3048,10 +3048,15 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
               // filled from the router's own `reviewSwitch` classification (D1-6). Never "runtime" in
               // the message text (R-10b-4): the review fires for a family change, which never moves a
               // runtime at all.
+              //
+              // WS-23 (reasoning-state, decision 9): what a switch can lose is only what the new model
+              // cannot represent (an image it cannot read, another vendor's server tools, a conversation
+              // too large for it -- summarized first -- or a cancelled turn); the message says so, and
+              // `fit` ({fits, estimatedTokens, window}) rides the data when the review computed one.
               throw new RpcFailure(
                 ERR.INVALID_PARAMS,
-                "this model change may lose some of the conversation's carried state; resend with confirmLossy to proceed",
-                { code: "handoff_confirmation_required", warnings: outcome.warnings, portable: outcome.portable },
+                "this model change loses part of what the conversation holds (see warnings); resend with confirmLossy to proceed",
+                { code: "handoff_confirmation_required", warnings: outcome.warnings, portable: outcome.portable, ...(outcome.fit !== undefined ? { fit: outcome.fit } : {}) },
               );
             case "same-runtime": {
               // Winter Phase 10b (D1 fix round 3, INVARIANT 1c): `meta.model` and the 8a record may
