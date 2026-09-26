@@ -42,6 +42,23 @@ describe("readHistoryPage", () => {
     expect(HISTORY_EVENT_TYPES.has("reasoning_item" as SessionEvent["type"])).toBe(false);
   });
 
+  test("WS-24 lane `phone` review r1: hook_notice/continuity_warning come back field-for-field", () => {
+    const { store, sessionId } = boot();
+    store.append(sessionId, {
+      type: "hook_notice", sessionId, threadId: "main",
+      text: "a hook stopped this turn", level: "warning", stopsTurn: true,
+    });
+    store.append(sessionId, {
+      type: "continuity_warning", sessionId, threadId: "main",
+      warning: "model_switch_lossy", text: "reasoning state did not carry over",
+    });
+    const page = readHistoryPage(store, { sessionId });
+    expect(page.events.map((e) => e.type)).toEqual(["hook_notice", "continuity_warning"]);
+    const [notice, warning] = page.events;
+    expect(notice).toMatchObject({ type: "hook_notice", text: "a hook stopped this turn", level: "warning", stopsTurn: true });
+    expect(warning).toMatchObject({ type: "continuity_warning", warning: "model_switch_lossy", text: "reasoning state did not carry over" });
+  });
+
   test("filters out non-allowlisted events; returns ascending page with oldestSeq/hasMore", () => {
     const { store, sessionId } = boot();
     store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: "hi", clientName: "cli" }); // seq 2

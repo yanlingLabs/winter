@@ -10,7 +10,7 @@ import { startIpcServer } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
 import { HISTORY_EVENT_TYPES, WHOLE_EVENT_CEILING } from "../../src/sessions/history";
-import { REMOTE_STREAM_EVENT_TYPES } from "../../src/sessions/remote-stream";
+import { REMOTE_STREAM_EVENT_TYPES, filterRemoteStreamEvent } from "../../src/sessions/remote-stream";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 
@@ -408,14 +408,32 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
     // 22 → 24 (Winter Phase 10a O5, P10a-6: provider_login_progress/provider_login_finished — via
     // the transients; both are SYSTEM_SESSION_ID-scoped like plugin_tile_updated, so this is a
     // reach-the-wire proof, never an endorsement of phone-side rendering).
-    // 24 → 25 (that count predates this file's own last edit) → 27 (WS-24 lane `phone`:
-    // hook_notice/continuity_warning — via HISTORY_EVENT_TYPES, which grew 10 → 12; confirmed safe
-    // for an old phone with no capability gate, see history.ts's own doc comment).
+    // 24 → 25 (2026-09-17, retry progress: `provider_retry` — via the transients, same growth this
+    // file's TRANSIENT_EVENT_TYPES test logs below as 11 → 12).
+    // 25 → 27 (WS-24 lane `phone`: hook_notice/continuity_warning — via HISTORY_EVENT_TYPES, which
+    // grew 10 → 12; confirmed safe for an old phone with no capability gate, see history.ts's own
+    // doc comment).
     expect(REMOTE_STREAM_EVENT_TYPES.size).toBe(27);
     // The one exclusion the whole first half of this file is about.
     expect(REMOTE_STREAM_EVENT_TYPES.has("reasoning_item" as SessionEvent["type"])).toBe(false);
     // ...and the ones that would have quietly reverted the phone-client streaming fix.
     for (const t of TRANSIENT_EVENT_TYPES) expect(REMOTE_STREAM_EVENT_TYPES.has(t)).toBe(true);
+  });
+
+  test("WS-24 lane `phone` review r1: filterRemoteStreamEvent passes hook_notice/continuity_warning through unchanged", () => {
+    const hookNotice: SessionEvent = {
+      type: "hook_notice", seq: 5, sessionId: "s1", ts: 0, threadId: "main",
+      text: "a hook stopped this turn", level: "warning", stopsTurn: true,
+    };
+    const continuityWarning: SessionEvent = {
+      type: "continuity_warning", seq: 6, sessionId: "s1", ts: 0, threadId: "main",
+      warning: "model_switch_lossy", text: "reasoning state did not carry over",
+    };
+    // Both are well under the per-event cap, so `capEvent` is a no-op and the SAME reference comes
+    // back — the fast path this file's header comment documents for `assistant_delta`'s hot loop
+    // applies here too, and is worth pinning since neither of these two is transient.
+    expect(filterRemoteStreamEvent(hookNotice)).toBe(hookNotice);
+    expect(filterRemoteStreamEvent(continuityWarning)).toBe(continuityWarning);
   });
 
   test("TRANSIENT_EVENT_TYPES is EXACTLY the twelve — the Swift mirror pins the same literals", () => {
