@@ -23,8 +23,8 @@
 //   4a. The DANGEROUS-DOMAIN FLOOR on the two web built-ins (2026-09-18, user ruling; §5 below) —
 //      a `PreToolUse` group per web tool: `WebFetch` on a floor host is DENIED with one fixed
 //      refusal, and `WebSearch` carries the floor into the call itself through `updatedInput`. Not a
-//      port of anything the retired engine had: it is the only enforcement of the floor that exists
-//      on the OFFICIAL leg at all, where claude's native web tools take no host-supplied option.
+//      port of anything the retired engine had: defence in depth over the child's own executor-level
+//      `blockedDomains`, earlier and read live (§5 below says why that earns its place).
 //   4. The `fileDiff` producer (Task 3.3) — a `PreToolUse` group per file-mutating tool that
 //      snapshots the file (bounded by `DIFF_PATCH_MAX_BYTES`; over the bound, or unreadable, or
 //      outside the session's fence: no diff, never an error) and a `PostToolUse` group that diffs,
@@ -42,23 +42,10 @@
 // require a daemon restart") takes effect on this session's very next matching call, not just on
 // the next session.
 //
-// **The official leg (`official` in the return value), fix wave M4 (ruling P8c-19).** Lane 3's own
-// header used to read `OptionsTemplatePolicy.hooks` as the router's DECLARATIVE, settings-file-style
-// `SettingsHooksConfig` — the wrong reading. Measured against the router 0.0.3 source
-// (`dist/official/options-template.d.ts` + `.js`): `buildOfficialOptions` does
-// `hooks: mergeHooks(createContainmentHooks(...), policy.hooks)`, and `mergeHooks(ours, hostHooks)`
-// treats `hostHooks` as `Record<HookEvent, HookCallbackMatcher[]>` — the SAME `HookCallback`/
-// `HookCallbackMatcher`/`HookEvent` shape `@yanlinglabs/winter-agent-sdk` exports (`options.d.ts`),
-// which is itself a structural mirror of `@anthropic-ai/claude-agent-sdk`'s own `sdk.d.ts` types
-// (`HookCallback = (input, toolUseID, {signal}) => Promise<HookJSONOutput>`; identical `HookInput`
-// field names — `tool_name`/`tool_input`/`tool_response`/`tool_use_id`/`session_id`/`agent_id` — on
-// both SDKs). So the exact object built for `winter` below is ALREADY the shape the official leg's
-// `mergeHooks` expects for its second argument: no translation, no second implementation. The
-// router puts its own containment matchers FIRST in each event's array (`mergeHooks`'s own
-// `[...matchers, ...host[event] ?? []]`), so Winter's groups here always run AFTER the containment
-// floor on the official leg — the ordering the fix-wave brief calls for. `official-options.ts`
-// (lane 1's file) threads this value into `OptionsTemplatePolicy.hooks` via `session-driver.ts`'s
-// `hooksFor(session).official`, already wired at integration.
+// **One leg (WS-23).** This builder used to return the same groups twice — `winter` and `official`
+// (fix wave M4, ruling P8c-19: the router's official leg merged them after its own containment
+// matchers). With the official `claude` leg retired the return value carries `winter` alone; the
+// `{ winter }` shape is kept so `session-driver.ts`'s `hooksFor(session).winter` wiring does not move.
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
@@ -210,6 +197,40 @@ function additionalContext(text: string): HookJSONOutput {
   return { hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: text } };
 }
 
+// ── WS-23: the floors FAIL CLOSED ──────────────────────────────────────────────────────────────
+//
+// A floor callback that THROWS used to fail OPEN: the child's wrapper answered `hook_threw`, the
+// SDK runner recorded a non-blocking error, and the call went ahead -- and under `bypass`, or with a
+// matching allow rule, the approval bridge's own fence is never consulted, so nothing else stopped it
+// (inv-hooks-mcp A4, "the hole"). Two independent layers close it:
+//
+//  1. `failClosed(name, hook)` below: a throw inside the callback becomes a DENY, here, before it
+//     ever reaches the wire. It covers every runtime -- including one whose SDK predates layer 2.
+//  2. `failClosed: true` on the floors' matcher GROUPS (`FailClosedMatcher`): agent SDK WS-23's
+//     per-matcher opt-in, under which a floor that TIMES OUT, returns a malformed answer, or never
+//     answers because the bridge failed is also a deny, decided by the child's own hook runner.
+//     Layer 1 cannot see those cases: they happen outside the callback.
+//
+// The reason names the floor and says nothing about the failure beyond its error NAME (logged, not
+// returned): a floor's input is model-controlled text, and an exception message built from it is
+// not something to echo into the model's context or the daemon log verbatim.
+function failClosed(name: string, hook: HookCallback): HookCallback {
+  return async (input, toolUseID, options) => {
+    try {
+      return await hook(input, toolUseID, options);
+    } catch (err) {
+      console.error(`hooks: the ${name} threw (${err instanceof Error ? err.name : typeof err}); denying the call`);
+      return deny(`Denied: Winter's ${name} could not evaluate this call, and it fails closed -- the call was not allowed without its answer.`);
+    }
+  };
+}
+
+/** WS-23: a matcher group carrying the agent SDK's `failClosed` opt-in. Since the pin reached 0.0.27 the
+ *  SDK's own `HookCallbackMatcher` declares the identical field and its wrapper serialises it, so this
+ *  widening is now a no-op kept for readability (it was a structural widening while the pin was 0.0.24,
+ *  whose types did not declare the field). */
+type FailClosedMatcher = HookCallbackMatcher & { failClosed?: boolean };
+
 // ── 1. Plugin manifest hooks ───────────────────────────────────────────────────────────────────
 
 /** `PreToolUse`, no matcher (every tool) — mirrors the retired engine's "Site 2" pre-tool fire:
@@ -304,7 +325,7 @@ function pluginPostToolUseFailureHook(deps: SessionHooksDeps): HookCallback {
 // sandbox's own `denyWrite` so one edit reaches all three fences. Claude keeps its equivalent floor
 // bypass-immune (`utils/permissions/permissions.ts` ~1252-1260, `filesystem.ts` ~643-650) and denies
 // rather than prompts, so this does the same: a DETERMINISTIC deny, before any reviewer call, under
-// every policy and on both legs (`sessionHooksFor` feeds both). A PreToolUse deny is terminal ahead of
+// every policy (`sessionHooksFor` feeds every session). A PreToolUse deny is terminal ahead of
 // every permission mode (agent SDK 0.0.17 `permissions/evaluator.ts` ~1657).
 //
 // Conservative on purpose: a substring match on the control-plane filenames (plus `trust.json`), on
@@ -389,10 +410,11 @@ const STORE_HOME_VARIABLES: readonly string[] = ["$winter_store_home", "${winter
 /**
  * …and the variables that name a WRITE-ONLY fenced directory as a whole, refused in a write-shaped
  * position and readable otherwise (plugin skills are read and run there): both plugin-cache variables
- * (`<home>/sdk/plugins`), the official child's `CLAUDE_CONFIG_DIR` (its run folder, under `<home>/cache`,
- * whose `skills/` entries link into `sdk/skills` and the trusted project's skills), and the Winter child's
- * `WINTER_HOME` — which under a run home is ITS run folder, not the daemon's home (the router sets it to
- * `runHome.dir`); every other `$winter_home` spelling above still reads it as the daemon's home, too.
+ * (`<home>/sdk/plugins`), `CLAUDE_CONFIG_DIR` (a run folder under `<home>/cache` whose `skills/` entries link
+ * into `sdk/skills` and the trusted project's skills — the retired official child's variable, still refused
+ * because a write through it costs nothing to stop), and the child's `WINTER_HOME` — which under a run home is ITS run folder,
+ * not the daemon's home (the router sets it to `runHome.dir`); every other `$winter_home` spelling above still
+ * reads it as the daemon's home, too.
  */
 const WRITE_ONLY_DIR_VARIABLES: readonly string[] = [
   "$winter_plugin_cache_dir", "${winter_plugin_cache_dir}",
@@ -759,7 +781,7 @@ function segmentWriteTargets(seg: string): string[] {
 }
 
 /** The ASK a protected-path Bash write gets (fix round 2) — a card in code; the bridge turns it into the
- *  typed deny wherever nobody can answer (dispatch, chat, a dispatch child). Every policy, both legs. */
+ *  typed deny wherever nobody can answer (dispatch, chat, a dispatch child). Every policy. */
 function bashProtectedWriteHook(): HookCallback {
   return async (input) => {
     const { command } = bashEscapeInput(input);
@@ -796,8 +818,8 @@ export function escapeFloorHit(command: string, home: string | undefined, cwd?: 
 
 /**
  * R.3 re-review B-1: the absolute values of the path variables a child's shell has, as the daemon knows them.
- * Two readings of `WINTER_HOME` — under a run home it is the Winter child's run folder (`<home>/cache/runs/
- * <run id>`; `CLAUDE_CONFIG_DIR` is the official child's), before one it was the daemon's home — and one of
+ * Two readings of `WINTER_HOME` — under a run home it is the child's run folder (`<home>/cache/runs/
+ * <run id>`; `CLAUDE_CONFIG_DIR` was the retired official child's), before one it was the daemon's home — and one of
  * everything else: `WINTER_STORE_HOME` = `<home>/sdk`, both plugin-cache variables = `<home>/sdk/plugins`,
  * `OUTDIR` = `<home>/outputs/<session id>` (the SDK's Bash has exported it since WS-12). A run id and a
  * session id are placeholders: only their DEPTH matters to a `..`. A run folder's `projects` is a link into
@@ -941,7 +963,7 @@ export function escapeFloorDenial(hit: string): string {
 
 // ── 2b. The path fence (WS-21, spec §7.1 "hook" column, §7.2) ─────────────────────────────────
 //
-// One PreToolUse hook for the write- and read-class tools, on both legs and under every policy (a
+// One PreToolUse hook for the write- and read-class tools, under every policy (a
 // PreToolUse answer is evaluated ahead of the permission mode — F16), in this order:
 //  1. the control-plane fence the bridge already applies at (2) — the three control-plane filenames,
 //     `mcp.json` and `settings*.json` under any `.winter/`, and every home-fenced path — as a hook too,
@@ -950,7 +972,7 @@ export function escapeFloorDenial(hit: string): string {
 //  3. the read row (`protectedReadDenial`) — deny;
 //  4. a protected write (`protectedWriteDecision`) — ask in code, deny in chat and dispatch. The bridge
 //     (5e) independently refuses to auto-allow one, and the router pins the same set as flag-layer ask
-//     rules (claude's own sensitive-file check could otherwise swallow this hook's ask — F16).
+//     rules (a runtime's own sensitive-file check could otherwise swallow this hook's ask — F16).
 function pathFenceHook(deps: SessionHooksDeps): HookCallback {
   return async (input) => {
     const home = deps.home;
@@ -1170,33 +1192,28 @@ function diagnosticsPostToolUseHook(deps: SessionHooksDeps): HookCallback {
   };
 }
 
-// ── 5. The dangerous-domain floor, on BOTH legs ────────────────────────────────────────────────
+// ── 5. The dangerous-domain floor ──────────────────────────────────────────────────────────────
 //
-// **WHY THIS EXISTS AT ALL, given `Options.web.blockedDomains`.** At agent SDK 0.0.17 a WINTER child
+// **WHY THIS EXISTS AT ALL, given `Options.web.blockedDomains`.** Since agent SDK 0.0.17 the child
 // enforces the floor inside its own executors: `WebFetch` refuses a listed host on the input url, on
 // every redirect hop and on a cache hit, and `WebSearch` sends the list as the backend's exclusion
-// filter AND re-filters the hits locally. Nothing equivalent exists on the OFFICIAL leg — claude's
-// native `WebFetch`/`WebSearch` are the user's ruling now (both tools stay, with claude's own
-// behaviour), and `official-options.ts` sends no `web` block at all because claude has no such
-// option to send it to. So on that leg this hook is the ONLY thing between a floor domain and the
-// network, and `Options.hooks` is the one surface both legs share (`sessionHooksFor`'s own header).
+// filter AND re-filters the hits locally. (Until WS-23 this hook was also the ONLY enforcement on the
+// official `claude` leg, whose native tools took no such option; that leg is retired.)
 //
-// On the Winter leg it is defence in depth, and it EARNS that on its own terms: it is the earlier
-// refusal (before the executor, so the transcript carries a policy sentence instead of a tool error),
-// and it reads `dangerousDomainsAdded` LIVE, where the child's `blockedDomains` is frozen at the
-// spawn it was built for until that session next incarnates.
+// So it is defence in depth, and it EARNS that on its own terms: it is the earlier refusal (before
+// the executor, so the transcript carries a policy sentence instead of a tool error), and it reads
+// `dangerousDomainsAdded` LIVE, where the child's `blockedDomains` is frozen at the spawn it was
+// built for until that session next incarnates. Its failure mode is closed (`failClosed`, WS-23).
 //
 // **WHY DENY AND NEVER ASK.** The spine lane measured that a Winter child's executor-level
 // `blockedDomains` refuses a listed host even after an approved `ask` — so an `ask` here would raise
-// a card whose approval provably cannot take effect on the leg where a card exists at all, and
+// a card whose approval provably cannot take effect, and
 // chat/dispatch never prompt in the first place. A floor hit is a hard refusal in every mode; that is
 // the ruling ("dangerous domains are hard-blocked"), and `mode-options.ts`'s `webOptionsFor` says the
 // same thing about the same list.
 
-/** The two tool names this floor is keyed on. Both runtimes ship the pair under the SAME two names
- *  (`mode-options.ts`'s `SDK_WEB_BUILTINS`), and the official binary reports them unchanged to a
- *  `PreToolUse` hook (measured — `test/runtime-sdk/web-floor-measure.e2e.test.ts`), which is what
- *  lets one matcher pair serve both legs. */
+/** The two tool names this floor is keyed on — the runtime's own web built-ins
+ *  (`mode-options.ts`'s `SDK_WEB_BUILTINS`), reported unchanged to a `PreToolUse` hook. */
 export const WEB_FLOOR_FETCH_TOOL = "WebFetch";
 export const WEB_FLOOR_SEARCH_TOOL = "WebSearch";
 
@@ -1224,7 +1241,7 @@ function effectiveDangerousDomains(deps: SessionHooksDeps): string[] {
 }
 
 /**
- * The one refusal sentence, FIXED: the same text for every hit, on either leg, in every mode. Names
+ * The one refusal sentence, FIXED: the same text for every hit, in every mode. Names
  * the host and the matched list entry (so the model can tell a policy block from a network failure,
  * and a human reading the transcript can find the entry) and says plainly that nothing can approve
  * it, so the model re-plans instead of retrying or asking.
@@ -1243,13 +1260,9 @@ export function dangerousDomainFloorRefusal(host: string, matchedEntry: string):
  *  can be said about a url with no host, and the tool's own input refusal is both clearer and closer
  *  to the mistake. A non-string (or absent) `url` is the same case.
  *
- *  A CROSS-HOST REDIRECT IS NOT A HOLE, and it is why a host-side hook is enough for a tool that
- *  walks redirects itself: claude's `WebFetch` does NOT follow a cross-host redirect — it returns
- *  `REDIRECT DETECTED` to the model and asks it to call again with the redirect url — so the second
- *  call arrives at this hook like any other, and the short-link-into-a-paste-host route is checked on
- *  the hop that would actually reach it. (A Winter child re-checks every hop inside its own executor
- *  as well.) Same-host and bare-`www.` redirects are auto-followed on both legs, and a same-host hop
- *  cannot cross a suffix-matched floor entry. */
+ *  A CROSS-HOST REDIRECT IS NOT A HOLE: the child re-checks every redirect hop against its own
+ *  `blockedDomains` inside the executor, and a same-host or bare-`www.` hop cannot cross a
+ *  suffix-matched floor entry. */
 function webFetchFloorHook(deps: SessionHooksDeps): HookCallback {
   return async (input) => {
     const pre = input as PreToolUseHookInput;
@@ -1285,10 +1298,9 @@ function webFetchFloorHook(deps: SessionHooksDeps): HookCallback {
  *
  * WHAT IT DOES NOT COVER (stated, not silently accepted): an allow-list entry BROADER than a floor
  * entry — `example.com` when the floor lists `paste.example.com`, or a bare TLD — is kept, because
- * it is not itself a floor match, and on the official leg nothing then stops a blocked subdomain from
- * being SURFACED as a search hit (a Winter child re-filters its own hits locally, claude cannot be
- * asked to). The exfiltration itself still cannot happen: FETCHING any surfaced link goes through
- * `webFetchFloorHook` above, on both legs.
+ * it is not itself a floor match; the child re-filters its own hits locally against `blockedDomains`,
+ * so a blocked subdomain is not surfaced. The exfiltration itself cannot happen in any case:
+ * FETCHING any surfaced link goes through `webFetchFloorHook` above.
  */
 function webSearchFloorHook(deps: SessionHooksDeps): HookCallback {
   return async (input) => {
@@ -1305,8 +1317,15 @@ function webSearchFloorHook(deps: SessionHooksDeps): HookCallback {
     // an injected `blocked_domains` beside it and came back as "cannot specify both" instead. Passing
     // the call through untransformed gives the model the error that names what it actually got wrong.
     // Nothing is lost by standing down: the call cannot search at all, and FETCHING anything it could
-    // have surfaced still goes through `webFetchFloorHook` on both legs.
+    // have surfaced still goes through `webFetchFloorHook`.
     if (wrongTypedDomainList(record["allowed_domains"]) || wrongTypedDomainList(record["blocked_domains"])) return allow();
+    // WS-23 (hooks fix round 2): the same stand-down for a MISSING or too-short `query`. The agent SDK
+    // now validates a hook's `updatedInput` against the tool's schema and DENIES an invalid one
+    // whatever the original was, and this floor copies `query` verbatim -- so a rewrite of
+    // `{query: "x"}` would turn the model's own typo into a policy denial it cannot act on. With no
+    // query there is no search to filter; the tool's own "Missing query" is the right answer.
+    const query = record["query"];
+    if (typeof query !== "string" || query.length < 2) return allow();
     const allowed = domainList(record["allowed_domains"]);
 
     if (allowed !== undefined) {
@@ -1402,33 +1421,38 @@ function webSearchInput(record: Record<string, unknown>, patch: { allowed_domain
   return out;
 }
 
-/** `{ winter, official }` — fix wave M4 (ruling P8c-19): BOTH legs get the same groups, built ONCE
- *  from the same `deps` and the same per-tool hook functions (this file's header explains why the
- *  two SDKs' `HookCallback`/`HookCallbackMatcher`/`HookEvent` shapes make that safe rather than a
- *  reuse-across-legs hazard). `winter` is `Options["hooks"]` from `@yanlinglabs/winter-agent-sdk`;
- *  `official` is the identical object, typed `unknown` only because `OptionsTemplatePolicy.hooks`
- *  (the router 0.0.3 export `official-options.ts` assigns it through) declares no narrower type —
- *  never a second, independently-built copy that could drift from `winter`.
+/** `{ winter }` — the session's hook groups, built ONCE from `deps` and the per-tool hook functions
+ *  above. `winter` is `Options["hooks"]` from `@yanlinglabs/winter-agent-sdk`. (WS-23: the identical
+ *  `official` copy the retired official leg took is gone.)
  *
  *  Every hook function above is a safe, cheap no-op (`allow()`/`{}`) when its own dependency is
  *  absent, so registering the groups unconditionally costs nothing extra beyond the wire round trip
  *  `Options.hooks` already requires the moment ANY group is registered for an event — and the
  *  plugin-hook groups (no matcher) are the one case that always needs to be live, since a plugin
  *  can be enabled on a running daemon between sessions with no restart. */
-export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hooks"] | undefined; official: unknown } {
+export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hooks"] | undefined } {
   const pending = new Map<string, PendingDiffSnapshot>();
 
-  const preToolUse: HookCallbackMatcher[] = [{ hooks: [pluginPreToolUseHook(deps)] }];
-  if (deps.reviewer) preToolUse.push({ matcher: "Bash", hooks: [bashReviewerHook(deps)] });
+  const preToolUse: FailClosedMatcher[] = [{ hooks: [pluginPreToolUseHook(deps)] }];
+  // WS-23: every floor and security callback below is wrapped by `failClosed` (a throw is a deny)
+  // and its group carries `failClosed: true` (a timeout / malformed answer / failed bridge is a deny
+  // too, on a WS-23 SDK). The plugin, fileDiff and diagnostics hooks are deliberately NOT: they are
+  // observers and a plugin's own gate, whose designed failure mode is to stay out of the way.
+  //
+  // The reviewer: only its OUTER code is wrapped. Its own designed failure modes are unchanged -- a
+  // transient review failure still escalates with `ask`, and a structurally unavailable reviewer
+  // still allows (`bashReviewerHook`'s own catch) -- what changes is that a throw OUTSIDE the review
+  // (a settings getter, the escape parse) is a deny instead of a silent pass.
+  if (deps.reviewer) preToolUse.push({ matcher: "Bash", failClosed: true, hooks: [failClosed("bash safety reviewer", bashReviewerHook(deps))] });
   // C3 round 3: the escape floor runs under EVERY policy, reviewer or none — see §2a. Its position
   // does not matter: a deny outranks every other hook answer, and the reviewer skips (never reviews,
   // never clears) a command this floor denies, whichever of the two runs first.
   // Fix round 2: in the escape floor's own group, a Bash write under any `.winter/<kind>` is asked about,
   // sandboxed or not (see `bashProtectedWriteHit`). An `ask` — the floor's deny, when both apply, outranks it.
-  preToolUse.push({ matcher: "Bash", hooks: [escapeFloorHook(deps), bashProtectedWriteHook()] });
-  // WS-21 (spec §7.1, §7.2): the path fence — every policy, both legs. Unmatched (one callback per tool
+  preToolUse.push({ matcher: "Bash", failClosed: true, hooks: [failClosed("sandbox-escape floor", escapeFloorHook(deps)), failClosed("protected-path Bash fence", bashProtectedWriteHook())] });
+  // WS-21 (spec §7.1, §7.2): the path fence — every policy. Unmatched (one callback per tool
   // call) because the write and read tools carry two vocabularies; anything else is an immediate allow.
-  if (deps.home) preToolUse.push({ hooks: [pathFenceHook(deps)] });
+  if (deps.home) preToolUse.push({ failClosed: true, hooks: [failClosed("path fence", pathFenceHook(deps))] });
   if (deps.home) {
     for (const tool of Object.keys(DIFF_TOOL_FILE_PATH_ARG)) {
       preToolUse.push({ matcher: tool, hooks: [fileDiffPreToolUseHook(deps, pending)] });
@@ -1444,7 +1468,11 @@ export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hook
   //    WRITER WINS — so a plugin pre-tool hook that one day rewrites a `WebSearch` call's own
   //    `blocked_domains` must not be able to land after the floor and drop it. Last here means last.
   for (const tool of [WEB_FLOOR_FETCH_TOOL, WEB_FLOOR_SEARCH_TOOL]) {
-    preToolUse.push({ matcher: tool, hooks: [tool === WEB_FLOOR_FETCH_TOOL ? webFetchFloorHook(deps) : webSearchFloorHook(deps)] });
+    preToolUse.push({
+      matcher: tool,
+      failClosed: true,
+      hooks: [failClosed("dangerous-domain floor", tool === WEB_FLOOR_FETCH_TOOL ? webFetchFloorHook(deps) : webSearchFloorHook(deps))],
+    });
   }
 
   const postToolUse: HookCallbackMatcher[] = [{ hooks: [pluginPostToolUseHook(deps)] }];
@@ -1461,5 +1489,5 @@ export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hook
   const postToolUseFailure: HookCallbackMatcher[] = [{ hooks: [pluginPostToolUseFailureHook(deps)] }];
 
   const built: Options["hooks"] = { PreToolUse: preToolUse, PostToolUse: postToolUse, PostToolUseFailure: postToolUseFailure };
-  return { winter: built, official: built };
+  return { winter: built };
 }

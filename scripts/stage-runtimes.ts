@@ -1,9 +1,13 @@
 /**
- * Winter Phase 8d (P8d-1..3), P9a-8 — stages the Release bundle's runtime payload: `winter`, the
- * platform `claude` binary, and the `VERSIONS.json` record that lets both executable ladders (and
- * `release.ts`'s gates) prove the pair is the pinned artifact.
+ * Winter Phase 8d (P8d-1..3), P9a-8 — stages the Release bundle's runtime payload: `winter` and the
+ * `VERSIONS.json` record that lets the executable ladder (and `release.ts`'s gates) prove it is the
+ * pinned artifact.
  *
- *   bun run runtimes:stage                              # -> dist/runtimes/{winter,claude-official/*}
+ * WS-23: the official `claude` binary is no longer staged — the official leg is retired, and the
+ * record is schema 2 (no claude fields). `ant` is staged by `embed-runtimes.sh`, which writes its own
+ * record beside it (`runtimes/ant/VERSIONS.json`).
+ *
+ *   bun run runtimes:stage                              # -> dist/runtimes/{winter,VERSIONS.json}
  *   bun run runtimes:stage --out <dir>
  *   bun run runtimes:stage --winter <path>               # skip winter resolution, use an already-built one
  *   bun run runtimes:stage --sdk-checkout <path>          # forwarded to buildWinter() (checkout-build only)
@@ -19,27 +23,24 @@
  *
  * project.yml's "Embed runtimes" postCompileScript calls this SAME script with
  * `--out "${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources/runtimes"`, staging directly
- * into the app bundle — this file and the embed script are the ONE place either binary is copied.
+ * into the app bundle — this file and the embed script are the ONE place a runtime is copied.
  *
  * Layout (RUNTIME_BUNDLE_LAYOUT, bundle-layout.ts — the one place the subpaths are spelled):
  *   <out>/winter
- *   <out>/claude-official/claude
- *   <out>/claude-official/VERSIONS.json
+ *   <out>/VERSIONS.json
  */
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { buildWinter } from "./build-winter";
 import { RUNTIME_BUNDLE_LAYOUT, type VersionsJson } from "../packages/core/src/runtime-sdk/bundle-layout";
 import { resolvePlatformPackageWinter } from "../packages/core/src/runtime-sdk/executable";
-import { resolveClaudeAgentSdkPackageDir } from "../packages/core/src/runtime-sdk/official-executable";
-import { REQUIRED_CLAUDE_AGENT_SDK, REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK } from "../packages/core/src/runtime-sdk/versions";
+import { REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK } from "../packages/core/src/runtime-sdk/versions";
 
 /** `RUNTIME_BUNDLE_LAYOUT` entries are spelled relative to the bundle's `runtimes/` root
  *  (`dirname(execPath)`-relative); `--out` here IS that root, so the caller-facing paths are the
  *  layout's own strings with the leading `runtimes/` segment stripped — never re-spelled. */
-function relativeToRuntimesRoot(entry: "winter" | "claude" | "versions"): string {
+function relativeToRuntimesRoot(entry: "winter" | "versions"): string {
   return RUNTIME_BUNDLE_LAYOUT[entry].slice(RUNTIME_BUNDLE_LAYOUT.root.length + 1);
 }
 
@@ -88,64 +89,23 @@ export function resolveInstalledWinterPackage(): InstalledWinterPackage | undefi
   return { binPath, version };
 }
 
-/** Extracts the leading version token from `claude --version`'s stdout (controller measurement
- *  M1: `"2.1.250 (Claude Code)"`). */
-export function parseClaudeVersionOutput(text: string): string {
-  const m = text.trim().match(/^(\S+)/);
-  if (!m) throw new Error(`stage-runtimes: could not parse a version out of claude --version output: ${JSON.stringify(text)}`);
-  return m[1]!;
-}
-
-/** P8d-3's record, built from this build's own pins (never re-typed by a caller) plus the three
- *  staging-time measurements. Exported so it is unit-testable without a real `claude` binary.
- *  P9a-8: `winterSource` is OPTIONAL here too (kept absent when not given) — an 8d-era caller that
- *  never learned about the field still gets a valid record, defaulting through `winterSourceOf`
- *  to `"checkout-build"` exactly as it always effectively was. */
-export function buildVersionsJson(input: { claudeCode: string; winterPreSignSha256: string; claudeSha256: string; now?: Date; winterSource?: VersionsJson["winterSource"] }): VersionsJson {
+/** P8d-3's record (schema 2, WS-23), built from this build's own pins (never re-typed by a caller)
+ *  plus the staging-time measurement. Exported so it is unit-testable without a real build.
+ *  P9a-8: `winterSource` is OPTIONAL here too (kept absent when not given), defaulting through
+ *  `winterSourceOf` to `"checkout-build"`. */
+export function buildVersionsJson(input: { winterPreSignSha256: string; now?: Date; winterSource?: VersionsJson["winterSource"] }): VersionsJson {
   return {
-    schema: 1,
+    schema: 2,
     winterAgentSdk: REQUIRED_WINTER_AGENT_SDK,
     winterRuntimeSdk: REQUIRED_WINTER_RUNTIME_SDK,
-    officialSdk: REQUIRED_CLAUDE_AGENT_SDK,
-    claudeCode: input.claudeCode,
-    checksums: { winterPreSign: input.winterPreSignSha256, claude: input.claudeSha256 },
+    checksums: { winterPreSign: input.winterPreSignSha256 },
     stagedAt: (input.now ?? new Date()).toISOString(),
     ...(input.winterSource === undefined ? {} : { winterSource: input.winterSource }),
   };
 }
 
-/**
- * THE CI STEP'S EXACT CHAIN, by DELEGATION rather than re-implementation: `official-executable.ts`
- * exports `resolveClaudeAgentSdkPackageDir` precisely so this script (and anything else outside
- * `packages/core`) resolves the platform package through the SAME `createRequire(import.meta.url)`
- * — rooted at THAT module's own location — as the real daemon ladder and
- * `.github/workflows/ci.yml`'s "Verify the official runtime platform package installed" step.
- *
- * Rooting matters: bun's isolated linker nests this optional dependency under `packages/core`'s
- * own `node_modules`, never hoisted to the repo root, so a `createRequire` rooted at THIS script's
- * own location (`<repo>/scripts/`) would walk right past it — measured empirically staging this
- * very script before this fix (`stage-runtimes: no claude binary found` on a machine where the
- * package plainly IS installed, one directory over). Returns `undefined` when the optional
- * platform package is not installed at all (a legitimate skip on a non-darwin/arm64 host); a
- * version-mismatched platform package THROWS (WS-02 §6) — surfaced by `stageRuntimes` as-is, since
- * staging on top of a mismatched pair is exactly the failure this must not paper over.
- */
-export function resolveInstalledClaudeBinary(): string | undefined {
-  const dir = resolveClaudeAgentSdkPackageDir();
-  if (dir === undefined) return undefined;
-  const bin = join(dir, "claude");
-  return existsSync(bin) ? bin : undefined;
-}
-
-function realGetClaudeVersion(bin: string): string {
-  const r = spawnSync(bin, ["--version"], { encoding: "utf8", timeout: 10_000 });
-  if (r.status !== 0) throw new Error(`stage-runtimes: "${bin} --version" exited ${r.status ?? `signal ${r.signal}`}: ${r.stderr || r.stdout}`);
-  return parseClaudeVersionOutput(r.stdout);
-}
-
 export interface StageRuntimesResult {
   winterPath: string;
-  claudePath: string;
   versionsPath: string;
   versions: VersionsJson;
 }
@@ -176,12 +136,6 @@ export interface StageRuntimesOpts {
   /** Test seam for the Mach-O/arch assertion on a package-resolved winter binary; defaults to
    *  `assertMachOArm64`. Throws to refuse, same contract as the real one. */
   checkWinterMachO?: (path: string) => void;
-  /** Test/CI seam: an already-resolved `claude` binary, bypassing `resolveInstalledClaudeBinary()`. */
-  claudeBinaryPath?: string;
-  /** Test seam for `resolveInstalledClaudeBinary` (never spawns the real dual-`createRequire` chain). */
-  resolveClaudeBinary?: () => string | undefined;
-  /** Test seam: avoids spawning a (possibly fake, non-executable) `claude --version` in tests. */
-  getClaudeVersion?: (bin: string) => string;
   /** Test seam for the from-source fallback build; defaults to the real `buildWinter` (a two-
    *  minute `bun build --compile`) — injected so the checkout-build FALLBACK path is unit-testable
    *  with a fake binary, never a real build (this file's own tests never pay for one). */
@@ -191,9 +145,7 @@ export interface StageRuntimesOpts {
 export async function stageRuntimes(opts: StageRuntimesOpts): Promise<StageRuntimesResult> {
   mkdirSync(opts.out, { recursive: true });
   const winterDest = join(opts.out, relativeToRuntimesRoot("winter"));
-  const claudeDest = join(opts.out, relativeToRuntimesRoot("claude"));
   const versionsDest = join(opts.out, relativeToRuntimesRoot("versions"));
-  mkdirSync(dirname(claudeDest), { recursive: true });
 
   // (1) winter — P9a-8's ladder: an explicit `winterPath` bypasses resolution entirely; otherwise
   // the platform package is tried first (strong row-16 path) unless `checkout-build` was asked
@@ -239,33 +191,15 @@ export async function stageRuntimes(opts: StageRuntimesOpts): Promise<StageRunti
   copyFileSync(winterSrc, winterDest);
   chmodSync(winterDest, 0o755);
 
-  // (2) claude — through the wrapper's own createRequire, or an injected path for tests/CI.
-  const resolveClaudeBinary = opts.resolveClaudeBinary ?? resolveInstalledClaudeBinary;
-  const claudeSrc = opts.claudeBinaryPath ?? resolveClaudeBinary();
-  if (!claudeSrc) {
-    throw new Error(
-      "stage-runtimes: no claude binary found — install the optional @anthropic-ai/claude-agent-sdk " +
-        "platform package (`bun install`) or pass a claudeBinaryPath",
-    );
-  }
-  copyFileSync(claudeSrc, claudeDest);
-  chmodSync(claudeDest, 0o755);
-
-  // (3) SHA-256 both. `winterPreSign` is the PRE-SIGN payload (P8d-2's row-16 check compares
-  // against exactly this value — `winter` is re-signed at embed time; `claude` never is, so its
-  // checksum is simply of the byte-copied binary).
+  // (2) SHA-256 — the PRE-SIGN payload (P8d-2's row-16 check compares against exactly this value;
+  // `winter` is re-signed at embed time).
   const winterPreSignSha256 = sha256File(winterDest);
-  const claudeSha256 = sha256File(claudeDest);
 
-  // (4) claude --version -> claudeCode.
-  const getClaudeVersion = opts.getClaudeVersion ?? realGetClaudeVersion;
-  const claudeCode = getClaudeVersion(claudeDest);
-
-  // (5) VERSIONS.json — winterSource names WHICH rung produced winterSrc above (P9a-8).
-  const versions = buildVersionsJson({ claudeCode, winterPreSignSha256, claudeSha256, winterSource });
+  // (3) VERSIONS.json — winterSource names WHICH rung produced winterSrc above (P9a-8).
+  const versions = buildVersionsJson({ winterPreSignSha256, winterSource });
   writeFileSync(versionsDest, `${JSON.stringify(versions, null, 2)}\n`);
 
-  return { winterPath: winterDest, claudePath: claudeDest, versionsPath: versionsDest, versions };
+  return { winterPath: winterDest, versionsPath: versionsDest, versions };
 }
 
 if (import.meta.main) {
@@ -286,6 +220,6 @@ if (import.meta.main) {
     sdkCheckout: flag("--sdk-checkout"),
     winterSource: winterSourceArg as VersionsJson["winterSource"] | undefined,
   });
-  // (6) print the JSON.
+  // (4) print the JSON.
   console.log(JSON.stringify(result, null, 2));
 }

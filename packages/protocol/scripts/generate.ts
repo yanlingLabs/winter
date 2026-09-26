@@ -128,6 +128,10 @@ const fixtures: Record<string, unknown> = {
   // variant, same full switch-trap discipline as tool_review above. NOT sensitive — a normal
   // fixture.
   notification_requested: { type: "notification_requested", sessionId: "s_1", threadId: "t_1", seq: 33, ts: 1700000000023, title: "Winter", message: "Long-running migration finished — 12,004 rows updated." },
+  // WS-23: a hook's notice to the host -- a NEW SessionEvent variant, full switch-trap discipline.
+  hook_notice: { type: "hook_notice", sessionId: "s_1", threadId: "main", seq: 34, ts: 1700000000024, text: "UserPromptSubmit operation blocked by hook:\nprompt contains a secret", level: "warning", stopsTurn: true },
+  // WS-23 review r1 I-3: a continuity warning the runtime raised -- a NEW SessionEvent variant, full switch-trap discipline.
+  continuity_warning: { type: "continuity_warning", sessionId: "s_1", threadId: "main", seq: 35, ts: 1700000000025, warning: "switch_compaction", text: "This conversation (about 612000 tokens) is larger than deepseek/deepseek-v4-pro can hold (a 128000-token window), so openai/gpt-5.6-terra is summarizing its older part before continuing. The most recent exchanges carry over as they are." },
   "child_update": { ...base, threadId: "main", type: "child_update", childSessionId: "s_child000001", status: "completed", title: "Fix login bug", resultSummary: "Fixed the null token check; tests pass." },
   // Dispatch relay (Phase 7): childSessionId is additive/optional on the four existing
   // approval/question shapes — dedicated with-fixtures so Swift round-trips carriers, mirroring

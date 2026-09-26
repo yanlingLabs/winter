@@ -541,30 +541,34 @@ describe("makeApply: the runtime options diff (P8b Task 15)", () => {
     expect(lines).toEqual(["runtimes.winterIdleTimeoutSec changed — it takes effect for new sessions"]);
   });
 
-  // Pre-release hardening (P9c-1 amendment): `runtimes.official.subscriptionAuth: true` is inert
-  // (the compile-time approval constant stays `false`) — every settings change that carries it
-  // must say so exactly once, same "accepted, logged, ignored" posture as winterLeg above.
-  test("official.subscriptionAuth = true is reported inert on every settings change that carries it", async () => {
+  // WS-23: the retired official leg's keys (`claudeExecutable`, `official.*`, `handoff.crossRuntime`)
+  // are accepted and ignored — a settings change that introduces one says so once; an unrelated
+  // change never re-narrates one already reported (boot reports what a home already carries).
+  test("a retired official-leg key introduced by a settings change is reported once, as ignored", async () => {
     const lines: string[] = [];
     const apply = makeApply(baseDeps({ log: (m) => lines.push(m) }));
-    await apply(Settings.parse(BASE_SETTINGS), Settings.parse({ ...BASE_SETTINGS, runtimes: { official: { subscriptionAuth: true } } }));
-    expect(lines.some((l) => l.includes("runtimes.official.subscriptionAuth") && l.includes("inert until Anthropic approves"))).toBe(true);
+    await apply(Settings.parse(BASE_SETTINGS), Settings.parse({ ...BASE_SETTINGS, runtimes: { official: { subscriptionAuth: true }, claudeExecutable: "/x/claude" } }));
+    const hits = lines.filter((l) => l.includes("official claude runtime was retired"));
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toContain("runtimes.claudeExecutable");
+    expect(hits[0]).toContain("runtimes.official.subscriptionAuth");
+    expect(hits[0]).toContain("ignored");
   });
 
-  test("official.subscriptionAuth = false, or the block absent, never narrates", async () => {
+  test("no retired key, or the same retired set as before, never narrates", async () => {
     const lines: string[] = [];
     const apply = makeApply(baseDeps({ log: (m) => lines.push(m) }));
-    await apply(Settings.parse(BASE_SETTINGS), Settings.parse({ ...BASE_SETTINGS, runtimes: { official: { subscriptionAuth: false } } }));
     await apply(Settings.parse(BASE_SETTINGS), Settings.parse({ ...BASE_SETTINGS, runtimes: { winterIdleTimeoutSec: 60 } }));
-    expect(lines.filter((l) => l.includes("subscriptionAuth"))).toEqual([]);
-  });
-
-  test("an UNRELATED settings change re-narrates the SAME still-inert flag — one line per settings change, not a one-time transition", async () => {
-    const lines: string[] = [];
-    const apply = makeApply(baseDeps({ log: (m) => lines.push(m) }));
     const withFlag = (idle: number) => Settings.parse({ ...BASE_SETTINGS, runtimes: { official: { subscriptionAuth: true }, winterIdleTimeoutSec: idle } });
     await apply(withFlag(900), withFlag(60)); // only winterIdleTimeoutSec actually changed
-    expect(lines.filter((l) => l.includes("subscriptionAuth") && l.includes("inert"))).toHaveLength(1);
+    expect(lines.filter((l) => l.includes("retired"))).toEqual([]);
+  });
+
+  test("a stale runtimes.handoff.crossRuntime is reported as ignored, never obeyed", async () => {
+    const lines: string[] = [];
+    const apply = makeApply(baseDeps({ log: (m) => lines.push(m) }));
+    await apply(Settings.parse(BASE_SETTINGS), Settings.parse({ ...BASE_SETTINGS, runtimes: { handoff: { crossRuntime: true } } }));
+    expect(lines.some((l) => l.includes("runtimes.handoff.crossRuntime") && l.includes("ignored"))).toBe(true);
   });
 });
 

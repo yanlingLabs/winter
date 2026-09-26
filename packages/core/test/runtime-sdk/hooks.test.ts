@@ -249,9 +249,10 @@ describe("sessionHooksFor — bash safety reviewer", () => {
   // case; these pin the structural one, which must NOT become a card storm.
   //
   // Facts the rule comes from: the Mac creates code sessions with `approvalPolicy: "auto"`; a
-  // Claude-only home has NO eligible credential at all, because the user's own ruling excludes the
-  // first-party Claude providers from Winter's own jobs ("claude models run through anthropic which
-  // has its own reviewer anyways"); and on `origin/main` such a home had no `BashReviewer` instance,
+  // home with NO credential Winter's own jobs can run on has no `BashReviewer` instance (WS-23: a
+  // Claude-only home WITH an Anthropic key DOES — `anthropic` rejoined the eligible set when every
+  // model moved onto the Winter SDK — so this is now the no-credential-at-all home, not the
+  // Claude-default one); and on `origin/main` such a home had no `BashReviewer` instance,
   // so `bashReviewerHook`'s very first line answered `allow()` — Winter never reviewed bash there.
   // Turning that into an `ask` on every non-trivially-safe command would be new behaviour for a whole
   // class of user, and `bashReviewerHook`'s own doc records that an `ask` from this hook on the
@@ -469,9 +470,10 @@ describe("sessionHooksFor — the escape control-plane floor", () => {
     expect(escapeFloorHit("ls ~/.winter/runtimes", undefined)).toBeUndefined();
   });
 
-  test("both legs get the floor — `official` is the same object", () => {
+  // WS-23: one leg — the builder returns `{ winter }` alone (the retired official copy is gone).
+  test("the builder returns the Winter groups alone", () => {
     const built = sessionHooksFor({ ...baseDeps, home: HOME });
-    expect(built.official).toBe(built.winter);
+    expect(Object.keys(built)).toEqual(["winter"]);
   });
 });
 
@@ -728,7 +730,7 @@ describe("sessionHooksFor — the dangerous-domain floor on WebSearch", () => {
   });
 
   test("the model's own blocked_domains are kept and the floor is unioned in, deduped case-insensitively", async () => {
-    const out = await searchVerdict({ query: "q", blocked_domains: ["ads.example", "PASTEBIN.COM"] });
+    const out = await searchVerdict({ query: "qq", blocked_domains: ["ads.example", "PASTEBIN.COM"] });
     const blocked = updatedInputOf(out)!["blocked_domains"] as string[];
     expect(blocked.slice(0, FLOOR_SIZE)).toEqual([...SHIPPED_DANGEROUS_DOMAINS]); // the floor first
     expect(blocked.slice(FLOOR_SIZE)).toEqual(["ads.example"]); // the model's own, minus its duplicate of a floor entry
@@ -736,39 +738,39 @@ describe("sessionHooksFor — the dangerous-domain floor on WebSearch", () => {
   });
 
   test("a call already carrying exactly the floor is left alone (no pointless transform)", async () => {
-    expect(await searchVerdict({ query: "q", blocked_domains: [...SHIPPED_DANGEROUS_DOMAINS] })).toEqual({});
+    expect(await searchVerdict({ query: "qq", blocked_domains: [...SHIPPED_DANGEROUS_DOMAINS] })).toEqual({});
   });
 
   test("allowed_domains: floor entries are removed and blocked_domains is NEVER added (the two are mutually exclusive)", async () => {
-    const out = await searchVerdict({ query: "q", allowed_domains: ["docs.example", "pastebin.com", "raw.paste.ee"] });
-    expect(updatedInputOf(out)).toEqual({ query: "q", allowed_domains: ["docs.example"] });
+    const out = await searchVerdict({ query: "qq", allowed_domains: ["docs.example", "pastebin.com", "raw.paste.ee"] });
+    expect(updatedInputOf(out)).toEqual({ query: "qq", allowed_domains: ["docs.example"] });
     expect(updatedInputOf(out)!["blocked_domains"]).toBeUndefined();
   });
 
   test("allowed_domains with nothing left after the floor is DENIED with the same fixed refusal", async () => {
-    const out = await searchVerdict({ query: "q", allowed_domains: ["pastebin.com", "ngrok.io"] });
+    const out = await searchVerdict({ query: "qq", allowed_domains: ["pastebin.com", "ngrok.io"] });
     expect(denialReason(out)).toContain("pastebin.com matches the blocked entry pastebin.com");
     expect(updatedInputOf(out)).toBeUndefined();
   });
 
   test("the denied allow-list entry is named in its NORMALIZED form — a model-written value never reaches the refusal raw", async () => {
-    const out = await searchVerdict({ query: "q", allowed_domains: ["  *.RAW.PasteBin.COM.  "] });
+    const out = await searchVerdict({ query: "qq", allowed_domains: ["  *.RAW.PasteBin.COM.  "] });
     expect(denialReason(out)).toContain("raw.pastebin.com matches the blocked entry pastebin.com");
     expect(denialReason(out)).not.toContain("*.");
   });
 
   test("an allow-list clear of the floor is untouched", async () => {
-    expect(await searchVerdict({ query: "q", allowed_domains: ["docs.example", "example.org"] })).toEqual({});
+    expect(await searchVerdict({ query: "qq", allowed_domains: ["docs.example", "example.org"] })).toEqual({});
   });
 
   test("the transform carries ONLY the three declared keys — an invented key is dropped, not smuggled into a schema-validated transform", async () => {
-    const out = await searchVerdict({ query: "q", max_results: 40, __proto__: { polluted: true } });
+    const out = await searchVerdict({ query: "qq", max_results: 40, __proto__: { polluted: true } });
     expect(Object.keys(updatedInputOf(out)!).sort()).toEqual(["blocked_domains", "query"]);
   });
 
   test("over the SDK's 1,000-entry list cap the floor goes first and the model's tail is dropped, rather than refusing the call", async () => {
     const own = Array.from({ length: 1200 }, (_, i) => `noise${i}.example`);
-    const blocked = updatedInputOf(await searchVerdict({ query: "q", blocked_domains: own }))!["blocked_domains"] as string[];
+    const blocked = updatedInputOf(await searchVerdict({ query: "qq", blocked_domains: own }))!["blocked_domains"] as string[];
     expect(blocked.length).toBe(1000);
     expect(blocked.slice(0, FLOOR_SIZE)).toEqual([...SHIPPED_DANGEROUS_DOMAINS]);
   });
@@ -781,8 +783,8 @@ describe("sessionHooksFor — the dangerous-domain floor on WebSearch", () => {
     // `undefined || null -> absent`, so standing down on it would leave a call the tool runs
     // unfiltered with no floor on it.
     for (const input of [
-      { query: "q", blocked_domains: [] }, { query: "q", blocked_domains: ["", "  "] },
-      { query: "q", allowed_domains: [] }, { query: "q", blocked_domains: null }, { query: "q", allowed_domains: null },
+      { query: "qq", blocked_domains: [] }, { query: "qq", blocked_domains: ["", "  "] },
+      { query: "qq", allowed_domains: [] }, { query: "qq", blocked_domains: null }, { query: "qq", allowed_domains: null },
     ]) {
       const blocked = updatedInputOf(await searchVerdict(input))!["blocked_domains"] as string[];
       expect(blocked.slice(0, FLOOR_SIZE), JSON.stringify(input)).toEqual([...SHIPPED_DANGEROUS_DOMAINS]);
@@ -797,12 +799,12 @@ describe("sessionHooksFor — the dangerous-domain floor on WebSearch", () => {
   // error naming what the model actually got wrong.
   test("a WRONG-TYPED domain list passes through UNTRANSFORMED, so the tool's own refusal is what the model sees", async () => {
     for (const input of [
-      { query: "q", blocked_domains: "pastebin.com" },
-      { query: "q", blocked_domains: [null, 3] },
-      { query: "q", blocked_domains: ["ok.example", 7] },
-      { query: "q", allowed_domains: "docs.example" },
-      { query: "q", allowed_domains: [{}] },
-      { query: "q", allowed_domains: ["docs.example"], blocked_domains: 5 },
+      { query: "qq", blocked_domains: "pastebin.com" },
+      { query: "qq", blocked_domains: [null, 3] },
+      { query: "qq", blocked_domains: ["ok.example", 7] },
+      { query: "qq", allowed_domains: "docs.example" },
+      { query: "qq", allowed_domains: [{}] },
+      { query: "qq", allowed_domains: ["docs.example"], blocked_domains: 5 },
     ]) {
       const out = await searchVerdict(input);
       expect(updatedInputOf(out), JSON.stringify(input)).toBeUndefined();
@@ -811,19 +813,29 @@ describe("sessionHooksFor — the dangerous-domain floor on WebSearch", () => {
     }
   });
 
-  test("hostile input shapes never throw and still carry the floor where there is a call to carry it on", async () => {
+  test("hostile input shapes never throw -- and with no query there is no search to carry the floor on, so the floor stands down (WS-23 fix round 2)", async () => {
     for (const shape of [null, [], "a string", 7]) {
-      const out = await searchVerdict(shape);
-      expect(Object.keys(updatedInputOf(out)!)).toEqual(["blocked_domains"]);
+      expect(await searchVerdict(shape)).toEqual({});
     }
+  });
+
+  // WS-23 fix round 2: the agent SDK now DENIES a schema-invalid `updatedInput` whatever the original
+  // was, and this floor copies `query` verbatim -- so it stands down on a missing/short query and the
+  // tool reports its own error, instead of the model's typo becoming a policy denial.
+  test("a missing, non-string or one-character query gets NO rewrite (the tool's own 'Missing query' answers it)", async () => {
+    for (const input of [{ query: "x" }, { query: 42, blocked_domains: ["a.com"] }, { blocked_domains: ["pastebin.com"] }, { query: "" }]) {
+      expect(await searchVerdict(input)).toEqual({});
+    }
+    expect(updatedInputOf(await searchVerdict({ query: "xy" }))).toMatchObject({ query: "xy" });
   });
 });
 
 describe("sessionHooksFor — the floor's wiring, ordering and both legs", () => {
-  test("`winter` and `official` are the SAME object — the floor cannot differ between the legs", () => {
+  // WS-23: the `official` copy is gone — there is one leg to carry the floor.
+  test("the floor rides the Winter groups, and no second copy exists", () => {
     const built = sessionHooksFor(baseDeps);
-    expect(built.official).toBe(built.winter);
-    expect(groupFor((built.official as { PreToolUse?: HookCallbackMatcher[] }).PreToolUse, "WebFetch")).toBe(groupFor(built.winter?.PreToolUse, "WebFetch"));
+    expect(Object.keys(built)).toEqual(["winter"]);
+    expect(groupFor(built.winter?.PreToolUse, "WebFetch")).toBeDefined();
   });
 
   test("both groups are registered unconditionally, on the bare deps every mode shares", () => {
@@ -860,5 +872,114 @@ describe("sessionHooksFor — the floor's wiring, ordering and both legs", () =>
     const input = preInput({ tool_name: "WebFetch", tool_input: { url: "https://pastebin.com/x" }, tool_use_id: "t1" });
     expect(await groupFor(built.winter?.PreToolUse, undefined).hooks[0]!(input, "t1", { signal: abortSignal() })).toEqual({});
     expect(denialReason((await groupFor(built.winter?.PreToolUse, "WebFetch").hooks[0]!(input, "t1", { signal: abortSignal() })) as Record<string, unknown>)).toContain("pastebin.com");
+  });
+});
+
+// ── WS-23: the floors FAIL CLOSED ──────────────────────────────────────────────────────────────
+//
+// Driven through the exact callbacks `sessionHooksFor(...).winter` hands the agent SDK (the object
+// the child's hook bridge invokes, by positional id), with a HOSTILE `tool_input` whose every read
+// throws -- the realistic way a floor's own code throws mid-evaluation. Before WS-23 each of these
+// threw out of the callback; the child's wrapper answered `hook_threw` and the SDK runner let the
+// call proceed (inv-hooks-mcp A4).
+describe("sessionHooksFor — WS-23: a floor that throws DENIES, and every floor group is marked fail-closed", () => {
+  const HOME = join(homedir(), "ws23-failclosed-test-home"); // never created: every floor here is lexical until it throws
+  const hostile = (): unknown =>
+    new Proxy(
+      {},
+      {
+        get() { throw new Error("hostile tool_input"); },
+        has() { throw new Error("hostile tool_input"); },
+        ownKeys() { throw new Error("hostile tool_input"); },
+        getOwnPropertyDescriptor() { throw new Error("hostile tool_input"); },
+      },
+    );
+  const decision = (out: unknown) => (out as { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string } }).hookSpecificOutput;
+  const fire = (group: HookCallbackMatcher, index: number, toolName: string) =>
+    group.hooks[index]!(preInput({ tool_name: toolName, tool_input: hostile(), tool_use_id: "tx" }), "tx", { signal: abortSignal() });
+  const failClosedOf = (group: HookCallbackMatcher) => (group as HookCallbackMatcher & { failClosed?: boolean }).failClosed;
+  const silenceLog = <T>(fn: () => Promise<T>): Promise<T> => {
+    const original = console.error;
+    console.error = () => {};
+    return fn().finally(() => { console.error = original; });
+  };
+
+  test("the sandbox-escape floor and the protected-path Bash fence deny on a throw", async () => {
+    const { winter } = sessionHooksFor({ ...baseDeps, home: HOME });
+    const floor = winter!.PreToolUse!.filter((g) => g.matcher === "Bash").at(-1)!;
+    for (const index of [0, 1]) {
+      const out = decision(await silenceLog(() => fire(floor, index, "Bash")));
+      expect(out?.permissionDecision).toBe("deny");
+      expect(out?.permissionDecisionReason).toContain("fails closed");
+      expect(out?.permissionDecisionReason).not.toContain("hostile tool_input"); // the error NAME is logged, the message never echoed
+    }
+  });
+
+  test("the path fence denies on a throw", async () => {
+    const { winter } = sessionHooksFor({ ...baseDeps, home: HOME, cwd: "/tmp" });
+    const fence = winter!.PreToolUse!.filter((g) => g.matcher === undefined).at(-1)!;
+    expect(decision(await silenceLog(() => fire(fence, 0, "Write")))?.permissionDecision).toBe("deny");
+  });
+
+  test("both dangerous-domain floors deny on a throw", async () => {
+    const { winter } = sessionHooksFor(baseDeps);
+    for (const tool of ["WebFetch", "WebSearch"]) {
+      const group = groupFor(winter?.PreToolUse, tool);
+      expect(decision(await silenceLog(() => fire(group, 0, tool)))?.permissionDecision).toBe("deny");
+    }
+  });
+
+  test("the reviewer's OUTER code denies on a throw; its designed transient failure still escalates with ask", async () => {
+    const throwingPolicy = sessionHooksFor({ ...baseDeps, reviewer: { review: async () => ({ verdict: "safe", reason: "" }) } as unknown as BashReviewer, policy: () => { throw new Error("settings torn"); } });
+    const outer = decision(await silenceLog(() => groupFor(throwingPolicy.winter?.PreToolUse, "Bash").hooks[0]!(preInput({ tool_name: "Bash", tool_input: { command: "rm -rf build" }, tool_use_id: "t1" }), "t1", { signal: abortSignal() })));
+    expect(outer?.permissionDecision).toBe("deny");
+    const transient = sessionHooksFor({ ...baseDeps, reviewer: { review: async () => { throw new Error("timeout"); } } as unknown as BashReviewer, policy: () => "auto" });
+    const inner = decision(await groupFor(transient.winter?.PreToolUse, "Bash").hooks[0]!(preInput({ tool_name: "Bash", tool_input: { command: "rm -rf build" }, tool_use_id: "t2" }), "t2", { signal: abortSignal() }));
+    expect(inner?.permissionDecision).toBe("ask");
+  });
+
+  test("every floor group carries failClosed: true (the SDK-side opt-in for timeouts / malformed answers); observers and the plugin gate do not", () => {
+    const { winter } = sessionHooksFor({ ...baseDeps, home: HOME, reviewer: { review: async () => ({ verdict: "safe", reason: "" }) } as unknown as BashReviewer, lsp: () => undefined });
+    const pre = winter!.PreToolUse!;
+    const bash = pre.filter((g) => g.matcher === "Bash");
+    expect(bash.map(failClosedOf)).toEqual([true, true]); // reviewer, escape floor
+    expect(failClosedOf(groupFor(pre, "WebFetch"))).toBe(true);
+    expect(failClosedOf(groupFor(pre, "WebSearch"))).toBe(true);
+    const unmatched = pre.filter((g) => g.matcher === undefined);
+    expect(unmatched.map(failClosedOf)).toEqual([undefined, true]); // plugin gate, path fence
+    for (const tool of ["Edit", "Write", "NotebookEdit"]) expect(failClosedOf(groupFor(pre, tool))).toBeUndefined(); // fileDiff snapshots
+    for (const g of [...(winter!.PostToolUse ?? []), ...(winter!.PostToolUseFailure ?? [])]) expect(failClosedOf(g)).toBeUndefined();
+  });
+
+  test("a floor that does NOT throw is unchanged by the wrapper (a normal allow stays an allow)", async () => {
+    const { winter } = sessionHooksFor(baseDeps);
+    const out = await groupFor(winter?.PreToolUse, "WebFetch").hooks[0]!(preInput({ tool_name: "WebFetch", tool_input: { url: "https://example.org/" }, tool_use_id: "t3" }), "t3", { signal: abortSignal() });
+    expect(out).toEqual({});
+  });
+});
+
+// WS-23 (brief item 4): the SDK now DELIVERS a PostToolUse `additionalContext` to the model, so this
+// hook's output is live. Pinned here is exactly what the SDK receives from the callback; the
+// end-to-end check (the text inside the model's next request) runs after the SDK release.
+describe("sessionHooksFor — WS-23: diagnostics-after-edit hands the SDK a PostToolUse additionalContext", () => {
+  test("a fake LSP's diagnostics come back as { hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext } }", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hooks-diag-ws23-"));
+    try {
+      writeFileSync(join(root, "a.ts"), "const x = 1;\n");
+      const fakeLsp = {
+        clientFor: async () => ({ diagnostics: async () => [{ line: 0, character: 6, severity: 1, message: "'x' is declared but its value is never read." }] }),
+      } as unknown as LspManager;
+      const { winter } = sessionHooksFor({ ...baseDeps, roots: [root], lsp: () => fakeLsp });
+      const group = groupFor(winter?.PostToolUse, "Edit");
+      const out = await group.hooks[0]!(postInput({ tool_name: "Edit", tool_input: { file_path: "a.ts" }, tool_response: "edited", cwd: root, tool_use_id: "t1" }), "t1", { signal: abortSignal() });
+      expect(out).toEqual({
+        hookSpecificOutput: {
+          hookEventName: "PostToolUse",
+          additionalContext: "diagnostics (1 errors, 0 warnings):\na.ts:1:7 error 'x' is declared but its value is never read.",
+        },
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

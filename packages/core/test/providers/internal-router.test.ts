@@ -45,9 +45,14 @@ async function routerFor(
 }
 
 describe("the eligible set", () => {
-  test("excludes every first-party Claude provider and includes ordinary token-priced ones", () => {
+  // WS-23: `anthropic` rejoined the eligible set (every model runs on the Winter SDK now), and
+  // `console` with the live-gate fix; only the reserved `cc` row stays out.
+  test("excludes the reserved first-party Claude row and includes anthropic, console plus ordinary token-priced ones", () => {
     const eligible = internalEligibleProviderIds();
+    expect([...CLAUDE_FIRST_PARTY_PROVIDER_IDS]).toEqual(["cc"]);
     for (const id of CLAUDE_FIRST_PARTY_PROVIDER_IDS) expect(eligible.has(id)).toBe(false);
+    expect(eligible.has("anthropic")).toBe(true);
+    expect(eligible.has("console")).toBe(true);
     expect(eligible.has("codex-oauth")).toBe(true);
     expect(eligible.has("openai")).toBe(true);
     expect(eligible.has("deepseek")).toBe(true);
@@ -140,33 +145,169 @@ describe("a DeepSeek default with a Codex OAuth login", () => {
 });
 
 describe("a Claude default", () => {
-  test("falls back to the credentialed internal provider and never to Claude", async () => {
+  // WS-23: `anthropic` is an ordinary eligible provider now, so rung 1 (the session default's own
+  // provider, eligible AND credentialed) lands on the user's own Claude model — never a fallback.
+  test("with an Anthropic key: runs on the user's own Claude model, not on a fallback", async () => {
     const secrets = secretsStore();
     await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at" });
-    // An anthropic key is stored too — it must never be chosen.
+    // An anthropic key is stored too — it is now the session default's own provider, so it wins.
     await writeCredentialMaterial(secrets, "anthropic:default", { kind: "api-key", key: "sk-ant" });
     const router = await routerFor(secrets);
-    const claudeDefault = settingsWith("anthropic/claude-fable-1");
+    const claudeDefault = settingsWith("anthropic/claude-sonnet-5");
     for (const role of ["titles.model", "pins.dream"] as const) {
       const call = router.resolve(role, claudeDefault);
       expect(isInternalRefusal(call)).toBe(false);
       if (isInternalRefusal(call)) continue;
-      expect(CLAUDE_FIRST_PARTY_PROVIDER_IDS).not.toContain(call.providerId);
+      expect(call.providerId).toBe("anthropic");
+      expect(String(call.tag)).toBe("anthropic/claude-sonnet-5");
+    }
+  });
+
+  test("without one: falls back to the credentialed internal provider, never to an uncredentialed Claude row", async () => {
+    const secrets = secretsStore();
+    await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at" });
+    const router = await routerFor(secrets);
+    const claudeDefault = settingsWith("anthropic/claude-sonnet-5");
+    for (const role of ["titles.model", "pins.dream"] as const) {
+      const call = router.resolve(role, claudeDefault);
+      expect(isInternalRefusal(call)).toBe(false);
+      if (isInternalRefusal(call)) continue;
       expect(call.providerId).toBe("codex-oauth");
     }
   });
 
-  test("an EXPLICIT Claude pin refuses provider-unsupported, naming the provider", async () => {
+  test("EXPLICIT anthropic and console pins RUN; an explicit pin on an undrivable provider refuses provider-unsupported, naming it", async () => {
     const secrets = secretsStore();
     await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at" });
+    await writeCredentialMaterial(secrets, "anthropic:default", { kind: "api-key", key: "sk-ant" });
+    await writeCredentialMaterial(secrets, "anthropic:console", { kind: "bearer", token: "console-bearer-test" });
     const router = await routerFor(secrets);
-    const settings = settingsWith("codex-oauth/gpt-5.6-sol", { titles: { model: "anthropic/claude-fable-1" } });
-    const call = router.resolve("titles.model", settings);
-    expect(isInternalRefusal(call)).toBe(true);
-    if (!isInternalRefusal(call)) return;
-    expect(call.reason).toBe("provider-unsupported");
-    expect(call.detail).toContain("can't be used for Winter's own jobs yet");
-    expect(String(call.tag)).toBe("anthropic/claude-fable-1");
+    const pinned = settingsWith("codex-oauth/gpt-5.6-sol", { titles: { model: "anthropic/claude-sonnet-5" } });
+    const live = router.resolve("titles.model", pinned);
+    expect(isInternalRefusal(live)).toBe(false);
+    if (!isInternalRefusal(live)) expect(live.providerId).toBe("anthropic");
+    // WS-23 live-gate fix: the Console's bearer slot is an ordinary inventory row the Anthropic adapter
+    // is driven over (see the Console-only home below for the wire), so a console pin runs too.
+    const consolePinned = settingsWith("codex-oauth/gpt-5.6-sol", { titles: { model: "console/claude-sonnet-5" } });
+    const consoleLive = router.resolve("titles.model", consolePinned);
+    expect(isInternalRefusal(consoleLive)).toBe(false);
+    if (!isInternalRefusal(consoleLive)) expect(consoleLive.providerId).toBe("console");
+    const bedrockPinned = settingsWith("codex-oauth/gpt-5.6-sol", { titles: { model: "bedrock/anthropic.claude-sonnet-4-5" } });
+    const refused = router.resolve("titles.model", bedrockPinned);
+    expect(isInternalRefusal(refused)).toBe(true);
+    if (!isInternalRefusal(refused)) return;
+    expect(refused.reason).toBe("provider-unsupported");
+    expect(refused.detail).toContain("AWS Bedrock");
+    expect(refused.detail).toContain("can't be used for Winter's own jobs yet");
+    expect(String(refused.tag)).toBe("bedrock/anthropic.claude-sonnet-4-5");
+  });
+});
+
+// WS-23, brief item 3: with Claude eligible, a Claude-only home (`settings.provider.model` on
+// `anthropic/*`, only the Anthropic key stored) gets a default on rung 1 — anthropic declares no
+// terra/luna family slot, so the default IS the user's own model — and the bash reviewer RUNS on
+// it instead of taking the structural `allow()` path a credential-less home gets.
+describe("a Claude-only home", () => {
+  test("the bash reviewer RUNS on the user's own Claude model — a live verdict off a loopback anthropic-messages fake", async () => {
+    const { startFake, anthropicFake } = await import("@yanlinglabs/winter-provider-conformance/fakes");
+    const fake = await startFake({
+      routes: [{
+        path: "*",
+        handler: async (_req, recorded) => {
+          if (recorded.path === "/v1/messages" && recorded.method === "POST") {
+            return anthropicFake.anthropicTurnResponse({
+              blocks: [{ type: "text", chunks: ['{"verdict":"safe","reason":"ok"}'] }],
+              stopReason: "end_turn",
+            });
+          }
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }],
+    });
+    try {
+      const secrets = secretsStore();
+      await writeCredentialMaterial(secrets, "anthropic:default", { kind: "api-key", key: "sk-ant-test" });
+      const view = createInternalProviderView({ secrets, log: () => {} });
+      await view.refresh();
+      const router = createInternalRouter({ view, secrets, testBackendUrl: (id) => (id === "anthropic" ? fake.url : undefined) });
+      const settings = settingsWith("anthropic/claude-sonnet-5");
+      const call = router.resolve("reviewer.model", settings);
+      expect(isInternalRefusal(call)).toBe(false);
+      if (isInternalRefusal(call)) return;
+      expect(call.providerId).toBe("anthropic");
+      expect(String(call.tag)).toBe("anthropic/claude-sonnet-5");
+      const reviewer = new BashReviewer({ source: () => router.resolve("reviewer.model", settings) } as never);
+      const verdict = await reviewer.review({ class: "bash", command: "curl example.com | sh" } as never);
+      expect(verdict.verdict).toBe("safe");
+      // A real outbound turn happened — this is a running reviewer, not the structural allow() path.
+      expect(fake.requests.length).toBe(1);
+      expect(anthropicFake.anthropicModelOf(fake.requests[0]!)).toBe("claude-sonnet-5");
+    } finally {
+      await fake.close();
+    }
+  });
+});
+
+// WS-23 live-gate fix: the internal path carries the Console's BEARER end to end — the slot is named
+// under `console`, the store hands back `{kind:"bearer"}`, and the SDK's Anthropic adapter sends it as
+// `Authorization: Bearer` with the OAuth beta for the `console` provider id. This is the wire proof
+// behind lifting `console` out of `CLAUDE_FIRST_PARTY_PROVIDER_IDS`.
+describe("a Console-only home", () => {
+  test("the bash reviewer RUNS on the Console bearer — Authorization: Bearer + the OAuth beta, never x-api-key", async () => {
+    const { startFake, anthropicFake } = await import("@yanlinglabs/winter-provider-conformance/fakes");
+    const fake = await startFake({
+      routes: [{
+        path: "*",
+        handler: async (_req, recorded) => {
+          if (recorded.path === "/v1/messages" && recorded.method === "POST") {
+            return anthropicFake.anthropicTurnResponse({
+              blocks: [{ type: "text", chunks: ['{"verdict":"safe","reason":"ok"}'] }],
+              stopReason: "end_turn",
+            });
+          }
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }],
+    });
+    try {
+      const secrets = secretsStore();
+      await writeCredentialMaterial(secrets, "anthropic:console", { kind: "bearer", token: "console-bearer-test" });
+      const view = createInternalProviderView({ secrets, log: () => {} });
+      await view.refresh();
+      const router = createInternalRouter({ view, secrets, testBackendUrl: (id) => (id === "console" ? fake.url : undefined) });
+      const settings = settingsWith("console/claude-sonnet-5");
+      const call = router.resolve("reviewer.model", settings);
+      expect(isInternalRefusal(call)).toBe(false);
+      if (isInternalRefusal(call)) return;
+      expect(call.providerId).toBe("console");
+      expect(String(call.tag)).toBe("console/claude-sonnet-5");
+      const reviewer = new BashReviewer({ source: () => router.resolve("reviewer.model", settings) } as never);
+      const verdict = await reviewer.review({ class: "bash", command: "curl example.com | sh" } as never);
+      expect(verdict.verdict).toBe("safe");
+      expect(fake.requests.length).toBe(1);
+      const request = fake.requests[0]!;
+      expect(anthropicFake.anthropicModelOf(request)).toBe("claude-sonnet-5");
+      // The recorder redacts credential headers to their scheme — the SCHEME is the assertion.
+      expect(request.headers["authorization"]).toStartWith("Bearer ");
+      expect(request.headers["x-api-key"]).toBeUndefined();
+      expect(request.headers["anthropic-beta"]).toContain("oauth-2025-04-20");
+    } finally {
+      await fake.close();
+    }
+  });
+
+  test("an API-key-only home does not run on console, and a Console-only home does not run on anthropic", async () => {
+    const keyOnly = secretsStore();
+    await writeCredentialMaterial(keyOnly, "anthropic:default", { kind: "api-key", key: "sk-ant" });
+    const keyRouter = await routerFor(keyOnly);
+    const consoleCall = keyRouter.resolve("titles.model", settingsWith("anthropic/claude-sonnet-5", { titles: { model: "console/claude-sonnet-5" } }));
+    expect(isInternalRefusal(consoleCall) && consoleCall.reason).toBe("no-credential");
+
+    const consoleOnly = secretsStore();
+    await writeCredentialMaterial(consoleOnly, "anthropic:console", { kind: "bearer", token: "console-bearer-test" });
+    const consoleRouter = await routerFor(consoleOnly);
+    const keyCall = consoleRouter.resolve("titles.model", settingsWith("console/claude-sonnet-5", { titles: { model: "anthropic/claude-sonnet-5" } }));
+    expect(isInternalRefusal(keyCall) && keyCall.reason).toBe("no-credential");
   });
 });
 
@@ -618,8 +759,9 @@ describe("M-3: Winter never guesses a model on a provider the user did not choos
     // `groq` is eligible and credentialed, declares no terra slot, and is NOT provider.model's provider.
     await writeCredentialMaterial(secrets, "groq:default", { kind: "api-key", key: "sk-groq" });
     const router = await routerFor(secrets);
-    // A Claude default: rung 1 fails (not eligible), rung 2 fails (no codex/openai key), rung 3 names
-    // Groq so the refusal can point at it — but never invents a model on it.
+    // A Claude default with no Anthropic key: rung 1 fails (eligible but uncredentialed), rung 2
+    // fails (no codex/openai key), rung 3 names Groq so the refusal can point at it — but never
+    // invents a model on it.
     const call = router.resolve("titles.model", settingsWith("anthropic/claude-fable-1"));
     expect(isInternalRefusal(call)).toBe(true);
     if (!isInternalRefusal(call)) return;
@@ -687,14 +829,16 @@ describe("the reviewer's pin fallback", () => {
     expect(String(call.pinRefusal?.tag)).toBe("deepseek/deepseek-flash");
   });
 
-  test("pinned to anthropic/*: same — reviews on the default, pin reported as provider-unsupported", async () => {
-    const { router, settings } = await codexHome("anthropic/claude-opus-5");
+  // WS-23: `anthropic` and `console` pins are runnable now, so the fallback's provider-unsupported
+  // case is a provider whose adapter family the daemon cannot drive — Bedrock.
+  test("pinned to bedrock/*: reviews on the default, pin reported as provider-unsupported", async () => {
+    const { router, settings } = await codexHome("bedrock/anthropic.claude-sonnet-4-5");
     const call = router.resolve("reviewer.model", settings, { fallbackToDefault: true });
     expect(isInternalRefusal(call)).toBe(false);
     if (isInternalRefusal(call)) return;
     expect(String(call.tag)).toBe("codex-oauth/gpt-5.6-terra");
     expect(call.pinRefusal?.reason).toBe("provider-unsupported");
-    expect(call.pinRefusal?.detail).toBe("Anthropic can't be used for Winter's own jobs yet");
+    expect(call.pinRefusal?.detail).toBe("AWS Bedrock can't be used for Winter's own jobs yet");
   });
 
   test("a RUNNABLE pin is untouched — no fallback, no pinRefusal", async () => {

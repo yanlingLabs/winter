@@ -24,12 +24,12 @@ import { startDaemon } from "../daemon";
 import { runtimeStateOnline } from "./wiring";
 
 export type RuntimeStateProbeResult =
-  // A2: `runtimeSdk` (the router handle constructed — no `RuntimeSdkVersionError`, no bad brand) and
-  // `officialPeer` (`@anthropic-ai/claude-agent-sdk` loaded AND was declared to the router) are the
-  // two facts the compiled gate asserts, so a shipped daemon whose official leg (or whole runtime
-  // handle) cannot come up fails `verify:runtime-state` instead of a user's session. REPORTED, never
-  // folded into `ok`: the spine proof above stays what it was.
-  | { ok: true; home: string; dbPath: string; userVersion: number; online: true; runtimeSdk: boolean; officialPeer: boolean }
+  // A2: `runtimeSdk` (the router handle constructed — no `RuntimeSdkVersionError`, no bad brand) is
+  // the fact the compiled gate asserts, so a shipped daemon whose runtime handle cannot come up fails
+  // `verify:runtime-state` instead of a user's session. REPORTED, never folded into `ok`: the spine
+  // proof above stays what it was. (WS-23: the second fact, the official `claude` peer loading, is
+  // gone with that leg.)
+  | { ok: true; home: string; dbPath: string; userVersion: number; online: true; runtimeSdk: boolean }
   | { ok: false; error: string };
 
 export async function runRuntimeStateProbe(input: { home: string | undefined }): Promise<RuntimeStateProbeResult> {
@@ -46,7 +46,6 @@ export async function runRuntimeStateProbe(input: { home: string | undefined }):
     let dbPath: string;
     let online: boolean;
     const runtimeSdk = daemon.runtimeSdk !== undefined;
-    const officialPeer = daemon.runtimeSdk?.officialPeerSync() !== undefined;
     try {
       const state = runtimeStateOnline(daemon.runtimeState);
       online = state !== undefined;
@@ -68,7 +67,7 @@ export async function runRuntimeStateProbe(input: { home: string | undefined }):
     } finally {
       db.close();
     }
-    return { ok: true, home, dbPath, userVersion, online: true, runtimeSdk, officialPeer };
+    return { ok: true, home, dbPath, userVersion, online: true, runtimeSdk };
   } catch (err) {
     return { ok: false, error: String(err) };
   }

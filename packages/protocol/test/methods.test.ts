@@ -1426,39 +1426,46 @@ describe("provider.status (O5, P10a-3); WS-20: auth is gone, effective gains \"b
   });
 });
 
-// Minor 5a (fix wave, pre-merge review): `official.schema` (required at the source,
-// runtime-sdk/bundle-layout.ts's `VersionsJson.schema: 1`) used to be entirely absent from this
-// wire schema — a bare `z.object()` strips an unmodeled key rather than throwing, so any real
-// parse of a `versions.get` reply silently dropped it. Declared now; this pins that it survives.
-describe("versions.get official.schema (Minor 5a)", () => {
-  const fullOfficial = {
-    schema: 1 as const,
-    winterAgentSdk: "0.0.16",
-    winterRuntimeSdk: "0.0.9",
-    officialSdk: "0.3.250",
-    claudeCode: "0.3.250",
-    checksums: { winterPreSign: "abc", claude: "def" },
-    stagedAt: "2026-09-18T00:00:00.000Z",
+// Minor 5a (fix wave, pre-merge review): a bare `z.object()` strips an unmodeled key rather than
+// throwing, so a record's `schema` once vanished from every real parse of a `versions.get` reply.
+// WS-23: the record is `bundle.runtimes` (schema 2) beside `bundle.ant` now — the retired
+// `official` block (the `claude-official/VERSIONS.json` record) is gone; this pins both survive.
+describe("versions.get bundle records (Minor 5a, WS-23)", () => {
+  const runtimes = {
+    schema: 2 as const,
+    winterAgentSdk: "0.0.24",
+    winterRuntimeSdk: "0.0.14",
+    checksums: { winterPreSign: "abc" },
+    stagedAt: "2026-09-25T00:00:00.000Z",
+    winterSource: "platform-package" as const,
   };
+  const ant = { schema: 1 as const, tag: "v1.32.0", checksums: { antPreSign: "def" }, stagedAt: "2026-09-25T00:00:00.000Z" };
   const base = {
     ok: true as const,
-    core: "0.114.4",
-    pins: { winterAgentSdk: "0.0.16", winterRuntimeSdk: "0.0.9", claudeAgentSdk: "0.3.250" },
-    installed: { winterAgentSdk: "0.0.16" },
+    core: "0.119.0",
+    pins: { winterAgentSdk: "0.0.24", winterRuntimeSdk: "0.0.14" },
+    installed: { winterAgentSdk: "0.0.24" },
   };
 
-  test("official.schema survives a real parse — not silently stripped", () => {
-    const parsed = VersionsGetResult.parse({ ...base, official: fullOfficial });
-    expect(parsed.official).toEqual(fullOfficial);
+  test("both records survive a real parse — not silently stripped", () => {
+    const parsed = VersionsGetResult.parse({ ...base, bundle: { runtimes, ant } });
+    expect(parsed.bundle).toEqual({ runtimes, ant });
   });
 
-  test("official.schema is REQUIRED — omitting it now refuses rather than silently stripping", () => {
-    const { schema: _schema, ...officialWithoutSchema } = fullOfficial;
-    expect(VersionsGetResult.safeParse({ ...base, official: officialWithoutSchema }).success).toBe(false);
+  test("each record's schema is REQUIRED — omitting it refuses rather than silently stripping", () => {
+    const { schema: _schema, ...runtimesWithoutSchema } = runtimes;
+    expect(VersionsGetResult.safeParse({ ...base, bundle: { runtimes: runtimesWithoutSchema } }).success).toBe(false);
+    const { schema: _antSchema, ...antWithoutSchema } = ant;
+    expect(VersionsGetResult.safeParse({ ...base, bundle: { ant: antWithoutSchema } }).success).toBe(false);
   });
 
-  test("official: null still parses (no staged bundle)", () => {
-    expect(VersionsGetResult.parse({ ...base, official: null }).official).toBeNull();
+  test("the pre-WS-23 schema-1 runtimes record is refused, and each record is independently optional", () => {
+    expect(VersionsGetResult.safeParse({ ...base, bundle: { runtimes: { ...runtimes, schema: 1 } } }).success).toBe(false);
+    expect(VersionsGetResult.parse({ ...base, bundle: { ant } }).bundle).toEqual({ ant });
+  });
+
+  test("bundle: null still parses (nothing staged)", () => {
+    expect(VersionsGetResult.parse({ ...base, bundle: null }).bundle).toBeNull();
   });
 });
 

@@ -257,9 +257,8 @@ export interface RebindableProvider {
    * comment for why), so a settings.json stuck on a provider this can't rebuild to logs ONE line
    * AND retries a real credential lookup on every UNRELATED settings write too (an LSP toggle, a
    * plugin enable, …) for as long as it stays stuck — the same per-change narration
-   * `officialSubscriptionAuthFlagInert` already has elsewhere in this codebase (its own test pins
-   * "one line per settings change, not a one-time transition"), applied here rather than a novel
-   * choice. The alternative (dedup by `nextProviderId`) would trade that repeated diagnostic for
+   * `retiredRuntimeSettingKeys` and `winterLegDisabledKeys` have elsewhere in this codebase ("one line
+   * per settings change, not a one-time transition"), applied here rather than a novel choice. The alternative (dedup by `nextProviderId`) would trade that repeated diagnostic for
    * silence on every write after the first — not obviously better, and not what this does today.
    *
    * Never throws: every failure mode this function can hit is reported through the return value,

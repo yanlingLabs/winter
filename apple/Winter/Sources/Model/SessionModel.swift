@@ -320,6 +320,12 @@ struct ActivityItem: Equatable {
         /// the payload has to live here because this item is the transcript's ONLY anchor for the
         /// card, now that the pinned band that used to own it is gone.
         case interaction(InteractionRecord)
+        /// WS-23: a hook's notice (`hook_notice`) -- a blocked prompt's reason, a hook that stopped
+        /// the turn, or a hook's `systemMessage`. One quiet system line in the transcript, the same
+        /// activity-row style every other non-message event uses. Also (WS-23 review r1 I-3) a
+        /// continuity warning (`continuity_warning`): what a model switch could not carry across, a
+        /// summary before a switch to a smaller model, reasoning state that could not be saved.
+        case notice(text: String)
     }
     var kind: Kind
 }
@@ -752,6 +758,16 @@ enum SessionReducer {
                     s.subagents[i].activeSince = nil
                 }
             }
+        case .hookNotice(let v) where v.threadId == mainThread:
+            // WS-23: shown as a system line on the exchange it belongs to. A blocked prompt's
+            // exchange has no reply, so without this the user saw their bubble and nothing else.
+            let line = v.text.split(separator: "\n", omittingEmptySubsequences: true).joined(separator: " — ")
+            appendActivity(.notice(text: line), to: &s)
+        case .continuityWarning(let v) where v.threadId == mainThread:
+            // WS-23 review r1 I-3: what the conversation lost or what Winter did to it (a lossy
+            // switch, a summary before a switch, unsaved reasoning state) -- the same quiet line.
+            let line = v.text.split(separator: "\n", omittingEmptySubsequences: true).joined(separator: " — ")
+            appendActivity(.notice(text: line), to: &s)
         case .agentError(let v) where v.threadId == mainThread:
             s.turnRunning = false
             endOutstandingInteractions(&s) // clears pendingInteractions, freezing each as `.ended`

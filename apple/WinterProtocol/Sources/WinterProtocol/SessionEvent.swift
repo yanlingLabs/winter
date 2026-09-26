@@ -40,6 +40,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     case tileAction(TileAction)
     case toolReview(ToolReview)
     case notificationRequested(NotificationRequested)
+    case hookNotice(HookNotice)
+    case continuityWarning(ContinuityWarning)
     case childUpdate(ChildUpdate)
     case workflowStarted(WorkflowStarted)
     case workflowProgress(WorkflowProgress)
@@ -712,6 +714,34 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let message: String
     }
 
+    /// WS-23 (agent SDK hooks): a notice a HOOK asked the host to show -- a hook's `systemMessage`,
+    /// a blocked prompt's reason, a hook's `continue: false`, or the reason of a turn a hook stopped.
+    /// Persisted and replayed like any transcript row. `level` is a plain String ("info", "notice",
+    /// "suggestion", "warning"; validated on the TS producer side, like `ThreadCompleted.stopReason`).
+    /// `stopsTurn` marks the notice that ENDED the turn it belongs to.
+    public struct HookNotice: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let threadId: String
+        public let text: String
+        public let level: String
+        public let stopsTurn: Bool?
+    }
+
+    /// WS-23 (reasoning-state, review r1 I-3): a continuity warning the runtime raised -- what a model
+    /// switch could not carry across, a conversation summarized before a switch to a smaller model, a
+    /// turn whose reasoning state could not be saved, or a resume-time loss. `warning` is a plain String
+    /// (an open set, like `HookNotice.level`); `text` is the prose to show.
+    public struct ContinuityWarning: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let threadId: String
+        public let warning: String
+        public let text: String
+    }
+
     /// Dispatch (Phase 7): appended to the DISPATCH session's stream whenever a child session's
     /// status changes materially (spawned, turn ended, error, stopped). `status` is a plain
     /// String (like `ThreadCompleted.stopReason` above) — validation of its allowed values lives
@@ -953,6 +983,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case tile_action
         case tool_review
         case notification_requested
+        case hook_notice
+        case continuity_warning
         case child_update
         case workflow_started
         case workflow_progress
@@ -1012,6 +1044,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case .tile_action:          self = .tileAction(try TileAction(from: decoder))
         case .tool_review:          self = .toolReview(try ToolReview(from: decoder))
         case .notification_requested: self = .notificationRequested(try NotificationRequested(from: decoder))
+        case .hook_notice: self = .hookNotice(try HookNotice(from: decoder))
+        case .continuity_warning: self = .continuityWarning(try ContinuityWarning(from: decoder))
         case .child_update:         self = .childUpdate(try ChildUpdate(from: decoder))
         case .workflow_started:     self = .workflowStarted(try WorkflowStarted(from: decoder))
         case .workflow_progress:    self = .workflowProgress(try WorkflowProgress(from: decoder))
@@ -1186,6 +1220,14 @@ public enum SessionEvent: Codable, Equatable, Sendable {
             try v.encode(to: encoder)
             var c = encoder.container(keyedBy: TypeKey.self)
             try c.encode(Discriminator.notification_requested.rawValue, forKey: .type)
+        case .hookNotice(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.hook_notice.rawValue, forKey: .type)
+        case .continuityWarning(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.continuity_warning.rawValue, forKey: .type)
         case .childUpdate(let v):
             try v.encode(to: encoder)
             var c = encoder.container(keyedBy: TypeKey.self)

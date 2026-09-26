@@ -13,7 +13,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { REQUIRED_CLAUDE_AGENT_SDK, REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK } from "../packages/core/src/runtime-sdk/versions";
+import { REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK } from "../packages/core/src/runtime-sdk/versions";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const CI_YML = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
@@ -74,11 +74,9 @@ describe("packages/core/package.json's SDK pins agree with versions.ts's REQUIRE
     expect(bareVersion(range!)).toBe(REQUIRED_WINTER_RUNTIME_SDK);
   });
 
-  test("claude-agent-sdk is pinned EXACT (no ^/~ range) and matches REQUIRED_CLAUDE_AGENT_SDK", () => {
-    const range = CORE_PACKAGE_JSON.dependencies?.["@anthropic-ai/claude-agent-sdk"];
-    expect(range).toBeDefined();
-    expect(range).toBe(REQUIRED_CLAUDE_AGENT_SDK);
-    expect(range).not.toMatch(/^[\^~]/);
+  // WS-23: the official leg is retired — the daemon depends on no claude-agent-sdk at all.
+  test("claude-agent-sdk is no longer a daemon dependency", () => {
+    expect(CORE_PACKAGE_JSON.dependencies?.["@anthropic-ai/claude-agent-sdk"]).toBeUndefined();
   });
 });
 

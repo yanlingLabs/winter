@@ -123,7 +123,11 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     // 0.0.22 → 0.0.24 (the first-party catalog refresh + the Anthropic adapter fix; 0.0.23 was published
     // but never pinned): `git diff v0.0.22 <0.0.24> -- packages/runtime/src/provider/keychain-store.ts`
     // came back EMPTY (0 lines); the mirror stands unchanged.
-    expect(pkg.version).toBe("0.0.24");
+    //
+    // 0.0.24 → 0.0.27 (WS-23; 0.0.25 and 0.0.26 were tagged but never published): `git diff v0.0.24
+    // v0.0.27 -- packages/runtime/src/provider/keychain-store.ts` came back EMPTY (0 lines); the mirror
+    // stands unchanged.
+    expect(pkg.version).toBe("0.0.27");
   });
 
 

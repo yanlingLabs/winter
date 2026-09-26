@@ -67,12 +67,22 @@ export interface ConfiguredMcpInput {
   log?: (message: string) => void;
 }
 
-function stdio(cfg: { command: string; args?: string[]; env?: Record<string, string> }): McpServerConfig {
+type VersionNegotiation = NonNullable<McpServerSettingsEntry["versionNegotiation"]>;
+
+/** WS-23: a server's own `versionNegotiation`, copied (never shared — the `pin` form is an object)
+ *  and forwarded verbatim; absent stays absent, so the runtime's per-transport default applies. */
+function negotiation(v: VersionNegotiation | undefined): { versionNegotiation?: VersionNegotiation } {
+  if (v === undefined) return {};
+  return { versionNegotiation: typeof v === "string" ? v : { pin: v.pin } };
+}
+
+function stdio(cfg: { command: string; args?: string[]; env?: Record<string, string>; versionNegotiation?: VersionNegotiation }): McpServerConfig {
   return {
     type: "stdio",
     command: cfg.command,
     ...(cfg.args === undefined ? {} : { args: [...cfg.args] }),
     ...(cfg.env === undefined ? {} : { env: { ...cfg.env } }),
+    ...negotiation(cfg.versionNegotiation),
   };
 }
 
@@ -80,10 +90,15 @@ function stdio(cfg: { command: string; args?: string[]; env?: Record<string, str
  *  3b) straight onto the matching SDK config — no translation beyond copying the fields the SDK
  *  type actually has (`tools`/`timeout`/`alwaysLoad` are NOT in Winter's settings grammar today, so
  *  they are never set here; the SDK treats an absent optional field the same as one explicitly
- *  omitted). */
+ *  omitted). WS-23: `versionNegotiation` IS in the grammar, and rides every transport. */
 function toMcpServerConfig(entry: McpServerSettingsEntry): McpServerConfig {
   if (entry.type === "stdio") return stdio(entry);
-  return { type: entry.type, url: entry.url, ...(entry.headers === undefined ? {} : { headers: { ...entry.headers } }) };
+  return {
+    type: entry.type,
+    url: entry.url,
+    ...(entry.headers === undefined ? {} : { headers: { ...entry.headers } }),
+    ...negotiation(entry.versionNegotiation),
+  };
 }
 
 /** The `Options.mcpServers` entries Winter's configuration contributes to ONE session, keyed as the

@@ -13,7 +13,7 @@
  */
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { parseVersionsJson, winterSourceOf, type VersionsJson } from "../packages/core/src/runtime-sdk/bundle-layout";
+import { parseAntVersionsJson, parseVersionsJson, winterSourceOf, type VersionsJson } from "../packages/core/src/runtime-sdk/bundle-layout";
 import { parseAntPin, type AntPin } from "./fetch-ant";
 
 export interface Preflight {
@@ -49,7 +49,7 @@ export const GH_REPO = "yanlingLabs/winter";
  * `<description>` element (CDATA-wrapped release notes — Sparkle has always supported this; it is
  * new to THIS repo's template, never a new element invented for this) — never a bespoke element.
  * `embeddedRuntimesDescriptionLine` is the one caller release.ts uses to fill it, naming the
- * embedded runtime pair for a release.
+ * embedded runtime for a release.
  *
  * Item 9 (2026-09-17 daemon-settings-surface plan) fills the SAME element with the release notes as
  * HTML (`appcastDescription`), so the text can now be long and marked up. Two consequences handled
@@ -532,11 +532,13 @@ export function publishGuard(i: PublishGuardInputs): PublishGuardResult {
 // constant this pipeline needs to nudge about.
 
 /**
- * P8d-2: the one line naming the embedded runtime pair, threaded into `appcastItem`'s
- * `description` field (never a new Sparkle element — see that function's own doc).
+ * P8d-2: the one line naming the embedded runtime, threaded into `appcastItem`'s `description`
+ * field (never a new Sparkle element — see that function's own doc). WS-23: it named a PAIR
+ * (`… · Claude Agent SDK y`) while the official runtime shipped; the app's release-notes parser
+ * promotes whatever the first paragraph says to the subtitle, so the shorter line needs nothing there.
  */
-export function embeddedRuntimesDescriptionLine(v: { winterAgentSdk: string; officialSdk: string }): string {
-  return `Winter agent SDK ${v.winterAgentSdk} · Claude Agent SDK ${v.officialSdk}`;
+export function embeddedRuntimesDescriptionLine(v: { winterAgentSdk: string }): string {
+  return `Winter agent SDK ${v.winterAgentSdk}`;
 }
 
 export interface VersionsJsonPinCheck {
@@ -548,30 +550,22 @@ export interface VersionsJsonPinCheck {
 }
 
 /**
- * The PURE half of release.ts's `claude` gate (P8d-2): does the staged `VERSIONS.json` TEXT parse
- * and match this build's pins (`parseVersionsJson` — `bundle-layout.ts`, the ladder's own gate,
- * reused rather than re-typed here), AND does its recorded `checksums.claude` equal the ACTUAL
- * SHA-256 of the binary release.ts just hashed off disk? The second check is what catches a stale
- * or tampered embed that a valid-looking (even pin-matching) `VERSIONS.json` could otherwise paper
- * over — the codesign/TeamIdentifier half of the gate stays in release.ts itself (real `codesign`
- * shell-outs, not pure). Aggregates rather than throwing so release.ts can report every mismatch
- * in one `fail()` call, same shape as `preflight`.
+ * The PURE half of release.ts's runtimes-record gate (P8d-2): does the staged `runtimes/VERSIONS.json`
+ * TEXT parse and match this build's pins (`parseVersionsJson` — `bundle-layout.ts`, the ladder's own
+ * gate, reused rather than re-typed here)? The recorded `winterPreSign` checksum is checked by the
+ * row-16 gates (`row16IdentityCheck`/`row16ProvenanceCheck`), and `ant`'s by `verifyAntEmbed`.
+ * WS-23: this used to also compare `checksums.claude` against the embedded `claude` binary; the
+ * official runtime is no longer embedded. Aggregates rather than throwing so release.ts can report
+ * every mismatch in one `fail()` call, same shape as `preflight`.
  */
-export function verifyVersionsJsonAgainstPins(input: { versionsJsonText: string; claudeSha256: string }): VersionsJsonPinCheck {
+export function verifyVersionsJsonAgainstPins(input: { versionsJsonText: string }): VersionsJsonPinCheck {
   let versions: VersionsJson;
   try {
     versions = parseVersionsJson(input.versionsJsonText);
   } catch (err) {
     return { ok: false, failures: [`VERSIONS.json: ${err instanceof Error ? err.message : String(err)}`] };
   }
-  const failures: string[] = [];
-  if (versions.checksums.claude !== input.claudeSha256) {
-    failures.push(
-      `VERSIONS.json checksums.claude (${versions.checksums.claude}) does not match the embedded claude ` +
-        `binary's actual SHA-256 (${input.claudeSha256}) — the embedded file does not match what was staged/recorded`,
-    );
-  }
-  return { ok: failures.length === 0, failures, versions };
+  return { ok: true, failures: [], versions };
 }
 
 export interface AntEmbedCheck {
@@ -583,9 +577,8 @@ export interface AntEmbedCheck {
 
 /**
  * Winter Phase 10a (Task L3, fix round 2): the PURE half of release.ts's `ant` CONTENT-IDENTITY
- * gate — mirrors `row16IdentityCheck`'s shape for `winter` far more closely than
- * `verifyVersionsJsonAgainstPins`'s shape for `claude` does, because `ant`, like `winter`, is
- * RE-SIGNED at embed time (never claude's "embedded unmodified" shape): a signature blob changes
+ * gate — mirrors `row16IdentityCheck`'s shape for `winter`, because `ant`, like `winter`, is
+ * RE-SIGNED at embed time: a signature blob changes
  * a Mach-O's bytes, so no hash of the ALREADY-SIGNED embedded file can ever equal a pre-sign pin
  * (measured: codesign --remove-signature on the real vendored ant binary does NOT restore the
  * original bytes — it produced a file ~256KB smaller — so "strip the signature back off and
@@ -595,9 +588,11 @@ export interface AntEmbedCheck {
  * So this checks the STAGE-TIME PRE-SIGN hash instead — `stagedAntPreSignSha256`, the value
  * `embed-runtimes.sh` computes on the staged `Contents/Resources/runtimes/ant/ant` IMMEDIATELY
  * after copying it from `vendor/ant/<tag>/ant` and BEFORE `codesign` ever touches it, recorded
- * into the staged `claude-official/VERSIONS.json`'s `checksums.ant` field (`bundle-layout.ts`'s
- * `VersionsJson`) — against the repo-root VERSIONS.json's git-committed `ant.binarySha256` pin.
- * This proves "the file embed-runtimes.sh signed is the pinned, committed one".
+ * in ant's OWN staged record, `runtimes/ant/VERSIONS.json` (`checksums.antPreSign`,
+ * `bundle-layout.ts`'s `AntVersionsJson`; WS-23 — it used to ride the claude record as
+ * `checksums.ant`) — against the repo-root VERSIONS.json's git-committed `ant.binarySha256` pin.
+ * The staged record's `tag` must name the pinned tag too. This proves "the file embed-runtimes.sh
+ * signed is the pinned, committed one".
  *
  * That alone does not prove "the file sitting at `embeddedAntPath` TODAY is still that exact
  * signed file" — release.ts supplies the OTHER half of that proof itself (real `codesign` shell-
@@ -608,13 +603,13 @@ export interface AntEmbedCheck {
  * verified-unchanged-since-signing — a complete, unbroken chain, never just the vendor source
  * hashed in isolation (which proves nothing about what actually shipped in the bundle).
  *
- * `stagedAntPreSignSha256` is `undefined` when the staged VERSIONS.json carries no `checksums.ant`
- * at all (a bundle built by an embed-runtimes.sh that predates this recording, or one with no
- * vendored ant) — a named failure, never a silent pass. Aggregates rather than throwing so
- * release.ts can report every mismatch in one `fail()` call, same shape as
+ * `stagedAntVersionsText` is `undefined` when the bundle carries no `runtimes/ant/VERSIONS.json` at
+ * all (a bundle built by an embed-runtimes.sh that predates WS-23, or one with no vendored ant) — a
+ * named failure, never a silent pass; so is a record that does not parse. Aggregates rather than
+ * throwing so release.ts can report every mismatch in one `fail()` call, same shape as
  * `preflight`/`verifyVersionsJsonAgainstPins`.
  */
-export function verifyAntEmbed(input: { versionsJsonText: string; stagedAntPreSignSha256: string | undefined }): AntEmbedCheck {
+export function verifyAntEmbed(input: { versionsJsonText: string; stagedAntVersionsText: string | undefined }): AntEmbedCheck {
   let pin: AntPin;
   try {
     pin = parseAntPin(input.versionsJsonText);
@@ -622,15 +617,27 @@ export function verifyAntEmbed(input: { versionsJsonText: string; stagedAntPreSi
     return { ok: false, failures: [`VERSIONS.json: ${err instanceof Error ? err.message : String(err)}`] };
   }
   const failures: string[] = [];
-  if (input.stagedAntPreSignSha256 === undefined) {
+  if (input.stagedAntVersionsText === undefined) {
     failures.push(
-      `the staged claude-official/VERSIONS.json carries no checksums.ant — it was not staged by a fix-round-2-or-later ` +
-        `embed-runtimes.sh (or the vendored ant was absent at stage time); rebuild before releasing`,
+      `the bundle carries no runtimes/ant/VERSIONS.json — it was not staged by a WS-23-or-later embed-runtimes.sh ` +
+        `(or the vendored ant was absent at stage time); rebuild before releasing`,
     );
-  } else if (pin.binarySha256 !== input.stagedAntPreSignSha256) {
+    return { ok: false, failures, pin };
+  }
+  let staged: ReturnType<typeof parseAntVersionsJson>;
+  try {
+    staged = parseAntVersionsJson(input.stagedAntVersionsText);
+  } catch (err) {
+    failures.push(`runtimes/ant/VERSIONS.json: ${err instanceof Error ? err.message : String(err)}`);
+    return { ok: false, failures, pin };
+  }
+  if (staged.tag !== pin.tag) {
+    failures.push(`runtimes/ant/VERSIONS.json names ant ${staged.tag}, but VERSIONS.json pins ant.tag=${pin.tag} — rebuild before releasing`);
+  }
+  if (pin.binarySha256 !== staged.checksums.antPreSign) {
     failures.push(
       `VERSIONS.json ant.binarySha256 (${pin.binarySha256}) does not match the STAGED ant binary's recorded pre-sign ` +
-        `SHA-256 (${input.stagedAntPreSignSha256}) — the file embed-runtimes.sh signed does not match the pinned, ` +
+        `SHA-256 (${staged.checksums.antPreSign}) — the file embed-runtimes.sh signed does not match the pinned, ` +
         `committed digest; re-run \`bun run scripts/fetch-ant.ts\` (or investigate tampering) before releasing`,
     );
   }

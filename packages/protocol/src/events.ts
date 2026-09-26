@@ -537,6 +537,45 @@ export const ToolReviewEvent = ThreadBase.extend({
  *  clients at emission time (`SessionHub.attachedCount`, checked by the engine's `notify` bridge
  *  in `engine.ts`) — see `agent/notify-fallback.ts`'s own doc comment for why that fallback is
  *  argv-safe against injection. */
+/** WS-23 (agent SDK hooks): a notice a HOOK asked the host to show -- the runtime's
+ *  `system/informational` frame (a hook's `systemMessage`, a blocked prompt's reason, a hook's
+ *  `continue: false`), and the reason of a turn a hook stopped (`result.terminal_reason:
+ *  "hook_stopped"`). Persisted and replayed like any transcript row: it explains why a turn ended
+ *  without the reply a user was waiting for, which is exactly what a client that reattaches later
+ *  must still be able to show. `stopsTurn` marks the notice that ENDED the turn it belongs to.
+ *
+ *  No existing variant says this honestly: `agent_error` would paint a hook's deliberate stop as a
+ *  failure (and clients treat it as the end of a turn), `notification_requested` raises a native
+ *  banner, and `assistant_message` would put the hook's words in the model's mouth. `text` is
+ *  bounded by the projector (the SDK already caps each hook contribution at 10,000 characters). */
+export const HookNoticeEvent = ThreadBase.extend({
+  type: z.literal("hook_notice"),
+  text: z.string().min(1).max(12_000),
+  level: z.enum(["info", "notice", "suggestion", "warning"]),
+  stopsTurn: z.boolean().optional(),
+});
+
+/** WS-23 (reasoning-state, review r1 I-3): a CONTINUITY warning the runtime raised -- what the
+ *  conversation lost, or what Winter did to it, that the user must be told about: a model switch that
+ *  cannot carry everything across (`model_switch_lossy`), a conversation summarized before a switch to a
+ *  smaller model (`switch_compaction`), a turn whose reasoning state could not be saved
+ *  (`reasoning_state_unsaved`), a replay dropped across domains (`cross_domain_replay_dropped`) and a
+ *  child refused its provider (`child_provider_refused`). The agent SDK's `system/continuity_warning`
+ *  frame, persisted and replayed like any transcript row. The three RESUME-TIME kinds
+ *  (`provider_state_missing`, `provider_state_deleted`, `sidecar_unreadable`) are logged, never
+ *  projected: the runtime re-emits them on every incarnation (review r2).
+ *
+ *  No existing variant says this honestly: `hook_notice` is by definition a HOOK's notice, `agent_error`
+ *  would paint a completed turn as failed, and `notification_requested` raises a native banner.
+ *  `warning` is an open string (the SDK may add a kind; a client renders `text` and needs no table),
+ *  bounded; `text` is the runtime's own prose about counts and model ids -- never provider state --
+ *  bounded by the projector. */
+export const ContinuityWarningEvent = ThreadBase.extend({
+  type: z.literal("continuity_warning"),
+  warning: z.string().min(1).max(64),
+  text: z.string().min(1).max(4_000),
+});
+
 export const NotificationRequestedEvent = ThreadBase.extend({
   type: z.literal("notification_requested"),
   title: z.string().min(1).max(100),
@@ -868,6 +907,8 @@ export const SessionEvent = z.discriminatedUnion("type", [
   TileActionEvent,
   ToolReviewEvent,
   NotificationRequestedEvent,
+  HookNoticeEvent,
+  ContinuityWarningEvent,
   ChildUpdateEvent,
   WorkflowStartedEvent,
   WorkflowProgressEvent,

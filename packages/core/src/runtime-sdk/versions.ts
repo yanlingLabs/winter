@@ -1,18 +1,14 @@
-/// <reference path="./claude-agent-sdk-manifest.ts" />
-// (The reference pulls the ambient manifest declaration into EVERY program that compiles this file —
-// the CLI's tsconfig reaches core only through its imports, never by globbing core's `src`.)
 import { SDK_VERSION } from "@yanlinglabs/winter-agent-sdk";
 import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
-// The wrapper's manifest, EMBEDDED by `bun build --compile` (typed by `claude-agent-sdk-manifest.ts`
-// — the package's `exports` map does not list `./package.json`, so TypeScript cannot resolve it on
-// its own; bun resolves and bundles it regardless, measured in a `--compile` binary). A JSON file,
-// not the SDK's code: importing it evaluates nothing of the SDK.
-import claudeAgentSdkManifest from "@anthropic-ai/claude-agent-sdk/package.json" with { type: "json" };
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.24";
-/** Bumped to 0.0.24 (2026-09-25; 0.0.23 was published the same day but never pinned here): 0.0.23's
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.27";
+/** Bumped to 0.0.27 (2026-09-26, WS-23; 0.0.25 and 0.0.26 were tagged but their release CI stopped at the
+ *  test step, so neither was published): every model on the Winter SDK (xAI Responses, MCP v2, hooks, the
+ *  Anthropic hardening + caching, per-message effort, mid-conversation tool changes, the reasoning-state
+ *  sidecar, and the embedded runtime `@yanlinglabs/winter-agent-runtime`).
+ *  Before that, bumped to 0.0.24 (2026-09-25; 0.0.23 was published the same day but never pinned here): 0.0.23's
  *  first-party provider/model catalog refresh — 213 providers, 1000
  *  models, 22 families (China-region and plan/dialect twins as separate providers, GPT-6 Sol/Luna,
  *  Opus 5.5, Xiaomi MiMo, Tencent TokenHub, the Meta Model API, …); the `gpt` family's sol/luna slots
@@ -42,8 +38,8 @@ export const REQUIRED_WINTER_AGENT_SDK = "0.0.24";
  *  on the official leg — measured by its own tests, a cloned repository's `hooks/hooks.json` ran on a
  *  Code session's first prompt through it, with no trust decision anywhere — and gained
  *  `OptionsTemplatePolicy.plugins`, through which the daemon hands the SAME skills-only plugin views the
- *  Winter leg gets (`official-options.ts`'s `skillPlugins`). A router below this still names the
- *  project dir itself, so this pin is also the floor.
+ *  Winter leg gets. A router below this still names the project dir itself, so this pin is also the
+ *  floor.
  *
  *  0.0.10 (the official leg's LIVE permission-mode change): the router's `OfficialQuery`
  *  gained `setPermissionMode(mode)`, so `OfficialSession.setPolicy` can tell a RUNNING claude child
@@ -55,29 +51,10 @@ export const REQUIRED_WINTER_AGENT_SDK = "0.0.24";
  *  Readonly<Record<string, unknown>>` — the router-package wall `official-options.ts`'s own comment
  *  on `OfficialInputDeps.agents` used to name (a router version this low has no field to forward the
  *  daemon's merged subagent definitions through) is CLOSED as of that pin. */
-export const REQUIRED_WINTER_RUNTIME_SDK = "0.0.13";
-/** P8c-3/versions: the official peer is pinned EXACT (`"0.3.250"` in package.json, no `^`) — the
- *  ladder's package door and the router's own `assertVersionMatrix` both key off this string
- *  matching the installed wrapper's manifest, never a range. */
-export const REQUIRED_CLAUDE_AGENT_SDK = "0.3.250";
-
-/**
- * The `@anthropic-ai/claude-agent-sdk` wrapper's own declared version — the copy THIS process
- * actually loads — or `undefined` when it cannot be established (never a throw).
- *
- * A2 (2026-09-22): read from the manifest the bundler EMBEDS beside the wrapper's code (the static
- * JSON import above), not from a `createRequire` probe of `node_modules`. That probe answered
- * `undefined` inside every compiled `$bunfs` binary — there is no `node_modules` there — so the
- * shipped daemon handed the router a loaded `claude` peer with no declared version, and the
- * router's version matrix (which then looks for a `package.json` on disk itself) threw
- * `RuntimeSdkVersionError`, failing the whole handle. That was masked in the dist app only because
- * the peer never loaded at all there (the missing JIT entitlement — see `create.ts`). The bundled
- * manifest is the same file in dev and compiled builds, so this is now the one answer everywhere.
- */
-export function installedClaudeAgentSdkVersion(): string | undefined {
-  const version = (claudeAgentSdkManifest as { version?: unknown } | undefined)?.version;
-  return typeof version === "string" && version !== "" ? version : undefined;
-}
+export const REQUIRED_WINTER_RUNTIME_SDK = "0.0.14";
+// WS-23: `REQUIRED_CLAUDE_AGENT_SDK`, `installedClaudeAgentSdkVersion` (and the embedded manifest it
+// read) and `OFFICIAL_SUBSCRIPTION_AUTH_APPROVED` are gone with the official `claude` leg; the daemon
+// no longer depends on `@anthropic-ai/claude-agent-sdk` at all.
 
 /**
  * Daemon settings surface (2026-09-17 plan, item 3): the installed `@yanlinglabs/winter-runtime-sdk`
@@ -85,8 +62,8 @@ export function installedClaudeAgentSdkVersion(): string | undefined {
  * `$bunfs` binary, per `readResolvedManifestVersion`'s own doc (it walks up from the resolved entry
  * file to find a `package.json`, which does not exist inside the bundle), never a throw. This is
  * NOT `WINTER_PEER_VERSIONS.winterAgentSdk` (the WRAPPER's own `SDK_VERSION`, re-exported by that
- * package) — it is the ROUTER package's own manifest, the third installed peer `versions.get` reports
- * alongside it and `installedClaudeAgentSdkVersion()`.
+ * package) — it is the ROUTER package's own manifest, the second installed peer `versions.get`
+ * reports.
  */
 export function installedWinterRuntimeSdkVersion(): string | undefined {
   try {
@@ -97,26 +74,11 @@ export function installedWinterRuntimeSdkVersion(): string | undefined {
 }
 
 /** Host-declared peer versions (router 0.0.2 consults these FIRST — the only answer that works
- *  inside a compiled $bunfs binary, where createRequire cannot resolve a manifest). P8b-4.
- *  `claudeAgentSdk` is OMITTED (never `undefined`-valued) when the optional peer is not installed —
- *  a Winter-only host must not carry a stray key the router's version matrix would try to satisfy. */
-export const WINTER_PEER_VERSIONS: { winterAgentSdk: string; claudeAgentSdk?: string } = {
+ *  inside a compiled $bunfs binary, where createRequire cannot resolve a manifest). P8b-4. WS-23: the
+ *  Winter peer is the only one. */
+export const WINTER_PEER_VERSIONS: { winterAgentSdk: string } = {
   winterAgentSdk: SDK_VERSION,
-  ...(installedClaudeAgentSdkVersion() === undefined ? {} : { claudeAgentSdk: installedClaudeAgentSdkVersion()! }),
 };
-
-/**
- * Winter Phase 10a fix wave (C1-interim; F1 corrected the comparison target): the router version
- * the console auth arm needs. A router below this floor forwards only `MINIMAL_OS_VARIABLES` from
- * `base` and runs `officialCredentialPlan` itself regardless of arm — so a console child spawned
- * against it would get the OAuth bearer profile injected as `ANTHROPIC_API_KEY` by the router's own
- * api-key-family logic, not read the profile file at all. `official-options.ts`'s
- * `officialInputFor` compares the COMPILE-TIME PIN (`REQUIRED_WINTER_RUNTIME_SDK`, above) against
- * this constant — never a runtime probe of the installed package (F1: that probe always answers
- * `undefined` inside a compiled `$bunfs` binary) — so the refusal flips off automatically the
- * moment a future pin bump actually raises `REQUIRED_WINTER_RUNTIME_SDK` to this floor or above.
- */
-export const CONSOLE_AUTH_ROUTER_MIN = "0.0.4";
 
 /**
  * Winter Phase 10a fix wave (F2 corrected design, M-A): the `@yanlinglabs/winter-agent-sdk` floor
@@ -125,28 +87,12 @@ export const CONSOLE_AUTH_ROUTER_MIN = "0.0.4";
  * --console`/`claude auth logout` — which was measured NOT to write the profile file at all (it
  * mints a Console API key into `CLAUDE_CONFIG_DIR` instead) — rather than the single intended door,
  * `ant auth login --profile winter`. Compared against the COMPILE-TIME PIN
- * (`REQUIRED_WINTER_AGENT_SDK`, above), same F1 pattern as `CONSOLE_AUTH_ROUTER_MIN`: never a
- * runtime probe of the installed package, so the refusal flips off automatically the moment a pin
- * bump actually raises `REQUIRED_WINTER_AGENT_SDK` to this floor or above.
+ * (`REQUIRED_WINTER_AGENT_SDK`, above), never a runtime probe of the installed package (F1: that
+ * probe always answers `undefined` inside a compiled `$bunfs` binary), so the refusal flips off
+ * automatically the moment a pin bump actually raises `REQUIRED_WINTER_AGENT_SDK` to this floor or
+ * above.
  */
 export const CONSOLE_BROKER_SDK_MIN = "0.0.9";
-
-/**
- * Pre-release hardening (P9c-1 amendment): the compile-time approval gate on
- * `runtimes.official.subscriptionAuth` — same posture as the router's own
- * `D14_CLAUDE_OAUTH_APPROVED_DEFAULT` (a compile-time approval constant kept separate from any
- * runtime setting; `runtime-sdk/create.ts` reads it, never a settings key, at its own two call
- * sites). The official Claude leg must never authenticate with a claude.ai subscription until
- * Anthropic approves it for this integration — so the settings flag ALONE must never be able to
- * open that door. `officialSubscriptionAuthEnabled` (`../settings.ts`) ANDs the flag against this
- * constant; flipping the flag in settings.json while this constant stays `false` is INERT (logged
- * once per settings change, `settings-apply.ts`/`daemon.ts`), never a silent widen. Only a reviewed
- * code change to THIS constant — never a test, never a settings override in production — may flip
- * it. Tests that need to exercise the "approved" branch use the injectable override parameter
- * `officialSubscriptionAuthEnabled`/`OfficialInputDeps.officialSubscriptionAuthApproved` accept,
- * never by editing this constant.
- */
-export const OFFICIAL_SUBSCRIPTION_AUTH_APPROVED = false;
 
 /**
  * A plain per-component numeric comparison (`"0.0.10"` sorts ABOVE `"0.0.4"`, unlike a
