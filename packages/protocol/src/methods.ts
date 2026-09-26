@@ -584,10 +584,23 @@ export const McpDisableResult = z.object({ ok: z.literal(true), name: z.string()
  * still happens once, on the daemon side; this schema only bounds the wire shape. LOCAL role only
  * (never added to `REMOTE_ALLOWED_METHODS`), same posture as `mcp.enable`/`mcp.disable`.
  */
+/**
+ * WS-24: a server's own MCP protocol-revision choice — hand-mirrors core's `McpVersionNegotiationSetting`
+ * (`agent/mcp/project-file.ts`, the agent SDK's `McpVersionNegotiation`): `"legacy"` (the 2025
+ * `initialize` handshake), `"auto"` (probe `server/discover`, then fall back) or `{ pin }` (exactly that
+ * revision). It must be declared here because zod strips an undeclared key: without it a server added
+ * through `mcp.add` (or `winter mcp add-json`, which validates against this schema) silently lost the
+ * choice the settings file and `runtime-sdk/external-mcp.ts` both carry. Nothing here interprets it.
+ */
+export const McpVersionNegotiationSchema = z.union([
+  z.literal("legacy"),
+  z.literal("auto"),
+  z.object({ pin: z.string().min(1) }),
+]);
 export const McpAddEntrySchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("stdio"), command: z.string().min(1), args: z.array(z.string()).optional(), env: z.record(z.string(), z.string()).optional() }),
-  z.object({ type: z.literal("http"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional() }),
-  z.object({ type: z.literal("sse"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional() }),
+  z.object({ type: z.literal("stdio"), command: z.string().min(1), args: z.array(z.string()).optional(), env: z.record(z.string(), z.string()).optional(), versionNegotiation: McpVersionNegotiationSchema.optional() }),
+  z.object({ type: z.literal("http"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional(), versionNegotiation: McpVersionNegotiationSchema.optional() }),
+  z.object({ type: z.literal("sse"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional(), versionNegotiation: McpVersionNegotiationSchema.optional() }),
 ]);
 /**
  * WS-21 (spec §4.4, `winter mcp add` = `claude mcp add`): the three MCP scopes, claude's names and

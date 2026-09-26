@@ -131,10 +131,12 @@ export interface McpAddParsed {
   transportRaw?: string;
   envArgs: string[];
   headerArgs: string[];
+  /** WS-24: `--version-negotiation legacy|auto|<revision>` — Winter-only (claude has no such flag). */
+  versionNegotiationRaw?: string;
 }
 export type McpAddParseResult = { kind: "ok"; parsed: McpAddParsed } | { kind: "usageError"; message: string };
 
-const ADD_USAGE = "usage: winter mcp add [-s local|user|project] [-t stdio|sse|http] [-e KEY=value...] [-H \"Name: value\"...] <name> <commandOrUrl> [-- args...]";
+const ADD_USAGE = "usage: winter mcp add [-s local|user|project] [-t stdio|sse|http] [-e KEY=value...] [-H \"Name: value\"...] [--version-negotiation legacy|auto|<revision>] <name> <commandOrUrl> [-- args...]";
 
 /** Flags may appear anywhere before the positionals; a bare `--` (commander's own convention, kept
  *  identical here) stops FLAG parsing only — positional consumption continues across it exactly as
@@ -148,6 +150,7 @@ const ADD_USAGE = "usage: winter mcp add [-s local|user|project] [-t stdio|sse|h
 export function parseMcpAddArgs(args: string[]): McpAddParseResult {
   let scopeRaw: string | undefined;
   let transportRaw: string | undefined;
+  let versionNegotiationRaw: string | undefined;
   const envArgs: string[] = [];
   const headerArgs: string[] = [];
   const positionals: string[] = [];
@@ -161,6 +164,7 @@ export function parseMcpAddArgs(args: string[]): McpAddParseResult {
       if (tok === "-t" || tok === "--transport") { transportRaw = args[++i]; continue; }
       if (tok === "-e" || tok === "--env") { const v = args[++i]; if (v !== undefined) envArgs.push(v); continue; }
       if (tok === "-H" || tok === "--header") { const v = args[++i]; if (v !== undefined) headerArgs.push(v); continue; }
+      if (tok === "--version-negotiation") { versionNegotiationRaw = args[++i] ?? ""; continue; }
     }
     positionals.push(tok);
   }
@@ -170,7 +174,7 @@ export function parseMcpAddArgs(args: string[]): McpAddParseResult {
   if (!name) return { kind: "usageError", message: `Error: Server name is required.\n${ADD_USAGE}` };
   if (!commandOrUrl) return { kind: "usageError", message: `Error: Command is required when server name is provided.\n${ADD_USAGE}` };
   const trailingArgs = positionals.slice(2);
-  return { kind: "ok", parsed: { name, commandOrUrl, trailingArgs, scopeRaw, transportRaw, envArgs, headerArgs } };
+  return { kind: "ok", parsed: { name, commandOrUrl, trailingArgs, scopeRaw, transportRaw, envArgs, headerArgs, ...(versionNegotiationRaw === undefined ? {} : { versionNegotiationRaw }) } };
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -234,10 +238,13 @@ export type McpEntryBuildResult = { kind: "ok"; entry: McpServerSettingsEntry } 
  *  rule (a narrower choice of the write door, not of what the file format accepts — see this file's
  *  own header); that's the route's job (it knows the scope, this function doesn't need to). */
 export function buildMcpEntry(parsed: McpAddParsed, transport: McpTransport): McpEntryBuildResult {
+  const negotiationR = parseMcpVersionNegotiation(parsed.versionNegotiationRaw);
+  if (negotiationR.kind === "invalid") return { kind: "error", message: negotiationR.message };
+  const negotiation = negotiationR.value === undefined ? {} : { versionNegotiation: negotiationR.value };
   if (transport === "http" || transport === "sse") {
     const headersR = parseMcpHeaders(parsed.headerArgs);
     if (headersR.kind === "invalid") return { kind: "error", message: headersR.message };
-    return { kind: "ok", entry: { type: transport, url: parsed.commandOrUrl, ...(Object.keys(headersR.headers).length > 0 ? { headers: headersR.headers } : {}) } };
+    return { kind: "ok", entry: { type: transport, url: parsed.commandOrUrl, ...(Object.keys(headersR.headers).length > 0 ? { headers: headersR.headers } : {}), ...negotiation } };
   }
   const envR = parseMcpEnv(parsed.envArgs);
   if (envR.kind === "invalid") return { kind: "error", message: envR.message };
@@ -247,8 +254,26 @@ export function buildMcpEntry(parsed: McpAddParsed, transport: McpTransport): Mc
       type: "stdio", command: parsed.commandOrUrl,
       ...(parsed.trailingArgs.length > 0 ? { args: parsed.trailingArgs } : {}),
       ...(Object.keys(envR.env).length > 0 ? { env: envR.env } : {}),
+      ...negotiation,
     },
   };
+}
+
+type McpVersionNegotiationValue = NonNullable<McpServerSettingsEntry["versionNegotiation"]>;
+
+/**
+ * WS-24: `--version-negotiation legacy|auto|<revision>` → the entry's `versionNegotiation` (the agent
+ * SDK's own per-server choice; `settings.ts`'s `McpVersionNegotiationSetting`). `legacy` and `auto` are
+ * the two named modes; any other value is a revision to PIN (`{ pin: "2026-07-28" }`). A Winter-only flag
+ * — claude has no protocol-era choice to make, so there is nothing of its to mirror. Absent → no key
+ * (the runtime's per-transport default). An empty value is refused rather than guessed at.
+ */
+export function parseMcpVersionNegotiation(raw: string | undefined): { kind: "ok"; value?: McpVersionNegotiationValue } | { kind: "invalid"; message: string } {
+  if (raw === undefined) return { kind: "ok" };
+  const v = raw.trim();
+  if (v === "") return { kind: "invalid", message: "--version-negotiation needs a value: legacy, auto, or a protocol revision to pin (e.g. 2026-07-28)" };
+  if (v === "legacy" || v === "auto") return { kind: "ok", value: v };
+  return { kind: "ok", value: { pin: v } };
 }
 
 /** claude's own stdio branch warns (never refuses) when an OAuth-only flag was given on stdio
@@ -443,6 +468,17 @@ function malformedProjectFileMessage(cwd: string, verb: string): string {
   return `${winterMcpConfigPath(cwd)} is not valid JSON — fix it before ${verb} (Winter refuses to overwrite a project file it cannot parse)`;
 }
 
+/** A stdio entry in the project file's shape — `versionNegotiation` included (WS-24: both project-scope
+ *  write paths rebuilt the entry field by field and dropped it). */
+function projectStdioEntry(e: Extract<McpServerSettingsEntry, { type: "stdio" }>): ProjectMcpServerEntry {
+  return {
+    command: e.command,
+    ...(e.args ? { args: e.args } : {}),
+    ...(e.env ? { env: e.env } : {}),
+    ...(e.versionNegotiation === undefined ? {} : { versionNegotiation: e.versionNegotiation }),
+  };
+}
+
 function addProjectScope(deps: McpRouteDeps, name: string, entry: ProjectMcpServerEntry): McpAddOutcome {
   const root = projectScopeRootFor(deps.cwd);
   const read = readRawWinterMcpConfig(root);
@@ -497,7 +533,7 @@ export async function runMcpAddRoute(args: string[], deps: McpRouteDeps): Promis
   let outcome: McpAddOutcome;
   if (scopeResult.scope === "project") {
     const stdioEntry = entryResult.entry as Extract<McpServerSettingsEntry, { type: "stdio" }>;
-    outcome = addProjectScope(deps, parsed.name, { command: stdioEntry.command, ...(stdioEntry.args ? { args: stdioEntry.args } : {}), ...(stdioEntry.env ? { env: stdioEntry.env } : {}) });
+    outcome = addProjectScope(deps, parsed.name, projectStdioEntry(stdioEntry));
   } else if (scopeResult.scope === "local") {
     outcome = addLocalScope(deps, parsed.name, entryResult.entry, transport);
   } else {
@@ -541,8 +577,7 @@ export async function runMcpAddJsonRoute(args: string[], deps: McpRouteDeps): Pr
     return { ok: false, message: `winter mcp add --scope ${scopeResult.scope} only writes a stdio entry today — use "-s user" to add an http/sse server, or edit ${scopeResult.scope === "project" ? ".winter/mcp.json" : "sdk/.winter.json"} directly for one at this scope` };
   }
   if (scopeResult.scope === "project") {
-    const e = shaped.data as Extract<McpServerSettingsEntry, { type: "stdio" }>;
-    return addProjectScope(deps, parsed.name, { command: e.command, ...(e.args ? { args: e.args } : {}), ...(e.env ? { env: e.env } : {}) });
+    return addProjectScope(deps, parsed.name, projectStdioEntry(shaped.data as Extract<McpServerSettingsEntry, { type: "stdio" }>));
   }
   if (scopeResult.scope === "local") {
     return addLocalScope(deps, parsed.name, shaped.data, shaped.data.type);

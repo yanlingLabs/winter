@@ -115,6 +115,32 @@ describe("mcp.add / remove / get over the three scopes", () => {
     expect(local.error?.message).not.toContain("Bearer team");
   });
 
+  // WS-24: the wire schema used to strip `versionNegotiation` (zod drops an undeclared key), so a server
+  // added through the RPC lost the protocol-era choice the settings file and `external-mcp.ts` carry.
+  test("mcp.add keeps a server's versionNegotiation in every scope, and the child's config carries it", async () => {
+    const { home, project, c, config } = await boot();
+    const pinned = { ...stdio, versionNegotiation: { pin: "2026-07-28" } };
+    const auto = { type: "http", url: "https://auto.test/mcp", versionNegotiation: "auto" } as const;
+    const legacy = { ...stdio, command: "legacy-srv", versionNegotiation: "legacy" } as const;
+    expect((await c.request(METHODS.mcpAdd, { name: "pinned", entry: pinned, scope: "local", cwd: project })).result.ok).toBe(true);
+    expect((await c.request(METHODS.mcpAdd, { name: "auto", entry: auto, scope: "user" })).result.ok).toBe(true);
+    expect((await c.request(METHODS.mcpAdd, { name: "legacy", entry: legacy, scope: "project", cwd: project })).result.ok).toBe(true);
+    expect(config().projects[project].mcpServers.pinned.versionNegotiation).toEqual({ pin: "2026-07-28" });
+    expect(config().mcpServers.auto.versionNegotiation).toBe("auto");
+    expect(JSON.parse(readFileSync(join(project, ".winter", "mcp.json"), "utf8")).mcpServers.legacy.versionNegotiation).toBe("legacy");
+    // What a spawned child is handed (the project file only because the project is trusted here).
+    const child = configuredMcpServersFor({
+      settings: null, cwd: project, trusted: () => true,
+      userMcpServers: sdkUserMcpServers(home), localMcpServers: sdkLocalMcpServers(home, project),
+    });
+    expect((child.pinned as { versionNegotiation?: unknown }).versionNegotiation).toEqual({ pin: "2026-07-28" });
+    expect((child.auto as { versionNegotiation?: unknown }).versionNegotiation).toBe("auto");
+    expect((child.legacy as { versionNegotiation?: unknown }).versionNegotiation).toBe("legacy");
+    // A malformed value is still refused at the wire.
+    const bad = await c.request(METHODS.mcpAdd, { name: "bad", entry: { ...stdio, versionNegotiation: "modern" }, scope: "user" });
+    expect(bad.error).toBeDefined();
+  });
+
   test("the scopes are independent: the same name in two scopes is two entries", async () => {
     const { home, project, c } = await boot();
     await c.request(METHODS.mcpAdd, { name: "dup", entry: stdio, scope: "user" });
