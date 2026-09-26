@@ -23,8 +23,8 @@
 //   4a. The DANGEROUS-DOMAIN FLOOR on the two web built-ins (2026-09-18, user ruling; §5 below) —
 //      a `PreToolUse` group per web tool: `WebFetch` on a floor host is DENIED with one fixed
 //      refusal, and `WebSearch` carries the floor into the call itself through `updatedInput`. Not a
-//      port of anything the retired engine had: it is the only enforcement of the floor that exists
-//      on the OFFICIAL leg at all, where claude's native web tools take no host-supplied option.
+//      port of anything the retired engine had: defence in depth over the child's own executor-level
+//      `blockedDomains`, earlier and read live (§5 below says why that earns its place).
 //   4. The `fileDiff` producer (Task 3.3) — a `PreToolUse` group per file-mutating tool that
 //      snapshots the file (bounded by `DIFF_PATCH_MAX_BYTES`; over the bound, or unreadable, or
 //      outside the session's fence: no diff, never an error) and a `PostToolUse` group that diffs,
@@ -326,7 +326,7 @@ function pluginPostToolUseFailureHook(deps: SessionHooksDeps): HookCallback {
 // sandbox's own `denyWrite` so one edit reaches all three fences. Claude keeps its equivalent floor
 // bypass-immune (`utils/permissions/permissions.ts` ~1252-1260, `filesystem.ts` ~643-650) and denies
 // rather than prompts, so this does the same: a DETERMINISTIC deny, before any reviewer call, under
-// every policy and on both legs (`sessionHooksFor` feeds both). A PreToolUse deny is terminal ahead of
+// every policy (`sessionHooksFor` feeds every session). A PreToolUse deny is terminal ahead of
 // every permission mode (agent SDK 0.0.17 `permissions/evaluator.ts` ~1657).
 //
 // Conservative on purpose: a substring match on the control-plane filenames (plus `trust.json`), on
@@ -411,10 +411,11 @@ const STORE_HOME_VARIABLES: readonly string[] = ["$winter_store_home", "${winter
 /**
  * …and the variables that name a WRITE-ONLY fenced directory as a whole, refused in a write-shaped
  * position and readable otherwise (plugin skills are read and run there): both plugin-cache variables
- * (`<home>/sdk/plugins`), the official child's `CLAUDE_CONFIG_DIR` (its run folder, under `<home>/cache`,
- * whose `skills/` entries link into `sdk/skills` and the trusted project's skills), and the Winter child's
- * `WINTER_HOME` — which under a run home is ITS run folder, not the daemon's home (the router sets it to
- * `runHome.dir`); every other `$winter_home` spelling above still reads it as the daemon's home, too.
+ * (`<home>/sdk/plugins`), `CLAUDE_CONFIG_DIR` (a run folder under `<home>/cache` whose `skills/` entries link
+ * into `sdk/skills` and the trusted project's skills — the retired official child's variable, still refused
+ * because a write through it costs nothing to stop), and the child's `WINTER_HOME` — which under a run home is ITS run folder,
+ * not the daemon's home (the router sets it to `runHome.dir`); every other `$winter_home` spelling above still
+ * reads it as the daemon's home, too.
  */
 const WRITE_ONLY_DIR_VARIABLES: readonly string[] = [
   "$winter_plugin_cache_dir", "${winter_plugin_cache_dir}",
@@ -781,7 +782,7 @@ function segmentWriteTargets(seg: string): string[] {
 }
 
 /** The ASK a protected-path Bash write gets (fix round 2) — a card in code; the bridge turns it into the
- *  typed deny wherever nobody can answer (dispatch, chat, a dispatch child). Every policy, both legs. */
+ *  typed deny wherever nobody can answer (dispatch, chat, a dispatch child). Every policy. */
 function bashProtectedWriteHook(): HookCallback {
   return async (input) => {
     const { command } = bashEscapeInput(input);
@@ -818,8 +819,8 @@ export function escapeFloorHit(command: string, home: string | undefined, cwd?: 
 
 /**
  * R.3 re-review B-1: the absolute values of the path variables a child's shell has, as the daemon knows them.
- * Two readings of `WINTER_HOME` — under a run home it is the Winter child's run folder (`<home>/cache/runs/
- * <run id>`; `CLAUDE_CONFIG_DIR` is the official child's), before one it was the daemon's home — and one of
+ * Two readings of `WINTER_HOME` — under a run home it is the child's run folder (`<home>/cache/runs/
+ * <run id>`; `CLAUDE_CONFIG_DIR` was the retired official child's), before one it was the daemon's home — and one of
  * everything else: `WINTER_STORE_HOME` = `<home>/sdk`, both plugin-cache variables = `<home>/sdk/plugins`,
  * `OUTDIR` = `<home>/outputs/<session id>` (the SDK's Bash has exported it since WS-12). A run id and a
  * session id are placeholders: only their DEPTH matters to a `..`. A run folder's `projects` is a link into
@@ -963,7 +964,7 @@ export function escapeFloorDenial(hit: string): string {
 
 // ── 2b. The path fence (WS-21, spec §7.1 "hook" column, §7.2) ─────────────────────────────────
 //
-// One PreToolUse hook for the write- and read-class tools, on both legs and under every policy (a
+// One PreToolUse hook for the write- and read-class tools, under every policy (a
 // PreToolUse answer is evaluated ahead of the permission mode — F16), in this order:
 //  1. the control-plane fence the bridge already applies at (2) — the three control-plane filenames,
 //     `mcp.json` and `settings*.json` under any `.winter/`, and every home-fenced path — as a hook too,
@@ -972,7 +973,7 @@ export function escapeFloorDenial(hit: string): string {
 //  3. the read row (`protectedReadDenial`) — deny;
 //  4. a protected write (`protectedWriteDecision`) — ask in code, deny in chat and dispatch. The bridge
 //     (5e) independently refuses to auto-allow one, and the router pins the same set as flag-layer ask
-//     rules (claude's own sensitive-file check could otherwise swallow this hook's ask — F16).
+//     rules (a runtime's own sensitive-file check could otherwise swallow this hook's ask — F16).
 function pathFenceHook(deps: SessionHooksDeps): HookCallback {
   return async (input) => {
     const home = deps.home;
@@ -1192,33 +1193,28 @@ function diagnosticsPostToolUseHook(deps: SessionHooksDeps): HookCallback {
   };
 }
 
-// ── 5. The dangerous-domain floor, on BOTH legs ────────────────────────────────────────────────
+// ── 5. The dangerous-domain floor ──────────────────────────────────────────────────────────────
 //
-// **WHY THIS EXISTS AT ALL, given `Options.web.blockedDomains`.** At agent SDK 0.0.17 a WINTER child
+// **WHY THIS EXISTS AT ALL, given `Options.web.blockedDomains`.** Since agent SDK 0.0.17 the child
 // enforces the floor inside its own executors: `WebFetch` refuses a listed host on the input url, on
 // every redirect hop and on a cache hit, and `WebSearch` sends the list as the backend's exclusion
-// filter AND re-filters the hits locally. Nothing equivalent exists on the OFFICIAL leg — claude's
-// native `WebFetch`/`WebSearch` are the user's ruling now (both tools stay, with claude's own
-// behaviour), and `official-options.ts` sends no `web` block at all because claude has no such
-// option to send it to. So on that leg this hook is the ONLY thing between a floor domain and the
-// network, and `Options.hooks` is the one surface both legs share (`sessionHooksFor`'s own header).
+// filter AND re-filters the hits locally. (Until WS-23 this hook was also the ONLY enforcement on the
+// official `claude` leg, whose native tools took no such option; that leg is retired.)
 //
-// On the Winter leg it is defence in depth, and it EARNS that on its own terms: it is the earlier
-// refusal (before the executor, so the transcript carries a policy sentence instead of a tool error),
-// and it reads `dangerousDomainsAdded` LIVE, where the child's `blockedDomains` is frozen at the
-// spawn it was built for until that session next incarnates.
+// So it is defence in depth, and it EARNS that on its own terms: it is the earlier refusal (before
+// the executor, so the transcript carries a policy sentence instead of a tool error), and it reads
+// `dangerousDomainsAdded` LIVE, where the child's `blockedDomains` is frozen at the spawn it was
+// built for until that session next incarnates. Its failure mode is closed (`failClosed`, WS-23).
 //
 // **WHY DENY AND NEVER ASK.** The spine lane measured that a Winter child's executor-level
 // `blockedDomains` refuses a listed host even after an approved `ask` — so an `ask` here would raise
-// a card whose approval provably cannot take effect on the leg where a card exists at all, and
+// a card whose approval provably cannot take effect, and
 // chat/dispatch never prompt in the first place. A floor hit is a hard refusal in every mode; that is
 // the ruling ("dangerous domains are hard-blocked"), and `mode-options.ts`'s `webOptionsFor` says the
 // same thing about the same list.
 
-/** The two tool names this floor is keyed on. Both runtimes ship the pair under the SAME two names
- *  (`mode-options.ts`'s `SDK_WEB_BUILTINS`), and the official binary reports them unchanged to a
- *  `PreToolUse` hook (measured — `test/runtime-sdk/web-floor-measure.e2e.test.ts`), which is what
- *  lets one matcher pair serve both legs. */
+/** The two tool names this floor is keyed on — the runtime's own web built-ins
+ *  (`mode-options.ts`'s `SDK_WEB_BUILTINS`), reported unchanged to a `PreToolUse` hook. */
 export const WEB_FLOOR_FETCH_TOOL = "WebFetch";
 export const WEB_FLOOR_SEARCH_TOOL = "WebSearch";
 
@@ -1246,7 +1242,7 @@ function effectiveDangerousDomains(deps: SessionHooksDeps): string[] {
 }
 
 /**
- * The one refusal sentence, FIXED: the same text for every hit, on either leg, in every mode. Names
+ * The one refusal sentence, FIXED: the same text for every hit, in every mode. Names
  * the host and the matched list entry (so the model can tell a policy block from a network failure,
  * and a human reading the transcript can find the entry) and says plainly that nothing can approve
  * it, so the model re-plans instead of retrying or asking.
@@ -1265,13 +1261,9 @@ export function dangerousDomainFloorRefusal(host: string, matchedEntry: string):
  *  can be said about a url with no host, and the tool's own input refusal is both clearer and closer
  *  to the mistake. A non-string (or absent) `url` is the same case.
  *
- *  A CROSS-HOST REDIRECT IS NOT A HOLE, and it is why a host-side hook is enough for a tool that
- *  walks redirects itself: claude's `WebFetch` does NOT follow a cross-host redirect — it returns
- *  `REDIRECT DETECTED` to the model and asks it to call again with the redirect url — so the second
- *  call arrives at this hook like any other, and the short-link-into-a-paste-host route is checked on
- *  the hop that would actually reach it. (A Winter child re-checks every hop inside its own executor
- *  as well.) Same-host and bare-`www.` redirects are auto-followed on both legs, and a same-host hop
- *  cannot cross a suffix-matched floor entry. */
+ *  A CROSS-HOST REDIRECT IS NOT A HOLE: the child re-checks every redirect hop against its own
+ *  `blockedDomains` inside the executor, and a same-host or bare-`www.` hop cannot cross a
+ *  suffix-matched floor entry. */
 function webFetchFloorHook(deps: SessionHooksDeps): HookCallback {
   return async (input) => {
     const pre = input as PreToolUseHookInput;
@@ -1307,10 +1299,9 @@ function webFetchFloorHook(deps: SessionHooksDeps): HookCallback {
  *
  * WHAT IT DOES NOT COVER (stated, not silently accepted): an allow-list entry BROADER than a floor
  * entry — `example.com` when the floor lists `paste.example.com`, or a bare TLD — is kept, because
- * it is not itself a floor match, and on the official leg nothing then stops a blocked subdomain from
- * being SURFACED as a search hit (a Winter child re-filters its own hits locally, claude cannot be
- * asked to). The exfiltration itself still cannot happen: FETCHING any surfaced link goes through
- * `webFetchFloorHook` above, on both legs.
+ * it is not itself a floor match; the child re-filters its own hits locally against `blockedDomains`,
+ * so a blocked subdomain is not surfaced. The exfiltration itself cannot happen in any case:
+ * FETCHING any surfaced link goes through `webFetchFloorHook` above.
  */
 function webSearchFloorHook(deps: SessionHooksDeps): HookCallback {
   return async (input) => {
@@ -1327,7 +1318,7 @@ function webSearchFloorHook(deps: SessionHooksDeps): HookCallback {
     // an injected `blocked_domains` beside it and came back as "cannot specify both" instead. Passing
     // the call through untransformed gives the model the error that names what it actually got wrong.
     // Nothing is lost by standing down: the call cannot search at all, and FETCHING anything it could
-    // have surfaced still goes through `webFetchFloorHook` on both legs.
+    // have surfaced still goes through `webFetchFloorHook`.
     if (wrongTypedDomainList(record["allowed_domains"]) || wrongTypedDomainList(record["blocked_domains"])) return allow();
     // WS-23 (hooks fix round 2): the same stand-down for a MISSING or too-short `query`. The agent SDK
     // now validates a hook's `updatedInput` against the tool's schema and DENIES an invalid one
@@ -1460,7 +1451,7 @@ export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hook
   // Fix round 2: in the escape floor's own group, a Bash write under any `.winter/<kind>` is asked about,
   // sandboxed or not (see `bashProtectedWriteHit`). An `ask` — the floor's deny, when both apply, outranks it.
   preToolUse.push({ matcher: "Bash", failClosed: true, hooks: [failClosed("sandbox-escape floor", escapeFloorHook(deps)), failClosed("protected-path Bash fence", bashProtectedWriteHook())] });
-  // WS-21 (spec §7.1, §7.2): the path fence — every policy, both legs. Unmatched (one callback per tool
+  // WS-21 (spec §7.1, §7.2): the path fence — every policy. Unmatched (one callback per tool
   // call) because the write and read tools carry two vocabularies; anything else is an immediate allow.
   if (deps.home) preToolUse.push({ failClosed: true, hooks: [failClosed("path fence", pathFenceHook(deps))] });
   if (deps.home) {
