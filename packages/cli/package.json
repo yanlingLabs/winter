@@ -9,8 +9,8 @@
   },
   "scripts": {
     "test": "bun test",
-    "compile": "bun build --compile src/main.ts src/embedded-worker.ts --outfile ../../dist/winter",
-    "compile:core": "bun build --compile src/main.ts src/embedded-worker.ts --outfile ../../dist/winter-core"
+    "compile": "bun build src/embedded-worker.source.ts --target bun --outfile .build/embedded-worker.bundle.js && bun build --compile src/main.ts src/embedded-worker.ts --outfile ../../dist/winter",
+    "compile:core": "bun build src/embedded-worker.source.ts --target bun --outfile .build/embedded-worker.bundle.js && bun build --compile src/main.ts src/embedded-worker.ts --outfile ../../dist/winter-core"
   },
   "dependencies": {
     "@yanlinglabs/winter-core": "workspace:*",

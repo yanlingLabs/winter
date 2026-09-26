@@ -90,7 +90,7 @@ async function main(): Promise<void> {
   log("=== WS-23: compiled-binary embedded chat proof ===");
 
   // ---- Step 1 -------------------------------------------------------------------------------
-  log("\n--- Step 1: compiling dist/winter-core (compile:core: src/main.ts + src/embedded-worker.ts) ---");
+  log("\n--- Step 1: compiling dist/winter-core (compile:core: the Worker graph pre-bundled alone, then src/main.ts + src/embedded-worker.ts) ---");
   const t0 = Date.now();
   const compile = spawnSync(process.execPath, ["run", "--filter", "@yanlinglabs/winter-cli", "compile:core"], { cwd: REPO_ROOT, encoding: "utf8", timeout: COMPILE_TIMEOUT_MS });
   log(`compile:core exit=${compile.status ?? "null"} (${Date.now() - t0}ms)`);
