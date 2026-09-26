@@ -24,13 +24,17 @@ describe("readHistoryPage", () => {
     return { store, sessionId };
   }
 
-  test("the allowlist is exactly the 10 persisted foldable types", () => {
+  test("the allowlist is exactly the 12 persisted foldable types", () => {
     // Widening cast: HISTORY_EVENT_TYPES is a ReadonlySet<SessionEvent["type"]>, so the plain
     // string[] literal below (not a member of that narrower union type) would otherwise fail
     // toEqual's generic inference (bound to the `expect(...)` receiver's type) under tsc.
     expect([...HISTORY_EVENT_TYPES].sort() as string[]).toEqual(
       [
         "agent_error", "approval_requested", "approval_resolved", "assistant_message",
+        // WS-24 lane `phone`: hook_notice/continuity_warning joined the allowlist (10 -> 12) once
+        // the phone's own decode path was confirmed to tolerate an unrecognized type with no gate
+        // (see history.ts's HISTORY_EVENT_TYPES doc comment).
+        "continuity_warning", "hook_notice",
         "question_asked", "question_resolved", "tool_call", "tool_result", "turn_completed", "user_message",
       ].sort(),
     );

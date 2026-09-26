@@ -77,9 +77,9 @@ export const REMOTE_STREAM_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new 
   ...HISTORY_EVENT_TYPES,
   ...TRANSIENT_EVENT_TYPES,
   ...STREAM_CONTROL_EVENT_TYPES,
-  // `hook_notice` (WS-23) is kept off the phone on purpose until a kit tag carries it -- see the
-  // follow-up note in `history.ts`'s HISTORY_EVENT_TYPES, which is where it will be added. The same
-  // holds for `continuity_warning` (WS-23 review r1 I-3).
+  // `hook_notice` and `continuity_warning` (WS-23, allowlisted WS-24 lane `phone`) reach here via the
+  // `HISTORY_EVENT_TYPES` spread above -- see that constant's own doc comment (`history.ts`) for why
+  // an old phone on a pre-WS-24 kit tag survives seeing either one with no capability gate.
 ]);
 
 /** Applies the remote live/replay policy to one event.
