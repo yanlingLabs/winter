@@ -234,6 +234,18 @@ export class BashReviewer {
             quota: this.provider.quota,
           }
         : { provider: resolved.provider, model: resolved.model, effort: resolved.effort, tag: resolved.tag, quota: resolved.quota };
+    // WS-24: the model call is aborted when the CALLER's signal aborts — the hook runner aborts a callback's
+    // `signal` when it times it out (SDK 0.0.28; 0.0.27 never aborts it, so this is inert there) — and when
+    // this review's own timeout fires, so neither leaves a request running on the provider for a verdict
+    // nobody will read. One controller for both; an already-aborted signal never reaches the provider.
+    const ac = new AbortController();
+    const onCallerAbort = (): void => ac.abort();
+    if (signal?.aborted) throw new Error("review aborted");
+    signal?.addEventListener("abort", onCallerAbort, { once: true });
+    const aborted = new Promise<never>((_, rej) => {
+      ac.signal.addEventListener("abort", () => rej(new Error("review aborted")), { once: true });
+    });
+    aborted.catch(() => { /* observed through the race below */ });
     const run = (async () => {
       let text = "";
       let sawProviderError = false;
@@ -245,7 +257,7 @@ export class BashReviewer {
         instructions,
         input: turnInput,
         tools: [],
-        signal,
+        signal: ac.signal,
       })) {
         if (ev.type === "text_delta") text += ev.delta;
         // 2026-09-18: role health only — see `SessionTitler.oneShot`'s identical branch; this class
@@ -269,12 +281,14 @@ export class BashReviewer {
 
     let timer: ReturnType<typeof setTimeout>;
     const timeout = new Promise<never>((_, rej) => {
-      timer = setTimeout(() => rej(new Error(`review timeout after ${this.timeoutMs}ms`)), this.timeoutMs);
+      timer = setTimeout(() => { rej(new Error(`review timeout after ${this.timeoutMs}ms`)); ac.abort(); }, this.timeoutMs);
     });
+    run.catch(() => { /* a rejection after the race settled (an aborted stream) is not an unhandled one */ });
     try {
-      return await Promise.race([run, timeout]);
+      return await Promise.race([run, timeout, aborted]);
     } finally {
       clearTimeout(timer!);
+      signal?.removeEventListener("abort", onCallerAbort);
     }
   }
 }

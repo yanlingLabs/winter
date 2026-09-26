@@ -124,6 +124,35 @@ describe("BashReviewer", () => {
     await expect(p).rejects.toThrow();
   });
 
+  // WS-24: the hook runner aborts a callback's `signal` when it times it out (SDK 0.0.28). The review
+  // rejects AT ONCE — even against a provider that ignores its signal — and the provider's own signal is
+  // aborted, so no request is left running for a verdict nobody reads.
+  test("the caller's abort ends the review at once and aborts the provider's own call", async () => {
+    let providerSignal: AbortSignal | undefined;
+    const deaf = {
+      streamTurn: (req: { signal?: AbortSignal }) => {
+        providerSignal = req.signal;
+        return (async function* () { await new Promise(() => {}); })();
+      },
+    };
+    const ac = new AbortController();
+    const review = new BashReviewer({ provider: { provider: deaf, model: "fake" } } as any).review({ command: "ls" }, ac.signal);
+    await Bun.sleep(5);
+    const t0 = Date.now();
+    ac.abort();
+    await expect(review).rejects.toThrow(/aborted/);
+    expect(Date.now() - t0).toBeLessThan(1_000);
+    expect(providerSignal?.aborted).toBe(true);
+  });
+
+  test("an already-aborted signal never reaches the provider", async () => {
+    const p = new FakeProvider(verdict("safe", "ok"));
+    const ac = new AbortController();
+    ac.abort();
+    await expect(new BashReviewer({ provider: { provider: p, model: "fake" } } as any).review({ command: "ls" }, ac.signal)).rejects.toThrow(/aborted/);
+    expect(p.requests).toHaveLength(0);
+  });
+
   // phase 5e T3: ONE review() entry point serves bash/fs/external — `class` selects the
   // per-class prompt clause + content shape. Omitting `class` (every pre-T3 call site/test above)
   // still means "bash" — verified here rather than assumed, since that's the whole back-compat claim.
