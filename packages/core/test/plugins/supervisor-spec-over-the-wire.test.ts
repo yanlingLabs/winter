@@ -131,6 +131,44 @@ describe("two marketplaces' same-named Tier-2 plugins over the wire (WS-24)", ()
   });
 });
 
+describe("plugin.list says plainly that a project/local install's background process does not run (WS-24)", () => {
+  test("a project-scope row with an entry carries extras.entryNote; the user-scope row does not", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-ws24-note-"));
+    const project = mkdtempSync(join(tmpdir(), "winter-ws24-note-proj-"));
+    const store = new SessionStore(home);
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets")));
+    const tokens = await authority.ensureTokens();
+    const socketPath = join(home, "core.sock");
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } }));
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets: new FileSecretStore(join(home, "s2")) });
+    const c = await TestClient.connect(socketPath);
+    try {
+      await c.request(METHODS.hello, { protocolVersion: PROTOCOL_VERSION, role: "harness", token: tokens.harness, clientName: "cli" });
+      for (const mkt of ["m1", "m2"]) {
+        const dir = join(home, `mkt-${mkt}`);
+        mkdirSync(join(dir, ".claude-plugin"), { recursive: true });
+        writeFileSync(join(dir, ".claude-plugin", "marketplace.json"), JSON.stringify({ name: mkt, owner: { name: "t" }, plugins: [{ name: "p", source: "./plugins/p" }] }));
+        mkdirSync(join(dir, "plugins", "p"), { recursive: true });
+        writeFileSync(join(dir, "plugins", "p", "winter-plugin.json"), JSON.stringify({ id: "p", tier: "platform", permissions: { exec: true }, entry: ENTRY }));
+        expect((await c.request(METHODS.pluginMarketplaceAdd, { source: dir })).result?.ok).toBe(true);
+      }
+      expect((await c.request(METHODS.pluginInstall, { spec: "p@m1", scope: "user" })).result?.ok).toBe(true);
+      expect((await c.request(METHODS.pluginInstall, { spec: "p@m2", scope: "project", cwd: project })).result?.ok).toBe(true);
+      const rows = (await c.request(METHODS.pluginList, { cwd: project })).result.plugins as Array<{ marketplace: string; scope: string; extras?: { entryNote?: string } }>;
+      const user = rows.find((r) => r.marketplace === "m1")!;
+      const proj = rows.find((r) => r.marketplace === "m2")!;
+      expect(user.scope).toBe("user");
+      expect(user.extras?.entryNote).toBeUndefined();
+      expect(proj.scope).toBe("project");
+      expect(proj.extras?.entryNote).toMatch(/only when it is installed for your user/);
+    } finally {
+      c.close(); server.stop(); store.close();
+      rmSync(home, { recursive: true, force: true });
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("boot: a bare-name plugin token from the old key is revoked (WS-24)", () => {
   test("a token a pre-WS-24 core minted under the bare name no longer verifies; the spec's own mint still works", async () => {
     const { startDaemon } = await import("../../src/daemon");

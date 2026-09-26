@@ -1393,6 +1393,11 @@ export const PluginListingExtrasSchema = z.object({
    *  echoes this back verbatim as `plugin.setConsent`'s own `fingerprint` param; the daemon refuses
    *  `stale_disclosure` when it no longer matches what it recomputes at consent time. */
   fingerprint: z.string(),
+  /** WS-24: present only for a row that declares an `entry` at PROJECT or LOCAL scope — says, in plain
+   *  words, that Winter does not start that background process for such an install: the Tier-2 entry is
+   *  one daemon-wide process (tiles, shortcuts, hardware), with no session or project to scope it to, so
+   *  only a user-scope install runs it. A consent UI shows it beside the disclosure. */
+  entryNote: z.string().optional(),
 });
 /** WS-21 fix round 2: `plugin.list`'s `hooks` — TOP-LEVEL (a sibling of `extras`, not nested in it),
  *  because a claude-format plugin with no `winter-plugin.json` at all still carries hooks (they're

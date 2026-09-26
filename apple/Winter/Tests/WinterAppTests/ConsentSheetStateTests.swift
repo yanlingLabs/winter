@@ -1077,6 +1077,20 @@ final class PluginManagerModelConsentTests: XCTestCase {
         XCTAssertNotNil(model.errorText)
     }
 
+    // MARK: - WS-24: a project/local install's background process is not started
+
+    func testIntroTextSaysAProjectOrLocalInstallsProcessIsNotStarted() {
+        for scope in [PluginScope.project, .local] {
+            let text = pluginConsentIntroText(scope: scope, hasEntry: true, openedByInstall: false)
+            XCTAssertTrue(text.contains("only when the plugin is installed for your user"), text)
+            XCTAssertTrue(text.contains("at \(scope.rawValue) scope it is not started"), text)
+        }
+        // A user-scope install (the one the daemon runs), or a plugin with no process at all: no clause.
+        XCTAssertFalse(pluginConsentIntroText(scope: .user, hasEntry: true, openedByInstall: true).contains("not started"))
+        XCTAssertFalse(pluginConsentIntroText(scope: .project, hasEntry: false, openedByInstall: false).contains("not started"))
+        XCTAssertTrue(pluginConsentIntroText(scope: .user, hasEntry: true, openedByInstall: true).contains("declining here turns the whole plugin off"))
+    }
+
     // MARK: - C2 defence in depth: ambiguous bare id
 
     /// `enable(_:)` refuses when the SAME bare id is installed (user scope) from more than one

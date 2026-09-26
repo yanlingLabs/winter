@@ -716,6 +716,8 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
       extras: {
         tier: "platform", requiredConsents: ["exec"], consented: [], entry: { command: "bun", args: ["--version"] },
         fingerprint: pluginConsentFingerprint(mktDir, { entry: { command: "bun", args: ["--version"] }, requiredConsents: ["exec"] }),
+        // WS-24: a project/local-scope install's background process is not started — said plainly.
+        entryNote: expect.stringContaining("only when it is installed for your user") as unknown as string,
       },
       hooks: [],
     }]);
