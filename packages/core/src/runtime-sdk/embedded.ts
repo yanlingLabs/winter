@@ -32,7 +32,7 @@
 // ordering is the only thing keeping two engines off one transcript.
 import { fileURLToPath } from "node:url";
 import { SDK_VERSION, type SpawnedRuntimeProcess, type SpawnRuntimeOptions } from "@yanlinglabs/winter-agent-sdk";
-import { EMBEDDED_KILL_GRACE_MS, spawnEmbeddedWorker, type EmbeddedWorkerProcess, type EmbeddedWorkflowWorkerCommand } from "@yanlinglabs/winter-agent-runtime/embedded-host";
+import { EMBEDDED_KILL_GRACE_MS, spawnEmbeddedWorker, type EmbeddedWorkerProcess, type EmbeddedWorkflowWorkerCommand, type SpawnEmbeddedWorkerOptions } from "@yanlinglabs/winter-agent-runtime/embedded-host";
 import { RUNTIME_VERSION } from "@yanlinglabs/winter-agent-runtime/version";
 import { WORKFLOW_WORKER_BRIDGE_FLAG } from "@yanlinglabs/winter-agent-runtime/workflow-worker";
 import { REQUIRED_WINTER_AGENT_SDK } from "./versions";
@@ -175,6 +175,58 @@ export interface EmbeddedSessionHostDeps {
   workerEntry?: string;
   workflowWorkerCommand?: () => EmbeddedWorkflowWorkerCommand;
   killGraceMs?: number;
+  /** Test seam over the SDK's `spawnEmbeddedWorker` (WS-24: a Worker whose orphans a test controls). */
+  spawnWorker?: (options: SpawnEmbeddedWorkerOptions) => EmbeddedWorkerProcess;
+  /** Test seam over `killProcessGroup` (WS-24). */
+  killProcessGroup?: (pgid: number) => boolean;
+}
+
+// --- WS-24: process groups a Worker leaves behind ------------------------------------------------------
+//
+// An embedded session's Bash/Monitor commands, stdio MCP servers, command hooks and workflow worker each
+// run as their own process group (`setsid`), started from the session's Worker. The Worker's own
+// teardown kills them -- but a Worker that is `terminate()`d while it spins (the kill grace ran out, or
+// `shutdown()`'s budget did) or that crashes never runs that teardown, and the groups keep running with
+// no parent that will ever reap them: `setsid` detached them from this process on purpose. The SDK
+// (0.0.28+) mirrors each group's birth and end over the Worker channel, and `EmbeddedWorkerProcess`
+// reports what is still live as `processGroups()` -- readable after `exited` settles, which is when the
+// daemon SIGKILLs them (`-pgid`, the whole group). A healthy close leaves nothing listed (every removal is
+// posted before the Worker's exit message), so this reaps exactly what a dead Worker orphaned.
+//
+// FEATURE-DETECTED, so this compiles and runs against 0.0.27, whose host bridge has no
+// `processGroups()` and whose Worker posts no such message: there, nothing is reported and nothing is
+// reaped -- the pre-WS-24 behaviour, never an error.
+//
+// What cannot be reaped: a SIGKILLed child of a terminated Worker stays a zombie of this process (the
+// Worker loop that would have waited on it is gone) -- it runs nothing and holds only its process-table
+// slot. And the residual of any pid-based kill: a group that ended in the instant between its last
+// message and this kill leaves an id the OS could hand to a NEW group leader; pids are not reused while
+// any member of a group lives, so only that window remains.
+
+/** The process groups `proc` reported live when its Worker closed -- `[]` on an SDK that predates the mirror. */
+export function orphanedProcessGroupsOf(proc: SpawnedRuntimeProcess): number[] {
+  const read = (proc as { processGroups?: unknown }).processGroups;
+  if (typeof read !== "function") return [];
+  let groups: unknown;
+  try {
+    groups = (read as () => unknown).call(proc);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(groups)) return [];
+  // Never 0/1/negative (kill(2) would read them as "my group" or "every process"), never this
+  // process's own id (as a group, that is the daemon itself).
+  return groups.filter((g): g is number => Number.isInteger(g) && g > 1 && g !== process.pid);
+}
+
+/** SIGKILL the whole group `pgid`. `false` when it is already gone (or was never ours to signal). */
+export function killProcessGroup(pgid: number): boolean {
+  try {
+    process.kill(-pgid, "SIGKILL");
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -219,7 +271,7 @@ export function createEmbeddedSessionHost(deps: EmbeddedSessionHostDeps = {}): E
       log(`embedded session ${sessionId}: a new incarnation arrived while the previous Worker was still running — ending it before the new one starts`);
       prior!.kill();
     }
-    const proc = spawnEmbeddedWorker({
+    const proc = (deps.spawnWorker ?? spawnEmbeddedWorker)({
       workerEntry: deps.workerEntry ?? embeddedWorkerEntry(),
       spawn: options,
       workflowWorkerCommand: (deps.workflowWorkerCommand ?? runtimeWorkflowWorkerCommand)(),
@@ -235,6 +287,13 @@ export function createEmbeddedSessionHost(deps: EmbeddedSessionHostDeps = {}): E
       else void predecessorExited.then(() => onLifecycle({ backendSessionId: sessionId, event: "start", worker }));
     }
     void proc.exited.then((exit) => {
+      // WS-24: FIRST, before the registry lets go of it -- whatever the Worker left running is killed
+      // the moment we know the Worker is gone (see "process groups a Worker leaves behind" above).
+      const orphans = orphanedProcessGroupsOf(proc);
+      if (orphans.length > 0) {
+        const killed = orphans.filter((pgid) => (deps.killProcessGroup ?? killProcessGroup)(pgid)).length;
+        log(`embedded session ${sessionId}: its Worker closed with ${orphans.length} process group(s) still running — killed ${killed}`);
+      }
       live.delete(proc);
       if (newest.get(sessionId) === proc) newest.delete(sessionId);
       onLifecycle?.({ backendSessionId: sessionId, event: "exited", worker });
