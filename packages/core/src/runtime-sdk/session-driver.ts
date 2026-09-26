@@ -175,7 +175,8 @@ export interface LegSession {
   send(text: string, clientName?: string): Promise<{ seq: number; queued: boolean }>;
   steer(text: string, clientName?: string): Promise<{ seq: number; injected: boolean }>;
   interrupt(): Promise<{ wasRunning: boolean }>;
-  compact(): Promise<never>;
+  /** WS-23 (reasoning-state): compact the live child now, on its own model -- see `WinterSession.compact`. */
+  compact(opts?: { customInstructions?: string }): Promise<{ retainedCount: number }>;
   setModel(model?: string): Promise<void>;
   setPolicy(policy: SessionApprovalPolicy): Promise<void>;
   end(): Promise<void>;

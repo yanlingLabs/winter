@@ -316,8 +316,15 @@ export interface WinterSession {
   send(text: string, clientName?: string): Promise<{ seq: number; queued: boolean }>;
   steer(text: string, clientName?: string): Promise<{ seq: number; injected: boolean }>;
   interrupt(): Promise<{ wasRunning: boolean }>;
-  /** Winter's `Query` has no compaction control at 0.0.4 — a typed `WinterLegUnsupported`, never a silent no-op. */
-  compact(): Promise<never>;
+  /**
+   * WS-23 (reasoning-state, decision 5): compacts the LIVE child's conversation NOW, on the model it runs
+   * (`Query.compact`, the Winter SDK's `compact` control), and resolves once the compaction finished.
+   * `planAndApplySwitch` calls it before a switch to another provider whose model cannot hold the
+   * conversation -- the model being left writes the summary (the user's rule). A typed
+   * `WinterLegUnsupported` when there is no live child, or its SDK has no compaction control; never a
+   * silent no-op.
+   */
+  compact(opts?: { customInstructions?: string }): Promise<{ retainedCount: number }>;
   setModel(model?: string): Promise<void>;
   /** Task 17 Step 0(b): `session.setPolicy` reaches a LIVE child as `Query.setPermissionMode`
    *  (the 1:1 map of P8b-7); the bridge's policy getter is live already, and a resumable session
@@ -341,7 +348,7 @@ export interface WinterSession {
 export class WinterLegUnsupported extends Error {
   readonly code = "not_supported_on_winter_leg" as const;
   constructor(what: string) {
-    super(`${what} is not supported on the Winter leg (SDK 0.0.4 carry: Winter's Query has no compaction control)`);
+    super(`${what} is not supported here (no live Winter child, or its SDK has no compaction control)`);
     this.name = "WinterLegUnsupported";
   }
 }
@@ -500,8 +507,10 @@ class WinterSessionImpl implements WinterSession {
     return { wasRunning: true };
   }
 
-  compact(): Promise<never> {
-    return Promise.reject(new WinterLegUnsupported("session.compact"));
+  compact(opts?: { customInstructions?: string }): Promise<{ retainedCount: number }> {
+    const compact = this.stateValue === "live" ? this.inc?.query.compact : undefined;
+    if (compact === undefined || this.inc === undefined) return Promise.reject(new WinterLegUnsupported("session.compact"));
+    return compact.call(this.inc.query, opts);
   }
 
   idle(): Promise<void> {
