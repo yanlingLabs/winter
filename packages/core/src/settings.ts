@@ -24,6 +24,7 @@ import { credentialInventory } from "./runtime-sdk/keychain";
 import { internalDrivableAdapterIds } from "./providers/internal-adapters";
 import { liveSdkGlobalConfig, liveSdkSettings } from "./sdk-files";
 import { sdkSettingsPath } from "./agent/paths";
+import { McpVersionNegotiationSetting } from "./agent/mcp/project-file";
 
 /** Reasoning-effort slugs valid on the wire — measured LIVE against the Codex OAuth endpoint
  *  (2026-07-30), one model at a time, NOT read off the /models catalogue text. That distinction
@@ -237,6 +238,9 @@ const McpStdioServerSettings = z.object({
   command: z.string().min(1),
   args: z.array(z.string()).optional(),
   env: z.record(z.string(), z.string()).optional(),
+  // WS-23: the SDK's own per-server protocol-revision choice, passed through untouched
+  // (`McpVersionNegotiationSetting`'s doc says why an undeclared key would be stripped here).
+  versionNegotiation: McpVersionNegotiationSetting.optional(),
 });
 
 /**
@@ -350,11 +354,13 @@ const McpHttpServerSettings = refuseCredentialShapedHeaders(z.object({
   type: z.literal("http"),
   url: z.string().url(),
   headers: z.record(z.string(), z.string()).optional(),
+  versionNegotiation: McpVersionNegotiationSetting.optional(),
 }));
 const McpSSEServerSettings = refuseCredentialShapedHeaders(z.object({
   type: z.literal("sse"),
   url: z.string().url(),
   headers: z.record(z.string(), z.string()).optional(),
+  versionNegotiation: McpVersionNegotiationSetting.optional(),
 }));
 /** A pre-item-3b entry (no `type` field at all) is stdio — the shape every `settings.mcpServers`
  *  entry has always had — normalized to the explicit-discriminant form BEFORE the discriminated

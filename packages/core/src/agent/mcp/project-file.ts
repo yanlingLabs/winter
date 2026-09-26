@@ -89,21 +89,39 @@ import { z } from "zod";
  * `settings.ts`'s `McpStdioServerSettings`/`McpHttpServerSettings`/`McpSSEServerSettings` if either
  * ever changes shape.
  */
+/**
+ * WS-23: how the child's MCP client negotiates the protocol revision with ONE server — the agent SDK's
+ * own `McpVersionNegotiation` (`"legacy"` = the 2025 `initialize` handshake; `"auto"` = probe the
+ * 2026-07-28 `server/discover` first, then fall back; `{ pin }` = the modern era at exactly that
+ * revision or a typed connect failure). Absent = the runtime's per-transport default (`auto` for http,
+ * `legacy` for stdio/sse). Validated here and in `settings.ts`'s entry schemas (which import this one)
+ * because zod strips an undeclared key: without it, a server's own choice was dropped on every read
+ * and every write before the child could see it. Nothing here interprets the value — the SDK does.
+ */
+export const McpVersionNegotiationSetting = z.union([
+  z.literal("legacy"),
+  z.literal("auto"),
+  z.object({ pin: z.string().min(1) }),
+]);
+
 const ProjectMcpEntryStdio = z.object({
   type: z.literal("stdio"),
   command: z.string().min(1),
   args: z.array(z.string()).optional(),
   env: z.record(z.string(), z.string()).optional(),
+  versionNegotiation: McpVersionNegotiationSetting.optional(),
 });
 const ProjectMcpEntryHttp = z.object({
   type: z.literal("http"),
   url: z.string().url(),
   headers: z.record(z.string(), z.string()).optional(),
+  versionNegotiation: McpVersionNegotiationSetting.optional(),
 });
 const ProjectMcpEntrySse = z.object({
   type: z.literal("sse"),
   url: z.string().url(),
   headers: z.record(z.string(), z.string()).optional(),
+  versionNegotiation: McpVersionNegotiationSetting.optional(),
 });
 /** A pre-item-3b-shaped entry (no `type` field at all) is stdio — mirrors `settings.ts`'s own
  *  preprocess step, same rationale: it's the shape every project `.mcp.json` stdio entry has always
