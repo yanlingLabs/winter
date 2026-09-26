@@ -249,9 +249,10 @@ describe("sessionHooksFor — bash safety reviewer", () => {
   // case; these pin the structural one, which must NOT become a card storm.
   //
   // Facts the rule comes from: the Mac creates code sessions with `approvalPolicy: "auto"`; a
-  // Claude-only home has NO eligible credential at all, because the user's own ruling excludes the
-  // first-party Claude providers from Winter's own jobs ("claude models run through anthropic which
-  // has its own reviewer anyways"); and on `origin/main` such a home had no `BashReviewer` instance,
+  // home with NO credential Winter's own jobs can run on has no `BashReviewer` instance (WS-23: a
+  // Claude-only home WITH an Anthropic key DOES — `anthropic` rejoined the eligible set when every
+  // model moved onto the Winter SDK — so this is now the no-credential-at-all home, not the
+  // Claude-default one); and on `origin/main` such a home had no `BashReviewer` instance,
   // so `bashReviewerHook`'s very first line answered `allow()` — Winter never reviewed bash there.
   // Turning that into an `ask` on every non-trivially-safe command would be new behaviour for a whole
   // class of user, and `bashReviewerHook`'s own doc records that an `ask` from this hook on the

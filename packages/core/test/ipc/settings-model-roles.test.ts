@@ -292,23 +292,29 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     c.close();
   });
 
-  // 2026-09-19 (the internal-jobs widening): this test used to pin "the write always accepts, the read
-  // reports" for an internal-jobs role, on the strength of `internalModelFor` skipping a mismatched pin
-  // at run time. Both halves moved, and on a principled line:
+  // 2026-09-19 (the internal-jobs widening), narrowed WS-23: this test used to pin "the write always
+  // accepts, the read reports" for an internal-jobs role, on the strength of `internalModelFor`
+  // skipping a mismatched pin at run time. Both halves moved, and on a principled line:
   //
-  //  - a PERMANENTLY unrunnable provider (a first-party Claude row — Claude runs through Anthropic's
-  //    own runtime, which brings its own reviewer) is refused AT THE WRITE, because no future credential
-  //    makes it runnable and storing it would only produce a role that silently never runs;
+  //  - a PERMANENTLY unrunnable provider (a remaining first-party Claude row — `console`/`cc`,
+  //    which have no internal-calls credential path) is refused AT THE WRITE, because no future
+  //    credential makes it runnable and storing it would only produce a role that silently never runs;
+  //  - `anthropic` rejoined the admittable set in WS-23 (its API key is an ordinary token-priced
+  //    credential now that every model runs on the Winter SDK), so it is accepted at the write;
   //  - an ELIGIBLE provider with no credential yet is accepted and LISTED as permitted — the old test's
   //    own rationale ("a provider the user is about to bind") applies to exactly that case.
   test("an internal-jobs role refuses a permanently-unrunnable provider at the write, and says why", async () => {
     const { socketPath, harnessToken } = await boot("codex-oauth/gpt-5.6-sol");
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
-    const set = await c.request(METHODS.settingsSetModelRole, { role: "pins.dream", model: "anthropic/claude-opus-5" });
+    const set = await c.request(METHODS.settingsSetModelRole, { role: "pins.dream", model: "console/claude-opus-5" });
     expect(set.error?.code).toBe(-32602);
-    expect(set.error?.message).toContain("can't run on Anthropic");
-    expect(set.error?.message).toContain("its own reviewer");
+    expect(set.error?.message).toContain("can't run on Anthropic Console");
+    expect(set.error?.message).toContain("no internal-calls credential path");
+    // ...while the rejoined `anthropic` row is accepted on the same role.
+    const anthropic = await c.request(METHODS.settingsSetModelRole, { role: "pins.dream", model: "anthropic/claude-opus-5" });
+    expect(anthropic.error).toBeUndefined();
+    expect(anthropic.result.model).toBe("anthropic/claude-opus-5");
     c.close();
   });
 
@@ -323,8 +329,9 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     expect(set.result.model).toBe("deepseek/deepseek-flash");
     const permittedProviderIds = set.result.roles["pins.dream"].permitted.map((p: any) => p.providerId);
     expect(permittedProviderIds).toContain("deepseek");
-    // Never a Claude provider, whatever else is listed.
-    expect(permittedProviderIds).not.toContain("anthropic");
+    // WS-23: `anthropic` is an ordinary eligible provider now; only the remaining first-party
+    // rows stay out of every internal role's permitted set.
+    expect(permittedProviderIds).toContain("anthropic");
     expect(permittedProviderIds).not.toContain("console");
     c.close();
   });
@@ -346,7 +353,8 @@ describe("settings.modelRoles / settings.setModelRole", () => {
       const ids = info.permitted.map((p: any) => p.providerId);
       expect(ids).toContain("codex-oauth");
       expect(ids).toContain("deepseek");
-      expect(ids).not.toContain("anthropic");
+      expect(ids).toContain("anthropic");
+      expect(ids).not.toContain("console");
     }
     c.close();
   });
@@ -358,6 +366,23 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     const res = await c.request(METHODS.settingsModelRoles, {});
     expect(res.result.roles["titles.model"].model).toBe("deepseek/deepseek-flash");
     expect(res.result.roles["titles.model"].problem).toBeNull();
+    c.close();
+  });
+
+  // WS-23 R1 addendum: a Claude-only home — `anthropic/*` default, only the Anthropic key stored.
+  // `anthropic` is an ordinary eligible provider now, so every internal role sits on the user's own
+  // Claude model with no problem (rung 1: eligible AND credentialed; anthropic declares no
+  // terra/luna slot, so the default is `provider.model` itself).
+  test("a Claude-only home: zero setup — all four internal roles sit on the user's own Claude model, problem null", async () => {
+    const { socketPath, harnessToken } = await boot("anthropic/claude-sonnet-5", { internalCredentials: ["anthropic:default"] });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const res = await c.request(METHODS.settingsModelRoles, {});
+    for (const role of ["titles.model", "reviewer.model", "pins.dream", "pins.cleaner"]) {
+      const info = res.result.roles[role];
+      expect(info.model).toBe("anthropic/claude-sonnet-5");
+      expect(info.problem).toBeNull();
+    }
     c.close();
   });
 
@@ -394,26 +419,28 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     c.close();
   });
 
+  // WS-23: the pre-ruling pin is a `console` row now (`anthropic` pins are runnable since the
+  // pivot, so they report no problem at all) — a settings.json written before the ruling.
   test("a stored pin on a provider that became ineligible reports provider-unsupported (a settings.json written before the ruling)", async () => {
     const { socketPath, harnessToken, settingsPath } = await boot("codex-oauth/gpt-5.6-sol", { internalCredentials: ["codex-oauth:default"] });
     // Written by hand, the way an old settings.json carries it — the write door refuses this now.
     const raw = JSON.parse(readFileSync(settingsPath, "utf8"));
-    writeFileSync(settingsPath, JSON.stringify({ ...raw, titles: { model: "anthropic/claude-opus-5" } }, null, 2));
+    writeFileSync(settingsPath, JSON.stringify({ ...raw, titles: { model: "console/claude-opus-5" } }, null, 2));
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     const res = await c.request(METHODS.settingsModelRoles, {});
     const info = res.result.roles["titles.model"];
     expect(info.problem?.reason).toBe("provider-unsupported");
-    expect(info.problem?.detail).toBe("Anthropic can't be used for Winter's own jobs yet");
+    expect(info.problem?.detail).toBe("Anthropic Console can't be used for Winter's own jobs yet");
     // The role's own model is still reported verbatim so the user can SEE and clear it.
-    expect(info.model).toBe("anthropic/claude-opus-5");
+    expect(info.model).toBe("console/claude-opus-5");
     c.close();
   });
 
   test("the derived problem clears itself the moment the pin is cleared — nothing persisted to unwind", async () => {
     const { socketPath, harnessToken, settingsPath } = await boot("codex-oauth/gpt-5.6-sol", { internalCredentials: ["codex-oauth:default"] });
     const raw = JSON.parse(readFileSync(settingsPath, "utf8"));
-    writeFileSync(settingsPath, JSON.stringify({ ...raw, titles: { model: "anthropic/claude-opus-5" } }, null, 2));
+    writeFileSync(settingsPath, JSON.stringify({ ...raw, titles: { model: "console/claude-opus-5" } }, null, 2));
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     expect((await c.request(METHODS.settingsModelRoles, {})).result.roles["titles.model"].problem?.reason).toBe("provider-unsupported");
@@ -512,15 +539,15 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     c.close();
   });
 
-  test("reviewer.model with a pre-ruling Claude pin (written by hand): same, as provider-unsupported", async () => {
+  test("reviewer.model with a pre-ruling console pin (written by hand): same, as provider-unsupported", async () => {
     const { socketPath, harnessToken, settingsPath } = await boot("codex-oauth/gpt-5.6-sol", { internalCredentials: ["codex-oauth:default"] });
     const raw = JSON.parse(readFileSync(settingsPath, "utf8"));
-    writeFileSync(settingsPath, JSON.stringify({ ...raw, reviewer: { model: "anthropic/claude-opus-5" } }, null, 2));
+    writeFileSync(settingsPath, JSON.stringify({ ...raw, reviewer: { model: "console/claude-opus-5" } }, null, 2));
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     const info = (await c.request(METHODS.settingsModelRoles, {})).result.roles["reviewer.model"];
     expect(info.problem?.reason).toBe("provider-unsupported");
-    expect(info.problem?.detail).toBe("Anthropic can't be used for Winter's own jobs yet — reviewing on codex-oauth/gpt-5.6-terra meanwhile");
+    expect(info.problem?.detail).toBe("Anthropic Console can't be used for Winter's own jobs yet — reviewing on codex-oauth/gpt-5.6-terra meanwhile");
     c.close();
   });
 
