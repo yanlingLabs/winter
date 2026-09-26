@@ -185,7 +185,7 @@ export function writeAndLoadSettings(home: string, pluginId: string, opts?: { ha
  *  never a `<home>/plugins/<name>` convention — see `agent/plugins.ts`'s own doc). */
 export function buildSpawnablePlugins(home: string, settings: Settings): EligiblePlugin[] {
   const pluginStore = new PluginStore({
-    winterHome: home, plugins: settings.plugins, consents: settings.plugins?.consents,
+    winterHome: home, consents: settings.plugins?.consents,
     log: (m) => { if (process.env.WINTER_TEST_DEBUG) console.error(`[plugins] ${m}`); },
   });
   return pluginStore.list()
@@ -286,13 +286,13 @@ export async function createSupervisedInstance(params: {
     hardwareBroker = new HardwareBroker({ audit, pushToProvider: (e) => providerLink!.push(e) });
     const settings = loadSettings(join(home, "settings.json"));
     plugins = new PluginStore({
-      winterHome: home, plugins: settings.plugins, consents: settings.plugins?.consents,
+      winterHome: home, consents: settings.plugins?.consents,
       log: (m) => { if (process.env.WINTER_TEST_DEBUG) console.error(`[plugins] ${m}`); },
     });
   } else if (params.plugins) {
     const settings = loadSettings(join(home, "settings.json"));
     plugins = new PluginStore({
-      winterHome: home, plugins: settings.plugins, consents: settings.plugins?.consents,
+      winterHome: home, consents: settings.plugins?.consents,
       log: (m) => { if (process.env.WINTER_TEST_DEBUG) console.error(`[plugins] ${m}`); },
     });
   }

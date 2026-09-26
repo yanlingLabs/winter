@@ -695,7 +695,7 @@ export async function startDaemon(opts: {
   // resolved/inline script needs the WorkflowRuntime below, which DOES require an engine).
   const workflowStore = new WorkflowStore({ winterHome, trust: trustStore });
   const pluginStore = new PluginStore({
-    winterHome, plugins: settings?.plugins, consents: settings?.plugins?.consents, log: (m) => console.error(m),
+    winterHome, consents: settings?.plugins?.consents, log: (m) => console.error(m),
   });
   // Built unconditionally (Phase 4b Task 4): shortcut.register/tile.update/provider.register are
   // plain latest-per-plugin storage, independent of whether an LLM provider (and thus a
@@ -2159,7 +2159,7 @@ export async function startDaemon(opts: {
     // Tier-2 platform plugins (Phase 4b Task 3, spec §3): PluginSupervisor owns process lifecycle
     // (spawn/registration timeout/crash backoff/circuit breaker/PID-file orphan reclaim) for every
     // spawn-eligible plugin (pluginSpawnEligible — tier "platform" + entry present + enabled +
-    // consented, the same enabled/disabled/consent shape as pluginMcpEligible above). `pluginSupervisor`/
+    // consented). `pluginSupervisor`/
     // `spawnablePlugins` are constructed above, OUTSIDE this gate (Phase 4d-cleanup Task 2 — the
     // orphan sweep runs regardless of agentProvider); only the actual spawn — `startAll()` — is
     // gated here, since a spawned plugin process needs `registry` (just below) to bridge its tools
