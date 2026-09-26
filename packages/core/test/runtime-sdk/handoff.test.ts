@@ -845,6 +845,36 @@ describe("item 6: a same-leg PROVIDER change replaces the live child", () => {
     });
   });
 
+  // Review r1 I-5: the handoff promise is kept per session -- a message sent while the source compacts is
+  // held for the target (the live child's `beginHandoff`), and once the child is replaced the session is
+  // resumed on the new provider at once (`ensure`) to answer it.
+  test("WS-23 r1 I-5: messages held during the switch are answered by the TARGET -- the session is resumed right after the evict", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      const calls: string[] = [];
+      let release: (() => void) | undefined;
+      const compacting = new Promise<void>((resolve) => { release = resolve; });
+      let pending = false;
+      const live: LegSession = {
+        ...compactingLive(false, async () => {}, calls, async () => { await compacting; return { retainedCount: 3 }; }),
+        get handoffPending() { return pending; },
+        beginHandoff: async (work: () => Promise<void>) => { pending = true; await work(); pending = false; return { heldTurns: 1 }; },
+      };
+      const winter = fakeWinter({ live });
+      await planAndApplySwitch(
+        deps({ records, winter: { ...winter, evict: async () => { calls.push("evict"); }, ensure: async () => { calls.push("ensure"); return undefined; } }, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-v4-pro")) }), barrier: { reviewSwitch: async () => tooBig } }),
+        "s1", "deepseek/deepseek-v4-pro", true,
+      );
+      expect(live.handoffPending).toBe(true);   // synchronously: server.ts reads it right after the switch returns
+      await Bun.sleep(10);
+      expect(calls).toEqual(["compact"]);
+      release!();
+      await Bun.sleep(20);
+      expect(calls).toEqual(["compact", "evict", "ensure"]);
+      expect(live.handoffPending).toBe(false);
+    });
+  });
+
   test("a running turn is never interrupted — the evict waits for the idle boundary", async () => {
     await withRs(async (_rs, records) => {
       seedRecord(records, "s1");

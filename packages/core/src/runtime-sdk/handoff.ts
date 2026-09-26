@@ -489,27 +489,39 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
           deps.log?.(`handoff: ${sessionId} could not compact on its source model before the provider switch (${err instanceof Error ? err.name : "unknown"}) — the new model's own fit check compacts instead`);
         }
       };
+      // Review r1 I-5: the switch is confirmed and the record names the new provider, so from here on
+      // the TARGET answers. While the source finishes its turn and/or compacts, what the user sends is
+      // held (logged, not pushed -- `WinterSession.beginHandoff`); once the child is replaced, the
+      // session is resumed on the new provider at once to answer it.
+      const handOff = (work: () => Promise<void>): void => {
+        const held = liveChild.beginHandoff !== undefined ? liveChild.beginHandoff(work) : work().then(() => ({ heldTurns: 0 }));
+        void held.then(
+          async ({ heldTurns }) => {
+            if (heldTurns === 0) return;
+            deps.log?.(`handoff: ${sessionId} — ${heldTurns} message(s) sent during the switch now run on ${modelLabelFor(model)}`);
+            await deps.winter.ensure(sessionId);
+          },
+        ).catch((err: unknown) => {
+          deps.log?.(`handoff: ${sessionId} could not resume on its new provider for the messages held during the switch (${err instanceof Error ? err.name : "unknown"}) — they stay owed in the log for the next send`);
+        });
+      };
       if (liveChild.turnRunning === true) {
         deps.log?.(`handoff: ${sessionId} changed provider (${providerBeforeSwitch} -> ${decided.providerId}) while a turn was running — the child will be replaced at the next idle boundary`);
-        void liveChild.idle().then(
-          async () => {
-            await compactFirst();
-            await deps.winter.evict(sessionId);
-          },
-          () => { /* the session ended before settling — nothing left to replace */ },
-        );
+        handOff(async () => {
+          await liveChild.idle();
+          await compactFirst();
+          await deps.winter.evict(sessionId);
+        });
       } else if (compactOnSource) {
         // NOT awaited: a compaction can take tens of seconds, and `session.setModel`'s callers time out
         // far sooner (the Mac client's default is 5 s) -- the switch has already been applied to the
-        // record. Disclosed trade-off: a message sent while the source compacts is answered by the
-        // source model (its engine starts no turn until the compaction settles), and the child is
-        // replaced at the idle boundary after it, like the running-turn branch above.
+        // record. A message sent while the source compacts is held for the target (I-5, above).
         deps.log?.(`handoff: ${sessionId} changed provider (${providerBeforeSwitch} -> ${decided.providerId}) and does not fit the new model — compacting on the source model, then replacing its child`);
-        void (async () => {
+        handOff(async () => {
           await compactFirst();
           await liveChild.idle();
           await deps.winter.evict(sessionId);
-        })().catch(() => { /* evict never throws; the session ended meanwhile — nothing left to replace */ });
+        });
       } else {
         deps.log?.(`handoff: ${sessionId} changed provider (${providerBeforeSwitch} -> ${decided.providerId}) — replacing its child so the next turn spawns against the new endpoint`);
         await deps.winter.evict(sessionId);

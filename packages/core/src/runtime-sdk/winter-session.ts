@@ -325,6 +325,18 @@ export interface WinterSession {
    * silent no-op.
    */
   compact(opts?: { customInstructions?: string }): Promise<{ retainedCount: number }>;
+  /**
+   * WS-23 (reasoning-state, review r1 I-5): the switch to ANOTHER provider has been applied to the record,
+   * and `work` (compact on the source if asked, wait for the idle boundary, evict) replaces this child.
+   * Until `work` settles, what arrives through `send`/`steer`/`deliver` is HELD FOR THE TARGET: its
+   * `user_message` lands in the log (the log is the queue, P8b-39) and nothing is pushed to the source
+   * child; texts queued before the switch stop draining too. Resolves with how many texts were held,
+   * so the caller can resume the session on its new provider at once to answer them. The pending
+   * flag is set synchronously. A second call chains after the first.
+   */
+  beginHandoff(work: () => Promise<void>): Promise<{ heldTurns: number }>;
+  /** True while a `beginHandoff` is pending: the live child is the SOURCE being left, not the target. */
+  readonly handoffPending: boolean;
   setModel(model?: string): Promise<void>;
   /** Task 17 Step 0(b): `session.setPolicy` reaches a LIVE child as `Query.setPermissionMode`
    *  (the 1:1 map of P8b-7); the bridge's policy getter is live already, and a resumable session
@@ -413,6 +425,11 @@ class WinterSessionImpl implements WinterSession {
   private opening: Promise<void> | undefined;
   private idleWaiters: Array<() => void> = [];
   private turnStart: number | undefined;
+  /** Review r1 M-4: a `compact` control is running -- the idle clock must not end the child under it. */
+  private compacting = 0;
+  /** Review r1 I-5: the pending handoff (see `beginHandoff`), and what it has held so far. */
+  private handoff: Promise<void> | undefined;
+  private heldForHandoff = 0;
 
   constructor(private readonly deps: WinterSessionDeps) {
     this.sessionId = deps.sessionId;
@@ -431,6 +448,7 @@ class WinterSessionImpl implements WinterSession {
   get done(): Promise<void> { return this.inc?.done ?? this.lastDone; }
   get pendingSends(): readonly string[] { return this.pending; }
   get heldDeliveries(): readonly string[] { return this.held; }
+  get handoffPending(): boolean { return this.handoff !== undefined; }
 
   // ── the doors ──────────────────────────────────────────────────────────────────────────────
 
@@ -439,6 +457,7 @@ class WinterSessionImpl implements WinterSession {
     // WS-19 (W19-7): the pre-turn gate, BEFORE the open and before the append — a refusal here
     // leaves the session exactly as it was, with no child and no orphan `user_message`.
     await this.deps.beforeTurn?.();
+    if (this.handoff !== undefined) return { seq: this.holdForHandoff(text, clientName), queued: true };
     // Open FIRST: a refused open (the binary is gone) then leaves no orphan `user_message`, and a
     // delivery held while resumable is appended by `open()` BEFORE this text — chronological.
     await this.open();
@@ -463,6 +482,8 @@ class WinterSessionImpl implements WinterSession {
   async steer(text: string, clientName = "steer"): Promise<{ seq: number; injected: boolean }> {
     this.assertNotEnded();
     await this.deps.beforeTurn?.();
+    // I-5: a steer during a pending handoff is not injected into the SOURCE's turn: it is the target's.
+    if (this.handoff !== undefined) return { seq: this.holdForHandoff(text, clientName), injected: false };
     await this.open();
     const seq = this.appendUser(text, clientName);
     const wasRunning = this.inFlight > 0;
@@ -477,6 +498,7 @@ class WinterSessionImpl implements WinterSession {
       this.log(`a delivery reached ${this.sessionId} after it ended — dropped`);
       return;
     }
+    if (this.handoff !== undefined) { this.holdForHandoff(text, "messaging"); return; }
     if (this.stateValue !== "live" || this.inc === undefined || this.ending || this.inc.queue.closed) {
       // P8b-24: a delivery that reached the sink was already receipted by the router; holding it
       // host-side (rather than throwing, which the wrapper would report as `delivery_uncertain`)
@@ -507,10 +529,52 @@ class WinterSessionImpl implements WinterSession {
     return { wasRunning: true };
   }
 
-  compact(opts?: { customInstructions?: string }): Promise<{ retainedCount: number }> {
+  async compact(opts?: { customInstructions?: string }): Promise<{ retainedCount: number }> {
     const compact = this.stateValue === "live" ? this.inc?.query.compact : undefined;
-    if (compact === undefined || this.inc === undefined) return Promise.reject(new WinterLegUnsupported("session.compact"));
-    return compact.call(this.inc.query, opts);
+    if (compact === undefined || this.inc === undefined) throw new WinterLegUnsupported("session.compact");
+    // Review r1 M-4: no turn is in flight during a compaction, so the idle clock would otherwise run --
+    // and end the child mid-compaction, leaving the target to compact a second time. Held off for the
+    // compaction's whole length, re-armed after it.
+    this.compacting++;
+    this.clearIdleTimer();
+    try {
+      return await compact.call(this.inc.query, opts);
+    } finally {
+      this.compacting--;
+      if (this.compacting === 0 && this.inFlight === 0) this.armIdleTimer();
+    }
+  }
+
+  beginHandoff(work: () => Promise<void>): Promise<{ heldTurns: number }> {
+    const previous = this.handoff ?? Promise.resolve();
+    const mine: Promise<void> = previous.then(work).catch((err: unknown) => {
+      this.log(`handoff work for ${this.sessionId} failed (${err instanceof Error ? err.name : "unknown"}) — held texts wait in the log for the next incarnation`);
+    });
+    this.handoff = mine;
+    return mine.then(() => {
+      if (this.handoff !== mine) return { heldTurns: 0 };   // a later handoff took over; it reports
+      this.handoff = undefined;
+      const heldTurns = this.heldForHandoff;
+      this.heldForHandoff = 0;
+      // The work normally ends this child (the caller then resumes the session on its new provider). If
+      // it did not -- it failed, or the session was not evicted -- the texts held for it run HERE, in the
+      // log's order, rather than waiting for an incarnation nobody is opening.
+      if (heldTurns > 0 && this.stateValue === "live" && this.inc !== undefined && !this.ending && this.inFlight === 0) {
+        const owed = this.deps.unconsumed !== undefined ? this.deps.unconsumed() : [];
+        if (owed.length > 0) {
+          this.beginAndPush(owed[0]!, this.inc);
+          this.pending.push(...owed.slice(1));
+        }
+      }
+      return { heldTurns };
+    });
+  }
+
+  /** I-5: the text is in the log (unconsumed: no `turn_started` pairs it), so the next incarnation --
+   *  on the target -- pushes it (`deps.unconsumed`). Nothing reaches the source child. */
+  private holdForHandoff(text: string, clientName: string): number {
+    this.heldForHandoff++;
+    return this.appendUser(text, clientName);
   }
 
   idle(): Promise<void> {
@@ -746,12 +810,15 @@ class WinterSessionImpl implements WinterSession {
     // An ending incarnation's queue is closed: a push would throw inside the iteration and cost
     // the held text a spurious `agent_error`. It stays owed (it is in the log) for the next one.
     if (this.ending || inc.queue.closed) return;
-    if (!this.drainPaused) {
+    if (!this.drainPaused && this.handoff === undefined) {
       // P8b-5: one held text per result; its turn is begun as it is pushed (P8b-39).
       const next = this.pending.shift();
       if (next !== undefined) { this.beginAndPush(next, inc); return; }
     }
     if (this.inFlight === 0) {
+      // I-5: texts queued before a provider switch are left in the log for the target -- counted, so
+      // the handoff resumes the session to answer them.
+      if (this.handoff !== undefined) { this.heldForHandoff += this.pending.length; this.pending.length = 0; }
       this.recordState("idle");
       inc.attachment?.refresh();
       this.armIdleTimer();
@@ -855,12 +922,12 @@ class WinterSessionImpl implements WinterSession {
 
   private armIdleTimer(): void {
     this.clearIdleTimer();
-    if (this.stateValue !== "live" || this.ending) return;
+    if (this.stateValue !== "live" || this.ending || this.compacting > 0) return;
     const ms = this.deps.idleTimeoutMs();
     if (!Number.isFinite(ms) || ms <= 0) return;
     this.idleTimer = this.timers.set(() => {
       this.idleTimer = undefined;
-      if (this.stateValue === "live" && this.inFlight === 0 && !this.ending) {
+      if (this.stateValue === "live" && this.inFlight === 0 && !this.ending && this.compacting === 0) {
         this.log(`session ${this.sessionId} idle for ${ms} ms — ending its winter child (resumable)`);
         void this.end();
       }
