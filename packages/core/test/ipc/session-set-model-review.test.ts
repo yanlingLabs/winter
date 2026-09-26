@@ -56,7 +56,7 @@ import type { anthropicFake as AnthropicFakeModule } from "@yanlinglabs/winter-p
 
 type AnthropicTurnScript = Parameters<typeof AnthropicFakeModule.anthropicTurnResponse>[0];
 
-interface RpcErrorLike { rpc?: { message?: string; data?: { code?: string; warnings?: string[]; portable?: string[]; reason?: string } } }
+interface RpcErrorLike { rpc?: { message?: string; data?: { code?: string; warnings?: string[]; portable?: string[]; reason?: string; fit?: { fits: boolean; estimatedTokens: number; window: number } } } }
 
 class TestClient {
   private decoder = new LineDecoder();
@@ -427,6 +427,14 @@ describeWithWinterBinary("A-7: a zero-turn session that switches families does n
 // from it is `lossless-native`) and `openai/gpt-5.6-sol` (hidden reasoning; a move away from it is
 // `warned-lossy`). If the review reads the STALE gpt-4.1 identity after the same-leg move to
 // gpt-5.6-sol, the final gpt -> claude move would WRONGLY fail to prompt.
+//
+// WS-23 (reasoning-state, decision 9 — SDK b5a79db): gpt -> claude no longer prompts from EITHER
+// source (reasoning is parked in the sidecar, not lost), so the worry is asked of what still depends
+// on the source. The last move now goes to `zai/glm-5` (200k window) after a conversation GLM cannot
+// hold — a switch that prompts over the compaction the fit check will run — and the confirmation names
+// the SOURCE twice: as the model that will summarize the older part (the stale bug would name
+// gpt-4.1), and in `portable`, where only a reasoning source's own state is listed as kept for it
+// (gpt-4.1 is `continuation: "none"` and has none).
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 describeWithWinterBinary("C1: a same-leg switch must not leave the review reading a stale model", (winterBin) => {
   let home: string;
@@ -448,11 +456,11 @@ describeWithWinterBinary("C1: a same-leg switch must not leave the review readin
     }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-test-c1" });
-    // An anthropic credential is REQUIRED even though the LAST move only needs to PROMPT, never to
-    // succeed: without one, `selectRuntimeFor` itself refuses `runtime_selection_refused` (no
-    // credential) BEFORE the pre-flight review is ever reached at all (measured) — a different,
-    // uninteresting refusal that would never exercise this test's own point.
-    await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-test-c1-anthropic" });
+    // A zai credential is REQUIRED even though the LAST move only needs to PROMPT, never to succeed:
+    // without one, `selectRuntimeFor` itself refuses `runtime_selection_refused` (no credential) BEFORE
+    // the pre-flight review is ever reached at all (measured, when this move targeted anthropic) — a
+    // different, uninteresting refusal that would never exercise this test's own point.
+    await writeCredentialMaterial(secrets, "zai:default", { kind: "api-key", key: "sk-test-c1-zai" });
     daemon = await startDaemon({ home, secrets, agentProvider: null });
     if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
     client = await TestClient.connect(daemon.socketPath);
@@ -468,7 +476,7 @@ describeWithWinterBinary("C1: a same-leg switch must not leave the review readin
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("gpt-4.1 -> gpt-5.6-sol (same-leg, silent) -> claude MUST prompt (the review must read gpt-5.6-sol, not the stale gpt-4.1)", async () => {
+  test("gpt-4.1 -> gpt-5.6-sol (same-leg, silent) -> GLM (a conversation it cannot hold) prompts NAMING gpt-5.6-sol, not the stale gpt-4.1", async () => {
     const d = daemon!;
     if ("unavailable" in d.runtimeState) throw d.runtimeState.unavailable;
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), "review-c1-cwd-")));
@@ -480,20 +488,30 @@ describeWithWinterBinary("C1: a same-leg switch must not leave the review readin
     // Step 1: gpt-4.1 -> gpt-5.6-sol, same family, same leg — must apply silently.
     await client.call(METHODS.sessionSetModel, { sessionId, model: "openai/gpt-5.6-sol" }); // never throws
     expect(d.winter.legOf(sessionId)).toBe("winter");
-    // A turn on the NEW model, so the review has a source turn to weigh under the NEW identity.
-    await client.call(METHODS.sessionSend, { sessionId, text: "on the reasoning model now" });
+    // A turn on the NEW model, so the review has a source turn to weigh under the NEW identity — and
+    // ~700k characters of it (~220k tokens by the review's estimate), past GLM's 200k window outright.
+    await client.call(METHODS.sessionSend, { sessionId, text: `on the reasoning model now: ${"a".repeat(700_000)}` });
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && client.events.filter((ev) => ev.type === "turn_completed").length >= 2, 45_000);
 
-    // Step 2: gpt-5.6-sol -> claude, a family change (on the Winter runtime since WS-23) — MUST
-    // prompt (W18-21's own required behaviour).
-    // GREEN since the D1 C1 fix (`5c09626d`): the review now reads gpt-5.6-sol's OWN fresh facts
-    // (hidden reasoning, warned-lossy), not the stale gpt-4.1 identity from before the same-leg move.
+    // Step 2: gpt-5.6-sol -> GLM, a family change GLM cannot hold — MUST prompt, over the compaction.
+    // GREEN since the D1 C1 fix (`5c09626d`): the review reads gpt-5.6-sol's OWN fresh identity, not
+    // the stale gpt-4.1 one from before the same-leg move.
     let caught: RpcErrorLike | undefined;
     try {
-      await client.call(METHODS.sessionSetModel, { sessionId, model: "anthropic/claude-sonnet-5" });
+      await client.call(METHODS.sessionSetModel, { sessionId, model: "zai/glm-5" });
     } catch (err) { caught = err as RpcErrorLike; }
     expect(caught).toBeDefined();
     expect(caught!.rpc?.data?.code).toBe("handoff_confirmation_required");
+    expect(caught!.rpc?.data?.fit?.fits).toBe(false);
+    expect(caught!.rpc?.data?.fit?.window).toBe(200_000);
+    const warnings = caught!.rpc?.data?.warnings ?? [];
+    const portable = caught!.rpc?.data?.portable ?? [];
+    // The model that will summarize the older part is the LIVE source...
+    expect(warnings.some((w) => w.includes("so openai/gpt-5.6-sol will summarize its older part"))).toBe(true);
+    // ...and it is gpt-5.6-sol's own reasoning that is listed as kept for it.
+    expect(portable.some((line) => line.startsWith("openai/gpt-5.6-sol's reasoning"))).toBe(true);
+    // The stale identity appears in neither.
+    expect([...warnings, ...portable].some((line) => line.includes("gpt-4.1"))).toBe(false);
 
     rmSync(cwd, { recursive: true, force: true });
   }, 90_000);
@@ -560,7 +578,14 @@ async function startChatProviderFake(reply: string, reasoning?: string[]): Promi
  * regressed, the destination fake would simply never be reached.
  */
 
-describeWithWinterBinary("A-7: the LITERAL gpt -> deepseek (prompts) / deepseek -> GLM (silent) pairing", (winterBin) => {
+// WS-23 (reasoning-state, decision 9 — SDK b5a79db): the pairing's FIRST hop no longer prompts. It
+// prompted because gpt's hidden reasoning "could not carry" to DeepSeek; that reasoning is now parked in
+// the sidecar for gpt (a switch back replays it), and nothing in this conversation is something
+// DeepSeek cannot represent. Both hops are therefore the plain switch; what this block still proves is
+// the rest of its point — each hop really reaches its own provider, body-level, with the conversation
+// carried. The prompt half of a real session lives in C1 above (a conversation the target cannot hold);
+// the loss matrix itself in the "same-leg loss" block.
+describeWithWinterBinary("A-7: the LITERAL gpt -> deepseek / deepseek -> GLM pairing (both silent since WS-23)", (winterBin) => {
   let home: string;
   let daemon: RunningDaemon | undefined;
   let client: TestClient;
@@ -607,27 +632,21 @@ describeWithWinterBinary("A-7: the LITERAL gpt -> deepseek (prompts) / deepseek 
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("gpt -> deepseek PROMPTS and, once confirmed, really runs on deepseek; deepseek -> GLM is SILENT and really runs on GLM", async () => {
+  test("gpt -> deepseek is SILENT (WS-23) and really runs on deepseek; deepseek -> GLM is SILENT and really runs on GLM", async () => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), "a7-literal-cwd-")));
     const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: "openai/gpt-5.6-sol", cwd });
     await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
     await client.call(METHODS.sessionSend, { sessionId, text: "hop 0, on gpt" });
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 90_000);
 
-    // HOP 1 — gpt -> deepseek. A hidden-reasoning source crossing to a foreign family: PROMPTS.
-    let caught: RpcErrorLike | undefined;
-    try {
-      await client.call(METHODS.sessionSetModel, { sessionId, model: "deepseek/deepseek-v4-pro" });
-    } catch (err) { caught = err as RpcErrorLike; }
-    expect(caught?.rpc?.data?.code).toBe("handoff_confirmation_required");
-    expect((caught?.rpc?.data?.warnings?.length ?? 0)).toBeGreaterThan(0);
-    // Confirmed, it goes through — same leg, so no runtime migration is involved at all.
-    await client.call(METHODS.sessionSetModel, { sessionId, model: "deepseek/deepseek-v4-pro", confirmLossy: true });
+    // HOP 1 — gpt -> deepseek. A hidden-reasoning source crossing to a foreign family. WS-23: SILENT —
+    // gpt's reasoning stays in the sidecar for gpt, so there is nothing to confirm; a prompt here
+    // throws `handoff_confirmation_required` and fails the test.
+    await client.call(METHODS.sessionSetModel, { sessionId, model: "deepseek/deepseek-v4-pro" });
 
     // BODY-LEVEL (W18-19): the next turn reaches DeepSeek's own endpoint asking for its own id, AND
     // carries the conversation so far, in order. gpt is a HIDDEN-reasoning source, so there is no
-    // reasoning to carry off it — the prompt this hop is about is precisely that loss, and the
-    // confirmation above is where the user was told.
+    // readable reasoning to carry off it — and its opaque state stays behind (`opaqueLeaks` below).
     await client.call(METHODS.sessionSend, { sessionId, text: "hop 1, on deepseek" });
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && client.events.filter((x) => x.type === "turn_completed").length >= 2, 90_000);
     expect(deepseek!.models).toContain("deepseek-v4-pro");
