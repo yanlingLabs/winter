@@ -30,6 +30,16 @@ function effortsForModel(tag: string): string[] {
  * providers a home is ready to use — and it reads the same `byProvider` the router admits a session's
  * row on, so a model offered here is one `session.create` accepts (the WS-23 live-gate fix: `console`
  * used to be answered by its on-disk profile here while the router saw no `console` credential at all).
+ *
+ * WS-24 (pickers lane): a row whose `toolCalling` is `"none"` is EXCLUDED too — this is THE session
+ * picker, and a Winter session of any mode always offers tools, so a session started on such a row
+ * could never work (WS-23 hardened the Responses adapters to omit tools for these rows entirely,
+ * which is what makes the row unusable rather than merely undesirable). This is the ONE choke point
+ * every session picker reads through (`sync.config`'s `models`, the Mac's `ComposerModelPanel`, the
+ * CLI's `winter model`, the TUI's `/model` — all read `sync.config` and none re-filters), so filtering
+ * here is enough to hide these rows everywhere a SESSION picks a model, with no per-client change.
+ * `models.catalog` (`providers/model-catalog-wire.ts`) is a DIFFERENT listing on purpose and is left
+ * unfiltered — see that module's own note on why.
  */
 export function pickerModels(deps: { credentials: CredentialPresence; home: string }): SyncConfigModel[] {
   const catalog = loadCatalog();
@@ -41,6 +51,8 @@ export function pickerModels(deps: { credentials: CredentialPresence; home: stri
       if (row.providerId !== provider.id) continue;
       // A vendor-retired row (`deprecated`, SDK 0.0.23) still resolves for a stored tag but is never offered.
       if (row.status === "blocked" || row.status === "deprecated") continue;
+      // WS-24: a toolless row is never offered here either — see this function's own doc.
+      if (row.toolCalling.value === "none") continue;
       const tag = row.key as ModelTag;
       out.push({
         id: tag,
