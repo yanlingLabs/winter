@@ -13,15 +13,15 @@
   },
   "dependencies": {
     "@yanlinglabs/winter-protocol": "workspace:*",
-    "@yanlinglabs/winter-agent-sdk": "0.0.24",
-    "@yanlinglabs/winter-agent-runtime": "0.0.24",
-    "@yanlinglabs/winter-provider-catalog": "0.0.24",
-    "@yanlinglabs/winter-provider-runtime": "0.0.24",
-    "@yanlinglabs/winter-runtime-sdk": "^0.0.13",
+    "@yanlinglabs/winter-agent-sdk": "0.0.27",
+    "@yanlinglabs/winter-agent-runtime": "0.0.27",
+    "@yanlinglabs/winter-provider-catalog": "0.0.27",
+    "@yanlinglabs/winter-provider-runtime": "0.0.27",
+    "@yanlinglabs/winter-runtime-sdk": "^0.0.14",
     "unpdf": "^1.6.2",
     "zod": "^4.0.0"
   },
   "devDependencies": {
-    "@yanlinglabs/winter-provider-conformance": "0.0.24"
+    "@yanlinglabs/winter-provider-conformance": "0.0.27"
   }
 }
