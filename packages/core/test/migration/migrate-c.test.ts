@@ -890,3 +890,57 @@ describe("round 3: the bulk canonical-cwd re-key", () => {
     expect(existsSync(join(home, "projects", rawKey, `${BACKEND}.jsonl`))).toBe(true);
   });
 });
+
+// WS-24: a consent the user REVOKED on the new build must not come back when Migration C is rolled back
+// and run again. Rollback never touches settings.json or sdk/ (DECISION 15), so the second run's
+// convert-plugins meets the SAME bare legacy record it carried the first time — and used to carry it
+// again. It carries a bare record once; a re-run carries it again only if it CHANGED since (the user
+// re-consented on the older build after the rollback — a new decision).
+describe("WS-24: a revoked consent survives rollback + re-migrate", () => {
+  const SPEC = "bl@winter-legacy";
+  function legacyHome(): string {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-migc-revoke-")));
+    mkdirSync(join(home, "sdk", "projects"), { recursive: true });
+    write(join(home, "skills", "s", "SKILL.md"), "x"); // something else to migrate
+    write(join(home, "plugins", "bl", "winter-plugin.json"), JSON.stringify({ id: "bl", tier: "capability", permissions: { hardware: ["battery"] } }));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, plugins: { enabled: ["bl"], consents: { bl: { hardware: 1_700_000_000_000 } } } }));
+    return home;
+  }
+  const migrate = (home: string) => runMigrationC(home, deps({ reconcile: stubReconcile().reconcile, convertLegacyPlugins: convertLegacyPluginsForMigration }));
+  const consents = (home: string): Record<string, unknown> => JSON.parse(readFileSync(join(home, "settings.json"), "utf8")).plugins.consents;
+  const editConsents = (home: string, edit: (c: Record<string, unknown>) => void): void => {
+    const s = JSON.parse(readFileSync(join(home, "settings.json"), "utf8"));
+    edit(s.plugins.consents);
+    writeFileSync(join(home, "settings.json"), JSON.stringify(s));
+  };
+
+  test("revoked by deleting the record (what uninstall's strip does): still absent after rollback + re-migrate", async () => {
+    const home = legacyHome();
+    expect((await migrate(home)).status).toBe("complete");
+    expect(consents(home)[SPEC]).toMatchObject({ classes: ["hardware"] });
+    editConsents(home, (c) => { delete c[SPEC]; });            // the user revokes on the new build
+    await rollbackMigrationC(home, { log: () => {} });
+    expect((await migrate(home)).status).toBe("complete");
+    expect(consents(home)[SPEC]).toBeUndefined();
+    expect(consents(home).bl).toEqual({ hardware: 1_700_000_000_000 }); // the bare record, untouched
+  });
+
+  test("revoked by narrowing it to no classes: still no classes after rollback + re-migrate", async () => {
+    const home = legacyHome();
+    await migrate(home);
+    editConsents(home, (c) => { c[SPEC] = { ...(c[SPEC] as object), classes: [] }; });
+    await rollbackMigrationC(home, { log: () => {} });
+    await migrate(home);
+    expect(consents(home)[SPEC]).toMatchObject({ classes: [] });
+  });
+
+  test("a consent the user gave AGAIN on the older build after the rollback is carried (a new decision)", async () => {
+    const home = legacyHome();
+    await migrate(home);
+    editConsents(home, (c) => { delete c[SPEC]; });
+    await rollbackMigrationC(home, { log: () => {} });
+    editConsents(home, (c) => { c.bl = { hardware: 1_800_000_000_000 }; }); // re-consented on the older build
+    await migrate(home);
+    expect(consents(home)[SPEC]).toMatchObject({ classes: ["hardware"] });
+  });
+});

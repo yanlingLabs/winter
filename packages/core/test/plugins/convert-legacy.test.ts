@@ -503,6 +503,10 @@ describe("reviewer round, item 1: a crash between install and disable doesn't le
     const corrupted = JSON.parse(readFileSync(settingsPath, "utf8"));
     delete corrupted.plugins.consents["partial@winter-legacy"];
     writeFileSync(settingsPath, JSON.stringify(corrupted));
+    // WS-24: rekeyConsents writes its carry ledger right AFTER the settings record, so a crash before it
+    // ran left neither — without this, the deleted record reads as the user's own revoke (which a re-run
+    // must NOT undo; migrate-c.test.ts's "a revoked consent survives rollback + re-migrate").
+    rmSync(join(h, "migration", "c", "carried-consents.json"), { force: true });
 
     // Confirm the simulated crash state actually represents "enabled, unconsented" before resuming.
     const beforeResume = await listPlugins(pluginOptions);
@@ -542,6 +546,7 @@ describe("reviewer round, item 1: a crash between install and disable doesn't le
     const corrupted = JSON.parse(readFileSync(settingsPath, "utf8"));
     delete corrupted.plugins.consents["trusted@winter-legacy"];
     writeFileSync(settingsPath, JSON.stringify(corrupted));
+    rmSync(join(h, "migration", "c", "carried-consents.json"), { force: true }); // WS-24: see the test above
 
     const pluginOptions = pluginOptionsFor(h);
     const second = await convertLegacyPlugins(h);

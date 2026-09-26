@@ -830,7 +830,9 @@ function rawRuntimeState(home: string, fn: (db: Database) => void): void {
  * `plugins.consents` record re-keyed and re-fingerprinted — a consent the user already gave, kept valid),
  * and it only ever rewrote `backend_root` in runtime-state, so rollback reverses exactly that one rewrite
  * and never touches `settings.json`, instead of restoring the preflight backups over the live files (which
- * would drop every post-upgrade settings edit, generation, handoff and quarantine row). The sdk files the split filled are
+ * would drop every post-upgrade settings edit, generation, handoff and quarantine row). WS-24: the consent
+ * carry ledger (`migration/c/carried-consents.json`, `plugins/convert-legacy.ts`) stays too, so a re-run
+ * never carries the same legacy consent twice — a revoke made on the new build survives the round trip. The sdk files the split filled are
  * left (an older build never reads them, and they hold the user's post-upgrade answers); the copies
  * `copy-files` made are moved into the archive, never deleted. The preflight backups stay under
  * `archiveDir` for an operator. The daemon must be stopped (the CLI checks the lock).
