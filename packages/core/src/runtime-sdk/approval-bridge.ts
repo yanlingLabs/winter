@@ -615,9 +615,13 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     // Fix round 2: …and a Bash command writing under any `.winter/{skills,commands,rules,output-styles,
     // agents}` (the path-fence Bash hook's own detector) — a card for what the child's sandbox does not bind
     // (R.3 I-4: its any-depth `<dir>/**/.winter/<kind>` fence covers the working directories themselves).
+    // WS-24: `deps.cwd` so a RELATIVE write through an existing link resolves at this layer too (the
+    // detector's own doc). `deps.cwd` is fixed per incarnation, so after an `enter_worktree`/`session.setCwd`
+    // it lags until the next spawn; the PreToolUse hook reads the live `input.cwd` and stays the primary
+    // fence — this layer is the one that holds when a hook's `ask` never reached it.
     const protectedBashWrite = classificationName === "bash" && typeof input === "object" && input !== null
       && typeof (input as Record<string, unknown>).command === "string"
-      && bashProtectedWriteHit((input as Record<string, unknown>).command as string) !== undefined;
+      && bashProtectedWriteHit((input as Record<string, unknown>).command as string, deps.cwd ? { cwd: deps.cwd } : {}) !== undefined;
     const protectedWrite = protectedBashWrite || deps.home !== undefined && protectedWriteDecision(toolName, input, {
       mode: "code", cwd: deps.cwd ?? "",
       // R.3 I-1: the walk's top is the run home's own project root (`projectScopeRootFor`).
