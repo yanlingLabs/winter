@@ -45,7 +45,7 @@
 // reads only the qualified key (`PluginStore#list()`, `agent/plugins.ts`); an older, downgraded build
 // reads only the bare one — both coexist in the same file, neither ever reads the other's key.
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join, sep } from "node:path";
+import { basename, join, sep } from "node:path";
 import { sdkPluginsRoot, sdkHomeFor } from "../agent/paths";
 import { loadManifest, requiredConsentClasses } from "../agent/plugin-manifest";
 import { writeJsonAtomic } from "../sdk-files";
@@ -89,20 +89,57 @@ function isDirectory(path: string): boolean {
   try { return statSync(path).isDirectory(); } catch { return false; }
 }
 
-/** Whether `<home>/plugins/<name>` (or any path under it) is a legacy PLUGIN this converter would
- *  actually pick up. `convertLegacyPlugins`'s own discovery treats ANY real directory under
- *  `<home>/plugins` as a candidate — a `winter-plugin.json` or a Tier-1 `plugin.json` is read if
- *  present (`readLegacyManifest`), but NEITHER is required: a manifest-less directory still converts,
- *  generating a fresh manifest from just its own name. Exported so Migration C's old-layout detection
- *  (`migration/migrate-c.ts`'s `legacyPluginDirs`) can use the EXACT SAME predicate — reviewer round,
- *  item 3 — instead of maintaining a second, driftable definition of "this counts as a legacy
- *  plugin" (the one it had required a `winter-plugin.json`, so a home whose only legacy content was a
- *  manifest-less or `plugin.json`-only plugin never migrated even though this converter would have
- *  picked it up). Follows symlinks (`statSync`-based `isDirectory`, not `Dirent.isDirectory()`) for
- *  the same reason finding 4's own discovery fix needed to — see this converter's own directory scan,
- *  below, which uses this same function. */
-export function isLegacyPluginDir(path: string): boolean {
-  return isDirectory(path);
+/** WS-24: the files a pre-WS-21 plugin directory could be recognized by — what that build's own
+ *  `PluginStore` read out of `<home>/plugins/<id>` (its `winter-plugin.json`, a Tier-1 `plugin.json`, a
+ *  `.mcp.json`), plus claude's own manifest. A `skills/<name>/SKILL.md` counts too (`hasLegacySkill`). */
+const LEGACY_PLUGIN_MARKER_FILES: readonly string[] = ["winter-plugin.json", "plugin.json", join(".claude-plugin", "plugin.json"), ".mcp.json"];
+
+function isFile(path: string): boolean {
+  try { return statSync(path).isFile(); } catch { return false; }
+}
+
+function hasLegacySkill(dir: string): boolean {
+  try {
+    return readdirSync(join(dir, "skills"), { withFileTypes: true }).some((e) => isFile(join(dir, "skills", e.name, "SKILL.md")));
+  } catch { return false; }
+}
+
+/** WS-24: every bare plugin id the legacy `settings.json` names — `plugins.enabled`, `plugins.disabled`,
+ *  or a `plugins.consents` record's key (a qualified `"<id>@<marketplace>"` key names no LEGACY dir, so
+ *  only an `@`-less one counts). A directory the user demonstrably acted on is a plugin whatever it holds. */
+export function legacyPluginIdsNamedInSettings(home: string): Set<string> {
+  const { enabled, disabled, consents } = readLegacyPluginSettings(home);
+  return new Set([...enabled, ...disabled, ...Object.keys(consents).filter((k) => !k.includes("@"))]);
+}
+
+/** Whether `<home>/plugins/<name>` (or any path under it) is a legacy PLUGIN this converter picks up.
+ *  Exported so Migration C's old-layout detection (`migration/migrate-c.ts`, through
+ *  `legacyPluginDirNames`) uses the EXACT SAME predicate — reviewer round, item 3 — instead of a
+ *  second, driftable definition. Follows symlinks (`statSync`, not `Dirent.isDirectory()`, finding 4:
+ *  a dev checkout linked into `<home>/plugins`).
+ *
+ *  WS-24: a directory alone is no longer enough. The reviewer round's rule ("no manifest required") let
+ *  ANY folder under `<home>/plugins` — an empty one, a stray `marketplaces/` or `cache/` some tool wrote,
+ *  a leftover checkout — trip Migration C on every boot, and then be "converted" into an empty plugin.
+ *  A legacy plugin is now a directory holding something the pre-WS-21 build could load from it
+ *  (`LEGACY_PLUGIN_MARKER_FILES`, or a skill), OR one the legacy settings name (`namedInSettings`) —
+ *  still no manifest required: a `.mcp.json`- or skills-only plugin, or a bare one the user enabled,
+ *  converts as before. */
+export function isLegacyPluginDir(path: string, namedInSettings: ReadonlySet<string> = new Set()): boolean {
+  if (!isDirectory(path)) return false;
+  if (namedInSettings.has(basename(path))) return true;
+  return LEGACY_PLUGIN_MARKER_FILES.some((f) => isFile(join(path, f))) || hasLegacySkill(path);
+}
+
+/** WS-24: the ONE discovery of the legacy plugins under `<home>/plugins` — `convertLegacyPlugins`'s
+ *  candidate list AND Migration C's old-layout check (`migrate-c.ts`'s `legacyPluginDirs`), so the two
+ *  cannot count different things. `[]` when there is no `<home>/plugins` at all. */
+export function legacyPluginDirNames(home: string): string[] {
+  const root = join(home, "plugins");
+  const named = legacyPluginIdsNamedInSettings(home);
+  try {
+    return readdirSync(root, { withFileTypes: true }).filter((e) => isLegacyPluginDir(join(root, e.name), named)).map((e) => e.name);
+  } catch { return []; }
 }
 
 function readJsonIfPresent<T>(path: string): T | undefined {
@@ -385,18 +422,11 @@ function rekeyConsents(home: string, idToKey: Map<string, string>, idToFingerpri
 export async function convertLegacyPlugins(home: string): Promise<ConvertLegacyPluginsResult> {
   const legacyRoot = join(home, "plugins");
   const result: ConvertLegacyPluginsResult = { converted: [], skipped: [] };
-  let ids: string[] = [];
-  try {
-    // Post-merge fix round, finding 4 / reviewer round, item 3: `isLegacyPluginDir` — the SAME
-    // predicate Migration C's old-layout detection now shares (see its own doc) — follows symlinks
-    // and requires no manifest at all (a manifest-less directory still converts, below).
-    ids = readdirSync(legacyRoot, { withFileTypes: true })
-      .filter((e) => isLegacyPluginDir(join(legacyRoot, e.name)))
-      .map((e) => e.name);
-  } catch {
-    return result; // no legacy plugins directory at all — nothing to convert
-  }
-  if (ids.length === 0) return result;
+  // Post-merge fix round, finding 4 / reviewer round, item 3 / WS-24: `legacyPluginDirNames` — the SAME
+  // discovery Migration C's old-layout detection shares (see its own doc) — follows symlinks and needs
+  // no manifest, but skips a folder holding nothing a legacy plugin could have loaded.
+  const ids = legacyPluginDirNames(home);
+  if (ids.length === 0) return result; // no legacy plugins directory, or no plugin in it
 
   const marketplaceDir = join(sdkPluginsRoot(home), "marketplaces", LEGACY_MARKETPLACE_NAME);
   mkdirSync(join(marketplaceDir, "plugins"), { recursive: true });
