@@ -319,5 +319,11 @@ jobs:
       - name: verify:runtime-state
         run: bun run verify:runtime-state
 
+      # WS-23 (fix round 1, minor 6): the vendored ant, pinned and checksum-verified by fetch-ant
+      # itself, so verify:runtimes exercises ant's bundle rung and its record's SHA against the pin
+      # rather than skipping them.
+      - name: Fetch the pinned ant
+        run: bun run scripts/fetch-ant.ts
+
       - name: verify:runtimes
         run: bun run verify:runtimes

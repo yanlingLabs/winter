@@ -120,12 +120,8 @@ chmod 755 "${ANT}"
 # re-signed under a legitimate identity, would otherwise pass unnoticed.
 ANT_PRESIGN_SHA256="$(shasum -a 256 "${ANT}" | awk '{print $1}')"
 ANT_VERSIONS_JSON="${DEST}/ant/VERSIONS.json"
-bun -e '
-  const [path, tag, sha] = process.argv.slice(1);
-  const fs = require("node:fs");
-  const record = { schema: 1, tag, checksums: { antPreSign: sha }, stagedAt: new Date().toISOString() };
-  fs.writeFileSync(path, JSON.stringify(record, null, 2) + "\n");
-' "${ANT_VERSIONS_JSON}" "${ANT_TAG}" "${ANT_PRESIGN_SHA256}"
+# The ONE writer of that record's shape (scripts/ant-record.ts), shared with verify-runtimes-compiled.ts.
+( cd "${REPO_ROOT}" && bun run scripts/ant-record.ts "${ANT_VERSIONS_JSON}" "${ANT_TAG}" "${ANT_PRESIGN_SHA256}" )
 
 codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --identifier com.winter.ant --options runtime --timestamp "${ANT}"
 
