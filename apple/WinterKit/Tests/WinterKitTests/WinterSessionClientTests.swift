@@ -607,6 +607,12 @@ final class WinterSessionClientTests: XCTestCase {
     /// heard of either variant still advances its cursor correctly and simply fails to render the
     /// row (its own transcript fold's `default: break` — see history.ts's own doc comment for the
     /// full chain of evidence).
+    ///
+    /// **This test proves old-phone behaviour, not merely current behaviour**, because
+    /// `apple/WinterKit/Sources/WinterSessionKit/` is byte-identical to the shipped `v-web-kit1` tag
+    /// (`git diff v-web-kit1 -- apple/WinterKit/Sources/WinterSessionKit/` is empty) and
+    /// `SessionEvent.transientTypes` is unchanged since that tag too — so an app actually built at
+    /// `v-web-kit1` runs this exact code path, not merely code shaped like it.
     func testHookNoticeAndContinuityWarningTakeTheOrdinaryPersistedPathNotTheTransientOne() async throws {
         let conn = ScriptedRemoteConn()
         let cursors = InMemoryCursorStore()
@@ -1123,6 +1129,12 @@ final class WinterSessionClientTests: XCTestCase {
     /// (`SessionEnvelope.json`), so no client-side change was needed to "surface" them — they were
     /// always reachable the moment the daemon started sending them. Pinned here as the caller-facing
     /// proof: their fields (`text`/`level`/`warning`) read back exactly as sent.
+    ///
+    /// **This test proves old-phone behaviour, not merely current behaviour**, because
+    /// `apple/WinterKit/Sources/WinterSessionKit/` is byte-identical to the shipped `v-web-kit1` tag
+    /// (`git diff v-web-kit1 -- apple/WinterKit/Sources/WinterSessionKit/` is empty) and
+    /// `SessionEvent.transientTypes` is unchanged since that tag too — so an app actually built at
+    /// `v-web-kit1` runs this exact code path, not merely code shaped like it.
     func testHistoryDecodesHookNoticeAndContinuityWarningRows() async throws {
         let conn = ScriptedRemoteConn()
         let client = makeClient(conn: conn, cursors: InMemoryCursorStore())
