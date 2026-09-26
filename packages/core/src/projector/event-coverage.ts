@@ -180,7 +180,7 @@ export const PROJECTED_EVENT_COVERAGE = {
   // WS-23: `system/informational` (a hook's notice), and a `result` whose `terminal_reason` is
   // `hook_stopped` when no notice already carried that stop's reason (`index.ts`).
   hook_notice: true,
-  // WS-23 review r1 I-3: the runtime's `system/continuity_warning` frame, every kind (`index.ts`).
+  // WS-23 review r1 I-3: the runtime's `system/continuity_warning` frame, all but the three resume-time kinds (`index.ts`).
   continuity_warning: true,
   // `user_message` is produced ONLY as a pass-through: a `user` text frame that the host's own
   // push queue does not account for (an inbound agent-message delivery rendered into the child's

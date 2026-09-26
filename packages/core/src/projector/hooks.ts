@@ -18,7 +18,8 @@ import type { ProtocolSdkMessage } from "./types";
  *  - **Winter-only extension messages** — `thinking_tokens`, `model_refusal_*`, `reasoning_summary`,
  *    `model_switch` (§4.7). `continuity_warning` is NOT one of them any more (WS-23 review r1 I-3): it
  *    is persisted as the `continuity_warning` SessionEvent, because the user must see what a switch or
- *    a failed write lost. It stays in the allowlist below only for the one log line of a frame too
+ *    a failed write lost -- except its three resume-time kinds, re-emitted on every incarnation and so
+ *    kept log-only (review r2). It stays in the allowlist below only for the one log line of a frame too
  *    empty to show (like `system/api_retry`, which projects a transient) -- and its `detail` is still
  *    never logged.
  *
