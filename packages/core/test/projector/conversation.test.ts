@@ -241,7 +241,6 @@ describe("projector: conversation fold (Winter 8b Task 10)", () => {
     const unknowns = [
       { type: "rate_limit_event", rate_limit_info: { status: "allowed" } },
       { type: "auth_status", isAuthenticating: true, output: ["step"] },
-      { type: "system", subtype: "continuity_warning", warning: "provider_state_missing", detail: "2 anchors" },
       { type: "system", subtype: "reasoning_summary", text: "SUMMARY", provider: "p", model: "m" },
       { type: "hook_started", hook_id: "h", hook_name: "n", hook_event: "e", session_id: "s", uuid: "u" },
       { type: "task_started", task_id: "t", description: "d", uuid: "u", session_id: "s" },
