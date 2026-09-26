@@ -45,7 +45,7 @@ import { WINTER_CAPABILITY_TOOLS, assertNoCapabilityCollision, type CapabilitySe
 import { createProjector, type Projector } from "../projector";
 import type { RuntimeSessionRecord, RuntimeSessionRecords } from "../runtime-state/records";
 import type { ProjectionCheckpoints } from "../runtime-state/checkpoints";
-import { moveTranscriptFiles, transcriptEntriesOf } from "../runtime-state/transcript-rekey";
+import { moveTranscriptFiles, transcriptEntriesOf, type TranscriptMoveResult } from "../runtime-state/transcript-rekey";
 import { recordLazyRekey } from "../migration/migrate-c";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
@@ -107,10 +107,11 @@ export type WinterLegRefusalCode =
   | "not_supported_on_winter_leg"     // `session.compact` (SDK 0.0.4 carry)
   | "runtime_selection_refused"       // P8c-14: the router's selectRuntime refused this session's model
   // WS-23 (ruling R2): a session recorded on the retired official leg (`runtimeKind: "claude-agent"`)
-  // could not be moved onto the Winter leg at its resume — its transcript collided with another copy at
-  // the Winter key, or is already marked `repair-required`. `data.reason` says which. Nothing is moved
-  // or opened, and the record keeps naming the old leg, so the next resume refuses the same way until
-  // the transcript is repaired.
+  // could not be moved onto the Winter leg at its resume. `data.reason` says why: `transcript-collision`
+  // (the Winter key already holds a copy), `transcript-move-refused` (a link, mkdir or rename the
+  // filesystem refused), `repair-required` (already marked) or `claude-oauth`. Nothing is moved or
+  // opened, and the record keeps naming the old leg, until `winter doctor --repair
+  // adopt-legacy-session` (finding `legacy-adoption-blocked`) clears it for the next resume.
   | "legacy_session_migration_refused"
   // WS-21: a run-home router's refusal (`RunHomeError.code`), forwarded verbatim as `data.code`.
   | RunHomeErrorCode;
@@ -488,6 +489,8 @@ export function childrenSinkFor(registry: AgentRegistry, sessionId: string, log:
 export function rekeyTranscriptToCwd(
   deps: { home: string; records: RuntimeSessionRecords; log: (line: string) => void },
   sessionId: string, record: RuntimeSessionRecord, cwd: string,
+  /** WS-23 (fix round 1): told what the move did, so a caller can tell a collision from a refusal. */
+  onMove?: (result: TranscriptMoveResult) => void,
 ): RuntimeSessionRecord {
   const { records, log } = deps;
   const backendId = record.backendSessionId;
@@ -500,6 +503,7 @@ export function rekeyTranscriptToCwd(
   const intent = { sessionId, backendId, from: fromKey, to: toKey, entries: transcriptEntriesOf(join(projects, fromKey), backendId) };
   recordLazyRekey(deps.home, { ...intent, outcome: "pending" });
   const moved = moveTranscriptFiles(projects, backendId, fromKey, toKey);
+  onMove?.(moved);
   recordLazyRekey(deps.home, moved.kind === "moved" || moved.kind === "not-needed"
     ? { ...intent, ...(moved.kind === "moved" ? { entries: moved.entries } : {}), outcome: "moved" }
     : { ...intent, outcome: moved.kind, ...(moved.kind === "refused" ? { reason: moved.reason } : {}) });
@@ -611,11 +615,11 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
    * runs in (`winterCwdOf`). WS-23: the retired official leg keyed a cwd-less session by its first working
    * directory instead (`dirs[0]`), so adopting one of its records moves the transcript here too.
    */
-  const rekeyForCanonicalCwd = (sessionId: string, record: RuntimeSessionRecord): RuntimeSessionRecord => {
+  const rekeyForCanonicalCwd = (sessionId: string, record: RuntimeSessionRecord, onMove?: (result: TranscriptMoveResult) => void): RuntimeSessionRecord => {
     if (deps.records === undefined) return record;
     let cwd: string;
     try { cwd = winterCwdOf(sessionId, deps.store.meta(sessionId).cwd); } catch { return record; }
-    return rekeyTranscriptToCwd({ home: deps.home, records: deps.records, log }, sessionId, record, cwd);
+    return rekeyTranscriptToCwd({ home: deps.home, records: deps.records, log }, sessionId, record, cwd, onMove);
   };
 
   /**
@@ -659,14 +663,24 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     if (record.selection.authFamily === "claude-oauth") {
       refuse("claude-oauth", "it was authorised with a Claude subscription login, which Winter's runtime does not use — start a new session");
     }
+    // The one remedy for all three: `winter doctor` names the session (`legacy-adoption-blocked`) and
+    // `--repair adopt-legacy-session` clears it; the next resume then adopts it.
+    const remedy = `quit Winter, then run \`winter doctor\` and \`winter doctor --repair adopt-legacy-session --session ${sessionId}\``;
     if (record.transcriptHealth === "repair-required") {
-      refuse("repair-required", "its transcript is marked repair-required, so its history is not proven — run `winter doctor`");
+      refuse("repair-required", `its transcript is marked repair-required, so its history is not proven — ${remedy}`);
     }
-    rekeyForCanonicalCwd(sessionId, record);
+    let move: TranscriptMoveResult | undefined;
+    rekeyForCanonicalCwd(sessionId, record, (result) => { move = result; });
     const moved = recordOf(sessionId);
     if (moved === undefined) return undefined;
     if (moved.transcriptHealth === "repair-required") {
-      refuse("transcript-collision", "its transcript could not be moved to the key Winter reads it from (another copy is already there, or the move was refused) — run `winter doctor`");
+      // Fix round 1 (minor 2): a COLLISION (the Winter key already holds a copy) and a REFUSED move (a
+      // link in the way, a directory or rename the filesystem refused) are different problems.
+      const refusedMove = (move as TranscriptMoveResult | undefined)?.kind === "refused";
+      if (refusedMove) {
+        refuse("transcript-move-refused", `its transcript could not be moved to the key Winter reads it from (${(move as Extract<TranscriptMoveResult, { kind: "refused" }>).reason}) — fix that, then ${remedy}`);
+      }
+      refuse("transcript-collision", `the key Winter reads its transcript from already holds another copy of it — compare the two, then ${remedy} with \`--keep recorded\` or \`--keep canonical\` (the other copy is moved to quarantine, never deleted)`);
     }
     const authRef = credentialRefFor(moved.selection.providerId, deps.home);
     try {
@@ -681,6 +695,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
           decidedAt: new Date().toISOString(),
         },
         authRef: authRef?.kind === "keychain" ? `keychain:${authRef.account}` : undefined,
+        // Fix round 1 (minor 7): the record-level versions too, not only the selection's.
+        sdkVersion,
+        engineVersion: sdkVersion,
       });
     } catch (err) {
       throw new WinterLegRefusal("winter_leg_unavailable", `the runtime record for ${sessionId} could not be moved to the Winter leg (${err instanceof Error ? err.name : "unknown"})`);

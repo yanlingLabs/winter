@@ -1664,18 +1664,23 @@ if (import.meta.main) {
     const session = flag("--session");
     const backend = flag("--backend");
     const backup = flag("--backup");
+    const keep = flag("--keep");
     const op =
       repair === "rebuild-index" ? ({ kind: "rebuild-index" } as const)
       : repair === "quarantine-tail" && session ? ({ kind: "quarantine-tail", winterSessionId: session } as const)
       : repair === "relink-backend" && session && backend ? ({ kind: "relink-backend", winterSessionId: session, backendSessionId: backend } as const)
       : repair === "detach-backend" && session ? ({ kind: "detach-backend", winterSessionId: session } as const)
       : repair === "restore-backup" && backup ? ({ kind: "restore-backup", backupPath: backup } as const)
+      // WS-23 (fix round 1): unblock a legacy session's adoption; `--keep` only for a collision.
+      : repair === "adopt-legacy-session" && session && (keep === undefined || keep === "recorded" || keep === "canonical")
+        ? ({ kind: "adopt-legacy-session", winterSessionId: session, ...(keep === undefined ? {} : { keep: keep as "recorded" | "canonical" }) } as const)
       : undefined;
     if (!op) {
       console.error(
         "usage: winter doctor | winter doctor --repair rebuild-index" +
           " | --repair quarantine-tail --session <id> | --repair relink-backend --session <id> --backend <uuid>" +
-          " | --repair detach-backend --session <id> | --repair restore-backup --backup <path>",
+          " | --repair detach-backend --session <id> | --repair restore-backup --backup <path>" +
+          " | --repair adopt-legacy-session --session <id> [--keep recorded|canonical]",
       );
       process.exit(1);
     }
