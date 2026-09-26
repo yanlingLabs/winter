@@ -13,23 +13,24 @@
  * `pickerModels()`, which feeds `sync.config` and is what the Mac's session composer, the CLI's
  * `winter model` and the TUI's `/model` all actually choose a session's model FROM) — it is the Roles
  * pane's FACTS join (family, pricing, credential door) over whatever a role's `permitted` already
- * names, keyed by tag. A role may legitimately be pinned to a `toolCalling: "none"` row: EVERY ONE of
- * the four daemon-internal jobs this pane can pin (titles, the dreamer, the cleaner, AND the bash
- * reviewer's classifier — `agent/titles.ts`, `agent/dreamer.ts`, `sessions/cleaner.ts`,
- * `agent/reviewer.ts`) calls its provider with `tools: []` explicitly; none of them would break on a
- * toolless row. The pane's OTHER two roles, `provider.model` and `pins.dispatch`, DO run real
- * sessions and would break — but those are gated by `session-driver.ts`'s `beforeTurn` refusal, not
- * by this listing. So this listing is deliberately left UNFILTERED by tool capability: filtering it
- * would desync it from `permittedProviders()` and fail this file's own drift-tripwire test
- * (`models-catalog.test.ts`). A consumer that DOES need to hide toolless rows reads the new
- * `toolCalling` field itself, on its own copy of the row.
+ * names, keyed by tag. A role may legitimately be pinned to a row a real turn would refuse tools on
+ * (`sessionUsable: false` below): EVERY ONE of the four daemon-internal jobs this pane can pin
+ * (titles, the dreamer, the cleaner, AND the bash reviewer's classifier — `agent/titles.ts`,
+ * `agent/dreamer.ts`, `sessions/cleaner.ts`, `agent/reviewer.ts`) calls its provider with `tools: []`
+ * explicitly; none of them would break on such a row. The pane's OTHER two roles, `provider.model`
+ * and `pins.dispatch`, DO run real sessions and would break — the Mac app filters THOSE TWO roles'
+ * own picker by `sessionUsable` (`SettingsRoleModelPicker.swift`), and `session-driver.ts`'s
+ * `beforeTurn` refuses an already-stored one typed at its next turn either way. So this listing is
+ * deliberately left UNFILTERED itself: filtering its OWN rows would desync it from
+ * `permittedProviders()` and fail this file's own drift-tripwire test (`models-catalog.test.ts`). A
+ * consumer that DOES need to hide a row reads the new `sessionUsable` field, on its own copy of it.
  */
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import type { CapabilityEvidence, ModelPricing } from "@yanlinglabs/winter-provider-catalog";
 import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { permittedProviders } from "../settings";
 import { credentialInventory, credentialPresentProbe } from "../runtime-sdk/keychain";
-import { effortVocabularyOf } from "../runtime-sdk/provider-selection";
+import { effortVocabularyOf, toolsRefusedFor } from "../runtime-sdk/provider-selection";
 
 export interface ModelCatalogWirePricing {
   inputPerMTokUsd: number;
@@ -54,16 +55,20 @@ export interface ModelCatalogWireModel {
    *  and `[]` are different answers here and must not be collapsed. */
   efforts: string[] | null;
   defaultEffort: string | null;
-  /** WS-24 (pickers lane): the catalog's own three-state tool capability, verbatim
-   *  (`WinterModelDescriptor.toolCalling.value`) — added so a consumer of THIS listing (the Roles pane,
-   *  today) can tell a toolless row apart from one that merely lacks facts, without a second lookup
-   *  against the raw catalog package it has no reason to import. This listing's OWN rows are never
-   *  filtered by it — see the module doc above for why: it would break the one invariant this module
-   *  exists to keep (`permittedProviders()`'s set and this listing's set must never disagree), and a
-   *  role MAY legitimately be pinned to a toolless row: titles, the dreamer, the cleaner AND the bash
-   *  reviewer's classifier all call their provider with `tools: []` — none of them need this field to
-   *  be anything but informational. */
-  toolCalling: "native" | "emulated" | "none";
+  /** WS-24 (pickers lane, fix round 1): whether a REAL Winter turn on this row can actually carry
+   *  tools — `!toolsRefusedFor(row)` (`runtime-sdk/provider-selection.ts`), never the catalog's bare
+   *  `toolCalling` verbatim. `toolCalling: "none"` alone is mostly the catalog's fail-closed
+   *  placeholder for a capability upstream never stated (most rows are `confidence: "unknown"`) and
+   *  is NOT the same fact as "a turn here would be refused" — only four adapter families (anthropic,
+   *  google, vertex, bedrock) actually gate on it; every OpenAI-shaped family sends tools regardless.
+   *  Derived rather than carried raw so no consumer can repeat the mistake this field's first cut
+   *  made (treating every non-`"native"` row as unusable and hiding ~470 working models). This
+   *  listing's OWN rows are never filtered by it — see the module doc above for why: it would break
+   *  the one invariant this module exists to keep (`permittedProviders()`'s set and this listing's
+   *  set must never disagree), and a role MAY legitimately be pinned to a `sessionUsable: false` row:
+   *  titles, the dreamer, the cleaner AND the bash reviewer's classifier all call their provider with
+   *  `tools: []` — none of them need this field to be anything but informational. */
+  sessionUsable: boolean;
 }
 
 export interface ModelCatalogWireProvider {
@@ -215,7 +220,7 @@ export function modelCatalogWire(deps: { credentials: CredentialPresence; home: 
       // `implicitEffortFor` maps an unsupported implicit effort onto, which is why it rides beside
       // the vocabulary rather than being left for a consumer to guess.
       defaultEffort: m.reasoning?.defaultEffort ?? null,
-      toolCalling: m.toolCalling.value,
+      sessionUsable: !toolsRefusedFor(m),
     }));
 
   // Families with at least one offerable model, in the catalog's own id order — an empty family
