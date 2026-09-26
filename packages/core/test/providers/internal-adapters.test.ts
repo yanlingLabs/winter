@@ -8,6 +8,10 @@
  * user's internal calls hit the day the catalog and the SDK constant diverged. `catalogApiEndpointFor`
  * therefore DEFERS for a single-provider adapter family, and these tests pin both halves of that: the
  * deferral itself, and the equality that makes it a no-op today.
+ *
+ * WS-23 (agent SDK 0.0.25): `winter.openai-responses` serves `openai` AND `xai` now, so `openai` is a
+ * multi-provider row and carries the catalog's endpoint explicitly. The tripwire below (catalog row ===
+ * `OPENAI_API_BASE_URL`) is what proves that is still the host openai's internal jobs always reached.
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
@@ -33,17 +37,22 @@ function connectionOf(p: unknown): { providerId: string; baseUrl?: string; local
 
 describe("the single-provider deferral", () => {
   test("a family serving exactly one catalog provider defers to the adapter's own default", () => {
-    // `winter.codex-oauth` and `winter.openai-responses` each serve exactly one provider.
+    // `winter.codex-oauth` serves exactly one provider.
     expect(catalogApiEndpointFor("codex-oauth")).toBeUndefined();
-    expect(catalogApiEndpointFor("openai")).toBeUndefined();
-    // …while the catalog does ship an endpoint for both — the deferral is deliberate, not a lookup miss.
+    // …while the catalog does ship an endpoint for it — the deferral is deliberate, not a lookup miss.
     expect(catalogApiEndpointRawFor("codex-oauth")).toBeTruthy();
-    expect(catalogApiEndpointRawFor("openai")).toBeTruthy();
   });
 
   test("a multi-provider family carries the catalog's endpoint (it has no vendor default)", () => {
     expect(catalogApiEndpointFor("deepseek")).toBe("https://api.deepseek.com");
     expect(catalogApiEndpointFor("openrouter")).toBe("https://openrouter.ai/api/v1");
+  });
+
+  test("WS-23: openai shares winter.openai-responses with xai, so it states the catalog endpoint — the SAME host as the SDK's own default", () => {
+    const family = loadCatalog().providers.filter((p) => p.adapterId === "winter.openai-responses").map((p) => p.id).sort();
+    expect(family).toEqual(["openai", "xai"]);
+    expect(catalogApiEndpointFor("openai")).toBe(OPENAI_API_BASE_URL);
+    expect(catalogApiEndpointFor("xai")).toBe("https://api.x.ai/v1");
   });
 
   // THE TRIPWIRE. Today the SDK constant and the catalog row agree byte-for-byte, which is the only
@@ -60,16 +69,23 @@ describe("the single-provider deferral", () => {
 });
 
 describe("the connection profile buildInternalProvider assembles", () => {
-  test("codex-oauth and openai: no baseUrl, no `local` — byte-identical to the retired factories", () => {
-    for (const providerId of ["codex-oauth", "openai"]) {
-      const built = buildInternalProvider({ providerId, secrets: secrets(), settings: settings() });
-      expect("provider" in built).toBe(true);
-      if (!("provider" in built)) continue;
-      const conn = connectionOf(built.provider);
-      expect(conn.providerId).toBe(providerId);
-      expect(conn.baseUrl).toBeUndefined();
-      expect(conn.local).toBeUndefined();
-    }
+  test("codex-oauth: no baseUrl, no `local` — byte-identical to the retired factory", () => {
+    const built = buildInternalProvider({ providerId: "codex-oauth", secrets: secrets(), settings: settings() });
+    if (!("provider" in built)) throw new Error("expected a provider");
+    const conn = connectionOf(built.provider);
+    expect(conn.providerId).toBe("codex-oauth");
+    expect(conn.baseUrl).toBeUndefined();
+    expect(conn.local).toBeUndefined();
+  });
+
+  test("openai (WS-23): the catalog endpoint stated explicitly — the host the retired factory's default reached — and NOT declared local", () => {
+    const built = buildInternalProvider({ providerId: "openai", secrets: secrets(), settings: settings() });
+    if (!("provider" in built)) throw new Error("expected a provider");
+    const conn = connectionOf(built.provider);
+    expect(conn.providerId).toBe("openai");
+    expect(conn.baseUrl).toBe(OPENAI_API_BASE_URL);
+    expect(new URL(conn.baseUrl!).host).toBe("api.openai.com");
+    expect(conn.local).toBeUndefined();
   });
 
   test("a multi-provider row carries the catalog endpoint and is NOT declared local", () => {
