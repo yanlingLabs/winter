@@ -825,6 +825,94 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
     } finally { t.close(); }
   });
 
+  // WS-24 (pickers lane, fix round 1): a row `toolsRefusedFor` (`runtime-sdk/provider-selection.ts`)
+  // says would refuse a real turn's tools cannot be run here — same "refused before any child, no
+  // silent swap" shape as the retired-catalog check just above, so an already-stored tag (a session
+  // recorded before this build, or written outside a picker) keeps naming the model and refuses typed
+  // at its next turn rather than being silently switched to another one. The four tests below pin the
+  // corrected boundary (measured adapter behaviour, not the catalog's bare `toolCalling`) at THIS
+  // gate the same way `sync-config.test.ts` pins it for the picker listing.
+  test("an anthropic-family toolCalling:none tag is refused typed on RESUME, with no child and nothing consumed", async () => {
+    const t = table();
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const session = await t.drivers.create(sid);
+      await session.send("A", "cli");
+      const held = await session.send("B", "cli");
+      expect(held.queued).toBe(true);
+      // `zai-anthropic/glm-5` is a real, non-retired ("candidate") catalog row whose `toolCalling` is
+      // `"none"` at `confidence: "unknown"`, on the `winter.anthropic-messages` adapter — one of the
+      // four families that actually THROWS on a non-native row asking for tools. Bypasses the RPC's
+      // own picker, as a hand-edited settings file or a session recorded before the pickers lane's
+      // filter landed would.
+      t.store.setModel(sid, "zai-anthropic/glm-5");
+      await t.drivers.evict(sid);
+      const spawnsBefore = t.queries.length;
+      let caught: unknown;
+      try { await t.drivers.ensure(sid); } catch (err) { caught = err; }
+      expect((caught as { code?: string })?.code).toBe("runtime_selection_refused");
+      expect((caught as { reason?: string })?.reason).toBe("no-tool-calling");
+      expect((caught as Error).message).toContain("cannot call tools");
+      expect(t.queries.length).toBe(spawnsBefore);
+      expect(unconsumedUserMessages(t.store.read(sid))).toEqual(["B"]);
+    } finally { t.close(); }
+  });
+
+  test("a FRESH create whose stored model is already toolCalling-refused refuses at its very first send", async () => {
+    const t = table();
+    try {
+      // No resume/eviction dance this time — a session created directly on the refused tag (a stored
+      // `settings.provider.model` or a hand-typed `session.create` naming it) must refuse the very
+      // first turn, not just a later resume.
+      const sid = t.store.createSession("t", { mode: "chat", model: "zai-anthropic/glm-5" });
+      const session = await t.drivers.create(sid);
+      const spawnsBefore = t.queries.length;
+      let caught: unknown;
+      try { await session.send("A", "cli"); } catch (err) { caught = err; }
+      expect((caught as { code?: string })?.code).toBe("runtime_selection_refused");
+      expect((caught as { reason?: string })?.reason).toBe("no-tool-calling");
+      expect(t.queries.length).toBe(spawnsBefore); // no additional child for the refused turn
+      expect(unconsumedUserMessages(t.store.read(sid))).toEqual([]); // never appended
+    } finally { t.close(); }
+  });
+
+  test("a Responses-family tag whose non-native evidence IS confidently stated is refused too", async () => {
+    const t = table();
+    try {
+      // `xai/grok-4.20-multi-agent-0309` sits on `winter.openai-responses`, which does not gate on
+      // `toolCalling` at all — but its evidence is `official-doc`/`declared` ("function calling
+      // unsupported"), a real fact about the model regardless of adapter, so it is refused here too.
+      const sid = t.store.createSession("t", { mode: "chat", model: "xai/grok-4.20-multi-agent-0309" });
+      const session = await t.drivers.create(sid);
+      let caught: unknown;
+      try { await session.send("A", "cli"); } catch (err) { caught = err; }
+      expect((caught as { code?: string })?.code).toBe("runtime_selection_refused");
+      expect((caught as { reason?: string })?.reason).toBe("no-tool-calling");
+    } finally { t.close(); }
+  });
+
+  test("a chat-completions tag whose toolCalling is none at confidence:unknown PASSES the gate — that family sends tools regardless", async () => {
+    // `groq/openai/gpt-oss-120b` is the exact same `toolCalling: "none"`/`confidence: "unknown"`
+    // shape as the refused rows above, but groq's adapter (`winter.openai-chat-completions`) is not
+    // one of the four gated families, so `toolsRefusedFor` never fires for it. A stored credential
+    // for groq means the send reaches a real child rather than stopping on a DIFFERENT refusal
+    // (`no-credential`), which would make this test pass for the wrong reason.
+    const secrets = new FileSecretStore(join(mkdtempSync(join(tmpdir(), "winter-groq-secrets-")), "secrets.json"));
+    await writeCredentialMaterial(secrets, "groq:default", { kind: "api-key", key: "sk-groq-test-not-real" });
+    const t = table({ secrets });
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "groq/openai/gpt-oss-120b" });
+      const session = await t.drivers.create(sid);
+      // `create()` already spawned the one child this incarnation reuses for every turn (the "fresh
+      // create with nothing owed" test above), so the proof here is that `send` neither throws NOR
+      // adds a SECOND child (which a refused-then-retried turn would) — it just runs the turn on it.
+      const spawnsBefore = t.queries.length;
+      const result = await session.send("A", "cli");
+      expect(result.queued).toBe(false); // no refusal thrown; the turn actually began
+      expect(t.queries.length).toBe(spawnsBefore); // the SAME child ran it — no gate ever intervened
+    } finally { t.close(); }
+  });
+
   test("a fresh create with nothing owed never consults the gate on the open path", async () => {
     // The cost of N2 on the hot path is zero: `create()` opens with an empty log.
     const t = table();

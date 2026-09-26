@@ -63,7 +63,7 @@ import { neutralSelectionRefusal, refusalDetailCategoryFor } from "./refusal-cop
 import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
 import { attachWinterSession } from "./messaging";
 import { buildWinterOptions, bypassAllowedAtSpawn, permissionModeFor } from "./mode-options";
-import { providerFor, rowForTag, testProviderNameFor } from "./provider-selection";
+import { providerFor, rowForTag, testProviderNameFor, toolsRefusedFor } from "./provider-selection";
 import { splitTag, UNSTATED_TAG, isModelTag, WINTER_TEST_PREFIX, type ModelTag } from "./model-tag";
 import { winterSessions } from "./sessions";
 import { canonicalCwd, storeProjectsDir } from "../agent/paths";
@@ -1180,6 +1180,26 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // `provider.allowUnlisted`, so the child refused every unlisted model anyway.
       if (isRetiredCatalogTag(model)) {
         throw new WinterLegRefusal("runtime_selection_refused", `${model} is not in this build's model catalog — switch this session to another model`, "model-not-in-catalog");
+      }
+      // WS-24 (pickers lane, fix round 1): a row `toolsRefusedFor` says would refuse a real turn's
+      // tools cannot be run here — a Winter session of ANY mode always offers tools — the daemon's
+      // own MCP capability surface at minimum. `toolsRefusedFor` mirrors the FOUR adapter families
+      // (anthropic, google, vertex, bedrock) that actually throw on a non-`"native"` row, plus any
+      // row whose non-`"native"` evidence is confidently stated regardless of adapter — never the
+      // catalog's bare `toolCalling: "none"`, which is mostly a fail-closed placeholder for a
+      // capability upstream never stated and works fine on the OpenAI-shaped families (see that
+      // function's own doc). The picker lane's listings (`sync.config`'s `models`) no longer OFFER a
+      // row this returns true for, but nothing stops a hand-typed tag from naming one anyway —
+      // `resolveModelSelection`'s write-time gate is a catalog MEMBERSHIP check only (same as a
+      // retired tag, above), not an availability one — and a session or a hand-edited
+      // `settings.provider.model` recorded before this build may already name one. Either way it must
+      // keep displaying the model rather than being silently swapped to another one — the fix is
+      // `session.setModel`, and the refusal fires here, before any child, same shape as the
+      // retired-catalog check just above. Shared verbatim with `ipc/picker-models.ts` so the two can
+      // never disagree about which rows a session can actually run tools on.
+      const row = rowForTag(model);
+      if (row !== undefined && toolsRefusedFor(row)) {
+        throw new WinterLegRefusal("runtime_selection_refused", `${model} cannot call tools, and this session needs them — switch this session to another model`, "no-tool-calling");
       }
       const selection = providerFor(model, deps.home);
       if (selection === undefined) return;

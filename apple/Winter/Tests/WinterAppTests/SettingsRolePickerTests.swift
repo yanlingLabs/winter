@@ -277,6 +277,46 @@ final class SettingsRolePickerTests: XCTestCase {
         }
     }
 
+    // MARK: - WS-24 (pickers lane, fix round 1): sessionUsable filtering, session-driving roles only
+
+    /// `provider.model` and `pins.dispatch` run REAL Winter sessions — every other role calls its
+    /// provider with `tools: []` and never needs a tool at all, so `permitted` must reach their card
+    /// untouched even when `facts` says a row is not session-usable.
+    func testOnlyTheTwoSessionDrivingRolesAreFiltered() {
+        var facts = ModelCatalogFacts.none
+        facts.byTag["codex-oauth/gpt-5.6-luna"] = ModelCatalogFact(sessionUsable: false)
+        for role in [SettingsModelRole.sessionDefault, .dispatch] {
+            let filtered = roleModelPermittedForPicker(permitted, role: role, facts: facts)
+            XCTAssertFalse(filtered.flatMap(\.models).contains("codex-oauth/gpt-5.6-luna"),
+                           "\(role) drives a real session and must never offer a toolless row")
+        }
+        for role in SettingsModelRole.allCases where ![.sessionDefault, .dispatch].contains(role) {
+            let untouched = roleModelPermittedForPicker(permitted, role: role, facts: facts)
+            XCTAssertEqual(untouched, permitted, "\(role) calls tools: [] and must see permitted verbatim")
+        }
+    }
+
+    /// A MIXED provider keeps its usable rows and loses only the refused one — not the whole
+    /// provider — and a provider left with NOTHING after filtering is dropped so step two never
+    /// renders an empty group.
+    func testAMixedProviderKeepsItsUsableRowsAndAnAllRefusedProviderIsDropped() {
+        var facts = ModelCatalogFacts.none
+        facts.byTag["codex-oauth/gpt-5.6-luna"] = ModelCatalogFact(sessionUsable: false)
+        facts.byTag["anthropic/claude-opus-5"] = ModelCatalogFact(sessionUsable: false)
+        let filtered = roleModelPermittedForPicker(permitted, role: .sessionDefault, facts: facts)
+        XCTAssertEqual(filtered.first { $0.providerId == "codex-oauth" }?.models,
+                       ["codex-oauth/gpt-5.6-terra"], "the OTHER row on this provider stays offerable")
+        XCTAssertFalse(filtered.contains { $0.providerId == "anthropic" },
+                       "a provider with nothing left offerable is dropped, not left as an empty group")
+    }
+
+    /// `sessionUsable == nil` — a fact `facts` never joined, or an older daemon — is "not told", and
+    /// silence is never a refusal: the row stays offerable even for a session-driving role.
+    func testAnUntoldSessionUsableIsNeverHidden() {
+        let filtered = roleModelPermittedForPicker(permitted, role: .sessionDefault, facts: .none)
+        XCTAssertEqual(filtered, permitted, "no facts at all must leave every row exactly as permitted named it")
+    }
+
     /// **A DERIVED value does not tick its own model's row.** A role that is not `explicit` still
     /// reports a model — the derived one, which moves on its own — so ticking it would claim
     /// somebody chose it and would leave "Use the default" unticked on exactly the rows that are

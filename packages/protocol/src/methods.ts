@@ -1908,6 +1908,19 @@ export const ModelCatalogModelSchema = z.object({
    *  This is the value the daemon falls back to when an IMPLICIT effort is not in the row's
    *  vocabulary (core's `implicitEffortFor`), so a UI showing "provider default" can name it. */
   defaultEffort: z.string().nullable(),
+  /** WS-24 (pickers lane, fix round 1): whether a REAL Winter turn on this row can carry tools —
+   *  DERIVED (never the catalog's bare `toolCalling` verbatim): only four adapter families
+   *  (anthropic, google, vertex, bedrock) actually refuse a turn's tools for a non-`"native"` row;
+   *  every OpenAI-shaped family (Responses, chat-completions, and everything built on either) sends
+   *  them regardless, and `toolCalling: "none"` alone is mostly the catalog's fail-closed placeholder
+   *  for a capability upstream never stated, not a measured denial (`false` is still asserted when
+   *  the evidence IS confidently non-`"native"`, whatever the adapter). `models.catalog` still LISTS
+   *  a `sessionUsable: false` row (a role may legitimately be pinned to one — titles, the dreamer,
+   *  the cleaner and the bash reviewer's classifier all call their provider with `tools: []`, so none
+   *  of them need this row's tools at all), so this field is informational here, never a filter this
+   *  schema applies. The session-picker listing (`sync.config`'s `models`) is the one that excludes
+   *  these rows outright. */
+  sessionUsable: z.boolean(),
 });
 
 export const ModelsCatalogResult = z.object({

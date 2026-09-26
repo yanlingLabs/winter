@@ -2,7 +2,7 @@ import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import type { SyncConfigModel } from "@yanlinglabs/winter-protocol";
 import { facingNameOf, type ModelTag } from "../runtime-sdk/model-tag";
-import { effortVocabularyFor } from "../runtime-sdk/provider-selection";
+import { effortVocabularyFor, toolsRefusedFor } from "../runtime-sdk/provider-selection";
 import { credentialPresentProbe } from "../runtime-sdk/keychain";
 
 // Mirrors `ipc/sync.ts`'s own `effortsForModel` EXACTLY (never imported from there — `sync.ts`
@@ -30,6 +30,19 @@ function effortsForModel(tag: string): string[] {
  * providers a home is ready to use — and it reads the same `byProvider` the router admits a session's
  * row on, so a model offered here is one `session.create` accepts (the WS-23 live-gate fix: `console`
  * used to be answered by its on-disk profile here while the router saw no `console` credential at all).
+ *
+ * WS-24 (pickers lane, fix round 1): a row `toolsRefusedFor` (`runtime-sdk/provider-selection.ts`)
+ * says would refuse a real turn's tools is EXCLUDED too — this is THE session picker, and a Winter
+ * session of any mode always offers tools, so a session started on such a row could never work.
+ * `toolsRefusedFor` is NOT "the catalog's `toolCalling` says `\"none\"`" — most `"none"` rows are the
+ * catalog's fail-closed placeholder for a capability upstream never stated, and would work fine
+ * today (see that function's own doc for the measured adapter behaviour and the ~470-row mistake its
+ * first cut made). This is the ONE choke point every session picker reads through (`sync.config`'s
+ * `models`, the Mac's `ComposerModelPanel`, the CLI's `winter model`, the TUI's `/model` — all read
+ * `sync.config` and none re-filters), so filtering here is enough to hide these rows everywhere a
+ * SESSION picks a model, with no per-client change. `models.catalog`
+ * (`providers/model-catalog-wire.ts`) is a DIFFERENT listing on purpose and is left unfiltered — see
+ * that module's own note on why.
  */
 export function pickerModels(deps: { credentials: CredentialPresence; home: string }): SyncConfigModel[] {
   const catalog = loadCatalog();
@@ -41,6 +54,9 @@ export function pickerModels(deps: { credentials: CredentialPresence; home: stri
       if (row.providerId !== provider.id) continue;
       // A vendor-retired row (`deprecated`, SDK 0.0.23) still resolves for a stored tag but is never offered.
       if (row.status === "blocked" || row.status === "deprecated") continue;
+      // WS-24: a row a real turn would refuse tools on is never offered here either — see this
+      // function's own doc, and `toolsRefusedFor`'s.
+      if (toolsRefusedFor(row)) continue;
       const tag = row.key as ModelTag;
       out.push({
         id: tag,
