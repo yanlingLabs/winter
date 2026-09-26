@@ -36,12 +36,13 @@
  * NEVER run the compiled binary against a real home — see step 4/7 above.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveInstalledWinterPackage, sha256File, stageRuntimes, type StageRuntimesOpts } from "./stage-runtimes";
 import { parseAntPin } from "./fetch-ant";
+import { writeAntVersionsJson } from "./ant-record";
 import { REQUIRED_WINTER_AGENT_SDK } from "../packages/core/src/runtime-sdk/versions";
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -150,7 +151,7 @@ async function main(): Promise<void> {
   // available (`bun run scripts/fetch-ant.ts`), never a hard requirement of this script. WS-23: ant's
   // own record is written beside it in embed-runtimes.sh's shape, so the probe's parse of it is
   // exercised too.
-  let antStaged: { tag: string } | undefined;
+  let antStaged: { tag: string; binarySha256: string } | undefined;
   try {
     const antPin = parseAntPin(readFileSync(VERSIONS_JSON_PATH, "utf8"));
     const vendoredAnt = join(REPO_ROOT, "vendor", "ant", antPin.tag, "ant");
@@ -159,11 +160,8 @@ async function main(): Promise<void> {
       mkdirSync(antDest, { recursive: true });
       copyFileSync(vendoredAnt, join(antDest, "ant"));
       chmodSync(join(antDest, "ant"), 0o755);
-      writeFileSync(
-        join(antDest, "VERSIONS.json"),
-        `${JSON.stringify({ schema: 1, tag: antPin.tag, checksums: { antPreSign: sha256File(join(antDest, "ant")) }, stagedAt: new Date().toISOString() }, null, 2)}\n`,
-      );
-      antStaged = { tag: antPin.tag };
+      writeAntVersionsJson(join(antDest, "VERSIONS.json"), antPin.tag, sha256File(join(antDest, "ant")));
+      antStaged = { tag: antPin.tag, binarySha256: antPin.binarySha256 };
       log(`staged: ant=${join(antDest, "ant")} (from ${vendoredAnt})`);
     } else {
       log(`WARNING: no vendored ant at ${vendoredAnt} (VERSIONS.json pins ant.tag=${antPin.tag}) — run \`bun run scripts/fetch-ant.ts\` to also exercise the ant bundle-rung assertions below`);
@@ -259,6 +257,12 @@ async function main(): Promise<void> {
       [
         antStaged ? `result.antVersions.tag === '${antStaged.tag}' (ant's own record parsed)` : "result.antVersions parsed (SKIPPED — no vendored ant staged, see WARNING above)",
         antStaged ? antVersions?.tag === antStaged.tag : true,
+      ],
+      // Fix round 1 (minor 6): the record's pre-sign SHA is the repo-root VERSIONS.json pin — the
+      // staged binary is the pinned one (release-lib's `verifyAntEmbed` makes the same comparison).
+      [
+        antStaged ? "result.antVersions.checksums.antPreSign === VERSIONS.json ant.binarySha256 (the pin)" : "ant record SHA vs pin (SKIPPED — no vendored ant staged, see WARNING above)",
+        antStaged ? (antVersions?.checksums as { antPreSign?: string } | undefined)?.antPreSign === antStaged.binarySha256 : true,
       ],
       ...untouched.map(([dir, ok]) => [`${dir}: unchanged`, ok] as [string, boolean]),
     ];
