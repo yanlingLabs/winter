@@ -210,6 +210,41 @@ function additionalContext(text: string): HookJSONOutput {
   return { hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: text } };
 }
 
+// ── WS-23: the floors FAIL CLOSED ──────────────────────────────────────────────────────────────
+//
+// A floor callback that THROWS used to fail OPEN: the child's wrapper answered `hook_threw`, the
+// SDK runner recorded a non-blocking error, and the call went ahead -- and under `bypass`, or with a
+// matching allow rule, the approval bridge's own fence is never consulted, so nothing else stopped it
+// (inv-hooks-mcp A4, "the hole"). Two independent layers close it:
+//
+//  1. `failClosed(name, hook)` below: a throw inside the callback becomes a DENY, here, before it
+//     ever reaches the wire. It covers every runtime -- including one whose SDK predates layer 2.
+//  2. `failClosed: true` on the floors' matcher GROUPS (`FailClosedMatcher`): agent SDK WS-23's
+//     per-matcher opt-in, under which a floor that TIMES OUT, returns a malformed answer, or never
+//     answers because the bridge failed is also a deny, decided by the child's own hook runner.
+//     Layer 1 cannot see those cases: they happen outside the callback.
+//
+// The reason names the floor and says nothing about the failure beyond its error NAME (logged, not
+// returned): a floor's input is model-controlled text, and an exception message built from it is
+// not something to echo into the model's context or the daemon log verbatim.
+function failClosed(name: string, hook: HookCallback): HookCallback {
+  return async (input, toolUseID, options) => {
+    try {
+      return await hook(input, toolUseID, options);
+    } catch (err) {
+      console.error(`hooks: the ${name} threw (${err instanceof Error ? err.name : typeof err}); denying the call`);
+      return deny(`Denied: Winter's ${name} could not evaluate this call, and it fails closed -- the call was not allowed without its answer.`);
+    }
+  };
+}
+
+/** WS-23: a matcher group carrying agent SDK WS-23's `failClosed` opt-in. A STRUCTURAL widening of
+ *  `HookCallbackMatcher`, not the SDK's own field: this compiles against the pinned 0.0.24 types
+ *  (which do not declare it -- the key then simply rides along in the object, and a 0.0.24 wrapper
+ *  never serialises it) and against a WS-23 SDK (which declares the identical field). Assignable to
+ *  `HookCallbackMatcher` either way. */
+type FailClosedMatcher = HookCallbackMatcher & { failClosed?: boolean };
+
 // ── 1. Plugin manifest hooks ───────────────────────────────────────────────────────────────────
 
 /** `PreToolUse`, no matcher (every tool) — mirrors the retired engine's "Site 2" pre-tool fire:
@@ -1307,6 +1342,13 @@ function webSearchFloorHook(deps: SessionHooksDeps): HookCallback {
     // Nothing is lost by standing down: the call cannot search at all, and FETCHING anything it could
     // have surfaced still goes through `webFetchFloorHook` on both legs.
     if (wrongTypedDomainList(record["allowed_domains"]) || wrongTypedDomainList(record["blocked_domains"])) return allow();
+    // WS-23 (hooks fix round 2): the same stand-down for a MISSING or too-short `query`. The agent SDK
+    // now validates a hook's `updatedInput` against the tool's schema and DENIES an invalid one
+    // whatever the original was, and this floor copies `query` verbatim -- so a rewrite of
+    // `{query: "x"}` would turn the model's own typo into a policy denial it cannot act on. With no
+    // query there is no search to filter; the tool's own "Missing query" is the right answer.
+    const query = record["query"];
+    if (typeof query !== "string" || query.length < 2) return allow();
     const allowed = domainList(record["allowed_domains"]);
 
     if (allowed !== undefined) {
@@ -1418,17 +1460,26 @@ function webSearchInput(record: Record<string, unknown>, patch: { allowed_domain
 export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hooks"] | undefined; official: unknown } {
   const pending = new Map<string, PendingDiffSnapshot>();
 
-  const preToolUse: HookCallbackMatcher[] = [{ hooks: [pluginPreToolUseHook(deps)] }];
-  if (deps.reviewer) preToolUse.push({ matcher: "Bash", hooks: [bashReviewerHook(deps)] });
+  const preToolUse: FailClosedMatcher[] = [{ hooks: [pluginPreToolUseHook(deps)] }];
+  // WS-23: every floor and security callback below is wrapped by `failClosed` (a throw is a deny)
+  // and its group carries `failClosed: true` (a timeout / malformed answer / failed bridge is a deny
+  // too, on a WS-23 SDK). The plugin, fileDiff and diagnostics hooks are deliberately NOT: they are
+  // observers and a plugin's own gate, whose designed failure mode is to stay out of the way.
+  //
+  // The reviewer: only its OUTER code is wrapped. Its own designed failure modes are unchanged -- a
+  // transient review failure still escalates with `ask`, and a structurally unavailable reviewer
+  // still allows (`bashReviewerHook`'s own catch) -- what changes is that a throw OUTSIDE the review
+  // (a settings getter, the escape parse) is a deny instead of a silent pass.
+  if (deps.reviewer) preToolUse.push({ matcher: "Bash", failClosed: true, hooks: [failClosed("bash safety reviewer", bashReviewerHook(deps))] });
   // C3 round 3: the escape floor runs under EVERY policy, reviewer or none — see §2a. Its position
   // does not matter: a deny outranks every other hook answer, and the reviewer skips (never reviews,
   // never clears) a command this floor denies, whichever of the two runs first.
   // Fix round 2: in the escape floor's own group, a Bash write under any `.winter/<kind>` is asked about,
   // sandboxed or not (see `bashProtectedWriteHit`). An `ask` — the floor's deny, when both apply, outranks it.
-  preToolUse.push({ matcher: "Bash", hooks: [escapeFloorHook(deps), bashProtectedWriteHook()] });
+  preToolUse.push({ matcher: "Bash", failClosed: true, hooks: [failClosed("sandbox-escape floor", escapeFloorHook(deps)), failClosed("protected-path Bash fence", bashProtectedWriteHook())] });
   // WS-21 (spec §7.1, §7.2): the path fence — every policy, both legs. Unmatched (one callback per tool
   // call) because the write and read tools carry two vocabularies; anything else is an immediate allow.
-  if (deps.home) preToolUse.push({ hooks: [pathFenceHook(deps)] });
+  if (deps.home) preToolUse.push({ failClosed: true, hooks: [failClosed("path fence", pathFenceHook(deps))] });
   if (deps.home) {
     for (const tool of Object.keys(DIFF_TOOL_FILE_PATH_ARG)) {
       preToolUse.push({ matcher: tool, hooks: [fileDiffPreToolUseHook(deps, pending)] });
@@ -1444,7 +1495,11 @@ export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hook
   //    WRITER WINS — so a plugin pre-tool hook that one day rewrites a `WebSearch` call's own
   //    `blocked_domains` must not be able to land after the floor and drop it. Last here means last.
   for (const tool of [WEB_FLOOR_FETCH_TOOL, WEB_FLOOR_SEARCH_TOOL]) {
-    preToolUse.push({ matcher: tool, hooks: [tool === WEB_FLOOR_FETCH_TOOL ? webFetchFloorHook(deps) : webSearchFloorHook(deps)] });
+    preToolUse.push({
+      matcher: tool,
+      failClosed: true,
+      hooks: [failClosed("dangerous-domain floor", tool === WEB_FLOOR_FETCH_TOOL ? webFetchFloorHook(deps) : webSearchFloorHook(deps))],
+    });
   }
 
   const postToolUse: HookCallbackMatcher[] = [{ hooks: [pluginPostToolUseHook(deps)] }];

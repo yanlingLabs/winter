@@ -19,6 +19,11 @@ export const HISTORY_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<Se
   "agent_error",
   "question_asked",
   "question_resolved",
+  // DELIBERATELY ABSENT (WS-23): `hook_notice` -- a hook's blocked-prompt reason / stop notice. The
+  // phone decodes through a PINNED WinterProtocol kit tag that has no case for it, so it would round-
+  // trip as an unknown event at best. FOLLOW-UP: once a kit tag carries `SessionEvent.hookNotice`
+  // (and the iOS project bumps to it), add it here -- `text` is capped at 12,000 characters, well
+  // inside this file's per-event string cap -- and it reaches REMOTE_STREAM_EVENT_TYPES by the spread.
 ]);
 
 /** Truncates `value` to `cap` UTF-8 bytes (backed off to a char boundary) plus a deterministic

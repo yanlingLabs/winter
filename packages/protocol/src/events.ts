@@ -537,6 +537,24 @@ export const ToolReviewEvent = ThreadBase.extend({
  *  clients at emission time (`SessionHub.attachedCount`, checked by the engine's `notify` bridge
  *  in `engine.ts`) — see `agent/notify-fallback.ts`'s own doc comment for why that fallback is
  *  argv-safe against injection. */
+/** WS-23 (agent SDK hooks): a notice a HOOK asked the host to show -- the runtime's
+ *  `system/informational` frame (a hook's `systemMessage`, a blocked prompt's reason, a hook's
+ *  `continue: false`), and the reason of a turn a hook stopped (`result.terminal_reason:
+ *  "hook_stopped"`). Persisted and replayed like any transcript row: it explains why a turn ended
+ *  without the reply a user was waiting for, which is exactly what a client that reattaches later
+ *  must still be able to show. `stopsTurn` marks the notice that ENDED the turn it belongs to.
+ *
+ *  No existing variant says this honestly: `agent_error` would paint a hook's deliberate stop as a
+ *  failure (and clients treat it as the end of a turn), `notification_requested` raises a native
+ *  banner, and `assistant_message` would put the hook's words in the model's mouth. `text` is
+ *  bounded by the projector (the SDK already caps each hook contribution at 10,000 characters). */
+export const HookNoticeEvent = ThreadBase.extend({
+  type: z.literal("hook_notice"),
+  text: z.string().min(1).max(12_000),
+  level: z.enum(["info", "notice", "suggestion", "warning"]),
+  stopsTurn: z.boolean().optional(),
+});
+
 export const NotificationRequestedEvent = ThreadBase.extend({
   type: z.literal("notification_requested"),
   title: z.string().min(1).max(100),
@@ -868,6 +886,7 @@ export const SessionEvent = z.discriminatedUnion("type", [
   TileActionEvent,
   ToolReviewEvent,
   NotificationRequestedEvent,
+  HookNoticeEvent,
   ChildUpdateEvent,
   WorkflowStartedEvent,
   WorkflowProgressEvent,

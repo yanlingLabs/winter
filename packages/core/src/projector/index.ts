@@ -11,7 +11,7 @@ import { createEchoWindow, type EchoWindow } from "./dedupe";
 import { classifyThrown, sanitizeDetail } from "./errors";
 import { isKnownUnpersistedKind, kindOf, summarize } from "./hooks";
 import { isQuestionTool } from "./questions";
-import { projectTerminal, sharesMainLedgerRow, totalsOf, turnUsageOf, type MainModelKey, type UsageTotals } from "./terminal";
+import { boundHookNoticeText, projectTerminal, sharesMainLedgerRow, totalsOf, turnUsageOf, type MainModelKey, type UsageTotals } from "./terminal";
 import { hostToolNameFor } from "../runtime-sdk/tool-names";
 import { ProjectorRefusedError } from "./types";
 import type { CheckpointStore, ProjectedBatch, ProjectedEvent, Projector, ProjectorDeps, ProjectorRefusal, ProtocolSdkMessage } from "./types";
@@ -168,6 +168,8 @@ class ProjectorImpl implements Projector {
    * cleared at turn start would miss exactly the case that motivated this fix.
    */
   private sharedRowActivity = false;
+  /** WS-23: a stop notice (`system/informational` with `prevent_continuation`) was projected this turn -- see `TerminalInput.stopAlreadyAnnounced`. */
+  private stopAnnounced = false;
   private running = false;
   private resultAt: string | undefined;
   /** One log line per unknown wire `type`, not one per message. */
@@ -365,6 +367,27 @@ class ProjectorImpl implements Projector {
 
     const claim = (sourceId: string, produce: () => ProjectedEvent[]): ProjectedBatch => this.claimed(sourceId, produce);
 
+    // WS-23: `system/informational` -- the runtime's text notice for the host (a hook's
+    // `systemMessage`, a blocked prompt's reason, a hook's `continue: false`). Persisted as
+    // `hook_notice` on the thread it came from, keyed by the frame's own uuid so a replay appends it
+    // once. The text is a hook's own words: bounded, never logged.
+    if (kindOf(msg) === "system/informational") {
+      const m = msg as Record<string, unknown>;
+      const content = typeof m.content === "string" ? m.content.trim() : "";
+      if (content.length === 0) {
+        this.logSkipped(msg);
+        return EMPTY_BATCH();
+      }
+      const level = m.level === "info" || m.level === "notice" || m.level === "suggestion" ? m.level : "warning";
+      const stopsTurn = m.prevent_continuation === true;
+      if (stopsTurn) this.stopAnnounced = true;
+      const threadId = threadIdOf(m as { parent_tool_use_id?: string | null });
+      const uuid = typeof m.uuid === "string" && m.uuid.length > 0 ? m.uuid : `${this.turnIndex}:${this.roundIndex}:${content.length}`;
+      return claim(`hn:${uuid}`, () => [
+        { type: "hook_notice", sessionId: this.deps.sessionId, threadId, text: boundHookNoticeText(content), level, ...(stopsTurn ? { stopsTurn: true } : {}) },
+      ]);
+    }
+
     const assistant = asAssistantFrame(msg);
     if (assistant !== undefined) {
       this.running = true;
@@ -527,6 +550,7 @@ class ProjectorImpl implements Projector {
           result: resultFrame, sessionId: this.deps.sessionId, threadId: MAIN_THREAD,
           previous: this.totals, rounds, ...(this.mainModel === undefined ? {} : { mainModel: this.mainModel }),
           ...(sawSharedRowActivity ? { sawSharedRowActivity } : {}),
+          ...(this.stopAnnounced ? { stopAlreadyAnnounced: true } : {}),
         });
         this.totals = out.totals ?? this.totals;
         return out.events;
@@ -539,6 +563,7 @@ class ProjectorImpl implements Projector {
       // 0.0.17 (P-B1 item 3): the window this flag covers is TERMINAL-to-terminal, not turn-start to
       // terminal — see the field's own doc comment for the background child that spends between turns.
       this.sharedRowActivity = false;
+      this.stopAnnounced = false;
       this.running = false;
       this.sawFrame = false;
       if (this.openTurns > 0) this.openTurns--;
