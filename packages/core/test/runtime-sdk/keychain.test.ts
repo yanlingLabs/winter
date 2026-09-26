@@ -149,7 +149,7 @@ describe("credential inventory and presence over SecretStore", () => {
   // the level that can survive a catalog that grows on its own, which is the whole point of the
   // "providers live in the SDKs" ruling.
   describe("the derived inventory (WS-19 W19-1)", () => {
-    test("today's four rows are the PREFIX, verbatim and in order — providerSelectionFor breaks ties by inventory order", () => {
+    test("today's four rows are the PREFIX, verbatim and in order — credential.list's order and the no-default-model refusal's naming follow it", () => {
       expect(WINTER_CREDENTIAL_INVENTORY.slice(0, 4)).toEqual([
         { provider: "openai", secretName: "openai:default", kind: "keychain" },
         { provider: "codex-oauth", secretName: "codex-oauth:default", kind: "keychain" },
