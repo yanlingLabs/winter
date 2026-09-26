@@ -6,5 +6,15 @@
 // resolves against the binary's `$bunfs` root, not the cwd (measured) — so the name and the
 // location of this file ARE the contract. `test/compile-core.test.ts` pins both.
 //
-// One import: the daemon package's own entry, which is the SDK's Worker half of the bridge.
-import "@yanlinglabs/winter-core/embedded-worker";
+// Why a PRE-BUILT bundle and not `@yanlinglabs/winter-core/embedded-worker` directly: Bun 1.3's
+// multi-entrypoint `bun build` decides once, for the whole graph, which modules to wrap in lazy
+// `__esm` initialisers — and `src/main.ts` dynamically `import()`s `@yanlinglabs/winter-core` and
+// `@yanlinglabs/winter-protocol`, which wraps them and everything they reach (zod included). A module
+// shared with THIS entry stays wrapped here too, but an unwrapped importer that exists only in this
+// entry's graph (the runtime's `@modelcontextprotocol/*`) never gets the `init_*()` call, so the Worker
+// died at load with `TypeError: undefined is not a constructor (evaluating 'new ZodLazy(…)')` and
+// every chat/dispatch turn ended `exited before init`. It surfaced only once the runtime came from npm:
+// a linked SDK checkout resolved its own zod, so nothing was shared. `compile` / `compile:core` bundle
+// `src/embedded-worker.source.ts` alone first; the bundle imports only `node:` builtins, so this
+// entry's graph shares no module with `src/main.ts`'s and the linker has nothing to get wrong.
+import "../.build/embedded-worker.bundle.js";
