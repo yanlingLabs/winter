@@ -2361,11 +2361,18 @@ public struct CatalogModel: Equatable, Sendable {
     public let efforts: [String]?
     /// The effort the model runs at when none is stored. Can be nil even when `efforts` is not.
     public let defaultEffort: String?
+    /// WS-24 (pickers lane, fix round 1): whether a REAL Winter turn on this row can carry tools —
+    /// daemon-DERIVED (never a bare `toolCalling` value the app would have to re-interpret): only
+    /// four adapter families actually refuse a turn's tools for a non-native row, and most
+    /// non-native rows are the catalog's fail-closed placeholder for a capability upstream never
+    /// stated, not a measured denial. `nil` means an older daemon that predates this field — "not
+    /// told", which every reader must treat as "no claim either way", never as `false`.
+    public let sessionUsable: Bool?
 
     public init(tag: String, canonicalModelId: String? = nil, providerId: String? = nil,
                 familyId: String? = nil, status: String? = nil,
                 pricing: CatalogPricing? = nil, costBasis: String = "unknown",
-                efforts: [String]? = nil, defaultEffort: String? = nil) {
+                efforts: [String]? = nil, defaultEffort: String? = nil, sessionUsable: Bool? = nil) {
         self.tag = tag
         self.canonicalModelId = canonicalModelId
         self.providerId = providerId
@@ -2375,6 +2382,7 @@ public struct CatalogModel: Equatable, Sendable {
         self.costBasis = costBasis
         self.efforts = efforts
         self.defaultEffort = defaultEffort
+        self.sessionUsable = sessionUsable
     }
 }
 
@@ -2467,7 +2475,8 @@ extension WinterClient {
                 // Not told ⇒ not quotable. `"unknown"` is the catalog's own word for that.
                 costBasis: m["costBasis"]?.stringValue ?? "unknown",
                 efforts: effortVocabulary(m["efforts"]),
-                defaultEffort: m["defaultEffort"]?.stringValue
+                defaultEffort: m["defaultEffort"]?.stringValue,
+                sessionUsable: m["sessionUsable"]?.boolValue
             )
         }
         return ModelsCatalog(schemaVersion: r["schemaVersion"]?.intValue,
