@@ -24,18 +24,39 @@ describe("readHistoryPage", () => {
     return { store, sessionId };
   }
 
-  test("the allowlist is exactly the 10 persisted foldable types", () => {
+  test("the allowlist is exactly the 12 persisted foldable types", () => {
     // Widening cast: HISTORY_EVENT_TYPES is a ReadonlySet<SessionEvent["type"]>, so the plain
     // string[] literal below (not a member of that narrower union type) would otherwise fail
     // toEqual's generic inference (bound to the `expect(...)` receiver's type) under tsc.
     expect([...HISTORY_EVENT_TYPES].sort() as string[]).toEqual(
       [
         "agent_error", "approval_requested", "approval_resolved", "assistant_message",
+        // WS-24 lane `phone`: hook_notice/continuity_warning joined the allowlist (10 -> 12) once
+        // the phone's own decode path was confirmed to tolerate an unrecognized type with no gate
+        // (see history.ts's HISTORY_EVENT_TYPES doc comment).
+        "continuity_warning", "hook_notice",
         "question_asked", "question_resolved", "tool_call", "tool_result", "turn_completed", "user_message",
       ].sort(),
     );
     // Security: the opaque reasoning_item is NOT allowlisted.
     expect(HISTORY_EVENT_TYPES.has("reasoning_item" as SessionEvent["type"])).toBe(false);
+  });
+
+  test("WS-24 lane `phone` review r1: hook_notice/continuity_warning come back field-for-field", () => {
+    const { store, sessionId } = boot();
+    store.append(sessionId, {
+      type: "hook_notice", sessionId, threadId: "main",
+      text: "a hook stopped this turn", level: "warning", stopsTurn: true,
+    });
+    store.append(sessionId, {
+      type: "continuity_warning", sessionId, threadId: "main",
+      warning: "model_switch_lossy", text: "reasoning state did not carry over",
+    });
+    const page = readHistoryPage(store, { sessionId });
+    expect(page.events.map((e) => e.type)).toEqual(["hook_notice", "continuity_warning"]);
+    const [notice, warning] = page.events;
+    expect(notice).toMatchObject({ type: "hook_notice", text: "a hook stopped this turn", level: "warning", stopsTurn: true });
+    expect(warning).toMatchObject({ type: "continuity_warning", warning: "model_switch_lossy", text: "reasoning state did not carry over" });
   });
 
   test("filters out non-allowlisted events; returns ascending page with oldestSeq/hasMore", () => {
