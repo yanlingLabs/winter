@@ -24,7 +24,8 @@ import { join } from "node:path";
 import { openaiChatFake, startFake, type FakeServer } from "@yanlinglabs/winter-provider-conformance/fakes";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import { FileSecretStore } from "../../src/auth/secret-store";
-import { credentialRefFor, keychainSeamFromSecretStore } from "../../src/runtime-sdk/keychain";
+import { readCredentialMaterial } from "../../src/auth/credential-material";
+import { credentialRefFor } from "../../src/runtime-sdk/keychain";
 import { keychainService } from "../../src/profile";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
@@ -226,10 +227,12 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
     // The durable record names the right credential LOCATOR (never material — records.ts's own rule).
     expect(rt.records.get(sessionId)?.authRef).toBe("keychain:deepseek:default");
     expect(rt.records.get(sessionId)?.providerId).toBe("deepseek");
-    // ...and that locator, through the daemon's OWN seam, resolves to exactly what was stored.
+    // ...and that locator names exactly the record that was stored (the child resolves it itself; WS-23
+    // retired the daemon-side seam that used to read it for the official leg).
     const ref = credentialRefFor("deepseek", home)!;
     expect(ref).toEqual({ kind: "keychain", account: "deepseek:default", service: keychainService(undefined, home) });
-    expect(await keychainSeamFromSecretStore(secretsRef!, home).read(ref)).toBe(SENTINEL);
+    const stored = await readCredentialMaterial(secretsRef!, "deepseek:default");
+    expect(stored?.kind === "api-key" ? stored.key : undefined).toBe(SENTINEL);
 
     rmSync(cwd, { recursive: true, force: true });
   }, 180_000);

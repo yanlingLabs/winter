@@ -132,9 +132,8 @@ describe("credential.list / credential.set / credential.remove (WS-19)", () => {
 
   test("§9 A-1: the Console slot's `present` is the BEARER, never an api-key sitting in that account", async () => {
     const { socketPath, harnessToken, secrets } = await boot();
-    // The wrong kind in the console account — exactly what `keychainSeamFromSecretStore` refuses to
-    // serve. `present` must agree with the seam, or the app would offer to use a credential that
-    // can never be read.
+    // The wrong kind in the console account — the console arm reads a bearer there and nothing
+    // else. `present` must agree, or the app would offer to use a credential that can never be read.
     await writeCredentialMaterial(secrets, ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: SENTINEL });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "test");
