@@ -4,7 +4,7 @@
 // worktree's OWN git top, `projectScopeRootFor`) — the walk the run home loads them along. Before, each of
 // these checked trust on the cwd's own path and read `<cwd>/.winter/…` only, so a worktree listed nothing.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TrustStore } from "../../src/agent/trust";
@@ -90,15 +90,17 @@ describe("listing surfaces from a linked worktree of a trusted repo (WS-24)", ()
     expect(flows.read("wt-flow", join(repo.wt, "pkg"))?.body).toContain("pkg flow");
   });
 
-  test("project memory: the worktree's scope root, reachable from a subdirectory", async () => {
+  test("project memory: a worktree of a trusted repo reaches it; the directory stays the cwd's own", async () => {
     const memory = new MemoryStore({ winterHome: home, trust });
-    const wrote = await memory.write("project", { name: "wt-fact", description: "a fact", type: "project", body: "b" }, { source: "rpc" }, join(repo.wt, "pkg", "deep"));
+    const sub = join(repo.wt, "pkg", "deep");
+    const wrote = await memory.write("project", { name: "wt-fact", description: "a fact", type: "project", body: "b" }, { source: "rpc" }, sub);
     expect(wrote.ok).toBe(true);
-    const listed = memory.list("project", repo.wt);
+    expect(existsSync(join(sub, ".winter", "memory", "wt-fact.md"))).toBe(true); // beside the session, as before
+    const listed = memory.list("project", sub);
     expect(listed.ok && listed.value.map((f) => f.name)).toEqual(["wt-fact"]);
-    // …and never the main checkout's store.
-    const main = memory.list("project", repo.main);
-    expect(main.ok && main.value).toEqual([]);
+    // An untrusted repository still refuses.
+    const untrusted = new MemoryStore({ winterHome: home, trust: new TrustStore(join(home, "nobody.json")) });
+    expect(untrusted.list("project", sub).ok).toBe(false);
   });
 
   test("permission dirs: the worktree's project tiers, trusted through the repository", () => {

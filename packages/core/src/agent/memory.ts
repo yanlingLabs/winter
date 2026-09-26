@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, readdirSync, writeFileSync, appendFileSync, unlinkSync, existsSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { TrustStore } from "./trust";
-import { trustedProjectRoot } from "./project-scope-dirs";
+import { projectScopeTrusted } from "../runtime-sdk/run-home-input";
 
 export type MemoryScope = "user" | "project";
 export type MemoryType = "user" | "feedback" | "project" | "reference";
@@ -139,17 +139,16 @@ export class MemoryStore {
     this.nowMs = deps.nowMs ?? Date.now;
   }
 
-  /** user → `~/.winter/memory`; project → `<project root>/.winter/memory`, gated on a trusted project.
+  /** user → `~/.winter/memory`; project → `<cwd>/.winter/memory`, gated on a trusted project.
    *
-   *  WS-24: the project is the cwd's project SCOPE (`trustedProjectRoot`: trust keyed on the repository,
-   *  the directory at `projectScopeRootFor(cwd)` — the cwd's own git top, a linked worktree's own) rather
-   *  than the cwd's own path, so a worktree of a trusted repo reaches its project memory, and a session in
-   *  a subdirectory reads and writes the project's one store instead of a `.winter/memory` beside itself. */
+   *  WS-24: TRUST follows the project scope (`projectScopeTrusted`: the cwd's own trust, or its repository's —
+   *  a linked worktree of a trusted repo is trusted), so a worktree reaches its project memory. The DIRECTORY
+   *  stays the cwd's own `.winter/memory`, deliberately — moving it to the project root would hide every fact
+   *  a subdirectory session already stored beside itself, and `context.ts`/`memory-migrate.ts` read it there. */
   private resolveRoot(scope: MemoryScope, cwd?: string): MemoryResult<string> {
     if (scope === "user") return { ok: true, value: join(this.winterHome, "memory") };
-    const root = trustedProjectRoot(cwd, this.trust);
-    if (root === null) return { ok: false, error: PROJECT_TRUST_ERROR, kind: "trust" };
-    return { ok: true, value: join(root, ".winter", "memory") };
+    if (!cwd || !projectScopeTrusted(cwd, this.trust)) return { ok: false, error: PROJECT_TRUST_ERROR, kind: "trust" };
+    return { ok: true, value: join(cwd, ".winter", "memory") };
   }
 
   list(scope: MemoryScope, cwd?: string): MemoryResult<MemoryFactMeta[]> {

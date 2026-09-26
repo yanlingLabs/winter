@@ -6,7 +6,8 @@
 // under-reported twice over: trust is keyed on the REPOSITORY (`projectScopeTrusted` — a worktree of a
 // trusted repo is trusted, the worktree's own path is not in `trust.json`), and the run home walks from the
 // cwd up to the project scope's root (`projectScopeRootFor`: the cwd's own git top, a worktree's own), not
-// the cwd alone. This is that walk, for the daemon's readers.
+// the cwd alone. This is that walk, for the daemon's readers. (The project MEMORY store keeps its cwd's
+// own directory and takes only the trust half — `agent/memory.ts`.)
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import type { TrustStore } from "./trust";
@@ -26,17 +27,13 @@ function real(p: string): string {
  */
 export function trustedProjectWalk(cwd: string | null | undefined, trust: Pick<TrustStore, "isTrusted">): string[] {
   if (!cwd) return [];
+  // realpath, not `path.resolve`: `projectScopeRootFor` answers with a realpathed git top, and `projectWalk`
+  // compares the two textually — a cwd under a symlinked ancestor (`/tmp` → `/private/tmp` on macOS, a
+  // linked checkout) would otherwise fall "outside" its own root and walk nothing. The router's run home
+  // receives the session's recorded (physical) cwd, so the two walks name the same directories.
   const dir = real(cwd);
   if (!trustedAsGiven(cwd, dir, trust)) return [];
   return projectWalk(dir, projectScopeRootFor(dir), real(homedir()));
-}
-
-/** The trusted project's scope ROOT for `cwd` (`projectScopeRootFor`), or `null` when there is no cwd or its
- *  project is not trusted — for a reader that keeps ONE project directory (the project memory store). */
-export function trustedProjectRoot(cwd: string | null | undefined, trust: Pick<TrustStore, "isTrusted">): string | null {
-  if (!cwd) return null;
-  const dir = real(cwd);
-  return trustedAsGiven(cwd, dir, trust) ? projectScopeRootFor(dir) : null;
 }
 
 /** Trust asked of the cwd as the caller spelled it AND as realpathed — a `trust.json` entry, or a caller's

@@ -121,7 +121,9 @@ export { CORE_VERSION } from "./version";
  * top, a linked worktree's own — where `winter plugin|mcp --scope project|local` write them and a run home
  * reads them), trusted when the REPOSITORY is (`projectScopeTrusted`). It used to be `<primary>/.winter/…`
  * gated on the primary's own path, which a worktree of a trusted repo (not itself in `trust.json`), or a
- * session in a subdirectory, never matched.
+ * session in a subdirectory, never matched. The widening to the git top is the router's own: a run home
+ * builds the project settings tiers from `RunHomeInput.trustedProjectRoot` (`projectScopeRootFor(cwd)`,
+ * `runtime-sdk/run-home-input.ts`), so the child and this fence read the same two files.
  */
 export function sessionPermissionDirs(home: string, primary: string, trust: Pick<TrustStore, "isTrusted">): string[] {
   return loadPermissionDirs(home, projectScopeRootFor(primary), projectScopeTrusted(primary, trust));
