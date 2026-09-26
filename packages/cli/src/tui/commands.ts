@@ -112,8 +112,20 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
     // (the picker has no section headers); the provider rides `hint` since the label is the
     // facing name / modelId.
     if (ctx.openChoice && models.length > 0) {
+      const currentMarked = models.some((m) => m.id === settings.provider.model);
+      // WS-24 (pickers lane, fix round 1): the CURRENT model named in the title, but ONLY when no
+      // option is marked `current` — the session-picker listing (`models`, off `sync.config`) now
+      // excludes a row `toolsRefusedFor` refuses tools on, so an already-stored model that got hidden
+      // this way (a session recorded before this build, or a hand-typed tag) would otherwise have NO
+      // row here at all, nothing marked current, and the title's own "effort: …" line said nothing
+      // about the model either. When the current model DOES have a row (the common case), it is
+      // already named there (`❯*`), so the title stays exactly as it was — this title row has a hard
+      // width budget (the key-grammar hint at its tail truncates first) and must not grow on the hot
+      // path for the rare case's sake. `modelDisplayWithHint` is the same "modelId (providerId)" form
+      // the bare-tag show path already prints.
+      const modelPrefix = currentMarked ? "" : `model: ${modelDisplayWithHint(settings.provider.model)} — `;
       ctx.openChoice({
-        title: `model — effort: ${settings.provider.reasoningEffort ?? "default"} (/model --effort)`,
+        title: `${modelPrefix}effort: ${settings.provider.reasoningEffort ?? "default"} (/model --effort)`,
         options: models.map((m) => ({
           value: m.id,
           label: m.facingName ?? m.id.slice(m.id.indexOf("/") + 1),
