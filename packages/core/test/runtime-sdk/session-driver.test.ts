@@ -363,12 +363,15 @@ describe("createWinterSessionDrivers — the table", () => {
       buildSessionCapabilities: () => ({ "winter__browser": { type: "sdk", name: "winter__browser", instance: {} } }),
       extraMcpServers: (session) => ({ fake: { type: "stdio", command: "bun", args: ["run", "fake.ts", session.cwd] } }),
     }, {}, undefined, { legacyRouter: true });
+    // A REAL directory: a session whose cwd does not exist is refused before any child
+    // (`session_cwd_unavailable`), so a literal "/repo" would never reach the MCP merge under test.
+    const repo = realpathSync(mkdtempSync(join(tmpdir(), "winter-row7-legacy-")));
     try {
-      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd: "/repo" });
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd: repo });
       const session = await t.drivers.create(sid);
       const servers = t.q().options.mcpServers as Record<string, unknown>;
       expect(Object.keys(servers).sort()).toEqual(["fake", "winter__browser"]);
-      expect(servers.fake).toEqual({ type: "stdio", command: "bun", args: ["run", "fake.ts", "/repo"] });
+      expect(servers.fake).toEqual({ type: "stdio", command: "bun", args: ["run", "fake.ts", repo] });
       await session.end();
     } finally { t.close(); }
     const spawnsBefore: number[] = [];
@@ -378,14 +381,14 @@ describe("createWinterSessionDrivers — the table", () => {
     }, {}, undefined, { legacyRouter: true });
     try {
       spawnsBefore.push(c.queries.length);
-      const sid = c.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd: "/repo" });
+      const sid = c.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd: repo });
       let refused: unknown;
       try { await c.drivers.create(sid); } catch (err) { refused = err; }
       expect((refused as { code?: string })?.code).toBe("winter_leg_unavailable");
       expect(String((refused as Error).message)).toContain("winter__browser");
       expect(c.queries.length).toBe(spawnsBefore[0]!);   // no child was spawned for a refused session
       expect(c.drivers.get(sid)).toBeUndefined();
-    } finally { c.close(); }
+    } finally { c.close(); rmSync(repo, { recursive: true, force: true }); }
   });
 
   test("R1 (P8b-39): a resume re-pushes what the STORE's log still owes — a send held behind a turn at end() runs first, with exactly one turn_started", async () => {
@@ -634,6 +637,125 @@ describe("WS-23 live-gate fix: Console sessions select on the Console bearer, an
       expect(t.q().pushed).not.toContain("after sign-out");
       await session.end();
     } finally { await close(); }
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// A SESSION WHOSE WORKING DIRECTORY IS GONE. A code session whose cwd was deleted used to die at spawn
+// with the generic `agent_error` "the runtime process exited unexpectedly: runtime exited before init"
+// (`process_death`) — nothing told the user the directory was the problem. Now every incarnation checks
+// the stored cwd first and refuses typed (`session_cwd_unavailable`), naming the path, before any child
+// — and never falls back to another directory.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+describe("a session whose working directory is gone refuses typed, before any child (session_cwd_unavailable)", () => {
+  const freshDir = (): string => realpathSync(mkdtempSync(join(tmpdir(), "winter-cwd-gone-")));
+
+  async function refusalOf(run: () => Promise<unknown>): Promise<{ code?: string; message: string }> {
+    try { await run(); } catch (err) { return { code: (err as { code?: string }).code, message: (err as Error).message }; }
+    throw new Error("expected a refusal");
+  }
+
+  test("create: a deleted cwd is refused naming the path and the way out — no child, no driver", async () => {
+    const t = table();
+    const dir = freshDir();
+    try {
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd: dir });
+      rmSync(dir, { recursive: true, force: true });
+      const refused = await refusalOf(() => t.drivers.create(sid));
+      expect(refused.code).toBe("session_cwd_unavailable");
+      expect(refused.message).toBe(`this session's working directory ${dir} no longer exists — restore it, or start a new session`);
+      expect(t.queries).toHaveLength(0);
+      expect(t.drivers.get(sid)).toBeUndefined();
+    } finally { t.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("resume: a cwd deleted while the session was resumable is refused at the next open — and restoring it resumes", async () => {
+    const t = table();
+    const dir = freshDir();
+    try {
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd: dir });
+      const created = await t.drivers.create(sid);
+      await created.end();
+      rmSync(dir, { recursive: true, force: true });
+      // A "restart": a second table over the same store and records knows no driver.
+      const again = table({ records: t.records, store: t.store, hub: t.hub, home: t.home });
+      try {
+        const refused = await refusalOf(() => again.drivers.ensure(sid));
+        expect(refused.code).toBe("session_cwd_unavailable");
+        expect(refused.message).toContain(dir);
+        expect(again.queries).toHaveLength(0);
+        // No silent fallback, and no permanent damage: put the directory back and the session opens.
+        mkdirSync(dir, { recursive: true });
+        const resumed = await again.drivers.ensure(sid);
+        expect(resumed?.state).toBe("live");
+        expect(again.q().options.cwd).toBe(dir);
+        await resumed!.end();
+      } finally { again.close(); }
+    } finally { t.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("send on a resumable session: refused before the user_message is appended — no orphan text in the log", async () => {
+    const t = table();
+    const dir = freshDir();
+    try {
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd: dir });
+      const session = await t.drivers.create(sid);
+      await session.end();
+      expect(session.state).toBe("resumable");
+      rmSync(dir, { recursive: true, force: true });
+      const spawns = t.queries.length;
+      const refused = await refusalOf(() => session.send("into the void"));
+      expect(refused.code).toBe("session_cwd_unavailable");
+      expect(t.queries.length).toBe(spawns);
+      expect(t.store.read(sid).some((e) => e.type === "user_message" && JSON.stringify(e).includes("into the void"))).toBe(false);
+    } finally { t.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("a cwd that is a FILE, not a directory, is refused the same way", async () => {
+    const t = table();
+    const dir = freshDir();
+    const file = join(dir, "not-a-dir.txt");
+    writeFileSync(file, "x");
+    try {
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd: file });
+      const refused = await refusalOf(() => t.drivers.create(sid));
+      expect(refused.code).toBe("session_cwd_unavailable");
+      expect(refused.message).toBe(`this session's working directory ${file} is not a directory — restore it, or start a new session`);
+      expect(t.queries).toHaveLength(0);
+    } finally { t.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("an embedded (chat) session WITH a cwd is held to the same rule; a cwd-less one runs in its temp dir, unchecked", async () => {
+    const t = table();
+    const dir = freshDir();
+    try {
+      const withCwd = t.store.createSession("t", { mode: "chat", model: "winter-test/echo", cwd: dir });
+      rmSync(dir, { recursive: true, force: true });
+      expect((await refusalOf(() => t.drivers.create(withCwd))).code).toBe("session_cwd_unavailable");
+      const cwdless = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const session = await t.drivers.create(cwdless);
+      expect(session.state).toBe("live");
+      await session.end();
+    } finally { t.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("a symlinked cwd whose target is gone reads as missing; one whose target exists passes", async () => {
+    const t = table();
+    const target = freshDir();
+    const holder = freshDir();
+    const link = join(holder, "link");
+    symlinkSync(target, link);
+    try {
+      const live = t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd: link });
+      const session = await t.drivers.create(live);
+      expect(session.state).toBe("live");
+      await session.end();
+      rmSync(target, { recursive: true, force: true });
+      const dangling = t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd: link });
+      const refused = await refusalOf(() => t.drivers.create(dangling));
+      expect(refused.code).toBe("session_cwd_unavailable");
+      expect(refused.message).toContain("no longer exists");
+    } finally { t.close(); rmSync(target, { recursive: true, force: true }); rmSync(holder, { recursive: true, force: true }); }
   });
 });
 
