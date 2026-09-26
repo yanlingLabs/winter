@@ -95,6 +95,9 @@ class FakeQuery {
     if (this.interruptEndsChild) this.fail(named("AbortError", "query aborted: runtime process killed"));
   }
   async setModel(model?: string): Promise<void> { this.models.push(model); }
+  /** WS-23 (reasoning-state): the SDK's `compact` control -- recorded, answering what a real compaction kept. */
+  readonly compactions: Array<{ customInstructions?: string } | undefined> = [];
+  async compact(opts?: { customInstructions?: string }): Promise<{ retainedCount: number }> { this.compactions.push(opts); return { retainedCount: 7 }; }
   async setPermissionMode(mode: string): Promise<void> { this.modes.push(mode); }
 }
 
@@ -552,9 +555,16 @@ describe("startWinterSession — one incarnation", () => {
     }
   });
 
-  test("compact is a typed refusal; setModel reaches a live child and is a no-op while resumable", async () => {
+  // WS-23 (reasoning-state, decision 5): `compact` reaches a LIVE child's `Query.compact` (the SDK's
+  // `compact` control) -- what the handoff calls before a provider switch the target cannot hold -- and
+  // stays a typed refusal with no live child to ask.
+  test("compact reaches a live child and is a typed refusal while resumable; setModel reaches a live child and is a no-op while resumable", async () => {
     const h = harness();
     await expect(h.session.compact()).rejects.toMatchObject({ code: "not_supported_on_winter_leg" });
+    await h.session.open();
+    await expect(h.session.compact()).resolves.toEqual({ retainedCount: 7 });
+    expect(h.q().compactions).toEqual([undefined]);
+    await h.session.end();
     await h.session.setModel("gpt-5.6-terra");   // resumable: nothing to tell
     await h.session.open();
     await h.session.setModel("gpt-5.6-luna");
