@@ -226,5 +226,50 @@
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
       <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.117.0/Winter-0.117.0.zip" sparkle:edSignature="pXDKOWYrKt3ojScb4eIFcHuKoRFHypeik1weS6xvJTYZ/oHP9ajfTZjz2E1RXu2cZnsvXQkmBeJTKF/3EQp9CA==" length="508929228" type="application/octet-stream"/>
     </item>
+      <item>
+      <title>0.118.0</title>
+      <description><![CDATA[<p>Winter agent SDK 0.0.27</p>
+<h2>Every model runs on Winter's own runtime</h2>
+<ul>
+  <li><strong>Claude runs on Winter's runtime too.</strong> Winter no longer launches Anthropic's <code>claude</code> program: Claude, GPT, Grok and every other model now share one runtime, one set of tools, one hook system and one approval flow.</li>
+  <li><strong>Your Claude sessions carry over.</strong> A session that ran on the old Claude runtime moves across the first time you open it, with its history intact. If one can't move, it says why and names the <code>winter doctor --repair adopt-legacy-session</code> command that fixes it.</li>
+  <li><strong>Chat and dispatch start faster.</strong> They now run inside Winter itself instead of starting a separate program for every session. Code sessions still run in their own process.</li>
+  <li><strong>Console login works with Winter's runtime.</strong> Claude models on an Anthropic Console account run in chat and code sessions. If your default model is a Console model, Winter's background jobs (titles, the shell-command reviewer, memory dreaming and cleanup) now run on it too.</li>
+  <li><strong>Winter's background jobs can use Claude.</strong> A Claude-only setup now gets titles and the shell-command safety reviewer.</li>
+</ul>
+<h2>Switching models</h2>
+<ul>
+  <li><strong>Switching models keeps the conversation.</strong> A switch to another model family sends the new model the whole conversation as it is, as long as it fits that model's context window. If it doesn't fit, the model you are leaving writes the summary first, and Winter tells you before it does.</li>
+  <li><strong>Switching back picks up where you left off.</strong> Each model's own reasoning is kept, so returning to a model gives it its earlier thinking back.</li>
+  <li><strong>Fewer confirmation prompts.</strong> Winter now asks before a switch only when something can't be carried over, such as images going to a model that can't read them.</li>
+</ul>
+<h2>Faster, cheaper turns</h2>
+<ul>
+  <li><strong>Prompt caching holds across the whole session.</strong> Changing the effort level, loading a tool mid-session, connecting an MCP server late or compacting the conversation no longer throws away the cache on Claude and OpenAI models.</li>
+  <li><strong>Codex sessions now use prompt caching.</strong> They were missing it entirely before.</li>
+  <li><strong>Effort changes take effect per message</strong> on Claude Opus 5, Opus 5.5, Fable 5.1 and the GPT-6 models, without resetting the cache.</li>
+</ul>
+<h2>Claude in code sessions</h2>
+<ul>
+  <li><strong>Long tool loops are more reliable.</strong> Claude's thinking, text and tool calls are replayed in the exact order they were produced.</li>
+  <li><strong>A conversation that outgrows the context window compacts and carries on</strong> instead of ending the turn with an error.</li>
+  <li><strong>Web search works on Claude Opus 5.5 and Fable 5.1.</strong></li>
+</ul>
+<h2>Tools, hooks and MCP</h2>
+<ul>
+  <li><strong>Grok models use xAI's Responses API</strong>, so their reasoning carries from turn to turn. Grok 4.20 Multi-Agent is available.</li>
+  <li><strong>MCP updated</strong> to the current MCP protocol library. Remote servers use the newest protocol version when they support it, and fall back to the older one when they don't.</li>
+  <li><strong>Hooks do everything Claude Code's do.</strong> Regex matchers, exit code 2 to block, extra context for the model, blocking prompts and stopping a turn all work, and plugin hooks written for Claude Code run as they are. Winter's own safety checks now block a call if they fail.</li>
+</ul>
+<h2>Fixes</h2>
+<ul>
+  <li>A session whose working folder was deleted now says so and names the folder, instead of failing with a generic error.</li>
+  <li>Warnings about a session's continuity are now shown in the app and the terminal.</li>
+</ul>]]></description>
+      <sparkle:version>0.118.0</sparkle:version>
+      <sparkle:shortVersionString>0.118.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.118.0/Winter-0.118.0.zip" sparkle:edSignature="u35aRjs6xKe/YhMawvHchAoyunrS31sE1x3CvvgVjp9alxs/ODYvOXppTI5GG7D/cKP9YJapFKcsLbhKWdntCA==" length="425847323" type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>
