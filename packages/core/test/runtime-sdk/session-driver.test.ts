@@ -31,7 +31,7 @@ import { QuestionBroker } from "../../src/agent/questions";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { CREDENTIAL_MATERIAL_NAMES, writeCredentialMaterial } from "../../src/auth/credential-material";
 import { CORE_BRAND } from "../../src/runtime-sdk/brand";
-import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
+import { createWinterRuntimeSdk, type WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import { coldResumeRunHomeFor, createWinterSessionDrivers, refusalMayBeCredentialShaped, type WinterLegDeps } from "../../src/runtime-sdk/session-driver";
 import { updateSdkSettings } from "../../src/sdk-files";
 import { evictSessionsForCredential } from "../../src/runtime-sdk/credentials";
@@ -544,6 +544,100 @@ describe("refusalForSelection — only credential-shaped reasons are re-describe
 });
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
+// WS-23 LIVE-GATE BUG — `session.create {mode:"chat", model:"console/claude-sonnet-5"}` refused with
+// "console: add a credential" on a home whose Keychain held the Console bearer. The bearer's inventory
+// row was filed under "anthropic", so the router (which admits a row only when presence names ITS
+// provider) never saw a `console` credential. These run `decideRuntime` against the REAL router
+// (`createWinterRuntimeSdk(...).selectRuntimeFor`) over the same secret store the driver reads, so the
+// whole create path — presence, selection, the record, the child's locator, the pre-turn gate — is
+// the production one.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+describe("WS-23 live-gate fix: Console sessions select on the Console bearer, and only on it", () => {
+  const CONSOLE_BEARER = JSON.stringify({ kind: "bearer", token: "console-bearer-test" });
+  const ANTHROPIC_KEY = JSON.stringify({ kind: "api-key", key: "sk-ant-test" });
+
+  async function realRouterTable(seed: (secrets: FileSecretStore) => Promise<void>) {
+    const secretsHome = mkdtempSync(join(tmpdir(), "winter-console-select-"));
+    const secrets = new FileSecretStore(join(secretsHome, "secrets.json"));
+    await seed(secrets);
+    const handle = await createWinterRuntimeSdk({ home: secretsHome, settings: () => null, secrets, capabilities: [] });
+    const t = table({ secrets }, { selectRuntimeFor: (input: Parameters<WinterRuntimeSdk["selectRuntimeFor"]>[0]) => handle.selectRuntimeFor(input) });
+    return {
+      t, secrets,
+      close: async () => { t.close(); await handle.dispose(); rmSync(secretsHome, { recursive: true, force: true }); },
+    };
+  }
+
+  async function createRefusal(t: ReturnType<typeof table>, model: string): Promise<{ code?: string; reason?: string; message: string }> {
+    const sid = t.store.createSession("t", { mode: "chat", model });
+    try { await t.drivers.create(sid); } catch (err) { return { code: (err as { code?: string }).code, reason: (err as { reason?: string }).reason, message: (err as Error).message }; }
+    throw new Error(`expected ${model} to be refused`);
+  }
+
+  test("a Console-only home CREATES a console/* chat session: the record, the locator and the first turn all name the Console", async () => {
+    const { t, close } = await realRouterTable((secrets) => secrets.set("anthropic:console", CONSOLE_BEARER));
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "console/claude-sonnet-5" });
+      const session = await t.drivers.create(sid);
+      const record = t.records.get(sid)!;
+      expect(record.selection).toMatchObject({ runtimeKind: "winter-agent", providerId: "console", modelRef: "console/claude-sonnet-5", authFamily: "console-profile" });
+      expect(record.providerId).toBe("console");
+      expect(record.authRef).toBe("keychain:anthropic:console");
+      expect(t.q().options.provider?.authRef).toMatchObject({ kind: "keychain", account: "anthropic:console" });
+      // The pre-turn gate passes on the bearer: the text reaches the child.
+      await session.send("hello console");
+      expect(t.q().pushed).toContain("hello console");
+      await session.end();
+    } finally { await close(); }
+  });
+
+  test("…and that Console-only home does NOT have the Anthropic API key: an anthropic/* session refuses no-credential", async () => {
+    const { t, close } = await realRouterTable((secrets) => secrets.set("anthropic:console", CONSOLE_BEARER));
+    try {
+      const refused = await createRefusal(t, "anthropic/claude-sonnet-5");
+      expect(refused.code).toBe("runtime_selection_refused");
+      expect(refused.reason).toBe("no-credential");
+      expect(refused.message).toContain("winter login --anthropic-key");
+      expect(t.queries).toHaveLength(0);
+    } finally { await close(); }
+  });
+
+  test("an API-key-only home does NOT have the Console: a console/* session refuses no-credential, naming the Console sign-in", async () => {
+    const { t, close } = await realRouterTable((secrets) => secrets.set("anthropic:default", ANTHROPIC_KEY));
+    try {
+      const refused = await createRefusal(t, "console/claude-sonnet-5");
+      expect(refused.code).toBe("runtime_selection_refused");
+      expect(refused.reason).toBe("no-credential");
+      expect(refused.message).toContain("winter login --anthropic-console");
+      // The live-gate report's exact wrong door — there is no key to add for the Console.
+      expect(refused.message).not.toContain("console: add a credential");
+      expect(t.queries).toHaveLength(0);
+      // The API key it DOES have still creates an anthropic/* session.
+      const sid = t.store.createSession("t", { mode: "chat", model: "anthropic/claude-sonnet-5" });
+      const session = await t.drivers.create(sid);
+      expect(t.records.get(sid)?.selection).toMatchObject({ providerId: "anthropic", authFamily: "api-key" });
+      await session.end();
+    } finally { await close(); }
+  });
+
+  test("a Console session whose bearer is signed out refuses the next turn typed, before any text reaches a child", async () => {
+    const { t, secrets, close } = await realRouterTable((s) => s.set("anthropic:console", CONSOLE_BEARER));
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "console/claude-sonnet-5" });
+      const session = await t.drivers.create(sid);
+      await secrets.delete("anthropic:console");
+      let caught: unknown;
+      try { await session.send("after sign-out"); } catch (err) { caught = err; }
+      expect((caught as { code?: string })?.code).toBe("runtime_selection_refused");
+      expect((caught as { reason?: string })?.reason).toBe("no-credential");
+      expect((caught as Error).message).toContain("winter login --anthropic-console");
+      expect(t.q().pushed).not.toContain("after sign-out");
+      await session.end();
+    } finally { await close(); }
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
 // WS-19 (review N2) — THE REPLAY PATH IS GATED TOO.
 //
 // `open()` re-pushes what the log still owes (an interrupted or held `user_message`) and any
@@ -859,12 +953,11 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
     } finally { t.close(); }
   });
 
-  // Review M2 (2026-09-23), extended WS-23 fix round 1 addendum: the advisor pin follows the
-  // `pins.research` digest rule in full — an off-catalog pin, and a cross-provider pin whose
-  // credential has no Keychain locator, fall back to the family default too. `console/*` is covered
-  // in BOTH slot states: empty (the old locator-less case) and POPULATED with broker material (the
-  // exclusion is explicit — a stored bearer must not start stating the pin).
-  test("M2: an off-catalog advisor pin, or a cross-provider pin with no credential locator, falls back to the D30 default", async () => {
+  // Review M2 (2026-09-23): the advisor pin follows the `pins.research` digest rule in full — an
+  // off-catalog pin, and a cross-provider pin whose credential slot is empty, fall back to the family
+  // default too. `console/*` with an EMPTY bearer slot is the second case (WS-23 live-gate fix: the
+  // Console is an ordinary route now; the populated case runs, pinned by the next test).
+  test("M2: an off-catalog advisor pin, or a cross-provider pin with an empty credential slot, falls back to the D30 default", async () => {
     for (const pin of ["openai/no-such-model-anywhere", "console/claude-fable-5-1"]) {
       const settings = { runtimes: { advisorModel: pin, winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } } as unknown as Settings;
       const t = table({ settings: () => settings });
@@ -876,27 +969,13 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
         await s.end();
       } finally { t.close(); }
     }
-    // WS-23 R1 addendum: the console pin with a POPULATED broker slot still falls back — the
-    // exclusion is explicit, not locator-absence. (The loop above covers the empty slot.)
-    const settings = { runtimes: { advisorModel: "console/claude-fable-5-1", winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } } as unknown as Settings;
-    const t = table({ settings: () => settings });
-    try {
-      await new FileSecretStore(join(t.home, "secrets.json")).set("anthropic:console", JSON.stringify({ kind: "bearer", token: "console-bearer-test" }));
-      const sid = t.store.createSession("t", { mode: "code", model: "openai/gpt-5.6-sol", approvalPolicy: "ask" });
-      const s = await t.drivers.create(sid);
-      expect(t.q().options.advisor).toEqual({ model: "openai/gpt-6-astra", authRef: expect.objectContaining({ account: "openai:default" }) });
-      expect(t.logs.some((l) => l.includes("runtimes.advisorModel"))).toBe(true);
-      await s.end();
-    } finally { t.close(); }
   });
 
-  // WS-23 fix round 1: `credentialRefFor("console")` names the broker's bearer slot for SESSIONS,
-  // but the SDK adapter cannot send console OAuth headers yet — so a `console/*` advisor pin AND a
-  // `console/*` digest pin are dropped EXPLICITLY, even with broker material stored. Both drops are
-  // asserted here because both call sites gate on the ref lookup. Lifts after the Console live gate
-  // passes. (Both pins name real catalog rows, so the drop is the console exclusion specifically —
-  // not the off-catalog rule M1/M2 pin above.)
-  test("WS-23 R1: console advisor and digest pins are dropped even with broker material stored", async () => {
+  // WS-23 live-gate fix: fix round 1 had dropped a `console/*` advisor pin AND a `console/*` digest pin
+  // EXPLICITLY, even with broker material stored, until the SDK adapter sent console OAuth headers. It
+  // does now (the SDK-level live Console turn passed), so with the bearer stored both pins are STATED,
+  // each naming the Console's own slot — the same as any other provider's cross-provider pin.
+  test("WS-23 live-gate fix: console advisor and digest pins RUN once broker material is stored", async () => {
     const settings = {
       provider: { model: "openai/gpt-5.6-sol" },
       pins: { research: "console/claude-sonnet-5" },
@@ -907,12 +986,15 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
       await new FileSecretStore(join(t.home, "secrets.json")).set("anthropic:console", JSON.stringify({ kind: "bearer", token: "console-bearer-test" }));
       const sid = t.store.createSession("t", { mode: "code", model: "openai/gpt-5.6-sol", approvalPolicy: "ask" });
       const s = await t.drivers.create(sid);
-      // The advisor falls back to the D30 default, and the drop is logged naming the setting.
-      expect(t.q().options.advisor).toEqual({ model: "openai/gpt-6-astra", authRef: expect.objectContaining({ account: "openai:default" }) });
-      expect(t.logs.some((l) => l.includes("runtimes.advisorModel"))).toBe(true);
-      // The digest is not stated, so WebFetch keeps working on the session's own model.
-      expect(t.q().options.web?.fetch).not.toHaveProperty("digestModel");
-      expect(t.logs.some((l) => l.includes("pins.research"))).toBe(true);
+      expect(t.q().options.advisor).toEqual({ model: "console/claude-sonnet-5", authRef: expect.objectContaining({ kind: "keychain", account: "anthropic:console" }) });
+      expect(t.logs.some((l) => l.includes("runtimes.advisorModel"))).toBe(false);
+      expect(t.q().options.web?.fetch).toMatchObject({ digestModel: "console/claude-sonnet-5", authRef: expect.objectContaining({ kind: "keychain", account: "anthropic:console" }) });
+      // Not DROPPED (no "WebFetch will digest pages on this session's own model" line) — only the
+      // cross-provider spend note, naming both providers.
+      expect(t.logs.some((l) => l.includes("pins.research") && l.includes("own model instead"))).toBe(false);
+      expect(t.logs.some((l) => l.includes("pins.research") && l.includes("its WebFetch digest runs on console"))).toBe(true);
+      // A credential write for `console` now reaches this child through its advisor pin too.
+      expect(t.drivers.advisorProviderOf?.(sid)).toBe("console");
       await s.end();
     } finally { t.close(); }
   });

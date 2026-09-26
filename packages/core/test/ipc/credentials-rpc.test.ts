@@ -112,17 +112,20 @@ describe("credential.list / credential.set / credential.remove (WS-19)", () => {
     c.close();
   });
 
-  test("§9 A-1: anthropic appears TWICE — the api-key slot and the Console slot, each with its own door and kind", async () => {
+  test("§9 A-1: the API-key slot is `anthropic` and the Console slot is `console`, each with its own door and kind (WS-23 live-gate fix)", async () => {
     const { socketPath, harnessToken, secrets } = await boot();
     await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: SENTINEL });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "test");
 
     const rows: any[] = (await c.request(METHODS.credentialList, {})).result.providers;
+    // The Console bearer used to be a SECOND `anthropic` row; it is its own catalog provider's row now.
     const anthropic = rows.filter((r) => r.providerId === "anthropic");
-    expect(anthropic).toHaveLength(2);
+    expect(anthropic).toHaveLength(1);
     expect(anthropic[0]).toMatchObject({ door: "credential.set", kind: "api-key", manageable: true, present: true });
-    expect(anthropic[1]).toMatchObject({ door: "provider.login", kind: "bearer", manageable: false, present: false });
+    const consoleRows = rows.filter((r) => r.providerId === "console");
+    expect(consoleRows).toHaveLength(1);
+    expect(consoleRows[0]).toMatchObject({ displayName: "Anthropic Console", authKinds: ["console-profile"], door: "provider.login", kind: "bearer", manageable: false, present: false });
     // The three identity fields a client keys a row by are UNIQUE across the whole reply — a
     // duplicate would make two different slots indistinguishable in the app and on the phone.
     const keys = rows.map((r) => `${r.providerId}|${r.door}|${r.kind}`);
@@ -138,11 +141,31 @@ describe("credential.list / credential.set / credential.remove (WS-19)", () => {
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "test");
     let rows: any[] = (await c.request(METHODS.credentialList, {})).result.providers;
-    expect(rowFor(rows, "anthropic", "provider.login").present).toBe(false);
+    expect(rowFor(rows, "console", "provider.login").present).toBe(false);
 
     await writeCredentialMaterial(secrets, ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, { kind: "bearer", token: SENTINEL });
     rows = (await c.request(METHODS.credentialList, {})).result.providers;
-    expect(rowFor(rows, "anthropic", "provider.login").present).toBe(true);
+    expect(rowFor(rows, "console", "provider.login").present).toBe(true);
+    // A Console-only home: the API-key row stays absent — the bearer answers for `console` alone.
+    expect(rowFor(rows, "anthropic").present).toBe(false);
+    c.close();
+  });
+
+  test("`console` through credential.set/remove is a typed refusal naming its own door — never a write into the bearer account", async () => {
+    const { socketPath, harnessToken, secrets } = await boot();
+    await writeCredentialMaterial(secrets, ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, { kind: "bearer", token: `${SENTINEL}-console` });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "test");
+
+    const set = await c.request(METHODS.credentialSet, { providerId: "console", apiKey: SENTINEL });
+    expect(set.error.data).toEqual({ code: "credential_kind_unsupported", door: "provider.login" });
+    expect(set.error.message).toContain("winter login --anthropic-console");
+    expect(JSON.stringify(set)).not.toContain(SENTINEL);
+    const removed = await c.request(METHODS.credentialRemove, { providerId: "console" });
+    expect(removed.error.data).toEqual({ code: "credential_kind_unsupported", door: "provider.login" });
+    expect(removed.error.message).toContain("winter logout --anthropic-console");
+    // Neither door touched the bearer — its only ways in and out are the Console sign-in/sign-out.
+    expect(await readCredentialMaterial(secrets, ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME)).toEqual({ kind: "bearer", token: `${SENTINEL}-console` });
     c.close();
   });
 

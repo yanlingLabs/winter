@@ -1382,12 +1382,11 @@ function digestOptionsFor(input: WinterOptionsInput): Pick<WebFetchConfig, "dige
   // `=== input.model` check above has already dropped. Never stated.
   if (digest.startsWith(WINTER_TEST_PREFIX)) return {};
   const digestProvider = providerFor(digest, input.home);
-  // WS-23 fix round 1 addendum: `console` is excluded EXPLICITLY here too — `providerFor` returns
-  // the broker's bearer slot for it (for sessions), but the SDK adapter cannot send console OAuth
-  // headers yet. Same lift condition as session-driver's two call sites: the Console live gate.
-  // Anything dropped here is NOT stated, so the digest runs on the session's own model — the SDK's
-  // documented default — rather than becoming a typed refusal on every call.
-  if (digestProvider === undefined || digestProvider.providerId === "console" || digestProvider.authRef === undefined) return {};
+  // A provider with no locator is dropped, NOT stated, so the digest runs on the session's own model —
+  // the SDK's documented default — rather than becoming a typed refusal on every call. (`console` was
+  // dropped here explicitly until the WS-23 live-gate fix: its bearer slot is named like any
+  // provider's now, and the SDK adapter sends it for the `console` id.)
+  if (digestProvider === undefined || digestProvider.authRef === undefined) return {};
   return { digestModel: digest, authRef: digestProvider.authRef };
 }
 

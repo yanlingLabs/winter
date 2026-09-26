@@ -2324,6 +2324,10 @@ if (import.meta.main) {
           // own (see ConsoleProfileBroker.startWatcher), but only if one is actually running.
           console.error(`warning: could not refresh the native-provider bearer token yet (${refreshed.reason}) — a running daemon will notice this profile and retry automatically; otherwise this refreshes the next time a daemon with this profile starts`);
         }
+        // WS-23 live-gate fix: the bearer is the `console` provider's credential now, and Winter's own
+        // jobs may run on it — this write never went through the daemon, so its internal-jobs view is
+        // told the same way `winter login` (ChatGPT) tells it (`notifyDaemonOfOutOfBandCredentialChange`).
+        await notifyDaemonOfOutOfBandCredentialChange(openCredentialDaemonDoor);
       } else {
         console.error(`sign-in failed: ${result.reason}`);
         process.exit(1);
@@ -2495,6 +2499,8 @@ if (import.meta.main) {
       });
       try {
         await broker.logout();
+        // WS-23 live-gate fix: the logout direction of the same poke as the login door above.
+        await notifyDaemonOfOutOfBandCredentialChange(openCredentialDaemonDoor);
         console.log("anthropic console profile signed out");
       } catch (err) {
         console.error(`sign-out failed: ${err instanceof Error ? err.message : String(err)}`);

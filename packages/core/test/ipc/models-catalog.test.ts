@@ -129,22 +129,20 @@ describe("models.catalog", () => {
     expect(costBasisFor({ value: { inputPerMTokUsd: 1, outputPerMTokUsd: 2 }, source: "official-doc", confidence: "declared" })).toBe("list");
   });
 
-  test("credentialSlotId: a real eligible provider with NO credential slot (the catalog's own \"console\" provider) reports null", async () => {
+  test("credentialSlotId: the catalog's own \"console\" provider names its bearer slot, and its DOOR stays the Console sign-in", async () => {
     const { socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     const result = await c.request(METHODS.modelsCatalog, {});
     const consoleProvider = result.result.providers.find((p: any) => p.id === "console");
-    // "console" (authKinds: ["console-profile"]) is catalog-eligible (12 servable Claude rows) but
-    // is NOT an api-key provider — its one usable slot (`anthropic:console`) is filed under the
-    // SEPARATE catalog provider id "anthropic", never under "console" itself.
+    // WS-23 live-gate fix: the broker's bearer slot is filed under `console` itself now (it used to be
+    // filed under "anthropic", which left this `null`).
     expect(consoleProvider).toBeDefined();
-    expect(consoleProvider.credentialSlotId).toBeNull();
+    expect(consoleProvider.credentialSlotId).toBe("anthropic:console");
     expect(consoleProvider.authKinds).toEqual(["console-profile"]);
-    // …and `credentialDoor` is what stops a picker reading that `null` as "can never be
-    // credentialed": this provider IS reachable, through `winter login --anthropic-console`. A
-    // slotless provider with no other door would read `"none"` here instead, which is the whole
-    // point of carrying the door rather than leaving the consumer to infer it from `authKinds`.
+    // …but a slot is NOT a "paste a key" door: the broker fills it from `winter login
+    // --anthropic-console`, so a picker offering "add a key" for it would send the user nowhere. The
+    // door is decided from `authKinds` BEFORE the slot.
     expect(consoleProvider.credentialDoor).toBe("console-profile");
     c.close();
   });
@@ -308,25 +306,29 @@ describe("models.catalog", () => {
     c.close();
   });
 
-  test("credentialPresent: `console` is answered from the ON-DISK ant profile, not from the inventory's \"anthropic\" key", async () => {
+  test("credentialPresent: `console` is answered from its Keychain BEARER slot — the credential a turn sends — never the on-disk profile (WS-23 live-gate fix)", async () => {
     const { home, socketPath, harnessToken } = await boot();
-    // The console door's ONLY readiness signal — `winter login --anthropic-console` writes this file
-    // (`consoleProfileCredentialFile`). Its CONTENT is never read here (presence, not validity).
+    // An `ant` profile on disk with NO bearer in the slot yet (its first refresh has not landed, or
+    // keeps failing): the router would refuse a `console/*` session on this home, so the listing must
+    // not offer one.
     const profile = consoleProfileCredentialFile(home);
     mkdirSync(dirname(profile), { recursive: true });
     writeFileSync(profile, "{}");
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
-    const result = await c.request(METHODS.modelsCatalog, {});
-    const byId = (id: string) => result.result.providers.find((p: any) => p.id === id);
+    const byIdIn = async () => {
+      const result = await c.request(METHODS.modelsCatalog, {});
+      return (id: string) => result.result.providers.find((p: any) => p.id === id);
+    };
+    let byId = await byIdIn();
+    expect(byId("console").credentialPresent).toBe(false);
+    // The broker's bearer lands: `console` is ready…
+    await writeCredentialMaterial(new FileSecretStore(join(home, "secrets")), "anthropic:console", { kind: "bearer", token: "console-bearer-test" });
+    byId = await byIdIn();
     expect(byId("console").credentialPresent).toBe(true);
-    // The whole reason this is computed daemon-side: `console` holds no Keychain slot of its own, so
-    // a client joining `credential.list` on `credentialSlotId` would have called it unusable…
-    expect(byId("console").credentialSlotId).toBeNull();
     expect(byId("console").credentialDoor).toBe("console-profile");
     // …and `anthropic` must NOT have turned ready off the back of it: its own slot
-    // (`anthropic:default`, an API KEY) is still empty, and the legacy inventory files both Anthropic
-    // accounts under that one provider id, which is exactly the conflation this rule avoids.
+    // (`anthropic:default`, an API KEY) is still empty. The two accounts are two providers now.
     expect(byId("anthropic").credentialPresent).toBe(false);
     c.close();
   });

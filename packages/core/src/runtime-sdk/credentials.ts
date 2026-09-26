@@ -23,6 +23,7 @@ import { CODEX_SECRET_NAMES, readCredentialMaterial, writeCredentialMaterial } f
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
 import { WEB_SEARCH_API_KEY_SECRET } from "../agent/tools/web";
 import {
+  ANTHROPIC_ACCOUNT_REQUIRED_KIND,
   ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME,
   ANTHROPIC_CREDENTIAL_SECRET_NAME,
   credentialInventory,
@@ -115,16 +116,6 @@ function presentationFor(slot: CredentialSlot): { kind: CredentialRow["kind"]; m
 }
 
 /**
- * The anthropic accounts each answer exactly ONE material kind (`keychain.ts`'s own
- * `ANTHROPIC_ACCOUNT_ALLOWED_KIND` gate, mirrored here so `present` agrees with what the seam would
- * actually serve): an api-key sitting in the console account is NOT "console present".
- */
-const ACCOUNT_REQUIRED_KIND: Readonly<Record<string, "api-key" | "bearer">> = {
-  [ANTHROPIC_CREDENTIAL_SECRET_NAME]: "api-key",
-  [ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME]: "bearer",
-};
-
-/**
  * `credential.list` could not read the store AT ALL (review Minor 4).
  *
  * "Absent" and "unreadable" are different facts and must not render the same: a locked or denied
@@ -147,12 +138,15 @@ type Probe = "present" | "absent" | "failed";
 
 /** Presence for one inventory slot: parseable material (`credentialPresenceFrom`'s own rule — a
  *  blank or unparseable record is ABSENT, never "present with something the child will reject"),
- *  narrowed by the account's required kind where it has one. */
+ *  narrowed by the account's required kind where it has one — `keychain.ts`'s
+ *  `ANTHROPIC_ACCOUNT_REQUIRED_KIND`, the SAME table `credentialPresenceFrom` narrows by, so a row's
+ *  `present` and the router's admission never disagree (an api-key sitting in the console account is
+ *  NOT "console present"). */
 async function slotPresent(store: SecretStore, slot: CredentialSlot): Promise<Probe> {
   try {
     const material = await readCredentialMaterial(store, slot.secretName);
     if (material === null) return "absent";
-    const required = ACCOUNT_REQUIRED_KIND[slot.secretName];
+    const required = ANTHROPIC_ACCOUNT_REQUIRED_KIND[slot.secretName];
     return required === undefined || material.kind === required ? "present" : "absent";
   } catch {
     return "failed";
@@ -170,9 +164,10 @@ async function rawPresent(store: SecretStore, name: string): Promise<Probe> {
 }
 
 /**
- * W19-3's body. ONE ROW PER INVENTORY SLOT (A-1), so `anthropic` appears twice — the api-key slot
- * (`door: "credential.set"`, manageable) and the console slot (`door: "provider.login"`, not
- * manageable) — followed by the two tool rows.
+ * W19-3's body. ONE ROW PER INVENTORY SLOT (A-1) — the Anthropic API key under `anthropic`
+ * (`door: "credential.set"`, manageable) and, since the WS-23 live-gate fix, the Console bearer under
+ * its own catalog provider `console` (`door: "provider.login"`, not manageable; it used to be a second
+ * `anthropic` row) — followed by the two tool rows.
  *
  * LIVE on every call: presence is re-probed, never a boot snapshot, which is what makes
  * `credential.set` followed immediately by `credential.list` (W19-8) agree with no restart. The
@@ -246,7 +241,9 @@ type WriteTarget = { storage: "material" | "raw"; secretName: string };
 
 /** Resolves a `providerId` to the slot `credential.set` would write, or the typed refusal that
  *  explains why it cannot. `anthropic` always resolves to `anthropic:default` (A-1): the console arm
- *  is not addressable through this door in either direction. */
+ *  is not addressable through this door in either direction — and now that its slot is filed under
+ *  `console`, that provider id is refused by name rather than falling through to the generic slot
+ *  lookup, which would write an API-KEY record into the bearer account. */
 function setTargetFor(providerId: string): WriteTarget | CredentialRefusal {
   const tool = TOOL_ROWS.find((r) => r.providerId === providerId);
   if (tool?.retired === true) {
@@ -265,11 +262,31 @@ function setTargetFor(providerId: string): WriteTarget | CredentialRefusal {
       door: "cli-oauth",
     };
   }
+  if (providerId === CONSOLE_PROVIDER_ID) return consoleDoorRefusal("set");
   const slot = credentialInventory().find((s) => s.provider === providerId);
   if (slot === undefined) {
     return { code: "credential_provider_unknown", message: `no credential slot for provider "${providerId}"` };
   }
   return { storage: "material", secretName: slot.secretName };
+}
+
+/** The catalog provider the console broker's bearer slot is filed under (`keychain.ts`'s head row). */
+const CONSOLE_PROVIDER_ID = "console";
+
+/**
+ * `console` through this RPC, in either direction: a typed refusal naming the one door that works.
+ * Set, because its material is the `ant` broker's refreshed BEARER, never a pasted key. Remove, because
+ * signing out also has to remove the `ant` profile on disk, which no secret-store delete can do — and
+ * a bare delete would only be re-minted by the broker's refresher on its next tick from that profile.
+ */
+function consoleDoorRefusal(direction: "set" | "remove"): CredentialRefusal {
+  return {
+    code: "credential_kind_unsupported",
+    message: direction === "set"
+      ? "Anthropic Console signs in through the Console login rather than an API key — run `winter login --anthropic-console`, or use Sign in in the Mac app's Providers settings"
+      : "Anthropic Console signs out through its own door — run `winter logout --anthropic-console`, or use Sign out in the Mac app's Providers settings",
+    door: "provider.login",
+  };
 }
 
 /**
@@ -335,7 +352,8 @@ export async function setCredential(store: SecretStore, providerId: string, apiK
  * install would stay signed in through the fallback path. `anthropic` clears `anthropic:default`
  * only; the console arm's own sign-out (`provider.logout` / `winter logout --anthropic-console`) is
  * the only way to clear `anthropic:console`, because that door also has an `ant` profile on disk to
- * remove, which no secret-store delete can do.
+ * remove, which no secret-store delete can do — so `console` itself is a typed refusal here, naming
+ * that door (`consoleDoorRefusal`).
  */
 export async function removeCredential(store: SecretStore, providerId: string): Promise<{ removed: boolean } | CredentialRefusal> {
   const names = removalNamesFor(providerId);
@@ -362,6 +380,7 @@ function removalNamesFor(providerId: string): { names: string[] } | CredentialRe
   if (tool !== undefined) return { names: [tool.secretName] };
   if (providerId === "anthropic") return { names: [ANTHROPIC_CREDENTIAL_SECRET_NAME] };
   if (providerId === "codex-oauth") return { names: [CODEX_SECRET_MATERIAL_NAME, ...Object.values(CODEX_SECRET_NAMES)] };
+  if (providerId === CONSOLE_PROVIDER_ID) return consoleDoorRefusal("remove");
   const slot = credentialInventory().find((s) => s.provider === providerId);
   if (slot === undefined) {
     return { code: "credential_provider_unknown", message: `no credential slot for provider "${providerId}"` };
@@ -502,21 +521,29 @@ export function credentialDisplayNameFor(providerId: string): string {
  * client branches on. A token in the copy is only ever read by a person, and it means nothing to one.
  */
 export function missingCredentialDetail(providerId: string): string {
+  // The Console is signed in, never keyed: `credential.set console` is a typed refusal
+  // (`consoleDoorRefusal`), so naming it here would send the user to a door that says no.
+  if (providerId === CONSOLE_PROVIDER_ID) {
+    return `${credentialDisplayNameFor(providerId)} is not signed in — sign in from the Mac app's Providers settings, or run \`winter login --anthropic-console\``;
+  }
   return `${credentialDisplayNameFor(providerId)} has no stored credential — add one from the Mac app, the iPhone app, or run \`winter credentials set ${providerId}\``;
 }
 
 /**
  * W19-7's gate: does this provider need a credential Winter does not have?
  *
- * TRUE only for a provider whose auth family is a bare API KEY (`PROVIDER_AUTH_FAMILY`, itself
- * derived) and whose slot is empty. Everything else is false, and each exclusion is load-bearing:
- * a `local-none` provider (Ollama, LM Studio, a local gateway) has no row in that map at all and
- * must never be refused for lacking a key it does not want; `codex-oauth` is `"custom"` and signs in
- * its own way; a provider Winter has no inventory row for is the child's question, not ours.
+ * TRUE for a provider whose auth family is a bare API KEY (`PROVIDER_AUTH_FAMILY`, itself derived)
+ * and whose slot is empty — and for `console` with an empty bearer slot (the WS-23 live-gate fix: its
+ * slot is an ordinary inventory row now, and a signed-out Console session must refuse typed before a
+ * turn, with the sign-in door in `missingCredentialDetail`, not reach the child with nothing to send).
+ * Everything else is false, and each exclusion is load-bearing: a `local-none` provider (Ollama,
+ * LM Studio, a local gateway) has no row in that map at all and must never be refused for lacking a
+ * key it does not want; `codex-oauth` is `"custom"` and signs in its own way; a provider Winter has no
+ * inventory row for is the child's question, not ours.
  */
 export function apiKeyProviderIsUnauthenticated(providerId: string, present: boolean): boolean {
   if (present) return false;
   const slot = credentialInventory().find((s) => s.provider === providerId);
   if (slot === undefined) return false;
-  return PROVIDER_AUTH_FAMILY[providerId] === "api-key";
+  return PROVIDER_AUTH_FAMILY[providerId] === "api-key" || providerId === CONSOLE_PROVIDER_ID;
 }

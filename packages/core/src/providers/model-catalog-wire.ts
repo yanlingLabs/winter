@@ -51,7 +51,8 @@ export interface ModelCatalogWireProvider {
    *  ambiguous between "another door" and "no door", and those must not look alike to a picker. */
   credentialDoor: "keychain" | "console-profile" | "none";
   /** Whether that door is actually SATISFIED on this home right now — `credentialPresentProbe`
-   *  (runtime-sdk/keychain.ts), the same rule `sync.config`'s own model list filters on. */
+   *  (runtime-sdk/keychain.ts), the same rule `sync.config`'s own model list filters on and the
+   *  router's create-time admission reads. */
   credentialPresent: boolean;
 }
 
@@ -113,13 +114,12 @@ function wirePricing(pricing: CapabilityEvidence<ModelPricing> | undefined): Mod
  * and the caller (`ipc/server.ts`'s `models.catalog` handler) already computes exactly this pair for
  * `sync.config` on the very same `opts.secrets`/`opts.winterHome`. Taking the ALREADY-COMPUTED
  * presence keeps this reader synchronous and keeps the two surfaces on one probe per call. A server
- * with no secret store wired hands over an empty `{byProvider:{}}` (and `home: ""`), which reports
- * every provider as not-ready — the same degradation `sync.config` documents for the same inputs.
+ * with no secret store wired hands over an empty `{byProvider:{}}`, which reports every provider as
+ * not-ready — the same degradation `sync.config` documents for the same inputs. (`home` is no longer
+ * read: the Console's readiness is its Keychain slot now, not an on-disk profile.)
  */
 export function modelCatalogWire(deps: { credentials: CredentialPresence; home: string }): ModelCatalogWireResult {
   const catalog = loadCatalog();
-  // ONE on-disk console probe for the whole listing (the closure's own contract) — never one per
-  // provider row.
   const credentialPresent = credentialPresentProbe(deps);
 
   // The SAME set `settings.modelRoles`'s "any"/"same-as-session" roles permit — `permittedProviders()`
@@ -130,38 +130,25 @@ export function modelCatalogWire(deps: { credentials: CredentialPresence; home: 
   const eligibleProviderIds = new Set<string>(eligible.map((p) => p.providerId));
   const eligibleModelTags = new Set<string>(eligible.flatMap((p) => p.models));
 
-  // `credentialInventory()`'s slots, keyed by provider id, first-match. `anthropic` carries TWO
-  // rows (`anthropic:default`, the api-key slot; `anthropic:console`, the console broker's bearer
-  // slot — keychain.ts's own doc on why both are filed under "anthropic"); the derivation's head
-  // array lists the api-key row FIRST, so `.find` lands on `anthropic:default` — the row that
-  // actually matches the "anthropic" CATALOG provider's own `authKinds` (it includes "api-key"; the
-  // console row's material kind is "bearer", not this provider's). The catalog's separate `console`
-  // provider (authKinds: ["console-profile"]) matches no inventory row at all under ITS id — its
-  // one usable slot is filed under "anthropic", and the SESSION path names it explicitly
-  // (`credentialRefFor("console")`, WS-23) rather than through this lookup — so `credentialSlotId`
-  // for it is genuinely `null`, not a lookup miss: a real, eligible provider this daemon can serve
-  // but never stores a key for under its own catalog id.
+  // `credentialInventory()`'s slots, keyed by provider id — exactly one per provider. `anthropic` names
+  // `anthropic:default` (the api-key slot) and, since the WS-23 live-gate fix, `console` names
+  // `anthropic:console` (the console broker's bearer slot, which used to be filed under "anthropic"
+  // and so left `console` with a `null` slot here).
   const slots = credentialInventory();
 
   const providers: ModelCatalogWireProvider[] = catalog.providers
     .filter((p) => eligibleProviderIds.has(p.id))
     .map((p) => {
       const slotId = slots.find((s) => s.provider === p.id)?.secretName ?? null;
-      // `credentialSlotId: null` alone is AMBIGUOUS to a consumer, and dangerously so: on `console`
-      // it means "credentialed by a different door", but a future eligible provider with no door at
-      // all would report the identical `null`. A picker that reads `null` as "cannot hold a
-      // credential" would mark a correctly-signed-in Console user as unusable. So the DOOR is named
-      // explicitly, and derived from data rather than from a provider id:
-      //   "keychain"        -> join `credential.list` on `credentialSlotId`; that is the whole test.
-      //   "console-profile" -> `winter login --anthropic-console`; readiness is the on-disk `ant`
-      //                        profile, checked LIVE at every spawn (`console_profile_missing`), so
-      //                        it is deliberately NOT answered by this read. Offerable, not promised.
+      // The DOOR answers "which flow fixes this provider when it is not ready", named explicitly and
+      // derived from data rather than from a provider id — a slot id alone cannot say it:
+      //   "console-profile" -> `winter login --anthropic-console` (or the app's Sign in). Checked
+      //                        FIRST: the Console HAS a Keychain slot now (`anthropic:console`), but
+      //                        the broker fills it from the `ant` login — there is no key to paste,
+      //                        so a picker must never offer "add a key" for it.
+      //   "keychain"        -> a key in Settings → Providers, into `credentialSlotId`.
       //   "none"            -> eligible in the catalog, but this daemon stores no credential for it.
-      // `keychain.ts`'s `credentialPresentProbe` is the pin for why `console` has no slot of its
-      // own here: its presence is the on-disk profile file, never `CredentialPresence.byProvider`
-      // (whose `"anthropic"` key conflates the two accounts). The SESSION credential for it is named
-      // separately (`credentialRefFor("console")` → `anthropic:console`, WS-23).
-      const door = slotId !== null ? "keychain" : p.authKinds.includes("console-profile") ? "console-profile" : "none";
+      const door = p.authKinds.includes("console-profile") ? "console-profile" : slotId !== null ? "keychain" : "none";
       return {
         id: p.id,
         displayName: p.displayName,
@@ -170,12 +157,10 @@ export function modelCatalogWire(deps: { credentials: CredentialPresence; home: 
         credentialSlotId: slotId,
         credentialDoor: door,
         // The DOOR above says how this provider can be credentialed; this says whether it IS.
-        // Computed HERE, daemon-side, because the join a client would have to do instead is wrong
-        // for exactly the two providers a Claude user cares about: `credential.list` is keyed by
-        // secret NAME, and guessing `<providerId>:default` reports `console` as unusable (its one
-        // slot is filed under `anthropic`) while reporting `anthropic` as ready on a console-only
-        // home (that same `anthropic` key covers both accounts). `credentialPresentProbe` is the
-        // one rule that gets both right, and `sync.config`'s model list already filters on it.
+        // Computed HERE, daemon-side, so no client has to join `credential.list` by guessing
+        // `<providerId>:default` (which is wrong for `console`, whose slot is `anthropic:console`).
+        // `credentialPresentProbe` is the one rule, and `sync.config`'s model list and the router's
+        // create-time admission read the same presence.
         credentialPresent: credentialPresent(p.id),
       };
     });

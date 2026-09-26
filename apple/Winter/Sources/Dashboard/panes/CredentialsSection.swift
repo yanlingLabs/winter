@@ -66,10 +66,12 @@ func credentialDoorText(_ door: String?) -> String {
 /// equivalent of a bare `winter logout`). Gating Remove on `manageable`, as this section first did,
 /// left a stored Codex login with no way out except the CLI.
 ///
-/// `door == "provider.login"` is the one exclusion: that row is the Anthropic CONSOLE slot, and
-/// A-1 makes `credential.remove anthropic` act on `anthropic:default` ONLY — so a Remove here
-/// would either do nothing visible or delete the OTHER anthropic row's key. Its sign-out lives in
-/// `AnthropicAuthSection`, which the row's own door text already points at.
+/// `door == "provider.login"` is the one exclusion: that row is the Anthropic CONSOLE slot
+/// (`providerId: "console"` since the daemon's WS-23 live-gate fix; a second `anthropic` row
+/// before it), and the daemon refuses `credential.remove console` typed — signing out also has to
+/// remove the `ant` profile on disk, which no Keychain delete can do. (On an older daemon the row
+/// said `anthropic`, and a Remove would have deleted the OTHER anthropic row's key.) Its sign-out
+/// lives in `AnthropicAuthSection`, which the row's own door text already points at.
 func credentialRowOffersRemove(_ row: CredentialRow) -> Bool {
     row.present && row.door != "provider.login"
 }
@@ -105,9 +107,10 @@ final class CredentialsSectionModel: ObservableObject {
     @Published var loadErrorText: String?
 
     /// Per-row key text, keyed by `providerId` — one shared `@Published` field could not serve N
-    /// rows. Keyed by `providerId` rather than `CredentialRow.id` on purpose: a providerId can
-    /// carry two rows (the `anthropic:default` api-key slot and the `anthropic:console` bearer
-    /// slot), but at most ONE of them is `manageable`, so only one of them ever owns a field.
+    /// rows. Keyed by `providerId` rather than `CredentialRow.id` on purpose: an older daemon sends
+    /// two `anthropic` rows (the `anthropic:default` api-key slot and the `anthropic:console` bearer
+    /// slot — a current one files the latter under `console`), but at most ONE of them is
+    /// `manageable`, so only one of them ever owns a field.
     ///
     /// This dictionary is the only place a typed key exists in the app. It is cleared for a
     /// provider the moment its `credential.set` succeeds, and it is never persisted anywhere.

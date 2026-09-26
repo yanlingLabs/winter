@@ -592,6 +592,23 @@ describe("renderNoCredentialHint", () => {
     for (const label of ["Anthropic API key", "Anthropic Console login", "OpenRouter", "Amazon Bedrock", "Google Vertex AI"]) expect(hint).toContain(label);
   });
 
+  // WS-23 live-gate report: a `console/*` refusal listed the router's `console` row as "console: add a
+  // credential from the app's Providers settings" — there is no key to add. The Console row renders as
+  // the Console sign-in door, once, even beside the `anthropic`/`console-profile` alternative.
+  test("a `console` row renders as the Console sign-in door — never 'add a credential' — and only once", () => {
+    const alternatives: SelectionAlternative[] = [
+      { providerId: "console", authKind: "unknown", label: "console" },
+      { providerId: "anthropic", authKind: "console-profile", label: "Anthropic Console login" },
+      { providerId: "openrouter", authKind: "api-key", label: "OpenRouter" },
+    ];
+    const hint = renderNoCredentialHint(alternatives);
+    expect(hint).toContain("Anthropic Console login: run `winter login --anthropic-console`");
+    expect(hint.split("winter login --anthropic-console").length - 1).toBe(1);
+    expect(hint).not.toContain("console: add a credential");
+    expect(hint).toContain("OpenRouter: add a credential from the app's Providers settings");
+    expect(renderNoCredentialHint([{ providerId: "console", authKind: "console-profile", label: "console" }])).toBe("add one of these to use this model — Anthropic Console login: run `winter login --anthropic-console`");
+  });
+
   // WS-23: the claude.ai subscription door is never rendered — the only runtime that could have used
   // it is retired, and it never shipped.
   test("the claude.ai subscription alternative is never rendered", () => {

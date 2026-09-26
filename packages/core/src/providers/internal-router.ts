@@ -91,7 +91,7 @@ export function requireInternalWiring(what: string): never {
  * `no-credential`:
  *
  *  - `"provider-unsupported"` — the role's EXPLICIT tag names a provider Winter's own jobs cannot run
- *    on (a reserved console/subscription row, or one whose adapter family the daemon cannot drive).
+ *    on (the reserved subscription row, or one whose adapter family the daemon cannot drive).
  *    `detail` names the provider's display name.
  *  - `"no-credential"` — the role's explicit tag names an ELIGIBLE provider with nothing stored in its
  *    slot. The pre-existing reason, reused deliberately: it already means exactly this, and the Mac
@@ -161,7 +161,7 @@ export interface InternalRouter {
  * USER RULING 2026-09-19: `fallbackToDefault` is for `reviewer.model` AND NOTHING ELSE.
  *
  * A SAFETY job must not switch itself off because of a pin mistake. When the reviewer's EXPLICIT pin is
- * unrunnable — `provider-unsupported` (a pre-ruling console pin), `no-credential` (pinned to a provider
+ * unrunnable — `provider-unsupported` (e.g. a pin on a Bedrock row, whose credential shape the daemon cannot drive), `no-credential` (pinned to a provider
  * whose key has not arrived; a state the write door deliberately admits) or `model-not-in-catalog` (a
  * pin on a row the catalog retired, R.1 ruling 1) — the reviewer RUNS on the
  * answer an UNPINNED reviewer would get (the default rule's rungs 1-2), and the role's `problem` still

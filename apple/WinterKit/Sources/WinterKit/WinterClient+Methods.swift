@@ -2290,9 +2290,12 @@ public struct CatalogFamily: Equatable, Sendable {
 ///
 /// - `"keychain"` (~96 providers) — `credentialSlotId` names a Keychain slot; the fix is a key in
 ///   Settings → Providers.
-/// - `"console-profile"` (1, the `console` provider) — `credentialSlotId` is **null and that is
-///   CORRECT**: the Anthropic Console arm has no Keychain slot at all. Its readiness is an on-disk
-///   `ant` profile (which `credentialPresent` reports); the fix is `winter login --anthropic-console`.
+/// - `"console-profile"` (1, the `console` provider) — the fix is `winter login --anthropic-console`
+///   (or the app's Sign in), never a pasted key. `credentialSlotId` names its bearer slot
+///   (`anthropic:console`) on a daemon with the WS-23 live-gate fix and is null on an older one;
+///   either way the broker fills that slot from the sign-in, so the door, not the slot, decides the
+///   flow. Its readiness (`credentialPresent`) is that bearer slot on a current daemon, the on-disk
+///   `ant` profile on an older one.
 /// - `"none"` (5: bedrock, ollama-local, uncloseai, vertex, xai-oauth) — this daemon stores no
 ///   credential for them. These are precisely the rows a naive join would mark "no credential"
 ///   forever, with nothing the user could do about it.
@@ -2309,13 +2312,14 @@ public struct CatalogProvider: Equatable, Sendable {
     public let pricingBasis: String?
     public let authKinds: [String]
     /// The Keychain slot id (`openai:default`). **Null is meaningful, not missing** — see the
-    /// `console-profile` and `none` doors above.
+    /// `none` door above (and the `console-profile` one on an older daemon).
     public let credentialSlotId: String?
     /// `keychain` | `console-profile` | `none`, raw. Nil means the daemon did not say, which is
     /// "not told" and must render as no credential state at all.
     public let credentialDoor: String?
     /// **THE readiness answer**, computed daemon-side by the rule that backs the composer's model
-    /// list: the on-disk `ant` profile for the `console-profile` door, stored material otherwise. A
+    /// list: stored Keychain material (the Console's bearer for the `console-profile` door; an older
+    /// daemon read the on-disk `ant` profile for it). A
     /// daemon with no secret store reports every provider `false`. Nil = not told (a daemon that
     /// predates the field), which must render as no readiness claim at all — never as "missing".
     public let credentialPresent: Bool?

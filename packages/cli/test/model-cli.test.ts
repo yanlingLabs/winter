@@ -110,12 +110,16 @@ describe("internalProviderNote", () => {
     // WS-23 (claude-creds): every model runs on the Winter agent SDK, so an Anthropic API key serves
     // the jobs too — choosing a Claude model says nothing either.
     expect(internalProviderNote("anthropic/claude-opus-5")).toBeUndefined();
+    // WS-23 live-gate fix: the Console's bearer slot is an inventory row the Anthropic adapter is
+    // driven over, so choosing a Console model says nothing either.
+    expect(internalProviderNote("console/claude-opus-5")).toBeUndefined();
   });
 
   test("a heads-up for a provider Winter's own jobs cannot be driven over — never a refusal, never 'inert'", () => {
-    // `console` stays outside the eligible set (WS-23: its bearer slot serves sessions, not these jobs).
-    const note = internalProviderNote("console/claude-opus-5");
-    expect(note).toContain("can't run on console");
+    // Bedrock stays outside the eligible set: its `aws` credential material is not one the daemon's
+    // own jobs can drive.
+    const note = internalProviderNote("bedrock/anthropic.claude-sonnet-4-5");
+    expect(note).toContain("can't run on bedrock");
     // The jobs FALL BACK now; they are not inert, and nothing hinges on provider.model.
     expect(note).toContain("whichever provider you have a usable credential for");
     expect(note).not.toContain("inert");

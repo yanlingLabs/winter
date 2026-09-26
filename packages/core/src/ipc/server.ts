@@ -995,6 +995,20 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     }
   }
 
+  /**
+   * WS-23 live-gate fix: the Console's bearer slot (`anthropic:console`) is an ordinary credential of
+   * the `console` provider now — a `console/*` session names it, a cross-provider advisor pin can, and
+   * Winter's own jobs may run on it — so a sign-in or sign-out through the daemon does what
+   * `credential.set`/`credential.remove` do for a key: replace the live children that name `console`
+   * and re-probe the internal-jobs view. Best-effort for the same reasons as those two (the sign-in or
+   * sign-out itself already succeeded). A CLI-door login in another process pokes the view through
+   * `credential.list` instead (`notifyDaemonOfOutOfBandCredentialChange`).
+   */
+  async function afterConsoleCredentialChange(): Promise<void> {
+    await evictSessionsForCredentialChange("console");
+    await refreshInternalProvidersAfterCredentialChange();
+  }
+
   async function ensureWinterSession(sessionId: string): Promise<LegSession | undefined> {
     if (opts.winter === undefined) return undefined;
     try { return await opts.winter.ensure(sessionId); } catch (err) { rpcFromWinterRefusal(err); }
@@ -3809,7 +3823,19 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             // everything after, but an app-driven login through this RPC never started one at all.
             // `startRefresher()` is idempotent (a no-op while already running) and performs its own
             // immediate refresh, so this is the one missing call, not a duplicate of anything above.
-            if (result.ok) opts.consoleBroker?.startRefresher();
+            //
+            // WS-23 live-gate fix: the bearer is now what `console` sessions and Winter's own jobs READ,
+            // and the refresher's seed refresh writes it asynchronously — so ONE refresh is awaited
+            // first (the CLI door's own sequence: `refreshBearer()`, then a refresher), and the
+            // children are replaced and the jobs' view re-probed only once the material has landed.
+            if (result.ok) {
+              const broker = opts.consoleBroker;
+              void (async () => {
+                try { await broker?.refreshBearer(); } catch { /* the refresher below retries on its own backoff */ }
+                broker?.startRefresher();
+                await afterConsoleCredentialChange();
+              })();
+            }
           })
           .catch((err) => {
             broadcastAnthropicLoginEvent({ type: "provider_login_finished", provider: "anthropic", ok: false, reason: err instanceof Error ? err.name : "unknown" });
@@ -3867,6 +3893,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           const code = /^[a-z_]+$/.test(prefix) ? prefix : "console_logout_failed";
           throw new RpcFailure(ERR.INTERNAL, message, { code });
         }
+        // The bearer is gone (the broker's logout deletes `anthropic:console`): a live `console` child
+        // is replaced, so its next turn meets the typed "not signed in" refusal before any child runs.
+        await afterConsoleCredentialChange();
         return { ok: true };
       }
 

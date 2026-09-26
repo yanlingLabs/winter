@@ -9,7 +9,7 @@ import { TOKEN_NAMES } from "../../src/auth/tokens";
 import { keychainService } from "../../src/profile";
 import { OPENAI_API_KEY_SECRET } from "../../src/providers/manager";
 import { CODEX_SECRET_NAMES, CodexAuthStore, writeOpenAiApiKey } from "../../src/auth/credential-material";
-import { credentialInventory, credentialPresenceFrom, credentialRefFor, isInScopeApiKeyProvider, WINTER_CREDENTIAL_INVENTORY, ANTHROPIC_CREDENTIAL_SECRET_NAME, ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
+import { credentialInventory, credentialPresenceFrom, credentialPresentProbe, credentialRefFor, isInScopeApiKeyProvider, refMaterialPresent, WINTER_CREDENTIAL_INVENTORY, ANTHROPIC_CREDENTIAL_SECRET_NAME, ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { ANTHROPIC_CONSOLE_CREDENTIAL_ACCOUNT } from "@yanlinglabs/winter-provider-runtime";
 import { Settings } from "../../src/settings";
@@ -74,6 +74,47 @@ describe("credential inventory and presence over SecretStore", () => {
     expect(presence.authByProvider).toEqual({ openai: { authFamily: "api-key" }, anthropic: { authFamily: "api-key" } });
   });
 
+  // WS-23 live-gate bug: a Console-only home refused every `console/*` session at create ("console:
+  // add a credential"), because its bearer was filed under "anthropic" — so `byProvider.console` never
+  // existed, and the home falsely reported `anthropic` (the API-key provider) present. Each Anthropic
+  // account now answers for its OWN provider, and only with its own material kind.
+  describe("the two Anthropic accounts answer for their own providers (WS-23 live-gate fix)", () => {
+    test("a Console-only home: `console` present, `anthropic` NOT", async () => {
+      await store.set(ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, JSON.stringify({ kind: "bearer", token: "console-bearer-test" }));
+      const presence = await credentialPresenceFrom(store);
+      expect(presence.byProvider.console).toBe("keychain");
+      expect(presence.byProvider.anthropic).toBeUndefined();
+      // No declared family for `console` — the router names it `console-profile` itself.
+      expect(presence.authByProvider?.console).toBeUndefined();
+    });
+
+    test("an API-key-only home: `anthropic` present, `console` NOT", async () => {
+      await store.set(ANTHROPIC_CREDENTIAL_SECRET_NAME, JSON.stringify({ kind: "api-key", key: "sk-ant-test" }));
+      const presence = await credentialPresenceFrom(store);
+      expect(presence.byProvider.anthropic).toBe("keychain");
+      expect(presence.byProvider.console).toBeUndefined();
+    });
+
+    test("a record of the WRONG kind in either account is absent — the same narrowing credential.list applies", async () => {
+      await store.set(ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, JSON.stringify({ kind: "api-key", key: "sk-ant-misfiled" }));
+      await store.set(ANTHROPIC_CREDENTIAL_SECRET_NAME, JSON.stringify({ kind: "bearer", token: "bearer-misfiled" }));
+      const presence = await credentialPresenceFrom(store);
+      expect(presence.byProvider.console).toBeUndefined();
+      expect(presence.byProvider.anthropic).toBeUndefined();
+      expect(await refMaterialPresent(store, credentialRefFor("console", dir))).toBe(false);
+      expect(await refMaterialPresent(store, credentialRefFor("anthropic", dir))).toBe(false);
+    });
+
+    test("credentialPresentProbe answers `console` from its slot, never from an on-disk profile", async () => {
+      await store.set(ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, JSON.stringify({ kind: "bearer", token: "console-bearer-test" }));
+      const present = credentialPresentProbe({ credentials: await credentialPresenceFrom(store) });
+      expect(present("console")).toBe(true);
+      expect(present("anthropic")).toBe(false);
+      const none = credentialPresentProbe({ credentials: await credentialPresenceFrom(new FileSecretStore(mkdtempSync(join(dir, "empty-")))) });
+      expect(none("console")).toBe(false);
+    });
+  });
+
   test("credentialPresenceFrom: PRESENCE IS PARSEABILITY (hotfix review r1, M1) — a raw non-JSON leftover (the OLD pre-hotfix shape) is ABSENT, never present", async () => {
     await store.set(WINTER_CREDENTIAL_INVENTORY.find((s) => s.provider === "codex-oauth")!.secretName, "codex-token");
     const presence = await credentialPresenceFrom(store);
@@ -113,11 +154,10 @@ describe("credential inventory and presence over SecretStore", () => {
         { provider: "openai", secretName: "openai:default", kind: "keychain" },
         { provider: "codex-oauth", secretName: "codex-oauth:default", kind: "keychain" },
         { provider: "anthropic", secretName: "anthropic:default", kind: "keychain" },
-        // Fix wave 3 (M-B): a SECOND "anthropic" row for the console bearer account — see this
-        // row's own comment in keychain.ts for why BOTH rows must stay (the seam's "known accounts"
-        // set, `credentialPresenceFrom`'s console-only presence case, and WS-23's `credentialRefFor`
-        // special-case of "console" to this row while "anthropic" resolves to the api-key row first).
-        { provider: "anthropic", secretName: "anthropic:console", kind: "keychain" },
+        // WS-23 live-gate fix: the console bearer account is filed under the `console` CATALOG
+        // provider (fix wave 3's M-B had filed it under "anthropic", which left `byProvider.console`
+        // unproducible and refused every `console/*` session at create time).
+        { provider: "console", secretName: "anthropic:console", kind: "keychain" },
       ]);
     });
 
@@ -129,7 +169,7 @@ describe("credential inventory and presence over SecretStore", () => {
       expect(credentialInventory()).toBe(WINTER_CREDENTIAL_INVENTORY); // memoised, one array
     });
 
-    test("every row's secretName is <providerId>:default, and every provider appears exactly once (bar anthropic's two accounts)", () => {
+    test("every row's secretName is <providerId>:default (bar the Console's fixed account), and every provider appears exactly once", () => {
       for (const slot of WINTER_CREDENTIAL_INVENTORY) {
         if (slot.secretName === "anthropic:console") continue;
         expect(slot.secretName).toBe(`${slot.provider}:default`);
@@ -137,7 +177,10 @@ describe("credential inventory and presence over SecretStore", () => {
       }
       const counts = new Map<string, number>();
       for (const slot of WINTER_CREDENTIAL_INVENTORY) counts.set(slot.provider, (counts.get(slot.provider) ?? 0) + 1);
-      expect([...counts].filter(([, n]) => n > 1)).toEqual([["anthropic", 2]]);
+      expect([...counts].filter(([, n]) => n > 1)).toEqual([]);
+      // The Console's account keeps its `anthropic:` prefix (renaming a Keychain item would strand every
+      // signed-in home) but belongs to the `console` provider — the one row whose name is not derived.
+      expect(WINTER_CREDENTIAL_INVENTORY.filter((s) => s.secretName === "anthropic:console")).toEqual([{ provider: "console", secretName: "anthropic:console", kind: "keychain" }]);
     });
 
     test("the providers WS-18's five-hop chain needs are IN — this is the whole reason the inventory was derived", () => {
@@ -192,12 +235,13 @@ describe("credential inventory and presence over SecretStore", () => {
       expect(credentialRefFor("anthropic", dir)).toEqual({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, dir) });
     });
 
-    test("\"console\" names the console broker's bearer slot — the Winter child needs a locator, not an on-disk profile", () => {
-      // WS-23 (the Winter-only pivot): the official `claude` leg that read the on-disk profile is
-      // gone, so `console` gets the `{kind:"keychain", account, service}` locator for
-      // `anthropic:console` like every other provider. Presence is STILL the on-disk profile file
-      // (`credentialPresentProbe`), never this ref.
+    test("\"console\" names the console broker's bearer slot — an ordinary inventory row, no special case", () => {
+      // WS-23: the official `claude` leg that read the on-disk profile is gone, so `console` gets the
+      // `{kind:"keychain", account, service}` locator for `anthropic:console` like every other
+      // provider — and since the live-gate fix it is the inventory's own `console` row, so presence
+      // (`credentialPresenceFrom`) reads the very slot this ref names.
       expect(credentialRefFor("console", dir)).toEqual({ kind: "keychain", account: ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, dir) });
+      expect(WINTER_CREDENTIAL_INVENTORY.find((s) => s.provider === "console")?.secretName).toBe(ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME);
     });
 
     test("every OTHER provider is an ordinary fixed inventory row", () => {
