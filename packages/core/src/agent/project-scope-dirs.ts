@@ -27,7 +27,7 @@ function real(p: string): string {
 export function trustedProjectWalk(cwd: string | null | undefined, trust: Pick<TrustStore, "isTrusted">): string[] {
   if (!cwd) return [];
   const dir = real(cwd);
-  if (!projectScopeTrusted(dir, trust)) return [];
+  if (!trustedAsGiven(cwd, dir, trust)) return [];
   return projectWalk(dir, projectScopeRootFor(dir), real(homedir()));
 }
 
@@ -36,5 +36,12 @@ export function trustedProjectWalk(cwd: string | null | undefined, trust: Pick<T
 export function trustedProjectRoot(cwd: string | null | undefined, trust: Pick<TrustStore, "isTrusted">): string | null {
   if (!cwd) return null;
   const dir = real(cwd);
-  return projectScopeTrusted(dir, trust) ? projectScopeRootFor(dir) : null;
+  return trustedAsGiven(cwd, dir, trust) ? projectScopeRootFor(dir) : null;
+}
+
+/** Trust asked of the cwd as the caller spelled it AND as realpathed — a `trust.json` entry, or a caller's
+ *  own trust set, may hold either spelling (`/var/…` vs `/private/var/…` on macOS); the walk itself is
+ *  always built from the real path, which is what `projectScopeRootFor` answers in. */
+function trustedAsGiven(cwd: string, dir: string, trust: Pick<TrustStore, "isTrusted">): boolean {
+  return projectScopeTrusted(dir, trust) || (cwd !== dir && projectScopeTrusted(cwd, trust));
 }
