@@ -1,0 +1,9 @@
+{
+  "type": "continuity_warning",
+  "sessionId": "s_1",
+  "threadId": "main",
+  "seq": 35,
+  "ts": 1700000000025,
+  "warning": "switch_compaction",
+  "text": "This conversation (about 612000 tokens) is larger than deepseek/deepseek-v4-pro can hold (a 128000-token window), so openai/gpt-5.6-terra is summarizing its older part before continuing. The most recent exchanges carry over as they are."
+}
