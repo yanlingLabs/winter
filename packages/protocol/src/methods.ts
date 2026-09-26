@@ -1908,6 +1908,15 @@ export const ModelCatalogModelSchema = z.object({
    *  This is the value the daemon falls back to when an IMPLICIT effort is not in the row's
    *  vocabulary (core's `implicitEffortFor`), so a UI showing "provider default" can name it. */
   defaultEffort: z.string().nullable(),
+  /** WS-24 (pickers lane): the catalog's own three-state tool capability, verbatim. `"none"` means
+   *  this row cannot carry a tool call at all — WS-23 hardened the Responses adapters to omit tools
+   *  for it entirely — so a SESSION started on it could never work; a Winter session of any mode
+   *  always offers tools. `models.catalog` still LISTS such rows (a role may legitimately be pinned
+   *  to one — titles, the dreamer, the cleaner and the bash reviewer's classifier all call their
+   *  provider with `tools: []`, so none of them need this row's tools at all), so this field is
+   *  informational here, never a filter this schema applies. The session-picker listing
+   *  (`sync.config`'s `models`) is the one that excludes `"none"` rows outright. */
+  toolCalling: z.enum(["native", "emulated", "none"]),
 });
 
 export const ModelsCatalogResult = z.object({
