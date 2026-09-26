@@ -77,6 +77,8 @@ export const REMOTE_STREAM_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new 
   ...HISTORY_EVENT_TYPES,
   ...TRANSIENT_EVENT_TYPES,
   ...STREAM_CONTROL_EVENT_TYPES,
+  // `hook_notice` (WS-23) is kept off the phone on purpose until a kit tag carries it -- see the
+  // follow-up note in `history.ts`'s HISTORY_EVENT_TYPES, which is where it will be added.
 ]);
 
 /** Applies the remote live/replay policy to one event.

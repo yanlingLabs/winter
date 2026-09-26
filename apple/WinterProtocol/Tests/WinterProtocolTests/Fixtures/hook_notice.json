@@ -1,0 +1,10 @@
+{
+  "type": "hook_notice",
+  "sessionId": "s_1",
+  "threadId": "main",
+  "seq": 34,
+  "ts": 1700000000024,
+  "text": "UserPromptSubmit operation blocked by hook:\nprompt contains a secret",
+  "level": "warning",
+  "stopsTurn": true
+}
