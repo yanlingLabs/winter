@@ -137,6 +137,9 @@ export const ProjectMcpServerEntry = z.object({
   command: z.string().min(1),
   args: z.array(z.string()).optional(),
   env: z.record(z.string(), z.string()).optional(),
+  // WS-24: the CLI's project-scope write door builds its entry from this shape — without the key, a
+  // `winter mcp add --scope project --version-negotiation …` (or an `add-json` carrying it) lost it.
+  versionNegotiation: McpVersionNegotiationSetting.optional(),
 });
 export type ProjectMcpServerEntry = z.infer<typeof ProjectMcpServerEntry>;
 
