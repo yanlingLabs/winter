@@ -1,14 +1,9 @@
 // Winter Phase 8c (Task 4.1): `session.setModel`'s RPC-level wiring to `opts.handoff` — proved
 // against a fake `planAndApplySwitch` hook (the decision matrix itself is
 // `test/runtime-sdk/handoff.test.ts`'s). Confirms the store write is gated on the outcome: it runs
-// for same-runtime/resumed, and never runs for a refusal/confirmation/lossy-fork/blocked.
-//
-// Winter Phase 8d fix round 1 (item 5): `deferred` moved OUT of the "writes" bucket into its own
-// test below — Lane 2's handoff m5 change makes the deferred continuation commit the model
-// preference itself, exactly once, when it settles to "resumed"; this RPC must reply success
-// (never a refusal) but must NOT write `meta.model` now, or the continuation's later write would
-// either double it or race a preference this RPC never actually applied.
-import { describe, expect, spyOn, test } from "bun:test";
+// for same-runtime, and never runs for a refusal or a confirmation. (WS-23: the cross-runtime
+// outcomes — resumed, deferred, lossy_fork, blocked — are gone with the official leg.)
+import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -77,11 +72,10 @@ async function boot(store: SessionStore, home: string, outcome: PlanSwitchOutcom
 
 const cases: Array<{ name: string; outcome: PlanSwitchOutcome; expectWrite: boolean; expectedCode?: string }> = [
   { name: "same-runtime", outcome: { kind: "same-runtime" }, expectWrite: true },
-  { name: "resumed", outcome: { kind: "resumed", selection: { runtimeKind: "claude-agent", providerId: "p", modelRef: "m", family: "f", authFamily: "api-key", sdkVersion: "x", reason: "r", decidedAt: "t" } }, expectWrite: true },
   { name: "refused", outcome: { kind: "refused", code: "runtime_selection_refused", detail: "no credential" }, expectWrite: false, expectedCode: "runtime_selection_refused" },
+  // WS-23: a legacy claude-agent record that could not be adopted onto the Winter leg.
+  { name: "refused (legacy adoption)", outcome: { kind: "refused", code: "legacy_session_migration_refused", detail: "cannot move", reason: "transcript-collision" }, expectWrite: false, expectedCode: "legacy_session_migration_refused" },
   { name: "confirmation_required", outcome: { kind: "confirmation_required", warnings: ["lossy"], portable: ["deepseek"] }, expectWrite: false, expectedCode: "handoff_confirmation_required" },
-  { name: "lossy_fork", outcome: { kind: "lossy_fork", reason: "cannot compare tails" }, expectWrite: false, expectedCode: "handoff_lossy_fork" },
-  { name: "blocked", outcome: { kind: "blocked", reason: "lease held" }, expectWrite: false, expectedCode: "handoff_blocked" },
 ];
 
 describe("session.setModel — the P8c-14 handoff outcome gate", () => {
@@ -115,46 +109,16 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
     });
   }
 
-  // ══════════════════════════════════════════════════════════════════════════════════════════════
-  // D1 round-3 carry (WS-19 lane rider x1) — the `lossy_fork` arm's user copy.
-  //
-  // The router builds a lossy-fork `reason` by interpolating a caught `error.message` in seven of
-  // its nine cases, so an ABSOLUTE PATH was reaching the user verbatim in the RPC error. Same class
-  // as the `blocked` arm's own M1 fix, and fixed the same way: one neutral sentence for every
-  // reason, and the raw reason only in the daemon log, only as a category.
-  // ══════════════════════════════════════════════════════════════════════════════════════════════
-  test("lossy_fork: the user copy is neutral and NEVER carries the router's raw reason (an absolute path)", async () => {
-    const home = mkdtempSync(join(tmpdir(), "winter-setmodel-lossy-copy-"));
+  // WS-23: the refusal's own `reason` travels as `data.reason` beside `data.code`.
+  test("a refusal's reason reaches error.data.reason", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-setmodel-handoff-reason-"));
     const store = new SessionStore(home);
     const sessionId = store.createSession("global");
-    store.setModel(sessionId, "openai/gpt-5.4");
-    const leaky = `the shared session store could not be resolved, so nothing about this session can be read or written: ENOENT: no such file or directory, open '${home}/runtime-state.db'`;
-    const { server, c: client } = await boot(store, home, { kind: "lossy_fork", reason: leaky });
+    const { server, c: client } = await boot(store, home, { kind: "refused", code: "legacy_session_migration_refused", detail: "cannot move", reason: "repair-required" });
     try {
-      const res = await client.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/sonnet", confirmLossy: true });
-      expect(res.error?.data?.code).toBe("handoff_lossy_fork");
-      expect(res.error!.message).toBe("Couldn't switch models without losing part of the conversation; the session stays on openai/gpt-5.4.");
-      // The whole envelope, not just the message: no fragment of the raw reason may ride anywhere.
-      expect(JSON.stringify(res)).not.toContain(home);
-      expect(JSON.stringify(res)).not.toContain("ENOENT");
-      // ...and nothing was written.
-      expect(store.meta(sessionId).model).toBe("openai/gpt-5.4");
-    } finally {
-      client.close();
-      server.stop();
-      store.close();
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  test("lossy_fork on a session with no model of its own still reads as a sentence", async () => {
-    const home = mkdtempSync(join(tmpdir(), "winter-setmodel-lossy-default-"));
-    const store = new SessionStore(home);
-    const sessionId = store.createSession("global");
-    const { server, c: client } = await boot(store, home, { kind: "lossy_fork", reason: "anything at all" });
-    try {
-      const res = await client.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/sonnet", confirmLossy: true });
-      expect(res.error!.message).toBe("Couldn't switch models without losing part of the conversation; the session stays on the default model.");
+      const res = await client.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/sonnet" });
+      expect(res.error?.data).toEqual({ code: "legacy_session_migration_refused", reason: "repair-required" });
+      expect(store.meta(sessionId).model).toBeUndefined();
     } finally {
       client.close();
       server.stop();
@@ -167,11 +131,9 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
   // Winter Phase 10b (D1 fix round 3) — THE 1c INVARIANT.
   //
   // `session.setModel` may report success / write `meta.model` ONLY when the durable 8a record's
-  // `runtimeKind`/`selection` — what `session-driver.ts`'s `resume()` and `resumeOfficial()`
-  // actually route on — now name the requested model's leg and selection. The round-2 CRITICAL was
-  // exactly this disagreement: a `same-runtime` outcome for a cross-leg move wrote `meta.model`
-  // while the record kept naming the source leg, so `session.list` showed the new model and every
-  // future turn ran the old one, silently and forever.
+  // `runtimeKind`/`selection` — what `session-driver.ts`'s `resume()` routes on and the credential
+  // eviction reads — now name the requested model's selection. The round-2 CRITICAL was exactly this
+  // disagreement: `session.list` showed the new model while the record said otherwise.
   // ══════════════════════════════════════════════════════════════════════════════════════════════
   const SEL = (kind: "winter-agent" | "claude-agent", providerId: string, modelRef: string): RuntimeSelection => ({
     runtimeKind: kind, providerId, modelRef, family: "f", authFamily: "api-key",
@@ -182,7 +144,6 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
 
   for (const arm of [
     { name: "same-runtime", outcome: (want: RuntimeSelection): PlanSwitchOutcome => ({ kind: "same-runtime", decided: want }) },
-    { name: "resumed", outcome: (want: RuntimeSelection): PlanSwitchOutcome => ({ kind: "resumed", selection: want }) },
   ]) {
     test(`1c: ${arm.name} whose record DISAGREES is blocked, and meta.model is left untouched`, async () => {
       const home = mkdtempSync(join(tmpdir(), `winter-setmodel-invariant-${arm.name}-`));
@@ -190,7 +151,7 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
       const sessionId = store.createSession("global");
       // The record still names the SOURCE leg — precisely the state a "not in the runtime
       // directory" silent apply used to leave behind.
-      const { server, c } = await boot(store, home, arm.outcome(SEL("claude-agent", "anthropic", "claude-sonnet-5")), {
+      const { server, c } = await boot(store, home, arm.outcome(SEL("winter-agent", "anthropic", "claude-sonnet-5")), {
         get: () => recordNaming("winter-agent", "openai", "openai/gpt-5.6-sol"),
       });
       try {
@@ -212,8 +173,8 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
       const home = mkdtempSync(join(tmpdir(), `winter-setmodel-invariant-ok-${arm.name}-`));
       const store = new SessionStore(home);
       const sessionId = store.createSession("global");
-      const want = SEL("claude-agent", "anthropic", "claude-sonnet-5");
-      const { server, c } = await boot(store, home, arm.outcome(want), { get: () => recordNaming("claude-agent", "anthropic", "claude-sonnet-5") });
+      const want = SEL("winter-agent", "anthropic", "claude-sonnet-5");
+      const { server, c } = await boot(store, home, arm.outcome(want), { get: () => recordNaming("winter-agent", "anthropic", "claude-sonnet-5") });
       try {
         const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/sonnet", confirmLossy: true });
         expect(res.error).toBeUndefined();
@@ -296,111 +257,5 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
       server.stop();
       store.close();
     }
-  });
-
-  // Fix round 1 (item 5): "deferred" is neither a refusal NOR an immediate write — the RPC
-  // succeeds (a turn is running; the caller's model preference was accepted, not rejected) but
-  // `meta.model` must stay exactly what it was before this call, because `planAndApplySwitch`'s
-  // OWN deferred continuation is what commits it, once, when the turn settles to "resumed".
-  test("deferred: succeeds with no error, but leaves meta.model UNCHANGED (the continuation commits it later)", async () => {
-    const home = mkdtempSync(join(tmpdir(), "winter-setmodel-handoff-deferred-"));
-    const store = new SessionStore(home);
-    const sessionId = store.createSession("global");
-    const { server, c } = await boot(store, home, { kind: "deferred" });
-    try {
-      const before = store.meta(sessionId).model;
-      const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/sonnet", confirmLossy: true });
-      expect(res.error).toBeUndefined();
-      expect(res.result).toEqual({});
-      expect(store.meta(sessionId).model).toBe(before);
-      expect(store.meta(sessionId).model).toBeUndefined();
-    } finally {
-      c.close();
-      server.stop();
-      store.close();
-    }
-  });
-
-  // M1 (whole-branch review, fix round 2): `blocked` NEVER surfaces the raw `reason`/`detail` to
-  // the user (either can name router/daemon internals) — the user copy is one neutral sentence
-  // naming the session's CURRENT model, and `detail` (router 0.0.6's `revert-pending` reason)
-  // goes to the daemon log only, as a CATEGORY, never raw text.
-  describe("blocked: never surfaces the raw reason/detail to the user", () => {
-    test("the error message is the neutral copy, naming the session's current model, never the raw reason", async () => {
-      const home = mkdtempSync(join(tmpdir(), "winter-setmodel-handoff-blocked-copy-"));
-      const store = new SessionStore(home);
-      const sessionId = store.createSession("global");
-      store.setModel(sessionId, "openai/gpt-5.6-sol"); // the session's CURRENT model, before this failed attempt
-      const { server, c } = await boot(store, home, { kind: "blocked", reason: "revert-pending", detail: "the pending-revert note was written; this will self-converge" });
-      try {
-        const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/claude-sonnet-5", confirmLossy: true });
-        expect(res.error).toBeDefined();
-        expect(res.error.data?.code).toBe("handoff_blocked");
-        expect(res.error.message).toBe("Couldn't finish switching models; the session stays on openai/gpt-5.6-sol. Try again in a moment.");
-        // Never the raw reason enum or any part of the router's own detail text.
-        expect(res.error.message).not.toContain("revert-pending");
-        expect(res.error.message).not.toContain("self-converge");
-        expect(res.error.message).not.toMatch(/\bSDK\b|\brouter\b|Claude Agent|Winter Agent/i);
-        // The model preference never applied — the source stays authoritative.
-        expect(store.meta(sessionId).model).toBe("openai/gpt-5.6-sol");
-      } finally {
-        c.close();
-        server.stop();
-        store.close();
-      }
-    });
-
-    test("the SAME neutral copy fires regardless of what detail says — self-converge or needing manual reconciliation", async () => {
-      const home = mkdtempSync(join(tmpdir(), "winter-setmodel-handoff-blocked-copy2-"));
-      const store = new SessionStore(home);
-      const sessionId = store.createSession("global");
-      store.setModel(sessionId, "openai/gpt-5.6-sol");
-      const { server, c } = await boot(store, home, { kind: "blocked", reason: "revert-pending", detail: "the pending-revert note ALSO failed; this needs manual reconciliation" });
-      try {
-        const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/claude-sonnet-5", confirmLossy: true });
-        expect(res.error.message).toBe("Couldn't finish switching models; the session stays on openai/gpt-5.6-sol. Try again in a moment.");
-        expect(res.error.message).not.toContain("manual reconciliation");
-      } finally {
-        c.close();
-        server.stop();
-        store.close();
-      }
-    });
-
-    test("no current model on record: the copy falls back to \"the default model\", never a blank", async () => {
-      const home = mkdtempSync(join(tmpdir(), "winter-setmodel-handoff-blocked-nodefault-"));
-      const store = new SessionStore(home);
-      const sessionId = store.createSession("global"); // no model ever set
-      const { server, c } = await boot(store, home, { kind: "blocked", reason: "lease-held" });
-      try {
-        const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/claude-sonnet-5", confirmLossy: true });
-        expect(res.error.message).toBe("Couldn't finish switching models; the session stays on the default model. Try again in a moment.");
-      } finally {
-        c.close();
-        server.stop();
-        store.close();
-      }
-    });
-
-    test("detail reaches the daemon log as a CATEGORY only — never its raw text", async () => {
-      const home = mkdtempSync(join(tmpdir(), "winter-setmodel-handoff-blocked-log-"));
-      const store = new SessionStore(home);
-      const sessionId = store.createSession("global");
-      store.setModel(sessionId, "openai/gpt-5.6-sol");
-      const errSpy = spyOn(console, "error").mockImplementation(() => {});
-      const { server, c } = await boot(store, home, { kind: "blocked", reason: "revert-pending", detail: "the pending-revert note was written; this will self-converge" });
-      try {
-        await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/claude-sonnet-5", confirmLossy: true });
-        const logged = errSpy.mock.calls.map((call) => String(call[0])).join("\n");
-        expect(logged).toContain("revert-pending"); // the reason enum — a safe, closed vocabulary
-        expect(logged).toContain("self-converge"); // the DERIVED category, not raw prose
-        expect(logged).not.toContain("the pending-revert note was written"); // never the raw sentence
-      } finally {
-        errSpy.mockRestore();
-        c.close();
-        server.stop();
-        store.close();
-      }
-    });
   });
 });

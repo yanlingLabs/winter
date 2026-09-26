@@ -63,10 +63,9 @@ export function quarantinedBackendSessions(report: RecoveryReport): string[] {
 }
 
 /**
- * THE INCARNATION-END DISPOSAL RULE (spec §3.8, r3; L2 fix round 1), one function for both legs: dispose
- * ONLY when the router says `safe` — on the official leg its exit reconcile found the working copy clean
- * (or appended it); on the Winter leg the query finished, was closed or failed (it reports `pending`
- * while the child runs, and for a query nobody iterated). Everything else KEEPS the folder:
+ * THE INCARNATION-END DISPOSAL RULE (spec §3.8, r3; L2 fix round 1): dispose ONLY when the router says
+ * `safe` — the query finished, was closed or failed (it reports `pending` while the child runs, and for a
+ * query nobody iterated). Everything else KEEPS the folder:
  *  - `quarantined` → the router copied the working copy under `<home>/cache/quarantine/`; the folder is
  *    kept and handed to `onQuarantined` (the daemon records it, so the boot sweep never re-reconciles
  *    it and `winter doctor` reports it);

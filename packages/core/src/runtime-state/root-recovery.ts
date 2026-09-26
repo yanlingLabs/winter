@@ -23,6 +23,11 @@
 //   a throw          → the root is left in place, kept and counted (the router rethrows its own refusals,
 //                      e.g. a linked quarantine dir); recovery stays bounded — one root never stops the others
 //
+// WS-23: the official `claude` leg is retired, so no NEW working copy, spool root or staging root is
+// created — Winter-leg run folders carry none (`projects/` is a link to the store). This pass stays for
+// the ones an older build left behind (a crashed official generation, a pre-WS-21 spool), which still
+// hold transcript tails the canonical store may lack.
+//
 // ORDERING CONTRACT (router review of I6): a `canonical-ahead` verdict is only safe while no live session
 // with that key exists, so this pass — like Migration C's phase 2 — completes before ANY session opens
 // (`daemon.ts` awaits it before the driver table and the socket exist; pinned by a boot test).

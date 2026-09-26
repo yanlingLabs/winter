@@ -10,7 +10,9 @@
 //       controller against the sibling checkout at the named tag (recorded in the sign-off
 //       report) — or
 //   (b) COVER the gap explicitly — `status: "carried"` or `"unproven"` with a non-empty `note`
-//       naming what is missing and why, rather than a silently-stale claim.
+//       naming what is missing and why, rather than a silently-stale claim — or
+//   (c) RETIRE it — `status: "retired"` with a non-empty `note`, for a row whose subject Winter no
+//       longer has at all (WS-23 retired the official `claude` runtime rows 4 and 5 measured).
 //
 // This is deliberately a TEST, not a document: a citation that stops matching (a renamed test, a
 // deleted file) fails HERE, the same reasoning the router's own `test/conformance/rows.test.ts`
@@ -27,7 +29,7 @@ const REPO_ROOT = join(import.meta.dir, "..", "..", "..", "..");
 const ROWS_PATH = join(import.meta.dir, "..", "..", "conformance", "ws17-rows.json");
 
 const MIN_CONTAINS_LENGTH = 12;
-const STATUSES = ["proven", "partial", "unproven", "carried"] as const;
+const STATUSES = ["proven", "partial", "unproven", "carried", "retired"] as const;
 const REPOS = ["winter", "router", "sdk"] as const;
 
 type Status = (typeof STATUSES)[number];
@@ -75,7 +77,7 @@ describe("WS-17 §8 sign-off matrix (ws17-rows.json)", () => {
         // CITE: proven/partial claims must point at machine-checkable evidence.
         expect(row.citations.length, `row ${row.row} (${row.status}) has no citations`).toBeGreaterThan(0);
       }
-      if (row.status === "partial" || row.status === "carried") {
+      if (row.status === "partial" || row.status === "carried" || row.status === "retired") {
         // COVER: a gap or a standing obligation must be named, never left silent.
         expect(row.note.trim().length, `row ${row.row} (${row.status}) has an empty note`).toBeGreaterThan(0);
       }

@@ -120,9 +120,8 @@ export { DEFAULT_PROVIDER, INTERNAL_PROVIDER_IDS, pinsFor, internalEligibleProvi
 // console-profile row all run IN-PROCESS against WINTER_HOME (the CLI door inherits stdio and
 // drives the SDK's login directly — see console-profile-broker.ts's own header — never an RPC), so
 // they reach these through the package barrel exactly like the doctor exports just below.
-export { anthropicConfigDirFor, ANTHROPIC_PROFILE_NAME } from "./runtime-sdk/official-options";
+export { anthropicConfigDirFor, ANTHROPIC_PROFILE_NAME } from "./runtime-sdk/anthropic-paths";
 export { createConsoleProfileBroker, type ConsoleProfileBroker, type AnthropicLoginHandle } from "./auth/console-profile-broker";
-export { resolveClaudeExecutable, ClaudeExecutableUnavailable } from "./runtime-sdk/official-executable";
 // Fix wave (C2): `resolveAntExecutable`/`antExecutablePath` — the SAME ladder `daemon.ts` wires its
 // broker's `antExecutable` dep from (settings.runtimes.antExecutable -> $WINTER_ANT_EXECUTABLE ->
 // the bundle path -> `which ant` dev-only) — reached through this barrel by BOTH CLI doors

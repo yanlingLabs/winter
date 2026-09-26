@@ -3,8 +3,7 @@
 // directly against this Bun build — `mock.restore()` does NOT undo `mock.module()` at all (it only
 // restores `mock(fn)`/`spyOn` doubles); the ONLY way this codebase has to un-mock a module is to
 // call `mock.module(id, factory)` again with a factory that reproduces the real export shape
-// (`official-session.test.ts`/`official-options.test.ts` already do exactly this, in their own
-// `afterAll`/`afterEach`). So "left registered" cannot mean "the factory differs from the real
+// (the retired official-leg test files did exactly this, in their own `afterAll`/`afterEach`). So "left registered" cannot mean "the factory differs from the real
 // module" — that is unobservable from here — it means "mocked once and never touched again", which
 // is precisely the shape a forgotten cleanup takes and precisely what the codebase's own working
 // examples do NOT do (they always call `mock.module` a second time for the same id).

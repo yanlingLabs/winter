@@ -1567,23 +1567,20 @@ if (import.meta.main) {
         console.log(`  ${DIM}unavailable (${err instanceof Error ? err.message : "unknown error"})${RESET}`);
         return;
       }
-      const legLine = (label: string, leg: { resolved?: { path: string; source: string }; error?: string; installedWrapper?: string; platformPackage?: string }): void => {
-        if (leg.resolved) {
-          const extras = [
-            leg.installedWrapper ? `wrapper=${leg.installedWrapper}` : null,
-            leg.platformPackage ? `platform=${leg.platformPackage}` : null,
-          ].filter(Boolean).join(" ");
-          console.log(`  ${AQUA}${label}${RESET} ${leg.resolved.path} ${DIM}(${leg.resolved.source})${extras ? ` ${extras}` : ""}${RESET}`);
-        } else {
-          console.log(`  ${AQUA}${label}${RESET} ${DIM}${leg.error ?? "unresolved"}${RESET}`);
-        }
-      };
-      legLine("winter:", report.winter);
-      legLine("claude:", report.claude);
+      // WS-23: the `winter` executable only — the official `claude` ladder is gone with the leg.
+      if (report.winter.resolved) {
+        console.log(`  ${AQUA}winter:${RESET} ${report.winter.resolved.path} ${DIM}(${report.winter.resolved.source})${RESET}`);
+      } else {
+        console.log(`  ${AQUA}winter:${RESET} ${DIM}${report.winter.error ?? "unresolved"}${RESET}`);
+      }
       if (report.bundle?.versions) {
         const v = report.bundle.versions;
-        console.log(`  ${AQUA}bundle:${RESET} ${DIM}winterAgentSdk=${v.winterAgentSdk} winterRuntimeSdk=${v.winterRuntimeSdk} officialSdk=${v.officialSdk} claudeCode=${v.claudeCode}${RESET}`);
-      } else if (report.bundle?.error) {
+        console.log(`  ${AQUA}bundle:${RESET} ${DIM}winterAgentSdk=${v.winterAgentSdk} winterRuntimeSdk=${v.winterRuntimeSdk} winterSource=${v.winterSource ?? "checkout-build"}${RESET}`);
+      }
+      if (report.bundle?.antVersions) {
+        console.log(`  ${AQUA}ant:${RESET} ${DIM}tag=${report.bundle.antVersions.tag}${RESET}`);
+      }
+      if (report.bundle?.error) {
         console.log(`  ${AQUA}bundle:${RESET} ${DIM}${report.bundle.error}${RESET}`);
       }
     };
@@ -1670,18 +1667,23 @@ if (import.meta.main) {
     const session = flag("--session");
     const backend = flag("--backend");
     const backup = flag("--backup");
+    const keep = flag("--keep");
     const op =
       repair === "rebuild-index" ? ({ kind: "rebuild-index" } as const)
       : repair === "quarantine-tail" && session ? ({ kind: "quarantine-tail", winterSessionId: session } as const)
       : repair === "relink-backend" && session && backend ? ({ kind: "relink-backend", winterSessionId: session, backendSessionId: backend } as const)
       : repair === "detach-backend" && session ? ({ kind: "detach-backend", winterSessionId: session } as const)
       : repair === "restore-backup" && backup ? ({ kind: "restore-backup", backupPath: backup } as const)
+      // WS-23 (fix round 1): unblock a legacy session's adoption; `--keep` only for a collision.
+      : repair === "adopt-legacy-session" && session && (keep === undefined || keep === "recorded" || keep === "canonical")
+        ? ({ kind: "adopt-legacy-session", winterSessionId: session, ...(keep === undefined ? {} : { keep: keep as "recorded" | "canonical" }) } as const)
       : undefined;
     if (!op) {
       console.error(
         "usage: winter doctor | winter doctor --repair rebuild-index" +
           " | --repair quarantine-tail --session <id> | --repair relink-backend --session <id> --backend <uuid>" +
-          " | --repair detach-backend --session <id> | --repair restore-backup --backup <path>",
+          " | --repair detach-backend --session <id> | --repair restore-backup --backup <path>" +
+          " | --repair adopt-legacy-session --session <id> [--keep recorded|canonical]",
       );
       process.exit(1);
     }
@@ -2311,19 +2313,19 @@ if (import.meta.main) {
       }
       break;
     }
-    // P8c-10: the official leg's own credential — same shape as --api-key below (prefix check,
-    // the invisible-char guard, Keychain-only), keyed under the anthropic row's own name.
+    // P8c-10: the Anthropic API key — same shape as --api-key below (prefix check, the
+    // invisible-char guard, Keychain-only), keyed under the anthropic row's own name.
     if (process.argv.includes("--anthropic-key")) {
       const key = (await readSecret("Paste your Anthropic API key: ")).trim();
       if (!key.startsWith("sk-ant-")) { console.error("that does not look like an Anthropic API key"); process.exit(1); }
       const invisibleWarning = invisibleKeyCharWarning(key);
       if (invisibleWarning) { console.error(invisibleWarning); process.exit(1); }
       // WS-19 (fix round 4): the SAME slot `credential.set anthropic` writes, so it takes the same
-      // door — through the daemon when one is listening, so a Code session already running on the
-      // official leg is re-armed rather than left holding a stale (or absent) key in its spawn env.
+      // door — through the daemon when one is listening, so a session already running on an
+      // `anthropic/*` model is re-armed rather than left holding a stale (or absent) key.
       const wrote = await writeCredentialThroughDaemonOrLocally({ kind: "set", providerId: "anthropic", apiKey: key }, secrets, openCredentialDaemonDoor);
       if (!wrote.ok) { console.error(wrote.message); process.exit(1); }
-      console.log(`${AQUA}Anthropic API key stored in Keychain${RESET} — the official leg is ready to use on Code sessions; ${credentialEffectNote(wrote.via)}`);
+      console.log(`${AQUA}Anthropic API key stored in Keychain${RESET} — anthropic/* models are ready to use; ${credentialEffectNote(wrote.via)}`);
       break;
     }
     if (process.argv.includes("--api-key")) {
@@ -2483,11 +2485,11 @@ if (import.meta.main) {
       }
       break;
     }
-    // P8c-10: `--anthropic` clears ONLY the official leg's own credential — Codex sign-out
-    // (the bare command, unchanged) must not touch it, and this flag must not touch Codex's.
+    // P8c-10: `--anthropic` clears ONLY the Anthropic API key — Codex sign-out (the bare command,
+    // unchanged) must not touch it, and this flag must not touch Codex's.
     if (process.argv.includes("--anthropic")) {
       // WS-19 (fix round 4): the same slot `credential.remove anthropic` clears, so the same door —
-      // a live official child holds the key in its spawn environment and must be replaced.
+      // a live child whose provider is anthropic must be replaced.
       const cleared = await writeCredentialThroughDaemonOrLocally({ kind: "remove", providerId: "anthropic" }, secrets, openCredentialDaemonDoor);
       if (!cleared.ok) { console.error(cleared.message); process.exit(1); }
       console.log(`anthropic API key cleared — ${credentialEffectNote(cleared.via)}`);

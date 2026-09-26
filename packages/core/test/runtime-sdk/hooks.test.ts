@@ -470,9 +470,10 @@ describe("sessionHooksFor — the escape control-plane floor", () => {
     expect(escapeFloorHit("ls ~/.winter/runtimes", undefined)).toBeUndefined();
   });
 
-  test("both legs get the floor — `official` is the same object", () => {
+  // WS-23: one leg — the builder returns `{ winter }` alone (the retired official copy is gone).
+  test("the builder returns the Winter groups alone", () => {
     const built = sessionHooksFor({ ...baseDeps, home: HOME });
-    expect(built.official).toBe(built.winter);
+    expect(Object.keys(built)).toEqual(["winter"]);
   });
 });
 
@@ -830,10 +831,11 @@ describe("sessionHooksFor — the dangerous-domain floor on WebSearch", () => {
 });
 
 describe("sessionHooksFor — the floor's wiring, ordering and both legs", () => {
-  test("`winter` and `official` are the SAME object — the floor cannot differ between the legs", () => {
+  // WS-23: the `official` copy is gone — there is one leg to carry the floor.
+  test("the floor rides the Winter groups, and no second copy exists", () => {
     const built = sessionHooksFor(baseDeps);
-    expect(built.official).toBe(built.winter);
-    expect(groupFor((built.official as { PreToolUse?: HookCallbackMatcher[] }).PreToolUse, "WebFetch")).toBe(groupFor(built.winter?.PreToolUse, "WebFetch"));
+    expect(Object.keys(built)).toEqual(["winter"]);
+    expect(groupFor(built.winter?.PreToolUse, "WebFetch")).toBeDefined();
   });
 
   test("both groups are registered unconditionally, on the bare deps every mode shares", () => {

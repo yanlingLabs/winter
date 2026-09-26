@@ -31,16 +31,12 @@
 //   1. The PROMPT-TIMING half of A-5 (W18-19's own binding rule), proven against the REAL daemon
 //      resolver and the REAL `classifySwitch` — never a fixture that fakes `readableState`/
 //      `continuation` (the same discipline `test/providers/registry.test.ts`'s own D1-6 describe
-//      block already established for two of these four pairs). The gpt -> claude cell is deliberately
-//      NOT duplicated here as a classifySwitch-only check (review-lane-d2.md: "drop every substitute
-//      a real session now covers") — Defect 1 is fixed, so Part 2 below and
-//      `handoff-parity-e2e.test.ts`'s own A-1 already prove that exact pairing end to end through a
-//      REAL session; only the two structurally-unreachable transitions (claude -> deepseek,
-//      deepseek -> GLM, GLM -> gpt) keep a resolver-only check, each labeled as such.
-//   2. The two REACHABLE endpoints of the chain (claude, gpt) through REAL daemon wiring — the
-//      SAME two directions `handoff-parity-e2e.test.ts`'s A-1/A-2 already prove in depth, so this
-//      file does not re-implement them; it only confirms the chain's own FIRST and LAST prompts
-//      fire against a REAL session (not just the resolver).
+//      block already established for two of these four pairs).
+//   2. The chain's LAST prompt (gpt -> claude) against a REAL session (part 2).
+//
+// WS-23: the official `claude` leg this file's Claude hops once ran on is retired — every hop,
+// Claude's included, runs on the Winter runtime, and the retired cross-runtime parity files that
+// parts 1 and 2 used to lean on are gone with it.
 //
 // RESOLVED (WS-19, Lane P): the finding above is a HISTORICAL RECORD, accurate for when it was
 // written — it is no longer this daemon's current state. W19-1 derives `WINTER_CREDENTIAL_INVENTORY`
@@ -63,7 +59,9 @@ import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain
 import { daemonResolveEndpoint } from "../../src/providers/registry";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
 import { carriesReasoning, opaqueLeaks, outOfOrder } from "../helpers/carriage";
-import { claudeRuntimeForTests, describeWithClaudeRuntime, type AnthropicTurnScript } from "../helpers/claude-runtime";
+import type { anthropicFake as AnthropicFakeModule } from "@yanlinglabs/winter-provider-conformance";
+
+type AnthropicTurnScript = Parameters<typeof AnthropicFakeModule.anthropicTurnResponse>[0];
 
 const CATALOG_GPT_MODEL = "openai/gpt-5.6-sol";
 const CATALOG_CLAUDE_MODEL = "anthropic/claude-sonnet-5";
@@ -122,19 +120,15 @@ describe("A-5 part 1: the five-hop chain's prompt rule, against the REAL daemon 
   });
 
   // gpt -> claude's OWN prompt is deliberately NOT a classifySwitch-only check here (review-lane-
-  // d2.md: "drop every substitute a real session now covers") — Defect 1 is fixed, so Part 2 below
-  // (and handoff-parity-e2e.test.ts's own A-1) prove this exact pairing end to end through a REAL
-  // session instead.
+  // d2.md: "drop every substitute a real session now covers") — Part 2 below proves this exact
+  // pairing through a REAL session instead, and Part 3's hop 4 the round trip past the prompt.
 });
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // Part 2 — the chain's two REACHABLE endpoints (claude, gpt), through REAL daemon wiring: the FIRST
 // hop's own source prompt (claude -> [a foreign family]) and the LAST hop's own prompt (gpt ->
 // claude), each measured directly against a real session.setModel call — never inferred from the
-// resolver alone. The actual round trip past the prompt is GREEN and covered in depth by
-// `handoff-parity-e2e.test.ts`'s own A-1/A-2 (Defects 1/2 both fixed); this file does not repeat
-// that depth, only confirms the CHAIN's own two prompting edges fire against a live session — Part 3
-// below covers the FULL chain, body-level, on every hop.
+// resolver alone. Part 3 below covers the FULL chain, body-level, on every hop.
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 interface RpcErrorLike { rpc?: { message?: string; data?: { code?: string; warnings?: string[] } } }
 
@@ -188,8 +182,10 @@ class TestClient {
   close(): void { try { this.socket.end(); } catch { /* closed */ } }
 }
 
+// WS-23: Claude runs on the Winter runtime too now — the Anthropic fake is reached through
+// `settings.providers.anthropic.baseUrl`, the same per-provider door every other hop uses.
 describeWithWinterBinary("A-5 part 2: the chain's LAST hop (gpt -> claude) prompts against a real session", (winterBin) => {
-  describeWithClaudeRuntime("gpt -> claude", () => {
+  describe("gpt -> claude", () => {
     let home: string;
     let daemon: RunningDaemon | undefined;
     let client: TestClient;
@@ -215,16 +211,13 @@ describeWithWinterBinary("A-5 part 2: the chain's LAST hop (gpt -> claude) promp
       writeFileSync(join(home, "settings.json"), JSON.stringify({
         schemaVersion: 3,
         provider: { model: CATALOG_GPT_MODEL },
-        providers: { openai: { baseUrl: openaiFake.url } },
-        runtimes: { winterExecutable: winterBin, claudeExecutable: claudeRuntimeForTests()!.executable, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
+        providers: { openai: { baseUrl: openaiFake.url }, anthropic: { baseUrl: anthropicFakeServer.url } },
+        runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60 },
       }, null, 2));
       const secrets = new FileSecretStore(join(home, "test-secrets"));
       await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-test-5hop" });
       await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-test-5hop-anthropic" });
-      daemon = await startDaemon({
-        home, secrets, agentProvider: null,
-        officialConnectionOverride: () => ({ explicitConnectionEnv: { ANTHROPIC_BASE_URL: anthropicFakeServer.url }, authFamily: "custom" }),
-      });
+      daemon = await startDaemon({ home, secrets, agentProvider: null });
       if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
       client = await TestClient.connect(daemon.socketPath);
       await client.hello(daemon.tokens.harness, "e2e");
@@ -256,8 +249,7 @@ describeWithWinterBinary("A-5 part 2: the chain's LAST hop (gpt -> claude) promp
       expect(caught).toBeDefined();
       expect(caught!.rpc?.data?.code).toBe("handoff_confirmation_required");
       expect(caught!.rpc?.data?.warnings?.length ?? 0).toBeGreaterThan(0);
-      // The actual resumed round trip past this prompt is GREEN and covered in depth by
-      // `handoff-parity-e2e.test.ts`'s own A-1 (same pairing) — not repeated here.
+      // The confirmed round trip past this prompt is part 3's hop 4 below.
 
       rmSync(cwd, { recursive: true, force: true });
     }, 90_000);
@@ -285,8 +277,8 @@ describeWithWinterBinary("A-5 part 2: the chain's LAST hop (gpt -> claude) promp
 //   (a) the PRIOR TURNS are there, IN ORDER — the same conversation continued, not a fresh one;
 //   (b) the prior model's REASONING is carried as data with its own provenance, where W18-19 says it
 //       should be: `kind="summary"` off a hidden-reasoning source (Claude, GPT), `kind="exposed"`
-//       off DeepSeek and GLM — including on ROW 4, the official-leg destination, which no test
-//       covered anywhere before fix round 2;
+//       off DeepSeek and GLM — including on ROW 4, the Claude destination (the official leg's
+//       until WS-23; the Winter runtime's Anthropic adapter since);
 //   (c) NO OPAQUE STATE crosses — no `signature`, `encrypted_content` or `redacted_thinking` in the
 //       conversation, and the Claude turn's own scripted signature value appears in no body at all.
 //
@@ -294,7 +286,9 @@ describeWithWinterBinary("A-5 part 2: the chain's LAST hop (gpt -> claude) promp
 // for both renderings and why asserting only the angle-bracket one would have made every
 // chat-completions hop read as a defect.
 //
-// ── A W18-19 ROW-4 CONTINUITY FINDING, MEASURED 2026-09-15 (review N4) ─────────────────────────
+// ── A W18-19 ROW-4 CONTINUITY FINDING, MEASURED 2026-09-15 (review N4) — CLOSED BY WS-23 ─────────
+// (On the Winter runtime the Claude destination replays hop 0's thinking natively, signature and all;
+// the account below is the official leg's, kept as the record of what it did.)
 // Hop 4's Claude-destination body carries the WHOLE conversation from hop 0 in order — every user
 // turn and every assistant reply, including the Claude turn the chain started with — and it carries
 // the reasoning of all three FOREIGN families as `<recovered_reasoning>` tags (`kind="summary"` for
@@ -341,7 +335,7 @@ async function startChainChatFake(reply: string, reasoning?: string[]): Promise<
 }
 
 describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude, every hop on its own provider", (winterBin) => {
-  describeWithClaudeRuntime("the chain", () => {
+  describe("the chain", () => {
     let home: string;
     let daemon: RunningDaemon | undefined;
     let client: TestClient;
@@ -382,11 +376,9 @@ describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude
         providers: {
           openai: { baseUrl: openaiFakeRef.url },
           deepseek: { baseUrl: `${deepseek.fake.url}/v1` }, zai: { baseUrl: `${glm.fake.url}/v1` },
+          anthropic: { baseUrl: anthropicFakeServer.url },
         },
-        runtimes: {
-          winterExecutable: winterBin, claudeExecutable: claudeRuntimeForTests()!.executable,
-          winterIdleTimeoutSec: 60, handoff: { crossRuntime: true },
-        },
+        runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60 },
       }, null, 2));
       const secrets = new FileSecretStore(join(home, "test-secrets"));
       await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-test-chain-openai" });
@@ -394,10 +386,7 @@ describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude
       // W19-1: these two slots did not exist before WS-19.
       await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-test-chain-deepseek" });
       await writeCredentialMaterial(secrets, "zai:default", { kind: "api-key", key: "sk-test-chain-zai" });
-      daemon = await startDaemon({
-        home, secrets, agentProvider: null,
-        officialConnectionOverride: () => ({ explicitConnectionEnv: { ANTHROPIC_BASE_URL: anthropicFakeServer!.url }, authFamily: "custom" }),
-      });
+      daemon = await startDaemon({ home, secrets, agentProvider: null });
       if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
       client = await TestClient.connect(daemon.socketPath);
       await client.hello(daemon.tokens.harness, "e2e");
@@ -423,16 +412,16 @@ describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude
       // D1 round 4 evicts it, so every hop below changes provider on its own. If that eviction
       // regressed, the destination fake would simply never be reached and these assertions fail.
 
-      // HOP 0 — claude, on the OFFICIAL leg.
+      // HOP 0 — claude (on the Winter runtime since WS-23).
       const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: CATALOG_CLAUDE_MODEL, cwd });
       await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
-      expect(daemon!.winter!.legOf(sessionId)).toBe("official");
+      expect(daemon!.winter!.legOf(sessionId)).toBe("winter");
       await client.call(METHODS.sessionSend, { sessionId, text: "hop 0, on claude" });
       await client.waitFor(() => turns() >= 1, 120_000);
       expect(anthropicFakeServer!.requests.some((r) => r.path === "/v1/messages")).toBe(true);
 
-      // HOP 1 — claude -> deepseek. A native/summary-only source crossing to a foreign family, AND
-      // a cross-runtime move: PROMPTS (part 1's own table).
+      // HOP 1 — claude -> deepseek. A native/summary-only source crossing to a foreign family:
+      // PROMPTS (part 1's own table).
       let caught: RpcErrorLike | undefined;
       try {
         await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_DEEPSEEK_MODEL });
@@ -484,29 +473,30 @@ describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude
       expect(carriesReasoning(gptBody, { kind: "exposed", provider: "zai", text: "reasoning on the glm hop" })).toBe(true);
       expect(opaqueLeaks(gptBody, [CLAUDE_SIGNATURE])).toEqual([]);
 
-      // HOP 4 — gpt -> claude. PROMPTS, and moves back to the official leg.
+      // HOP 4 — gpt -> claude. PROMPTS.
       let caught2: RpcErrorLike | undefined;
       try {
         await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_CLAUDE_MODEL });
       } catch (err) { caught2 = err as RpcErrorLike; }
       expect(caught2?.rpc?.data?.code).toBe("handoff_confirmation_required");
-      // CONFIRMED, and the turn actually runs — W18-19's ROW 4, the one destination class no test
-      // covered anywhere: back onto the OFFICIAL leg, whose `readableState` is not full-exposed, so
-      // it takes the TAG door.
+      // CONFIRMED, and the turn actually runs — W18-19's ROW 4: a Claude destination, whose
+      // `readableState` is not full-exposed, so it takes the TAG door.
       const anthropicTurnsBefore = anthropicFakeServer!.requests.filter((r) => r.path === "/v1/messages").length;
       await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_CLAUDE_MODEL, confirmLossy: true });
-      expect(daemon!.winter!.legOf(sessionId)).toBe("official");
+      expect(daemon!.winter!.legOf(sessionId)).toBe("winter");
       await client.call(METHODS.sessionSend, { sessionId, text: "hop 4, back on claude" });
       await client.waitFor(() => turns() >= 5, 120_000);
       const claudeRequests = anthropicFakeServer!.requests.filter((r) => r.path === "/v1/messages");
       expect(claudeRequests.length).toBeGreaterThan(anthropicTurnsBefore);
       const claudeBody = claudeRequests.at(-1)!.body;
-      // The WHOLE chain, from hop 0, in order — MEASURED (review N4): the official destination does
+      // The WHOLE chain, from hop 0, in order — MEASURED (review N4): the Claude destination does
       // receive the Claude turn it started with, so the needles start where the conversation does.
       expect(outOfOrder(claudeBody, ["hop 0, on claude", "hello from claude", "hop 1, on deepseek", "hello from deepseek", "hop 2, on glm", "hello from glm", "hop 3, on gpt", "hop 4, back on claude"])).toEqual([]);
-      // ...but NOT hop 0's own THINKING. See the row-4 continuity finding in this block's header:
-      // deliberately not asserted either way, because neither answer is this lane's to pin.
-      expect(claudeBody.includes(CLAUDE_THINKING)).toBe(false);
+      // ...AND hop 0's own THINKING, replayed NATIVELY — a `thinking` block carrying its signature,
+      // same-domain replay. MEASURED 2026-09-25 (WS-23): the row-4 gap this block's header records
+      // was the retired official leg's; the Winter runtime's Anthropic adapter closes it. Pinned as
+      // carried, so a regression has to come here and say so.
+      expect(claudeBody).toContain(`{"type":"thinking","thinking":"${CLAUDE_THINKING}","signature":"${CLAUDE_SIGNATURE}"}`);
       // THE TAG DOOR, all three prior families: GPT is hidden-reasoning, so its readable SUMMARY is
       // what carries (`kind="summary"`); DeepSeek and GLM are full-exposed sources, so theirs carry
       // as `kind="exposed"`.
@@ -531,11 +521,8 @@ describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude
       // exactly what W18-19 wants to happen, and it carries a `signature` field legitimately. A
       // names-only bar there would fail the very behaviour it is meant to protect.
       //
-      // MEASURED in THIS construction the exemption is not yet load-bearing: hop 4's request carries
-      // no `signature` at all, because the Claude source turn is four hops back and its thinking
-      // arrives as a `<recovered_reasoning>` TAG rather than as native replay. It is written this way
-      // so that a future chain with adjacent Claude hops — where native replay IS the right answer —
-      // does not fail on a rule that was only ever about crossing a family boundary.
+      // MEASURED (WS-23): the exemption IS load-bearing now — hop 4's request carries hop 0's native
+      // `thinking` block with its `signature`, the same-domain replay the rule was written to allow.
       //
       // What must never happen is that signature reaching a FOREIGN family, so its VALUE is asserted
       // absent from every non-Anthropic body, and `encrypted_content`/`redacted_thinking` stay barred

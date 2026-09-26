@@ -45,11 +45,11 @@ import { WINTER_CAPABILITY_TOOLS, assertNoCapabilityCollision, type CapabilitySe
 import { createProjector, type Projector } from "../projector";
 import type { RuntimeSessionRecord, RuntimeSessionRecords } from "../runtime-state/records";
 import type { ProjectionCheckpoints } from "../runtime-state/checkpoints";
-import { moveTranscriptFiles, transcriptEntriesOf } from "../runtime-state/transcript-rekey";
+import { moveTranscriptFiles, transcriptEntriesOf, type TranscriptMoveResult } from "../runtime-state/transcript-rekey";
 import { recordLazyRekey } from "../migration/migrate-c";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
-import { CLAUDE_FIRST_PARTY_PROVIDER_IDS, DEFAULT_PROVIDER, effortRefusalFor, effortToSpendForRole, officialSubscriptionAuthEnabled, ownProviderFor, pinsFor, providerBaseUrlFor, sdkAllowRules, sdkDenyRules, winterOptionsFromSettings, type Settings } from "../settings";
+import { CLAUDE_FIRST_PARTY_PROVIDER_IDS, DEFAULT_PROVIDER, effortRefusalFor, effortToSpendForRole, ownProviderFor, pinsFor, providerBaseUrlFor, sdkAllowRules, sdkDenyRules, winterOptionsFromSettings, type Settings } from "../settings";
 import { d30DefaultModel } from "./advisor-reviewer";
 import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
 import type { WinterRuntimeSdk, SessionMode } from "./create";
@@ -60,7 +60,7 @@ import { apiKeyProviderIsUnauthenticated, exaKeyPresent, missingCredentialDetail
 import { renderNoCredentialHint } from "./handoff";
 import { neutralSelectionRefusal, refusalDetailCategoryFor } from "./refusal-copy";
 import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
-import { attachOfficialSession, attachWinterSession } from "./messaging";
+import { attachWinterSession } from "./messaging";
 import { buildWinterOptions, bypassAllowedAtSpawn, permissionModeFor } from "./mode-options";
 import { providerFor, rowForTag, testProviderNameFor } from "./provider-selection";
 import { splitTag, UNSTATED_TAG, isModelTag, WINTER_TEST_PREFIX, type ModelTag } from "./model-tag";
@@ -74,12 +74,12 @@ import { dispatchEffortFor } from "../agent/dispatch-config";
 import { loadUserAgentDefinitions, loadProjectAgentDefinitions, mergeAgentDefinitionTiers, type LoadedAgentDefinitions } from "../agent/agent-definitions";
 
 /**
- * Daemon settings surface batch 3: the ONE merge both legs' builders call — `<home>/agents/*.md`
+ * Daemon settings surface batch 3: the ONE merge the incarnation builder calls — `<home>/agents/*.md`
  * (user tier) merged with a TRUSTED project's `<cwd>/.winter/agents/*.md` (project tier, trust-gated
  * by `projectAgentDefinitions` itself — absent/untrusted degrades to the empty scan shape), project
  * winning by name (the SDK's own precedence, batch 3 item 1). A fresh scan on every call, same as
  * `loadUserAgentDefinitions` itself — no caching here either, so a new/edited/removed file reaches
- * the very next incarnation on EITHER leg with no daemon restart.
+ * the very next incarnation with no daemon restart.
  */
 function mergedAgentDefinitions(
   home: string,
@@ -95,9 +95,6 @@ import type { SkillStore } from "../agent/skills";
 import { startWinterSession, unconsumedUserMessages, withRunHome, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
 import { RunHomeError, type RunHome, type RunHomeErrorCode, type RunHomeFor, type RunHomeInput } from "@yanlinglabs/winter-runtime-sdk";
 import { projectScopeTrusted, type RunHomeSessionFacts } from "./run-home-input";
-import { ClaudeExecutableUnavailable } from "./official-executable";
-import { startOfficialSession, type OfficialSession } from "./official-session";
-import { officialAuthArmFor, OfficialConsoleProfileMissing, OfficialConsoleRouterUnsupported, OfficialNoWireModel, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
 import { readWinterTasks } from "./tasks-reader";
 
 export type WinterLegRefusalCode =
@@ -108,19 +105,22 @@ export type WinterLegRefusalCode =
   // record at all (phone-owned, `createSynced`) never reaches the table's own refusals.
   | "winter_session_ended"            // the driver said the store refused it for good
   | "not_supported_on_winter_leg"     // `session.compact` (SDK 0.0.4 carry)
-  | "claude_executable_unavailable"   // P8c-3: no `claude` binary resolves for an official-leg create
   | "runtime_selection_refused"       // P8c-14: the router's selectRuntime refused this session's model
-  | "official_console_router_unsupported" // C1-interim: the pinned router cannot support the console auth arm yet
-  | "console_profile_missing" // Winter Phase 10a fix wave (F3): the console arm's on-disk profile is missing
+  // WS-23 (ruling R2): a session recorded on the retired official leg (`runtimeKind: "claude-agent"`)
+  // could not be moved onto the Winter leg at its resume. `data.reason` says why: `transcript-collision`
+  // (the Winter key already holds a copy), `transcript-move-refused` (a link, mkdir or rename the
+  // filesystem refused), `repair-required` (already marked) or `claude-oauth`. Nothing is moved or
+  // opened, and the record keeps naming the old leg, until `winter doctor --repair
+  // adopt-legacy-session` (finding `legacy-adoption-blocked`) clears it for the next resume.
+  | "legacy_session_migration_refused"
   // WS-21: a run-home router's refusal (`RunHomeError.code`), forwarded verbatim as `data.code`.
   | RunHomeErrorCode;
 
 /**
- * P8c-14: the intersection of `WinterSession`'s and `OfficialSession`'s public members — everything
- * the IPC layer and this table's own `evict`/`list`/`endAll`/`runTurn` need, on EITHER leg, without
- * caring which one a given driver actually is. Deliberately excludes `query`/`turnStartedAt`
- * (Winter-only; nothing outside `winter-session.ts` reads them) and `resumed`'s callers never
- * needed cross-leg parity beyond the boolean itself.
+ * P8c-14: the public members of a live session driver the IPC layer and this table's own
+ * `evict`/`list`/`endAll`/`runTurn` need. It was the intersection of the two legs' drivers; since
+ * WS-23 `WinterSession` is the only implementation, and the interface stays as the narrow surface the
+ * rest of the daemon is written against (`query` and friends remain `winter-session.ts`'s own).
  */
 export interface LegSession {
   readonly sessionId: string;
@@ -131,8 +131,7 @@ export interface LegSession {
   readonly resumed: boolean;
   readonly init: { sessionId?: string; model?: string; tools: string[] } | undefined;
   readonly turnRunning: boolean;
-  /** Present on both legs (`WinterSession`/`OfficialSession` both track it) — `daemon.ts`'s
-   *  `list_sessions` activity surface reads it across whichever leg a session is actually on. */
+  /** `daemon.ts`'s `list_sessions` activity surface reads it. */
   readonly turnStartedAt: number | undefined;
   readonly done: Promise<void>;
   readonly pendingSends: readonly string[];
@@ -207,15 +206,10 @@ const SDK_EFFORTS: ReadonlySet<string> = new Set(["low", "medium", "high", "xhig
 const sdkEffortOf = (raw: string | undefined): EffortLevel | undefined => (raw !== undefined && SDK_EFFORTS.has(raw) ? (raw as EffortLevel) : undefined);
 
 /**
- * The effort a session SPENDS on its requests — ONE expression, for BOTH legs.
+ * The effort a session SPENDS on its requests — ONE expression.
  *
- * It exists as a function because the official leg had NO effort at all until 2026-09-18: its
- * `OfficialSessionInput.effort` reached only `winterSystemPromptFor` (where it toggles the
- * `ultra` delegation paragraph) and never the query's `Options`. `session.setEffort` succeeded, every
- * client displayed the choice, and the `claude` child never received it — so on a Claude model the
- * effort picker was a no-op while the identical picker worked on every other model. The router was
- * not the obstacle (it forwards top-level `Options` untouched and has no effort handling of its own);
- * the daemon simply never set the field. Both legs now call THIS, so they cannot drift apart again:
+ * It exists as a function because it once had two callers (the retired official leg took effort
+ * through a different door and, until 2026-09-18, silently never sent it). The rule:
  *  - the session's OWN effort first, verbatim (explicit — the child refuses it typed when unsupported);
  *  - else dispatch's role effort on a dispatch session, else the daemon default
  *    (`provider.reasoningEffort`), each IMPLICIT and therefore mapped onto `model`'s own vocabulary;
@@ -270,10 +264,8 @@ export interface WinterLegDeps {
   /** Task 17 Step 0(a): the daemon's ONE `ContextAssembler` — Winter's system prompt per mode,
    *  composed per incarnation (hot: WINTER.md, memory, the output style are re-read on resume).
    *  Absent (a harness without one) ⇒ no `systemPrompt` and the child runs Winter's own.
-   *  `"memoryDirFor"` is required alongside `"assemble"` because the official leg's own
-   *  `OfficialInputDeps.assembler` (`official-options.ts`) needs it too — this is the SAME instance
-   *  forwarded to that leg below, so the official leg's `autoMemoryDirectory` reads the identical
-   *  MEMDIR decision this assembler's `assemble()` just used to build the system prompt. */
+   *  (`"memoryDirFor"` stays in the pick for the daemon's own wiring, which hands the same instance
+   *  elsewhere; this file calls only `assemble`.) */
   assembler?: Pick<ContextAssembler, "assemble" | "memoryDirFor">;
   /**
    * Lane B (2026-09-22): the user's SAVED allow rules for a session at `cwd` — Winter's raw rule
@@ -294,8 +286,7 @@ export interface WinterLegDeps {
    * Daemon settings surface (2026-09-17 plan, item 3): fired best-effort, fire-and-forget, once per
    * incarnation, with whatever `Query.supportedAgents()` answers for THIS session's live child
    * (`winter-session.ts`'s `open()`, right after the query is created). This is the ONLY place a
-   * built-in-agent-type list can come from — `Query.supportedAgents()` is Winter-leg-only (the
-   * official leg's own router seam exposes no equivalent), and it must NOT be read off
+   * built-in-agent-type list can come from, and it must NOT be read off
    * `system/init.agents` in the projector, which serves a different purpose (the projector's job is
    * turning wire frames into `SessionEvent`s, not caching a daemon-wide fact). Absent from a test
    * double that doesn't care; never awaited or retried by this file — a rejection (a torn/aborted
@@ -344,39 +335,28 @@ export interface WinterLegDeps {
    * it, only threads a value of this shape through to both legs' `CanUseToolDeps.planBridge`
    * (`approval-bridge.ts`, consulted BEFORE the generic gate/never-prompt logic when
    * `toolName === "ExitPlanMode"`). Now typed EXACTLY as `CanUseToolDeps.planBridge` (widened from
-   * the original `unknown`-shaped placeholder once a real consumer existed on both legs) — the
-   * Winter path passes it straight into `canUseToolFor` below; the official path passes it into
-   * `assembleOfficial`'s `canUseToolDeps` (`officialBrokerFor` reads the SAME field).
+   * the original `unknown`-shaped placeholder once a real consumer existed) — passed straight into
+   * `canUseToolFor` below.
    */
   planBridge?: { onExitPlanMode(req: BridgedApprovalRequest): Promise<PermissionResult> };
   /**
    * P8c-14 (integration round 2): lane 3's `sessionHooksFor(...)` module — this file never imports
-   * it, only threads its result through. `.official` is wired into the official leg's
-   * `OfficialInputDeps.hooks` below (`assembleOfficial`'s own `inputDeps()`); `.winter` is now
-   * threaded into the Winter incarnation's `buildWinterOptions({..., hooks})` call above (`.winter`
-   * TYPED as `Options["hooks"]`, not `unknown`, since `mode-options.ts`'s `WinterOptionsInput.hooks`
-   * needs that exact type and `sessionHooksFor(...).winter` already produces it).
+   * it, only threads its result through: `.winter` goes into every incarnation's
+   * `buildWinterOptions({..., hooks})` call (TYPED as `Options["hooks"]`, the exact type
+   * `mode-options.ts`'s `WinterOptionsInput.hooks` needs). WS-23: the `.official` half is gone with
+   * the leg it fed.
    */
-  hooksFor?: (session: CapabilitySession) => { winter?: Options["hooks"]; official?: unknown };
+  hooksFor?: (session: CapabilitySession) => { winter?: Options["hooks"] };
   /** Test seams. */
   idleTimeoutMs?: () => number;
   endGraceMs?: number;
   /**
-   * TEST ONLY — never set by production `daemon.ts` wiring (fix round 1, M2): the ONLY way an
-   * official-leg e2e reaches a loopback fake is a real `anthropic:default` credential PLUS this
-   * override, injected the same way `startDaemon`'s own test callers already inject a fake
-   * provider — never an ambient env var (the deleted `WINTER_OFFICIAL_TEST_BASE_URL` hatch). Mirrors
-   * the `winter-test/<name>` double's own shape: a value only a test constructs, threaded through
-   * an explicit parameter, inert unless a caller supplies one.
-   */
-  officialConnectionOverride?: () => { explicitConnectionEnv?: Readonly<Record<string, string>>; authFamily?: RuntimeSelection["authFamily"] } | undefined;
-  /**
    * WS-21 (spec §3.1): present ONLY when the linked router applies run homes (`daemon.ts` wires it
-   * from `linkedRunHomeBuilder()`; a test injects a stub). Then EVERY incarnation on either leg —
-   * create, resume, eviction, a policy switch across the bypass boundary, a model switch — awaits
-   * `build(inputFor(facts))` and hands the result to the router as `runtime.runHome`: the Winter leg
-   * in `optionsFor` (built LAST, after every refusal), the official leg in its session's `open()`.
-   * Absent (router 0.0.11): no run home, and every child is launched exactly as before.
+   * from `linkedRunHomeBuilder()`; a test injects a stub). Then EVERY incarnation — create, resume,
+   * eviction, a policy switch across the bypass boundary, a model switch — awaits
+   * `build(inputFor(facts))` in `optionsFor` (built LAST, after every refusal) and hands the result to
+   * the router as `runtime.runHome`. Absent (router 0.0.11): no run home, and every child is launched
+   * exactly as before.
    */
   runHome?: {
     build: (input: RunHomeInput) => Promise<RunHome>;
@@ -403,18 +383,31 @@ export interface WinterSessionDrivers {
   /** Refuse (typed) unless a Winter-leg session of this mode could be created right now. Runs
    *  BEFORE the product row is minted, so a refusal costs nothing. */
   assertAvailable(mode: SessionMode): void;
-  /** The creation transaction, for a session row that already exists: decide the leg
-   *  (`runtime.selectRuntimeFor`), persist the record (fresh backend uuid), start the driver,
-   *  register it. Throws `WinterLegRefusal`. P8c-14: may return either leg's session. */
+  /** The creation transaction, for a session row that already exists: ask the router for the
+   *  selection (`runtime.selectRuntimeFor`), persist the record (fresh backend uuid), start the driver,
+   *  register it. Throws `WinterLegRefusal`. */
   create(sessionId: string): Promise<LegSession>;
   /** The live driver, if any. */
   get(sessionId: string): LegSession | undefined;
   /** One HEADLESS turn (routines, the -p path): the session's driver (created for a session that
    *  has no record yet, resumed otherwise), `send`, then wait until nothing is in flight. */
   runTurn(sessionId: string, text: string, clientName: string): Promise<void>;
-  /** A live driver, or a resumed one when the record says "winter"/"official"; undefined ⇒ no
-   *  transcript to resume (an engine-era or record-less session — the IPC layer refuses typed). */
+  /** A live driver, or a resumed one when the record says "winter" — or "official", which is adopted
+   *  onto the Winter leg first (`adoptLegacyRecord`); undefined ⇒ no transcript to resume (an
+   *  engine-era or record-less session — the IPC layer refuses typed). */
   ensure(sessionId: string): Promise<LegSession | undefined>;
+  /**
+   * WS-23 (ruling R2): move a record the retired official leg wrote (`runtimeKind: "claude-agent"`)
+   * onto the Winter leg, WITHOUT opening anything — the transcript re-keyed to the Winter cwd key, then
+   * `runtimeKind`/`selection` rewritten. The same step `resume()` runs first; `session.setModel` calls it
+   * too, so a model change on a not-yet-resumed legacy session lands on a Winter record rather than
+   * being refused for disagreeing with one. Returns the (possibly re-read) record; a record that is not
+   * a legacy one comes back untouched. Throws a typed `WinterLegRefusal`
+   * (`legacy_session_migration_refused`) and moves nothing on a collision or a `repair-required`
+   * transcript. SYNCHRONOUS — sqlite and same-volume renames only — so `ensure()`'s no-await window
+   * holds. Optional so a test double need not implement it.
+   */
+  adoptLegacyRecord?(sessionId: string): RuntimeSessionRecord | undefined;
   /** The session was DELETED (the reaper, the cleaner): end its child (bounded) and forget the
    *  driver — a live child never outlives its session (the reaper's 600 s grace is shorter than
    *  the 900 s idle timer). Never throws. */
@@ -496,6 +489,8 @@ export function childrenSinkFor(registry: AgentRegistry, sessionId: string, log:
 export function rekeyTranscriptToCwd(
   deps: { home: string; records: RuntimeSessionRecords; log: (line: string) => void },
   sessionId: string, record: RuntimeSessionRecord, cwd: string,
+  /** WS-23 (fix round 1): told what the move did, so a caller can tell a collision from a refusal. */
+  onMove?: (result: TranscriptMoveResult) => void,
 ): RuntimeSessionRecord {
   const { records, log } = deps;
   const backendId = record.backendSessionId;
@@ -508,6 +503,7 @@ export function rekeyTranscriptToCwd(
   const intent = { sessionId, backendId, from: fromKey, to: toKey, entries: transcriptEntriesOf(join(projects, fromKey), backendId) };
   recordLazyRekey(deps.home, { ...intent, outcome: "pending" });
   const moved = moveTranscriptFiles(projects, backendId, fromKey, toKey);
+  onMove?.(moved);
   recordLazyRekey(deps.home, moved.kind === "moved" || moved.kind === "not-needed"
     ? { ...intent, ...(moved.kind === "moved" ? { entries: moved.entries } : {}), outcome: "moved" }
     : { ...intent, outcome: moved.kind, ...(moved.kind === "refused" ? { reason: moved.reason } : {}) });
@@ -615,24 +611,99 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
   const winterCwdOf = (sessionId: string, cwd: string | null | undefined): string => canonicalCwd(cwd ?? deps.tmpDirOf(sessionId));
 
   /**
-   * The cwd each leg keys a session's transcript by — the Winter leg `winterCwdOf`, the official leg its
-   * `sessionInput().cwd` (the primary: the `cwd` column, else `dirs[0]`, canonical; else the same fallback).
-   * `assembleOfficial`'s `sessionInput` reads THIS, so the lazy re-key below can never pick another key.
+   * Round 3/4: the lazy canonical-cwd re-key (`rekeyTranscriptToCwd`), keyed by the cwd the Winter child
+   * runs in (`winterCwdOf`). WS-23: the retired official leg keyed a cwd-less session by its first working
+   * directory instead (`dirs[0]`), so adopting one of its records moves the transcript here too.
    */
-  const transcriptCwdOf = (sessionId: string, leg: "winter" | "official"): string => {
-    const meta = deps.store.meta(sessionId);
-    if (leg === "winter") return winterCwdOf(sessionId, meta.cwd);
-    let primary: string | undefined = meta.cwd ?? undefined;
-    try { primary ??= deps.store.dirs(sessionId)[0]?.path; } catch { /* a session with no dirs row: workdir-less */ }
-    return primary === undefined ? winterCwdOf(sessionId, meta.cwd) : canonicalCwd(primary);
-  };
-
-  /** Round 3/4: the lazy canonical-cwd re-key (`rekeyTranscriptToCwd`), keyed by the cwd THIS leg uses. */
-  const rekeyForCanonicalCwd = (sessionId: string, record: RuntimeSessionRecord, leg: "winter" | "official"): RuntimeSessionRecord => {
+  const rekeyForCanonicalCwd = (sessionId: string, record: RuntimeSessionRecord, onMove?: (result: TranscriptMoveResult) => void): RuntimeSessionRecord => {
     if (deps.records === undefined) return record;
     let cwd: string;
-    try { cwd = transcriptCwdOf(sessionId, leg); } catch { return record; }
-    return rekeyTranscriptToCwd({ home: deps.home, records: deps.records, log }, sessionId, record, cwd);
+    try { cwd = winterCwdOf(sessionId, deps.store.meta(sessionId).cwd); } catch { return record; }
+    return rekeyTranscriptToCwd({ home: deps.home, records: deps.records, log }, sessionId, record, cwd, onMove);
+  };
+
+  /**
+   * WS-23 (ruling R2) — THE LAZY ADOPTION of a record the retired official leg wrote. See
+   * `WinterSessionDrivers.adoptLegacyRecord` for the contract; the WHY of each step:
+   *
+   *  - Nothing new is needed to READ the history. The Winter runtime resumes transcripts the `claude`
+   *    binary wrote (it reads claude's entry shapes), and a resume needs only the transcript file and a
+   *    lease, never a Winter producer record — the same file the retired handoff barrier reused
+   *    unchanged when it moved a session between the two legs.
+   *  - `repair-required` refuses BEFORE anything moves: that flag means the canonical transcript is
+   *    not proven (a quarantined working copy, an earlier collision), and opening a Winter child on it
+   *    would append to a history nobody has reconciled.
+   *  - The re-key runs next, and a collision (both keys hold the session) or a refused move leaves the
+   *    record marked `repair-required` by `rekeyTranscriptToCwd` — refused here too, with the record
+   *    still naming `claude-agent`, so every later resume refuses the same way rather than opening on
+   *    whichever copy the Winter key happens to hold.
+   *  - Only then are `runtimeKind`/`selection` rewritten — the same two fields (plus the credential
+   *    locator) the retired handoff's `confirmInit` patched when a session moved legs. Provider, model,
+   *    family and auth family are the session's own and carry over verbatim: a `console/*` record stays
+   *    a Console session, and whether its credential can serve a turn is `beforeTurn`'s typed question,
+   *    exactly as for any Winter session.
+   *  - A `claude-oauth` selection is refused: that credential family never routed to the Winter runtime
+   *    (D28), and claude.ai subscription auth never shipped, so no such record should exist — but if one
+   *    does, a typed refusal is the only honest answer.
+   *
+   * SYNCHRONOUS — sqlite and same-volume renames — so `ensure()`'s no-await window (see `resume()`) holds.
+   */
+  const adoptLegacyRecord = (sessionId: string): RuntimeSessionRecord | undefined => {
+    const record = recordOf(sessionId);
+    const records = deps.records;
+    if (record === undefined || records === undefined || record.runtimeKind !== "claude-agent" || record.backendSessionId === undefined) return record;
+    const refuse = (reason: string, why: string): never => {
+      log(`legacy session ${sessionId} not adopted onto the Winter leg (${reason})`);
+      throw new WinterLegRefusal(
+        "legacy_session_migration_refused",
+        `session ${sessionId} was created on the retired official Claude runtime and cannot move to Winter's runtime: ${why}`,
+        reason,
+      );
+    };
+    if (record.selection.authFamily === "claude-oauth") {
+      refuse("claude-oauth", "it was authorised with a Claude subscription login, which Winter's runtime does not use — start a new session");
+    }
+    // The one remedy for all three: `winter doctor` names the session (`legacy-adoption-blocked`) and
+    // `--repair adopt-legacy-session` clears it; the next resume then adopts it.
+    const remedy = `quit Winter, then run \`winter doctor\` and \`winter doctor --repair adopt-legacy-session --session ${sessionId}\``;
+    if (record.transcriptHealth === "repair-required") {
+      refuse("repair-required", `its transcript is marked repair-required, so its history is not proven — ${remedy}`);
+    }
+    let move: TranscriptMoveResult | undefined;
+    rekeyForCanonicalCwd(sessionId, record, (result) => { move = result; });
+    const moved = recordOf(sessionId);
+    if (moved === undefined) return undefined;
+    if (moved.transcriptHealth === "repair-required") {
+      // Fix round 1 (minor 2): a COLLISION (the Winter key already holds a copy) and a REFUSED move (a
+      // link in the way, a directory or rename the filesystem refused) are different problems.
+      const refusedMove = (move as TranscriptMoveResult | undefined)?.kind === "refused";
+      if (refusedMove) {
+        refuse("transcript-move-refused", `its transcript could not be moved to the key Winter reads it from (${(move as Extract<TranscriptMoveResult, { kind: "refused" }>).reason}) — fix that, then ${remedy}`);
+      }
+      refuse("transcript-collision", `the key Winter reads its transcript from already holds another copy of it — compare the two, then ${remedy} with \`--keep recorded\` or \`--keep canonical\` (the other copy is moved to quarantine, never deleted)`);
+    }
+    const authRef = credentialRefFor(moved.selection.providerId, deps.home);
+    try {
+      records.patch(sessionId, moved.state, {
+        runtimeKind: "winter-agent",
+        selection: {
+          ...moved.selection,
+          runtimeKind: "winter-agent",
+          sdkVersion,
+          engineVersion: sdkVersion,
+          reason: "adopted onto the Winter runtime at its next resume: the official claude runtime this session was created on is retired (WS-23)",
+          decidedAt: new Date().toISOString(),
+        },
+        authRef: authRef?.kind === "keychain" ? `keychain:${authRef.account}` : undefined,
+        // Fix round 1 (minor 7): the record-level versions too, not only the selection's.
+        sdkVersion,
+        engineVersion: sdkVersion,
+      });
+    } catch (err) {
+      throw new WinterLegRefusal("winter_leg_unavailable", `the runtime record for ${sessionId} could not be moved to the Winter leg (${err instanceof Error ? err.name : "unknown"})`);
+    }
+    log(`legacy session ${sessionId} adopted onto the Winter leg (${moved.selection.providerId}, transcript kept)`);
+    return recordOf(sessionId);
   };
 
   /** The facts every incarnation of a session needs, assembled once per driver. */
@@ -959,8 +1030,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         capabilities: { ...extra, ...capabilities } as CapabilityServerRecord,
         ...(connection === undefined ? {} : { connection }),
         resume: inc.resume,
-        // P8c-14 (integration round 2): the Winter-leg half of lane 3's hooks facade — the official
-        // leg's `inputDeps()` below already threads `.official`; this is that same call's `.winter`.
+        // P8c-14 (integration round 2): lane 3's hooks facade (`hooks.ts`'s `sessionHooksFor`).
         ...(deps.hooksFor === undefined ? {} : { hooks: deps.hooksFor(capSession).winter }),
         // P8d-8 (D30): a LIVE read at every incarnation — `runtimes.advisorModel` when the user set
         // one, else Winter's own D30 default for this session's model family (`advisor-reviewer.ts`'s
@@ -986,9 +1056,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // Batch 3 (item 1): merged with the TRUSTED project tier (`deps.projectAgentDefinitions`,
         // trust-gated by the daemon's own wiring — absent/untrusted degrades to the empty scan
         // shape) via `mergeAgentDefinitionTiers`, restoring the SDK's own precedence (project wins
-        // over user, by name) instead of the user tier alone winning outright. `mergedAgentDefinitions`
-        // is the SAME helper the official leg's `inputDeps()` calls below, so both legs see the
-        // identical merged map from one owner.
+        // over user, by name) instead of the user tier alone winning outright.
         // WS-21 (L3.4): on a run-home incarnation the agents are the run folder's (copies, spec §3.3).
         ...(runHomeApplied ? {} : { agents: mergedAgentDefinitions(home, cwd, deps.projectAgentDefinitions) }),
         // Lane B: the user's SAVED allow rules, live and trust-gated (`WinterLegDeps.persistedAllowRules`).
@@ -1107,272 +1175,6 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     return session;
   };
 
-  /**
-   * P8c-14: the official leg's per-session assembly, mirroring `assemble()`'s shape as closely as
-   * the two legs' state machines allow (same `append`/titler hook, same capability-record source).
-   * SYNCHRONOUS on purpose — `ensure()`'s "no await from map-miss to drivers.set" invariant (see
-   * `assemble`'s own callers) applies to this leg too, and `runtime.officialPeerSync()`/
-   * `claudeExecutableFor()` are both synchronous accessors for exactly this reason.
-   */
-  const assembleOfficial = (sessionId: string, backendSessionId: string, persistedSelection: RuntimeSelection): OfficialSession => {
-    const runtime = deps.runtime!;
-    const records = deps.records;
-    const meta = deps.store.meta(sessionId);
-    const mode = modeOf(meta.mode);
-    const cwd = winterCwdOf(sessionId, meta.cwd);
-    // TEST-ONLY (see `officialConnectionOverride` on `WinterLegDeps`): the LIVE query's own
-    // selection is widened to the injected `authFamily` (a loopback needs `custom` so the
-    // env-allowlist's family-shape check does not itself refuse `ANTHROPIC_BASE_URL`) — never the
-    // PERSISTED record, which keeps the router's real decision.
-    const connectionOverride = deps.officialConnectionOverride?.();
-    // WS-20: the console-vs-api-key decision is the TAG's own prefix now
-    // (`officialAuthArmFor(persistedSelection)`, official-options.ts) — no live settings read, no
-    // on-disk profile probe here at all. The tag cannot go stale the way `runtimes.official.auth`
-    // could (a session that wants the OTHER arm needs a real `session.setModel` onto a
-    // `console/*`/`anthropic/*` tag, which mints a FRESH `RuntimeSelection` with the correct
-    // `authFamily` already — there is no "live state disagrees with the recorded selection" case
-    // left to reconcile at assembly time). Winter's own console-vs-api-key decision still widens
-    // THIS session's `RuntimeSelection.authFamily` to `"console-profile"` directly (never a
-    // parallel `officialAuthArm` field) because the router's own `openOfficialLeg` re-derives
-    // `credentials`/`connectionEnv` from `Options.runtime.selection` AT SPAWN, keyed on
-    // `request.selection` — a selection left at `"api-key"` would have the router re-inject
-    // `ANTHROPIC_API_KEY` from the provider's own authRef regardless of what this host built.
-    const officialAuthArm: "api-key" | "console" | undefined =
-      connectionOverride?.authFamily === undefined ? officialAuthArmFor(persistedSelection) : undefined;
-    const selection: RuntimeSelection = connectionOverride?.authFamily !== undefined
-      ? { ...persistedSelection, authFamily: connectionOverride.authFamily }
-      : officialAuthArm === "console"
-        ? { ...persistedSelection, authFamily: "console-profile" }
-        : persistedSelection;
-
-    let claimedInBatch = 0;
-    const append = (event: Parameters<SessionHub["append"]>[1]) => {
-      const stamped = deps.hub.append(sessionId, event);
-      claimedInBatch = 0;
-      if (deps.titler !== undefined && event.type === "turn_completed") {
-        const threadId = (event as { threadId?: string }).threadId;
-        if (threadId === undefined || threadId === "main") { // error terminals included — see the Winter leg's twin above
-          try { void deps.titler.maybeTitle(sessionId); } catch { /* maybeTitle never throws by contract; belt only */ }
-        }
-      }
-      return stamped;
-    };
-
-    // `exaKeyPresent` is deliberately UNSET here (⇒ read as present, `CapabilitySession`'s own
-    // convention). It gates only `Search`, whose `modes` are chat and dispatch, and this leg ships
-    // Code-only (P8c-1/P8c-2) — so the mode filter withholds the tool on the official leg whatever the
-    // key says, and probing the Keychain for an answer that decides nothing would be noise.
-    const capSessionFor = (): CapabilitySession => ({
-      sessionId, mode, cwd,
-      roots: deps.rootsOf(sessionId),
-      tmpDir: deps.tmpDirOf(sessionId),
-      outDir: deps.outDirOf(sessionId),
-    });
-
-    const sessionInput = (): OfficialSessionInput => {
-      const live = deps.store.meta(sessionId);
-      let primary: string | undefined = live.cwd ?? undefined;
-      let extraDirs: string[] = [];
-      try {
-        const rows = deps.store.dirs(sessionId).map((d) => d.path);
-        primary ??= rows[0];
-        extraDirs = primary === undefined ? [] : rows.filter((d) => d !== primary);
-      } catch { /* a session with no dirs row: workdir-less */ }
-      return {
-        sessionId, mode,
-        // WS-21 (L2 O-1): canonical, like the Winter leg — and the ONE rule the lazy re-key keys by (round 3).
-        cwd: transcriptCwdOf(sessionId, "official"),
-        outDir: deps.outDirOf(sessionId),
-        extraDirs,
-        ...(live.effort === undefined ? {} : { effort: live.effort }),
-        // The effort this session SPENDS, computed by the SAME function the Winter leg uses (its own
-        // doc carries why). Kept apart from `effort` just above on purpose: that one is the RAW
-        // stored value and may be Winter's `ultra` tier, which `winterSystemPromptFor` needs to see
-        // to add the delegation paragraph; this one is what may go on the wire. The model is this
-        // session's own decided tag — `selection.modelRef`, the same one `official-session.ts`
-        // splits into the query's `model`.
-        spendEffort: spendEffortFor(deps.settings(), mode, live.model ?? selection.modelRef, live.effort),
-        ...(live.origin === undefined ? {} : { origin: live.origin }),
-        // `OfficialSessionInput.primary`'s own doc: kept DISTINCT from `cwd` above (which already
-        // defaulted to the session tmp dir) so `officialInputFor` can tell a genuinely workdir-less
-        // session apart from a real single-directory one — the SAME `primary` this closure just
-        // computed, undefaulted, mirroring the Winter leg's own `winterSystemPromptFor` call
-        // (`primary` above, not `primary ?? cwd`).
-        primary,
-      };
-    };
-
-    const inputDeps = async (): Promise<OfficialInputDeps> => {
-      const live = deps.store.meta(sessionId);
-      // WS-21 (L3.4): the same single fact as the Winter leg's `optionsFor`.
-      const runHomeApplied = deps.runHome !== undefined;
-      const capSession = capSessionFor();
-      const capabilities = deps.buildSessionCapabilities(capSession);
-      const hooks = deps.hooksFor?.(capSession).official;
-      // Daemon settings surface batch 3 (item 3): the SAME configured-server read the Winter leg's
-      // `optionsFor` makes (`deps.extraMcpServers`), threaded onto the official leg too — closing
-      // the pre-existing gap where user/project-configured MCP servers reached the Winter leg only.
-      // The collision guard is identical to the Winter leg's own (`assertNoCapabilityCollision`,
-      // P8b-36 obligation): a configured server named exactly like a daemon-owned `winter__<key>`
-      // server refuses the SESSION typed, here just as much as there.
-      const configuredMcpServers = runHomeApplied ? {} : (deps.extraMcpServers?.(capSession) ?? {});
-      try { assertNoCapabilityCollision(configuredMcpServers, capabilities); } catch (err) {
-        throw new WinterLegRefusal("winter_leg_unavailable", err instanceof Error ? err.message : String(err));
-      }
-      // Router 0.0.9: the SAME merged (project-over-user) subagent map the Winter leg's `optionsFor`
-      // carries — one owner, one merge, both legs (`mergedAgentDefinitions`, above).
-      const agents = runHomeApplied ? {} : mergedAgentDefinitions(deps.home, capSession.cwd, deps.projectAgentDefinitions);
-      // The SAME credential read `optionsFor` (the Winter incarnation builder, above) makes per
-      // incarnation — `officialCredentialPlan`'s auto-derivation (`official-options.ts`) needs this
-      // provider's `authRef` to inject `ANTHROPIC_API_KEY` at spawn.
-      const credentials = await credentialPresenceFrom(deps.secrets);
-      // Winter Phase 10a fix wave 4 (M-C): NEVER thread `deps.settings()` into this call — fix
-      // wave 3 (M-B, "Native sessions") used to, on the theory that it was "inert for the console
-      // arm itself" and merely kept this leg's own ref decision agreeing with the Winter leg's.
-      // Measured wrong: `selection.authFamily` (this session's ARM) is fixed ONCE, at session
-      // ASSEMBLY (`assembleOfficial`, above) — it is never re-widened by a later `open()` — while
-      // `inputDeps()` runs fresh on EVERY `open()`/resume. A session assembled on the "api-key" arm
-      // before a Console sign-in, then re-opened after one (the profile file and `anthropic:console`
-      // bearer both now present), would have THIS call re-point `provider.authRef` at
-      // `anthropic:console` on the very next open — while `selection.authFamily` stayed the
-      // assembly-time `"api-key"`. The router's own `officialCredentialPlan` derives
-      // `ANTHROPIC_API_KEY` from `provider.authRef` for the api-key family regardless of which
-      // account that ref names, so the child would receive `ANTHROPIC_API_KEY=<the Console OAuth
-      // bearer>` — and `official-session.ts`'s own `apiKeySource === "ANTHROPIC_API_KEY"` assertion
-      // still passes, because it only checks WHICH env var the vendor CLI read from, never which
-      // account produced its value. Fix: never let this leg's own credential ref move with live
-      // settings — `credentialRefFor`'s own doc says an absent `settings` argument keeps its OLD,
-      // unconditional `anthropic:default` answer, which is exactly what the api-key arm must
-      // ALWAYS get; the console arm never reads `provider.authRef` at all regardless of what it
-      // holds (`officialCredentialPlan`'s own `AUTH_FAMILY_VARIABLES["console-profile"]` injects
-      // nothing), so leaving it at the same settings-independent `anthropic:default` value costs
-      // the console arm nothing. (Simplest of the two fixes the review offered — dropping the
-      // argument — chosen over threading `selection.authFamily` through explicitly, since the
-      // settings-independent default already IS "api-key arm -> anthropic:default" with no new
-      // branch needed.) The native Winter leg's own `optionsFor` (this file, above) is UNCHANGED —
-      // it re-derives its OWN per-incarnation live choice every `open()`, which is correct for that
-      // leg because it has no separately-fixed `selection.authFamily` to disagree with.
-      const provider = live.model === undefined ? undefined : providerFor(live.model, deps.home);
-      // TEST-ONLY (`WinterLegDeps.officialConnectionOverride`, fix round 1 M2 — never an ambient
-      // env var, never set by production `daemon.ts` wiring): a loopback fake needs
-      // `ANTHROPIC_BASE_URL` beside the key, which the `api-key` family's own variable set does
-      // not include (WS-14 §12) — the SAME reason the router's own door-bed test widens to
-      // `authFamily: "custom"` (done above, in `assembleOfficial`). `custom` needs the credential
-      // named explicitly too (`officialCredentialPlan` refuses to guess it for that family), so
-      // this still derives the REAL keychain ref for the provider the router actually selected —
-      // only the CONNECTION is test-injected, never the credential material.
-      const testOverrides = connectionOverride === undefined || provider?.providerId === undefined ? {} : {
-        explicitCredentials: [{ variable: "ANTHROPIC_API_KEY", ref: credentialRefFor(provider.providerId, deps.home) ?? provider.authRef! }],
-        ...(connectionOverride.explicitConnectionEnv === undefined ? {} : { explicitConnectionEnv: connectionOverride.explicitConnectionEnv }),
-      };
-      // Winter Phase 10a (router 0.0.4, C1): the console-vs-api-key decision now lives entirely in
-      // `selection.authFamily` (widened once, above, in `assembleOfficial` — see that widening's own
-      // doc for why the parallel `officialAuthArm` field from the C1-interim fix wave is gone). This
-      // closure captures `selection` from the outer scope, so `official-session.ts`'s init-message
-      // assertion (`this.deps.selection.authFamily`) and this leg's `officialInputFor` call
-      // (`deps.selection.authFamily` below) read the identical value with no separate field to keep
-      // in sync.
-      return {
-        home: deps.home,
-        selection,
-        ...(provider === undefined ? {} : { provider }),
-        ...testOverrides,
-        officialPeer: runtime.officialPeerSync(),
-        claudeExecutableFor: () => runtime.claudeExecutableFor(),
-        // A harness with no assembler at all (`deps.assembler` absent) has no memory config to have
-        // consulted either — `memoryDirFor: () => undefined` reports that honestly (the SAME answer
-        // a real assembler gives when its own `memory` dep is unwired), so `autoMemoryDirectoryFor`
-        // takes its own documented no-assembler-answer fallback rather than being handed a fake path.
-        assembler: deps.assembler ?? { assemble: () => "", memoryDirFor: () => undefined },
-        capabilities,
-        // Batch 3 (item 3): threaded onto `officialInputFor` regardless of whether it's empty —
-        // `{}` there is byte-identical to before item 3.
-        configuredMcpServers,
-        // Router 0.0.9: threaded onto `officialInputFor` regardless of whether it's empty —
-        // `officialInputFor` itself omits the `options.agents` key entirely when empty.
-        agents,
-        // Lane B: the SAME saved-rule read the Winter leg's `optionsFor` makes, for this leg's
-        // flag-settings `permissions.allow` (translated there by the same `sdkAllowRulesFor`).
-        ...(runHomeApplied || deps.persistedAllowRules === undefined ? {} : { persistedAllow: deps.persistedAllowRules(capSession.cwd) }),
-        // WS-21: the SAME live `sdk/settings.json` read the Winter leg's `optionsFor` makes.
-        ...userRulesFrom(deps.home, runHomeApplied),
-        ...(runHomeApplied ? { runHomeApplied: true } : {}),
-        // Phase 9c (P9c-1): the LIVE settings snapshot (`deps.settings()` — the same hot holder
-        // `create()`/`legForNew` already read above; never a boot snapshot) — `official-options.ts`'s
-        // `officialInputFor` reads it ONLY through `officialSubscriptionAuthEnabled`, and
-        // `official-session.ts`'s own init-message assertion reads the SAME value off this object
-        // (never re-fetched separately) so the two agree within one incarnation. This is the one
-        // field `OfficialInputDeps` cannot get from `WinterRuntimeSdk` itself (that handle exposes
-        // no settings accessor of its own — only this driver's own `deps.settings` holds it), which
-        // is why it is threaded here rather than read inside `official-session.ts`/`official-options.ts`.
-        settings: deps.settings(),
-        canUseToolDeps: {
-          approvals: deps.approvals, questions: deps.questions, gate: deps.gate,
-          // WS-21: "in this project" is offered only for a trusted project (the same rule as the Winter leg).
-          ...(deps.isTrusted === undefined ? {} : { projectTrusted: bridgeProjectTrustedFor(deps.isTrusted, capSession.cwd) }),
-          emit: (event) => { deps.hub.append(sessionId, event); },
-          home: deps.home, threadId: "main",
-          ...(live.origin === undefined ? {} : { origin: live.origin }),
-          // A getter, same as the Winter incarnation builder's own `canUseTool` above — a
-          // `session.setPolicy` mid-session is seen by the NEXT approval, not just the next open().
-          policy: () => deps.store.meta(sessionId).approvalPolicy,
-          // P8c-14 (integration round 2): the SAME plan bridge the Winter leg wires above —
-          // `officialBrokerFor` (official-options.ts) reads this field the identical way.
-          ...(deps.planBridge === undefined ? {} : { planBridge: deps.planBridge }),
-        },
-        policy: live.approvalPolicy,
-        ...(hooks === undefined ? {} : { hooks }),
-      };
-    };
-
-    const projectorFor = (generation: number): Projector =>
-      createProjector({
-        sessionId, mode,
-        generation,
-        winterSessionId: sessionId,
-        runtimeKind: "claude-agent",
-        nextSeq: () => deps.store.lastSeq(sessionId) + (++claimedInBatch),
-        priorTodos: () => readWinterTasks(deps.store, sessionId),
-        checkpoint: deps.checkpoints!,
-        now: () => new Date().toISOString(),
-        log: {
-          warn: (message, fields) => log(`${message} ${fields === undefined ? "" : JSON.stringify(fields)}`.trim()),
-        },
-      });
-
-    // WS-21 (spec §3.1): the official leg's run home, built inside its session's `open()` for every
-    // incarnation (the SAME live session facts `sessionInput()` answers, on this leg).
-    const runHomeDeps = deps.runHome;
-    const runHomeForOpen = runHomeDeps === undefined ? undefined : async (): Promise<RunHome> => {
-      const input = sessionInput();
-      return runHomeDeps.build(runHomeDeps.inputFor({
-        mode, dispatchChild: input.origin === "dispatch-child", leg: "official", cwd: input.cwd, workdirLess: input.primary === undefined,
-      }));
-    };
-
-    const session = startOfficialSession({
-      sessionId, backendSessionId, mode, runtime, selection,
-      sessionInput,
-      inputDeps,
-      ...(runHomeForOpen === undefined ? {} : { runHome: runHomeForOpen }),
-      projector: projectorFor,
-      append,
-      broadcast: (event) => { deps.hub.broadcastTransient(sessionId, event); },
-      messaging: {
-        attach: attachOfficialSession,
-        facts: () => {
-          const title = deps.store.getTitle(sessionId) ?? undefined;
-          const record = records?.get(sessionId);
-          return { ...(title === undefined ? {} : { title }), cwd, ...(record === undefined ? {} : { selection: record.selection }) };
-        },
-      },
-      records,
-      log,
-    });
-    drivers.set(sessionId, session);
-    return session;
-  };
-
   /** `selection.reason` is what `winter doctor` and the app render for "why is this session on that
    *  runtime" — it narrates a FACT, never a flag: since Task 17 the Winter leg is the only leg
    *  (fix wave F12 retired the "settings.runtimes.winterLeg.<mode> is on" wording, which named a
@@ -1415,8 +1217,12 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
    *      typed `runtime_selection_refused` (bail-out 4 checks the catalog, not the credential map).
    *
    * Outside those four cases the router's answer — including a REFUSAL — is honoured: a Claude
-   * model with no configured credential is `runtime_selection_refused`, never a silent Winter
-   * fallback (D13's own "never a substitution").
+   * model with no configured credential is `runtime_selection_refused`, never a silent fallback to
+   * another provider (D13's own "never a substitution").
+   *
+   * WS-23: the router is told there is no official runtime (`hasClaudePeer: false`, `create.ts`), so
+   * a Claude model selects the Winter runtime like every other family. An answer naming any other
+   * runtime would be a router this daemon cannot serve, and is refused typed rather than recorded.
    */
   const decideRuntime = async (mode: SessionMode, model: string | undefined): Promise<RuntimeSelection | undefined> => {
     if (typeof deps.runtime?.selectRuntimeFor !== "function") return undefined;
@@ -1424,6 +1230,10 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     if (rowForTag(model) === undefined) return undefined;
     const decided = await deps.runtime.selectRuntimeFor({ mode, model });
     if (isSelectionRefusal(decided)) throw await refusalForSelection(decided, model);
+    if (decided.runtimeKind !== "winter-agent") {
+      deps.log?.(`selectRuntimeFor chose ${decided.runtimeKind} for ${model}, which this daemon no longer hosts — refused`);
+      throw new WinterLegRefusal("runtime_selection_refused", neutralSelectionRefusal(model), "runtime-unavailable");
+    }
     return decided;
   };
 
@@ -1446,8 +1256,8 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
    *     verbatim, with the router's own `reason`. `refusalMayBeCredentialShaped` is the gate: only
    *     the two reasons a MISSING CREDENTIAL can actually produce are eligible for case 2 (review
    *     Minor 2 — before this, ANY refusal was relabelled `no-credential` whenever the probe
-   *     happened to find an empty slot, so a Claude session on a home with no `claude` binary would
-   *     have been told to go and add an API key).
+   *     happened to find an empty slot, so a session whose runtime was unavailable would have been
+   *     told to go and add an API key).
    *
    * The credential probe happens ONLY on this path (a refusal), never on the hot create path, which
    * has already done its own.
@@ -1455,16 +1265,15 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
   const refusalForSelection = async (refusal: { reason: string; detail: string; alternatives?: readonly SelectionAlternative[] }, model: string): Promise<WinterLegRefusal> => {
     // THE RAW DETAIL GOES TO THE LOG, AS A CATEGORY, AND NOWHERE ELSE (whole-branch review MAJOR 2).
     // `session.setModel` has scrubbed this class since D1 fix round 4; `session.create` handed it
-    // through verbatim, and `session.create` is REMOTE-ALLOWED, so the measured shapes — "the
-    // official runtime", "persisted on claude-agent (…) (WS-00 §2, D13)", and `slot-unservable`'s
-    // enumeration of the user's own configured providers — were reaching the phone. Both doors now
-    // share one definition (`refusal-copy.ts`).
+    // through verbatim, and `session.create` is REMOTE-ALLOWED, so router-internal wording (runtime
+    // kinds, spec ids) and `slot-unservable`'s enumeration of the user's own configured providers were
+    // reaching the phone. Both doors now share one definition (`refusal-copy.ts`).
     deps.log?.(`selectRuntimeFor refused ${model} (reason=${refusal.reason}, detail=${refusalDetailCategoryFor(refusal.detail)})`);
     const neutral = neutralSelectionRefusal(model);
     if (refusal.reason === "no-credential" && refusal.alternatives !== undefined) {
       // The hint is the ONE refusal text that is actionable, and it is built HERE out of the
       // router's structured `alternatives` — never out of `detail`, whose prefix is now dropped.
-      const hint = renderNoCredentialHint(refusal.alternatives, { subscriptionEnabled: officialSubscriptionAuthEnabled(deps.settings()) });
+      const hint = renderNoCredentialHint(refusal.alternatives);
       return new WinterLegRefusal("runtime_selection_refused", `${neutral} ${hint}`, "no-credential");
     }
     if (!refusalMayBeCredentialShaped(refusal.reason)) {
@@ -1484,71 +1293,6 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     return new WinterLegRefusal("runtime_selection_refused", neutral, refusal.reason);
   };
 
-  const createOfficial = async (sessionId: string, selection: RuntimeSelection): Promise<LegSession> => {
-    const records = deps.records!;
-    const meta = deps.store.meta(sessionId);
-    const cwd = winterCwdOf(sessionId, meta.cwd);
-    const executable = deps.runtime!.claudeExecutableFor();
-    if (executable instanceof ClaudeExecutableUnavailable) {
-      throw new WinterLegRefusal("claude_executable_unavailable", executable.message);
-    }
-    const backendSessionId = randomUUID();
-    // Round 3: the key THIS leg writes under (`sessionInput().cwd`), which differs from `cwd` only for a
-    // cwd-less session whose `dirs[0]` is set.
-    const transcriptKey = transcriptProjectKey(transcriptCwdOf(sessionId, "official"));
-    // m5: the same locator-only rule the Winter path follows (records.ts's own rule: never
-    // material, just where to find it) — `credentialRefFor` is this leg's OWN source of truth for
-    // "is this provider one of Winter's keychain-backed slots", the identical function the Winter
-    // path's `explicitCredentials` build already calls (`credentialRefFor(provider.providerId) ??
-    // provider.authRef!` above). `selection.providerId` is "anthropic" for a real Claude selection,
-    // so this resolves to `keychain:anthropic:default`.
-    const authRef = credentialRefFor(selection.providerId, deps.home);
-    try {
-      records.create({
-        winterSessionId: sessionId,
-        runtimeKind: "claude-agent",
-        backendSessionId,
-        providerId: selection.providerId,
-        modelRef: selection.modelRef,
-        ...(authRef?.kind === "keychain" ? { authRef: `keychain:${authRef.account}` } : {}),
-        backendRoot: join(storeProjectsDir(deps.home), transcriptKey),
-        effectiveTempDir: deps.tmpDirOf(sessionId),
-        transcriptProjectKey: transcriptKey,
-        memoryProjectKey: deps.memoryKeyOf(cwd),
-        tempProjectKey: transcriptKey,
-        transcriptDialect: "claude-code-jsonl",
-        transcriptHealth: "clean",
-        compatibilityLevel: "agent-state",
-        conformanceCorpusVersion: "unverified",
-        versionProvenance: "recorded",
-        sdkVersion: selection.sdkVersion,
-        engineVersion: selection.sdkVersion,   // the official SDK's own version (P8c-14)
-        providerCatalogVersion: catalogVersion(),
-        providerAdapterVersion: "unstated",
-        capabilities: ["message", "resume"],
-        selection,
-      });
-      records.transition(sessionId, "ready");
-    } catch (err) {
-      throw new WinterLegRefusal("winter_leg_unavailable", `the runtime record for ${sessionId} could not be written (${err instanceof Error ? err.name : "unknown"})`);
-    }
-    const session = assembleOfficial(sessionId, backendSessionId, selection);
-    try {
-      await session.open();
-    } catch (err) {
-      drivers.delete(sessionId);
-      if (err instanceof WinterLegRefusal) throw err;
-      if (err instanceof ClaudeExecutableUnavailable) throw new WinterLegRefusal("claude_executable_unavailable", err.message);
-      if (err instanceof OfficialConsoleRouterUnsupported) throw new WinterLegRefusal("official_console_router_unsupported", err.message);
-      if (err instanceof OfficialConsoleProfileMissing) throw new WinterLegRefusal("console_profile_missing", err.message);
-      // F1 follow-on: a Claude row with no wire spelling on Anthropic's API — typed, never a fallback.
-      if (err instanceof OfficialNoWireModel) throw new WinterLegRefusal(err.code, err.message, err.reason);
-      if (err instanceof RunHomeError) throw new WinterLegRefusal(err.code, err.message);
-      throw new WinterLegRefusal("winter_leg_unavailable", `the official child for ${sessionId} could not be started (${err instanceof Error ? err.name : "unknown"})`);
-    }
-    return session;
-  };
-
   const create = async (sessionId: string): Promise<LegSession> => {
     const meta = deps.store.meta(sessionId);
     const mode = modeOf(meta.mode);
@@ -1560,9 +1304,6 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     const cwd = winterCwdOf(sessionId, meta.cwd);
 
     const decided = await decideRuntime(mode, meta.model);
-    if (decided !== undefined && decided.runtimeKind === "claude-agent") {
-      return createOfficial(sessionId, decided);
-    }
 
     const backendSessionId = randomUUID();
     const transcriptKey = transcriptProjectKey(cwd);
@@ -1655,38 +1396,15 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
    * `assemble` only because its caller holds the freshly minted row nobody else can address yet.
    * `session-driver.test.ts` pins the race.
    */
-  const resumeOfficial = async (sessionId: string, record: RuntimeSessionRecord): Promise<LegSession> => {
-    const executable = deps.runtime!.claudeExecutableFor();
-    if (executable instanceof ClaudeExecutableUnavailable) {
-      throw new WinterLegRefusal("claude_executable_unavailable", executable.message);
-    }
-    // P8c-14: "the persisted selection wins" (D13's own rule) — resume reads `record.selection`
-    // BY IDENTITY, never re-decides through `selectRuntimeFor`.
-    const session = assembleOfficial(sessionId, record.backendSessionId!, record.selection);
-    try {
-      await session.open();
-    } catch (err) {
-      drivers.delete(sessionId);
-      if (err instanceof WinterLegRefusal) throw err;
-      if (err instanceof ClaudeExecutableUnavailable) throw new WinterLegRefusal("claude_executable_unavailable", err.message);
-      if (err instanceof OfficialConsoleRouterUnsupported) throw new WinterLegRefusal("official_console_router_unsupported", err.message);
-      if (err instanceof OfficialConsoleProfileMissing) throw new WinterLegRefusal("console_profile_missing", err.message);
-      // F1 follow-on: a Claude row with no wire spelling on Anthropic's API — typed, never a fallback.
-      if (err instanceof OfficialNoWireModel) throw new WinterLegRefusal(err.code, err.message, err.reason);
-      throw new WinterLegRefusal("winter_leg_unavailable", `the official child for ${sessionId} could not be resumed (${err instanceof Error ? err.name : "unknown"})`);
-    }
-    return session;
-  };
-
   const resume = async (sessionId: string): Promise<LegSession> => {
     assertSpine();
-    const recorded = recordOf(sessionId);
+    // WS-23 (R2): a record the retired official leg wrote is adopted onto the Winter leg first — its
+    // transcript re-keyed, its runtime kind and selection rewritten — or refused typed, having moved
+    // nothing (`adoptLegacyRecord`). Synchronous, like everything up to `drivers.set` (n7).
+    const recorded = sessionLegOf(recordOf(sessionId)) === "official" ? adoptLegacyRecord(sessionId) : recordOf(sessionId);
     const leg = sessionLegOf(recorded);
-    // Round 3: the transcript is where the leg will look BEFORE it opens (synchronous — n7).
-    const record = recorded !== undefined && (leg === "winter" || leg === "official") ? rekeyForCanonicalCwd(sessionId, recorded, leg) : recorded;
-    if (leg === "official" && record !== undefined) {
-      return resumeOfficial(sessionId, record);
-    }
+    // Round 3: the transcript is where the child will look BEFORE it opens (synchronous — n7).
+    const record = recorded !== undefined && leg === "winter" ? rekeyForCanonicalCwd(sessionId, recorded) : recorded;
     if (leg !== "winter" || record?.backendSessionId === undefined) {
       throw new WinterLegRefusal("session_predates_winter_leg", `session ${sessionId} predates the Winter leg (it has no Winter transcript); start a new session`);
     }
@@ -1704,13 +1422,15 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     return session;
   };
 
-  /** P8c-14: a leg the table can actually resume/create a driver on. */
+  /** P8c-14: a leg the table can resume a driver on — `official` included, because `resume()` adopts
+   *  such a record onto the Winter leg before it opens (WS-23). */
   const isResumableLeg = (leg: SessionLeg | undefined): boolean => leg === "winter" || leg === "official";
 
   return {
     legForNewSession: legForNew,
     legOf: (sessionId) => sessionLegOf(recordOf(sessionId)),
     advisorProviderOf: (sessionId) => (drivers.has(sessionId) ? advisorProviders.get(sessionId) : undefined),
+    adoptLegacyRecord,
     assertAvailable,
     create,
     get: (sessionId) => drivers.get(sessionId),

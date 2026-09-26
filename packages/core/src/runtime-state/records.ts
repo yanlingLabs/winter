@@ -127,6 +127,11 @@ export type RuntimeSessionPatch = Partial<
     | "providerId"
     | "modelRef"
     | "authRef"
+    // WS-23 (R2, fix round 1 minor 7): a legacy `claude-agent` record adopted onto the Winter runtime
+    // is re-stamped with the Winter runtime's own versions, so the record never keeps naming the
+    // retired official SDK's. Nullable columns: an explicit `undefined` clears them.
+    | "sdkVersion"
+    | "engineVersion"
   >
 >;
 
@@ -322,6 +327,9 @@ const PATCH_COLUMNS: ReadonlyArray<readonly [keyof RuntimeSessionPatch, string]>
   ["providerId", "provider_id"],
   ["modelRef", "model_ref"],
   ["authRef", "auth_ref"],
+  // WS-23 (fix round 1 minor 7): the legacy adoption's version re-stamp.
+  ["sdkVersion", "sdk_version"],
+  ["engineVersion", "engine_version"],
 ];
 
 const DUPLICATE_BACKEND_ID = /UNIQUE constraint failed: runtime_sessions\.backend_session_id/;
