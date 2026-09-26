@@ -311,12 +311,12 @@ The question is Winter asking, so its text is **binding #4 by derivation** on bo
 | Role | iOS | Mac | Notes |
 | --- | --- | --- | --- |
 | `composerField` | `.body` | derived | The input itself — BOUND to the user-message size (ruling 2026-08-13), reading the live sans metrics so typing and the sent bubble can never diverge. EVERY home, the orb field included: the new-chat 16-pt opt-up (2026-08-07) and the orb's brief hold-at-14 were both retired by rulings the same day (§ 4.6). |
-| `composerPlusGlyph` | 17 light | 17 medium | The attach circle — the one composer glyph size the platforms share. Mac: `composerAttachGlyph`. |
+| `composerPlusGlyph` | `.callout` medium | 17 medium | The attach circle — iOS moved off a pinned size onto Dynamic Type in its dark-mode pass, so the platforms no longer share a number. Mac: `composerAttachGlyph`. |
 | `composerModelPill` | 14 (pinned) | 13 | iOS Claude-measured on device; Mac `control`. Recorded, § 4.6. |
 | `composerSend` | 17 bold | 15 medium | Recorded divergence, § 4.6. |
-| `composerMicGlyph` | 15 | — | The mock mic circle. |
+| `composerMicGlyph` | `.callout` medium | — | The mock mic circle — matches `composerPlusGlyph`. |
 | `composerStop` | 15 semibold | — | |
-| `composerVoice` | 17 | — | The mock voice orb. |
+| `composerVoice` | `.body` bold | — | The mock voice-orb waveform — bold only; the other composer glyphs keep their own weights. |
 
 #### iOS chrome (no Mac counterpart — the drawer, session lists, pickers, approvals, pairing)
 
@@ -336,7 +336,8 @@ The question is Winter asking, so its text is **binding #4 by derivation** on bo
 | `newSessionGlyph` | 14 | — | The plus-bubble in the 32 pt inverse circle. |
 | `bannerText` | `.caption` | — | Session-level notice rows. |
 | `bannerDismiss` | `.caption2` bold | — | |
-| `actionIcon` | 16 | — | Message action buttons (copy/retry). |
+| `actionIcon` | 13 semibold | — | Message action buttons (copy/retry). |
+| `actionIconBold` | 13 bold | — | Bold action glyphs, emphasized independently of the other action icons. |
 | `footerAsterisk` | 22 semibold | — | The end-of-conversation mark. |
 | `footerDisclaimer` | `.footnote` | — | |
 | `approvalTitle` | `.subheadline` semibold | — | |
@@ -366,7 +367,7 @@ The question is Winter asking, so its text is **binding #4 by derivation** on bo
 | `scannerGlyphLarge` | 48 | — | |
 | `scannerGlyph` | 40 | — | |
 
-The pinned glyph sizes above (14/16/17/18/22/40/48/56/64 and the two 13/11 tool marks) are **decoration geometry, not reading text** — the same exception class as the wordmark. Everything a user *reads* on iOS stays on the ramp.
+The pinned glyph sizes above (14/17/18/22/40/48/56/64, the 13/11 tool marks and the two 13 action icons) are **decoration geometry, not reading text** — the same exception class as the wordmark. Everything a user *reads* on iOS stays on the ramp.
 
 #### Mac chrome (no iOS counterpart — the window shell, dashboard, orb)
 
