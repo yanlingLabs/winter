@@ -74,3 +74,28 @@ describe("projector: WS-23 hook notices", () => {
     expect(accept(projector, frame)).toHaveLength(0);
   });
 });
+
+// WS-24: SDK 0.0.28 stamps `parent_tool_use_id` on a subagent's forwarded system frames. A child's stop
+// notice stops the child, not the session's turn.
+describe("projector: a subagent's informational frame (WS-24)", () => {
+  test("a child's stop notice is filed on the child's thread and does not suppress the main turn's own notice", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    beginTurn(projector, "go");
+    const child = accept(projector, informational("child stopped", { prevent_continuation: true, parent_tool_use_id: "toolu_child" }));
+    expect(child[0]).toMatchObject({ type: "hook_notice", threadId: "toolu_child", stopsTurn: true });
+    const end = accept(projector, result({ result: "budget review required", terminal_reason: "hook_stopped" }));
+    expect(end.map((e) => e.type)).toEqual(["hook_notice", "turn_completed"]);
+    expect(end[0]).toMatchObject({ threadId: MAIN_THREAD, text: "Stopped by a hook: budget review required" });
+  });
+
+  test("a frame without the id (0.0.27) behaves exactly as before", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    beginTurn(projector, "go");
+    accept(projector, informational("main stopped", { prevent_continuation: true, parent_tool_use_id: null }));
+    const end = accept(projector, result({ result: "x", terminal_reason: "hook_stopped" }));
+    expect(end.map((e) => e.type)).toEqual(["turn_completed"]);
+  });
+});
+

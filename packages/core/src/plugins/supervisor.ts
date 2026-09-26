@@ -22,6 +22,19 @@ import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
  * values instead of waiting out real seconds; the one thing that can't be waited out in a test
  * (a full 1s·2ⁿ…60s backoff schedule) is exposed as the pure `backoffDelayMs` for exact-value
  * assertions, same reasoning.
+ *
+ * THE KEY (WS-24). A plugin's id here is its SPEC, `"<name>@<marketplace>"` (`PluginInfo.spec`,
+ * `installed_plugins.json`'s own key) — the one every other plugin surface (consent, enable, install)
+ * already used. It was the bare name, so two marketplaces' same-named plugins shared one runtime, one
+ * PID file, one token and one tool namespace. The id is the plugin's whole identity downstream: its PID
+ * file (`<runDir>/plugins/<spec>.pid`), the token minted for it, the `WINTER_PLUGIN_ID` it says hello
+ * with, its contributions and its tools (`plugin__<spec>__<tool>`).
+ *
+ * WHAT A BARE-NAME ERA LEFT BEHIND. A PID file a pre-WS-24 core wrote is `<name>.pid`; the bare name is
+ * never an eligible id now, so `sweepOrphans` finds it and — only on a VERIFIED start-time match — ends
+ * that process, and `startAll` spawns the plugin fresh under its spec. Adopting it instead would be
+ * wrong: the orphan authenticated as the bare name (its token, its `WINTER_PLUGIN_ID`), so it could
+ * never register under the spec. `daemon.ts` revokes the bare-name tokens at boot for the same reason.
  */
 
 // -------------------------------------------------------------------------------------------
@@ -115,8 +128,8 @@ function defaultProcessStartedAt(pid: number): string | null {
 // -------------------------------------------------------------------------------------------
 
 /** The daemon-computed spawn config for one consented, spawn-eligible platform plugin
- *  (agent/plugins.ts#pluginSpawnEligible). `dir` is the plugin's directory (default cwd);
- *  `entry.cwd`, when set, is resolved relative to `dir`. */
+ *  (agent/plugins.ts#pluginSpawnEligible). `id` is the plugin's spec (WS-24 — see this file's header).
+ *  `dir` is the plugin's directory (default cwd); `entry.cwd`, when set, is resolved relative to `dir`. */
 export interface EligiblePlugin {
   id: string;
   dir: string;
@@ -567,6 +580,25 @@ export class PluginSupervisor {
     return this.runtimes.get(pluginId)?.config;
   }
 
+  /** WS-24: every id (spec) this supervisor tracks, in any status — for a caller that must resolve a
+   *  pre-WS-24 BARE name (`winter plugin restart <name>`) to the one spec it can mean. */
+  trackedIds(): string[] {
+    return [...this.runtimes.keys()];
+  }
+
+  /** WS-24: the ONE tracked spec whose name half is `name`, or `undefined` (none, or ambiguous — two
+   *  marketplaces' same-named plugins). A shortcut binding the Mac saved before WS-24 names the plugin by
+   *  its bare id (`shortcut.invoke`/`tile.action`'s `pluginId`); `pushToPlugin` resolves it through this so
+   *  an existing binding keeps firing, and refuses (as unknown) only when the bare name is ambiguous. */
+  private uniqueSpecNamed(name: string): string | undefined {
+    if (name.includes("@")) return undefined;
+    const named = [...this.runtimes.keys()].filter((id) => {
+      const at = id.lastIndexOf("@");
+      return at > 0 && id.slice(0, at) === name;
+    });
+    return named.length === 1 ? named[0] : undefined;
+  }
+
   // -----------------------------------------------------------------------------------------
   // Registration / connection lifecycle (Task 4 calls these from ipc/server.ts).
   // -----------------------------------------------------------------------------------------
@@ -613,7 +645,7 @@ export class PluginSupervisor {
    *  `{code:"not_connected"}` when it IS tracked but isn't currently "running" with a live `conn`,
    *  or the live conn's own `push()` reports the socket already dead; `{ok:true}` once handed off. */
   pushToPlugin(pluginId: string, event: NewSessionEvent): { ok: true } | { code: "not_connected" } | { code: "unknown_plugin" } {
-    const rt = this.runtimes.get(pluginId);
+    const rt = this.runtimes.get(pluginId) ?? this.runtimes.get(this.uniqueSpecNamed(pluginId) ?? "");
     if (!rt) return { code: "unknown_plugin" };
     if (rt.status !== "running" || !rt.conn) return { code: "not_connected" };
     return rt.conn.push(event) ? { ok: true } : { code: "not_connected" };

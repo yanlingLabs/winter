@@ -1,10 +1,12 @@
+// `McpManager` — since WS-24 a STATUS PROBE for `mcp.list` (see `agent/mcp/manager.ts`'s header): each
+// server is connected, its `tools/list` read, and closed again. It registers nothing anywhere (no session
+// ever read the `mcp__…` rows it used to write into the daemon's shared registry) and leaves nothing
+// running (every session's child connects its own copy).
 import { describe, expect, test } from "bun:test";
-import { z } from "zod";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { mkdirSync, mkdtempSync, writeFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
 import { McpManager } from "../../../src/agent/mcp/manager";
-import { ToolRegistry, type ToolContext } from "../../../src/agent/tools/registry";
 import { TrustStore } from "../../../src/agent/trust";
 
 // WS-21: the project MCP file is `<root>/.winter/mcp.json` (the repo-root `.mcp.json` is never read).
@@ -14,101 +16,113 @@ const writeProjectMcp = (root: string, body: string): void => {
 };
 
 const FIXTURE = join(import.meta.dir, "fake-mcp-server.ts");
-const ctx = (): ToolContext => ({ cwd: "/tmp", roots: ["/tmp"], sessionId: "s1" });
 const isMac = process.platform === "darwin";
 function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "mcp-mgr-"))); }
+const trustNone = (): TrustStore => new TrustStore(join(realDir(), "trust.json"));
 
-describe.if(isMac)("McpManager", () => {
-  test("startAll registers mcp__fake__echo; execute dispatches to the server", async () => {
-    const registry = new ToolRegistry();
-    const mgr = new McpManager({ registry, trust: new TrustStore(join(realDir(), "trust.json")) });
-    await mgr.startAll({ fake: { command: "bun", args: ["run", FIXTURE] } });
-    expect(registry.has("mcp__fake__echo")).toBe(true);
-    const out = await registry.execute("mcp__fake__echo", { msg: "hi" }, ctx());
-    expect(out.isError).toBe(false);
-    expect(out.output).toBe("echo: hi");
+/** Whether `pid` is still a live process, waited on briefly (a closed stdio server exits on its own time). */
+async function stillRunning(pid: number, withinMs = 3_000): Promise<boolean> {
+  const t0 = Date.now();
+  for (;;) {
+    try { process.kill(pid, 0); } catch { return false; }
+    if (Date.now() - t0 > withinMs) return true;
+    await Bun.sleep(25);
+  }
+}
+
+describe.if(isMac)("McpManager (a status probe)", () => {
+  test("startAll reports a connected server with its tool names — and leaves nothing running (WS-24)", async () => {
+    const pidFile = join(realDir(), "pid");
+    const mgr = new McpManager({ trust: trustNone() });
+    await mgr.startAll({ fake: { command: "bun", args: ["run", FIXTURE], env: { WINTER_FAKE_PID_FILE: pidFile } } });
     expect(mgr.list()).toEqual([{ name: "fake", status: "connected", toolNames: ["echo"], source: "user" }]);
-    mgr.stopAll();
+    expect(existsSync(pidFile)).toBe(true); // it really ran…
+    expect(await stillRunning(Number(readFileSync(pidFile, "utf8")))).toBe(false); // …and the probe closed it
   });
 
-  test("a bad-command server is skipped; a good one still registers (one bad ≠ dead)", async () => {
-    const registry = new ToolRegistry();
-    const mgr = new McpManager({ registry, trust: new TrustStore(join(realDir(), "trust.json")) });
+  test("a wrapper-launched server (an npx-style grandchild) is ended with its whole process group", async () => {
+    const pidFile = join(realDir(), "pid");
+    const mgr = new McpManager({ trust: trustNone() });
+    // `sh` stays the parent (the trailing `; true`), so the real server is its CHILD — our grandchild.
+    await mgr.startAll({ wrapped: { command: "sh", args: ["-c", `bun run '${FIXTURE}'; true`], env: { WINTER_FAKE_PID_FILE: pidFile } } });
+    expect(mgr.list().find((s) => s.name === "wrapped")?.status).toBe("connected");
+    expect(await stillRunning(Number(readFileSync(pidFile, "utf8")))).toBe(false);
+  });
+
+  test("a server that never answers the handshake is a failed probe within the start timeout, and is killed", async () => {
+    const pidFile = join(realDir(), "pid");
+    const prev = process.env.WINTER_MCP_START_TIMEOUT_MS;
+    process.env.WINTER_MCP_START_TIMEOUT_MS = "500";
+    try {
+      const mgr = new McpManager({ trust: trustNone() });
+      const t0 = Date.now();
+      await mgr.startAll({ hung: { command: "sh", args: ["-c", `echo $$ > '${pidFile}'; exec sleep 60`] } });
+      expect(Date.now() - t0).toBeLessThan(5_000);
+      expect(mgr.list().find((s) => s.name === "hung")?.status).toBe("failed");
+      expect(await stillRunning(Number(readFileSync(pidFile, "utf8").trim()))).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.WINTER_MCP_START_TIMEOUT_MS; else process.env.WINTER_MCP_START_TIMEOUT_MS = prev;
+    }
+  });
+
+  test("a bad-command server is reported failed; a good one still connects (one bad ≠ dead)", async () => {
+    const mgr = new McpManager({ trust: trustNone() });
     await mgr.startAll({ good: { command: "bun", args: ["run", FIXTURE] }, bad: { command: "this-command-does-not-exist-xyz" } });
-    expect(registry.has("mcp__good__echo")).toBe(true);
     expect(mgr.list().find((s) => s.name === "bad")!.status).toBe("failed");
     expect(mgr.list().find((s) => s.name === "good")!.status).toBe("connected");
-    mgr.stopAll();
   });
 
-  test("a server with duplicate tool names (register throws) is skipped; a sibling good server still registers (one bad ≠ dead)", async () => {
-    const registry = new ToolRegistry();
-    const mgr = new McpManager({ registry, trust: new TrustStore(join(realDir(), "trust.json")) });
-    await mgr.startAll({
-      good: { command: "bun", args: ["run", FIXTURE] },
-      dup: { command: "bun", args: ["run", FIXTURE], env: { WINTER_FAKE_DUP: "1" } },
-    });
-    // startAll must never throw regardless of one server's registration failure.
-    expect(registry.has("mcp__good__echo")).toBe(true);
-    expect(mgr.list().find((s) => s.name === "good")!.status).toBe("connected");
-    expect(mgr.list().find((s) => s.name === "dup")!.status).toBe("failed");
-    mgr.stopAll();
+  test("a server whose tool list repeats a name still probes connected — the probe registers nothing to collide (WS-24)", async () => {
+    const mgr = new McpManager({ trust: trustNone() });
+    await mgr.startAll({ dup: { command: "bun", args: ["run", FIXTURE], env: { WINTER_FAKE_DUP: "1" } } });
+    expect(mgr.list().find((s) => s.name === "dup")).toMatchObject({ status: "connected", toolNames: ["echo", "echo"] });
   });
 });
 
-function projDir(withServer = true): string {
+function projDir(withServer = true, env?: Record<string, string>): string {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "mcp-proj-")));
-  if (withServer) writeProjectMcp(dir, JSON.stringify({ mcpServers: { proj: { command: "bun", args: ["run", FIXTURE] } } }));
+  if (withServer) writeProjectMcp(dir, JSON.stringify({ mcpServers: { proj: { command: "bun", args: ["run", FIXTURE], ...(env ? { env } : {}) } } }));
   return dir;
 }
 
 describe.if(isMac)("McpManager.ensureProject", () => {
-  test("UNTRUSTED project .mcp.json → nothing starts/registers (SECURITY)", async () => {
+  test("UNTRUSTED project → nothing probed or recorded (SECURITY); probed after trust", async () => {
     const dir = projDir();
-    const registry = new ToolRegistry();
-    const trust = new TrustStore(join(realDir(), "trust.json"));
-    const mgr = new McpManager({ registry, trust });
+    const trust = trustNone();
+    const mgr = new McpManager({ trust });
     await mgr.ensureProject(dir);
-    expect(registry.has("mcp__proj__echo")).toBe(false); // not spawned/registered while untrusted
+    expect(mgr.list(dir)).toEqual([]); // not spawned while untrusted
     // and NOT recorded — retries after trust:
     trust.trust(dir);
     await mgr.ensureProject(dir);
-    expect(registry.has("mcp__proj__echo")).toBe(true);
-    mgr.stopAll();
+    expect(mgr.list(dir)).toEqual([{ name: "proj", status: "connected", toolNames: ["echo"], source: "project" }]);
   });
 
-  test("TRUSTED project → tool registered with scope=dir + callable", async () => {
-    const dir = projDir();
-    const registry = new ToolRegistry();
-    const trust = new TrustStore(join(realDir(), "trust.json")); trust.trust(dir);
-    const mgr = new McpManager({ registry, trust });
+  test("TRUSTED project → probed connected, and not left running", async () => {
+    const pidFile = join(realDir(), "pid");
+    const dir = projDir(true, { WINTER_FAKE_PID_FILE: pidFile });
+    const trust = trustNone(); trust.trust(dir);
+    const mgr = new McpManager({ trust });
     await mgr.ensureProject(dir);
-    expect(registry.has("mcp__proj__echo")).toBe(true);
-    const out = await registry.execute("mcp__proj__echo", { msg: "hi" }, { cwd: dir, roots: [dir], sessionId: "s" });
-    expect(out.output).toBe("echo: hi");
-    // scope enforced: a call from another cwd is rejected
-    const other = realDir();
-    expect((await registry.execute("mcp__proj__echo", { msg: "x" }, { cwd: other, roots: [other], sessionId: "s" })).isError).toBe(true);
-    mgr.stopAll();
+    expect(mgr.list(dir).find((s) => s.name === "proj")).toMatchObject({ status: "connected", toolNames: ["echo"], source: "project" });
+    expect(await stillRunning(Number(readFileSync(pidFile, "utf8")))).toBe(false);
   });
 
-  test("malformed .mcp.json → skip, no throw; idempotent 2nd call", async () => {
+  test("malformed .winter/mcp.json → skip, no throw; idempotent 2nd call", async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "mcp-bad-")));
     writeProjectMcp(dir, "{ not json");
-    const registry = new ToolRegistry();
-    const trust = new TrustStore(join(realDir(), "trust.json")); trust.trust(dir);
-    const mgr = new McpManager({ registry, trust });
+    const trust = trustNone(); trust.trust(dir);
+    const mgr = new McpManager({ trust });
     await expect(mgr.ensureProject(dir)).resolves.toBeUndefined();
     await mgr.ensureProject(dir); // idempotent
-    mgr.stopAll();
+    expect(mgr.list(dir)).toEqual([]);
   });
 
   // PARITY FIX (controller-directed): `doEnsureProject` used to validate the WHOLE `mcpServers` map
   // in one `.parse()` call (stdio-only) — a single http/sse (or otherwise malformed) entry anywhere
-  // failed the whole parse and silently dropped every OTHER configured project server, including
-  // sibling STDIO ones that would otherwise have started fine. Per-entry validation
-  // (`parseProjectMcpServers`) fixes that: the stdio entry below still starts despite its siblings.
-  test("mixed .mcp.json (stdio + http + sse + one malformed entry): the stdio entry still starts; http/sse are recognized but not tracked by this manager (no in-daemon client); the malformed one is skipped — one log line each, no thrown error", async () => {
+  // failed the whole parse and silently dropped every OTHER configured project server. Per-entry
+  // validation (`parseProjectMcpServers`) fixes that: the stdio entry below still probes despite its siblings.
+  test("mixed file (stdio + http + sse + one malformed entry): the stdio entry is probed; http/sse are recognized but not probed (no in-daemon client); the malformed one is skipped — one log line each", async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "mcp-mixed-")));
     writeProjectMcp(dir, JSON.stringify({
       mcpServers: {
@@ -118,318 +132,125 @@ describe.if(isMac)("McpManager.ensureProject", () => {
         broken: { type: "stdio" }, // missing `command` — invalid
       },
     }));
-    const registry = new ToolRegistry();
-    const trust = new TrustStore(join(realDir(), "trust.json")); trust.trust(dir);
+    const trust = trustNone(); trust.trust(dir);
     const logs: string[] = [];
-    const mgr = new McpManager({ registry, trust, log: (m) => logs.push(m) });
+    const mgr = new McpManager({ trust, log: (m) => logs.push(m) });
     await mgr.ensureProject(dir);
-    // The stdio sibling survives despite the other three entries in the same file.
-    expect(registry.has("mcp__proj__echo")).toBe(true);
     expect(mgr.list(dir).find((s) => s.name === "proj")?.status).toBe("connected");
-    // http/sse entries validated (no error) but not tracked by the manager's own registry — no
-    // in-daemon client for those transports; the session's own child connects to them directly
-    // (`configuredMcpServersFor`, exercised separately in `external-mcp.test.ts`).
     expect(mgr.list(dir).find((s) => s.name === "httpOne")).toBeUndefined();
     expect(mgr.list(dir).find((s) => s.name === "sseOne")).toBeUndefined();
     expect(mgr.list(dir).find((s) => s.name === "broken")).toBeUndefined();
-    // Exactly ONE line per name (never a batch, never a re-log on top of the entry's own line).
     expect(logs.filter((m) => m.includes("httpOne")).length).toBe(1);
     expect(logs.filter((m) => m.includes("sseOne")).length).toBe(1);
     expect(logs.filter((m) => m.includes("broken")).length).toBe(1);
-    mgr.stopAll();
   });
 
-  test("the SAME mixed .mcp.json, untrusted, still starts/registers nothing at all — the trust gate is unchanged by the per-entry fix", async () => {
+  test("the SAME mixed file, untrusted, still probes nothing at all — the trust gate is unchanged by the per-entry fix", async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "mcp-mixed-untrusted-")));
     writeProjectMcp(dir, JSON.stringify({
       mcpServers: {
         proj: { command: "bun", args: ["run", FIXTURE] },
         httpOne: { type: "http", url: "https://example.com/mcp" },
-        sseOne: { type: "sse", url: "https://example.com/sse" },
         broken: { type: "stdio" },
       },
     }));
-    const registry = new ToolRegistry();
-    const trust = new TrustStore(join(realDir(), "trust.json")); // never trusted
-    const mgr = new McpManager({ registry, trust });
+    const mgr = new McpManager({ trust: trustNone() }); // never trusted
     await mgr.ensureProject(dir);
-    expect(registry.has("mcp__proj__echo")).toBe(false);
     expect(mgr.list(dir)).toEqual([]);
-    mgr.stopAll();
   });
 
-  test("concurrent ensureProject for the same dir shares one in-flight run (no double-spawn)", async () => {
+  test("concurrent ensureProject for the same dir shares one in-flight run (no double probe)", async () => {
     const dir = projDir();
-    const registry = new ToolRegistry();
-    const trust = new TrustStore(join(realDir(), "trust.json")); trust.trust(dir);
-    const mgr = new McpManager({ registry, trust });
+    const trust = trustNone(); trust.trust(dir);
+    const mgr = new McpManager({ trust });
     const p1 = mgr.ensureProject(dir);
     const p2 = mgr.ensureProject(dir);
-    expect(p2).toBe(p1); // second call JOINS the first (in-flight guard) — RED without the fix
+    expect(p2).toBe(p1); // second call JOINS the first (in-flight guard)
     await Promise.all([p1, p2]);
-    expect(registry.has("mcp__proj__echo")).toBe(true);
-    expect(mgr.list(dir).filter((s) => s.name === "proj").length).toBe(1); // exactly one project server, not duplicated
-    mgr.stopAll();
+    expect(mgr.list(dir).filter((s) => s.name === "proj").length).toBe(1);
   });
 
   // MEDIUM (fix wave, pre-merge review, finding 3): `ensureProject` is called merely to RENDER
-  // `mcp.list {cwd}` (`ipc/server.ts`'s `mcpList` handler) — before this fix that unconditionally
-  // spawned every configured project server, disabled or not.
+  // `mcp.list {cwd}` (`ipc/server.ts`'s `mcpList` handler) — it must never spawn a disabled server.
   test("a name in settings.mcp.disabled is NEVER spawned by ensureProject, even in a trusted project", async () => {
-    const dir = projDir();
-    const registry = new ToolRegistry();
-    const trust = new TrustStore(join(realDir(), "trust.json")); trust.trust(dir);
-    const mgr = new McpManager({ registry, trust, disabled: () => new Set(["proj"]) });
+    const pidFile = join(realDir(), "pid");
+    const dir = projDir(true, { WINTER_FAKE_PID_FILE: pidFile });
+    const trust = trustNone(); trust.trust(dir);
+    const mgr = new McpManager({ trust, disabled: () => new Set(["proj"]) });
     await mgr.ensureProject(dir);
-    expect(registry.has("mcp__proj__echo")).toBe(false); // never spawned/registered
-    // Still reported, so mcp.list's own settings overlay has a row to rewrite to "disabled" —
-    // never started, so never "connected".
-    const row = mgr.list(dir).find((s) => s.name === "proj");
-    expect(row?.status).not.toBe("connected");
-    mgr.stopAll();
+    expect(existsSync(pidFile)).toBe(false); // never spawned
+    // Still reported, so mcp.list's own settings overlay has a row to rewrite to "disabled".
+    expect(mgr.list(dir).find((s) => s.name === "proj")?.status).not.toBe("connected");
   });
 
-  test("mcp.disabled on an http/sse project entry changes nothing — it was never trackable by this manager either way (no placeholder row, disabled or not)", async () => {
+  test("mcp.disabled on an http/sse project entry changes nothing — never probed either way (no placeholder row)", async () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "mcp-disabled-http-")));
     writeProjectMcp(dir, JSON.stringify({
       mcpServers: { httpDisabled: { type: "http", url: "https://example.com/mcp" }, httpEnabled: { type: "http", url: "https://example.com/mcp2" } },
     }));
-    const registry = new ToolRegistry();
-    const trust = new TrustStore(join(realDir(), "trust.json")); trust.trust(dir);
+    const trust = trustNone(); trust.trust(dir);
     const logs: string[] = [];
-    const mgr = new McpManager({ registry, trust, log: (m) => logs.push(m), disabled: () => new Set(["httpDisabled"]) });
+    const mgr = new McpManager({ trust, log: (m) => logs.push(m), disabled: () => new Set(["httpDisabled"]) });
     await mgr.ensureProject(dir);
-    // Neither gets a tracked row — same "not trackable by this reader" treatment regardless of
-    // mcp.disabled (the asymmetry a review caught: checking `disabled` before the transport would
-    // have given the disabled one a `status: "failed"` placeholder while the enabled one got none).
     expect(mgr.list(dir).find((s) => s.name === "httpDisabled")).toBeUndefined();
     expect(mgr.list(dir).find((s) => s.name === "httpEnabled")).toBeUndefined();
     expect(logs.filter((m) => m.includes("httpDisabled")).length).toBe(1);
     expect(logs.filter((m) => m.includes("httpEnabled")).length).toBe(1);
-    mgr.stopAll();
   });
 
-  test("a name NOT in settings.mcp.disabled still starts normally (the filter is name-specific)", async () => {
+  test("a name NOT in settings.mcp.disabled still probes normally (the filter is name-specific)", async () => {
     const dir = projDir();
-    const registry = new ToolRegistry();
-    const trust = new TrustStore(join(realDir(), "trust.json")); trust.trust(dir);
-    const mgr = new McpManager({ registry, trust, disabled: () => new Set(["some-other-server"]) });
+    const trust = trustNone(); trust.trust(dir);
+    const mgr = new McpManager({ trust, disabled: () => new Set(["some-other-server"]) });
     await mgr.ensureProject(dir);
-    expect(registry.has("mcp__proj__echo")).toBe(true);
     expect(mgr.list(dir).find((s) => s.name === "proj")?.status).toBe("connected");
-    mgr.stopAll();
   });
 });
 
-describe.if(isMac)("McpManager.stopServer (finding 3)", () => {
-  test("stops a running USER-tier server and removes its tools from the registry", async () => {
-    const registry = new ToolRegistry();
-    const mgr = new McpManager({ registry, trust: new TrustStore(join(realDir(), "trust.json")) });
+describe.if(isMac)("McpManager.stopServer / startOneUserServer (mcp.disable / mcp.enable)", () => {
+  test("stopServer drops a USER-tier server's recorded status", async () => {
+    const mgr = new McpManager({ trust: trustNone() });
     await mgr.startAll({ fake: { command: "bun", args: ["run", FIXTURE] } });
-    expect(registry.has("mcp__fake__echo")).toBe(true);
     mgr.stopServer("fake");
-    expect(registry.has("mcp__fake__echo")).toBe(false);
-    expect(mgr.list().find((s) => s.name === "fake")).toBeUndefined(); // status dropped too, not just tools
-    mgr.stopAll();
+    expect(mgr.list().find((s) => s.name === "fake")).toBeUndefined();
   });
 
-  test("stops a running PROJECT-tier server and removes its tools from the registry", async () => {
+  test("stopServer drops a PROJECT-tier server's recorded row", async () => {
     const dir = projDir();
-    const registry = new ToolRegistry();
-    const trust = new TrustStore(join(realDir(), "trust.json")); trust.trust(dir);
-    const mgr = new McpManager({ registry, trust });
+    const trust = trustNone(); trust.trust(dir);
+    const mgr = new McpManager({ trust });
     await mgr.ensureProject(dir);
-    expect(registry.has("mcp__proj__echo")).toBe(true);
     mgr.stopServer("proj");
-    expect(registry.has("mcp__proj__echo")).toBe(false);
     expect(mgr.list(dir).find((s) => s.name === "proj")).toBeUndefined();
-    mgr.stopAll();
   });
 
-  test("a name with no running client anywhere is a no-op — never throws", () => {
-    const registry = new ToolRegistry();
-    const mgr = new McpManager({ registry, trust: new TrustStore(join(realDir(), "trust.json")) });
+  test("a name with no record anywhere is a no-op — never throws", () => {
+    const mgr = new McpManager({ trust: trustNone() });
     expect(() => mgr.stopServer("never-existed")).not.toThrow();
   });
-});
 
-// MEDIUM (fix wave, pre-merge review, finding 3, symmetry) — regression coverage caught by a
-// second review pass: `startOneUserServer` used to stop the old client WITHOUT unregistering its
-// tools, so re-registering under `startOne`'s "throw" collision mode hit a duplicate-name
-// `registry.register` and turned an ordinary `mcp.enable` (on an ALREADY-running, or never-disabled,
-// name) into a dead process with a "failed" status. `startOneUserServer` now calls `this.
-// stopServer(name)` first, which unregisters too.
-describe.if(isMac)("McpManager.startOneUserServer (finding 3, symmetry — regression)", () => {
-  test("enabling an ALREADY-RUNNING server (never disabled) does not kill it — connects clean, no collision", async () => {
-    const registry = new ToolRegistry();
-    const mgr = new McpManager({ registry, trust: new TrustStore(join(realDir(), "trust.json")) });
+  test("startOneUserServer re-probes: an already-known server stays connected, a dropped one comes back", async () => {
+    const mgr = new McpManager({ trust: trustNone() });
     const cfg = { command: "bun", args: ["run", FIXTURE] };
     await mgr.startAll({ fake: cfg });
-    expect(registry.has("mcp__fake__echo")).toBe(true);
+    await mgr.startOneUserServer("fake", cfg); // never disabled — must not turn into "failed"
     expect(mgr.list().find((s) => s.name === "fake")?.status).toBe("connected");
-
-    // The regression: calling startOneUserServer on a name that was never stopped/disabled.
-    await mgr.startOneUserServer("fake", cfg);
-    expect(registry.has("mcp__fake__echo")).toBe(true);
-    expect(mgr.list().find((s) => s.name === "fake")?.status).toBe("connected"); // NOT "failed"
-    const out = await registry.execute("mcp__fake__echo", { msg: "hi" }, ctx());
-    expect(out.output).toBe("echo: hi"); // the tool actually still works, not a stale registration
-    mgr.stopAll();
-  });
-
-  test("enabling a genuinely stopped/disabled server restarts it clean", async () => {
-    const registry = new ToolRegistry();
-    const mgr = new McpManager({ registry, trust: new TrustStore(join(realDir(), "trust.json")) });
-    const cfg = { command: "bun", args: ["run", FIXTURE] };
-    await mgr.startAll({ fake: cfg });
     mgr.stopServer("fake");
-    expect(registry.has("mcp__fake__echo")).toBe(false);
-
     await mgr.startOneUserServer("fake", cfg);
-    expect(registry.has("mcp__fake__echo")).toBe(true);
-    expect(mgr.list().find((s) => s.name === "fake")?.status).toBe("connected");
-    mgr.stopAll();
+    expect(mgr.list()).toEqual([{ name: "fake", status: "connected", toolNames: ["echo"], source: "user" }]);
   });
 });
 
 describe.if(isMac)("McpManager.list(cwd) + stopAll", () => {
-  test("list(trusted cwd) includes the project server (source project); list() only user", async () => {
+  test("list(trusted cwd) includes the project server (source project); list() only user; stopAll forgets both", async () => {
     const dir = projDir();
-    const registry = new ToolRegistry();
-    const trust = new TrustStore(join(realDir(), "trust.json")); trust.trust(dir);
-    const mgr = new McpManager({ registry, trust });
-    await mgr.startAll({}); // no user servers
+    const trust = trustNone(); trust.trust(dir);
+    const mgr = new McpManager({ trust });
+    await mgr.startAll({ fake: { command: "bun", args: ["run", FIXTURE] } });
     await mgr.ensureProject(dir);
     expect(mgr.list().some((s) => s.source === "project")).toBe(false); // no cwd → no project
-    const withCwd = mgr.list(dir);
-    expect(withCwd.find((s) => s.name === "proj")).toMatchObject({ status: "connected", source: "project" });
+    expect(mgr.list(dir).find((s) => s.name === "proj")).toMatchObject({ status: "connected", source: "project" });
     mgr.stopAll();
-    expect(registry.has("mcp__proj__echo")).toBe(false); // stopAll unregistered project tools
-  });
-});
-
-function pluginDir(mcpJson?: string | object): string {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "mcp-plugin-")));
-  if (mcpJson !== undefined) {
-    writeFileSync(join(dir, ".mcp.json"), typeof mcpJson === "string" ? mcpJson : JSON.stringify(mcpJson));
-  }
-  return dir;
-}
-
-describe.if(isMac)("McpManager.startPlugins", () => {
-  test("enabled plugin's .mcp.json servers start; tools mcp__<plugin>_<server>__*; list source plugin; stopAll unregisters", async () => {
-    const dir = pluginDir({ mcpServers: { fake: { command: "bun", args: ["run", FIXTURE] } } });
-    const registry = new ToolRegistry();
-    const trust = new TrustStore(join(realDir(), "trust.json"));
-    const mgr = new McpManager({ registry, trust });
-    await mgr.startPlugins([{ name: "demo", dir }]);
-    expect(registry.has("mcp__demo_fake__echo")).toBe(true);
-    const st = mgr.list().find((s) => s.name === "demo:fake");
-    expect(st?.source).toBe("plugin");
-    expect(st?.status).toBe("connected");
-    mgr.stopAll();
-    expect(registry.has("mcp__demo_fake__echo")).toBe(false); // stopAll unregistered plugin tools
-  });
-
-  test("missing/malformed .mcp.json → skipped, no throw", async () => {
-    const noMcp = pluginDir(); // no .mcp.json at all
-    const badMcp = pluginDir("{ not json");
-    const registry = new ToolRegistry();
-    const trust = new TrustStore(join(realDir(), "trust.json"));
-    const mgr = new McpManager({ registry, trust });
-    await expect(mgr.startPlugins([{ name: "nop", dir: noMcp }, { name: "bad", dir: badMcp }])).resolves.toBeUndefined();
-    expect(mgr.list().length).toBe(0);
-    mgr.stopAll();
-  });
-
-  test("one failing server + one FIXTURE sibling → failed status + connected sibling", async () => {
-    const dir = pluginDir({ mcpServers: { bad: { command: "/nonexistent" }, good: { command: "bun", args: ["run", FIXTURE] } } });
-    const registry = new ToolRegistry();
-    const trust = new TrustStore(join(realDir(), "trust.json"));
-    const mgr = new McpManager({ registry, trust });
-    await mgr.startPlugins([{ name: "demo", dir }]);
-    expect(mgr.list().find((s) => s.name === "demo:bad")?.status).toBe("failed");
-    expect(mgr.list().find((s) => s.name === "demo:good")?.status).toBe("connected");
-    expect(registry.has("mcp__demo_good__echo")).toBe(true);
-    mgr.stopAll();
-  });
-
-  test("tool-name collision with an existing registration → collision-skipped + logged, no crash", async () => {
-    const dir = pluginDir({ mcpServers: { fake: { command: "bun", args: ["run", FIXTURE] } } });
-    const registry = new ToolRegistry();
-    registry.register({ name: "mcp__demo_fake__echo", description: "pre-existing", args: z.object({}).passthrough(), run: () => "pre-existing" });
-    const trust = new TrustStore(join(realDir(), "trust.json"));
-    const logs: string[] = [];
-    const mgr = new McpManager({ registry, trust, log: (m) => logs.push(m) });
-    await expect(mgr.startPlugins([{ name: "demo", dir }])).resolves.toBeUndefined();
-    const st = mgr.list().find((s) => s.name === "demo:fake");
-    expect(st?.status).toBe("connected"); // server still connects; only the colliding tool is skipped
-    expect(st?.toolNames).toEqual([]);
-    expect(logs.some((m) => m.includes("collide"))).toBe(true);
-    // the pre-existing registration is untouched:
-    expect((await registry.execute("mcp__demo_fake__echo", {}, ctx())).output).toBe("pre-existing");
-    mgr.stopAll();
-  });
-
-  // -------------------------------------------------------------------------------------------
-  // Task 4: manifest-declared mcpServers (design spec §2 — "mcpServers may now come from the
-  // manifest instead of .mcp.json (both accepted; manifest wins on conflict)"). `manifestServers`
-  // is passed by the daemon from winter-plugin.json's `contributes.mcpServers`.
-  // -------------------------------------------------------------------------------------------
-  test("manifestServers present + .mcp.json also present → manifest list used, .mcp.json ignored entirely", async () => {
-    const dir = pluginDir({ mcpServers: { legacy: { command: "/nonexistent-legacy-server" } } });
-    const registry = new ToolRegistry();
-    const trust = new TrustStore(join(realDir(), "trust.json"));
-    const mgr = new McpManager({ registry, trust });
-    await mgr.startPlugins([{ name: "demo", dir, manifestServers: [{ name: "fake", command: "bun", args: ["run", FIXTURE] }] }]);
-    expect(registry.has("mcp__demo_fake__echo")).toBe(true);
-    expect(mgr.list().find((s) => s.name === "demo:fake")?.status).toBe("connected");
-    // the .mcp.json-declared server was never even read/started:
-    expect(mgr.list().find((s) => s.name === "demo:legacy")).toBeUndefined();
-    mgr.stopAll();
-  });
-
-  test("manifest-only plugin (no .mcp.json at all) starts from manifestServers", async () => {
-    const dir = pluginDir(); // no .mcp.json
-    const registry = new ToolRegistry();
-    const trust = new TrustStore(join(realDir(), "trust.json"));
-    const logs: string[] = [];
-    const mgr = new McpManager({ registry, trust, log: (m) => logs.push(m) });
-    await mgr.startPlugins([{ name: "demo", dir, manifestServers: [{ name: "fake", command: "bun", args: ["run", FIXTURE] }] }]);
-    expect(registry.has("mcp__demo_fake__echo")).toBe(true);
-    expect(mgr.list().find((s) => s.name === "demo:fake")?.status).toBe("connected");
-    expect(logs.some((m) => m.includes(".mcp.json"))).toBe(false); // legacy path never consulted
-    mgr.stopAll();
-  });
-
-  test("manifestServers env/args passed through to the spawned server", async () => {
-    const dir = pluginDir(); // no .mcp.json — proves the config came from manifestServers
-    const registry = new ToolRegistry();
-    const trust = new TrustStore(join(realDir(), "trust.json"));
-    const logs: string[] = [];
-    const mgr = new McpManager({ registry, trust, log: (m) => logs.push(m) });
-    // WINTER_FAKE_DUP makes the fixture report two identically-named tools; observing the
-    // resulting collision-skip proves `env` reached the spawned process (args already proven by
-    // ["run", FIXTURE] resolving to a connected server across every other test in this file).
-    await mgr.startPlugins([{
-      name: "demo", dir,
-      manifestServers: [{ name: "dup", command: "bun", args: ["run", FIXTURE], env: { WINTER_FAKE_DUP: "1" } }],
-    }]);
-    const st = mgr.list().find((s) => s.name === "demo:dup");
-    expect(st?.status).toBe("connected");
-    expect(st?.toolNames).toEqual(["echo"]); // only one of the two duplicate tools registered
-    expect(logs.some((m) => m.includes("collide"))).toBe(true);
-    mgr.stopAll();
-  });
-
-  test("manifestServers absent → unchanged legacy .mcp.json path still works", async () => {
-    const dir = pluginDir({ mcpServers: { fake: { command: "bun", args: ["run", FIXTURE] } } });
-    const registry = new ToolRegistry();
-    const trust = new TrustStore(join(realDir(), "trust.json"));
-    const mgr = new McpManager({ registry, trust });
-    await mgr.startPlugins([{ name: "demo", dir }]); // no manifestServers key at all
-    expect(registry.has("mcp__demo_fake__echo")).toBe(true);
-    expect(mgr.list().find((s) => s.name === "demo:fake")?.status).toBe("connected");
-    mgr.stopAll();
+    expect(mgr.list(dir)).toEqual([]);
   });
 });

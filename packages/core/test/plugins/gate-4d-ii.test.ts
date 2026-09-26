@@ -32,7 +32,7 @@ import {
  *    build has no network source to have cloned a copy of in the first place).
  *  - `plugin.list`'s result mirrors Contract B's `PluginListing` field-for-field (no `status`
  *    enrichment — that was a pre-WS-21, Winter-only addition with no room in the new schema); this
- *    gate checks hot-spawn/hot-stop directly against `inst.supervisor.status(pluginId)`, the SAME
+ *    gate checks hot-spawn/hot-stop directly against `inst.supervisor.status(spec)`, the SAME
  *    `PluginSupervisor` instance the RPC handlers reach through `hotApplyStart`/`hotApplyStop`.
  */
 
@@ -107,6 +107,7 @@ describe("4d-ii gate: over-the-wire plugin lifecycle (marketplace.add -> install
       const mktRes = await harness.request(METHODS.pluginMarketplaceAdd, { source: marketplaceDir });
       expect(mktRes.result.ok).toBe(true);
       const marketplaceName: string = mktRes.result.marketplace.name;
+      // WS-24: the spec is also the live plugin's id — the supervisor, its token and its tools are keyed by it.
       const spec = `${pluginId}@${marketplaceName}`;
 
       // --- plugin.install: enabled by default (Contract B), NOT yet spawn-eligible (no exec consent) ---
@@ -117,12 +118,12 @@ describe("4d-ii gate: over-the-wire plugin lifecycle (marketplace.add -> install
       const listAfterInstall = await harness.request(METHODS.pluginList, {});
       const afterInstallEntry = listAfterInstall.result.plugins.find((p: any) => p.id === pluginId);
       expect(afterInstallEntry).toMatchObject({ enabled: true, marketplace: marketplaceName });
-      expect(inst.supervisor.status(pluginId)).toBe("stopped"); // never hot-spawned — enable hasn't run yet
+      expect(inst.supervisor.status(spec)).toBe("stopped"); // never hot-spawned — enable hasn't run yet
 
       // --- plugin.enable BEFORE the entry's own exec consent: settings-only, never spawns ---
       const enableUnconsented = await harness.request(METHODS.pluginEnable, { spec, scope: "user" });
       expect(enableUnconsented.result).toEqual({ ok: true, spec, scope: "user", enabled: true });
-      expect(inst.supervisor.status(pluginId)).toBe("stopped"); // still not spawn-eligible
+      expect(inst.supervisor.status(spec)).toBe("stopped"); // still not spawn-eligible
 
       // --- plugin.setConsent grants the Tier-2 entry process's own extra (spec §5.4) ---
       // L5 re-review (TOCTOU): the fingerprint comes from the listing already fetched above --
@@ -135,15 +136,15 @@ describe("4d-ii gate: over-the-wire plugin lifecycle (marketplace.add -> install
       // --- plugin.enable (again) is now spawn-eligible -> hot-SPAWNS the real child ---
       const enableRes = await harness.request(METHODS.pluginEnable, { spec, scope: "user" });
       expect(enableRes.result).toEqual({ ok: true, spec, scope: "user", enabled: true });
-      expect(["starting", "running"]).toContain(inst.supervisor.status(pluginId)); // SAME supervisor instance — proves the RPC actually reached it
+      expect(["starting", "running"]).toContain(inst.supervisor.status(spec)); // SAME supervisor instance — proves the RPC actually reached it
 
-      await waitFor(() => inst.supervisor.status(pluginId) === "running", 30_000, `supervisor status "running" for ${pluginId} (real child registered)`);
+      await waitFor(() => inst.supervisor.status(spec) === "running", 30_000, `supervisor status "running" for ${pluginId} (real child registered)`);
 
       // Prove it's a REAL OS process, not a stub: round-trip the real child's `echo` tool through
       // the SAME ToolRegistry the running daemon shares, and `ps -p`-verify the pid it reports.
-      await waitFor(() => inst.registry.has(`plugin__${pluginId}__echo`), 5_000, `plugin__${pluginId}__echo registered`);
+      await waitFor(() => inst.registry.has(`plugin__${spec}__echo`), 5_000, `plugin__${spec}__echo registered`);
       const echoOutcome = await inst.registry.execute(
-        `plugin__${pluginId}__echo`,
+        `plugin__${spec}__echo`,
         { text: "hi" },
         { cwd: "/", roots: ["/"], sessionId: "gate-4d-ii" },
       );
@@ -157,7 +158,7 @@ describe("4d-ii gate: over-the-wire plugin lifecycle (marketplace.add -> install
       const disableRes = await harness.request(METHODS.pluginDisable, { spec, scope: "user" });
       expect(disableRes.result).toEqual({ ok: true, spec, scope: "user", enabled: false });
 
-      await waitFor(() => inst.supervisor.status(pluginId) !== "running", 30_000, `supervisor status leaves "running" for ${pluginId}`);
+      await waitFor(() => inst.supervisor.status(spec) !== "running", 30_000, `supervisor status leaves "running" for ${pluginId}`);
       await waitFor(() => !isPidAlive(pluginPid), 5_000, `hot-stopped real child pid ${pluginPid} to actually die (no orphan)`);
 
       const listAfterDisable = await harness.request(METHODS.pluginList, {});
@@ -166,9 +167,9 @@ describe("4d-ii gate: over-the-wire plugin lifecycle (marketplace.add -> install
       // Re-enabling needs no fresh consent — the entry's own exec record is still on file.
       const enableAgain = await harness.request(METHODS.pluginEnable, { spec, scope: "user" });
       expect(enableAgain.result).toEqual({ ok: true, spec, scope: "user", enabled: true });
-      await waitFor(() => inst.supervisor.status(pluginId) === "running", 30_000, `supervisor status "running" again for ${pluginId}`);
-      inst.supervisor.stop(pluginId);
-      await waitFor(() => inst.supervisor.status(pluginId) !== "running", 30_000, `supervisor status leaves "running" for ${pluginId} (teardown)`);
+      await waitFor(() => inst.supervisor.status(spec) === "running", 30_000, `supervisor status "running" again for ${pluginId}`);
+      inst.supervisor.stop(spec);
+      await waitFor(() => inst.supervisor.status(spec) !== "running", 30_000, `supervisor status leaves "running" for ${pluginId} (teardown)`);
       const disableAgain = await harness.request(METHODS.pluginDisable, { spec, scope: "user" });
       expect(disableAgain.result.ok).toBe(true);
 

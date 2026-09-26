@@ -34,6 +34,7 @@ import {
 } from "./task-block";
 import {
   revokePluginTokenBestEffort,
+  pluginTokenIdsFor,
   runPluginInstallRoute, runPluginUninstallRoute, runPluginSetEnabledRoute, runPluginUpdateRoute,
   runPluginListRoute, runPluginMarketplaceAddRoute, runPluginMarketplaceRemoveRoute,
   runPluginMarketplaceListRoute, runPluginMarketplaceUpdateRoute,
@@ -1937,7 +1938,7 @@ if (import.meta.main) {
     // `add-from-claude-desktop` (an Ink dialog over Claude Desktop's OWN config format — not
     // trivially mappable), `reset-project-choices` (Winter has no per-project approve/reject ledger
     // for `.mcp.json` servers — `winter trust`'s directory-level TrustStore is the only gate).
-    console.error("usage: winter mcp [list] | get <name> | add [-s local|user|project] [-t stdio|sse|http] [-e KEY=value...] [-H \"Name: value\"...] <name> <commandOrUrl> [-- args...] | add-json [-s local|user|project] <name> <json> | remove <name> [-s local|user|project]");
+    console.error("usage: winter mcp [list] | get <name> | add [-s local|user|project] [-t stdio|sse|http] [-e KEY=value...] [-H \"Name: value\"...] [--version-negotiation legacy|auto|<revision>] <name> <commandOrUrl> [-- args...] | add-json [-s local|user|project] <name> <json> | remove <name> [-s local|user|project]");
     process.exit(1);
   }
   case "plugin": {
@@ -2031,8 +2032,10 @@ if (import.meta.main) {
       // platform plugin's own, harmless no-op for a Tier-1/legacy one (the daemon just deletes a
       // row that never existed). A down daemon is tolerated, never blocks the uninstall.
       if (outcome.ok) {
-        const revoked = await revokePluginTokenBestEffort((id) => revokePluginTokenViaDaemon(id), spec.split("@")[0]!);
-        if (!revoked.ok) console.log(`${DIM}${revoked.note}${RESET}`);
+        for (const id of pluginTokenIdsFor(outcome.spec)) {
+          const revoked = await revokePluginTokenBestEffort((i) => revokePluginTokenViaDaemon(i), id);
+          if (!revoked.ok) { console.log(`${DIM}${revoked.note}${RESET}`); break; }
+        }
       }
       door?.close();
       process.exit(outcome.ok ? 0 : 1);
@@ -2046,8 +2049,10 @@ if (import.meta.main) {
       const outcome = await runPluginSetEnabledRoute({ cwd: process.cwd(), winterHome: home, door }, spec, scopeRaw, sub === "enable", process.cwd());
       console.log(renderPluginSetEnabledOutcome(outcome));
       if (sub === "disable" && outcome.ok) {
-        const revoked = await revokePluginTokenBestEffort((id) => revokePluginTokenViaDaemon(id), spec.split("@")[0]!);
-        if (!revoked.ok) console.log(`${DIM}${revoked.note}${RESET}`);
+        for (const id of pluginTokenIdsFor(outcome.spec)) {
+          const revoked = await revokePluginTokenBestEffort((i) => revokePluginTokenViaDaemon(i), id);
+          if (!revoked.ok) { console.log(`${DIM}${revoked.note}${RESET}`); break; }
+        }
       }
       door?.close();
       process.exit(outcome.ok ? 0 : 1);
@@ -2065,7 +2070,7 @@ if (import.meta.main) {
 
     if (sub === "restart") {
       const name = process.argv[4];
-      if (!name) { console.error("usage: winter plugin restart <name>"); process.exit(1); }
+      if (!name) { console.error("usage: winter plugin restart <plugin>[@<marketplace>]"); process.exit(1); }
       const c = await connect(`cli-plugin-restart-${name}`);
       try {
         await c.restartPlugin(name);

@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, readdirSync, writeFileSync, appendFileSync, unlinkSync, existsSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { TrustStore } from "./trust";
+import { projectScopeTrusted } from "../runtime-sdk/run-home-input";
 
 export type MemoryScope = "user" | "project";
 export type MemoryType = "user" | "feedback" | "project" | "reference";
@@ -138,10 +139,15 @@ export class MemoryStore {
     this.nowMs = deps.nowMs ?? Date.now;
   }
 
-  /** user → `~/.winter/memory`; project → `<cwd>/.winter/memory`, gated on a trusted `cwd`. */
+  /** user → `~/.winter/memory`; project → `<cwd>/.winter/memory`, gated on a trusted project.
+   *
+   *  WS-24: TRUST follows the project scope (`projectScopeTrusted`: the cwd's own trust, or its repository's —
+   *  a linked worktree of a trusted repo is trusted), so a worktree reaches its project memory. The DIRECTORY
+   *  stays the cwd's own `.winter/memory`, deliberately — moving it to the project root would hide every fact
+   *  a subdirectory session already stored beside itself, and `context.ts`/`memory-migrate.ts` read it there. */
   private resolveRoot(scope: MemoryScope, cwd?: string): MemoryResult<string> {
     if (scope === "user") return { ok: true, value: join(this.winterHome, "memory") };
-    if (!cwd || !this.trust.isTrusted(cwd)) return { ok: false, error: PROJECT_TRUST_ERROR, kind: "trust" };
+    if (!cwd || !projectScopeTrusted(cwd, this.trust)) return { ok: false, error: PROJECT_TRUST_ERROR, kind: "trust" };
     return { ok: true, value: join(cwd, ".winter", "memory") };
   }
 

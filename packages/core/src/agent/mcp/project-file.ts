@@ -29,12 +29,6 @@
 // is the OPPOSITE case: it feeds the CHILD, which DOES speak all three transports, so it forwards
 // the validated entry — headers included, verbatim — via `toMcpServerConfig`. See the RULING below
 // for why "verbatim, credential-shaped or not" is the deliberate answer for the child-facing path.
-// NOT converted, deliberately out of this fix's scope:
-// `manager.ts`'s OWN `startPlugins` still does a one-shot `ProjectMcpConfig.parse(...)` over a
-// PLUGIN's `.mcp.json` (a different config, a different tier — manifest-declared servers win over
-// it entirely when present) — a plugin author's own malformed entry is a different failure mode
-// than a project's, and this fix was never asked to touch it.
-//
 // RULING (review round 2 — CREDENTIAL HEADERS ARE NOT REFUSED HERE, DELIBERATELY):
 // `ProjectMcpEntrySchema` below is otherwise IDENTICAL to `settings.ts`'s `McpServerSettingsEntry`
 // (same three shapes, same `type`-defaulting preprocess) but does NOT carry that schema's
@@ -137,6 +131,9 @@ export const ProjectMcpServerEntry = z.object({
   command: z.string().min(1),
   args: z.array(z.string()).optional(),
   env: z.record(z.string(), z.string()).optional(),
+  // WS-24: the CLI's project-scope write door builds its entry from this shape — without the key, a
+  // `winter mcp add --scope project --version-negotiation …` (or an `add-json` carrying it) lost it.
+  versionNegotiation: McpVersionNegotiationSetting.optional(),
 });
 export type ProjectMcpServerEntry = z.infer<typeof ProjectMcpServerEntry>;
 

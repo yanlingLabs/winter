@@ -14,10 +14,10 @@ import UniformTypeIdentifiers
 //
 // IDENTITY: a row's `id`/`spec` is the QUALIFIED `"<plugin>@<marketplace>"` Contract B and claude
 // both use to name an install (`PluginListing.spec`) — NOT the bare plugin id, which is not unique
-// across marketplaces. `plugin.restart{pluginId}` is the one call that still takes the bare id
-// (`PluginRowDisplay.pluginId`); `plugin.setConsent` takes the qualified `spec` (fix round 1) plus
-// a `fingerprint` (fix round 3) — see `hasAmbiguousBareId`'s own doc for what's left that still
-// cares about a bare-id collision.
+// across marketplaces. WS-24: `plugin.restart{pluginId}` takes the qualified `spec` too (the daemon's
+// plugin supervisor is keyed by it); `plugin.setConsent` takes the `spec` (fix round 1) plus a
+// `fingerprint` (fix round 3), so no call this pane makes is ambiguous between two same-named
+// plugins from different marketplaces.
 //
 // STATUS: WS-21 retired the daemon's own supervisor-status merge into `plugin.list` — there is no
 // live "starting"/"backoff"/"circuit-open" signal on the wire any more, only `enabled`. The
@@ -278,22 +278,10 @@ final class PluginManagerModel: ObservableObject {
         (error as? RpcError)?.message ?? "\(error)"
     }
 
-    /// Fix round 1 (C2 defence in depth), doc corrected round 3: true when more than one LISTED
-    /// (`.user`-scope) plugin shares `id` — e.g. the same plugin installed from two different
-    /// marketplaces. `plugin.setConsent` is no longer ambiguous by itself (it takes the qualified
-    /// `spec` — since round 1 — plus a `fingerprint` the daemon checks against the exact install,
-    /// since round 3), so this guard's remaining reason to exist is `plugin.restart{pluginId}`,
-    /// which IS still keyed by the bare id/first-match daemon-side (`PluginSupervisor`,
-    /// `agent/plugins.ts`'s own doc on the collision this implies) — acting on a `restart` when two
-    /// installs share a bare id is genuinely ambiguous, refused rather than guessed at, mirroring
-    /// the existing "this folder lists N plugins" refusal `installFromFolder` already gives.
-    /// `enable(_:)` keeps this guard too even though ITS own downstream calls are all spec-keyed
-    /// now — a plugin it enables may later need `restart`, and refusing the ambiguity up front, at
-    /// the one place a user is most likely to first encounter it, reads better than only surfacing
-    /// it later from a Restart button that mysteriously does nothing.
-    private func hasAmbiguousBareId(_ id: String) -> Bool {
-        listingsBySpec.values.filter { $0.id == id }.count > 1
-    }
+    // WS-24: `hasAmbiguousBareId` and its four refusals are gone. Every call this pane makes is keyed by
+    // the qualified spec (`plugin.setConsent`, `plugin.enable/disable/uninstall` and — since the daemon's
+    // supervisor is keyed by spec — `plugin.restart`), so two marketplaces' same-named plugins are two
+    // separate installs here, as they are in the daemon.
 
     func refresh() async {
         do {
@@ -338,10 +326,6 @@ final class PluginManagerModel: ObservableObject {
         // silently proceeding as if nothing went wrong.
         guard errorText == nil else { return }
         guard let listing = listingsBySpec[spec] else { return }
-        guard !hasAmbiguousBareId(listing.id) else {
-            errorText = "\(listing.id) is installed from more than one marketplace — this pane can't tell them apart for its background process yet"
-            return
-        }
         if let extras = listing.extras, extras.needsConsent {
             consentSheet = ConsentSheetState(pluginId: listing.id, spec: spec, scope: listing.scope,
                                              extras: extras, openedByInstall: false)
@@ -433,15 +417,12 @@ final class PluginManagerModel: ObservableObject {
     func restart(_ spec: String) async {
         noticeText = nil
         guard let listing = listingsBySpec[spec] else { return }
-        guard !hasAmbiguousBareId(listing.id) else {
-            errorText = "\(listing.id) is installed from more than one marketplace — this pane can't tell them apart for restart yet"
-            return
-        }
         busySpec = spec
         defer { busySpec = nil }
         var actionError: String?
         do {
-            try await client.pluginRestart(name: listing.id)
+            // WS-24: the spec — the daemon's supervisor is keyed by it, not the bare id.
+            try await client.pluginRestart(name: spec)
         } catch {
             actionError = "couldn't restart \(spec): \(daemonMessage(error))"
         }
@@ -480,26 +461,6 @@ final class PluginManagerModel: ObservableObject {
         }
         let pluginName = manifest.pluginNames[0]
 
-        // Ordering (round 3 minor): the bare-id ambiguity check now runs BEFORE
-        // `plugin.marketplace.add` — using the manifest's OWN plugin name, read locally, since
-        // nothing is installed yet to look a listing up by — rather than after the plugin is
-        // already live. Refusing before anything is registered means there is nothing left over to
-        // clean up on the common path. This can't close the race completely by itself (another
-        // client could install a colliding plugin in the window between this check and the actual
-        // install below), so the POST-install check further down stays too, as defense in depth —
-        // its own refusal branch now disables the plugin it just found ambiguous, rather than
-        // leaving an enabled-but-unmanageable install behind.
-        do {
-            let existing = try await client.pluginList()
-            if existing.contains(where: { $0.id == pluginName && $0.scope == .user && $0.marketplace != manifest.name }) {
-                errorText = "\(pluginName) is already installed from another marketplace — this pane can't tell them apart yet"
-                return
-            }
-        } catch {
-            errorText = "couldn't check existing plugins: \(daemonMessage(error))"
-            return
-        }
-
         // C1: refuse a marketplace NAME collision with a DIFFERENT path before registering
         // anything — `plugin.marketplace.add` would otherwise silently repoint every plugin
         // already installed from the old path (a directory marketplace is read in place, F15).
@@ -537,16 +498,6 @@ final class PluginManagerModel: ObservableObject {
                 // installed must not return silently — something is wrong (another client removed
                 // it already, say), and the user just watched this pane say nothing about it.
                 errorText = "installed \(spec) but couldn't find it in the list afterward — try Refresh"
-                return
-            }
-            guard !hasAmbiguousBareId(listing.id) else {
-                // Ordering minor: reachable only via the race the pre-install check above can't
-                // close by itself. The plugin IS live and enabled at this point, so refuse AND
-                // disable it — leaving it silently enabled-but-unmanageable would be worse than
-                // the error alone.
-                errorText = "\(listing.id) is already installed from another marketplace — this pane can't tell them apart yet"
-                _ = try? await client.pluginDisable(spec: spec, scope: .user)
-                await refresh()
                 return
             }
             // C1: a plugin with ANY required consent class ALWAYS shows the sheet on a fresh

@@ -40,7 +40,26 @@ function excludeLocalSettings(o: PluginManagerOptions, scope: PluginScope): void
   } catch { /* best-effort, as above */ }
 }
 
+/**
+ * WS-24: the marketplace half of a spec (`"<name>@<marketplace>"`) is now part of a plugin's IDENTITY in the
+ * daemon — its supervisor key, the token it is minted, its PID file name (`<runDir>/plugins/<spec>.pid`)
+ * and its tools' namespace (`plugin__<spec>__<tool>`). A name that could climb out of that PID directory
+ * or truncate a C string is refused before anything is installed: a `/` or `\`, a `..`, a NUL. (The SDK
+ * validates no marketplace name of its own; `__`, which only confuses the tool-name split, is warned about
+ * by `PluginStore`, not refused.) `undefined` when acceptable or when the spec names no marketplace.
+ */
+export function marketplaceNameError(spec: string): string | undefined {
+  const at = spec.lastIndexOf("@");
+  if (at <= 0) return undefined;
+  const name = spec.slice(at + 1);
+  if (name.length === 0) return `"${spec}" names an empty marketplace`;
+  if (/[/\\\0]/.test(name) || name.includes("..")) return `marketplace name "${name.replace(/\0/g, "\\0")}" may not contain "/", "\\", ".." or a NUL`;
+  return undefined;
+}
+
 export async function installPlugin(o: PluginManagerOptions, spec: string, scope: PluginScope): Promise<InstalledPlugin> {
+  const refused = marketplaceNameError(spec);
+  if (refused !== undefined) throw new sdk.PluginManagerError(refused);
   const installed = await sdk.installPlugin(o, spec, scope);
   excludeLocalSettings(o, scope);
   return installed;

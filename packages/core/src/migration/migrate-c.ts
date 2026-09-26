@@ -47,7 +47,7 @@ import { normalizeRecoveryReport, quarantinedBackendSessions } from "../runtime-
 import { DEAD_LEGACY_TOP_LEVEL_FILES } from "./dead-legacy-files";
 import { LEGACY_INSTRUCTIONS_FILE } from "../legacy-names";
 import { settingsSplitMarkerPath, splitSettingsToSdk } from "./settings-split";
-import { isLegacyPluginDir } from "../plugins/convert-legacy";
+import { legacyPluginDirNames } from "../plugins/convert-legacy";
 
 export type MigrationCStep = "preflight" | "reconcile-official-roots" | "move-dirs" | "copy-files"
   | "split-settings" | "convert-plugins" | "runtime-state" | "rekey-transcripts" | "archive" | "done";
@@ -168,9 +168,9 @@ function hasFiles(dir: string, budget = { left: 20_000 }): boolean {
  *  `winter-plugin.json` specifically — but `convertLegacyPlugins`'s own discovery requires no
  *  manifest at all (a `plugin.json`-only or fully manifest-less directory still converts, generating
  *  a fresh manifest from just its name), so a home whose only plugin had neither STILL never
- *  migrated. Delegates to `legacyPluginDirs` (below), which now shares `isLegacyPluginDir` —
- *  `convertLegacyPlugins`'s own discovery predicate — so the two can never drift apart again: this
- *  function counts a directory exactly when the converter itself would pick it up. */
+ *  migrated. Delegates to `legacyPluginDirs` (below), which is `convertLegacyPlugins`'s own discovery
+ *  (`legacyPluginDirNames`) — so the two can never drift apart again: this function counts a directory
+ *  exactly when the converter itself would pick it up. WS-24: and a stray folder is not a plugin. */
 function hasLegacyPlugin(home: string): boolean {
   return legacyPluginDirs(home).length > 0;
 }
@@ -224,20 +224,14 @@ function officialRoots(home: string): string[] {
   return [join(home, "runtimes", "claude-config"), join(home, "runtimes", "official-agent-spool")];
 }
 
-/** `<home>/plugins` entries that are plugin DIRECTORIES (a stray file is not a plugin) — reviewer
- *  round, items 2 and 3: was `Dirent.isDirectory()` (doesn't follow symlinks — a symlinked plugin
- *  folder, a dev checkout linked in, was silently missed) filtered further by nothing else, which
- *  happened to already match "no manifest required" but for the wrong (buggy) reason. Now uses
- *  `isLegacyPluginDir` — the SAME predicate `convertLegacyPlugins`'s own directory scan uses
- *  (`plugins/convert-legacy.ts`) — deliberately, so this list and the converter's own candidate list
- *  can never drift apart: whatever this function counts is exactly what a real conversion run would
- *  pick up. */
+/** `<home>/plugins` entries that are legacy PLUGINS — `legacyPluginDirNames`, the SAME discovery
+ *  `convertLegacyPlugins` itself runs (`plugins/convert-legacy.ts`; reviewer round, items 2 and 3), so
+ *  this list and the converter's candidates can never drift apart: whatever this function counts is
+ *  exactly what a real conversion run picks up. WS-24: a stray folder (empty, or holding nothing a legacy
+ *  plugin could have loaded, and not named in the legacy settings) is not a plugin — it no longer trips
+ *  Migration C. */
 function legacyPluginDirs(home: string): string[] {
-  try {
-    return readdirSync(join(home, "plugins"), { withFileTypes: true })
-      .filter((e) => isLegacyPluginDir(join(home, "plugins", e.name)))
-      .map((e) => e.name);
-  } catch { return []; }
+  return legacyPluginDirNames(home);
 }
 
 /**
@@ -836,7 +830,9 @@ function rawRuntimeState(home: string, fn: (db: Database) => void): void {
  * `plugins.consents` record re-keyed and re-fingerprinted — a consent the user already gave, kept valid),
  * and it only ever rewrote `backend_root` in runtime-state, so rollback reverses exactly that one rewrite
  * and never touches `settings.json`, instead of restoring the preflight backups over the live files (which
- * would drop every post-upgrade settings edit, generation, handoff and quarantine row). The sdk files the split filled are
+ * would drop every post-upgrade settings edit, generation, handoff and quarantine row). WS-24: the consent
+ * carry ledger (`migration/c/carried-consents.json`, `plugins/convert-legacy.ts`) stays too, so a re-run
+ * never carries the same legacy consent twice — a revoke made on the new build survives the round trip. The sdk files the split filled are
  * left (an older build never reads them, and they hold the user's post-upgrade answers); the copies
  * `copy-files` made are moved into the archive, never deleted. The preflight backups stay under
  * `archiveDir` for an operator. The daemon must be stopped (the CLI checks the lock).

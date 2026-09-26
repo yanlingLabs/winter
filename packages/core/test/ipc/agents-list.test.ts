@@ -2,7 +2,7 @@
 // `<home>/agents/*.md`, its rejections, and the cached built-in list. Bare IPC server harness, same
 // shape `capabilities-list.test.ts`/`settings-set-advisor-model.test.ts` already use.
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@yanlinglabs/winter-protocol";
@@ -138,6 +138,34 @@ describe("agents.list", () => {
     await c.hello(harnessToken, "cli");
     const result = await c.request(METHODS.agentsList, { cwd });
     expect(result.result.definitions).toEqual([]);
+    c.close();
+  });
+
+  // WS-24: trust keyed on the repository and the run home's walk — a linked worktree of a trusted repo
+  // lists its own agents (it used to list none: its own path is not in trust.json), and the nearest
+  // definition of a name wins along the walk.
+  test("a linked worktree of a trusted repo lists its agents; the nearest definition along the walk wins", async () => {
+    const agent = (name: string, description: string) => ["---", `name: ${name}`, `description: ${description}`, "---", "", "Body."].join("\n");
+    const main = realpathSync(mkdtempSync(join(tmpdir(), "winter-agents-list-main-")));
+    const git = (...args: string[]) => expect(Bun.spawnSync(["git", "-C", main, ...args], { stderr: "ignore" }).exitCode).toBe(0);
+    git("init", "-q");
+    writeFileSync(join(main, "f"), "x");
+    git("add", "f");
+    git("commit", "-q", "-m", "init");
+    const wt = join(realpathSync(mkdtempSync(join(tmpdir(), "winter-agents-list-wtp-"))), "wt");
+    git("worktree", "add", "-q", "-b", "side", wt);
+    mkdirSync(join(wt, ".winter", "agents"), { recursive: true });
+    mkdirSync(join(wt, "pkg", ".winter", "agents"), { recursive: true });
+    writeFileSync(join(wt, ".winter", "agents", "reviewer.md"), agent("reviewer", "from the worktree root"));
+    writeFileSync(join(wt, ".winter", "agents", "root-only.md"), agent("root-only", "root only"));
+    writeFileSync(join(wt, "pkg", ".winter", "agents", "reviewer.md"), agent("reviewer", "from pkg"));
+    const trust = new TrustStore(join(realpathSync(mkdtempSync(join(tmpdir(), "winter-agents-list-trust-"))), "trust.json"));
+    trust.trust(main); // the MAIN checkout only
+    const { socketPath, harnessToken } = await boot({ trust });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const rows = (await c.request(METHODS.agentsList, { cwd: join(wt, "pkg") })).result.definitions as Array<{ name: string; description: string; tier: string }>;
+    expect(rows.filter((r) => r.tier === "project").map((r) => [r.name, r.description]).sort()).toEqual([["reviewer", "from pkg"], ["root-only", "root only"]]);
     c.close();
   });
 

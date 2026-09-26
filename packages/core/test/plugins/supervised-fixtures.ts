@@ -88,8 +88,10 @@ function installExample(srcDir: string, winterHome: string, pluginId: string): s
 
 /** The `"<name>@<marketplace>"` spec these fixtures use for `pluginId` — shared by `installExample`
  *  (the record's key) and `writeAndLoadSettings` (the `enabledPlugins`/`plugins.consents` key), so
- *  the two can never drift onto different keys for the same plugin. */
-function pluginSpecFor(pluginId: string): string {
+ *  the two can never drift onto different keys for the same plugin. WS-24: also the id the daemon's
+ *  plugin supervisor, the plugin's token and connection and its tools (`plugin__<spec>__<tool>`) are
+ *  keyed by — exported so a test names a live plugin the way the daemon does. */
+export function pluginSpecFor(pluginId: string): string {
   return `${pluginId}@${EXAMPLE_MARKETPLACE_PREFIX}${pluginId}`;
 }
 
@@ -185,12 +187,12 @@ export function writeAndLoadSettings(home: string, pluginId: string, opts?: { ha
  *  never a `<home>/plugins/<name>` convention — see `agent/plugins.ts`'s own doc). */
 export function buildSpawnablePlugins(home: string, settings: Settings): EligiblePlugin[] {
   const pluginStore = new PluginStore({
-    winterHome: home, plugins: settings.plugins, consents: settings.plugins?.consents,
+    winterHome: home, consents: settings.plugins?.consents,
     log: (m) => { if (process.env.WINTER_TEST_DEBUG) console.error(`[plugins] ${m}`); },
   });
   return pluginStore.list()
     .filter(pluginSpawnEligible)
-    .map((p) => ({ id: p.name, dir: p.installPath, entry: p.entry! }));
+    .map((p) => ({ id: p.spec, dir: p.installPath, entry: p.entry! }));
 }
 
 export interface SupervisedInstance {
@@ -286,13 +288,13 @@ export async function createSupervisedInstance(params: {
     hardwareBroker = new HardwareBroker({ audit, pushToProvider: (e) => providerLink!.push(e) });
     const settings = loadSettings(join(home, "settings.json"));
     plugins = new PluginStore({
-      winterHome: home, plugins: settings.plugins, consents: settings.plugins?.consents,
+      winterHome: home, consents: settings.plugins?.consents,
       log: (m) => { if (process.env.WINTER_TEST_DEBUG) console.error(`[plugins] ${m}`); },
     });
   } else if (params.plugins) {
     const settings = loadSettings(join(home, "settings.json"));
     plugins = new PluginStore({
-      winterHome: home, plugins: settings.plugins, consents: settings.plugins?.consents,
+      winterHome: home, consents: settings.plugins?.consents,
       log: (m) => { if (process.env.WINTER_TEST_DEBUG) console.error(`[plugins] ${m}`); },
     });
   }
@@ -328,6 +330,8 @@ export async function bootSupervisedServer(pluginId: string, opts?: {
   contrib: PluginContribRegistry;
   server: IpcServer;
   spawnable: EligiblePlugin[];
+  /** WS-24: the plugin's spec — the id the supervisor, its token, contributions and tools use. */
+  spec: string;
   stop: () => void;
 }> {
   const home = mkdtempSync(join(tmpdir(), "winter-plugin-supervised-"));
@@ -340,13 +344,14 @@ export async function bootSupervisedServer(pluginId: string, opts?: {
   });
 
   const spawnable = buildSpawnablePlugins(home, settings);
-  if (spawnable.map((p) => p.id).join(",") !== pluginId) {
-    throw new Error(`sanity: pluginSpawnEligible did not pick up ${pluginId} (got ${JSON.stringify(spawnable.map((p) => p.id))})`);
+  const spec = pluginSpecFor(pluginId);
+  if (spawnable.map((p) => p.id).join(",") !== spec) {
+    throw new Error(`sanity: pluginSpawnEligible did not pick up ${spec} (got ${JSON.stringify(spawnable.map((p) => p.id))})`);
   }
   inst.supervisor.startAll(spawnable);
 
   return {
-    home, socketPath, spawnable, ...inst,
+    home, socketPath, spawnable, spec, ...inst,
     stop: () => { inst.supervisor.stopAll(); inst.server.stop(); inst.store.close(); },
   };
 }

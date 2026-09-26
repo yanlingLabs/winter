@@ -127,8 +127,8 @@ describeWithWinterBinary("code on the Winter leg — the built binary through a 
       runtimes: { winterExecutable: bin, winterLeg: { code: true }, winterIdleTimeoutSec: 10 },
     }, null, 2));
     // fix wave (review row 7): a configured user MCP server — the repo's fake stdio server — must
-    // reach the child (case (n)). The daemon's own McpManager starts a copy for the shared registry
-    // too; the child spawns its own from the forwarded config. WS-21: the user scope is
+    // reach the child (case (n)). The daemon's own McpManager probes a copy at boot (WS-24: connects,
+    // lists, closes); the child spawns its own from the forwarded config. WS-21: the user scope is
     // `sdk/.winter.json` (claude's `.claude.json` shape).
     mkdirSync(join(home, "sdk"), { recursive: true });
     writeFileSync(join(home, "sdk", ".winter.json"), JSON.stringify({ mcpServers: { fake: { command: "bun", args: ["run", MCP_FIXTURE] } } }, null, 2));
@@ -330,7 +330,7 @@ describeWithWinterBinary("code on the Winter leg — the built binary through a 
     // process-transport servers asynchronously after init (`WaitForMcpServers`/`RefreshMcpTools`
     // are advertised for exactly that), so the observable fact is the SPAWN: a `bun run
     // fake-mcp-server.ts` whose PARENT is this session's winter child (the daemon's own McpManager
-    // copy has the test process as its parent, so the parent pid is what tells them apart).
+    // probe copy has the test process as its parent, so the parent pid is what tells them apart).
     const winterPid = winterChildren(bin).find((p) => !before.has(p));
     expect(winterPid).toBeDefined();
     const spawnedByChild = (): string[] =>

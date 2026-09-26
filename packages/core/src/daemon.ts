@@ -113,6 +113,22 @@ import { describeDeadLegacyFiles, findDeadLegacyFiles } from "./migration/dead-l
 
 export { CORE_VERSION } from "./version";
 
+/**
+ * The `additionalDirectories` a session whose primary working directory is `primary` is granted: the user
+ * tier (`sdk/settings.json`) plus, when its project is trusted, the project's committed and local tiers.
+ *
+ * WS-24: the project tiers are read at the project SCOPE root (`projectScopeRootFor`: the cwd's own git
+ * top, a linked worktree's own — where `winter plugin|mcp --scope project|local` write them and a run home
+ * reads them), trusted when the REPOSITORY is (`projectScopeTrusted`). It used to be `<primary>/.winter/…`
+ * gated on the primary's own path, which a worktree of a trusted repo (not itself in `trust.json`), or a
+ * session in a subdirectory, never matched. The widening to the git top is the router's own: a run home
+ * builds the project settings tiers from `RunHomeInput.trustedProjectRoot` (`projectScopeRootFor(cwd)`,
+ * `runtime-sdk/run-home-input.ts`), so the child and this fence read the same two files.
+ */
+export function sessionPermissionDirs(home: string, primary: string, trust: Pick<TrustStore, "isTrusted">): string[] {
+  return loadPermissionDirs(home, projectScopeRootFor(primary), projectScopeTrusted(primary, trust));
+}
+
 export interface RunningDaemon {
   socketPath: string;
   // `remote` (SP2a Task 1): ensureTokens() already mints/returns it (auth/tokens.ts's
@@ -695,7 +711,7 @@ export async function startDaemon(opts: {
   // resolved/inline script needs the WorkflowRuntime below, which DOES require an engine).
   const workflowStore = new WorkflowStore({ winterHome, trust: trustStore });
   const pluginStore = new PluginStore({
-    winterHome, plugins: settings?.plugins, consents: settings?.plugins?.consents, log: (m) => console.error(m),
+    winterHome, consents: settings?.plugins?.consents, log: (m) => console.error(m),
   });
   // Built unconditionally (Phase 4b Task 4): shortcut.register/tile.update/provider.register are
   // plain latest-per-plugin storage, independent of whether an LLM provider (and thus a
@@ -853,7 +869,7 @@ export async function startDaemon(opts: {
       }
       return roots;
     }
-    roots.push(...loadPermissionDirs(winterHome, primary, trustStore.isTrusted(primary)));
+    roots.push(...sessionPermissionDirs(winterHome, primary, trustStore));
     // T1 write-root join (design doc: "the tmpDir pattern" — a plain, ungated, auto-provisioned
     // root, mirroring how `sessionTmpDir` needs no user approval either): whenever file-based
     // memory is enabled, the session's MEMDIR joins the SAME write-fence `roots` the `write`/`edit`
@@ -1065,9 +1081,18 @@ export async function startDaemon(opts: {
   // anywhere a directory marketplace's manifest names, so the old `<home>/plugins/<name>` convention
   // no longer holds (it never matched a converted-legacy or freshly-installed plugin's actual
   // location; only ever worked by coincidence for a hand-seeded fixture at that exact path).
+  // WS-24: keyed by the plugin's SPEC (`"<name>@<marketplace>"`), not its bare name — see
+  // `plugins/supervisor.ts`'s header ("THE KEY").
   const spawnablePlugins = allPlugins
     .filter(pluginSpawnEligible)
-    .map((p) => ({ id: p.name, dir: p.installPath, entry: p.entry! }));
+    .map((p) => ({ id: p.spec, dir: p.installPath, entry: p.entry! }));
+  // WS-24: a token a pre-WS-24 core minted under a plugin's BARE name can no longer name a plugin this
+  // supervisor runs (ids are specs now) — revoked, so a leftover process holding one cannot authenticate
+  // as it. A bare name some install really uses as its whole spec is left alone.
+  {
+    const specs = new Set(allPlugins.map((p) => p.spec));
+    for (const p of allPlugins) if (!specs.has(p.name)) store.revokePluginToken(p.name);
+  }
   // Phase 4d-i Task 4: boot-time orphan-PID sweep, BEFORE startAll spawns the current set — a
   // plugin disabled or removed since the last run may have left its process running under a
   // stale <runDir>/plugins/<id>.pid; startAll/reclaimOrphans would never find it (they only look
@@ -2139,18 +2164,15 @@ export async function startDaemon(opts: {
     // file uses everywhere else — `doEnsureProject` reads it on every `ensureProject` call, never a
     // boot snapshot, so a `mcp.disable`/`mcp.enable` write is honoured on the very next `mcp.list
     // {cwd}` with no daemon restart.
-    mcp = new McpManager({ registry, trust: trustStore, log: (m) => console.error(m), disabled: () => new Set(settings?.mcp?.disabled ?? []) });
-    // MCP resources (CC parity: ListMcpResourcesTool/ReadMcpResourceTool) — registered
-    // unconditionally here (not per-server-connect: see mcp-resources.ts's own doc comment for why
-    // a live conditional-registration mirror of CC isn't cheap with this registry's shape) so it
-    // exists across every later startAll/ensureProject/startPlugins call this `mcp` instance ever
-    // makes. Deferred like schedule/notebook_edit/worktree above — specialized, not needed most
-    // turns.
-    // Daemon settings surface batch 3 (item 3): the daemon's own shared registry can only ever run
-    // STDIO servers (no in-daemon HTTP/SSE client — `external-mcp.ts`'s header explains why that's
-    // fine, the spawned child connects to those itself) and must not start anything the user has
-    // disabled (`settings.mcp.disabled`) — `stdioMcpServersFor` is the one filter both facts go
-    // through (settings.ts).
+    // WS-24: a STATUS PROBE for `mcp.list` (`agent/mcp/manager.ts`'s header) — it connects, lists and
+    // closes each server, and registers nothing: every session's child connects its own copy, and no
+    // session ever read the `mcp__…` rows this used to write into the shared registry.
+    mcp = new McpManager({ trust: trustStore, log: (m) => console.error(m), disabled: () => new Set(settings?.mcp?.disabled ?? []) });
+    // Daemon settings surface batch 3 (item 3): the daemon can only ever probe STDIO servers (no
+    // in-daemon HTTP/SSE client — `external-mcp.ts`'s header explains why that's fine, the spawned
+    // child connects to those itself) and must not start anything the user has disabled
+    // (`settings.mcp.disabled`) — `stdioMcpServersFor` is the one filter both facts go through
+    // (settings.ts).
     await mcp.startAll(stdioMcpServersFor(sdkUserMcpServers(winterHome), settings?.mcp?.disabled));
     // WS-21 (L4 request 2): a plugin's MCP servers are claude-native content now (its `.mcp.json`, or a
     // claude manifest's own `mcpServers`), loaded by both runtimes themselves (spec §5.3) — the daemon no
@@ -2159,7 +2181,7 @@ export async function startDaemon(opts: {
     // Tier-2 platform plugins (Phase 4b Task 3, spec §3): PluginSupervisor owns process lifecycle
     // (spawn/registration timeout/crash backoff/circuit breaker/PID-file orphan reclaim) for every
     // spawn-eligible plugin (pluginSpawnEligible — tier "platform" + entry present + enabled +
-    // consented, the same enabled/disabled/consent shape as pluginMcpEligible above). `pluginSupervisor`/
+    // consented). `pluginSupervisor`/
     // `spawnablePlugins` are constructed above, OUTSIDE this gate (Phase 4d-cleanup Task 2 — the
     // orphan sweep runs regardless of agentProvider); only the actual spawn — `startAll()` — is
     // gated here, since a spawned plugin process needs `registry` (just below) to bridge its tools
