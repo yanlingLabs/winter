@@ -498,9 +498,20 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
           },
           () => { /* the session ended before settling — nothing left to replace */ },
         );
+      } else if (compactOnSource) {
+        // NOT awaited: a compaction can take tens of seconds, and `session.setModel`'s callers time out
+        // far sooner (the Mac client's default is 5 s) -- the switch has already been applied to the
+        // record. Disclosed trade-off: a message sent while the source compacts is answered by the
+        // source model (its engine starts no turn until the compaction settles), and the child is
+        // replaced at the idle boundary after it, like the running-turn branch above.
+        deps.log?.(`handoff: ${sessionId} changed provider (${providerBeforeSwitch} -> ${decided.providerId}) and does not fit the new model — compacting on the source model, then replacing its child`);
+        void (async () => {
+          await compactFirst();
+          await liveChild.idle();
+          await deps.winter.evict(sessionId);
+        })().catch(() => { /* evict never throws; the session ended meanwhile — nothing left to replace */ });
       } else {
         deps.log?.(`handoff: ${sessionId} changed provider (${providerBeforeSwitch} -> ${decided.providerId}) — replacing its child so the next turn spawns against the new endpoint`);
-        await compactFirst();
         await deps.winter.evict(sessionId);
       }
     }
