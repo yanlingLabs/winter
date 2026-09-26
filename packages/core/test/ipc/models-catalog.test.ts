@@ -275,6 +275,27 @@ describe("models.catalog", () => {
   });
 
   // -----------------------------------------------------------------------------------------------
+  // WS-24 (pickers lane): `toolCalling` — carried verbatim, and NEVER used to filter this listing.
+  // `sync.config`'s `pickerModels()` is the surface that hides `"none"` rows from a SESSION picker;
+  // this one stays complete so it never disagrees with `settings.modelRoles`'s `permitted` (the drift
+  // tripwire test above) — a role may legitimately be pinned to a toolless row.
+  // -----------------------------------------------------------------------------------------------
+  test("toolCalling: carried verbatim off the catalog row, in EVERY state, and never filters this listing", async () => {
+    const { socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.modelsCatalog, {});
+    const codexTerra = result.result.models.find((m: any) => m.tag === "codex-oauth/gpt-5.6-terra");
+    expect(codexTerra.toolCalling).toBe("native");
+    // A real, non-retired ("candidate") row whose `toolCalling` is `"none"` — still PRESENT here
+    // (unlike `pickerModels()`'s session-picker listing, which excludes it — see sync-config.test.ts).
+    const toolless = result.result.models.find((m: any) => m.tag === "agentrouter/claude-opus-4-8");
+    expect(toolless).toBeDefined();
+    expect(toolless.toolCalling).toBe("none");
+    c.close();
+  });
+
+  // -----------------------------------------------------------------------------------------------
   // 2026-09-18, item 2: `credentialPresent` — readiness, answered daemon-side by the SAME rule
   // `pickerModels` filters `sync.config`'s model list on.
   // -----------------------------------------------------------------------------------------------

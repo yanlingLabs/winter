@@ -8,6 +8,21 @@
  * `settings.modelRoles` about: every provider/model here is exactly what `permittedProviders`
  * (settings.ts) already lets some role's `permitted` name, called here unfiltered — never a second,
  * hand-written copy of that predicate that the two could drift apart from.
+ *
+ * WS-24 (pickers lane): this is NOT the SESSION model picker's listing (`ipc/picker-models.ts`'s
+ * `pickerModels()`, which feeds `sync.config` and is what the Mac's session composer, the CLI's
+ * `winter model` and the TUI's `/model` all actually choose a session's model FROM) — it is the Roles
+ * pane's FACTS join (family, pricing, credential door) over whatever a role's `permitted` already
+ * names, keyed by tag. A role may legitimately be pinned to a `toolCalling: "none"` row: EVERY ONE of
+ * the four daemon-internal jobs this pane can pin (titles, the dreamer, the cleaner, AND the bash
+ * reviewer's classifier — `agent/titles.ts`, `agent/dreamer.ts`, `sessions/cleaner.ts`,
+ * `agent/reviewer.ts`) calls its provider with `tools: []` explicitly; none of them would break on a
+ * toolless row. The pane's OTHER two roles, `provider.model` and `pins.dispatch`, DO run real
+ * sessions and would break — but those are gated by `session-driver.ts`'s `beforeTurn` refusal, not
+ * by this listing. So this listing is deliberately left UNFILTERED by tool capability: filtering it
+ * would desync it from `permittedProviders()` and fail this file's own drift-tripwire test
+ * (`models-catalog.test.ts`). A consumer that DOES need to hide toolless rows reads the new
+ * `toolCalling` field itself, on its own copy of the row.
  */
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import type { CapabilityEvidence, ModelPricing } from "@yanlinglabs/winter-provider-catalog";
@@ -39,6 +54,16 @@ export interface ModelCatalogWireModel {
    *  and `[]` are different answers here and must not be collapsed. */
   efforts: string[] | null;
   defaultEffort: string | null;
+  /** WS-24 (pickers lane): the catalog's own three-state tool capability, verbatim
+   *  (`WinterModelDescriptor.toolCalling.value`) — added so a consumer of THIS listing (the Roles pane,
+   *  today) can tell a toolless row apart from one that merely lacks facts, without a second lookup
+   *  against the raw catalog package it has no reason to import. This listing's OWN rows are never
+   *  filtered by it — see the module doc above for why: it would break the one invariant this module
+   *  exists to keep (`permittedProviders()`'s set and this listing's set must never disagree), and a
+   *  role MAY legitimately be pinned to a toolless row: titles, the dreamer, the cleaner AND the bash
+   *  reviewer's classifier all call their provider with `tools: []` — none of them need this field to
+   *  be anything but informational. */
+  toolCalling: "native" | "emulated" | "none";
 }
 
 export interface ModelCatalogWireProvider {
@@ -190,6 +215,7 @@ export function modelCatalogWire(deps: { credentials: CredentialPresence; home: 
       // `implicitEffortFor` maps an unsupported implicit effort onto, which is why it rides beside
       // the vocabulary rather than being left for a consumer to guess.
       defaultEffort: m.reasoning?.defaultEffort ?? null,
+      toolCalling: m.toolCalling.value,
     }));
 
   // Families with at least one offerable model, in the catalog's own id order — an empty family
