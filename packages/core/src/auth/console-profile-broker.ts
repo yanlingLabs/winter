@@ -410,8 +410,7 @@ export function createConsoleProfileBroker(deps: ConsoleProfileBrokerDeps): Cons
    * `logout()` call (which already ran that spawn once) or it is an external removal with nothing
    * left to log out of. Deletes ONLY `anthropic:console`, and ONLY when the material actually
    * reads as `bearer` there (M-B: never touch the user's own `anthropic:default` api-key slot, and
-   * never delete a kind this account should not hold in the first place — `keychainSeamFromSecretStore`'s
-   * own per-account restriction is the READ-side half of that same discipline).
+   * never delete a kind this account should not hold in the first place).
    */
   async function handleDisappearance(): Promise<void> {
     stopRefresherImpl();
