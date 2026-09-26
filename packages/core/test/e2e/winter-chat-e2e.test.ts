@@ -1,5 +1,11 @@
 // P8b Task 16 — CHAT ON THE WINTER LEG, end to end, on the BUILT binary.
 //
+// WS-23 (ruling R1): chat now runs EMBEDDED — one Bun Worker per session inside the daemon — so a chat
+// session's "child" is its Worker, observed through `daemon.embedded` by its backend session id, and
+// every create asserts that NO `winter` process appeared. The binary is still this file's gate because
+// the code-shaped tripwire below spawns it (code keeps the subprocess), and `winterExecutable` still names
+// it; the embedded-only proofs that need no binary at all are `embedded-chat-dispatch-e2e.test.ts`.
+//
 // A real `startDaemon` in a temp home (every mode is the Winter leg since Task 17), a real NDJSON client
 // on its socket, and the real `winter` child `WINTER_RUNTIME_EXECUTABLE` names (the helper SKIPS this
 // whole file when it is unset, and FAILS when `WINTER_RUNTIME_REQUIRE_BINARY=1`). Every model is a
@@ -14,7 +20,7 @@
 //   (d) steer during a hang, interrupt → the interrupted terminal, NO agent_error; the child stays
 //       live and the same child takes the next send; then end() → resumable → a send RESUMES the
 //       same backend session (init reports the same id)
-//   (d2) the idle timeout ends the child (kill -0 fails) and a later send resumes it
+//   (d2) the idle timeout ends the child (its Worker leaves `daemon.embedded`) and a later send resumes it
 //   (i) P8b-39: a send held behind a running turn survives a daemon RESTART through the log — the
 //       resumed child runs it first, with exactly one turn_started, before the new text
 //   (j) P8b-39: a send held behind an INTERRUPTED turn is not auto-run; the next send runs it first
@@ -147,7 +153,9 @@ const winterSurvivors = (bin: string): string[] =>
 /** The child processes of THIS test process that are the winter binary. */
 const winterChildren = (bin: string): string[] =>
   Bun.spawnSync(["pgrep", "-P", String(process.pid), "-f", bin]).stdout.toString().trim().split("\n").filter(Boolean);
-const alive = (pid: string): boolean => Bun.spawnSync(["kill", "-0", pid]).exitCode === 0;
+
+/** WS-23: the daemon's embedded-session host — where a chat session's Worker is observed. */
+type EmbeddedHost = RunningDaemon["embedded"];
 
 const types = (events: SessionEvent[]): string[] => events.map((e) => e.type);
 
@@ -205,20 +213,21 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     rmSync(home, { recursive: true, force: true });
   });
 
-  /** create + attach a chat session on the given double; returns its id and ITS child's pid(s) —
-   *  the winter children that appeared with this create (the spawn is synchronous inside
-   *  `query()`, and this file creates sessions one at a time). */
-  async function createChat(model: string): Promise<{ sid: string; pids: string[] }> {
+  /** create + attach a chat session on the given double; returns its id and the embedded host its
+   *  Worker runs in (WS-23: the Worker is constructed synchronously inside `query()`), having checked
+   *  that the create spawned NO `winter` process — chat is embedded, never a subprocess. */
+  async function createChat(model: string): Promise<{ sid: string; host: EmbeddedHost }> {
     const before = new Set(winterChildren(bin));
     const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "chat", model: `winter-test/${model}` });
     await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
-    const pids = winterChildren(bin).filter((p) => !before.has(p));
-    return { sid: sessionId, pids };
+    expect(winterChildren(bin).filter((p) => !before.has(p))).toEqual([]);
+    return { sid: sessionId, host: daemon!.embedded };
   }
-  const goneWithin = async (pids: string[], ms: number): Promise<boolean> => {
+  const workerAlive = (host: EmbeddedHost, backend: string): boolean => host.live().includes(backend);
+  const workerGoneWithin = async (host: EmbeddedHost, backend: string, ms: number): Promise<boolean> => {
     const t0 = Date.now();
-    while (Date.now() - t0 < ms) { if (!pids.some(alive)) return true; await Bun.sleep(50); }
-    return !pids.some(alive);
+    while (Date.now() - t0 < ms) { if (!workerAlive(host, backend)) return true; await Bun.sleep(50); }
+    return !workerAlive(host, backend);
   };
 
   test("the boot order: recovery finished before the socket existed (no projector precedes the sweep)", () => {
@@ -226,8 +235,9 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
   });
 
   test("(a) create → a Winter-leg record with a backend uuid; send 'hello' → the ordered turn with ONE terminal", async () => {
-    const { sid, pids } = await createChat("echo");
-    expect(pids).toHaveLength(1);   // one child per session (P8b-1, path (a))
+    const { sid, host } = await createChat("echo");
+    // one Worker per session (WS-23: chat is embedded — P8b-1's path (b))
+    expect(host.live().filter((b) => b === record(sid)?.backendSessionId)).toHaveLength(1);
     const rec = record(sid);
     expect(rec).toBeDefined();
     expect(sessionLegOf(rec)).toBe("winter");
@@ -324,7 +334,7 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
   }, 30_000);
 
   test("(d) steer during a hang + interrupt → the interrupted terminal, NO agent_error, the child stays live; end() then send resumes the SAME backend session", async () => {
-    const { sid, pids } = await createChat("hang");
+    const { sid, host } = await createChat("hang");
     const driver = daemon!.winter.get(sid)!;
     await client.call(METHODS.sessionSend, { sessionId: sid, text: "hang please" });
     await Bun.sleep(400);
@@ -349,7 +359,7 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     // under `options.resume` and init reports the SAME backend id, with a bumped generation.
     await driver.end();
     expect(driver.state).toBe("resumable");
-    expect(await goneWithin(pids, 3000)).toBe(true);
+    expect(await workerGoneWithin(host, backendOf(sid), 3000)).toBe(true);
     // M2 — the positive proof: the backend transcript EXISTS under the TEMP home (the record's
     // `backendRoot`, `<uuid>.jsonl`) before the resume, it is the only transcript there, and the
     // resumed child APPENDS to it rather than starting a second one under the same name.
@@ -374,18 +384,18 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     expect(statSync(transcriptFile(sid)).size).toBeGreaterThan(sizeBefore);   // it grew
   }, 40_000);
 
-  test("(d2) the idle timeout ends an idle child (kill -0 fails) and a later send resumes it", async () => {
-    const { sid, pids } = await createChat("echo");
+  test("(d2) the idle timeout ends an idle child (its Worker leaves the embedded host) and a later send resumes it", async () => {
+    const { sid, host } = await createChat("echo");
     const driver = daemon!.winter.get(sid)!;
     await client.call(METHODS.sessionSend, { sessionId: sid, text: "one" });
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sid);
     expect(driver.state).toBe("live");
-    expect(pids.some(alive)).toBe(true);
+    expect(workerAlive(host, backendOf(sid))).toBe(true);
     // winterIdleTimeoutSec is 10 (the schema's floor); the child is reaped ~10 s after its last result
     const t0 = Date.now();
     while (driver.state === "live" && Date.now() - t0 < 14_000) await Bun.sleep(100);
     expect(driver.state).toBe("resumable");
-    expect(await goneWithin(pids, 3000)).toBe(true);
+    expect(await workerGoneWithin(host, backendOf(sid), 3000)).toBe(true);
     const evCount = client.events.length;
     await client.call(METHODS.sessionSend, { sessionId: sid, text: "two" });
     await client.waitFor((e) => client.events.indexOf(e) >= evCount && e.type === "turn_completed" && e.sessionId === sid);
@@ -401,6 +411,7 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     const { sid: sender } = await createChat("echo");
     { const s = daemon!.winter.get(sender)!; const t1 = Date.now(); while (s.init === undefined && Date.now() - t1 < 10_000) await Bun.sleep(20); }
     const before = winterChildren(bin);
+    const workersBefore = daemon!.embedded.live();
     const outcome = await daemon!.runtimeSdk!.sdk.messaging.send({
       from: buildSessionAddress(backendOf(sender)),
       to: serializeRuntimeAddress(buildSessionAddress(backendOf(sid))),
@@ -411,6 +422,7 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     expect(driver.state).toBe("resumable");
     expect(driver.heldDeliveries).toEqual([]);
     expect(winterChildren(bin)).toEqual(before);
+    expect(daemon!.embedded.live()).toEqual(workersBefore);   // nor a Worker
   }, 40_000);
 
   test("(j) P8b-39: a send held behind an INTERRUPTED turn is not auto-run — no turn_started until the next send, which runs it FIRST and queues its own text", async () => {
@@ -456,16 +468,17 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sid);   // the transcript now exists
     await daemon!.winter.get(sid)!.end();                                              // the model is re-read on resume
     await client.call(METHODS.sessionSetModel, { sessionId: sid, model: "winter-test/hang" });
-    const before = winterChildren(bin);
+    const host = daemon!.embedded;
+    const backend = backendOf(sid);
     await client.call(METHODS.sessionSend, { sessionId: sid, text: "hang please" });
-    const pids = winterChildren(bin).filter((p) => !before.includes(p));
+    expect(workerAlive(host, backend)).toBe(true);
     expect(daemon!.winter.get(sid)!.resumed).toBe(true);
     await Bun.sleep(400);
     await client.call(METHODS.sessionSend, { sessionId: sid, text: "held one" });
     expect(daemon!.winter.get(sid)!.pendingSends).toEqual(["held one"]);
     const transcriptBefore = statSync(transcriptFile(sid)).size;
     await stopDaemon();                        // the hanging turn is aborted; "held one" is in the log only
-    expect(await goneWithin(pids, 3000)).toBe(true);
+    expect(await workerGoneWithin(host, backend, 3000)).toBe(true);
     await bootDaemon();
     expect(daemon!.winter.get(sid)).toBeUndefined();   // never cold-resumed at boot: the first RPC does it
     expect(daemon!.winter.legOf(sid)).toBe("winter");
@@ -511,6 +524,7 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     await bootDaemon();
     expect(daemon!.winter.get(engineSid)).toBeUndefined();
     expect(winterChildren(bin)).toEqual([]);   // nothing spawned for a backfilled row
+    expect(daemon!.embedded.live()).toEqual([]);   // …and no Worker either (WS-23)
     const rec = record(engineSid);
     expect(rec).toBeDefined();
     expect(sessionLegOf(rec)).toBe("engine");
@@ -589,14 +603,14 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     rmSync(cwd, { recursive: true, force: true });
   }, 40_000);
 
-  test("(e) stop() with a HANGING live turn ends inside the grace, and the child is gone", async () => {
-    const { sid, pids } = await createChat("hang");
+  test("(e) stop() with a HANGING live turn ends inside the grace, and the child (its Worker) is gone", async () => {
+    const { sid, host } = await createChat("hang");
     const driver = daemon!.winter.get(sid)!;
+    const backend = backendOf(sid);
     await client.call(METHODS.sessionSend, { sessionId: sid, text: "hang forever" });
     await Bun.sleep(400);
     expect(driver.turnRunning).toBe(true);
-    expect(pids.length).toBeGreaterThan(0);
-    expect(pids.some(alive)).toBe(true);
+    expect(workerAlive(host, backend)).toBe(true);
     client.close();
     const t0 = Date.now();
     const stopping = daemon!.stop();
@@ -605,8 +619,8 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     const took = Date.now() - t0;
     expect(took).toBeLessThan(2000);          // the app's SIGKILL grace
     expect(driver.state).toBe("resumable");
-    await Bun.sleep(200);
-    for (const pid of pids) expect(alive(pid)).toBe(false);
+    // WS-23: stop() drained the embedded host before the stores closed — the Worker is already gone.
+    expect(host.live()).toEqual([]);
     // the aborted turn still got its terminal, appended before the store closed
     const store = new (await import("../../src/sessions/store")).SessionStore(home);
     try {

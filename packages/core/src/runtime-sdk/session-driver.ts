@@ -99,6 +99,7 @@ import { readWinterTasks } from "./tasks-reader";
 
 export type WinterLegRefusalCode =
   | "winter_executable_unavailable"   // P8b-2: no `winter` binary resolves (setting → env → bundle → home)
+  | "embedded_runtime_unavailable"    // WS-23: chat/dispatch's embedded runtime refused (version lock, no host)
   | "winter_leg_unavailable"          // the router handle or the runtime spine did not construct
   | "session_predates_winter_leg"     // P8b-22: the record has no Winter transcript to resume
   // `session_unrecorded` (fix wave F2) is minted by `ipc/server.ts` directly — a session with NO
@@ -589,7 +590,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
   const assertAvailable = (mode: SessionMode): void => {
     assertSpine();
     const hook = deps.runtime!.spawnHookFor(mode);
-    if (hook instanceof Error) throw new WinterLegRefusal("winter_executable_unavailable", hook.message);
+    // WS-23: the refusal carries its own code — a binary that does not resolve (code) or an embedded
+    // runtime that refused (chat, dispatch). Forwarded as-is, never re-described as the other.
+    if (hook instanceof Error) throw new WinterLegRefusal(hook.code, hook.message);
   };
 
   /** The 8a record, read WITHOUT letting a store failure out of `legOf`/`ensure`: a records store
@@ -762,7 +765,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       const runHomeApplied = deps.runHome !== undefined;
       const settings = deps.settings();
       const hook = runtime.spawnHookFor(mode);
-      if (hook instanceof Error) throw new WinterLegRefusal("winter_executable_unavailable", hook.message);
+      if (hook instanceof Error) throw new WinterLegRefusal(hook.code, hook.message);
       // Both credential probes, together: the provider inventory (`CredentialPresence`) and the ONE
       // tool key whose presence changes the tool SURFACE (0.0.17 — see `WinterOptionsInput`'s
       // `exaKeyPresent`). Independent Keychain reads, so they are issued in parallel, and re-issued at

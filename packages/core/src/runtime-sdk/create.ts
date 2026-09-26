@@ -9,9 +9,10 @@
 // WHY A WRAPPER RATHER THAN `createRuntimeSdk` AT THE CALL SITE. Three things the daemon has to do
 // exactly once, in exactly one place, and that a raw handle cannot carry:
 //
-//  1. `spawnHookFor(mode)` — P8b-1's single topology site. Path (a) today (one spawned `winter`
-//     child per session); when the SDK publishes its engine, path (b) is a change to this one
-//     function's return value and nothing else in the daemon moves.
+//  1. `spawnHookFor(mode)` — P8b-1's single topology site. Code: path (a), one spawned `winter`
+//     child per session. Chat and dispatch (WS-23): path (b), the runtime EMBEDDED in this process,
+//     one Bun Worker per session (`embedded.ts`) — the change to this one function's return value
+//     P8b-1 promised, with nothing else in the daemon moving.
 //  2. `trackQuery`/`untrack`/`dispose` — G-14's ordering. Every live `Query` ends BEFORE the router
 //     disposes and, in `daemon.ts`, before the 8a spine closes: a draining child's last frames
 //     write delivery receipts into `runtime-state.db`, and a closed store loses them.
@@ -34,6 +35,7 @@ import { retentionFromSettings } from "../runtime-state/retention";
 import { winterOptionsFromSettings, type Settings } from "../settings";
 import { buildCoreBrand } from "./brand";
 import { resolveWinterExecutable, type WinterExecutableUnavailable } from "./executable";
+import { EmbeddedRuntimeUnavailable, embeddedVersionCheck, runsEmbedded, type EmbeddedSessionHost } from "./embedded";
 import { credentialPresenceFrom } from "./keychain";
 import { familyListingFromCatalog } from "./provider-selection";
 import { splitTag, WINTER_TEST_PREFIX } from "./model-tag";
@@ -74,7 +76,9 @@ export type SessionMode = "code" | "dispatch" | "chat";
 export const SHUTDOWN_QUERY_GRACE_MS = 300;
 
 /** What `Options` needs to spawn a child (P8b-1). `spawnClaudeCodeProcess` is left to the SDK's
- *  `defaultSpawn` on path (a); path (b) fills it in here and nowhere else. */
+ *  `defaultSpawn` on path (a) (code); path (b) (chat, dispatch — WS-23's embedded Worker) fills it in
+ *  here and nowhere else, and `pathToClaudeCodeExecutable` is then only a label (the SDK hands it to
+ *  the hook as `command` and resolves nothing). */
 export interface WinterSpawnHook {
   pathToClaudeCodeExecutable: string;
   spawnClaudeCodeProcess?: SpawnClaudeCodeProcess;
@@ -120,6 +124,13 @@ export interface WinterRuntimeSdkDeps {
    * the router is created exactly as before.
    */
   runHomeFor?: RunHomeFor;
+  /**
+   * WS-23: the daemon's embedded-session host (`embedded.ts`), where chat and dispatch Workers are
+   * spawned and — at shutdown — ended (`daemon.ts` owns it and drains it before the stores close).
+   * ABSENT (a test double, a harness that never runs a session) ⇒ chat and dispatch refuse typed
+   * (`embedded_runtime_unavailable`); they never fall back to the spawned binary.
+   */
+  embedded?: EmbeddedSessionHost;
   log?: (line: string) => void;
 }
 
@@ -147,11 +158,14 @@ export interface WinterRuntimeSdk {
   /**
    * P8b-1: THE ONE SITE for the spawn topology, re-resolved on EVERY call.
    *
-   * `settings.runtimes.winterExecutable` is hot, so a newly built binary is picked up by the next
-   * session with no restart. Returns the typed `WinterExecutableUnavailable` rather than throwing
-   * and NEVER falls back to anything — a session on the Winter leg refuses at create instead.
+   * CODE: the spawned `winter` binary. `settings.runtimes.winterExecutable` is hot, so a newly built
+   * binary is picked up by the next session with no restart. CHAT and DISPATCH (WS-23): the embedded
+   * runtime, one Worker per session — no binary is resolved for them at all, so
+   * `winter_executable_unavailable` cannot apply; their refusal is `EmbeddedRuntimeUnavailable`
+   * (a version-locked set that does not agree, or no embedded host wired). Returns the typed error
+   * rather than throwing and NEVER falls back to the other topology — a session refuses at create.
    */
-  spawnHookFor(mode: SessionMode): WinterSpawnHook | WinterExecutableUnavailable;
+  spawnHookFor(mode: SessionMode): WinterSpawnHook | WinterExecutableUnavailable | EmbeddedRuntimeUnavailable;
   /**
    * P8c-12: the router's selection for a NEW session (or a resumed one's `persisted` record, which
    * the router returns BY IDENTITY — "the persisted selection wins", never re-decided). Builds
@@ -367,7 +381,16 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
         await releaseAllHeld(sdk, deps.directoryStore, deps.log);
       },
     },
-    spawnHookFor(_mode: SessionMode): WinterSpawnHook | WinterExecutableUnavailable {
+    spawnHookFor(mode: SessionMode): WinterSpawnHook | WinterExecutableUnavailable | EmbeddedRuntimeUnavailable {
+      if (runsEmbedded(mode)) {
+        const embedded = deps.embedded;
+        if (embedded === undefined) return new EmbeddedRuntimeUnavailable("this daemon was built without an embedded-session host; chat and dispatch cannot start");
+        // Checked on every call, not only at boot: the values are constants, so this costs nothing,
+        // and it keeps the refusal at the one topology site rather than a boot flag someone must read.
+        const versionRefusal = embeddedVersionCheck();
+        if (versionRefusal !== undefined) return versionRefusal;
+        return { pathToClaudeCodeExecutable: "winter-embedded", spawnClaudeCodeProcess: (options) => embedded.spawn(options) };
+      }
       const resolution = resolveWinterExecutable({
         setting: winterOptionsFromSettings(deps.settings()).winterExecutable,
         env: process.env,

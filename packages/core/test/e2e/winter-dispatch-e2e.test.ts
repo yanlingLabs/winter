@@ -1,5 +1,10 @@
 // P8b Task 17 Step 1 — DISPATCH ON THE WINTER LEG, end to end, on the BUILT binary.
 //
+// WS-23 (ruling R1): the dispatch singleton now runs EMBEDDED — a Bun Worker inside the daemon, observed
+// through `daemon.embedded` by its backend session id — and the mint asserts that NO `winter` process
+// appeared. Its spawned SESSIONS are code sessions and stay subprocesses; this file's subagent is an
+// in-process child engine of the dispatch runtime (it lives in the same Worker).
+//
 // A real `startDaemon` in a temp home whose settings carry NO `winterLeg` block (the engine is
 // retired: every mode is the Winter leg), a real NDJSON client, the real `winter` child
 // `WINTER_RUNTIME_EXECUTABLE` names (skipped when unset; required under WINTER_RUNTIME_REQUIRE_BINARY=1).
@@ -102,7 +107,6 @@ const winterSurvivors = (bin: string): string[] =>
   Bun.spawnSync(["ps", "-axo", "pid=,command="]).stdout.toString().split("\n").map((l) => l.trim()).filter((l) => l.replace(/^\d+\s+/, "").startsWith(bin));
 const winterChildren = (bin: string): string[] =>
   Bun.spawnSync(["pgrep", "-P", String(process.pid), "-f", bin]).stdout.toString().trim().split("\n").filter(Boolean);
-const alive = (pid: string): boolean => Bun.spawnSync(["kill", "-0", pid]).exitCode === 0;
 const types = (events: SessionEvent[]): string[] => events.map((e) => e.type);
 const TURN = ["user_message", "turn_started", "tool_call", "tool_result", "assistant_message", "turn_completed", "approval_requested", "thread_started", "thread_completed", "agent_error"];
 
@@ -136,10 +140,11 @@ describeWithWinterBinary("dispatch on the Winter leg — the built binary throug
     daemon = undefined;
     await stopping;
   };
-  const goneWithin = async (pids: string[], ms: number): Promise<boolean> => {
+  /** WS-23: every embedded Worker of `host` has ended within `ms`. */
+  const workersGoneWithin = async (host: RunningDaemon["embedded"], ms: number): Promise<boolean> => {
     const t0 = Date.now();
-    while (Date.now() - t0 < ms) { if (!pids.some(alive)) return true; await Bun.sleep(50); }
-    return !pids.some(alive);
+    while (Date.now() - t0 < ms) { if (host.live().length === 0) return true; await Bun.sleep(50); }
+    return host.live().length === 0;
   };
   const mainLog = (): SessionEvent[] => daemon!.sessions.read(sid).filter((e) => (e as { threadId?: string }).threadId === "main" || (e as { threadId?: string }).threadId === undefined);
   const kinds = (log: SessionEvent[]): string[] => types(log).filter((t) => TURN.includes(t));
@@ -176,7 +181,9 @@ describeWithWinterBinary("dispatch on the Winter leg — the built binary throug
     const minted = await client.call<{ sessionId: string; created: boolean }>(METHODS.sessionDispatch, {});
     expect(minted.created).toBe(true);
     sid = minted.sessionId;
-    expect(winterChildren(bin).filter((p) => !before.includes(p))).toHaveLength(1);
+    // WS-23: embedded — one Worker for the singleton, and no `winter` process.
+    expect(winterChildren(bin).filter((p) => !before.includes(p))).toEqual([]);
+    expect(daemon!.embedded.live()).toEqual([rt.records.get(sid)!.backendSessionId!]);
     const rec = rt.records.get(sid);
     expect(sessionLegOf(rec)).toBe("winter");
     expect(rec!.backendSessionId).toMatch(/^[0-9a-f-]{36}$/);
@@ -263,9 +270,10 @@ describeWithWinterBinary("dispatch on the Winter leg — the built binary throug
     expect(driver.generation).toBe(4);   // minted (1), tooluse under auto (2), tooluse under ask (3), subagent under auto (4)
 
     // the simulated restart
-    const pids = winterChildren(bin);
+    const host = daemon!.embedded;
+    expect(host.live().length).toBeGreaterThan(0);
     await stopDaemon();
-    expect(await goneWithin(pids, 3000)).toBe(true);
+    expect(await workersGoneWithin(host, 3000)).toBe(true);
     await bootDaemon();
     expect(rt.children.get(sid, started!.threadId)?.status).toBe("completed");
     expect(rt.children.list(sid)).toHaveLength(1);
