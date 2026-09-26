@@ -798,6 +798,21 @@ describe("item 6: a same-leg PROVIDER change replaces the live child", () => {
     });
   });
 
+  test("WS-23 r1 I-3: the source compaction is announced to the user, with the target's window, before it runs", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      const seenOpts: unknown[] = [];
+      const live: LegSession = { ...compactingLive(false, async () => {}, []), compact: async (opts?: unknown) => { seenOpts.push(opts); return { retainedCount: 2 }; } };
+      const winter = fakeWinter({ live });
+      await planAndApplySwitch(
+        deps({ records, winter: { ...winter, evict: async () => {} }, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-v4-pro")) }), barrier: { reviewSwitch: async () => tooBig } }),
+        "s1", "deepseek/deepseek-v4-pro", true,
+      );
+      await Bun.sleep(20);
+      expect(seenOpts).toEqual([{ announce: { warning: "switch_compaction", text: "This conversation (about 612000 tokens) is larger than deepseek/deepseek-v4-pro can hold (a 128000-token window), so the current model is summarizing its older part before the switch. The most recent exchanges carry over as they are." } }]);
+    });
+  });
+
   test("WS-23: a conversation that fits is replaced with no compaction; a compaction that fails still lets the switch through", async () => {
     await withRs(async (_rs, records) => {
       seedRecord(records, "s1");

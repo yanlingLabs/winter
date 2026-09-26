@@ -380,6 +380,7 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
   // WS-23 (decision 5): the review said the conversation does not fit the target -- a provider-changing
   // switch below then asks the live child to compact on its SOURCE model before it is replaced.
   let compactOnSource = false;
+  let sourceFit: { estimatedTokens?: number; window?: number } | undefined;
   if (sessionKey !== undefined && reviewer !== undefined) {
     let review: SwitchReview;
     try {
@@ -418,6 +419,7 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
       };
     }
     compactOnSource = fit?.fits === false;
+    sourceFit = fit;
   }
   // Fix round 2 (C1, belt-and-braces): keep the 8a record's identity columns in step with an APPLIED
   // family change (gpt -> deepseek) — without this a switch away from the family the session was
@@ -483,7 +485,13 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
       const compactFirst = async (): Promise<void> => {
         if (!compactOnSource) return;
         try {
-          const { retainedCount } = await liveChild.compact();
+          // Review r1 I-3: the user is TOLD, in the transcript, that a summary replaces the older part of
+          // what the new model continues from (the in-runtime path's `switch_compaction` warning; the
+          // compaction control emits none of its own). Counts and model ids only.
+          const size = sourceFit?.estimatedTokens !== undefined ? `This conversation (about ${sourceFit.estimatedTokens} tokens) is larger than` : "This conversation is larger than";
+          const window = sourceFit?.window !== undefined ? ` (a ${sourceFit.window}-token window)` : "";
+          const announce = `${size} ${modelLabelFor(model)} can hold${window}, so the current model is summarizing its older part before the switch. The most recent exchanges carry over as they are.`;
+          const { retainedCount } = await liveChild.compact({ announce: { warning: "switch_compaction", text: announce } });
           deps.log?.(`handoff: ${sessionId} compacted on its source model before the provider switch (${retainedCount} messages kept) — the conversation did not fit ${modelLabelFor(model)}`);
         } catch (err) {
           deps.log?.(`handoff: ${sessionId} could not compact on its source model before the provider switch (${err instanceof Error ? err.name : "unknown"}) — the new model's own fit check compacts instead`);
