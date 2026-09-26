@@ -106,11 +106,46 @@ describe("the old-layout definition (spec §8, r3)", () => {
     expect(isOldLayout(home)).toBe(true);
   });
 
-  test("reviewer round, item 3: a <home>/plugins dir with NO manifest file at all (not even plugin.json) still triggers old layout", () => {
+  // WS-24: flipped — an EMPTY folder under <home>/plugins is a stray folder, not a plugin; it used to trip
+  // Migration C on every boot (and then convert into an empty plugin). What still counts with no manifest:
+  // something the pre-WS-21 build could load from it, or a folder the legacy settings name.
+  test("WS-24: a <home>/plugins dir holding nothing a plugin could load (no manifest, no .mcp.json, no skill) does NOT trigger old layout", () => {
     const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-migc-nomanifest-")));
     mkdirSync(join(home, "sdk", "projects"), { recursive: true });
-    mkdirSync(join(home, "plugins", "bare"), { recursive: true }); // no winter-plugin.json, no plugin.json, nothing
-    expect(isOldLayout(home)).toBe(true);
+    mkdirSync(join(home, "plugins", "bare"), { recursive: true }); // nothing at all
+    mkdirSync(join(home, "plugins", "marketplaces", "x"), { recursive: true }); // a stray tool's tree
+    writeFileSync(join(home, "plugins", "marketplaces", "x", "README.md"), "not a plugin");
+    mkdirSync(join(home, "plugins", "cache"), { recursive: true });
+    writeFileSync(join(home, "plugins", "cache", "blob"), "x");
+    writeFileSync(join(home, "plugins", ".DS_Store"), "x");
+    expect(isOldLayout(home)).toBe(false);
+  });
+
+  test("WS-24: a manifest-less dir with a .mcp.json, or a skill, still triggers; so does an empty dir the legacy settings name", () => {
+    for (const seed of [
+      (h: string) => { mkdirSync(join(h, "plugins", "mcp-only"), { recursive: true }); writeFileSync(join(h, "plugins", "mcp-only", ".mcp.json"), "{}"); },
+      (h: string) => { mkdirSync(join(h, "plugins", "skill-only", "skills", "greet"), { recursive: true }); writeFileSync(join(h, "plugins", "skill-only", "skills", "greet", "SKILL.md"), "hi"); },
+      (h: string) => {
+        mkdirSync(join(h, "plugins", "enabled-bare"), { recursive: true });
+        writeFileSync(join(h, "settings.json"), JSON.stringify({ schemaVersion: 3, plugins: { enabled: ["enabled-bare"] } }));
+      },
+    ]) {
+      const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-migc-marker-")));
+      mkdirSync(join(home, "sdk", "projects"), { recursive: true });
+      seed(home);
+      expect(isOldLayout(home)).toBe(true);
+    }
+  });
+
+  test("WS-24: the converter picks up exactly what the old-layout check counts — never a stray folder", async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-migc-stray-convert-")));
+    mkdirSync(join(home, "plugins", "stray"), { recursive: true });
+    mkdirSync(join(home, "plugins", "real"), { recursive: true });
+    writeFileSync(join(home, "plugins", "real", "plugin.json"), JSON.stringify({ name: "Real" }));
+    const { convertLegacyPlugins, legacyPluginDirNames } = await import("../../src/plugins/convert-legacy");
+    expect(legacyPluginDirNames(home)).toEqual(["real"]);
+    const result = await convertLegacyPlugins(home);
+    expect(result.converted.map((c) => c.id)).toEqual(["real"]);
   });
 
   test("an EMPTY <home>/plugins directory does not trigger old layout", () => {
@@ -203,6 +238,8 @@ describe("preflight", () => {
   test("plugins without a converter refuse; sdk/ with unexpected content refuses", async () => {
     const a = fixture();
     mkdirSync(join(a.home, "plugins", "battery-limiter"), { recursive: true });
+    // WS-24: a plugin, not a stray folder — it holds something a legacy plugin loads.
+    writeFileSync(join(a.home, "plugins", "battery-limiter", "winter-plugin.json"), JSON.stringify({ id: "battery-limiter", tier: "capability" }));
     await expect(runMigrationC(a.home, deps())).rejects.toBeInstanceOf(MigrationCRefused);
     const b = fixture();
     writeFileSync(join(b.home, "sdk", "projects", "stray.jsonl"), "x");
