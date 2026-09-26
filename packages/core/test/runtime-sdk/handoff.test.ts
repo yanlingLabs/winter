@@ -507,7 +507,7 @@ describe("planAndApplySwitch: a throwing reviewSwitch fails safe as a prompt, ne
       expect(caught).toBeUndefined(); // never a rejection
       expect(out).toEqual({
         kind: "confirmation_required",
-        warnings: ["Winter couldn't check what carries over to deepseek/deepseek-v4-pro. The conversation carries over; reasoning private to the current model may not."],
+        warnings: ["Winter couldn't check whether this conversation fits deepseek/deepseek-v4-pro, or holds anything it can't read. The conversation carries over as it is; if it is too large, the current model will summarize its older part first."],
         portable: [],
       });
       // Logged ONCE, naming the error CLASS only — never `.message` (which could carry payload
@@ -759,6 +759,86 @@ describe("item 6: a same-leg PROVIDER change replaces the live child", () => {
       );
       expect(out.kind).toBe("same-runtime");
       expect(evicted).toEqual([]);
+    });
+  });
+
+  // WS-23 (reasoning-state, decision 5): the review said the conversation does not fit the target, so the
+  // child being replaced compacts FIRST, on its own (source) model -- the model being left pays -- and only
+  // then is evicted; a conversation that fits is replaced at once, with no compaction.
+  const compactingLive = (turnRunning: boolean, idle: () => Promise<void>, calls: string[], outcome: () => Promise<{ retainedCount: number }> = async () => ({ retainedCount: 4 })): LegSession => ({
+    ...idleLive(turnRunning, idle),
+    compact: async () => {
+      calls.push("compact");
+      return await outcome();
+    },
+  });
+  const tooBig = { prompt: true, fits: false, estimatedTokens: 612_000, window: 128_000, classification: { lossClass: "warned-lossy" as const, warnings: ["too large"], portable: ["the recent conversation as it is, and a summary of the older part"] } };
+
+  test("WS-23: a switch the target cannot hold -- the confirmation carries the fit, and once confirmed the source compacts BEFORE the evict", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1"); // seeded providerId "p"
+      const calls: string[] = [];
+      const winter = fakeWinter({ live: compactingLive(false, async () => {}, calls) });
+      const run = (confirm: boolean) =>
+        planAndApplySwitch(
+          deps({
+            records,
+            winter: { ...winter, evict: async () => { calls.push("evict"); } },
+            runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-v4-pro")) }),
+            barrier: { reviewSwitch: async () => tooBig },
+          }),
+          "s1", "deepseek/deepseek-v4-pro", confirm,
+        );
+      expect(await run(false)).toEqual({ kind: "confirmation_required", warnings: ["too large"], portable: ["the recent conversation as it is, and a summary of the older part"], fit: { fits: false, estimatedTokens: 612_000, window: 128_000 } });
+      expect(calls).toEqual([]);
+      expect((await run(true)).kind).toBe("same-runtime");
+      expect(calls).toEqual(["compact", "evict"]);
+    });
+  });
+
+  test("WS-23: a conversation that fits is replaced with no compaction; a compaction that fails still lets the switch through", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      const calls: string[] = [];
+      const fits = { prompt: false, fits: true, estimatedTokens: 20_000, window: 128_000 };
+      const winter = fakeWinter({ live: compactingLive(false, async () => {}, calls) });
+      await planAndApplySwitch(
+        deps({ records, winter: { ...winter, evict: async () => { calls.push("evict"); } }, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-v4-pro")) }), barrier: { reviewSwitch: async () => fits } }),
+        "s1", "deepseek/deepseek-v4-pro", false,
+      );
+      expect(calls).toEqual(["evict"]);
+    });
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      const calls: string[] = [];
+      const logs: string[] = [];
+      const failing = fakeWinter({ live: compactingLive(false, async () => {}, calls, async () => { throw Object.assign(new Error("nothing to compact"), { name: "WinterRpcError" }); }) });
+      const out = await planAndApplySwitch(
+        deps({ records, log: (line: string) => logs.push(line), winter: { ...failing, evict: async () => { calls.push("evict"); } }, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-v4-pro")) }), barrier: { reviewSwitch: async () => tooBig } }),
+        "s1", "deepseek/deepseek-v4-pro", true,
+      );
+      expect(out.kind).toBe("same-runtime");
+      expect(calls).toEqual(["compact", "evict"]);
+      expect(logs.some((l) => l.includes("could not compact on its source model") && l.includes("WinterRpcError"))).toBe(true);
+    });
+  });
+
+  test("WS-23: with a turn running, the source compacts at the idle boundary, then the child is replaced", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      const calls: string[] = [];
+      let resolveIdle: (() => void) | undefined;
+      const idlePromise = new Promise<void>((resolve) => { resolveIdle = resolve; });
+      const winter = fakeWinter({ live: compactingLive(true, () => idlePromise, calls) });
+      await planAndApplySwitch(
+        deps({ records, winter: { ...winter, evict: async () => { calls.push("evict"); } }, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-v4-pro")) }), barrier: { reviewSwitch: async () => tooBig } }),
+        "s1", "deepseek/deepseek-v4-pro", true,
+      );
+      expect(calls).toEqual([]);
+      resolveIdle!();
+      await idlePromise;
+      await Bun.sleep(20);
+      expect(calls).toEqual(["compact", "evict"]);
     });
   });
 
