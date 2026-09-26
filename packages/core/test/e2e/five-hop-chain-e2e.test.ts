@@ -38,6 +38,15 @@
 // Claude's included, runs on the Winter runtime, and the retired cross-runtime parity files that
 // parts 1 and 2 used to lean on are gone with it.
 //
+// WS-23 (reasoning-state, decision 9 — SDK b5a79db): W18-19's prompt rule ("prompts appear exactly at
+// claude -> deepseek and gpt -> claude") is SUPERSEDED. Both prompts were over reasoning a hidden-
+// reasoning source could not hand on; that reasoning now stays in the provider-state sidecar for its
+// own model and replays on a switch back (hop 4 below measures exactly that), so NO hop of this chain
+// prompts. A switch prompts only over what the target cannot represent — images or documents for a
+// text-only model, another vendor's server-tool steps, a compaction the fit check will run, an
+// interrupted turn — and part 2 keeps a real-session prompt on the one of those a text-only session
+// can reach: a conversation the chain's own GLM cannot hold.
+//
 // RESOLVED (WS-19, Lane P): the finding above is a HISTORICAL RECORD, accurate for when it was
 // written — it is no longer this daemon's current state. W19-1 derives `WINTER_CREDENTIAL_INVENTORY`
 // from the catalog (deepseek/zai/openrouter are now real, routable rows) and W19-6 gives
@@ -132,8 +141,10 @@ describe("A-5 part 1: the five-hop chain's prompt rule, against the REAL daemon 
 // hop's own source prompt (claude -> [a foreign family]) and the LAST hop's own prompt (gpt ->
 // claude), each measured directly against a real session.setModel call — never inferred from the
 // resolver alone. Part 3 below covers the FULL chain, body-level, on every hop.
+// WS-23: gpt -> claude is measured SILENT now; the real-session prompt moves to a hop the target
+// cannot hold (see this file's header).
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-interface RpcErrorLike { rpc?: { message?: string; data?: { code?: string; warnings?: string[] } } }
+interface RpcErrorLike { rpc?: { message?: string; data?: { code?: string; warnings?: string[]; portable?: string[]; fit?: { fits: boolean; estimatedTokens: number; window: number } } } }
 
 class TestClient {
   private decoder = new LineDecoder();
@@ -187,7 +198,7 @@ class TestClient {
 
 // WS-23: Claude runs on the Winter runtime too now — the Anthropic fake is reached through
 // `settings.providers.anthropic.baseUrl`, the same per-provider door every other hop uses.
-describeWithWinterBinary("A-5 part 2: the chain's LAST hop (gpt -> claude) prompts against a real session", (winterBin) => {
+describeWithWinterBinary("A-5 part 2: the chain's LAST hop (gpt -> claude) is silent against a real session; a hop the target cannot hold prompts", (winterBin) => {
   describe("gpt -> claude", () => {
     let home: string;
     let daemon: RunningDaemon | undefined;
@@ -220,6 +231,9 @@ describeWithWinterBinary("A-5 part 2: the chain's LAST hop (gpt -> claude) promp
       const secrets = new FileSecretStore(join(home, "test-secrets"));
       await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-test-5hop" });
       await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-test-5hop-anthropic" });
+      // The GLM hop only has to PROMPT here, never to run, but `selectRuntimeFor` refuses a provider
+      // with no credential before the review is ever reached.
+      await writeCredentialMaterial(secrets, "zai:default", { kind: "api-key", key: "sk-test-5hop-zai" });
       daemon = await startDaemon({ home, secrets, agentProvider: null });
       if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
       client = await TestClient.connect(daemon.socketPath);
@@ -236,7 +250,7 @@ describeWithWinterBinary("A-5 part 2: the chain's LAST hop (gpt -> claude) promp
       rmSync(home, { recursive: true, force: true });
     });
 
-    test("gpt -> claude prompts, exactly as part 1's table computed", async () => {
+    test("gpt -> claude is SILENT (WS-23: gpt's reasoning stays in the sidecar), and the session really moves to claude", async () => {
       const d = daemon!;
       if ("unavailable" in d.runtimeState) throw d.runtimeState.unavailable;
       const cwd = realpathSync(mkdtempSync(join(tmpdir(), "five-hop-cwd-")));
@@ -245,14 +259,39 @@ describeWithWinterBinary("A-5 part 2: the chain's LAST hop (gpt -> claude) promp
       await client.call(METHODS.sessionSend, { sessionId, text: "the chain's last hop" });
       await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 45_000);
 
+      // No `confirmLossy`: a prompt here throws `handoff_confirmation_required` and fails the test.
+      await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_CLAUDE_MODEL });
+      expect(d.runtimeState.records.get(sessionId)?.providerId).toBe("anthropic");
+      // The body-level round trip past this hop is part 3's hop 4 below.
+
+      rmSync(cwd, { recursive: true, force: true });
+    }, 90_000);
+
+    // The prompt part 2 used to measure, kept on a loss WS-23 still counts: the same gpt session shape,
+    // but ~700k characters of conversation (~220k tokens by the review's estimate) toward the chain's
+    // own GLM, whose 200k window cannot hold it — the fit check will compact on gpt first, and the
+    // confirmation says so, with the fit itself in the error data.
+    test("gpt -> GLM with a conversation GLM cannot hold PROMPTS, carrying the fit and naming gpt as the summarizer", async () => {
+      const d = daemon!;
+      if ("unavailable" in d.runtimeState) throw d.runtimeState.unavailable;
+      const cwd = realpathSync(mkdtempSync(join(tmpdir(), "five-hop-cwd-")));
+      const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: CATALOG_GPT_MODEL, cwd });
+      await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+      await client.call(METHODS.sessionSend, { sessionId, text: `a long document: ${"a".repeat(700_000)}` });
+      await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 45_000);
+
       let caught: RpcErrorLike | undefined;
       try {
-        await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_CLAUDE_MODEL });
+        await client.call(METHODS.sessionSetModel, { sessionId, model: "zai/glm-5" });
       } catch (err) { caught = err as RpcErrorLike; }
       expect(caught).toBeDefined();
       expect(caught!.rpc?.data?.code).toBe("handoff_confirmation_required");
-      expect(caught!.rpc?.data?.warnings?.length ?? 0).toBeGreaterThan(0);
-      // The confirmed round trip past this prompt is part 3's hop 4 below.
+      expect(caught!.rpc?.data?.fit?.fits).toBe(false);
+      expect(caught!.rpc?.data?.fit?.window).toBe(200_000);
+      expect(caught!.rpc?.data?.fit?.estimatedTokens ?? 0).toBeGreaterThan(200_000);
+      expect(caught!.rpc?.data?.warnings?.some((w) => w.includes(`so ${CATALOG_GPT_MODEL} will summarize its older part`))).toBe(true);
+      // Unconfirmed, nothing moved.
+      expect(d.runtimeState.records.get(sessionId)?.providerId).toBe("openai");
 
       rmSync(cwd, { recursive: true, force: true });
     }, 90_000);
@@ -407,7 +446,7 @@ describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude
       rmSync(home, { recursive: true, force: true });
     });
 
-    test("every hop runs on its own provider, and the prompts fall exactly where W18-19's table says", async () => {
+    test("every hop runs on its own provider, and no hop prompts (WS-23: every model's reasoning stays in the sidecar)", async () => {
       const cwd = realpathSync(mkdtempSync(join(tmpdir(), "five-hop-chain-cwd-")));
       const turns = (): number => client.events.filter((e) => e.type === "turn_completed").length;
       // NOTHING stands in for an idle reap here any more. Lane P's first round had to force a fresh
@@ -423,22 +462,18 @@ describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude
       await client.waitFor(() => turns() >= 1, 120_000);
       expect(anthropicFakeServer!.requests.some((r) => r.path === "/v1/messages")).toBe(true);
 
-      // HOP 1 — claude -> deepseek. A native/summary-only source crossing to a foreign family:
-      // PROMPTS (part 1's own table).
-      let caught: RpcErrorLike | undefined;
-      try {
-        await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_DEEPSEEK_MODEL });
-      } catch (err) { caught = err as RpcErrorLike; }
-      expect(caught?.rpc?.data?.code).toBe("handoff_confirmation_required");
-      await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_DEEPSEEK_MODEL, confirmLossy: true });
+      // HOP 1 — claude -> deepseek. A native/summary-only source crossing to a foreign family. WS-23:
+      // SILENT (part 1's table) — Claude's signed thinking stays in the sidecar for Claude, and hop 4
+      // proves it comes back. No `confirmLossy`: a prompt here throws and fails the test.
+      await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_DEEPSEEK_MODEL });
       expect(daemon!.winter!.legOf(sessionId)).toBe("winter");
       await client.call(METHODS.sessionSend, { sessionId, text: "hop 1, on deepseek" });
       await client.waitFor(() => turns() >= 2, 120_000);
       expect(deepseek!.models).toContain("deepseek-v4-pro");
       const deepseekBody = deepseek!.bodies.at(-1)!;
       expect(outOfOrder(deepseekBody, ["hop 0, on claude", "hello from claude", "hop 1, on deepseek"])).toEqual([]);
-      // (b) the Claude turn's thinking, carried as data with its own provenance — the lossy carriage
-      // the prompt above warned about, actually delivered rather than dropped. DeepSeek is
+      // (b) the Claude turn's thinking, carried as data with its own provenance — the readable part of
+      // it, as the capped decoration WS-23 keeps (decision 2). DeepSeek is
       // full-exposed, so this hop takes the THINKING-CHANNEL door, which renders no `kind`: the
       // `kind` half of W18-19's table is proven on hop 3, whose destination takes the tag door.
       expect(carriesReasoning(deepseekBody, { kind: "summary", provider: "anthropic", text: CLAUDE_THINKING })).toBe(true);
@@ -476,16 +511,11 @@ describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude
       expect(carriesReasoning(gptBody, { kind: "exposed", provider: "zai", text: "reasoning on the glm hop" })).toBe(true);
       expect(opaqueLeaks(gptBody, [CLAUDE_SIGNATURE])).toEqual([]);
 
-      // HOP 4 — gpt -> claude. PROMPTS.
-      let caught2: RpcErrorLike | undefined;
-      try {
-        await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_CLAUDE_MODEL });
-      } catch (err) { caught2 = err as RpcErrorLike; }
-      expect(caught2?.rpc?.data?.code).toBe("handoff_confirmation_required");
-      // CONFIRMED, and the turn actually runs — W18-19's ROW 4: a Claude destination, whose
+      // HOP 4 — gpt -> claude. WS-23: SILENT, like every hop before it (part 2 measures the same
+      // pairing on its own). The turn actually runs — W18-19's ROW 4: a Claude destination, whose
       // `readableState` is not full-exposed, so it takes the TAG door.
       const anthropicTurnsBefore = anthropicFakeServer!.requests.filter((r) => r.path === "/v1/messages").length;
-      await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_CLAUDE_MODEL, confirmLossy: true });
+      await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_CLAUDE_MODEL });
       expect(daemon!.winter!.legOf(sessionId)).toBe("winter");
       await client.call(METHODS.sessionSend, { sessionId, text: "hop 4, back on claude" });
       await client.waitFor(() => turns() >= 5, 120_000);
