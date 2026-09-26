@@ -1420,13 +1420,6 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     };
   }
 
-  /** The plugin name half of a `"<name>@<marketplace>"` spec — for `hotApplyStop`, which the
-   *  supervisor tracks by bare name (`hotApplyStart`'s own `config.id: info.name`). */
-  function pluginNameOfSpec(spec: string): string {
-    const at = spec.lastIndexOf("@");
-    return at > 0 ? spec.slice(0, at) : spec;
-  }
-
   /** I1 fix round 1: `plugin.list`'s `extras` — winter-plugin.json's tier/permissions/entry plus
    *  the SAME consent-completeness pair `agent/plugins.ts#PluginStore` computes (requiredConsents
    *  from the manifest, consented from `<home>/settings.json`'s `plugins.consents`, keyed by the
@@ -1537,9 +1530,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     if (!opts.supervisor || !opts.registry || !opts.winterHome) return "stopped";
     // WS-21: `info.installPath` — a plugin's real install path, straight off Contract B's own
     // record, never the pre-WS-21 `<home>/plugins/<name>` convention (agent/plugins.ts's own doc).
-    const config: EligiblePlugin = { id: info.name, dir: info.installPath, entry: info.entry! };
+    // WS-24: the supervisor is keyed by the plugin's SPEC (`plugins/supervisor.ts`'s header, "THE KEY").
+    const config: EligiblePlugin = { id: info.spec, dir: info.installPath, entry: info.entry! };
     opts.supervisor.restart(config);
-    return opts.supervisor.status(info.name);
+    return opts.supervisor.status(info.spec);
   }
 
   /** `plugin.disable`/`plugin.remove`'s hot-apply STOP — kills a Tier-2 plugin's running process
@@ -1550,8 +1544,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
    *  stop. Deliberately left ungated on `opts.registry`, unlike `hotApplyStart` — a stop can only
    *  ever tear something down, never spawn, so widening when it runs is harmless cleanup, not a
    *  new-process risk. */
-  function hotApplyStop(name: string): void {
-    opts.supervisor?.stop(name);
+  function hotApplyStop(spec: string): void {
+    opts.supervisor?.stop(spec);
   }
 
   const server = Bun.listen<ConnState>({
@@ -2690,9 +2684,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // hotApplyStop unconditionally, before uninstallPlugin's own "is it installed there" check
         // ever ran). `others` is every OTHER scope's current record for this exact spec, read
         // before this call's own mutation — stopping the Tier-2 process is correct only when NONE
-        // of them still has it installed and enabled (a plugin's runtime is one process per bare
-        // name, spec's own F15 compound-key convention notwithstanding — see the lane report's own
-        // concerns note on this).
+        // of them still has it installed and enabled (a plugin's runtime is one process per spec,
+        // WS-24 — every scope's install of one spec shares it).
         let stillLive = false;
         try {
           stillLive = (await listPlugins(options)).some((e) => e.enabled && e.scope !== p.scope && `${e.id}@${e.marketplace}` === p.spec);
@@ -2704,7 +2697,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         }
         invalidateLivePluginsCache();
         if (!stillLive) {
-          hotApplyStop(pluginNameOfSpec(p.spec));
+          hotApplyStop(p.spec);
           // C1 fix round 2: the last scope of this spec is gone — its consent record must go too,
           // or a later reinstall under the SAME spec (a different folder, spec's own scenario)
           // would find a stale record whose fingerprint just happens to still be checked against
@@ -2729,7 +2722,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         invalidateLivePluginsCache();
         // Tier-2 (platform, entry) hot-spawn — install+enable is itself the consent for a plugin's
         // claude-native content (spec §5.4); it does not gate the entry process's own hot-start.
-        const info = livePlugins().find((pl) => `${pl.name}@${pl.marketplace}` === p.spec);
+        const info = livePlugins().find((pl) => pl.spec === p.spec);
         if (info) hotApplyStart(info);
         return { ok: true, spec: p.spec, scope: p.scope, enabled: true };
       }
@@ -2742,7 +2735,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           throwPluginManagerFailure(err);
         }
         invalidateLivePluginsCache();
-        hotApplyStop(pluginNameOfSpec(p.spec));
+        hotApplyStop(p.spec);
         return { ok: true, spec: p.spec, scope: p.scope, enabled: false };
       }
       case METHODS.pluginUpdate: {
@@ -3652,7 +3645,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             // otherwise a `plugin.setConsent`/`plugin.enable {consent:true}` grant of "hardware"
             // consent would stay invisible to this gate until a daemon restart, quietly breaking
             // this task's "applied HOT" promise for the hardware.request consent path specifically.
-            const info = livePlugins().find((pl) => pl.name === pluginId);
+            // WS-24: a plugin connection authenticates as its SPEC (the supervisor's key).
+            const info = livePlugins().find((pl) => pl.spec === pluginId);
             if (!info?.hardwarePermissions.includes(cls)) {
               opts.hardware.auditDenied({ requester, verb: p.verb, code: "consent_denied", missing: cls });
               return { code: "consent_denied", missing: cls };
@@ -4053,7 +4047,20 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.pluginRestart: {
         const p = parseParams(PluginRestartParams, params);
         if (!opts.supervisor) throw new RpcFailure(ERR.INTERNAL, "plugin supervisor is not available on this server");
-        const config = opts.supervisor.configFor(p.pluginId);
+        // WS-24: `pluginId` is the plugin's spec (the supervisor's key). A BARE name — what this RPC took
+        // before, and what `winter plugin restart <name>` and older clients still send — resolves only when
+        // exactly one tracked spec has that name; two marketplaces' same-named plugins refuse it by name.
+        let config = opts.supervisor.configFor(p.pluginId);
+        if (!config && !p.pluginId.includes("@")) {
+          const named = opts.supervisor.trackedIds().filter((id) => {
+            const at = id.lastIndexOf("@");
+            return at > 0 && id.slice(0, at) === p.pluginId;
+          });
+          if (named.length > 1) {
+            throw new RpcFailure(ERR.INVALID_PARAMS, `"${p.pluginId}" is installed from more than one marketplace (${named.join(", ")}) — name the one to restart`);
+          }
+          if (named.length === 1) config = opts.supervisor.configFor(named[0]!);
+        }
         if (!config) throw new RpcFailure(ERR.NOT_FOUND, `unknown plugin: ${p.pluginId}`);
         opts.supervisor.restart(config);
         return { ok: true };

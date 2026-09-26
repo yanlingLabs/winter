@@ -12,6 +12,7 @@ import {
   waitFor,
   writeAndLoadSettings,
   type SupervisedInstance,
+  pluginSpecFor,
 } from "./supervised-fixtures";
 
 /**
@@ -114,10 +115,11 @@ describe("4d-i gate: live tiles + shortcut/tile-action round-trip (real sample-e
   test(
     "initial tile paint -> live tile push on tool call -> shortcut.invoke bump -> tile.action reset -> plugins.list running -> kill clears tile + contrib",
     async () => {
-      const pluginId = "sample-echo";
+      const pluginName = "sample-echo";
+      const pluginId = pluginSpecFor(pluginName); // WS-24: live plugins are keyed by their spec
       const home = mkdtempSync(join(tmpdir(), "winter-gate-4d-i-"));
-      installSampleEcho(home, pluginId);
-      const settings = writeAndLoadSettings(home, pluginId);
+      installSampleEcho(home, pluginName);
+      const settings = writeAndLoadSettings(home, pluginName);
       const socketPath = join(home, "core.sock");
 
       const spawnable = buildSpawnablePlugins(home, settings);
@@ -194,7 +196,7 @@ describe("4d-i gate: live tiles + shortcut/tile-action round-trip (real sample-e
       //     gate-4d-ii.test.ts's own header) ---
       const listed = await harness.request(METHODS.pluginList, {});
       expect(listed.result.ok).toBe(true);
-      const entry = listed.result.plugins.find((p: any) => p.id === pluginId);
+      const entry = listed.result.plugins.find((p: any) => p.id === pluginName); // a listing row's `id` is the bare name
       expect(entry?.enabled).toBe(true);
       expect(inst.supervisor.status(pluginId)).toBe("running");
 

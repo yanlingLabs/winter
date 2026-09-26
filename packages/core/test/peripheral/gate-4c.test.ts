@@ -10,6 +10,7 @@ import {
   waitFor,
   writeAndLoadSettings,
   type SupervisedInstance,
+  pluginSpecFor,
 } from "../plugins/supervised-fixtures";
 
 // =================================================================================================
@@ -147,10 +148,11 @@ describe("4c gate: hardware broker paths (spec §5, plan Task 6)", () => {
     test(
       "set_charge_limit routes broker -> scripted-provider-conn -> hardware.respond -> the real child's tool receives the limit",
       async () => {
-        const pluginId = "battery-limiter";
+        const pluginName = "battery-limiter";
+        const pluginId = pluginSpecFor(pluginName); // WS-24: live plugins are keyed by their spec
         home = mkdtempSync(join(tmpdir(), "winter-gate4c-roundtrip-"));
-        installBatteryLimiter(home, pluginId);
-        const settings = writeAndLoadSettings(home, pluginId, { hardwareConsent: true });
+        installBatteryLimiter(home, pluginName);
+        const settings = writeAndLoadSettings(home, pluginName, { hardwareConsent: true });
         const socketPath = join(home, "core.sock");
 
         const spawnable = buildSpawnablePlugins(home, settings);
@@ -212,10 +214,10 @@ describe("4c gate: hardware broker paths (spec §5, plan Task 6)", () => {
     const cleanups: Array<() => void> = [];
     afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
 
-    async function bootScripted(pluginId: string, opts?: { hardwareConsent?: boolean }): Promise<{ inst: SupervisedInstance; home: string; socketPath: string }> {
+    async function bootScripted(pluginName: string, opts?: { hardwareConsent?: boolean }): Promise<{ inst: SupervisedInstance; home: string; socketPath: string }> {
       const home = mkdtempSync(join(tmpdir(), "winter-gate4c-scripted-"));
-      installBatteryLimiter(home, pluginId);
-      writeAndLoadSettings(home, pluginId, opts);
+      installBatteryLimiter(home, pluginName);
+      writeAndLoadSettings(home, pluginName, opts);
       const socketPath = join(home, "core.sock");
       const inst = await createSupervisedInstance({ home, socketPath, hardware: true });
       cleanups.push(() => { inst.supervisor.stopAll(); inst.server.stop(); inst.store.close(); });
@@ -236,8 +238,9 @@ describe("4c gate: hardware broker paths (spec §5, plan Task 6)", () => {
     // (cited in each test's comment) rather than assumed.
 
     test("PATH 2: an UNCONSENTED plugin (manifest declares battery, no hardware consent record) -> typed consent_denied, AUDITED", async () => {
-      const pluginId = "battery-limiter";
-      const { inst, home, socketPath } = await bootScripted(pluginId); // opts omitted -> exec consent only, no hardware
+      const pluginName = "battery-limiter";
+      const pluginId = pluginSpecFor(pluginName); // WS-24: live plugins are keyed by their spec
+      const { inst, home, socketPath } = await bootScripted(pluginName); // opts omitted -> exec consent only, no hardware
       const plugin = await connectPlugin(inst, socketPath, pluginId);
 
       const res = await plugin.request(METHODS.hardwareRequest, { verb: "getChargeLimit" });
@@ -259,18 +262,19 @@ describe("4c gate: hardware broker paths (spec §5, plan Task 6)", () => {
       // present) — battery-limiter's own manifest always declares permissions.hardware:["battery"],
       // so this leg swaps in a hand-seeded manifest lacking it, same precedent as
       // server.test.ts's seedBatteryPlugin({}) variant.
-      const pluginId = "no-hw-permission-plugin";
+      const pluginName = "no-hw-permission-plugin";
+      const pluginId = pluginSpecFor(pluginName); // WS-24: live plugins are keyed by their spec
       const home = mkdtempSync(join(tmpdir(), "winter-gate4c-scripted-"));
       // WS-21: registers the plugin through Contract B (installed_plugins.json + sdk/settings.json)
       // the same way every other test in this file does (`installBatteryLimiter`), then overwrites
       // the COPIED manifest at its real install path to drop `permissions.hardware` — this test's
       // whole point is a manifest that lacks it, unlike battery-limiter's own fixture.
-      const dir = installBatteryLimiter(home, pluginId);
+      const dir = installBatteryLimiter(home, pluginName);
       const { writeFileSync } = await import("node:fs");
       writeFileSync(join(dir, "winter-plugin.json"), JSON.stringify({
-        id: pluginId, tier: "capability", permissions: { exec: true }, // no permissions.hardware at all
+        id: pluginName, tier: "capability", permissions: { exec: true }, // no permissions.hardware at all
       }));
-      writeAndLoadSettings(home, pluginId, { hardwareConsent: true });
+      writeAndLoadSettings(home, pluginName, { hardwareConsent: true });
       const socketPath = join(home, "core.sock");
       const inst = await createSupervisedInstance({ home, socketPath, hardware: true });
       cleanups.push(() => { inst.supervisor.stopAll(); inst.server.stop(); inst.store.close(); });
@@ -283,8 +287,9 @@ describe("4c gate: hardware broker paths (spec §5, plan Task 6)", () => {
     });
 
     test("PATH 3: NO-PROVIDER (no provider connection registered) -> typed no_provider whose message conveys \"requires Winter.app\"", async () => {
-      const pluginId = "battery-limiter";
-      const { inst, home, socketPath } = await bootScripted(pluginId, { hardwareConsent: true });
+      const pluginName = "battery-limiter";
+      const pluginId = pluginSpecFor(pluginName); // WS-24: live plugins are keyed by their spec
+      const { inst, home, socketPath } = await bootScripted(pluginName, { hardwareConsent: true });
       const plugin = await connectPlugin(inst, socketPath, pluginId);
 
       const res = await plugin.request(METHODS.hardwareRequest, { verb: "getChargeLimit" });
@@ -302,10 +307,11 @@ describe("4c gate: hardware broker paths (spec §5, plan Task 6)", () => {
     });
 
     test("PATH 4: TIMEOUT (provider registered but never responds) -> typed timeout, using WINTER_HARDWARE_TIMEOUT_MS to stay fast", async () => {
-      const pluginId = "battery-limiter";
+      const pluginName = "battery-limiter";
+      const pluginId = pluginSpecFor(pluginName); // WS-24: live plugins are keyed by their spec
       const home = mkdtempSync(join(tmpdir(), "winter-gate4c-scripted-timeout-"));
-      installBatteryLimiter(home, pluginId);
-      writeAndLoadSettings(home, pluginId, { hardwareConsent: true });
+      installBatteryLimiter(home, pluginName);
+      writeAndLoadSettings(home, pluginName, { hardwareConsent: true });
       const socketPath = join(home, "core.sock");
 
       // HardwareBroker reads WINTER_HARDWARE_TIMEOUT_MS synchronously at construction time (see
@@ -338,8 +344,9 @@ describe("4c gate: hardware broker paths (spec §5, plan Task 6)", () => {
     });
 
     test("PATH 5: hardware.respond from a NON-PROVIDER connection is rejected; the real provider connection can still respond", async () => {
-      const pluginId = "battery-limiter";
-      const { inst, socketPath } = await bootScripted(pluginId, { hardwareConsent: true });
+      const pluginName = "battery-limiter";
+      const pluginId = pluginSpecFor(pluginName); // WS-24: live plugins are keyed by their spec
+      const { inst, socketPath } = await bootScripted(pluginName, { hardwareConsent: true });
       const tokens = await inst.authority.ensureTokens();
       const provider = await connectProvider(socketPath, tokens.harness, "real-provider");
 
@@ -366,8 +373,9 @@ describe("4c gate: hardware broker paths (spec §5, plan Task 6)", () => {
       // hardware.respond (PLUGIN_ALLOWED_METHODS in server.ts omits it deliberately). Distinct
       // failure mode from PATH 5's harness-but-not-provider case: this one never reaches
       // PeripheralBroker.isProvider() at all.
-      const pluginId = "battery-limiter";
-      const { inst, socketPath } = await bootScripted(pluginId, { hardwareConsent: true });
+      const pluginName = "battery-limiter";
+      const pluginId = pluginSpecFor(pluginName); // WS-24: live plugins are keyed by their spec
+      const { inst, socketPath } = await bootScripted(pluginName, { hardwareConsent: true });
       const plugin = await connectPlugin(inst, socketPath, pluginId);
 
       const res = await plugin.request(METHODS.hardwareRespond, { requestId: "req_1", resultJson: "{}" });
@@ -378,8 +386,9 @@ describe("4c gate: hardware broker paths (spec §5, plan Task 6)", () => {
     });
 
     test("PATH 6: audit completeness — unknown_verb from a consented plugin is typed + audited (bypasses consent entirely)", async () => {
-      const pluginId = "battery-limiter";
-      const { inst, home, socketPath } = await bootScripted(pluginId, { hardwareConsent: true });
+      const pluginName = "battery-limiter";
+      const pluginId = pluginSpecFor(pluginName); // WS-24: live plugins are keyed by their spec
+      const { inst, home, socketPath } = await bootScripted(pluginName, { hardwareConsent: true });
       const plugin = await connectPlugin(inst, socketPath, pluginId);
 
       const res = await plugin.request(METHODS.hardwareRequest, { verb: "setFanSpeed" });

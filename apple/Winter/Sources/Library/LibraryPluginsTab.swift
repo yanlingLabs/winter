@@ -14,18 +14,18 @@ import SwiftUI
 //   - LIST: every installed plugin (id, tier, version, enabled), with Install Plugin… and Refresh.
 //   - DETAIL: one plugin — enabled state, consent, its lifecycle actions, and the two things that
 //     used to ride along in the Dashboard pane's single scroll but are in fact PER PLUGIN:
-//       * its live TILE (`TilesStripModel.tiles`, keyed by the BARE plugin id), and
+//       * its live TILE (`TilesStripModel.tiles`, keyed by the plugin's SPEC), and
 //       * its declared SHORTCUTS with their binding capture (`ShortcutBindingEditorModel.rows`,
-//         keyed by the BARE plugin id).
+//         keyed by the plugin's SPEC).
 //     The HELPER-APPROVAL row is not here at all: it reports the privileged `WinterHelper`'s
 //     System Settings approval, which is not a plugin's state, and it already lives in
 //     Settings → Peripheral.
 //
 // IDENTITY: a row's list/detail identity is its QUALIFIED spec (`PluginRowDisplay.spec`, `"<id>@
-// <marketplace>"`) — NOT unique across marketplaces if the bare id alone were used. The tile/
-// shortcut lookups below stay keyed on the BARE `pluginId` because that is what `plugins.contrib`/
-// `shortcut.invoke`/`tile.action` name a live plugin CONNECTION by, a different namespace than the
-// installed-plugin spec.
+// <marketplace>"`) — NOT unique across marketplaces if the bare id alone were used. WS-24: the tile/
+// shortcut lookups below are keyed on that same spec, because the daemon's plugin supervisor now names
+// a live plugin CONNECTION by it too (`plugins.contrib`/`shortcut.invoke`/`tile.action`'s `pluginId`
+// is the spec) — two marketplaces' same-named plugins no longer share one connection id.
 //
 // SHARED MODELS. These are the same instances the Dashboard's Plugins pane observes — an action
 // taken here is visible there on its next refresh, and vice versa. A consent sheet raised while
@@ -41,14 +41,14 @@ func libraryPluginSubtitle(_ row: PluginRowDisplay) -> String {
     "\(row.enabled ? "Enabled" : "Disabled") · \(row.tierBadge) · \(row.version)"
 }
 
-/// PURE: the shortcuts one plugin declares, in the editor model's own order. Keyed by the BARE
-/// plugin id, which the daemon's `plugins.contrib` spells the same as `PluginRowDisplay.pluginId`.
+/// PURE: the shortcuts one plugin declares, in the editor model's own order. Keyed by the plugin's
+/// spec, which the daemon's `plugins.contrib` spells the same as `PluginRowDisplay.spec` (WS-24).
 func libraryPluginShortcutRows(_ rows: [ShortcutBindingEditorModel.Row],
                                plugin: String) -> [ShortcutBindingEditorModel.Row] {
     rows.filter { $0.pluginId == plugin }
 }
 
-/// PURE: the live tile one plugin publishes, if any. Keyed by the BARE plugin id (see above).
+/// PURE: the live tile one plugin publishes, if any. Keyed by the plugin's spec (see above).
 func libraryPluginTile(_ tiles: [TilesStripModel.PluginTile],
                        plugin: String) -> TilesStripModel.PluginTile? {
     tiles.first { $0.pluginId == plugin }
@@ -212,7 +212,7 @@ struct LibraryPluginDetail: View {
     @ViewBuilder
     private var tileSection: some View {
         LibraryGroupHeader(title: "Live tile")
-        if let row, let tile = libraryPluginTile(tilesModel.tiles, plugin: row.pluginId) {
+        if let row, let tile = libraryPluginTile(tilesModel.tiles, plugin: row.spec) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 4) {
                     if let icon = tile.data.icon {
@@ -258,7 +258,7 @@ struct LibraryPluginDetail: View {
 
     @ViewBuilder
     private var shortcutsSection: some View {
-        let rows = libraryPluginShortcutRows(shortcutsModel.rows, plugin: row?.pluginId ?? "")
+        let rows = libraryPluginShortcutRows(shortcutsModel.rows, plugin: row?.spec ?? "")
         LibraryGroupHeader(title: "Shortcuts", detail: rows.isEmpty ? "" : "\(rows.count)")
         if let conflict = shortcutsModel.conflictMessage {
             LibraryErrorLine(text: conflict)
