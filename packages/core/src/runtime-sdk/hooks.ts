@@ -1173,7 +1173,7 @@ function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
       const verdict = await deps.reviewer.review({
         class: "bash", command,
         ...(escape ? { unsandboxed: true, ...(description !== undefined ? { justification: description } : {}), ...(cwd !== undefined && cwd.length > 0 ? { cwd } : {}) } : {}),
-      }, signal);
+      }, signal); // WS-24: the runner aborts `signal` when it times this callback out; the review aborts its model call with it
       if (verdict.verdict === "unsafe") return deny(verdict.reason || "the safety reviewer judged this command unsafe");
       if (escape) noteReviewerCleared(deps.sessionId, toolUseID ?? (typeof (pre as { tool_use_id?: unknown }).tool_use_id === "string" ? (pre as { tool_use_id: string }).tool_use_id : undefined), command);
       return allow();
