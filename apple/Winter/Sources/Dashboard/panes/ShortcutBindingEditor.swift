@@ -118,6 +118,7 @@ final class ShortcutBindingEditorModel: ObservableObject {
 
     func refresh() async {
         guard let entries = try? await client.pluginsContrib() else { return }
+        migrateLegacyBindings(knownPluginIds: entries.map(\.pluginId))
         let bindings = ShortcutSettingsStore.load(from: defaults)
         rows = entries.flatMap { entry in
             entry.shortcuts.map { shortcut in
@@ -130,6 +131,18 @@ final class ShortcutBindingEditorModel: ObservableObject {
                 )
             }
         }
+    }
+
+    /// WS-24: rewrites every persisted binding saved under a plugin's BARE id (what the daemon named a live
+    /// plugin before WS-24) to the one spec (`"<name>@<marketplace>"`) among `knownPluginIds` whose name half
+    /// matches, then saves and re-arms. Without it every binding saved before the upgrade showed as unbound,
+    /// re-binding it was refused as a conflict with itself, and a new combo left both armed. A bare id that
+    /// matches no spec, or two (the same name from two marketplaces), is left as it is.
+    func migrateLegacyBindings(knownPluginIds: [String]) {
+        let bindings = ShortcutSettingsStore.load(from: defaults)
+        guard let migrated = migratedShortcutBindings(bindings, knownPluginIds: knownPluginIds) else { return }
+        ShortcutSettingsStore.save(migrated, to: defaults)
+        _ = shortcutRegistry?.reload(migrated)
     }
 
     /// The key-capture control's callback. Three gates, in order, before anything is persisted:
@@ -177,6 +190,27 @@ final class ShortcutBindingEditorModel: ObservableObject {
             rows[idx].binding = candidate
         }
     }
+}
+
+/// PURE (WS-24): `bindings` with each bare-id `pluginId` rewritten to the ONE spec in `knownPluginIds` whose
+/// name half (before the last `@`) equals it, or `nil` when nothing changes. A binding already on a spec, or
+/// whose bare id matches none or several specs, is kept as it is. Table-tested in `ShortcutBindingEditorTests`.
+func migratedShortcutBindings(_ bindings: [ShortcutBinding], knownPluginIds: [String]) -> [ShortcutBinding]? {
+    func nameHalf(_ spec: String) -> String? {
+        guard let at = spec.lastIndex(of: "@"), at != spec.startIndex else { return nil }
+        return String(spec[..<at])
+    }
+    var changed = false
+    let out = bindings.map { binding -> ShortcutBinding in
+        guard !binding.pluginId.contains("@") else { return binding }
+        let matches = knownPluginIds.filter { nameHalf($0) == binding.pluginId }
+        guard matches.count == 1 else { return binding }
+        changed = true
+        var next = binding
+        next.pluginId = matches[0]
+        return next
+    }
+    return changed ? out : nil
 }
 
 // -----------------------------------------------------------------------------------------------
