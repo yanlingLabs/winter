@@ -151,15 +151,24 @@ struct ModelCatalogFact: Equatable, Sendable {
     var displayName: String?
     /// This pair's list price, when the catalog publishes one.
     var pricing: ModelPricingFact?
+    /// WS-24 (pickers lane, fix round 1): whether a REAL Winter turn on this row can carry tools —
+    /// `models.catalog`'s daemon-derived `sessionUsable`, never a bare `toolCalling` value this app
+    /// would have to re-interpret (only four adapter families actually refuse tools for a non-native
+    /// row; most non-native rows are the catalog's fail-closed placeholder for a capability upstream
+    /// never stated). Nil means "not told" — an older daemon, or a tag `facts` never joined — and is
+    /// NEVER treated as `false`: silence is not a refusal.
+    var sessionUsable: Bool?
 
     init(familyId: String? = nil,
          canonicalId: String? = nil,
          displayName: String? = nil,
-         pricing: ModelPricingFact? = nil) {
+         pricing: ModelPricingFact? = nil,
+         sessionUsable: Bool? = nil) {
         self.familyId = familyId
         self.canonicalId = canonicalId
         self.displayName = displayName
         self.pricing = pricing
+        self.sessionUsable = sessionUsable
     }
 }
 
@@ -257,7 +266,8 @@ func modelCatalogFacts(_ catalog: ModelsCatalog) -> ModelCatalogFacts {
                                  confidence: p.confidence,
                                  observedAt: p.observedAt,
                                  sourceRef: p.sourceRef)
-            }
+            },
+            sessionUsable: model.sessionUsable
         )
     }
 
@@ -1065,6 +1075,33 @@ enum RoleModelPickerStep: Equatable {
     case providers(modelKey: String)
 }
 
+/// WS-24 (pickers lane, fix round 1): the two roles that run a REAL Winter session —
+/// `provider.model` (the default session model) and `pins.dispatch` (dispatch's own pin) — must
+/// never offer a row `facts` says a real turn there would refuse tools on. Every OTHER role (titles,
+/// the dreamer, the cleaner, the bash reviewer's classifier, research and its fallback, the advisor)
+/// calls its provider with `tools: []` and is unaffected either way, so `permitted` reaches THEIR
+/// card exactly as the daemon named it — see `ModelCatalogWireModel.sessionUsable`'s own doc
+/// (`packages/core/src/providers/model-catalog-wire.ts`) for the daemon-side half of this rule.
+let sessionDrivingModelRoles: Set<SettingsModelRole> = [.sessionDefault, .dispatch]
+
+/// PURE: `permitted`, filtered to rows `facts` says are session-usable — but ONLY for a
+/// session-driving role (`sessionDrivingModelRoles`). A row `facts` has NO OPINION on
+/// (`sessionUsable == nil`: an older daemon, or a tag `facts` never joined) is NEVER hidden — nil is
+/// "not told", not a refusal, same rule every other optional fact in `ModelCatalogFacts` follows. A
+/// provider left with no models after filtering is dropped entirely, so it does not render an empty
+/// group in step two.
+func roleModelPermittedForPicker(_ permitted: [ModelRolePermittedProvider],
+                                 role: SettingsModelRole,
+                                 facts: ModelCatalogFacts) -> [ModelRolePermittedProvider] {
+    guard sessionDrivingModelRoles.contains(role) else { return permitted }
+    return permitted.compactMap { provider in
+        let models = provider.models.filter { facts.byTag[$0]?.sessionUsable != false }
+        return models.isEmpty ? nil : ModelRolePermittedProvider(providerId: provider.providerId,
+                                                                 displayName: provider.displayName,
+                                                                 models: models)
+    }
+}
+
 /// The picker itself, wearing `ShellPanelCard` — the same card, the same size, the same place as
 /// the library/devices/updates panels and ⌘K, because it is the same kind of thing: a consultation
 /// you make and dismiss.
@@ -1084,7 +1121,7 @@ struct SettingsRoleModelPicker: View {
     var body: some View {
         ModelFamilyPickerCard(title: settingsRolePickerTitle(role),
                               subtitle: settingsModelRoleExplanation(role),
-                              permitted: value.permittedProviders,
+                              permitted: roleModelPermittedForPicker(value.permittedProviders, role: role, facts: facts),
                               selection: settingsRolePickerSelection(value),
                               offersClear: settingsRoleAllowsClearing(role),
                               facts: facts,
