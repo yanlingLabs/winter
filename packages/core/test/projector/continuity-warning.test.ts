@@ -12,7 +12,7 @@ const warning = (kind: string, detail: string, extra: Record<string, unknown> = 
   ({ type: "system", subtype: "continuity_warning", warning: kind, detail, uuid: `cw-${kind}-${detail.length}`, session_id: "s", ...extra }) as unknown as ProtocolSdkMessage;
 
 describe("projector: WS-23 continuity warnings are shown", () => {
-  for (const kind of ["reasoning_state_unsaved", "model_switch_lossy", "switch_compaction", "provider_state_missing"]) {
+  for (const kind of ["reasoning_state_unsaved", "model_switch_lossy", "switch_compaction", "cross_domain_replay_dropped", "child_provider_refused"]) {
     test(`${kind} is persisted as continuity_warning on the main thread`, () => {
       const { projector } = makeProjector();
       accept(projector, init());
@@ -37,5 +37,16 @@ describe("projector: WS-23 continuity warnings are shown", () => {
     const out = accept(projector, warning("model_switch_lossy", "x".repeat(10_000)));
     expect((out[0] as { text: string }).text.length).toBe(CONTINUITY_WARNING_MAX_CHARS);
     expect(accept(projector, warning("model_switch_lossy", "   "))).toEqual([]);
+  });
+
+  test("review r2: the resume-time kinds stay log-only -- two incarnations of a session with a missing origin show nothing", () => {
+    for (const kind of ["provider_state_missing", "provider_state_deleted", "sidecar_unreadable"]) {
+      for (let generation = 1; generation <= 2; generation++) {
+        const { projector } = makeProjector();
+        accept(projector, init());
+        // The runtime re-emits it on every resume, each time with a fresh uuid.
+        expect(accept(projector, warning(kind, "1 anchor has no recorded origin", { uuid: `resume-${generation}` }))).toEqual([]);
+      }
+    }
   });
 });

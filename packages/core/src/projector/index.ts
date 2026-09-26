@@ -126,6 +126,9 @@ function mainModelKeyFrom(init: Record<string, unknown>): MainModelKey | undefin
   return { ...(key === undefined ? {} : { key }), ...(model === undefined ? {} : { modelId: model }) };
 }
 
+/** Review r2: `continuity_warning` kinds re-emitted on every resume -- logged, never shown (see the projector's branch). */
+const RESUME_TIME_CONTINUITY_WARNINGS: ReadonlySet<string> = new Set(["provider_state_missing", "provider_state_deleted", "sidecar_unreadable"]);
+
 class ProjectorImpl implements Projector {
   private readonly checkpoint: CheckpointStore;
   private readonly winterSessionId: string;
@@ -379,7 +382,10 @@ class ProjectorImpl implements Projector {
       const m = msg as Record<string, unknown>;
       const text = typeof m.detail === "string" ? m.detail.trim() : "";
       const warning = typeof m.warning === "string" && m.warning.length > 0 ? m.warning.slice(0, 64) : "";
-      if (text.length === 0 || warning.length === 0) {
+      // Review r2: the three RESUME-TIME kinds stay log-only. The runtime re-emits them with a fresh uuid
+      // on every incarnation (`continuation-attach.ts`), so a session with an origin-less anchor -- every
+      // adopted legacy session -- would gain the same line each time an idle child is resumed.
+      if (text.length === 0 || warning.length === 0 || RESUME_TIME_CONTINUITY_WARNINGS.has(warning)) {
         this.logSkipped(msg);
         return EMPTY_BATCH();
       }
