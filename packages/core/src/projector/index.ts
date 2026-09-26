@@ -95,6 +95,13 @@ interface PendingMark { sourceId: string; first: number; last: number; cursor: s
 /** A fresh empty batch. A shared frozen object would be a foot-gun the day a caller mutates one. */
 const EMPTY_BATCH = (): ProjectedBatch => ({ persist: [], broadcast: [] });
 
+/** WS-24: whether a frame is a subagent's, forwarded to the parent — SDK 0.0.28 stamps `parent_tool_use_id` on
+ *  a child's system frames; a 0.0.27 frame (and every main-thread one) carries none, or `null`. */
+function fromSubagent(msg: unknown): boolean {
+  const id = (msg as { parent_tool_use_id?: unknown } | null)?.parent_tool_use_id;
+  return typeof id === "string" && id.length > 0;
+}
+
 /** The `clientName` the projector stamps on the ONE `user_message` it produces itself — a `user`
  *  text frame the host never pushed (a resume prompt, a send_message drain). The driver's log scan
  *  (`unconsumedUserMessages`, P8b-39) reads it to tell the child's text from the host's debts. */
@@ -336,7 +343,10 @@ class ProjectorImpl implements Projector {
     // announces both ids as catalog keys for a resolved switch; an unresolved one may still be bare,
     // which is why the bare tail is derived rather than assumed). NOT consumed here — no `return`:
     // the frame falls through to the same "known unpersisted kind" log line it has always taken.
-    if (kindOf(msg) === "system/model_switch") {
+    // WS-24: a SUBAGENT's forwarded `model_switch` (SDK 0.0.28 stamps `parent_tool_use_id` on a child's
+    // system frames) is the child's own model, never the session's — it must not re-key the main ledger
+    // row. A frame without the id (0.0.27, or the main thread) is applied exactly as before.
+    if (kindOf(msg) === "system/model_switch" && !fromSubagent(msg)) {
       const to = (msg as Record<string, unknown>).to_model;
       if (typeof to === "string" && to.length > 0) {
         const slash = to.lastIndexOf("/");
@@ -365,7 +375,10 @@ class ProjectorImpl implements Projector {
       }
       const level = m.level === "info" || m.level === "notice" || m.level === "suggestion" ? m.level : "warning";
       const stopsTurn = m.prevent_continuation === true;
-      if (stopsTurn) this.stopAnnounced = true;
+      // WS-24: a SUBAGENT's stop notice (`parent_tool_use_id`, SDK 0.0.28) stops that child, not the
+      // session's turn — it is filed on the child's thread (`threadIdOf`, below) but never marks the MAIN
+      // turn's stop as announced. No-op for a frame without the id (0.0.27).
+      if (stopsTurn && !fromSubagent(m)) this.stopAnnounced = true;
       const threadId = threadIdOf(m as { parent_tool_use_id?: string | null });
       const uuid = typeof m.uuid === "string" && m.uuid.length > 0 ? m.uuid : `${this.turnIndex}:${this.roundIndex}:${content.length}`;
       return claim(`hn:${uuid}`, () => [
