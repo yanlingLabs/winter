@@ -1,8 +1,7 @@
 import { z } from "zod";
-import { readFileSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { realpathSync } from "node:fs";
 import { McpStdioClient } from "./client";
-import { ProjectMcpConfig, readRawProjectMcpConfig, parseProjectMcpServers } from "./project-file";
+import { readRawProjectMcpConfig, parseProjectMcpServers } from "./project-file";
 import { projectScopeRootFor, projectScopeTrusted } from "../../runtime-sdk/run-home-input";
 import type { ToolRegistry } from "../tools/registry";
 import type { TrustStore } from "../trust";
@@ -21,8 +20,6 @@ export class McpManager {
   private statuses = new Map<string, McpServerStatus>();
   private projects = new Map<string, ProjectState>();
   private inFlight = new Map<string, Promise<void>>();
-  private pluginState: Array<{ display: string; status: McpServerStatus["status"]; toolNames: string[]; client?: McpStdioClient }> = [];
-  private pluginToolNames: string[] = []; // full `mcp__<plugin>_<server>__<tool>` names, for stopAll teardown
   constructor(private readonly deps: {
     registry: ToolRegistry;
     trust: TrustStore;
@@ -40,14 +37,14 @@ export class McpManager {
   }) {}
 
   /**
-   * Shared per-server bring-up used by startAll/doEnsureProject/startPlugins: spawn the client,
+   * Shared per-server bring-up used by startAll/doEnsureProject: spawn the client,
    * handshake under WINTER_MCP_START_TIMEOUT_MS, register its tools as
    * `mcp__<serverKey>__<tool>`, and report a status. Every failure (start timeout/error, or —
    * in "throw" collision mode — a registration throw) is caught HERE so one bad server never
    * rejects the `Promise.all` its caller runs it under.
    *
    * `opts.onCollision` controls what happens when a tool name is already registered:
-   *  - "skip" (project/plugin bring-up): pre-check `registry.has(full)` and skip + log just
+   *  - "skip" (project bring-up): pre-check `registry.has(full)` and skip + log just
    *    that one tool (collisions are expected across namespaces there) — the whole server still
    *    ends up "connected" as long as it started. A register() throw (e.g. a race) is likewise
    *    caught per-tool and skipped, never failing the server.
@@ -237,57 +234,13 @@ export class McpManager {
     this.projects.set(dir, state);
   }
 
-  /**
-   * Start the MCP servers of EXPLICITLY ENABLED plugins. Boot-time, like user servers — the
-   * daemon passes only consented plugins (consent is `settings.plugins.enabled` +, per-exec-class,
-   * `pluginMcpEligible`, checked by the caller); this method does not itself consult any
-   * consent/trust store. Tools are namespaced per-plugin-per-server as
-   * `mcp__<plugin>_<server>__<tool>` (GLOBAL scope — no `scope` field — unlike project servers,
-   * which are cwd-scoped). Each server is started via the shared `startOne` helper in "skip"
-   * collision mode, so one bad/colliding server never blocks its siblings or the rest of the
-   * plugin list.
-   *
-   * Two sources per plugin (design spec §2 — "mcpServers may now come from the manifest instead
-   * of .mcp.json (both accepted; manifest wins on conflict)"):
-   *  - `manifestServers` present (winter-plugin.json `contributes.mcpServers`, passed by the
-   *    caller): those servers are started and `<dir>/.mcp.json` is IGNORED entirely for this
-   *    plugin — manifest wins, no merge.
-   *  - `manifestServers` absent: falls back to the legacy `<dir>/.mcp.json` path, unchanged. A
-   *    missing/malformed file there is defensive: logged and skipped, never throws.
-   */
-  async startPlugins(
-    plugins: Array<{
-      name: string; dir: string;
-      manifestServers?: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string> }>;
-    }>,
-  ): Promise<void> {
-    for (const { name, dir, manifestServers } of plugins) {
-      let servers: Array<[string, McpServerConfig]>;
-      if (manifestServers) {
-        servers = manifestServers.map((s): [string, McpServerConfig] => [s.name, { command: s.command, args: s.args, env: s.env }]);
-      } else {
-        let cfg: z.infer<typeof ProjectMcpConfig>;
-        try {
-          cfg = ProjectMcpConfig.parse(JSON.parse(readFileSync(join(dir, ".mcp.json"), "utf8")));
-        } catch {
-          this.deps.log?.(`plugin ${name}: no/invalid .mcp.json — no servers started`);
-          continue;
-        }
-        servers = Object.entries(cfg.mcpServers ?? {});
-      }
-      await Promise.all(servers.map(async ([server, sc]) => {
-        // serverKey namespaces the tools per-plugin: mcp__<plugin>_<server>__<tool>
-        const serverKey = `${name}_${server}`;
-        const entry = await this.startOne(serverKey, sc, { onCollision: "skip", label: "plugin" });
-        this.pluginState.push({ display: `${name}:${server}`, status: entry.status, toolNames: entry.toolNames, client: entry.client });
-        for (const t of entry.toolNames) this.pluginToolNames.push(`mcp__${serverKey}__${t}`);
-      }));
-    }
-  }
+  // WS-24: `startPlugins` (a plugin's own MCP servers, started in the daemon) is gone. It had no caller
+  // since WS-21: a plugin's `.mcp.json` is claude-native content each session's runtime child connects
+  // itself, once the plugin is enabled.
 
   /**
    * SYNC/PURE: returns already-known statuses without spawning/reading anything. User servers
-   * (source "user") and plugin servers (source "plugin") are always included; project servers
+   * (source "user") are always included; project servers
    * (source "project") for `cwd` are included only if `ensureProject(cwd)` has already recorded
    * a "started" state for it — this method does NOT call `ensureProject` itself (callers, e.g.
    * the daemon's request handler, must `await ensureProject(cwd)` first).
@@ -300,7 +253,6 @@ export class McpManager {
       const state = this.projects.get(dir);
       if (state?.kind === "started") out.push(...state.servers);
     }
-    out.push(...this.pluginState.map((p): McpServerStatus => ({ name: p.display, status: p.status, toolNames: p.toolNames, source: "plugin" })));
     return out;
   }
 
@@ -321,7 +273,6 @@ export class McpManager {
       const state = this.projects.get(dir);
       if (state?.kind === "started") out.push(...state.clients);
     }
-    for (const p of this.pluginState) if (p.client) out.push({ name: p.display, client: p.client });
     return out;
   }
 
@@ -396,9 +347,5 @@ export class McpManager {
       }
     }
     this.projects.clear();
-    for (const p of this.pluginState) p.client?.stop();
-    for (const n of this.pluginToolNames) this.deps.registry.unregister(n);
-    this.pluginState = [];
-    this.pluginToolNames = [];
   }
 }

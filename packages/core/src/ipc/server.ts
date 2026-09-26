@@ -1507,7 +1507,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     } catch {
       return opts.plugins?.list() ?? [];
     }
-    const list = new PluginStore({ winterHome: opts.winterHome, plugins: settings.plugins, consents: settings.plugins?.consents }).list();
+    const list = new PluginStore({ winterHome: opts.winterHome, consents: settings.plugins?.consents }).list();
     livePluginsCache = { key, list };
     return list;
   }
