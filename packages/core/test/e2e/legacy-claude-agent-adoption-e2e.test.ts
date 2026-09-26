@@ -3,8 +3,11 @@
 // through the REAL daemon and the REAL `winter` child, and the model is sent the history claude wrote.
 //
 // The bed is planted exactly as an upgrading home would hold it, BEFORE the daemon boots: the session
-// row, a `claude-agent` record keyed by the session's cwd, and a two-entry transcript in claude's own
-// entry shapes (`message.model` on the assistant entry) under the shared runtime home. The only
+// row, a `claude-agent` record keyed by the session's cwd, and a transcript in claude's own entry
+// shapes under the shared runtime home — a `summary` line, a `system` line, a user turn, an assistant
+// turn carrying SIGNED thinking and a `tool_use`, the user `tool_result` (with claude's
+// `toolUseResult`), and the assistant's closing text (fix round 1, minor 4: the realistic shape, not
+// two plain text entries). The only
 // network the child reaches is an Anthropic loopback fake (`settings.providers.anthropic.baseUrl`),
 // whose recorded request body is the proof that the prior turns were carried.
 //
@@ -12,7 +15,7 @@
 // typed refusal against a fake child; this file is the one proof that the Winter runtime itself reads
 // what claude wrote.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
@@ -74,6 +77,8 @@ class TestClient {
 const MODEL = "anthropic/claude-sonnet-5";
 const PRIOR_USER = "remember the word PAPAYA";
 const PRIOR_ASSISTANT = "Noted: PAPAYA.";
+const TOOL_USE_ID = "toolu_legacy_ls_1";
+const THINKING_SIGNATURE = "sig-legacy-claude-1";
 
 describeWithWinterBinary("WS-23: a legacy claude-agent session resumes on the Winter runtime with claude's history", (winterBin) => {
   let home: string;
@@ -112,9 +117,21 @@ describeWithWinterBinary("WS-23: a legacy claude-agent session resumes on the Wi
     const key = transcriptProjectKey(cwd);
     const projects = storeProjectsDir(home);
     mkdirSync(join(projects, key), { recursive: true });
+    const base = (uuid: string, parentUuid: string | null, ts: string) => ({ uuid, parentUuid, isSidechain: false, userType: "external", sessionId: backendId, cwd, version: "2.1.250", gitBranch: "", timestamp: ts });
     writeFileSync(join(projects, key, `${backendId}.jsonl`), [
-      { type: "user", uuid: "u-claude-1", parentUuid: null, sessionId: backendId, cwd, version: "2.1.250", timestamp: "2026-09-20T10:00:00.000Z", message: { role: "user", content: PRIOR_USER } },
-      { type: "assistant", uuid: "a-claude-1", parentUuid: "u-claude-1", sessionId: backendId, cwd, version: "2.1.250", timestamp: "2026-09-20T10:00:01.000Z", message: { id: "msg_legacy_1", type: "message", role: "assistant", model: "claude-sonnet-5", content: [{ type: "text", text: PRIOR_ASSISTANT }], stop_reason: "end_turn", usage: { input_tokens: 10, output_tokens: 3 } } },
+      { type: "summary", summary: "Remembering a word", leafUuid: "a-claude-2" },
+      { type: "system", subtype: "informational", content: "Session started with the official runtime", level: "info", isMeta: false, ...base("s-claude-0", null, "2026-09-20T09:59:59.000Z") },
+      { type: "user", ...base("u-claude-1", "s-claude-0", "2026-09-20T10:00:00.000Z"), message: { role: "user", content: PRIOR_USER } },
+      { type: "assistant", ...base("a-claude-1", "u-claude-1", "2026-09-20T10:00:01.000Z"), requestId: "req_legacy_1", message: {
+        id: "msg_legacy_1", type: "message", role: "assistant", model: "claude-sonnet-5",
+        content: [
+          { type: "thinking", thinking: "I should note the word and check the directory.", signature: THINKING_SIGNATURE },
+          { type: "tool_use", id: TOOL_USE_ID, name: "Bash", input: { command: "ls", description: "List files" } },
+        ],
+        stop_reason: "tool_use", stop_sequence: null, usage: { input_tokens: 10, output_tokens: 20 },
+      } },
+      { type: "user", ...base("u-claude-2", "a-claude-1", "2026-09-20T10:00:02.000Z"), message: { role: "user", content: [{ tool_use_id: TOOL_USE_ID, type: "tool_result", content: "notes.md", is_error: false }] }, toolUseResult: { stdout: "notes.md", stderr: "", interrupted: false, isImage: false } },
+      { type: "assistant", ...base("a-claude-2", "u-claude-2", "2026-09-20T10:00:03.000Z"), requestId: "req_legacy_2", message: { id: "msg_legacy_2", type: "message", role: "assistant", model: "claude-sonnet-5", content: [{ type: "text", text: PRIOR_ASSISTANT }], stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: 30, output_tokens: 3 } } },
     ].map((e) => JSON.stringify(e)).join("\n") + "\n");
     const rs = openRuntimeStateDb(home);
     try {
@@ -164,14 +181,30 @@ describeWithWinterBinary("WS-23: a legacy claude-agent session resumes on the Wi
     expect(record.backendSessionId).toBe(backendId);
     expect(d.winter.legOf(sessionId)).toBe("winter");
 
-    // The history reached the model: the request body carries claude's two entries, in order, before
-    // the new question.
+    // The history reached the model, in order: the user turn, the tool call and its paired result,
+    // claude's closing text, then the new question. The signed thinking is replayed natively (same
+    // provider and model family — the Winter Anthropic adapter carries claude's signature through).
     const bodies = fake.requests.filter((r) => r.path === "/v1/messages").map((r) => r.body);
     expect(bodies.length).toBeGreaterThan(0);
     const body = bodies.at(-1)!;
     const at = (needle: string): number => body.indexOf(needle);
     expect(at(PRIOR_USER)).toBeGreaterThan(-1);
-    expect(at(PRIOR_ASSISTANT)).toBeGreaterThan(at(PRIOR_USER));
+    expect(at(`"id":"${TOOL_USE_ID}"`)).toBeGreaterThan(at(PRIOR_USER));
+    expect(at(`"tool_use_id":"${TOOL_USE_ID}"`)).toBeGreaterThan(at(`"id":"${TOOL_USE_ID}"`));
+    expect(at(PRIOR_ASSISTANT)).toBeGreaterThan(at(`"tool_use_id":"${TOOL_USE_ID}"`));
     expect(at("which word did I ask you to remember?")).toBeGreaterThan(at(PRIOR_ASSISTANT));
+    expect(at(THINKING_SIGNATURE)).toBeGreaterThan(-1);
+    // The bookkeeping lines never reach the model as conversation.
+    expect(at("Session started with the official runtime")).toBe(-1);
+
+    // The new turn APPENDS to the very file claude wrote — same key, same backend id, no second file.
+    const keyDir = join(storeProjectsDir(home), transcriptProjectKey(cwd));
+    const transcript = readFileSync(join(keyDir, `${backendId}.jsonl`), "utf8").trim().split("\n");
+    expect(transcript.slice(0, 6).map((l) => (JSON.parse(l) as { uuid?: string; type: string }).uuid ?? (JSON.parse(l) as { type: string }).type)).toEqual(["summary", "s-claude-0", "u-claude-1", "a-claude-1", "u-claude-2", "a-claude-2"]);
+    expect(transcript.length).toBeGreaterThan(6);
+    expect(transcript.slice(6).join("\n")).toContain("which word did I ask you to remember?");
+    // (The Winter runtime's provider-state sidecar, `<id>.provider-state.jsonl`, sits beside it — the
+    // same session's, not a second transcript.)
+    expect(readdirSync(keyDir).filter((n) => n.endsWith(".jsonl") && !n.endsWith(".provider-state.jsonl"))).toEqual([`${backendId}.jsonl`]);
   }, 90_000);
 });
