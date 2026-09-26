@@ -26,6 +26,67 @@ export function rowForTag(tag: string): WinterModelDescriptor | undefined {
 }
 
 /**
+ * WS-24 (pickers lane, fix round 1): the adapter families whose `buildRequestBody` actually THROWS a
+ * capability refusal when a turn asks for tools and the row's `toolCalling` is not `"native"` —
+ * measured directly against the pinned SDK (0.0.27), never assumed from the field's NAME:
+ *
+ *   - `winter.anthropic-messages`  (`adapters/anthropic/messages.ts`'s `buildRequestBody`)
+ *   - `winter.google-generate-content` (`adapters/google/generate-content.ts`'s `buildRequestBody`)
+ *   - `winter.vertex-gemini` (`adapters/google/vertex.ts` — it IMPORTS `createGoogleFamilyAdapter`
+ *     from `generate-content.ts` rather than building its own body, so it throws the identical check)
+ *   - `winter.bedrock-converse` (`adapters/bedrock/converse.ts`'s `buildConverseBody`)
+ *
+ * Every OTHER family — `winter.openai-responses` and `winter.openai-chat-completions`, and every
+ * adapter built on either of them (`winter.codex-oauth` on Responses; `winter.xai-oauth`,
+ * `winter.azure-openai`, `winter.local-openai` on chat-completions) — sends the turn's tools
+ * regardless of what `toolCalling` says; neither file so much as reads the field. `toolCalling` is
+ * evidence there, never enforced.
+ */
+const TOOLS_GATED_ADAPTER_IDS: ReadonlySet<string> = new Set([
+  "winter.anthropic-messages",
+  "winter.google-generate-content",
+  "winter.vertex-gemini",
+  "winter.bedrock-converse",
+]);
+
+/**
+ * WS-24 (pickers lane, fix round 1): whether a REAL Winter turn that asks for tools on this row
+ * would actually be refused — the question a session or role picker needs answered, which is
+ * narrower than "the catalog's `toolCalling` says `\"none\"`".
+ *
+ * The first pickers-lane cut got this wrong: it hid every non-`"native"` row from session pickers,
+ * on the premise that WS-23 made every adapter omit tools for one. That premise was false — only the
+ * four families above gate on it at all (`TOOLS_GATED_ADAPTER_IDS`), and `toolCalling: "none"` at
+ * `confidence: "unknown"` is the catalog's own FAIL-CLOSED DEFAULT for a capability upstream never
+ * stated (`winter-provider-catalog`'s `PROVENANCE.md`: "absent toolCalling becomes none, not native
+ * … the confidence marker says unknown so nobody reads it as a denial"), not a measured denial. On
+ * the ~470 rows served by the two OpenAI-shaped families (chat-completions and Responses, and
+ * everything built on either), that default is exactly what it says — unknown, not refused — and
+ * hiding them took working models (groq, qwen-cloud, novita, together, perplexity, huggingface,
+ * nvidia, …) out of every session picker on a guess.
+ *
+ * TRUE exactly when:
+ *
+ *   1. the row's value is not `"native"` (an `"emulated"` row is refused here too — Winter disables
+ *      emulated tool use for agent modes by policy, WS-13 §8.1, and none of the four gated adapters
+ *      distinguishes `"emulated"` from `"none"` at this check; both throw identically), AND EITHER
+ *   2a. the row's PROVIDER resolves to one of the four adapters that actually gate on it, OR
+ *   2b. the evidence is CONFIDENTLY stated regardless of adapter (`confidence !== "unknown"`) — a
+ *       vendor's own docs or a live probe saying "no tools" is a real fact about that model, whatever
+ *       family serves it (e.g. `xai/grok-4.20-multi-agent-0309`, `official-doc`/`declared`).
+ *
+ * Shared by BOTH `ipc/picker-models.ts` (the session-picker listing) and `session-driver.ts`'s
+ * `beforeTurn` gate (an already-stored tag's typed refusal) so the two can never drift apart about
+ * which rows a session can actually run tools on.
+ */
+export function toolsRefusedFor(row: WinterModelDescriptor): boolean {
+  if (row.toolCalling.value === "native") return false;
+  if (row.toolCalling.confidence !== "unknown") return true;
+  const adapterId = loadCatalog().providers.find((p) => p.id === row.providerId)?.adapterId;
+  return adapterId !== undefined && TOOLS_GATED_ADAPTER_IDS.has(adapterId);
+}
+
+/**
  * WS-20: **a tag names exactly its provider and that provider's credential ref.** No selection, no
  * inventory-order tie-break, no bare-id ambiguity — the old bare-id selector this function replaces
  * is gone entirely, because there is nothing left to decide: `splitTag(tag).providerId` IS the

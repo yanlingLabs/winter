@@ -1036,6 +1036,31 @@ describe("B2 — /model (no args) opens the model picker when openChoice is wire
     expect(requests[0]!.title).toContain("--effort");
   });
 
+  // WS-24 (pickers lane, fix round 1): the session-picker listing now excludes a row a real turn
+  // there would refuse tools on (`toolsRefusedFor`), so an already-stored model can be MISSING from
+  // `models` entirely — no row, nothing marked `current`. The title must still name it; when the
+  // model DOES have a row (the common case, above), the title stays exactly as before rather than
+  // repeating a name the option list already shows (this title row has a hard width budget — the
+  // trailing key-grammar hint truncates first).
+  test("a current model MISSING from the catalogue (hidden by the pickers-lane filter) is still named in the title", async () => {
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "zai-anthropic", model: "zai-anthropic/glm-5" } }));
+    const { client } = makeClient({ request: () => codexModels() }); // does not list zai-anthropic/glm-5
+    const requests: ChoiceRequest[] = [];
+    const { ctx } = makeCtx(client, { openChoice: (r) => requests.push(r) });
+    await runCommand(ctx, "/model");
+    expect(requests[0]!.options.some((o) => o.current)).toBe(false); // nothing marked current
+    expect(requests[0]!.title).toContain("glm-5 (zai-anthropic)");
+  });
+
+  test("a current model PRESENT in the catalogue does not have its name repeated in the title", async () => {
+    const { client } = makeClient({ request: () => codexModels() }); // lists codex-oauth/gpt-5.6-sol
+    const requests: ChoiceRequest[] = [];
+    const { ctx } = makeCtx(client, { openChoice: (r) => requests.push(r) });
+    await runCommand(ctx, "/model");
+    expect(requests[0]!.options.some((o) => o.current)).toBe(true);
+    expect(requests[0]!.title).not.toContain("gpt-5.6-sol");
+  });
+
   test("onPick takes the SAME write path as `/model <tag>`: settings write + onModelChanged + the identical note", async () => {
     const { client } = makeClient({ request: () => codexModels(), setModel: () => ({}) });
     const requests: ChoiceRequest[] = [];
