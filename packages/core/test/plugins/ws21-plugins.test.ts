@@ -12,7 +12,7 @@
 //    kept sync because `daemon.ts`/`ipc/server.ts` call `.list()` synchronously — see this file's own
 //    header comment) reports each installed, enabled plugin's extras.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -208,5 +208,19 @@ describe("skills.list shows plugin:skill (spec §5.3)", () => {
     const [skill] = await pluginSkillsFor(options);
     expect(skill?.loadsInSessions).toBe(false);
     expect(skill?.sessionNote).toContain("Enable the p plugin");
+  });
+});
+
+// WS-24: the marketplace half of a spec names a plugin's PID file and token in the daemon now.
+describe("installPlugin refuses a marketplace name that could escape a path", () => {
+  test("/, \\, .. and NUL are refused before anything is installed; an ordinary name passes the check", async () => {
+    const { marketplaceNameError } = await import("../../src/plugins/plugin-manager");
+    for (const spec of ["p@../x", "p@a/b", "p@a\\b", "p@a\0b", "p@"]) {
+      expect(marketplaceNameError(spec)).toBeDefined();
+      await expect(installPlugin(options, spec, "user")).rejects.toBeInstanceOf(PluginManagerError);
+    }
+    expect(marketplaceNameError("p@m")).toBeUndefined();
+    expect(marketplaceNameError("p")).toBeUndefined();
+    expect(existsSync(join(pluginsRoot, "installed_plugins.json"))).toBe(false); // nothing was installed
   });
 });

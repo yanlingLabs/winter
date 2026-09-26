@@ -430,6 +430,15 @@ function rekeyConsents(home: string, idToKey: Map<string, string>, idToFingerpri
  * Kept under the migration's own directory (`migration/c/`), which a rollback leaves in place (it removes
  * only the manifest and the COMPLETE marker) — spelled here rather than imported from `migrate-c.ts`,
  * which imports this module. Holds digests and timestamps only.
+ *
+ * TWO LIMITS, stated rather than papered over:
+ *  - A home first migrated by 0.117/0.118 has NO ledger. The first re-migration on this build therefore
+ *    carries every bare record once more — a revoke made before that re-run is lost that one time (the
+ *    ledger it then writes protects every later one). Nothing on disk tells an old qualified-key absence
+ *    ("revoked") from one that was never written, so there is nothing safer to infer.
+ *  - The downgrade direction is asymmetric by design (DECISION 15): a revoke on THIS build changes the
+ *    qualified key only, so an older build rolled back to still reads the untouched bare record and
+ *    treats the plugin as consented there. Only the new build honours a revoke made on the new build.
  */
 function consentCarryLedgerPath(home: string): string {
   return join(home, "migration", "c", "carried-consents.json");
