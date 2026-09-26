@@ -2,14 +2,10 @@
 // `<home>/agents/*.md` subagent definitions. Agent SDK 0.0.16's Winter runtime already parses this
 // exact directory itself (`packages/runtime/src/subagents/definitions.ts` in the winter-agent-sdk
 // repo — NOT exported from the published `@yanlinglabs/winter-agent-sdk` package, so it cannot be
-// imported here), and the official (`claude`) leg has no idea `<home>/agents` exists at all either:
-// it only ever sees whatever the daemon hands it as `Options.agents`. So the daemon reads and
-// parses the directory ITSELF (mirroring the Winter runtime's own field-for-field rules, verbatim
-// where they're stated) and passes the result as `Options.agents` on BOTH legs — see
-// `runtime-sdk/mode-options.ts`'s `buildWinterOptions` for the Winter leg and
-// `runtime-sdk/official-options.ts`'s `officialInputFor` (router 0.0.9's `OptionsTemplatePolicy.
-// agents`) for the official one — a router-package wall this daemon once had to report rather than
-// route around, closed as of that pin.
+// imported here). So the daemon reads and parses the directory ITSELF (mirroring the Winter runtime's
+// own field-for-field rules, verbatim where they're stated) and passes the result as
+// `Options.agents` — see `runtime-sdk/mode-options.ts`'s `buildWinterOptions`. (Until WS-23 the same
+// map also reached the retired official `claude` leg.)
 //
 // This is a REIMPLEMENTATION, not a copy — the source lives in a sibling repository this package
 // does not depend on. It follows `skills.ts`'s own in-repo precedent for a small, dependency-free

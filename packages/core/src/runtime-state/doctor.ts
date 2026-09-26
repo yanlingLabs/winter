@@ -19,7 +19,7 @@
 // open is not a lock fight. Every REPAIR is the opposite: `restore-backup` refuses outright while
 // the lock is held, and the CLI refuses every op on the same probe.
 import { Database } from "bun:sqlite";
-import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, truncateSync } from "node:fs";
+import { appendFileSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, truncateSync } from "node:fs";
 import { join } from "node:path";
 import { SessionStore, SYNCED_SESSION_ID_RE } from "../sessions/store";
 import { openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION, RuntimeStateUnavailableError, type RuntimeStateDb } from "./db";
@@ -32,6 +32,10 @@ import { MIGRATION_B_SECRET_NAMES } from "../auth/legacy-secret-names";
 import type { SecretStore } from "../auth/secret-store";
 import { storeProjectsDir } from "../agent/paths";
 import { quarantinedRunRoots } from "./root-recovery";
+import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
+import { canonicalCwd } from "../agent/paths";
+import { sessionTmpDir } from "../agent/session-tmp";
+import { transcriptEntriesOf, transcriptMoveObstruction } from "./transcript-rekey";
 
 export type FindingKind =
   | "db-missing"
@@ -57,7 +61,12 @@ export type FindingKind =
   /** WS-21 (spec §3.8): run folders (or staging roots) boot recovery could not prove clean — the router
    *  copied each working transcript under `<home>/cache/quarantine/`; the root is kept and never swept
    *  again. Nothing to repair automatically: the operator compares the copy with the session. */
-  | "run-roots-quarantined";
+  | "run-roots-quarantined"
+  /** WS-23 (R2, fix round 1): a session the retired official leg created whose adoption onto the Winter
+   *  runtime is refused — its transcript is marked `repair-required` (an earlier collision or refused
+   *  move, or a quarantined working copy). `adopt-legacy-session` clears it; a COLLISION (both keys hold
+   *  the transcript) needs the operator's `--keep recorded|canonical`. */
+  | "legacy-adoption-blocked";
 
 export interface Finding {
   kind: FindingKind;
@@ -75,7 +84,11 @@ export type RepairOp =
   | { kind: "restore-backup"; backupPath: string }
   /** P8d-11: `rollbackMemoryKeyMigration` given an operator door. Whole-manifest, like
    *  `rebuild-index` — a rollback undoes every `moved` project's relocation, not one session's. */
-  | { kind: "memory-keys-rollback" };
+  | { kind: "memory-keys-rollback" }
+  /** WS-23 (fix round 1): unblock a legacy `claude-agent` session's adoption. Keeps the canonical copy
+   *  and clears `repair-required`; on a collision `keep` names the copy to keep and the OTHER is moved
+   *  to `<home>/cache/quarantine/` — never deleted. The next resume adopts the session. */
+  | { kind: "adopt-legacy-session"; winterSessionId: string; keep?: "recorded" | "canonical" };
 
 export interface RepairResult {
   applied: boolean;
@@ -222,13 +235,36 @@ function tailSeq(logPath: string): number | undefined {
 
 interface SessionDiagRow {
   winter_session_id: string;
+  runtime_kind: string;
   backend_session_id: string | null;
   transcript_project_key: string;
   transcript_health: string;
   state: string;
 }
 
-export async function diagnoseRuntimeState(home: string): Promise<Finding[]> {
+/** Where a legacy session's transcript is and where the Winter runtime will look for it. */
+interface LegacyTranscriptPlaces {
+  projects: string;
+  recordedKey: string;
+  canonicalKey: string;
+  /** This session's names present under BOTH keys (empty when the keys are equal). */
+  collisions: string[];
+}
+
+/**
+ * The same two keys the driver's adoption compares (`rekeyTranscriptToCwd`): the key recorded on the
+ * row, and the key of the cwd the Winter child will run in — `meta.cwd`, else the session's temp dir,
+ * canonicalized. The cwd comes from the product index (or an injected store), never guessed.
+ */
+function legacyTranscriptPlaces(home: string, sessionId: string, backendSessionId: string, recordedKey: string, cwd: string | null | undefined, tmpDirOf: (id: string) => string): LegacyTranscriptPlaces {
+  const projects = storeProjectsDir(home);
+  let canonicalKey = recordedKey;
+  try { canonicalKey = transcriptProjectKey(canonicalCwd(cwd ?? tmpDirOf(sessionId))); } catch { /* keep the recorded key */ }
+  const collisions = canonicalKey === recordedKey ? [] : transcriptEntriesOf(join(projects, recordedKey), backendSessionId).filter((n) => existsSync(join(projects, canonicalKey, n)));
+  return { projects, recordedKey, canonicalKey, collisions };
+}
+
+export async function diagnoseRuntimeState(home: string, deps: { tmpDirOf?: (sessionId: string) => string } = {}): Promise<Finding[]> {
   const findings: Finding[] = [];
 
   let rs: RuntimeStateDb;
@@ -285,7 +321,7 @@ export async function diagnoseRuntimeState(home: string): Promise<Finding[]> {
     const index = readIndexResult ?? new Map<string, IndexRow>();
     const sessions = rs.db
       .query<SessionDiagRow, []>(
-        "SELECT winter_session_id, backend_session_id, transcript_project_key, transcript_health, state FROM runtime_sessions ORDER BY winter_session_id",
+        "SELECT winter_session_id, runtime_kind, backend_session_id, transcript_project_key, transcript_health, state FROM runtime_sessions ORDER BY winter_session_id",
       )
       .all();
 
@@ -304,6 +340,21 @@ export async function diagnoseRuntimeState(home: string): Promise<Finding[]> {
             repairable: ["relink-backend", "detach-backend"],
           });
         }
+      }
+
+      // WS-23 (fix round 1, I1): a legacy session whose adoption the driver refuses — the refusal tells
+      // the user to come here, so here must name it and offer the repair.
+      if (row.runtime_kind === "claude-agent" && row.transcript_health === "repair-required" && row.backend_session_id !== null) {
+        const places = legacyTranscriptPlaces(home, id, row.backend_session_id, row.transcript_project_key, indexRow?.cwd, deps.tmpDirOf ?? sessionTmpDir);
+        const at = (key: string): string => join(places.projects, key, `${row.backend_session_id}.jsonl`);
+        findings.push({
+          kind: "legacy-adoption-blocked",
+          winterSessionId: id,
+          detail: places.collisions.length > 0
+            ? `a session the retired official runtime created cannot be adopted: its transcript exists at BOTH ${at(places.recordedKey)} (recorded) and ${at(places.canonicalKey)} (where Winter reads it). Compare them, then run --repair adopt-legacy-session --session ${id} --keep recorded|canonical — the other copy is moved to ${join(home, "cache", "quarantine")}, never deleted`
+            : `a session the retired official runtime created cannot be adopted: its transcript is marked repair-required. --repair adopt-legacy-session --session ${id} keeps the canonical copy (${at(places.recordedKey)}), clears the flag, and the next resume adopts it onto the Winter runtime`,
+          repairable: ["adopt-legacy-session"],
+        });
       }
 
       if (!indexRow) continue;
@@ -545,7 +596,7 @@ export function latestRecoveryAttempts(home: string): RecoveryAttemptSummary[] {
  * trace in exactly the broken-home state the verb exists for. Unlike the recovery path, a message is
  * safe to carry here: nothing on this path ever touches a message body or a transcript body.
  */
-export async function repairRuntimeState(home: string, op: RepairOp, deps: { store?: SessionStore } = {}): Promise<RepairResult> {
+export async function repairRuntimeState(home: string, op: RepairOp, deps: { store?: SessionStore; tmpDirOf?: (sessionId: string) => string } = {}): Promise<RepairResult> {
   try {
     // EVERY repair refuses while the daemon holds the lock, not just `restore-backup` (whole-branch
     // review, M3). This function is exported on the package barrel, so the CLI's own probe is not
@@ -567,9 +618,88 @@ export async function repairRuntimeState(home: string, op: RepairOp, deps: { sto
         return restoreBackup(home, op.backupPath);
       case "memory-keys-rollback":
         return repairMemoryKeysRollback(home);
+      case "adopt-legacy-session":
+        return adoptLegacySession(home, op.winterSessionId, op.keep, deps);
     }
   } catch (e) {
     return { applied: false, detail: e instanceof Error ? `${e.name}: ${e.message}` : "repair failed" };
+  }
+}
+
+/**
+ * WS-23 (fix round 1, I1): unblock a legacy `claude-agent` session so its next resume adopts it.
+ *
+ * NEVER DELETES A TRANSCRIPT. With one copy, nothing moves: the flag is cleared and the next resume
+ * re-keys and adopts it exactly as the driver always would. With a COLLISION (the recorded key and the
+ * key Winter reads both hold this session's names) the operator names the copy to keep, and every one
+ * of the OTHER key's names for this session is MOVED to `<home>/cache/quarantine/<stamp>-legacy-adoption-
+ * <id>/<key>/` — never through a link, put back on any failure. The adoption itself stays the driver's:
+ * one code path rewrites a record, so a repaired session is adopted exactly like an untroubled one.
+ */
+function adoptLegacySession(home: string, sessionId: string, keep: "recorded" | "canonical" | undefined, deps: { store?: SessionStore; tmpDirOf?: (sessionId: string) => string }): RepairResult {
+  let rs: RuntimeStateDb | undefined;
+  try {
+    rs = openRuntimeStateDb(home);
+    const records = new RuntimeSessionRecords(rs);
+    const record = records.get(sessionId);
+    if (record === undefined) return { applied: false, detail: `unknown session: ${sessionId}` };
+    if (record.runtimeKind !== "claude-agent" || record.backendSessionId === undefined) {
+      return { applied: false, detail: `${sessionId} is not a session the retired official runtime created — nothing to adopt` };
+    }
+    if (record.transcriptHealth !== "repair-required") {
+      return { applied: false, detail: `${sessionId} is not blocked: its next resume adopts it onto the Winter runtime` };
+    }
+    const backend = record.backendSessionId;
+    let cwd: string | null | undefined;
+    try { cwd = deps.store?.meta(sessionId).cwd ?? readIndex(home)?.get(sessionId)?.cwd; } catch { cwd = readIndex(home)?.get(sessionId)?.cwd; }
+    const places = legacyTranscriptPlaces(home, sessionId, backend, record.transcriptProjectKey, cwd, deps.tmpDirOf ?? sessionTmpDir);
+    const transcriptAt = (key: string): string => join(places.projects, key, `${backend}.jsonl`);
+    if (!existsSync(transcriptAt(places.recordedKey)) && !existsSync(transcriptAt(places.canonicalKey))) {
+      return { applied: false, detail: `no transcript for ${sessionId} at ${transcriptAt(places.recordedKey)} or ${transcriptAt(places.canonicalKey)} — use relink-backend or detach-backend` };
+    }
+    let moved = "";
+    if (places.collisions.length > 0) {
+      if (keep === undefined) {
+        return { applied: false, detail: `both ${transcriptAt(places.recordedKey)} (recorded) and ${transcriptAt(places.canonicalKey)} (where Winter reads it) hold this session — compare them and pass --keep recorded or --keep canonical; the other copy is moved to quarantine, never deleted` };
+      }
+      const loserKey = keep === "recorded" ? places.canonicalKey : places.recordedKey;
+      const loserDir = join(places.projects, loserKey);
+      const cache = join(home, "cache");
+      const quarantine = join(cache, "quarantine");
+      for (const p of [cache, quarantine, places.projects, loserDir]) {
+        if (existsSync(p) && lstatSync(p).isSymbolicLink()) return { applied: false, detail: `${p} is a symbolic link — nothing is moved through one` };
+      }
+      const destination = join(quarantine, `${new Date().toISOString().replace(/[:.]/g, "-")}-legacy-adoption-${sessionId}`, loserKey);
+      mkdirSync(destination, { recursive: true, mode: 0o700 });
+      const done: string[] = [];
+      for (const name of transcriptEntriesOf(loserDir, backend)) {
+        try {
+          renameSync(join(loserDir, name), join(destination, name));
+          done.push(name);
+        } catch (e) {
+          for (const back of [...done].reverse()) {
+            try { renameSync(join(destination, back), join(loserDir, back)); } catch { /* reported below */ }
+          }
+          return { applied: false, detail: `moving ${name} to quarantine failed (${e instanceof Error ? e.name : "unknown"}); ${done.length} earlier move(s) put back, nothing changed` };
+        }
+      }
+      moved = `; the ${keep === "recorded" ? "canonical-key" : "recorded-key"} copy (${done.length} file(s)) was moved to ${destination}`;
+    }
+    // Fix round 2: the next resume MOVES the transcript to the key Winter reads it from. If that move
+    // would be refused (a link in the way, a destination outside the store), clearing the flag would
+    // only report success and send the user round the same refusal again — so refuse, with the cause.
+    if (places.recordedKey !== places.canonicalKey && transcriptEntriesOf(join(places.projects, places.recordedKey), backend).length > 0) {
+      const obstruction = transcriptMoveObstruction(places.projects, places.recordedKey, places.canonicalKey);
+      if (obstruction !== undefined) {
+        return { applied: false, detail: `${sessionId} stays blocked: its transcript must move from ${join(places.projects, places.recordedKey)} to ${join(places.projects, places.canonicalKey)}, and that move would be refused — ${obstruction}. Remove or fix that path, then run this repair again` };
+      }
+    }
+    records.setTranscriptHealth(sessionId, "clean");
+    return { applied: true, detail: `${sessionId}: repair-required cleared${moved}; its next resume adopts it onto the Winter runtime` };
+  } catch (e) {
+    return { applied: false, detail: e instanceof Error ? `${e.name}: ${e.message}` : "legacy adoption repair failed" };
+  } finally {
+    rs?.close();
   }
 }
 

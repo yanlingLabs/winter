@@ -42,23 +42,10 @@
 // require a daemon restart") takes effect on this session's very next matching call, not just on
 // the next session.
 //
-// **The official leg (`official` in the return value), fix wave M4 (ruling P8c-19).** Lane 3's own
-// header used to read `OptionsTemplatePolicy.hooks` as the router's DECLARATIVE, settings-file-style
-// `SettingsHooksConfig` — the wrong reading. Measured against the router 0.0.3 source
-// (`dist/official/options-template.d.ts` + `.js`): `buildOfficialOptions` does
-// `hooks: mergeHooks(createContainmentHooks(...), policy.hooks)`, and `mergeHooks(ours, hostHooks)`
-// treats `hostHooks` as `Record<HookEvent, HookCallbackMatcher[]>` — the SAME `HookCallback`/
-// `HookCallbackMatcher`/`HookEvent` shape `@yanlinglabs/winter-agent-sdk` exports (`options.d.ts`),
-// which is itself a structural mirror of `@anthropic-ai/claude-agent-sdk`'s own `sdk.d.ts` types
-// (`HookCallback = (input, toolUseID, {signal}) => Promise<HookJSONOutput>`; identical `HookInput`
-// field names — `tool_name`/`tool_input`/`tool_response`/`tool_use_id`/`session_id`/`agent_id` — on
-// both SDKs). So the exact object built for `winter` below is ALREADY the shape the official leg's
-// `mergeHooks` expects for its second argument: no translation, no second implementation. The
-// router puts its own containment matchers FIRST in each event's array (`mergeHooks`'s own
-// `[...matchers, ...host[event] ?? []]`), so Winter's groups here always run AFTER the containment
-// floor on the official leg — the ordering the fix-wave brief calls for. `official-options.ts`
-// (lane 1's file) threads this value into `OptionsTemplatePolicy.hooks` via `session-driver.ts`'s
-// `hooksFor(session).official`, already wired at integration.
+// **One leg (WS-23).** This builder used to return the same groups twice — `winter` and `official`
+// (fix wave M4, ruling P8c-19: the router's official leg merged them after its own containment
+// matchers). With the official `claude` leg retired the return value carries `winter` alone; the
+// `{ winter }` shape is kept so `session-driver.ts`'s `hooksFor(session).winter` wiring does not move.
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
@@ -1444,20 +1431,16 @@ function webSearchInput(record: Record<string, unknown>, patch: { allowed_domain
   return out;
 }
 
-/** `{ winter, official }` — fix wave M4 (ruling P8c-19): BOTH legs get the same groups, built ONCE
- *  from the same `deps` and the same per-tool hook functions (this file's header explains why the
- *  two SDKs' `HookCallback`/`HookCallbackMatcher`/`HookEvent` shapes make that safe rather than a
- *  reuse-across-legs hazard). `winter` is `Options["hooks"]` from `@yanlinglabs/winter-agent-sdk`;
- *  `official` is the identical object, typed `unknown` only because `OptionsTemplatePolicy.hooks`
- *  (the router 0.0.3 export `official-options.ts` assigns it through) declares no narrower type —
- *  never a second, independently-built copy that could drift from `winter`.
+/** `{ winter }` — the session's hook groups, built ONCE from `deps` and the per-tool hook functions
+ *  above. `winter` is `Options["hooks"]` from `@yanlinglabs/winter-agent-sdk`. (WS-23: the identical
+ *  `official` copy the retired official leg took is gone.)
  *
  *  Every hook function above is a safe, cheap no-op (`allow()`/`{}`) when its own dependency is
  *  absent, so registering the groups unconditionally costs nothing extra beyond the wire round trip
  *  `Options.hooks` already requires the moment ANY group is registered for an event — and the
  *  plugin-hook groups (no matcher) are the one case that always needs to be live, since a plugin
  *  can be enabled on a running daemon between sessions with no restart. */
-export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hooks"] | undefined; official: unknown } {
+export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hooks"] | undefined } {
   const pending = new Map<string, PendingDiffSnapshot>();
 
   const preToolUse: FailClosedMatcher[] = [{ hooks: [pluginPreToolUseHook(deps)] }];
@@ -1516,5 +1499,5 @@ export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hook
   const postToolUseFailure: HookCallbackMatcher[] = [{ hooks: [pluginPostToolUseFailureHook(deps)] }];
 
   const built: Options["hooks"] = { PreToolUse: preToolUse, PostToolUse: postToolUse, PostToolUseFailure: postToolUseFailure };
-  return { winter: built, official: built };
+  return { winter: built };
 }

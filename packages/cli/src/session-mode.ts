@@ -47,7 +47,8 @@ export function sessionModeMarker(mode?: string): string {
 
 /** Winter Phase 8d (Task 4.3): `winter sessions`' runtime tag — "" when absent (an engine-era row,
  *  a record-less/phone-owned row, or a daemon predating the field — `SessionListResult.runtimeKind`'s
- *  own doc names all three), ` · winter-agent`/` · claude-agent` verbatim otherwise. Deliberately
+ *  own doc names all three), ` · winter-agent`/` · claude-agent` verbatim otherwise (`claude-agent`:
+ *  a session the retired official leg created, not yet resumed onto the Winter leg — WS-23). Deliberately
  *  the RAW WIRE VALUE, not a display label ("Winter Agent"/"Claude Agent", WS-14 §14) — this
  *  listing's own convention is terse machine-ish tags (`sessionModeMarker`'s bracketed form is the
  *  other example), unlike the Mac app's prose badge; the Interfaces block spells this exact tag. */

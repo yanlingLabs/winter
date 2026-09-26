@@ -10,6 +10,7 @@
 import { describe, expect, test } from "bun:test";
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { diagnoseRuntimeState, repairRuntimeState } from "../../src/runtime-state/doctor";
 import { storeHomeFor, storeProjectsDir } from "../../src/agent/paths";
 import { Database } from "bun:sqlite";
 import { migrationCManifestPath, migrationCState, rollbackMigrationC } from "../../src/migration/migrate-c";
@@ -951,7 +952,9 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
     } finally { t.close(); }
   });
 
-  test("an `exa` change leaves an OFFICIAL-leg session alone — that leg is sent no `web` block at all", async () => {
+  // WS-23: no live child runs on the official leg any more, but the filter is still the LEG — a session
+  // whose record says anything other than `winter` is not a child the key reached.
+  test("an `exa` change leaves a session not on the Winter leg alone", async () => {
     const t = table({});
     try {
       const acted = await evictSessionsForCredential({
@@ -1466,5 +1469,281 @@ describe("WS-21 round 3: the lazy canonical-cwd re-key at resume (Winter leg)", 
       expect(again.logs.some((l) => l.includes("collision") && l.includes(sid))).toBe(true);
       await resumed.end();
     } finally { again.close(); t.close(); }
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// WS-23 (ruling R2) — a record the retired official leg wrote is ADOPTED onto the Winter leg at its
+// next resume: its transcript re-keyed to the Winter cwd key, its runtime kind and selection
+// rewritten, then the child opens on the SAME transcript file (the Winter runtime reads claude's
+// entry shapes). A collision or an already-`repair-required` transcript refuses typed and moves
+// nothing, with the record still naming `claude-agent`, so every later resume refuses the same way.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+describe("WS-23: a legacy claude-agent record is adopted onto the Winter leg at resume", () => {
+  /** Two entries in the shape the `claude` binary writes (`message.model` on the assistant entry). */
+  const claudeTranscript = (id: string, cwd: string): string => [
+    { type: "user", uuid: "u-claude-1", parentUuid: null, sessionId: id, cwd, version: "2.1.250", timestamp: "2026-09-20T10:00:00.000Z", message: { role: "user", content: "remember the word PAPAYA" } },
+    { type: "assistant", uuid: "a-claude-1", parentUuid: "u-claude-1", sessionId: id, cwd, version: "2.1.250", timestamp: "2026-09-20T10:00:01.000Z", message: { id: "msg_legacy_1", type: "message", role: "assistant", model: "claude-sonnet-5", content: [{ type: "text", text: "Noted: PAPAYA." }], stop_reason: "end_turn", usage: { input_tokens: 10, output_tokens: 3 } } },
+  ].map((e) => JSON.stringify(e)).join("\n") + "\n";
+
+  type Legacy = { provider: "anthropic" | "console"; authFamily?: "api-key" | "console-profile" | "claude-oauth"; cwdless?: boolean; health?: "clean" | "repair-required" };
+  /** A session exactly as the official leg left it: the store row, a `claude-agent` record keyed by
+   *  the cwd THAT leg used (the `cwd` column, else `dirs[0]`), and claude's own transcript there. */
+  function legacySession(t: ReturnType<typeof table>, opts: Legacy) {
+    const workdir = realpathSync(mkdtempSync(join(tmpdir(), "winter-legacy-cwd-")));
+    const model = `${opts.provider}/claude-sonnet-5`;
+    const sid = opts.cwdless === true
+      ? t.store.createSession("t", { mode: "code", model })
+      : t.store.createSession("t", { mode: "code", model, cwd: workdir });
+    if (opts.cwdless === true) t.store.setDirsRaw(sid, [{ path: workdir, locked: false }]);
+    const id = crypto.randomUUID();
+    const officialKey = transcriptProjectKey(workdir);
+    const projects = storeProjectsDir(t.home);
+    mkdirSync(join(projects, officialKey), { recursive: true });
+    writeFileSync(join(projects, officialKey, `${id}.jsonl`), claudeTranscript(id, workdir));
+    t.records.create({
+      winterSessionId: sid, runtimeKind: "claude-agent", backendSessionId: id,
+      providerId: opts.provider, modelRef: model, authRef: "keychain:anthropic:default",
+      backendRoot: join(projects, officialKey), effectiveTempDir: t.home,
+      transcriptProjectKey: officialKey, memoryProjectKey: "k", tempProjectKey: officialKey,
+      transcriptDialect: "claude-code-jsonl", transcriptHealth: opts.health ?? "clean", compatibilityLevel: "agent-state",
+      conformanceCorpusVersion: "unverified", versionProvenance: "recorded", sdkVersion: "0.3.250", engineVersion: "0.3.250",
+      providerCatalogVersion: "t", providerAdapterVersion: "unstated", capabilities: ["message", "resume"],
+      selection: {
+        runtimeKind: "claude-agent", providerId: opts.provider, modelRef: model, family: "claude",
+        authFamily: opts.authFamily ?? (opts.provider === "console" ? "console-profile" : "api-key"),
+        sdkVersion: "0.3.250", reason: "D13-2", decidedAt: "2026-09-20T10:00:00.000Z",
+      },
+    });
+    t.records.transition(sid, "ready");
+    return { sid, id, workdir, officialKey, projects };
+  }
+
+  test("an api-key record resumes on the Winter leg and keeps its history: same transcript file, record rewritten", async () => {
+    const t = table();
+    try {
+      const { sid, id, workdir, officialKey, projects } = legacySession(t, { provider: "anthropic" });
+      expect(t.drivers.legOf(sid)).toBe("official");
+      const resumed = (await t.drivers.ensure(sid))!;
+      const record = t.records.get(sid)!;
+      expect(record.runtimeKind).toBe("winter-agent");
+      expect(record.selection).toMatchObject({ runtimeKind: "winter-agent", providerId: "anthropic", modelRef: "anthropic/claude-sonnet-5", family: "claude", authFamily: "api-key", sdkVersion: WINTER_PEER_VERSIONS.winterAgentSdk });
+      expect(record.selection.reason).toContain("WS-23");
+      expect([record.providerId, record.modelRef, record.authRef]).toEqual(["anthropic", "anthropic/claude-sonnet-5", "keychain:anthropic:default"]);
+      // Fix round 1 (minor 7): the record-level versions are the Winter runtime's now, not 0.3.250.
+      expect([record.sdkVersion, record.engineVersion]).toEqual([WINTER_PEER_VERSIONS.winterAgentSdk, WINTER_PEER_VERSIONS.winterAgentSdk]);
+      expect(record.transcriptHealth).toBe("clean");
+      expect(t.drivers.legOf(sid)).toBe("winter");
+      // The child RESUMES the same backend transcript — never a fresh one — in the same cwd.
+      const opts = t.q().options;
+      expect(opts.resume).toBe(id);
+      expect(opts.cwd).toBe(workdir);
+      // …and that transcript is exactly where the child looks, with claude's own entries in it.
+      expect(transcriptProjectKey(opts.cwd!)).toBe(officialKey);
+      const loaded = await new winter.WinterCompatibilitySessionStore({ winterHome: storeHomeFor(t.home) }).load({ projectKey: officialKey, sessionId: id });
+      expect(loaded?.map((e) => e.uuid)).toEqual(["u-claude-1", "a-claude-1"]);
+      expect(readFileSync(join(projects, officialKey, `${id}.jsonl`), "utf8")).toContain("remember the word PAPAYA");
+      expect(t.logs.some((l) => l.includes("adopted onto the Winter leg") && l.includes(sid))).toBe(true);
+      await resumed.end();
+    } finally { t.close(); }
+  });
+
+  test("a console record resumes: provider, model and auth family carry over verbatim", async () => {
+    const t = table();
+    try {
+      const { sid, id } = legacySession(t, { provider: "console" });
+      const resumed = (await t.drivers.ensure(sid))!;
+      const record = t.records.get(sid)!;
+      expect(record.runtimeKind).toBe("winter-agent");
+      expect(record.selection).toMatchObject({ runtimeKind: "winter-agent", providerId: "console", modelRef: "console/claude-sonnet-5", authFamily: "console-profile" });
+      expect(t.q().options.resume).toBe(id);
+      await resumed.end();
+    } finally { t.close(); }
+  });
+
+  test("a cwd-less record (keyed by its first working directory on the official leg) moves to the Winter key and resumes there", async () => {
+    const t = table();
+    try {
+      const { sid, id, officialKey, projects } = legacySession(t, { provider: "anthropic", cwdless: true });
+      const winterKey = transcriptProjectKey(realpathSync(t.home)); // the table's `tmpDirOf` is the home
+      expect(winterKey).not.toBe(officialKey);
+      const resumed = (await t.drivers.ensure(sid))!;
+      expect(existsSync(join(projects, officialKey, `${id}.jsonl`))).toBe(false);
+      expect(readFileSync(join(projects, winterKey, `${id}.jsonl`), "utf8")).toContain("remember the word PAPAYA");
+      const record = t.records.get(sid)!;
+      expect([record.runtimeKind, record.transcriptProjectKey]).toEqual(["winter-agent", winterKey]);
+      expect(t.q().options.resume).toBe(id);
+      await resumed.end();
+    } finally { t.close(); }
+  });
+
+  test("a collision refuses typed, moves nothing and opens nothing — and keeps refusing on the next resume", async () => {
+    const t = table();
+    try {
+      const { sid, id, officialKey, projects } = legacySession(t, { provider: "anthropic", cwdless: true });
+      const winterKey = transcriptProjectKey(realpathSync(t.home));
+      mkdirSync(join(projects, winterKey), { recursive: true });
+      writeFileSync(join(projects, winterKey, `${id}.jsonl`), '{"type":"user","uuid":"u-other"}\n');
+      const first = await t.drivers.ensure(sid).then(() => undefined, (e: unknown) => e);
+      expect(first).toMatchObject({ name: "WinterLegRefusal", code: "legacy_session_migration_refused", reason: "transcript-collision" });
+      // The refusal names the repair that exists (fix round 1, I1), not a doctor with nothing to offer.
+      expect((first as Error).message).toContain(`--repair adopt-legacy-session --session ${sid}`);
+      expect((first as Error).message).toContain("--keep recorded");
+      expect(t.queries).toHaveLength(0);
+      expect(readFileSync(join(projects, officialKey, `${id}.jsonl`), "utf8")).toContain("PAPAYA");
+      expect(readFileSync(join(projects, winterKey, `${id}.jsonl`), "utf8")).toContain("u-other");
+      const record = t.records.get(sid)!;
+      expect([record.runtimeKind, record.transcriptHealth, record.transcriptProjectKey]).toEqual(["claude-agent", "repair-required", officialKey]);
+      // The record still names the old leg and is now marked: the next resume refuses the same way.
+      const second = await t.drivers.ensure(sid).then(() => undefined, (e: unknown) => e);
+      expect(second).toMatchObject({ code: "legacy_session_migration_refused", reason: "repair-required" });
+      expect(t.queries).toHaveLength(0);
+    } finally { t.close(); }
+  });
+
+  test("a transcript already marked repair-required refuses typed before anything moves", async () => {
+    const t = table();
+    try {
+      const { sid, id, officialKey, projects } = legacySession(t, { provider: "anthropic", cwdless: true, health: "repair-required" });
+      const refused = await t.drivers.ensure(sid).then(() => undefined, (e: unknown) => e);
+      expect(refused).toMatchObject({ code: "legacy_session_migration_refused", reason: "repair-required" });
+      expect(existsSync(join(projects, officialKey, `${id}.jsonl`))).toBe(true);
+      expect(t.records.get(sid)!.runtimeKind).toBe("claude-agent");
+      expect(t.queries).toHaveLength(0);
+    } finally { t.close(); }
+  });
+
+  test("a claude.ai subscription (claude-oauth) record refuses typed — that credential never served the Winter runtime", async () => {
+    const t = table();
+    try {
+      const { sid } = legacySession(t, { provider: "anthropic", authFamily: "claude-oauth" });
+      const refused = await t.drivers.ensure(sid).then(() => undefined, (e: unknown) => e);
+      expect(refused).toMatchObject({ code: "legacy_session_migration_refused", reason: "claude-oauth" });
+      expect(t.records.get(sid)!.runtimeKind).toBe("claude-agent");
+      expect(t.queries).toHaveLength(0);
+    } finally { t.close(); }
+  });
+
+  test("adoptLegacyRecord alone moves the record without opening a child; a Winter record comes back untouched", async () => {
+    const t = table();
+    try {
+      const { sid } = legacySession(t, { provider: "anthropic" });
+      const adopted = t.drivers.adoptLegacyRecord!(sid);
+      expect(adopted?.runtimeKind).toBe("winter-agent");
+      expect(t.queries).toHaveLength(0);
+      const again = t.drivers.adoptLegacyRecord!(sid);
+      expect(again).toEqual(adopted);
+    } finally { t.close(); }
+  });
+
+  test("fix round 1 (minor 2): a move the filesystem REFUSES is `transcript-move-refused`, not a collision", async () => {
+    const t = table();
+    try {
+      const { sid, id, officialKey, projects } = legacySession(t, { provider: "anthropic", cwdless: true });
+      const winterKey = transcriptProjectKey(realpathSync(t.home));
+      // The Winter key is a symbolic link: a transcript is never moved through one.
+      const elsewhere = mkdtempSync(join(tmpdir(), "winter-legacy-link-"));
+      symlinkSync(elsewhere, join(projects, winterKey));
+      const refused = await t.drivers.ensure(sid).then(() => undefined, (e: unknown) => e);
+      expect(refused).toMatchObject({ code: "legacy_session_migration_refused", reason: "transcript-move-refused" });
+      expect((refused as Error).message).toContain("symbolic link");
+      expect(existsSync(join(projects, officialKey, `${id}.jsonl`))).toBe(true);
+      expect(t.records.get(sid)!.runtimeKind).toBe("claude-agent");
+      expect(t.queries).toHaveLength(0);
+    } finally { t.close(); }
+  });
+
+  // Fix round 1, I1: the refusal sends the user to `winter doctor`, so the doctor must NAME the blocked
+  // session and its repair must leave the session resumable — both paths, end to end through the table.
+  test("I1 — a repair-required legacy session: the doctor names it, the repair clears it, and it then resumes", async () => {
+    const t = table();
+    const tmpDirOf = (): string => t.home; // the table's own `tmpDirOf`
+    try {
+      const { sid, id, officialKey, projects } = legacySession(t, { provider: "anthropic", health: "repair-required" });
+      expect(await t.drivers.ensure(sid).then(() => undefined, (e: unknown) => e)).toMatchObject({ reason: "repair-required" });
+
+      const findings = await diagnoseRuntimeState(t.home, { tmpDirOf });
+      const finding = findings.find((f) => f.kind === "legacy-adoption-blocked" && f.winterSessionId === sid);
+      expect(finding?.repairable).toEqual(["adopt-legacy-session"]);
+      expect(finding?.detail).toContain("repair-required");
+
+      const repaired = await repairRuntimeState(t.home, { kind: "adopt-legacy-session", winterSessionId: sid }, { store: t.store, tmpDirOf });
+      expect(repaired.applied).toBe(true);
+      expect((await diagnoseRuntimeState(t.home, { tmpDirOf })).some((f) => f.kind === "legacy-adoption-blocked")).toBe(false);
+
+      const resumed = (await t.drivers.ensure(sid))!;
+      expect(t.records.get(sid)!.runtimeKind).toBe("winter-agent");
+      expect(t.q().options.resume).toBe(id);
+      expect(readFileSync(join(projects, officialKey, `${id}.jsonl`), "utf8")).toContain("PAPAYA");
+      await resumed.end();
+    } finally { t.close(); }
+  });
+
+  test("I1 — a collision: the doctor names both copies, refuses without --keep, then keeps one and QUARANTINES the other; the session resumes", async () => {
+    const t = table();
+    const tmpDirOf = (): string => t.home;
+    try {
+      const { sid, id, officialKey, projects } = legacySession(t, { provider: "anthropic", cwdless: true });
+      const winterKey = transcriptProjectKey(realpathSync(t.home));
+      mkdirSync(join(projects, winterKey), { recursive: true });
+      writeFileSync(join(projects, winterKey, `${id}.jsonl`), '{"type":"user","uuid":"u-other"}\n');
+      expect(await t.drivers.ensure(sid).then(() => undefined, (e: unknown) => e)).toMatchObject({ reason: "transcript-collision" });
+
+      const finding = (await diagnoseRuntimeState(t.home, { tmpDirOf })).find((f) => f.kind === "legacy-adoption-blocked");
+      expect(finding?.winterSessionId).toBe(sid);
+      expect(finding?.detail).toContain("BOTH");
+      expect(finding?.detail).toContain(join(projects, officialKey, `${id}.jsonl`));
+      expect(finding?.detail).toContain(join(projects, winterKey, `${id}.jsonl`));
+
+      // Without a choice, nothing moves and nothing is cleared.
+      const undecided = await repairRuntimeState(t.home, { kind: "adopt-legacy-session", winterSessionId: sid }, { store: t.store, tmpDirOf });
+      expect(undecided.applied).toBe(false);
+      expect(undecided.detail).toContain("--keep");
+      expect(t.records.get(sid)!.transcriptHealth).toBe("repair-required");
+
+      // Keep the recorded (claude-written) copy: the Winter-key copy goes to quarantine, never deleted.
+      const kept = await repairRuntimeState(t.home, { kind: "adopt-legacy-session", winterSessionId: sid, keep: "recorded" }, { store: t.store, tmpDirOf });
+      expect(kept.applied).toBe(true);
+      const quarantine = join(t.home, "cache", "quarantine");
+      const [stamp] = readdirSync(quarantine);
+      expect(readFileSync(join(quarantine, stamp!, winterKey, `${id}.jsonl`), "utf8")).toContain("u-other");
+
+      const resumed = (await t.drivers.ensure(sid))!;
+      expect(readFileSync(join(projects, winterKey, `${id}.jsonl`), "utf8")).toContain("PAPAYA");
+      const record = t.records.get(sid)!;
+      expect([record.runtimeKind, record.transcriptProjectKey, record.transcriptHealth]).toEqual(["winter-agent", winterKey, "clean"]);
+      expect(t.q().options.resume).toBe(id);
+      await resumed.end();
+    } finally { t.close(); }
+  });
+
+  test("fix round 2 — a move-refused session: the repair refuses honestly while the obstruction stands (no false success, no loop), then succeeds once it is removed", async () => {
+    const t = table();
+    const tmpDirOf = (): string => t.home;
+    try {
+      const { sid, id, projects } = legacySession(t, { provider: "anthropic", cwdless: true });
+      const winterKey = transcriptProjectKey(realpathSync(t.home));
+      const elsewhere = mkdtempSync(join(tmpdir(), "winter-legacy-link-"));
+      symlinkSync(elsewhere, join(projects, winterKey));
+      expect(await t.drivers.ensure(sid).then(() => undefined, (e: unknown) => e)).toMatchObject({ reason: "transcript-move-refused" });
+      expect((await diagnoseRuntimeState(t.home, { tmpDirOf })).some((f) => f.kind === "legacy-adoption-blocked" && f.winterSessionId === sid)).toBe(true);
+
+      // THE LOOP THE REVIEW REPRODUCED: this used to clear the flag and report success, and the next
+      // resume refused again. Now it refuses, names the cause, and leaves the session blocked.
+      const blocked = await repairRuntimeState(t.home, { kind: "adopt-legacy-session", winterSessionId: sid }, { store: t.store, tmpDirOf });
+      expect(blocked.applied).toBe(false);
+      expect(blocked.detail).toContain("symbolic link");
+      expect(blocked.detail).toContain(join(projects, winterKey));
+      expect(t.records.get(sid)!.transcriptHealth).toBe("repair-required");
+      expect(await t.drivers.ensure(sid).then(() => undefined, (e: unknown) => e)).toMatchObject({ reason: "repair-required" });
+
+      // The user removes the link, as told: the repair now succeeds and the session resumes.
+      rmSync(join(projects, winterKey));
+      expect((await repairRuntimeState(t.home, { kind: "adopt-legacy-session", winterSessionId: sid }, { store: t.store, tmpDirOf })).applied).toBe(true);
+      const resumed = (await t.drivers.ensure(sid))!;
+      expect(readFileSync(join(projects, winterKey, `${id}.jsonl`), "utf8")).toContain("PAPAYA");
+      expect(t.records.get(sid)!.runtimeKind).toBe("winter-agent");
+      await resumed.end();
+    } finally { t.close(); }
   });
 });

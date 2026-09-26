@@ -47,18 +47,14 @@ describe("capability-matrix.json (P8d-15)", () => {
   // generator's header) — they pin the LITERAL predicates this generator was told to encode, so a
   // future edit that silently drops one of them (rather than deliberately changing it) fails loud.
 
-  test("the official (claude-agent) leg is correctly-unavailable for every dispatch/chat cell, every surface", () => {
+  // WS-23: the official leg is retired — its column survives (the protocol keeps `claude-agent` for the
+  // sessions it created, ruling R4) and every cell in it is unavailable, in every mode, on every surface.
+  test("the retired official (claude-agent) leg is correctly-unavailable for every cell, every surface", () => {
     const { rows } = buildCapabilityMatrix();
-    const officialNonCode = rows.filter((r) => r.runtime === "claude-agent" && r.mode !== "code");
-    expect(officialNonCode.length).toBe(6); // 2 modes x 3 surfaces
-    for (const r of officialNonCode) expect(r.cell).toBe("correctly-unavailable");
-  });
-
-  test("the official (claude-agent) leg is implemented for every code cell, every surface", () => {
-    const { rows } = buildCapabilityMatrix();
-    const officialCode = rows.filter((r) => r.runtime === "claude-agent" && r.mode === "code");
-    expect(officialCode.length).toBe(3); // 3 surfaces
-    for (const r of officialCode) expect(r.cell).toBe("implemented");
+    const official = rows.filter((r) => r.runtime === "claude-agent");
+    expect(official.length).toBe(9); // 3 modes x 3 surfaces
+    for (const r of official) expect(r.cell).toBe("correctly-unavailable");
+    for (const r of official.filter((row) => row.surface !== "cli" || row.mode === "code")) expect(r.reason).toContain("retired (WS-23)");
   });
 
   test("the CLI surface is correctly-unavailable for dispatch/chat regardless of runtime (session-mode.ts: code-only)", () => {

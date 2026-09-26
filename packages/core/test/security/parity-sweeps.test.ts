@@ -8,10 +8,10 @@
 //     phase introduces (`ENC-DUMMY`, `SIG-DUMMY`, `<recovered_reasoning`) — proving the EXISTING
 //     allowlist filters (`HISTORY_EVENT_TYPES`, `REMOTE_STREAM_EVENT_TYPES`) hold for THESE payloads
 //     too, with a harness-role CONTROL proving it is a scoped filter, not a blanket outage.
-//   Part B — a REAL e2e (official Claude with a `thinking` block -> Winter GPT, the one achievable
-//     direction per `handoff-parity-e2e.test.ts`'s own Defect 1/2 findings) sweeping the REAL
-//     captured request bodies, the REAL canonical transcript file and a REAL `session.history` call
-//     for the same markers, plus I-3 over the real record's own credential locator.
+//   Part B — a REAL e2e (Claude with a `thinking` block -> GPT, both on the Winter runtime since
+//     WS-23 retired the official leg this used to start on) sweeping the REAL captured request bodies,
+//     the REAL canonical transcript file and a REAL `session.history` call for the same markers, plus
+//     I-3 over the real record's own credential locator.
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -29,7 +29,9 @@ import { CREDENTIAL_MATERIAL_NAMES, writeCredentialMaterial } from "../../src/au
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
-import { claudeRuntimeForTests, describeWithClaudeRuntime, type AnthropicTurnScript } from "../helpers/claude-runtime";
+import type { anthropicFake as AnthropicFakeModule } from "@yanlinglabs/winter-provider-conformance";
+
+type AnthropicTurnScript = Parameters<typeof AnthropicFakeModule.anthropicTurnResponse>[0];
 
 const ENC_DUMMY = "ENC-DUMMY-SWEEP-1";
 const SIG_DUMMY = "SIG-DUMMY-SWEEP-1";
@@ -195,11 +197,11 @@ describe("A-8 part A: opaque state + the carry tag never reach session.history o
 });
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// Part B — a REAL e2e (official Claude -> Winter GPT): sweep the REAL captured request bodies, the
-// REAL canonical transcript file, and a REAL session.history call.
+// Part B — a REAL e2e (Claude -> GPT, both on the Winter runtime): sweep the REAL captured request
+// bodies, the REAL canonical transcript file, and a REAL session.history call.
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-describeWithWinterBinary("A-8 part B: real captures (official Claude -> Winter GPT)", (winterBin) => {
-  describeWithClaudeRuntime("sweep the real request bodies + canonical file + session.history", () => {
+describeWithWinterBinary("A-8 part B: real captures (Claude -> GPT on the Winter runtime)", (winterBin) => {
+  describe("sweep the real request bodies + canonical file + session.history", () => {
     let home: string;
     let daemon: RunningDaemon | undefined;
     let client: TestClient;
@@ -235,16 +237,13 @@ describeWithWinterBinary("A-8 part B: real captures (official Claude -> Winter G
       writeFileSync(join(home, "settings.json"), JSON.stringify({
         schemaVersion: 3,
         provider: { model: "openai/gpt-5.6-sol" },
-        providers: { openai: { baseUrl: openaiFake.url } },
-        runtimes: { winterExecutable: winterBin, claudeExecutable: claudeRuntimeForTests()!.executable, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
+        providers: { openai: { baseUrl: openaiFake.url }, anthropic: { baseUrl: anthropicFakeServer.url } },
+        runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60 },
       }, null, 2));
       const secrets = new FileSecretStore(join(home, "test-secrets"));
       await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-test-sweep" });
       await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-test-sweep-anthropic" });
-      daemon = await startDaemon({
-        home, secrets, agentProvider: null,
-        officialConnectionOverride: () => ({ explicitConnectionEnv: { ANTHROPIC_BASE_URL: anthropicFakeServer.url }, authFamily: "custom" }),
-      });
+      daemon = await startDaemon({ home, secrets, agentProvider: null });
       if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
       client = await TestClient.connect(daemon.socketPath);
       await client.hello(daemon.tokens.harness, "e2e");
@@ -267,13 +266,12 @@ describeWithWinterBinary("A-8 part B: real captures (official Claude -> Winter G
       const PRIOR_TEXT = "remember P10B-SWEEP-1";
       const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: "anthropic/claude-sonnet-5" });
       await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
-      expect(d.winter.legOf(sessionId)).toBe("official");
+      expect(d.winter.legOf(sessionId)).toBe("winter");
       await client.call(METHODS.sessionSend, { sessionId, text: PRIOR_TEXT });
       await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 45_000);
 
       // I-1's designated sink: the fake's own `thinking`/`signature` block genuinely landed in the
-      // canonical file (never a vacuous sweep) — asserted before the handoff, mirroring A-2's own
-      // "first assert it landed" discipline.
+      // canonical file (never a vacuous sweep) — asserted before the switch ("first assert it landed").
       const record = rt.records.get(sessionId);
       if (record === undefined) throw new Error("no record");
       const findTranscriptFile = (root: string, backendSessionId: string): string | undefined => {
@@ -308,10 +306,9 @@ describeWithWinterBinary("A-8 part B: real captures (official Claude -> Winter G
       expect(afterRecord?.authRef).toBe("keychain:openai:default");
       expect(afterRecord?.authRef).not.toContain("anthropic");
 
-      // The destination's own outbound request (unaffected by Defect 2's event-drop — see
-      // `handoff-parity-e2e.test.ts`'s header): SIG-DUMMY and redacted_thinking never appear.
+      // The destination's own outbound request: SIG-DUMMY and redacted_thinking never appear.
       const before = openaiFakeRef!.requests.length;
-      await client.call(METHODS.sessionSend, { sessionId, text: "the last question" }).catch(() => { /* fire; see Defect 2 */ });
+      await client.call(METHODS.sessionSend, { sessionId, text: "the last question" }).catch(() => { /* fire; the request is what is swept */ });
       {
         const t0 = Date.now();
         for (;;) {

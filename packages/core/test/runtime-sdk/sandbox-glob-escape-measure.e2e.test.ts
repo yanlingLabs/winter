@@ -1,114 +1,25 @@
 // Router 3279a1d (Contract A `escapeSandboxGlobPath`) — does the daemon's sandbox fence hold under a
-// directory whose name holds `[`, on BOTH real binaries?
+// directory whose name holds `[`, on the real `winter` binary?
 //
-// claude reads a `sandbox.filesystem` entry holding any of `* ? [ ]` as a GLOB (a seatbelt regex), so a
-// raw `[wip] app` entry is a character class that misses the literal directory. `childSandboxConfigFor`
-// spells it `[[]wip] app`. Measured with the daemon's OWN list for a `[wip] app` project: the spelled list
-// must stop a python and a redirect write into `.winter/skills` while an ordinary cwd write lands; the raw
-// (literal) list is the control, and R.3 I-6 ASSERTS it — its writes land (the gap the spelling closes).
-//
-// The Winter leg (C-1, the R.3 SDK review): since agent SDK round 11 (`2a118c6`, claude's `Rt` port) the
-// Winter runtime reads the same grammar, which is why the daemon sends the spelled list on both legs.
+// The runtime reads a `sandbox.filesystem` entry holding any of `* ? [ ]` as a GLOB (a seatbelt regex —
+// claude's `Rt`, ported to the Winter runtime at agent SDK round 11, `2a118c6`), so a raw `[wip] app` entry
+// is a character class that misses the literal directory. `childSandboxConfigFor` spells it `[[]wip] app`.
 // Since SDK round 17 (`bfecbfb`) the Winter runtime ALSO fences `<cwd>/**/.winter/{skills,rules,
-// output-styles,commands,agents}` on its own, whatever the daemon sends — so on this leg a `.winter/skills`
-// write is blocked even under the literal list, and the literal-list CONTROL moved to a target only the
-// daemon's list protects: a `[`-named daemon HOME (`<cwd>/[wip] home`) and writes into its `permissions/`
-// and `run/`. The official leg's control stays on `.winter/skills` (claude has no `.winter` cover).
+// output-styles,commands,agents}` on its own, whatever the daemon sends — so a `.winter/skills` write is
+// blocked even under the literal list, and the literal-list CONTROL sits on a target only the daemon's list
+// protects: a `[`-named daemon HOME (`<cwd>/[wip] home`) and writes into its `permissions/` and `run/`.
 //
-// Same hermetic beds as the sibling measurements. GATED by `describeWithClaudeRuntime` /
+// WS-23: the official-leg half of this measurement (the pinned `claude` binary, whose control stayed on
+// `.winter/skills` because claude has no `.winter` cover) is gone with that leg. GATED by
 // `describeWithWinterBinary`.
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { query as winterQuery } from "@yanlinglabs/winter-agent-sdk";
 import { anthropicFake, startFake } from "@yanlinglabs/winter-provider-conformance";
 import { childSandboxConfigFor, sandboxConfigFor } from "../../src/runtime-sdk/mode-options";
-import { claudeRuntimeForTests, describeWithClaudeRuntime, LOOPBACK_MODEL_ID } from "../helpers/claude-runtime";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
-
-/** One sandboxed Bash turn on the real `claude`, its sandbox the daemon's OWN fence for a `[wip] app` project (inside a plain cwd — see below) —
- *  `childSandboxConfigFor` (what the official leg is sent) or, as the recorded control, the literal
- *  `sandboxConfigFor`. R.3 I-6: the same three writes as the Winter block — into the protected
- *  `<cwd>/.winter/skills` twice (python, which the permission layer cannot see, and a redirect) and once into
- *  an ordinary cwd file that MUST land (the proof the Bash call ran at all). */
-async function officialRun(spelled: boolean): Promise<{ python: boolean; redirect: boolean; notes: boolean; messages: string[] }> {
-  const bed = claudeRuntimeForTests();
-  if (bed === undefined) throw new Error("unreachable: the suite is skipped without a bed");
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "winter-sbx-glob-")));
-  const home = join(root, "home");
-  const cfg = join(root, "cfg");
-  const daemonHome = join(root, "winter-home");
-  // The `[wip] app` project sits INSIDE a plain cwd. MEASURED (R.3 I-6): claude cannot write anything into
-  // a cwd whose own path holds `[` — with no deny list at all, python, a redirect and `notes.md` all fail
-  // (its own allow entry for the cwd is read as a glob too) — so a bed whose cwd IS `[wip] app` reads
-  // "nothing landed" for every fence and would pass vacuously. The Winter runtime writes such a cwd fine.
-  const project = join(root, "work", "[wip] app");
-  const cwd = join(root, "work");
-  for (const dir of [home, cfg, daemonHome, join(home, "tmp"), join(project, ".winter", "skills", "x")]) mkdirSync(dir, { recursive: true });
-  const py = join(project, ".winter", "skills", "x", "SKILL.md");
-  const redir = join(project, ".winter", "skills", "x", "r.md");
-  const notes = join(project, "notes.md");
-  const command = `python3 -c "open('${py}','w').write('x')"; echo x > '${redir}'; echo x > '${notes}'; true`;
-  let served = false;
-  const fake = await startFake({
-    routes: [{
-      path: "*",
-      handler: async (_req, recorded) => {
-        if (!(recorded.path === "/v1/messages" && recorded.method === "POST")) return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
-        if (!served && !recorded.body.includes("tool_result")) {
-          served = true;
-          return anthropicFake.anthropicTurnResponse({ blocks: [{ type: "tool_use", id: "call_bash_1", name: "Bash", jsonChunks: [JSON.stringify({ command, description: "write into the project" })] }], stopReason: "tool_use" });
-        }
-        return anthropicFake.anthropicTurnResponse({ blocks: [{ type: "text", chunks: ["done"] }], stopReason: "end_turn" });
-      },
-    }],
-  });
-  const messages: string[] = [];
-  try {
-    const q = query({
-      prompt: "run the command you were scripted to run",
-      options: {
-        pathToClaudeCodeExecutable: bed.executable,
-        model: LOOPBACK_MODEL_ID,
-        cwd,
-        settingSources: [],
-        settings: { sandbox: { ...(spelled ? childSandboxConfigFor(daemonHome, project) : sandboxConfigFor(daemonHome, project)) } },
-        maxTurns: 4,
-        canUseTool: async (_tool, input) => ({ behavior: "allow", updatedInput: input }),
-        env: {
-          HOME: home, USER: "winter-measure", LOGNAME: "winter-measure", SHELL: "/bin/zsh", LANG: "en_US.UTF-8",
-          TMPDIR: `${join(home, "tmp")}/`, PATH: "/usr/bin:/bin:/usr/sbin:/sbin", CLAUDE_CONFIG_DIR: cfg,
-          ANTHROPIC_BASE_URL: fake.url, ANTHROPIC_API_KEY: "sk-ant-fake-sandbox-glob-measurement-0000",
-          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", DISABLE_AUTOUPDATER: "1", CLAUDE_CODE_MAX_RETRIES: "0",
-        },
-      },
-    });
-    for await (const message of q as AsyncIterable<SDKMessage>) {
-      const m = message as { type: string; subtype?: string };
-      messages.push(m.subtype === undefined ? m.type : `${m.type}/${m.subtype}`);
-      if (m.type === "result") break;
-    }
-    return { python: existsSync(py), redirect: existsSync(redir), notes: existsSync(notes), messages };
-  } finally {
-    await fake.close();
-    rmSync(root, { recursive: true, force: true });
-  }
-}
-
-describeWithClaudeRuntime("router 3279a1d — the official-leg sandbox fence under a `[`-named project (the daemon's own deny list)", () => {
-  test("the spelled fence stops the python and the redirect write into .winter/skills; notes.md lands; the literal list's writes land (the recorded control, ASSERTED)", async () => {
-    const spelled = await officialRun(true);
-    const literal = await officialRun(false);
-    const view = (r: { python: boolean; redirect: boolean; notes: boolean }) => ({ python: r.python, redirect: r.redirect, notes: r.notes });
-    console.error(`sandbox glob escape (official): spelled ${JSON.stringify(view(spelled))}; literal ${JSON.stringify(view(literal))}; ${spelled.messages.join(",")}`);
-    expect(view(spelled)).toEqual({ python: false, redirect: false, notes: true });
-    // R.3 I-6: the control is ASSERTED, not logged — a broken bed (the Bash call never running) would read
-    // "nothing landed" everywhere and pass the line above vacuously.
-    expect(view(literal)).toEqual({ python: true, redirect: true, notes: true });
-  }, 180_000);
-});
 
 describeWithWinterBinary("C-1 — the Winter-leg sandbox fence under a `[`-named project (the daemon's own deny list)", (bin) => {
   /** One sandboxed Bash turn on the built `winter`, the sandbox being the daemon's OWN fence for this home
@@ -202,8 +113,7 @@ describeWithWinterBinary("C-1 — the Winter-leg sandbox fence under a `[`-named
     const r = await run("plain app", true, script, bed);
     // R.3 re-review minor (a) added the literal list as an in-file control (at SDK 5e37898 the write LANDED under
     // it). SDK round 17 (`bfecbfb`, the runtime's own cwd-anchored `<cwd>/**/.winter/<kind>/**` cover) now stops
-    // it on this leg whatever the daemon sends, so the daemon's any-depth glob is defence in depth here; its
-    // literal-list control that still lands is the official leg's (`official-leg.e2e.test.ts`, R.3 I-4).
+    // it whatever the daemon sends, so the daemon's any-depth glob is defence in depth here.
     const literal = await run("plain app", false, script, bed);
     console.error(`R.3 I-4 (winter): child ${JSON.stringify(r.landed)}; literal ${JSON.stringify(literal.landed)}`);
     expect(r.landed).toEqual({ "pkg/.winter/rules/x.md": false, "pkg/notes.md": true });

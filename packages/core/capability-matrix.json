@@ -13,8 +13,8 @@
       "mode": "code",
       "runtime": "claude-agent",
       "surface": "cli",
-      "cell": "implemented",
-      "reason": "the official leg serves Code-mode sessions on a Claude catalog model with an Anthropic key (session-driver.ts's decideRuntime -> createOfficial), reachable from this surface"
+      "cell": "correctly-unavailable",
+      "reason": "the official claude runtime was retired (WS-23): no session is created on it, and a session recorded on it is adopted onto the Winter leg at its next resume (session-driver.ts's adoptLegacyRecord)"
     },
     {
       "mode": "code",
@@ -27,8 +27,8 @@
       "mode": "code",
       "runtime": "claude-agent",
       "surface": "mac",
-      "cell": "implemented",
-      "reason": "the official leg serves Code-mode sessions on a Claude catalog model with an Anthropic key (session-driver.ts's decideRuntime -> createOfficial), reachable from this surface"
+      "cell": "correctly-unavailable",
+      "reason": "the official claude runtime was retired (WS-23): no session is created on it, and a session recorded on it is adopted onto the Winter leg at its next resume (session-driver.ts's adoptLegacyRecord)"
     },
     {
       "mode": "code",
@@ -41,8 +41,8 @@
       "mode": "code",
       "runtime": "claude-agent",
       "surface": "ios-remote",
-      "cell": "implemented",
-      "reason": "the official leg serves Code-mode sessions on a Claude catalog model with an Anthropic key (session-driver.ts's decideRuntime -> createOfficial), reachable from this surface"
+      "cell": "correctly-unavailable",
+      "reason": "the official claude runtime was retired (WS-23): no session is created on it, and a session recorded on it is adopted onto the Winter leg at its next resume (session-driver.ts's adoptLegacyRecord)"
     },
     {
       "mode": "dispatch",
@@ -70,7 +70,7 @@
       "runtime": "claude-agent",
       "surface": "mac",
       "cell": "correctly-unavailable",
-      "reason": "SessionDispatchParams carries no model field at all (methods.ts) — the dispatch singleton can never name a Claude catalog model for the router to route on"
+      "reason": "the official claude runtime was retired (WS-23): no session is created on it, and a session recorded on it is adopted onto the Winter leg at its next resume (session-driver.ts's adoptLegacyRecord)"
     },
     {
       "mode": "dispatch",
@@ -84,7 +84,7 @@
       "runtime": "claude-agent",
       "surface": "ios-remote",
       "cell": "correctly-unavailable",
-      "reason": "SessionDispatchParams carries no model field at all (methods.ts) — the dispatch singleton can never name a Claude catalog model for the router to route on"
+      "reason": "the official claude runtime was retired (WS-23): no session is created on it, and a session recorded on it is adopted onto the Winter leg at its next resume (session-driver.ts's adoptLegacyRecord)"
     },
     {
       "mode": "chat",
@@ -112,7 +112,7 @@
       "runtime": "claude-agent",
       "surface": "mac",
       "cell": "correctly-unavailable",
-      "reason": "the official leg ships Code-only (P8c-1/P8c-2 policy, runtime-sdk/create.ts's official env block) — decideRuntime's own bail-outs never route a chat session to the claude-agent leg"
+      "reason": "the official claude runtime was retired (WS-23): no session is created on it, and a session recorded on it is adopted onto the Winter leg at its next resume (session-driver.ts's adoptLegacyRecord)"
     },
     {
       "mode": "chat",
@@ -126,7 +126,7 @@
       "runtime": "claude-agent",
       "surface": "ios-remote",
       "cell": "correctly-unavailable",
-      "reason": "the official leg ships Code-only (P8c-1/P8c-2 policy, runtime-sdk/create.ts's official env block) — decideRuntime's own bail-outs never route a chat session to the claude-agent leg"
+      "reason": "the official claude runtime was retired (WS-23): no session is created on it, and a session recorded on it is adopted onto the Winter leg at its next resume (session-driver.ts's adoptLegacyRecord)"
     }
   ]
 }

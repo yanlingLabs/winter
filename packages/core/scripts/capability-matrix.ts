@@ -6,14 +6,11 @@
  * own daemon/CLI/app/remote-gateway code lets each combination reach", derived from three real
  * predicates rather than hand-typed:
  *
- *   1. **decideRuntime's bail-outs** (`runtime-sdk/session-driver.ts`) — chat/dispatch never
- *      reach the official (`claude-agent`) leg. This is a STRUCTURAL fact for dispatch (its wire
- *      params, `SessionDispatchParams = z.object({})`, carry no model at all — there is nothing
- *      for the router to route on) and a deployment-wide policy fact for chat/code (P8c-1/P8c-2's
- *      "the official leg ships Code-only" ruling, `runtime-sdk/create.ts`'s official env block) —
- *      cited here rather than re-derived, since re-deriving the router's own internal decision
- *      from this package would mean asserting something about `@yanlinglabs/winter-agent-sdk`'s
- *      compiled code this repo does not own.
+ *   1. **The runtime axis** — WS-23 retired the official (`claude-agent`) leg: every mode, Claude
+ *      models included, runs on the Winter leg (`runtime-sdk/create.ts` tells the router
+ *      `hasClaudePeer: false`, and `session-driver.ts`'s `decideRuntime` refuses any other answer).
+ *      The `claude-agent` column stays, because the protocol keeps the value for sessions the leg
+ *      created (ruling R4) — every cell in it is `correctly-unavailable`.
  *   2. **`REMOTE_ALLOWED_METHODS`** (`ipc/server.ts`) — a remote (iOS) client CAN reach
  *      `session.create`/`session.setModel` for every mode `REMOTE_ELIGIBLE_SESSION_MODES` names
  *      (`code`/`dispatch`/`chat` — Chat Slice C lifted chat's remote gate, SP3.4 added remote
@@ -86,21 +83,12 @@ function surfaceUnreachableReason(surface: CapabilitySurface, mode: CapabilityMo
   return `unreachable for this surface`; // unused today — mac/ios-remote reach every mode
 }
 
-/** The official leg's own Code-only gate (P8c-1/P8c-2, `runtime-sdk/create.ts`'s official env
- *  policy) — a deployment-wide ruling this package hosts a driver for but does not itself enforce
- *  per-mode (the router does), cited rather than re-derived (see this file's header). Dispatch
- *  additionally has a STRUCTURAL reason: `SessionDispatchParams` carries no model field at all. */
-function officialLegReason(mode: CapabilityMode): string {
-  if (mode === "dispatch") {
-    return "SessionDispatchParams carries no model field at all (methods.ts) — the dispatch singleton can never name a Claude catalog model for the router to route on";
-  }
-  return "the official leg ships Code-only (P8c-1/P8c-2 policy, runtime-sdk/create.ts's official env block) — decideRuntime's own bail-outs never route a chat session to the claude-agent leg";
-}
+/** WS-23: the one answer for the `claude-agent` column, in every mode. */
+const OFFICIAL_LEG_RETIRED_REASON = "the official claude runtime was retired (WS-23): no session is created on it, and a session recorded on it is adopted onto the Winter leg at its next resume (session-driver.ts's adoptLegacyRecord)";
 
 const CHAT_MODE_TOOL_NOTE = (() => {
-  // The WINTER leg's chat answer, with an Exa key assumed present (the narrower surface) —
-  // this matrix describes the daemon's own capability tools, which only a Winter child is handed.
-  const excluded = disallowedToolsFor("chat", { leg: "winter" });
+  // Chat's answer with an Exa key assumed present (the narrower surface).
+  const excluded = disallowedToolsFor("chat", {});
   return `chat's own tool registry excludes ${excluded.length} Winter built-in(s) by design (runtime-sdk/mode-options.ts's disallowedToolsFor) — narrower by mode policy, not a runtime/surface gate`;
 })();
 
@@ -129,14 +117,7 @@ export function buildCapabilityMatrix(): CapabilityMatrix {
           continue;
         }
         // runtime === "claude-agent"
-        if (mode === "code") {
-          rows.push({
-            mode, runtime, surface, cell: "implemented",
-            reason: "the official leg serves Code-mode sessions on a Claude catalog model with an Anthropic key (session-driver.ts's decideRuntime -> createOfficial), reachable from this surface",
-          });
-        } else {
-          rows.push({ mode, runtime, surface, cell: "correctly-unavailable", reason: officialLegReason(mode) });
-        }
+        rows.push({ mode, runtime, surface, cell: "correctly-unavailable", reason: OFFICIAL_LEG_RETIRED_REASON });
       }
     }
   }

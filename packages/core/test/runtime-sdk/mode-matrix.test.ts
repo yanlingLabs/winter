@@ -32,8 +32,8 @@ const silent: BridgeLogger = { info: () => {}, error: () => {} };
 const NO_CREDS: CredentialPresence = { byProvider: {} };
 // 0.0.17: the two Winter-leg tool-exposure inputs, spelled once. `exaKeyPresent` is explicit on both
 // (the absent default is `true`, which one test below pins on purpose).
-const WINTER_LEG_WITH_EXA: ToolExposure = { leg: "winter", exaKeyPresent: true };
-const WINTER_LEG_NO_EXA: ToolExposure = { leg: "winter", exaKeyPresent: false };
+const WINTER_LEG_WITH_EXA: ToolExposure = { exaKeyPresent: true };
+const WINTER_LEG_NO_EXA: ToolExposure = { exaKeyPresent: false };
 
 // -------------------------------------------------------------------------------------------
 // permissionModeFor — the P8b-7 1:1 table
@@ -341,7 +341,7 @@ test("the control-plane deny rules cover the four write tools × the control-pla
     expect(deny).toContain(`${tool}(//h/run/**)`);
     expect(deny).toContain(`${tool}(//h/runtimes/**)`);
   }
-  // P8d-12 (WS-16 §10); Winter Phase 10b (D1-3, W18-9): the official leg's SDK-parent staging root,
+  // P8d-12 (WS-16 §10); Winter Phase 10b (D1-3, W18-9): the retired official leg's SDK-parent staging root,
   // denied to BOTH the write and the read-class tools — rooted at the SYSTEM temp dir, never under
   // `home`. `fsRootAnchored` prepends exactly ONE more slash onto an already-absolute pattern
   // (`tmpdir()` is absolute), so the wire form carries two leading slashes total, not three. Built
@@ -500,11 +500,10 @@ test("the Bash sandbox names real DIRECTORIES — plus, since R.3 I-4, the any-d
   // child's list ends with the five `<cwd>/**/.winter/<kind>` entries, and those are its ONLY globs.
   const sb = buildWinterOptions(optionsInput({ home: "/h" })).sandbox!;
   expect(sb.enabled).toBe(true);
-  // `runtimes` is on BOTH lists (2026-09-18). It was read-denied and write-allowed, which the
-  // official leg makes reachable: that leg has no out-of-cwd Bash fence (see the "8d MEASURED" test
-  // in official-leg.e2e.test.ts), and a per-tool `Write(path)` deny rule does not constrain a Bash
-  // redirect — so `<home>/runtimes/bin/winter`, rung 4 of `resolveWinterExecutable`'s ladder, was
-  // writable there. If either list loses it, that is the regression this line exists to catch.
+  // `runtimes` is on BOTH lists (2026-09-18). It was read-denied and write-allowed, which the retired
+  // official leg made reachable: that leg had no out-of-cwd Bash fence, and a per-tool `Write(path)`
+  // deny rule does not constrain a Bash redirect — so `<home>/runtimes/bin/winter`, rung 4 of
+  // `resolveWinterExecutable`'s ladder, was writable there. If either list loses it, that is the regression this line exists to catch.
   // B1 follow-up: + the skills-only plugin views (write only — see `controlPlaneDenyRules`); since
   // re-review M-a the whole `<home>/cache` that holds them.
   // Whole-branch review: EVERY self-grant path, because lane C's escape floor (an unsandboxed command)
@@ -631,23 +630,13 @@ test("EXA_GATED_SEARCH_TOOL is the real wire name of the `research` server's Sea
 
 test("ABSENT exaKeyPresent reads as PRESENT — a caller that cannot answer must not widen the surface", () => {
   for (const mode of ["chat", "dispatch"] as const) {
-    expect(disallowedToolsFor(mode, { leg: "winter" })).toEqual(disallowedToolsFor(mode, WINTER_LEG_WITH_EXA));
+    expect(disallowedToolsFor(mode, {})).toEqual(disallowedToolsFor(mode, WINTER_LEG_WITH_EXA));
   }
 });
 
-test("the OFFICIAL leg withholds neither web built-in, in any mode (the 2026-09-18 ruling)", () => {
+test("WebFetch is never withheld, in any mode, with or without an Exa key", () => {
   for (const mode of MODES) {
-    expect(disallowedToolsFor(mode, { leg: "official" })).not.toContain("WebFetch");
-    expect(disallowedToolsFor(mode, { leg: "official" })).not.toContain("WebSearch");
-  }
-  // …and the Exa key is irrelevant there: it only ever decides a Winter-leg chat/dispatch question.
-  expect(disallowedToolsFor("chat", { leg: "official", exaKeyPresent: true }))
-    .toEqual(disallowedToolsFor("chat", { leg: "official", exaKeyPresent: false }));
-});
-
-test("WebFetch is never withheld, on either leg, in any mode", () => {
-  for (const mode of MODES) {
-    for (const exposure of [WINTER_LEG_WITH_EXA, WINTER_LEG_NO_EXA, { leg: "official" as const }]) {
+    for (const exposure of [WINTER_LEG_WITH_EXA, WINTER_LEG_NO_EXA, {}]) {
       expect(disallowedToolsFor(mode, exposure)).not.toContain("WebFetch");
     }
   }

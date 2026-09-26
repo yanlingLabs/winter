@@ -1,18 +1,18 @@
 // The DEV-path half of `verify:runtime-state` (the compiled half boots `dist/winter-core`): the
-// probe reports the two A2 facts the gate asserts — the router handle constructed, and the official
-// peer loaded and declared.
+// probe reports the A2 fact the gate asserts — the router handle constructed. (WS-23: the second
+// fact, the official peer loading, is gone with that leg.)
 import { describe, expect, test } from "bun:test";
 import { runRuntimeStateProbe } from "../../src/runtime-state/probe";
 import { withTempHome } from "./support";
 
 describe("runRuntimeStateProbe", () => {
-  test("reports runtimeSdk and officialPeer (both true in this dev tree, which installs the pinned peer)", async () => {
+  test("reports runtimeSdk (true in this dev tree), and nothing about the retired official peer", async () => {
     await withTempHome(async (home) => {
       const result = await runRuntimeStateProbe({ home });
       expect(result.ok).toBe(true);
       if (!result.ok) return;
       expect(result.runtimeSdk).toBe(true);
-      expect(result.officialPeer).toBe(true);
+      expect("officialPeer" in result).toBe(false);
     });
   });
   test("refuses without a home", async () => {

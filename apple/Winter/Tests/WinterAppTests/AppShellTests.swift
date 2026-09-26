@@ -401,12 +401,17 @@ final class AppShellTests: XCTestCase {
     }
 
     /// Things the briefs for these pages assumed turned out not to exist; the copy must not name
-    /// them. `runtimes.official.auth` was removed in WS-20 (the arm is the tag prefix), there is no
-    /// default-approval-policy key, there is no browser on/off key, and computer use is OPT-IN.
+    /// them. `runtimes.official.auth` was removed in WS-20 (the arm is the tag prefix); WS-23 retired
+    /// the official runtime, taking `runtimes.claudeExecutable` and `runtimes.handoff.crossRuntime`
+    /// with it; there is no default-approval-policy key, there is no browser on/off key, and
+    /// computer use is OPT-IN.
     func testComingCopyNamesOnlyWhatExists() {
         let runtimes = settingsSectionComingCopy(.runtimes) ?? ""
         XCTAssertFalse(runtimes.contains("runtimes.official.auth"))
-        XCTAssertTrue(runtimes.contains("runtimes.handoff.crossRuntime"))
+        XCTAssertFalse(runtimes.contains("runtimes.claudeExecutable"))
+        XCTAssertFalse(runtimes.contains("runtimes.handoff.crossRuntime"))
+        XCTAssertTrue(runtimes.contains("runtimes.winterExecutable"))
+        XCTAssertTrue(runtimes.contains("runtimes.antExecutable"))
         let permissions = settingsSectionComingCopy(.permissions) ?? ""
         XCTAssertTrue(permissions.contains("reviewer.enabled"))
         XCTAssertTrue(permissions.contains("composer"), "the policy is per session, in the composer")
@@ -1268,12 +1273,12 @@ final class AppShellTests: XCTestCase {
 
     // MARK: - Winter Phase 8d (Task 4.2, WS-14 §14): the runtime badge label
 
-    /// The branding ruling this function exists to serve: NEVER "Claude Code" — `"claude-agent"`
-    /// reads "Claude Agent", full stop. `nil` for an absent OR unrecognised value, same fail-quiet
-    /// posture as `recentsActivityDotStyle` above (never a guessed default).
-    func testRuntimeBadgeLabelMapsTheTwoKnownKindsAndNeverGuesses() {
+    /// WS-23: one runtime, one badge. `"claude-agent"` (a legacy session not yet resumed onto the
+    /// Winter runtime) gets none; `nil` for an absent OR unrecognised value, same fail-quiet posture
+    /// as `recentsActivityDotStyle` above (never a guessed default).
+    func testRuntimeBadgeLabelMapsTheOneKnownKindAndNeverGuesses() {
         XCTAssertEqual(runtimeBadgeLabel("winter-agent"), "Winter Agent")
-        XCTAssertEqual(runtimeBadgeLabel("claude-agent"), "Claude Agent")
+        XCTAssertNil(runtimeBadgeLabel("claude-agent"), "the retired official runtime has no badge (WS-23)")
         XCTAssertNil(runtimeBadgeLabel(nil), "an absent runtimeKind shows no badge at all")
         XCTAssertNil(runtimeBadgeLabel("claude-code"), "never surfaced as \"Claude Code\", and never guessed from an unrecognised string")
         XCTAssertNil(runtimeBadgeLabel("engine"), "an old engine-era value is not a licence to invent a label")

@@ -24,8 +24,7 @@
 // option keep the process's ORIGINAL environment (measured, Bun 1.3.14); only async
 // `child_process.spawn` re-reads it. So: A SPAWN THAT NEEDS THE USER'S TOOLS MUST PASS AN `env`
 // DERIVED FROM `process.env` AT SPAWN TIME. Every spawn that matters does today — `buildChildEnv`
-// (the Winter child, its Bash tool and its stdio MCP servers), the official leg's environment
-// (`official-options.ts`), `agent/mcp/client.ts`, the hook runner, the plugin supervisor, the
+// (the Winter child, its Bash tool and its stdio MCP servers), `agent/mcp/client.ts`, the hook runner, the plugin supervisor, the
 // background-task registry; the router and SDK wrappers spawn with `env: options.env`.
 //
 // NEVER HANGS BOOT. Bounded (`LOGIN_SHELL_TIMEOUT_MS`), the shell runs in its own process group and

@@ -3,8 +3,8 @@
  * REAL Release artifact (`dist/winter-core`, a `bun build --compile` single-file binary), the same
  * way `scripts/verify-runtime-state-compiled.ts` proves 8a's runtime spine.
  *
- * Why this can't be proven under plain `bun test`: `official-executable.ts`'s package door and
- * `executable.ts`'s bundle rung both resolve real filesystem paths relative to `process.execPath` —
+ * Why this can't be proven under plain `bun test`: `executable.ts`'s and `bundle-layout.ts`'s bundle
+ * rungs resolve real filesystem paths relative to `process.execPath` —
  * under `bun test` that's the `bun` binary itself, not a daemon sitting in `Contents/Resources/`.
  * Only running the real compiled binary, laid out exactly as the Release app would, proves the
  * bundle rung (not the dev `node_modules` package door) is what actually resolves.
@@ -17,13 +17,13 @@
  *      `dirname(execPath)` really is `<tmp>/Resources`, exactly like a Release app).
  *   3. `stageRuntimes({ out: <tmp>/Resources/runtimes, winterPath: dist/winter if present })` —
  *      reuses an already-built `dist/winter` (CI's `winter-binary` artifact, or a prior
- *      `bun run build:winter`) rather than paying for a fresh SDK-checkout build here; the claude
- *      binary resolves through the same installed-platform-package door `stage-runtimes.ts`
- *      always uses.
+ *      `bun run build:winter`) rather than paying for a fresh SDK-checkout build here. WS-23: no
+ *      `claude` binary is staged — the official leg is retired. `ant` is staged beside it with its
+ *      own record when a vendored copy exists (step 3b).
  *   4. Take a signature of the REAL homes (`~/.winter`, `~/.winter-dev`) BEFORE the run.
  *   5. `spawn(<tmp>/Resources/winter-core, ["__runtimes-probe"], { env: { WINTER_HOME: <tmp>/home } })`.
- *   6. Parse the one JSON result line; assert both ladders resolved via "bundle", the staged
- *      `VERSIONS.json` parsed and matches this build's pins, and `claude --version` really ran.
+ *   6. Parse the one JSON result line; assert the ladders resolved via "bundle" and the staged
+ *      `VERSIONS.json` records parsed and match this build's pins.
  *   7. Re-take the real-home signature and assert it is UNCHANGED.
  *   8. `rm -rf` both temp dirs — in a `finally`, failure paths included.
  *
@@ -40,9 +40,10 @@ import { copyFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSyn
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveInstalledWinterPackage, stageRuntimes, type StageRuntimesOpts } from "./stage-runtimes";
+import { resolveInstalledWinterPackage, sha256File, stageRuntimes, type StageRuntimesOpts } from "./stage-runtimes";
 import { parseAntPin } from "./fetch-ant";
-import { REQUIRED_CLAUDE_AGENT_SDK } from "../packages/core/src/runtime-sdk/versions";
+import { writeAntVersionsJson } from "./ant-record";
+import { REQUIRED_WINTER_AGENT_SDK } from "../packages/core/src/runtime-sdk/versions";
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(SCRIPTS_DIR, "..");
@@ -50,12 +51,10 @@ const DIST_BINARY = join(REPO_ROOT, "dist", "winter-core");
 const DIST_WINTER = join(REPO_ROOT, "dist", "winter");
 const VERSIONS_JSON_PATH = join(REPO_ROOT, "VERSIONS.json");
 const COMPILE_TIMEOUT_MS = 180_000;
-/** The probe resolves two ladders, best-effort `codesign`s them, and runs one real `claude
- *  --version` — seconds in practice; this only guards against a genuine hang. */
+/** The probe resolves the ladders and best-effort `codesign`s them — seconds in practice; this only
+ *  guards against a genuine hang. */
 const PROBE_TIMEOUT_MS = 60_000;
 const REAL_HOMES = [join(homedir(), ".winter"), join(homedir(), ".winter-dev")];
-/** Controller measurement M1: the pinned platform package's own `claude --version`. */
-const EXPECTED_CLAUDE_VERSION_PREFIX = "2.1.250";
 
 function log(line: string): void { console.log(line); }
 
@@ -143,14 +142,16 @@ async function main(): Promise<void> {
   } catch (err) {
     fail(`stageRuntimes failed: ${err instanceof Error ? err.message : String(err)}`);
   }
-  log(`staged: winter=${staged.winterPath} claude=${staged.claudePath} versions=${staged.versionsPath}`);
+  log(`staged: winter=${staged.winterPath} versions=${staged.versionsPath}`);
   log(`VERSIONS.json: ${JSON.stringify(staged.versions)}`);
 
   // ---- Step 3b: stage ant (Winter Phase 10a, P10a-4) — best-effort, mirrors the DIST_WINTER
-  // fallback above: this proof's PRIMARY point is winter/claude's bundle-rung resolution inside
-  // the compiled binary, unchanged by this addition; ant coverage is additive when a vendored copy
-  // is available (`bun run scripts/fetch-ant.ts`), never a hard requirement of this script.
-  let antStaged = false;
+  // fallback above: this proof's PRIMARY point is winter's bundle-rung resolution inside the
+  // compiled binary, unchanged by this addition; ant coverage is additive when a vendored copy is
+  // available (`bun run scripts/fetch-ant.ts`), never a hard requirement of this script. WS-23: ant's
+  // own record is written beside it in embed-runtimes.sh's shape, so the probe's parse of it is
+  // exercised too.
+  let antStaged: { tag: string; binarySha256: string } | undefined;
   try {
     const antPin = parseAntPin(readFileSync(VERSIONS_JSON_PATH, "utf8"));
     const vendoredAnt = join(REPO_ROOT, "vendor", "ant", antPin.tag, "ant");
@@ -159,7 +160,8 @@ async function main(): Promise<void> {
       mkdirSync(antDest, { recursive: true });
       copyFileSync(vendoredAnt, join(antDest, "ant"));
       chmodSync(join(antDest, "ant"), 0o755);
-      antStaged = true;
+      writeAntVersionsJson(join(antDest, "VERSIONS.json"), antPin.tag, sha256File(join(antDest, "ant")));
+      antStaged = { tag: antPin.tag, binarySha256: antPin.binarySha256 };
       log(`staged: ant=${join(antDest, "ant")} (from ${vendoredAnt})`);
     } else {
       log(`WARNING: no vendored ant at ${vendoredAnt} (VERSIONS.json pins ant.tag=${antPin.tag}) — run \`bun run scripts/fetch-ant.ts\` to also exercise the ant bundle-rung assertions below`);
@@ -178,7 +180,7 @@ async function main(): Promise<void> {
     const child = spawn(stagedBinary, ["__runtimes-probe"], {
       stdio: ["ignore", "pipe", "pipe"],
       // Narrow env, same reasoning as verify-runtime-state-compiled.ts: inheriting process.env
-      // could drag this shell's own WINTER_HOME/WINTER_RUNTIME_EXECUTABLE/WINTER_CLAUDE_EXECUTABLE in,
+      // could drag this shell's own WINTER_HOME/WINTER_RUNTIME_EXECUTABLE/WINTER_ANT_EXECUTABLE in,
       // which would defeat the entire point of proving the BUNDLE rung resolves.
       env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir(), WINTER_HOME: tmpHome },
     });
@@ -225,27 +227,25 @@ async function main(): Promise<void> {
     for (const [dir, ok] of untouched) if (!ok) log(`\n[real home CHANGED] ${dir}`);
 
     const winter = result.winter as Record<string, unknown> | undefined;
-    const claude = result.claude as Record<string, unknown> | undefined;
     const ant = result.ant as Record<string, unknown> | undefined;
     const versions = result.versions as Record<string, unknown> | undefined;
-    const claudeVersion = typeof claude?.version === "string" ? claude.version : undefined;
+    const antVersions = result.antVersions as Record<string, unknown> | undefined;
 
     const checks: Array<[string, boolean]> = [
       ["the compiled binary produced a JSON result line", true],
       ["result.ok === true", result.ok === true],
       ["result.winter.source === 'bundle'", winter?.source === "bundle"],
       ["result.winter.executable === true", winter?.executable === true],
-      ["result.claude.source === 'bundle'", claude?.source === "bundle"],
-      ["result.claude.executable === true", claude?.executable === true],
-      [`result.claude.version starts with '${EXPECTED_CLAUDE_VERSION_PREFIX}' (M1)`, !!claudeVersion?.startsWith(EXPECTED_CLAUDE_VERSION_PREFIX)],
-      [`result.versions.officialSdk === ${REQUIRED_CLAUDE_AGENT_SDK} (this build's pin)`, versions?.officialSdk === REQUIRED_CLAUDE_AGENT_SDK],
+      // WS-23: the official leg is retired — nothing about a `claude` runtime is probed or reported.
+      ["result has no `claude` entry (WS-23)", !("claude" in result)],
+      [`result.versions.schema === 2 and winterAgentSdk === ${REQUIRED_WINTER_AGENT_SDK} (this build's pin)`, versions?.schema === 2 && versions?.winterAgentSdk === REQUIRED_WINTER_AGENT_SDK],
       [`result.versions.winterSource === '${staged.versions.winterSource}' (P9a-8: matches what Step 3 actually staged)`, versions?.winterSource === staged.versions.winterSource],
       ["probe exited 0", exitCode === 0],
       // Winter Phase 10a (P10a-4): ant resolves via the SAME 'bundle' rung inside the compiled
-      // binary, the way winter/claude do above — asserted for real when Step 3b staged a vendored
-      // copy (`antStaged`); a vacuous pass (never a silent green) when it did not, since ant
-      // coverage here is additive to this proof's primary winter/claude subject, not a new hard
-      // requirement of every environment that runs this script.
+      // binary, the way winter does above — asserted for real when Step 3b staged a vendored copy
+      // (`antStaged`); a vacuous pass (never a silent green) when it did not, since ant coverage here
+      // is additive to this proof's primary winter subject, not a new hard requirement of every
+      // environment that runs this script.
       [
         antStaged ? "result.ant.source === 'bundle'" : "result.ant.source === 'bundle' (SKIPPED — no vendored ant staged, see WARNING above)",
         antStaged ? ant?.source === "bundle" : true,
@@ -253,6 +253,16 @@ async function main(): Promise<void> {
       [
         antStaged ? "result.ant.executable === true" : "result.ant.executable === true (SKIPPED — no vendored ant staged, see WARNING above)",
         antStaged ? ant?.executable === true : true,
+      ],
+      [
+        antStaged ? `result.antVersions.tag === '${antStaged.tag}' (ant's own record parsed)` : "result.antVersions parsed (SKIPPED — no vendored ant staged, see WARNING above)",
+        antStaged ? antVersions?.tag === antStaged.tag : true,
+      ],
+      // Fix round 1 (minor 6): the record's pre-sign SHA is the repo-root VERSIONS.json pin — the
+      // staged binary is the pinned one (release-lib's `verifyAntEmbed` makes the same comparison).
+      [
+        antStaged ? "result.antVersions.checksums.antPreSign === VERSIONS.json ant.binarySha256 (the pin)" : "ant record SHA vs pin (SKIPPED — no vendored ant staged, see WARNING above)",
+        antStaged ? (antVersions?.checksums as { antPreSign?: string } | undefined)?.antPreSign === antStaged.binarySha256 : true,
       ],
       ...untouched.map(([dir, ok]) => [`${dir}: unchanged`, ok] as [string, boolean]),
     ];
@@ -274,14 +284,14 @@ async function main(): Promise<void> {
 
     log(
       "\nRESULT: PASS — dist/winter-core (the real `bun build --compile` Release artifact), laid out " +
-        "exactly as the app bundle will be, resolved BOTH runtime executables through the P8d-1 " +
-        "'bundle' rung, parsed a matching VERSIONS.json, and ran a real `claude --version` — the " +
-        "user's real homes were left untouched throughout.",
+        "exactly as the app bundle will be, resolved the runtime executables through the P8d-1 " +
+        "'bundle' rung and parsed matching VERSIONS.json records — the user's real homes were left " +
+        "untouched throughout.",
     );
   } finally {
     // Runs on every path, failures included — the temp home and staged binary hold nothing
-    // sensitive, but leaving multi-hundred-MB copies of `claude` behind on every failed run would
-    // be its own kind of mess.
+    // sensitive, but leaving multi-hundred-MB runtime copies behind on every failed run would be its
+    // own kind of mess.
     rmSync(tmpHome, { recursive: true, force: true });
     rmSync(tmpRoot, { recursive: true, force: true });
     log(`\n(cleanup) removed ${tmpHome} and ${tmpRoot}`);

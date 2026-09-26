@@ -4,7 +4,7 @@ import WinterKit
 // MARK: - What is actually installed (2026-09-18)
 //
 // The panel's second half. "What version am I on" is not one number — Winter ships a browser engine
-// and three agent SDKs inside itself, and when something misbehaves the first question is always
+// and two agent SDKs inside itself, and when something misbehaves the first question is always
 // which of them is which version. This file is the model plus the two readers that can answer
 // locally; the SDK rows come from the daemon and are modelled as PENDING rather than omitted.
 
@@ -90,7 +90,8 @@ func embeddedChromiumVersion(appBundleURL: URL = Bundle.main.bundleURL) -> Strin
 
 // MARK: - The table
 
-/// The three SDK rows, in a fixed order, as they read before the daemon answers.
+/// The SDK rows, in a fixed order, as they read before the daemon answers. (WS-23: the "Claude agent
+/// SDK" row went with the official runtime — nothing Winter ships runs on it any more.)
 ///
 /// They are LISTED rather than omitted on purpose. Omitting them would make the panel quietly claim
 /// Winter is made of two components; naming them with an honest "pending" says what is missing and
@@ -100,10 +101,9 @@ func embeddedChromiumVersion(appBundleURL: URL = Bundle.main.bundleURL) -> Strin
 let pendingSdkComponents: [InstalledComponent] = [
     InstalledComponent(name: "Winter agent SDK", pendingReason: "waiting for the daemon"),
     InstalledComponent(name: "Winter runtime SDK", pendingReason: "waiting for the daemon"),
-    InstalledComponent(name: "Claude agent SDK", pendingReason: "waiting for the daemon"),
 ]
 
-/// The three SDK rows' wire keys, paired with the facing names `pendingSdkComponents` uses.
+/// The SDK rows' wire keys, paired with the facing names `pendingSdkComponents` uses.
 ///
 /// The pairing is the whole contract: `installedComponents` swaps a daemon row in BY NAME, so a
 /// name that does not match a pending row's exactly would append nothing and silently leave the
@@ -111,10 +111,9 @@ let pendingSdkComponents: [InstalledComponent] = [
 let sdkComponentWireKeys: [(name: String, key: String)] = [
     ("Winter agent SDK", "winterAgentSdk"),
     ("Winter runtime SDK", "winterRuntimeSdk"),
-    ("Claude agent SDK", "claudeAgentSdk"),
 ]
 
-/// PURE: `versions.get`'s answer → the three SDK rows.
+/// PURE: `versions.get`'s answer → the SDK rows.
 ///
 /// Both numbers ride along untouched: `pinned` is what this daemon build was compiled against,
 /// `installed` is what actually resolved. A disagreement renders as "0.0.15 (pinned 0.0.16)" in a
@@ -123,9 +122,9 @@ let sdkComponentWireKeys: [(name: String, key: String)] = [
 /// fact this table exists to show.
 ///
 /// A row the daemon did not name in `installed` keeps its pin and renders "pinned X"; a row it
-/// named in neither map says so rather than going blank. `winterExecutable`/`claudeExecutable` are
-/// deliberately NOT rows: they carry a path and a resolver rung but no version (the `winter` binary
-/// has no version flag at all), so they are a different table than this one.
+/// named in neither map says so rather than going blank. `winterExecutable` is deliberately NOT a
+/// row: it carries a path and a resolver rung but no version (the `winter` binary has no version
+/// flag at all), so it belongs to a different table than this one.
 func sdkInstalledComponents(_ snapshot: VersionsSnapshot) -> [InstalledComponent] {
     sdkComponentWireKeys.map { name, key in
         InstalledComponent(name: name,
