@@ -1556,6 +1556,12 @@ describe("WS-23: a legacy claude-agent record is adopted onto the Winter leg at 
       const record = t.records.get(sid)!;
       expect(record.runtimeKind).toBe("winter-agent");
       expect(record.selection).toMatchObject({ runtimeKind: "winter-agent", providerId: "console", modelRef: "console/claude-sonnet-5", authFamily: "console-profile" });
+      // WS-23 (official-removal review, minor 3; claude-creds): the locator is REWRITTEN, not carried
+      // over. The official leg recorded the api-key slot (`keychain:anthropic:default`) for this
+      // session; on the Winter leg a Console session names the ant broker's bearer slot, both in the
+      // durable record and on the child it spawns — never the user's own API key.
+      expect(record.authRef).toBe("keychain:anthropic:console");
+      expect(t.q().options.provider?.authRef).toMatchObject({ kind: "keychain", account: "anthropic:console" });
       expect(t.q().options.resume).toBe(id);
       await resumed.end();
     } finally { t.close(); }
