@@ -1,4 +1,8 @@
 // Minimal MCP stdio server for tests: initialize / notifications/initialized / tools/list (echo) / tools/call (echoes msg).
+// WS-24: WINTER_FAKE_PID_FILE names a file this process writes its own pid to at startup, so a test can
+// check the server is not left running after the daemon's status probe.
+import { writeFileSync } from "node:fs";
+if (process.env.WINTER_FAKE_PID_FILE) writeFileSync(process.env.WINTER_FAKE_PID_FILE, String(process.pid));
 let buf = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk: string) => {

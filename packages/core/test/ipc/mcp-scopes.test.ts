@@ -13,7 +13,6 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 import { Settings, saveSettings, sdkLocalMcpServers, sdkUserMcpServers } from "../../src/settings";
 import { McpManager } from "../../src/agent/mcp/manager";
-import { ToolRegistry } from "../../src/agent/tools/registry";
 import { TrustStore } from "../../src/agent/trust";
 import { configuredMcpServersFor } from "../../src/runtime-sdk/external-mcp";
 import { localScopeKeyFor, runHomeInputFor } from "../../src/runtime-sdk/run-home-input";
@@ -61,7 +60,7 @@ describe("mcp.add / remove / get over the three scopes", () => {
     const project = tmp("winter-mcpscope-proj-");
     saveSettings(join(home, "settings.json"), Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } }));
     const trust = new TrustStore(join(home, "trust.json"));
-    const mcp = new McpManager({ registry: new ToolRegistry(), trust });
+    const mcp = new McpManager({ trust });
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets")));
@@ -225,7 +224,7 @@ describe("review I5: localScopeKeyFor", () => {
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets")));
     const tokens = await authority.ensureTokens();
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets: new FileSecretStore(join(home, "s2")), mcp: new McpManager({ registry: new ToolRegistry(), trust: new TrustStore(join(home, "trust.json")) }) });
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets: new FileSecretStore(join(home, "s2")), mcp: new McpManager({ trust: new TrustStore(join(home, "trust.json")) }) });
     try {
       const c = await TestClient.connect(socketPath);
       await c.request(METHODS.hello, { protocolVersion: PROTOCOL_VERSION, role: "harness", token: tokens.harness, clientName: "cli" });
@@ -264,7 +263,7 @@ describe("R.3 residual: MCP project scope from a linked worktree of a trusted re
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets")));
     const tokens = await authority.ensureTokens();
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets: new FileSecretStore(join(home, "s2")), trust, mcp: new McpManager({ registry: new ToolRegistry(), trust }) });
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets: new FileSecretStore(join(home, "s2")), trust, mcp: new McpManager({ trust }) });
     const c = await TestClient.connect(socketPath);
     await c.request(METHODS.hello, { protocolVersion: PROTOCOL_VERSION, role: "harness", token: tokens.harness, clientName: "cli" });
     stop = () => { c.close(); server.stop(); store.close(); };

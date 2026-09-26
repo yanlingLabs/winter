@@ -623,9 +623,10 @@ export const McpAddParams = z.object({
   scope: McpScopeSchema.default("local"),
   cwd: z.string().min(1).optional(),
 });
-/** `started`: true only when this call ALSO brought a stdio user server up right now
- *  (`McpManager.startOneUserServer`, mirroring `mcp.enable`'s own restart) — false for an http/sse
- *  entry (no in-daemon client for those transports) or a name also listed in `mcp.disabled`. */
+/** `started`: true only when this call ALSO probed a stdio user server right now
+ *  (`McpManager.startOneUserServer`, mirroring `mcp.enable`'s own re-probe; WS-24: the daemon connects,
+ *  lists and closes — each session's child connects its own copy) — false for an http/sse entry (no
+ *  in-daemon client for those transports) or a name also listed in `mcp.disabled`. */
 export const McpAddResult = z.object({ ok: z.literal(true), name: z.string(), transport: z.enum(["stdio", "http", "sse"]), started: z.boolean(), scope: McpScopeSchema.optional() });
 
 export const McpRemoveParams = z.object({

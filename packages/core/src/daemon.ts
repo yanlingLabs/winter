@@ -2162,18 +2162,15 @@ export async function startDaemon(opts: {
     // file uses everywhere else — `doEnsureProject` reads it on every `ensureProject` call, never a
     // boot snapshot, so a `mcp.disable`/`mcp.enable` write is honoured on the very next `mcp.list
     // {cwd}` with no daemon restart.
-    mcp = new McpManager({ registry, trust: trustStore, log: (m) => console.error(m), disabled: () => new Set(settings?.mcp?.disabled ?? []) });
-    // MCP resources (CC parity: ListMcpResourcesTool/ReadMcpResourceTool) — registered
-    // unconditionally here (not per-server-connect: see mcp-resources.ts's own doc comment for why
-    // a live conditional-registration mirror of CC isn't cheap with this registry's shape) so it
-    // exists across every later startAll/ensureProject/startPlugins call this `mcp` instance ever
-    // makes. Deferred like schedule/notebook_edit/worktree above — specialized, not needed most
-    // turns.
-    // Daemon settings surface batch 3 (item 3): the daemon's own shared registry can only ever run
-    // STDIO servers (no in-daemon HTTP/SSE client — `external-mcp.ts`'s header explains why that's
-    // fine, the spawned child connects to those itself) and must not start anything the user has
-    // disabled (`settings.mcp.disabled`) — `stdioMcpServersFor` is the one filter both facts go
-    // through (settings.ts).
+    // WS-24: a STATUS PROBE for `mcp.list` (`agent/mcp/manager.ts`'s header) — it connects, lists and
+    // closes each server, and registers nothing: every session's child connects its own copy, and no
+    // session ever read the `mcp__…` rows this used to write into the shared registry.
+    mcp = new McpManager({ trust: trustStore, log: (m) => console.error(m), disabled: () => new Set(settings?.mcp?.disabled ?? []) });
+    // Daemon settings surface batch 3 (item 3): the daemon can only ever probe STDIO servers (no
+    // in-daemon HTTP/SSE client — `external-mcp.ts`'s header explains why that's fine, the spawned
+    // child connects to those itself) and must not start anything the user has disabled
+    // (`settings.mcp.disabled`) — `stdioMcpServersFor` is the one filter both facts go through
+    // (settings.ts).
     await mcp.startAll(stdioMcpServersFor(sdkUserMcpServers(winterHome), settings?.mcp?.disabled));
     // WS-21 (L4 request 2): a plugin's MCP servers are claude-native content now (its `.mcp.json`, or a
     // claude manifest's own `mcpServers`), loaded by both runtimes themselves (spec §5.3) — the daemon no

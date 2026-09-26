@@ -832,31 +832,26 @@ describe("daemon IPC", () => {
 
     const disableRes = await c.request(METHODS.mcpDisable, { name: "fake" });
     expect(disableRes.result).toEqual({ ok: true, name: "fake", enabled: false });
-    // MEDIUM (fix wave, pre-merge review, finding 3): `mcp.disable` now ACTUALLY stops the tracked
-    // client (`McpManager.stopServer`) and unregisters its tools, rather than leaving the real
-    // process running under a cosmetic "disabled" label — a disabled server's tools must not still
-    // be callable through `tool.list`. The row is synthesized (never tracked any more), so
-    // `toolNames` is empty and `transport` is now set (same shape an HTTP/SSE "unmanaged" row gets).
-    // The registry-level proof that the tools are truly gone (not just absent from THIS report) is
-    // `manager.test.ts`'s "McpManager.stopServer" block, which has a direct `ToolRegistry` handle.
+    // MEDIUM (fix wave, pre-merge review, finding 3): `mcp.disable` drops the tracked status
+    // (`McpManager.stopServer`; WS-24: the manager is a status probe — nothing of the server is left
+    // running to stop). The row is synthesized (never tracked any more), so `toolNames` is empty and
+    // `transport` is now set (same shape an HTTP/SSE "unmanaged" row gets).
     expect((await c.request(METHODS.mcpList, {})).result.servers).toEqual([{ name: "fake", status: "disabled", toolNames: [], source: "user", transport: "stdio" }]);
 
     const enableRes = await c.request(METHODS.mcpEnable, { name: "fake" });
     expect(enableRes.result).toEqual({ ok: true, name: "fake", enabled: true });
-    // Symmetry: re-enabling actually RESTARTS it (`McpManager.startOneUserServer`) — a disable/enable
-    // round trip must never need a daemon restart to bring a stdio server back.
+    // Symmetry: re-enabling re-probes it (`McpManager.startOneUserServer`) — a disable/enable round
+    // trip must never need a daemon restart to bring a stdio server's status back.
     expect((await c.request(METHODS.mcpList, {})).result.servers).toEqual([{ name: "fake", status: "connected", toolNames: ["echo"], source: "user" }]);
     c.close();
   });
 
   // MEDIUM (fix wave, pre-merge review, finding 3, symmetry — regression coverage caught by a
   // second review pass): `mcp.enable` on a server that was NEVER disabled (an idempotent double
-  // toggle from the Mac pane, or an enable racing an unrelated write) used to kill the running
-  // process: `startOneUserServer` stopped the old client but left its tools registered, so
-  // `startOne`'s "throw" collision mode hit a duplicate-name `registry.register` on the very next
-  // line and turned it into a dead process with a "failed" status. Fixed by routing the stop
-  // through `stopServer` (which also unregisters), proven here at the full IPC layer against a real
-  // boot-started child.
+  // toggle from the Mac pane, or an enable racing an unrelated write) used to turn it into a dead
+  // process with a "failed" status (a duplicate-name tool registration). WS-24: the manager is a
+  // status probe that registers nothing, so the collision cannot arise; kept at the full IPC layer
+  // against a real boot-probed server.
   test("mcp.enable on an ALREADY-RUNNING, never-disabled server does not kill it", async () => {
     if (process.platform !== "darwin") return; // spawns a child process
     const { FakeProvider } = await import("../src/agent/fake-provider");
