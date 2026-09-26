@@ -46,7 +46,7 @@
 // (fix wave M4, ruling P8c-19: the router's official leg merged them after its own containment
 // matchers). With the official `claude` leg retired the return value carries `winter` alone; the
 // `{ winter }` shape is kept so `session-driver.ts`'s `hooksFor(session).winter` wiring does not move.
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import type {
@@ -538,20 +538,34 @@ function writeContextStart(c: string): number {
  *   * for an interpreter one-liner (`python`/`python3`/`node`/`bun`/`ruby`/`perl`/`deno` with `-c`, `-e`,
  *     `--eval`; `deno eval`), any protected segment its code names (round 3, minor 9).
  *
+ * LINKS (WS-24). A write target is ALSO judged after resolving the links that already exist on its path —
+ * relative targets against the session's `cwd` (`opts.cwd`; the hook input's own), `~` against the user's
+ * home — so a link planted earlier (`ln -s ../.winter/skills s`, then later `echo … > s/x/SKILL.md`) no
+ * longer carries a write past the match. Component by component, the way the kernel walks it: each
+ * existing component is realpathed (a `..` after a link climbs out of the link's TARGET), the first one
+ * that does not exist yet ends the walk and the rest is appended as written. With no `cwd` only absolute
+ * and `~` targets are resolved.
+ *
  * THE LIMITATION, the escape floor's own: a static match on the normalised text (case folded, quotes
- * stripped, `//`/`/./`/`..` collapsed, `cd` tracked). A path the command ASSEMBLES at run time (`$(…)`,
- * its own variables — `d=.winter; touch $d/rules/x` —, a script it writes and then runs, an interpreter
- * that joins the path from pieces) is beyond its reach, and so is a write whose path is not in the command
- * at all — `git apply x.patch`, `patch < x.diff`.
+ * stripped, `//`/`/./`/`..` collapsed, `cd` tracked), plus the links that exist on disk WHEN THE CALL IS
+ * JUDGED. A path the command ASSEMBLES at run time (`$(…)`, its own variables — `d=.winter; touch
+ * $d/rules/x` —, a script it writes and then runs, an interpreter that joins the path from pieces) is beyond
+ * its reach; so is a link the SAME command creates before writing through it (`ln -s … s && echo x > s/y`:
+ * `s` is not on disk yet), a `cd` into a link whose target the command itself changes, and a write whose
+ * path is not in the command at all — `git apply x.patch`, `patch < x.diff`.
  */
-export function bashProtectedWriteHit(command: string, depth = 0): string | undefined {
+export function bashProtectedWriteHit(command: string, opts: { cwd?: string } = {}): string | undefined {
+  return protectedWriteHitIn(command, opts.cwd, 0);
+}
+
+function protectedWriteHitIn(command: string, sessionCwd: string | undefined, depth: number): string | undefined {
   let cwd: string | undefined;
   for (const raw of shellSegments(command)) {
     // Round 5: a shell's `-c` string, `eval`'s argument and the same inside `find -exec` are COMMANDS — each
     // judged as one of its own (from the cwd carried so far), before its quotes are blanked as text below.
     if (depth < 4) {
       for (const nested of nestedCommandStrings(shellWords(raw))) {
-        const hit = bashProtectedWriteHit(cwd === undefined ? nested : `cd ${cwd}; ${nested}`, depth + 1);
+        const hit = protectedWriteHitIn(cwd === undefined ? nested : `cd ${cwd}; ${nested}`, sessionCwd, depth + 1);
         if (hit !== undefined) return hit;
       }
     }
@@ -567,9 +581,62 @@ export function bashProtectedWriteHit(command: string, depth = 0): string | unde
       const path = cwd === undefined || /^[/~$]/.test(target) ? target : `${cwd}/${target.replace(/^\.\//, "")}`;
       const m = PROTECTED_BASH_TARGET.exec(path);
       if (m !== null) return m[0];
+      // WS-24: the same target once the links already on its path are resolved (see the doc above).
+      const resolved = resolveExistingLinks(path, sessionCwd);
+      const r = resolved === undefined ? null : PROTECTED_BASH_TARGET.exec(resolved);
+      if (r !== null) return r[0];
     }
   }
   return undefined;
+}
+
+/**
+ * WS-24: `path` (one write target, as `protectedWriteHitIn` spells it — lowercased by the normaliser) with
+ * every link that EXISTS on it resolved, lowercased again for the match; `undefined` when it cannot be
+ * anchored (a `$VAR` path, or a relative one with no session cwd). Walks from the root like the kernel:
+ * an existing component is realpathed before the next is looked up (so a `..` after a link climbs from
+ * the link's TARGET); a DANGLING link is followed by its text (writing through it creates its target);
+ * the first missing component ends the walk and the rest is appended verbatim. A component is looked up
+ * as spelled and then case-insensitively (the text was case-folded; a case-sensitive volume still
+ * resolves). Bounded (40 link hops, like the kernel's ELOOP). Never throws.
+ */
+function resolveExistingLinks(path: string, sessionCwd: string | undefined): string | undefined {
+  let abs: string;
+  if (path.startsWith("/")) abs = path;
+  else if (path === "~" || path.startsWith("~/")) abs = `${homedir()}${path.slice(1)}`;
+  else if (path.startsWith("$") || sessionCwd === undefined) return undefined;
+  else abs = `${sessionCwd}/${path}`;
+  let parts = abs.split("/").filter((p) => p !== "" && p !== ".");
+  let cur = "/";
+  let hops = 0;
+  while (parts.length > 0) {
+    const part = parts[0]!;
+    if (part === "..") { cur = dirname(cur); parts = parts.slice(1); continue; }
+    const entry = existingEntry(cur, part);
+    if (entry === undefined) break;
+    let real: string | undefined;
+    try { real = realpathSync(entry); } catch { real = undefined; }
+    if (real !== undefined) { cur = real; parts = parts.slice(1); continue; }
+    // Exists but does not resolve: a dangling link (or a loop). Follow its text once more, bounded.
+    let text: string;
+    try { text = readlinkSync(entry); } catch { break; }
+    if (++hops > 40) break;
+    const target = text.startsWith("/") ? text : `${cur}/${text}`;
+    parts = [...target.split("/").filter((p) => p !== "" && p !== "."), ...parts.slice(1)];
+    cur = "/";
+  }
+  return (parts.length === 0 ? cur : `${cur.replace(/\/+$/, "")}/${parts.join("/")}`).toLowerCase();
+}
+
+/** `dir/name` when it exists (a dangling link included — it still names where the write lands), else a
+ *  case-insensitive match among `dir`'s entries. */
+function existingEntry(dir: string, name: string): string | undefined {
+  const direct = join(dir, name);
+  try { lstatSync(direct); return direct; } catch { /* not as spelled */ }
+  try {
+    const hit = readdirSync(dir).find((e) => e.toLowerCase() === name);
+    return hit === undefined ? undefined : join(dir, hit);
+  } catch { return undefined; }
 }
 
 /** Round 5: the shells whose `-c` string is a command. */
@@ -785,7 +852,7 @@ function segmentWriteTargets(seg: string): string[] {
 function bashProtectedWriteHook(): HookCallback {
   return async (input) => {
     const { command } = bashEscapeInput(input);
-    const hit = bashProtectedWriteHit(command);
+    const hit = bashProtectedWriteHit(command, { cwd: hookCwd(input) });
     return hit === undefined
       ? allow()
       : ask(`Bash writes under ${hit} — skills, commands, rules, output styles and agent definitions load into every future session; the user decides.`);

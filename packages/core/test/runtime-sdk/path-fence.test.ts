@@ -1,7 +1,7 @@
 // WS-21 L3.6 (spec §7.1 "hook" column, §7.2): the path fence as a PreToolUse hook on both legs, and the
 // bridge's third layer — a protected write is never auto-allowed, under any policy.
 import { describe, expect, test } from "bun:test";
-import { realpathSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CanUseTool, HookCallback, HookCallbackMatcher } from "@yanlinglabs/winter-agent-sdk";
@@ -339,6 +339,59 @@ describe("fix round 2: Bash writes under .winter/<kind>", () => {
 // R.3 C-1: the escape floor (the LAST Bash PreToolUse group, every policy, bypass included, both legs) knows
 // the variables WS-21 exports into every child — `$WINTER_STORE_HOME`, both plugin-cache variables,
 // `$CLAUDE_CONFIG_DIR` and the Winter child's own `$WINTER_HOME` (its run folder).
+// WS-24: a write through a link that already exists on disk is judged at the link's target.
+describe("Bash writes through an existing link to a protected directory", () => {
+  function project(): { root: string; work: string } {
+    const root = real("winter-link-proj-");
+    mkdirSync(join(root, ".winter", "skills"), { recursive: true });
+    mkdirSync(join(root, ".winter", "rules"), { recursive: true });
+    mkdirSync(join(root, "notes"), { recursive: true });
+    const work = join(root, "pkg");
+    mkdirSync(work, { recursive: true });
+    symlinkSync(join(root, ".winter", "skills"), join(work, "s"));                // a link to a protected dir
+    symlinkSync(join(root, ".winter"), join(work, "dot"));                        // a link to .winter itself
+    symlinkSync(join(root, ".winter", "rules", "planted.md"), join(work, "r.md")); // dangling: writing creates the target
+    symlinkSync(join(root, "notes"), join(work, "n"));                           // a link to an ordinary dir
+    return { root, work };
+  }
+
+  test("relative targets resolve against the session cwd; the static text alone never named .winter", () => {
+    const { work } = project();
+    for (const cmd of [
+      "echo x > s/deploy/SKILL.md",
+      "mkdir -p s/new-skill",
+      "cp evil.md dot/skills/x/SKILL.md",
+      "tee dot/rules/r.md < /dev/null",
+      "echo planted > r.md",
+      "cd s && echo x > y/SKILL.md",
+      "echo x > S/Deploy/SKILL.md",
+    ]) {
+      expect({ cmd, before: bashProtectedWriteHit(cmd) }).toEqual({ cmd, before: undefined });
+      expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) }).toEqual({ cmd, hit: cmd.includes("dot/rules") || cmd.includes("r.md") ? ".winter/rules" : ".winter/skills" });
+    }
+  });
+
+  test("an absolute target through a link resolves without a cwd; ordinary links and reads stay quiet", () => {
+    const { work } = project();
+    expect(bashProtectedWriteHit(`echo x > ${work}/s/a/SKILL.md`)).toBe(".winter/skills");
+    for (const cmd of ["echo x > n/todo.md", "cat s/deploy/SKILL.md", "ls dot/rules", "echo x > fresh/file.md"]) {
+      expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) }).toEqual({ cmd, hit: undefined });
+    }
+  });
+
+  test("the hook reads the cwd off its input and asks", async () => {
+    const { work } = project();
+    const built = sessionHooksFor({ sessionId: "s_1", roots: [work], home: "/Users/x/.winter", mode: "code" });
+    const groups = (built.winter?.PreToolUse ?? []).filter((g: HookCallbackMatcher) => g.matcher === "Bash");
+    const answers: string[] = [];
+    for (const g of groups) for (const h of g.hooks) {
+      const r = (await h({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "echo x > s/deploy/SKILL.md" }, session_id: "b", transcript_path: "", cwd: work } as never, "tu1", { signal: new AbortController().signal })) as { hookSpecificOutput?: { permissionDecision?: string } };
+      answers.push(r.hookSpecificOutput?.permissionDecision ?? "none");
+    }
+    expect(answers).toContain("ask");
+  });
+});
+
 describe("R.3 C-1: the escape floor under bypass — the child's own variables", () => {
   const floor = () => {
     const built = sessionHooksFor({ sessionId: "s_1", roots: ["/r"], home: "/Users/x/.winter", mode: "code", policy: () => "bypass" });
