@@ -275,23 +275,33 @@ describe("models.catalog", () => {
   });
 
   // -----------------------------------------------------------------------------------------------
-  // WS-24 (pickers lane): `toolCalling` — carried verbatim, and NEVER used to filter this listing.
-  // `sync.config`'s `pickerModels()` is the surface that hides `"none"` rows from a SESSION picker;
+  // WS-24 (pickers lane, fix round 1): `sessionUsable` — DERIVED (`!toolsRefusedFor(row)`, never the
+  // catalog's bare `toolCalling` verbatim) and NEVER used to filter this listing. `sync.config`'s
+  // `pickerModels()` is the surface that hides a `sessionUsable: false` row from a SESSION picker;
   // this one stays complete so it never disagrees with `settings.modelRoles`'s `permitted` (the drift
-  // tripwire test above) — a role may legitimately be pinned to a toolless row.
+  // tripwire test above) — a role may legitimately be pinned to one.
   // -----------------------------------------------------------------------------------------------
-  test("toolCalling: carried verbatim off the catalog row, in EVERY state, and never filters this listing", async () => {
+  test("sessionUsable: derived from the real adapter gate, in EVERY state, and never filters this listing", async () => {
     const { socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     const result = await c.request(METHODS.modelsCatalog, {});
     const codexTerra = result.result.models.find((m: any) => m.tag === "codex-oauth/gpt-5.6-terra");
-    expect(codexTerra.toolCalling).toBe("native");
-    // A real, non-retired ("candidate") row whose `toolCalling` is `"none"` — still PRESENT here
-    // (unlike `pickerModels()`'s session-picker listing, which excludes it — see sync-config.test.ts).
-    const toolless = result.result.models.find((m: any) => m.tag === "agentrouter/claude-opus-4-8");
-    expect(toolless).toBeDefined();
-    expect(toolless.toolCalling).toBe("none");
+    expect(codexTerra.sessionUsable).toBe(true);
+    // `agentrouter/claude-opus-4-8` is `toolCalling: "none"` at `confidence: "unknown"` on the
+    // `winter.anthropic-messages` adapter — one of the four families that actually throws on a
+    // non-native row asking for tools — so `sessionUsable` is false, but the row is still PRESENT
+    // here (unlike `pickerModels()`'s session-picker listing, which excludes it — sync-config.test.ts).
+    const anthropicFamily = result.result.models.find((m: any) => m.tag === "agentrouter/claude-opus-4-8");
+    expect(anthropicFamily).toBeDefined();
+    expect(anthropicFamily.sessionUsable).toBe(false);
+    // `groq/openai/gpt-oss-120b` is the SAME `toolCalling: "none"`/`confidence: "unknown"` shape, but
+    // groq's adapter (`winter.openai-chat-completions`) sends tools regardless of the field — so this
+    // one is `sessionUsable: true`. Pinned so `sessionUsable` is never quietly re-collapsed to a bare
+    // `toolCalling !== "native"` check, which is the mistake this field's derivation exists to avoid.
+    const chatCompletionsFamily = result.result.models.find((m: any) => m.tag === "groq/openai/gpt-oss-120b");
+    expect(chatCompletionsFamily).toBeDefined();
+    expect(chatCompletionsFamily.sessionUsable).toBe(true);
     c.close();
   });
 
