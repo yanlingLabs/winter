@@ -31,7 +31,11 @@ export class McpStdioClient {
 
   async start(timeoutMs = Number(process.env.WINTER_MCP_START_TIMEOUT_MS ?? 10000)): Promise<void> {
     // WS-24: its own process GROUP (`detached`), so `stop()` ends the whole tree — an `npx`/`uvx`-style
-    // wrapper otherwise leaves its real server (a grandchild) running after every status probe.
+    // wrapper otherwise leaves its real server (a grandchild) running after every status probe. The price of
+    // `detached`: a daemon that CRASHES mid-probe (the probe lives a few seconds) no longer takes the server
+    // down with its own process group — it keeps running until it notices its stdin closed, or forever if it
+    // never reads it. Accepted: the window is one handshake long, where the old non-detached client leaked a
+    // grandchild on EVERY probe.
     const child = spawn(this.cfg.command, this.cfg.args ?? [], { env: { ...process.env, ...this.cfg.env }, stdio: ["pipe", "pipe", "pipe"], detached: true });
     this.child = child;
     child.on("error", (e) => this.die(e instanceof Error ? e : new Error(String(e))));
