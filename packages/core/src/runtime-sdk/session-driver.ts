@@ -30,6 +30,7 @@
 // it was never announced to any client). Every refusal is a `WinterLegRefusal` whose `code` the IPC
 // layer forwards as the JSON-RPC error's `data.code`.
 import { randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
 import { join } from "node:path";
 import { classifyPermissionMode } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { PermissionClassLabel } from "@yanlinglabs/winter-agent-sdk/messaging";
@@ -114,8 +115,42 @@ export type WinterLegRefusalCode =
   // opened, and the record keeps naming the old leg, until `winter doctor --repair
   // adopt-legacy-session` (finding `legacy-adoption-blocked`) clears it for the next resume.
   | "legacy_session_migration_refused"
+  // The session's own working directory is gone (deleted, moved, unmounted) or is not a directory:
+  // refused before any child spawns, naming the path — never the child's generic death at spawn, and
+  // never a silent fallback to another directory (`sessionCwdRefusal`).
+  | "session_cwd_unavailable"
   // WS-21: a run-home router's refusal (`RunHomeError.code`), forwarded verbatim as `data.code`.
   | RunHomeErrorCode;
+
+/**
+ * THE SESSION'S WORKING DIRECTORY MUST EXIST before a runtime is started in it. A `winter` child spawned
+ * with a `cwd` that is gone dies before its first frame, and all the user saw was the generic
+ * `agent_error` "the runtime process exited unexpectedly: runtime exited before init"
+ * (`process_death`) — nothing said the directory was the problem. An embedded (chat/dispatch) session
+ * with a cwd runs its tools there too, so it is held to the same rule.
+ *
+ * A REFUSAL, deliberately, never a fallback: running the session somewhere else (its temp dir, `$HOME`)
+ * would put the model's shell and file edits in a directory the user never chose. The message names the
+ * path and the two ways out; `data.code` is `session_cwd_unavailable` for a client to branch on.
+ *
+ * `statSync` follows symlinks, so a dangling link reads as missing (ENOENT), and a link to a directory
+ * passes. Only the cwd the SESSION stored is checked — a cwd-less session runs in its daemon-owned temp
+ * dir, which is Winter's own to create.
+ */
+export function sessionCwdRefusal(cwd: string): WinterLegRefusal | undefined {
+  let isDirectory: boolean;
+  try {
+    isDirectory = statSync(cwd).isDirectory();
+  } catch (err) {
+    const code = (err as { code?: unknown }).code;
+    const what = code === "ENOENT" || code === "ENOTDIR" ? "no longer exists" : `can't be opened (${typeof code === "string" ? code : "unreadable"})`;
+    return new WinterLegRefusal("session_cwd_unavailable", `this session's working directory ${cwd} ${what} — restore it, or start a new session`);
+  }
+  if (!isDirectory) {
+    return new WinterLegRefusal("session_cwd_unavailable", `this session's working directory ${cwd} is not a directory — restore it, or start a new session`);
+  }
+  return undefined;
+}
 
 /**
  * P8c-14: the public members of a live session driver the IPC layer and this table's own
@@ -759,6 +794,15 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     };
 
     const optionsFor = async (inc: WinterIncarnationShape) => {
+      // FIRST, before the spawn hook, the credential probes or the run home: a session whose own
+      // working directory is gone refuses typed here rather than dying at spawn (`sessionCwdRefusal`).
+      // Every incarnation passes this — create, resume, and a send that re-opens a resumable session —
+      // and `open()` builds its options before it bumps a generation or appends anything, so a refusal
+      // leaves no orphan row and no orphan `user_message`. `cwd` is the path the child is spawned in.
+      if (meta.cwd != null) {
+        const cwdRefusal = sessionCwdRefusal(cwd);
+        if (cwdRefusal !== undefined) throw cwdRefusal;
+      }
       const live = deps.store.meta(sessionId);
       // WS-21 (spec §3.1, §6.1): the ONE place that knows whether this incarnation runs on a run home —
       // the builders below stop building what the run folder carries when it does.
