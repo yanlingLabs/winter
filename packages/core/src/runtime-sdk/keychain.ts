@@ -143,11 +143,14 @@ export async function writeAnthropicApiKey(store: SecretStore, key: string): Pro
  * `local-none` row, every `cloud-credential-chain`-only row and every blocked row is absent by
  * construction rather than by a denylist anyone has to maintain.
  *
- * THE ORDER IS LOAD-BEARING and starts with today's four rows VERBATIM. `providerSelectionFor`
- * breaks a tie between several providers serving the same bare model id by inventory order
- * (presence-preferred first), so moving `openai` off the front would silently re-point every
- * credential-less `gpt-5.6-*` session at some third-party reseller. Today's prefix is therefore
- * pinned byte-for-byte and the derived remainder is appended in catalog order behind it.
+ * THE ORDER SELECTS NOTHING (since WS-20). It used to be load-bearing: the retired bare-id selector
+ * (`providerSelectionFor`) broke ties between providers serving one bare model id by inventory order.
+ * A model is always a provider-qualified tag now, so the tag names its provider and this order never
+ * decides which provider or credential a session or a job uses. What it still orders, and why the
+ * four-row head stays pinned (`keychain.test.ts`) with the derived remainder in catalog order behind
+ * it: `credential.list`'s row order (the Providers pane, the phone), and which credentialed provider
+ * an internal role's `no-default-model` refusal NAMES when nothing the user chose can run it
+ * (`preferredInternalProviderFor`'s last rung, via `internalProviderPreferenceOrder`).
  *
  * The two OAuth rows are NOT derived — they are the fixed accounts Winter's own bespoke login doors
  * write (`codex-oauth:default` from `winter login`, `anthropic:console` from the console broker) and

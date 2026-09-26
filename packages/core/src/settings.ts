@@ -2040,9 +2040,10 @@ export function internalEligibleProviderIds(): ReadonlySet<string> {
  * provider wins whenever it is eligible AND credentialed, so a DeepSeek user with a DeepSeek key gets
  * titles on DeepSeek with ZERO setup. Only when the session default's provider cannot serve these
  * jobs (a Claude default, or an eligible provider with no key stored yet) does this fall to
- * `internalProviderPreferenceOrder()`'s first credentialed member. `console`/`cc` are never in the
- * eligible set at all, so no rung can land on them; `anthropic` (WS-23) is an ordinary member —
- * a Claude-only home with an Anthropic key gets rung 1 on its own provider, below.
+ * `internalProviderPreferenceOrder()`'s first credentialed member. Only the reserved `cc` is outside the
+ * eligible set, so no rung can land on it; `anthropic` (WS-23) and `console` (the WS-23 live-gate fix)
+ * are ordinary members — a Claude-only home with an Anthropic key, or a Console-only home signed in
+ * with a `console/*` default, gets rung 1 on its own provider, below.
  *
  * `undefined` means "nothing runnable": every internal role then reports `no-internal-credential`
  * (`providers/internal-router.ts`) and the jobs are inert — one log line per change, never per call.
@@ -2089,7 +2090,8 @@ export function preferredInternalProviderFor(
  * providers Winter's jobs have always run on; a user who signed in with ChatGPT expects the dreamer
  * on Codex, not on whichever third-party key happens to be stored too), then every other eligible
  * provider in `credentialInventory()` order, which is the ONE provider ordering this daemon already
- * pins deliberately (see that function's "THE ORDER IS LOAD-BEARING" note).
+ * pins deliberately (see that function's "THE ORDER SELECTS NOTHING" note — here it only decides which
+ * provider a `no-default-model` refusal names).
  *
  * Deterministic by construction: no `Set` iteration order and no catalog scan order leaks into it.
  */
@@ -2213,9 +2215,10 @@ export function explicitInternalRolePin(settings: Settings | null | undefined, r
   }
 }
 
-/** The provider ids `credentialInventory()` names, de-duplicated, in inventory order. Spelled here
- *  (rather than inline twice above) because the inventory carries TWO rows for `anthropic` and the
- *  order of the FIRST occurrence is what `internalProviderPreferenceOrder` promises. */
+/** The provider ids `credentialInventory()` names, in inventory order — the order
+ *  `internalProviderPreferenceOrder` promises. Spelled once (rather than inline twice above). Every
+ *  provider has exactly one row since the WS-23 live-gate fix filed the Console bearer under
+ *  `console`; the de-duplication stays as a cheap guard should a later head row ever share an id. */
 function credentialSlotProviderIds(): readonly string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -2702,10 +2705,11 @@ export function setModelRole(settings: Settings, role: ModelRole, model?: string
   }
   // 2026-09-19 (the internal-jobs widening), narrowed WS-23: an internal-jobs role may only
   // name a provider Winter's own background calls can actually be driven over. Refused on the
-  // PERMANENT facts only — a remaining first-party Claude row (`console`/`cc`, which have no
-  // internal-calls credential path) or an adapter family the daemon cannot drive — never on the
-  // situational one. (`anthropic` rejoined the admittable set in WS-23: its API key is an ordinary
-  // token-priced credential now that every model runs on the Winter SDK.)
+  // PERMANENT facts only — the reserved subscription row (`cc`) or an adapter family the daemon
+  // cannot drive (Bedrock's/Vertex's cloud-credential material) — never on the situational one.
+  // (`anthropic` rejoined the admittable set in WS-23: its API key is an ordinary token-priced
+  // credential now that every model runs on the Winter SDK; `console` with the live-gate fix: its
+  // bearer is carried to the Anthropic adapter end to end — see `CLAUDE_FIRST_PARTY_PROVIDER_IDS`.)
   // An ELIGIBLE provider with no key stored yet is ACCEPTED: that is precisely the case
   // `assertCatalogBackedTag`'s own doc says a write must not refuse ("a provider the user is about to
   // bind"), and the role reports `no-credential` on its `problem` until the key arrives.
