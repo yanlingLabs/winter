@@ -30,7 +30,9 @@ export class McpStdioClient {
   resourcesCapable(): boolean { return this._resourcesCapable; }
 
   async start(timeoutMs = Number(process.env.WINTER_MCP_START_TIMEOUT_MS ?? 10000)): Promise<void> {
-    const child = spawn(this.cfg.command, this.cfg.args ?? [], { env: { ...process.env, ...this.cfg.env }, stdio: ["pipe", "pipe", "pipe"] });
+    // WS-24: its own process GROUP (`detached`), so `stop()` ends the whole tree — an `npx`/`uvx`-style
+    // wrapper otherwise leaves its real server (a grandchild) running after every status probe.
+    const child = spawn(this.cfg.command, this.cfg.args ?? [], { env: { ...process.env, ...this.cfg.env }, stdio: ["pipe", "pipe", "pipe"], detached: true });
     this.child = child;
     child.on("error", (e) => this.die(e instanceof Error ? e : new Error(String(e))));
     child.on("exit", () => this.die(new Error("mcp server exited")));
@@ -87,7 +89,22 @@ export class McpStdioClient {
     }));
   }
 
-  stop(): void { try { this.child?.stdin?.end(); this.child?.kill("SIGTERM"); } catch { /* ignore */ } this.die(new Error("stopped")); }
+  /** Ends the server's whole process group (WS-24): SIGTERM now, SIGKILL after a short grace for a server
+   *  that ignores it (a hung one included). Never throws. */
+  stop(): void {
+    const pid = this.child?.pid;
+    const signalGroup = (sig: NodeJS.Signals): void => {
+      if (pid === undefined) return;
+      try { process.kill(-pid, sig); } catch { try { this.child?.kill(sig); } catch { /* already gone */ } }
+    };
+    try { this.child?.stdin?.end(); } catch { /* ignore */ }
+    signalGroup("SIGTERM");
+    if (pid !== undefined) {
+      const timer = setTimeout(() => signalGroup("SIGKILL"), 2_000);
+      timer.unref?.();
+    }
+    this.die(new Error("stopped"));
+  }
 
   private request(method: string, params: unknown): Promise<any> {
     if (this._dead) return Promise.reject(new Error("mcp server is not running"));

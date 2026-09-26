@@ -59,8 +59,10 @@ export class McpManager {
   }) {}
 
   /**
-   * One server's probe: spawn it, handshake under WINTER_MCP_START_TIMEOUT_MS, read its `tools/list`, and
-   * close it again — ALWAYS, whether or not the handshake succeeded (WS-24: nothing is left running). Every
+   * One server's probe: spawn it, handshake under WINTER_MCP_START_TIMEOUT_MS (default 10 s — a hung server
+   * is a `"failed"` probe, never a hung `mcp.list`), read its `tools/list`, and close it again — its whole
+   * process group, SIGKILL after a grace (`McpStdioClient.stop`) — ALWAYS, whether or not the handshake
+   * succeeded (WS-24: nothing is left running). Every
    * failure is caught HERE and reported as `"failed"`, so one bad server never rejects the `Promise.all` its
    * caller runs it under.
    */

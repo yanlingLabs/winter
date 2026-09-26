@@ -2226,10 +2226,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         return {};
       }
       // -----------------------------------------------------------------------------------------
-      // Daemon settings surface batch 3 (item 3a): `mcp.list` now overlays LIVE settings onto
-      // whatever the daemon's own `McpManager` tracked (which is a BOOT-TIME snapshot for "user"
-      // servers and an ensureProject-time snapshot for "project" ones; neither re-runs on a
-      // settings edit — a pre-existing limitation this item does not attempt to fix). Two things
+      // Daemon settings surface batch 3 (item 3a): `mcp.list` overlays LIVE settings onto whatever
+      // the daemon's own `McpManager` recorded — WS-24: a STATUS PROBE (connect, list tools, close;
+      // each session's child connects its own copy), taken at boot for "user" servers, on the first
+      // `mcp.list {cwd}` for "project" ones and on every `mcp.enable`/`mcp.add`; neither re-runs on a
+      // plain settings edit — a pre-existing limitation this item does not attempt to fix. Two things
       // this overlay adds that the manager itself cannot know, for EVERY source (user/project/
       // plugin alike — `configuredMcpServersFor` withholds a disabled server from the CHILD
       // regardless of which tier configured it, so the report must not narrow to "user" only,
@@ -2241,12 +2242,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       //    if also named in `settings.mcp.disabled`), `transport` set from its own `type`.
       // A stdio server added to settings AFTER boot is NOT synthesized here — the manager's own
       // "started at boot" gap is unrelated to this item and stays exactly as wide as it already was.
-      // KNOWN GAP, not routed around: `McpManager.doEnsureProject`/`startAll` have no `disabled`
-      // concept of their own, so the daemon's OWN registry (this leg of `mcp.list`'s source data,
-      // and `tool.list`/MCP resources) still actually STARTS a disabled project/user stdio server
-      // for itself — only the report here, and the copy `configuredMcpServersFor` builds for each
-      // session's OWN child, honour the disable. Closing that needs the manager to skip/stop a
-      // disabled server itself, which is out of this item's scope.
+      // (WS-24: the old "known gap" — the daemon's own registry starting a disabled server for itself —
+      // is gone with the registry: the probe skips a disabled name, and nothing of a server is kept.)
       // -----------------------------------------------------------------------------------------
       case METHODS.mcpList: {
         const p = parseParams(McpListParams, params);
@@ -2267,12 +2264,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const overlaid = tracked.map((row) => withStripped(disabled.has(row.name) ? { ...row, status: "disabled" as const } : row));
         const trackedNames = new Set(overlaid.map((r) => r.name));
         // MEDIUM (fix wave, pre-merge review, finding 3): a stdio entry is normally excluded here
-        // (the "started at boot" gap this item doesn't touch — see this block's own header) UNLESS
-        // it is ALSO disabled: `mcp.disable`'s handler now actually STOPS a running server and drops
-        // its tracked status (`McpManager.stopServer`), so a disabled stdio server is no longer in
-        // `tracked` at all and would otherwise vanish from this report entirely rather than reading
-        // "disabled" — the same "reported, not silently absent" posture every other disabled entry
-        // in this list already has.
+        // (the probe-at-boot gap this item doesn't touch — see this block's own header) UNLESS it is
+        // ALSO disabled: `mcp.disable`'s handler drops its recorded status (`McpManager.stopServer`),
+        // so a disabled stdio server is no longer in `tracked` at all and would otherwise vanish from
+        // this report entirely rather than reading "disabled" — the same "reported, not silently
+        // absent" posture every other disabled entry in this list already has.
         const unmanaged = Object.entries(opts.winterHome ? sdkUserMcpServers(opts.winterHome) : {})
           .filter(([name, entry]) => (entry.type !== "stdio" || disabled.has(name)) && !trackedNames.has(name))
           .map(([name, entry]) => withStripped({
@@ -2294,9 +2290,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "mcp.disable is not available on this server (no winterHome configured)");
         const settingsPath = join(opts.winterHome, "settings.json");
         saveSettings(settingsPath, setMcpServerDisabled(loadSettings(settingsPath), p.name, true));
-        // MEDIUM (fix wave, pre-merge review, finding 3): the settings write alone does not touch
-        // an already-running server — stop it and drop its status/tools now, so a disable takes
-        // effect immediately rather than merely relabeling `mcp.list`'s report.
+        // MEDIUM (fix wave, pre-merge review, finding 3): drop the name's recorded probe status now, so
+        // `mcp.list` reports it from the settings overlay ("disabled"). WS-24: the daemon keeps no copy
+        // of the server running (a session's child connects its own and honours `mcp.disabled` at its next
+        // incarnation), so there is nothing else to stop here.
         opts.mcp?.stopServer(p.name);
         return { ok: true, name: p.name, enabled: false };
       }
@@ -2306,13 +2303,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const settingsPath = join(opts.winterHome, "settings.json");
         const next = setMcpServerDisabled(loadSettings(settingsPath), p.name, false);
         saveSettings(settingsPath, next);
-        // MEDIUM (fix wave, pre-merge review, finding 3, symmetry): `mcp.disable` now actually stops
-        // a running server rather than leaving it up under a cosmetic label — so re-enabling must
-        // actually restart it, or a disable/enable round trip would need a daemon restart to bring a
-        // USER-tier stdio server back, violating the no-restart-for-settings rule. Only the
-        // CONFIGURED stdio user-tier shape is restartable this way (`stdioMcpServersFor`'s own
-        // narrowing — the one shape `McpManager` can run at all); an HTTP/SSE or project `.mcp.json`
-        // name is a no-op here, same as it always was for `mcp.enable`.
+        // MEDIUM (fix wave, pre-merge review, finding 3, symmetry): `mcp.disable` drops a server's
+        // recorded status — so re-enabling re-probes it, or a disable/enable round trip would need a
+        // daemon restart to report a USER-tier stdio server again (the no-restart-for-settings rule).
+        // Only the CONFIGURED stdio user-tier shape is probed this way (`stdioMcpServersFor`'s own
+        // narrowing — the one shape `McpManager` can connect at all); an HTTP/SSE or project
+        // `.winter/mcp.json` name is a no-op here, same as it always was for `mcp.enable`.
         const cfg = stdioMcpServersFor(sdkUserMcpServers(opts.winterHome), next.mcp?.disabled)[p.name];
         if (cfg) await opts.mcp?.startOneUserServer(p.name, cfg);
         return { ok: true, name: p.name, enabled: true };
@@ -2363,8 +2359,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         } catch (err) {
           throw sdkWriteFailure(err);
         }
-        // Stop a live tracked user instance now, same as `mcp.disable` — a removed server must not go on
-        // answering tool calls until the next daemon restart.
+        // Drop a user server's recorded probe status now, same as `mcp.disable` — a removed server must not
+        // go on being reported until the next daemon restart.
         if (removed && target.scope === "user") opts.mcp?.stopServer(p.name);
         return { ok: true, name: p.name, removed, scope: p.scope };
       }
@@ -2393,6 +2389,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           transport: entry.type,
           disabled: disabled.has(p.name),
           ...(strippedHeaders && strippedHeaders.length > 0 ? { strippedHeaders } : {}),
+          // WS-24: the entry's protocol-era choice, echoed as `mcp.add` stored it.
+          ...(entry.versionNegotiation !== undefined ? { versionNegotiation: entry.versionNegotiation } : {}),
         };
         if (entry.type === "stdio") {
           return { ...base, command: entry.command, ...(entry.args ? { args: entry.args } : {}), ...(entry.env ? { env: entry.env } : {}) };
