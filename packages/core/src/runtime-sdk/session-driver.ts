@@ -913,10 +913,10 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // makes every `advisor` call a typed refusal, while the family default keeps the tool working.
       // The pin is therefore not stated, and the D30 default is (one line naming the setting), when:
       //   - it names no catalog row (`rowForTag`: a hand-edited settings file can hold any tag shape);
-      //   - it is cross-provider and excluded from this route (`console`/`cc`: `console` names the
-      //     broker's bearer slot for sessions — unstatable here until the SDK sends console OAuth
-      //     headers — and `cc` names no slot at all; stating nothing avoids the M7 hazard, the
-      //     child's fallback to the brand's own Keychain lookup);
+      //   - it is cross-provider and excluded from this route (the reserved `cc`, which names no slot
+      //     at all; stating nothing avoids the M7 hazard, the child's fallback to the brand's own
+      //     Keychain lookup). `console` is an ordinary route since the WS-23 live-gate fix: its bearer
+      //     slot is named like any provider's, and the SDK adapter sends it for the `console` id;
       //   - it is cross-provider and that provider's slot is EMPTY.
       // A same-provider pin needs no probe: the session's own turn cannot run without that credential.
       advisorProviders.delete(sessionId);
@@ -927,11 +927,8 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // — whether the pin runs there (its `authRef` names that slot) or fell back because the slot was
         // empty (the key is what it waits for). An off-catalog pin is not recorded: no key fixes it.
         if (crossProvider && rowForTag(pinnedAdvisor) !== undefined) advisorProviders.set(sessionId, advisorProviderId);
-        // WS-23 fix round 1: `console` is excluded EXPLICITLY here, symmetric with
-        // `CLAUDE_FIRST_PARTY_PROVIDER_IDS` — `credentialRefFor("console")` names the broker's
-        // bearer slot for SESSIONS, but the SDK adapter cannot send console OAuth headers yet, so
-        // stating a console advisor would refuse every advisor call. This lifts after the Console
-        // live gate passes.
+        // `CLAUDE_FIRST_PARTY_PROVIDER_IDS` (only the reserved `cc` since the WS-23 live-gate fix lifted
+        // `console`, whose bearer the SDK adapter now sends) — symmetric with the internal jobs' set.
         const advisorRef = crossProvider && !(CLAUDE_FIRST_PARTY_PROVIDER_IDS as readonly string[]).includes(advisorProviderId)
           ? credentialRefFor(advisorProviderId, deps.home)
           : undefined;
@@ -958,8 +955,8 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       //                             the tool works.
       //   the session's own tag     nothing to state: that IS the SDK's default (`buildWinterOptions`
       //                             drops this one itself, since it holds both tags).
-      //   an excluded first-party login (`console`/`cc` — the bearer slot serves sessions, not the
-      //                             digest route, until the Console live gate passes).
+      //   an excluded first-party login (the reserved `cc`, which has no slot; `console` is an
+      //                             ordinary digest route since the WS-23 live-gate fix).
       //
       // Logged once per incarnation when it is dropped for a reason the user could act on, naming the
       // setting — a pin that silently does nothing is exactly what `runtimes.advisorModel`'s own
@@ -968,14 +965,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       const digestProviderId = researchPin === UNSTATED_TAG ? undefined : (() => {
         try { return splitTag(researchPin).providerId; } catch { return undefined; }
       })();
-      // The probe is of the ITEM THIS DOOR WOULD NAME, not of `credentials.byProvider` — that map is
-      // keyed by provider and conflates anthropic's two slots, so a console-only home would pass its
-      // api-key slot off as present and every WebFetch would then refuse typed on an empty item
-      // (`refMaterialPresent`'s own doc). One extra read, only when an explicit pin differs from the
-      // session's own model, which is the rare case.
-      // WS-23 fix round 1: the same explicit `console` exclusion as the advisor pin above,
-      // symmetric with `CLAUDE_FIRST_PARTY_PROVIDER_IDS` — the bearer slot serves sessions, not
-      // the digest route, until the Console live gate passes.
+      // The probe is of the ITEM THIS DOOR WOULD NAME (`refMaterialPresent`'s own doc) — one extra
+      // read, only when an explicit pin differs from the session's own model, which is the rare case.
+      // `CLAUDE_FIRST_PARTY_PROVIDER_IDS` is the same set as the advisor pin's above (only `cc`).
       const digestRef = digestProviderId === undefined || researchPin === model ||
           (CLAUDE_FIRST_PARTY_PROVIDER_IDS as readonly string[]).includes(digestProviderId)
         ? undefined

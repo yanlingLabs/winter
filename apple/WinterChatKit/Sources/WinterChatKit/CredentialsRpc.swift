@@ -44,10 +44,12 @@ import WinterProtocol
 /// NORMAL state on this leg, not an edge case. A closed enum turns "a value I don't know" into "a
 /// row I drop", which for a credentials list means a stored key that is simply invisible.
 ///
-/// `id` is a COMPOSITE, not `providerId` (WS-19 §9 A-1): rows are emitted per SLOT, so `anthropic`
-/// appears TWICE — once for `anthropic:default` (`door: "credential.set"`, manageable) and once for
-/// `anthropic:console` (`door: "provider.login"`, not manageable). A SwiftUI `ForEach` keyed on
-/// `providerId` alone would collide and render one of the two, silently.
+/// `id` is a COMPOSITE, not `providerId` (WS-19 §9 A-1): rows are emitted per SLOT, and a daemon
+/// before the WS-23 live-gate fix sends `anthropic` TWICE — once for `anthropic:default`
+/// (`door: "credential.set"`, manageable) and once for `anthropic:console` (`door:
+/// "provider.login"`, not manageable; a current daemon files that one under `console`). A SwiftUI
+/// `ForEach` keyed on `providerId` alone would collide on such a daemon and render one of the two,
+/// silently.
 public struct CredentialRow: Equatable, Sendable, Identifiable {
     /// The provider's id as the daemon knows it (`openai`, `anthropic`, `deepseek`, …). Also the
     /// value `credential.set`/`credential.remove` take — never a display name.

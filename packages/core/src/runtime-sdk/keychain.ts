@@ -2,10 +2,8 @@ import type { CredentialRef } from "@yanlinglabs/winter-agent-sdk";
 import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import type { WinterProviderDescriptor } from "@yanlinglabs/winter-provider-catalog";
-import { existsSync } from "node:fs";
 import type { SecretStore } from "../auth/secret-store";
 import { keychainService } from "../profile";
-import { consoleProfileCredentialFile } from "./anthropic-paths";
 import { CREDENTIAL_MATERIAL_NAMES, readCredentialMaterial, writeCredentialMaterial } from "../auth/credential-material";
 
 /**
@@ -97,13 +95,30 @@ export const ANTHROPIC_CREDENTIAL_SECRET_NAME = "anthropic:default";
  * (`winter login --anthropic-key`); the console broker's bearer material (refreshed off
  * `ant auth print-credentials`, `console-profile-broker.ts`) now lands here instead, never mixed
  * into the api-key slot. Same LOCAL-literal convention as `ANTHROPIC_CREDENTIAL_SECRET_NAME` above
- * — the controller adds the equality test against the SDK's own export at the 0.0.9 integration.
- * WS-23: `credentialRefFor("console")` names THIS account for a `console/*` session, and the child
- * resolves the locator itself — the daemon names a credential and never reads it through a ref (the
- * `KeychainSeam` that used to serve the retired official leg is gone with it). What keeps the api-key
- * arm off this account is the tag prefix: `anthropic/*` always names `anthropic:default`.
+ * — `keychain.test.ts` pins it equal to the SDK's own `ANTHROPIC_CONSOLE_CREDENTIAL_ACCOUNT`, the
+ * one account the SDK's Anthropic adapter honours a Console bearer under.
+ *
+ * The account NAME keeps its `anthropic:` prefix (it predates the catalog's separate `console`
+ * provider, and renaming a Keychain item would strand every signed-in home), but since the WS-23
+ * live-gate fix its inventory ROW is filed under the `console` catalog provider — see
+ * `credentialInventory`'s head array. `anthropic/*` always names `anthropic:default`; `console/*`
+ * always names this account.
  */
 export const ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME = "anthropic:console";
+
+/**
+ * The ONE material kind each Anthropic account may hold, for PRESENCE (`credentialPresenceFrom`) and
+ * `credential.list`'s own `present` (`credentials.ts`) alike — so the two never disagree about a stray
+ * record of the wrong kind. An api-key sitting in the console account is not "console present" (the
+ * SDK's adapter would refuse to send it there), and a bearer sitting in `anthropic:default` is not
+ * "anthropic present" (the adapter refuses a bearer under any account but the console one — see
+ * `buildHeaders` in the SDK's `adapters/anthropic/messages.ts`). Every other slot has no required kind:
+ * any material the child's `coerceMaterial` accepts counts.
+ */
+export const ANTHROPIC_ACCOUNT_REQUIRED_KIND: Readonly<Record<string, "api-key" | "bearer">> = {
+  [ANTHROPIC_CREDENTIAL_SECRET_NAME]: "api-key",
+  [ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME]: "bearer",
+};
 
 /** `winter login --anthropic-key` (`cli/main.ts`) — the SAME `{kind:"api-key", key}` material shape
  *  `writeOpenAiApiKey` writes, under the anthropic row's own name. No legacy raw-key record exists
@@ -136,7 +151,8 @@ export async function writeAnthropicApiKey(store: SecretStore, key: string): Pro
  *
  * The two OAuth rows are NOT derived — they are the fixed accounts Winter's own bespoke login doors
  * write (`codex-oauth:default` from `winter login`, `anthropic:console` from the console broker) and
- * they carry no api-key slot of their own.
+ * they carry no api-key slot of their own. Each is filed under the catalog provider it serves
+ * (`codex-oauth`, `console`), so every provider appears exactly once.
  *
  * Memoised: `loadCatalog()` is itself memoised for the life of the process and the catalog is
  * immutable, so this array is computed once and handed back by reference (callers treat it as
@@ -163,13 +179,15 @@ export function credentialInventory(): readonly CredentialSlot[] {
     { provider: "openai", secretName: CREDENTIAL_MATERIAL_NAMES.openai, kind: "keychain" },
     { provider: "codex-oauth", secretName: CREDENTIAL_MATERIAL_NAMES.codexOauth, kind: "keychain" },
     { provider: "anthropic", secretName: ANTHROPIC_CREDENTIAL_SECRET_NAME, kind: "keychain" },
-    // Fix wave 3 (M-B): a SECOND row for the SAME "anthropic" provider — it makes
-    // `credentialPresenceFrom`'s presence probe see a console-only install as present, so
-    // `providerSelectionFor` still picks "anthropic" as a candidate. `credentialRefFor` special-cases
-    // "console" to THIS row (WS-23) and resolves "anthropic" via the generic `.find()` below, which
-    // lands on the api-key row first — so this row's own ORDER relative to the row above matters for
-    // neither path, but both rows must stay here.
-    { provider: "anthropic", secretName: ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, kind: "keychain" },
+    // The console broker's bearer account, filed under the `console` CATALOG provider (WS-23 live-gate
+    // fix). Fix wave 3 (M-B) had filed it under "anthropic": in the official-leg era a Console-only home
+    // still had to select the `anthropic` provider so the `claude` child would use the `ant` profile.
+    // That conflation is what refused every `console/*` session at create time once the Winter runtime
+    // served Claude (the router admits a row only when `byProvider` names ITS provider, and nothing
+    // produced `byProvider.console`) — and it reported a Console-only home's `anthropic/*` rows as
+    // credentialed with no api key behind them. `console` is its own catalog provider on the Winter
+    // runtime, and the SDK's Anthropic adapter sends this bearer for exactly that provider id.
+    { provider: "console", secretName: ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, kind: "keychain" },
   ];
   const already = new Set(head.map((s) => s.provider));
   const derived = loadCatalog().providers
@@ -216,19 +234,13 @@ function describeError(err: unknown): string {
  * WS-23 (the Winter-only pivot, 2026-09-25): `console` names the console broker's OWN bearer slot
  * (`anthropic:console`, refreshed off `ant auth print-credentials` by `console-profile-broker.ts`)
  * — the official `claude` leg that used to read the on-disk profile is gone, and the Winter child
- * needs a credential locator like every other provider (`session-provider.ts:643` in the SDK
- * refuses a turn with no credential). The slot holds `{kind:"bearer", token}` material, which the
- * child's `coerceMaterial` accepts and the SDK's anthropic-messages adapter sends as the console
- * arm's OAuth headers (that adapter half is a parallel lane's work; this function only names the
- * slot). PRESENCE is still the on-disk profile file, checked at spawn time
- * (`official-options.ts`'s `console_profile_missing` gate) and by `credentialPresentProbe` below —
- * never `CredentialPresence.byProvider`, whose `"anthropic"` key conflates the two accounts.
+ * needs a credential locator like every other provider. The slot holds `{kind:"bearer", token}`
+ * material, which the child's `coerceMaterial` accepts and the SDK's anthropic-messages adapter sends
+ * as `Authorization: Bearer` plus the OAuth beta for the `console` provider id. Since the live-gate fix
+ * that slot is an ordinary inventory row filed under `console`, so this is the same one lookup as
+ * every other provider — and presence (`credentialPresenceFrom`) reads the same slot this names.
  */
 export function credentialRefFor(provider: string, home?: string): CredentialRef | undefined {
-  // WS-23: `console` is special-cased to the broker's bearer slot (see the doc above) — it is the
-  // one provider whose slot is filed under a DIFFERENT catalog id, because the derived inventory
-  // only derives api-key rows and the broker's account predates the `console` catalog row.
-  if (provider === "console") return { kind: "keychain", account: ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, home) };
   const slot = WINTER_CREDENTIAL_INVENTORY.find((s) => s.provider === provider);
   if (!slot) return undefined;
   return { kind: "keychain", account: slot.secretName, service: keychainService(undefined, home) };
@@ -251,6 +263,10 @@ export function credentialRefFor(provider: string, home?: string): CredentialRef
  * WORKING — an expired-but-well-formed OAuth material with a dead refresh token still reads as
  * present and fails later, at the turn, exactly as documented above.
  *
+ * An Anthropic account additionally counts only when it holds ITS kind (`ANTHROPIC_ACCOUNT_REQUIRED_KIND`
+ * — api-key in `anthropic:default`, bearer in `anthropic:console`), the same narrowing
+ * `credential.list` applies, so the router's admission and the Providers pane agree on a stray record.
+ *
  * A `SecretStore.get` FAILURE for one slot never propagates and never fails the whole probe: it is
  * caught, logged at `warn` with the secret NAME and an error CODE/class only (never the message
  * text), and that slot is treated as absent — exactly as if the secret were simply not stored.
@@ -265,9 +281,10 @@ export function credentialRefFor(provider: string, home?: string): CredentialRef
  */
 /** WS-19 (W19-1): DERIVED alongside the inventory rather than a three-row literal — every derived
  *  api-key row is `"api-key"`, and `codex-oauth` (Winter's own OAuth material shape) stays
- *  `"custom"`, exactly as before. The anthropic console arm needs no entry of its own: it shares the
- *  `"anthropic"` provider id with the api-key row, and the router's selector reads this map by
- *  PROVIDER, not by account — which is what "the anthropic console arm as today" means here. */
+ *  `"custom"`, exactly as before. `console` has no entry, deliberately: its family is not expressible
+ *  in this `"api-key" | "custom"` vocabulary, and the router names it itself — `candidatesFor`
+ *  overrides a `console` row's auth family to `console-profile` whenever a ref admits it, so the
+ *  presence `byProvider.console` carries is all it needs. */
 let memoisedAuthFamily: Readonly<Record<string, "api-key" | "custom">> | undefined;
 function providerAuthFamilyMap(): Readonly<Record<string, "api-key" | "custom">> {
   if (memoisedAuthFamily !== undefined) return memoisedAuthFamily;
@@ -313,7 +330,8 @@ export async function credentialPresenceFrom(
       failures.push(row.failure);
       continue;
     }
-    if (row.material) {
+    const required = ANTHROPIC_ACCOUNT_REQUIRED_KIND[row.slot.secretName];
+    if (row.material && (required === undefined || row.material.kind === required)) {
       byProvider[row.slot.provider] = row.slot.kind;
       const authFamily = authFamilies[row.slot.provider];
       if (authFamily !== undefined) authByProvider[row.slot.provider] = { authFamily };
@@ -326,39 +344,14 @@ export async function credentialPresenceFrom(
 }
 
 /**
- * 2026-09-18: "does this CATALOG PROVIDER hold a credential right now" — the one rule every
- * provider-facing listing answers it with, returned as a closure so the console door's on-disk probe
- * runs ONCE per listing rather than once per provider (the catalog has ~100 eligible providers).
- *
- * `console` is checked ON DISK (`consoleProfileCredentialFile`), never through
- * `CredentialPresence.byProvider` — that inventory's `"anthropic"` key conflates the api-key slot
- * (`anthropic:default`) with the console broker's bearer slot (`anthropic:console`), both filed under
- * provider id `"anthropic"` (see `credentialInventory`'s own head array). Reading `byProvider` for
- * `console` would therefore report a console-only home's `anthropic/*` API-KEY rows as credentialed
- * with no api-key material behind them, and an api-key-only home's `console/*` rows the same way.
- * `console` is its own catalog provider id and is answered on its own terms.
- *
- * PRESENCE IS NOT VALIDITY — the file-wide rule (see this module's own header): a stored secret or an
- * existing profile file may be expired or revoked, and only the child/provider layer decides that.
- * For the console door specifically, the daemon re-checks the profile LIVE at every spawn
- * (`console_profile_missing`), so a `true` here is "offerable", never "promised".
- *
- * ONE implementation, shared by `ipc/picker-models.ts` (`sync.config`'s `models`) and
- * `providers/model-catalog-wire.ts` (`models.catalog`'s `providers`), so the two surfaces cannot
- * disagree about whether a provider is ready. A `home` of `""` (a server with none wired) simply
- * never finds a profile — the same degradation `sync.config` already documents for it.
- */
-/**
  * 2026-09-18 (agent SDK 0.0.17): does the item THIS REF NAMES hold usable material right now?
  *
- * `CredentialPresence.byProvider` cannot answer it: that map is keyed by PROVIDER, and for
- * `anthropic` one key covers two slots (`anthropic:default`'s api key and `anthropic:console`'s
- * broker bearer — see `credentialPresentProbe`'s own note). A console-only home therefore reads as
- * "anthropic present" while `credentialRefFor("anthropic")` names the EMPTY api-key slot. That is
- * fine for a session (its provider is decided by the tag's own prefix, and `beforeTurn` refuses on
- * the real material), and NOT fine for an auxiliary route whose whole point is "state this model only
- * if the credential this daemon can NAME for it is really there" — `Options.web.fetch.authRef`, whose
- * absence is a typed refusal on every call rather than a fallback.
+ * For an auxiliary route whose whole point is "state this model only if the credential this daemon
+ * can NAME for it is really there" — `Options.web.fetch.authRef` and a cross-provider advisor's
+ * `authRef`, whose absence is a typed refusal on every call rather than a fallback. It was written when
+ * `CredentialPresence.byProvider`'s `anthropic` key covered two accounts (fixed since: every provider
+ * now has exactly one slot); it stays because it reads only the ONE item the route would name instead
+ * of probing the whole ~150-slot inventory, on a path that runs once per incarnation.
  *
  * ONE probe of ONE named item, and only the caller's `undefined`/boolean ever leaves it — the value is
  * never read into anything logged or returned, and a store failure reads as absent.
@@ -366,14 +359,33 @@ export async function credentialPresenceFrom(
 export async function refMaterialPresent(store: SecretStore | undefined, ref: CredentialRef | undefined): Promise<boolean> {
   if (store === undefined || ref === undefined || ref.kind !== "keychain") return false;
   try {
-    return (await readCredentialMaterial(store, ref.account)) !== null;
+    const material = await readCredentialMaterial(store, ref.account);
+    const required = ANTHROPIC_ACCOUNT_REQUIRED_KIND[ref.account];
+    return material !== null && (required === undefined || material.kind === required);
   } catch {
     return false;
   }
 }
 
-export function credentialPresentProbe(deps: { credentials: CredentialPresence; home: string }): (providerId: string) => boolean {
-  const consolePresent = existsSync(consoleProfileCredentialFile(deps.home));
-  return (providerId: string): boolean =>
-    providerId === "console" ? consolePresent : deps.credentials.byProvider[providerId] !== undefined;
+/**
+ * 2026-09-18: "does this CATALOG PROVIDER hold a credential right now" — the one rule every
+ * provider-facing listing answers it with, shared by `ipc/picker-models.ts` (`sync.config`'s `models`)
+ * and `providers/model-catalog-wire.ts` (`models.catalog`'s `providers`), so the two surfaces cannot
+ * disagree about whether a provider is ready.
+ *
+ * WS-23 live-gate fix: `console` is answered by its Keychain slot like every other provider, no longer
+ * by the on-disk `ant` profile (`consoleProfileCredentialFile`). The slot is what a turn actually sends
+ * — the Winter child and the daemon's own internal jobs both read `anthropic:console` — while the
+ * profile is only where the broker refreshes it FROM. The two normally move together (a login fills
+ * the slot at once; the broker's watcher deletes it when the profile disappears), and where they
+ * diverge — a profile whose first refresh has not landed or keeps failing — the profile would offer a
+ * provider whose turn cannot run and which the router's create-time admission (the same `byProvider`)
+ * refuses. One source is how the listings, selection and the turn gate agree.
+ *
+ * PRESENCE IS NOT VALIDITY — the file-wide rule (see this module's own header): a stored bearer may be
+ * expired or revoked, and only the child/provider layer decides that. `true` here is "offerable",
+ * never "promised".
+ */
+export function credentialPresentProbe(deps: { credentials: CredentialPresence }): (providerId: string) => boolean {
+  return (providerId: string): boolean => deps.credentials.byProvider[providerId] !== undefined;
 }

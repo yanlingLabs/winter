@@ -1951,15 +1951,23 @@ export function permittedProviders(filterProviderIds?: ReadonlySet<string>): Arr
  * Anthropic key is an ordinary token-priced credential for titles, the bash reviewer, the dreamer
  * and the cleaner.
  *
- * `console` stays: it has no credential SLOT in the derived inventory (`console-profile` is not an
- * api-key kind, so `isInScopeApiKeyProvider` excludes it by construction) and the SDK adapter's
- * console-OAuth headers are a parallel lane's pending work — so even a named slot could not
- * produce a correct internal call today. `cc` stays: reserved for the subscription arm this daemon
- * does not serve. This is an exclusion by PROVIDER ID, deliberately NOT by adapter family — a
- * third-party provider that merely speaks the Anthropic dialect (`deepseek-anthropic`,
+ * `console` is gone from it too (the WS-23 live-gate fix), because the internal path now carries its
+ * bearer end to end: its slot (`anthropic:console`) is an ordinary inventory row under `console`, so
+ * `internalCredentialAccountFor("console")` names it; its adapter is `winter.anthropic-messages`,
+ * which the daemon drives, and `buildInternalProvider` hands it `connection.providerId: "console"`,
+ * the catalog's multi-provider `api` endpoint and that account as `authRef`; `credential-store.ts`
+ * returns the stored `{kind:"bearer"}` material verbatim; and the SDK adapter sends a bearer as
+ * `Authorization: Bearer` + the OAuth beta for exactly the `anthropic`/`console` ids, only under the
+ * `anthropic:console` account (`ANTHROPIC_BEARER_PROVIDER_IDS`, `buildHeaders`). The daemon's broker
+ * keeps that bearer refreshed ahead of expiry, so a background job reads the same fresh material a
+ * session does. Console is token-priced, like an API key.
+ *
+ * `cc` stays: reserved for the subscription arm this daemon does not serve (it is not even a catalog
+ * provider, so this is belt only). This is an exclusion by PROVIDER ID, deliberately NOT by adapter
+ * family — a third-party provider that merely speaks the Anthropic dialect (`deepseek-anthropic`,
  * `zai-anthropic`, `kimi-coding`, …) is an ordinary token-priced vendor and stays eligible.
  */
-export const CLAUDE_FIRST_PARTY_PROVIDER_IDS = ["console", "cc"] as const;
+export const CLAUDE_FIRST_PARTY_PROVIDER_IDS = ["cc"] as const;
 
 /**
  * A LIVE snapshot of which providers this home actually holds credential material for, threaded
@@ -1992,10 +2000,9 @@ let memoisedInternalEligible: ReadonlySet<string> | undefined;
  *  1. the provider is an ordinary model-role candidate at all — `permittedProviders()`'s own floor
  *     (`scope === "llm"`, `risk.class !== "blocked"`), reused rather than restated;
  *  2. it is not a remaining first-party Claude row (`CLAUDE_FIRST_PARTY_PROVIDER_IDS` — WS-23: only
- *     `console`/`cc`; `anthropic` rejoined the eligible set when every model moved onto the Winter
- *     SDK). Note `console` ALSO fails condition 3 (no derived slot), so this exclusion is the
- *     belt to that condition's suspenders — and what keeps the refusal reason `provider-unsupported`
- *     rather than a downstream build failure;
+ *     the reserved `cc`; `anthropic` rejoined the eligible set when every model moved onto the Winter
+ *     SDK, and `console` when its bearer slot became an ordinary inventory row the Anthropic adapter
+ *     can be driven over);
  *  3. this daemon has a credential SLOT for it — a row in `credentialInventory()`. That inventory is
  *     itself catalog-derived and already excludes every `requiresUserEndpoint` row (`azure-ai`, `oci`
  *     — whose shipped endpoint is a placeholder host), every local-none row and every cloud-
@@ -2647,7 +2654,7 @@ function assertInternalJobRoleTag(tag: string, role: InternalJobRole): void {
   throw new TypeError(
     `${role}: Winter's own background jobs can't run on ${display}. ` +
       (claude
-        ? `Console and subscription Claude rows have no internal-calls credential path on this daemon (console's bearer slot serves sessions, not the internal provider, and the subscription arm is reserved) — so titles, the bash safety reviewer, the dreamer and the session cleaner never borrow one. `
+        ? `The subscription Claude arm is reserved and has no internal-calls credential path on this daemon — so titles, the bash safety reviewer, the dreamer and the session cleaner never borrow one. `
         : `Winter has no way to drive that provider for its own calls (its credential shape or its API family is not one the daemon can use). `) +
       `Pick a model from the providers \`settings.modelRoles\` reports as \`permitted\` for this role, or clear the pin (model: null) to use the default.`,
   );

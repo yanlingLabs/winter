@@ -208,12 +208,20 @@ export type PlanSwitchOutcome =
   // unreachable or found nothing portable to name.
   | { kind: "confirmation_required"; warnings: string[]; portable: string[] };
 
+/** The console door's label — the router's own for the `anthropic`/`console-profile` alternative, used
+ *  for a `console` row too (whose router label is its bare id) so the one door renders once. */
+const CONSOLE_DOOR_LABEL = "Anthropic Console login";
+
 /**
  * Winter Phase 10b (D1-7, W18-3): the no-credential refusal's hint, built FROM the router's own
  * `alternatives` — never a hardcoded provider list, so a catalog change (a new Claude-serving
  * gateway) widens the hint automatically. Each door names ITS OWN way in:
  *   - `anthropic`/`api-key` → `winter login --anthropic-key`;
- *   - `anthropic`/`console-profile` → `winter login --anthropic-console`;
+ *   - `anthropic`/`console-profile`, and any alternative on the `console` catalog provider → the ONE
+ *     console door, `winter login --anthropic-console`, rendered once. The router lists a `console`
+ *     row under its bare id with whatever auth kind the host declared (none — `console-profile` has no
+ *     spelling in presence), so it used to fall through to the generic branch below and tell a Console
+ *     user to "add a credential" (the WS-23 live-gate report) — there is no key to add;
  *   - `anthropic`/`claude-oauth` (the claude.ai subscription door) → never rendered: WS-23 retired the
  *     only runtime that could have used it, and it never shipped;
  *   - every other alternative (OpenRouter, Bedrock, Vertex, …) → the app's Providers settings.
@@ -227,15 +235,16 @@ export type PlanSwitchOutcome =
  */
 export function renderNoCredentialHint(alternatives: readonly SelectionAlternative[]): string {
   const doors: string[] = [];
+  const push = (door: string): void => { if (!doors.includes(door)) doors.push(door); };
   for (const alt of alternatives) {
     if (alt.providerId === "anthropic" && alt.authKind === "api-key") {
-      doors.push(`${alt.label}: run \`winter login --anthropic-key\``);
-    } else if (alt.providerId === "anthropic" && alt.authKind === "console-profile") {
-      doors.push(`${alt.label}: run \`winter login --anthropic-console\``);
+      push(`${alt.label}: run \`winter login --anthropic-key\``);
+    } else if ((alt.providerId === "anthropic" && alt.authKind === "console-profile") || alt.providerId === "console") {
+      push(`${CONSOLE_DOOR_LABEL}: run \`winter login --anthropic-console\``);
     } else if (alt.providerId === "anthropic" && alt.authKind === "claude-oauth") {
       continue;
     } else {
-      doors.push(`${alt.label}: add a credential from the app's Providers settings`);
+      push(`${alt.label}: add a credential from the app's Providers settings`);
     }
   }
   if (doors.length === 0) return "no door is currently available for this model — add a credential from the app's Providers settings";

@@ -1818,40 +1818,33 @@ export const ModelCatalogProviderSchema = z.object({
   authKinds: z.array(z.string()),
   /** The credential slot this provider resolves to in `credentialInventory()`'s own derivation
    *  (`runtime-sdk/keychain.ts`), or `null` when this catalog provider can hold no credential here
-   *  at all — e.g. the catalog's `console` provider (`authKinds: ["console-profile"]`), whose one
-   *  usable slot (`anthropic:console`) is filed under provider id `anthropic`, never `console`. A
-   *  NAME only (a Keychain secret NAME, never material) — same "names and booleans only" rule
-   *  `CredentialRow` states for itself above.
+   *  at all. The catalog's `console` provider names `anthropic:console`, the console broker's bearer
+   *  slot (since the WS-23 live-gate fix; it used to be filed under `anthropic`, leaving `console`
+   *  `null`). A NAME only (a Keychain secret NAME, never material) — same "names and booleans only"
+   *  rule `CredentialRow` states for itself above.
    */
   credentialSlotId: z.string().nullable(),
-  /** WHICH DOOR credentials this provider, so a consumer never has to read meaning into
-   *  `credentialSlotId: null`. `"keychain"`: a slot exists — join `credential.list` on
-   *  `credentialSlotId` and that is the whole readiness test. `"console-profile"`: credentialed by
-   *  `winter login --anthropic-console`, and readiness is the on-disk `ant` profile the daemon
-   *  re-checks LIVE at every spawn (`console_profile_missing`), so this read deliberately does not
-   *  answer it — the provider is offerable, not promised. `"none"`: catalog-eligible but this daemon
-   *  stores no credential for it. Without this field the first and third cases are indistinguishable,
-   *  and a picker that reads `null` as "cannot be credentialed" would present a correctly
-   *  signed-in Console user as unusable. */
+  /** WHICH DOOR credentials this provider — the flow a UI offers when it is not ready.
+   *  `"keychain"`: a key pasted into `credentialSlotId` (Settings → Providers). `"console-profile"`:
+   *  `winter login --anthropic-console` (or the app's Sign in) — the broker fills the slot from that
+   *  login, so there is no key to paste even though `credentialSlotId` names one. `"none"`:
+   *  catalog-eligible but this daemon stores no credential for it. Readiness is `credentialPresent`
+   *  below, never this field. */
   credentialDoor: z.enum(["keychain", "console-profile", "none"]),
   /** Whether the door named above is SATISFIED on this daemon's home right now — the readiness test
    *  itself, answered daemon-side so no client has to perform it.
    *
-   *  A client MUST NOT re-derive this by joining `credential.list` on `credentialSlotId`: that join
-   *  is wrong for both Anthropic doors, in opposite directions. `credential.list` is keyed by secret
-   *  NAME, and the `anthropic` row covers TWO accounts (`anthropic:default`, the user's api key;
-   *  `anthropic:console`, the console broker's bearer), so a `<providerId>:default` guess reports
-   *  `anthropic` as ready on a console-only home with no api key at all — and reports `console`
-   *  (whose only slot is filed under `anthropic`, never under its own id) as permanently unusable
-   *  even when the user is correctly signed in. The daemon answers `console` from the on-disk `ant`
-   *  profile and every other provider from its own Keychain slot; that is one rule
+   *  A client MUST NOT re-derive this by guessing `<providerId>:default` against `credential.list`:
+   *  that is wrong for `console`, whose slot is `anthropic:console`. The daemon answers every provider,
+   *  `console` included, from its own Keychain slot (the Console's bearer, not its on-disk `ant`
+   *  profile, since the WS-23 live-gate fix — the slot is what a turn sends); that is one rule
    *  (`credentialPresentProbe`, core's `runtime-sdk/keychain.ts`), shared verbatim with the model
-   *  list `sync.config` serves, so the two can never disagree.
+   *  list `sync.config` serves and the presence `session.create`'s selection admits on, so none of
+   *  them can disagree.
    *
-   *  PRESENCE, NEVER VALIDITY: a stored key can be revoked and a console profile can be expired, and
-   *  only a real turn finds out. For the console door the daemon re-checks the profile LIVE at every
-   *  spawn (`console_profile_missing`), so `true` means offerable, not promised. A boolean only —
-   *  never a secret name beyond the `credentialSlotId` already above, and never material.
+   *  PRESENCE, NEVER VALIDITY: a stored key can be revoked and a Console bearer can be expired, and
+   *  only a real turn finds out, so `true` means offerable, not promised. A boolean only — never a
+   *  secret name beyond the `credentialSlotId` already above, and never material.
    *
    *  `false` for EVERY provider is also what a daemon with no secret store wired reports (a bare test
    *  harness): absence of evidence reads as absence, the same degradation `sync.config`'s own
@@ -1986,11 +1979,11 @@ export const ProviderStatusResult = z.object({
 // answers `{ok:true}`; `credential.remove` answers whether something went away. The value travels in
 // exactly one direction, once, inside `CredentialSetParams.apiKey`.
 //
-// ROWS ARE PER SLOT (§9 A-1), not per provider: `anthropic` appears twice — its api-key slot
-// (`door: "credential.set"`, manageable) and its Console slot (`door: "provider.login"`, not
-// manageable, whose `present` reports the broker's bearer). Clients key a row by
-// `providerId|door|kind`, so those three fields are the row's identity and must stay stable for a
-// slot whether or not anything is stored in it.
+// ROWS ARE PER SLOT (§9 A-1): the Anthropic API key is `anthropic` (`door: "credential.set"`,
+// manageable) and the Console bearer is `console` (`door: "provider.login"`, not manageable, whose
+// `present` reports the broker's bearer; before the WS-23 live-gate fix it was a second `anthropic`
+// row). Clients key a row by `providerId|door|kind`, so those three fields are the row's identity and
+// must stay stable for a slot whether or not anything is stored in it.
 // ---------------------------------------------------------------------------------------------
 export const CredentialRow = z.object({
   providerId: z.string().min(1),

@@ -47,10 +47,10 @@ import WinterKit
 //      CATALOG ELIGIBILITY — it applies the blocked floor and nothing else, so it names providers
 //      the user has no credential for. Since 2026-09-18 every `models.catalog` provider row carries
 //      `credentialPresent`, computed daemon-side by the rule that backs the composer's model list
-//      (the on-disk `ant` profile for the console arm, stored material otherwise). That boolean IS
-//      the readiness test. There is no `credential.list` join and no slot lookup any more — the
-//      join is gone, not bypassed, because a providerId- or slot-keyed guess was provably wrong
-//      for a real user (two secrets live under the id `anthropic` alone).
+//      (stored Keychain material — for the console arm, its bearer). That boolean IS the readiness
+//      test. There is no `credential.list` join and no slot lookup any more — the join is gone, not
+//      bypassed, because a providerId- or slot-keyed guess was provably wrong for a real user (the
+//      Console's slot is `anthropic:console`, and older daemons filed it under `anthropic`).
 //
 //      `credentialDoor` answers a SEPARATE question — which flow to offer when it is not ready —
 //      and is branched on, never a hardcoded provider id (`roleProviderCredentialState`):
