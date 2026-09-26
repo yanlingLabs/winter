@@ -275,6 +275,14 @@ export interface TerminalInput {
 
 /** WS-23: the bound on a `hook_notice.text` (the schema's own `max`), with a visible marker when cut. */
 export const HOOK_NOTICE_MAX_CHARS = 12_000;
+/** WS-23 review r1 I-3: `continuity_warning.text`'s schema bound. */
+export const CONTINUITY_WARNING_MAX_CHARS = 4_000;
+export function boundContinuityWarningText(text: string): string {
+  if (text.length <= CONTINUITY_WARNING_MAX_CHARS) return text;
+  const marker = "\n[…truncated]";
+  return text.slice(0, CONTINUITY_WARNING_MAX_CHARS - marker.length) + marker;
+}
+
 export function boundHookNoticeText(text: string): string {
   if (text.length <= HOOK_NOTICE_MAX_CHARS) return text;
   const marker = "\n[…truncated]";

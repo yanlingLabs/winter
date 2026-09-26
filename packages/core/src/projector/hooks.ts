@@ -16,7 +16,11 @@ import type { ProtocolSdkMessage } from "./types";
  *  - **`system/api_retry`** — one frame per attempt, BEFORE the delay. A retried request that then
  *    succeeds is not an error, and the terminal `result` is where a genuine failure lands.
  *  - **Winter-only extension messages** — `thinking_tokens`, `model_refusal_*`, `reasoning_summary`,
- *    `model_switch`, `continuity_warning` (§4.7).
+ *    `model_switch` (§4.7). `continuity_warning` is NOT one of them any more (WS-23 review r1 I-3): it
+ *    is persisted as the `continuity_warning` SessionEvent, because the user must see what a switch or
+ *    a failed write lost. It stays in the allowlist below only for the one log line of a frame too
+ *    empty to show (like `system/api_retry`, which projects a transient) -- and its `detail` is still
+ *    never logged.
  *
  * ── THE LOGGING RULE IS A SECURITY RULE, NOT A TIDINESS ONE ─────────────────────────────────────
  *
