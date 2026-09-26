@@ -8,7 +8,8 @@ import type { ModelTag } from "../../src/runtime-sdk/model-tag";
 test("a tag names exactly its provider and that provider's credential ref", () => {
   expect(providerFor("codex-oauth/gpt-5.6-terra" as ModelTag)).toEqual({ providerId: "codex-oauth", authRef: { kind: "keychain", account: "codex-oauth:default", service: keychainService() } });
   expect(providerFor("openai/gpt-5.6-terra" as ModelTag)?.providerId).toBe("openai");
-  expect(providerFor("console/claude-sonnet-5" as ModelTag)).toEqual({ providerId: "console" });
+  // WS-23: `console` names the console broker's bearer slot — the Winter child needs a locator.
+  expect(providerFor("console/claude-sonnet-5" as ModelTag)).toEqual({ providerId: "console", authRef: { kind: "keychain", account: "anthropic:console", service: keychainService() } });
   expect(providerFor("winter-test/echo" as ModelTag)).toBeUndefined();
 });
 

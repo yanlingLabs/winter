@@ -72,7 +72,10 @@ describe("daemon boot — Winter's own jobs vs settings.provider.model", () => {
     expect(lines.some((l) => l.startsWith("agent disabled:"))).toBe(false);
   });
 
-  test("a Claude primary with a Codex login: the jobs run on Codex, never on Anthropic", async () => {
+  // WS-23: `anthropic` is an ordinary eligible provider now, so a Claude primary WITH an
+  // Anthropic key runs its jobs on its own provider (rung 1) — and a Claude primary WITHOUT one
+  // still falls back to Codex rather than an uncredentialed Claude row.
+  test("a Claude primary with an Anthropic key: the jobs run on Anthropic", async () => {
     const home = tempHomeWithProviderModel("anthropic/claude-sonnet-5");
     const { lines } = await boot(home, [
       [CREDENTIAL_MATERIAL_NAMES.codexOauth, "codex-material"],
@@ -81,8 +84,20 @@ describe("daemon boot — Winter's own jobs vs settings.provider.model", () => {
     expect(daemon!.registry).not.toBeNull();
     const summary = lines.filter((l) => l.startsWith("internal-provider:"));
     expect(summary.length).toBe(1);
+    expect(summary[0]).toContain("can run on");
+    expect(summary[0]).toContain("anthropic");
+  });
+
+  test("a Claude primary with only a Codex login: the jobs run on Codex, never on an uncredentialed Claude row", async () => {
+    const home = tempHomeWithProviderModel("anthropic/claude-sonnet-5");
+    const { lines } = await boot(home, [
+      [CREDENTIAL_MATERIAL_NAMES.codexOauth, "codex-material"],
+    ]);
+    expect(daemon!.registry).not.toBeNull();
+    const summary = lines.filter((l) => l.startsWith("internal-provider:"));
+    expect(summary.length).toBe(1);
     expect(summary[0]).toContain("codex-oauth");
-    // The anthropic key is stored and must never be named as a provider for Winter's own jobs.
+    // The session default's own provider holds no credential, so it is never named.
     expect(summary[0]).not.toContain("anthropic");
   });
 

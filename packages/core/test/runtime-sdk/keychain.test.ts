@@ -161,9 +161,9 @@ describe("KeychainSeam over SecretStore", () => {
         { provider: "codex-oauth", secretName: "codex-oauth:default", kind: "keychain" },
         { provider: "anthropic", secretName: "anthropic:default", kind: "keychain" },
         // Fix wave 3 (M-B): a SECOND "anthropic" row for the console bearer account — see this
-        // row's own comment in keychain.ts for why `credentialRefFor` never reaches it via the
-        // generic per-provider `.find()` lookup, and why its presence here still matters (the
-        // seam's "known accounts" set, and `credentialPresenceFrom`'s console-only presence case).
+        // row's own comment in keychain.ts for why BOTH rows must stay (the seam's "known accounts"
+        // set, `credentialPresenceFrom`'s console-only presence case, and WS-23's `credentialRefFor`
+        // special-case of "console" to this row while "anthropic" resolves to the api-key row first).
         { provider: "anthropic", secretName: "anthropic:console", kind: "keychain" },
       ]);
     });
@@ -283,8 +283,12 @@ describe("KeychainSeam over SecretStore", () => {
       expect(credentialRefFor("anthropic", dir)).toEqual({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, dir) });
     });
 
-    test("\"console\" has NO Keychain slot at all — its presence is the on-disk profile file, never a CredentialRef", () => {
-      expect(credentialRefFor("console", dir)).toBeUndefined();
+    test("\"console\" names the console broker's bearer slot — the Winter child needs a locator, not an on-disk profile", () => {
+      // WS-23 (the Winter-only pivot): the official `claude` leg that read the on-disk profile is
+      // gone, so `console` gets the `{kind:"keychain", account, service}` locator for
+      // `anthropic:console` like every other provider. Presence is STILL the on-disk profile file
+      // (`credentialPresentProbe`), never this ref.
+      expect(credentialRefFor("console", dir)).toEqual({ kind: "keychain", account: ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, dir) });
     });
 
     test("every OTHER provider is an ordinary fixed inventory row", () => {

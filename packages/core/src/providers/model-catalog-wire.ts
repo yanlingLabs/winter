@@ -137,9 +137,10 @@ export function modelCatalogWire(deps: { credentials: CredentialPresence; home: 
   // actually matches the "anthropic" CATALOG provider's own `authKinds` (it includes "api-key"; the
   // console row's material kind is "bearer", not this provider's). The catalog's separate `console`
   // provider (authKinds: ["console-profile"]) matches no inventory row at all under ITS id — its
-  // one usable slot is filed under "anthropic" — so `credentialSlotId` for it is genuinely `null`,
-  // not a lookup miss: a real, eligible provider this daemon can serve but never stores a key for
-  // under its own catalog id.
+  // one usable slot is filed under "anthropic", and the SESSION path names it explicitly
+  // (`credentialRefFor("console")`, WS-23) rather than through this lookup — so `credentialSlotId`
+  // for it is genuinely `null`, not a lookup miss: a real, eligible provider this daemon can serve
+  // but never stores a key for under its own catalog id.
   const slots = credentialInventory();
 
   const providers: ModelCatalogWireProvider[] = catalog.providers
@@ -156,8 +157,10 @@ export function modelCatalogWire(deps: { credentials: CredentialPresence; home: 
       //                        profile, checked LIVE at every spawn (`console_profile_missing`), so
       //                        it is deliberately NOT answered by this read. Offerable, not promised.
       //   "none"            -> eligible in the catalog, but this daemon stores no credential for it.
-      // `keychain.ts`'s `credentialRefFor` is the pin for why `console` has no slot of its own: "its
-      // presence is the on-disk profile file ... never a `CredentialRef`".
+      // `keychain.ts`'s `credentialPresentProbe` is the pin for why `console` has no slot of its
+      // own here: its presence is the on-disk profile file, never `CredentialPresence.byProvider`
+      // (whose `"anthropic"` key conflates the two accounts). The SESSION credential for it is named
+      // separately (`credentialRefFor("console")` → `anthropic:console`, WS-23).
       const door = slotId !== null ? "keychain" : p.authKinds.includes("console-profile") ? "console-profile" : "none";
       return {
         id: p.id,
