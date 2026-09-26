@@ -44,6 +44,7 @@
 // downgraded, pre-WS-21 build's ability to read its own consent back after a rollback. The new build
 // reads only the qualified key (`PluginStore#list()`, `agent/plugins.ts`); an older, downgraded build
 // reads only the bare one — both coexist in the same file, neither ever reads the other's key.
+import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, sep } from "node:path";
 import { sdkPluginsRoot, sdkHomeFor } from "../agent/paths";
@@ -387,10 +388,17 @@ function rekeyConsents(home: string, idToKey: Map<string, string>, idToFingerpri
   // Every bare-id record starts here, untouched — the qualified records are ADDED below, never
   // replacing what's already here.
   const additive: Record<string, unknown> = { ...(consents as Record<string, unknown>) };
+  const ledger = readConsentCarryLedger(home);
+  const carriedNow: Record<string, { from: string; at: string }> = {};
   let changed = false;
   for (const [id, record] of Object.entries(consents as Record<string, unknown>)) {
     const key = idToKey.get(id);
     if (key === undefined) continue;
+    // WS-24: carried ONCE per bare record (see `consentCarryLedgerPath`). The same record already carried
+    // by an earlier run means whatever the qualified key holds now — revoked, narrowed, or still granted —
+    // is the user's own decision since, and a re-run after a rollback must not overwrite or resurrect it.
+    const from = bareConsentDigest(record);
+    if (ledger.carried[key]?.from === from) continue;
     changed = true;
     const classes: string[] = [];
     if (record && typeof record === "object") {
@@ -400,9 +408,46 @@ function rekeyConsents(home: string, idToKey: Map<string, string>, idToFingerpri
     }
     const fingerprint = idToFingerprint.get(id) ?? "";
     additive[key] = { classes, fingerprint };
+    carriedNow[key] = { from, at: new Date().toISOString() };
   }
   if (!changed) return;
   writeJsonAtomic(path, { ...raw, plugins: { ...plugins, consents: additive } });
+  // After the settings write, never before: a crash between the two re-carries the SAME record on the
+  // next run (identical content), where the reverse order could lose it.
+  writeJsonAtomic(consentCarryLedgerPath(home), { version: 1, carried: { ...ledger.carried, ...carriedNow } });
+}
+
+/**
+ * WS-24 — THE CARRY LEDGER. Which bare legacy consent records `rekeyConsents` has already carried to a
+ * qualified `"<id>@winter-legacy"` key, by the record's digest. Without it a revoke did not survive a
+ * rollback: Migration C's rollback leaves `settings.json` and `sdk/` alone (DECISION 15), so the next
+ * run's `convert-plugins` met the SAME bare record again and carried it again — resurrecting a qualified
+ * record the user had deleted (`plugin.uninstall`'s strip, a hand edit) or overwriting one they had
+ * narrowed. Now a bare record is carried once: an unchanged one is left to whatever the user made of its
+ * qualified key since; a CHANGED one (the user consented again on the older build after the rollback) is
+ * a new decision, and carried.
+ *
+ * Kept under the migration's own directory (`migration/c/`), which a rollback leaves in place (it removes
+ * only the manifest and the COMPLETE marker) — spelled here rather than imported from `migrate-c.ts`,
+ * which imports this module. Holds digests and timestamps only.
+ */
+function consentCarryLedgerPath(home: string): string {
+  return join(home, "migration", "c", "carried-consents.json");
+}
+
+function readConsentCarryLedger(home: string): { carried: Record<string, { from: string; at: string }> } {
+  const raw = readJsonIfPresent<{ carried?: unknown }>(consentCarryLedgerPath(home));
+  const carried = raw && typeof raw.carried === "object" && raw.carried !== null ? raw.carried as Record<string, { from: string; at: string }> : {};
+  return { carried };
+}
+
+/** A stable digest of one bare consent record (object keys sorted, so a re-serialized file with the same
+ *  content reads as the same record). */
+function bareConsentDigest(record: unknown): string {
+  const stable = (v: unknown): unknown => (v && typeof v === "object" && !Array.isArray(v)
+    ? Object.fromEntries(Object.keys(v as object).sort().map((k) => [k, stable((v as Record<string, unknown>)[k])]))
+    : v);
+  return createHash("sha256").update(JSON.stringify(stable(record) ?? null)).digest("hex");
 }
 
 /**
