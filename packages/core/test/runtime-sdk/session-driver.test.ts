@@ -825,6 +825,35 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
     } finally { t.close(); }
   });
 
+  // WS-24 (pickers lane): a row whose catalog `toolCalling` is `"none"` cannot carry a tool call at
+  // all, and a Winter session of any mode always offers tools — same "refused before any child, no
+  // silent swap" shape as the retired-catalog check just above, so an already-stored tag (a session
+  // recorded before this build, or written outside a picker) keeps naming the model and refuses typed
+  // at its next turn rather than being silently switched to another one.
+  test("a toolCalling:none catalog tag is refused typed before the turn (no-tool-calling), with no child and nothing consumed", async () => {
+    const t = table();
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const session = await t.drivers.create(sid);
+      await session.send("A", "cli");
+      const held = await session.send("B", "cli");
+      expect(held.queued).toBe(true);
+      // `agentrouter/claude-opus-4-8` is a real, non-retired ("candidate") catalog row whose
+      // `toolCalling` is `"none"` — bypasses the RPC's own picker, as a hand-edited settings file or a
+      // session recorded before the pickers lane's filter landed would.
+      t.store.setModel(sid, "agentrouter/claude-opus-4-8");
+      await t.drivers.evict(sid);
+      const spawnsBefore = t.queries.length;
+      let caught: unknown;
+      try { await t.drivers.ensure(sid); } catch (err) { caught = err; }
+      expect((caught as { code?: string })?.code).toBe("runtime_selection_refused");
+      expect((caught as { reason?: string })?.reason).toBe("no-tool-calling");
+      expect((caught as Error).message).toContain("cannot call tools");
+      expect(t.queries.length).toBe(spawnsBefore);
+      expect(unconsumedUserMessages(t.store.read(sid))).toEqual(["B"]);
+    } finally { t.close(); }
+  });
+
   test("a fresh create with nothing owed never consults the gate on the open path", async () => {
     // The cost of N2 on the hot path is zero: `create()` opens with an empty log.
     const t = table();
