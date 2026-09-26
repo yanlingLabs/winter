@@ -1181,6 +1181,20 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       if (isRetiredCatalogTag(model)) {
         throw new WinterLegRefusal("runtime_selection_refused", `${model} is not in this build's model catalog — switch this session to another model`, "model-not-in-catalog");
       }
+      // WS-24 (pickers lane): a row whose catalog `toolCalling` is `"none"` cannot carry a tool call at
+      // all (WS-23 hardened the Responses adapters to omit tools for such rows entirely), and a Winter
+      // session of ANY mode always offers tools — the daemon's own MCP capability surface at minimum.
+      // The picker lane's listings (`sync.config`'s `models`) no longer OFFER these rows, but nothing
+      // stops a hand-typed tag from naming one anyway — `resolveModelSelection`'s write-time gate is a
+      // catalog MEMBERSHIP check only (same as a retired tag, above), not an availability one — and a
+      // session or a hand-edited `settings.provider.model` recorded before this build may already name
+      // one. Either way it must keep displaying the model rather than being silently swapped to another
+      // one — the fix is `session.setModel`, and the refusal fires here, before any child, same shape as
+      // the retired-catalog check just above.
+      const row = rowForTag(model);
+      if (row !== undefined && row.toolCalling.value === "none") {
+        throw new WinterLegRefusal("runtime_selection_refused", `${model} cannot call tools, and this session needs them — switch this session to another model`, "no-tool-calling");
+      }
       const selection = providerFor(model, deps.home);
       if (selection === undefined) return;
       const credentials = await credentialPresenceFrom(deps.secrets);
