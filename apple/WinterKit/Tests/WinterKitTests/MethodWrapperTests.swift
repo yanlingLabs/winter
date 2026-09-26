@@ -1939,7 +1939,7 @@ extension MethodWrapperTests {
     /// "not told" (nil), never as false.
     func testModelsCatalogCarriesEffortVocabulariesVerbatimAndCredentialPresent() async throws {
         let (client, t) = try await connected()
-        let payload = #"{"ok":true,"providers":[ {"id":"openai","credentialDoor":"keychain","credentialSlotId":"openai:default","credentialPresent":true}, {"id":"console","credentialDoor":"console-profile","credentialSlotId":null,"credentialPresent":false}, {"id":"old","credentialDoor":"keychain"} ], "models":[ {"tag":"openai/o4-mini","efforts":["low","medium","high"],"defaultEffort":"medium"}, {"tag":"xai-oauth/grok-4.5","efforts":["high","medium","low"],"defaultEffort":null}, {"tag":"a/empty","efforts":[],"defaultEffort":null}, {"tag":"a/nullblock","efforts":null}, {"tag":"a/absent"} ]}"#
+        let payload = #"{"ok":true,"providers":[ {"id":"openai","credentialDoor":"keychain","credentialSlotId":"openai:default","credentialPresent":true}, {"id":"console","credentialDoor":"console-profile","credentialSlotId":null,"credentialPresent":false}, {"id":"old","credentialDoor":"keychain"} ], "models":[ {"tag":"openai/o4-mini","efforts":["low","medium","high"],"defaultEffort":"medium","sessionUsable":true}, {"tag":"xai-oauth/grok-4.5","efforts":["high","medium","low"],"defaultEffort":null,"sessionUsable":false}, {"tag":"a/empty","efforts":[],"defaultEffort":null}, {"tag":"a/nullblock","efforts":null}, {"tag":"a/absent"} ]}"#
         let (_, c) = try await roundTrip(t, sentIndex: 1, result: payload) { try await client.modelsCatalog() }
 
         XCTAssertEqual(c.providers.map(\.credentialPresent), [true, false, nil],
@@ -1951,6 +1951,11 @@ extension MethodWrapperTests {
         XCTAssertEqual(c.models[2].efforts, [], "`[]` survives as `[]` — an empty vocabulary, not no block")
         XCTAssertNil(c.models[3].efforts, "`null` = no reasoning block at all")
         XCTAssertNil(c.models[4].efforts, "absent reads the same as `null`")
+        // WS-24 (pickers lane, fix round 1): `sessionUsable` — carried as told, and an absent key
+        // (a daemon that predates it, `a/empty` onward) is nil, never coerced to `false`.
+        XCTAssertEqual(c.models[0].sessionUsable, true)
+        XCTAssertEqual(c.models[1].sessionUsable, false)
+        XCTAssertNil(c.models[2].sessionUsable, "not told ⇒ nil, never false")
     }
 
     /// `settings.modelRoles`' effort fields, and `setModelRole`'s THREE effort states on the wire:
