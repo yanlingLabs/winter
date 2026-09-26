@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, readdirSync, writeFileSync, appendFileSync, unlinkSync, existsSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { TrustStore } from "./trust";
+import { trustedProjectRoot } from "./project-scope-dirs";
 
 export type MemoryScope = "user" | "project";
 export type MemoryType = "user" | "feedback" | "project" | "reference";
@@ -138,11 +139,17 @@ export class MemoryStore {
     this.nowMs = deps.nowMs ?? Date.now;
   }
 
-  /** user → `~/.winter/memory`; project → `<cwd>/.winter/memory`, gated on a trusted `cwd`. */
+  /** user → `~/.winter/memory`; project → `<project root>/.winter/memory`, gated on a trusted project.
+   *
+   *  WS-24: the project is the cwd's project SCOPE (`trustedProjectRoot`: trust keyed on the repository,
+   *  the directory at `projectScopeRootFor(cwd)` — the cwd's own git top, a linked worktree's own) rather
+   *  than the cwd's own path, so a worktree of a trusted repo reaches its project memory, and a session in
+   *  a subdirectory reads and writes the project's one store instead of a `.winter/memory` beside itself. */
   private resolveRoot(scope: MemoryScope, cwd?: string): MemoryResult<string> {
     if (scope === "user") return { ok: true, value: join(this.winterHome, "memory") };
-    if (!cwd || !this.trust.isTrusted(cwd)) return { ok: false, error: PROJECT_TRUST_ERROR, kind: "trust" };
-    return { ok: true, value: join(cwd, ".winter", "memory") };
+    const root = trustedProjectRoot(cwd, this.trust);
+    if (root === null) return { ok: false, error: PROJECT_TRUST_ERROR, kind: "trust" };
+    return { ok: true, value: join(root, ".winter", "memory") };
   }
 
   list(scope: MemoryScope, cwd?: string): MemoryResult<MemoryFactMeta[]> {

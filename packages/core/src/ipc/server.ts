@@ -123,7 +123,8 @@ import { readSdkGlobalConfig, SdkFileUnreadable, updateSdkSettings } from "../sd
 import { bypassAllowedAtSpawn, disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
 import { diagnoseRuntimes } from "../runtime-sdk/runtimes-doctor";
-import { loadUserAgentDefinitions, loadProjectAgentDefinitions, mergeAgentDefinitionTiers } from "../agent/agent-definitions";
+import { loadUserAgentDefinitions, loadProjectAgentDefinitions, mergeAgentDefinitionTiers, type LoadedAgentDefinitions } from "../agent/agent-definitions";
+import { trustedProjectWalk } from "../agent/project-scope-dirs";
 import type { SupportedAgentsCache } from "../agent/supported-agents-cache";
 import {
   REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK,
@@ -2522,7 +2523,17 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.agentsList: {
         const p = parseParams(AgentsListParams, params);
         const user = opts.winterHome ? loadUserAgentDefinitions(opts.winterHome) : { definitions: {}, sources: [], rejected: [] };
-        const project = p.cwd && opts.trust?.isTrusted(p.cwd) ? loadProjectAgentDefinitions(p.cwd) : { definitions: {}, sources: [], rejected: [] };
+        // WS-24: the project tier a run home loads — the trusted project's walk (`trustedProjectWalk`: trust
+        // keyed on the repository, the directories from the cwd up to the project scope's root, so a linked
+        // worktree of a trusted repo lists its own agents), the NEAREST definition of a name winning, as the
+        // router's run-home builder has it (`lastWins` over the walk reversed).
+        const project: LoadedAgentDefinitions = { definitions: {}, sources: [], rejected: [] };
+        for (const dir of opts.trust ? [...trustedProjectWalk(p.cwd, opts.trust)].reverse() : []) {
+          const tier = loadProjectAgentDefinitions(dir);
+          project.definitions = { ...project.definitions, ...tier.definitions };
+          project.sources = [...project.sources.filter((s) => tier.definitions[s.name] === undefined), ...tier.sources];
+          project.rejected.push(...tier.rejected);
+        }
         const { sources, rejected } = mergeAgentDefinitionTiers(user, project);
         const definitionRows = sources.map(({ name, definition, path, tier, shadowed }) => ({
           name,

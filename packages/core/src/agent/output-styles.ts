@@ -4,6 +4,7 @@ import type { TrustStore } from "./trust";
 import { storeHomeFor } from "./paths";
 import { neutralizeReminderTags } from "./context";
 import { LEGACY_PROJECT_DIR, resolveLegacyProjectDir, resolveLegacyProjectPath } from "./legacy-project-files";
+import { trustedProjectWalk } from "./project-scope-dirs";
 import type { Settings } from "../settings";
 
 /** A fully-resolved output style ready to inject. `body` is neutralized + byte-capped for FILE
@@ -94,9 +95,13 @@ function parseStyleFile(path: string, fallbackName: string, cap: number): Resolv
 
 /**
  * Resolves an output style by name from three sources, closest-wins: a trusted project's
- * `<cwd>/.winter/output-styles/<name>.md`, then `<store home>/output-styles/<name>.md` (WS-21:
- * `storeHomeFor(winterHome)`), then the
- * built-ins. Mirrors SkillStore's trust-gated project-dir discovery. Never throws.
+ * `.winter/output-styles/<name>.md`, then `<store home>/output-styles/<name>.md` (WS-21:
+ * `storeHomeFor(winterHome)`), then the built-ins. Never throws.
+ *
+ * WS-24: the project tier is what a run home loads — trust keyed on the repository and the directories
+ * walked from the cwd up to the project scope's root (`trustedProjectWalk`), a linked worktree of a trusted
+ * repo included; where two walk directories define the same name, the ROOT-most wins, the router's own
+ * `lastWins` over the nearest-first walk (its run-home builder, output styles).
  */
 export class OutputStyleStore {
   private readonly cap: number;
@@ -124,8 +129,9 @@ export class OutputStyleStore {
     // skills.ts's skillNameError; no dots either, so a bare "." or ".." stem is rejected too rather
     // than relying on the `${name}.md` suffix to accidentally neuter it into "..md"/"...md".
     if (!/^[A-Za-z0-9_-]+$/.test(name)) return null;
-    if (cwd && this.deps.trust.isTrusted(cwd)) {
-      const { path, usedLegacy } = this.resolveStylePath(cwd, name);
+    // Root-most first: the run home's `lastWins` over the nearest-first walk (see the class doc).
+    for (const dir of [...trustedProjectWalk(cwd, this.deps.trust)].reverse()) {
+      const { path, usedLegacy } = this.resolveStylePath(dir, name);
       const p = parseStyleFile(path, name, this.cap);
       if (p) {
         if (usedLegacy) {
@@ -148,7 +154,7 @@ export class OutputStyleStore {
     return resolveLegacyProjectPath(winterPath, join(cwd, LEGACY_PROJECT_DIR, "output-styles", `${name}.md`), this.deps.legacySettings());
   }
 
-  /** All resolvable styles for the CLI: built-ins ∪ user files ∪ project files (if trusted),
+  /** All resolvable styles for the CLI: built-ins ∪ user files ∪ project files (if trusted, along the walk),
    *  deduped by name closest-wins (project > user > built-in). A legacy project output-styles
    *  directory is included ONLY when the Winter-named one does not exist at all (same
    *  file-vs-file fallback rule `resolve()` applies per style, generalized to "the whole dir is
@@ -166,11 +172,13 @@ export class OutputStyleStore {
       }
     };
     scan(join(storeHomeFor(this.deps.winterHome), "output-styles")); // user overrides built-in (WS-21: the store home)
-    if (cwd && this.deps.trust.isTrusted(cwd)) {
-      const winterDir = join(cwd, ".winter", "output-styles");
-      const legacyDir = join(cwd, LEGACY_PROJECT_DIR, "output-styles");
+    // Project overrides user; along the walk, nearest first and each later (more root-ward) dir overriding
+    // — the run home's `lastWins` (see the class doc).
+    for (const projectDir of trustedProjectWalk(cwd, this.deps.trust)) {
+      const winterDir = join(projectDir, ".winter", "output-styles");
+      const legacyDir = join(projectDir, LEGACY_PROJECT_DIR, "output-styles");
       const dir = this.deps.legacySettings ? resolveLegacyProjectDir(winterDir, legacyDir, this.deps.legacySettings()).dir : winterDir;
-      scan(dir); // project overrides user
+      scan(dir);
     }
     return [...out].map(([name, description]) => ({ name, description }));
   }
