@@ -10,20 +10,31 @@ import type { SessionStore } from "./store";
  *  never appear here either.
  *
  *  `hook_notice` and `continuity_warning` (WS-24, lane `phone`) were held out of this set at WS-23
- *  time pending confirmation that an OLD phone -- one still on the PINNED WinterProtocol kit tag
- *  that predates these two variants -- can survive receiving them. It can, by construction, not by
- *  luck: the phone's own transport (`WinterSessionKit.WinterSessionClient.decode`,
- *  apple/WinterKit/Sources/WinterSessionKit/WinterSessionClient.swift:792-795, and the type's own
- *  doc comment on `HistoryPage`, SessionModels.swift:29-32) decodes every event OPAQUELY as
- *  `SessionEvent.JSONValue`, never through the strict `SessionEvent` enum -- so an unrecognized
- *  `type` string can never throw there regardless of what cases an old kit's Discriminator knows.
- *  The seq/cursor bookkeeping (`WinterSessionClient.applyEvent`, same file:723-748) treats the
- *  unrecognized event exactly like any other persisted one (advances the cursor -- correct, since it
- *  really did consume a daemon seq). The one place these come to a stop is the phone's own transcript
- *  fold (`norma-ios` `Winter/Code/Transcript.swift`'s `TranscriptBuilder.apply`, `default: break` at
- *  the end of its switch on `type`) -- an unrecognized type is silently skipped, never rendered,
- *  never a crash, never a dropped connection. So no kit/capability gate is needed here: both types
- *  are safe to allow the moment this file does, on old phones and new alike. */
+ *  time pending confirmation that an OLD phone -- one still on the shipped `v-web-kit1` kit tag,
+ *  which predates these two variants -- can survive receiving them. It can, by construction, not by
+ *  luck, VERIFIED against that exact tag (`git diff v-web-kit1 --
+ *  apple/WinterKit/Sources/WinterSessionKit/` is empty, and `SessionEvent.transientTypes` is
+ *  unchanged since it too): the phone's own transport (`WinterSessionKit.WinterSessionClient`'s
+ *  private `decode(_:session:)`) decodes every event OPAQUELY as `SessionEvent.JSONValue`, never
+ *  through the strict `SessionEvent` enum -- so an unrecognized `type` string can never throw there
+ *  regardless of what cases an old kit's Discriminator knows. The seq/cursor bookkeeping
+ *  (`WinterSessionClient.applyEvent`) treats the unrecognized event exactly like any other persisted
+ *  one (advances the cursor -- correct, since it really did consume a daemon seq).
+ *
+ *  The one place these come to a stop is the phone's own transcript fold (`norma-ios`
+ *  `Winter/Code/Transcript.swift`'s `TranscriptBuilder.apply`, `default: break` at the end of its
+ *  switch on `type`) -- an unrecognized type is silently skipped, never rendered, never a crash,
+ *  never a dropped connection. So no kit/capability gate is needed here: both types are safe to
+ *  allow the moment this file does, on old phones and new alike.
+ *
+ *  A quieter corollary of the same filtering (`norma-ios` `CodeSessionModel.cacheableTypes`, the
+ *  in-memory mirror of THIS allowlist as it stood before this change): an old phone also filters
+ *  these two out of its merged history (`mergedEnvelopes`), so a `session.history` page made up
+ *  ENTIRELY of `hook_notice`/`continuity_warning` rows with `hasMore: true` would leave
+ *  `CodeSessionModel.loadOlder`'s floor (`mergedEnvelopes.keys.min()`) unchanged, and the next
+ *  `loadOlder()` would re-request the same page rather than progress further back. Implausible at
+ *  this file's 200-event default page size (some cacheable content is the overwhelming case) and
+ *  harmless even so -- a stalled re-fetch of the same page, never a crash or data loss. */
 export const HISTORY_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<SessionEvent["type"]>([
   "user_message",
   "assistant_message",
