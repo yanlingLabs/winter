@@ -398,6 +398,12 @@ final class ShortcutBindingLegacyIdMigrationTests: XCTestCase {
         XCTAssertNil(migratedShortcutBindings(old, knownPluginIds: ["p@m1", "p@m2", "q@m"]))
     }
 
+    func testAMigratedBindingThatDuplicatesASpecKeyedOneIsDroppedAndTheSpecKeyedOneWins() {
+        let kept = ShortcutBinding(pluginId: "battery@m", shortcutId: "toggle", keyCode: UInt32(kVK_ANSI_J), modifiers: ctrl)
+        let old = [ShortcutBinding(pluginId: "battery", shortcutId: "toggle", keyCode: k, modifiers: ctrl), kept]
+        XCTAssertEqual(migratedShortcutBindings(old, knownPluginIds: ["battery@m"]), [kept])
+    }
+
     func testTheModelSavesTheRewriteSoTheBindingShowsAndRebindsWithoutAConflict() {
         let suite = "ShortcutBindingLegacyIdMigrationTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

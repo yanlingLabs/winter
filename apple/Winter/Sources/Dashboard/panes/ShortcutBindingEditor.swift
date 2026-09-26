@@ -194,21 +194,27 @@ final class ShortcutBindingEditorModel: ObservableObject {
 
 /// PURE (WS-24): `bindings` with each bare-id `pluginId` rewritten to the ONE spec in `knownPluginIds` whose
 /// name half (before the last `@`) equals it, or `nil` when nothing changes. A binding already on a spec, or
-/// whose bare id matches none or several specs, is kept as it is. Table-tested in `ShortcutBindingEditorTests`.
+/// whose bare id matches none or several specs, is kept as it is. Fix round 2: when the rewrite lands on a
+/// (spec, shortcutId) pair that ALREADY has a spec-keyed binding (the user re-bound it after the upgrade),
+/// the spec-keyed one wins and the migrated duplicate is dropped — two bindings for one pair would both arm.
+/// Table-tested in `ShortcutBindingEditorTests`.
 func migratedShortcutBindings(_ bindings: [ShortcutBinding], knownPluginIds: [String]) -> [ShortcutBinding]? {
     func nameHalf(_ spec: String) -> String? {
         guard let at = spec.lastIndex(of: "@"), at != spec.startIndex else { return nil }
         return String(spec[..<at])
     }
     var changed = false
-    let out = bindings.map { binding -> ShortcutBinding in
-        guard !binding.pluginId.contains("@") else { return binding }
+    let alreadyKeyed = Set(bindings.filter { $0.pluginId.contains("@") }.map { "\($0.pluginId)\u{0}\($0.shortcutId)" })
+    var out: [ShortcutBinding] = []
+    for binding in bindings {
+        guard !binding.pluginId.contains("@") else { out.append(binding); continue }
         let matches = knownPluginIds.filter { nameHalf($0) == binding.pluginId }
-        guard matches.count == 1 else { return binding }
+        guard matches.count == 1 else { out.append(binding); continue }
         changed = true
+        guard !alreadyKeyed.contains("\(matches[0])\u{0}\(binding.shortcutId)") else { continue } // the spec-keyed one wins
         var next = binding
         next.pluginId = matches[0]
-        return next
+        out.append(next)
     }
     return changed ? out : nil
 }
