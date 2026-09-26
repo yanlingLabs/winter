@@ -12,7 +12,7 @@ import { EXA_API_KEY_SECRET } from "../../src/agent/tools/search";
 import { CLIENT_EFFORTS, REASONING_EFFORTS, Settings, loadSettings } from "../../src/settings";
 import { createProvider } from "../../src/providers/manager";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
-import { writeOpenAiApiKey, CodexAuthStore } from "../../src/auth/credential-material";
+import { writeOpenAiApiKey, writeCredentialMaterial, CodexAuthStore } from "../../src/auth/credential-material";
 import type { SecretStore } from "../../src/auth/secret-store";
 import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -531,6 +531,26 @@ describe("sync.config model catalogue (provider-correctness T3, WS-20)", () => {
       );
       expect(m.id.startsWith(`${m.providerId}/`)).toBe(true);
     }
+  });
+
+  // WS-24 (pickers lane): `toolCalling: "none"` rows never reach a SESSION picker — a Winter session
+  // of any mode always offers tools, so a session started on one of these rows could never work
+  // (WS-23 hardened the Responses adapters to omit tools for them entirely). `openrouter` is a real,
+  // CREDENTIALED-here provider whose own catalog rows are a genuine MIX: ten `native` rows plus
+  // `openrouter/openrouter/auto`, whose `toolCalling` is `"none"` — so this proves selective
+  // filtering, not merely "an all-toolless provider serves nothing" (already covered by the
+  // credential-presence tests above for a different reason).
+  test("pickerModels() excludes toolCalling:none rows, even from a provider whose OTHER rows are offered", async () => {
+    const secrets = new FakeSecretStore();
+    await writeCredentialMaterial(secrets, "openrouter:default", { kind: "api-key", key: "sk-or-test" });
+    const { credentialPresenceFrom } = await import("../../src/runtime-sdk/keychain");
+    const credentials = await credentialPresenceFrom(secrets);
+    const home = mkdtempSync(join(tmpdir(), "winter-picker-models-toolcalling-"));
+    const models = pickerModels({ credentials, home });
+    const openrouterIds = models.filter((m) => m.providerId === "openrouter").map((m) => m.id);
+    expect(openrouterIds).not.toContain("openrouter/openrouter/auto");
+    expect(openrouterIds.length).toBeGreaterThan(0); // the provider's native rows are still offered
+    expect(openrouterIds).toContain("openrouter/openai/gpt-5.6-sol");
   });
 });
 
