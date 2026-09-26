@@ -6,12 +6,12 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@yanlinglabs/winter-protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
-import type { WinterSessionDrivers, LegSession } from "../../src/runtime-sdk/session-driver";
+import { sessionCwdRefusal, type WinterSessionDrivers, type LegSession } from "../../src/runtime-sdk/session-driver";
 import { ImportLegacySessionError } from "../../src/runtime-sdk/import-legacy";
 
 class TestClient {
@@ -149,6 +149,34 @@ describe("session.send — the P8c-6 engine-era import door", () => {
       await c.request(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
       const res = await c.request(METHODS.sessionSend, { sessionId, text: "hi" });
       expect(res.error?.data?.code).toBe("session_predates_winter_leg");
+    } finally {
+      c.close();
+      server.stop();
+      store.close();
+    }
+  });
+
+  // A session whose working directory is gone is the USER's to fix (restore it, or start a new
+  // session), so it travels as INVALID_PARAMS — the class the other client-actionable refusals use —
+  // never INTERNAL, which a client renders as a daemon fault.
+  test("session_cwd_unavailable reaches the client as INVALID_PARAMS with its typed code and the path", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-send-cwd-gone-"));
+    const store = new SessionStore(home);
+    const sessionId = store.createSession("global");
+    const gone = join(home, "deleted-project");
+    const refusal = sessionCwdRefusal(gone)!;
+    const table: WinterSessionDrivers = {
+      ...fakeTable({ leg: { current: "winter" }, sent: [] }),
+      get: () => undefined,
+      ensure: async () => { throw refusal; },
+    };
+    const { server, c } = await boot(table, store, home, undefined);
+    try {
+      await c.request(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+      const res = await c.request(METHODS.sessionSend, { sessionId, text: "hi" });
+      expect(res.error?.code).toBe(ERR.INVALID_PARAMS);
+      expect(res.error?.data).toEqual({ code: "session_cwd_unavailable" });
+      expect(res.error?.message).toContain(gone);
     } finally {
       c.close();
       server.stop();
