@@ -1837,7 +1837,7 @@ public struct WinterCapability: Equatable, Sendable {
     }
 }
 
-/// A resolved runtime binary (`versions.get`'s `installed.winterExecutable`/`.claudeExecutable`).
+/// A resolved runtime binary (`versions.get`'s `installed.winterExecutable`).
 ///
 /// **There is no version here, by nature, not by omission**: the `winter` binary has no version
 /// flag, so the only true facts about it are WHERE it is and WHICH resolver rung answered
@@ -1859,33 +1859,32 @@ public struct VersionsExecutable: Equatable, Sendable {
 /// setting, a dev checkout, a home-local binary) and is a thing to SHOW, never an error to raise.
 ///
 /// Every field is independently optional: `pins`/`installed` are decoded as plain string maps so a
-/// fourth pin a later daemon adds arrives intact instead of being dropped by a fixed struct, and
-/// `official` is `nil` when no Release bundle is staged — a normal state on every dev machine.
+/// pin a later daemon adds arrives intact instead of being dropped by a fixed struct, and `bundle` is
+/// `nil` when no Release bundle is staged — a normal state on every dev machine.
+///
+/// WS-23: the official `claude` runtime is retired, so there is no `claudeExecutable` and no
+/// `claudeAgentSdk` pin; the bundle block is `bundle` (`{ runtimes?, ant? }`), no longer `official`.
 public struct VersionsSnapshot: Equatable, Sendable {
     /// The daemon's own version (`VERSION`).
     public let core: String?
-    /// Compile-time pins, keyed as the wire keys them (`winterAgentSdk`, `winterRuntimeSdk`,
-    /// `claudeAgentSdk`).
+    /// Compile-time pins, keyed as the wire keys them (`winterAgentSdk`, `winterRuntimeSdk`).
     public let pins: [String: String]
     /// Actually-resolved SDK versions, same keys. Only the STRING-valued entries land here; the
-    /// two executable objects are split out below because they carry no version at all.
+    /// executable object is split out below because it carries no version at all.
     public let installed: [String: String]
     public let winterExecutable: VersionsExecutable?
-    public let claudeExecutable: VersionsExecutable?
-    /// The staged Release bundle's own block, kept OPAQUE: its shape is the daemon's and no
-    /// surface reads it yet, so decoding it into named fields would be inventing a contract.
-    /// `nil` when nothing is staged.
-    public let official: [String: JSONValue]?
+    /// The staged Release bundle's own block (`{ runtimes?, ant? }` — the runtimes record and ant's
+    /// own), kept OPAQUE: its shape is the daemon's and no surface reads it yet, so decoding it into
+    /// named fields would be inventing a contract. `nil` when nothing is staged.
+    public let bundle: [String: JSONValue]?
 
     public init(core: String?, pins: [String: String], installed: [String: String],
-                winterExecutable: VersionsExecutable?, claudeExecutable: VersionsExecutable?,
-                official: [String: JSONValue]?) {
+                winterExecutable: VersionsExecutable?, bundle: [String: JSONValue]?) {
         self.core = core
         self.pins = pins
         self.installed = installed
         self.winterExecutable = winterExecutable
-        self.claudeExecutable = claudeExecutable
-        self.official = official
+        self.bundle = bundle
     }
 }
 
@@ -2066,14 +2065,13 @@ extension WinterClient {
         return VersionsSnapshot(
             core: r["core"]?.stringValue,
             pins: strings(r["pins"]),
-            // `compactMapValues { $0.stringValue }` also does the splitting: the two executable
-            // entries are OBJECTS, so they simply don't land in the string map.
+            // `compactMapValues { $0.stringValue }` also does the splitting: the executable entry is
+            // an OBJECT, so it simply doesn't land in the string map.
             installed: strings(installed),
             winterExecutable: executable(installed?["winterExecutable"]),
-            claudeExecutable: executable(installed?["claudeExecutable"]),
             // An explicit `null` decodes to `.null`, whose `objectValue` is nil — the same answer
             // as an absent key, which is what "no Release bundle staged" means either way.
-            official: r["official"]?.objectValue
+            bundle: r["bundle"]?.objectValue
         )
     }
 
@@ -2292,9 +2290,12 @@ public struct CatalogFamily: Equatable, Sendable {
 ///
 /// - `"keychain"` (~96 providers) — `credentialSlotId` names a Keychain slot; the fix is a key in
 ///   Settings → Providers.
-/// - `"console-profile"` (1, the `console` provider) — `credentialSlotId` is **null and that is
-///   CORRECT**: the Anthropic Console arm has no Keychain slot at all. Its readiness is an on-disk
-///   `ant` profile (which `credentialPresent` reports); the fix is `winter login --anthropic-console`.
+/// - `"console-profile"` (1, the `console` provider) — the fix is `winter login --anthropic-console`
+///   (or the app's Sign in), never a pasted key. `credentialSlotId` names its bearer slot
+///   (`anthropic:console`) on a daemon with the WS-23 live-gate fix and is null on an older one;
+///   either way the broker fills that slot from the sign-in, so the door, not the slot, decides the
+///   flow. Its readiness (`credentialPresent`) is that bearer slot on a current daemon, the on-disk
+///   `ant` profile on an older one.
 /// - `"none"` (5: bedrock, ollama-local, uncloseai, vertex, xai-oauth) — this daemon stores no
 ///   credential for them. These are precisely the rows a naive join would mark "no credential"
 ///   forever, with nothing the user could do about it.
@@ -2311,13 +2312,14 @@ public struct CatalogProvider: Equatable, Sendable {
     public let pricingBasis: String?
     public let authKinds: [String]
     /// The Keychain slot id (`openai:default`). **Null is meaningful, not missing** — see the
-    /// `console-profile` and `none` doors above.
+    /// `none` door above (and the `console-profile` one on an older daemon).
     public let credentialSlotId: String?
     /// `keychain` | `console-profile` | `none`, raw. Nil means the daemon did not say, which is
     /// "not told" and must render as no credential state at all.
     public let credentialDoor: String?
     /// **THE readiness answer**, computed daemon-side by the rule that backs the composer's model
-    /// list: the on-disk `ant` profile for the `console-profile` door, stored material otherwise. A
+    /// list: stored Keychain material (the Console's bearer for the `console-profile` door; an older
+    /// daemon read the on-disk `ant` profile for it). A
     /// daemon with no secret store reports every provider `false`. Nil = not told (a daemon that
     /// predates the field), which must render as no readiness claim at all — never as "missing".
     public let credentialPresent: Bool?

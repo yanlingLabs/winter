@@ -113,7 +113,9 @@ describe("D1-6: the pre-flight review, against the daemon's REAL resolveEndpoint
     expect(review.classification?.lossClass).toBe("lossless-portable");
   });
 
-  test("gpt -> claude prompts (a hidden-reasoning source crossing to a different domain is warned-lossy)", () => {
+  // WS-23 (reasoning-state, user decision 9): GPT's hidden reasoning stays in the sidecar for GPT and
+  // replays on a switch back -- nothing the target can see is lost -- so this no longer prompts.
+  test("gpt -> claude does NOT prompt (WS-23: the source's reasoning stays with it), and the fit rides the review", () => {
     // gpt-5.6-sol: `reasoning.continuation: "opaque-provider-state"` (it reasons) with no readable-
     // summary evidence declared (`readableState` reads back "none") — the catalog's own "Anthropic/
     // OpenAI strip thinking across models" premise this case rests on.
@@ -124,12 +126,11 @@ describe("D1-6: the pre-flight review, against the daemon's REAL resolveEndpoint
     const entries: SessionStoreEntry[] = [
       { type: "assistant", uuid: "b1", parentUuid: null, message: { role: "assistant", content: [{ type: "text", text: "the answer is 4" }] } },
     ];
-    // No sidecar record at all — GPT's reasoning is hidden/encrypted, so there is nothing readable
-    // to carry, which is exactly the case that must still warn (never "no evidence, so silence").
+    // No sidecar record at all — GPT's reasoning is hidden/encrypted; either way it is GPT's to keep.
     const review: SwitchReview = reviewModelSwitch({ entries, sidecarRecords: [], from, to });
-    expect(review.prompt).toBe(true);
-    expect(review.classification?.lossClass).toBe("warned-lossy");
-    expect(review.classification?.warnings.length).toBeGreaterThan(0);
+    expect(review.prompt).toBe(false);
+    expect(review.classification?.lossClass).toBe("lossless-portable");
+    expect((review as SwitchReview & { fits?: boolean }).fits).toBe(true);
     // Never names an SDK or runtime (R-10b-4) — the matrix's own prose invariant.
     for (const w of review.classification?.warnings ?? []) {
       expect(w).not.toMatch(/\bSDK\b|\bruntime\b|Claude Agent|Winter Agent/i);

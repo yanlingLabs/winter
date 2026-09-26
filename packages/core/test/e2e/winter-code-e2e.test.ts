@@ -223,8 +223,8 @@ describeWithWinterBinary("code on the Winter leg — the built binary through a 
     const record = daemon!.buildSessionCapabilities({ sessionId: "s_probe", mode: "code", cwd, roots: [cwd], tmpDir: cwd });
     expect(Object.keys(record)).toContain("winter__computer");
     // the server is built for every mode (P8b-36); the MODE scoping is `disallowedTools` (P8b-12)
-    expect(disallowedToolsFor("chat", { leg: "winter" })).toContain("mcp__winter__computer__computer");
-    expect(disallowedToolsFor("code", { leg: "winter" })).not.toContain("mcp__winter__computer__computer");
+    expect(disallowedToolsFor("chat", {})).toContain("mcp__winter__computer__computer");
+    expect(disallowedToolsFor("code", {})).not.toContain("mcp__winter__computer__computer");
     // the tool reaches the service: build the capability with a spy and drive its instance
     const calls: Array<{ cls: string; payload: string }> = [];
     const spy = { act: async (_sid: string, cls: string, payload: string) => { calls.push({ cls, payload }); return { ok: true, resultJson: JSON.stringify({ text: "#0 window" }) }; } };

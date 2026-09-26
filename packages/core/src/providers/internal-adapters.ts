@@ -116,14 +116,18 @@ export function internalAdapterFor(providerId: string, opts: { tokenUrl?: string
  *
  * `undefined` for a family that serves exactly ONE catalog provider, deliberately, mirroring the
  * runtime's own `generatedBaseUrlForAdapter` rule (`createShippedAdapters`): such an adapter carries a
- * built-in default, `resolveEndpoint` PREFERS `connection.baseUrl` when one is set, and the two
- * factories this replaced passed no base URL at all for codex-oauth/openai. Measured 2026-09-19 the two
- * agree byte-for-byte (`CODEX.backendUrl` = `https://chatgpt.com/backend-api/codex` = the catalog's
- * `codex-oauth` api; `OPENAI_API_BASE_URL` = `https://api.openai.com/v1` = the catalog's `openai` api),
- * so forcing the catalog value would be a no-op TODAY — but a later catalog or SDK bump that moved one
- * of them would silently redirect every existing codex/openai user's internal calls, and no loopback
- * test could see it (they all override the URL). Deferring to the adapter keeps the pre-existing
- * behaviour exactly; `internal-adapters.test.ts` pins the equality so a divergence is a test failure.
+ * built-in default, `resolveEndpoint` PREFERS `connection.baseUrl` when one is set, and the factory this
+ * replaced passed no base URL at all for codex-oauth. Measured 2026-09-19 the two agree byte-for-byte
+ * (`CODEX.backendUrl` = `https://chatgpt.com/backend-api/codex` = the catalog's `codex-oauth` api), so
+ * forcing the catalog value would be a no-op TODAY — but a later catalog or SDK bump that moved one of
+ * them would silently redirect every existing codex user's internal calls, and no loopback test could
+ * see it (they all override the URL). Deferring to the adapter keeps the pre-existing behaviour exactly.
+ *
+ * WS-23 (agent SDK 0.0.25): `openai` NO LONGER defers. `winter.openai-responses` now serves `openai`
+ * AND `xai`, so it is a multi-provider family with no single vendor default, and `openai` gets the
+ * catalog's `https://api.openai.com/v1` stated explicitly. That is the SAME host its internal jobs
+ * always reached: `internal-adapters.test.ts` pins the catalog row equal to the SDK's own
+ * `OPENAI_API_BASE_URL`, so a divergence is a test failure, never a silent redirect.
  *
  * No `endpointOrigin` is stamped: the runtime reserves `"reviewed"` for its own copy path
  * (`ConnectionProfile.endpointOrigin`'s doc), and an absent value reads as `"user"`, which the endpoint

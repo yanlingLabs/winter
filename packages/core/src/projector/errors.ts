@@ -36,6 +36,8 @@ export type AgentErrorCode =
   | "billing" | "model_not_found" | "max_output_tokens" | "context_overflow"
   // turn-shaped terminals
   | "max_turns" | "max_budget" | "structured_output_exhausted" | "tool_failure"
+  // the runtime's own named verdicts (WS-23): a model refusal, and a paused turn Winter stopped resuming
+  | "refusal" | "pause_turn_limit"
   // transport / lifecycle
   | "aborted" | "process_death" | "protocol_decode" | "connection_closed"
   // host-side storage
@@ -60,6 +62,8 @@ const CLASS_MESSAGE: Record<AgentErrorCode, string> = {
   max_budget: "the turn hit its spending limit",
   structured_output_exhausted: "the model could not produce valid structured output",
   tool_failure: "a tool failed while the turn was running",
+  refusal: "the model declined to respond to this request",
+  pause_turn_limit: "the model kept pausing its turn, and Winter stopped resuming it",
   aborted: "the turn was stopped before it finished",
   process_death: "the runtime process exited unexpectedly",
   protocol_decode: "the runtime sent a frame this daemon could not decode",
@@ -169,10 +173,36 @@ function isCredentialResolutionFailure(raw: unknown): boolean {
 }
 
 /**
+ * WS-23: the `terminal_reason`s the runtime names ITSELF, each a verdict about the turn rather than
+ * about one HTTP exchange — so each outranks `api_error_status` (below). The case that makes the
+ * ordering load-bearing is `prompt_too_long`: the runtime emits it WITH the vendor's status (a 400 on
+ * Anthropic's overflow), which the status branch would read as `bad_request` ("the provider rejected
+ * the request as invalid") — a message that sends the user looking for a malformed request instead of
+ * a conversation that no longer fits.
+ *
+ *  - `prompt_too_long` — the context overflowed and the runtime's reactive compaction could not
+ *    recover it (claude's own `TerminalReason` spelling; the runtime reuses it). → `context_overflow`.
+ *  - `refusal` — the model ended the stream with `stop_reason: "refusal"` and there was no fallback
+ *    model to retry on. `result` carries the partial text, else the vendor's explanation (display-only,
+ *    never parsed — it reaches the message only through `sanitizeDetail`'s bound).
+ *  - `pause_turn_limit` — the vendor paused the turn more times than the runtime resumes one
+ *    (`MAX_PAUSE_TURN_CONTINUATIONS`); `result` is the paused turn's text.
+ *
+ * `hook_stopped` is deliberately NOT here: it is `is_error: false` (a hook ended the turn on purpose),
+ * and `terminal.ts` projects it as a `hook_notice`, never an `agent_error`.
+ */
+const NAMED_TERMINAL_CODE: Readonly<Record<string, AgentErrorCode>> = {
+  prompt_too_long: "context_overflow",
+  refusal: "refusal",
+  pause_turn_limit: "pause_turn_limit",
+};
+
+/**
  * Classify a terminal `result` that is an error.
  *
- * Precedence, most specific first: the provider taxonomy (a named class), then `api_error_status`
- * (a structural HTTP class), then `terminal_reason`, then `subtype`. Anything unrecognised is
+ * Precedence, most specific first: the provider taxonomy (a named class), then the runtime's own
+ * named terminal verdicts (`NAMED_TERMINAL_CODE`, WS-23), then `api_error_status` (a structural HTTP
+ * class), then the remaining `terminal_reason`s, then `subtype`. Anything unrecognised is
  * `unknown_error` — never a pass-through of the runtime's own string as a code, which would make
  * the field unswitchable.
  */
@@ -182,15 +212,17 @@ export function classifyResult(result: ResultFrame): ClassifiedError {
   const taxonomy = typeof result.error === "string" ? PROVIDER_TAXONOMY[result.error] : undefined;
   if (taxonomy !== undefined) return compose(taxonomy, detail);
 
+  const reason = typeof result.terminal_reason === "string" ? result.terminal_reason : undefined;
+  const named = reason !== undefined ? NAMED_TERMINAL_CODE[reason] : undefined;
+  if (named !== undefined) return compose(named, detail);
+
   const status = result.api_error_status;
   if (typeof status === "number" && Number.isFinite(status)) return compose(codeForHttpStatus(status), detail);
 
-  const reason = typeof result.terminal_reason === "string" ? result.terminal_reason : undefined;
   if (reason === "structured_output_retry_exhausted") return compose("structured_output_exhausted", detail);
-  // NOTE: 0.0.3 has NO wire producer for a context overflow — Winter auto-compacts before it can
-  // happen (`DEFAULT_COMPACTION_THRESHOLD` on the barrel), and the 11-member provider taxonomy has
-  // no overflow member. The class is implemented and tested against a synthetic frame so the code
-  // is distinct and has a home the day a signal appears; it is NOT claimed to be reachable today.
+  // The runtime's own overflow spelling is `prompt_too_long` (above, since WS-23). This older
+  // spelling has never had a wire producer; it keeps its class so a frame carrying it is not
+  // misread as `unknown_error`.
   if (reason === "context_overflow") return compose("context_overflow", detail);
   if (reason === "api_error") {
     if (isCapabilityRefusal(result.result)) return { code: "bad_request", message: detail === undefined ? CAPABILITY_REFUSAL_MESSAGE : `${CAPABILITY_REFUSAL_MESSAGE}: ${detail}` };

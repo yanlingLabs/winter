@@ -46,43 +46,16 @@
     {
       "row": 4,
       "title": "Two official sessions under the spool: isolated discovery, delivery, hold/refuse, idle wake, zero visibility into `~/.claude` (item 4)",
-      "status": "partial",
-      "citations": [
-        {
-          "repo": "winter",
-          "file": "packages/core/test/runtime-sdk/official-leg.e2e.test.ts",
-          "contains": "WS-17 §8 row 4"
-        },
-        {
-          "repo": "winter",
-          "file": "packages/core/test/runtime-sdk/official-leg.e2e.test.ts",
-          "contains": "9a MEASURED: row 4 HOLD"
-        },
-        {
-          "repo": "winter",
-          "file": "packages/core/test/runtime-sdk/official-leg.e2e.test.ts",
-          "contains": "9a MEASURED: row 4 REFUSE"
-        },
-        {
-          "repo": "winter",
-          "file": "packages/core/test/runtime-sdk/official-leg.e2e.test.ts",
-          "contains": "9a MEASURED: row 4 IDLE WAKE"
-        }
-      ],
-      "note": "PARTIAL — proven halves (8d + 9a): two official sessions, one spool — isolated discovery, delivery (SendMessage A->B), a planted ~/.claude byte-identical, HOLD (queued, delivered into B's next request body) and REFUSE (not_found, isError) match the spec on the real 0.3.250 binary; crash mid-turn -> resumable, next send = generation 2, matches WS-16 §14. The idle-wake half is a measured GAP, not proven: a genuinely `resumable` official session is refused `unavailable` exactly like an exited one, because router 0.0.3 exposes no cold-resume path (WS-15 §6.2) — carried to router 0.0.4."
+      "status": "retired",
+      "citations": [],
+      "note": "RETIRED (WS-23) — the official `claude` runtime this row measured is no longer part of Winter: every model runs on the Winter runtime, so there is no official session to spool, message or resume. The row's measured history (8d + 9a) is in git, in `packages/core/test/runtime-sdk/official-leg.e2e.test.ts` as deleted at WS-23; PARTIAL — proven halves (8d + 9a): two official sessions, one spool — isolated discovery, delivery (SendMessage A->B), a planted ~/.claude byte-identical, HOLD (queued, delivered into B's next request body) and REFUSE (not_found, isError) match the spec on the real 0.3.250 binary; crash mid-turn -> resumable, next send = generation 2, matches WS-16 §14. The idle-wake half is a measured GAP, not proven: a genuinely `resumable` official session is refused `unavailable` exactly like an exited one, because router 0.0.3 exposes no cold-resume path (WS-15 §6.2) — carried to router 0.0.4."
     },
     {
       "row": 5,
       "title": "Official parent resume after restart restores completed children for native SendMessage resume (item 5)",
-      "status": "partial",
-      "citations": [
-        {
-          "repo": "winter",
-          "file": "packages/core/test/runtime-sdk/official-leg.e2e.test.ts",
-          "contains": "WS-17 §8 row 5"
-        }
-      ],
-      "note": "PARTIAL — refusal branch only (8d): native SendMessage to a completed official child, across a directory restart, refuses `unavailable` (WS-15 §6.2 wording). Router 0.0.3 exposes no official cold-resume path, so the restore direction itself stays unmeasured — carried to router 0.0.4."
+      "status": "retired",
+      "citations": [],
+      "note": "RETIRED (WS-23) — the official `claude` runtime this row measured is no longer part of Winter: every model runs on the Winter runtime, so there is no official session to spool, message or resume. The row's measured history (8d + 9a) is in git, in `packages/core/test/runtime-sdk/official-leg.e2e.test.ts` as deleted at WS-23; PARTIAL — refusal branch only (8d): native SendMessage to a completed official child, across a directory restart, refuses `unavailable` (WS-15 §6.2 wording). Router 0.0.3 exposes no official cold-resume path, so the restore direction itself stays unmeasured — carried to router 0.0.4."
     },
     {
       "row": 6,
@@ -192,10 +165,10 @@
         {
           "repo": "winter",
           "file": "scripts/embed-runtimes.sh",
-          "contains": "VERIFY (never re-sign)"
+          "contains": "nothing under `runtimes/claude-official/` is staged"
         }
       ],
-      "note": "The router's proof is scoped to its own distribution (the pinned package, its bundle, or a vendored copy — never tracked; the OPTIONAL peer named in a REACHABLE declaration is rejected). Separately, by the user's P9c-1 ruling: the Winter DISTRIBUTION (the `@yanlinglabs/winter-agent-sdk*` packages) carries no all-rights-reserved artifact, while the APP embeds the unmodified `claude` binary under Anthropic's published permission — `scripts/embed-runtimes.sh` VERIFIES (never re-signs) that embedded binary's Developer ID signature and hardened-runtime flag before every Release build."
+      "note": "The router's proof is scoped to its own distribution (the pinned package, its bundle, or a vendored copy — never tracked). Separately, by the user's P9c-1 ruling: the Winter DISTRIBUTION (the `@yanlinglabs/winter-agent-sdk*` packages) carries no all-rights-reserved artifact. WS-23: the app no longer embeds Anthropic's `claude` binary at all — `scripts/embed-runtimes.sh` stages only `winter` and `ant` (MIT, re-signed), and nothing under `runtimes/claude-official/`."
     },
     {
       "row": 14,

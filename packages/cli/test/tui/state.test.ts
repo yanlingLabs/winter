@@ -523,6 +523,20 @@ describe("state.ts — note one-liners match main.ts's wording (bg-task/worktree
     expect(s.committed.at(-1)).toEqual({ kind: "note", text: "notification: Winter: migration finished" });
   });
 
+  // WS-23: a hook's notice (a blocked prompt's reason) is one dim note line, multi-line text joined.
+  test("hook_notice", () => {
+    let s = initialState();
+    s = reduce(s, { type: "hook_notice", threadId: "main", text: "UserPromptSubmit operation blocked by hook:\nprompt contains a secret", level: "warning", stopsTurn: true }, T0);
+    expect(s.committed.at(-1)).toEqual({ kind: "note", text: "hook: UserPromptSubmit operation blocked by hook: — prompt contains a secret" });
+  });
+
+  // WS-23 review r1 I-3: a continuity warning is one dim note line too.
+  test("continuity_warning", () => {
+    let s = initialState();
+    s = reduce(s, { type: "continuity_warning", threadId: "main", warning: "model_switch_lossy", text: "switching from a to b:\n2 images cannot be read." }, T0);
+    expect(s.committed.at(-1)).toEqual({ kind: "note", text: "note: switching from a to b: — 2 images cannot be read." });
+  });
+
   test("lease_granted / lease_lost (Phase 5 CU) — CU control notes with friendly class labels", () => {
     let s = initialState();
     const holder = { kind: "session", id: "s1" };

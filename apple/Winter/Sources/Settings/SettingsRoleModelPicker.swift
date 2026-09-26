@@ -47,10 +47,10 @@ import WinterKit
 //      CATALOG ELIGIBILITY — it applies the blocked floor and nothing else, so it names providers
 //      the user has no credential for. Since 2026-09-18 every `models.catalog` provider row carries
 //      `credentialPresent`, computed daemon-side by the rule that backs the composer's model list
-//      (the on-disk `ant` profile for the console arm, stored material otherwise). That boolean IS
-//      the readiness test. There is no `credential.list` join and no slot lookup any more — the
-//      join is gone, not bypassed, because a providerId- or slot-keyed guess was provably wrong
-//      for a real user (two secrets live under the id `anthropic` alone).
+//      (stored Keychain material — for the console arm, its bearer). That boolean IS the readiness
+//      test. There is no `credential.list` join and no slot lookup any more — the join is gone, not
+//      bypassed, because a providerId- or slot-keyed guess was provably wrong for a real user (the
+//      Console's slot is `anthropic:console`, and older daemons filed it under `anthropic`).
 //
 //      `credentialDoor` answers a SEPARATE question — which flow to offer when it is not ready —
 //      and is branched on, never a hardcoded provider id (`roleProviderCredentialState`):
@@ -888,9 +888,9 @@ let roleModelPickerClearDetail = "Follows the default session model, and moves w
 /// fallback, titles, the reviewer — mapped onto the role's CURRENT model at spend time rather than
 /// refused, so even a stale effort degrades to "mapped or omitted", never to a broken job.
 ///
-/// The advisor is the exception and needs nothing here (parity-blocked, not forgotten — see
-/// `roleEffortControl`): neither SDK's advisor option carries an
-/// effort (and the parity rule forbids inventing one), so its `efforts` is `null` whatever its model,
+/// The advisor is the exception and needs nothing here (not forgotten — see
+/// `roleEffortControl`): the agent SDK's advisor option carries no
+/// effort, so the daemon reports its `efforts` as `null` whatever its model,
 /// and the null-vocabulary rule already renders no control. A null on a model that obviously HAS a
 /// vocabulary is correct there, not a bug.
 ///
@@ -975,10 +975,10 @@ func roleEffortControl(enabled: Bool, canWriteEffort: Bool,
     guard !options.isEmpty else {
         // `nil`: no reasoning block — no control at all, unless a leftover must be named.
         //
-        // THE ADVISOR LANDS HERE, and that is PARITY-BLOCKED, NOT FORGOTTEN: neither SDK's advisor
-        // option carries an effort, and a capability the Claude Agent SDK does not expose is not
-        // added unilaterally (user's standing rule). The daemon therefore always reports its
-        // `efforts` as null, whatever its model. Do not special-case it into a menu.
+        // THE ADVISOR LANDS HERE, and that is NOT FORGOTTEN: the Winter agent SDK's advisor option
+        // carries no effort, so the daemon always reports its `efforts` as null, whatever its
+        // model. Do not special-case it into a menu; if the SDK gains an advisor effort, the
+        // daemon's vocabulary will say so and this falls through to the menu below.
         guard value.efforts != nil else {
             return value.effort.map { .noSetting(stale: $0) } ?? .hidden
         }

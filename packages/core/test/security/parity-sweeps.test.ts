@@ -8,10 +8,18 @@
 //     phase introduces (`ENC-DUMMY`, `SIG-DUMMY`, `<recovered_reasoning`) — proving the EXISTING
 //     allowlist filters (`HISTORY_EVENT_TYPES`, `REMOTE_STREAM_EVENT_TYPES`) hold for THESE payloads
 //     too, with a harness-role CONTROL proving it is a scoped filter, not a blanket outage.
-//   Part B — a REAL e2e (official Claude with a `thinking` block -> Winter GPT, the one achievable
-//     direction per `handoff-parity-e2e.test.ts`'s own Defect 1/2 findings) sweeping the REAL
-//     captured request bodies, the REAL canonical transcript file and a REAL `session.history` call
-//     for the same markers, plus I-3 over the real record's own credential locator.
+//   Part B — a REAL e2e (Claude with a `thinking` block -> GPT, both on the Winter runtime since
+//     WS-23 retired the official leg this used to start on) sweeping the REAL captured request bodies,
+//     the REAL canonical transcript file and a REAL `session.history` call for the same markers, plus
+//     I-3 over the real record's own credential locator.
+//
+// WS-23 (reasoning-state, SDK ef5d6fd): Anthropic thinking and redacted_thinking, signatures and all,
+// moved OUT of the canonical transcript into the `<sessionId>.provider-state.jsonl` sidecar as
+// `reasoning-blocks` records — the transcript is provider-neutral now, and the sidecar is I-1's one
+// designated sink. Part B asserts exactly that split, then the point of the whole sweep: signed
+// thinking reaches NO foreign request — no signature bytes, no redacted_thinking data, no `thinking`
+// block; only the capped `<recovered_reasoning>` text decoration — while a switch BACK to Claude
+// splices the very same blocks in again (the control that keeps the negative from being vacuous).
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -29,10 +37,18 @@ import { CREDENTIAL_MATERIAL_NAMES, writeCredentialMaterial } from "../../src/au
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
-import { claudeRuntimeForTests, describeWithClaudeRuntime, type AnthropicTurnScript } from "../helpers/claude-runtime";
+import { opaqueLeaks } from "../helpers/carriage";
+import { DECORATION_CHAR_BUDGET, MAX_DECORATION_CHARS } from "@yanlinglabs/winter-provider-runtime";
+import type { anthropicFake as AnthropicFakeModule } from "@yanlinglabs/winter-provider-conformance";
+
+type AnthropicTurnScript = Parameters<typeof AnthropicFakeModule.anthropicTurnResponse>[0];
 
 const ENC_DUMMY = "ENC-DUMMY-SWEEP-1";
 const SIG_DUMMY = "SIG-DUMMY-SWEEP-1";
+/** The opaque `data` of a scripted `redacted_thinking` block — Part B's second signed-state marker. */
+const REDACTED_DUMMY = "REDACTED-DUMMY-SWEEP-1";
+/** Part B's scripted thinking TEXT: the one part of Claude's reasoning a foreign model may read, as a capped decoration. */
+const THINKING_TEXT = "reasoning about the sweep";
 const TAG_LIKE = '<recovered_reasoning kind="summary" provider="anthropic" model="claude-sonnet-5">the reasoning text</recovered_reasoning>';
 
 function sweep(haystack: string): { encDummy: boolean; sigDummy: boolean; redactedThinking: boolean; tag: boolean } {
@@ -195,11 +211,11 @@ describe("A-8 part A: opaque state + the carry tag never reach session.history o
 });
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// Part B — a REAL e2e (official Claude -> Winter GPT): sweep the REAL captured request bodies, the
-// REAL canonical transcript file, and a REAL session.history call.
+// Part B — a REAL e2e (Claude -> GPT, both on the Winter runtime): sweep the REAL captured request
+// bodies, the REAL canonical transcript file, and a REAL session.history call.
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-describeWithWinterBinary("A-8 part B: real captures (official Claude -> Winter GPT)", (winterBin) => {
-  describeWithClaudeRuntime("sweep the real request bodies + canonical file + session.history", () => {
+describeWithWinterBinary("A-8 part B: real captures (Claude -> GPT on the Winter runtime)", (winterBin) => {
+  describe("sweep the real request bodies + canonical file + session.history", () => {
     let home: string;
     let daemon: RunningDaemon | undefined;
     let client: TestClient;
@@ -208,7 +224,8 @@ describeWithWinterBinary("A-8 part B: real captures (official Claude -> Winter G
     const anthropicRequests: Array<{ path: string; body: string }> = [];
     const anthropicScript: AnthropicTurnScript = {
       blocks: [
-        { type: "thinking", chunks: ["reasoning about the sweep"], signature: SIG_DUMMY },
+        { type: "thinking", chunks: [THINKING_TEXT], signature: SIG_DUMMY },
+        { type: "redacted_thinking", data: REDACTED_DUMMY },
         { type: "text", chunks: ["the sweep answer"] },
       ],
       stopReason: "end_turn",
@@ -235,16 +252,13 @@ describeWithWinterBinary("A-8 part B: real captures (official Claude -> Winter G
       writeFileSync(join(home, "settings.json"), JSON.stringify({
         schemaVersion: 3,
         provider: { model: "openai/gpt-5.6-sol" },
-        providers: { openai: { baseUrl: openaiFake.url } },
-        runtimes: { winterExecutable: winterBin, claudeExecutable: claudeRuntimeForTests()!.executable, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
+        providers: { openai: { baseUrl: openaiFake.url }, anthropic: { baseUrl: anthropicFakeServer.url } },
+        runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60 },
       }, null, 2));
       const secrets = new FileSecretStore(join(home, "test-secrets"));
       await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-test-sweep" });
       await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-test-sweep-anthropic" });
-      daemon = await startDaemon({
-        home, secrets, agentProvider: null,
-        officialConnectionOverride: () => ({ explicitConnectionEnv: { ANTHROPIC_BASE_URL: anthropicFakeServer.url }, authFamily: "custom" }),
-      });
+      daemon = await startDaemon({ home, secrets, agentProvider: null });
       if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
       client = await TestClient.connect(daemon.socketPath);
       await client.hello(daemon.tokens.harness, "e2e");
@@ -260,45 +274,63 @@ describeWithWinterBinary("A-8 part B: real captures (official Claude -> Winter G
       rmSync(home, { recursive: true, force: true });
     });
 
-    test("SIG-DUMMY/redacted_thinking never leak into the foreign (openai) request; the canonical file and session.history are clean; I-3 holds", async () => {
+    test("signed thinking lives in the sidecar, never the transcript; SIG-DUMMY/redacted_thinking/thinking never reach the foreign (openai) request; a switch back splices them in again; history is clean; I-3 holds", async () => {
       const d = daemon!;
       if ("unavailable" in d.runtimeState) throw d.runtimeState.unavailable;
       const rt = d.runtimeState;
       const PRIOR_TEXT = "remember P10B-SWEEP-1";
       const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: "anthropic/claude-sonnet-5" });
       await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
-      expect(d.winter.legOf(sessionId)).toBe("official");
+      expect(d.winter.legOf(sessionId)).toBe("winter");
       await client.call(METHODS.sessionSend, { sessionId, text: PRIOR_TEXT });
       await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 45_000);
 
-      // I-1's designated sink: the fake's own `thinking`/`signature` block genuinely landed in the
-      // canonical file (never a vacuous sweep) — asserted before the handoff, mirroring A-2's own
-      // "first assert it landed" discipline.
       const record = rt.records.get(sessionId);
       if (record === undefined) throw new Error("no record");
-      const findTranscriptFile = (root: string, backendSessionId: string): string | undefined => {
+      const findFile = (root: string, name: string): string | undefined => {
         if (!existsSync(root)) return undefined;
         for (const entry of readdirSync(root, { withFileTypes: true })) {
           const full = join(root, entry.name);
           if (entry.isDirectory()) {
-            const found = findTranscriptFile(full, backendSessionId);
+            const found = findFile(full, name);
             if (found !== undefined) return found;
-          } else if (entry.name === `${backendSessionId}.jsonl`) {
+          } else if (entry.name === name) {
             return full;
           }
         }
         return undefined;
       };
       if (record.backendSessionId === undefined) throw new Error("no backendSessionId on the record");
-      const transcriptFile = findTranscriptFile(home, record.backendSessionId);
+      const transcriptFile = findFile(home, `${record.backendSessionId}.jsonl`);
       if (transcriptFile === undefined) throw new Error(`no canonical transcript file found for ${record.backendSessionId}`);
+      const sidecarFile = findFile(home, `${record.backendSessionId}.provider-state.jsonl`);
+      if (sidecarFile === undefined) throw new Error(`no provider-state sidecar found for ${record.backendSessionId}`);
+
+      // WS-23: the canonical transcript is PROVIDER-NEUTRAL — the reply's text is there, its signed
+      // thinking is not (no signature, no redacted data, no thinking block, not even the thinking text).
       const canonicalRaw = readFileSync(transcriptFile, "utf8");
-      expect(canonicalRaw).toContain(SIG_DUMMY); // I-1's own designated sink — legitimately present here
+      expect(canonicalRaw).toContain("the sweep answer"); // a real, populated transcript — never a vacuous sweep
+      expect(canonicalRaw).not.toContain(SIG_DUMMY);
+      expect(canonicalRaw).not.toContain(REDACTED_DUMMY);
+      expect(canonicalRaw).not.toContain("redacted_thinking");
+      expect(canonicalRaw).not.toContain('"type":"thinking"');
+      expect(canonicalRaw).not.toContain(THINKING_TEXT);
       expect(canonicalRaw).not.toContain("<recovered_reasoning"); // I-2: the tag itself never persists
 
-      // Prompt, confirmLossy, then the destination's own request.
-      try { await client.call(METHODS.sessionSetModel, { sessionId, model: "openai/gpt-5.6-sol" }); } catch { /* expected to prompt */ }
-      await client.call(METHODS.sessionSetModel, { sessionId, model: "openai/gpt-5.6-sol", confirmLossy: true });
+      // ...and the sidecar is I-1's designated sink: one `reasoning-blocks` record holding BOTH blocks
+      // verbatim, signature and redacted data included ("first assert it landed").
+      const sidecarRecords = readFileSync(sidecarFile, "utf8").split("\n").filter((l) => l.length > 0).map((l) => JSON.parse(l) as { kind?: string; provider?: string; payload?: { blocks?: Array<{ at: number; block: Record<string, unknown> }> } });
+      const reasoningBlocks = sidecarRecords.filter((r) => r.kind === "reasoning-blocks");
+      expect(reasoningBlocks).toHaveLength(1);
+      expect(reasoningBlocks[0]!.provider).toBe("anthropic");
+      expect(reasoningBlocks[0]!.payload?.blocks?.map((b) => b.block)).toEqual([
+        { type: "thinking", thinking: THINKING_TEXT, signature: SIG_DUMMY },
+        { type: "redacted_thinking", data: REDACTED_DUMMY },
+      ]);
+
+      // WS-23 (decision 9): Claude -> GPT is the PLAIN switch — the signed thinking is parked in the
+      // sidecar, not lost — so it applies with no confirmation at all. A prompt here would throw.
+      await client.call(METHODS.sessionSetModel, { sessionId, model: "openai/gpt-5.6-sol" });
       expect(d.winter.legOf(sessionId)).toBe("winter");
 
       // I-3: the destination's own credential locator names ONLY the fresh (openai) selection —
@@ -308,10 +340,9 @@ describeWithWinterBinary("A-8 part B: real captures (official Claude -> Winter G
       expect(afterRecord?.authRef).toBe("keychain:openai:default");
       expect(afterRecord?.authRef).not.toContain("anthropic");
 
-      // The destination's own outbound request (unaffected by Defect 2's event-drop — see
-      // `handoff-parity-e2e.test.ts`'s header): SIG-DUMMY and redacted_thinking never appear.
+      // The destination's own outbound request.
       const before = openaiFakeRef!.requests.length;
-      await client.call(METHODS.sessionSend, { sessionId, text: "the last question" }).catch(() => { /* fire; see Defect 2 */ });
+      await client.call(METHODS.sessionSend, { sessionId, text: "the last question" });
       {
         const t0 = Date.now();
         for (;;) {
@@ -320,13 +351,82 @@ describeWithWinterBinary("A-8 part B: real captures (official Claude -> Winter G
           await Bun.sleep(20);
         }
       }
-      const lastReq = openaiFakeRef!.requests[openaiFakeRef!.requests.length - 1]!;
-      const reqBody = JSON.stringify(lastReq.body ?? {});
-      const found = sweep(reqBody);
-      expect(found.sigDummy).toBe(false);
-      expect(found.redactedThinking).toBe(false);
-      // The prior text DOES carry (proving this is a real, populated request, not an empty one).
-      expect(reqBody).toContain(PRIOR_TEXT);
+      await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && client.events.filter((x) => x.type === "turn_completed" && x.sessionId === sessionId).length >= 2, 45_000);
+      // EVERY request the foreign provider received after the switch, not only the last one.
+      const foreignBodies = openaiFakeRef!.requests.slice(before).map((r) => String(r.body ?? ""));
+      expect(foreignBodies.length).toBeGreaterThan(0);
+      for (const reqBody of foreignBodies) {
+        // (1) no signed-state BYTES anywhere in the raw body — neither value, nor any opaque field name
+        //     in the conversation (`opaqueLeaks` checks `signature`/`encrypted_content`/`redacted_thinking`).
+        expect(reqBody).not.toContain(SIG_DUMMY);
+        expect(reqBody).not.toContain(REDACTED_DUMMY);
+        expect(reqBody).not.toContain("redacted_thinking");
+        expect(opaqueLeaks(reqBody, [SIG_DUMMY, REDACTED_DUMMY])).toEqual([]);
+        // (2) no `thinking`/`redacted_thinking` BLOCK at any depth of the parsed request.
+        const parsed = JSON.parse(reqBody) as unknown;
+        const blockTypes: string[] = [];
+        const strings: string[] = [];
+        const walk = (v: unknown): void => {
+          if (typeof v === "string") { strings.push(v); return; }
+          if (Array.isArray(v)) { for (const x of v) walk(x); return; }
+          if (typeof v === "object" && v !== null) {
+            const type = (v as { type?: unknown }).type;
+            if (typeof type === "string") blockTypes.push(type);
+            for (const x of Object.values(v)) walk(x);
+          }
+        };
+        walk((parsed as { input?: unknown }).input);
+        expect(blockTypes.filter((t) => t === "thinking" || t === "redacted_thinking")).toEqual([]);
+        // (3) the thinking TEXT may appear ONLY inside a `<recovered_reasoning>` decoration, each one
+        //     within the per-message cap and all of them within the overall budget.
+        const decoration = /<recovered_reasoning\b[^>]*>([\s\S]*?)<\/recovered_reasoning>/g;
+        let decorationChars = 0;
+        for (const str of strings) {
+          for (const m of str.matchAll(decoration)) {
+            expect(m[1]!.length).toBeLessThanOrEqual(MAX_DECORATION_CHARS);
+            decorationChars += m[1]!.length;
+          }
+          expect(str.replace(decoration, "")).not.toContain(THINKING_TEXT);
+        }
+        expect(decorationChars).toBeLessThanOrEqual(DECORATION_CHAR_BUDGET);
+      }
+      const lastBody = foreignBodies.at(-1)!;
+      // The prior text DOES carry (proving this is a real, populated request, not an empty one), and
+      // Claude's readable thinking crosses as the labelled decoration WS-23 keeps (decision 2).
+      expect(lastBody).toContain(PRIOR_TEXT);
+      expect(lastBody).toContain("the sweep answer");
+      expect(lastBody).toContain(`<recovered_reasoning kind=\\"summary\\" provider=\\"anthropic\\"`);
+      expect(lastBody).toContain(THINKING_TEXT);
+
+      // CONTROL — the switch BACK to Claude: the same signed blocks are spliced into the Anthropic
+      // request again, verbatim and in stream order. Without this, "never in the foreign request" could
+      // pass on a sidecar nothing ever reads.
+      await client.call(METHODS.sessionSetModel, { sessionId, model: "anthropic/claude-sonnet-5" });
+      const anthropicBefore = anthropicRequests.filter((r) => r.path === "/v1/messages").length;
+      await client.call(METHODS.sessionSend, { sessionId, text: "back on claude" });
+      await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && client.events.filter((x) => x.type === "turn_completed" && x.sessionId === sessionId).length >= 3, 45_000);
+      const claudeRequests = anthropicRequests.filter((r) => r.path === "/v1/messages");
+      expect(claudeRequests.length).toBeGreaterThan(anthropicBefore);
+      const claudeBody = claudeRequests.at(-1)!.body;
+      expect(claudeBody).toContain(`{"type":"thinking","thinking":"${THINKING_TEXT}","signature":"${SIG_DUMMY}"},{"type":"redacted_thinking","data":"${REDACTED_DUMMY}"}`);
+      // Claude's own reasoning is replayed natively, never ALSO as a decoration of itself.
+      expect(claudeBody).not.toContain(`provider=\\"anthropic\\"`);
+
+      // I-1, whole-home: outside the sidecar, NO file under the daemon's home holds the signature or
+      // the redacted data — the daemon's own event log included (the stream frames it receives carry
+      // no signature, WS-23 decision 7).
+      const holders: string[] = [];
+      const sweepHome = (root: string): void => {
+        for (const entry of readdirSync(root, { withFileTypes: true })) {
+          const full = join(root, entry.name);
+          if (entry.isDirectory()) { sweepHome(full); continue; }
+          if (!entry.isFile() || entry.name.endsWith(".provider-state.jsonl")) continue;
+          const raw = readFileSync(full, "latin1");
+          if (raw.includes(SIG_DUMMY) || raw.includes(REDACTED_DUMMY)) holders.push(full.slice(home.length));
+        }
+      };
+      sweepHome(home);
+      expect(holders).toEqual([]);
 
       // session.history for this session, over the whole canonical run: same sweep, same result.
       const page = await client.call<{ events: SessionEvent[] }>(METHODS.sessionHistory, { sessionId });
@@ -334,6 +434,7 @@ describeWithWinterBinary("A-8 part B: real captures (official Claude -> Winter G
       const historyFound = sweep(historyRaw);
       expect(historyFound.sigDummy).toBe(false);
       expect(historyFound.redactedThinking).toBe(false);
+      expect(historyRaw).not.toContain(REDACTED_DUMMY);
       expect(historyFound.tag).toBe(false);
     }, 90_000);
   });

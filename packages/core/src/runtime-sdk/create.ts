@@ -9,65 +9,41 @@
 // WHY A WRAPPER RATHER THAN `createRuntimeSdk` AT THE CALL SITE. Three things the daemon has to do
 // exactly once, in exactly one place, and that a raw handle cannot carry:
 //
-//  1. `spawnHookFor(mode)` — P8b-1's single topology site. Path (a) today (one spawned `winter`
-//     child per session); when the SDK publishes its engine, path (b) is a change to this one
-//     function's return value and nothing else in the daemon moves.
+//  1. `spawnHookFor(mode)` — P8b-1's single topology site. Code: path (a), one spawned `winter`
+//     child per session. Chat and dispatch (WS-23): path (b), the runtime EMBEDDED in this process,
+//     one Bun Worker per session (`embedded.ts`) — the change to this one function's return value
+//     P8b-1 promised, with nothing else in the daemon moving.
 //  2. `trackQuery`/`untrack`/`dispose` — G-14's ordering. Every live `Query` ends BEFORE the router
 //     disposes and, in `daemon.ts`, before the 8a spine closes: a draining child's last frames
 //     write delivery receipts into `runtime-state.db`, and a closed store loses them.
 //  3. The settings-derived options. Winter's hard rule is that no setting may require a restart, but
-//     `createRuntimeSdk` takes PLAIN VALUES for retention and the advisor (Winter map §8.3). The two
-//     doors this file uses to keep them live are a getter-backed retention object (the router reads
-//     the property at recovery time, not at construction) and a resolver closure for the advisor
-//     model (re-read on every call). Both are noted at their definitions.
+//     `createRuntimeSdk` takes PLAIN VALUES for retention (Winter map §8.3). The door this file uses
+//     to keep it live is a getter-backed retention object (the router reads the property at recovery
+//     time, not at construction), noted at its definition.
+//
+// WS-23: the handle serves ONE runtime. The official `claude` peer and everything this file built for
+// it (the peer import and its version guard, the executable ladder, the credential seam, the advisor
+// resolver, the capability-schema bridge, the handoff participants) is gone.
 import { existsSync } from "node:fs";
 import * as winter from "@yanlinglabs/winter-agent-sdk";
-import type { McpSdkServerConfigWithInstance, SessionKey, SpawnClaudeCodeProcess } from "@yanlinglabs/winter-agent-sdk";
-import type { AdvisorReviewer, ReviewerResolver } from "@yanlinglabs/winter-agent-sdk/tools";
-import { createRuntimeSdk as createRouterSdk, D14_CLAUDE_OAUTH_APPROVED_DEFAULT, isSelectionRefusal, selectionVersionsFrom, selectRuntime, SelectionRefusedError } from "@yanlinglabs/winter-runtime-sdk";
-import type { OfficialSdkModule, RuntimeDirectoryEntry, RuntimeDirectoryOptions, RuntimeDirectoryStore, RuntimeKind, RuntimeSdk, RuntimeSdkOptions, RuntimeSelection, SelectionInput, SelectionRefusal } from "@yanlinglabs/winter-runtime-sdk";
+import type { McpSdkServerConfigWithInstance, SpawnClaudeCodeProcess } from "@yanlinglabs/winter-agent-sdk";
+import { createRuntimeSdk as createRouterSdk, isSelectionRefusal, selectionVersionsFrom, selectRuntime, SelectionRefusedError } from "@yanlinglabs/winter-runtime-sdk";
+import type { RuntimeDirectoryEntry, RuntimeDirectoryOptions, RuntimeDirectoryStore, RuntimeSdk, RuntimeSdkOptions, RuntimeSelection, SelectionInput, SelectionRefusal } from "@yanlinglabs/winter-runtime-sdk";
 import type { PermissionClassLabel } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { SecretStore } from "../auth/secret-store";
 import { retentionFromSettings } from "../runtime-state/retention";
 import { winterOptionsFromSettings, type Settings } from "../settings";
 import { buildCoreBrand } from "./brand";
 import { resolveWinterExecutable, type WinterExecutableUnavailable } from "./executable";
-import { resolveClaudeExecutable, ClaudeExecutableUnavailable } from "./official-executable";
-import { credentialPresenceFrom, keychainSeamFromSecretStore } from "./keychain";
-import { routerInputShape } from "./official-capabilities";
+import { EmbeddedRuntimeUnavailable, embeddedVersionCheck, runsEmbedded, type EmbeddedSessionHost } from "./embedded";
+import { credentialPresenceFrom } from "./keychain";
 import { familyListingFromCatalog } from "./provider-selection";
 import { splitTag, WINTER_TEST_PREFIX } from "./model-tag";
 import { releaseAllHeld } from "./messaging";
 import { daemonResolveEndpoint } from "../providers/registry";
-import { WINTER_PEER_VERSIONS, REQUIRED_CLAUDE_AGENT_SDK } from "./versions";
+import { WINTER_PEER_VERSIONS } from "./versions";
 import type { RecoveryReport, RunHomeFor, RunHomeOutcome } from "@yanlinglabs/winter-runtime-sdk";
 import { runHomeHandleOf } from "./run-home-support";
-
-/**
- * P8c-1's own alias for the peer this daemon injects at `RuntimeSdkPeers.claude` — the router's own
- * `OfficialSdkModule` (its published barrel re-exports it via `seams/index.ts`'s wildcard; see
- * `versions.ts`'s header for why the SAME duck-typed shape is what a compiled `$bunfs` binary can
- * still see). Named locally so callers of `officialPeer()` need not reach into the router package
- * for a type that exists only to describe an injected module.
- */
-export type OfficialPeer = OfficialSdkModule;
-
-/**
- * P8c-14 (Neighbours' contracts, for lane 4): the router's `HandoffParticipants` +
- * `HandoffBarrierDeps.selectionInputFor`, bundled into ONE registration call — a LOCAL shape,
- * never imported from the router: `HandoffParticipants`/`HandoffSourceOwner`/
- * `HandoffDestinationRuntime` live in `store/handoff-barrier.d.ts`, which `dist/index.d.ts`'s own
- * barrel does not re-export (`package.json`'s `exports` map has exactly one entry, `"."`, same gap
- * `official-capabilities.ts`'s header documents for `createApprovalBridge`). The two members
- * structurally satisfy the router's own `HandoffBarrierDeps.participants`/`.selectionInputFor`
- * fields regardless — `createRuntimeSdk`'s parameter type is already imported (`RuntimeSdkOptions`),
- * so TypeScript checks the object literal built below against ITS real, unexported field types.
- */
-export interface HandoffParticipants {
-  source?(session: SessionKey, from: RuntimeKind): unknown;
-  destination?(session: SessionKey, to: RuntimeKind): unknown;
-  selectionInputFor?: (args: { session: SessionKey; from: RuntimeKind; to: RuntimeKind; persisted: RuntimeSelection }) => SelectionInput | Promise<SelectionInput>;
-}
 
 /** `RuntimeDirectoryRetention` is not on the router's barrel; this is the same type. */
 type RuntimeDirectoryRetention = NonNullable<RuntimeDirectoryOptions["retention"]>;
@@ -100,7 +76,9 @@ export type SessionMode = "code" | "dispatch" | "chat";
 export const SHUTDOWN_QUERY_GRACE_MS = 300;
 
 /** What `Options` needs to spawn a child (P8b-1). `spawnClaudeCodeProcess` is left to the SDK's
- *  `defaultSpawn` on path (a); path (b) fills it in here and nowhere else. */
+ *  `defaultSpawn` on path (a) (code); path (b) (chat, dispatch — WS-23's embedded Worker) fills it in
+ *  here and nowhere else, and `pathToClaudeCodeExecutable` is then only a label (the SDK hands it to
+ *  the hook as `command` and resolves nothing). */
 export interface WinterSpawnHook {
   pathToClaudeCodeExecutable: string;
   spawnClaudeCodeProcess?: SpawnClaudeCodeProcess;
@@ -117,24 +95,9 @@ export interface WinterRuntimeSdkDeps {
    *  its own in-memory store: messaging works for this process's lifetime, receipts are not
    *  durable. That is a degraded daemon, never a dead one. */
   directoryStore?: RuntimeDirectoryStore;
-  /** Tasks 6–7's capability servers. `[]` is valid and is what Task 5 passes. */
+  /** Tasks 6–7's capability servers, handle-wide. `[]` is valid and is what the daemon passes: Winter's
+   *  capability servers ride each session's own `Options.mcpServers` instead (P8b-36). */
   capabilities: readonly McpSdkServerConfigWithInstance[];
-  /**
-   * P8d-8 (D30): the router's ONE `ReviewerResolver` for the OFFICIAL leg — `daemon.ts` builds this
-   * from `advisor-reviewer.ts`'s `advisorReviewerFor(...)`, which already reads
-   * `settings.runtimes.advisorModel` LIVE and applies the D30 per-family defaults internally, so
-   * nothing here re-derives that precedence. `advisorFrom` (below) ALWAYS wires this into
-   * `RuntimeSdkOptions.advisor` — never conditional on whether a reviewer is configured, per the
-   * no-restart rule (Winter map §8.3) — so a settings edit that later configures a reviewer takes
-   * effect on this daemon's very next official-leg advisor call, no restart. `undefined` only in a
-   * test/harness that does not care about the advisor at all; with no reviewer wired the resolver
-   * answers `undefined`, WS-06 §4's ordinary "no reviewer resolvable" tool error, never a throw.
-   *
-   * WINTER-LEG SESSIONS DO NOT USE THIS FIELD: their own advisor is configured per-session through
-   * `Options.advisor.model` (`mode-options.ts`/`session-driver.ts`), which needs no provider built on
-   * the daemon side — the spawned child resolves the reviewer's OWN provider itself.
-   */
-  advisorReviewer?: ReviewerResolver;
   /**
    * WS-10 §13's inbound class for a session this process holds NO live facet for (Task 12).
    *
@@ -157,10 +120,17 @@ export interface WinterRuntimeSdkDeps {
    * when `linkedRunHomeBuilder()` answers). The router is then created with `requireRunHome: true` —
    * every generation without a run home is refused `run_home_required` — with this host builder for its
    * OWN cold-resume path, and (L2's Contract A) with `handoff.winterHome` set, which `requireRunHome`
-   * needs (the handoff option is always stated with `deps.home`). Absent (router 0.0.11, every test
-   * double): the router is created exactly as before.
+   * needs (the option is always stated with `deps.home`). Absent (router 0.0.11, every test double):
+   * the router is created exactly as before.
    */
   runHomeFor?: RunHomeFor;
+  /**
+   * WS-23: the daemon's embedded-session host (`embedded.ts`), where chat and dispatch Workers are
+   * spawned and — at shutdown — ended (`daemon.ts` owns it and drains it before the stores close).
+   * ABSENT (a test double, a harness that never runs a session) ⇒ chat and dispatch refuse typed
+   * (`embedded_runtime_unavailable`); they never fall back to the spawned binary.
+   */
+  embedded?: EmbeddedSessionHost;
   log?: (line: string) => void;
 }
 
@@ -170,35 +140,6 @@ export interface WinterRuntimeSdkOverrides {
   /** Test seam for the router factory — a spy wraps it to capture the `RuntimeSdkOptions` this
    *  file builds while still returning a REAL `RuntimeSdk`. */
   createRuntimeSdk?: (opts: RuntimeSdkOptions) => RuntimeSdk;
-  /** Test seam for the official peer's import — a Winter-only test never pays for
-   *  `@anthropic-ai/claude-agent-sdk` to load, and a peer-present test can hand in a fake module
-   *  shaped like `OfficialSdkModule` without a real platform binary anywhere on disk. Defaults to
-   *  `import("@anthropic-ai/claude-agent-sdk")`. */
-  officialPeer?: () => Promise<OfficialPeer | undefined>;
-  /** Test seam for M4's version guard — a fake "installed version" so a unit test can drive a
-   *  mismatch without an actual mismatched `node_modules` tree. Defaults to
-   *  `WINTER_PEER_VERSIONS.claudeAgentSdk` (the real installed manifest's own version, or absent). */
-  installedClaudeAgentSdkVersion?: () => string | undefined;
-}
-
-/**
- * P8c-1: the lazy, memoized official peer.
- *
- * RESOLVED ONCE, BEFORE `createRuntimeSdk` — the router needs `peers.claude` AT CONSTRUCTION (its
- * own `hasClaudePeer`/version-matrix checks read it there), so "lazy" here means "resolved on the
- * daemon's own boot path rather than baked into a compiled artifact's import graph", not "deferred
- * past this function's own async body" (`createWinterRuntimeSdk` is already async — Task 1.1's own
- * note). A FAILED import (the optional platform package genuinely absent, or `@anthropic-ai/sdk` /
- * `@modelcontextprotocol/sdk` / `zod` peer mismatch) is logged ONCE, here, and answered as
- * `undefined` — a Winter-only daemon process is a normal outcome, never a crash.
- */
-async function resolveOfficialPeer(load: () => Promise<unknown>, log?: (line: string) => void): Promise<OfficialPeer | undefined> {
-  try {
-    return (await load()) as OfficialPeer;
-  } catch (err) {
-    log?.(`the official peer (@anthropic-ai/claude-agent-sdk) did not load — the official leg is unavailable on this daemon process: ${describeLoadError(err)}`);
-    return undefined;
-  }
 }
 
 /** `Name: message`, first line only, capped — an import failure's message names a missing global
@@ -217,65 +158,24 @@ export interface WinterRuntimeSdk {
   /**
    * P8b-1: THE ONE SITE for the spawn topology, re-resolved on EVERY call.
    *
-   * `settings.runtimes.winterExecutable` is hot, so a newly built binary is picked up by the next
-   * session with no restart. Returns the typed `WinterExecutableUnavailable` rather than throwing
-   * and NEVER falls back to anything — a session on the Winter leg refuses at create instead.
+   * CODE: the spawned `winter` binary. `settings.runtimes.winterExecutable` is hot, so a newly built
+   * binary is picked up by the next session with no restart. CHAT and DISPATCH (WS-23): the embedded
+   * runtime, one Worker per session — no binary is resolved for them at all, so
+   * `winter_executable_unavailable` cannot apply; their refusal is `EmbeddedRuntimeUnavailable`
+   * (a version-locked set that does not agree, or no embedded host wired). Returns the typed error
+   * rather than throwing and NEVER falls back to the other topology — a session refuses at create.
    */
-  spawnHookFor(mode: SessionMode): WinterSpawnHook | WinterExecutableUnavailable;
+  spawnHookFor(mode: SessionMode): WinterSpawnHook | WinterExecutableUnavailable | EmbeddedRuntimeUnavailable;
   /**
-   * P8c-1: the official peer this handle was constructed with — `undefined` on a Winter-only
-   * daemon process. ALREADY RESOLVED (this call never imports anything); the `Promise` return is
-   * the API shape the Interfaces block fixes, not a live import each time.
-   */
-  officialPeer(): Promise<OfficialPeer | undefined>;
-  /** P8c-14: the SAME already-resolved value `officialPeer()` answers, without the `Promise`
-   *  wrapper — `session-driver.ts`'s official-leg assembly must stay SYNCHRONOUS up to
-   *  `drivers.set` (the same racing-resume invariant the Winter path already has), and awaiting a
-   *  Promise that is in fact already settled would still cost a microtask inside that window. */
-  officialPeerSync(): OfficialPeer | undefined;
-  /**
-   * P8c-3: THE ONE SITE for the official leg's executable ladder, re-resolved on EVERY call — same
-   * hot-settings posture as `spawnHookFor`. Returns the typed `ClaudeExecutableUnavailable` rather
-   * than throwing; a session on the official leg refuses at create instead.
-   */
-  claudeExecutableFor(): { path: string } | ClaudeExecutableUnavailable;
-  /**
-   * P8c-12: decides the leg for a NEW session (or reviews a resumed one's `persisted` record,
-   * which the router returns BY IDENTITY — "the persisted selection wins", never re-decided).
-   * Builds `SelectionInput` from the pinned catalog (`familyListingFromCatalog`, no live query
-   * needed), this process's credential presence and whether the official peer resolved. Never
-   * throws — the router's own `SelectionRefusedError` is unwrapped into the `SelectionRefusal`
+   * P8c-12: the router's selection for a NEW session (or a resumed one's `persisted` record, which
+   * the router returns BY IDENTITY — "the persisted selection wins", never re-decided). Builds
+   * `SelectionInput` from the pinned catalog (`familyListingFromCatalog`, no live query needed) and
+   * this process's credential presence. WS-23: there is no official runtime to route to, so the input
+   * says so (`hasClaudePeer: false`) and every family — Claude included — selects the Winter runtime.
+   * Never throws — the router's own `SelectionRefusedError` is unwrapped into the `SelectionRefusal`
    * value its own `refusal` field carries.
    */
   selectRuntimeFor(input: { mode: SessionMode; model?: string; persisted?: RuntimeSelection }): Promise<RuntimeSelection | SelectionRefusal>;
-  /**
-   * P8c handoff fix: the raw `SelectionInput` a fresh decision would use, built from the SAME live
-   * facts `selectRuntimeFor` reads (catalog, credential presence, official-peer availability) but
-   * returned as DATA rather than run through `selectRuntime`.
-   *
-   * WHY THIS EXISTS. `handoff.ts`'s `selectionInputFor` hands the router's barrier a `SelectionInput`
-   * so `barrier.plan()` can review destination servability against this deployment's real catalog and
-   * credentials — the router's OWN unregistered default (this file's `handoff.selectionInputFor`
-   * fallback, above) synthesizes an empty one instead ("ABSENT MEANS UNREVIEWED, NOT ASSUMED-FINE").
-   * `handoff.ts` has no reach into `deps.secrets`/the official peer/the catalog — this is the one
-   * door those facts leave this module through, for that lane, without duplicating the construction.
-   *
-   * OPTIONAL: a hand-built test double for this interface (several exist — `handoff.test.ts`,
-   * `session-driver.test.ts`) need not implement it; `handoff.ts` treats its absence as "no
-   * `selectionInputFor` to register" rather than a crash.
-   */
-  buildSelectionInput?(input: { mode: SessionMode; model?: string; persisted?: RuntimeSelection }): Promise<SelectionInput>;
-  /**
-   * P8c-14 (Neighbours' contracts, for lane 4): registers the live handoff participants + the
-   * fresh-selection reviewer, AFTER construction — `createRuntimeSdk({ handoff })` is fixed at
-   * construction time, but the daemon's session-driver table (where a `HandoffSourceOwner`/
-   * `HandoffDestinationRuntime` for a given session actually lives) exists only once THIS handle
-   * has already returned. The router reads `handoff.participants`/`.selectionInputFor` lazily, at
-   * handoff time, never at construction — so a mutable holder the constructor's own delegating
-   * closures read from is sufficient; calling this more than once REPLACES the previous
-   * registration (the last caller wins, same as any other hot-settings door in this file).
-   */
-  registerHandoffParticipants(p: HandoffParticipants): void;
   /**
    * Register a live session so shutdown can end it — GRACEFULLY FIRST, THEN BY FORCE.
    *
@@ -341,21 +241,6 @@ function retentionFrom(settings: () => Settings | null | undefined): RuntimeDire
 }
 
 /**
- * P8d-8: ALWAYS an `advisor` key — never conditional on `settings.runtimes.advisorModel` (the
- * no-restart rule, Winter map §8.3: whether the router's `advisor` OPTION KEY exists is fixed at
- * construction, so a resolver must always be passed and read settings live, rather than the key
- * itself growing/shrinking as a setting changes on a running daemon). `deps.advisorReviewer` is
- * `daemon.ts`'s already-built `advisorReviewerFor(...)` resolver, which does its own live settings
- * read and D30 default derivation — this function only ever delegates to it verbatim; with none
- * wired (a harness that does not care) the resolver answers `undefined` on every call, WS-06 §4's
- * ordinary "no reviewer resolvable" case.
- */
-function advisorFrom(deps: WinterRuntimeSdkDeps): { advisor: NonNullable<RuntimeSdkOptions["advisor"]> } {
-  const resolveReviewer: ReviewerResolver = () => deps.advisorReviewer?.();
-  return { advisor: { resolveReviewer } };
-}
-
-/**
  * Await `end()`, but never longer than `ms` — and when the budget runs out, ABORT.
  *
  * G-14's wording is "closes queues, awaits iterations with a bounded grace, aborts stragglers", and
@@ -383,42 +268,6 @@ function endWithin(sessionId: string, abort: AbortController, end: () => Promise
 
 export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrides: WinterRuntimeSdkOverrides = {}): Promise<WinterRuntimeSdk> {
   const factory = overrides.createRuntimeSdk ?? createRouterSdk;
-  // P8c-1: resolved BEFORE the factory call — the router reads `peers.claude`/`hasClaudePeer` at
-  // construction, so the import has to have already settled by the time `factory(...)` runs. This
-  // function is already async (the note every 8b doc comment above makes), so nothing here changes
-  // the daemon's own boot shape.
-  const officialModuleRaw = await resolveOfficialPeer(overrides.officialPeer ?? (() => import("@anthropic-ai/claude-agent-sdk")), deps.log);
-  // Fix round 1 (M4): a Winter-side version guard beside the router's own `assertVersionMatrix` —
-  // this one fires BEFORE `peers.claude`/`peerVersions.claudeAgentSdk` ever reach the router, so a
-  // mismatched install degrades to "the official leg is unavailable" (Winter entirely unaffected)
-  // rather than whatever the router's own matrix check does with a peer it was never declared for.
-  const installedClaudeAgentSdkVersion = (overrides.installedClaudeAgentSdkVersion ?? (() => WINTER_PEER_VERSIONS.claudeAgentSdk))();
-  const claudeAgentSdkVersionMismatch = officialModuleRaw !== undefined && installedClaudeAgentSdkVersion !== undefined && installedClaudeAgentSdkVersion !== REQUIRED_CLAUDE_AGENT_SDK;
-  if (claudeAgentSdkVersionMismatch) {
-    deps.log?.(`the installed @anthropic-ai/claude-agent-sdk is ${installedClaudeAgentSdkVersion}, but this daemon pins ${REQUIRED_CLAUDE_AGENT_SDK} — the official leg is unavailable until they match (Winter unaffected)`);
-  }
-  // A2: a peer that LOADED but whose version this host cannot declare is never forwarded. The
-  // router's version matrix needs a version for every peer it is handed; with none declared it
-  // falls back to resolving a `package.json` on disk, which does not exist inside a compiled
-  // `$bunfs` binary — and its `RuntimeSdkVersionError` then fails the WHOLE handle, the Winter leg
-  // included. `versions.ts` bundles the manifest so this should not happen; if it ever does, the
-  // official leg degrades alone.
-  const claudeAgentSdkVersionUnknown = officialModuleRaw !== undefined && installedClaudeAgentSdkVersion === undefined;
-  if (claudeAgentSdkVersionUnknown) {
-    deps.log?.(`the official peer (@anthropic-ai/claude-agent-sdk) loaded, but its version could not be established — the official leg is unavailable on this daemon process (Winter unaffected)`);
-  }
-  const officialModule = claudeAgentSdkVersionMismatch || claudeAgentSdkVersionUnknown ? undefined : officialModuleRaw;
-  const claudeExecutableResolution = resolveClaudeExecutable({
-    setting: winterOptionsFromSettings(deps.settings()).claudeExecutable,
-    env: process.env,
-    execPath: process.execPath,
-    exists: (p) => existsSync(p),
-  });
-  // P8c-14: the mutable holder `registerHandoffParticipants` (below) writes into; the router reads
-  // `handoff.participants`/`.selectionInputFor` lazily at handoff time, so a delegating closure
-  // here is enough — nothing calls a handoff before lane 4 registers, and this handle simply has
-  // no participants until then (the router's own barrier reports "no participant" for either side).
-  const handoffParticipants: { current: HandoffParticipants | undefined } = { current: undefined };
   // test-keychain-isolation fix: built from `deps.home` — the daemon's ACTUAL home — rather than
   // reusing the frozen, env-only `CORE_BRAND` singleton. `CORE_BRAND` resolves its `keychainService`
   // once at module load from `WINTER_HOME`/`WINTER_PROFILE` env vars alone, which a daemon booted
@@ -429,122 +278,52 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
   // explicit `authRef` — see `mode-options.ts`'s `buildWinterOptions` header), so it is the one that
   // must be home-aware.
   const homeAwareBrand = buildCoreBrand(undefined, deps.home);
+  // WS-23: THE WINTER PEER ALONE. The official `claude` peer, its executable, its credential seam, its
+  // advisor resolver, its capability bridge and its handoff participants are gone with the leg they
+  // served; the router routes every family to the Winter runtime (`hasClaudePeer: false` below).
   const sdk = factory({
-    // A `claude` peer is injected ONLY when the import actually resolved (P8c-1) — the namespace is
-    // injected as an INSTANCE, same as `winter`; the router never imports either SDK by name.
-    peers: { winter, ...(officialModule === undefined ? {} : { claude: officialModule }) },
+    peers: { winter },
     // P8b-4: host-declared, and the ONLY probe that answers inside a compiled `$bunfs` binary.
-    // `claudeAgentSdk` is present only when `officialModule` itself resolved — never a stray key
-    // for a peer this handle just declared unavailable (import failure OR M4's version mismatch).
-    peerVersions: {
-      winterAgentSdk: WINTER_PEER_VERSIONS.winterAgentSdk,
-      ...(officialModule === undefined ? {} : { claudeAgentSdk: installedClaudeAgentSdkVersion }),
-    },
-    // Required even though the Winter leg resolves its own credentials runtime-side (surface map
-    // §1.3): the field has no `?`, and the official leg is the only caller.
-    keychain: keychainSeamFromSecretStore(deps.secrets, deps.home),
+    peerVersions: { winterAgentSdk: WINTER_PEER_VERSIONS.winterAgentSdk },
     // R-1. Resolved once here, through the injected peer's own `resolveBrand`.
     brand: homeAwareBrand,
-    // P8c-3: the ladder's answer AT CONSTRUCTION TIME. Omitted (never a bare "claude") when it does
-    // not resolve — the door then refuses ONLY a session that selects the official leg
-    // (`claude_executable_unavailable`), and every Winter session proceeds unaffected. A later
-    // `runtimes.claudeExecutable` edit takes effect for new sessions through `claudeExecutableFor()`
-    // above; this constructor-time value is what the router itself launches with today.
-    ...(claudeExecutableResolution instanceof ClaudeExecutableUnavailable ? {} : { vendoredOfficialRuntime: claudeExecutableResolution.path }),
     // 8a's durable store when the spine opened; the router's in-memory default when it did not.
     directoryStore: deps.directoryStore,
     capabilities: deps.capabilities,
-    // Lane 3b (P8d-17 root cause): WITHOUT this, `RuntimeSdkOptions.toInputShape` stays `undefined`
-    // and the router's OWN `officialCapabilityServers` early-returns for EVERY official-leg session
-    // (its own doc: "WITHOUT `toInputShape` THIS IS A WINTER-LEG-ONLY DOOR") — because Winter's
-    // construction-level `capabilities` above is `[]` on purpose (P8b-36), the early-return is a
-    // SILENT no-op rather than the throw a non-empty `capabilities` would get. That skips building
-    // `winterMcpServerDescriptor`'s standing server on the official leg entirely: SendMessage/
-    // ListAgents/ReadNotifications/advisor never get their canonical `mcp__<brand>__<tool>`
-    // registrations, so `officialToolAliases`'s redirects have no target and a bare `advisor` call
-    // is refused "No such tool available" before `resolveReviewer()` ever runs. `routerInputShape`
-    // is the SAME JSON-Schema→zod-shape bridge `official-capabilities.ts`'s own per-session
-    // `officialCapabilityServersFor` already uses for Winter's OWN capability tools — reused here,
-    // never a second copy, for the router's construction-time door.
-    toInputShape: routerInputShape,
-    // §1.6: this is what fills `SeamContext.winterHome`, so the barrier and every later seam
-    // resolve under the daemon's OWN home. Without it they fall back to
-    // `resolveWinterHome(undefined, brand)` — which is `~/.winter` for a daemon booted on a temp
-    // home with no `WINTER_HOME` in its environment, i.e. every test. `participants` is 8c's Task
-    // 1.3/lane 4 concern; this handle passes none yet.
+    // §1.6: this is what fills `SeamContext.winterHome`, so the session store `reviewSwitch` reads and
+    // `reconcileRootForRecovery` writes resolve under the daemon's OWN home — without it they fall back
+    // to `resolveWinterHome(undefined, brand)`, which is `~/.winter` for a daemon booted on a temp home
+    // with no `WINTER_HOME` in its environment, i.e. every test. A `requireRunHome` router refuses to
+    // construct without it.
     handoff: {
       winterHome: deps.home,
-      // Winter Phase 10b (D1-6, R6-R8 review, CRITICAL): without this the barrier's own
-      // `reviewSwitch`/`plan().review` fall back to `defaultEndpointResolver()` — a registry with
-      // NO adapters registered, which reports `readableState: "none"` for every model and silently
-      // over-warns a real lossless exposed-reasoning transfer (measured: DeepSeek -> GLM came back
-      // `warned-lossy` with no resolver injected). `daemonResolveEndpoint()` is the daemon's own
-      // catalog-backed registry (`providers/registry.ts`), memoised for the process's life.
+      // Winter Phase 10b (D1-6, R6-R8 review, CRITICAL): without this `reviewSwitch` falls back to
+      // `defaultEndpointResolver()` — a registry with NO adapters registered, which reports
+      // `readableState: "none"` for every model and silently over-warns a real lossless
+      // exposed-reasoning transfer (measured: DeepSeek -> GLM came back `warned-lossy` with no resolver
+      // injected). `daemonResolveEndpoint()` is the daemon's own catalog-backed registry
+      // (`providers/registry.ts`), memoised for the process's life.
       resolveEndpoint: daemonResolveEndpoint(),
-      participants: {
-        source: (session, from) => handoffParticipants.current?.source?.(session, from),
-        destination: (session, to) => handoffParticipants.current?.destination?.(session, to),
-      } as NonNullable<RuntimeSdkOptions["handoff"]>["participants"],
-      selectionInputFor: (args) => {
-        const fn = handoffParticipants.current?.selectionInputFor;
-        if (fn !== undefined) return fn(args);
-        // Unregistered (no lane-4 wiring yet, or a Winter-only test): the honest "unreviewed"
-        // answer this deployment's OWN `selectRuntimeFor` would give for the session's PERSISTED
-        // family — never a synthesized credential/catalog view (`HandoffBarrierDeps.
-        // selectionInputFor`'s own doc: "ABSENT MEANS UNREVIEWED, NOT ASSUMED-FINE").
-        return {
-          mode: "code",
-          requested: {},
-          families: { active: undefined, families: [] },
-          credentials: { byProvider: {} },
-          hasClaudePeer: officialModule !== undefined,
-          claudeOauthApproved: D14_CLAUDE_OAUTH_APPROVED_DEFAULT,
-          persisted: args.persisted,
-        };
-      },
     },
-    // P8c-1/P8c-2: the official branch's deployment-wide policy. `remoteConfig: "deny"` is R-7b-11's
-    // own default (a session's own child never fetches remote feature configuration); `claudeOauth`
-    // is left at the router's own default gate (D14/P8c-2: the official leg ships Code-only,
-    // API-key auth, with Claude OAuth closed) — Winter states the auth-family gate at SELECTION time
-    // (`claudeOauthApproved: false` on every `SelectionInput`, Task 1.3) rather than here twice.
-    // `permissionMode: "default"` is the DEPLOYMENT floor a session with no other policy gets; a
-    // live session's own `runtime.official.options.permissionMode` (Task 1.2) overrides it per the
-    // P8b-7 map, and `bypassPermissions` is refused by the router itself either way.
-    official: { env: { remoteConfig: "deny" }, permissionMode: "default" },
-    // G-12. The WINTER adapter's `permissionClass` (Task 12) fails inbound delivery closed without
-    // it; the OFFICIAL adapter has the identical fail-closed rule (the router's own messaging
-    // README), so P8c-1 sets both from the SAME classifier — a message addressed to a session this
-    // process holds no live facet for is classified by the record's policy, never by which leg the
-    // record happens to be on.
+    // G-12. The WINTER adapter's `permissionClass` (Task 12) fails inbound delivery closed without it.
     //
     // CARRY FOR TASKS 13/16: `directory` carries `retention` and nothing else, so the router's own
     // `RuntimeDirectoryRecoveryHooks` (`revalidateProcessIdentity`, `reattachSupervised`) stay
-    // unset and its `recoverDirectory` reattaches nothing. That is correct for 8b/8c — 8a owns
-    // recovery, and its twelve steps have already run by the time this handle exists — but the day
-    // a Winter child must be re-adopted across a daemon restart (`PersistedWinterChild`, P8b-15),
-    // this is the door those hooks come through.
+    // unset and its `recoverDirectory` reattaches nothing. That is correct — 8a owns recovery, and its
+    // twelve steps have already run by the time this handle exists — but the day a Winter child must
+    // be re-adopted across a daemon restart (`PersistedWinterChild`, P8b-15), this is the door those
+    // hooks come through.
     messaging: {
       directory: { retention: retentionFrom(deps.settings) },
       ...(deps.sessionPermissionClass === undefined
         ? {}
-        : {
-            messaging: {
-              winter: { permissionClass: deps.sessionPermissionClass },
-              official: { permissionClass: deps.sessionPermissionClass },
-            },
-          }),
+        : { messaging: { winter: { permissionClass: deps.sessionPermissionClass } } }),
     },
-    ...advisorFrom(deps),
     // WS-21 (spec §3.1): only when the linked router applies run homes. `RuntimeSdkOptions` of the
     // published 0.0.11 does not declare these, hence the widening; an older router never sees them.
     ...(deps.runHomeFor === undefined ? {} : ({ requireRunHome: true, runHomeFor: deps.runHomeFor } as Record<string, unknown>)),
   } as RuntimeSdkOptions);
 
-  // P8c handoff fix: the ONE construction `selectRuntimeFor` and `buildSelectionInput` both run —
-  // factored out so the fresh-decision door (`selectRuntimeFor`) and the raw-data door
-  // (`buildSelectionInput`, for `handoff.ts`'s barrier review) can never drift into two answers for
-  // the same session.
   const buildSelectionInput = async (input: { mode: SessionMode; model?: string; persisted?: RuntimeSelection }): Promise<SelectionInput> => {
     const credentials = await credentialPresenceFrom(deps.secrets);
     // WS-20: `requested.model` is ALWAYS a provider-qualified tag now — the router (0.0.8+)
@@ -572,8 +351,11 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
       requested: requestedModel,
       families: familyListingFromCatalog(),
       credentials,
-      hasClaudePeer: officialModule !== undefined,
-      claudeOauthApproved: D14_CLAUDE_OAUTH_APPROVED_DEFAULT,
+      // WS-23: no official runtime exists, so a Claude model routes to the Winter runtime (the router's
+      // own `R-7b-1-no-peer` rule) — never to a peer this daemon cannot launch.
+      hasClaudePeer: false,
+      // claude.ai subscription auth never shipped, and the one runtime left never takes it (D28).
+      claudeOauthApproved: false,
       ...(input.persisted === undefined ? {} : { persisted: input.persisted }),
       versions: selectionVersionsFrom(sdk.versions),
     };
@@ -599,7 +381,16 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
         await releaseAllHeld(sdk, deps.directoryStore, deps.log);
       },
     },
-    spawnHookFor(_mode: SessionMode): WinterSpawnHook | WinterExecutableUnavailable {
+    spawnHookFor(mode: SessionMode): WinterSpawnHook | WinterExecutableUnavailable | EmbeddedRuntimeUnavailable {
+      if (runsEmbedded(mode)) {
+        const embedded = deps.embedded;
+        if (embedded === undefined) return new EmbeddedRuntimeUnavailable("this daemon was built without an embedded-session host; chat and dispatch cannot start");
+        // Checked on every call, not only at boot: the values are constants, so this costs nothing,
+        // and it keeps the refusal at the one topology site rather than a boot flag someone must read.
+        const versionRefusal = embeddedVersionCheck();
+        if (versionRefusal !== undefined) return versionRefusal;
+        return { pathToClaudeCodeExecutable: "winter-embedded", spawnClaudeCodeProcess: (options) => embedded.spawn(options) };
+      }
       const resolution = resolveWinterExecutable({
         setting: winterOptionsFromSettings(deps.settings()).winterExecutable,
         env: process.env,
@@ -609,23 +400,6 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
       });
       return resolution.ok ? { pathToClaudeCodeExecutable: resolution.path } : resolution.error;
     },
-    officialPeerSync(): OfficialPeer | undefined {
-      return officialModule;
-    },
-    officialPeer(): Promise<OfficialPeer | undefined> {
-      // Already resolved above; this is the accessor's own contract (a `Promise`, never a live
-      // re-import) — see `officialModule`'s own doc comment.
-      return Promise.resolve(officialModule);
-    },
-    claudeExecutableFor(): { path: string } | ClaudeExecutableUnavailable {
-      const resolution = resolveClaudeExecutable({
-        setting: winterOptionsFromSettings(deps.settings()).claudeExecutable,
-        env: process.env,
-        execPath: process.execPath,
-        exists: (p) => existsSync(p),
-      });
-      return resolution instanceof ClaudeExecutableUnavailable ? resolution : { path: resolution.path };
-    },
     async selectRuntimeFor(input: { mode: SessionMode; model?: string; persisted?: RuntimeSelection }): Promise<RuntimeSelection | SelectionRefusal> {
       try {
         return selectRuntime(await buildSelectionInput(input));
@@ -634,10 +408,6 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
         if (typeof err === "object" && err !== null && isSelectionRefusal(err)) return err;
         throw err;
       }
-    },
-    buildSelectionInput,
-    registerHandoffParticipants(p: HandoffParticipants): void {
-      handoffParticipants.current = p;
     },
     trackQuery(sessionId: string, abort: AbortController, end: () => Promise<void>): void {
       if (disposing !== undefined) {

@@ -112,7 +112,7 @@ describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", (
   let stop: (() => void) | undefined;
   afterEach(() => { stop?.(); stop = undefined; });
 
-  async function boot(brokerOverrides: Partial<ConsoleProfileBroker> = {}, ipcOpts: { providerLoginUrlHintWaitMs?: number } = {}) {
+  async function boot(brokerOverrides: Partial<ConsoleProfileBroker> = {}, ipcOpts: { providerLoginUrlHintWaitMs?: number; consoleSessions?: string[] } = {}) {
     const home = mkdtempSync(join(tmpdir(), "winter-provider-login-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
@@ -120,6 +120,18 @@ describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", (
     const authority = new TokenAuthority(secrets);
     const tokens = await authority.ensureTokens();
     const { broker, calls } = fakeBroker(brokerOverrides);
+    // WS-23 live-gate fix: a sign-in/sign-out now reaches the live `console` children and the
+    // internal-jobs view. Minimal stand-ins record both, in the SAME `calls` log as the broker's own, so
+    // a test can assert the order (the bearer must have landed before either runs).
+    const consoleSessions = ipcOpts.consoleSessions ?? [];
+    const winter = {
+      list: () => consoleSessions.map((sessionId) => ({ sessionId, turnRunning: false, idle: async () => {} })),
+      legOf: () => "winter" as const,
+      advisorProviderOf: () => undefined,
+      evict: async (sessionId: string) => { calls.push(`evict:${sessionId}`); },
+    };
+    const records = { get: (sessionId: string) => (consoleSessions.includes(sessionId) ? { providerId: "console" } : undefined) };
+    const internalRouter = { view: { refresh: async () => { calls.push("viewRefresh"); } } };
     // Fix wave (F4): a small ceiling by default — this suite's fakes that never emit a URL and
     // never settle `done` (the "second login refused"/"line clipped" tests below) would otherwise
     // pay the full 3s production default per test; 200ms is still comfortably above the async
@@ -127,6 +139,7 @@ describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", (
     const server = startIpcServer({
       socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets, consoleBroker: broker,
       providerLoginUrlHintWaitMs: ipcOpts.providerLoginUrlHintWaitMs ?? 200,
+      winter: winter as never, records: records as never, internalRouter: internalRouter as never,
     });
     stop = () => { server.stop(); store.close(); };
     return { socketPath, harnessToken: tokens.harness, calls };
@@ -251,6 +264,37 @@ describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", (
     c.close();
   });
 
+  // WS-23 live-gate fix: the Console bearer is the `console` provider's credential now (sessions name
+  // it, Winter's own jobs may run on it), so a sign-in does what `credential.set` does for a key —
+  // AFTER the bearer has landed: one awaited refresh, then the refresher, then the live `console`
+  // children are replaced and the internal-jobs view re-probed.
+  test("a successful login replaces the live console children and re-probes the jobs' view, once the bearer has landed", async () => {
+    const { socketPath, harnessToken, calls } = await boot({}, { consoleSessions: ["s_console"] });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    await c.request(METHODS.providerLogin, { provider: "anthropic", kind: "console" });
+    await waitFor(() => calls.includes("viewRefresh"));
+    const after = calls.slice(calls.indexOf("login"));
+    expect(after.filter((call) => ["refreshBearer", "startRefresher", "evict:s_console", "viewRefresh"].includes(call))).toEqual(["refreshBearer", "startRefresher", "evict:s_console", "viewRefresh"]);
+    c.close();
+  });
+
+  test("a login whose first refresh FAILS starts the refresher but re-probes nothing — Console is never snapshotted absent right before the retry lands it", async () => {
+    const { socketPath, harnessToken, calls } = await boot({
+      refreshBearer: async () => { calls.push("refreshBearer"); return { ok: false, reason: "ant_executable_unavailable" }; },
+    }, { consoleSessions: ["s_console"] });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    await c.request(METHODS.providerLogin, { provider: "anthropic", kind: "console" });
+    await waitFor(() => calls.includes("startRefresher"));
+    // Give the (skipped) follow-up every chance to have run before asserting its absence.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(calls).toContain("refreshBearer");
+    expect(calls).not.toContain("evict:s_console");
+    expect(calls).not.toContain("viewRefresh");
+    c.close();
+  });
+
   test("a failed login broadcasts provider_login_finished {ok:false, reason}", async () => {
     const { socketPath, harnessToken, calls } = await boot({
       login: async () => ({ submitCode: async () => {}, done: Promise.resolve({ ok: false, reason: "exit_code_1" }) }),
@@ -314,6 +358,17 @@ describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", (
     const result = await c.request(METHODS.providerLogout, { provider: "anthropic", kind: "console" });
     expect(result.result).toEqual({ ok: true });
     expect(calls).toContain("logout");
+    c.close();
+  });
+
+  test("a successful logout replaces the live console children and re-probes the jobs' view (WS-23 live-gate fix)", async () => {
+    const { socketPath, harnessToken, calls } = await boot({}, { consoleSessions: ["s_console"] });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.providerLogout, { provider: "anthropic", kind: "console" });
+    expect(result.result).toEqual({ ok: true });
+    // Both ran before the reply — the next turn on that session meets the typed "not signed in" gate.
+    expect(calls.slice(calls.indexOf("logout"))).toEqual(["logout", "evict:s_console", "viewRefresh"]);
     c.close();
   });
 

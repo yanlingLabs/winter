@@ -71,7 +71,7 @@ function printMigrationCSummary(m: MigrationCManifest, log: (line: string) => vo
   if (m.moved.length > 0) log(`  moved into sdk/: ${m.moved.map((mv) => mv.from).join(", ")} (links left at the old paths)`);
   if (m.reconciled.length > 0) log(`  reconciled: ${m.reconciled.map((r) => `${r.root} (${r.outcome})`).join(", ")}`);
   if (m.archived.length > 0) log(`  archived under ${m.archiveDir}: ${m.archived.length} item(s)`);
-  if (m.status === "phase1-complete") log("  the official working copies are reconciled — and the migration finished — at the next daemon boot");
+  if (m.status === "phase1-complete") log("  the legacy official working copies are reconciled — and the migration finished — at the next daemon boot");
   if (m.status === "rolling-back") log("  a rollback was interrupted — run `winter migrate --sdk-home --rollback` to finish it");
 }
 

@@ -4,7 +4,6 @@ import { dirname, join } from "node:path";
 import { z } from "zod";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { ensureGlobalGitignore, WINTER_PERSONAL_IGNORES } from "./global-gitignore";
-import { OFFICIAL_SUBSCRIPTION_AUTH_APPROVED } from "./runtime-sdk/versions";
 import { consoleProfileCredentialFile } from "./runtime-sdk/anthropic-paths";
 import { canonicalModelTag, facingNameToTag, isModelTag, splitTag, UNSTATED_TAG, WINTER_TEST_PREFIX, type ModelTag } from "./runtime-sdk/model-tag";
 // The ONE catalog-row-by-tag lookup (WS-20) — imported rather than re-written here so a role write
@@ -25,6 +24,7 @@ import { credentialInventory } from "./runtime-sdk/keychain";
 import { internalDrivableAdapterIds } from "./providers/internal-adapters";
 import { liveSdkGlobalConfig, liveSdkSettings } from "./sdk-files";
 import { sdkSettingsPath } from "./agent/paths";
+import { McpVersionNegotiationSetting } from "./agent/mcp/project-file";
 
 /** Reasoning-effort slugs valid on the wire — measured LIVE against the Codex OAuth endpoint
  *  (2026-07-30), one model at a time, NOT read off the /models catalogue text. That distinction
@@ -206,8 +206,8 @@ export const PermissionsSettings = z.object({
     added: z.array(z.string()).optional(),
   }).optional(),
   /** Daemon settings surface batch 3 (item 2): SDK-grammar DENY rules — `Options.permissions.deny`
-   *  string entries (`"Skill(<name>)"`, `"Agent(<type>)"`, …), forwarded verbatim to BOTH legs
-   *  (`mode-options.ts`'s `permissionDenyRulesFor`, reused by `official-options.ts`) alongside the
+   *  string entries (`"Skill(<name>)"`, `"Agent(<type>)"`, …), forwarded verbatim to the child
+   *  (`mode-options.ts`'s `permissionDenyRulesFor`) alongside the
    *  fixed control-plane fence (`controlPlaneDenyRules`). This is a COMPLETELY SEPARATE mechanism
    *  from `allow` above: `allow` feeds Winter's OWN engine-level approval gate
    *  (`agent/permission-rules.ts`'s `PermissionRules`, a different grammar/evaluator entirely) and
@@ -238,6 +238,9 @@ const McpStdioServerSettings = z.object({
   command: z.string().min(1),
   args: z.array(z.string()).optional(),
   env: z.record(z.string(), z.string()).optional(),
+  // WS-23: the SDK's own per-server protocol-revision choice, passed through untouched
+  // (`McpVersionNegotiationSetting`'s doc says why an undeclared key would be stripped here).
+  versionNegotiation: McpVersionNegotiationSetting.optional(),
 });
 
 /**
@@ -343,7 +346,7 @@ export function stripCredentialShapedMcpHeaders(raw: unknown): Record<string, st
  *  file path too, so two different homes (or two different temp-dir test fixtures) with the SAME
  *  server/header name each still get their own line. Never cleared — intentionally process-lifetime,
  *  matching the "logged once" posture of this file's other boot-time "accepted, logged, ignored"
- *  lines (`winterLegDisabledKeys`/`officialSubscriptionAuthFlagInert`), which log once per settings
+ *  lines (`winterLegDisabledKeys`/`retiredRuntimeSettingKeys`), which log once per settings
  *  CHANGE rather than once per read for the same reason. */
 const loggedCredentialHeaderStrips = new Set<string>();
 
@@ -351,11 +354,13 @@ const McpHttpServerSettings = refuseCredentialShapedHeaders(z.object({
   type: z.literal("http"),
   url: z.string().url(),
   headers: z.record(z.string(), z.string()).optional(),
+  versionNegotiation: McpVersionNegotiationSetting.optional(),
 }));
 const McpSSEServerSettings = refuseCredentialShapedHeaders(z.object({
   type: z.literal("sse"),
   url: z.string().url(),
   headers: z.record(z.string(), z.string()).optional(),
+  versionNegotiation: McpVersionNegotiationSetting.optional(),
 }));
 /** A pre-item-3b entry (no `type` field at all) is stdio — the shape every `settings.mcpServers`
  *  entry has always had — normalized to the explicit-discriminant form BEFORE the discriminated
@@ -654,14 +659,14 @@ export const Settings = z.object({
     }).prefault({}),
     migrations: z.object({ memoryKeys: z.boolean().default(false) }).prefault({}),
     winterExecutable: z.string().optional(),
-    // P8c-3: the same blank-is-absent, restart-free ladder rung as `winterExecutable` above, for the
-    // official leg's `claude` executable (`official-executable.ts`'s `resolveClaudeExecutable`,
-    // ahead of env `WINTER_CLAUDE_EXECUTABLE`, the 8d bundle drop and the dev-only package door).
+    // WS-23: RETIRED — it named the official leg's `claude` executable, and that leg is gone. Still
+    // ACCEPTED so an existing settings file keeps loading (a removed key must never refuse boot or
+    // cost the whole file), never read, and reported once per settings change as inert
+    // (`retiredRuntimeSettingKeys`) — the `winterLeg` block's own one-release pattern below.
     claudeExecutable: z.string().optional(),
     // Winter Phase 10a (Lane L's own rung — `bundle-layout.ts`'s `resolveAntExecutable` ladder):
-    // same blank-is-absent shape as `claudeExecutable` above, for the bundled Anthropic Platform
-    // CLI (`ant`) the console-profile broker spawns. Lane O adds only the schema line here; Lane L
-    // owns the resolver that reads it.
+    // same blank-is-absent shape as `winterExecutable` above, for the bundled Anthropic Platform
+    // CLI (`ant`) the console-profile broker spawns — the Console's one login and token-refresh door.
     antExecutable: z.string().optional(),
     // Task 17 Step 4: the engine is retired — every mode runs on the Winter leg. The block stays
     // ACCEPTED for one release (the `migrations.memoryKeys` pattern): a `false` is read, logged
@@ -677,37 +682,19 @@ export const Settings = z.object({
     // stored value is a `ModelTag` by construction of that door, never re-validated here.
     advisorModel: z.string().optional(),
     winterIdleTimeoutSec: z.number().int().min(10).default(DEFAULT_WINTER_IDLE_TIMEOUT_SEC),
-    // Fix wave (whole-branch review C2 / ruling P8c-18): a `session.setModel` whose FRESH
-    // destination decision names a DIFFERENT runtime leg than the session's recorded one is a
-    // cross-runtime HANDOFF (`runtime-sdk/handoff.ts`). Winter Phase 10b (D1-1, W18-10, R-10b-1):
-    // the real round-trip is now measured end to end (the whole-branch parity e2e coverage), so the
-    // fence flips to default ON for Code sessions — chat and dispatch never reach the official leg
-    // regardless (`select-runtime.ts`'s own mode gate), so they stay at the pre-10b "off" posture.
-    // `crossRuntime` is deliberately left `.optional()` here rather than `.default()`ed, so a raw
-    // parse can tell "never set" from an explicit `true`/`false` — same "absent isn't a value"
-    // shape `winterExecutable`/`advisorModel` already have on this block. The MODE-AWARE default
-    // lives in `handoffCrossRuntimeEnabled` below, the one door every reader goes through; an
-    // explicit value here always overrides it, in every mode. `handoff.ts` reads this HOT
-    // (`handoffCrossRuntimeEnabled(deps.settings(), mode)`), never a boot snapshot, same as every
-    // other setting in this file.
+    // WS-23: RETIRED. `crossRuntime` fenced a `session.setModel` that moved a session between the
+    // Winter runtime and the official `claude` leg; with that leg gone no switch crosses runtimes.
+    // Still ACCEPTED (`.optional()`, never defaulted, so an absent block stays absent) and reported
+    // once per settings change as inert (`retiredRuntimeSettingKeys`); nothing reads it.
     handoff: z.object({ crossRuntime: z.boolean().optional() }).prefault({}),
-    // Phase 9c (P9c-1, the user's ruling on WS-00 §8 #1): the official leg authenticates ONLY with
-    // Anthropic API-key material the user supplied to Winter. `subscriptionAuth: false` (the
-    // default, and the ONLY shipped value until Anthropic approves subscription auth for Winter's
-    // Agent SDK integration) means the spawned `claude` child gets a Winter-owned
-    // `CLAUDE_CONFIG_DIR`, an env scrubbed of every auth-injecting variable except the one the
-    // credential plan names, and a per-session assertion on the SDK's reported `apiKeySource`.
-    // Read HOT (`official-options.ts`), never a boot snapshot.
-    // WS-20: `official.auth` is REMOVED, not deprecated — the official leg's auth arm is now the
-    // tag's own prefix (`anthropic/*` = API key, `console/*` = the Console profile;
-    // `officialAuthArmFor`, official-options.ts). `subscriptionAuth` stays: it is orthogonal to
-    // WHICH arm, gating whether a claude.ai subscription login is even permitted at all.
-    // `.strict()` (unlike every sibling block in this schema, which strips unknown keys) so a
-    // stray legacy `auth` field THROWS rather than being silently discarded — `auth` is REMOVED,
-    // not deprecated, and the migration is the only place that reads and discards it.
+    // WS-23: RETIRED with the official leg (`subscriptionAuth` gated whether that leg could use a
+    // claude.ai subscription login, and never shipped as anything but `false`). ACCEPTED so an existing
+    // file keeps loading — `.loose()`, where it used to be `.strict()`: the pre-WS-20 `auth` key that
+    // strictness existed to catch now merely rides along, inert, rather than costing the whole file —
+    // and reported once per settings change as inert (`retiredRuntimeSettingKeys`). Nothing reads it.
     official: z.object({
-      subscriptionAuth: z.boolean().default(false),
-    }).strict().optional(),
+      subscriptionAuth: z.boolean().optional(),
+    }).loose().optional(),
   }).optional(),
   // Phase 9c (P9c-4, the user's ruling on WS-00 §8 #7): Winter reads a project's unconverted legacy
   // instructions file / project dir (`legacy-names.ts`'s `LEGACY_INSTRUCTIONS_FILE` / `LEGACY_PROJECT_DIR`) READ-ONLY when the Winter-named file/dir is absent and this is true —
@@ -1159,41 +1146,6 @@ export function removeMcpServerEntry(settings: Settings, name: string): Settings
   return { ...settings, mcpServers: rest };
 }
 
-/**
- * Phase 9c (P9c-1) / pre-release hardening: the ONE reader of `runtimes.official.subscriptionAuth`
- * — absent means OFF (blocked); only an explicit `true` on the SETTINGS FLAG opens the door, and
- * even then only while the compile-time approval gate (`OFFICIAL_SUBSCRIPTION_AUTH_APPROVED`,
- * `runtime-sdk/versions.ts`) is also `true`. Before this hardening the settings flag alone could
- * flip the official leg's subscription posture — this ANDs the two so a hand-set (or migrated,
- * or mis-synced) `true` in settings.json can never do that on its own; only a reviewed code change
- * to the compile-time constant can. `approved` defaults to the real constant and exists ONLY as an
- * injectable seam for tests that need to exercise the "approved" branch — production callers must
- * never pass it.
- */
-export function officialSubscriptionAuthEnabled(
-  settings: Settings | null | undefined,
-  approved: boolean = OFFICIAL_SUBSCRIPTION_AUTH_APPROVED,
-): boolean {
-  return approved && (settings?.runtimes?.official?.subscriptionAuth ?? false);
-}
-
-/**
- * Pre-release hardening (P9c-1 amendment): true when the settings file's raw flag is `true` but
- * the compile-time approval gate is not — i.e. the flag is currently INERT and every settings
- * change while it stays set should say so exactly once (`settings-apply.ts`'s hot-reload diff,
- * `daemon.ts`'s boot-time check). Never the inverse of `officialSubscriptionAuthEnabled`: an
- * absent/false raw flag is not "inert", it is simply off and unremarkable.
- */
-export function officialSubscriptionAuthFlagInert(
-  settings: Settings | null | undefined,
-  approved: boolean = OFFICIAL_SUBSCRIPTION_AUTH_APPROVED,
-): boolean {
-  return !approved && (settings?.runtimes?.official?.subscriptionAuth ?? false);
-}
-
-// WS-20: `officialAuthModeSetting` is DELETED along with `runtimes.official.auth` — the official
-// leg's auth arm is now the tag's own prefix (`official-options.ts`'s `officialAuthArmFor`).
-
 /** The one place `hooks.enabled`'s default-ON semantics live (4f Task 2): absent block, absent
  *  field, or `enabled: true` all mean hooks run; only an explicit `false` turns them off. Kept as
  *  a pure `Settings -> boolean` helper (not inlined at each call site) so both the daemon's hot
@@ -1201,34 +1153,10 @@ export function officialSubscriptionAuthFlagInert(
  *  providers/manager.ts's `liveModel`) and this file's own tests exercise the SAME decision. */
 export const hooksEnabledFrom = (s: Settings): boolean => s.hooks?.enabled !== false;
 
-/** Fix wave (C2 / P8c-18); Winter Phase 10b (D1-1, W18-10, R-10b-1): the ONE door
- *  `runtime-sdk/handoff.ts` reads before letting a `session.setModel` cross a runtime leg.
- *
- *  An EXPLICIT `true`/`false` on `runtimes.handoff.crossRuntime` always wins, in every mode — the
- *  schema leaves the field `.optional()` (no `.default()`) precisely so this function can tell
- *  "the user never set it" from "the user set it to false" (see the schema comment above).
- *
- *  Absent (never set) falls back to the MODE-AWARE default: ON for Code, OFF for chat/dispatch.
- *  `mode` follows the file-wide `mode ?? "code"` convention (`clientEffortEligible` above is the
- *  same shape) — an omitted mode reads as Code, never as "unknown". Chat and dispatch sessions
- *  never reach the official leg regardless of this flag (`select-runtime.ts`'s own mode gate), so
- *  their OFF default is belt-and-suspenders, not a behavioural fence on its own.
- *
- *  Deliberately total (`null`/`undefined` settings both fall through to the mode-aware default,
- *  never a throw) for the same boot-degraded-to-`settings=null` reason every getter here is total. */
-export function handoffCrossRuntimeEnabled(s: Settings | null | undefined, mode?: string): boolean {
-  const explicit = s?.runtimes?.handoff?.crossRuntime;
-  if (explicit !== undefined) return explicit;
-  return mode === undefined || mode === "code";
-}
-
 /** What the Winter leg actually runs with, for a home whose `runtimes` block may not exist at all. */
 export interface WinterOptions {
   /** Absent when unset OR blank — never `""`. See `winterOptionsFromSettings`. */
   winterExecutable?: string;
-  /** P8c-3's own rung, same blank-is-absent rule. Read only by the official leg's ladder — inert on
-   *  a Winter-only session. */
-  claudeExecutable?: string;
   /** Winter Phase 10a (Lane L's `bundle-layout.ts` `resolveAntExecutable` ladder), same
    *  blank-is-absent rule. Read only by the console-profile broker (`daemon.ts`, O6) — inert
    *  everywhere else. */
@@ -1266,6 +1194,27 @@ export function winterLegDisabledKeys(s: Settings | null | undefined): string[] 
   return (["chat", "dispatch", "code"] as const).filter((m) => leg[m] === false);
 }
 
+/**
+ * WS-23: the settings a file still SETS that belonged to the retired official `claude` leg —
+ * `runtimes.claudeExecutable`, `runtimes.official.*` and `runtimes.handoff.crossRuntime`. Accepted by
+ * the schema (a key that names a removed feature must never refuse boot or cost the whole file),
+ * obeyed by nothing, and reported once at boot and once per settings change (`daemon.ts`,
+ * `settings-apply.ts`) — the same "accepted, logged, ignored" posture as `winterLegDisabledKeys`.
+ * Dotted paths, for the log line; empty when the file sets none of them.
+ */
+export function retiredRuntimeSettingKeys(s: Settings | null | undefined): string[] {
+  const r = s?.runtimes;
+  if (r === undefined) return [];
+  const out: string[] = [];
+  if (r.claudeExecutable !== undefined) out.push("runtimes.claudeExecutable");
+  if (r.official !== undefined) {
+    const keys = Object.keys(r.official);
+    out.push(...(keys.length === 0 ? ["runtimes.official"] : keys.sort().map((k) => `runtimes.official.${k}`)));
+  }
+  if (r.handoff?.crossRuntime !== undefined) out.push("runtimes.handoff.crossRuntime");
+  return out;
+}
+
 export function winterOptionsFromSettings(s: Settings | null | undefined): WinterOptions {
   const r = s?.runtimes;
   const blankIsAbsent = (v: string | undefined): string | undefined => {
@@ -1274,7 +1223,6 @@ export function winterOptionsFromSettings(s: Settings | null | undefined): Winte
   };
   return {
     ...(blankIsAbsent(r?.winterExecutable) === undefined ? {} : { winterExecutable: blankIsAbsent(r?.winterExecutable)! }),
-    ...(blankIsAbsent(r?.claudeExecutable) === undefined ? {} : { claudeExecutable: blankIsAbsent(r?.claudeExecutable)! }),
     ...(blankIsAbsent(r?.antExecutable) === undefined ? {} : { antExecutable: blankIsAbsent(r?.antExecutable)! }),
     ...(blankIsAbsent(r?.advisorModel) === undefined ? {} : { advisorModel: blankIsAbsent(r?.advisorModel)! }),
     idleTimeoutSec: r?.winterIdleTimeoutSec ?? DEFAULT_WINTER_IDLE_TIMEOUT_SEC,
@@ -1654,7 +1602,7 @@ export function loadSettings(path: string, opts?: { presentProviders?: ReadonlyS
  * cannot originate one (see above) and there is nothing for the daemon to decide about it. A LEAF
  * (string/number/boolean/enum/array/anything not itself an object/record) always takes `owned`'s
  * value wholesale — a leaf has no "extra keys" of its own to lose. `.strict()` blocks
- * (`ProviderSettings`, `runtimes.official`) need no special case: `Settings.parse` already throws
+ * (`ProviderSettings`) need no special case: `Settings.parse` already throws
  * before an unknown key inside one of those ever reaches this merge (their own schema comments), so
  * there is nothing there this function could be asked to preserve that would not already have
  * refused the whole file at load time.
@@ -1693,8 +1641,7 @@ function mergeUnknownKeys(schema: unknown, raw: unknown, owned: unknown): unknow
       // (never backfilled from `raw`, matching `saveSettings`'s pre-existing "write `s` verbatim,
       // an absent optional block stays absent" contract).
       if (owned === undefined) return undefined;
-      // BLOCKER FIX (fix wave, pre-merge review): a `.strict()` block (`provider`,
-      // `runtimes.official`) accepts NOTHING this schema does not itself model — `Settings.parse`
+      // BLOCKER FIX (fix wave, pre-merge review): a `.strict()` block (`provider`) accepts NOTHING this schema does not itself model — `Settings.parse`
       // already refuses a stray key inside one at LOAD time (their own schema comments), so any
       // such key still sitting in `raw` can only be a block that predates the `.strict()` schema
       // and was never rewritten to disk (the v2→v3 migration's `provider.type`/`provider.baseUrl`
@@ -1771,8 +1718,8 @@ export function saveSettings(path: string, s: Settings): void {
   const raw = readRawSettings(path);
   const merged = raw === null ? s : (mergeUnknownKeys(Settings, raw, s) as Settings);
   // Second validation pass, on the MERGED shape (review round 2): `s` alone can be valid while the
-  // merge just copied an unknown key from a `.strict()` block ON DISK (`provider`,
-  // `runtimes.official` — see their own schema comments) straight through untouched, because
+  // merge just copied an unknown key from a `.strict()` block ON DISK (`provider` — see its own
+  // schema comment) straight through untouched, because
   // nothing else in this function ever decided that key's fate. The BLOCKER fix above (the `.strict()`
   // branch in `mergeUnknownKeys`'s object case) means a `.strict()` block's stray on-disk key can no
   // longer reach here at all — `owned` wins outright for that whole block — but this pass stays as
@@ -1997,19 +1944,30 @@ export function permittedProviders(filterProviderIds?: ReadonlySet<string>): Arr
 }
 
 /**
- * USER RULING 2026-09-19: Winter's OWN background jobs — session titles, the bash safety reviewer,
- * the dreamer and the session cleaner — never run on a FIRST-PARTY CLAUDE provider. "claude models
- * run through anthropic which has its own reviewer anyway": the official leg exists for Claude, and
- * a Winter-internal job that borrowed an Anthropic credential would be spending a subscription/
- * Console entitlement on work the user never asked for.
+ * WS-23 (the Winter-only pivot, 2026-09-25): the REMAINING first-party Claude rows Winter's own
+ * background jobs never run on. `anthropic` (the API-key row) is GONE from this list — every
+ * model, Claude included, now runs on the Winter agent SDK, so the 2026-09-19 premise ("Claude
+ * runs through Anthropic's own runtime, which brings its own reviewer") no longer holds and an
+ * Anthropic key is an ordinary token-priced credential for titles, the bash reviewer, the dreamer
+ * and the cleaner.
  *
- * The three ids, and why each is here: `anthropic` (the API-key row), `console` (the Console-profile
- * row) and `cc` (reserved for the claude.ai subscription arm, `runtime-sdk/create.ts`'s tag prefixes).
- * This is an exclusion by PROVIDER ID, deliberately NOT by adapter family — a third-party provider
- * that merely speaks the Anthropic dialect (`deepseek-anthropic`, `zai-anthropic`, `kimi-coding`, …)
- * is an ordinary token-priced vendor and stays eligible.
+ * `console` is gone from it too (the WS-23 live-gate fix), because the internal path now carries its
+ * bearer end to end: its slot (`anthropic:console`) is an ordinary inventory row under `console`, so
+ * `internalCredentialAccountFor("console")` names it; its adapter is `winter.anthropic-messages`,
+ * which the daemon drives, and `buildInternalProvider` hands it `connection.providerId: "console"`,
+ * the catalog's multi-provider `api` endpoint and that account as `authRef`; `credential-store.ts`
+ * returns the stored `{kind:"bearer"}` material verbatim; and the SDK adapter sends a bearer as
+ * `Authorization: Bearer` + the OAuth beta for exactly the `anthropic`/`console` ids, only under the
+ * `anthropic:console` account (`ANTHROPIC_BEARER_PROVIDER_IDS`, `buildHeaders`). The daemon's broker
+ * keeps that bearer refreshed ahead of expiry, so a background job reads the same fresh material a
+ * session does. Console is token-priced, like an API key.
+ *
+ * `cc` stays: reserved for the subscription arm this daemon does not serve (it is not even a catalog
+ * provider, so this is belt only). This is an exclusion by PROVIDER ID, deliberately NOT by adapter
+ * family — a third-party provider that merely speaks the Anthropic dialect (`deepseek-anthropic`,
+ * `zai-anthropic`, `kimi-coding`, …) is an ordinary token-priced vendor and stays eligible.
  */
-export const CLAUDE_FIRST_PARTY_PROVIDER_IDS = ["anthropic", "console", "cc"] as const;
+export const CLAUDE_FIRST_PARTY_PROVIDER_IDS = ["cc"] as const;
 
 /**
  * A LIVE snapshot of which providers this home actually holds credential material for, threaded
@@ -2041,7 +1999,10 @@ let memoisedInternalEligible: ReadonlySet<string> | undefined;
  * Four conditions, each for its own reason:
  *  1. the provider is an ordinary model-role candidate at all — `permittedProviders()`'s own floor
  *     (`scope === "llm"`, `risk.class !== "blocked"`), reused rather than restated;
- *  2. it is not a first-party Claude provider (`CLAUDE_FIRST_PARTY_PROVIDER_IDS`, the user's ruling);
+ *  2. it is not a remaining first-party Claude row (`CLAUDE_FIRST_PARTY_PROVIDER_IDS` — WS-23: only
+ *     the reserved `cc`; `anthropic` rejoined the eligible set when every model moved onto the Winter
+ *     SDK, and `console` when its bearer slot became an ordinary inventory row the Anthropic adapter
+ *     can be driven over);
  *  3. this daemon has a credential SLOT for it — a row in `credentialInventory()`. That inventory is
  *     itself catalog-derived and already excludes every `requiresUserEndpoint` row (`azure-ai`, `oci`
  *     — whose shipped endpoint is a placeholder host), every local-none row and every cloud-
@@ -2079,8 +2040,10 @@ export function internalEligibleProviderIds(): ReadonlySet<string> {
  * provider wins whenever it is eligible AND credentialed, so a DeepSeek user with a DeepSeek key gets
  * titles on DeepSeek with ZERO setup. Only when the session default's provider cannot serve these
  * jobs (a Claude default, or an eligible provider with no key stored yet) does this fall to
- * `internalProviderPreferenceOrder()`'s first credentialed member — never to Claude, which is not in
- * the eligible set at all.
+ * `internalProviderPreferenceOrder()`'s first credentialed member. Only the reserved `cc` is outside the
+ * eligible set, so no rung can land on it; `anthropic` (WS-23) and `console` (the WS-23 live-gate fix)
+ * are ordinary members — a Claude-only home with an Anthropic key, or a Console-only home signed in
+ * with a `console/*` default, gets rung 1 on its own provider, below.
  *
  * `undefined` means "nothing runnable": every internal role then reports `no-internal-credential`
  * (`providers/internal-router.ts`) and the jobs are inert — one log line per change, never per call.
@@ -2127,7 +2090,8 @@ export function preferredInternalProviderFor(
  * providers Winter's jobs have always run on; a user who signed in with ChatGPT expects the dreamer
  * on Codex, not on whichever third-party key happens to be stored too), then every other eligible
  * provider in `credentialInventory()` order, which is the ONE provider ordering this daemon already
- * pins deliberately (see that function's "THE ORDER IS LOAD-BEARING" note).
+ * pins deliberately (see that function's "THE ORDER SELECTS NOTHING" note — here it only decides which
+ * provider a `no-default-model` refusal names).
  *
  * Deterministic by construction: no `Set` iteration order and no catalog scan order leaks into it.
  */
@@ -2251,9 +2215,10 @@ export function explicitInternalRolePin(settings: Settings | null | undefined, r
   }
 }
 
-/** The provider ids `credentialInventory()` names, de-duplicated, in inventory order. Spelled here
- *  (rather than inline twice above) because the inventory carries TWO rows for `anthropic` and the
- *  order of the FIRST occurrence is what `internalProviderPreferenceOrder` promises. */
+/** The provider ids `credentialInventory()` names, in inventory order — the order
+ *  `internalProviderPreferenceOrder` promises. Spelled once (rather than inline twice above). Every
+ *  provider has exactly one row since the WS-23 live-gate fix filed the Console bearer under
+ *  `console`; the de-duplication stays as a cheap guard should a later head row ever share an id. */
 function credentialSlotProviderIds(): readonly string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -2692,7 +2657,7 @@ function assertInternalJobRoleTag(tag: string, role: InternalJobRole): void {
   throw new TypeError(
     `${role}: Winter's own background jobs can't run on ${display}. ` +
       (claude
-        ? `Claude models run through Anthropic's own runtime, which brings its own reviewer — so titles, the bash safety reviewer, the dreamer and the session cleaner never borrow an Anthropic credential. `
+        ? `The subscription Claude arm is reserved and has no internal-calls credential path on this daemon — so titles, the bash safety reviewer, the dreamer and the session cleaner never borrow one. `
         : `Winter has no way to drive that provider for its own calls (its credential shape or its API family is not one the daemon can use). `) +
       `Pick a model from the providers \`settings.modelRoles\` reports as \`permitted\` for this role, or clear the pin (model: null) to use the default.`,
   );
@@ -2738,10 +2703,13 @@ export function setModelRole(settings: Settings, role: ModelRole, model?: string
         `never be used. Pass model: null to clear a value stored before the retirement.`,
     );
   }
-  // 2026-09-19 (the internal-jobs widening): an internal-jobs role may only name a provider Winter's
-  // own background calls can actually be driven over. Refused on the PERMANENT facts only — a
-  // first-party Claude provider (the user's own ruling: those run through the official leg, which has
-  // its own reviewer) or an adapter family the daemon cannot drive — never on the situational one.
+  // 2026-09-19 (the internal-jobs widening), narrowed WS-23: an internal-jobs role may only
+  // name a provider Winter's own background calls can actually be driven over. Refused on the
+  // PERMANENT facts only — the reserved subscription row (`cc`) or an adapter family the daemon
+  // cannot drive (Bedrock's/Vertex's cloud-credential material) — never on the situational one.
+  // (`anthropic` rejoined the admittable set in WS-23: its API key is an ordinary token-priced
+  // credential now that every model runs on the Winter SDK; `console` with the live-gate fix: its
+  // bearer is carried to the Anthropic adapter end to end — see `CLAUDE_FIRST_PARTY_PROVIDER_IDS`.)
   // An ELIGIBLE provider with no key stored yet is ACCEPTED: that is precisely the case
   // `assertCatalogBackedTag`'s own doc says a write must not refuse ("a provider the user is about to
   // bind"), and the role reports `no-credential` on its `problem` until the key arrives.

@@ -43,12 +43,12 @@ import {
 } from "@yanlinglabs/winter-provider-runtime";
 import type { SecretStore } from "./secret-store";
 import { keychainService } from "../profile";
-import { ANTHROPIC_PROFILE_NAME, anthropicConfigDirFor, ensureOfficialConfigDir } from "../runtime-sdk/official-options";
+import { ANTHROPIC_PROFILE_NAME, anthropicConfigDirFor, ensurePrivateDir } from "../runtime-sdk/anthropic-paths";
 import { ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME } from "../runtime-sdk/keychain";
 import { CONSOLE_BROKER_SDK_MIN, REQUIRED_WINTER_AGENT_SDK, versionAtLeast } from "../runtime-sdk/versions";
 
 // Tripwire (Winter Phase 10a, v0.0.6 wiring): Winter's own profile name (`ANTHROPIC_PROFILE_NAME`,
-// `runtime-sdk/official-options.ts`) is a separate literal from the SDK's own default — they are
+// `runtime-sdk/anthropic-paths.ts`) is a separate literal from the SDK's own default — they are
 // both `"winter"` today by coincidence of the two repos agreeing, not by one importing the other
 // (`optionsFor` below always passes `ANTHROPIC_PROFILE_NAME` explicitly, so the SDK's default is
 // never actually consulted at runtime). This throws at import time rather than letting the two
@@ -410,8 +410,7 @@ export function createConsoleProfileBroker(deps: ConsoleProfileBrokerDeps): Cons
    * `logout()` call (which already ran that spawn once) or it is an external removal with nothing
    * left to log out of. Deletes ONLY `anthropic:console`, and ONLY when the material actually
    * reads as `bearer` there (M-B: never touch the user's own `anthropic:default` api-key slot, and
-   * never delete a kind this account should not hold in the first place — `keychainSeamFromSecretStore`'s
-   * own per-account restriction is the READ-side half of that same discipline).
+   * never delete a kind this account should not hold in the first place).
    */
   async function handleDisappearance(): Promise<void> {
     stopRefresherImpl();
@@ -504,13 +503,11 @@ export function createConsoleProfileBroker(deps: ConsoleProfileBrokerDeps): Cons
       // `antExecutable`, not `claudeExecutable`, is what this door actually needs resolved.
       if (!deps.antExecutable?.()) throw new Error("ant_executable_unavailable");
       // Winter Phase 10a fix wave (M4): harden `anthropicConfigDirFor(home)` 0700 BEFORE the
-      // login child ever spawns — `official-session.ts`'s `open()` only ensures this directory
-      // for a session actually launched on the console arm, which (per C1-interim) never happens
-      // against the pinned router yet; without this, the very first `winter login
-      // --anthropic-console` could hand the login a config dir that does not exist at all, or one
-      // left over-permissive by something else. Same helper, same 0700 shape as every other caller
-      // of `ensureOfficialConfigDir` — never a second, hand-rolled mkdir/chmod.
-      ensureOfficialConfigDir(anthropicConfigDir);
+      // login child ever spawns — without this, the very first `winter login --anthropic-console`
+      // could hand the login a config dir that does not exist at all, or one left over-permissive by
+      // something else. Same helper, same 0700 shape as every other caller of `ensurePrivateDir` —
+      // never a second, hand-rolled mkdir/chmod.
+      ensurePrivateDir(anthropicConfigDir);
       return sdk.startAnthropicConsoleBrokerLogin(store, optionsFor(onLine));
     },
 
@@ -563,10 +560,10 @@ export function createConsoleProfileBroker(deps: ConsoleProfileBrokerDeps): Cons
       // Fix wave 3 (Minor 1): harden the PARENT `anthropicConfigDir` explicitly FIRST — a single
       // recursive `mkdirSync(credentialsDir, {recursive:true})` only `chmodSync`s the LEAF path it
       // was called on, leaving a freshly-created parent at the default 0755 if it didn't already
-      // exist. Both calls are `ensureOfficialConfigDir`'s own idempotent mkdir+chmod, so an
+      // exist. Both calls are `ensurePrivateDir`'s own idempotent mkdir+chmod, so an
       // already-0700 parent (the common case — `login()` already hardens it) is a harmless no-op.
-      ensureOfficialConfigDir(anthropicConfigDir);
-      ensureOfficialConfigDir(credentialsDir);
+      ensurePrivateDir(anthropicConfigDir);
+      ensurePrivateDir(credentialsDir);
       watcherKnownExists = watcherProfileExists();
       try {
         watchHandle = watchDir(credentialsDir, onFsEvent);

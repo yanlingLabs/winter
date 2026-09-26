@@ -1,28 +1,29 @@
 // Winter Phase 8d — the compiled-binary probe behind `winter-core __runtimes-probe`. It runs
-// OUTSIDE a daemon (no settings, no store — mirrors `resolveWinterExecutable`/
-// `resolveClaudeExecutable`'s own `setting: undefined`, exactly as a fresh boot with nothing
-// configured would see them), resolves both executable ladders from the given execPath/home/env,
-// and reports what it found. It NEVER spawns `winter` (the pinned build has no version flag —
-// controller measurement M2) and never calls `resolveWinterHome()` — `home` is exactly what the
-// caller passed, so `scripts/verify-runtimes-compiled.ts` can point it at a mkdtemp dir and prove
-// the real user's homes are never touched.
+// OUTSIDE a daemon (no settings, no store — `setting: undefined`, exactly as a fresh boot with
+// nothing configured would see it), resolves the `winter` and `ant` ladders from the given
+// execPath/home/env, reads the bundle's records, and reports what it found. WS-23: the official
+// `claude` ladder it also resolved is gone with the leg. It NEVER spawns `winter` (the pinned build
+// has no version flag — controller measurement M2) and never calls `resolveWinterHome()` — `home` is
+// exactly what the caller passed, so `scripts/verify-runtimes-compiled.ts` can point it at a mkdtemp
+// dir and prove the real user's homes are never touched.
 import { accessSync, constants as fsConstants, existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { bundleRuntimePath, parseVersionsJson, resolveAntExecutable, type VersionsJson } from "./bundle-layout";
+import { bundleRuntimePath, parseAntVersionsJson, parseVersionsJson, resolveAntExecutable, type AntVersionsJson, type VersionsJson } from "./bundle-layout";
 import { resolveWinterExecutable } from "./executable";
-import { ClaudeExecutableUnavailable, resolveClaudeExecutable } from "./official-executable";
 
 export interface RuntimesProbeResult {
   ok: boolean;
   winter: { path?: string; source?: string; executable: boolean; signature?: string };
-  claude: { path?: string; source?: string; executable: boolean; version?: string; teamIdentifier?: string };
-  /** Winter Phase 10a (P10a-4): OPTIONAL, unlike winter/claude above — a miss never affects `ok`
+  /** Winter Phase 10a (P10a-4): OPTIONAL, unlike winter above — a miss never affects `ok`
    *  (`resolveAntExecutable` itself has no typed refusal; see bundle-layout.ts). Reported purely
    *  for `scripts/verify-runtimes-compiled.ts`'s fixture-driven proof that the bundle rung
    *  resolves ant inside a REAL compiled `$bunfs` binary, the same way it already proves this for
-   *  winter/claude. */
+   *  winter. */
   ant: { path?: string; source?: string; executable: boolean; signature?: string };
+  /** `runtimes/VERSIONS.json`, when staged. */
   versions?: VersionsJson;
+  /** `runtimes/ant/VERSIONS.json` (WS-23: ant's own record), when staged. */
+  antVersions?: AntVersionsJson;
   errors: string[];
 }
 
@@ -68,18 +69,6 @@ function formatSignature(info: CodesignInfo | undefined): string | undefined {
   return parts.length > 0 ? parts.join(" ") : undefined;
 }
 
-/** `claude --version` (controller measurement M1: `"2.1.250 (Claude Code)"`), 10s timeout,
- *  best-effort — NEVER `winter` (M2: the pinned build has no version flag and would hang/error). */
-function claudeVersion(path: string): string | undefined {
-  try {
-    const r = spawnSync(path, ["--version"], { encoding: "utf8", timeout: 10_000 });
-    if (r.status !== 0) return undefined;
-    return r.stdout?.trim() || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 export async function runRuntimesProbe(input: {
   execPath: string;
   home: string;
@@ -117,25 +106,10 @@ export async function runRuntimesProbe(input: {
     errors.push(winterResolution.error.message);
   }
 
-  // --- claude (P8d-1: the bundle rung is gated on VERSIONS.json — see official-executable.ts) --
-  const claudeResolution = resolveClaudeExecutable({ setting: undefined, env: input.env, execPath: input.execPath, exists });
-  const claude: RuntimesProbeResult["claude"] = { executable: false };
-  if (!(claudeResolution instanceof ClaudeExecutableUnavailable)) {
-    claude.path = claudeResolution.path;
-    claude.source = claudeResolution.source;
-    claude.executable = isExecutable(claudeResolution.path);
-    if (!claude.executable) errors.push(`claude at ${claudeResolution.path} exists but is not executable`);
-    claude.version = claudeVersion(claudeResolution.path);
-    if (claude.version === undefined) errors.push(`claude at ${claudeResolution.path} did not report a version (claude --version)`);
-    claude.teamIdentifier = codesignInfo(claudeResolution.path)?.teamIdentifier;
-  } else {
-    errors.push(claudeResolution.message);
-  }
-
   // --- ant (Winter Phase 10a, P10a-4) — OPTIONAL: a miss is recorded, never pushed into `errors`
   // or `ok`, since resolveAntExecutable has no typed refusal (an absent ant never refuses a
-  // session on either leg; only the native-provider console-profile broker's own bearer refresh
-  // depends on it, with its own failure path at that point). ------------------------------------
+  // session; only the console-profile broker's own login and bearer refresh depend on it, with its
+  // own failure path at that point). --------------------------------------------------------------
   const antResolution = resolveAntExecutable({
     setting: undefined,
     env: input.env,
@@ -150,9 +124,8 @@ export async function runRuntimesProbe(input: {
     ant.signature = formatSignature(codesignInfo(antResolution.path));
   }
 
-  // --- versions.json (independent of whether the claude ladder resolved through the bundle rung
-  // — a bundle claude that itself refused on a mismatched VERSIONS.json is exactly the case a
-  // diagnostic reader most wants to see the record for) -----------------------------------------
+  // --- the two records, each independent of how its binary resolved — a record that refuses on a
+  // pin mismatch is exactly the case a diagnostic reader most wants to see. -------------------------
   let versions: VersionsJson | undefined;
   const versionsPath = bundleRuntimePath(input.execPath, "versions");
   if (exists(versionsPath)) {
@@ -162,7 +135,16 @@ export async function runRuntimesProbe(input: {
       errors.push(`${versionsPath}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+  let antVersions: AntVersionsJson | undefined;
+  const antVersionsPath = bundleRuntimePath(input.execPath, "antVersions");
+  if (exists(antVersionsPath)) {
+    try {
+      antVersions = parseAntVersionsJson(readFileSync(antVersionsPath, "utf8"));
+    } catch (err) {
+      errors.push(`${antVersionsPath}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
-  const ok = winter.executable && claude.executable;
-  return { ok, winter, claude, ant, ...(versions === undefined ? {} : { versions }), errors };
+  const ok = winter.executable;
+  return { ok, winter, ant, ...(versions === undefined ? {} : { versions }), ...(antVersions === undefined ? {} : { antVersions }), errors };
 }

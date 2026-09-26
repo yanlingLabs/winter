@@ -7,38 +7,50 @@ import {
   antExecutablePath,
   bundleRuntimePath,
   isCompiledBinary,
+  parseAntVersionsJson,
   parseVersionsJson,
   resolveAntExecutable,
   winterSourceOf,
+  type AntVersionsJson,
   type VersionsJson,
 } from "../../src/runtime-sdk/bundle-layout";
-import { REQUIRED_CLAUDE_AGENT_SDK, REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK } from "../../src/runtime-sdk/versions";
+import { REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK } from "../../src/runtime-sdk/versions";
 
 const sha = "a".repeat(64);
 const good: VersionsJson = {
-  schema: 1, winterAgentSdk: REQUIRED_WINTER_AGENT_SDK, winterRuntimeSdk: REQUIRED_WINTER_RUNTIME_SDK,
-  officialSdk: REQUIRED_CLAUDE_AGENT_SDK, claudeCode: "2.1.250", checksums: { winterPreSign: sha, claude: sha }, stagedAt: "2026-09-12T00:00:00Z",
+  schema: 2, winterAgentSdk: REQUIRED_WINTER_AGENT_SDK, winterRuntimeSdk: REQUIRED_WINTER_RUNTIME_SDK,
+  checksums: { winterPreSign: sha }, stagedAt: "2026-09-25T00:00:00Z",
 };
+const goodAnt: AntVersionsJson = { schema: 1, tag: "v1.32.0", checksums: { antPreSign: "b".repeat(64) }, stagedAt: "2026-09-25T00:00:00Z" };
 
-describe("bundle-layout (P8d-1)", () => {
+describe("bundle-layout (P8d-1; WS-23 split the record)", () => {
   test("the bundle rung is dirname(execPath) + the layout entry", () => {
     expect(bundleRuntimePath("/Applications/Winter.app/Contents/Resources/winter-core", "winter")).toBe("/Applications/Winter.app/Contents/Resources/runtimes/winter");
-    expect(bundleRuntimePath("/x/Resources/winter-core", "claude")).toBe("/x/Resources/runtimes/claude-official/claude");
-    expect(bundleRuntimePath("/x/Resources/winter-core", "versions")).toBe("/x/Resources/runtimes/claude-official/VERSIONS.json");
+    expect(bundleRuntimePath("/x/Resources/winter-core", "versions")).toBe("/x/Resources/runtimes/VERSIONS.json");
+    expect(bundleRuntimePath("/x/Resources/winter-core", "antVersions")).toBe("/x/Resources/runtimes/ant/VERSIONS.json");
     expect(RUNTIME_BUNDLE_LAYOUT.root).toBe("runtimes");
   });
+  // WS-23: the official leg's `claude-official/` subtree is gone from the layout.
+  test("the layout names no claude-official entry", () => {
+    expect(Object.values(RUNTIME_BUNDLE_LAYOUT).some((p) => p.includes("claude"))).toBe(false);
+  });
   test("parseVersionsJson accepts a record matching this build's pins", () => {
-    expect(parseVersionsJson(JSON.stringify(good)).claudeCode).toBe("2.1.250");
+    expect(parseVersionsJson(JSON.stringify(good))).toEqual(good);
   });
   test("parseVersionsJson refuses a pin mismatch, a bad checksum, and a bad schema", () => {
-    expect(() => parseVersionsJson(JSON.stringify({ ...good, officialSdk: "0.3.251" }))).toThrow(/disagrees with this build's pins/);
-    expect(() => parseVersionsJson(JSON.stringify({ ...good, checksums: { winterPreSign: "nope", claude: sha } }))).toThrow(/sha256/);
-    expect(() => parseVersionsJson(JSON.stringify({ ...good, schema: 2 }))).toThrow(/schema/);
+    expect(() => parseVersionsJson(JSON.stringify({ ...good, winterAgentSdk: "0.0.1" }))).toThrow(/disagrees with this build's pins/);
+    expect(() => parseVersionsJson(JSON.stringify({ ...good, winterRuntimeSdk: "0.0.1" }))).toThrow(/disagrees with this build's pins/);
+    expect(() => parseVersionsJson(JSON.stringify({ ...good, checksums: { winterPreSign: "nope" } }))).toThrow(/sha256/);
+    expect(() => parseVersionsJson(JSON.stringify({ ...good, schema: 3 }))).toThrow(/schema/);
     expect(() => parseVersionsJson("{")).toThrow(/valid JSON/);
+  });
+  test("the pre-WS-23 schema-1 claude-official record is refused by name", () => {
+    const legacy = { schema: 1, winterAgentSdk: REQUIRED_WINTER_AGENT_SDK, winterRuntimeSdk: REQUIRED_WINTER_RUNTIME_SDK, officialSdk: "0.3.250", claudeCode: "2.1.250", checksums: { winterPreSign: sha, claude: sha }, stagedAt: "x" };
+    expect(() => parseVersionsJson(JSON.stringify(legacy))).toThrow(/schema 1 is the pre-WS-23 claude-official record/);
   });
 
   // P9a-8: VersionsJson.winterSource, the checksum equality's own provenance label.
-  test("winterSourceOf defaults an absent field to checkout-build (an 8d-staged bundle predates this field)", () => {
+  test("winterSourceOf defaults an absent field to checkout-build", () => {
     expect(winterSourceOf(good)).toBe("checkout-build");
     expect(winterSourceOf({ ...good, winterSource: "platform-package" })).toBe("platform-package");
     expect(winterSourceOf({ ...good, winterSource: "checkout-build" })).toBe("checkout-build");
@@ -62,22 +74,21 @@ describe("bundle-layout (P8d-1)", () => {
     expect(RUNTIME_BUNDLE_LAYOUT.ant).toBe("runtimes/ant/ant");
   });
 
-  // Winter Phase 10a (fix round 2): checksums.ant — the STAGE-TIME pre-sign hash embed-runtimes.sh
-  // records for ant, mirroring winterPreSign's own shape. Optional so a pre-fix-round-2 bundle (or
-  // one with no vendored ant) still parses.
-  test("parseVersionsJson accepts an optional checksums.ant and preserves its absence as absence", () => {
-    const antSha = "b".repeat(64);
-    expect(parseVersionsJson(JSON.stringify(good)).checksums.ant).toBeUndefined();
-    expect(parseVersionsJson(JSON.stringify({ ...good, checksums: { ...good.checksums, ant: antSha } })).checksums.ant).toBe(antSha);
+  // WS-23: ant's pre-sign checksum moved out of the claude-official record into its own.
+  test("parseAntVersionsJson accepts ant's own record", () => {
+    expect(parseAntVersionsJson(JSON.stringify(goodAnt))).toEqual(goodAnt);
   });
-  test("parseVersionsJson refuses a malformed checksums.ant without silently dropping it", () => {
-    expect(() => parseVersionsJson(JSON.stringify({ ...good, checksums: { ...good.checksums, ant: "nope" } }))).toThrow(/checksums\.ant must be lowercase sha256 hex/);
-    expect(() => parseVersionsJson(JSON.stringify({ ...good, checksums: { ...good.checksums, ant: 123 } }))).toThrow(/checksums\.ant must be lowercase sha256 hex/);
+  test("parseAntVersionsJson refuses a malformed checksum, a missing tag and a bad schema — never a silent drop", () => {
+    expect(() => parseAntVersionsJson(JSON.stringify({ ...goodAnt, checksums: { antPreSign: "nope" } }))).toThrow(/checksums\.antPreSign must be lowercase sha256 hex/);
+    expect(() => parseAntVersionsJson(JSON.stringify({ ...goodAnt, checksums: {} }))).toThrow(/antPreSign/);
+    const { tag: _tag, ...noTag } = goodAnt;
+    expect(() => parseAntVersionsJson(JSON.stringify(noTag))).toThrow(/tag/);
+    expect(() => parseAntVersionsJson(JSON.stringify({ ...goodAnt, schema: 2 }))).toThrow(/schema/);
   });
 });
 
 // Winter Phase 10a (P10a-4/L4): resolveAntExecutable's ladder. `ant` is OPTIONAL — a total miss is
-// `undefined`, never a typed refusal (unlike resolveWinterExecutable/resolveClaudeExecutable).
+// `undefined`, never a typed refusal (unlike resolveWinterExecutable).
 describe("resolveAntExecutable (P10a-4 ladder)", () => {
   const base = { env: {}, execPath: "/bundle/Contents/MacOS/winter-core" };
   const BUNDLE_ANT = antExecutablePath(base.execPath);

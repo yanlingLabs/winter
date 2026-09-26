@@ -47,7 +47,7 @@ import type { SecretStore } from "../auth/secret-store";
 import { readCredentialMaterial, writeOpenAiApiKey } from "../auth/credential-material";
 import { ANTHROPIC_CREDENTIAL_SECRET_NAME, credentialPresenceFrom } from "../runtime-sdk/keychain";
 import { credentialRows, credentialValueRefusal, evictSessionsForCredential, exaKeyPresent, removeCredential, setCredential, CredentialStoreUnavailable } from "../runtime-sdk/credentials";
-import { effectiveOfficialAuthFor } from "../runtime-sdk/official-options";
+import { effectiveAnthropicAuthFor } from "../runtime-sdk/anthropic-paths";
 import type { ConsoleProfileBroker } from "../auth/console-profile-broker";
 import type { RoutineStore } from "../routines/store";
 import type { WorkflowRuntime } from "../workflows/runtime";
@@ -82,7 +82,6 @@ import { ImportLegacySessionError } from "../runtime-sdk/import-legacy";
 import type { PlanSwitchOutcome } from "../runtime-sdk/handoff";
 import { recordNamesSelection } from "../runtime-sdk/handoff";
 import type { RuntimeSessionRecords } from "../runtime-state/records";
-import { loadCatalog, CLAUDE_FAMILY_ID } from "@yanlinglabs/winter-provider-catalog";
 import { rowForTag } from "../runtime-sdk/provider-selection";
 import { parseModelTag, canonicalizeModelTag, splitTag, UNSTATED_TAG, type ModelTag } from "../runtime-sdk/model-tag";
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
@@ -127,8 +126,8 @@ import { diagnoseRuntimes } from "../runtime-sdk/runtimes-doctor";
 import { loadUserAgentDefinitions, loadProjectAgentDefinitions, mergeAgentDefinitionTiers } from "../agent/agent-definitions";
 import type { SupportedAgentsCache } from "../agent/supported-agents-cache";
 import {
-  REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK, REQUIRED_CLAUDE_AGENT_SDK,
-  installedClaudeAgentSdkVersion, installedWinterRuntimeSdkVersion,
+  REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK,
+  installedWinterRuntimeSdkVersion,
 } from "../runtime-sdk/versions";
 import { dispatchPinMessage } from "../agent/dispatch-config";
 // plugin.setConsent (spec §5.4, "the extras keep their own consents") still writes the daemon's own
@@ -521,12 +520,15 @@ class RpcFailure extends Error { constructor(public code: number, message: strin
  *  can branch on. Anything else is rethrown untouched. */
 function rpcFromWinterRefusal(err: unknown): never {
   if (err instanceof WinterLegRefusal) {
-    // P8c-14: the official leg's two typed refusals are client-actionable in the same shape as
-    // `session_predates_winter_leg` (the caller can fix its own input — install the executable,
-    // configure a credential, pick a servable model) rather than a daemon-internal fault.
+    // Client-actionable refusals, in the same shape as `session_predates_winter_leg` (the caller can
+    // fix its own input — configure a credential, pick a servable model, repair a transcript) rather
+    // than a daemon-internal fault. WS-23: `legacy_session_migration_refused` is a session the retired
+    // official leg created whose transcript cannot move to the Winter leg as it stands.
+    // `session_cwd_unavailable`: the session's own working directory is gone — the user restores it
+    // or starts a new session, so it is theirs to fix, not a daemon fault.
     const invalid = err.code === "session_predates_winter_leg" || err.code === "not_supported_on_winter_leg"
-      || err.code === "claude_executable_unavailable" || err.code === "runtime_selection_refused"
-      || err.code === "official_console_router_unsupported" || err.code === "console_profile_missing";
+      || err.code === "runtime_selection_refused" || err.code === "legacy_session_migration_refused"
+      || err.code === "session_cwd_unavailable";
     // WS-19 (W19-7): `reason` is additive beside `code` — one `runtime_selection_refused` covers
     // several distinct situations, and `"no-credential"` is the one a client should render as "you
     // have no key for <provider>" rather than "the model could not be selected". Same `data.reason`
@@ -754,27 +756,6 @@ function assertEffortSelectable(effort: string, model: string, mode: string | un
   if (refusal !== undefined) throw new RpcFailure(ERR.INVALID_PARAMS, refusal);
 }
 
-/**
- * Winter Phase 8d (P8d-7, Task 4.1): is `model` a row of the pinned catalog's `claude` family
- * (`CLAUDE_FAMILY_ID`, `@yanlinglabs/winter-provider-catalog`)? The ONE fact `session.create`/
- * `session.dispatch` need to decide whether `runtimeKind` is KNOWABLE at create time — never a
- * string-prefix test (a `claude-*` id is exactly the kind of guess P8d-7 forbids: a `baseUrl`
- * override or a reseller alias could name a non-Claude model that way, or a Claude row could be
- * addressed by a bare alias that doesn't start with "claude" at all).
- *
- * Mirrors `runtime-sdk/provider-selection.ts`'s `catalogRowsFor` MATCH PREDICATE exactly (a row's
- * `key`, `upstreamId`, `canonicalModelId`, or any `aliases` entry) — deliberately NOT a call to that
- * function, because `catalogRowsFor` returns only `{key, providerId}` and this needs `modelFamily`,
- * which is a different field on the same underlying row. `provider-selection.ts` is not this lane's
- * file to extend in Phase 8d (Winter Phase 8d lane map): duplicating the four-way identity match
- * here — never the family answer itself, which is read straight off the row — is the cost of that
- * boundary, not a second source of truth for "what the catalog says a model's family is".
- */
-// WS-20: `model` is ALWAYS a tag now — the exact catalog row `key` is the only match this needs;
-// the broad alias/upstreamId/canonicalModelId matching a bare id used to require is gone.
-function isClaudeCatalogModel(model: string): boolean {
-  return loadCatalog().models.some((m) => m.key === model && m.modelFamily === CLAUDE_FAMILY_ID);
-}
 
 /** WS-20: the ONE model-validation door, shared verbatim by `session.setModel` and
  *  `session.create` — collapses to a straight `parseModelTag` now: a model is ALWAYS a
@@ -796,42 +777,6 @@ function isClaudeCatalogModel(model: string): boolean {
  *  (`anthropic/claude-sonnet-5`) — a legitimate request (spec §1), never a typo, since `providerId`
  *  is already the chosen provider. The RESOLVED (canonical) tag is what this function returns and
  *  every caller stores/forwards; the facing form itself is never persisted. */
-/**
- * M1 (whole-branch review, fix round 2): a CATEGORY for the daemon log, never `detail`'s raw text
- * (this file's "names only" logging discipline). Router 0.0.6's `revert-pending` `detail` says
- * whether the pending-revert note was written ("will self-converge") or ALSO failed ("needs manual
- * reconciliation") — the two words this classifies on are the router's own documented vocabulary
- * for that outcome, never guessed at; anything else is `"unrecognized"` rather than logged verbatim.
- */
-/**
- * The `lossy_fork` twin of `detailCategoryFor` below (D1 round-3 carry / WS-19 lane rider x1).
- *
- * The router's lossy-fork reasons are free text built around a step in its own eight-step barrier,
- * and seven of the nine interpolate a caught `error.message` — which is how an absolute path was
- * reaching the user. These substrings are the STABLE, path-free part of each: a reason that stops
- * matching simply reads `unrecognized`, which is the honest answer and still leaks nothing. Order
- * matters only in that the more specific phrases come first.
- */
-function lossyForkCategoryFor(reason: string): string {
-  const lower = reason.toLowerCase();
-  if (lower.includes("session store could not be resolved")) return "store-unresolved";
-  if (lower.includes("re-plan against the current owner")) return "owner-changed";
-  if (lower.includes("no destination runtime confirmed")) return "unconfirmed-destination";
-  if (lower.includes("could not be staged")) return "staging-failed";
-  if (lower.includes("temp continuity")) return "temp-continuity-failed";
-  if (lower.includes("writer lease")) return "lease-unverified";
-  if (lower.includes("canonical tail is still moving")) return "tail-unsettled";
-  if (lower.includes("exited before it reached init")) return "destination-exited-before-init";
-  return "unrecognized";
-}
-
-function detailCategoryFor(detail: string): "self-converge" | "needs-manual-reconciliation" | "unrecognized" {
-  const lower = detail.toLowerCase();
-  if (lower.includes("manual reconciliation")) return "needs-manual-reconciliation";
-  if (lower.includes("self-converge")) return "self-converge";
-  return "unrecognized";
-}
-
 function resolveModelSelection(model: string, settings?: Settings): string {
   let tag: string;
   try {
@@ -1051,6 +996,20 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     } catch (err) {
       console.error(`credentials: reconciling the internal-jobs view failed (${err instanceof Error ? err.name : "unknown"}) — it keeps the set it had`);
     }
+  }
+
+  /**
+   * WS-23 live-gate fix: the Console's bearer slot (`anthropic:console`) is an ordinary credential of
+   * the `console` provider now — a `console/*` session names it, a cross-provider advisor pin can, and
+   * Winter's own jobs may run on it — so a sign-in or sign-out through the daemon does what
+   * `credential.set`/`credential.remove` do for a key: replace the live children that name `console`
+   * and re-probe the internal-jobs view. Best-effort for the same reasons as those two (the sign-in or
+   * sign-out itself already succeeded). A CLI-door login in another process pokes the view through
+   * `credential.list` instead (`notifyDaemonOfOutOfBandCredentialChange`).
+   */
+  async function afterConsoleCredentialChange(): Promise<void> {
+    await evictSessionsForCredentialChange("console");
+    await refreshInternalProvidersAfterCredentialChange();
   }
 
   async function ensureWinterSession(sessionId: string): Promise<LegSession | undefined> {
@@ -1827,28 +1786,16 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (opts.winter !== undefined) {
           try { opts.winter.assertAvailable(p.mode ?? "code"); } catch (err) { rpcFromWinterRefusal(err); }
         }
-        // Winter Phase 8c (P8c-5), AMENDED Phase 8d (P8d-7, M7): `runtimeKind` is stamped HERE and
-        // only here — the 8a runtime record `winter.create()` mints just below does not exist yet,
-        // so this is the ONE call site that can honestly stamp the seq-1 event. Phase 8c stamped
-        // "winter-agent" unconditionally whenever `opts.winter` existed, which was a LIE for a
-        // session the driver goes on to run on the official leg (M7 measured this: `session.create`/
-        // `session.dispatch` stamped it even for a Claude catalog model with an official peer
-        // available). P8d-7's fix: stamp "winter-agent" only when the leg is ACTUALLY knowable as
-        // Winter from here — no official peer present, OR the resolved model is not a row of the
-        // catalog's `claude` family (`isClaudeCatalogModel`, never a string-prefix test) — and OMIT
-        // the field otherwise (an official peer present AND a Claude-family model: `decideRuntime`
-        // inside `winter.create()` below may yet route this to the official leg, and this call site
-        // has no way to ask the router without duplicating its own async decision). `undefined`
-        // model counts as "not a Claude catalog model" — `decideRuntime`'s own bail-out #3 never
-        // consults the selector for an unset model, so the Winter leg is exactly what runs. Never a
-        // guess either way: an omitted field means "ask `session.list`'s `legOf` once the record
-        // exists", not "unknown forever". `modelRef` rides the ALREADY-RESOLVED `model` local (set
-        // above, before the effort check) — never the caller's raw, possibly-aliased `p.model`.
-        // `providerId` has no producer on THIS event in this phase (P8d-7: `session.list` is the
-        // truthful source, from the record) and is deliberately omitted, not set to a guess.
-        const officialPeerPresent = opts.runtimeSdk?.officialPeerSync() !== undefined;
-        const knowsWinterLeg = opts.winter !== undefined
-          && (!officialPeerPresent || model === undefined || !isClaudeCatalogModel(model));
+        // Winter Phase 8c (P8c-5), AMENDED Phase 8d (P8d-7, M7) and WS-23: `runtimeKind` is stamped
+        // HERE and only here — the 8a runtime record `winter.create()` mints just below does not exist
+        // yet, so this is the ONE call site that can honestly stamp the seq-1 event. P8d-7 omitted it
+        // for a Claude-family model while an official peer could still have claimed that session; with
+        // the official leg retired, every session a driver table creates runs on the Winter leg.
+        // `modelRef` rides the ALREADY-RESOLVED `model` local (set above, before the effort check) —
+        // never the caller's raw, possibly-aliased `p.model`. `providerId` has no producer on THIS event
+        // (P8d-7: `session.list` is the truthful source, from the record) and is deliberately omitted,
+        // not set to a guess.
+        const knowsWinterLeg = opts.winter !== undefined;
         const sessionId = opts.store.createSession(p.scope, {
           cwd, approvalPolicy, origin: p.origin, mode: p.mode, model, effort: p.effort,
           ...(knowsWinterLeg ? { runtimeKind: "winter-agent" as const } : {}),
@@ -2003,12 +1950,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // the row back on a refusal. (`winter` is undefined only on a bare test server.)
         if (opts.winter !== undefined) { try { opts.winter.assertAvailable("dispatch"); } catch (err) { rpcFromWinterRefusal(err); } }
         // Winter Phase 8c (P8c-5), amended Phase 8d (P8d-7): same reasoning as `session.create`
-        // above, but dispatch takes no model param — `model` is always `undefined` here, which is
-        // exactly the P8d-7 "not a Claude catalog model" case, so `runtimeKind` stays knowable and
-        // unconditional on `opts.winter`'s presence, unlike `session.create`'s own conditional (that
-        // call site's `officialPeerPresent`/Claude-catalog check never has anything to bite on for a
-        // request that never named a model). `modelRef` stays unset (the dispatch singleton always
-        // uses the live/boot default model).
+        // above — `runtimeKind` is knowable whenever `opts.winter` exists. `modelRef` stays unset (the
+        // dispatch singleton always uses the live/boot default model).
         const sessionId = opts.store.createSession("global", {
           cwd: canonicalSessionCwd(homedir()), approvalPolicy: "auto", origin: "dispatch", mode: "dispatch",
           ...(opts.winter !== undefined ? { runtimeKind: "winter-agent" as const } : {}),
@@ -2477,11 +2420,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // through (`capabilityTools: WINTER_CAPABILITY_TOOLS`) — computed once per mode, not
         // per tool, since `disallowedToolsFor` itself is a pure O(table size) scan.
         //
-        // 0.0.17: the answer now depends on the LEG and on whether an Exa key is stored, so both are
-        // supplied rather than defaulted. `leg: "winter"` is the right one for this listing even though
-        // code sessions can run on the official leg: every row it reports is a `mcp__winter__*`
-        // capability tool, which only a Winter child is ever handed — the official leg's own web pair is
-        // claude's and appears in no capability server. The key presence is probed LIVE here, per call,
+        // 0.0.17: the answer depends on whether an Exa key is stored, so that is supplied rather than
+        // defaulted. The key presence is probed LIVE here, per call,
         // for the same reason `credential.list` re-probes: a client that adds a key and re-reads must
         // see the new answer with no restart. It decides one row in THIS listing:
         // `mcp__winter__research__Search` reports `exposure: false` for chat and dispatch when no key is
@@ -2489,7 +2429,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // not advertise the tool either) — so this surface answers the "why can't chat search?" question
         // without a second, drifting explanation of the rule.
         const exaPresent = await exaKeyPresent(opts.secrets);
-        const exposure = { leg: "winter" as const, exaKeyPresent: exaPresent };
+        const exposure = { exaKeyPresent: exaPresent };
         const disallowedByMode: Record<"code" | "dispatch" | "chat", Set<string>> = {
           code: new Set(disallowedToolsFor("code", exposure, WINTER_CAPABILITY_TOOLS)),
           dispatch: new Set(disallowedToolsFor("dispatch", exposure, WINTER_CAPABILITY_TOOLS)),
@@ -2534,10 +2474,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // capabilities.list just above. Reuses `diagnoseRuntimes` — the SAME resolver `winter
       // doctor`'s "runtimes" section calls (packages/cli/src/main.ts's `printRuntimesSection`) —
       // rather than `runtimes-probe.ts`'s `runRuntimesProbe`: that second probe spawns `codesign
-      // -dvv` (x3) and `claude --version`, each with a 10s timeout, and hardcodes `setting:
-      // undefined` to emulate a fresh boot with nothing configured — exactly wrong for an RPC
-      // inside a LIVE daemon whose settings may set `runtimes.winterExecutable`/`claudeExecutable`
-      // explicitly. `diagnoseRuntimes` is settings-aware and never spawns anything.
+      // -dvv` with a 10s timeout and hardcodes `setting: undefined` to emulate a fresh boot with
+      // nothing configured — exactly wrong for an RPC inside a LIVE daemon whose settings may set
+      // `runtimes.winterExecutable` explicitly. `diagnoseRuntimes` is settings-aware and never spawns
+      // anything.
       // -----------------------------------------------------------------------------------------
       case METHODS.versionsGet: {
         parseParams(VersionsGetParams, params);
@@ -2552,18 +2492,19 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           pins: {
             winterAgentSdk: REQUIRED_WINTER_AGENT_SDK,
             winterRuntimeSdk: REQUIRED_WINTER_RUNTIME_SDK,
-            claudeAgentSdk: REQUIRED_CLAUDE_AGENT_SDK,
           },
           installed: {
             winterAgentSdk: SDK_VERSION,
             ...(installedWinterRuntimeSdkVersion() === undefined ? {} : { winterRuntimeSdk: installedWinterRuntimeSdkVersion()! }),
-            // `report.claude.installedWrapper` IS `installedClaudeAgentSdkVersion()` — reused
-            // rather than a second call, same value either way.
-            ...(report.claude.installedWrapper === undefined ? {} : { claudeAgentSdk: report.claude.installedWrapper }),
             ...(report.winter.resolved === undefined ? {} : { winterExecutable: report.winter.resolved }),
-            ...(report.claude.resolved === undefined ? {} : { claudeExecutable: report.claude.resolved }),
           },
-          official: report.bundle?.versions ?? null,
+          // WS-23: the staged records (`runtimes/VERSIONS.json`, `runtimes/ant/VERSIONS.json`), or
+          // `null` when neither is staged (every dev checkout). Was `official`, the retired
+          // `claude-official/VERSIONS.json` verbatim.
+          bundle: report.bundle?.versions === undefined && report.bundle?.antVersions === undefined ? null : {
+            ...(report.bundle.versions === undefined ? {} : { runtimes: report.bundle.versions }),
+            ...(report.bundle.antVersions === undefined ? {} : { ant: report.bundle.antVersions }),
+          },
         };
       }
       // -----------------------------------------------------------------------------------------
@@ -3090,95 +3031,51 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (model !== null) {
           model = resolveModelSelection(model, liveSettingsFor(opts));
         }
-        // Winter Phase 8c (Task 4.1): a model that resolves to a DIFFERENT runtime leg than the
-        // session's record is a HANDOFF, not a plain write — `planAndApplySwitch` is the one place
-        // that decides. `same-runtime`/`deferred`/`resumed` all still want the ordinary store write
-        // below (the model preference is valid input either way — only the RUNTIME MIGRATION's own
-        // outcome differs); `refused`/`confirmation_required`/`lossy_fork`/`blocked` stop here,
-        // typed, with NOTHING written — the caller's model preference never took effect.
+        // Winter Phase 8c (Task 4.1) / 10b / WS-23: `planAndApplySwitch` runs the pre-flight review and
+        // keeps the durable record in step (adopting a record the retired official leg wrote first).
+        // `same-runtime` still wants the ordinary store write below; `refused`/`confirmation_required`
+        // stop here, typed, with NOTHING written — the caller's model preference never took effect.
         if (opts.handoff !== undefined) {
           const outcome = await opts.handoff.planAndApplySwitch(p.sessionId, model, p.confirmLossy ?? false);
           switch (outcome.kind) {
             case "refused":
-              throw new RpcFailure(ERR.INVALID_PARAMS, outcome.detail, { code: outcome.code });
+              throw new RpcFailure(ERR.INVALID_PARAMS, outcome.detail, {
+                code: outcome.code,
+                ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+              });
             case "confirmation_required":
               // Winter Phase 10b (D1-4/D1-6, W18-23): `portable` is additive in the error data —
-              // now filled from `PlanSwitchOutcome.confirmation_required.portable`, itself sourced
-              // from the router's own `reviewSwitch` classification (D1-6). Never "runtime" in the
-              // message text (R-10b-4): as of 10b this same outcome also fires for a same-leg
-              // family change (gpt -> deepseek on Winter), which never moves a runtime at all.
-              throw new RpcFailure(
-                ERR.INVALID_PARAMS,
-                "this model change may lose some of the conversation's carried state; resend with confirmLossy to proceed",
-                { code: "handoff_confirmation_required", warnings: outcome.warnings, portable: outcome.portable },
-              );
-            case "lossy_fork": {
-              // D1 round-3 carry, same class as `blocked` below and fixed the same way: the router
-              // builds a lossy-fork `reason` by interpolating `error.message` (see the barrier's own
-              // `lossy(...)` helper — "the shared session store could not be resolved …: ${error}",
-              // "the handoff could not be staged: ${error}", and five more), so an ABSOLUTE PATH was
-              // reaching the user verbatim in an RPC error. The raw reason now goes to the daemon
-              // log as a CATEGORY only, and the user gets one neutral sentence that is the same for
-              // every reason — never conditioned on its content, which would risk leaking what it
-              // says.
-              let currentModel: string | undefined;
-              try { currentModel = opts.store.meta(p.sessionId).model; } catch { /* unknown id: the fallback copy still reads fine */ }
-              console.error(`session.setModel: handoff offered a lossy fork for ${p.sessionId} (reason=${lossyForkCategoryFor(outcome.reason)})`);
-              throw new RpcFailure(
-                ERR.INVALID_PARAMS,
-                `Couldn't switch models without losing part of the conversation; the session stays on ${currentModel ?? "the default model"}.`,
-                { code: "handoff_lossy_fork" },
-              );
-            }
-            case "blocked": {
-              // M1 (whole-branch review, fix round 2): NEVER surface the raw `reason`/`detail` to
-              // the user — either can name router/daemon internals (R-10b-4's discipline applies
-              // here too). `detail` (present as of router 0.0.6 on the `revert-pending` reason —
-              // `DetailedHandoffOutcome`'s own doc: "widened with the detail the pinned union has
-              // no room for") goes to the daemon log ONLY, and as a CATEGORY derived from it, never
-              // its raw text (this file's own "names only" logging discipline). The user copy is
-              // the SAME neutral sentence for every `blocked` reason — never conditioned on
-              // `detail`'s content, which would risk leaking what it says.
-              let currentModel: string | undefined;
-              try { currentModel = opts.store.meta(p.sessionId).model; } catch { /* unknown id: the fallback copy still reads fine */ }
-              console.error(`session.setModel: handoff blocked for ${p.sessionId} (reason=${outcome.reason}${outcome.detail === undefined ? "" : `, detail=${detailCategoryFor(outcome.detail)}`})`);
-              throw new RpcFailure(
-                ERR.INTERNAL,
-                `Couldn't finish switching models; the session stays on ${currentModel ?? "the default model"}. Try again in a moment.`,
-                { code: "handoff_blocked" },
-              );
-            }
-            // Fix round 1 (item 5, Lane 2's handoff m5 change): a turn is running and the switch's
-            // OWN continuation now commits the model preference itself, exactly once, when it
-            // settles to "resumed" — this RPC must NOT also write it now. Writing here too would
-            // either double-write the same value or (worse) write a preference the deferred plan
-            // has not actually landed yet, ahead of the runtime migration it's gating. Returns the
-            // same bare `{}` `session.setModel` always returns on acceptance — deferred is not a
-            // refusal, it is accepted input whose effect is merely not-yet-applied.
-            case "deferred":
-              return {};
-            case "same-runtime":
-            case "resumed": {
-              // Winter Phase 10b (D1 fix round 3, INVARIANT 1c): `meta.model` and the 8a record may
-              // NEVER disagree about which leg/selection this session runs on.
+              // filled from the router's own `reviewSwitch` classification (D1-6). Never "runtime" in
+              // the message text (R-10b-4): the review fires for a family change, which never moves a
+              // runtime at all.
               //
-              // `session-driver.ts`'s `resume()` picks the leg from `record.runtimeKind` and
-              // `resumeOfficial` hands `record.selection` on BY IDENTITY; `meta.model` is read only
-              // by the Winter leg's own `optionsFor`. So a `session.setModel` that writes
-              // `meta.model` while the record still names the SOURCE has not switched anything — it
-              // has made `session.list` show the new model while every future turn runs the old one,
-              // silently and permanently. That is exactly what round 2's "not in the runtime
-              // directory ⇒ same-runtime" mapping produced, and it is why this guard is here rather
-              // than only inside `planAndApplySwitch`: the store write itself lives on this side.
+              // WS-23 (reasoning-state, decision 9): what a switch can lose is only what the new model
+              // cannot represent (an image it cannot read, another vendor's server tools, a conversation
+              // too large for it -- summarized first -- or a cancelled turn); the message says so, and
+              // `fit` ({fits, estimatedTokens, window}) rides the data when the review computed one.
+              throw new RpcFailure(
+                ERR.INVALID_PARAMS,
+                "this model change loses part of what the conversation holds (see warnings); resend with confirmLossy to proceed",
+                { code: "handoff_confirmation_required", warnings: outcome.warnings, portable: outcome.portable, ...(outcome.fit !== undefined ? { fit: outcome.fit } : {}) },
+              );
+            case "same-runtime": {
+              // Winter Phase 10b (D1 fix round 3, INVARIANT 1c): `meta.model` and the 8a record may
+              // NEVER disagree about which selection this session runs on. `session-driver.ts`'s
+              // `resume()` routes on `record.runtimeKind`, and the credential eviction reads the
+              // record's provider; `meta.model` is read only by the incarnation builder. So a
+              // `session.setModel` that writes `meta.model` while the record still names the SOURCE has
+              // made `session.list` show the new model while the record says otherwise — which is why
+              // this guard is here rather than only inside `planAndApplySwitch`: the store write
+              // itself lives on this side.
               //
               // Guarded ONLY when the outcome actually carries a decided selection. A bare
               // `same-runtime` with no `decided` is one of `planAndApplySwitch`'s early bail-outs
               // (`model === null`, no record at all, an engine-era row, a `winter-test/*` double, an
-              // off-catalog model) — no leg decision ever ran, so there is nothing for a record to
-              // agree or disagree with, and those keep their ordinary store-write behaviour. Also
-              // inert when no `records` door is wired (a daemon whose 8a spine is offline, and every
-              // test that boots the server without one): the pre-10b behaviour, unchanged.
-              const decidedSelection = outcome.kind === "resumed" ? outcome.selection : outcome.decided;
+              // off-catalog model) — no decision ever ran, so there is nothing for a record to agree or
+              // disagree with, and those keep their ordinary store-write behaviour. Also inert when no
+              // `records` door is wired (a daemon whose 8a spine is offline, and every test that boots
+              // the server without one).
+              const decidedSelection = outcome.decided;
               if (decidedSelection !== undefined && opts.records !== undefined
                   && !recordNamesSelection(opts.records.get(p.sessionId), decidedSelection)) {
                 let currentModel: string | undefined;
@@ -3186,7 +3083,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
                 // Category only — never the selection itself, which names a provider and a model
                 // ref and rides alongside credential-adjacent facts (this file's own "names only"
                 // logging discipline, and the runtime-state header's rule about record contents).
-                console.error(`session.setModel: refusing to report ${outcome.kind} for ${p.sessionId} — the durable runtime record does not name the requested model's leg/selection (category=record-disagrees)`);
+                console.error(`session.setModel: refusing to report ${outcome.kind} for ${p.sessionId} — the durable runtime record does not name the requested model's selection (category=record-disagrees)`);
                 throw new RpcFailure(
                   ERR.INTERNAL,
                   `Couldn't finish switching models; the session stays on ${currentModel ?? "the default model"}. Try again in a moment.`,
@@ -3205,7 +3102,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // P8b Task 16: a LIVE Winter child is told (`Query.setModel`); a resumable one re-reads the
         // store when it reopens. The store write above is the contract; this is best-effort and
         // never delays the reply.
-        void opts.winter?.get(p.sessionId)?.setModel(model ?? undefined).catch((err: unknown) => {
+        // WS-23 review r1 I-5: not while a provider switch is replacing the child -- the live child is the
+        // SOURCE being left, it would refuse a model on another provider, and the target is spawned with
+        // the new model from the record anyway.
+        const liveDriver = opts.winter?.get(p.sessionId);
+        if (liveDriver?.handoffPending !== true) void liveDriver?.setModel(model ?? undefined).catch((err: unknown) => {
           console.error(`session.setModel: the winter child for ${p.sessionId} refused the model: ${(err as Error)?.name ?? "unknown"}`);
         });
         return {};
@@ -3934,7 +3835,24 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             // everything after, but an app-driven login through this RPC never started one at all.
             // `startRefresher()` is idempotent (a no-op while already running) and performs its own
             // immediate refresh, so this is the one missing call, not a duplicate of anything above.
-            if (result.ok) opts.consoleBroker?.startRefresher();
+            //
+            // WS-23 live-gate fix: the bearer is now what `console` sessions and Winter's own jobs READ,
+            // and the refresher's seed refresh writes it asynchronously — so ONE refresh is awaited
+            // first (the CLI door's own sequence: `refreshBearer()`, then a refresher), and the
+            // children are replaced and the jobs' view re-probed ONLY when that refresh reports the
+            // material landed. A failed one re-probes nothing: the view would snapshot Console as
+            // absent right before the refresher's retry writes it. That retry lands the bearer on its
+            // own backoff; sessions read the slot at their next turn, and the jobs' view heals itself
+            // (`refreshSoon` on a refused internal call, and once per dreamer tick).
+            if (result.ok) {
+              const broker = opts.consoleBroker;
+              void (async () => {
+                let landed = false;
+                try { landed = (await broker?.refreshBearer())?.ok === true; } catch { /* the refresher below retries on its own backoff */ }
+                broker?.startRefresher();
+                if (landed) await afterConsoleCredentialChange();
+              })();
+            }
           })
           .catch((err) => {
             broadcastAnthropicLoginEvent({ type: "provider_login_finished", provider: "anthropic", ok: false, reason: err instanceof Error ? err.name : "unknown" });
@@ -3992,6 +3910,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           const code = /^[a-z_]+$/.test(prefix) ? prefix : "console_logout_failed";
           throw new RpcFailure(ERR.INTERNAL, message, { code });
         }
+        // The bearer is gone (the broker's logout deletes `anthropic:console`): a live `console` child
+        // is replaced, so its next turn meets the typed "not signed in" refusal before any child runs.
+        await afterConsoleCredentialChange();
         return { ok: true };
       }
 
@@ -4004,7 +3925,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const apiKey = material?.kind === "api-key";
         const consoleProfile = opts.consoleBroker?.profileExists() ?? false;
         // WS-20: `auth` is gone — presence alone; a session's own tag decides which arm it uses.
-        return { anthropic: { apiKey, consoleProfile, effective: effectiveOfficialAuthFor(apiKey, consoleProfile) } };
+        return { anthropic: { apiKey, consoleProfile, effective: effectiveAnthropicAuthFor(apiKey, consoleProfile) } };
       }
 
       // -----------------------------------------------------------------------------------------

@@ -105,27 +105,27 @@ export const CAPABILITY_TOOL_MODES: Readonly<Record<string, { modes: readonly Se
   // web-tools ruling. P8b-33's reason for a daemon-owned web pair ("the SDK's built-ins carry neither
   // the Exa key nor the dangerous-domain floor") expired at agent SDK 0.0.17, which gives the child
   // both through `Options.web` — so the daemon's copies retired rather than shadowing the real tools.
-  // See `SDK_WEB_BUILTINS` for the per-LEG rule that replaces them.
+  // See `SDK_WEB_BUILTINS` for the per-mode rule that replaces them.
   // Fix wave (review F7): the `lsp` capability server — code-only, as the registry door was.
   "mcp__winter__lsp__lsp": { modes: ["code"] },
 };
 
 /**
- * **The two web built-ins BOTH runtimes ship**, under the same two names.
+ * **The two web built-ins the Winter runtime ships**: `WebFetch`/`WebSearch` (agent SDK 0.0.17), on by
+ * default in every session's `init.tools`. So the blanket per-mode disallow P8b-33 imposed (they had
+ * no Exa key and no dangerous-domain floor, both of which were daemon state a built-in could not
+ * reach) is retired: `Options.web` now carries the key as an `authRef` the child resolves itself and
+ * the floor as `blockedDomains`.
  *
- * Agent SDK 0.0.17 gives the Winter runtime its own `WebFetch`/`WebSearch` — a copy of claude's, on
- * by default in every session's `init.tools` — and the official leg has always had claude's native
- * pair. So the blanket per-mode disallow P8b-33 imposed (they had no Exa key and no dangerous-domain
- * floor, both of which were daemon state a built-in could not reach) is retired: `Options.web` now
- * carries the key as an `authRef` the child resolves itself and the floor as `blockedDomains`.
+ * **The rule is per MODE** (user ruling, 2026-09-18) — see `disallowedToolsFor`:
  *
- * **The rule is now per LEG and per MODE** (user ruling, 2026-09-18) — see `disallowedToolsFor`:
- *
- *   official leg   both tools stay, claude's own, with claude's own per-domain approval behaviour.
- *   Winter, code   both tools.
- *   Winter, chat   `WebFetch`, plus `WebSearch` ONLY when no Exa key is stored — with a key, the
- *   Winter, disp.  daemon's `Search` (Exa answer mode) is the search surface instead, and exposing
+ *   code           both tools.
+ *   chat,          `WebFetch`, plus `WebSearch` ONLY when no Exa key is stored — with a key, the
+ *   dispatch       daemon's `Search` (Exa answer mode) is the search surface instead, and exposing
  *                  two searches to one model is a choice nobody asked it to make.
+ *
+ * (Until WS-23 the rule was also per LEG: the retired official `claude` leg kept claude's native pair
+ * in every mode.)
  */
 export const SDK_WEB_BUILTINS: readonly string[] = ["WebFetch", "WebSearch"];
 
@@ -140,15 +140,11 @@ export const SDK_WEB_BUILTINS: readonly string[] = ["WebFetch", "WebSearch"];
 export const EXA_GATED_SEARCH_TOOL = "mcp__winter__research__Search";
 
 /**
- * Which runtime leg a tool list is being built for. The two legs' web surfaces are decided by
- * DIFFERENT owners — Winter's by this daemon's `Options.web`, claude's by claude — so the leg is a
- * REQUIRED argument rather than a defaulted one: a call site that forgets it would silently hand one
- * leg the other's answer, and that is the exact failure the ruling is about.
+ * The runtime state a tool list depends on beyond the mode. WS-23: it used to carry a REQUIRED `leg`
+ * as well — the retired official leg's web surface was claude's, decided by a different owner — and
+ * with one runtime left there is nothing for a caller to forget.
  */
-export type ToolExposureLeg = "winter" | "official";
-
 export interface ToolExposure {
-  leg: ToolExposureLeg;
   /**
    * Is an Exa API key stored? Decides chat/dispatch's search surface (see `SDK_WEB_BUILTINS`).
    *
@@ -160,7 +156,7 @@ export interface ToolExposure {
 }
 
 /**
- * The bare allow rules the two web built-ins need on the WINTER leg in code mode, and nowhere else.
+ * The bare allow rules the two web built-ins need in code mode, and nowhere else.
  *
  * WHY THEY ARE NEEDED (measured in the pinned SDK's `permissions/evaluator.ts`): neither tool is in
  * `isBuiltInReadOnly` or `TASK_MODE_CLASS_SILENT_ALLOW`, so the mode stage answers `unresolved` for
@@ -178,9 +174,6 @@ export interface ToolExposure {
  * loopback or private target still prompts in code mode under this rule. And a BARE name is not an
  * exact-host `WebFetch(domain:<host>)` rule, so it grants none of the standing DNS-rebinding consent
  * that naming a host does.
- *
- * NOT on the official leg, deliberately: claude asks per domain there and the user asked for claude's
- * native behaviour to be kept exactly.
  */
 export const WEB_BUILTIN_ALLOW_RULES: readonly string[] = [...SDK_WEB_BUILTINS];
 
@@ -553,9 +546,10 @@ export function controlPlaneDenyRules(home: string): string[] {
   // R.1 ruling 2: `escapeRulePath` is the ROUTER's (one source for both legs' rule spelling) — the daemon's
   // character-for-character copy is gone.
   const lit = escapeRulePath;
-  // P8d-12 (WS-16 §10); Winter Phase 10b (D1-3, W18-9): the official leg's own SDK-parent staging
-  // root — `claude-resume-<uuid>` directories the Claude Agent SDK stages a cross-generation resume
-  // payload under, directly in the SYSTEM temp dir (never under `home`, which is why this rule
+  // P8d-12 (WS-16 §10); Winter Phase 10b (D1-3, W18-9): the retired official leg's own SDK-parent
+  // staging root — `claude-resume-<uuid>` directories the Claude Agent SDK staged a cross-generation
+  // resume payload under (WS-23: none is created any more, but boot recovery still reconciles a crashed
+  // one, so the fence stays until it has), directly in the SYSTEM temp dir (never under `home`, which is why this rule
   // anchors at `tmpdir()` rather than joining `home` the way every other rule here does). Nothing on
   // either leg may WRITE a staged resume payload: the official SDK's own process boundary does not fence
   // that off from a child it spawns. READS (round 6): every resumed official generation runs IN a staging
@@ -660,11 +654,8 @@ export function controlPlaneDenyRules(home: string): string[] {
  * fence above) PLUS whatever the user's deny rules name — WS-21: `sdk/settings.json`
  * `permissions.deny` (`sdkDenyRules`), passed in by the caller (user/daemon-authored SDK-grammar
  * rules — today only `Skill(<name>)`, written by `settings.setSkillDenied`, but a hand-written entry
- * of any other shape rides along unchanged). This is the ONE place both legs' `Options.permissions.
- * deny` is assembled from, so `buildWinterOptions` (below) and `official-options.ts`'s
- * `officialInputFor` reuse this exact function rather than each concatenating the two lists their
- * own way — the same "provably the same fence on both legs" precedent `controlPlaneDenyRules`'s own
- * doc states for `sandboxConfigFor`. `settings` is read from the ALREADY-RESOLVED input a caller
+ * of any other shape rides along unchanged). This is the ONE place `Options.permissions.deny` is
+ * assembled from, so `buildWinterOptions` (below) never concatenates the two lists its own way. `settings` is read from the ALREADY-RESOLVED input a caller
  * passes in (never a file read here) — this function stays as pure as `controlPlaneDenyRules`
  * itself, just with one more input.
  */
@@ -693,13 +684,12 @@ export function permissionDenyRulesFor(home: string, userDeny: readonly string[]
  *
  * Winter's position has always been that `Read`/`Glob`/`Grep` are unfenced apart from the daemon's
  * own state (CLAUDE.md: "Reads are deliberately unfenced"). Until this constant that was true only
- * INDIRECTLY: neither leg carried an allow rule, so a read outside the working directory made the
- * runtime ask, the ask reached `canUseTool`, the approval bridge normalised the tool name and
- * `PermissionGate.evaluate` allowed it as read-only. Correct, but a host round trip per call, invisible
- * in the `Options` either leg is handed, and pinned by no test on the official leg (the measured
- * "8d" e2e covers a Bash read outside cwd, never the Read TOOL).
+ * INDIRECTLY: no allow rule was carried, so a read outside the working directory made the runtime
+ * ask, the ask reached `canUseTool`, the approval bridge normalised the tool name and
+ * `PermissionGate.evaluate` allowed it as read-only. Correct, but a host round trip per call, and
+ * invisible in the `Options` the child is handed.
  *
- * Stating it as an allow rule makes it native and makes the two legs literally identical. It cannot
+ * Stating it as an allow rule makes it native. It cannot
  * widen the fence: both runtimes evaluate DENY before ALLOW — claude's own order, and the Winter
  * SDK's `permissions/evaluator.ts` header ("1 PreToolUse hooks -> 2 deny rules -> 3 ask rules -> 4
  * permission mode -> 5 allow rules -> 6 canUseTool") — so `controlPlaneDenyRules`'s `<home>/run`,
@@ -718,16 +708,15 @@ export const GLOBAL_READ_ALLOW_RULES: readonly string[] = ["Read", "Glob", "Grep
  * A card's "Allow … everywhere" / "in this project" answer is written by `approval.respond`'s
  * `PermissionRules.append` in Winter's own rule grammar (`agent/permission-rules.ts`'s `parseRule`).
  * Both runtimes' permission evaluators read claude's grammar, which is the same for the common shapes
- * and different for a few Winter-only ones — this is the ONE translation, used by both legs:
+ * and different for a few Winter-only ones — this is the ONE translation:
  *
  *   `Bash` / `Bash(x)` / `Bash(x:*)`   unchanged (claude's exact and prefix forms).
  *   `BashUnsandboxed(…)`               → `Bash(…)`. claude has no separate rule: `dangerouslyDisableSandbox`
  *                                       only removes the sandbox's auto-allow, and rules then decide
  *                                       (lane C's parity ruling — see `sandboxConfigFor`'s last note).
- *                                       True on BOTH legs: the official leg is claude, and agent SDK
- *                                       0.0.20 replaced RULING P3-J (every escape a mandatory
- *                                       interaction) with claude's rule, behind claude's own
- *                                       write-target checks (`checkPathConstraints`).
+ *                                       Agent SDK 0.0.20 replaced RULING P3-J (every escape a
+ *                                       mandatory interaction) with claude's rule, behind claude's
+ *                                       own write-target checks (`checkPathConstraints`).
  *   `Edit`                             → `Edit` + `Write` (Winter's rule covered both; the agent SDK
  *                                       matches a bare rule's tool name literally).
  *   `Edit(<abs dir>)`                  NOT forwarded: Winter's writable-DIRECTORY declaration, which never
@@ -971,20 +960,13 @@ export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSett
       // defeat them — that is the protection that actually holds for the bash-redirect path, and it
       // is Winter's, not ours. Winter's contribution here is the daemon control plane.
       // `runtimes` joined `run` here (2026-09-18) because the read list already had it and the write
-      // list did not, and on the OFFICIAL leg that asymmetry is reachable. Measured in
-      // `official-leg.e2e.test.ts`'s "8d MEASURED" test: that leg has NO path-independent out-of-cwd
-      // fence for Bash — containment there is these two lists plus `permissions.deny`, and a deny
-      // rule is per-tool (`Write(path)` does not constrain a `Bash` redirect). So `echo … >
-      // <home>/runtimes/bin/winter` had nothing stopping it, and that path is rung 4 of
+      // list did not — measured reachable on the retired official leg, which had no path-independent
+      // out-of-cwd fence for Bash. `echo … > <home>/runtimes/bin/winter` would plant rung 4 of
       // `resolveWinterExecutable`'s ladder (`runtime-sdk/executable.ts`) — code the NEXT spawn would
-      // run — while `<home>/runtimes/anthropic-config` holds the Console profile and
-      // `<home>/runtimes/claude-config` the official child's own state. The Winter leg was already
-      // covered (its seatbelt fences Bash to the working directory; the same e2e comment notes the
-      // contrast), so this closes the leg that was not.
+      // run — and `<home>/runtimes/anthropic-config` holds the Console profile. The Winter runtime's
+      // seatbelt already fences Bash to the working directory; this entry states the fence anyway.
       //
-      // Nothing legitimate writes here through a TOOL: the runtime store is the daemon's own, and a
-      // child's internal writes (the official transcript store under `claude-config`) are the binary's,
-      // never its Bash sandbox's.
+      // Nothing legitimate writes here through a TOOL: the runtime store is the daemon's own.
       // …and the skills-only plugin views (B1 follow-up): a Bash redirect planting a manifest with
       // command hooks there would be run by the next child — see `controlPlaneDenyRules`' matching
       // entry. Write only; the views stay readable (a skill reads its own supporting files). The whole
@@ -1045,8 +1027,8 @@ export function sandboxConfigFor(home: string, cwd?: string | null): SandboxSett
 }
 
 /**
- * The SAME sandbox fence, spelled for the sandbox glob grammar BOTH runtimes read — what a child is sent,
- * on either leg (the Winter spawn below, `official-options.ts`'s flag settings).
+ * The SAME sandbox fence, spelled for the sandbox glob grammar the runtime reads — what a child is sent
+ * (the Winter spawn below).
  *
  * Why both legs (C-1, the R.3 SDK review): both runtimes read a `sandbox.filesystem` entry holding any of
  * `* ? [ ]` as a GLOB and render it as a seatbelt REGEX, not a `(subpath …)` — claude always has (`Rt`),
@@ -1090,24 +1072,20 @@ const ANY_DEPTH_PROJECT_KINDS: readonly string[] = [...PROTECTED_ITEM_DIRS, "age
 
 /**
  * Every capability tool NOT exposed to this mode, plus — for chat — the Winter built-ins chat
- * excludes, plus the per-leg web-built-in rule. The literal is pinned by the matrix test; the parity
+ * excludes, plus the per-mode web-built-in rule. The literal is pinned by the matrix test; the parity
  * tripwire diffs `CAPABILITY_TOOL_MODES` against Task 7's `WINTER_CAPABILITY_TOOLS`.
  *
- * **`exposure` is required, and comes SECOND** — ahead of the defaulted `capabilityTools`, because a
- * required parameter cannot follow an optional one and this one may not be defaulted (see
- * `ToolExposure`). The web rule it decides (0.0.17, user ruling 2026-09-18):
+ * **`exposure` comes SECOND** — ahead of the defaulted `capabilityTools`. The web rule it decides
+ * (0.0.17, user ruling 2026-09-18):
  *
- *   official        nothing is added: claude's NATIVE `WebFetch`/`WebSearch` stay. (Their APPROVALS
- *                   are Winter's, not claude's — see `official-options.ts`'s own note at the call
- *                   site, and `approval-bridge.ts`'s private-address floor.)
- *   winter + code   nothing is added either: both tools are the code-mode web surface now.
- *   winter + chat   `WebSearch` is disallowed WHEN AN EXA KEY IS STORED, because the daemon's
- *   winter + disp.  `Search` (Exa answer mode) is then the search surface. With NO key `Search`
+ *   code            nothing is added: both tools are the code-mode web surface.
+ *   chat,           `WebSearch` is disallowed WHEN AN EXA KEY IS STORED, because the daemon's
+ *   dispatch        `Search` (Exa answer mode) is then the search surface. With NO key `Search`
  *                   cannot work at all, so it is disallowed INSTEAD and `WebSearch` — whose backend
  *                   has an anonymous tier — takes its place rather than leaving those two modes with
  *                   no search. Exactly one of the two is withheld, never both and never neither.
  *
- * `WebFetch` is never disallowed on either leg in any mode any more.
+ * `WebFetch` is never disallowed in any mode any more.
  */
 export function disallowedToolsFor(
   mode: SessionMode,
@@ -1119,9 +1097,8 @@ export function disallowedToolsFor(
     .map(([name]) => name);
   if (mode === "chat") out.push(...CHAT_DISALLOWED_BUILTINS);
   // The one place either web built-in is withheld — see this function's own doc comment, and
-  // `SDK_WEB_BUILTINS` for the ruling. A string in `disallowedTools` that the child does not
-  // advertise is inert, so this is safe to state for a leg whose tool happens to be named otherwise.
-  if (exposure.leg === "winter" && mode !== "code" && (exposure.exaKeyPresent ?? true)) out.push("WebSearch");
+  // `SDK_WEB_BUILTINS` for the ruling.
+  if (mode !== "code" && (exposure.exaKeyPresent ?? true)) out.push("WebSearch");
   // …and its EXACT COMPLEMENT: with no key stored the daemon's own `Search` is withheld instead,
   // because Exa's `/answer` endpoint cannot be called anonymously. The capability server makes the
   // same decision on the same value (`capabilities/research.ts`, reading `CapabilitySession.
@@ -1132,7 +1109,7 @@ export function disallowedToolsFor(
   // chat/dispatch tool, so code mode's answer comes from the base scan and nothing else. Without it
   // this line also pushed the name for `code`, where it was deduped and inert — a true no-op, and an
   // asymmetry that read as an oversight to the next person to touch either clause.
-  if (exposure.leg === "winter" && mode !== "code" && exposure.exaKeyPresent === false) out.push(EXA_GATED_SEARCH_TOOL);
+  if (mode !== "code" && exposure.exaKeyPresent === false) out.push(EXA_GATED_SEARCH_TOOL);
   return [...new Set(out)].sort();
 }
 
@@ -1176,7 +1153,7 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     forwardSubagentText: true,
     disallowedTools: disallowedToolsFor(
       input.mode,
-      { leg: "winter", ...(input.exaKeyPresent === undefined ? {} : { exaKeyPresent: input.exaKeyPresent }) },
+      input.exaKeyPresent === undefined ? {} : { exaKeyPresent: input.exaKeyPresent },
       input.capabilityTools,
     ),
     // Batch 3 (item 2): the fixed control-plane fence PLUS `settings.permissions.deny` (today just
@@ -1211,11 +1188,9 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
       // they are answers to code-mode cards, chat's policy is fixed and dispatch never cards. Deny
       // still comes first in the runtime, so none of them can open the fence stated just below.
       //
-      // Two consequences, DOCUMENTED rather than changed (whole-branch review minors a/b — the official
-      // leg IS claude, and claude parity is the ruling):
-      //  - under `plan`, the two legs differ: claude applies saved allow rules in plan mode (its own
-      //    behaviour, and the official leg sends it the same list), while the Winter SDK still holds
-      //    writes back in plan whatever the allow list says;
+      // Two consequences, DOCUMENTED rather than changed (whole-branch review minors a/b):
+      //  - under `plan`, the Winter SDK holds writes back whatever the allow list says (claude applies
+      //    saved allow rules in plan mode; Winter does not follow it there);
       //  - a DISPATCH session's children run in CODE mode, so they receive the saved rules too — the
       //    same as claude's headless mode applying its settings files' `permissions.allow`.
       // WS-21: on a run-home incarnation the SAVED rules reach the child through the run folder's own
@@ -1238,10 +1213,8 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     // `run_in_background` STAYS advertised (unlike `WINTER_DISABLE_BACKGROUND_TASKS`, which would
     // withhold it), so nothing the model can ask for is taken away.
     backgroundByDefault: false,
-    // The official leg is already pinned to `settingSources: []` by the ROUTER, which also refuses a
-    // non-empty value outright (`winter-runtime-sdk/src/official/options-template.ts`); the Winter leg
-    // passed nothing, and in the agent SDK an ABSENT `settingSources` means all three sources
-    // (`user`/`project`/`local`). MEASURED at 0.0.16, what that actually gated is FILE DISCOVERY, not
+    // The Winter leg once passed nothing here, and in the agent SDK an ABSENT `settingSources` means
+    // all three sources (`user`/`project`/`local`). MEASURED at 0.0.16, what that actually gated is FILE DISCOVERY, not
     // the settings document: `context/winter-md.ts` (WINTER.md), `context/output-styles.ts`,
     // `commands/resolver.ts` and the skills/agent-definition loaders each default to all three tiers
     // and walk `<home>` + `<cwd>/.winter/**` themselves. The SDK's settings-document cascade
@@ -1383,16 +1356,12 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
  *    at all. `approval-bridge.ts`'s `privateWebFetchTarget` is what makes the word true: it escalates
  *    such a call to a real card in code mode (every policy, `bypass` and `plan` included) and to a
  *    typed deny wherever nobody can answer one. Do not read this field as self-enforcing — it is one
- *    half of a two-part arrangement, and the other half is leg-agnostic on purpose, because the
- *    official leg is sent no `web` block and would otherwise have no private-address floor at all.
+ *    half of a two-part arrangement.
  *  - `blockedDomains` — the dangerous-domain floor, verbatim (see `dangerousDomains`). This is an
  *    EXECUTOR-level refusal in the child, not an approval: a floor domain is refused even in code
  *    mode, where the retired daemon tool used to raise a card that could be approved once. That is
  *    the ruling ("dangerous domains are hard-blocked"), and it is the same answer chat and dispatch
  *    have always had.
- *
- * NOTHING HERE IS SET ON THE OFFICIAL LEG: `official-options.ts` sends no `web` at all, because
- * claude owns its own web tools' behaviour and the ruling keeps it.
  */
 function webOptionsFor(input: WinterOptionsInput): WebToolsConfig {
   const privateAddressPolicy = input.mode === "code" && input.origin !== "dispatch-child" ? "ask" : "deny";
@@ -1413,11 +1382,11 @@ function digestOptionsFor(input: WinterOptionsInput): Pick<WebFetchConfig, "dige
   // `=== input.model` check above has already dropped. Never stated.
   if (digest.startsWith(WINTER_TEST_PREFIX)) return {};
   const digestProvider = providerFor(digest, input.home);
-  // No provider, or no Keychain locator for it (`console/*`, whose credential lives in an `ant`
-  // profile a digest route never sees): the model is NOT stated, so the digest runs on the session's
-  // own model — the SDK's documented default — rather than becoming a typed refusal on every call.
-  // `session-driver.ts` logs the setting once when it drops a pin for this reason.
-  if (digestProvider?.authRef === undefined) return {};
+  // A provider with no locator is dropped, NOT stated, so the digest runs on the session's own model —
+  // the SDK's documented default — rather than becoming a typed refusal on every call. (`console` was
+  // dropped here explicitly until the WS-23 live-gate fix: its bearer slot is named like any
+  // provider's now, and the SDK adapter sends it for the `console` id.)
+  if (digestProvider === undefined || digestProvider.authRef === undefined) return {};
   return { digestModel: digest, authRef: digestProvider.authRef };
 }
 

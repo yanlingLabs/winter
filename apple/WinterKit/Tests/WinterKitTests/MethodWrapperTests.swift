@@ -1780,24 +1780,33 @@ extension MethodWrapperTests {
         XCTAssertTrue(caps[2].tools[0].exposure.isEmpty, "an absent exposure map is empty, not guessed")
     }
 
-    /// `versions.get`: pins and installed are independent, the two executables carry path+source
-    /// and NO version (the `winter` binary has no version flag), and `official: null` is the
-    /// ordinary "nothing staged" answer.
-    func testVersionsGetSplitsPinsInstalledAndTheVersionlessExecutables() async throws {
+    /// `versions.get`: pins and installed are independent, the executable carries path+source and
+    /// NO version (the `winter` binary has no version flag), and `bundle: null` is the ordinary
+    /// "nothing staged" answer. WS-23: no claude executable; the bundle block is `bundle`.
+    func testVersionsGetSplitsPinsInstalledAndTheVersionlessExecutable() async throws {
         let (client, t) = try await connected()
-        let (req, v) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true,"core":"0.114.4", "pins":{"winterAgentSdk":"0.0.16","winterRuntimeSdk":"0.0.8","claudeAgentSdk":"0.3.250"}, "installed":{"winterRuntimeSdk":"0.0.8","claudeAgentSdk":"0.3.249", "winterExecutable":{"path":"/tmp/dist/winter","source":"env"}, "claudeExecutable":{"source":"package"}}, "official":null}"#) { try await client.versionsGet() }
+        let (req, v) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true,"core":"0.118.0", "pins":{"winterAgentSdk":"0.0.24","winterRuntimeSdk":"0.0.14"}, "installed":{"winterRuntimeSdk":"0.0.13", "winterExecutable":{"path":"/tmp/dist/winter","source":"env"}}, "bundle":null}"#) { try await client.versionsGet() }
 
         XCTAssertEqual(req["method"] as? String, "versions.get")
-        XCTAssertEqual(v.core, "0.114.4")
-        XCTAssertEqual(v.pins["winterAgentSdk"], "0.0.16")
+        XCTAssertEqual(v.core, "0.118.0")
+        XCTAssertEqual(v.pins["winterAgentSdk"], "0.0.24")
         XCTAssertNil(v.installed["winterAgentSdk"], "not reported ⇒ nil, never the pin echoed back")
-        XCTAssertEqual(v.installed["claudeAgentSdk"], "0.3.249", "a disagreement with the pin is a normal state")
-        XCTAssertNil(v.installed["winterExecutable"], "the executable objects are not version strings")
+        XCTAssertEqual(v.installed["winterRuntimeSdk"], "0.0.13", "a disagreement with the pin is a normal state")
+        XCTAssertNil(v.installed["winterExecutable"], "the executable object is not a version string")
         XCTAssertEqual(v.winterExecutable?.path, "/tmp/dist/winter")
         XCTAssertEqual(v.winterExecutable?.source, "env")
-        XCTAssertNil(v.claudeExecutable?.path)
-        XCTAssertEqual(v.claudeExecutable?.source, "package")
-        XCTAssertNil(v.official, "null ⇒ no Release bundle staged, which is not an error")
+        XCTAssertNil(v.bundle, "null ⇒ no Release bundle staged, which is not an error")
+    }
+
+    /// A staged bundle arrives OPAQUE (`{ runtimes, ant }`, the daemon's own records), and a
+    /// pre-WS-23 daemon's `official`/`claudeExecutable` keys are simply not read.
+    func testVersionsGetKeepsTheBundleOpaqueAndIgnoresRetiredKeys() async throws {
+        let (client, t) = try await connected()
+        let (_, v) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true,"core":"0.118.0", "pins":{"winterAgentSdk":"0.0.24"}, "installed":{"winterAgentSdk":"0.0.24", "claudeExecutable":{"source":"package"}}, "bundle":{"runtimes":{"schema":2,"winterAgentSdk":"0.0.24"},"ant":{"schema":1,"tag":"v1.32.0"}}, "official":{"schema":1}}"#) { try await client.versionsGet() }
+
+        XCTAssertEqual(v.bundle?["ant"]?["tag"]?.stringValue, "v1.32.0")
+        XCTAssertEqual(v.bundle?["runtimes"]?["schema"], .number(2))
+        XCTAssertNil(v.installed["claudeExecutable"], "an object is never a version string")
     }
 
     /// `models.catalog`: the three arrays, the pricing evidence, and the credential DOORS.

@@ -274,8 +274,8 @@ describe("sync.config (Chat Slice D task 3)", () => {
 // lineup cannot be wrong-proof: the phone can never prove the tiers it invented exist.
 //
 // So the catalogue is SERVED, not derived. Under WS-20 it is served from `pickerModels()`
-// (ipc/picker-models.ts) — every provider the daemon holds a REAL credential for (or, for
-// `console`, an on-disk profile), read fresh off the pinned catalog at call time. `codex-oauth` is
+// (ipc/picker-models.ts) — every provider the daemon holds a REAL credential for (for `console`, its
+// Keychain bearer since the WS-23 live-gate fix), read fresh off the pinned catalog at call time. `codex-oauth` is
 // used throughout as the credentialed provider below: its four rows all carry the identical
 // five-tier `reasoning.efforts` list in the pinned catalog, which keeps these fixtures simple
 // without hand-copying a model id list that could drift from the real catalog.

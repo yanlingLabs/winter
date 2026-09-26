@@ -296,8 +296,9 @@ export const SessionListResult = z.object({
       working: z.boolean(),
     }).optional(),
     // Winter Phase 8c (P8c-14/Task 4.2): which runtime leg the session's RECORD names — "winter-agent"
-    // (the Winter leg, resumed by a spawned `winter` child) or "claude-agent" (the official leg, a
-    // spawned `claude` child). Derived from `opts.winter.legOf(sessionId)` at list time, never stored
+    // (the Winter leg, resumed by a spawned `winter` child) or "claude-agent" (a record the retired
+    // official `claude` leg wrote; WS-23 keeps the value (ruling R4), and such a session is moved onto
+    // the Winter leg at its next resume). Derived from `opts.winter.legOf(sessionId)` at list time, never stored
     // on the row itself (the durable fact lives in the runtime-state record, WS-16 §4's
     // `RuntimeSessionRecord.runtimeKind`). Absent means one of three honest things, never a lie: no
     // runtime spine on this daemon, an engine-era session with no leg at all, or a session with no
@@ -451,7 +452,7 @@ export const SkillMetaSchema = z.object({
    *  project-scoped deny) is ever added later. */
   deniedBy: z.enum(["settings"]).optional(),
   /** 2026-09-22 (lane B): can a SESSION's runtime child actually load this skill? `true` means a Code
-   *  session on EITHER leg loads it (router 0.0.11 hands the official leg the same views). `false`
+   *  session loads it. `false`
    *  for every tier the runtimes have no door for yet (user, self, project, built-in — only plugin
    *  skills reach a child), for a plugin the user has not enabled AND granted `exec` consent (a skill
    *  can run shell commands), and for a name the runtime's own jail refuses; `sessionNote` then says
@@ -703,11 +704,15 @@ export const CapabilitiesListResult = z.object({ ok: z.literal(true), capabiliti
  * Daemon settings surface (2026-09-17 plan, item 3): `versions.get` — read-only, LOCAL role only.
  * Both halves side by side, so a pin≠installed mismatch is a normal response the app renders, never
  * an error: `pins` are the compile-time peer versions this daemon build was written against
- * (`runtime-sdk/versions.ts`'s `REQUIRED_*` constants); `installed`/`official` are what is actually
+ * (`runtime-sdk/versions.ts`'s `REQUIRED_*` constants); `installed`/`bundle` are what is actually
  * resolvable/staged RIGHT NOW, reusing the SAME resolvers `winter doctor` calls
  * (`runtime-sdk/runtimes-doctor.ts`'s `diagnoseRuntimes`) rather than a second probe. Every
- * `installed`/`official` field is independently optional — a miss is reported as absent, never a
+ * `installed`/`bundle` field is independently optional — a miss is reported as absent, never a
  * thrown error (that IS the diagnostic; see each field's own doc below for why it can be missing).
+ *
+ * WS-23: the official `claude` leg's fields (`pins.claudeAgentSdk`, `installed.claudeAgentSdk`,
+ * `installed.claudeExecutable`, and `official` — the staged `claude-official/VERSIONS.json`) are gone
+ * with the leg; `bundle` carries the two records the Release bundle stages now.
  */
 export const VersionsGetParams = z.object({});
 
@@ -720,47 +725,42 @@ export const VersionsGetResult = z.object({
   pins: z.object({
     winterAgentSdk: z.string(),
     winterRuntimeSdk: z.string(),
-    claudeAgentSdk: z.string(),
   }),
   installed: z.object({
     /** The installed `@yanlinglabs/winter-agent-sdk` wrapper's own declared `SDK_VERSION`. Always
-     *  present — the Winter leg has no optional-peer story the claude leg does. */
+     *  present. */
     winterAgentSdk: z.string(),
     /** The installed `@yanlinglabs/winter-runtime-sdk` (router)'s own manifest version, or absent
      *  when it cannot be resolved (a compiled `$bunfs` binary — `readResolvedManifestVersion`'s own
      *  doc: there is no real `node_modules` to walk up from inside the bundle). */
     winterRuntimeSdk: z.string().optional(),
-    /** The installed `@anthropic-ai/claude-agent-sdk`'s own declared version, or absent when the
-     *  optional official peer is not installed at all (a Winter-only host — never an error). */
-    claudeAgentSdk: z.string().optional(),
     /** Where the `winter` executable resolves from TODAY (path + ladder rung), or absent when it
      *  does not resolve at all. NO version field: the pinned `winter` binary has no version flag
      *  (measured — spawning `--version` would hang/error, so this is never attempted); path+source
-     *  is the whole diagnostic this leg can offer without spawning anything. */
+     *  is the whole diagnostic this runtime can offer without spawning anything. */
     winterExecutable: ResolvedExecutableSchema.optional(),
-    /** Where the `claude` executable resolves from TODAY (path + ladder rung), or absent when it
-     *  does not resolve at all. Also never spawned here (`diagnoseRuntimes` is read-only by
-     *  construction) — a version string for the resolved claude binary is `official`'s own
-     *  `claudeCode` field below, from the staged `VERSIONS.json`, when one is staged. */
-    claudeExecutable: ResolvedExecutableSchema.optional(),
   }),
-  /** The staged `runtimes/claude-official/VERSIONS.json` beside the compiled binary, verbatim
-   *  (`runtime-sdk/bundle-layout.ts`'s `VersionsJson`, minus nothing), or `null` when nothing is
-   *  staged (a dev checkout, or a build that never embedded the official leg) — never an error
-   *  either way. */
-  official: z.object({
-    // Minor 5a (fix wave, pre-merge review): required at the source (`runtime-sdk/bundle-layout.ts`'s
-    // `VersionsJson.schema: 1`) but omitted here — a bare `z.object()` strips an unmodeled key by
-    // default rather than throwing, so `schema` silently vanished from any parse of this result, the
-    // exact silent-strip class this branch exists to fix. Declared verbatim.
-    schema: z.literal(1),
-    winterAgentSdk: z.string(),
-    winterRuntimeSdk: z.string(),
-    officialSdk: z.string(),
-    claudeCode: z.string(),
-    checksums: z.object({ winterPreSign: z.string(), claude: z.string(), ant: z.string().optional() }),
-    stagedAt: z.string(),
-    winterSource: z.enum(["platform-package", "checkout-build"]).optional(),
+  /** The Release bundle's staged records beside the compiled binary, verbatim
+   *  (`runtime-sdk/bundle-layout.ts`'s `VersionsJson`/`AntVersionsJson`), or `null` when neither is
+   *  staged (a dev checkout) — never an error either way. Each record is independently optional. */
+  bundle: z.object({
+    /** `runtimes/VERSIONS.json`. Declared field by field — a bare `z.object()` strips an unmodeled
+     *  key by default rather than throwing (Minor 5a, fix wave: `schema` once vanished that way). */
+    runtimes: z.object({
+      schema: z.literal(2),
+      winterAgentSdk: z.string(),
+      winterRuntimeSdk: z.string(),
+      checksums: z.object({ winterPreSign: z.string() }),
+      stagedAt: z.string(),
+      winterSource: z.enum(["platform-package", "checkout-build"]).optional(),
+    }).optional(),
+    /** `runtimes/ant/VERSIONS.json` — the Console's `ant`, its own record since WS-23. */
+    ant: z.object({
+      schema: z.literal(1),
+      tag: z.string(),
+      checksums: z.object({ antPreSign: z.string() }),
+      stagedAt: z.string(),
+    }).optional(),
   }).nullable(),
 });
 
@@ -772,10 +772,7 @@ export const VersionsGetResult = z.object({
  *
  *  - `definitions`: the daemon's OWN parse of `<home>/agents/*.md` MERGED with a trusted project's
  *    `<cwd>/.winter/agents/*.md` (`agent-definitions.ts`'s `mergeAgentDefinitionTiers`), the SAME
- *    merged map passed as `Options.agents` on BOTH legs (`mode-options.ts`'s `buildWinterOptions`
- *    for Winter; `official-options.ts`'s `officialInputFor`, router 0.0.9's `OptionsTemplatePolicy.
- *    agents`, for official — a router-package gap this daemon once had to report, closed as of that
- *    pin). Batch 3 (item 1): EVERY definition from BOTH tiers is reported, tagged `tier`, with a
+ *    merged map passed as `Options.agents` (`mode-options.ts`'s `buildWinterOptions`). Batch 3 (item 1): EVERY definition from BOTH tiers is reported, tagged `tier`, with a
  *    losing USER-tier row (same name as a project row) flagged `shadowed` rather than silently
  *    dropped — the project tier always
  *    wins the actual `Options.agents` slot (the SDK's own precedence), but the panel can still show
@@ -887,18 +884,17 @@ export const SessionSetPolicyResult = z.object({
 export const SessionSetModelParams = z.object({
   sessionId: z.string().min(1),
   model: ModelTagSchema.nullable(),
-  // Winter Phase 8c (P8c-5/P8c-14, WS-13 §8.2): a model switch that crosses runtime legs (Winter <->
-  // the official leg) may be LOSSY — the handoff barrier's own warning list (a source with reasoning
-  // state moving to a foreign target, chiefly). Absent/false means "the caller has not confirmed
+  // Winter Phase 8c (P8c-5/P8c-14, WS-13 §8.2): a model switch may be LOSSY — the router's own review
+  // warning list (a source with reasoning state moving to a foreign target, chiefly). Absent/false
+  // means "the caller has not confirmed
   // anything yet"; the daemon refuses a lossy, unconfirmed switch typed
   // (`handoff_confirmation_required`, carrying the warnings) rather than performing it or silently
   // downgrading to an in-place model change. `true` is a one-shot confirmation for THIS call only —
   // it is never stored, so confirming once does not waive the warning on a later, different switch.
-  // Winter Phase 10b (D1-6, W18-20/W18-21): AS OF 10b this ALSO applies to a SAME-leg family change
-  // (e.g. gpt -> deepseek on Winter) — the pre-flight review runs on every provider/model change
-  // that crosses families, not only a cross-runtime one, so `confirmLossy` is no longer meaningless
-  // there. It stays a no-op for a same-family change (Sonnet <-> Opus, Terra <-> Luna): the router
-  // skips the review entirely for those, and there is nothing to confirm.
+  // Winter Phase 10b (D1-6, W18-20/W18-21): the pre-flight review runs on every provider/model change
+  // that crosses families (gpt -> deepseek, claude -> gpt). It is a no-op for a same-family change
+  // (Sonnet <-> Opus, Terra <-> Luna): the router skips the review entirely for those, and there is
+  // nothing to confirm. WS-23: every model runs on the Winter runtime, so no switch crosses runtimes.
   confirmLossy: z.boolean().optional(),
 });
 export const SessionSetModelResult = z.object({});
@@ -1601,9 +1597,8 @@ export const MemoryAuditResult = z.object({ lines: z.array(MemoryAuditLineSchema
  *  daemon restart to take effect (providers/manager.ts fixes `providerType` at boot) — this RPC
  *  only persists the new config; triggering the restart is the caller's job (T2's Dashboard pane). */
 // WS-20: the SECOND arm (the Anthropic auth-mode radio, `settings["runtimes.official.auth"]`) is
-// DELETED, not deprecated — the official leg's arm is now the tag's own prefix
-// (`officialAuthArmFor`, official-options.ts), decided by which model a session runs, never a
-// standing settings toggle. The remaining (and only) arm is the openai-compatible BYOK path, kept
+// DELETED, not deprecated — the Anthropic arm is the tag's own prefix (`anthropic/*` or `console/*`),
+// decided by which model a session runs, never a standing settings toggle. The remaining (and only) arm is the openai-compatible BYOK path, kept
 // as a `z.union` of one for wire-shape stability (nothing about this arm's own shape changed).
 export const ProviderConfigureParams = z.union([
   z.object({
@@ -1823,40 +1818,33 @@ export const ModelCatalogProviderSchema = z.object({
   authKinds: z.array(z.string()),
   /** The credential slot this provider resolves to in `credentialInventory()`'s own derivation
    *  (`runtime-sdk/keychain.ts`), or `null` when this catalog provider can hold no credential here
-   *  at all — e.g. the catalog's `console` provider (`authKinds: ["console-profile"]`), whose one
-   *  usable slot (`anthropic:console`) is filed under provider id `anthropic`, never `console`. A
-   *  NAME only (a Keychain secret NAME, never material) — same "names and booleans only" rule
-   *  `CredentialRow` states for itself above.
+   *  at all. The catalog's `console` provider names `anthropic:console`, the console broker's bearer
+   *  slot (since the WS-23 live-gate fix; it used to be filed under `anthropic`, leaving `console`
+   *  `null`). A NAME only (a Keychain secret NAME, never material) — same "names and booleans only"
+   *  rule `CredentialRow` states for itself above.
    */
   credentialSlotId: z.string().nullable(),
-  /** WHICH DOOR credentials this provider, so a consumer never has to read meaning into
-   *  `credentialSlotId: null`. `"keychain"`: a slot exists — join `credential.list` on
-   *  `credentialSlotId` and that is the whole readiness test. `"console-profile"`: credentialed by
-   *  `winter login --anthropic-console`, and readiness is the on-disk `ant` profile the daemon
-   *  re-checks LIVE at every spawn (`console_profile_missing`), so this read deliberately does not
-   *  answer it — the provider is offerable, not promised. `"none"`: catalog-eligible but this daemon
-   *  stores no credential for it. Without this field the first and third cases are indistinguishable,
-   *  and a picker that reads `null` as "cannot be credentialed" would present a correctly
-   *  signed-in Console user as unusable. */
+  /** WHICH DOOR credentials this provider — the flow a UI offers when it is not ready.
+   *  `"keychain"`: a key pasted into `credentialSlotId` (Settings → Providers). `"console-profile"`:
+   *  `winter login --anthropic-console` (or the app's Sign in) — the broker fills the slot from that
+   *  login, so there is no key to paste even though `credentialSlotId` names one. `"none"`:
+   *  catalog-eligible but this daemon stores no credential for it. Readiness is `credentialPresent`
+   *  below, never this field. */
   credentialDoor: z.enum(["keychain", "console-profile", "none"]),
   /** Whether the door named above is SATISFIED on this daemon's home right now — the readiness test
    *  itself, answered daemon-side so no client has to perform it.
    *
-   *  A client MUST NOT re-derive this by joining `credential.list` on `credentialSlotId`: that join
-   *  is wrong for both Anthropic doors, in opposite directions. `credential.list` is keyed by secret
-   *  NAME, and the `anthropic` row covers TWO accounts (`anthropic:default`, the user's api key;
-   *  `anthropic:console`, the console broker's bearer), so a `<providerId>:default` guess reports
-   *  `anthropic` as ready on a console-only home with no api key at all — and reports `console`
-   *  (whose only slot is filed under `anthropic`, never under its own id) as permanently unusable
-   *  even when the user is correctly signed in. The daemon answers `console` from the on-disk `ant`
-   *  profile and every other provider from its own Keychain slot; that is one rule
+   *  A client MUST NOT re-derive this by guessing `<providerId>:default` against `credential.list`:
+   *  that is wrong for `console`, whose slot is `anthropic:console`. The daemon answers every provider,
+   *  `console` included, from its own Keychain slot (the Console's bearer, not its on-disk `ant`
+   *  profile, since the WS-23 live-gate fix — the slot is what a turn sends); that is one rule
    *  (`credentialPresentProbe`, core's `runtime-sdk/keychain.ts`), shared verbatim with the model
-   *  list `sync.config` serves, so the two can never disagree.
+   *  list `sync.config` serves and the presence `session.create`'s selection admits on, so none of
+   *  them can disagree.
    *
-   *  PRESENCE, NEVER VALIDITY: a stored key can be revoked and a console profile can be expired, and
-   *  only a real turn finds out. For the console door the daemon re-checks the profile LIVE at every
-   *  spawn (`console_profile_missing`), so `true` means offerable, not promised. A boolean only —
-   *  never a secret name beyond the `credentialSlotId` already above, and never material.
+   *  PRESENCE, NEVER VALIDITY: a stored key can be revoked and a Console bearer can be expired, and
+   *  only a real turn finds out, so `true` means offerable, not promised. A boolean only — never a
+   *  secret name beyond the `credentialSlotId` already above, and never material.
    *
    *  `false` for EVERY provider is also what a daemon with no secret store wired reports (a bare test
    *  harness): absence of evidence reads as absence, the same degradation `sync.config`'s own
@@ -1991,11 +1979,11 @@ export const ProviderStatusResult = z.object({
 // answers `{ok:true}`; `credential.remove` answers whether something went away. The value travels in
 // exactly one direction, once, inside `CredentialSetParams.apiKey`.
 //
-// ROWS ARE PER SLOT (§9 A-1), not per provider: `anthropic` appears twice — its api-key slot
-// (`door: "credential.set"`, manageable) and its Console slot (`door: "provider.login"`, not
-// manageable, whose `present` reports the broker's bearer). Clients key a row by
-// `providerId|door|kind`, so those three fields are the row's identity and must stay stable for a
-// slot whether or not anything is stored in it.
+// ROWS ARE PER SLOT (§9 A-1): the Anthropic API key is `anthropic` (`door: "credential.set"`,
+// manageable) and the Console bearer is `console` (`door: "provider.login"`, not manageable, whose
+// `present` reports the broker's bearer; before the WS-23 live-gate fix it was a second `anthropic`
+// row). Clients key a row by `providerId|door|kind`, so those three fields are the row's identity and
+// must stay stable for a slot whether or not anything is stored in it.
 // ---------------------------------------------------------------------------------------------
 export const CredentialRow = z.object({
   providerId: z.string().min(1),

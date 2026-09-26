@@ -17,7 +17,7 @@ import { ensureOutdir } from "./sessions/outdir";
 import { writeDiff, type DiffHeader } from "./diffs/store";
 import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
-import { loadSettings, loadPermissionDirs, effortRefusalFor, hooksEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, pinsFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, sdkAllowRules, sdkAutoMemory, sdkLocalMcpServers, sdkOutputStyle, sdkUserMcpServers, liveSettingsView, type Settings } from "./settings";
+import { loadSettings, loadPermissionDirs, effortRefusalFor, hooksEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, retiredRuntimeSettingKeys, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, pinsFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, sdkAllowRules, sdkAutoMemory, sdkLocalMcpServers, sdkOutputStyle, sdkUserMcpServers, liveSettingsView, type Settings } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
@@ -83,10 +83,9 @@ import { SettingsWatcher, watchViaParentDir } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { restampStep } from "./runtime-state/recovery";
 import { createWinterRuntimeSdk, describeLoadError, type WinterRuntimeSdk } from "./runtime-sdk/create";
-import { ClaudeExecutableUnavailable } from "./runtime-sdk/official-executable";
+import { createEmbeddedSessionHost, embeddedVersionCheck, EMBEDDED_SHUTDOWN_BUDGET_MS, type EmbeddedSessionHost, type EmbeddedSessionHostDeps } from "./runtime-sdk/embedded";
 import { createConsoleProfileBroker } from "./auth/console-profile-broker";
 import { resolveAntExecutable } from "./runtime-sdk/bundle-layout";
-import { advisorReviewerFor, familyOfModel, officialLegDefaultSessionModel } from "./runtime-sdk/advisor-reviewer";
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
 import { coldResumeRunHomeFor, createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
 import { linkedRouterSupportsRunHome, linkedRunHomeBuilder, runHomeHandleOf, runHomeReportSummary } from "./runtime-sdk/run-home-support";
@@ -100,7 +99,7 @@ import { projectScopeAllowRulesFor, winterGateRulesFromSdk } from "./runtime-sdk
 import { configuredMcpServersFor } from "./runtime-sdk/external-mcp";
 import { planBridgeFor, type PlanBridge } from "./runtime-sdk/plan-bridge";
 import { importEngineEraSession } from "./runtime-sdk/import-legacy";
-import { registerHandoffParticipants, planAndApplySwitch } from "./runtime-sdk/handoff";
+import { planAndApplySwitch } from "./runtime-sdk/handoff";
 import { createSinkCallStore, sinksFor } from "./runtime-sdk/sinks";
 import { sessionHooksFor } from "./runtime-sdk/hooks";
 import { buildCapabilitiesFor, type CapabilityDeps, type CapabilityServerRecord, type CapabilitySession } from "./capabilities";
@@ -150,6 +149,12 @@ export interface RunningDaemon {
    */
   runtimeSdk: WinterRuntimeSdk | undefined;
   /**
+   * WS-23: the embedded-session host — chat and dispatch Workers. Exposed for the same reason
+   * `winter` is: a test that boots a REAL daemon observes which sessions have a live Worker here (an
+   * embedded session has no pid to `kill -0`), rather than off a mirror it built itself.
+   */
+  embedded: EmbeddedSessionHost;
+  /**
    * P8b Task 5: THE SessionStore this daemon opened — the same instance `stop()` closes.
    *
    * Exposed for the same reason `registry` is: `store.close()` moved onto `stop()`'s ASYNC tail
@@ -190,7 +195,8 @@ export interface RunningDaemon {
    *      watcher, the routine scheduler/store, the dreamer. All of this has happened when `stop()`
    *      RETURNS, exactly as it always has.
    *   2. `runtimeSdk.dispose()` — every live Winter session ends (bounded by
-   *      `SHUTDOWN_QUERY_GRACE_MS`), then the router's own dispose. ASYNC.
+   *      `SHUTDOWN_QUERY_GRACE_MS`), then the router's own dispose; then (WS-23) the embedded host's
+   *      Workers drain (bounded by `EMBEDDED_SHUTDOWN_BUDGET_MS`, then `terminate()`). ASYNC.
    *   3. `store.close()` — the session store. NO LONGER SYNCHRONOUS when a Winter handle exists: a
    *      draining child appends its last events through it, so it must outlive step 2.
    *   4. `runtime.close()` — the §16 deletion drain (bounded) and `runtime-state.db`, which step 2's
@@ -323,9 +329,9 @@ export async function startDaemon(opts: {
   // than left for structural subtyping to paper over) so `daemon.ts`'s own `research` construction
   // can read `agentProvider.quota` for role-health's `subscriptionQuota` input.
   agentProvider?: { provider: Provider; model: string; live?: () => { model: string; reasoningEffort?: string; providerId?: string }; refresh?: (next: Settings, secrets: SecretStore, settingsPath?: string) => Promise<boolean>; quota?: SubscriptionQuotaSource } | null;
-  /** TEST ONLY (fix round 1, M2) — threaded straight into `WinterLegDeps.officialConnectionOverride`;
-   *  a production caller never sets this. See that field's own doc for why it exists at all. */
-  officialConnectionOverride?: WinterLegDeps["officialConnectionOverride"];
+  /** TEST ONLY (WS-23 review round 1): extra deps for the embedded-session host — a fixture Worker entry,
+   *  or the `onLifecycle` observer a test uses to prove no two engines ever overlap on one session. */
+  embeddedHost?: Omit<EmbeddedSessionHostDeps, "log">;
   /**
    * Phase 9c Migration B (WS-16 §18) — TEST SEAM for the boot hook below. Passing this object AT
    * ALL is what turns migration on for a caller that ALSO supplies its own `secrets`: without it, a
@@ -542,10 +548,11 @@ export async function startDaemon(opts: {
     // Task 17: the engine leg no longer exists — a `winterLeg.<mode>: false` is accepted for one
     // release, reported here (and by settings-apply on a hot edit), never obeyed.
     for (const key of winterLegDisabledKeys(settings)) console.error(`settings: runtimes.winterLeg.${key} = false — the engine leg no longer exists; ignored`);
-    // Pre-release hardening (P9c-1 amendment): a `runtimes.official.subscriptionAuth: true` that
-    // predates or bypasses the hot-reload path (a migrated/hand-edited settings.json present at
-    // boot) is reported here too, same "accepted, logged, ignored" posture as winterLeg above.
-    if (officialSubscriptionAuthFlagInert(settings)) console.error("settings: runtimes.official.subscriptionAuth = true — inert until Anthropic approves subscription auth for the official leg (P9c-1); the per-session apiKeySource assertion and Winter-owned config dir stay in force");
+    // WS-23: the retired official leg's settings (`claudeExecutable`, `official.*`,
+    // `handoff.crossRuntime`) still load and are reported here, once — same "accepted, logged,
+    // ignored" posture as winterLeg above (settings-apply reports a hot edit).
+    const retired = retiredRuntimeSettingKeys(settings);
+    if (retired.length > 0) console.error(`settings: ${retired.join(", ")} — the official claude runtime was retired (every model runs on the Winter runtime); ignored`);
   } catch (err) {
     console.error(`settings unavailable, agent disabled: ${(err as Error).message}`);
     settings = null;
@@ -1145,7 +1152,7 @@ export async function startDaemon(opts: {
   // that is a SECURITY bug, not only an identity one. 8b is Winter-leg-only (P8b-1) and the router
   // forwards a caller's own `Options.mcpServers` straight through, so the session driver (Task 16)
   // builds this session's servers and puts them on that session's own `Options` —
-  // `RuntimeSdkOptions.capabilities` stays `[]` and is reserved for the official leg.
+  // `RuntimeSdkOptions.capabilities` stays `[]`.
   //
   // `computerUse` is a LET assigned inside the gate below; these are closures, invoked at tool-call
   // time long after boot (the `engine?.turnStartedAt` precedent this file already relies on). The
@@ -1286,9 +1293,22 @@ export async function startDaemon(opts: {
     }, facts),
   };
 
+  // WS-23 (ruling R1): the ONE host for chat/dispatch sessions embedded in this process — one Bun
+  // Worker each (`runtime-sdk/embedded.ts`). Owned HERE rather than by the runtime handle, because
+  // `stop()` must drain it after `runtimeSdk.dispose()` and before the stores close (a Worker's last
+  // frames still pass through the session store and `runtime-state.db` on the way out).
+  const embeddedSessions = createEmbeddedSessionHost({ ...(opts.embeddedHost ?? {}), log: (line) => console.error(`runtime-sdk: ${line}`) });
+  // The version lock, said ONCE at boot: every embedded session re-checks it at `spawnHookFor` and
+  // refuses typed (`embedded_runtime_unavailable`); this line is where an operator finds out why.
+  {
+    const lock = embeddedVersionCheck();
+    if (lock !== undefined) console.error(`runtime-sdk: embedded runtime refused — ${lock.message}`);
+  }
+
   try {
     runtimeSdk = await createWinterRuntimeSdk({
       home: winterHome,
+      embedded: embeddedSessions,
       settings: () => settings, // LIVE holder, never a boot snapshot
       // WS-21 (spec §3.1): a run-home router is created with `requireRunHome: true` and this builder
       // for its OWN cold-resume path. Absent (router 0.0.11) — the router is created as before.
@@ -1300,30 +1320,12 @@ export async function startDaemon(opts: {
       directoryStore: runtime?.directory,
       // EMPTY ON PURPOSE (P8b-36) — this list is handle-wide and construction-time, which is
       // exactly what a per-session capability set must not be. Winter's capability servers ride each
-      // session's own `Options.mcpServers` instead (`buildSessionCapabilities` above). The field is
-      // reserved for the official leg, which has no host in 8b.
+      // session's own `Options.mcpServers` instead (`buildSessionCapabilities` above).
       capabilities: [],
       // Task 12's seam, filled by Task 16: the inbound class of a session this process holds no
       // live facet for — a parked (`resumable`) Winter session answers `unavailable` instead of
       // holding its mail forever, and is never cold-resumed behind the daemon's back.
       sessionPermissionClass: sessionPermissionClassFor({ records: () => runtime?.records, store }),
-      // P8d-8 (D30): the OFFICIAL leg's ONE reviewer resolver, ALWAYS wired (never conditional on
-      // whether `runtimes.advisorModel` is set — `advisorReviewerFor` reads that setting live
-      // itself). `sessionModel` (review fix F1) is NEVER `settings.provider.model` — that is the
-      // WINTER leg's own default-provider model (openai/codex on a non-Anthropic-primary install),
-      // and feeding it here silently resolved an OpenAI reviewer on a Claude-only leg.
-      // `officialLegDefaultSessionModel()` states the one fact this deployment can promise instead:
-      // every session on THIS leg is Claude-family (D13-2 — no other family can route here at all),
-      // so the D30 default is unconditionally "claude -> fable" regardless of which session asked
-      // (`advisor-reviewer.ts`'s own header records why a single daemon-wide getter cannot
-      // disambiguate between concurrent official-leg sessions on different models, and why that is a
-      // non-issue today for exactly this reason).
-      advisorReviewer: advisorReviewerFor({
-        settings: () => settings ?? undefined,
-        secrets,
-        familyOf: familyOfModel,
-        sessionModel: officialLegDefaultSessionModel,
-      }),
       log: (line) => console.error(`runtime-sdk: ${line}`),
     });
   } catch (err) {
@@ -1625,7 +1627,7 @@ export async function startDaemon(opts: {
     },
     log: planBridgeLog,
   });
-  // ── P8c integration Wiring 3: the Winter/official hooks facade (lane 3's `hooks.ts`, P8c-14) ───
+  // ── P8c integration Wiring 3: the hooks facade (lane 3's `hooks.ts`, P8c-14) ───────────────────
   // `hookRegistry`/`hooksEnabledFrom`/`lspAutoDiagnosticsEnabledFrom`/`projectRootOf` are all
   // already live above (boot + Task 9 project-settings machinery); `HookFacade`/`HookRunner`/
   // `BashReviewer` were never constructed anywhere in this file post-engine-deletion (8b) — this is
@@ -1700,10 +1702,9 @@ export async function startDaemon(opts: {
     });
   // ── P8c integration Wiring 2: the notification/schedule sinks (lane 2's `sinks.ts`, P8c-11) ────
   // `hub.addObserver` (Dispatch/Phase 7's existing fan-out of every appended event of EVERY
-  // session, both legs alike — see `sessions/hub.ts`) is the wiring point named in the brief: it
-  // needs no change to `session-driver.ts`/`official-session.ts`, so both legs' projected
-  // `tool_call`/`tool_result` reach the sinks through the SAME hub every other cross-cutting
-  // observer (Dispatch's own) already uses.
+  // session — see `sessions/hub.ts`) is the wiring point named in the brief: it needs no change to
+  // `session-driver.ts`, so a session's projected `tool_call`/`tool_result` reach the sinks through
+  // the SAME hub every other cross-cutting observer (Dispatch's own) already uses.
   const sinks = sinksFor({
     routines: routineStore,
     emit: (event) => { hub.append(event.sessionId, event); },
@@ -1826,32 +1827,15 @@ export async function startDaemon(opts: {
     // identical list, project overlay included, rather than a second derivation of it.
     dangerousDomainsAdded,
     log: (line) => console.error(`winter-leg: ${line}`),
-    ...(opts.officialConnectionOverride === undefined ? {} : { officialConnectionOverride: opts.officialConnectionOverride }),
     // P8c integration Wirings 1 & 3 (P8c-14): lane 2's plan bridge and lane 3's hooks facade,
-    // built above. BOTH legs consume both: `hooksFor(...).official` becomes the official child's
-    // `Options.hooks` (session-driver.ts's `assembleOfficial`) and `hooksFor(...).winter` the Winter
-    // child's (its `optionsFor` → `buildWinterOptions`); `planBridge` answers `ExitPlanMode` through
-    // each leg's `CanUseToolDeps.planBridge` (the Winter leg's approval-bridge deps in `assemble`).
+    // built above. `hooksFor(...).winter` becomes the child's `Options.hooks` (`optionsFor` →
+    // `buildWinterOptions`); `planBridge` answers `ExitPlanMode` through the approval-bridge deps.
     planBridge,
     hooksFor,
   });
   // Wiring 1: fills the forward reference `planBridge`'s `setPolicy` closes over (declared above,
   // before `winterDrivers` existed) — see that block's own comment for why the cycle is broken here.
   winterDriversForPlanBridge = winterDrivers;
-  // P8c integration round 3 (lane 4's NEEDS daemon.ts note): the ONE registration of the router's
-  // handoff participants (`create.ts`'s `WinterRuntimeSdk.registerHandoffParticipants`, lane 1's
-  // hook) — the router reads `participants`/`selectionInputFor` LAZILY at handoff time, so this
-  // must run once, after both `runtimeSdk` (the router handle — `HandoffDeps.runtime`) and
-  // `winterDrivers` exist, and never inside an RPC case. Guarded on both existing: `runtime`
-  // (the 8a spine, for `.records`) can be offline (`runtimeStateOnline` returned undefined), and
-  // `runtimeSdk` can be undefined (a packaging fault) — either absence already means every
-  // `session.*` Winter-leg call refuses typed, so a handoff has nothing live to register against.
-  if (runtime !== undefined && runtimeSdk !== undefined) {
-    // Winter Phase 10b (D1-2, W18-7): `home` lets `confirmInit` derive the destination's own
-    // credential locator via `credentialRefFor` — the same `winterHome` every other `HandoffDeps`-
-    // adjacent construction in this file already threads through (see `winterHome` above).
-    registerHandoffParticipants({ runtime: runtimeSdk, winter: winterDrivers, records: runtime.records, store, settings: () => settings, home: winterHome });
-  }
   /** A deleted session takes its Winter child (bounded `end()`, out of the table) AND its runtime
    *  rows with it — the reaper's 600 s grace is shorter than the 900 s idle timer, so without the
    *  first half a live child would outlive its session. The boot sweep above ran before any driver
@@ -2742,15 +2726,12 @@ export async function startDaemon(opts: {
     ...(runtime === undefined || runtimeSdk === undefined ? {} : ((sdk: WinterRuntimeSdk) => ({
       handoff: {
         planAndApplySwitch: (sessionId: string, model: string | null, confirmLossy: boolean) =>
-          // Winter Phase 10b (D1 fix round 4, MINOR 4): `home` — the SAME `winterHome` the
-          // `registerHandoffParticipants` call above already threads through, and for the same
-          // reason. `planAndApplySwitch` itself calls `credentialRefFor(decided.providerId, home,
-          // …)` twice now (the C1 same-leg patch and the zero-turn re-selection), and that function
-          // keeps the old unconditional `anthropic:default` account when `home` is absent — so
-          // without this the record's `authRef` column could persist a DIFFERENT account name than
-          // the one `confirmInit` (which HAS the home) would have written for the very same
-          // provider. Record hygiene only — every spawn recomputes the ref with the home — but the
-          // two writers must not disagree about what they persist.
+          // Winter Phase 10b (D1 fix round 4, MINOR 4): `home` — `planAndApplySwitch` calls
+          // `credentialRefFor(decided.providerId, home)` for the record patch, and that function keeps
+          // the old unconditional `anthropic:default` account when `home` is absent — so without this
+          // the record's `authRef` column could persist a DIFFERENT account name than `create()` (which
+          // HAS the home) writes for the very same provider. Record hygiene only — every spawn
+          // recomputes the ref with the home — but the two writers must not disagree.
           planAndApplySwitch({ runtime: sdk, winter: winterDrivers, records: runtime.records, store, settings: () => settings, home: winterHome }, sessionId, model, confirmLossy),
       },
     }))(runtimeSdk)),
@@ -2764,6 +2745,7 @@ export async function startDaemon(opts: {
     registry: sharedRegistry,
     runtimeState,
     runtimeSdk,
+    embedded: embeddedSessions,
     sessions: store,
     buildSessionCapabilities,
     winter: winterDrivers,
@@ -2808,9 +2790,17 @@ export async function startDaemon(opts: {
       //
       // The failure of one session's teardown is not the daemon's: `dispose()` bounds each `end()`
       // and swallows rejections, and this `.catch` is the belt for anything it did not.
+      // WS-23: and the embedded Workers END before the stores close too — `dispose()` above has already
+      // ended (then aborted) every tracked session, so an ordinary Worker has closed by now; this bounds
+      // a straggler (`EMBEDDED_SHUTDOWN_BUDGET_MS`, then `terminate()`). Its iteration's tail writes the
+      // generation's end into `runtime-state.db`, which is why this is not left to process exit.
       const winterDone = runtimeSdk === undefined
         ? undefined
-        : runtimeSdk.dispose().catch((err: unknown) => { console.error(`runtime-sdk: dispose failed: ${(err as Error)?.name ?? "unknown"}`); });
+        : runtimeSdk.dispose()
+          .catch((err: unknown) => { console.error(`runtime-sdk: dispose failed: ${(err as Error)?.name ?? "unknown"}`); })
+          .then(() => embeddedSessions.shutdown(EMBEDDED_SHUTDOWN_BUDGET_MS))
+          // One macrotask for the iterations whose stdout just ended to run their `finally` blocks.
+          .then(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
       const closeRest = (): void | Promise<void> => {
         store.close();
         if (!runtime) { lock.release(); return; }

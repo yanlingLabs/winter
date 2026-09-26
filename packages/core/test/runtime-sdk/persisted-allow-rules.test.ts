@@ -1,4 +1,4 @@
-// Persisted allow rules reach the runtime child on BOTH legs (lane B, 2026-09-22, from lane C's finding).
+// Persisted allow rules reach the runtime child (lane B, 2026-09-22, from lane C's finding).
 //
 // A card's "Allow … everywhere" / "in this project" writes a rule through `approval.respond`'s
 // `PermissionRules.append` — `<home>/settings.json`'s `permissions.allow` (global) or
@@ -9,7 +9,7 @@
 // settings files' `permissions.allow` natively; this is the host half of that parity.
 //
 // Pinned here: the translation from Winter's rule grammar to the runtimes' (`sdkAllowRulesFor`), the
-// trust-gated reader (`persistedAllowRulesFor`), and both legs' Options. Deny-before-allow on the real
+// trust-gated reader (`persistedAllowRulesFor`), and the child's Options (WS-23: one leg). Deny-before-allow on the real
 // binary is `persisted-allow-measure.e2e.test.ts`.
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -29,7 +29,6 @@ import {
   buildWinterOptions, controlPlaneDenyRules, GLOBAL_READ_ALLOW_RULES, persistedAllowRulesFor, projectScopeAllowRulesFor, sdkAllowRulesFor,
   WEB_BUILTIN_ALLOW_RULES, type WinterOptionsInput,
 } from "../../src/runtime-sdk/mode-options";
-import { officialInputFor, type OfficialInputDeps, type OfficialSessionInput } from "../../src/runtime-sdk/official-options";
 
 function realDir(prefix: string): string { return realpathSync(mkdtempSync(join(tmpdir(), prefix))); }
 
@@ -120,7 +119,7 @@ describe("persistedAllowRulesFor — global always, the project halves only when
   });
 });
 
-describe("both legs' Options carry the saved rules — after Winter's fixed ones, with the deny fence intact", () => {
+describe("the child's Options carry the saved rules — after Winter's fixed ones, with the deny fence intact", () => {
   test("Winter leg, code: fixed allow + translated saved rules; the control-plane deny list is unchanged", () => {
     const o = buildWinterOptions(winterInput({ persistedAllow: ["Bash(gh repo:*)", "Edit"] }));
     expect(o.permissions?.allow).toEqual([...GLOBAL_READ_ALLOW_RULES, ...WEB_BUILTIN_ALLOW_RULES, "Bash(gh repo:*)", "Edit", "Write"]);
@@ -136,68 +135,8 @@ describe("both legs' Options carry the saved rules — after Winter's fixed ones
       expect(o.permissions?.allow).toBeUndefined();
     }
   });
-
-  test("official leg: the same translated rules ride the flag-settings `permissions.allow`", () => {
-    const deps = minimalOfficialDeps({ persistedAllow: ["Bash(gh repo:*)", "Worktree"] });
-    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
-    const result = officialInputFor(input, deps);
-    if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
-    const perms = (result.input.options as { settings?: { permissions?: { allow?: string[]; deny?: string[] } } }).settings?.permissions;
-    expect(perms?.allow).toEqual([...GLOBAL_READ_ALLOW_RULES, "Bash(gh repo:*)", "EnterWorktree", "ExitWorktree"]);
-    expect(perms?.deny).toEqual(controlPlaneDenyRules(deps.home));
-  });
 });
 
-// Router 0.0.11 (lane B): the official leg gets the SAME skills-only plugin views the Winter leg's
-// child does, through the router's `plugins` policy (which no longer names `<cwd>/.winter` itself).
-describe("official leg: the skills-only views ride the router's plugins policy", () => {
-  test("views become `{local, absolute, skipMcpDiscovery: true}` entries; deny aliases join the deny list", () => {
-    const deps = minimalOfficialDeps({
-      skillPlugins: [{ type: "local", path: "/Users/x/.winter/cache/skill-plugins/superpowers", skipMcpDiscovery: true }],
-      skillDenyAliases: ["Skill(superpowers:dir-name)"],
-    });
-    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo", primary: "/Users/x/repo", spendEffort: undefined };
-    const result = officialInputFor(input, deps);
-    if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
-    const options = result.input.options as { plugins?: unknown[]; settings?: { permissions?: { deny?: string[] } } };
-    expect(options.plugins).toEqual([{ type: "local", path: "/Users/x/.winter/cache/skill-plugins/superpowers", skipMcpDiscovery: true }]);
-    expect(options.settings?.permissions?.deny?.slice(-1)).toEqual(["Skill(superpowers:dir-name)"]);
-  });
-
-  test("no views → no `plugins` key at all (the official leg then loads no plugin)", () => {
-    const result = officialInputFor({ sessionId: "s_1", mode: "code", cwd: "/r", primary: "/r", spendEffort: undefined }, minimalOfficialDeps({ skillPlugins: [] }));
-    if (!("input" in result)) throw new Error("refused");
-    expect("plugins" in (result.input.options as object)).toBe(false);
-  });
-});
-
-// The same shape official-options.test.ts's own `minimalDeps` builds.
-function minimalOfficialDeps(over: Partial<OfficialInputDeps>): OfficialInputDeps {
-  const selection: RuntimeSelection = {
-    runtimeKind: "claude-agent", providerId: "test", modelRef: "claude-test/echo", family: "claude",
-    authFamily: "custom", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
-  };
-  return {
-    home: "/Users/x/.winter-test-home",
-    selection,
-    explicitCredentials: [],
-    explicitConnectionEnv: {},
-    officialPeer: undefined,
-    claudeExecutableFor: () => ({ path: "/usr/bin/true" }),
-    assembler: { assemble: () => "", memoryDirFor: () => undefined },
-    capabilities: {},
-    canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
-    policy: "auto",
-    consoleProfileExists: () => true,
-    ...over,
-  };
-}
-
-// R.3 residual (controller ruling): the daemon's project-scope readers resolve the project at the cwd's OWN git
-// top (`projectScopeRootFor`: a linked worktree's own `.winter/`), with trust keyed on the REPOSITORY; the
-// retired approved-rules record keeps its `repoRootFor` key. The daemon builds exactly these two:
-// `new ProjectSettingsResolver({ trust: projectScopeTrust(trustStore) })` read at `projectScopeRootFor(cwd)`
-// (dangerous domains, output style, hooks, LSP, reviewer…) and `projectScopeAllowRulesFor`.
 describe("R.3 residual: the daemon's project-scope readers from a linked worktree of a trusted repo", () => {
   function bed() {
     const main = realDir("winter-r3p-allow-main-");

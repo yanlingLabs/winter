@@ -38,11 +38,12 @@ import Foundation
 /// vocabulary is the daemon's to extend.
 ///
 /// `id` is a COMPOSITE, not `providerId`. WS-19 §9 A-1 makes this load-bearing rather than
-/// defensive: rows are emitted per SLOT, so `anthropic` appears TWICE — once for `anthropic:default`
-/// (`door: "credential.set"`, manageable) and once for `anthropic:console`
-/// (`door: "provider.login"`, not manageable) — and A-1 names `providerId|door|kind` as the key
-/// clients use. A `ForEach` keyed on `providerId` alone would collide, and SwiftUI would render one
-/// row and drop the other, silently.
+/// defensive: rows are emitted per SLOT, and a daemon before the WS-23 live-gate fix sends
+/// `anthropic` TWICE — once for `anthropic:default` (`door: "credential.set"`, manageable) and once
+/// for `anthropic:console` (`door: "provider.login"`, not manageable; a current daemon files that
+/// one under `console`) — and A-1 names `providerId|door|kind` as the key clients use. A `ForEach`
+/// keyed on `providerId` alone would collide on such a daemon, and SwiftUI would render one row and
+/// drop the other, silently.
 public struct CredentialRow: Equatable, Sendable, Identifiable {
     /// The provider's id as the daemon knows it (`openai`, `anthropic`, `deepseek`, …). Also the
     /// value `credential.set`/`credential.remove` take — never a display name.

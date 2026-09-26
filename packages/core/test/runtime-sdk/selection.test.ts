@@ -25,21 +25,9 @@ import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain
 import { rowForTag, familyListingFromCatalog } from "../../src/runtime-sdk/provider-selection";
 
 describe("familyListingFromCatalog + the router's own selectRuntime", () => {
-  test("anthropic/claude-sonnet-5 + hasClaudePeer + an anthropic api-key credential + code mode -> claude-agent (D13-2)", () => {
-    const result = selectRuntime({
-      mode: "code",
-      requested: { model: "anthropic/claude-sonnet-5", provider: "anthropic" },
-      families: familyListingFromCatalog(),
-      credentials: { byProvider: { anthropic: "keychain" }, authByProvider: { anthropic: { authFamily: "api-key" } } },
-      hasClaudePeer: true,
-      claudeOauthApproved: false,
-    });
-    if (isSelectionRefusal(result)) throw new Error(`unexpected refusal: ${result.detail}`);
-    expect(result.runtimeKind).toBe("claude-agent");
-    expect(result.reason.startsWith("D13-2")).toBe(true);
-  });
-
-  test("the SAME model with no official peer -> winter-agent (R-7b-1-no-peer)", () => {
+  // WS-23: the daemon never offers the router an official peer (`hasClaudePeer: false`, always), so a
+  // Claude model routes to the Winter runtime — the official alternative's D13-2 case is gone.
+  test("a Claude model with no official peer -> winter-agent (R-7b-1-no-peer)", () => {
     const result = selectRuntime({
       mode: "code",
       requested: { model: "anthropic/claude-sonnet-5", provider: "anthropic" },
@@ -164,7 +152,7 @@ describe("createWinterRuntimeSdk(...).selectRuntimeFor", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("routes anthropic/claude-sonnet-5 to the official leg once the anthropic credential is stored", async () => {
+  test("routes anthropic/claude-sonnet-5 to the Winter runtime once the anthropic credential is stored (WS-23)", async () => {
     home = mkdtempSync(join(tmpdir(), "p8c-selection-"));
     secretsDir = join(home, "secrets");
     const secrets = new FileSecretStore(secretsDir);
@@ -173,9 +161,8 @@ describe("createWinterRuntimeSdk(...).selectRuntimeFor", () => {
     handles.push(handle);
     const result = await handle.selectRuntimeFor({ mode: "code", model: "anthropic/claude-sonnet-5" });
     if (isSelectionRefusal(result)) throw new Error(`unexpected refusal: ${result.detail}`);
-    // This dev/test environment has the real optional peer installed, so `hasClaudePeer` is true —
-    // matching the FIRST describe block's own D13-2 case.
-    expect(result.runtimeKind).toBe("claude-agent");
+    // WS-23: no official peer is ever offered, so the router's own no-peer rule decides.
+    expect(result.runtimeKind).toBe("winter-agent");
     expect(result.providerId).toBe("anthropic");
   });
 

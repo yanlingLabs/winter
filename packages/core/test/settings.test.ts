@@ -2,7 +2,7 @@ import { describe, expect, test, spyOn } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, computerUseEnabledFrom, lspEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialSubscriptionAuthEnabled, officialSubscriptionAuthFlagInert, DEFAULT_PROVIDER, pinsFor, setModelRole, modelRoleInfo, setSkillDenied, skillDenyRule, MODEL_ROLES, roleEffortFor, roleAcceptsClientEffort, roleCarriesEffort, effortToSpendForRole } from "../src/settings";
+import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, computerUseEnabledFrom, lspEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, DEFAULT_PROVIDER, pinsFor, setModelRole, modelRoleInfo, setSkillDenied, skillDenyRule, MODEL_ROLES, roleEffortFor, roleAcceptsClientEffort, roleCarriesEffort, effortToSpendForRole, retiredRuntimeSettingKeys } from "../src/settings";
 import { ModelRole as ProtocolModelRole } from "@yanlinglabs/winter-protocol";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
 import { UNSTATED_TAG, type ModelTag } from "../src/runtime-sdk/model-tag";
@@ -968,24 +968,19 @@ describe("saveSettings", () => {
       expect(loadSettings(p).titles?.model).toBe(tag("codex-oauth/gpt-5.6-luna"));
     });
 
-    // Same shape for `runtimes.official` — the OTHER `.strict()` block, guarding against a stray
-    // legacy `auth` key surviving from a v2-or-earlier `runtimes.official.auth` write. Unlike the
-    // `provider` block, this one is `.optional()` at the `runtimes.official` level, so the fixture
-    // must keep `runtimes.official` PRESENT in the owned value too — otherwise the whole block is
-    // simply absent-and-cleared (a different, already-correct code path) and the `.strict()` branch
-    // is never reached at all.
-    test("a stray legacy `runtimes.official.auth` key on disk survives a setSkillDenied write (BLOCKER)", () => {
+    // WS-23: `runtimes.official` was the OTHER `.strict()` block (a stray legacy `auth` key refused the
+    // whole file). The block is retired now — accepted and ignored, `.loose()` — so a stray key it
+    // carries on disk is simply carried through a save, like any other unknown key, and never costs
+    // the write.
+    test("a stray legacy `runtimes.official.auth` key on disk rides through a setSkillDenied write untouched (WS-23)", () => {
       const p = join(mkdtempSync(join(tmpdir(), "winter-save-v2-official-")), "settings.json");
       wf(p, JSON.stringify({
         schemaVersion: 3,
         provider: { model: "codex-oauth/gpt-5.6-sol" },
         runtimes: { official: { auth: "console", subscriptionAuth: false } },
       }, null, 2));
-      // `loadSettings` on a schemaVersion-3 file does NOT run the v2→v3 migration — it straight-up
-      // refuses a stray `auth` key inside the `.strict()` `runtimes.official` block, so this fixture
-      // (which deliberately still has the stray key ON DISK) is built by hand rather than via
-      // `loadSettings(p)`, exactly the "file drifted after `s` was last read" scenario the function's
-      // own comment names.
+      // Built by hand rather than via `loadSettings(p)` — the "file drifted after `s` was last read"
+      // scenario the function's own comment names.
       const before: Settings = {
         schemaVersion: 3,
         provider: { model: tag("codex-oauth/gpt-5.6-sol") },
@@ -994,7 +989,7 @@ describe("saveSettings", () => {
       expect(() => saveSettings(p, setSkillDenied(before, "bash-review", true))).not.toThrow();
 
       const onDisk = JSON.parse(readFileSync(p, "utf8"));
-      expect(onDisk.runtimes.official).toEqual({ subscriptionAuth: false }); // `auth` dropped, not carried through
+      expect(onDisk.runtimes.official).toEqual({ auth: "console", subscriptionAuth: false }); // inert, carried as found
       expect(onDisk.permissions.deny).toEqual([skillDenyRule("bash-review")]);
     });
 
@@ -1100,11 +1095,12 @@ describe("setModelRole: the catalog-membership check", () => {
   // The membership test is the CATALOG, deliberately not the role's own `permitted` set: existence and
   // present-tense usability are different questions, and clients already receive `constraint`.
   //
-  // 2026-09-19 SPLIT: for an internal-jobs role that now has two answers, on the situational/permanent
-  // line. An ELIGIBLE provider with no credential stored yet is still accepted — it is exactly the
-  // "a provider the user is about to bind" case this test was written for. A PERMANENTLY ineligible one
-  // (a first-party Claude row, or an adapter family the daemon cannot drive) is refused at the door,
-  // because no future credential makes it runnable.
+  // 2026-09-19 SPLIT, narrowed WS-23: for an internal-jobs role that now has two answers, on the
+  // situational/permanent line. An ELIGIBLE provider with no credential stored yet is still accepted
+  // — it is exactly the "a provider the user is about to bind" case this test was written for. A
+  // PERMANENTLY ineligible one (the reserved `cc` row, or an adapter family the daemon cannot drive)
+  // is refused at the door, because no future credential makes it runnable. (`anthropic` and
+  // `console` rejoined the eligible set in WS-23, so they are accepted here.)
   test("an internal-jobs role accepts an eligible provider with no credential stored yet", () => {
     const info = modelRoleInfo(base, "titles.model", "openai", { credentialed: new Set(["codex-oauth"]) });
     expect(info.constraint).toBe("internal-provider");
@@ -1114,9 +1110,16 @@ describe("setModelRole: the catalog-membership check", () => {
     expect(setModelRole(base, "titles.model", notYetCredentialed).titles?.model).toBe(tag(notYetCredentialed));
   });
 
-  test("an internal-jobs role REFUSES a first-party Claude provider, and says why", () => {
-    expect(() => setModelRole(base, "titles.model", "anthropic/claude-sonnet-5")).toThrow(/can't run on Anthropic/);
-    expect(() => setModelRole(base, "pins.dream", "anthropic/claude-sonnet-5")).toThrow(/its own reviewer/);
+  // WS-23: `anthropic` is an ordinary eligible provider now (every model runs on the Winter SDK), and
+  // so is `console` since the live-gate fix (its bearer slot is an inventory row the Anthropic adapter
+  // is driven over) — while a provider whose adapter family the daemon cannot drive stays refused.
+  test("an internal-jobs role ACCEPTS anthropic and console, and still REFUSES an undrivable provider, saying why", () => {
+    expect(setModelRole(base, "titles.model", "anthropic/claude-sonnet-5").titles?.model).toBe(tag("anthropic/claude-sonnet-5"));
+    expect(setModelRole(base, "pins.dream", "anthropic/claude-sonnet-5").pins?.dream).toBe(tag("anthropic/claude-sonnet-5"));
+    expect(setModelRole(base, "titles.model", "console/claude-sonnet-5").titles?.model).toBe(tag("console/claude-sonnet-5"));
+    expect(setModelRole(base, "pins.dream", "console/claude-sonnet-5").pins?.dream).toBe(tag("console/claude-sonnet-5"));
+    expect(() => setModelRole(base, "titles.model", "bedrock/anthropic.claude-sonnet-4-5")).toThrow(/can't run on AWS Bedrock/);
+    expect(() => setModelRole(base, "pins.dream", "bedrock/anthropic.claude-sonnet-4-5")).toThrow(/no way to drive that provider/);
     // `pins.dispatch` is an `"any"` role routed through the runtime SDK — untouched by the gate.
     expect(setModelRole(base, "pins.dispatch", "anthropic/claude-sonnet-5").pins?.dispatch).toBe(tag("anthropic/claude-sonnet-5"));
   });
@@ -1553,11 +1556,10 @@ describe("settings.runtimes", () => {
     expect(() => Settings.parse({ ...base, runtimes: { winterLeg: { chat: "true" } } })).toThrow();
   });
 
-  // Fix wave (whole-branch review C2 / ruling P8c-18); Winter Phase 10b (D1-1): `crossRuntime`
-  // stays UNSET by default — no schema-level default at all — so the raw parse can never be
-  // confused with an explicit choice. The mode-aware default lives entirely in
-  // `handoffCrossRuntimeEnabled`, exercised below.
-  test("crossRuntime stays unset by default and accepts an explicit true/false", () => {
+  // WS-23: `crossRuntime` is retired — still ACCEPTED (unset by default, an explicit true/false
+  // parses) so an existing file keeps loading, and read by nothing (`retiredRuntimeSettingKeys`
+  // reports it, below).
+  test("crossRuntime stays unset by default and still accepts an explicit true/false", () => {
     expect(Settings.parse({ ...base, runtimes: {} }).runtimes?.handoff).toEqual({});
     expect(Settings.parse({ ...base, runtimes: { handoff: { crossRuntime: true } } }).runtimes?.handoff)
       .toEqual({ crossRuntime: true });
@@ -1566,67 +1568,45 @@ describe("settings.runtimes", () => {
   });
 });
 
-// Winter Phase 10b (D1-1, W18-10, R-10b-1): `runtimes.handoff.crossRuntime` now defaults ON for
-// Code sessions (the real round-trip against the live barrier is measured end to end) and stays
-// OFF for chat/dispatch, which never reach the official leg regardless
-// (`select-runtime.ts`'s own mode gate). An explicit setting always overrides the mode-aware
-// default, in every mode.
-describe("handoffCrossRuntimeEnabled", () => {
+// WS-23: the official leg's settings — `runtimes.claudeExecutable`, `runtimes.official.*`,
+// `runtimes.handoff.crossRuntime` — are retired. A settings file that still names one must LOAD (a
+// removed key never refuses boot or costs the whole file), obey nothing, and be reported.
+describe("retired official-leg settings (WS-23)", () => {
   const base = { schemaVersion: 3 as const, provider: { model: DEFAULT_PROVIDER.model } };
 
-  test("null/undefined settings (a boot-degraded daemon) fall back to the mode-aware default, never a throw", () => {
-    expect(handoffCrossRuntimeEnabled(null)).toBe(true); // omitted mode reads as Code
-    expect(handoffCrossRuntimeEnabled(undefined)).toBe(true);
-    expect(handoffCrossRuntimeEnabled(null, "code")).toBe(true);
-    expect(handoffCrossRuntimeEnabled(null, "chat")).toBe(false);
-    expect(handoffCrossRuntimeEnabled(null, "dispatch")).toBe(false);
+  test("every retired key still parses — including the pre-WS-20 `official.auth` the strict block used to refuse", () => {
+    const parsed = Settings.parse({
+      ...base,
+      runtimes: { claudeExecutable: "/opt/claude", official: { subscriptionAuth: true, auth: "console" }, handoff: { crossRuntime: false } },
+    });
+    expect(parsed.runtimes?.claudeExecutable).toBe("/opt/claude");
+    expect(parsed.runtimes?.official).toEqual({ subscriptionAuth: true, auth: "console" });
+    expect(parsed.runtimes?.handoff).toEqual({ crossRuntime: false });
   });
 
-  test("an absent runtimes block answers the mode-aware default: ON for Code, OFF for chat/dispatch", () => {
-    expect(handoffCrossRuntimeEnabled(Settings.parse(base))).toBe(true);
-    expect(handoffCrossRuntimeEnabled(Settings.parse(base), "code")).toBe(true);
-    expect(handoffCrossRuntimeEnabled(Settings.parse(base), "chat")).toBe(false);
-    expect(handoffCrossRuntimeEnabled(Settings.parse(base), "dispatch")).toBe(false);
+  test("a settings.json naming them loads through loadSettings, never a throw", () => {
+    const p = join(mkdtempSync(join(tmpdir(), "winter-retired-keys-")), "settings.json");
+    wf(p, JSON.stringify({ ...base, runtimes: { claudeExecutable: "/opt/claude", official: { subscriptionAuth: true }, handoff: { crossRuntime: true } } }, null, 2));
+    expect(() => loadSettings(p)).not.toThrow();
   });
 
-  test("an empty runtimes block answers the same mode-aware default — crossRuntime stays unset, not schema-defaulted", () => {
-    expect(handoffCrossRuntimeEnabled(Settings.parse({ ...base, runtimes: {} }))).toBe(true);
-    expect(handoffCrossRuntimeEnabled(Settings.parse({ ...base, runtimes: {} }), "dispatch")).toBe(false);
+  test("retiredRuntimeSettingKeys names exactly the retired keys a file sets, as dotted paths", () => {
+    expect(retiredRuntimeSettingKeys(null)).toEqual([]);
+    expect(retiredRuntimeSettingKeys(Settings.parse(base))).toEqual([]);
+    expect(retiredRuntimeSettingKeys(Settings.parse({ ...base, runtimes: {} }))).toEqual([]);
+    expect(retiredRuntimeSettingKeys(Settings.parse({
+      ...base,
+      runtimes: { claudeExecutable: "/opt/claude", official: { subscriptionAuth: false, auth: "console" }, handoff: { crossRuntime: true } },
+    }))).toEqual(["runtimes.claudeExecutable", "runtimes.official.auth", "runtimes.official.subscriptionAuth", "runtimes.handoff.crossRuntime"]);
+    expect(retiredRuntimeSettingKeys(Settings.parse({ ...base, runtimes: { official: {} } }))).toEqual(["runtimes.official"]);
   });
 
-  test("an explicit value overrides the mode-aware default, in every mode", () => {
-    expect(handoffCrossRuntimeEnabled(Settings.parse({ ...base, runtimes: { handoff: { crossRuntime: true } } }), "chat")).toBe(true);
-    expect(handoffCrossRuntimeEnabled(Settings.parse({ ...base, runtimes: { handoff: { crossRuntime: true } } }), "dispatch")).toBe(true);
-    expect(handoffCrossRuntimeEnabled(Settings.parse({ ...base, runtimes: { handoff: { crossRuntime: false } } }))).toBe(false);
-    expect(handoffCrossRuntimeEnabled(Settings.parse({ ...base, runtimes: { handoff: { crossRuntime: false } } }), "code")).toBe(false);
+  test("the retired keys reach no reader: winterOptionsFromSettings carries no claudeExecutable", () => {
+    const options = winterOptionsFromSettings(Settings.parse({ ...base, runtimes: { claudeExecutable: "/opt/claude" } }));
+    expect("claudeExecutable" in options).toBe(false);
   });
 
-  test("a hot-reload flip takes effect immediately through the same getter — no restart, no cached decision", () => {
-    let live: Settings = Settings.parse(base);
-    const read = () => live;
-    expect(handoffCrossRuntimeEnabled(read(), "code")).toBe(true); // Code default ON, nothing set yet
-    live = Settings.parse({ ...base, runtimes: { handoff: { crossRuntime: false } } });
-    expect(handoffCrossRuntimeEnabled(read(), "code")).toBe(false); // same getter, flipped off, no restart
-  });
-});
-
-// WS-20: `runtimes.official.auth` (and its reader `officialAuthModeSetting`) is REMOVED, not
-// deprecated — the official leg's auth arm is now the tag's own prefix
-// (`officialAuthArmFor(selection)`, official-options.ts). `subscriptionAuth` stays, orthogonal to
-// which arm.
-describe("runtimes.official schema (WS-20: auth is gone)", () => {
-  const base = { schemaVersion: 3 as const, provider: { model: DEFAULT_PROVIDER.model } };
-
-  test("runtimes.official.auth is gone", () => {
-    expect(() => Settings.parse({ ...base, runtimes: { official: { auth: "console" } } })).toThrow();
-  });
-
-  test("subscriptionAuth still parses, default false", () => {
-    expect(Settings.parse({ ...base, runtimes: { official: {} } }).runtimes?.official?.subscriptionAuth).toBe(false);
-    expect(Settings.parse({ ...base, runtimes: { official: { subscriptionAuth: true } } }).runtimes?.official?.subscriptionAuth).toBe(true);
-  });
-
-  test("antExecutable parses as an optional string beside winterExecutable/claudeExecutable", () => {
+  test("antExecutable parses as an optional string beside winterExecutable", () => {
     expect(Settings.parse({ ...base, runtimes: { antExecutable: "/opt/ant/ant" } }).runtimes?.antExecutable).toBe("/opt/ant/ant");
     expect(Settings.parse({ ...base, runtimes: {} }).runtimes?.antExecutable).toBeUndefined();
   });
@@ -1751,66 +1731,6 @@ describe("winterOptionsFromSettings", () => {
   test("the schema default and the absent-block answer are the same number", () => {
     expect(Settings.parse({ ...base, runtimes: {} }).runtimes?.winterIdleTimeoutSec).toBe(DEFAULT_WINTER_IDLE_TIMEOUT_SEC);
     expect(winterOptionsFromSettings(Settings.parse(base)).idleTimeoutSec).toBe(DEFAULT_WINTER_IDLE_TIMEOUT_SEC);
-  });
-});
-
-// Pre-release hardening (P9c-1 amendment): the settings flag alone must never be able to widen the
-// official leg's subscription posture — only ANDing it against the compile-time approval constant
-// (`OFFICIAL_SUBSCRIPTION_AUTH_APPROVED`, versions.ts, real value `false`) does that. These tests
-// use the function's own injectable `approved` override rather than the real constant, exactly the
-// seam the constant's own doc says tests must use.
-describe("officialSubscriptionAuthEnabled (P9c-1 amendment)", () => {
-  const base = { schemaVersion: 3 as const, provider: { model: DEFAULT_PROVIDER.model } };
-
-  test("null/undefined settings answer false, never a throw", () => {
-    expect(officialSubscriptionAuthEnabled(null)).toBe(false);
-    expect(officialSubscriptionAuthEnabled(undefined)).toBe(false);
-  });
-
-  test("an absent runtimes/official block answers false", () => {
-    expect(officialSubscriptionAuthEnabled(Settings.parse(base))).toBe(false);
-  });
-
-  test("the flag true, with NO override -> false on the REAL compile-time constant (the shipped default, OFFICIAL_SUBSCRIPTION_AUTH_APPROVED = false)", () => {
-    const on = Settings.parse({ ...base, runtimes: { official: { subscriptionAuth: true } } });
-    expect(officialSubscriptionAuthEnabled(on)).toBe(false);
-  });
-
-  test("the flag true, with the injectable override explicitly false -> still false", () => {
-    const on = Settings.parse({ ...base, runtimes: { official: { subscriptionAuth: true } } });
-    expect(officialSubscriptionAuthEnabled(on, false)).toBe(false);
-  });
-
-  test("the flag true, with the injectable override true -> true (the only way to reach the widened branch)", () => {
-    const on = Settings.parse({ ...base, runtimes: { official: { subscriptionAuth: true } } });
-    expect(officialSubscriptionAuthEnabled(on, true)).toBe(true);
-  });
-
-  test("the override alone, with the flag false/absent -> still false (approval without the flag never widens)", () => {
-    expect(officialSubscriptionAuthEnabled(Settings.parse(base), true)).toBe(false);
-    const off = Settings.parse({ ...base, runtimes: { official: { subscriptionAuth: false } } });
-    expect(officialSubscriptionAuthEnabled(off, true)).toBe(false);
-  });
-});
-
-describe("officialSubscriptionAuthFlagInert (P9c-1 amendment)", () => {
-  const base = { schemaVersion: 3 as const, provider: { model: DEFAULT_PROVIDER.model } };
-
-  test("absent/false flag is never \"inert\" — it is simply off", () => {
-    expect(officialSubscriptionAuthFlagInert(null)).toBe(false);
-    expect(officialSubscriptionAuthFlagInert(Settings.parse(base))).toBe(false);
-    const off = Settings.parse({ ...base, runtimes: { official: { subscriptionAuth: false } } });
-    expect(officialSubscriptionAuthFlagInert(off)).toBe(false);
-  });
-
-  test("flag true, on the real compile-time constant -> inert (true)", () => {
-    const on = Settings.parse({ ...base, runtimes: { official: { subscriptionAuth: true } } });
-    expect(officialSubscriptionAuthFlagInert(on)).toBe(true);
-  });
-
-  test("flag true, WITH the approval override -> never inert (false) — approved means it's actually in effect, not stuck", () => {
-    const on = Settings.parse({ ...base, runtimes: { official: { subscriptionAuth: true } } });
-    expect(officialSubscriptionAuthFlagInert(on, true)).toBe(false);
   });
 });
 

@@ -926,12 +926,15 @@ func recentsActivityDotStyle(_ activity: String?) -> ActivityChipStyle? {
 /// Winter Phase 8d (Task 4.2, WS-14 §14): the runtime badge's label. `nil` for BOTH an absent
 /// `runtimeKind` (a daemon that hasn't decided/does not know the leg — never a guessed default) AND
 /// an unrecognised future value (fail-quiet, same posture as `recentsActivityDotStyle` just above —
-/// an unknown string is not a licence to invent a label). The branding ruling this exists to serve:
-/// NEVER "Claude Code" — `"claude-agent"` reads "Claude Agent", full stop.
+/// an unknown string is not a licence to invent a label).
+///
+/// WS-23: every session runs on the Winter runtime, so there is no "Claude Agent" badge. A
+/// `"claude-agent"` value can still arrive — a session the retired official runtime created, not yet
+/// resumed (the daemon moves it onto the Winter runtime at its next resume) — and it gets no badge,
+/// the same fail-quiet answer as any other value this does not name.
 func runtimeBadgeLabel(_ runtimeKind: String?) -> String? {
     switch runtimeKind {
     case "winter-agent": return "Winter Agent"
-    case "claude-agent": return "Claude Agent"
     default: return nil
     }
 }

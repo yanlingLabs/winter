@@ -24,7 +24,8 @@ import { join } from "node:path";
 import { openaiChatFake, startFake, type FakeServer } from "@yanlinglabs/winter-provider-conformance/fakes";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import { FileSecretStore } from "../../src/auth/secret-store";
-import { credentialRefFor, keychainSeamFromSecretStore } from "../../src/runtime-sdk/keychain";
+import { readCredentialMaterial } from "../../src/auth/credential-material";
+import { credentialRefFor } from "../../src/runtime-sdk/keychain";
 import { keychainService } from "../../src/profile";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
@@ -113,6 +114,10 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
    *  assertion this file exists to make. */
   const authHeaders: string[] = [];
   let secretsRef: FileSecretStore | undefined;
+  // The LIVE session's working directory. It outlives B-1 on purpose: MAJOR 1 and B-3 below re-open
+  // that same session, and a session whose cwd is gone is now refused before any child
+  // (`session_cwd_unavailable`) — which would mask the credential behaviour those tests pin.
+  let liveCwd: string | undefined;
 
   beforeAll(async () => {
     home = realpathSync(mkdtempSync(join(tmpdir(), "ws19-route-")));
@@ -155,6 +160,7 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
     await stopping;
     await fake?.close();
     rmSync(home, { recursive: true, force: true });
+    if (liveCwd !== undefined) rmSync(liveCwd, { recursive: true, force: true });
   });
 
   test("B-1/W19-8: credential.set -> credential.list -> a real turn reaches the fake carrying the key, with no restart", async () => {
@@ -193,6 +199,7 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
 
     // (3) A real session, a real child, a real turn — reaching the loopback fake.
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ws19-route-cwd-")));
+    liveCwd = cwd;
     const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: DEEPSEEK_MODEL, cwd });
     await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
     await client.call(METHODS.sessionSend, { sessionId, text: "say hello" });
@@ -226,12 +233,13 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
     // The durable record names the right credential LOCATOR (never material — records.ts's own rule).
     expect(rt.records.get(sessionId)?.authRef).toBe("keychain:deepseek:default");
     expect(rt.records.get(sessionId)?.providerId).toBe("deepseek");
-    // ...and that locator, through the daemon's OWN seam, resolves to exactly what was stored.
+    // ...and that locator names exactly the record that was stored (the child resolves it itself; WS-23
+    // retired the daemon-side seam that used to read it for the official leg).
     const ref = credentialRefFor("deepseek", home)!;
     expect(ref).toEqual({ kind: "keychain", account: "deepseek:default", service: keychainService(undefined, home) });
-    expect(await keychainSeamFromSecretStore(secretsRef!, home).read(ref)).toBe(SENTINEL);
-
-    rmSync(cwd, { recursive: true, force: true });
+    const stored = await readCredentialMaterial(secretsRef!, "deepseek:default");
+    expect(stored?.kind === "api-key" ? stored.key : undefined).toBe(SENTINEL);
+    // `cwd` is removed in `afterAll` (`liveCwd`): the tests below re-open this same session.
   }, 180_000);
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -270,15 +278,16 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
     await client.waitFor(() => client.events.filter((e) => e.type === "turn_completed" && e.sessionId === liveSessionId).length >= 2, 90_000);
     expect(rt.records.get(liveSessionId)!.generation).toBeGreaterThan(generationBefore);
 
-    // MEASURED LIMITATION — the same one B-1 records, and the reason this test pins the REPLACEMENT
-    // rather than the replacement's turn. The spawned child resolves its `CredentialRef` by reading
-    // the macOS Keychain ITSELF, and this harness's store is a `FileSecretStore`, so the re-spawned
-    // child finds nothing and exits before init (measured: the second turn ends `agent_error
-    // process_death`, and the loopback fake receives no second request). That is the harness, not
-    // the fix: what this test owes is that the stale child was replaced, and it was. The rule's own
-    // shape — which sessions match, turn-safety, tool rows, the official leg — is pinned in
-    // `test/runtime-sdk/credentials.test.ts`.
-    expect(fake!.requests.filter((r) => r.path.endsWith("/chat/completions")).length).toBe(requestsBefore);
+    // The REPLACEMENT'S TURN reaches the fake too. This used to be recorded as a harness limitation
+    // ("the re-spawned child exits before init — `agent_error process_death` — and the fake receives no
+    // second request", blamed on the Keychain read). It was not the Keychain: B-1 deleted this
+    // session's working directory at its end, and a child spawned in a missing cwd dies before init —
+    // the exact failure the `session_cwd_unavailable` refusal now names. With the cwd kept alive
+    // (`liveCwd`), the new incarnation runs its turn. The credential itself still never reaches the
+    // wire in this harness (the child reads the macOS Keychain, the store here is a `FileSecretStore`),
+    // as B-1 records. The rule's own shape — which sessions match, turn-safety, tool rows — is pinned
+    // in `test/runtime-sdk/credentials.test.ts`.
+    expect(fake!.requests.filter((r) => r.path.endsWith("/chat/completions")).length).toBe(requestsBefore + 1);
     expect(authHeaders.every((h) => h === "")).toBe(true);
   }, 120_000);
 

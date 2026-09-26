@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, writeFileSync, realpathSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { configuredMcpServersFor } from "../../src/runtime-sdk/external-mcp";
-import { Settings, sdkUserMcpServers } from "../../src/settings";
+import { Settings, sdkUserMcpServers, validateMcpServerEntryForWrite } from "../../src/settings";
 
 // WS-21: the project MCP file is `<root>/.winter/mcp.json` (the repo-root `.mcp.json` is never read).
 const writeProjectMcp = (root: string, body: string): void => {
@@ -191,4 +191,57 @@ test("a disabled server is withheld entirely — neither a user nor a project en
     expect(out.kept).toEqual({ type: "stdio", command: "keep" });
     expect(out.allowed).toEqual({ type: "stdio", command: "p" });
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// WS-23 (MCP v2): a server's own `versionNegotiation` reaches the child verbatim, on every transport and
+// from every scope. zod strips an undeclared key, so before this every read (`sdk/.winter.json`, a
+// project's `.winter/mcp.json`) and every write (`validateMcpServerEntryForWrite`) dropped it silently,
+// and the runtime's per-transport default applied instead of the server's stated choice.
+test("versionNegotiation passes through from sdk/.winter.json and a trusted project's mcp.json to the child's config", () => {
+  const home = mkdtempSync(join(tmpdir(), "winter-ext-mcp-negotiation-"));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "winter-ext-mcp-negotiation-proj-")));
+  try {
+    mkdirSync(join(home, "sdk"), { recursive: true });
+    writeFileSync(join(home, "sdk", ".winter.json"), JSON.stringify({
+      mcpServers: {
+        legacyStdio: { command: "bun", args: ["run", "s.ts"], versionNegotiation: "legacy" },
+        autoHttp: { type: "http", url: "https://example.com/mcp", versionNegotiation: "auto" },
+        pinnedSse: { type: "sse", url: "https://example.com/sse", versionNegotiation: { pin: "2026-07-28" } },
+        unstated: { type: "http", url: "https://example.com/plain" },
+      },
+    }));
+    writeProjectMcp(dir, JSON.stringify({ mcpServers: { proj: { command: "p", versionNegotiation: { pin: "2026-07-28" } } } }));
+    const out = configuredMcpServersFor({ settings: null, userMcpServers: sdkUserMcpServers(home), cwd: dir, trusted: () => true });
+    expect(out).toEqual({
+      legacyStdio: { type: "stdio", command: "bun", args: ["run", "s.ts"], versionNegotiation: "legacy" },
+      autoHttp: { type: "http", url: "https://example.com/mcp", versionNegotiation: "auto" },
+      pinnedSse: { type: "sse", url: "https://example.com/sse", versionNegotiation: { pin: "2026-07-28" } },
+      // Absent stays ABSENT — the runtime's own per-transport default, never a daemon-invented value.
+      unstated: { type: "http", url: "https://example.com/plain" },
+      proj: { type: "stdio", command: "p", versionNegotiation: { pin: "2026-07-28" } },
+    });
+    expect("versionNegotiation" in out.unstated!).toBe(false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("versionNegotiation survives the write door, and a value the SDK does not define is refused per entry, never silently dropped", () => {
+  expect(validateMcpServerEntryForWrite({ type: "http", url: "https://example.com/mcp", versionNegotiation: { pin: "2026-07-28" } }))
+    .toEqual({ type: "http", url: "https://example.com/mcp", versionNegotiation: { pin: "2026-07-28" } });
+  expect(() => validateMcpServerEntryForWrite({ type: "http", url: "https://example.com/mcp", versionNegotiation: "modern" })).toThrow();
+  expect(() => validateMcpServerEntryForWrite({ command: "x", versionNegotiation: { pin: "" } })).toThrow();
+
+  // On the read side a bad value costs only that entry (the per-entry posture `parseMcpServerMap` keeps).
+  const home = mkdtempSync(join(tmpdir(), "winter-ext-mcp-negotiation-bad-"));
+  try {
+    mkdirSync(join(home, "sdk"), { recursive: true });
+    writeFileSync(join(home, "sdk", ".winter.json"), JSON.stringify({
+      mcpServers: { bad: { command: "x", versionNegotiation: "modern" }, good: { command: "y", versionNegotiation: "auto" } },
+    }));
+    const servers = sdkUserMcpServers(home);
+    expect(servers.bad).toBeUndefined();
+    expect(servers.good).toEqual({ type: "stdio", command: "y", versionNegotiation: "auto" });
+  } finally { rmSync(home, { recursive: true, force: true }); }
 });

@@ -21,7 +21,6 @@ import { PermissionGate } from "../../src/agent/gate";
 import { QuestionBroker } from "../../src/agent/questions";
 import { assistantMemoryDirFor, memoryDirFor, _clearRepoRootCacheForTests } from "../../src/agent/memory-dir";
 import { buildWinterOptions, controlPlaneDenyRules, GLOBAL_READ_ALLOW_RULES, type WinterOptionsInput } from "../../src/runtime-sdk/mode-options";
-import { officialInputFor, type OfficialInputDeps, type OfficialSessionInput } from "../../src/runtime-sdk/official-options";
 import { winterSystemPromptFor } from "../../src/runtime-sdk/system-prompt";
 
 const real = (p: string): string => realpathSync(p);
@@ -172,64 +171,5 @@ describe("buildWinterOptions", () => {
     const on = buildWinterOptions(winterInput({ runHomeApplied: true, env: owned }));
     for (const key of Object.keys(owned)) expect(key in on.env!).toBe(false);
     expect(on.env!.WINTER_PROFILE).toBeDefined(); // the daemon's own pins stay
-  });
-});
-
-// ── the official leg's input ─────────────────────────────────────────────────────────────────────
-function officialDeps(assembler: OfficialInputDeps["assembler"], over: Partial<OfficialInputDeps> = {}): OfficialInputDeps {
-  const selection: RuntimeSelection = {
-    runtimeKind: "claude-agent", providerId: "test", modelRef: "claude-test/echo", family: "claude",
-    authFamily: "custom", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
-  };
-  return {
-    home: "/Users/x/.winter-test-home", selection, explicitCredentials: [], explicitConnectionEnv: {},
-    officialPeer: undefined, claudeExecutableFor: () => ({ path: "/usr/bin/true" }),
-    assembler, capabilities: {},
-    canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
-    policy: "auto", consoleProfileExists: () => true,
-    configuredMcpServers: { user_srv: { type: "stdio", command: "node" } } as never,
-    agents: { reviewer: { description: "d", prompt: "p" } },
-    persistedAllow: ["Bash(git status)"],
-    userAllow: ["Edit"],
-    userDeny: ["Skill(denied)"],
-    skillPlugins: [{ type: "local", path: "/h/cache/skill-plugins/sp" }],
-    ...over,
-  };
-}
-
-describe("officialInputFor", () => {
-  const optionsOf = (r: ReturnType<typeof officialInputFor>) => {
-    if (!("input" in r)) throw new Error("officialInputFor refused");
-    return r.input.options as { agents?: unknown; plugins?: unknown; systemPrompt?: unknown; appendSystemPrompt?: string; settings?: { permissions?: { allow?: string[]; deny?: string[] } } } & Record<string, unknown>;
-  };
-  const inputOf = (r: ReturnType<typeof officialInputFor>) => { if (!("input" in r)) throw new Error("refused"); return r.input; };
-
-  test("flag ON: no agents, no plugins, no configured MCP server, no saved allow rule, no instructions — deny unchanged", () => {
-    const w = world();
-    const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: w.cwd, primary: w.cwd, spendEffort: undefined };
-    const off = officialInputFor(input, officialDeps(w.assembler));
-    const on = officialInputFor(input, officialDeps(w.assembler, { runHomeApplied: true }));
-    expect(optionsOf(off).agents).toBeDefined();
-    expect(optionsOf(off).plugins).toBeDefined();
-    expect("agents" in optionsOf(on)).toBe(false);
-    expect("plugins" in optionsOf(on)).toBe(false);
-    for (const key of RUN_HOME_DECIDED_OPTIONS) expect(key in optionsOf(on)).toBe(false); // L2 fix round 1, M1
-    expect(Object.keys(inputOf(on).mcpServers ?? {})).not.toContain("user_srv");
-    const allowOn = optionsOf(on).settings!.permissions!.allow!;
-    expect(allowOn).toEqual(expect.arrayContaining([...GLOBAL_READ_ALLOW_RULES]));
-    expect(allowOn).not.toContain("Edit");
-    expect(allowOn).not.toContain("Bash(git status)");
-    expect(optionsOf(on).settings!.permissions!.deny).toEqual(optionsOf(off).settings!.permissions!.deny);
-    expect(optionsOf(on).settings!.permissions!.deny).toEqual(expect.arrayContaining([...controlPlaneDenyRules("/Users/x/.winter-test-home"), "Skill(denied)"]));
-    // L2's contract: beside a run home `spool`/`stagingRoot` are refused and the memory dir is the router's.
-    expect(inputOf(off).spool).toBeDefined();
-    expect(inputOf(off).autoMemoryDirectory).toBeDefined();
-    expect("spool" in inputOf(on)).toBe(false);
-    expect("stagingRoot" in inputOf(on)).toBe(false);
-    expect("autoMemoryDirectory" in inputOf(on)).toBe(false);
-    const promptOn = JSON.stringify(optionsOf(on));
-    for (const m of [MARK.userInstr, MARK.projInstr, MARK.rule, MARK.style, MARK.projMemory]) expect(promptOn).not.toContain(m);
-    const promptOff = JSON.stringify(optionsOf(off));
-    expect(promptOff).toContain(MARK.projInstr);
   });
 });

@@ -27,10 +27,9 @@
 // (`node_modules/.bun/@yanlinglabs+winter-agent-sdk@<ver>/node_modules/@yanlinglabs/<platform-pkg>`)
 // and links it only into the wrapper's own `node_modules` — never hoisted to `packages/core`'s own
 // `node_modules`, never to the workspace root. A single `createRequire(import.meta.url).resolve(...)`
-// rooted at THIS module walks straight past it (measured: proven identical to the claude leg's
-// `@anthropic-ai/claude-agent-sdk-darwin-arm64`/`-sdk` relationship). So this mirrors
-// `official-executable.ts`'s `resolveClaudeAgentSdkPackageDir` exactly: resolve the wrapper's own
-// `package.json` first, then `createRequire` THROUGH THAT to reach the platform package as a
+// rooted at THIS module walks straight past it (measured the same way on the retired official
+// leg's own `@anthropic-ai/claude-agent-sdk-darwin-arm64`/`-sdk` pair). So this resolves the
+// wrapper's own `package.json` first, then `createRequire`s THROUGH THAT to reach the platform package as a
 // dependency of the wrapper — falling back to the single hop only for a DIRECT install (e.g. a dev
 // `bun add <tarball> --optional` in `packages/core` itself, which is top-level-resolvable).
 import { createRequire } from "node:module";
@@ -58,9 +57,8 @@ const WINTER_PLATFORM_PACKAGE = "@yanlinglabs/winter-agent-sdk-darwin-arm64";
  * non-darwin/non-arm64 host, or simply no `bun install` yet) — a legitimate skip, never a throw;
  * the caller decides what an absent rung means. A platform package whose OWN version disagrees
  * with this build's pin (`REQUIRED_WINTER_AGENT_SDK`) THROWS instead (P9a fix wave, M2) — a mixed
- * pair is not the pinned artifact (WS-02 §6), mirroring the claude leg's
- * `resolveClaudeAgentSdkPackageDir`; staying silent about it would let a session run against an
- * unpinned binary.
+ * pair is not the pinned artifact (WS-02 §6); staying silent about it would let a session run
+ * against an unpinned binary.
  */
 export function resolvePlatformPackageWinter(fromUrl: string = import.meta.url): string | undefined {
   const req = createRequire(fromUrl);

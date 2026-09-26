@@ -19,7 +19,6 @@ function fenceOf(deps: Partial<SessionHooksDeps> & { home: string }): HookCallba
   const built = sessionHooksFor({ sessionId: "s_1", roots: [deps.cwd ?? "/tmp"], ...deps });
   const unmatched = (built.winter?.PreToolUse ?? []).filter((g: HookCallbackMatcher) => g.matcher === undefined);
   expect(unmatched).toHaveLength(2); // the plugin group, then the fence
-  expect(built.official).toBe(built.winter); // one builder, both legs
   return unmatched[1]!.hooks[0]!;
 }
 const call = async (hook: HookCallback, tool_name: string, tool_input: Record<string, unknown>) =>
@@ -315,7 +314,6 @@ describe("fix round 2: Bash writes under .winter/<kind>", () => {
     };
     for (const cmd of writes) expect(await run(cmd)).toContain("ask");
     for (const cmd of [...reads, ...outside]) expect(await run(cmd)).not.toContain("ask");
-    expect(built.official).toBe(built.winter);
   });
 
   test("the bridge never auto-allows one: bypass → card, dont-ask/dispatch → deny; a read runs", async () => {
@@ -344,7 +342,6 @@ describe("fix round 2: Bash writes under .winter/<kind>", () => {
 describe("R.3 C-1: the escape floor under bypass — the child's own variables", () => {
   const floor = () => {
     const built = sessionHooksFor({ sessionId: "s_1", roots: ["/r"], home: "/Users/x/.winter", mode: "code", policy: () => "bypass" });
-    expect(built.official).toBe(built.winter);
     const groups = (built.winter?.PreToolUse ?? []).filter((g: HookCallbackMatcher) => g.matcher === "Bash");
     return groups[groups.length - 1]!.hooks[0]!;
   };

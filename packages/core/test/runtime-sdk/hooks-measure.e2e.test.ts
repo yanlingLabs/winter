@@ -21,9 +21,9 @@
 // SKIPS cleanly when `WINTER_RUNTIME_EXECUTABLE` is unset; `WINTER_RUNTIME_REQUIRE_BINARY=1` (CI) makes
 // a missing binary a FAILURE (P8b-2 contract, `describeWithWinterBinary`).
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { query, type HookCallback, type HookInput, type Options } from "@yanlinglabs/winter-agent-sdk";
 import { createHostPromptQueue } from "../../src/runtime-sdk/prompt-queue";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
@@ -78,6 +78,23 @@ async function driveWithHooks(bin: string, hooks: Options["hooks"]): Promise<{
     for (const dir of [home, cwd]) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
   }
   return { messages };
+}
+
+/**
+ * WS-23: does the INSTALLED wrapper carry `HookCallbackMatcher.failClosed` onto the wire? The pinned agent
+ * SDK (0.0.27) does; the check stays, detected from the wrapper's own source, so a future pin that dropped
+ * the field would skip this test loudly rather than measure nothing.
+ */
+function installedWrapperCarriesFailClosed(): boolean {
+  try {
+    const entry = Bun.resolveSync("@yanlinglabs/winter-agent-sdk", import.meta.dir);
+    return ["query.js", "query.ts"].some((name) => {
+      const file = join(dirname(entry), name);
+      return existsSync(file) && readFileSync(file, "utf8").includes("failClosed");
+    });
+  } catch {
+    return false;
+  }
 }
 
 describeWithWinterBinary("P8c-7 measurement — Options.hooks against a real winter child", (bin) => {
@@ -138,6 +155,25 @@ describeWithWinterBinary("P8c-7 measurement — Options.hooks against a real win
     expect(String(toolResultBlock?.content)).not.toContain("winter-t8-lanec");
     // The turn still completes (never runs the command) and the model's own next turn proceeds
     // unaffected — a deny blocks the ONE call, not the session.
+    expect(messages.at(-1)).toMatchObject({ type: "result", is_error: false });
+  }, 40_000);
+
+  // WS-23: the daemon's floors mark their groups `failClosed` (`runtime-sdk/hooks.ts`). A floor that
+  // never answers -- a hung bridge, a wedged callback -- must DENY the call on the real binary, not
+  // time out open. Gated twice: on the binary (like every test here) and on the installed wrapper
+  // actually serialising the field (0.0.27, the current pin, does).
+  test.skipIf(!installedWrapperCarriesFailClosed())("WS-23: a fail-closed floor that TIMES OUT denies the Bash call — it never runs", async () => {
+    const hangingFloor: HookCallback = () => new Promise(() => { /* never answers */ });
+    const failClosedGroup = { matcher: "Bash", timeout: 2, failClosed: true, hooks: [hangingFloor] };
+    const { messages } = await driveWithHooks(bin, { PreToolUse: [failClosedGroup] });
+
+    const toolResultMsg = messages.find((m) => m.type === "user");
+    const toolResultBlock = contentOf(toolResultMsg)?.[0] as { type?: string; content?: unknown; denied?: unknown } | undefined;
+    expect(toolResultBlock?.type).toBe("tool_result");
+    expect(toolResultBlock?.denied).toBe(true);
+    expect(String(toolResultBlock?.content)).toContain("fail-closed");
+    expect(String(toolResultBlock?.content)).toContain("(timeout)");
+    expect(String(toolResultBlock?.content)).not.toContain("winter-t8-lanec");
     expect(messages.at(-1)).toMatchObject({ type: "result", is_error: false });
   }, 40_000);
 });
