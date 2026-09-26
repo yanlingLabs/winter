@@ -127,6 +127,10 @@ describe("mcp.add / remove / get over the three scopes", () => {
     expect(config().projects[project].mcpServers.pinned.versionNegotiation).toEqual({ pin: "2026-07-28" });
     expect(config().mcpServers.auto.versionNegotiation).toBe("auto");
     expect(JSON.parse(readFileSync(join(project, ".winter", "mcp.json"), "utf8")).mcpServers.legacy.versionNegotiation).toBe("legacy");
+    // …and mcp.get echoes it back, in every scope.
+    expect((await c.request(METHODS.mcpGet, { name: "pinned", scope: "local", cwd: project })).result.versionNegotiation).toEqual({ pin: "2026-07-28" });
+    expect((await c.request(METHODS.mcpGet, { name: "auto", scope: "user" })).result.versionNegotiation).toBe("auto");
+    expect((await c.request(METHODS.mcpGet, { name: "legacy", scope: "project", cwd: project })).result.versionNegotiation).toBe("legacy");
     // What a spawned child is handed (the project file only because the project is trusted here).
     const child = configuredMcpServersFor({
       settings: null, cwd: project, trusted: () => true,

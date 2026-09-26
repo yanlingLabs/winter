@@ -40,6 +40,31 @@ describe.if(isMac)("McpManager (a status probe)", () => {
     expect(await stillRunning(Number(readFileSync(pidFile, "utf8")))).toBe(false); // …and the probe closed it
   });
 
+  test("a wrapper-launched server (an npx-style grandchild) is ended with its whole process group", async () => {
+    const pidFile = join(realDir(), "pid");
+    const mgr = new McpManager({ trust: trustNone() });
+    // `sh` stays the parent (the trailing `; true`), so the real server is its CHILD — our grandchild.
+    await mgr.startAll({ wrapped: { command: "sh", args: ["-c", `bun run '${FIXTURE}'; true`], env: { WINTER_FAKE_PID_FILE: pidFile } } });
+    expect(mgr.list().find((s) => s.name === "wrapped")?.status).toBe("connected");
+    expect(await stillRunning(Number(readFileSync(pidFile, "utf8")))).toBe(false);
+  });
+
+  test("a server that never answers the handshake is a failed probe within the start timeout, and is killed", async () => {
+    const pidFile = join(realDir(), "pid");
+    const prev = process.env.WINTER_MCP_START_TIMEOUT_MS;
+    process.env.WINTER_MCP_START_TIMEOUT_MS = "500";
+    try {
+      const mgr = new McpManager({ trust: trustNone() });
+      const t0 = Date.now();
+      await mgr.startAll({ hung: { command: "sh", args: ["-c", `echo $$ > '${pidFile}'; exec sleep 60`] } });
+      expect(Date.now() - t0).toBeLessThan(5_000);
+      expect(mgr.list().find((s) => s.name === "hung")?.status).toBe("failed");
+      expect(await stillRunning(Number(readFileSync(pidFile, "utf8").trim()))).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.WINTER_MCP_START_TIMEOUT_MS; else process.env.WINTER_MCP_START_TIMEOUT_MS = prev;
+    }
+  });
+
   test("a bad-command server is reported failed; a good one still connects (one bad ≠ dead)", async () => {
     const mgr = new McpManager({ trust: trustNone() });
     await mgr.startAll({ good: { command: "bun", args: ["run", FIXTURE] }, bad: { command: "this-command-does-not-exist-xyz" } });

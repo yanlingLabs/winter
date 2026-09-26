@@ -547,6 +547,11 @@ export const SettingsSetSkillDeniedResult = z.object({ ok: z.literal(true), name
  * entirely on a row with nothing stripped, so every pre-existing exact-match test/fixture is
  * untouched. The Swift side stores this field as a plain array of strings, never an exhaustive
  * switch, so widening it here cannot break `apple/WinterKit`'s build either.
+ *
+ * WS-24: the daemon no longer keeps a copy of any server running (each session's child connects its
+ * own). `status: "connected"` and `toolNames` are AS OF THE LAST PROBE — the daemon connects, lists the
+ * tools and closes, at boot (user servers), on the first `mcp.list {cwd}` for a project's, and on every
+ * `mcp.enable`/`mcp.add` — not a live connection's state. `"failed"` = that probe failed (or timed out).
  */
 export const McpServerStatusSchema = z.object({
   name: z.string(),
@@ -664,6 +669,8 @@ export const McpGetResult = z.object({
   headers: z.record(z.string(), z.string()).optional(),
   disabled: z.boolean().optional(),
   strippedHeaders: z.array(z.string()).optional(),
+  /** WS-24: the server's own protocol-era choice, when it has one (`McpVersionNegotiationSchema`). */
+  versionNegotiation: McpVersionNegotiationSchema.optional(),
 });
 
 /**
@@ -1224,7 +1231,9 @@ export const PluginToolResultParams = z.object({
 export const PluginToolResultResult = z.object({ ok: z.literal(true) });
 
 /** Harness-role admin verb (Phase 4b Task 2, spec §3): deletes a plugin's stored token hash so a
- *  subsequent plugin hello for that id fails closed. Mirrors trust.remove's role precedent — NOT
+ *  subsequent plugin hello for that id fails closed. WS-24: `pluginId` is the plugin's SPEC
+ *  (`"<name>@<marketplace>"`), the id the supervisor mints a token under; a pre-WS-24 daemon minted it
+ *  under the bare name, which the CLI revokes too (`pluginTokenIdsFor`). Mirrors trust.remove's role precedent — NOT
  *  itself one of the six plugin-role verbs (a plugin can never revoke its own or another plugin's
  *  token). Exists because `plugin_tokens` lives in the daemon's sqlite: the CLI's disable/remove
  *  never opens that database directly (locking risk) and calls this RPC best-effort instead —
@@ -1236,7 +1245,9 @@ export const PluginRevokeTokenResult = z.object({ ok: z.literal(true) });
  *  — existed and was tested but had no caller) exposed over the wire so `winter plugin restart
  *  <id>` can recover a plugin stuck "circuit-open" (nothing else ever clears that state short of
  *  a daemon restart). Same role precedent as `plugins.list` — harness OR admin, NOT one of the six
- *  plugin-role verbs (a plugin can never restart itself or another plugin). */
+ *  plugin-role verbs (a plugin can never restart itself or another plugin). WS-24: `pluginId` is the
+ *  plugin's SPEC (`"<name>@<marketplace>"`, the supervisor's key); a bare name still resolves when exactly
+ *  one tracked plugin has it, and is refused as ambiguous when two marketplaces' plugins share it. */
 export const PluginRestartParams = z.object({ pluginId: z.string().min(1) });
 export const PluginRestartResult = z.object({ ok: z.literal(true) });
 
