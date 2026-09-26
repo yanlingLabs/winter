@@ -3,8 +3,12 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.24";
-/** Bumped to 0.0.24 (2026-09-25; 0.0.23 was published the same day but never pinned here): 0.0.23's
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.27";
+/** Bumped to 0.0.27 (2026-09-26, WS-23; 0.0.25 and 0.0.26 were tagged but their release CI stopped at the
+ *  test step, so neither was published): every model on the Winter SDK (xAI Responses, MCP v2, hooks, the
+ *  Anthropic hardening + caching, per-message effort, mid-conversation tool changes, the reasoning-state
+ *  sidecar, and the embedded runtime `@yanlinglabs/winter-agent-runtime`).
+ *  Before that, bumped to 0.0.24 (2026-09-25; 0.0.23 was published the same day but never pinned here): 0.0.23's
  *  first-party provider/model catalog refresh — 213 providers, 1000
  *  models, 22 families (China-region and plan/dialect twins as separate providers, GPT-6 Sol/Luna,
  *  Opus 5.5, Xiaomi MiMo, Tencent TokenHub, the Meta Model API, …); the `gpt` family's sol/luna slots
@@ -47,7 +51,7 @@ export const REQUIRED_WINTER_AGENT_SDK = "0.0.24";
  *  Readonly<Record<string, unknown>>` — the router-package wall `official-options.ts`'s own comment
  *  on `OfficialInputDeps.agents` used to name (a router version this low has no field to forward the
  *  daemon's merged subagent definitions through) is CLOSED as of that pin. */
-export const REQUIRED_WINTER_RUNTIME_SDK = "0.0.13";
+export const REQUIRED_WINTER_RUNTIME_SDK = "0.0.14";
 // WS-23: `REQUIRED_CLAUDE_AGENT_SDK`, `installedClaudeAgentSdkVersion` (and the embedded manifest it
 // read) and `OFFICIAL_SUBSCRIPTION_AUTH_APPROVED` are gone with the official `claude` leg; the daemon
 // no longer depends on `@anthropic-ai/claude-agent-sdk` at all.

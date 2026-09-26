@@ -225,11 +225,10 @@ function failClosed(name: string, hook: HookCallback): HookCallback {
   };
 }
 
-/** WS-23: a matcher group carrying agent SDK WS-23's `failClosed` opt-in. A STRUCTURAL widening of
- *  `HookCallbackMatcher`, not the SDK's own field: this compiles against the pinned 0.0.24 types
- *  (which do not declare it -- the key then simply rides along in the object, and a 0.0.24 wrapper
- *  never serialises it) and against a WS-23 SDK (which declares the identical field). Assignable to
- *  `HookCallbackMatcher` either way. */
+/** WS-23: a matcher group carrying the agent SDK's `failClosed` opt-in. Since the pin reached 0.0.27 the
+ *  SDK's own `HookCallbackMatcher` declares the identical field and its wrapper serialises it, so this
+ *  widening is now a no-op kept for readability (it was a structural widening while the pin was 0.0.24,
+ *  whose types did not declare the field). */
 type FailClosedMatcher = HookCallbackMatcher & { failClosed?: boolean };
 
 // ── 1. Plugin manifest hooks ───────────────────────────────────────────────────────────────────
