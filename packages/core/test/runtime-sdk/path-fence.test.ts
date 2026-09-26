@@ -1,7 +1,7 @@
 // WS-21 L3.6 (spec §7.1 "hook" column, §7.2): the path fence as a PreToolUse hook on both legs, and the
 // bridge's third layer — a protected write is never auto-allowed, under any policy.
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
+import { linkSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CanUseTool, HookCallback, HookCallbackMatcher } from "@yanlinglabs/winter-agent-sdk";
@@ -377,6 +377,74 @@ describe("Bash writes through an existing link to a protected directory", () => 
     for (const cmd of ["echo x > n/todo.md", "cat s/deploy/SKILL.md", "ls dot/rules", "echo x > fresh/file.md"]) {
       expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) }).toEqual({ cmd, hit: undefined });
     }
+  });
+
+  // Fix round 1 (the reviewer's probes): the shell's own spelling is walked too — `..` climbs out of the
+  // link's TARGET, so `./s/x/../../rules` is `.winter/rules`, however the text would collapse.
+  test("`..` after a link climbs from the link's target, with or without a leading ./", () => {
+    const { work } = project();
+    mkdirSync(join(work, "s", "x"), { recursive: true }); // s -> <root>/.winter/skills, so this is skills/x
+    for (const cmd of [
+      "echo x > ./s/../rules/e.md",
+      "echo x > ./s/x/../../rules/evil.md",
+      "echo x > s/x/../../rules/evil.md",
+      "echo x > s/x/../../rules/",
+      "echo x > s/../rules/evil.md",
+      "cd s; cd ..; echo x > rules/evil.md",
+    ]) expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) }).toEqual({ cmd, hit: ".winter/rules" });
+    expect(bashProtectedWriteHit("echo x > s/x/../y/SKILL.md", { cwd: work })).toBe(".winter/skills");
+  });
+
+  test("ln itself is judged: a link whose source is (or resolves under) a protected path is a card; an ordinary ln is not", () => {
+    const { work } = project();
+    for (const cmd of [
+      "ln -s .winter/skills t && echo x > t/y.md",
+      "ln -s ../.winter/skills t",
+      "ln ../.winter/skills/x/SKILL.md hard.md",
+      "ln -s s/x t",
+      "ln -sf dot/rules r2",
+    ]) expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) !== undefined }).toEqual({ cmd, hit: true });
+    for (const cmd of ["ln -s ../notes n2", "ln -s /usr/bin/env e"]) {
+      expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) }).toEqual({ cmd, hit: undefined });
+    }
+  });
+
+  test("the reviewer's probe matrix: every link shape resolves, with a cwd", () => {
+    const { root, work } = project();
+    mkdirSync(join(root, ".winter", "skills", "x"), { recursive: true });
+    symlinkSync("s", join(work, "chain"));
+    symlinkSync(join(root, ".winter", "skills"), join(work, "abs"));
+    mkdirSync(join(work, "sub"));
+    symlinkSync("../s", join(work, "sub", "up"));
+    for (const cmd of [
+      "echo x > s/x/SKILL.md", "echo x > chain/x/SKILL.md", "echo x > dot/skills/y/SKILL.md", "echo x > abs/y.md",
+      "cd s && echo x > y/SKILL.md", "cd sub && echo x > up/y.md", "echo x > sub/up/y.md",
+      "cp /etc/hosts s/new.md", "tee s/new.md < /etc/hosts", "mv /tmp/a s/b", `echo x > ${work}/abs/y.md`,
+      "echo x > S/X/SKILL.MD", "sed -i '' s/a/b/ s/x/SKILL.md", "bash -c 'echo x > s/y.md'",
+    ]) expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) !== undefined }).toEqual({ cmd, hit: true });
+    // The documented limit: a write through a HARD link made earlier names nothing protected (the `ln` that
+    // made it is the card, above).
+    writeFileSync(join(root, ".winter", "skills", "x", "SKILL.md"), "hi");
+    linkSync(join(root, ".winter", "skills", "x", "SKILL.md"), join(work, "hard.md"));
+    expect(bashProtectedWriteHit("echo x > hard.md", { cwd: work })).toBeUndefined();
+  });
+
+  test("the bridge (third layer) resolves a relative link from its session cwd: bypass → card, dispatch → deny", async () => {
+    const { work } = project();
+    const home = real("winter-link-bridge-home-");
+    const ctx = (): Parameters<CanUseTool>[2] => ({ signal: new AbortController().signal, toolUseID: `tu-${Math.random()}`, requestId: "r" } as Parameters<CanUseTool>[2]);
+    const mk = (policy: SessionApprovalPolicy, mode: "code" | "dispatch" = "code") => {
+      const approvals = new ApprovalBroker();
+      return { approvals, canUse: canUseToolFor({ sessionId: "s_1", mode, policy, approvals, questions: new QuestionBroker(), gate: new PermissionGate(), emit: () => {}, log: silent, home, cwd: work }) };
+    };
+    const b = mk("bypass");
+    const pending = b.canUse("Bash", { command: "echo x > s/deploy/SKILL.md" }, ctx());
+    await new Promise((r) => setTimeout(r, 10));
+    expect(b.approvals.list("s_1")).toHaveLength(1);
+    b.approvals.resolve("s_1", b.approvals.list("s_1")[0]!.callId, false, "test");
+    expect((await pending)?.behavior).toBe("deny");
+    expect((await mk("auto", "dispatch").canUse("Bash", { command: "echo x > ./s/../rules/r.md" }, ctx()))?.behavior).toBe("deny");
+    expect((await mk("bypass").canUse("Bash", { command: "echo x > n/todo.md" }, ctx()))?.behavior).toBe("allow");
   });
 
   test("the hook reads the cwd off its input and asks", async () => {

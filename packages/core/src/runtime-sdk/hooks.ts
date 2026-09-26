@@ -526,7 +526,8 @@ function writeContextStart(c: string): number {
  * text, never inside quotes; a `cd`/`pushd` carried across segments), so a read after a redirect or a write
  * elsewhere in the line is no longer taken for a write. In a segment, a write target is:
  *   * the target of an output redirect (`>`, `>>`, `>|`, `&>`; never an fd dup like `2>&1`);
- *   * for `cp`/`mv`/`ln`/`install`/`rsync`, ONLY the destination — the last operand, or the `-t`/
+ *   * for `ln`, EVERY operand (WS-24 fix round 1: a link to a protected path is itself the write);
+ *   * for `cp`/`mv`/`install`/`rsync`, ONLY the destination — the last operand, or the `-t`/
  *     `--target-directory` value (a copy's SOURCE is read; `mv`'s removal of it loads nothing new); round 4:
  *     `-t` inside a short-flag cluster and `--target-directory <dir>` too, and every operand after the first
  *     once an option follows an operand;
@@ -543,23 +544,43 @@ function writeContextStart(c: string): number {
  * home — so a link planted earlier (`ln -s ../.winter/skills s`, then later `echo … > s/x/SKILL.md`) no
  * longer carries a write past the match. Component by component, the way the kernel walks it: each
  * existing component is realpathed (a `..` after a link climbs out of the link's TARGET), the first one
- * that does not exist yet ends the walk and the rest is appended as written. With no `cwd` only absolute
- * and `~` targets are resolved.
+ * that does not exist yet ends the walk and the rest is appended as written. Both spellings are walked: the
+ * normalised one and the shell's own, uncollapsed (`./s/x/../../rules` must climb out of `s`'s target, not
+ * be folded to `./rules` first). With no `cwd` only absolute and `~` targets are resolved. And `ln` itself is
+ * judged: a link whose SOURCE is (or resolves under) a protected path is a card, so `ln -s .winter/skills t
+ * && echo x > t/y.md` is caught at the `ln`.
  *
  * THE LIMITATION, the escape floor's own: a static match on the normalised text (case folded, quotes
  * stripped, `//`/`/./`/`..` collapsed, `cd` tracked), plus the links that exist on disk WHEN THE CALL IS
  * JUDGED. A path the command ASSEMBLES at run time (`$(…)`, its own variables — `d=.winter; touch
  * $d/rules/x` —, a script it writes and then runs, an interpreter that joins the path from pieces) is beyond
- * its reach; so is a link the SAME command creates before writing through it (`ln -s … s && echo x > s/y`:
- * `s` is not on disk yet), a `cd` into a link whose target the command itself changes, and a write whose
- * path is not in the command at all — `git apply x.patch`, `patch < x.diff`.
+ * its reach; so is a MULTI-HOP chain the same command builds (`ln -s s a && ln -s a b && echo x > b/y`, where
+ * `s` exists but `a` does not yet — the first `ln`'s source is judged, not what a later hop resolves to), a
+ * write through a HARD link made earlier (`hard.md` sharing an inode with a protected file names nothing
+ * protected, and a hard link cannot be followed back to its other names), a `cd` into a link whose target
+ * the command itself changes, and a write whose path is not in the command at all — `git apply x.patch`,
+ * `patch < x.diff`. The child's sandbox fence and the path-fence hook bind what this cannot see.
  */
 export function bashProtectedWriteHit(command: string, opts: { cwd?: string } = {}): string | undefined {
   return protectedWriteHitIn(command, opts.cwd, 0);
 }
 
+/** `cd`/`pushd`'s next working directory, from its argument, relative to the one carried so far. */
+function nextCwd(cwd: string | undefined, arg0: string | undefined): string | undefined {
+  const arg = arg0?.replace(/\/+$/, "");
+  return arg === undefined || arg === "" ? "~" : arg === "-" ? undefined : /^[/~$]/.test(arg) || cwd === undefined ? arg : `${cwd}/${arg.replace(/^\.\//, "")}`;
+}
+
+/** WS-24 fix round 1 (I-1): a segment's text as the SHELL will walk it — case folded and quotes stripped like
+ *  `normaliseEscapeCommand`, but with no `.`/`..` collapsed: the kernel resolves `s/x/../..` from the link
+ *  `s`'s TARGET, so collapsing it textually first (`./s/x/../../rules` → `./rules`) hid the link. */
+function rawSpelling(command: string): string {
+  return command.toLowerCase().replace(/["']/g, "").replace(/\/{2,}/g, "/");
+}
+
 function protectedWriteHitIn(command: string, sessionCwd: string | undefined, depth: number): string | undefined {
   let cwd: string | undefined;
+  let rawCwd: string | undefined;
   for (const raw of shellSegments(command)) {
     // Round 5: a shell's `-c` string, `eval`'s argument and the same inside `find -exec` are COMMANDS — each
     // judged as one of its own (from the cwd carried so far), before its quotes are blanked as text below.
@@ -569,20 +590,30 @@ function protectedWriteHitIn(command: string, sessionCwd: string | undefined, de
         if (hit !== undefined) return hit;
       }
     }
-    const seg = normaliseEscapeCommand(quotedOperatorsAsText(raw)).replace(/^[\s({]+/, "").replace(/[\s)}]+$/, "");
+    const trimmed = (t: string): string => t.replace(/^[\s({]+/, "").replace(/[\s)}]+$/, "");
+    const seg = trimmed(normaliseEscapeCommand(quotedOperatorsAsText(raw)));
+    const rawSeg = trimmed(rawSpelling(quotedOperatorsAsText(raw)));
     if (seg.length === 0) continue;
     const words = seg.split(/\s+/);
     if (words[0] === "cd" || words[0] === "pushd") {
-      const arg = words[1]?.replace(/\/+$/, "");
-      cwd = arg === undefined || arg === "" ? "~" : arg === "-" ? undefined : /^[/~$]/.test(arg) || cwd === undefined ? arg : `${cwd}/${arg.replace(/^\.\//, "")}`;
+      cwd = nextCwd(cwd, words[1]);
+      rawCwd = nextCwd(rawCwd, rawSeg.split(/\s+/)[1]);
       continue;
     }
+    const under = (at: string | undefined, target: string): string => (at === undefined || /^[/~$]/.test(target) ? target : `${at}/${target.replace(/^\.\//, "")}`);
     for (const target of segmentWriteTargets(seg)) {
-      const path = cwd === undefined || /^[/~$]/.test(target) ? target : `${cwd}/${target.replace(/^\.\//, "")}`;
+      const path = under(cwd, target);
       const m = PROTECTED_BASH_TARGET.exec(path);
       if (m !== null) return m[0];
       // WS-24: the same target once the links already on its path are resolved (see the doc above).
       const resolved = resolveExistingLinks(path, sessionCwd);
+      const r = resolved === undefined ? null : PROTECTED_BASH_TARGET.exec(resolved);
+      if (r !== null) return r[0];
+    }
+    // WS-24 fix round 1 (I-1): and each target as the shell spells it, its `..` walked physically from the
+    // links it climbs out of (`rawSpelling`).
+    for (const target of segmentWriteTargets(rawSeg)) {
+      const resolved = resolveExistingLinks(under(rawCwd, target), sessionCwd);
       const r = resolved === undefined ? null : PROTECTED_BASH_TARGET.exec(resolved);
       if (r !== null) return r[0];
     }
@@ -805,6 +836,12 @@ function segmentWriteTargets(seg: string): string[] {
       if (GIT_READ_SUBCOMMANDS.has(rest[j] ?? "")) return [...targets, ...outputs];
       return [...targets, ...rest];
     }
+    // WS-24 fix round 1 (I-2): `ln` CREATES a name for its source — a symlink or hard link whose source is
+    // (or resolves under) a protected directory makes a later write through that name land there, so every
+    // operand counts, the sources as well as the link's own name. (A symlink's relative source is judged
+    // from the cwd, not the link's directory — an approximation; `ln -s ../.winter/…` names the segment
+    // outright anyway.)
+    if (verb === "ln") return [...targets, ...rest.filter((w) => !w.startsWith("-"))];
     if (DESTINATION_VERBS.has(verb)) {
       const operands: string[] = [];
       let optionAfterOperand = false;
