@@ -15,8 +15,8 @@
 // link (a key directory that is a symbolic link refuses). The transcript moves LAST, so a crash mid-move
 // leaves it at the old key and running the move again finishes the job: what already moved is no longer at
 // the old key, so it is no collision.
-import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync } from "node:fs";
+import { dirname, join, sep } from "node:path";
 
 export type TranscriptMoveResult =
   /** The two keys are the same: nothing to do. */
@@ -42,13 +42,38 @@ export function transcriptEntriesOf(dir: string, backendSessionId: string): stri
   return [...own.filter((n) => n !== transcript).sort(), ...own.filter((n) => n === transcript)];
 }
 
+/**
+ * WS-23 (fix round 2): what would make a move between the two keys REFUSE before anything is touched —
+ * a link at the store, either key, or (for a destination that does not exist yet) its nearest existing
+ * ancestor, or a destination that resolves outside the store. `undefined` = nothing in the way. The one
+ * check both the move itself and `winter doctor`'s repair run, so the doctor can never report a
+ * session fixed that the next resume would refuse again.
+ */
+export function transcriptMoveObstruction(projectsDir: string, fromKey: string, toKey: string): string | undefined {
+  const fromDir = join(projectsDir, fromKey);
+  const toDir = join(projectsDir, toKey);
+  for (const p of [projectsDir, fromDir, toDir]) {
+    if (isLink(p)) return `${p} is a symbolic link — a transcript is never moved through one`;
+  }
+  let realProjects: string;
+  try { realProjects = realpathSync(projectsDir); } catch { return undefined; }   // no store yet: nothing to move
+  let existing = toDir;
+  while (!existsSync(existing) && dirname(existing) !== existing) existing = dirname(existing);
+  let real: string;
+  try { real = realpathSync(existing); } catch (err) { return `${existing} cannot be resolved (${(err as Error).name})`; }
+  if (real !== realProjects && !real.startsWith(`${realProjects}${sep}`)) return `${toDir} resolves outside ${projectsDir} (to ${real})`;
+  try {
+    if (existsSync(toDir) && !lstatSync(toDir).isDirectory()) return `${toDir} exists and is not a directory`;
+  } catch (err) { return `${toDir} cannot be inspected (${(err as Error).name})`; }
+  return undefined;
+}
+
 export function moveTranscriptFiles(projectsDir: string, backendSessionId: string, fromKey: string, toKey: string): TranscriptMoveResult {
   if (fromKey === toKey) return { kind: "not-needed" };
   const fromDir = join(projectsDir, fromKey);
   const toDir = join(projectsDir, toKey);
-  for (const p of [projectsDir, fromDir, toDir]) {
-    if (isLink(p)) return { kind: "refused", reason: `${p} is a symbolic link — a transcript is never moved through one` };
-  }
+  const obstruction = transcriptMoveObstruction(projectsDir, fromKey, toKey);
+  if (obstruction !== undefined) return { kind: "refused", reason: obstruction };
   const entries = transcriptEntriesOf(fromDir, backendSessionId);
   if (entries.length === 0) return { kind: "moved", entries: [] };
   const taken = entries.filter((n) => existsSync(join(toDir, n)) || isLink(join(toDir, n)));
