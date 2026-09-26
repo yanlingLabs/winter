@@ -8,9 +8,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { query, SDK_VERSION, type SdkMessage } from "@yanlinglabs/winter-agent-sdk";
 import { RUNTIME_VERSION } from "@yanlinglabs/winter-agent-runtime/version";
+import { spawn as spawnChild } from "node:child_process";
+import type { EmbeddedWorkerProcess } from "@yanlinglabs/winter-agent-runtime/embedded-host";
 import {
   COMPILED_EMBEDDED_WORKER_ENTRY,
   createEmbeddedSessionHost,
+  killProcessGroup,
+  orphanedProcessGroupsOf,
   EMBEDDED_SHUTDOWN_BUDGET_MS,
   EMBEDDED_TERMINATE_WAIT_MS,
   EmbeddedRuntimeUnavailable,
@@ -241,5 +245,82 @@ describe("review round 1", () => {
         expect(existsSync(join(h, "probe-secrets"))).toBe(false);
       }
     });
+  });
+});
+
+// WS-24: a Worker that closes WITHOUT its own teardown (terminated while spinning, or crashed) leaves its
+// session's process groups running with no parent to reap them; the daemon SIGKILLs whatever the SDK
+// reported still live. Feature-detected: the SDK this commit is built against (0.0.27) reports nothing,
+// so these drive a fake Worker process that does.
+describe("WS-24: process groups a Worker leaves behind are killed when it closes", () => {
+  /** A stand-in for the SDK's EmbeddedWorkerProcess whose Worker "closes" when `close()` is called. */
+  function fakeWorker(groups: () => unknown): { proc: EmbeddedWorkerProcess; close: () => void } {
+    let settle!: (v: { code: number | null; signal: string | null }) => void;
+    const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) => (settle = resolve));
+    const proc = {
+      stdin: { write() {}, end() {} },
+      stdout: (async function* () {})(),
+      kill() {},
+      terminate() {},
+      exited,
+      pid: null,
+      state: "running",
+      processGroups: groups,
+    } as unknown as EmbeddedWorkerProcess;
+    return { proc, close: () => settle({ code: null, signal: "SIGKILL" }) };
+  }
+
+  const spawnOptions = (sessionId: string) => ({ command: "winter-embedded", args: ["--run", "--config-json", JSON.stringify({ sessionId })], cwd: "/", env: {} });
+
+  test("orphanedProcessGroupsOf: an SDK without the mirror reports nothing; ids that are no group leader, or this process, are never returned", () => {
+    const { proc: old } = fakeWorker(() => []);
+    delete (old as { processGroups?: unknown }).processGroups; // 0.0.27's shape
+    expect(orphanedProcessGroupsOf(old)).toEqual([]);
+    expect(orphanedProcessGroupsOf(fakeWorker(() => [0, 1, -3, 2.5, Number.NaN, process.pid, 4242]).proc)).toEqual([4242]);
+    expect(orphanedProcessGroupsOf(fakeWorker(() => { throw new Error("bridge bug"); }).proc)).toEqual([]);
+    expect(orphanedProcessGroupsOf(fakeWorker(() => "not a list").proc)).toEqual([]);
+  });
+
+  test("a REAL orphaned group is SIGKILLed the moment its Worker closes, and the log says so", async () => {
+    const orphan = spawnChild("/bin/sh", ["-c", "sleep 30 & wait"], { detached: true, stdio: "ignore" });
+    const died = new Promise<string | null>((resolve) => orphan.on("exit", (_code, signal) => resolve(signal)));
+    const logged: string[] = [];
+    const worker = fakeWorker(() => [orphan.pid!]);
+    const host = createEmbeddedSessionHost({ log: (l) => logged.push(l), spawnWorker: () => worker.proc });
+    try {
+      host.spawn(spawnOptions("orphaning-session"));
+      worker.close();
+      expect(await Promise.race([died, Bun.sleep(3000).then(() => "still running")])).toBe("SIGKILL");
+      expect(logged.join("\n")).toContain("embedded session orphaning-session: its Worker closed with 1 process group(s) still running — killed 1");
+      expect(host.live()).toEqual([]);
+    } finally {
+      killProcessGroup(orphan.pid!); // a no-op when the test passed
+    }
+  });
+
+  test("a healthy close (nothing reported live) kills nothing and logs nothing", async () => {
+    const kills: number[] = [];
+    const logged: string[] = [];
+    const worker = fakeWorker(() => []);
+    const host = createEmbeddedSessionHost({ log: (l) => logged.push(l), spawnWorker: () => worker.proc, killProcessGroup: (g) => (kills.push(g), true) });
+    host.spawn(spawnOptions("healthy-session"));
+    worker.close();
+    await worker.proc.exited;
+    await Bun.sleep(0);
+    expect(kills).toEqual([]);
+    expect(logged.filter((l) => l.includes("process group"))).toEqual([]);
+  });
+
+  test("every reported group is attempted, even when one is already gone", async () => {
+    const kills: number[] = [];
+    const logged: string[] = [];
+    const worker = fakeWorker(() => [5001, 5002]);
+    const host = createEmbeddedSessionHost({ log: (l) => logged.push(l), spawnWorker: () => worker.proc, killProcessGroup: (g) => (kills.push(g), g === 5002) });
+    host.spawn(spawnOptions("two-groups"));
+    worker.close();
+    await worker.proc.exited;
+    await Bun.sleep(0);
+    expect(kills).toEqual([5001, 5002]);
+    expect(logged.join("\n")).toContain("2 process group(s) still running — killed 1");
   });
 });
