@@ -123,7 +123,8 @@ import { readSdkGlobalConfig, SdkFileUnreadable, updateSdkSettings } from "../sd
 import { bypassAllowedAtSpawn, disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
 import { diagnoseRuntimes } from "../runtime-sdk/runtimes-doctor";
-import { loadUserAgentDefinitions, loadProjectAgentDefinitions, mergeAgentDefinitionTiers } from "../agent/agent-definitions";
+import { loadUserAgentDefinitions, loadProjectAgentDefinitions, mergeAgentDefinitionTiers, type LoadedAgentDefinitions } from "../agent/agent-definitions";
+import { trustedProjectWalk } from "../agent/project-scope-dirs";
 import type { SupportedAgentsCache } from "../agent/supported-agents-cache";
 import {
   REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK,
@@ -1419,13 +1420,6 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     };
   }
 
-  /** The plugin name half of a `"<name>@<marketplace>"` spec — for `hotApplyStop`, which the
-   *  supervisor tracks by bare name (`hotApplyStart`'s own `config.id: info.name`). */
-  function pluginNameOfSpec(spec: string): string {
-    const at = spec.lastIndexOf("@");
-    return at > 0 ? spec.slice(0, at) : spec;
-  }
-
   /** I1 fix round 1: `plugin.list`'s `extras` — winter-plugin.json's tier/permissions/entry plus
    *  the SAME consent-completeness pair `agent/plugins.ts#PluginStore` computes (requiredConsents
    *  from the manifest, consented from `<home>/settings.json`'s `plugins.consents`, keyed by the
@@ -1470,6 +1464,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     };
   }
 
+  /** WS-24: `plugin.list`'s `extras.entryNote` for a project/local-scope row with an entry (see that handler). */
+  const PROJECT_SCOPE_ENTRY_NOTE = "Winter runs this plugin's background process only when it is installed for your user (user scope). At project or local scope the process is not started; the plugin's skills, hooks and MCP servers still load in the sessions that enable it.";
+
   /** `PluginManagerError` (a typed, expected refusal — unknown marketplace/plugin, not installed,
    *  an unwritable settings file, …) becomes `RpcFailure(INVALID_PARAMS, message)`; anything else
    *  propagates unchanged — never swallowed. */
@@ -1507,7 +1504,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     } catch {
       return opts.plugins?.list() ?? [];
     }
-    const list = new PluginStore({ winterHome: opts.winterHome, plugins: settings.plugins, consents: settings.plugins?.consents }).list();
+    const list = new PluginStore({ winterHome: opts.winterHome, consents: settings.plugins?.consents }).list();
     livePluginsCache = { key, list };
     return list;
   }
@@ -1536,9 +1533,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     if (!opts.supervisor || !opts.registry || !opts.winterHome) return "stopped";
     // WS-21: `info.installPath` — a plugin's real install path, straight off Contract B's own
     // record, never the pre-WS-21 `<home>/plugins/<name>` convention (agent/plugins.ts's own doc).
-    const config: EligiblePlugin = { id: info.name, dir: info.installPath, entry: info.entry! };
+    // WS-24: the supervisor is keyed by the plugin's SPEC (`plugins/supervisor.ts`'s header, "THE KEY").
+    const config: EligiblePlugin = { id: info.spec, dir: info.installPath, entry: info.entry! };
     opts.supervisor.restart(config);
-    return opts.supervisor.status(info.name);
+    return opts.supervisor.status(info.spec);
   }
 
   /** `plugin.disable`/`plugin.remove`'s hot-apply STOP — kills a Tier-2 plugin's running process
@@ -1549,8 +1547,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
    *  stop. Deliberately left ungated on `opts.registry`, unlike `hotApplyStart` — a stop can only
    *  ever tear something down, never spawn, so widening when it runs is harmless cleanup, not a
    *  new-process risk. */
-  function hotApplyStop(name: string): void {
-    opts.supervisor?.stop(name);
+  function hotApplyStop(spec: string): void {
+    opts.supervisor?.stop(spec);
   }
 
   const server = Bun.listen<ConnState>({
@@ -2228,10 +2226,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         return {};
       }
       // -----------------------------------------------------------------------------------------
-      // Daemon settings surface batch 3 (item 3a): `mcp.list` now overlays LIVE settings onto
-      // whatever the daemon's own `McpManager` tracked (which is a BOOT-TIME snapshot for "user"
-      // servers and an ensureProject-time snapshot for "project" ones; neither re-runs on a
-      // settings edit — a pre-existing limitation this item does not attempt to fix). Two things
+      // Daemon settings surface batch 3 (item 3a): `mcp.list` overlays LIVE settings onto whatever
+      // the daemon's own `McpManager` recorded — WS-24: a STATUS PROBE (connect, list tools, close;
+      // each session's child connects its own copy), taken at boot for "user" servers, on the first
+      // `mcp.list {cwd}` for "project" ones and on every `mcp.enable`/`mcp.add`; neither re-runs on a
+      // plain settings edit — a pre-existing limitation this item does not attempt to fix. Two things
       // this overlay adds that the manager itself cannot know, for EVERY source (user/project/
       // plugin alike — `configuredMcpServersFor` withholds a disabled server from the CHILD
       // regardless of which tier configured it, so the report must not narrow to "user" only,
@@ -2243,12 +2242,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       //    if also named in `settings.mcp.disabled`), `transport` set from its own `type`.
       // A stdio server added to settings AFTER boot is NOT synthesized here — the manager's own
       // "started at boot" gap is unrelated to this item and stays exactly as wide as it already was.
-      // KNOWN GAP, not routed around: `McpManager.doEnsureProject`/`startAll` have no `disabled`
-      // concept of their own, so the daemon's OWN registry (this leg of `mcp.list`'s source data,
-      // and `tool.list`/MCP resources) still actually STARTS a disabled project/user stdio server
-      // for itself — only the report here, and the copy `configuredMcpServersFor` builds for each
-      // session's OWN child, honour the disable. Closing that needs the manager to skip/stop a
-      // disabled server itself, which is out of this item's scope.
+      // (WS-24: the old "known gap" — the daemon's own registry starting a disabled server for itself —
+      // is gone with the registry: the probe skips a disabled name, and nothing of a server is kept.)
       // -----------------------------------------------------------------------------------------
       case METHODS.mcpList: {
         const p = parseParams(McpListParams, params);
@@ -2269,12 +2264,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const overlaid = tracked.map((row) => withStripped(disabled.has(row.name) ? { ...row, status: "disabled" as const } : row));
         const trackedNames = new Set(overlaid.map((r) => r.name));
         // MEDIUM (fix wave, pre-merge review, finding 3): a stdio entry is normally excluded here
-        // (the "started at boot" gap this item doesn't touch — see this block's own header) UNLESS
-        // it is ALSO disabled: `mcp.disable`'s handler now actually STOPS a running server and drops
-        // its tracked status (`McpManager.stopServer`), so a disabled stdio server is no longer in
-        // `tracked` at all and would otherwise vanish from this report entirely rather than reading
-        // "disabled" — the same "reported, not silently absent" posture every other disabled entry
-        // in this list already has.
+        // (the probe-at-boot gap this item doesn't touch — see this block's own header) UNLESS it is
+        // ALSO disabled: `mcp.disable`'s handler drops its recorded status (`McpManager.stopServer`),
+        // so a disabled stdio server is no longer in `tracked` at all and would otherwise vanish from
+        // this report entirely rather than reading "disabled" — the same "reported, not silently
+        // absent" posture every other disabled entry in this list already has.
         const unmanaged = Object.entries(opts.winterHome ? sdkUserMcpServers(opts.winterHome) : {})
           .filter(([name, entry]) => (entry.type !== "stdio" || disabled.has(name)) && !trackedNames.has(name))
           .map(([name, entry]) => withStripped({
@@ -2296,9 +2290,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "mcp.disable is not available on this server (no winterHome configured)");
         const settingsPath = join(opts.winterHome, "settings.json");
         saveSettings(settingsPath, setMcpServerDisabled(loadSettings(settingsPath), p.name, true));
-        // MEDIUM (fix wave, pre-merge review, finding 3): the settings write alone does not touch
-        // an already-running server — stop it and drop its status/tools now, so a disable takes
-        // effect immediately rather than merely relabeling `mcp.list`'s report.
+        // MEDIUM (fix wave, pre-merge review, finding 3): drop the name's recorded probe status now, so
+        // `mcp.list` reports it from the settings overlay ("disabled"). WS-24: the daemon keeps no copy
+        // of the server running (a session's child connects its own and honours `mcp.disabled` at its next
+        // incarnation), so there is nothing else to stop here.
         opts.mcp?.stopServer(p.name);
         return { ok: true, name: p.name, enabled: false };
       }
@@ -2308,13 +2303,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const settingsPath = join(opts.winterHome, "settings.json");
         const next = setMcpServerDisabled(loadSettings(settingsPath), p.name, false);
         saveSettings(settingsPath, next);
-        // MEDIUM (fix wave, pre-merge review, finding 3, symmetry): `mcp.disable` now actually stops
-        // a running server rather than leaving it up under a cosmetic label — so re-enabling must
-        // actually restart it, or a disable/enable round trip would need a daemon restart to bring a
-        // USER-tier stdio server back, violating the no-restart-for-settings rule. Only the
-        // CONFIGURED stdio user-tier shape is restartable this way (`stdioMcpServersFor`'s own
-        // narrowing — the one shape `McpManager` can run at all); an HTTP/SSE or project `.mcp.json`
-        // name is a no-op here, same as it always was for `mcp.enable`.
+        // MEDIUM (fix wave, pre-merge review, finding 3, symmetry): `mcp.disable` drops a server's
+        // recorded status — so re-enabling re-probes it, or a disable/enable round trip would need a
+        // daemon restart to report a USER-tier stdio server again (the no-restart-for-settings rule).
+        // Only the CONFIGURED stdio user-tier shape is probed this way (`stdioMcpServersFor`'s own
+        // narrowing — the one shape `McpManager` can connect at all); an HTTP/SSE or project
+        // `.winter/mcp.json` name is a no-op here, same as it always was for `mcp.enable`.
         const cfg = stdioMcpServersFor(sdkUserMcpServers(opts.winterHome), next.mcp?.disabled)[p.name];
         if (cfg) await opts.mcp?.startOneUserServer(p.name, cfg);
         return { ok: true, name: p.name, enabled: true };
@@ -2342,11 +2336,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         } catch (err) {
           throw sdkWriteFailure(err);
         }
-        // Mirrors `mcp.enable`'s own restart (symmetry, same rationale): a newly-added stdio USER server
-        // must be usable on THIS incarnation's next turn, not just after a daemon restart — the daemon's
-        // own registry runs user stdio servers only (a local or project server reaches each session's
+        // Mirrors `mcp.enable`'s own re-probe (symmetry, same rationale): a newly-added stdio USER server
+        // reports a real status on the very next `mcp.list`, never after a daemon restart — the daemon's
+        // status probe (`McpManager`, WS-24: it connects, lists and closes; each session's child connects
+        // its own copy) covers user stdio servers only (a local or project server reaches each session's
         // child through its own configuration), an http/sse entry has no in-daemon client, and a name
-        // ALSO listed in `mcp.disabled` stays stopped until enabled — `started: false` says so honestly.
+        // ALSO listed in `mcp.disabled` is not probed until enabled — `started: false` says so honestly.
         let started = false;
         if (target.scope === "user" && entry.type === "stdio") {
           const cfg = stdioMcpServersFor(sdkUserMcpServers(opts.winterHome), liveSettingsFor(opts)?.mcp?.disabled)[p.name];
@@ -2364,8 +2359,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         } catch (err) {
           throw sdkWriteFailure(err);
         }
-        // Stop a live tracked user instance now, same as `mcp.disable` — a removed server must not go on
-        // answering tool calls until the next daemon restart.
+        // Drop a user server's recorded probe status now, same as `mcp.disable` — a removed server must not
+        // go on being reported until the next daemon restart.
         if (removed && target.scope === "user") opts.mcp?.stopServer(p.name);
         return { ok: true, name: p.name, removed, scope: p.scope };
       }
@@ -2394,6 +2389,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           transport: entry.type,
           disabled: disabled.has(p.name),
           ...(strippedHeaders && strippedHeaders.length > 0 ? { strippedHeaders } : {}),
+          // WS-24: the entry's protocol-era choice, echoed as `mcp.add` stored it.
+          ...(entry.versionNegotiation !== undefined ? { versionNegotiation: entry.versionNegotiation } : {}),
         };
         if (entry.type === "stdio") {
           return { ...base, command: entry.command, ...(entry.args ? { args: entry.args } : {}), ...(entry.env ? { env: entry.env } : {}) };
@@ -2522,7 +2519,17 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.agentsList: {
         const p = parseParams(AgentsListParams, params);
         const user = opts.winterHome ? loadUserAgentDefinitions(opts.winterHome) : { definitions: {}, sources: [], rejected: [] };
-        const project = p.cwd && opts.trust?.isTrusted(p.cwd) ? loadProjectAgentDefinitions(p.cwd) : { definitions: {}, sources: [], rejected: [] };
+        // WS-24: the project tier a run home loads — the trusted project's walk (`trustedProjectWalk`: trust
+        // keyed on the repository, the directories from the cwd up to the project scope's root, so a linked
+        // worktree of a trusted repo lists its own agents), the NEAREST definition of a name winning, as the
+        // router's run-home builder has it (`lastWins` over the walk reversed).
+        const project: LoadedAgentDefinitions = { definitions: {}, sources: [], rejected: [] };
+        for (const dir of opts.trust ? [...trustedProjectWalk(p.cwd, opts.trust)].reverse() : []) {
+          const tier = loadProjectAgentDefinitions(dir);
+          project.definitions = { ...project.definitions, ...tier.definitions };
+          project.sources = [...project.sources.filter((s) => tier.definitions[s.name] === undefined), ...tier.sources];
+          project.rejected.push(...tier.rejected);
+        }
         const { sources, rejected } = mergeAgentDefinitionTiers(user, project);
         const definitionRows = sources.map(({ name, definition, path, tier, shadowed }) => ({
           name,
@@ -2650,7 +2657,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           consents = loadSettings(join(opts.winterHome, "settings.json")).plugins?.consents ?? {};
         } catch { /* degrade to "nothing consented" rather than fail the whole list */ }
         const plugins = listed.map((entry) => {
-          const extras = pluginExtrasFor(entry.installPath, entry.id, consents[`${entry.id}@${entry.marketplace}`]);
+          const found = pluginExtrasFor(entry.installPath, entry.id, consents[`${entry.id}@${entry.marketplace}`]);
+          // WS-24: the Tier-2 entry process is ONE daemon-wide process (tiles, shortcuts, hardware) with no
+          // session or project to scope it to, so the supervisor starts it only for a USER-scope install —
+          // both at boot (`PluginStore` lists user scope) and on `plugin.enable` (`livePlugins()`, user scope).
+          // Starting it per project would still leave its tools, tiles and hardware access daemon-wide; a
+          // project/local row that declares one says so here, instead of reading as consented-and-running.
+          const extras = found?.entry !== undefined && entry.scope !== "user" ? { ...found, entryNote: PROJECT_SCOPE_ENTRY_NOTE } : found;
           // Fix round 2: `hooks` — a TOP-LEVEL sibling of `extras` (plugins/plugin-hooks.ts), read
           // from `hooks/hooks.json` and the claude manifest's own inline `hooks` field regardless of
           // whether this plugin has a winter-plugin.json at all.
@@ -2679,9 +2692,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // hotApplyStop unconditionally, before uninstallPlugin's own "is it installed there" check
         // ever ran). `others` is every OTHER scope's current record for this exact spec, read
         // before this call's own mutation — stopping the Tier-2 process is correct only when NONE
-        // of them still has it installed and enabled (a plugin's runtime is one process per bare
-        // name, spec's own F15 compound-key convention notwithstanding — see the lane report's own
-        // concerns note on this).
+        // of them still has it installed and enabled (a plugin's runtime is one process per spec,
+        // WS-24 — every scope's install of one spec shares it).
         let stillLive = false;
         try {
           stillLive = (await listPlugins(options)).some((e) => e.enabled && e.scope !== p.scope && `${e.id}@${e.marketplace}` === p.spec);
@@ -2693,7 +2705,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         }
         invalidateLivePluginsCache();
         if (!stillLive) {
-          hotApplyStop(pluginNameOfSpec(p.spec));
+          hotApplyStop(p.spec);
           // C1 fix round 2: the last scope of this spec is gone — its consent record must go too,
           // or a later reinstall under the SAME spec (a different folder, spec's own scenario)
           // would find a stale record whose fingerprint just happens to still be checked against
@@ -2718,7 +2730,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         invalidateLivePluginsCache();
         // Tier-2 (platform, entry) hot-spawn — install+enable is itself the consent for a plugin's
         // claude-native content (spec §5.4); it does not gate the entry process's own hot-start.
-        const info = livePlugins().find((pl) => `${pl.name}@${pl.marketplace}` === p.spec);
+        const info = livePlugins().find((pl) => pl.spec === p.spec);
         if (info) hotApplyStart(info);
         return { ok: true, spec: p.spec, scope: p.scope, enabled: true };
       }
@@ -2731,7 +2743,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           throwPluginManagerFailure(err);
         }
         invalidateLivePluginsCache();
-        hotApplyStop(pluginNameOfSpec(p.spec));
+        hotApplyStop(p.spec);
         return { ok: true, spec: p.spec, scope: p.scope, enabled: false };
       }
       case METHODS.pluginUpdate: {
@@ -3641,7 +3653,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             // otherwise a `plugin.setConsent`/`plugin.enable {consent:true}` grant of "hardware"
             // consent would stay invisible to this gate until a daemon restart, quietly breaking
             // this task's "applied HOT" promise for the hardware.request consent path specifically.
-            const info = livePlugins().find((pl) => pl.name === pluginId);
+            // WS-24: a plugin connection authenticates as its SPEC (the supervisor's key).
+            const info = livePlugins().find((pl) => pl.spec === pluginId);
             if (!info?.hardwarePermissions.includes(cls)) {
               opts.hardware.auditDenied({ requester, verb: p.verb, code: "consent_denied", missing: cls });
               return { code: "consent_denied", missing: cls };
@@ -4042,7 +4055,20 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.pluginRestart: {
         const p = parseParams(PluginRestartParams, params);
         if (!opts.supervisor) throw new RpcFailure(ERR.INTERNAL, "plugin supervisor is not available on this server");
-        const config = opts.supervisor.configFor(p.pluginId);
+        // WS-24: `pluginId` is the plugin's spec (the supervisor's key). A BARE name — what this RPC took
+        // before, and what `winter plugin restart <name>` and older clients still send — resolves only when
+        // exactly one tracked spec has that name; two marketplaces' same-named plugins refuse it by name.
+        let config = opts.supervisor.configFor(p.pluginId);
+        if (!config && !p.pluginId.includes("@")) {
+          const named = opts.supervisor.trackedIds().filter((id) => {
+            const at = id.lastIndexOf("@");
+            return at > 0 && id.slice(0, at) === p.pluginId;
+          });
+          if (named.length > 1) {
+            throw new RpcFailure(ERR.INVALID_PARAMS, `"${p.pluginId}" is installed from more than one marketplace (${named.join(", ")}) — name the one to restart`);
+          }
+          if (named.length === 1) config = opts.supervisor.configFor(named[0]!);
+        }
         if (!config) throw new RpcFailure(ERR.NOT_FOUND, `unknown plugin: ${p.pluginId}`);
         opts.supervisor.restart(config);
         return { ok: true };

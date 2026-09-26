@@ -6,7 +6,7 @@ import { readSdkGlobalConfig } from "@yanlinglabs/winter-core";
 import {
   parseMcpAddArgs, parseMcpAddJsonArgs, parseMcpRemoveArgs, parseMcpGetArgs,
   ensureMcpScope, ensureMcpTransport, parseMcpHeaders, parseMcpEnv, looksLikeMcpUrl,
-  buildMcpEntry, runMcpAddRoute, runMcpAddJsonRoute, runMcpRemoveRoute, runMcpGetRoute,
+  buildMcpEntry, parseMcpVersionNegotiation, runMcpAddRoute, runMcpAddJsonRoute, runMcpRemoveRoute, runMcpGetRoute,
   renderMcpAddOutcome, renderMcpRemoveOutcome, renderMcpGetOutcome, winterMcpConfigPath,
   type McpDoor, type McpRouteDeps,
 } from "../src/mcp-cli";
@@ -130,6 +130,23 @@ describe("buildMcpEntry", () => {
     if (r.kind !== "ok") throw new Error("expected ok");
     expect(buildMcpEntry(r.parsed, "http")).toEqual({ kind: "ok", entry: { type: "http", url: "https://mcp.sentry.dev/mcp", headers: { Authorization: "Bearer x" } } });
   });
+  // WS-24: a Winter-only flag for the server's protocol-era choice (the entry's `versionNegotiation`).
+  test("--version-negotiation: legacy/auto are the named modes, anything else pins that revision, empty is refused", () => {
+    expect(parseMcpVersionNegotiation(undefined)).toEqual({ kind: "ok" });
+    expect(parseMcpVersionNegotiation("legacy")).toEqual({ kind: "ok", value: "legacy" });
+    expect(parseMcpVersionNegotiation("auto")).toEqual({ kind: "ok", value: "auto" });
+    expect(parseMcpVersionNegotiation("2026-07-28")).toEqual({ kind: "ok", value: { pin: "2026-07-28" } });
+    expect(parseMcpVersionNegotiation(" ").kind).toBe("invalid");
+    const stdio = parseMcpAddArgs(["--version-negotiation", "2026-07-28", "srv", "npx", "pkg"]);
+    if (stdio.kind !== "ok") throw new Error("expected ok");
+    expect(buildMcpEntry(stdio.parsed, "stdio")).toEqual({ kind: "ok", entry: { type: "stdio", command: "npx", args: ["pkg"], versionNegotiation: { pin: "2026-07-28" } } });
+    const http = parseMcpAddArgs(["-t", "http", "--version-negotiation", "auto", "srv", "https://x.test/mcp"]);
+    if (http.kind !== "ok") throw new Error("expected ok");
+    expect(buildMcpEntry(http.parsed, "http")).toEqual({ kind: "ok", entry: { type: "http", url: "https://x.test/mcp", versionNegotiation: "auto" } });
+    const empty = parseMcpAddArgs(["--version-negotiation", "", "srv", "npx"]);
+    if (empty.kind !== "ok") throw new Error("expected ok");
+    expect(buildMcpEntry(empty.parsed, "stdio").kind).toBe("error");
+  });
 });
 
 describe("route functions (no daemon — direct sdk/.winter.json / .winter/mcp.json writes)", () => {
@@ -172,6 +189,15 @@ describe("route functions (no daemon — direct sdk/.winter.json / .winter/mcp.j
     const config = readSdkGlobalConfig(winterHome);
     expect(config.projects?.[repoRoot]?.mcpServers?.["my-server"]).toEqual({ type: "stdio", command: "npx", args: ["my-mcp"] });
     expect(config.projects?.[sub]).toBeUndefined(); // never keyed by the subdirectory itself
+  });
+
+  // WS-24: both project-scope write paths rebuilt the entry field by field and dropped the key.
+  test("add / add-json --scope project keep versionNegotiation in .winter/mcp.json", async () => {
+    expect((await runMcpAddRoute(["-s", "project", "--version-negotiation", "legacy", "a", "npx", "pkg"], deps())).ok).toBe(true);
+    expect((await runMcpAddJsonRoute(["-s", "project", "b", JSON.stringify({ command: "npx", versionNegotiation: { pin: "2026-07-28" } })], deps())).ok).toBe(true);
+    const servers = JSON.parse(readFileSync(winterMcpConfigPath(cwd), "utf8")).mcpServers;
+    expect(servers.a).toEqual({ command: "npx", args: ["pkg"], versionNegotiation: "legacy" });
+    expect(servers.b).toEqual({ command: "npx", versionNegotiation: { pin: "2026-07-28" } });
   });
 
   test("add --scope user writes sdk/.winter.json's top-level mcpServers, reports via:local", async () => {

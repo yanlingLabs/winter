@@ -590,6 +590,7 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
 
   // I2 fix round 1: plugin.uninstall must resolve the install record for that spec+scope BEFORE
   // touching the supervisor -- an uninstall of a scope the plugin isn't in must stop nothing.
+  // WS-24: the supervisor is keyed by the spec ("p@m"), not the bare name.
   test("plugin.uninstall on a scope the plugin isn't installed in refuses typed, with the OTHER scope's record untouched and nothing stopped", async () => {
     const { c, supervisor } = await boot({ withSupervisor: true });
     const mktDir = mkdtempSync(join(tmpdir(), "winter-plugin-mkt-"));
@@ -609,7 +610,7 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
     // The user-scope record survives, and the running Tier-2 process was never touched.
     const listRes = await c.request(METHODS.pluginList, {});
     expect(listRes.result.plugins.find((pl: any) => pl.scope === "user")).toBeDefined();
-    expect(["starting", "running"]).toContain(supervisor!.status("p"));
+    expect(["starting", "running"]).toContain(supervisor!.status("p@m"));
   });
 
   test("a plugin installed at two scopes: uninstalling one leaves the Tier-2 process running; uninstalling the last stops it", async () => {
@@ -630,7 +631,7 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
     await c.request(METHODS.pluginEnable, { spec: "p@m", scope: "user" }); // hot-spawns (livePlugins() is user-scope)
     await c.request(METHODS.pluginEnable, { spec: "p@m", scope: "project", cwd: projectDir });
 
-    expect(["starting", "running"]).toContain(supervisor!.status("p"));
+    expect(["starting", "running"]).toContain(supervisor!.status("p@m"));
 
     // Uninstall the USER-scope record first — the PROJECT-scope one is still installed+enabled, so
     // the running process must NOT be stopped. `cwd` is passed even for this user-scope call,
@@ -640,7 +641,7 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
     // project-scope record, so a caller that never sends one leaves that scope unresolvable.
     const firstUninstall = await c.request(METHODS.pluginUninstall, { spec: "p@m", scope: "user", cwd: projectDir });
     expect(firstUninstall.result).toEqual({ ok: true, spec: "p@m", scope: "user" });
-    expect(["starting", "running"]).toContain(supervisor!.status("p"));
+    expect(["starting", "running"]).toContain(supervisor!.status("p@m"));
     const afterFirst = await c.request(METHODS.pluginList, { cwd: projectDir });
     expect(afterFirst.result.plugins).toHaveLength(1);
     expect(afterFirst.result.plugins[0]).toMatchObject({ scope: "project", enabled: true });
@@ -649,7 +650,7 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
     // hot-stop the process.
     const secondUninstall = await c.request(METHODS.pluginUninstall, { spec: "p@m", scope: "project", cwd: projectDir });
     expect(secondUninstall.result).toEqual({ ok: true, spec: "p@m", scope: "project" });
-    expect(supervisor!.status("p")).toBe("stopped");
+    expect(supervisor!.status("p@m")).toBe("stopped");
     const afterSecond = await c.request(METHODS.pluginList, { cwd: projectDir });
     expect(afterSecond.result.plugins).toEqual([]);
   });
@@ -715,6 +716,8 @@ describe("plugin.* RPCs (WS-21, Contract B)", () => {
       extras: {
         tier: "platform", requiredConsents: ["exec"], consented: [], entry: { command: "bun", args: ["--version"] },
         fingerprint: pluginConsentFingerprint(mktDir, { entry: { command: "bun", args: ["--version"] }, requiredConsents: ["exec"] }),
+        // WS-24: a project/local-scope install's background process is not started — said plainly.
+        entryNote: expect.stringContaining("only when it is installed for your user") as unknown as string,
       },
       hooks: [],
     }]);

@@ -547,6 +547,11 @@ export const SettingsSetSkillDeniedResult = z.object({ ok: z.literal(true), name
  * entirely on a row with nothing stripped, so every pre-existing exact-match test/fixture is
  * untouched. The Swift side stores this field as a plain array of strings, never an exhaustive
  * switch, so widening it here cannot break `apple/WinterKit`'s build either.
+ *
+ * WS-24: the daemon no longer keeps a copy of any server running (each session's child connects its
+ * own). `status: "connected"` and `toolNames` are AS OF THE LAST PROBE — the daemon connects, lists the
+ * tools and closes, at boot (user servers), on the first `mcp.list {cwd}` for a project's, and on every
+ * `mcp.enable`/`mcp.add` — not a live connection's state. `"failed"` = that probe failed (or timed out).
  */
 export const McpServerStatusSchema = z.object({
   name: z.string(),
@@ -584,10 +589,23 @@ export const McpDisableResult = z.object({ ok: z.literal(true), name: z.string()
  * still happens once, on the daemon side; this schema only bounds the wire shape. LOCAL role only
  * (never added to `REMOTE_ALLOWED_METHODS`), same posture as `mcp.enable`/`mcp.disable`.
  */
+/**
+ * WS-24: a server's own MCP protocol-revision choice — hand-mirrors core's `McpVersionNegotiationSetting`
+ * (`agent/mcp/project-file.ts`, the agent SDK's `McpVersionNegotiation`): `"legacy"` (the 2025
+ * `initialize` handshake), `"auto"` (probe `server/discover`, then fall back) or `{ pin }` (exactly that
+ * revision). It must be declared here because zod strips an undeclared key: without it a server added
+ * through `mcp.add` (or `winter mcp add-json`, which validates against this schema) silently lost the
+ * choice the settings file and `runtime-sdk/external-mcp.ts` both carry. Nothing here interprets it.
+ */
+export const McpVersionNegotiationSchema = z.union([
+  z.literal("legacy"),
+  z.literal("auto"),
+  z.object({ pin: z.string().min(1) }),
+]);
 export const McpAddEntrySchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("stdio"), command: z.string().min(1), args: z.array(z.string()).optional(), env: z.record(z.string(), z.string()).optional() }),
-  z.object({ type: z.literal("http"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional() }),
-  z.object({ type: z.literal("sse"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional() }),
+  z.object({ type: z.literal("stdio"), command: z.string().min(1), args: z.array(z.string()).optional(), env: z.record(z.string(), z.string()).optional(), versionNegotiation: McpVersionNegotiationSchema.optional() }),
+  z.object({ type: z.literal("http"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional(), versionNegotiation: McpVersionNegotiationSchema.optional() }),
+  z.object({ type: z.literal("sse"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional(), versionNegotiation: McpVersionNegotiationSchema.optional() }),
 ]);
 /**
  * WS-21 (spec §4.4, `winter mcp add` = `claude mcp add`): the three MCP scopes, claude's names and
@@ -610,9 +628,10 @@ export const McpAddParams = z.object({
   scope: McpScopeSchema.default("local"),
   cwd: z.string().min(1).optional(),
 });
-/** `started`: true only when this call ALSO brought a stdio user server up right now
- *  (`McpManager.startOneUserServer`, mirroring `mcp.enable`'s own restart) — false for an http/sse
- *  entry (no in-daemon client for those transports) or a name also listed in `mcp.disabled`. */
+/** `started`: true only when this call ALSO probed a stdio user server right now
+ *  (`McpManager.startOneUserServer`, mirroring `mcp.enable`'s own re-probe; WS-24: the daemon connects,
+ *  lists and closes — each session's child connects its own copy) — false for an http/sse entry (no
+ *  in-daemon client for those transports) or a name also listed in `mcp.disabled`. */
 export const McpAddResult = z.object({ ok: z.literal(true), name: z.string(), transport: z.enum(["stdio", "http", "sse"]), started: z.boolean(), scope: McpScopeSchema.optional() });
 
 export const McpRemoveParams = z.object({
@@ -650,6 +669,8 @@ export const McpGetResult = z.object({
   headers: z.record(z.string(), z.string()).optional(),
   disabled: z.boolean().optional(),
   strippedHeaders: z.array(z.string()).optional(),
+  /** WS-24: the server's own protocol-era choice, when it has one (`McpVersionNegotiationSchema`). */
+  versionNegotiation: McpVersionNegotiationSchema.optional(),
 });
 
 /**
@@ -1210,7 +1231,9 @@ export const PluginToolResultParams = z.object({
 export const PluginToolResultResult = z.object({ ok: z.literal(true) });
 
 /** Harness-role admin verb (Phase 4b Task 2, spec §3): deletes a plugin's stored token hash so a
- *  subsequent plugin hello for that id fails closed. Mirrors trust.remove's role precedent — NOT
+ *  subsequent plugin hello for that id fails closed. WS-24: `pluginId` is the plugin's SPEC
+ *  (`"<name>@<marketplace>"`), the id the supervisor mints a token under; a pre-WS-24 daemon minted it
+ *  under the bare name, which the CLI revokes too (`pluginTokenIdsFor`). Mirrors trust.remove's role precedent — NOT
  *  itself one of the six plugin-role verbs (a plugin can never revoke its own or another plugin's
  *  token). Exists because `plugin_tokens` lives in the daemon's sqlite: the CLI's disable/remove
  *  never opens that database directly (locking risk) and calls this RPC best-effort instead —
@@ -1222,7 +1245,9 @@ export const PluginRevokeTokenResult = z.object({ ok: z.literal(true) });
  *  — existed and was tested but had no caller) exposed over the wire so `winter plugin restart
  *  <id>` can recover a plugin stuck "circuit-open" (nothing else ever clears that state short of
  *  a daemon restart). Same role precedent as `plugins.list` — harness OR admin, NOT one of the six
- *  plugin-role verbs (a plugin can never restart itself or another plugin). */
+ *  plugin-role verbs (a plugin can never restart itself or another plugin). WS-24: `pluginId` is the
+ *  plugin's SPEC (`"<name>@<marketplace>"`, the supervisor's key); a bare name still resolves when exactly
+ *  one tracked plugin has it, and is refused as ambiguous when two marketplaces' plugins share it. */
 export const PluginRestartParams = z.object({ pluginId: z.string().min(1) });
 export const PluginRestartResult = z.object({ ok: z.literal(true) });
 
@@ -1380,6 +1405,11 @@ export const PluginListingExtrasSchema = z.object({
    *  echoes this back verbatim as `plugin.setConsent`'s own `fingerprint` param; the daemon refuses
    *  `stale_disclosure` when it no longer matches what it recomputes at consent time. */
   fingerprint: z.string(),
+  /** WS-24: present only for a row that declares an `entry` at PROJECT or LOCAL scope — says, in plain
+   *  words, that Winter does not start that background process for such an install: the Tier-2 entry is
+   *  one daemon-wide process (tiles, shortcuts, hardware), with no session or project to scope it to, so
+   *  only a user-scope install runs it. A consent UI shows it beside the disclosure. */
+  entryNote: z.string().optional(),
 });
 /** WS-21 fix round 2: `plugin.list`'s `hooks` — TOP-LEVEL (a sibling of `extras`, not nested in it),
  *  because a claude-format plugin with no `winter-plugin.json` at all still carries hooks (they're

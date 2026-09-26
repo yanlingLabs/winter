@@ -1,7 +1,7 @@
 // WS-21 L3.6 (spec §7.1 "hook" column, §7.2): the path fence as a PreToolUse hook on both legs, and the
 // bridge's third layer — a protected write is never auto-allowed, under any policy.
 import { describe, expect, test } from "bun:test";
-import { realpathSync, mkdtempSync } from "node:fs";
+import { linkSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CanUseTool, HookCallback, HookCallbackMatcher } from "@yanlinglabs/winter-agent-sdk";
@@ -9,7 +9,7 @@ import { ApprovalBroker } from "../../src/agent/approvals";
 import { QuestionBroker } from "../../src/agent/questions";
 import { PermissionGate, type SessionApprovalPolicy } from "../../src/agent/gate";
 import { canUseToolFor, type BridgeLogger } from "../../src/runtime-sdk/approval-bridge";
-import { bashProtectedWriteHit, sessionHooksFor, type SessionHooksDeps } from "../../src/runtime-sdk/hooks";
+import { BASH_WRITE_CHECK_BOUND, _setInodeScanBudgetForTests, bashProtectedWriteHit, sessionHooksFor, type SessionHooksDeps } from "../../src/runtime-sdk/hooks";
 
 const real = (p: string): string => realpathSync(mkdtempSync(join(tmpdir(), p)));
 const silent: BridgeLogger = { info: () => {}, error: () => {} };
@@ -339,6 +339,233 @@ describe("fix round 2: Bash writes under .winter/<kind>", () => {
 // R.3 C-1: the escape floor (the LAST Bash PreToolUse group, every policy, bypass included, both legs) knows
 // the variables WS-21 exports into every child — `$WINTER_STORE_HOME`, both plugin-cache variables,
 // `$CLAUDE_CONFIG_DIR` and the Winter child's own `$WINTER_HOME` (its run folder).
+// WS-24: a write through a link that already exists on disk is judged at the link's target.
+describe("Bash writes through an existing link to a protected directory", () => {
+  function project(): { root: string; work: string } {
+    const root = real("winter-link-proj-");
+    mkdirSync(join(root, ".winter", "skills"), { recursive: true });
+    mkdirSync(join(root, ".winter", "rules"), { recursive: true });
+    mkdirSync(join(root, "notes"), { recursive: true });
+    const work = join(root, "pkg");
+    mkdirSync(work, { recursive: true });
+    symlinkSync(join(root, ".winter", "skills"), join(work, "s"));                // a link to a protected dir
+    symlinkSync(join(root, ".winter"), join(work, "dot"));                        // a link to .winter itself
+    symlinkSync(join(root, ".winter", "rules", "planted.md"), join(work, "r.md")); // dangling: writing creates the target
+    symlinkSync(join(root, "notes"), join(work, "n"));                           // a link to an ordinary dir
+    return { root, work };
+  }
+
+  test("relative targets resolve against the session cwd; the static text alone never named .winter", () => {
+    const { work } = project();
+    for (const cmd of [
+      "echo x > s/deploy/SKILL.md",
+      "mkdir -p s/new-skill",
+      "cp evil.md dot/skills/x/SKILL.md",
+      "tee dot/rules/r.md < /dev/null",
+      "echo planted > r.md",
+      "cd s && echo x > y/SKILL.md",
+      "echo x > S/Deploy/SKILL.md",
+    ]) {
+      expect({ cmd, before: bashProtectedWriteHit(cmd) }).toEqual({ cmd, before: undefined });
+      expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) }).toEqual({ cmd, hit: cmd.includes("dot/rules") || cmd.includes("r.md") ? ".winter/rules" : ".winter/skills" });
+    }
+  });
+
+  test("an absolute target through a link resolves without a cwd; ordinary links and reads stay quiet", () => {
+    const { work } = project();
+    expect(bashProtectedWriteHit(`echo x > ${work}/s/a/SKILL.md`)).toBe(".winter/skills");
+    for (const cmd of ["echo x > n/todo.md", "cat s/deploy/SKILL.md", "ls dot/rules", "echo x > fresh/file.md"]) {
+      expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) }).toEqual({ cmd, hit: undefined });
+    }
+  });
+
+  // Fix round 1 (the reviewer's probes): the shell's own spelling is walked too — `..` climbs out of the
+  // link's TARGET, so `./s/x/../../rules` is `.winter/rules`, however the text would collapse.
+  test("`..` after a link climbs from the link's target, with or without a leading ./", () => {
+    const { work } = project();
+    mkdirSync(join(work, "s", "x"), { recursive: true }); // s -> <root>/.winter/skills, so this is skills/x
+    for (const cmd of [
+      "echo x > ./s/../rules/e.md",
+      "echo x > ./s/x/../../rules/evil.md",
+      "echo x > s/x/../../rules/evil.md",
+      "echo x > s/x/../../rules/",
+      "echo x > s/../rules/evil.md",
+      "cd s; cd ..; echo x > rules/evil.md",
+    ]) expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) }).toEqual({ cmd, hit: ".winter/rules" });
+    expect(bashProtectedWriteHit("echo x > s/x/../y/SKILL.md", { cwd: work })).toBe(".winter/skills");
+  });
+
+  test("ln itself is judged: a link whose source is (or resolves under) a protected path is a card; an ordinary ln is not", () => {
+    const { work } = project();
+    for (const cmd of [
+      "ln -s .winter/skills t && echo x > t/y.md",
+      "ln -s ../.winter/skills t",
+      "ln ../.winter/skills/x/SKILL.md hard.md",
+      "ln -s s/x t",
+      "ln -sf dot/rules r2",
+    ]) expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) !== undefined }).toEqual({ cmd, hit: true });
+    for (const cmd of ["ln -s ../notes n2", "ln -s /usr/bin/env e"]) {
+      expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) }).toEqual({ cmd, hit: undefined });
+    }
+  });
+
+  test("the reviewer's probe matrix: every link shape resolves, with a cwd", () => {
+    const { root, work } = project();
+    mkdirSync(join(root, ".winter", "skills", "x"), { recursive: true });
+    symlinkSync("s", join(work, "chain"));
+    symlinkSync(join(root, ".winter", "skills"), join(work, "abs"));
+    mkdirSync(join(work, "sub"));
+    symlinkSync("../s", join(work, "sub", "up"));
+    for (const cmd of [
+      "echo x > s/x/SKILL.md", "echo x > chain/x/SKILL.md", "echo x > dot/skills/y/SKILL.md", "echo x > abs/y.md",
+      "cd s && echo x > y/SKILL.md", "cd sub && echo x > up/y.md", "echo x > sub/up/y.md",
+      "cp /etc/hosts s/new.md", "tee s/new.md < /etc/hosts", "mv /tmp/a s/b", `echo x > ${work}/abs/y.md`,
+      "echo x > S/X/SKILL.MD", "sed -i '' s/a/b/ s/x/SKILL.md", "bash -c 'echo x > s/y.md'",
+    ]) expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) !== undefined }).toEqual({ cmd, hit: true });
+    // Fix round 2 (N-2): a write through a HARD link made earlier is judged by its inode.
+    writeFileSync(join(root, ".winter", "skills", "x", "SKILL.md"), "hi");
+    linkSync(join(root, ".winter", "skills", "x", "SKILL.md"), join(work, "hard.md"));
+    for (const cmd of ["echo x > hard.md", "cp /etc/hosts hard.md", "sed -i '' s/a/b/ hard.md", "tee hard.md"]) {
+      expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) }).toEqual({ cmd, hit: ".winter/skills" });
+    }
+  });
+
+  // Fix round 2 (the reviewer's probe3/probe4).
+  test("a cd that fails leaves the shell where it was: every place it could stand is judged", () => {
+    const { work } = project();
+    mkdirSync(join(work, "sub"));
+    for (const cmd of [
+      "cd nope; cd s; echo x > y.md",
+      "cd /nonexistent; cd s; echo x > y.md",
+      "cd nope || true; echo x > s/y.md",
+      "cd sub 2>/dev/null; cd s; echo x > y.md",
+    ]) expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) }).toEqual({ cmd, hit: ".winter/skills" });
+    expect(bashProtectedWriteHit("cd nope; echo x > notes.md", { cwd: work })).toBeUndefined();
+  });
+
+  test("hard links: cp -l / -al sources are judged; an existing hard link is judged by inode; an unrelated one is quiet", () => {
+    const { root, work } = project();
+    mkdirSync(join(root, ".winter", "skills", "x"), { recursive: true });
+    writeFileSync(join(root, ".winter", "skills", "x", "SKILL.md"), "hi");
+    for (const cmd of ["cp -l ../.winter/skills/x/SKILL.md foo.md", "cp -al ../.winter/skills bk", "cp --link s/x/SKILL.md foo.md"]) {
+      expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) !== undefined }).toEqual({ cmd, hit: true });
+    }
+    expect(bashProtectedWriteHit("cp -L ../notes/a.md b.md", { cwd: work })).toBeUndefined(); // -L dereferences, it links nothing
+    // A hard link that is NOT a protected file (node_modules-style) stays quiet.
+    writeFileSync(join(work, "plain.md"), "p");
+    linkSync(join(work, "plain.md"), join(work, "plain2.md"));
+    expect(bashProtectedWriteHit("echo x > plain2.md", { cwd: work })).toBeUndefined();
+    // The store's own sdk/skills, when the Winter home is known.
+    const home = real("winter-link-home-");
+    mkdirSync(join(home, "sdk", "skills", "k"), { recursive: true });
+    writeFileSync(join(home, "sdk", "skills", "k", "SKILL.md"), "k");
+    linkSync(join(home, "sdk", "skills", "k", "SKILL.md"), join(work, "store-hard.md"));
+    expect(bashProtectedWriteHit("echo x > store-hard.md", { cwd: work, home })).toBe("sdk/skills");
+  });
+
+  test("$PWD / ${PWD} / $HOME expand; >| is a redirect; dd writes its of=; an escaped slash is a slash", () => {
+    const { work } = project();
+    for (const cmd of [
+      "echo x > $PWD/s/y.md", "echo x > \"${PWD}/s/y.md\"", "cd s && echo x > $PWD/y.md",
+      "echo x >| s/y.md", "echo x >| ../.winter/skills/y.md", "dd if=/etc/hosts of=s/y.md", "echo x > s\\/y.md",
+    ]) expect({ cmd, hit: bashProtectedWriteHit(cmd, { cwd: work }) !== undefined }).toEqual({ cmd, hit: true });
+    expect(bashProtectedWriteHit("dd if=../.winter/skills/x of=/tmp/copy", { cwd: work })).toBeUndefined(); // a read
+    expect(bashProtectedWriteHit(`echo x > $HOME/${"no-such-dir-ws24"}/y.md`, { cwd: work })).toBeUndefined();
+  });
+
+  // Fix round 3: every bound fails CLOSED (the reviewer's probe6/probe7).
+  test("the cwd cap: five failed cds then a link write is caught; past the cap a write is a card, never a pass", () => {
+    const { work } = project();
+    const cds = (n: number): string => Array.from({ length: n }, (_, i) => `cd n${i}`).join("; ");
+    for (const n of [3, 4, 5, 6]) expect({ n, hit: bashProtectedWriteHit(`${cds(n)}; echo x > s/y.md`, { cwd: work }) }).toEqual({ n, hit: ".winter/skills" });
+    // 8 cds: the session cwd is still judged exactly (it hits here)…
+    expect(bashProtectedWriteHit(`${cds(8)}; echo x > s/y.md`, { cwd: work })).toBe(".winter/skills");
+    // …and a write the kept candidates do not settle is the bound's card.
+    expect(bashProtectedWriteHit(`${cds(8)}; echo x > zz/y.md`, { cwd: work })).toBe(BASH_WRITE_CHECK_BOUND.cwds);
+    // A successful chain of cds (the all-took chain) is always exact.
+    mkdirSync(join(work, "a", "b", "c", "d", "e"), { recursive: true });
+    expect(bashProtectedWriteHit(`cd a; cd b; cd c; cd d; cd e; cd /; cd ${work}; echo x > s/y.md`, { cwd: work })).toBe(".winter/skills");
+    // Controls: an ordinary multi-cd command with no protected write stays quiet.
+    expect(bashProtectedWriteHit("cd packages/core && bun test; cd ../cli && echo x > out.txt; cd - ; echo y > skills/notes.md", { cwd: work })).toBeUndefined();
+  });
+
+  test("the nesting/work cap: deep bash -c nesting is bounded in time and never passes silently", () => {
+    const { work } = project();
+    const cds = (n: number): string => Array.from({ length: n }, (_, i) => `cd n${i}`).join("; ");
+    const nest = (d: number): string => (d === 0 ? "echo x > zz/y.md" : `bash -c "${cds(4)}; ${nest(d - 1).replace(/"/g, '\\"')}"`);
+    for (const d of [1, 2, 3]) {
+      const t0 = performance.now();
+      const hit = bashProtectedWriteHit(`${cds(4)}; ${nest(d)}`, { cwd: work });
+      expect(performance.now() - t0).toBeLessThan(2_000);
+      expect(hit).toBe(BASH_WRITE_CHECK_BOUND.cwds);
+    }
+    // Many targets in one command: the work cap answers with its card.
+    const many = Array.from({ length: 1_200 }, (_, i) => `echo x > f${i}.md`).join("; ");
+    expect(bashProtectedWriteHit(many, { cwd: work })).toBe(BASH_WRITE_CHECK_BOUND.work);
+  });
+
+  test("the hard-link scan: the store's sdk/ kinds are scanned first; an exhausted budget with no match is a card", () => {
+    const { root, work } = project();
+    const home = real("winter-link-budget-home-");
+    mkdirSync(join(home, "sdk", "skills", "k"), { recursive: true });
+    writeFileSync(join(home, "sdk", "skills", "k", "SKILL.md"), "k");
+    mkdirSync(join(root, ".winter", "skills", "big"), { recursive: true });
+    for (let i = 0; i < 300; i += 1) writeFileSync(join(root, ".winter", "skills", "big", `f${i}`), "");
+    linkSync(join(home, "sdk", "skills", "k", "SKILL.md"), join(work, "h2.md"));
+    writeFileSync(join(work, "plain.md"), "p");
+    linkSync(join(work, "plain.md"), join(work, "plain2.md"));
+    _setInodeScanBudgetForTests(100);
+    try {
+      // sdk first: found before the big project tree spends the budget.
+      expect(bashProtectedWriteHit("echo x > h2.md", { cwd: work, home })).toBe("sdk/skills");
+      // An unrelated hard link, budget exhausted by the project tree: it cannot be ruled out — a card.
+      expect(bashProtectedWriteHit("echo x > plain2.md", { cwd: work, home })).toBe(BASH_WRITE_CHECK_BOUND.inodes);
+    } finally {
+      _setInodeScanBudgetForTests(undefined);
+    }
+    // With the real budget the same unrelated hard link is quiet.
+    expect(bashProtectedWriteHit("echo x > plain2.md", { cwd: work, home })).toBeUndefined();
+  });
+
+  test("an in-place sed's SCRIPT is not a path (no walk through a link named `s`)", () => {
+    const { work } = project();
+    writeFileSync(join(work, "notes.md"), "a");
+    expect(bashProtectedWriteHit("sed -i '' s/a/b/ notes.md", { cwd: work })).toBeUndefined();
+    expect(bashProtectedWriteHit("sed -i -e s/a/b/ notes.md", { cwd: work })).toBeUndefined();
+    expect(bashProtectedWriteHit("sed -i '' s/a/b/ s/x/SKILL.md", { cwd: work })).toBe(".winter/skills");
+  });
+
+  test("the bridge (third layer) resolves a relative link from its session cwd: bypass → card, dispatch → deny", async () => {
+    const { work } = project();
+    const home = real("winter-link-bridge-home-");
+    const ctx = (): Parameters<CanUseTool>[2] => ({ signal: new AbortController().signal, toolUseID: `tu-${Math.random()}`, requestId: "r" } as Parameters<CanUseTool>[2]);
+    const mk = (policy: SessionApprovalPolicy, mode: "code" | "dispatch" = "code") => {
+      const approvals = new ApprovalBroker();
+      return { approvals, canUse: canUseToolFor({ sessionId: "s_1", mode, policy, approvals, questions: new QuestionBroker(), gate: new PermissionGate(), emit: () => {}, log: silent, home, cwd: work }) };
+    };
+    const b = mk("bypass");
+    const pending = b.canUse("Bash", { command: "echo x > s/deploy/SKILL.md" }, ctx());
+    await new Promise((r) => setTimeout(r, 10));
+    expect(b.approvals.list("s_1")).toHaveLength(1);
+    b.approvals.resolve("s_1", b.approvals.list("s_1")[0]!.callId, false, "test");
+    expect((await pending)?.behavior).toBe("deny");
+    expect((await mk("auto", "dispatch").canUse("Bash", { command: "echo x > ./s/../rules/r.md" }, ctx()))?.behavior).toBe("deny");
+    expect((await mk("bypass").canUse("Bash", { command: "echo x > n/todo.md" }, ctx()))?.behavior).toBe("allow");
+  });
+
+  test("the hook reads the cwd off its input and asks", async () => {
+    const { work } = project();
+    const built = sessionHooksFor({ sessionId: "s_1", roots: [work], home: "/Users/x/.winter", mode: "code" });
+    const groups = (built.winter?.PreToolUse ?? []).filter((g: HookCallbackMatcher) => g.matcher === "Bash");
+    const answers: string[] = [];
+    for (const g of groups) for (const h of g.hooks) {
+      const r = (await h({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "echo x > s/deploy/SKILL.md" }, session_id: "b", transcript_path: "", cwd: work } as never, "tu1", { signal: new AbortController().signal })) as { hookSpecificOutput?: { permissionDecision?: string } };
+      answers.push(r.hookSpecificOutput?.permissionDecision ?? "none");
+    }
+    expect(answers).toContain("ask");
+  });
+});
+
 describe("R.3 C-1: the escape floor under bypass — the child's own variables", () => {
   const floor = () => {
     const built = sessionHooksFor({ sessionId: "s_1", roots: ["/r"], home: "/Users/x/.winter", mode: "code", policy: () => "bypass" });

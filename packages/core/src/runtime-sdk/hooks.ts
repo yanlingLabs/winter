@@ -46,7 +46,7 @@
 // (fix wave M4, ruling P8c-19: the router's official leg merged them after its own containment
 // matchers). With the official `claude` leg retired the return value carries `winter` alone; the
 // `{ winter }` shape is kept so `session-driver.ts`'s `hooksFor(session).winter` wiring does not move.
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import type {
@@ -526,7 +526,8 @@ function writeContextStart(c: string): number {
  * text, never inside quotes; a `cd`/`pushd` carried across segments), so a read after a redirect or a write
  * elsewhere in the line is no longer taken for a write. In a segment, a write target is:
  *   * the target of an output redirect (`>`, `>>`, `>|`, `&>`; never an fd dup like `2>&1`);
- *   * for `cp`/`mv`/`ln`/`install`/`rsync`, ONLY the destination — the last operand, or the `-t`/
+ *   * for `ln`, EVERY operand (WS-24 fix round 1: a link to a protected path is itself the write);
+ *   * for `cp`/`mv`/`install`/`rsync`, ONLY the destination — the last operand, or the `-t`/
  *     `--target-directory` value (a copy's SOURCE is read; `mv`'s removal of it loads nothing new); round 4:
  *     `-t` inside a short-flag cluster and `--target-directory <dir>` too, and every operand after the first
  *     once an option follows an operand;
@@ -538,38 +539,308 @@ function writeContextStart(c: string): number {
  *   * for an interpreter one-liner (`python`/`python3`/`node`/`bun`/`ruby`/`perl`/`deno` with `-c`, `-e`,
  *     `--eval`; `deno eval`), any protected segment its code names (round 3, minor 9).
  *
+ * LINKS (WS-24). A write target is ALSO judged after resolving the links that already exist on its path —
+ * relative targets against the session's `cwd` (`opts.cwd`; the hook input's own), `~` against the user's
+ * home — so a link planted earlier (`ln -s ../.winter/skills s`, then later `echo … > s/x/SKILL.md`) no
+ * longer carries a write past the match. Component by component, the way the kernel walks it: each
+ * existing component is realpathed (a `..` after a link climbs out of the link's TARGET), the first one
+ * that does not exist yet ends the walk and the rest is appended as written. Both spellings are walked: the
+ * normalised one and the shell's own, uncollapsed (`./s/x/../../rules` must climb out of `s`'s target, not
+ * be folded to `./rules` first). With no `cwd` only absolute and `~` targets are resolved. And `ln` itself is
+ * judged: a link whose SOURCE is (or resolves under) a protected path is a card, so `ln -s .winter/skills t
+ * && echo x > t/y.md` is caught at the `ln`; so are `cp -l`/`--link`/`-al`'s sources (hard links). Fix round 2:
+ * a target that already exists as a HARD link (`nlink > 1`) is compared by inode against the files under the
+ * protected directories (`ProtectedInodes`); a `cd` that could fail is judged both ways (a real shell stays
+ * put); `$PWD`/`${PWD}` and `$HOME`/`${HOME}` at the start of a target are expanded.
+ *
+ * BOUNDS, EVERY ONE FAIL-CLOSED (fix round 3) — reaching one answers `BASH_WRITE_CHECK_BOUND.*`, a card (a
+ * deny where nobody can answer), never a pass: 64 candidate working directories (six `cd`s in full; the
+ * session's own cwd and the all-took chain are always kept), 2,000 judgments per call across every nested
+ * `bash -c`/`eval` level (nesting itself stops at four), and the hard-link scan's budget (`ProtectedInodes`).
+ *
  * THE LIMITATION, the escape floor's own: a static match on the normalised text (case folded, quotes
- * stripped, `//`/`/./`/`..` collapsed, `cd` tracked). A path the command ASSEMBLES at run time (`$(…)`,
- * its own variables — `d=.winter; touch $d/rules/x` —, a script it writes and then runs, an interpreter
- * that joins the path from pieces) is beyond its reach, and so is a write whose path is not in the command
- * at all — `git apply x.patch`, `patch < x.diff`.
+ * stripped, `//`/`/./`/`..` collapsed, `cd` tracked), plus the links that exist on disk WHEN THE CALL IS
+ * JUDGED. A path the command ASSEMBLES at run time (`$(…)`, its own variables — `d=.winter; touch
+ * $d/rules/x` —, a script it writes and then runs, an interpreter that joins the path from pieces) is beyond
+ * its reach — `$(pwd)` included; so is a MULTI-HOP chain the same command builds (`ln -s s a && ln -s a b &&
+ * echo x > b/y`, where `s` exists but `a` does not yet — the first `ln`'s source is judged, not what a later
+ * hop resolves to), a hard link to a protected file living outside the walked directories (the inode scan
+ * covers the cwd's walk, the target's own, and the store's `sdk/` kinds, bounded), an interpreter one-liner
+ * that names its path THROUGH a link (`python3 -c "open('s/y.md','w')"`: only a literal `.winter/<kind>` in
+ * the code is seen), a `cd` into a link whose target the command itself changes, and a write whose path is
+ * not in the command at all — `git apply x.patch`, `patch < x.diff`. The child's sandbox fence and the
+ * path-fence hook bind what this cannot see.
  */
-export function bashProtectedWriteHit(command: string, depth = 0): string | undefined {
-  let cwd: string | undefined;
+export function bashProtectedWriteHit(command: string, opts: { cwd?: string; home?: string } = {}): string | undefined {
+  const ctx: HitContext = { sessionCwd: opts.cwd, inodes: new ProtectedInodes(opts.cwd, opts.home), work: 0 };
+  return protectedWriteHitIn(command, ctx, 0, [{ norm: undefined, raw: undefined }]);
+}
+
+/** `cd`/`pushd`'s next working directory, from its argument, relative to the one carried so far. */
+function nextCwd(cwd: string | undefined, arg0: string | undefined): string | undefined {
+  const arg = arg0?.replace(/\/+$/, "");
+  return arg === undefined || arg === "" ? "~" : arg === "-" ? undefined : /^[/~$]/.test(arg) || cwd === undefined ? arg : `${cwd}/${arg.replace(/^\.\//, "")}`;
+}
+
+/** WS-24 fix round 1 (I-1): a segment's text as the SHELL will walk it — case folded and quotes stripped like
+ *  `normaliseEscapeCommand`, but with no `.`/`..` collapsed: the kernel resolves `s/x/../..` from the link
+ *  `s`'s TARGET, so collapsing it textually first (`./s/x/../../rules` → `./rules`) hid the link. */
+function rawSpelling(command: string): string {
+  // A backslash escapes the next character (`s\/y.md` is `s/y.md` to the shell); a literal `\\` stays one.
+  return command.toLowerCase().replace(/["']/g, "").replace(/\\(.)/g, "$1").replace(/\/{2,}/g, "/");
+}
+
+/** WS-24 fix round 2 (N-1): one place the shell may be standing — the normalised and the raw spelling of a
+ *  cwd carried from the command's `cd`s (`undefined` = the session's own cwd). */
+interface CwdCandidate { norm: string | undefined; raw: string | undefined }
+/** At most this many candidate working directories are carried through a command's `cd`s (6 `cd`s in full). */
+const MAX_CWD_CANDIDATES = 64;
+/** At most this many target judgments (and nested-command parses) per call, across every `bash -c` level. */
+const MAX_JUDGMENTS = 2_000;
+
+/** WS-24 fix round 3: the answers the check gives when it reaches one of its bounds — FAIL CLOSED, a card (a
+ *  deny where nobody can answer), never a silent pass. Phrased to read after "Bash writes under …". */
+export const BASH_WRITE_CHECK_BOUND = {
+  cwds: "a path this check cannot pin down (too many working directories to judge)",
+  work: "a path this check cannot pin down (too much to judge in one command)",
+  inodes: "a hard-linked file this check could not rule out (too many protected files to compare)",
+} as const;
+
+/** One call's shared state, across its nested `bash -c`/`eval` levels (fix round 3, minor 1): the work budget
+ *  and ONE inode index. */
+interface HitContext { sessionCwd: string | undefined; inodes: ProtectedInodes; work: number }
+
+function protectedWriteHitIn(command: string, ctx: HitContext, depth: number, start: CwdCandidate[]): string | undefined {
+  // WS-24 fix round 2 (N-1): a `cd` can FAIL, and a real shell then stays where it was — `cd nope; cd s; echo x
+  // > y.md` writes under `s`. So every place the shell could be standing is carried (each `cd` either took or
+  // did not), and a target is judged from each of them. Fix round 3: BOUNDED FAIL-CLOSED — the session's own
+  // cwd and the chain where every `cd` took are always kept; once any OTHER candidate had to be dropped, a
+  // write is answered with a card (`BASH_WRITE_CHECK_BOUND.cwds`), never judged from a partial set.
+  const sessionCwd = ctx.sessionCwd;
+  let cwds: CwdCandidate[] = start;
+  let allTook: CwdCandidate = start[0] ?? { norm: undefined, raw: undefined };
+  let overflowed = false;
   for (const raw of shellSegments(command)) {
+    if (++ctx.work > MAX_JUDGMENTS) return BASH_WRITE_CHECK_BOUND.work;
     // Round 5: a shell's `-c` string, `eval`'s argument and the same inside `find -exec` are COMMANDS — each
-    // judged as one of its own (from the cwd carried so far), before its quotes are blanked as text below.
+    // judged as one of its own, from EVERY place the shell may be standing (the whole set, passed once —
+    // fix round 3: not one recursion per candidate).
     if (depth < 4) {
       for (const nested of nestedCommandStrings(shellWords(raw))) {
-        const hit = bashProtectedWriteHit(cwd === undefined ? nested : `cd ${cwd}; ${nested}`, depth + 1);
+        const hit = protectedWriteHitIn(nested, ctx, depth + 1, cwds);
         if (hit !== undefined) return hit;
       }
     }
-    const seg = normaliseEscapeCommand(quotedOperatorsAsText(raw)).replace(/^[\s({]+/, "").replace(/[\s)}]+$/, "");
+    const trimmed = (t: string): string => t.replace(/^[\s({]+/, "").replace(/[\s)}]+$/, "");
+    const seg = trimmed(normaliseEscapeCommand(quotedOperatorsAsText(raw)));
+    const rawSeg = trimmed(rawSpelling(quotedOperatorsAsText(raw)));
     if (seg.length === 0) continue;
     const words = seg.split(/\s+/);
     if (words[0] === "cd" || words[0] === "pushd") {
-      const arg = words[1]?.replace(/\/+$/, "");
-      cwd = arg === undefined || arg === "" ? "~" : arg === "-" ? undefined : /^[/~$]/.test(arg) || cwd === undefined ? arg : `${cwd}/${arg.replace(/^\.\//, "")}`;
+      const rawArg = rawSeg.split(/\s+/)[1];
+      const took = (c: CwdCandidate): CwdCandidate => ({ norm: nextCwd(c.norm, words[1]), raw: nextCwd(c.raw, rawArg) });
+      allTook = took(allTook);
+      const next: CwdCandidate[] = [];
+      const seen = new Set<string>();
+      const add = (c: CwdCandidate, mustKeep = false): void => {
+        const key = `${c.norm ?? "\0"}|${c.raw ?? "\0"}`;
+        if (seen.has(key)) return;
+        if (!mustKeep && next.length >= MAX_CWD_CANDIDATES - 2) { overflowed = true; return; }
+        seen.add(key);
+        next.push(c);
+      };
+      add(allTook, true);                                   // the chain where every cd took
+      add({ norm: undefined, raw: undefined }, true);       // the session's own cwd (every cd failed)
+      for (const c of cwds) add(took(c));                   // this cd took…
+      for (const c of cwds) add(c);                         // …or it failed
+      cwds = next;
       continue;
     }
-    for (const target of segmentWriteTargets(seg)) {
-      const path = cwd === undefined || /^[/~$]/.test(target) ? target : `${cwd}/${target.replace(/^\.\//, "")}`;
-      const m = PROTECTED_BASH_TARGET.exec(path);
-      if (m !== null) return m[0];
+    const under = (at: string | undefined, target: string): string => {
+      const t = expandShellVars(target, at, sessionCwd);
+      return at === undefined || /^[/~$]/.test(t) ? t : `${at}/${t.replace(/^\.\//, "")}`;
+    };
+    const judge = (path: string, raw: boolean): string | undefined => {
+      if (++ctx.work > MAX_JUDGMENTS) return BASH_WRITE_CHECK_BOUND.work;
+      if (!raw) {
+        const m = PROTECTED_BASH_TARGET.exec(path);
+        if (m !== null) return m[0];
+      }
+      // WS-24: the same target once the links already on its path are resolved (see the doc above).
+      const physical = physicalPath(path, sessionCwd);
+      const r = physical === undefined ? null : PROTECTED_BASH_TARGET.exec(physical.toLowerCase());
+      if (r !== null) return r[0];
+      // WS-24 fix round 2 (N-2): a HARD link to a protected file — the same inode under another name.
+      return physical === undefined ? undefined : ctx.inodes.hit(physical);
+    };
+    // WS-24 fix round 2 (N-2): `cp -l`/`--link` (and `-al`) makes hard links to its SOURCES — judged like `ln`'s.
+    const linkSources = cpLinkOperands(raw);
+    const normTargets = [...segmentWriteTargets(seg), ...linkSources.norm];
+    const rawTargets = [...segmentWriteTargets(rawSeg), ...linkSources.raw];
+    // Past the cap only the two kept candidates are exact: judge them (a real hit names its directory), then
+    // answer the bound for the ones that were dropped.
+    const judged = overflowed ? cwds.slice(0, 2) : cwds;
+    for (const c of judged) {
+      for (const target of normTargets) {
+        const hit = judge(under(c.norm, target), false);
+        if (hit !== undefined) return hit;
+      }
+      // WS-24 fix round 1 (I-1): and each target as the shell spells it, its `..` walked physically from the
+      // links it climbs out of (`rawSpelling`).
+      for (const target of rawTargets) {
+        const hit = judge(under(c.raw, target), true);
+        if (hit !== undefined) return hit;
+      }
     }
+    if (overflowed && (normTargets.length > 0 || rawTargets.length > 0)) return BASH_WRITE_CHECK_BOUND.cwds;
   }
   return undefined;
+}
+
+/** WS-24 fix round 2 (minor 2): `$PWD`/`${PWD}` → the cwd the shell stands in (the tracked one, anchored at the
+ *  session's), `$HOME`/`${HOME}` → the user's home — at the START of a target only. `$(pwd)` and every other
+ *  variable stay unexpanded (a documented limit). Text arrives case-folded. */
+function expandShellVars(target: string, at: string | undefined, sessionCwd: string | undefined): string {
+  const pwd = /^\$(?:\{pwd\}|pwd)(?=\/|$)/;
+  if (pwd.test(target)) {
+    const here = at === undefined ? sessionCwd : /^[/~]/.test(at) ? at : sessionCwd === undefined ? undefined : `${sessionCwd}/${at}`;
+    return here === undefined ? target : target.replace(pwd, here);
+  }
+  return target.replace(/^\$(?:\{home\}|home)(?=\/|$)/, homedir());
+}
+
+/** WS-24 fix round 2 (N-2): the operands of a `cp` that makes HARD links (`-l`, `--link`, or `l` in a short
+ *  cluster such as `-al`) — every one of them, the sources included. Read from the command's own CASE (`-L`,
+ *  dereference, is not `-l`), then case-folded for judging like everything else. */
+function cpLinkOperands(raw: string): { norm: string[]; raw: string[] } {
+  const words = shellWords(raw);
+  let i = 0;
+  while (i < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i]!) || COMMAND_PREFIXES.has(baseName(words[i]!)))) i += 1;
+  if (baseName(words[i] ?? "") !== "cp") return { norm: [], raw: [] };
+  const rest = words.slice(i + 1);
+  if (!rest.some((w) => w === "--link" || /^-[A-Za-z]*l[A-Za-z]*$/.test(w))) return { norm: [], raw: [] };
+  const operands = rest.filter((w) => !w.startsWith("-"));
+  return { norm: operands.map((w) => normaliseEscapeCommand(w)), raw: operands.map((w) => rawSpelling(w)) };
+}
+
+/**
+ * WS-24 fix round 2 (N-2): the inodes of the files under the protected directories — every `.winter/{skills,
+ * commands,rules,output-styles,agents}` on the walk from the session's cwd (and from a target's own
+ * directory) up to the user's home or the filesystem root, plus the store's `sdk/{skills,commands,rules,
+ * output-styles}` when the Winter home is known — so a write to a file that is the SAME INODE as one of them
+ * (a hard link, `hard.md`) is judged as a write there. Only consulted for a target that exists as a regular
+ * file with more than one link (`nlink > 1`), so an ordinary write never scans anything; a hard-linked file
+ * that matches nothing protected (node_modules' own) stays quiet. Built lazily, once per command (shared by
+ * its nested `bash -c` levels). BOUNDED FAIL-CLOSED (fix round 3): the store's `sdk/` kinds are scanned
+ * first; 50,000 entries, 0.5 s and a depth of 12 bound the rest, and a scan a bound cut short answers an
+ * unmatched hard link with a card (`BASH_WRITE_CHECK_BOUND.inodes`) rather than a pass.
+ */
+let inodeScanBudget = 50_000;
+/** Test seam: the hard-link scan's entry budget (a >50,000-file tree is too slow to build in a unit test). */
+export function _setInodeScanBudgetForTests(n: number | undefined): void { inodeScanBudget = n ?? 50_000; }
+
+class ProtectedInodes {
+  private readonly byInode = new Map<string, string>();
+  private readonly scanned = new Set<string>();
+  /** Entries left to visit — 50,000 stats is ~0.1 s — and a wall-clock bound beside it (a slow volume). */
+  private budget = inodeScanBudget;
+  private deadline: number | undefined;
+  /** Set when a bound cut a scan short: an unmatched hard link can then not be ruled out. */
+  private exhausted = false;
+  constructor(private readonly sessionCwd: string | undefined, private readonly home: string | undefined) {}
+
+  hit(physical: string): string | undefined {
+    let st: ReturnType<typeof statSync>;
+    try { st = statSync(physical); } catch { return undefined; }
+    if (!st.isFile() || st.nlink < 2) return undefined;
+    this.deadline ??= Date.now() + 500;
+    // Fix round 3 (F-2): the store's small, fixed kinds FIRST, so a huge project tree cannot spend the budget
+    // before them; then the walks.
+    if (this.home !== undefined) {
+      for (const kind of ["skills", "commands", "rules", "output-styles"]) this.scanDir(join(this.home, "sdk", kind), `sdk/${kind}`, 0);
+    }
+    if (this.sessionCwd !== undefined) this.scanWalk(this.sessionCwd);
+    this.scanWalk(dirname(physical));
+    // FAIL CLOSED: a bound reached with no match means this link could still be one of the files not visited.
+    return this.byInode.get(`${st.dev}:${st.ino}`) ?? (this.exhausted ? BASH_WRITE_CHECK_BOUND.inodes : undefined);
+  }
+
+  private scanWalk(from: string): void {
+    const userHome = homedir();
+    let dir = from;
+    for (let i = 0; i < 64; i += 1) {
+      for (const kind of ["skills", "commands", "rules", "output-styles", "agents"]) this.scanDir(join(dir, ".winter", kind), `.winter/${kind}`, 0);
+      if (dir === userHome) break;
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  }
+
+  private scanDir(dir: string, label: string, depth: number): void {
+    if (this.scanned.has(dir)) return;
+    if (depth > 12 || this.budget <= 0 || Date.now() > (this.deadline ?? Infinity)) { this.exhausted = true; return; }
+    this.scanned.add(dir);
+    let entries: import("node:fs").Dirent[];
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (--this.budget <= 0) { this.exhausted = true; return; }
+      const p = join(dir, e.name);
+      if (e.isDirectory()) { this.scanDir(p, label, depth + 1); continue; }
+      if (!e.isFile()) continue;
+      try { const st = statSync(p); this.byInode.set(`${st.dev}:${st.ino}`, label); } catch { /* vanished */ }
+    }
+  }
+}
+
+/**
+ * WS-24: `path` (one write target, as `protectedWriteHitIn` spells it — lowercased by the normaliser) with
+ * every link that EXISTS on it resolved — in the volume's own case, lowercased by the caller for the match
+ * (the inode check needs the real path); `undefined` when it cannot be
+ * anchored (a `$VAR` path, or a relative one with no session cwd). Walks from the root like the kernel:
+ * an existing component is realpathed before the next is looked up (so a `..` after a link climbs from
+ * the link's TARGET); a DANGLING link is followed by its text (writing through it creates its target);
+ * the first missing component ends the walk and the rest is appended verbatim. A component is looked up
+ * as spelled and then case-insensitively (the text was case-folded; a case-sensitive volume still
+ * resolves). Bounded (40 link hops, like the kernel's ELOOP). Never throws.
+ */
+function physicalPath(path: string, sessionCwd: string | undefined): string | undefined {
+  let abs: string;
+  if (path.startsWith("/")) abs = path;
+  else if (path === "~" || path.startsWith("~/")) abs = `${homedir()}${path.slice(1)}`;
+  else if (path.startsWith("$") || sessionCwd === undefined) return undefined;
+  else abs = `${sessionCwd}/${path}`;
+  let parts = abs.split("/").filter((p) => p !== "" && p !== ".");
+  let cur = "/";
+  let hops = 0;
+  while (parts.length > 0) {
+    const part = parts[0]!;
+    if (part === "..") { cur = dirname(cur); parts = parts.slice(1); continue; }
+    const entry = existingEntry(cur, part);
+    if (entry === undefined) break;
+    let real: string | undefined;
+    try { real = realpathSync(entry); } catch { real = undefined; }
+    if (real !== undefined) { cur = real; parts = parts.slice(1); continue; }
+    // Exists but does not resolve: a dangling link (or a loop). Follow its text once more, bounded.
+    let text: string;
+    try { text = readlinkSync(entry); } catch { break; }
+    if (++hops > 40) break;
+    const target = text.startsWith("/") ? text : `${cur}/${text}`;
+    parts = [...target.split("/").filter((p) => p !== "" && p !== "."), ...parts.slice(1)];
+    cur = "/";
+  }
+  return parts.length === 0 ? cur : `${cur.replace(/\/+$/, "")}/${parts.join("/")}`;
+}
+
+/** `dir/name` when it exists (a dangling link included — it still names where the write lands), else a
+ *  case-insensitive match among `dir`'s entries. */
+function existingEntry(dir: string, name: string): string | undefined {
+  const direct = join(dir, name);
+  try { lstatSync(direct); return direct; } catch { /* not as spelled */ }
+  try {
+    const hit = readdirSync(dir).find((e) => e.toLowerCase() === name);
+    return hit === undefined ? undefined : join(dir, hit);
+  } catch { return undefined; }
 }
 
 /** Round 5: the shells whose `-c` string is a command. */
@@ -658,6 +929,8 @@ export function shellSegments(command: string): string[] {
     if (ch === ")" && ctx === "sub") { stack.pop(); cut(); continue; }
     if (ch === ")" && ctx === "paren") { stack.pop(); cur += ch; continue; }
     if (ch === "\n" || ch === ";") { cut(); continue; }
+    // WS-24 fix round 2 (minor 1): `>|` is the clobber REDIRECT, not a pipe.
+    if (ch === "|" && command[i - 1] === ">") { cur += ch; continue; }
     if (ch === "|") { if (command[i + 1] === "|" || command[i + 1] === "&") i += 1; cut(); continue; }
     if (ch === "&") {
       if (command[i + 1] === "&") { i += 1; cut(); continue; }
@@ -688,6 +961,24 @@ function quotedOperatorsAsText(raw: string): string {
     out += /[<>|;&()]/.test(ch) ? " " : ch;
   }
   return out;
+}
+
+/** WS-24 fix round 2 (minor): the FILES an in-place `sed`/`perl` edit names — every operand except its
+ *  script: the word after `-e`/`--expression`/`-f` (a script, or a script file that is read), and, for `sed`
+ *  with no `-e`/`-f`, the first operand (`sed -i '' s/a/b/ f` — the empty suffix vanishes with its quotes,
+ *  so `s/a/b/` is that first operand). Without this a script like `s/a/b/` was judged as a path, and walked
+ *  through a link named `s`. */
+function inPlaceFiles(verb: string, rest: readonly string[]): string[] {
+  const out: string[] = [];
+  let hasScriptFlag = false;
+  for (let j = 0; j < rest.length; j += 1) {
+    const w = rest[j]!;
+    if (w === "-e" || w === "--expression" || w === "-f" || w === "--file") { hasScriptFlag = true; j += 1; continue; }
+    if (/^-[a-z]*e$/.test(w) && verb === "perl") { hasScriptFlag = true; j += 1; continue; } // `-pie`, `-pe`
+    if (w.startsWith("-")) continue;
+    out.push(w);
+  }
+  return verb === "sed" && !hasScriptFlag ? out.slice(1) : out;
 }
 
 /** Round 3, minor 9: the interpreters whose one-liners count, their code flags, and a protected segment as
@@ -738,6 +1029,12 @@ function segmentWriteTargets(seg: string): string[] {
       if (GIT_READ_SUBCOMMANDS.has(rest[j] ?? "")) return [...targets, ...outputs];
       return [...targets, ...rest];
     }
+    // WS-24 fix round 1 (I-2): `ln` CREATES a name for its source — a symlink or hard link whose source is
+    // (or resolves under) a protected directory makes a later write through that name land there, so every
+    // operand counts, the sources as well as the link's own name. (A symlink's relative source is judged
+    // from the cwd, not the link's directory — an approximation; `ln -s ../.winter/…` names the segment
+    // outright anyway.)
+    if (verb === "ln") return [...targets, ...rest.filter((w) => !w.startsWith("-"))];
     if (DESTINATION_VERBS.has(verb)) {
       const operands: string[] = [];
       let optionAfterOperand = false;
@@ -772,9 +1069,11 @@ function segmentWriteTargets(seg: string): string[] {
       return targets;
     }
     if (verb === "sed" || verb === "perl") {
-      if (rest.some((w) => /^(?:-[a-z]*i\S*|--in-place\S*)$/.test(w))) return [...targets, ...rest];
+      if (rest.some((w) => /^(?:-[a-z]*i\S*|--in-place\S*)$/.test(w))) return [...targets, ...inPlaceFiles(verb, rest)];
       continue;
     }
+    // WS-24 fix round 2: `dd` writes only its `of=` file (`if=` is read).
+    if (verb === "dd") return [...targets, ...rest.filter((w) => w.startsWith("of=")).map((w) => w.slice("of=".length))];
     if (ESCAPE_WRITE_VERBS.has(verb)) return [...targets, ...rest];
   }
   return targets;
@@ -782,10 +1081,10 @@ function segmentWriteTargets(seg: string): string[] {
 
 /** The ASK a protected-path Bash write gets (fix round 2) — a card in code; the bridge turns it into the
  *  typed deny wherever nobody can answer (dispatch, chat, a dispatch child). Every policy. */
-function bashProtectedWriteHook(): HookCallback {
+function bashProtectedWriteHook(home?: string): HookCallback {
   return async (input) => {
     const { command } = bashEscapeInput(input);
-    const hit = bashProtectedWriteHit(command);
+    const hit = bashProtectedWriteHit(command, { cwd: hookCwd(input), ...(home !== undefined ? { home } : {}) });
     return hit === undefined
       ? allow()
       : ask(`Bash writes under ${hit} — skills, commands, rules, output styles and agent definitions load into every future session; the user decides.`);
@@ -1069,7 +1368,7 @@ function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
       const verdict = await deps.reviewer.review({
         class: "bash", command,
         ...(escape ? { unsandboxed: true, ...(description !== undefined ? { justification: description } : {}), ...(cwd !== undefined && cwd.length > 0 ? { cwd } : {}) } : {}),
-      }, signal);
+      }, signal); // WS-24: the runner aborts `signal` when it times this callback out; the review aborts its model call with it
       if (verdict.verdict === "unsafe") return deny(verdict.reason || "the safety reviewer judged this command unsafe");
       if (escape) noteReviewerCleared(deps.sessionId, toolUseID ?? (typeof (pre as { tool_use_id?: unknown }).tool_use_id === "string" ? (pre as { tool_use_id: string }).tool_use_id : undefined), command);
       return allow();
@@ -1449,7 +1748,7 @@ export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hook
   // never clears) a command this floor denies, whichever of the two runs first.
   // Fix round 2: in the escape floor's own group, a Bash write under any `.winter/<kind>` is asked about,
   // sandboxed or not (see `bashProtectedWriteHit`). An `ask` — the floor's deny, when both apply, outranks it.
-  preToolUse.push({ matcher: "Bash", failClosed: true, hooks: [failClosed("sandbox-escape floor", escapeFloorHook(deps)), failClosed("protected-path Bash fence", bashProtectedWriteHook())] });
+  preToolUse.push({ matcher: "Bash", failClosed: true, hooks: [failClosed("sandbox-escape floor", escapeFloorHook(deps)), failClosed("protected-path Bash fence", bashProtectedWriteHook(deps.home))] });
   // WS-21 (spec §7.1, §7.2): the path fence — every policy. Unmatched (one callback per tool
   // call) because the write and read tools carry two vocabularies; anything else is an immediate allow.
   if (deps.home) preToolUse.push({ failClosed: true, hooks: [failClosed("path fence", pathFenceHook(deps))] });

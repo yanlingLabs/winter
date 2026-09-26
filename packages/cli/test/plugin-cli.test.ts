@@ -12,6 +12,7 @@ import { join } from "node:path";
 import {
   ensurePluginScope,
   pluginManagerOptionsFor,
+  pluginTokenIdsFor,
   revokePluginTokenBestEffort,
   runPluginInstallRoute,
   runPluginListRoute,
@@ -219,5 +220,11 @@ describe("revokePluginTokenBestEffort", () => {
     const result = await revokePluginTokenBestEffort(async () => { throw new Error("connect ECONNREFUSED"); }, "demo");
     expect(result.ok).toBe(false);
     expect(result.note).toContain("connect ECONNREFUSED");
+  });
+  // WS-24: a Tier-2 plugin's token is minted under its spec now; a pre-WS-24 daemon minted it under the
+  // bare name — disable/uninstall revoke both.
+  test("pluginTokenIdsFor: the spec, then the bare name an older daemon keyed it by", () => {
+    expect(pluginTokenIdsFor("demo@winter-examples")).toEqual(["demo@winter-examples", "demo"]);
+    expect(pluginTokenIdsFor("demo")).toEqual(["demo"]);
   });
 });

@@ -345,6 +345,14 @@ export function renderPluginMarketplaceUpdateOutcome(outcome: PluginMarketplaceU
 // `plugin.revokeToken` RPC instead. A down daemon is TOLERATED, not fatal.
 // ------------------------------------------------------------------------------------------------
 
+/** WS-24: the ids a plugin's daemon-side token can be stored under — its spec (what the supervisor keys
+ *  a Tier-2 plugin by, and mints its token for, since WS-24) and, for a token an older daemon minted,
+ *  its bare name. `spec` is the resolved `"<name>@<marketplace>"` the route reports. */
+export function pluginTokenIdsFor(spec: string): string[] {
+  const at = spec.lastIndexOf("@");
+  return at > 0 ? [spec, spec.slice(0, at)] : [spec];
+}
+
 export async function revokePluginTokenBestEffort(
   revoke: (pluginId: string) => Promise<unknown>,
   pluginId: string,

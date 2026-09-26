@@ -1077,21 +1077,40 @@ final class PluginManagerModelConsentTests: XCTestCase {
         XCTAssertNotNil(model.errorText)
     }
 
-    // MARK: - C2 defence in depth: ambiguous bare id
+    // MARK: - WS-24: a project/local install's background process is not started
 
-    /// `enable(_:)` refuses when the SAME bare id is installed (user scope) from more than one
-    /// marketplace — `plugin.setConsent`/`plugin.restart` are both keyed by the bare id daemon-side
-    /// and would silently act on whichever one the daemon's own lookup finds first.
-    func testEnableRefusesAnAmbiguousBareId() async throws {
+    func testIntroTextSaysAProjectOrLocalInstallsProcessIsNotStarted() {
+        for scope in [PluginScope.project, .local] {
+            let text = pluginConsentIntroText(scope: scope, hasEntry: true, openedByInstall: false)
+            XCTAssertTrue(text.contains("only when the plugin is installed for your user"), text)
+            XCTAssertTrue(text.contains("at \(scope.rawValue) scope it is not started"), text)
+        }
+        // A user-scope install (the one the daemon runs), or a plugin with no process at all: no clause.
+        XCTAssertFalse(pluginConsentIntroText(scope: .user, hasEntry: true, openedByInstall: true).contains("not started"))
+        XCTAssertFalse(pluginConsentIntroText(scope: .project, hasEntry: false, openedByInstall: false).contains("not started"))
+        XCTAssertTrue(pluginConsentIntroText(scope: .user, hasEntry: true, openedByInstall: true).contains("declining here turns the whole plugin off"))
+    }
+
+    // MARK: - WS-24: two marketplaces' same-named plugins are two installs
+
+    /// The pane's bare-id ambiguity refusal is gone (every call it makes is spec-keyed, and the daemon's
+    /// supervisor is keyed by spec): enabling one of two same-named installs goes straight to
+    /// `plugin.enable` for THAT spec.
+    func testEnableOfOneOfTwoSameNamedPluginsEnablesThatSpec() async throws {
         let (client, t) = try await connectedClient()
         let model = PluginManagerModel(client: client)
 
         async let action: Void = model.enable("demo@winter-examples")
         let listReq = await feedNextRequest(t, index: 1)
-        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"plugins":[{"id":"demo","installPath":"/a","scope":"user","enabled":true,"marketplace":"winter-examples"},{"id":"demo","installPath":"/b","scope":"user","enabled":true,"marketplace":"other-market"}]}}"#)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"plugins":[{"id":"demo","installPath":"/a","scope":"user","enabled":false,"marketplace":"winter-examples"},{"id":"demo","installPath":"/b","scope":"user","enabled":true,"marketplace":"other-market"}]}}"#)
+        let enableReq = await feedNextRequest(t, index: 2)
+        XCTAssertEqual(enableReq["method"] as? String, "plugin.enable")
+        XCTAssertEqual((enableReq["params"] as? [String: Any])?["spec"] as? String, "demo@winter-examples")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(enableReq["id"] as! Int),"result":{"ok":true,"spec":"demo@winter-examples","scope":"user","enabled":true}}"#)
+        let refreshReq = await feedNextRequest(t, index: 3)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(refreshReq["id"] as! Int),"result":{"plugins":[]}}"#)
         await action
 
-        XCTAssertNil(model.consentSheet)
-        XCTAssertTrue(model.errorText?.contains("more than one marketplace") ?? false, "\(model.errorText ?? "nil")")
+        XCTAssertFalse(model.errorText?.contains("more than one marketplace") ?? false)
     }
 }

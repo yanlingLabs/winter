@@ -374,3 +374,48 @@ final class KeyCaptureNSViewEscapeCancelTests: XCTestCase {
         XCTAssertNotNil(captured)
     }
 }
+
+// WS-24: bindings saved under a plugin's bare id before the daemon keyed live plugins by spec.
+@MainActor
+final class ShortcutBindingLegacyIdMigrationTests: XCTestCase {
+    private let k = UInt32(kVK_ANSI_K)
+    private let ctrl = UInt32(controlKey)
+
+    func testABareIdIsRewrittenToItsOneSpec() {
+        let old = [ShortcutBinding(pluginId: "battery", shortcutId: "toggle", keyCode: k, modifiers: ctrl)]
+        XCTAssertEqual(
+            migratedShortcutBindings(old, knownPluginIds: ["battery@winter-legacy", "other@m"]),
+            [ShortcutBinding(pluginId: "battery@winter-legacy", shortcutId: "toggle", keyCode: k, modifiers: ctrl)]
+        )
+    }
+
+    func testAmbiguousUnknownOrAlreadyQualifiedIdsAreLeftAlone() {
+        let old = [
+            ShortcutBinding(pluginId: "p", shortcutId: "a", keyCode: k, modifiers: ctrl),
+            ShortcutBinding(pluginId: "gone", shortcutId: "b", keyCode: k, modifiers: ctrl),
+            ShortcutBinding(pluginId: "q@m", shortcutId: "c", keyCode: k, modifiers: ctrl),
+        ]
+        XCTAssertNil(migratedShortcutBindings(old, knownPluginIds: ["p@m1", "p@m2", "q@m"]))
+    }
+
+    func testAMigratedBindingThatDuplicatesASpecKeyedOneIsDroppedAndTheSpecKeyedOneWins() {
+        let kept = ShortcutBinding(pluginId: "battery@m", shortcutId: "toggle", keyCode: UInt32(kVK_ANSI_J), modifiers: ctrl)
+        let old = [ShortcutBinding(pluginId: "battery", shortcutId: "toggle", keyCode: k, modifiers: ctrl), kept]
+        XCTAssertEqual(migratedShortcutBindings(old, knownPluginIds: ["battery@m"]), [kept])
+    }
+
+    func testTheModelSavesTheRewriteSoTheBindingShowsAndRebindsWithoutAConflict() {
+        let suite = "ShortcutBindingLegacyIdMigrationTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        ShortcutSettingsStore.save([ShortcutBinding(pluginId: "battery", shortcutId: "toggle", keyCode: k, modifiers: ctrl)], to: defaults)
+        let m = ShortcutBindingEditorModel(client: WinterClientTestFactory.make(), shortcutRegistry: nil, defaults: defaults)
+        m.migrateLegacyBindings(knownPluginIds: ["battery@winter-legacy"])
+        XCTAssertEqual(ShortcutSettingsStore.load(from: defaults),
+                       [ShortcutBinding(pluginId: "battery@winter-legacy", shortcutId: "toggle", keyCode: k, modifiers: ctrl)])
+        // Re-binding the SAME combo on the migrated pair is not a conflict with its own old binding.
+        m.capture(pluginId: "battery@winter-legacy", shortcutId: "toggle", keyCode: k, modifiers: ctrl)
+        XCTAssertNil(m.conflictMessage)
+        XCTAssertEqual(ShortcutSettingsStore.load(from: defaults).count, 1)
+    }
+}

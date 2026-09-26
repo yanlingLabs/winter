@@ -2,6 +2,7 @@ import { readFileSync, readdirSync, statSync, mkdirSync, writeFileSync } from "n
 import { join } from "node:path";
 import type { TrustStore } from "../agent/trust";
 import { storeHomeFor } from "../agent/paths";
+import { trustedProjectWalk } from "../agent/project-scope-dirs";
 
 /** WS-21: user-scope workflow scripts live in the store home's `workflows/` — `<home>/sdk/workflows`
  *  (claude's persistent config-dir entry of the same name, spec §3.3, F18) on a run-home build,
@@ -104,7 +105,10 @@ function parseWorkflowFile(path: string, fallbackName: string): { name: string; 
 
 /**
  * Resolves a workflow script by name from two sources, closest-wins: a trusted project's
- * `<cwd>/.winter/workflows/<name>.js`, then `userWorkflowsDir(winterHome)/<name>.js`. Unlike
+ * `.winter/workflows/<name>.js`, then `userWorkflowsDir(winterHome)/<name>.js`. WS-24: the project
+ * tier is the trusted project's walk (`trustedProjectWalk` — trust keyed on the repository, the
+ * directories from the cwd up to the project scope's root, so a linked worktree of a trusted repo lists
+ * its own), NEAREST wins, as skills and agents do on a run home. Unlike
  * OutputStyleStore (agent/output-styles.ts) there are no built-ins to fall back to — an unresolved
  * name simply resolves to null. Mirrors OutputStyleStore's trust-gated project-dir discovery and
  * slug-guard exactly, adapted for the `.js` extension and the lack of built-ins. Never throws,
@@ -116,8 +120,8 @@ export class WorkflowStore {
   /** Shared traversal for resolve()/read(): project[trusted] > user. Slug-guarded — see SLUG_RE. */
   private resolveInternal(name: string, cwd: string | null): { name: string; description: string; source: string; body: string } | null {
     if (!SLUG_RE.test(name)) return null;
-    if (cwd && this.deps.trust.isTrusted(cwd)) {
-      const p = parseWorkflowFile(join(cwd, ".winter", "workflows", `${name}.js`), name);
+    for (const dir of trustedProjectWalk(cwd, this.deps.trust)) {
+      const p = parseWorkflowFile(join(dir, ".winter", "workflows", `${name}.js`), name);
       if (p) return { ...p, source: "project" };
     }
     const u = parseWorkflowFile(join(userWorkflowsDir(this.deps.winterHome), `${name}.js`), name);
@@ -152,7 +156,8 @@ export class WorkflowStore {
       }
     };
     scan(userWorkflowsDir(this.deps.winterHome), "user");
-    if (cwd && this.deps.trust.isTrusted(cwd)) scan(join(cwd, ".winter", "workflows"), "project"); // project overrides user
+    // Project overrides user; along the walk the NEAREST wins, so the root-most directory is scanned first.
+    for (const dir of [...trustedProjectWalk(cwd, this.deps.trust)].reverse()) scan(join(dir, ".winter", "workflows"), "project");
     return [...out].map(([name, v]) => ({ name, description: v.description, source: v.source }));
   }
 

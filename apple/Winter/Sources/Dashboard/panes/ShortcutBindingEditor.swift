@@ -118,6 +118,7 @@ final class ShortcutBindingEditorModel: ObservableObject {
 
     func refresh() async {
         guard let entries = try? await client.pluginsContrib() else { return }
+        migrateLegacyBindings(knownPluginIds: entries.map(\.pluginId))
         let bindings = ShortcutSettingsStore.load(from: defaults)
         rows = entries.flatMap { entry in
             entry.shortcuts.map { shortcut in
@@ -130,6 +131,18 @@ final class ShortcutBindingEditorModel: ObservableObject {
                 )
             }
         }
+    }
+
+    /// WS-24: rewrites every persisted binding saved under a plugin's BARE id (what the daemon named a live
+    /// plugin before WS-24) to the one spec (`"<name>@<marketplace>"`) among `knownPluginIds` whose name half
+    /// matches, then saves and re-arms. Without it every binding saved before the upgrade showed as unbound,
+    /// re-binding it was refused as a conflict with itself, and a new combo left both armed. A bare id that
+    /// matches no spec, or two (the same name from two marketplaces), is left as it is.
+    func migrateLegacyBindings(knownPluginIds: [String]) {
+        let bindings = ShortcutSettingsStore.load(from: defaults)
+        guard let migrated = migratedShortcutBindings(bindings, knownPluginIds: knownPluginIds) else { return }
+        ShortcutSettingsStore.save(migrated, to: defaults)
+        _ = shortcutRegistry?.reload(migrated)
     }
 
     /// The key-capture control's callback. Three gates, in order, before anything is persisted:
@@ -177,6 +190,33 @@ final class ShortcutBindingEditorModel: ObservableObject {
             rows[idx].binding = candidate
         }
     }
+}
+
+/// PURE (WS-24): `bindings` with each bare-id `pluginId` rewritten to the ONE spec in `knownPluginIds` whose
+/// name half (before the last `@`) equals it, or `nil` when nothing changes. A binding already on a spec, or
+/// whose bare id matches none or several specs, is kept as it is. Fix round 2: when the rewrite lands on a
+/// (spec, shortcutId) pair that ALREADY has a spec-keyed binding (the user re-bound it after the upgrade),
+/// the spec-keyed one wins and the migrated duplicate is dropped — two bindings for one pair would both arm.
+/// Table-tested in `ShortcutBindingEditorTests`.
+func migratedShortcutBindings(_ bindings: [ShortcutBinding], knownPluginIds: [String]) -> [ShortcutBinding]? {
+    func nameHalf(_ spec: String) -> String? {
+        guard let at = spec.lastIndex(of: "@"), at != spec.startIndex else { return nil }
+        return String(spec[..<at])
+    }
+    var changed = false
+    let alreadyKeyed = Set(bindings.filter { $0.pluginId.contains("@") }.map { "\($0.pluginId)\u{0}\($0.shortcutId)" })
+    var out: [ShortcutBinding] = []
+    for binding in bindings {
+        guard !binding.pluginId.contains("@") else { out.append(binding); continue }
+        let matches = knownPluginIds.filter { nameHalf($0) == binding.pluginId }
+        guard matches.count == 1 else { out.append(binding); continue }
+        changed = true
+        guard !alreadyKeyed.contains("\(matches[0])\u{0}\(binding.shortcutId)") else { continue } // the spec-keyed one wins
+        var next = binding
+        next.pluginId = matches[0]
+        out.append(next)
+    }
+    return changed ? out : nil
 }
 
 // -----------------------------------------------------------------------------------------------

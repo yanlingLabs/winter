@@ -22,7 +22,7 @@ export class HookRegistry {
   /** Replaces the ENTIRE index — not a merge. Callers always pass the full current eligible-plugin
    *  set (e.g. `allPlugins.filter(pluginHooksEligible)`), so a plugin that's since been disabled or
    *  had a hook removed simply isn't in the next `rebuild()` call and drops out of every event's
-   *  list, same as `PluginContribRegistry`/`McpManager.startPlugins` treat their own "current set". */
+   *  list, same as `PluginContribRegistry` treats its own "current set". */
   rebuild(plugins: HookRegistryPlugin[]): void {
     const next = new Map<string, HookSpec[]>();
     for (const plugin of plugins) {

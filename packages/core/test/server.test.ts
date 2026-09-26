@@ -832,31 +832,26 @@ describe("daemon IPC", () => {
 
     const disableRes = await c.request(METHODS.mcpDisable, { name: "fake" });
     expect(disableRes.result).toEqual({ ok: true, name: "fake", enabled: false });
-    // MEDIUM (fix wave, pre-merge review, finding 3): `mcp.disable` now ACTUALLY stops the tracked
-    // client (`McpManager.stopServer`) and unregisters its tools, rather than leaving the real
-    // process running under a cosmetic "disabled" label — a disabled server's tools must not still
-    // be callable through `tool.list`. The row is synthesized (never tracked any more), so
-    // `toolNames` is empty and `transport` is now set (same shape an HTTP/SSE "unmanaged" row gets).
-    // The registry-level proof that the tools are truly gone (not just absent from THIS report) is
-    // `manager.test.ts`'s "McpManager.stopServer" block, which has a direct `ToolRegistry` handle.
+    // MEDIUM (fix wave, pre-merge review, finding 3): `mcp.disable` drops the tracked status
+    // (`McpManager.stopServer`; WS-24: the manager is a status probe — nothing of the server is left
+    // running to stop). The row is synthesized (never tracked any more), so `toolNames` is empty and
+    // `transport` is now set (same shape an HTTP/SSE "unmanaged" row gets).
     expect((await c.request(METHODS.mcpList, {})).result.servers).toEqual([{ name: "fake", status: "disabled", toolNames: [], source: "user", transport: "stdio" }]);
 
     const enableRes = await c.request(METHODS.mcpEnable, { name: "fake" });
     expect(enableRes.result).toEqual({ ok: true, name: "fake", enabled: true });
-    // Symmetry: re-enabling actually RESTARTS it (`McpManager.startOneUserServer`) — a disable/enable
-    // round trip must never need a daemon restart to bring a stdio server back.
+    // Symmetry: re-enabling re-probes it (`McpManager.startOneUserServer`) — a disable/enable round
+    // trip must never need a daemon restart to bring a stdio server's status back.
     expect((await c.request(METHODS.mcpList, {})).result.servers).toEqual([{ name: "fake", status: "connected", toolNames: ["echo"], source: "user" }]);
     c.close();
   });
 
   // MEDIUM (fix wave, pre-merge review, finding 3, symmetry — regression coverage caught by a
   // second review pass): `mcp.enable` on a server that was NEVER disabled (an idempotent double
-  // toggle from the Mac pane, or an enable racing an unrelated write) used to kill the running
-  // process: `startOneUserServer` stopped the old client but left its tools registered, so
-  // `startOne`'s "throw" collision mode hit a duplicate-name `registry.register` on the very next
-  // line and turned it into a dead process with a "failed" status. Fixed by routing the stop
-  // through `stopServer` (which also unregisters), proven here at the full IPC layer against a real
-  // boot-started child.
+  // toggle from the Mac pane, or an enable racing an unrelated write) used to turn it into a dead
+  // process with a "failed" status (a duplicate-name tool registration). WS-24: the manager is a
+  // status probe that registers nothing, so the collision cannot arise; kept at the full IPC layer
+  // against a real boot-probed server.
   test("mcp.enable on an ALREADY-RUNNING, never-disabled server does not kill it", async () => {
     if (process.platform !== "darwin") return; // spawns a child process
     const { FakeProvider } = await import("../src/agent/fake-provider");
@@ -1460,6 +1455,8 @@ describe("daemon IPC", () => {
       writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
     }
 
+    /** WS-24: a plugin connection authenticates as its SPEC (`"<id>@test-mkt"` for `seedBatteryPlugin`'s
+     *  installs) — the daemon's plugin supervisor, token and consent lookups are all keyed by it. */
     async function connectPlugin(store: SessionStore, socketPath: string, pluginId: string): Promise<TestClient> {
       const raw = store.mintPluginToken(pluginId);
       const c = await TestClient.connect(socketPath);
@@ -1482,7 +1479,7 @@ describe("daemon IPC", () => {
     test("no provider connected → typed no_provider (plugin caller, fully consented)", async () => {
       const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] } });
       seedBatteryPlugin(srv.home, "battery-limiter");
-      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
+      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter@test-mkt");
 
       const res = await plugin.request(METHODS.hardwareRequest, { verb: "getChargeLimit" });
       expect(res.result).toEqual({ code: "no_provider", message: "hardware features require Winter.app" });
@@ -1494,7 +1491,7 @@ describe("daemon IPC", () => {
       const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] } });
       seedBatteryPlugin(srv.home, "battery-limiter");
       const provider = await connectProvider(srv.socketPath, srv.harnessToken);
-      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
+      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter@test-mkt");
 
       const reqPromise = plugin.request(METHODS.hardwareRequest, { verb: "setChargeLimit", argsJson: '{"percent":80}' });
       const pushed = await provider.waitForNotification((n) => n.method === METHODS.event && n.params.type === "hardware_requested");
@@ -1515,7 +1512,7 @@ describe("daemon IPC", () => {
     test("unconsented plugin (manifest declares battery, but no hardware consent record) → typed consent_denied naming the missing consent class", async () => {
       const srv = await bootHardwareServer(); // no consents at all
       seedBatteryPlugin(srv.home, "battery-limiter");
-      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
+      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter@test-mkt");
 
       const res = await plugin.request(METHODS.hardwareRequest, { verb: "getChargeLimit" });
       expect(res.result).toEqual({ code: "consent_denied", missing: "hardware" });
@@ -1529,7 +1526,7 @@ describe("daemon IPC", () => {
       writeFileSync(join(srv.home, "settings.json"), JSON.stringify({
         schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
       }));
-      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
+      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter@test-mkt");
 
       const denied = await plugin.request(METHODS.hardwareRequest, { verb: "getChargeLimit" });
       expect(denied.result).toEqual({ code: "consent_denied", missing: "hardware" });
@@ -1557,7 +1554,7 @@ describe("daemon IPC", () => {
     test("unconsented plugin (consented, but manifest doesn't declare the battery permission) → typed consent_denied naming the missing permission class", async () => {
       const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] }, hardwarePermission: [] });
       seedBatteryPlugin(srv.home, "battery-limiter", {}); // permissions.hardware omitted entirely
-      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
+      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter@test-mkt");
 
       const res = await plugin.request(METHODS.hardwareRequest, { verb: "getChargeLimit" });
       expect(res.result).toEqual({ code: "consent_denied", missing: "battery" });
@@ -1576,7 +1573,7 @@ describe("daemon IPC", () => {
     test("unknown verb from a fully consented plugin → typed unknown_verb, bypassing consent entirely", async () => {
       const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] } });
       seedBatteryPlugin(srv.home, "battery-limiter");
-      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
+      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter@test-mkt");
 
       const res = await plugin.request(METHODS.hardwareRequest, { verb: "setFanSpeed" });
       expect(res.result).toEqual({ code: "unknown_verb" });
@@ -1588,7 +1585,7 @@ describe("daemon IPC", () => {
       const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] }, timeoutMs: 50 });
       seedBatteryPlugin(srv.home, "battery-limiter");
       const provider = await connectProvider(srv.socketPath, srv.harnessToken);
-      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
+      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter@test-mkt");
 
       const res = await plugin.request(METHODS.hardwareRequest, { verb: "getChargeLimit" });
       expect(res.result).toEqual({ code: "timeout" });
@@ -1606,7 +1603,7 @@ describe("daemon IPC", () => {
       const impostorRespond = await impostor.request(METHODS.hardwareRespond, { requestId: "req_whatever" });
       expect(impostorRespond.error?.code).toBe(ERR.UNAUTHORIZED);
 
-      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
+      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter@test-mkt");
       const reqPromise = plugin.request(METHODS.hardwareRequest, { verb: "getChargeLimit" });
       const pushed = await provider.waitForNotification((n) => n.method === METHODS.event && n.params.type === "hardware_requested");
       const ok = await provider.request(METHODS.hardwareRespond, { requestId: pushed.params.requestId, resultJson: "{}" });
@@ -1642,7 +1639,7 @@ describe("daemon IPC", () => {
       const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] } });
       seedBatteryPlugin(srv.home, "battery-limiter");
       const provider = await connectProvider(srv.socketPath, srv.harnessToken);
-      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
+      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter@test-mkt");
 
       const reqPromise = plugin.request(METHODS.hardwareRequest, { verb: "getChargeLimit" });
       const pushed = await provider.waitForNotification((n) => n.method === METHODS.event && n.params.type === "hardware_requested");
@@ -1652,7 +1649,7 @@ describe("daemon IPC", () => {
       const auditLines = readFileSync(join(srv.home, "audit.jsonl"), "utf8").split("\n").filter((l) => l.length > 0).map((l) => JSON.parse(l));
       const hwLine = auditLines.find((l) => l.kind === "hardware" && l.verb === "getChargeLimit");
       expect(hwLine).toMatchObject({
-        kind: "hardware", verb: "getChargeLimit", requester: { kind: "plugin", id: "battery-limiter" },
+        kind: "hardware", verb: "getChargeLimit", requester: { kind: "plugin", id: "battery-limiter@test-mkt" },
         outcome: { resultJson: '{"percent":80}' },
       });
 
@@ -1662,7 +1659,7 @@ describe("daemon IPC", () => {
     test("audit trail: unconsented plugin's denied request lands an audit line with consent_denied outcome", async () => {
       const srv = await bootHardwareServer(); // no consents at all
       seedBatteryPlugin(srv.home, "battery-limiter");
-      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
+      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter@test-mkt");
 
       const res = await plugin.request(METHODS.hardwareRequest, { verb: "getChargeLimit" });
       expect(res.result).toEqual({ code: "consent_denied", missing: "hardware" });
@@ -1670,7 +1667,7 @@ describe("daemon IPC", () => {
       const auditLines = readFileSync(join(srv.home, "audit.jsonl"), "utf8").split("\n").filter((l) => l.length > 0).map((l) => JSON.parse(l));
       const hwLine = auditLines.find((l) => l.kind === "hardware" && l.verb === "getChargeLimit");
       expect(hwLine).toMatchObject({
-        kind: "hardware", verb: "getChargeLimit", requester: { kind: "plugin", id: "battery-limiter" },
+        kind: "hardware", verb: "getChargeLimit", requester: { kind: "plugin", id: "battery-limiter@test-mkt" },
         outcome: { code: "consent_denied", missing: "hardware" },
       });
       expect(typeof hwLine.ts).toBe("number");
@@ -1681,7 +1678,7 @@ describe("daemon IPC", () => {
     test("audit trail: unknown_verb from a plugin lands an audit line with unknown_verb outcome", async () => {
       const srv = await bootHardwareServer({ consents: { "battery-limiter": ["hardware"] } });
       seedBatteryPlugin(srv.home, "battery-limiter");
-      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
+      const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter@test-mkt");
 
       const res = await plugin.request(METHODS.hardwareRequest, { verb: "setFanSpeed" });
       expect(res.result).toEqual({ code: "unknown_verb" });
@@ -1689,7 +1686,7 @@ describe("daemon IPC", () => {
       const auditLines = readFileSync(join(srv.home, "audit.jsonl"), "utf8").split("\n").filter((l) => l.length > 0).map((l) => JSON.parse(l));
       const hwLine = auditLines.find((l) => l.kind === "hardware" && l.verb === "setFanSpeed");
       expect(hwLine).toMatchObject({
-        kind: "hardware", verb: "setFanSpeed", requester: { kind: "plugin", id: "battery-limiter" },
+        kind: "hardware", verb: "setFanSpeed", requester: { kind: "plugin", id: "battery-limiter@test-mkt" },
         outcome: { code: "unknown_verb" },
       });
       expect(typeof hwLine.ts).toBe("number");

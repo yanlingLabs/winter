@@ -13,7 +13,6 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 import { Settings, saveSettings, sdkLocalMcpServers, sdkUserMcpServers } from "../../src/settings";
 import { McpManager } from "../../src/agent/mcp/manager";
-import { ToolRegistry } from "../../src/agent/tools/registry";
 import { TrustStore } from "../../src/agent/trust";
 import { configuredMcpServersFor } from "../../src/runtime-sdk/external-mcp";
 import { localScopeKeyFor, runHomeInputFor } from "../../src/runtime-sdk/run-home-input";
@@ -61,7 +60,7 @@ describe("mcp.add / remove / get over the three scopes", () => {
     const project = tmp("winter-mcpscope-proj-");
     saveSettings(join(home, "settings.json"), Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } }));
     const trust = new TrustStore(join(home, "trust.json"));
-    const mcp = new McpManager({ registry: new ToolRegistry(), trust });
+    const mcp = new McpManager({ trust });
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets")));
@@ -113,6 +112,36 @@ describe("mcp.add / remove / get over the three scopes", () => {
     const local = await c.request(METHODS.mcpAdd, { name: "mine", entry: http, scope: "local", cwd: project });
     expect(local.error?.message).toMatch(/credential-shaped/);
     expect(local.error?.message).not.toContain("Bearer team");
+  });
+
+  // WS-24: the wire schema used to strip `versionNegotiation` (zod drops an undeclared key), so a server
+  // added through the RPC lost the protocol-era choice the settings file and `external-mcp.ts` carry.
+  test("mcp.add keeps a server's versionNegotiation in every scope, and the child's config carries it", async () => {
+    const { home, project, c, config } = await boot();
+    const pinned = { ...stdio, versionNegotiation: { pin: "2026-07-28" } };
+    const auto = { type: "http", url: "https://auto.test/mcp", versionNegotiation: "auto" } as const;
+    const legacy = { ...stdio, command: "legacy-srv", versionNegotiation: "legacy" } as const;
+    expect((await c.request(METHODS.mcpAdd, { name: "pinned", entry: pinned, scope: "local", cwd: project })).result.ok).toBe(true);
+    expect((await c.request(METHODS.mcpAdd, { name: "auto", entry: auto, scope: "user" })).result.ok).toBe(true);
+    expect((await c.request(METHODS.mcpAdd, { name: "legacy", entry: legacy, scope: "project", cwd: project })).result.ok).toBe(true);
+    expect(config().projects[project].mcpServers.pinned.versionNegotiation).toEqual({ pin: "2026-07-28" });
+    expect(config().mcpServers.auto.versionNegotiation).toBe("auto");
+    expect(JSON.parse(readFileSync(join(project, ".winter", "mcp.json"), "utf8")).mcpServers.legacy.versionNegotiation).toBe("legacy");
+    // …and mcp.get echoes it back, in every scope.
+    expect((await c.request(METHODS.mcpGet, { name: "pinned", scope: "local", cwd: project })).result.versionNegotiation).toEqual({ pin: "2026-07-28" });
+    expect((await c.request(METHODS.mcpGet, { name: "auto", scope: "user" })).result.versionNegotiation).toBe("auto");
+    expect((await c.request(METHODS.mcpGet, { name: "legacy", scope: "project", cwd: project })).result.versionNegotiation).toBe("legacy");
+    // What a spawned child is handed (the project file only because the project is trusted here).
+    const child = configuredMcpServersFor({
+      settings: null, cwd: project, trusted: () => true,
+      userMcpServers: sdkUserMcpServers(home), localMcpServers: sdkLocalMcpServers(home, project),
+    });
+    expect((child.pinned as { versionNegotiation?: unknown }).versionNegotiation).toEqual({ pin: "2026-07-28" });
+    expect((child.auto as { versionNegotiation?: unknown }).versionNegotiation).toBe("auto");
+    expect((child.legacy as { versionNegotiation?: unknown }).versionNegotiation).toBe("legacy");
+    // A malformed value is still refused at the wire.
+    const bad = await c.request(METHODS.mcpAdd, { name: "bad", entry: { ...stdio, versionNegotiation: "modern" }, scope: "user" });
+    expect(bad.error).toBeDefined();
   });
 
   test("the scopes are independent: the same name in two scopes is two entries", async () => {
@@ -199,7 +228,7 @@ describe("review I5: localScopeKeyFor", () => {
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets")));
     const tokens = await authority.ensureTokens();
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets: new FileSecretStore(join(home, "s2")), mcp: new McpManager({ registry: new ToolRegistry(), trust: new TrustStore(join(home, "trust.json")) }) });
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets: new FileSecretStore(join(home, "s2")), mcp: new McpManager({ trust: new TrustStore(join(home, "trust.json")) }) });
     try {
       const c = await TestClient.connect(socketPath);
       await c.request(METHODS.hello, { protocolVersion: PROTOCOL_VERSION, role: "harness", token: tokens.harness, clientName: "cli" });
@@ -238,7 +267,7 @@ describe("R.3 residual: MCP project scope from a linked worktree of a trusted re
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets")));
     const tokens = await authority.ensureTokens();
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets: new FileSecretStore(join(home, "s2")), trust, mcp: new McpManager({ registry: new ToolRegistry(), trust }) });
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets: new FileSecretStore(join(home, "s2")), trust, mcp: new McpManager({ trust }) });
     const c = await TestClient.connect(socketPath);
     await c.request(METHODS.hello, { protocolVersion: PROTOCOL_VERSION, role: "harness", token: tokens.harness, clientName: "cli" });
     stop = () => { c.close(); server.stop(); store.close(); };

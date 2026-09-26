@@ -44,8 +44,9 @@
 // downgraded, pre-WS-21 build's ability to read its own consent back after a rollback. The new build
 // reads only the qualified key (`PluginStore#list()`, `agent/plugins.ts`); an older, downgraded build
 // reads only the bare one — both coexist in the same file, neither ever reads the other's key.
+import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join, sep } from "node:path";
+import { basename, join, sep } from "node:path";
 import { sdkPluginsRoot, sdkHomeFor } from "../agent/paths";
 import { loadManifest, requiredConsentClasses } from "../agent/plugin-manifest";
 import { writeJsonAtomic } from "../sdk-files";
@@ -89,20 +90,57 @@ function isDirectory(path: string): boolean {
   try { return statSync(path).isDirectory(); } catch { return false; }
 }
 
-/** Whether `<home>/plugins/<name>` (or any path under it) is a legacy PLUGIN this converter would
- *  actually pick up. `convertLegacyPlugins`'s own discovery treats ANY real directory under
- *  `<home>/plugins` as a candidate — a `winter-plugin.json` or a Tier-1 `plugin.json` is read if
- *  present (`readLegacyManifest`), but NEITHER is required: a manifest-less directory still converts,
- *  generating a fresh manifest from just its own name. Exported so Migration C's old-layout detection
- *  (`migration/migrate-c.ts`'s `legacyPluginDirs`) can use the EXACT SAME predicate — reviewer round,
- *  item 3 — instead of maintaining a second, driftable definition of "this counts as a legacy
- *  plugin" (the one it had required a `winter-plugin.json`, so a home whose only legacy content was a
- *  manifest-less or `plugin.json`-only plugin never migrated even though this converter would have
- *  picked it up). Follows symlinks (`statSync`-based `isDirectory`, not `Dirent.isDirectory()`) for
- *  the same reason finding 4's own discovery fix needed to — see this converter's own directory scan,
- *  below, which uses this same function. */
-export function isLegacyPluginDir(path: string): boolean {
-  return isDirectory(path);
+/** WS-24: the files a pre-WS-21 plugin directory could be recognized by — what that build's own
+ *  `PluginStore` read out of `<home>/plugins/<id>` (its `winter-plugin.json`, a Tier-1 `plugin.json`, a
+ *  `.mcp.json`), plus claude's own manifest. A `skills/<name>/SKILL.md` counts too (`hasLegacySkill`). */
+const LEGACY_PLUGIN_MARKER_FILES: readonly string[] = ["winter-plugin.json", "plugin.json", join(".claude-plugin", "plugin.json"), ".mcp.json"];
+
+function isFile(path: string): boolean {
+  try { return statSync(path).isFile(); } catch { return false; }
+}
+
+function hasLegacySkill(dir: string): boolean {
+  try {
+    return readdirSync(join(dir, "skills"), { withFileTypes: true }).some((e) => isFile(join(dir, "skills", e.name, "SKILL.md")));
+  } catch { return false; }
+}
+
+/** WS-24: every bare plugin id the legacy `settings.json` names — `plugins.enabled`, `plugins.disabled`,
+ *  or a `plugins.consents` record's key (a qualified `"<id>@<marketplace>"` key names no LEGACY dir, so
+ *  only an `@`-less one counts). A directory the user demonstrably acted on is a plugin whatever it holds. */
+export function legacyPluginIdsNamedInSettings(home: string): Set<string> {
+  const { enabled, disabled, consents } = readLegacyPluginSettings(home);
+  return new Set([...enabled, ...disabled, ...Object.keys(consents).filter((k) => !k.includes("@"))]);
+}
+
+/** Whether `<home>/plugins/<name>` (or any path under it) is a legacy PLUGIN this converter picks up.
+ *  Exported so Migration C's old-layout detection (`migration/migrate-c.ts`, through
+ *  `legacyPluginDirNames`) uses the EXACT SAME predicate — reviewer round, item 3 — instead of a
+ *  second, driftable definition. Follows symlinks (`statSync`, not `Dirent.isDirectory()`, finding 4:
+ *  a dev checkout linked into `<home>/plugins`).
+ *
+ *  WS-24: a directory alone is no longer enough. The reviewer round's rule ("no manifest required") let
+ *  ANY folder under `<home>/plugins` — an empty one, a stray `marketplaces/` or `cache/` some tool wrote,
+ *  a leftover checkout — trip Migration C on every boot, and then be "converted" into an empty plugin.
+ *  A legacy plugin is now a directory holding something the pre-WS-21 build could load from it
+ *  (`LEGACY_PLUGIN_MARKER_FILES`, or a skill), OR one the legacy settings name (`namedInSettings`) —
+ *  still no manifest required: a `.mcp.json`- or skills-only plugin, or a bare one the user enabled,
+ *  converts as before. */
+export function isLegacyPluginDir(path: string, namedInSettings: ReadonlySet<string> = new Set()): boolean {
+  if (!isDirectory(path)) return false;
+  if (namedInSettings.has(basename(path))) return true;
+  return LEGACY_PLUGIN_MARKER_FILES.some((f) => isFile(join(path, f))) || hasLegacySkill(path);
+}
+
+/** WS-24: the ONE discovery of the legacy plugins under `<home>/plugins` — `convertLegacyPlugins`'s
+ *  candidate list AND Migration C's old-layout check (`migrate-c.ts`'s `legacyPluginDirs`), so the two
+ *  cannot count different things. `[]` when there is no `<home>/plugins` at all. */
+export function legacyPluginDirNames(home: string): string[] {
+  const root = join(home, "plugins");
+  const named = legacyPluginIdsNamedInSettings(home);
+  try {
+    return readdirSync(root, { withFileTypes: true }).filter((e) => isLegacyPluginDir(join(root, e.name), named)).map((e) => e.name);
+  } catch { return []; }
 }
 
 function readJsonIfPresent<T>(path: string): T | undefined {
@@ -350,10 +388,17 @@ function rekeyConsents(home: string, idToKey: Map<string, string>, idToFingerpri
   // Every bare-id record starts here, untouched — the qualified records are ADDED below, never
   // replacing what's already here.
   const additive: Record<string, unknown> = { ...(consents as Record<string, unknown>) };
+  const ledger = readConsentCarryLedger(home);
+  const carriedNow: Record<string, { from: string; at: string }> = {};
   let changed = false;
   for (const [id, record] of Object.entries(consents as Record<string, unknown>)) {
     const key = idToKey.get(id);
     if (key === undefined) continue;
+    // WS-24: carried ONCE per bare record (see `consentCarryLedgerPath`). The same record already carried
+    // by an earlier run means whatever the qualified key holds now — revoked, narrowed, or still granted —
+    // is the user's own decision since, and a re-run after a rollback must not overwrite or resurrect it.
+    const from = bareConsentDigest(record);
+    if (ledger.carried[key]?.from === from) continue;
     changed = true;
     const classes: string[] = [];
     if (record && typeof record === "object") {
@@ -363,9 +408,55 @@ function rekeyConsents(home: string, idToKey: Map<string, string>, idToFingerpri
     }
     const fingerprint = idToFingerprint.get(id) ?? "";
     additive[key] = { classes, fingerprint };
+    carriedNow[key] = { from, at: new Date().toISOString() };
   }
   if (!changed) return;
   writeJsonAtomic(path, { ...raw, plugins: { ...plugins, consents: additive } });
+  // After the settings write, never before: a crash between the two re-carries the SAME record on the
+  // next run (identical content), where the reverse order could lose it.
+  writeJsonAtomic(consentCarryLedgerPath(home), { version: 1, carried: { ...ledger.carried, ...carriedNow } });
+}
+
+/**
+ * WS-24 — THE CARRY LEDGER. Which bare legacy consent records `rekeyConsents` has already carried to a
+ * qualified `"<id>@winter-legacy"` key, by the record's digest. Without it a revoke did not survive a
+ * rollback: Migration C's rollback leaves `settings.json` and `sdk/` alone (DECISION 15), so the next
+ * run's `convert-plugins` met the SAME bare record again and carried it again — resurrecting a qualified
+ * record the user had deleted (`plugin.uninstall`'s strip, a hand edit) or overwriting one they had
+ * narrowed. Now a bare record is carried once: an unchanged one is left to whatever the user made of its
+ * qualified key since; a CHANGED one (the user consented again on the older build after the rollback) is
+ * a new decision, and carried.
+ *
+ * Kept under the migration's own directory (`migration/c/`), which a rollback leaves in place (it removes
+ * only the manifest and the COMPLETE marker) — spelled here rather than imported from `migrate-c.ts`,
+ * which imports this module. Holds digests and timestamps only.
+ *
+ * TWO LIMITS, stated rather than papered over:
+ *  - A home first migrated by 0.117/0.118 has NO ledger. The first re-migration on this build therefore
+ *    carries every bare record once more — a revoke made before that re-run is lost that one time (the
+ *    ledger it then writes protects every later one). Nothing on disk tells an old qualified-key absence
+ *    ("revoked") from one that was never written, so there is nothing safer to infer.
+ *  - The downgrade direction is asymmetric by design (DECISION 15): a revoke on THIS build changes the
+ *    qualified key only, so an older build rolled back to still reads the untouched bare record and
+ *    treats the plugin as consented there. Only the new build honours a revoke made on the new build.
+ */
+function consentCarryLedgerPath(home: string): string {
+  return join(home, "migration", "c", "carried-consents.json");
+}
+
+function readConsentCarryLedger(home: string): { carried: Record<string, { from: string; at: string }> } {
+  const raw = readJsonIfPresent<{ carried?: unknown }>(consentCarryLedgerPath(home));
+  const carried = raw && typeof raw.carried === "object" && raw.carried !== null ? raw.carried as Record<string, { from: string; at: string }> : {};
+  return { carried };
+}
+
+/** A stable digest of one bare consent record (object keys sorted, so a re-serialized file with the same
+ *  content reads as the same record). */
+function bareConsentDigest(record: unknown): string {
+  const stable = (v: unknown): unknown => (v && typeof v === "object" && !Array.isArray(v)
+    ? Object.fromEntries(Object.keys(v as object).sort().map((k) => [k, stable((v as Record<string, unknown>)[k])]))
+    : v);
+  return createHash("sha256").update(JSON.stringify(stable(record) ?? null)).digest("hex");
 }
 
 /**
@@ -385,18 +476,11 @@ function rekeyConsents(home: string, idToKey: Map<string, string>, idToFingerpri
 export async function convertLegacyPlugins(home: string): Promise<ConvertLegacyPluginsResult> {
   const legacyRoot = join(home, "plugins");
   const result: ConvertLegacyPluginsResult = { converted: [], skipped: [] };
-  let ids: string[] = [];
-  try {
-    // Post-merge fix round, finding 4 / reviewer round, item 3: `isLegacyPluginDir` — the SAME
-    // predicate Migration C's old-layout detection now shares (see its own doc) — follows symlinks
-    // and requires no manifest at all (a manifest-less directory still converts, below).
-    ids = readdirSync(legacyRoot, { withFileTypes: true })
-      .filter((e) => isLegacyPluginDir(join(legacyRoot, e.name)))
-      .map((e) => e.name);
-  } catch {
-    return result; // no legacy plugins directory at all — nothing to convert
-  }
-  if (ids.length === 0) return result;
+  // Post-merge fix round, finding 4 / reviewer round, item 3 / WS-24: `legacyPluginDirNames` — the SAME
+  // discovery Migration C's old-layout detection shares (see its own doc) — follows symlinks and needs
+  // no manifest, but skips a folder holding nothing a legacy plugin could have loaded.
+  const ids = legacyPluginDirNames(home);
+  if (ids.length === 0) return result; // no legacy plugins directory, or no plugin in it
 
   const marketplaceDir = join(sdkPluginsRoot(home), "marketplaces", LEGACY_MARKETPLACE_NAME);
   mkdirSync(join(marketplaceDir, "plugins"), { recursive: true });
