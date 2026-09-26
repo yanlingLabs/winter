@@ -3102,7 +3102,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // P8b Task 16: a LIVE Winter child is told (`Query.setModel`); a resumable one re-reads the
         // store when it reopens. The store write above is the contract; this is best-effort and
         // never delays the reply.
-        void opts.winter?.get(p.sessionId)?.setModel(model ?? undefined).catch((err: unknown) => {
+        // WS-23 review r1 I-5: not while a provider switch is replacing the child -- the live child is the
+        // SOURCE being left, it would refuse a model on another provider, and the target is spawned with
+        // the new model from the record anyway.
+        const liveDriver = opts.winter?.get(p.sessionId);
+        if (liveDriver?.handoffPending !== true) void liveDriver?.setModel(model ?? undefined).catch((err: unknown) => {
           console.error(`session.setModel: the winter child for ${p.sessionId} refused the model: ${(err as Error)?.name ?? "unknown"}`);
         });
         return {};
