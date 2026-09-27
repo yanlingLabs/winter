@@ -773,7 +773,7 @@ export const McpLogoutResult = z.object({ ok: z.literal(true) });
  * `mcp_discovery_failed`, ...). `name` is the user-scope server the secret belongs to.
  */
 export const McpClientSecretIssuerParams = McpServerRefParams;
-export const McpClientSecretIssuerResult = z.object({ name: z.string(), issuer: z.string(), issuerOrigin: z.string(), authorizeOrigin: z.string() });
+export const McpClientSecretIssuerResult = z.object({ name: z.string(), scope: McpScopeSchema, url: z.string(), issuer: z.string(), issuerOrigin: z.string(), authorizeOrigin: z.string() });
 /**
  * `mcp.setClientSecret`: a pre-registered client's secret, straight to the Keychain under the DERIVED
  * account `mcp-oauth-client-secret:<id>` (never a config-named one), bound to the authorization server it

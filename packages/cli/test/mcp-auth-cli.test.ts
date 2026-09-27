@@ -219,3 +219,143 @@ describe("winter mcp list's auth note (WS-25)", () => {
     expect(mcpAuthNote({})).toBe("");
   });
 });
+
+describe("the non-interactive doors (an agent's `!` shell): set-secret --from-clipboard, login --yes", () => {
+  const SECRET = "clipboard-client-SECRET-5c1e";
+  const ISSUER = "https://github.com/login/oauth";
+  const URL_ = "https://api.githubcopilot.com/mcp/";
+
+  function fakeClipboard(value: string, opts: { clearFails?: boolean } = {}) {
+    const c = {
+      value, reads: 0, clears: 0,
+      read: async () => { c.reads++; return c.value; },
+      clear: async () => { c.clears++; if (opts.clearFails === true) throw new Error("pbcopy failed"); c.value = ""; },
+    };
+    return c;
+  }
+  function secretDoor(over: (method: string, params: any) => unknown = () => undefined) {
+    return scriptedDoor((method, params) => {
+      const r = over(method, params);
+      if (r !== undefined) return r;
+      if (method === METHODS.mcpClientSecretIssuer) return { name: "gh", scope: "user", url: URL_, issuer: ISSUER, issuerOrigin: "https://github.com", authorizeOrigin: "https://github.com" };
+      if (method === METHODS.mcpSetClientSecret) return { ok: true, issuer: ISSUER, issuerOrigin: "https://github.com" };
+      throw new Error(`unexpected ${method}`);
+    });
+  }
+  const noAsk = { confirm: async () => { throw new Error("must not ask"); }, readSecret: async () => { throw new Error("must not prompt"); }, stdinIsTTY: false, platform: "darwin" };
+
+  test("without --issuer: prints the target and the exact re-run, reads nothing, writes nothing", async () => {
+    const clip = fakeClipboard(SECRET);
+    const door = secretDoor();
+    const d = deps({ door, clipboard: clip, ...noAsk });
+    const outcome = await runMcpSetSecretRoute(["gh", "--from-clipboard"], d);
+    expect(outcome).toMatchObject({ ok: false, code: "issuer_confirmation_required" });
+    expect(d.printed).toEqual([`"gh" → user ${URL_} → issuer ${ISSUER}`]);
+    expect((outcome as { message: string }).message).toContain(`--issuer ${ISSUER}`);
+    expect(clip.reads).toBe(0);
+    expect(clip.clears).toBe(0);
+    expect(door.calls.map((c) => c.method)).toEqual([METHODS.mcpClientSecretIssuer]);
+  });
+
+  test("a --issuer that is not the discovered one is refused before the clipboard is touched", async () => {
+    const clip = fakeClipboard(SECRET);
+    const door = secretDoor();
+    const outcome = await runMcpSetSecretRoute(["gh", "--from-clipboard", "--issuer", "https://evil.example/oauth"], deps({ door, clipboard: clip, ...noAsk }));
+    expect(outcome).toMatchObject({ ok: false, code: "mcp_issuer_changed" });
+    expect(clip.reads).toBe(0);
+    expect(clip.clears).toBe(0);
+    expect(door.calls.map((c) => c.method)).toEqual([METHODS.mcpClientSecretIssuer]);
+  });
+
+  test("the daemon's own re-discovery refusing the write leaves the clipboard alone and never echoes the value", async () => {
+    const clip = fakeClipboard(`${SECRET}\n`);
+    const door = secretDoor((m) => (m === METHODS.mcpSetClientSecret ? rpcError(`moved ${SECRET}`, { code: "mcp_issuer_changed", issuer: "https://elsewhere" }) : undefined));
+    const d = deps({ door, clipboard: clip, ...noAsk });
+    const outcome = await runMcpSetSecretRoute(["gh", "--from-clipboard", "--issuer", ISSUER], d);
+    expect(outcome).toMatchObject({ ok: false, code: "mcp_issuer_changed" });
+    expect(clip.clears).toBe(0);
+    expect(clip.value).toBe(`${SECRET}\n`);
+    expect(JSON.stringify(outcome) + d.printed.join("\n")).not.toContain(SECRET);
+  });
+
+  test("success: one trailing newline trimmed, sent with expectedIssuer = --issuer, the clipboard cleared, the value and its length never printed", async () => {
+    const clip = fakeClipboard(`${SECRET}\n`);
+    const door = secretDoor();
+    const d = deps({ door, clipboard: clip, ...noAsk });
+    const outcome = await runMcpSetSecretRoute(["gh", "--from-clipboard", "--issuer", ISSUER], d);
+    expect(outcome).toEqual({ ok: true, kind: "set-secret", name: "gh", via: "daemon", issuer: ISSUER, clipboardCleared: true });
+    expect(door.calls[1]!.params).toEqual({ name: "gh", cwd: "/work/proj", secret: SECRET, expectedIssuer: ISSUER });
+    expect(clip.clears).toBe(1);
+    const shown = d.printed.join("\n") + renderMcpAuthOutcome(outcome);
+    expect(shown).not.toContain(SECRET);
+    expect(shown).not.toContain(String(SECRET.length));
+    expect(renderMcpAuthOutcome(outcome)).toContain("clipboard was cleared");
+    // A clipboard that cannot be cleared is said so, not hidden.
+    const stuck = fakeClipboard(SECRET, { clearFails: true });
+    const r = await runMcpSetSecretRoute(["gh", "--from-clipboard", "--issuer", `${ISSUER}/`], deps({ door: secretDoor(), clipboard: stuck, ...noAsk }));
+    expect(renderMcpAuthOutcome(r)).toContain("could NOT be cleared");
+  });
+
+  test("empty, multi-line or implausible clipboard contents are refused typed; nothing is sent or cleared", async () => {
+    for (const [value, code] of [["", "clipboard_empty"], ["\n", "clipboard_empty"], ["line-one\nline-two", "clipboard_not_a_secret"], ["x".repeat(513), "clipboard_not_a_secret"], [" padded ", "clipboard_not_a_secret"]] as const) {
+      const clip = fakeClipboard(value);
+      const door = secretDoor();
+      const outcome = await runMcpSetSecretRoute(["gh", "--from-clipboard", "--issuer", ISSUER], deps({ door, clipboard: clip, ...noAsk }));
+      expect(outcome).toMatchObject({ ok: false, code });
+      expect(clip.clears).toBe(0);
+      expect(door.calls.map((c) => c.method)).toEqual([METHODS.mcpClientSecretIssuer]);
+    }
+  });
+
+  test("--from-clipboard is macOS-only; --issuer without it is a usage error; the interactive path is unchanged", async () => {
+    const clip = fakeClipboard(SECRET);
+    const door = secretDoor();
+    expect(await runMcpSetSecretRoute(["gh", "--from-clipboard", "--issuer", ISSUER], deps({ door, clipboard: clip, ...noAsk, platform: "linux" }))).toMatchObject({ ok: false, code: "clipboard_unsupported" });
+    expect(await runMcpSetSecretRoute(["gh", "--issuer", ISSUER], deps({ door, clipboard: clip, ...noAsk }))).toMatchObject({ ok: false });
+    expect(clip.reads).toBe(0);
+    expect(door.calls).toEqual([]);
+  });
+
+  test("with no daemon the same clipboard door runs in-process (and pokes a live daemon)", async () => {
+    const clip = fakeClipboard(SECRET);
+    let stored: { secret: string; expected: string | undefined } | undefined;
+    const local: McpAuthLocalDoors = {
+      resolve: (p) => p,
+      login: async () => { throw new Error("no"); },
+      loginStatus: () => ({ state: "done" }),
+      logout: async () => {},
+      clientSecretIssuer: async () => ({ name: "gh", scope: "user", url: URL_, issuer: ISSUER, issuerOrigin: "https://github.com", authorizeOrigin: "https://github.com" }),
+      setClientSecret: async (_s, secret, expected) => { stored = { secret, expected }; return { issuer: ISSUER, issuerOrigin: "https://github.com" }; },
+      dispose: () => {},
+    };
+    const d = deps({ local: () => local, clipboard: clip, ...noAsk });
+    expect(await runMcpSetSecretRoute(["gh", "--from-clipboard"], d)).toMatchObject({ ok: false, code: "issuer_confirmation_required" });
+    expect(stored).toBeUndefined();
+    expect(await runMcpSetSecretRoute(["gh", "--from-clipboard", "--issuer", ISSUER], d)).toMatchObject({ ok: true, via: "in-process", clipboardCleared: true });
+    expect(stored).toEqual({ secret: SECRET, expected: ISSUER });
+    expect(d.pokes).toBe(1);
+  });
+
+  test("login --yes skips the open-the-browser question (the target line is still printed) but NOT the issuer-change guard", async () => {
+    const start = { loginId: "ml_y", authUrl: "https://as.example.test/authorize?state=S", issuerOrigin: "https://as.example.test", authorizeOrigin: "https://as.example.test", issuer: "https://as.example.test", name: "linear", scope: "user", url: "https://mcp.example.test/mcp" };
+    const plain = scriptedDoor((m) => (m === METHODS.mcpLogin ? start : { state: "done" }));
+    const d = deps({ door: plain, ...noAsk });
+    expect(await runMcpLoginRoute(["linear", "--yes"], d)).toMatchObject({ ok: true });
+    expect(d.printed[0]).toBe(`"linear" → user https://mcp.example.test/mcp → issuer https://as.example.test`);
+    expect(d.opened).toEqual([start.authUrl]);
+
+    const change = rpcError("changed", { code: "mcp_issuer_change_requires_confirmation", storedIssuer: "https://old.example.test", newIssuer: "https://as.example.test", storedIssuerOrigin: "https://old.example.test", newIssuerOrigin: "https://as.example.test" });
+    const changed = scriptedDoor((m, p) => (m === METHODS.mcpLogin ? (p.confirmIssuerChange === true ? start : change) : { state: "done" }));
+    // --yes alone: the change is still asked (and a shell that cannot answer declines) — never implied.
+    const refused = await runMcpLoginRoute(["linear", "--yes"], deps({ door: changed, ...noAsk, confirm: async () => false }));
+    expect(refused).toMatchObject({ ok: false, code: "mcp_issuer_change_requires_confirmation" });
+    expect((refused as { message: string }).message).toContain("--confirm-issuer-change");
+    expect(changed.calls.filter((c) => c.method === METHODS.mcpLogin).map((c) => c.params.confirmIssuerChange)).toEqual([undefined]);
+    // The explicit flag accepts it (printed, not asked), and --yes then skips the browser question.
+    const changed2 = scriptedDoor((m, p) => (m === METHODS.mcpLogin ? (p.confirmIssuerChange === true ? start : change) : { state: "done" }));
+    const d2 = deps({ door: changed2, ...noAsk });
+    expect(await runMcpLoginRoute(["linear", "--yes", "--confirm-issuer-change"], d2)).toMatchObject({ ok: true });
+    expect(d2.printed[0]).toContain("--confirm-issuer-change");
+    expect(changed2.calls.filter((c) => c.method === METHODS.mcpLogin).map((c) => c.params.confirmIssuerChange)).toEqual([undefined, true]);
+  });
+});

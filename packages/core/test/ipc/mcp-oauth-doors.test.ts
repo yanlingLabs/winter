@@ -215,7 +215,7 @@ describe("the MCP sign-in doors (WS-25)", () => {
 
       // Confirm first: the issuer the secret would be bound to, discovered without a flow.
       const shown = await c.request(METHODS.mcpClientSecretIssuer, { name: "gh" });
-      expect(shown.result).toEqual({ name: "gh", issuer: fx.issuer, issuerOrigin: fx.origin, authorizeOrigin: fx.origin });
+      expect(shown.result).toEqual({ name: "gh", scope: "user", url: fx.mcpUrl, issuer: fx.issuer, issuerOrigin: fx.origin, authorizeOrigin: fx.origin });
       const unconfirmed = await c.request(METHODS.mcpSetClientSecret, { name: "gh", secret: SECRET });
       expect(unconfirmed.error.data).toEqual({ code: "mcp_expected_issuer_required", issuer: fx.issuer, issuerOrigin: fx.origin });
       expect(JSON.stringify(unconfirmed)).not.toContain(SECRET);
