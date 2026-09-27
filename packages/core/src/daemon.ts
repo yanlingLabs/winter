@@ -57,7 +57,7 @@ import { SessionCleaner } from "./sessions/cleaner";
 import { pickerModels } from "./ipc/picker-models";
 import { ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, credentialPresenceFrom } from "./runtime-sdk/keychain";
 import { refreshOauthMaterial } from "@yanlinglabs/winter-provider-runtime";
-import type { McpOAuthStore } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
+import { createMemoryMcpOAuthStore, type McpOAuthStore } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
 import { CREDENTIAL_MATERIAL_NAMES } from "./auth/credential-material";
 import { credentialStoreOverSecretStore } from "./providers/credential-store";
 import { CODEX } from "./providers/codex-config";
@@ -384,8 +384,8 @@ export async function startDaemon(opts: {
   runRootReconcileForTests?: RootReconcile;
   /** WS-25 §7 TEST SEAM: the MCP OAuth store sessions' `mcp-oauth:<id>` sign-ins are brokered from (a
    *  memory store). Absent: production reads `daemonMcpOAuthStore(<this home's Keychain service>)`, and a
-   *  caller that injected its own `secrets` gets NO store (every MCP sign-in reads as signed out) — so no
-   *  test daemon ever reads the Keychain for one. */
+   *  caller that injected its own `secrets` gets a per-daemon MEMORY store (WS-25 integration: shared by the
+   *  sign-in doors, the probe and the session answers) — so no test daemon ever reads the Keychain for one. */
   mcpOAuthStore?: McpOAuthStore;
 } = {}): Promise<RunningDaemon> {
   const startedAt = Date.now();
@@ -1833,13 +1833,18 @@ export async function startDaemon(opts: {
   // without `agentProvider`, since `Query.supportedAgents()` is entirely a Winter-runtime-SDK fact,
   // unrelated to the daemon's own internal Provider.
   const supportedAgentsCache = new SupportedAgentsCache();
-  // WS-25: the daemon's ONE MCP OAuth store for this home (`runtime-sdk/mcp-oauth-store.ts`), spelled once so
-  // the session credential answers, the `mcp.list` probe and the sign-in doors (`ipc/server.ts`, which derives
-  // the identical `keychainService(profile, winterHome)` when not handed one) share the instance and so the
-  // refresh single-flight. An injected `opts.mcpOAuthStore` is that one instance everywhere.
-  const daemonOAuthStore = (): McpOAuthStore => opts.mcpOAuthStore ?? daemonMcpOAuthStore(keychainService(profile, winterHome));
-  // WS-25 §7: see `opts.mcpOAuthStore` — a test daemon (its own `secrets`) never reads the Keychain for one.
-  const sessionMcpOAuthStore = opts.mcpOAuthStore ?? (opts.secrets === undefined ? daemonOAuthStore() : undefined);
+  // WS-25: the daemon's ONE MCP OAuth store for this home, chosen once so the session credential answers,
+  // the `mcp.list` probe and the sign-in doors share the instance (and so the refresh single-flight, which is
+  // keyed on the store object). Production: the Keychain store (`runtime-sdk/mcp-oauth-store.ts`). An injected
+  // `opts.mcpOAuthStore` is that one instance everywhere. A daemon handed its own `secrets` (every test
+  // daemon, and the Swift suites' `RealDaemon` fixture) gets a per-daemon MEMORY store instead: a test that
+  // configures an http/sse server and signs in must never reach the Keychain, not even the throwaway
+  // service `WINTER_KEYCHAIN_SERVICE` names (a fixture that forgets that variable would otherwise land on the
+  // real `com.winter.core`).
+  const oauthStoreForThisDaemon: McpOAuthStore = opts.mcpOAuthStore
+    ?? (opts.secrets !== undefined ? createMemoryMcpOAuthStore() : daemonMcpOAuthStore(keychainService(profile, winterHome)));
+  const daemonOAuthStore = (): McpOAuthStore => oauthStoreForThisDaemon;
+  const sessionMcpOAuthStore: McpOAuthStore = oauthStoreForThisDaemon;
   const winterDrivers: WinterSessionDrivers = createWinterSessionDrivers({
     home: winterHome,
     // WS-21: every incarnation's run home, when the linked router applies them (see `runHomeDeps`).
@@ -1917,7 +1922,7 @@ export async function startDaemon(opts: {
     // renewed here and only here: codex-oauth through its refresh-token grant (the SDK's own
     // `refreshOauthMaterial`, whose merge rule keeps an unrotated refresh token), the Console bearer
     // through the broker that already renews it from `ant`'s profile.
-    ...(sessionMcpOAuthStore === undefined ? {} : { mcpOAuthStore: sessionMcpOAuthStore }),
+    mcpOAuthStore: sessionMcpOAuthStore,
     // Review r1 (i): the enabled plugins' http/sse servers join the MCP sign-in allowlist (live per incarnation).
     pluginMcpServers: () => pluginMcpServersFor(pluginStore.list().filter((p) => !p.disabled).map((p) => p.installPath)),
     credentialRefreshers: {
@@ -2740,9 +2745,9 @@ export async function startDaemon(opts: {
     // own doc comment for why a credential add needs this rather than waiting for an unrelated
     // settings write to trigger the next `refresh()`.
     mcp: mcp ?? undefined,
-    // WS-25: an injected MCP OAuth store (a test daemon) is also the sign-in doors' store, so the doors, the
-    // probe and the session answers share ONE instance; absent, the server derives the same Keychain one.
-    ...(opts.mcpOAuthStore === undefined ? {} : { mcpOAuth: { store: opts.mcpOAuthStore } }),
+    // WS-25: the sign-in doors use the daemon's ONE MCP OAuth store (see `oauthStoreForThisDaemon`) — handed
+    // over explicitly, so the server never derives a Keychain store of its own for a test daemon.
+    mcpOAuth: { store: daemonOAuthStore() },
     // Phase 4b Task 4: the plugin tool bridge. `registry` is undefined whenever agentProvider is
     // null (see `sharedRegistry`'s doc comment above). `supervisor`, unlike `registry`, is now
     // ALWAYS defined (Phase 4d-cleanup Task 2 hoisted its construction out of the agentProvider
