@@ -1021,10 +1021,11 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
         expect(own).toMatchObject({ ok: true, generation: 1 });
         expect(JSON.parse((own as { material: string }).material).key).toBe(key);
         expect(await options.onCredentialResolve!({ ref: { kind: "keychain", account: "harness-token" } }, { signal })).toEqual({ ok: false, reason: "not_allowed" });
-        // The configured MCP server's sign-in is answerable (signed out here: no store wired); another's is not.
+        // The configured MCP server's sign-in is answerable (signed out here: no store wired).
         const { mcpOAuthTokenAccount } = await import("@yanlinglabs/winter-agent-runtime/mcp-auth");
         expect(await options.onCredentialResolve!({ ref: { kind: "keychain", account: mcpOAuthTokenAccount("https://mcp.linear.example/mcp") } }, { signal })).toEqual({ ok: false, reason: "not_found" });
-        expect(await options.onCredentialResolve!({ ref: { kind: "keychain", account: mcpOAuthTokenAccount("https://evil.example/mcp") } }, { signal })).toEqual({ ok: false, reason: "not_allowed" });
+        // A server outside the fold reads as signed out too — never its token (see `host-credentials.ts`).
+        expect(await options.onCredentialResolve!({ ref: { kind: "keychain", account: mcpOAuthTokenAccount("https://evil.example/mcp") } }, { signal })).toEqual({ ok: false, reason: "not_found" });
         // The Options themselves name locators only — the value is in no serialisable field.
         expect(JSON.stringify(options)).not.toContain(key);
         await session.end();

@@ -18,7 +18,8 @@
 //   agent definition may name any catalog model), and `mcp-oauth:<id>` for the http/sse servers in the
 //   session's own MCP configuration. Everything else is `not_allowed`: the app's pairing tokens, the MCP
 //   client registrations and client secrets (`mcp-oauth-client:*`, `mcp-oauth-client-secret:*`), a ref
-//   naming a Keychain service other than this daemon's.
+//   naming a Keychain service other than this daemon's. (One exception in the ANSWER, not the rule: an
+//   `mcp-oauth:<id>` outside the fold is answered `not_found` — see the resolver for why.)
 //
 //   NEVER A REFRESH TOKEN. Provider `oauth` material crosses with its refresh token removed; an MCP token
 //   record crosses through `toSessionMcpTokenRecord` (the refresh token replaced by the SDK's non-secret
@@ -199,6 +200,8 @@ export function createHostCredentialBroker(deps: HostCredentialDeps): HostCreden
   const seen = new Map<string, { digest: string; generation: number }>();
   /** account → the refresh in flight (a second asker joins it; a failed one is never cached). */
   const refreshing = new Map<string, Promise<void>>();
+  /** MCP sign-in accounts already logged as outside a session's fold (one line each, not one per connect). */
+  const outsideFold = new Set<string>();
 
   /** One read of a provider/tool item, stamped with its derived generation. `null` = no item (a blank
    *  string is the pre-WS-19 "removed" spelling, `SecretStore.delete`'s own doc). */
@@ -296,7 +299,22 @@ export function createHostCredentialBroker(deps: HostCredentialDeps): HostCreden
         if (isNeverBrokered(account)) return { ok: false, reason: "not_allowed" };
         try {
           if (account.startsWith(MCP_OAUTH_TOKEN_ACCOUNT_PREFIX)) {
-            if (!allowlist.mcpAccounts.has(account)) return { ok: false, reason: "not_allowed" };
+            // `not_found`, deliberately NOT `not_allowed`, for a sign-in outside this session's fold. The
+            // SDK's session provider reads the token item at EVERY http/sse connect, signed in or not, and
+            // lets any answer but `not_found` propagate as a connect failure (`mcp-auth/session-provider.ts`
+            // `read` → `readTokenRecordLenient`, reached from `preflight`). Servers the fold cannot see —
+            // a plugin's own `.mcp.json` servers, which ride the run folder's `enabledPlugins`, and a
+            // server a subagent declares — would then fail to connect at all instead of connecting
+            // unauthenticated. `not_found` crosses no material either way and reads as "not signed in",
+            // exactly what an empty Keychain says. Logged once per account, so a plugin server a user DID
+            // sign in to is diagnosable.
+            if (!allowlist.mcpAccounts.has(account)) {
+              if (!outsideFold.has(account)) {
+                outsideFold.add(account);
+                log(`host credentials: ${account} is not one of this session's configured MCP servers — answered as not signed in`);
+              }
+              return { ok: false, reason: "not_found" };
+            }
             return await resolveMcp(account, request.minGeneration, signal);
           }
           if (!allowlist.accounts.has(account)) return { ok: false, reason: "not_allowed" };
