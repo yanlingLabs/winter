@@ -2,7 +2,7 @@
 // THEIR OWN name for its URL (the live incarnation answers, `WinterSession.mcpServerNamesFor`); never an
 // eviction, never a restart.
 import { describe, expect, test } from "bun:test";
-import { reconnectLiveSessionsFor, type ReconnectableSession } from "../../../src/agent/mcp/reconnect";
+import { describeReconnectError, reconnectLiveSessionsFor, type ReconnectableSession } from "../../../src/agent/mcp/reconnect";
 
 function session(
   id: string,
@@ -59,6 +59,29 @@ describe("reconnectLiveSessionsFor (WS-25)", () => {
     expect(acted).toEqual(["a", "b"]);
     expect(lines.filter((l) => l.includes("did not connect"))).toHaveLength(2);
     expect(lines.some((l) => l.includes("WinterLegUnsupported"))).toBe(true);
+  });
+
+  test("the log line carries the error's code and message, not only its name (the live 2026-09-27 failure logged just 'WinterRpcError')", async () => {
+    const lines: string[] = [];
+    class WinterRpcError extends Error {
+      override name = "WinterRpcError";
+      constructor(readonly code: string, message: string) { super(message); }
+    }
+    const failing = session("s", () => ["github"], async () => { throw new WinterRpcError("mcp_reconnect_failed", "mcp client: the sign-in check exceeded 30000ms"); });
+    await reconnectLiveSessionsFor({ list: () => [failing], log: (l) => lines.push(l) }, "https://mcp.example.test/mcp");
+    expect(lines).toEqual(["mcp: s reconnected 'github', which did not connect (WinterRpcError mcp_reconnect_failed: mcp client: the sign-in check exceeded 30000ms)"]);
+  });
+
+  test("describeReconnectError masks token-shaped text, collapses whitespace and caps the length", () => {
+    const masked = describeReconnectError(new Error("401 from https://x.test/cb?code=abc123&state=s1 with Bearer eyJhbGciOi.secret and\n refresh_token=rt-1"));
+    expect(masked).not.toContain("abc123");
+    expect(masked).not.toContain("eyJhbGciOi");
+    expect(masked).not.toContain("rt-1");
+    expect(masked).toContain("state=s1");
+    expect(masked).not.toContain("\n");
+    expect(describeReconnectError(new Error("x".repeat(1000))).length).toBeLessThan(300);
+    expect(describeReconnectError("not an error")).toBe("unknown");
+    expect(describeReconnectError(Object.assign(new Error(""), { name: "WinterLegUnsupported", code: "not_supported_on_winter_leg" }))).toBe("WinterLegUnsupported not_supported_on_winter_leg");
   });
 
   test("a session without the two methods (a test double) or whose lookup throws is skipped", async () => {
