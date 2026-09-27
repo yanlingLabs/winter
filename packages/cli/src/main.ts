@@ -45,8 +45,8 @@ import {
 } from "./plugin-cli";
 import { parseModelArgs, validateEffort, validateModelTag, internalProviderNote, validateAdvisorSlug, renderModelListing, modelDisplayWithHint, type ModelListingRow } from "./model-cli";
 import {
-  runMcpAddRoute, runMcpAddJsonRoute, runMcpRemoveRoute, runMcpGetRoute,
-  renderMcpAddOutcome, renderMcpRemoveOutcome, renderMcpGetOutcome,
+  runMcpAddRoute, runMcpAddJsonRoute, runMcpRemoveRoute, runMcpRenameRoute, runMcpGetRoute,
+  renderMcpAddOutcome, renderMcpRemoveOutcome, renderMcpRenameOutcome, renderMcpGetOutcome,
   runMcpLoginRoute, runMcpLogoutRoute, runMcpSetSecretRoute, renderMcpAuthOutcome, mcpAuthNote, type McpAuthDeps,
   runMcpPermissionsRoute, renderMcpPermissionsOutcome,
 } from "./mcp-cli";
@@ -1909,7 +1909,7 @@ if (import.meta.main) {
     // `connect()`: these are write verbs, and `connect()` auto-launches the dist app on a dead
     // socket — exactly the "surprise, not a service" `openCredentialDaemonDoor`'s own doc warns
     // against for `winter login`/`credentials`.
-    if (sub === "add" || sub === "add-json" || sub === "remove" || sub === "get") {
+    if (sub === "add" || sub === "add-json" || sub === "remove" || sub === "rename" || sub === "get") {
       const winterHome = resolveWinterHome();
       const door = await openCredentialDaemonDoor();
       // `openCredentialDaemonDoor` is typed narrowly (`CredentialRpcDoor`: `request`/`close` only —
@@ -1921,6 +1921,7 @@ if (import.meta.main) {
       const mcpDoor = door ? {
         mcpAdd: (name: string, entry: unknown) => door.request(METHODS.mcpAdd, { name, entry, scope: "user" }),
         mcpRemove: (name: string) => door.request(METHODS.mcpRemove, { name, scope: "user" }),
+        mcpRename: (name: string, newName: string) => door.request(METHODS.mcpRename, { name, newName, scope: "user" }),
         mcpGet: (name: string) => door.request(METHODS.mcpGet, { name, scope: "user" }),
       } : undefined;
       const deps = { cwd: process.cwd(), winterHome, door: mcpDoor };
@@ -1939,6 +1940,14 @@ if (import.meta.main) {
       if (sub === "remove") {
         const outcome = await runMcpRemoveRoute(rest, deps);
         console.log(renderMcpRemoveOutcome(outcome));
+        door?.close();
+        process.exit(outcome.ok ? 0 : 1);
+      }
+      if (sub === "rename") {
+        // WS-27: within one scope, carrying the connector permissions and `mcp.disabled` (`mcp-cli.ts`).
+        const outcome = await runMcpRenameRoute(rest, deps);
+        if (outcome.ok) console.log(renderMcpRenameOutcome(outcome));
+        else console.error(renderMcpRenameOutcome(outcome));
         door?.close();
         process.exit(outcome.ok ? 0 : 1);
       }
@@ -2012,7 +2021,7 @@ if (import.meta.main) {
     // `add-from-claude-desktop` (an Ink dialog over Claude Desktop's OWN config format — not
     // trivially mappable), `reset-project-choices` (Winter has no per-project approve/reject ledger
     // for `.mcp.json` servers — `winter trust`'s directory-level TrustStore is the only gate).
-    console.error("usage: winter mcp [list] | get <name> | login <name> [--yes] [--confirm-issuer-change] | logout <name> [--forget-client] | set-secret <name> [--from-clipboard [--issuer <issuer>]] | add [-s local|user|project] [-t stdio|sse|http] [-e KEY=value...] [-H \"Name: value\"...] [--version-negotiation legacy|auto|<revision>] <name> <commandOrUrl> [-- args...] | add-json [-s local|user|project] <name> <json> | remove <name> [-s local|user|project] | permissions <server> [<tool> | '*'] [allow|ask|deny|default]");
+    console.error("usage: winter mcp [list] | get <name> | login <name> [--yes] [--confirm-issuer-change] | logout <name> [--forget-client] | set-secret <name> [--from-clipboard [--issuer <issuer>]] | add [-s local|user|project] [-t stdio|sse|http] [-e KEY=value...] [-H \"Name: value\"...] [--version-negotiation legacy|auto|<revision>] <name> <commandOrUrl> [-- args...] | add-json [-s local|user|project] <name> <json> | remove <name> [-s local|user|project] | rename <old> <new> [-s local|user|project] | permissions <server> [<tool> | '*'] [allow|ask|deny|default]");
     process.exit(1);
   }
   case "plugin": {

@@ -44,6 +44,7 @@ export { linkedRouterSupportsRunHome, routerSupportsRunHome } from "./runtime-sd
 export {
   validateMcpServerName, addUserMcpServer, removeUserMcpServer, addProjectMcpServer, removeProjectMcpServer,
   addSdkUserMcpServer, removeSdkUserMcpServer,
+  removeMcpServerForgettingPermissions, renameMcpServerCarryingSettings, McpRenameRefusal,
 } from "./agent/mcp/mcp-write";
 export {
   readProjectMcpConfig, writeProjectMcpConfig, projectMcpConfigPath, projectMcpConfigExists,

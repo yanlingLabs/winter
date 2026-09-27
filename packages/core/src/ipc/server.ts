@@ -10,7 +10,7 @@ import {
   SessionAddDirParams, SessionSetCwdParams, TrustDirParams,
   BgListParams, BgPeekParams, BgKillParams, BgKillAllParams,
   SessionSteerParams, SessionInterruptParams, SessionCompactParams, SkillsListParams, McpListParams, McpEnableParams, McpDisableParams,
-  McpAddParams, McpRemoveParams, McpGetParams,
+  McpAddParams, McpRemoveParams, McpRenameParams, McpGetParams,
   McpLoginParams, McpLoginStatusParams, McpLogoutParams, McpSetClientSecretParams, McpClientSecretIssuerParams,
   McpToolsParams, McpSetToolPermissionParams,
   SkillsReadParams, SkillsWriteParams, SkillsDeleteParams,
@@ -119,7 +119,7 @@ import type { InternalRouter } from "../providers/internal-router";
 import { internalRoleProblemsFor } from "../providers/internal-role-problems";
 import { catalogRoleProblemsFor } from "../providers/catalog-role-problems";
 import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, setConnectorToolPermission, connectorPermissionTable, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, type McpServerSettingsEntry } from "../settings";
-import { addMcpServerInScope, mcpServerInScope, removeMcpServerInScope, type McpScope, type McpScopeTarget } from "../agent/mcp/mcp-write";
+import { addMcpServerInScope, mcpServerInScope, McpRenameRefusal, removeMcpServerForgettingPermissions, renameMcpServerCarryingSettings, type McpScope, type McpScopeTarget } from "../agent/mcp/mcp-write";
 import { saveAnswerEverywhere, saveAnswerInProject, SavedAnswerRefused } from "../agent/saved-answers";
 import { localScopeKeyFor, projectScopeRootFor, projectScopeTrusted } from "../runtime-sdk/run-home-input";
 import { McpOAuthDoorRefusal, McpOAuthDoors, type McpOAuthDoorDeps } from "../agent/mcp/oauth-doors";
@@ -2566,16 +2566,42 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const p = parseParams(McpRemoveParams, params);
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "mcp.remove is not available on this server (no winterHome configured)");
         const target = mcpScopeTarget("mcp.remove", opts.winterHome, p);
-        let removed: boolean;
+        let outcome: ReturnType<typeof removeMcpServerForgettingPermissions>;
         try {
-          removed = removeMcpServerInScope(target, p.name);
+          // WS-27: the name's connector permissions go too — once nothing else defines a server of that name.
+          outcome = removeMcpServerForgettingPermissions(target, p.name, { cwd: p.cwd, trust: opts.trust });
         } catch (err) {
           throw sdkWriteFailure(err);
         }
+        if (outcome.settings !== undefined) opts.onConnectorPermissionsSaved?.(outcome.settings);
         // Drop a user server's recorded probe status now, same as `mcp.disable` — a removed server must not
         // go on being reported until the next daemon restart.
-        if (removed && target.scope === "user") opts.mcp?.stopServer(p.name);
-        return { ok: true, name: p.name, removed, scope: p.scope };
+        if (outcome.removed && target.scope === "user") opts.mcp?.stopServer(p.name);
+        return { ok: true, name: p.name, removed: outcome.removed, scope: p.scope, permissionsCleared: outcome.permissionsCleared };
+      }
+      // -----------------------------------------------------------------------------------------
+      // WS-27 — `winter mcp rename <old> <new>` (`McpRenameParams`' doc): within one scope, carrying the
+      // name's connector permissions and `mcp.disabled` membership. LOCAL role only. A sign-in is keyed by URL
+      // and follows by itself; the probe forgets the old user-scope name and re-probes a stdio user server.
+      // -----------------------------------------------------------------------------------------
+      case METHODS.mcpRename: {
+        const p = parseParams(McpRenameParams, params);
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "mcp.rename is not available on this server (no winterHome configured)");
+        const target = mcpScopeTarget("mcp.rename", opts.winterHome, p);
+        let outcome: ReturnType<typeof renameMcpServerCarryingSettings>;
+        try {
+          outcome = renameMcpServerCarryingSettings(target, p.name, p.newName, { cwd: p.cwd, trust: opts.trust });
+        } catch (err) {
+          if (err instanceof McpRenameRefusal) throw new RpcFailure(ERR.INVALID_PARAMS, err.message, { code: err.code });
+          throw sdkWriteFailure(err);
+        }
+        if (outcome.settings !== undefined) opts.onConnectorPermissionsSaved?.(outcome.settings);
+        if (target.scope === "user") {
+          opts.mcp?.stopServer(p.name);
+          const cfg = stdioMcpServersFor(sdkUserMcpServers(opts.winterHome), (outcome.settings ?? liveSettingsFor(opts))?.mcp?.disabled)[p.newName];
+          if (cfg) await opts.mcp?.startOneUserServer(p.newName, cfg);
+        }
+        return { ok: true, name: p.name, newName: p.newName, scope: p.scope, carried: outcome.carried, keptOld: outcome.keptOld };
       }
       // -----------------------------------------------------------------------------------------
       // `winter mcp get <name>` — read-only, degrades to `found: false` rather than throwing on a
