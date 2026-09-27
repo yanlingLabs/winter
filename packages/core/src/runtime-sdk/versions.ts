@@ -3,8 +3,12 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.29";
-/** Bumped to 0.0.29 (2026-09-27, security): 0.0.28 plus the compiled `winter` runtime built with
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.30";
+/** Bumped to 0.0.30 (2026-09-27, WS-25: MCP OAuth + prompt-free credentials): the `mcp-auth` subpath
+ *  (sign-in, refresh, revoke, the Keychain store, the issuer checks, the needs-auth notice), the
+ *  `onMcpOAuthRefresh`/`onCredentialResolve` host hooks (a code child resolves every credential over its
+ *  control channel and never reads the Keychain), and `Query.reconnectMcpServer`.
+ *  Earlier: bumped to 0.0.29 (2026-09-27, security): 0.0.28 plus the compiled `winter` runtime built with
  *  `--no-compile-autoload-bunfig --no-compile-autoload-dotenv`, so a code-session child started in a
  *  user's repository no longer reads that repository's `bunfig.toml` (a `preload` would have run as
  *  Winter) or `.env`. Winter's own `compile`/`compile:core` carry the same two flags.
