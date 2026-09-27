@@ -58,4 +58,47 @@ public enum KeychainToken {
         }
         return token
     }
+
+    /// Bounded retry around a token read that may have raced the daemon's own once-per-boot ACL
+    /// refresh: `winter-core` deletes and re-adds `harness-token`/`remote-token` with a new ACL (so
+    /// the app can read them without a consent prompt) once per daemon boot. A read landing in that
+    /// brief window sees `.notFound` even though the daemon has run, or is seconds from finishing —
+    /// without this, `AppModel.production()`/`AppDelegate.boot()` and `RemoteHost`'s gateway-token
+    /// read both took that as "the daemon has never run" and degraded (`tokenMissing` / a pairing
+    /// failure) with no retry short of relaunching.
+    ///
+    /// Retries ONLY `KeychainError.notFound`. `.unreadable` (a malformed item, a denied ACL) is a
+    /// REAL problem blind retrying will not fix, and propagates immediately, same as any other
+    /// thrown error `read` produces — this function never widens what it catches.
+    ///
+    /// **Never mints or creates a token.** `read` is the caller's own `readHarnessToken`/
+    /// `readRemoteToken` (or a fake in a test) — every attempt is a plain re-read of whatever the
+    /// daemon itself already wrote; this function adds patience, not material.
+    ///
+    /// `delays` defaults to five backoffs summing to ~5 seconds (item's own "a few times over ~5 s
+    /// with backoff") — six reads in total (the first attempt plus five retries) before giving up
+    /// and rethrowing `.notFound`, at which point the caller's EXISTING "no token yet" fallback
+    /// applies unchanged. `sleep` is synchronous and BLOCKING by default
+    /// (`Thread.sleep(forTimeInterval:)`) rather than `Task.sleep` — this helper is called from both
+    /// a fully synchronous site (`AppModel.production()`, itself called from `AppDelegate.boot()`,
+    /// which is not `async`) and an `async` one (`RemoteHost`'s gateway start), and a single
+    /// synchronous implementation is what both can share without `AppModel`/`AppDelegate.boot()`
+    /// growing an async boot path just for this one, rare, bounded race. Injectable so a test never
+    /// blocks real wall-clock time.
+    public static func readWithBoundedRetry<T>(
+        delays: [TimeInterval] = [0.25, 0.5, 1.0, 1.5, 1.75],
+        sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+        read: () throws -> T
+    ) throws -> T {
+        var attempt = 0
+        while true {
+            do {
+                return try read()
+            } catch KeychainError.notFound {
+                guard attempt < delays.count else { throw KeychainError.notFound }
+                sleep(delays[attempt])
+                attempt += 1
+            }
+        }
+    }
 }
