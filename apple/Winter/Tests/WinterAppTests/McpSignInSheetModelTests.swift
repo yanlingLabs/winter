@@ -83,6 +83,16 @@ final class McpSignInSheetModelTests: XCTestCase {
         }
     }
 
+    /// Polish round 3's two client-secret refusals answer `nil` — both drive their own re-confirm
+    /// phase (`McpClientSecretSheetModel.submit()`'s catch) and must never be shown as flat text.
+    func testMcpAuthErrorTextAnswersNilForTheClientSecretIssuerCodes() {
+        for code in ["mcp_expected_issuer_required", "mcp_issuer_changed"] {
+            let error = RpcError(code: -1, message: "refused", data: .object(["code": .string(code)]))
+            XCTAssertNil(mcpAuthErrorText(error), "code \(code)")
+        }
+    }
+
+
     /// `mcp_issuer_change_requires_confirmation` answers `nil` here — it drives its own confirmation
     /// phase and must never be shown as flat error text.
     func testMcpAuthErrorTextAnswersNilForTheIssuerChangeCode() {
@@ -180,6 +190,8 @@ final class McpSignInSheetModelTests: XCTestCase {
         let fake = FakeMcpAuthClient()
         fake.loginResult = .failure(RpcError(code: -1, message: "issuer changed", data: .object([
             "code": .string("mcp_issuer_change_requires_confirmation"),
+            "storedIssuer": .string("https://old.example/issuer"),
+            "newIssuer": .string("https://new.example/issuer"),
             "storedIssuerOrigin": .string("https://old.example"),
             "newIssuerOrigin": .string("https://new.example"),
         ])))
@@ -187,7 +199,9 @@ final class McpSignInSheetModelTests: XCTestCase {
 
         await model.start()
 
-        XCTAssertEqual(model.phase, .confirmIssuerChange(storedIssuerOrigin: "https://old.example",
+        XCTAssertEqual(model.phase, .confirmIssuerChange(storedIssuer: "https://old.example/issuer",
+                                                           newIssuer: "https://new.example/issuer",
+                                                           storedIssuerOrigin: "https://old.example",
                                                            newIssuerOrigin: "https://new.example"))
     }
 
@@ -198,6 +212,8 @@ final class McpSignInSheetModelTests: XCTestCase {
         fake.loginResults = [
             .failure(RpcError(code: -1, message: "issuer changed", data: .object([
                 "code": .string("mcp_issuer_change_requires_confirmation"),
+                "storedIssuer": .string("https://old.example/issuer"),
+                "newIssuer": .string("https://new.example/issuer"),
                 "storedIssuerOrigin": .string("https://old.example"),
                 "newIssuerOrigin": .string("https://new.example"),
             ]))),
@@ -208,7 +224,9 @@ final class McpSignInSheetModelTests: XCTestCase {
         ]
         let model = makeModel(fake: fake)
         await model.start()
-        XCTAssertEqual(model.phase, .confirmIssuerChange(storedIssuerOrigin: "https://old.example",
+        XCTAssertEqual(model.phase, .confirmIssuerChange(storedIssuer: "https://old.example/issuer",
+                                                          newIssuer: "https://new.example/issuer",
+                                                          storedIssuerOrigin: "https://old.example",
                                                           newIssuerOrigin: "https://new.example"))
 
         await model.confirmIssuerChangeAndRetry()
