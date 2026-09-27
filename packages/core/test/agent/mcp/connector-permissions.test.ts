@@ -549,8 +549,47 @@ describe("WS-27: the runtime states the call's server (winter_mcp_server / mcpSe
     expect(connectorFactsFor(liveSource({ cf: { x: "ask" }, cf_2: { x: "allow" } }), "mcp__cf_2__x", undefined, stated)?.setting).toBe("ask");
     expect(connectorFactsFor(liveSource({ cf: { x: "allow" }, cf_2: { x: "ask" } }), "mcp__cf_2__x", undefined, stated)?.setting).toBe("ask");
     expect(connectorFactsFor(liveSource({ cf_2: { x: "ask" } }), "mcp__cf_2__x", undefined, stated)?.setting).toBe("ask");
-    // cf's allow alone still allows.
-    expect(connectorFactsFor(liveSource({ cf: { x: "allow" } }), "mcp__cf_2__x", undefined, stated)?.setting).toBe("allow");
+    // cf's allow does NOT reach a renamed (different) server: the default.
+    expect(connectorFactsFor(liveSource({ cf: { x: "allow" } }), "mcp__cf_2__x", undefined, stated)?.setting).toBeUndefined();
+    // …while a server that was not renamed takes its own allow as ever.
+    expect(connectorFactsFor(liveSource({ cf: { x: "allow" } }), "mcp__cf__x", undefined, { name: "cf", configName: "cf" })?.setting).toBe("allow");
+  });
+
+  test("SDK review: a RENAMED server never inherits an allow stored under its config name (hook and bridge, chat and code)", async () => {
+    const source = liveSource({ cf: { "*": "allow" } });
+    const hookStated = { name: "cf_2", config_name: "cf", read_only_hint: false };
+    const bridgeStated = { name: "cf_2", configName: "cf", readOnlyHint: false };
+    // Chat: the user's own `cf` would run unasked; the subagent's renamed `cf` cards (the default).
+    const chat: Session = { label: "chat", mode: "chat", policy: "chat" };
+    expect(await hookWith(connectorHookOf(chat, source), "mcp__cf__x", { name: "cf", config_name: "cf" })).toBe("allow");
+    expect(await hookWith(connectorHookOf(chat, source), "mcp__cf_2__x", hookStated)).toBe("ask");
+    {
+      const { canUse, events, approvals } = bridgeOf(chat, source);
+      const pending = canUse("mcp__cf_2__x", {}, statedCtx(bridgeStated));
+      const card = events.find((e) => e.type === "approval_requested") as { callId: string } | undefined;
+      expect(card).toBeDefined();
+      approvals.resolve("s_1", card!.callId, false, "test");
+      await pending;
+    }
+    // Code/ask: no allow — the gate's own verdict (a card), not the explicit allow the floor gives `cf`.
+    const code: Session = { label: "ask", mode: "code", policy: "ask" };
+    expect(await hookWith(connectorHookOf(code, source), "mcp__cf__x", { name: "cf", config_name: "cf" })).toBe("allow");
+    expect(await hookWith(connectorHookOf(code, source), "mcp__cf_2__x", hookStated)).toBe("none");
+    {
+      const { canUse, events, approvals } = bridgeOf(code, source);
+      const pending = canUse("mcp__cf_2__x", {}, statedCtx(bridgeStated));
+      const card = events.find((e) => e.type === "approval_requested") as { callId: string } | undefined;
+      expect(card).toBeDefined();
+      approvals.resolve("s_1", card!.callId, false, "test");
+      await pending;
+    }
+    // Deny and ask under the config name still bind the renamed server; its stated read-only hint still
+    // makes an unset action run unasked.
+    expect(await hookWith(connectorHookOf(code, liveSource({ cf: { x: "deny" } })), "mcp__cf_2__x", hookStated)).toBe("deny");
+    expect(await hookWith(connectorHookOf(code, liveSource({ cf: { x: "ask" } })), "mcp__cf_2__x", hookStated)).toBe("ask");
+    expect(await hookWith(connectorHookOf(chat, source), "mcp__cf_2__x", { ...hookStated, read_only_hint: true })).toBe("allow");
+    const denied = await bridgeOf(code, liveSource({ cf: { x: "deny" } })).canUse("mcp__cf_2__x", {}, statedCtx(bridgeStated)) as PermissionResult;
+    expect(denied.behavior).toBe("deny");
   });
 
   test("the bridge reads canUseTool's mcpServer: a stored deny under the config name refuses the renamed call", async () => {
