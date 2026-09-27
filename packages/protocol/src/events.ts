@@ -187,27 +187,31 @@ export const ELICITATION_SERVER_NAME_MAX_LENGTH = 128;
 export const ELICITATION_HOST_MAX_LENGTH = 300;
 
 /** WS-27: an MCP server asked the user to open a link (MCP URL-mode elicitation) — for example to
- *  finish an authorization with a third party. The card shows `serverName`, `message` and `url`, with
- *  `host` (the parser's own, so an internationalized name reads in punycode) set apart so the
- *  destination is plain. Answered by `elicitation.respond` (methods.ts, local clients only): accept
- *  means the user chose to open the link, and the Mac opens it; nothing opens it by itself.
+ *  finish an authorization with a third party. The card shows `serverName`, `message` and the link's
+ *  `host` (the daemon's own parse of it — an internationalized name reads in punycode — with
+ *  `origin` its `https://host[:port]`). **The full url is never persisted**: it may carry a one-time
+ *  code, so the daemon holds it in memory only while the card is pending, and a local client that
+ *  is about to open it asks for it (`elicitation.url`, methods.ts). Answered by `elicitation.respond`
+ *  (local clients only): accept means the user chose to open the link, and the client opens it;
+ *  nothing opens it by itself.
  *
  *  URL mode only (`mode` is a literal so a later form mode is an additive widening); the daemon
  *  declines every form-mode request without a card. Persisted like `approval_requested` so a replay
  *  rebuilds the card and its outcome, but in neither `HISTORY_EVENT_TYPES` nor
- *  `TRANSIENT_EVENT_TYPES`, so it never reaches a remote (phone) stream: the phone cannot open a link
- *  on the Mac. `url` may carry a one-time code, which is why the daemon's log names its origin only. */
+ *  `TRANSIENT_EVENT_TYPES`, so it never reaches a remote (phone) stream. `origin` and `host` must
+ *  agree (the object-level refine below) — a stored or pushed line (`sync.push`) naming one host in
+ *  its origin and another in `host` is refused. */
 export const ElicitationRequestedEvent = ThreadBase.extend({
   type: z.literal("elicitation_requested"),
   elicitationId: z.string().min(1),
   mode: z.literal("url"),
   serverName: z.string().min(1).max(ELICITATION_SERVER_NAME_MAX_LENGTH),
   message: z.string().max(ELICITATION_MESSAGE_MAX_LENGTH),
-  url: z.string().min(1).max(ELICITATION_URL_MAX_LENGTH).regex(/^https:\/\//),
-  host: z.string().min(1).max(ELICITATION_HOST_MAX_LENGTH),
+  host: z.string().min(1).max(ELICITATION_HOST_MAX_LENGTH).regex(/^[^\s/?#@\\]+$/),
+  origin: z.string().min(1).max(ELICITATION_HOST_MAX_LENGTH + 8),
   issuedAt: z.number().int(),
   expiresAt: z.number().int(),
-});
+}).refine((e) => e.origin === `https://${e.host}`, { message: "elicitation_requested: origin and host disagree", path: ["origin"] });
 /** WS-27: how a URL-mode elicitation ended. `accept`/`decline` are the user's answers (`by` is the
  *  answering client's name); `cancel` is the daemon's own — the session ended, the turn ended, or the
  *  card timed out (`by` says which). */

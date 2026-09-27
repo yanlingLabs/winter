@@ -717,16 +717,16 @@
           "type": "string",
           "maxLength": 2000
         },
-        "url": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 2048,
-          "pattern": "^https:\\/\\/"
-        },
         "host": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 300
+          "maxLength": 300,
+          "pattern": "^[^\\s/?#@\\\\]+$"
+        },
+        "origin": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 308
         },
         "issuedAt": {
           "type": "integer",
@@ -749,8 +749,8 @@
         "mode",
         "serverName",
         "message",
-        "url",
         "host",
+        "origin",
         "issuedAt",
         "expiresAt"
       ],
