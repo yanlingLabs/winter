@@ -203,7 +203,7 @@ describe("mcp.tools / mcp.setToolPermission", () => {
     await c.request(METHODS.mcpSetToolPermission, { server: "db", tool: "query", permission: "deny" });
     const r = await c.request(METHODS.mcpTools, { server: "db" });
     expect(McpToolsResult.parse(r.result)).toBeTruthy();
-    expect(r.result.servers).toEqual([{ name: "db", status: "unknown", source: "agent", listed: false, tools: [
+    expect(r.result.servers).toEqual([{ name: "db", status: "unmanaged", source: "agent", listed: false, tools: [
       { name: "query", toolName: "mcp__db__query", readOnly: false, setting: "deny", permission: "deny", source: "tool" },
     ] }]);
     c.close();
