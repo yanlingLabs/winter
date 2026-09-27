@@ -62,6 +62,8 @@ bun run dev:daemon                  # build + sign + run the dev daemon
 bun run dev:daemon --transition     # ONCE, dev daemon stopped: move the bun-created dev items to the signed binary
 ```
 
+Before `--transition`, quit Winter Dev and stop every dev daemon, a launchd-managed one included (`launchctl list | grep -i winter`): between the transition and the signed daemon's first boot the pairing tokens are self-only (that boot re-widens them for Winter Dev), and a `bun` daemon relaunched afterwards is prompted for every item.
+
 **The transition is one-way.** Items `bun` created would prompt the signed binary once each, so `--transition` (run under `bun`, their creator) reads each value and hands it over a pipe to `dist/dev/winter-core __dev-keychain-adopt`, which re-creates the item as itself — shadow, delete (by bun), add, read back, drop the shadow (`auth/dev-keychain-transition.ts`), holding the home's daemon lock. Crash-safe and idempotent: if interrupted, run it again. Until it has run, `bun run dev:daemon` refuses to start the signed binary on `~/.winter-dev` (an item bun can still read silently means bun still owns them). Afterwards EVERY dev-profile process must be that binary — a `bun`-run dev CLI or daemon (`bun src/main.ts` with the dev env, the old `winter-dev` wrapper) is prompted for each item it reads, the admin token first. Point `winter-dev` at the signed binary:
 
 ```sh
