@@ -235,7 +235,7 @@ export class BashReviewer {
           }
         : { provider: resolved.provider, model: resolved.model, effort: resolved.effort, tag: resolved.tag, quota: resolved.quota };
     // WS-24: the model call is aborted when the CALLER's signal aborts — the hook runner aborts a callback's
-    // `signal` when it times it out (SDK 0.0.28; 0.0.27 never aborts it, so this is inert there) — and when
+    // `signal` when it times it out (SDK 0.0.28, this build's pin; 0.0.27 never aborted it) — and when
     // this review's own timeout fires, so neither leaves a request running on the provider for a verdict
     // nobody will read. One controller for both; an already-aborted signal never reaches the provider.
     const ac = new AbortController();
