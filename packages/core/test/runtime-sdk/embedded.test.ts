@@ -31,6 +31,8 @@ import type { EmbeddedLifecycleEvent } from "../../src/runtime-sdk/embedded";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { RUNTIME_SHUTDOWN_DRAIN_MS } from "../../src/runtime-state";
 import { REQUIRED_WINTER_AGENT_SDK } from "../../src/runtime-sdk/versions";
+import { buildWorkflowSeatbeltProfile } from "../../src/workflows/sandbox";
+import { WORKER_NOT_SANDBOXED_EXIT_CODE } from "../../src/workflows/sandbox-guard";
 
 const TEMP: string[] = [];
 afterAll(() => {
@@ -76,12 +78,21 @@ describe("the topology", () => {
     for (const c of [compiled, dev]) expect(c.args).not.toContain("__workflow-worker");
   });
 
-  test("the dev workflow command really reaches the RUNTIME's worker: undriven (no --bridge), it answers its own not-driven code", () => {
+  test.skipIf(process.platform !== "darwin")("the dev workflow command really reaches the RUNTIME's worker: undriven (no --bridge), it answers its own not-driven code", () => {
     const dev = runtimeWorkflowWorkerCommand(false, process.execPath);
-    const run = Bun.spawnSync([dev.file, ...dev.args.filter((a) => a !== "--bridge")], { stdout: "pipe", stderr: "pipe" });
+    // Inside the workflow seatbelt, as its parent runs it (WS-27: it refuses to run outside one).
+    const run = Bun.spawnSync(["/usr/bin/sandbox-exec", "-p", buildWorkflowSeatbeltProfile(dev.file), dev.file, ...dev.args.filter((a) => a !== "--bridge")], { stdout: "pipe", stderr: "pipe" });
     // 78 = WORKFLOW_WORKER_NOT_IMPLEMENTED_EXIT_CODE: "the dispatch works, nothing is driving the bridge".
     expect(run.exitCode).toBe(78);
     expect(run.stderr.toString()).toContain("was invoked without --bridge");
+  });
+
+  test("WS-27: outside a sandbox that denies the Keychain, the runtime's worker refuses before the runtime reads anything", () => {
+    const dev = runtimeWorkflowWorkerCommand(false, process.execPath);
+    const run = Bun.spawnSync([dev.file, ...dev.args], { stdin: new TextEncoder().encode('{"not":"read"}\n'), stdout: "pipe", stderr: "pipe" });
+    expect(run.exitCode).toBe(WORKER_NOT_SANDBOXED_EXIT_CODE);
+    expect(run.stdout.toString()).toBe("");
+    expect(run.stderr.toString()).toContain("runtime workflow worker refuses to run");
   });
 });
 
