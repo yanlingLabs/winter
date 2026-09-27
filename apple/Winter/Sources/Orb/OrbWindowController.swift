@@ -131,6 +131,8 @@ final class OrbWindowController: ObservableObject {
     var onApprovalRespond: ((String, Bool, String?, String?) async -> Bool)?  // callId, approved, optionId, childSessionId
     var onQuestionRespond: ((String, [String: String], [String: String], String?) async -> Bool)?
     var onPlanRespond: ((String, Bool, Bool, String?) async -> Bool)?
+    /// WS-27: elicitationId, accept — `AppModel.respondElicitation` (the link is opened before this).
+    var onElicitationRespond: ((String, Bool) async -> Bool)?
 
     /// Dispatch (Phase 7), Task 8: fired by `GlassRootView.wireCallbacks()` (relaying
     /// `FieldStateAdapter.onOpenChild`) when the field's own child-status circle is tapped —
@@ -1702,6 +1704,10 @@ func cardKeyAction(
         return .selectOption(callId, digit - 1, childSessionId)
     case .plan:
         return nil // approve/deny/feedback all need more than one bare keystroke — mouse only.
+    case .urlElicitation:
+        // WS-27: mouse only. A stray "y" must never open a browser — opening the link is always a
+        // deliberate click on the card's own "Open link".
+        return nil
     }
 }
 

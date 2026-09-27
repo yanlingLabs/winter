@@ -360,10 +360,14 @@ final class InteractionCardTests: XCTestCase {
                                             outcome: .question(answers: ["Which port?": "8080"], notes: [:], by: "orb"))
         let plan = ResolvedPlanBody(plan: "the plan",
                                     outcome: .plan(approved: true, autoAccept: false, feedback: nil, by: "orb"))
+        // WS-27: nor does a frozen elicitation — and it keeps no url either, only the host.
+        let elicitation = ResolvedElicitationBody(serverName: "linear", message: "Connect", host: "linear.app",
+                                                  outcome: .elicitation(action: "accept", by: "orb"))
 
         for (name, body) in [("ResolvedApprovalBody", Mirror(reflecting: approval)),
                              ("ResolvedQuestionBody", Mirror(reflecting: question)),
-                             ("ResolvedPlanBody", Mirror(reflecting: plan))] {
+                             ("ResolvedPlanBody", Mirror(reflecting: plan)),
+                             ("ResolvedElicitationBody", Mirror(reflecting: elicitation))] {
             for child in body.children {
                 let type = String(describing: Swift.type(of: child.value))
                 XCTAssertFalse(type.contains("->"),
@@ -409,7 +413,7 @@ final class InteractionCardTests: XCTestCase {
             .appendingPathComponent("Sources/ChatContent/PendingCards.swift")
         let source = try String(contentsOf: url, encoding: .utf8)
 
-        for name in ["ResolvedApprovalBody", "ResolvedQuestionBody", "ResolvedPlanBody"] {
+        for name in ["ResolvedApprovalBody", "ResolvedQuestionBody", "ResolvedPlanBody", "ResolvedElicitationBody"] {
             // Access level is not part of the claim — these are internal so `Mirror` can reach them
             // (`testAFrozenCardIsHandedNoRespondClosures`), and were `private` before that.
             guard let start = source.range(of: "\nstruct \(name): View {")
@@ -430,6 +434,7 @@ final class InteractionCardTests: XCTestCase {
             XCTAssertFalse(code.contains("Button"), "\(name) declares a Button — a frozen card is not clickable")
             XCTAssertFalse(code.contains("TextField"), "\(name) declares a TextField — a frozen card is not editable")
             XCTAssertFalse(code.contains("onTapGesture"), "\(name) declares a tap gesture")
+            XCTAssertFalse(code.contains("Link("), "\(name) declares a Link — a frozen card opens nothing")
         }
     }
 }

@@ -45,6 +45,9 @@ struct InteractionCardWiring {
     let onApproval: (String, Bool, String?, String?) -> Void  // callId, approved, optionId, childSessionId
     let onQuestion: (String, [String: String], [String: String], String?) -> Void  // callId, answers, notes (both keyed by question text), childSessionId
     let onPlan: (String, Bool, Bool, String?) -> Void   // callId, approved, autoAccept, feedback
+    /// WS-27: elicitationId, accept (the user chose "Open link"), url. Defaulted so a surface or test
+    /// that predates URL-mode elicitation keeps compiling; the surface's closure opens the link.
+    var onElicitation: (String, Bool, String) -> Void = { _, _, _ in }
 }
 
 // MARK: - panel-shell T10b: PendingCardDraft — the hoisted, externally-owned per-card answer
@@ -270,6 +273,8 @@ func cardTitle(_ ask: InteractionRecord.Ask) -> String {
         return first.header ?? first.question
     case .plan:
         return "Plan for approval"
+    case .urlElicitation(let serverName, _, _, _):
+        return "\(serverName) asks you to open a link"
     }
 }
 
@@ -331,6 +336,7 @@ func cardGlyphSymbol(_ ask: InteractionRecord.Ask) -> String {
     case .approval: return "hand.raised.fill"
     case .question: return "questionmark.circle.fill"
     case .plan: return "list.bullet.rectangle"
+    case .urlElicitation: return "link"
     }
 }
 
@@ -436,6 +442,11 @@ func outcomeLabel(_ outcome: InteractionRecord.Outcome) -> InteractionOutcomeLab
     case .question(_, _, let by):
         if by == "timeout" { return .init(symbol: "clock.badge.xmark", text: "Timed out", isAffirmative: false) }
         return .init(symbol: "checkmark.circle.fill", text: "Answered", isAffirmative: true)
+    case .elicitation(let action, let by):
+        if action == "accept" { return .init(symbol: "arrow.up.right.square", text: "Link opened", isAffirmative: true) }
+        if action == "decline" { return .init(symbol: "nosign", text: "Declined", isAffirmative: false) }
+        if by == "timeout" { return .init(symbol: "clock.badge.xmark", text: "Cancelled — timed out", isAffirmative: false) }
+        return .init(symbol: "clock.badge.xmark", text: "Cancelled", isAffirmative: false)
     case .ended:
         // The turn ended with this ask outstanding — see `InteractionRecord.Outcome.ended`. Says
         // that nothing was recorded rather than claiming a decision nobody made.
@@ -468,6 +479,13 @@ func interactionProvenance(_ outcome: InteractionRecord.Outcome) -> String? {
     let by: String
     switch outcome {
     case .approval(_, let value), .question(_, _, let value), .plan(_, _, _, let value): by = value
+    case .elicitation(let action, let value):
+        // WS-27: a daemon-side cancel names what ended it, never a person.
+        if action == "cancel" {
+            if value == "timeout" { return "no answer before the deadline — cancelled" }
+            return "cancelled — the \(value == "turn-ended" ? "turn" : "session") ended before an answer"
+        }
+        by = value
     case .ended: return nil
     }
     if by == "timeout" { return "no answer before the deadline — resolved by timeout" }
@@ -568,6 +586,8 @@ struct TranscriptInteractionCard: View {
             PendingQuestionBody(callId: record.callId, questions: questions, childSessionId: record.childSessionId, isInFlight: isInFlight, onQuestion: wiring.onQuestion, onClose: nil, draft: wiring.draftBinding(record.callId))
         case .plan(let plan):
             PendingPlanBody(callId: record.callId, plan: plan, isInFlight: isInFlight, onPlan: wiring.onPlan, draft: wiring.draftBinding(record.callId))
+        case .urlElicitation(let serverName, let message, let url, let host):
+            PendingElicitationBody(elicitationId: record.callId, serverName: serverName, message: message, url: url, host: host, isInFlight: isInFlight, onElicitation: wiring.onElicitation)
         }
     }
 
@@ -580,6 +600,8 @@ struct TranscriptInteractionCard: View {
             ResolvedQuestionBody(questions: questions, outcome: outcome)
         case .plan(let plan):
             ResolvedPlanBody(plan: plan, outcome: outcome)
+        case .urlElicitation(let serverName, let message, _, let host):
+            ResolvedElicitationBody(serverName: serverName, message: message, host: host, outcome: outcome)
         }
     }
 }
@@ -1102,6 +1124,99 @@ private struct PendingApprovalBody: View {
                     }
                 }
             }
+        }
+    }
+}
+
+// MARK: - URL-mode elicitation card (WS-27)
+
+/// An MCP server asking the user to open a link. The card names the server, shows its message, and
+/// shows the link with its HOST set apart on its own line — the one thing the user must read before
+/// clicking. "Open link" is the only thing that ever opens it (the surface's `onElicitation` opens it
+/// in the browser, then tells the daemon); nothing opens it by itself, and there is no keyboard
+/// shortcut for it (`cardKeyAction` leaves this card mouse-only).
+/// Internal rather than `private` so `InteractionCardTests` can construct it, like its siblings.
+struct PendingElicitationBody: View {
+    let elicitationId: String
+    let serverName: String
+    let message: String
+    let url: String
+    let host: String
+    let isInFlight: Bool
+    let onElicitation: (String, Bool, String) -> Void  // elicitationId, accept, url
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !message.isEmpty {
+                Text(message)
+                    .font(Typography.label())
+                    .foregroundStyle(.primary)
+                    .lineLimit(8)
+                    .textSelection(.enabled)
+            }
+            ElicitationLinkLines(url: url, host: host)
+
+            if isInFlight {
+                Label("Sending…", systemImage: "hourglass")
+                    .font(Typography.label(.medium))
+                    .foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 8) {
+                    Button("Open link") { onElicitation(elicitationId, true, url) }
+                        .buttonStyle(.borderedProminent)
+                        .frame(maxWidth: .infinity)
+                    Button("Decline") { onElicitation(elicitationId, false, url) }
+                        .buttonStyle(.bordered)
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.small)
+            }
+        }
+    }
+}
+
+/// The destination, twice over: the host alone and emphasised, then the full link small and
+/// middle-truncated beneath it. The host is what a user checks; the full link is the evidence.
+private struct ElicitationLinkLines: View {
+    let url: String
+    let host: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Label(host, systemImage: "lock.fill")
+                .font(Typography.labelMono(.semibold))
+                .foregroundStyle(.primary)
+            Text(url)
+                .font(Typography.caption())
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+        }
+    }
+}
+
+/// The frozen record: which server asked, where it pointed, and what happened. No `Button`, no link:
+/// a resolved card never opens anything. The full link is deliberately not kept on screen here — it
+/// may have carried a one-time code — only its host.
+struct ResolvedElicitationBody: View {
+    let serverName: String
+    let message: String
+    let host: String
+    let outcome: InteractionRecord.Outcome
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !message.isEmpty {
+                Text(message)
+                    .font(Typography.label())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+            Label(host, systemImage: "link")
+                .font(Typography.labelMono())
+                .foregroundStyle(.secondary)
+            ResolvedOutcomeRow(outcome: outcome)
         }
     }
 }

@@ -670,6 +670,10 @@ final class FieldStateAdapter: ObservableObject {
     var onQuestionRespond: (String, [String: String], [String: String], String?) -> Void = { _, _, _, _ in }
     /// callId, approved, autoAccept, feedback.
     var onPlanRespond: (String, Bool, Bool, String?) -> Void = { _, _, _, _ in }
+    /// WS-27: elicitationId, accept, url — a URL-mode elicitation card's "Open link"/"Decline".
+    /// Each surface routes it through `answerElicitation` (`ElicitationAnswer.swift`), which opens
+    /// the link before it tells the daemon.
+    var onElicitationRespond: (String, Bool, String) -> Void = { _, _, _ in }
 
     // MARK: - Task 4 (2d-iii): ⋯ menu — per-session approval-mode policy
 

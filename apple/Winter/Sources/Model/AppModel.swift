@@ -349,6 +349,13 @@ final class AppModel: ObservableObject {
         return (try? await client.askUserRespond(sessionId: sid, callId: callId, answers: answers, notes: notes.isEmpty ? nil : notes)) != nil
     }
 
+    /// WS-27: the focused session's URL-mode elicitation card. The link was already opened by the
+    /// surface (`answerElicitation`) when `accept` is true; this only tells the daemon.
+    func respondElicitation(elicitationId: String, accept: Bool) async -> Bool {
+        guard let sid = focusedSessionId, pendingCallIdIsCurrent(elicitationId) else { return false }
+        return (try? await client.elicitationRespond(sessionId: sid, elicitationId: elicitationId, accept: accept)) != nil
+    }
+
     func respondPlan(callId: String, approved: Bool, autoAccept: Bool, feedback: String?) async -> Bool {
         guard let sid = focusedSessionId, pendingCallIdIsCurrent(callId) else { return false }
         return (try? await client.planRespond(sessionId: sid, callId: callId, approved: approved, autoAccept: autoAccept, feedback: feedback)) != nil
