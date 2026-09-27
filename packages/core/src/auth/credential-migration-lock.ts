@@ -99,7 +99,7 @@ function readRecord(home: string): LockRecord | undefined {
   try {
     const parsed = JSON.parse(readFileSync(credentialMigrationLockPath(home), "utf8")) as { pid?: unknown; startSec?: unknown };
     if (typeof parsed.pid !== "number" || !Number.isInteger(parsed.pid) || parsed.pid <= 0) return undefined;
-    return { pid: parsed.pid, ...(typeof parsed.startSec === "number" && Number.isInteger(parsed.startSec) ? { startSec: parsed.startSec } : {}) };
+    return { pid: parsed.pid, ...(typeof parsed.startSec === "number" && Number.isInteger(parsed.startSec) && parsed.startSec > 0 ? { startSec: parsed.startSec } : {}) };
   } catch {
     return undefined;
   }
@@ -116,7 +116,10 @@ function recordLive(home: string, record: LockRecord, startOf: (pid: number) => 
   if (!alive(record.pid)) return false;
   if (record.startSec === undefined) return true; // no start time recorded: pid liveness is all there is
   const now = startOf(record.pid);
-  return now === undefined || now === record.startSec; // cannot ask: held (the safe side)
+  // A reading that is missing or garbled (not a positive whole number of seconds) says nothing: held, the
+  // safe side. Only a CLEAR different start time makes a live pid stale.
+  if (now === undefined || !Number.isInteger(now) || now <= 0) return true;
+  return now === record.startSec;
 }
 
 /**

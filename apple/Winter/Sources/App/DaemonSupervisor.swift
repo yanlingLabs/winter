@@ -97,7 +97,8 @@ final class DaemonSupervisor {
     /// again doesn't inherit the earlier crash toward the cap.
     private var recentCrashes: [Date] = []
 
-    /// Consecutive busy exits (reset by any other exit or a deliberate spawn), and the token of the one
+    /// Consecutive busy exits (reset by any other exit, a deliberate spawn, or a back-off respawn that stays up
+    /// through `rapidWindowSeconds`), and the token of the one
     /// scheduled back-off respawn — bumped by `stop()`/`restart()` so a timer that fires afterwards does nothing.
     private var credentialWaits = 0
     private var backoffToken = 0
@@ -193,6 +194,13 @@ final class DaemonSupervisor {
             guard let self, self.backoffToken == token, case .waitingForCredentials = self.state else { return }
             self.performSpawn()
             self.state = .running
+            // Once this daemon has stayed up through the rapid-exit window, the other process has finished:
+            // a LATER busy refusal is a new episode and starts again at the shortest back-off.
+            let spawned = self.process
+            self.deps.schedule(Self.rapidWindowSeconds) { [weak self] in
+                guard let self, let spawned, self.process === spawned, spawned.isRunning else { return }
+                self.credentialWaits = 0
+            }
         }
     }
 

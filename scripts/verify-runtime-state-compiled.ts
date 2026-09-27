@@ -44,6 +44,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RUNTIME_STATE_SCHEMA_VERSION } from "../packages/core/src/runtime-state/db";
+import { keychainFfiProbeOk } from "./release-lib";
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(SCRIPTS_DIR, "..");
@@ -182,13 +183,16 @@ async function main(): Promise<void> {
   // 0.120.0 shipped winter-core with allow-jit only; `bun:ffi`'s dlopen (auth/keychain-ffi.ts, the
   // app-token access lists) builds trampolines in non-MAP_JIT memory and the hardened runtime killed the
   // daemon at its first Keychain call. `__keychain-ffi-probe` loads the three libraries and asks only
-  // whether the default keychain is unlocked (no item read, no prompt). POSITIVE: the release's
+  // whether the default keychain is unlocked (no item read, no prompt), then (WS-27) reads its own start
+  // time through libSystem's sysctl. POSITIVE: the release's
   // entitlements run it. NEGATIVE: a copy signed with allow-jit alone must be killed — proof this leg
   // can see the failure at all.
   {
     const ffiEnv = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir(), WINTER_HOME: tmpHome, WINTER_PROFILE: "dev", WINTER_LOGIN_SHELL_PATH: "off" };
     const pos = spawnSync(probeBinary, ["__keychain-ffi-probe"], { encoding: "utf8", env: ffiEnv, timeout: 30_000 });
-    if (pos.status !== 0 || !(pos.stdout ?? "").includes("keychain-ffi: ok")) {
+    // WS-27: the probe also reads its own start time through libSystem's sysctl (the credential migration
+    // lock's ffi), so the positive leg covers both libraries.
+    if (pos.status !== 0 || !keychainFfiProbeOk(pos.stdout ?? "")) {
       rmSync(tmpHome, { recursive: true, force: true });
       rmSync(signedDir, { recursive: true, force: true });
       fail(`bun:ffi does not run on winter-core signed with ${WINTER_CORE_ENTITLEMENTS} (exit ${pos.status ?? pos.signal}): ${`${pos.stdout ?? ""}${pos.stderr ?? ""}`.trim().slice(0, 300)}`);

@@ -215,13 +215,46 @@ final class DaemonSupervisorTests: XCTestCase {
             XCTAssertNotEqual(s.state, .failed)
             scheduled().last!.1()
         }
-        XCTAssertEqual(scheduled().map(\.0), [5, 10, 20, 40, 60, 60, 60, 60])
+        // Each back-off (even entries) is followed by its respawn's survival check (odd entries), never fired
+        // here — so the refusals stay one episode.
+        let delays = scheduled().map(\.0)
+        XCTAssertEqual(stride(from: 0, to: delays.count, by: 2).map { delays[$0] }, [5, 10, 20, 40, 60, 60, 60, 60])
+        XCTAssertEqual(Set(stride(from: 1, to: delays.count, by: 2).map { delays[$0] }), [DaemonSupervisor.rapidWindowSeconds])
         XCTAssertEqual(s.state, .running)
         // Any other exit is an ordinary crash again, and the back-off count starts over after it.
         procs().last!.simulateExit(intentional: false)
         XCTAssertEqual(s.state, .respawning(attempt: 1))
         procs().last!.simulateExit(intentional: false, exitCode: DaemonSupervisor.credentialMigrationBusyExitCode)
         XCTAssertEqual(s.state, .waitingForCredentials(attempt: 1))
+    }
+
+    func testABackoffRespawnThatStaysUpResetsTheBackoffSoALaterRefusalStartsAgainAtFiveSeconds() {
+        let (s, procs, scheduled) = busySupervisor()
+        for _ in 0..<3 { // three refusals in a row: 5, 10, 20
+            procs().last!.simulateExit(intentional: false, exitCode: DaemonSupervisor.credentialMigrationBusyExitCode)
+            scheduled().last!.1() // the back-off respawn
+        }
+        XCTAssertEqual(s.state, .running)
+        // The last respawn's survival check is the most recent timer: the rapid-exit window.
+        XCTAssertEqual(scheduled().last!.0, DaemonSupervisor.rapidWindowSeconds)
+        scheduled().last!.1() // it stayed up
+        procs().last!.simulateExit(intentional: false, exitCode: DaemonSupervisor.credentialMigrationBusyExitCode)
+        XCTAssertEqual(s.state, .waitingForCredentials(attempt: 1))
+        XCTAssertEqual(scheduled().last!.0, 5, "a new episode starts at the shortest back-off")
+    }
+
+    func testABackoffRespawnThatIsRefusedAgainBeforeTheWindowKeepsBackingOff() {
+        let (s, procs, scheduled) = busySupervisor()
+        procs().last!.simulateExit(intentional: false, exitCode: DaemonSupervisor.credentialMigrationBusyExitCode)
+        scheduled().last!.1() // respawn #1 (5 s)
+        let survivalCheck = scheduled().last!.1
+        procs().last!.simulateExit(intentional: false, exitCode: DaemonSupervisor.credentialMigrationBusyExitCode)
+        survivalCheck() // fires late, for a daemon that did NOT stay up: no reset
+        XCTAssertEqual(s.state, .waitingForCredentials(attempt: 2))
+        XCTAssertEqual(scheduled().last!.0, 10)
+        scheduled().last!.1()
+        procs().last!.simulateExit(intentional: false, exitCode: DaemonSupervisor.credentialMigrationBusyExitCode)
+        XCTAssertEqual(s.state, .waitingForCredentials(attempt: 3))
     }
 
     func testStopWhileWaitingCancelsTheBackoffRespawn() {
