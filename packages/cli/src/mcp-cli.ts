@@ -34,8 +34,8 @@
 //     router reads live off disk when trusted (spec §3.4.5).
 //
 // WS-27: `remove` and the new `rename` also carry the name's CONNECTOR SETTINGS (`settings.json` →
-// `mcp.toolPermissions`, `mcp.disabled` and, for a rename, `sdk/settings.json` rules), keyed by name across
-// every scope. So with a live daemon they go through `mcp.remove`/`mcp.rename` for EVERY scope (scope + cwd,
+// `mcp.toolPermissions` and `mcp.disabled`), keyed by name across every scope; claude-grammar rules are never
+// edited, only listed (`rulesNotFollowed`). So with a live daemon they go through `mcp.remove`/`mcp.rename` for EVERY scope (scope + cwd,
 // as `permissions` does) — only the daemon knows which servers its live sessions still have connected. With
 // no daemon, the same core doors run in-process (`removeMcpServerForgettingPermissions`,
 // `renameMcpServerCarryingSettings`).
@@ -62,7 +62,7 @@ export type McpTransport = "stdio" | "http" | "sse";
 export interface McpDoor {
   mcpAdd(name: string, entry: McpServerSettingsEntry): Promise<{ ok: true; name: string; transport: McpTransport; started: boolean }>;
   /** WS-27: every scope (`cwd` for local/project) — the daemon decides whether the permissions may go. */
-  mcpRemove(name: string, scope?: McpScope, cwd?: string): Promise<{ ok: true; name: string; removed: boolean; permissionsCleared?: boolean; rulesDropped?: number; rulesNotFollowed?: string[]; permissionsNote?: string }>;
+  mcpRemove(name: string, scope?: McpScope, cwd?: string): Promise<{ ok: true; name: string; removed: boolean; permissionsCleared?: boolean; rulesNotFollowed?: string[]; permissionsNote?: string }>;
   /** WS-27: `mcp.rename`, every scope (optional, so a door built before it still fits). */
   mcpRename?(name: string, newName: string, scope?: McpScope, cwd?: string): Promise<McpRenameDoorResult>;
   mcpGet(name: string): Promise<{
@@ -574,9 +574,9 @@ export async function runMcpAddJsonRoute(args: string[], deps: McpRouteDeps): Pr
 /** WS-27: `permissionsCleared` is set (true) only when the removal also dropped the name's connector
  *  permissions — nothing else defined a server of that name any more. */
 export type McpRemoveOutcome =
-  | { ok: true; scope: "user"; name: string; removed: boolean; permissionsCleared?: true; permissionsNote?: string; rulesDropped?: number; rulesNotFollowed?: string[] }
-  | { ok: true; scope: "local"; name: string; removed: boolean; root: string; permissionsCleared?: true; permissionsNote?: string; rulesDropped?: number; rulesNotFollowed?: string[] }
-  | { ok: true; scope: "project"; name: string; removed: boolean; cwd: string; permissionsCleared?: true; permissionsNote?: string; rulesDropped?: number; rulesNotFollowed?: string[] }
+  | { ok: true; scope: "user"; name: string; removed: boolean; permissionsCleared?: true; permissionsNote?: string; rulesNotFollowed?: string[] }
+  | { ok: true; scope: "local"; name: string; removed: boolean; root: string; permissionsCleared?: true; permissionsNote?: string; rulesNotFollowed?: string[] }
+  | { ok: true; scope: "project"; name: string; removed: boolean; cwd: string; permissionsCleared?: true; permissionsNote?: string; rulesNotFollowed?: string[] }
   | { ok: false; message: string }
   | { ok: false; multi: true; name: string; scopes: McpScope[] };
 
@@ -610,7 +610,7 @@ function nameContext(deps: McpRouteDeps): { cwd: string; trust: TrustStore } {
   return { cwd: deps.cwd, trust: new TrustStore(join(deps.winterHome, "trust.json")) };
 }
 
-type ScopeRemoveResult = { ok: true; removed: boolean; permissionsCleared?: true; permissionsNote?: string; rulesDropped?: number; rulesNotFollowed?: string[] } | { ok: false; message: string };
+type ScopeRemoveResult = { ok: true; removed: boolean; permissionsCleared?: true; permissionsNote?: string; rulesNotFollowed?: string[] } | { ok: false; message: string };
 
 /**
  * WS-27 (review 6): one scope's remove. With a live daemon EVERY scope goes through `mcp.remove` (scope + cwd),
@@ -624,7 +624,7 @@ async function removeInScope(deps: McpRouteDeps, scope: McpScope, name: string):
     if (read.kind === "malformed") return { ok: false, message: malformedProjectFileMessage(root, `removing "${name}"`) };
     if (read.kind === "absent") return { ok: true, removed: false };
   }
-  let r: { removed: boolean; permissionsCleared?: boolean; permissionsNote?: string; rulesDropped?: number; rulesNotFollowed?: string[] };
+  let r: { removed: boolean; permissionsCleared?: boolean; permissionsNote?: string; rulesNotFollowed?: string[] };
   if (deps.door) {
     r = await deps.door.mcpRemove(name, scope, scope === "user" ? undefined : deps.cwd);
   } else {
@@ -634,7 +634,6 @@ async function removeInScope(deps: McpRouteDeps, scope: McpScope, name: string):
   return {
     ok: true, removed: r.removed,
     ...(r.permissionsCleared === true ? { permissionsCleared: true as const } : {}),
-    ...(r.rulesDropped !== undefined && r.rulesDropped > 0 ? { rulesDropped: r.rulesDropped } : {}),
     ...(r.rulesNotFollowed !== undefined && r.rulesNotFollowed.length > 0 ? { rulesNotFollowed: r.rulesNotFollowed } : {}),
     ...(r.permissionsNote !== undefined ? { permissionsNote: r.permissionsNote } : {}),
   };
@@ -688,11 +687,11 @@ const RENAME_USAGE = "usage: winter mcp rename <old> <new> [-s local|user|projec
 
 export interface McpRenameDoorResult {
   ok: true; name: string; newName: string; carried: boolean; keptOld: boolean;
-  rulesCarried?: number; rulesNotFollowed?: string[]; note?: string;
+  rulesNotFollowed?: string[]; note?: string;
 }
 
 export type McpRenameOutcome =
-  | { ok: true; scope: McpScope; name: string; newName: string; carried: boolean; keptOld: boolean; rulesCarried: number; rulesNotFollowed: string[]; note?: string; via: "daemon" | "local" }
+  | { ok: true; scope: McpScope; name: string; newName: string; carried: boolean; keptOld: boolean; rulesNotFollowed: string[]; note?: string; via: "daemon" | "local" }
   | { ok: false; message: string; code?: string }
   | { ok: false; multi: true; name: string; scopes: McpScope[] };
 
@@ -731,11 +730,11 @@ export async function runMcpRenameRoute(args: string[], deps: McpRouteDeps): Pro
     if (deps.door !== undefined) {
       if (deps.door.mcpRename === undefined) return { ok: false, message: "this daemon has no mcp.rename — update Winter, or stop the daemon to rename in-process" };
       const r = await deps.door.mcpRename(name, newName, scope, scope === "user" ? undefined : deps.cwd);
-      return { ok: true, scope, name, newName, carried: r.carried, keptOld: r.keptOld, rulesCarried: r.rulesCarried ?? 0, rulesNotFollowed: r.rulesNotFollowed ?? [], ...(r.note !== undefined ? { note: r.note } : {}), via: "daemon" };
+      return { ok: true, scope, name, newName, carried: r.carried, keptOld: r.keptOld, rulesNotFollowed: r.rulesNotFollowed ?? [], ...(r.note !== undefined ? { note: r.note } : {}), via: "daemon" };
     }
     const root = scope === "local" ? localScopeKeyFor(deps.cwd) : scope === "project" ? projectScopeRootFor(deps.cwd) : undefined;
     const r = renameMcpServerCarryingSettings({ home: deps.winterHome, scope, ...(root !== undefined ? { root } : {}) }, name, newName, nameContext(deps));
-    return { ok: true, scope, name, newName, carried: r.carried, keptOld: r.keptOld, rulesCarried: r.rulesCarried, rulesNotFollowed: r.rulesNotFollowed, ...(r.note !== undefined ? { note: r.note } : {}), via: "local" };
+    return { ok: true, scope, name, newName, carried: r.carried, keptOld: r.keptOld, rulesNotFollowed: r.rulesNotFollowed, ...(r.note !== undefined ? { note: r.note } : {}), via: "local" };
   } catch (err) {
     if (err instanceof McpRenameRefusal) return { ok: false, message: err.message, code: err.code };
     const r = refusalOf(err);
@@ -759,9 +758,8 @@ export function renderMcpRenameOutcome(outcome: McpRenameOutcome): string {
     : ` — its connector settings moved with it`;
   const where = outcome.via === "daemon" ? "" : " (no daemon was running; live sessions pick it up at their next start)";
   const lines = [`Renamed MCP server "${outcome.name}" to "${outcome.newName}" in ${scopeLabel(outcome.scope)}${settings}${where}.`];
-  if (outcome.rulesCarried > 0) lines.push(`${outcome.rulesCarried} rule${outcome.rulesCarried === 1 ? "" : "s"} in sdk/settings.json now name${outcome.rulesCarried === 1 ? "s" : ""} "${outcome.newName}".`);
   if (outcome.rulesNotFollowed.length > 0) {
-    lines.push(`These rules name "${outcome.name}" and do not follow the rename (files Winter does not edit, or rules that may name another server) — update them yourself:`);
+    lines.push(`These rules could still name "${outcome.name}" — Winter never rewrites a rule, so they do not follow the rename; edit them yourself:`);
     for (const r of outcome.rulesNotFollowed) lines.push(`  ${r}`);
   }
   if (outcome.note !== undefined) lines.push(outcome.note);
@@ -900,9 +898,8 @@ export function renderMcpRemoveOutcome(outcome: McpRemoveOutcome): string {
   const location = outcome.scope === "project" ? outcome.cwd : outcome.scope === "local" ? outcome.root : undefined;
   const cleared = outcome.permissionsCleared === true ? " and cleared its connector permissions" : "";
   const extra: string[] = [];
-  if (outcome.rulesDropped !== undefined) extra.push(`${outcome.rulesDropped} rule${outcome.rulesDropped === 1 ? "" : "s"} naming it dropped from sdk/settings.json.`);
   if (outcome.rulesNotFollowed !== undefined) {
-    extra.push(`These rules still name "${outcome.name}" and were left as they are — update them yourself:`);
+    extra.push(`These rules could still name "${outcome.name}" and remain as they are (Winter never edits a rule) — edit them if you want them gone:`);
     for (const r of outcome.rulesNotFollowed) extra.push(`  ${r}`);
   }
   if (outcome.permissionsNote !== undefined) extra.push(outcome.permissionsNote);

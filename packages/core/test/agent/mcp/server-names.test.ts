@@ -157,3 +157,34 @@ describe("review 8: a trusted repository's LINKED WORKTREES count", () => {
     expect(mcpServerNameDefined(f.home, "anything", { trust: f.trust })).toBe(false);
   });
 });
+
+describe("round 3: submodules and --separate-git-dir checkouts", () => {
+  const run = (cwd: string, args: string[]) => expect(Bun.spawnSync(["git", "-C", cwd, "-c", "user.email=t@t.test", "-c", "user.name=t", "-c", "protocol.file.allow=always", ...args], { stdout: "ignore", stderr: "ignore" }).exitCode).toBe(0);
+
+  test("a trusted SUBMODULE (its .git file points into the superproject's modules/, no commondir) is read, not 'unknown'", () => {
+    const f = fixture();
+    const upstream = dir("winter-srvnames-sub-up-");
+    run(upstream, ["init", "-q"]);
+    run(upstream, ["commit", "--allow-empty", "-q", "-m", "i"]);
+    run(f.project, ["commit", "--allow-empty", "-q", "-m", "i"]);
+    run(f.project, ["submodule", "add", "-q", upstream, "sub"]);
+    const sub = realpathSync(join(f.project, "sub"));
+    const onlySub = { isTrusted: (d: string) => d === sub, list: () => [sub] } as unknown as TrustStore;
+    expect(mcpServerNameDefined(f.home, "nowhere", { trust: onlySub })).toBe(false);
+    write(join(sub, ".winter", "mcp.json"), { mcpServers: { in_sub: { type: "stdio", command: "s" } } });
+    expect(mcpServerNameDefined(f.home, "in_sub", { trust: onlySub })).toBe(true);
+  });
+
+  test("a --separate-git-dir checkout, and a worktree entry with no gitdir file, are read", () => {
+    const f = fixture();
+    const work = dir("winter-srvnames-sep-work-");
+    const gitdir = join(dir("winter-srvnames-sep-git-"), "repo.git");
+    expect(Bun.spawnSync(["git", "init", "-q", `--separate-git-dir=${gitdir}`, work], { stdout: "ignore", stderr: "ignore" }).exitCode).toBe(0);
+    const trust = { isTrusted: (d: string) => d === work, list: () => [work] } as unknown as TrustStore;
+    expect(mcpServerNameDefined(f.home, "nowhere", { trust })).toBe(false);
+    mkdirSync(join(gitdir, "worktrees", "stale"), { recursive: true });   // no gitdir file: skipped
+    expect(mcpServerNameDefined(f.home, "nowhere", { trust })).toBe(false);
+    write(join(work, ".winter", "mcp.json"), { mcpServers: { sep: { type: "stdio", command: "s" } } });
+    expect(mcpServerNameDefined(f.home, "sep", { trust })).toBe(true);
+  });
+});

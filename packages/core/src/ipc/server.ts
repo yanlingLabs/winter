@@ -2585,7 +2585,6 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (outcome.removed && target.scope === "user") opts.mcp?.stopServer(p.name);
         return {
           ok: true, name: p.name, removed: outcome.removed, scope: p.scope, permissionsCleared: outcome.permissionsCleared,
-          ...(outcome.rulesDropped > 0 ? { rulesDropped: outcome.rulesDropped } : {}),
           ...(outcome.rulesNotFollowed.length > 0 ? { rulesNotFollowed: outcome.rulesNotFollowed } : {}),
           ...(outcome.permissionsNote !== undefined ? { permissionsNote: outcome.permissionsNote } : {}),
         };
@@ -2614,7 +2613,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         }
         return {
           ok: true, name: p.name, newName: p.newName, scope: p.scope, carried: outcome.carried, keptOld: outcome.keptOld,
-          rulesCarried: outcome.rulesCarried, rulesNotFollowed: outcome.rulesNotFollowed, ...(outcome.note !== undefined ? { note: outcome.note } : {}),
+          rulesNotFollowed: outcome.rulesNotFollowed, ...(outcome.note !== undefined ? { note: outcome.note } : {}),
         };
       }
       // -----------------------------------------------------------------------------------------

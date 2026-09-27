@@ -122,7 +122,7 @@ describe("mcp.remove / mcp.rename and the connector settings", () => {
       { mcp: { toolPermissions: { cf: { list: "allow", "*": "ask" } }, disabled: ["other"] } },
     );
     const r = await c.request(METHODS.mcpRename, { name: "cf", newName: "cloudflare", scope: "user" });
-    expect(McpRenameResult.parse(r.result)).toEqual({ ok: true, name: "cf", newName: "cloudflare", scope: "user", carried: true, keptOld: false, rulesCarried: 0, rulesNotFollowed: [] });
+    expect(McpRenameResult.parse(r.result)).toEqual({ ok: true, name: "cf", newName: "cloudflare", scope: "user", carried: true, keptOld: false, rulesNotFollowed: [] });
     const config = configOf(home);
     expect(Object.keys(config.mcpServers)).toEqual(["a", "cloudflare", "z"]);
     expect(config.mcpServers.cloudflare).toEqual({ type: "stdio", command: "cf" });
@@ -198,70 +198,43 @@ describe("mcp.remove / mcp.rename and the connector settings", () => {
     c.close();
   });
 
-  test("review 4: rename rewrites sdk/settings.json rules naming the server, and lists the ones in files Winter does not edit", async () => {
+  test("round 3: rename NEVER rewrites a rule — it lists every rule that could name the old server, in every file", async () => {
     const project = realpathSync(mkdtempSync(join(tmpdir(), "winter-mcp-rename-proj-")));
     mkdirSync(join(project, ".winter"), { recursive: true });
     writeFileSync(join(project, ".winter", "settings.json"), JSON.stringify({ permissions: { allow: ["mcp__cf__list", "Bash(ls)"] } }));
     const { home, c, trust } = await boot({ mcpServers: { cf: { type: "stdio", command: "cf" } } });
     trust.trust(project);
-    writeFileSync(join(home, "sdk", "settings.json"), JSON.stringify({ permissions: { allow: ["mcp__cf__list", "mcp__cf__*", "mcp__cfx__a", "Read"], deny: ["mcp__cf"], ask: ["mcp__cf__prod(*)"] } }));
+    const sdk = join(home, "sdk", "settings.json");
+    const sdkRules = { permissions: { allow: ["mcp__cf__list", "mcp__cf__*", "mcp__cfx__a", "mcp__c*", "Read"], deny: ["mcp__cf"], ask: ["mcp__cf__admin__delete(*)"] } };
+    writeFileSync(sdk, JSON.stringify(sdkRules));
     mkdirSync(join(home, "permissions"), { recursive: true });
     writeFileSync(join(home, "permissions", "projects.json"), JSON.stringify({ version: 1, projects: { [project]: ["mcp__cf__write", "Bash(npm test)"] } }));
     const r = await c.request(METHODS.mcpRename, { name: "cf", newName: "cloudflare", scope: "user", cwd: project });
-    expect(r.result).toMatchObject({ rulesCarried: 4, keptOld: false });
-    expect(JSON.parse(readFileSync(join(home, "sdk", "settings.json"), "utf8")).permissions).toEqual({
-      allow: ["mcp__cloudflare__list", "mcp__cloudflare__*", "mcp__cfx__a", "Read"], deny: ["mcp__cloudflare"], ask: ["mcp__cloudflare__prod(*)"],
-    });
-    expect(r.result.rulesNotFollowed.sort()).toEqual([
-      `${join(home, "permissions", "projects.json")}: mcp__cf__write`,
-      `${join(project, ".winter", "settings.json")}: mcp__cf__list`,
-    ].sort());
-    // The repository file and the record are untouched.
+    expect(McpRenameResult.parse(r.result)).toMatchObject({ ok: true, keptOld: false });
+    expect("rulesCarried" in r.result).toBe(false);
+    // Nothing rewritten, anywhere.
+    expect(JSON.parse(readFileSync(sdk, "utf8"))).toEqual(sdkRules);
     expect(JSON.parse(readFileSync(join(project, ".winter", "settings.json"), "utf8")).permissions.allow).toEqual(["mcp__cf__list", "Bash(ls)"]);
+    // Every rule that COULD name `cf` is listed: literal ones (every `__` split) and globs whose server part can
+    // match (`mcp__cf__*`, `mcp__c*`) — never `mcp__cfx__a`, `Read` or `Bash(...)`.
+    expect(r.result.rulesNotFollowed.sort()).toEqual([
+      `${sdk}: mcp__cf__list`, `${sdk}: mcp__cf__*`, `${sdk}: mcp__c*`, `${sdk}: mcp__cf`, `${sdk}: mcp__cf__admin__delete(*)`,
+      `${join(project, ".winter", "settings.json")}: mcp__cf__list`,
+      `${join(home, "permissions", "projects.json")}: mcp__cf__write`,
+    ].sort());
     c.close();
   });
 
-  test("review 4: while the old name stays in use, the rules are COPIED (both spellings kept)", async () => {
-    const { home, c } = await boot({ mcpServers: { cf: { type: "stdio", command: "cf" } } }, {}, ["cf"]);
-    writeFileSync(join(home, "sdk", "settings.json"), JSON.stringify({ permissions: { deny: ["mcp__cf__drop"] } }));
-    expect((await c.request(METHODS.mcpRename, { name: "cf", newName: "cf2", scope: "user" })).result).toMatchObject({ rulesCarried: 1, keptOld: true });
-    expect(JSON.parse(readFileSync(join(home, "sdk", "settings.json"), "utf8")).permissions.deny).toEqual(["mcp__cf__drop", "mcp__cf2__drop"]);
-    c.close();
-  });
-
-  test("round 2 N1: a rule that may name another in-use server (cf__prod) is neither copied nor dropped, and is listed", async () => {
-    const { home, c } = await boot({ mcpServers: { cf: { type: "stdio", command: "cf" }, cf__prod: { type: "stdio", command: "p" } } });
-    const sdk = join(home, "sdk", "settings.json");
-    writeFileSync(sdk, JSON.stringify({ permissions: { allow: ["mcp__cf__list"], ask: ["mcp__cf__prod(*)"] } }));
-    const r = await c.request(METHODS.mcpRename, { name: "cf", newName: "cloudflare", scope: "user" });
-    expect(r.result).toMatchObject({ rulesCarried: 1, keptOld: false });
-    expect(JSON.parse(readFileSync(sdk, "utf8")).permissions).toEqual({ allow: ["mcp__cloudflare__list"], ask: ["mcp__cf__prod(*)"] });
-    expect(r.result.rulesNotFollowed).toEqual([`${sdk}: mcp__cf__prod(*) (ambiguous — it may name server "cf__prod", which is in use; left as it is)`]);
-    c.close();
-  });
-
-  test("round 2 N1: a stored toolPermissions row makes a candidate in use too; unambiguous rules still move", async () => {
-    const { home, c } = await boot({ mcpServers: { cf: { type: "stdio", command: "cf" } } }, { mcp: { toolPermissions: { cf__prod: { "*": "deny" } } } });
-    const sdk = join(home, "sdk", "settings.json");
-    writeFileSync(sdk, JSON.stringify({ permissions: { deny: ["mcp__cf__prod__drop", "mcp__cf__list"] } }));
-    const r = await c.request(METHODS.mcpRemove, { name: "cf", scope: "user" });
-    expect(r.result).toMatchObject({ removed: true, rulesDropped: 1 });
-    expect(r.result.rulesNotFollowed[0]).toContain('may name server "cf__prod"');
-    expect(JSON.parse(readFileSync(sdk, "utf8")).permissions.deny).toEqual(["mcp__cf__prod__drop"]);
-    c.close();
-  });
-
-  test("round 2 N2: remove, once the name is unused, drops its sdk/settings.json rules and lists the repository ones", async () => {
-    const project = realpathSync(mkdtempSync(join(tmpdir(), "winter-mcp-rename-proj-")));
-    mkdirSync(join(project, ".winter"), { recursive: true });
-    writeFileSync(join(project, ".winter", "settings.local.json"), JSON.stringify({ permissions: { allow: ["mcp__cf__write"] } }));
-    const { home, c, trust } = await boot({ mcpServers: { cf: { type: "stdio", command: "cf" } } });
-    trust.trust(project);
+  test("round 3: remove NEVER drops a rule (claude parity) — it lists them; the permission row still goes", async () => {
+    const { home, c } = await boot({ mcpServers: { cf: { type: "stdio", command: "cf" } } }, { mcp: { toolPermissions: { cf: { "*": "deny" } } } });
     const sdk = join(home, "sdk", "settings.json");
     writeFileSync(sdk, JSON.stringify({ permissions: { allow: ["mcp__cf__list", "Read"], deny: ["mcp__cf"] } }));
     const r = await c.request(METHODS.mcpRemove, { name: "cf", scope: "user" });
-    expect(r.result).toMatchObject({ removed: true, rulesDropped: 2, rulesNotFollowed: [`${join(project, ".winter", "settings.local.json")}: mcp__cf__write`] });
-    expect(JSON.parse(readFileSync(sdk, "utf8")).permissions).toEqual({ allow: ["Read"], deny: [] });
+    expect(r.result).toMatchObject({ removed: true, permissionsCleared: true });
+    expect("rulesDropped" in r.result).toBe(false);
+    expect(r.result.rulesNotFollowed.sort()).toEqual([`${sdk}: mcp__cf`, `${sdk}: mcp__cf__list`].sort());
+    expect(JSON.parse(readFileSync(sdk, "utf8")).permissions).toEqual({ allow: ["mcp__cf__list", "Read"], deny: ["mcp__cf"] });
+    expect(settingsOf(home).mcp?.toolPermissions).toBeUndefined();
     c.close();
   });
 
