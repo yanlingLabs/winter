@@ -394,6 +394,17 @@ export const ElicitationRespondParams = z.object({
   action: z.enum(["accept", "decline"]),
 });
 export const ElicitationRespondResult = z.object({ ok: z.literal(true), alreadyResolved: z.boolean() });
+/** WS-27: the full url of a PENDING URL-mode elicitation, for the local client that is about to open
+ *  it. The url is never persisted (`elicitation_requested` carries only its host and origin) — the
+ *  daemon holds it in memory while the card is pending, and answers only then. A card that is no
+ *  longer pending (answered, cancelled, timed out, or a daemon restart since) refuses `NOT_FOUND`
+ *  with `data.code: "elicitation_not_active"`. Harness role only, like `elicitation.respond`. */
+export const ElicitationUrlParams = z.object({
+  sessionId: z.string().min(1),
+  elicitationId: z.string().min(1),
+});
+export const ElicitationUrlResult = z.object({ url: z.string().min(1) });
+export const ELICITATION_NOT_ACTIVE = "elicitation_not_active";
 
 export const SessionAddDirParams = z.object({
   sessionId: z.string(),
@@ -2883,6 +2894,7 @@ export const METHODS = {
   approvalRespond: "approval.respond",
   approvalList: "approval.list",
   elicitationRespond: "elicitation.respond",
+  elicitationUrl: "elicitation.url",
   sessionAddDir: "session.addDir",
   sessionSetCwd: "session.setCwd",
   trustDir: "daemon.trustDir",

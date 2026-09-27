@@ -8,8 +8,8 @@
   "mode": "url",
   "serverName": "linear",
   "message": "Connect your Linear workspace to continue.",
-  "url": "https://linear.app/oauth/authorize?client_id=abc&state=xyz",
   "host": "linear.app",
+  "origin": "https://linear.app",
   "issuedAt": 1700000000026,
   "expiresAt": 1700000600026
 }

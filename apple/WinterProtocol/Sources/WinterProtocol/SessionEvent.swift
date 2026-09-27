@@ -264,10 +264,12 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     }
 
     /// WS-27: an MCP server asked the user to open a link (MCP URL-mode elicitation) — for example to
-    /// finish an authorization with a third party. `url` is always https (the daemon declines anything
-    /// else without a card); `host` is the daemon's parse of it, shown apart so the destination is
-    /// plain. Answered with `elicitation.respond` (local clients only): accept means the user chose to
-    /// open the link, and the CLIENT opens it. `mode` is always `"url"` today.
+    /// finish an authorization with a third party. The link itself is NEVER on the wire here (it may
+    /// carry a one-time code): `host` and `origin` (`https://host[:port]`, always https) are the
+    /// daemon's parse of it, and a local client about to open it fetches the full url with
+    /// `elicitation.url` while the card is pending. Answered with `elicitation.respond` (local clients
+    /// only): accept means the user chose to open the link, and the CLIENT opens it. `mode` is always
+    /// `"url"` today.
     public struct ElicitationRequested: Codable, Equatable, Sendable {
         public let seq: Int
         public let sessionId: String
@@ -277,8 +279,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let mode: String
         public let serverName: String
         public let message: String
-        public let url: String
         public let host: String
+        public let origin: String
         public let issuedAt: Int
         public let expiresAt: Int
     }
