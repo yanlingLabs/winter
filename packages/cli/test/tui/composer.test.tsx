@@ -13,8 +13,9 @@ import { appendHistory } from "../../src/tui/history-store";
 const wait = (ms = 10) => new Promise((r) => setTimeout(r, ms));
 
 // T3 introduced an inverse-video cursor (`<Text inverse>`), which wraps its character in SGI escape
-// codes (`\x1b[7m` ... `\x1b[27m`) even though the rest of the frame carries no color codes in this
-// non-TTY test harness — same convention as flatten-blocks.test.ts's local stripAnsi helper.
+// codes (`\x1b[7m` ... `\x1b[27m`) — carried by chalk's shared singleton, whose color level the
+// suite's preload pins to 3 so this is present regardless of the host terminal — same convention
+// as flatten-blocks.test.ts's local stripAnsi helper.
 const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
 
 const historyPath = (): string => join(mkdtempSync(join(tmpdir(), "winter-composer-")), "history.jsonl");
