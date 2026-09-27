@@ -8,6 +8,7 @@ export {
 } from "./legacy-names";
 export { FileSecretStore, KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 export { TOKEN_NAMES } from "./auth/tokens";
+export { keychainUnlocked } from "./auth/keychain-ffi";
 export {
   loadSettings, saveSettings, loadPermissionDirs, addLocalDir,
   REASONING_EFFORTS, setProviderModel, setReasoningEffort, setOutputStyle, setAdvisorModel, memoryEnabledFrom,

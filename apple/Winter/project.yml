@@ -626,7 +626,12 @@ targets:
           # JIT-less, with no SharedArrayBuffer (the retired official peer failed to load on exactly
           # that, a ReferenceError at module top level) and ~5x slower. Pinned by release.ts's
           # HARDENING_PINS and scripts/release.test.ts.
-          codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --options runtime --timestamp --entitlements "${SRCROOT}/../../scripts/bun-jit.entitlements" "${DEST_RES}/winter-core"
+          # 0.120.1: winter-core now has its OWN file, scripts/winter-core.entitlements = allow-jit PLUS
+          # allow-unsigned-executable-memory. `bun:ffi` (auth/keychain-ffi.ts, the app-token access lists
+          # since 0.120.0) builds its call trampolines in non-MAP_JIT memory, and the hardened runtime
+          # SIGKILLs that ("Code Signature Invalid") — 0.120.0's daemon crash-looped at boot on it.
+          # The embedded `winter` runtime uses no FFI and keeps scripts/bun-jit.entitlements.
+          codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --options runtime --timestamp --entitlements "${SRCROOT}/../../scripts/winter-core.entitlements" "${DEST_RES}/winter-core"
       # Winter Phase 8d (P8d-1/P8d-2): the SECOND embedded binary, right after winter-core, same
       # Release-only shape. The body lives in scripts/embed-runtimes.sh (not inline, unlike the
       # script above) because it has a real gate worth unit-testing standalone

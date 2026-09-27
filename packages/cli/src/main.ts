@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
-import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeWorkflowWorker, RUNTIME_WORKFLOW_WORKER_ARG, runRuntimeStateProbe, runRuntimesProbe, runEmbeddedProbe, resolveWinterProfile, splitTag, sdkLocalMcpServers } from "@yanlinglabs/winter-core";
+import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeWorkflowWorker, RUNTIME_WORKFLOW_WORKER_ARG, runRuntimeStateProbe, runRuntimesProbe, keychainUnlocked, runEmbeddedProbe, resolveWinterProfile, splitTag, sdkLocalMcpServers } from "@yanlinglabs/winter-core";
 import type { CredentialRow, SecretStore, Settings } from "@yanlinglabs/winter-core";
 import { METHODS, type ApprovalPolicy, type Task } from "@yanlinglabs/winter-protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
@@ -1406,6 +1406,17 @@ if (import.meta.main) {
   // is the first user argument in BOTH the dev (`bun main.ts …`) and compiled ($bunfs) shapes —
   // the same index the CLI's own `process.argv.slice(2)` routing assumes below. The pre-existing
   // `__workflow-worker` branch above keeps its `includes` shape; it is not this batch's to change.
+  // 0.120.1: the compiled-binary `bun:ffi` probe, run by release.ts on the SIGNED winter-core. `bun:ffi`'s
+  // `dlopen` builds its call trampolines at run time in memory that is not MAP_JIT, which the hardened
+  // runtime kills (SIGKILL, "Code Signature Invalid") unless the binary carries
+  // `allow-unsigned-executable-memory` — 0.120.0 shipped without it and the daemon crash-looped at its
+  // first Keychain call (the app-token access lists, `auth/keychain-ffi.ts`). This loads all three
+  // libraries and asks only whether the default keychain is unlocked: no item is read, nothing prompts.
+  if (process.argv[2] === "__keychain-ffi-probe") {
+    const unlocked = keychainUnlocked(null);
+    process.stdout.write(`keychain-ffi: ok (default keychain ${unlocked ? "unlocked" : "locked"})\n`);
+    process.exit(0);
+  }
   if (process.argv[2] === "__runtime-state-probe") {
     const result = await runRuntimeStateProbe({ home: process.env.WINTER_HOME });
     process.stdout.write(`${JSON.stringify(result)}\n`);

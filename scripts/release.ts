@@ -819,6 +819,7 @@ for (const name of CEF_HELPERS) {
 // relaxation. Sparkle's own nested helpers are deliberately OUT of scope — they are third-party
 // and `resignPreservingEntitlements` preserves whatever they ship with, by design.
 const JIT = "com.apple.security.cs.allow-jit";
+const UNSIGNED_EXEC_MEMORY = "com.apple.security.cs.allow-unsigned-executable-memory";
 /// The helpers that legitimately carry `allow-jit` — the two Chromium runs a JIT in. Kept in
 /// lockstep with `apple/Winter/project.yml`'s `CEFHelperRenderer`/`CEFHelperGPU` blocks, both of
 /// which point at the SAME `Support/CEFHelperJit.entitlements` for the same anti-drift reason.
@@ -840,7 +841,15 @@ const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
   // winter-core (core, cli, protocol, the agent/runtime SDK wrappers, provider-runtime, unpdf) or into the agent SDK's own
   // sources imports `bun:ffi` or loads a `.node` addon, so they would widen the surface for nothing.
   // A future FFI/addon dependency must revisit this pin with evidence, not by widening it blind.
-  { path: join(app, "Contents", "Resources", "winter-core"), label: "winter-core", expect: [JIT] },
+  // 0.120.1 — THAT HAPPENED, unnoticed: 0.120.0's app-token access lists (`auth/keychain-ffi.ts`) use
+  // `bun:ffi`, whose `dlopen` builds call trampolines in memory that is not MAP_JIT, and the hardened
+  // runtime killed the shipped daemon at its first Keychain call (SIGKILL, "Code Signature Invalid",
+  // a crash loop at boot). Measured on a signed compiled probe: `allow-jit` alone → exit 137;
+  // + `allow-unsigned-executable-memory` → runs. So winter-core (only) carries that one more, from its
+  // own `scripts/winter-core.entitlements`; `disable-executable-page-protection`,
+  // `allow-dyld-environment-variables` and `disable-library-validation` stay off (not needed). The
+  // `__keychain-ffi-probe` run below proves it on the signed binary, every release.
+  { path: join(app, "Contents", "Resources", "winter-core"), label: "winter-core", expect: [JIT, UNSIGNED_EXEC_MEMORY] },
   // office-plumbing wave — Winter's own compiled binary, same posture as WinterHelper above (no
   // hardened-runtime relaxation of any kind; it is not a JS engine). The vendored LibreOffice product-set is
   // deliberately NOT enrolled here — see the team-ID-only probe on libmergedlo.dylib above this
@@ -894,10 +903,18 @@ console.log(
     // Both halves derived from HARDENING_PINS rather than typed, so this sentence cannot go stale
     // the way its predecessor did when the pin widened (Task 5 caught that one; Task 6a widened it
     // again by giving the GPU helper allow-jit).
-    `repo signs — exactly ${JIT} on ${HARDENING_PINS.filter((p) => p.expect.length).length} of them ` +
-    `(${HARDENING_PINS.filter((p) => p.expect.length).map((p) => p.label).join(", ")}), exactly none on ` +
+    `repo signs — ${HARDENING_PINS.filter((p) => p.expect.length).map((p) => `${p.label}: ${p.expect.map((e) => e.replace("com.apple.security.cs.", "")).join(" + ")}`).join("; ")}; exactly none on ` +
     `the other ${HARDENING_PINS.filter((p) => !p.expect.length).length}.`,
 );
+// 0.120.1: the signed winter-core must be able to run `bun:ffi` (the entitlement pin above says it may;
+// this proves it does). A missing entitlement is a SIGKILL here, never a published crash loop.
+{
+  const probed = probe(`"${join(app, "Contents", "Resources", "winter-core")}" __keychain-ffi-probe 2>&1`);
+  if (!probed.ok || !probed.stdout.includes("keychain-ffi: ok")) {
+    fail(`winter-core __keychain-ffi-probe failed on the signed binary — bun:ffi is killed under the hardened runtime without ${UNSIGNED_EXEC_MEMORY}:\n${probed.stdout.slice(0, 400)}`);
+  }
+  console.log(`Signed winter-core runs bun:ffi: ${probed.stdout.trim()}`);
+}
 
 // ---------------------------------------------------------------------------
 // 4b. Licence notices (panel-cef Task 5). CEF and Chromium are BSD-3-Clause, whose second
