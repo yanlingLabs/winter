@@ -75,7 +75,9 @@ describe.if(isMac)("McpManager (a status probe)", () => {
   test("a server whose tool list repeats a name still probes connected — the probe registers nothing to collide (WS-24)", async () => {
     const mgr = new McpManager({ trust: trustNone() });
     await mgr.startAll({ dup: { command: "bun", args: ["run", FIXTURE], env: { WINTER_FAKE_DUP: "1" } } });
-    expect(mgr.list().find((s) => s.name === "dup")).toMatchObject({ status: "connected", toolNames: ["echo", "echo"] });
+    // WS-25: the probe speaks through the runtime's own MCP client, which keeps the FIRST of a repeated
+    // tool name (the listing a session's child sees) — so the status line reports what a session gets.
+    expect(mgr.list().find((s) => s.name === "dup")).toMatchObject({ status: "connected", toolNames: ["echo"] });
   });
 });
 
