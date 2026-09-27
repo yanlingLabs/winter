@@ -54,6 +54,7 @@ import type { SessionStore } from "../sessions/store";
 import { CLAUDE_FIRST_PARTY_PROVIDER_IDS, DEFAULT_PROVIDER, effortRefusalFor, effortToSpendForRole, ownProviderFor, permittedProviders, pinsFor, providerBaseUrlFor, sdkAllowRules, sdkDenyRules, winterOptionsFromSettings, type Settings } from "../settings";
 import { d30DefaultModel } from "./advisor-reviewer";
 import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
+import { elicitationHandlerFor, type ElicitationBroker } from "./url-elicitation";
 import type { WinterRuntimeSdk, SessionMode } from "./create";
 import { clearSession } from "./diff-attach";
 import { credentialPresenceFrom, credentialRefFor, refMaterialPresent } from "./keychain";
@@ -390,6 +391,9 @@ export interface WinterLegDeps {
   planBridge?: { onExitPlanMode(req: BridgedApprovalRequest): Promise<PermissionResult> };
   /** WS-26: the connector permissions, threaded straight into `CanUseToolDeps.connectors` (live reads). */
   connectors?: ConnectorPermissionSource;
+  /** WS-27: the URL-mode elicitation broker `elicitation.respond` answers into. Absent: no
+   *  `onElicitation` is set, and the SDK declines every elicitation deterministically. */
+  elicitations?: ElicitationBroker;
   /**
    * P8c-14 (integration round 2): lane 3's `sessionHooksFor(...)` module — this file never imports
    * it, only threads its result through: `.winter` goes into every incarnation's
@@ -811,6 +815,14 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       ...(deps.planBridge === undefined ? {} : { planBridge: deps.planBridge }),
       ...(deps.connectors === undefined ? {} : { connectors: deps.connectors }),
     });
+    // WS-27: an MCP server's URL-mode elicitation — a card, like a connector prompt (`url-elicitation.ts`).
+    const elicitations = deps.elicitations;
+    const onElicitation = elicitations === undefined ? undefined : elicitationHandlerFor({
+      sessionId, mode, origin: meta.origin, broker: elicitations,
+      policy: () => deps.store.meta(sessionId).approvalPolicy,
+      emit: (event) => { deps.hub.append(sessionId, event); },
+      log: { info: log, error: log },
+    });
 
     /** Predictive, and exact: the driver appends every batch synchronously right after the projector
      *  returns it, so "the store's lastSeq plus how many this batch has already claimed" IS the seq
@@ -820,6 +832,13 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     const append = (event: Parameters<SessionHub["append"]>[1]) => {
       const stamped = deps.hub.append(sessionId, event);
       claimedInBatch = 0;
+      // WS-27: an elicitation card still open when the main turn ends is one nobody can answer any
+      // more (the Mac freezes it with the turn) — cancel it rather than park the server's request
+      // until the card's timeout.
+      if (elicitations !== undefined && event.type === "turn_completed") {
+        const threadId = (event as { threadId?: string }).threadId;
+        if (threadId === undefined || threadId === "main") elicitations.cancelSession(sessionId, "turn-ended");
+      }
       // The engine's titling moment, reproduced at the ONE place every persisted Winter-leg event
       // passes: after the main thread's `turn_completed` is in the log (so `maybeTitle`'s read of
       // the first user/assistant pair sees a complete turn). ON AN ERROR TERMINAL TOO (2026-09-19):
@@ -1165,6 +1184,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       const allowlist = sessionCredentialAllowlist(options, configuredMcp, slotProviders);
       options.onCredentialResolve = hostCredentials.resolverFor(allowlist);
       options.onMcpOAuthRefresh = hostCredentials.mcpRefresherFor(allowlist);
+      // WS-27: URL-mode elicitation. Form mode (and anything else that is not URL mode) is declined
+      // deterministically inside the handler, as is every request in a dispatch child.
+      if (onElicitation !== undefined) options.onElicitation = onElicitation;
       // WS-25: the same fold, kept with the incarnation (a symbol key — never on the wire), so a sign-in
       // door can ask a live session which of its servers sit at a URL (`WinterSession.mcpServerNamesFor`).
       withSessionMcpServers(options, configuredMcp);

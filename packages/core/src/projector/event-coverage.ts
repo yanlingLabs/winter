@@ -73,6 +73,10 @@ export const SUBAGENT_TRANSCRIPT_INCLUDE = {
   agent_error: true,
   approval_requested: true, // a gated child tool call's approval flow is part of its transcript
   approval_resolved: true,
+  // WS-27: a URL-mode elicitation's `url` may carry a one-time code, and it is a question for the
+  // HUMAN — it must never land in a file a model can read. (Always main-thread today, too.)
+  elicitation_requested: false,
+  elicitation_resolved: false,
   question_asked: true,
   question_resolved: true,
   task_updated: true, // task tools are not child-excluded — a child's task updates are its work
@@ -226,6 +230,11 @@ export const PROJECTED_EVENT_COVERAGE = {
   //   peripheral leases `daemon.ts:143-213`'s `buildLeasePolicy` (a second, older producer).
   approval_requested: false,
   approval_resolved: false,
+  // WS-27: a URL-mode elicitation is the same shape — answered inside a host CALLBACK
+  // (`Options.onElicitation`) before any frame about it reaches the stream.
+  //   producer: `runtime-sdk/url-elicitation.ts`'s `elicitationHandlerFor`.
+  elicitation_requested: false,
+  elicitation_resolved: false,
   question_asked: false,
   question_resolved: false,
   // PLAN PRESENTATION IS THE SAME SHAPE, FOR THE SAME REASON (Winter Phase 8c, P8c-11 / Task 2.3):

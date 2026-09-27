@@ -40,6 +40,7 @@ import { WINTER_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
 import { backfillNativeSessions, openRuntimeStateDb, ProjectionCheckpoints, RuntimeSessionRecords } from "../../src/runtime-state";
 import { SessionHub } from "../../src/sessions/hub";
 import { SessionStore } from "../../src/sessions/store";
+import { ElicitationBroker } from "../../src/runtime-sdk/url-elicitation";
 import type { Settings } from "../../src/settings";
 
 type Frame = Record<string, unknown>;
@@ -1041,6 +1042,51 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
         expect(JSON.stringify(options)).not.toContain(key);
         await session.end();
       }
+    } finally { t.close(); }
+  });
+
+  // WS-27: every incarnation carries the URL-mode elicitation handler; a card lands in the session's
+  // log, `elicitation.respond`'s broker answers it, and the main turn's end cancels one left open.
+  test("optionsFor attaches onElicitation: a URL card is persisted, answered through the broker, and cancelled at turn end", async () => {
+    const elicitations = new ElicitationBroker();
+    const t = table({ elicitations });
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const session = await t.drivers.create(sid);
+      const options = t.q().options;
+      expect(typeof options.onElicitation).toBe("function");
+      const signal = new AbortController().signal;
+      const request = { serverName: "linear", message: "Connect", mode: "url" as const, url: "https://linear.app/oauth?code=OTC-1" };
+      const answered = options.onElicitation!(request, { signal, requestId: "r1" });
+      await Bun.sleep(5);
+      const [card] = t.store.read(sid).filter((e) => e.type === "elicitation_requested") as Array<{ elicitationId: string; url: string; host: string }>;
+      expect(card).toMatchObject({ url: "https://linear.app/oauth?code=OTC-1", host: "linear.app" });
+      elicitations.respond(sid, card!.elicitationId, "accept", "orb");
+      expect(await answered).toEqual({ action: "accept" });
+      expect(t.store.read(sid).filter((e) => e.type === "elicitation_resolved")).toMatchObject([{ action: "accept", by: "orb" }]);
+      // A card still open when the main turn completes is cancelled with it.
+      await session.send("hello", "cli");
+      const open = options.onElicitation!(request, { signal, requestId: "r2" });
+      await Bun.sleep(5);
+      t.q().emit(result());
+      expect(await open).toEqual({ action: "cancel" });
+      expect(t.store.read(sid).filter((e) => e.type === "elicitation_resolved").map((e) => (e as { by: string }).by)).toEqual(["orb", "turn-ended"]);
+      // Form mode never cards.
+      expect(await options.onElicitation!({ serverName: "linear", message: "name?", mode: "form" }, { signal, requestId: "r3" })).toEqual({ action: "decline" });
+      expect(t.store.read(sid).filter((e) => e.type === "elicitation_requested")).toHaveLength(2);
+      // The daemon's log names the origin, never the url with its one-time code.
+      expect(t.logs.some((l) => l.includes("origin=https://linear.app"))).toBe(true);
+      expect(t.logs.join("\n")).not.toContain("OTC-1");
+      await session.end();
+    } finally { t.close(); }
+  });
+
+  test("with no elicitation broker wired, no onElicitation is set (the SDK declines every request)", async () => {
+    const t = table();
+    try {
+      const session = await t.drivers.create(t.store.createSession("t", { mode: "chat", model: "winter-test/echo" }));
+      expect(t.q().options.onElicitation).toBeUndefined();
+      await session.end();
     } finally { t.close(); }
   });
 
