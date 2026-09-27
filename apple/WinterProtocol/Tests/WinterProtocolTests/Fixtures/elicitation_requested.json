@@ -1,0 +1,15 @@
+{
+  "type": "elicitation_requested",
+  "sessionId": "s_1",
+  "threadId": "main",
+  "seq": 36,
+  "ts": 1700000000026,
+  "elicitationId": "el_1",
+  "mode": "url",
+  "serverName": "linear",
+  "message": "Connect your Linear workspace to continue.",
+  "host": "linear.app",
+  "origin": "https://linear.app",
+  "issuedAt": 1700000000026,
+  "expiresAt": 1700000600026
+}

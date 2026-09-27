@@ -793,6 +793,29 @@ extension WinterClient {
         ]))["alreadyResolved"]?.boolValue ?? false
     }
 
+    /// WS-27: answers a URL-mode elicitation card (`SessionEvent.ElicitationRequested`). `accept`
+    /// tells the MCP server the user chose to open the link — opening it is the CALLER's job; the
+    /// daemon opens nothing. `false` → `"decline"`. Local clients only (never remote-allowed).
+    /// Returns `alreadyResolved` — `true` means the card was no longer active (answered elsewhere,
+    /// cancelled, or timed out) and this answer changed nothing.
+    public func elicitationRespond(sessionId: String, elicitationId: String, accept: Bool) async throws -> Bool {
+        try await request("elicitation.respond", params: obj([
+            "sessionId": .string(sessionId), "elicitationId": .string(elicitationId),
+            "action": .string(accept ? "accept" : "decline"),
+        ]))["alreadyResolved"]?.boolValue ?? false
+    }
+
+    /// WS-27: the full url of a PENDING URL-mode elicitation card — the only place it exists (the event
+    /// carries its host and origin only). Throws once the card is no longer active (`NOT_FOUND`,
+    /// `data.code: "elicitation_not_active"`). Local clients only; never log what it returns.
+    public func elicitationURL(sessionId: String, elicitationId: String) async throws -> String {
+        let r = try await request("elicitation.url", params: obj([
+            "sessionId": .string(sessionId), "elicitationId": .string(elicitationId),
+        ]))
+        guard let url = r["url"]?.stringValue else { throw RpcError(code: -3, message: "invalid result from server for elicitation.url") }
+        return url
+    }
+
     /// `notes` — CC AskUserQuestion parity, free-text notes keyed by question text like `answers`
     /// (`packages/protocol/src/methods.ts`'s `AskUserRespondParams.notes`). Optional/defaulted so
     /// existing no-notes call sites keep compiling unchanged; `obj(...)`'s `compactMapValues`

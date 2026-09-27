@@ -108,6 +108,7 @@ import { loadSafeHighlighter } from "./highlight-guard";
 import type { Highlighter } from "./markdown";
 import { makeDeltaCoalescer, type EventBridge } from "./event-bridge";
 import type { parsePlanResponse } from "../plan-response";
+import { answerElicitation, elicitationAnswerNote, openInBrowser } from "../elicitation";
 import { runCommand, type CommandCtx } from "./commands";
 import { ChoiceMenu, choiceMenuRows, initialChoiceSelection, moveChoice, type ChoiceRequest } from "./choice-menu";
 import { buildFileIndex } from "./file-index";
@@ -247,6 +248,8 @@ function taskListRows(tasks: TaskRow[]): number {
 function pendingCardRows(pending: PendingCard): number {
   if (pending.kind === "approval") return 1;
   if (pending.kind === "plan") return 5 + pending.plan.split("\n").length; // header + plan + 3-line menu + choose line
+  // WS-27: title + message lines (when there is one) + host + prompt.
+  if (pending.kind === "elicitation") return 3 + (pending.message.length > 0 ? pending.message.split("\n").length : 0);
   const q = (pending.questions as { options?: unknown[] }[])[0];
   const options = Array.isArray(q?.options) ? q!.options!.length : 0;
   return 3 + options * 2 + 1; // header/question + per-option lines + prompt
@@ -924,6 +927,20 @@ export function App({
   const onPlan = (callId: string, resp: ReturnType<typeof parsePlanResponse>) => {
     void client.planRespond({ sessionId, callId, ...resp });
   };
+  // WS-27: a URL-mode elicitation card. Open fetches the url (`elicitation.url` — it is never on the
+  // card), checks it is https to the card's own host, runs `/usr/bin/open` on it (argv, no shell), and
+  // only then accepts. The url is never printed: every note names the host only.
+  const onElicitation = (elicitationId: string, open: boolean, host: string) => {
+    void answerElicitation(open, host, {
+      fetchUrl: async () => ((await client.request(METHODS.elicitationUrl, { sessionId, elicitationId })) as { url?: unknown }).url,
+      respond: async (accept) => ((await client.request(METHODS.elicitationRespond, { sessionId, elicitationId, action: accept ? "accept" : "decline" })) as { alreadyResolved?: boolean }).alreadyResolved === true,
+      open: (url) => openInBrowser(url),
+    }).then((answer) => {
+      if (answer === "inactive") dispatch({ type: "local_elicitation_inactive", elicitationId });
+      const note = elicitationAnswerNote(answer, host);
+      if (note !== undefined) appendNote(note);
+    });
+  };
 
   useInput(
     (input, key) => {
@@ -1058,7 +1075,7 @@ export function App({
          *  the slash menu). Keys are handled in the scroll/toggle useInput above, never here. */}
         {pickerOpen ? <ChoiceMenu title={choice!.title} options={choice!.options} selected={choiceSel} columns={columns} /> : null}
         {state.pending ? (
-          <PendingCards pending={state.pending} onApprove={onApprove} onAnswer={onAnswer} onPlan={onPlan} planBodyRows={layout.planBodyRows} />
+          <PendingCards pending={state.pending} onApprove={onApprove} onAnswer={onAnswer} onPlan={onPlan} onElicitation={onElicitation} planBodyRows={layout.planBodyRows} />
         ) : (
           <Composer
             running={state.turnRunning}

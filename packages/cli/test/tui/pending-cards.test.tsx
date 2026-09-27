@@ -631,3 +631,30 @@ describe("capPlanBody (T3 — the capped plan card)", () => {
     expect(capPlanBody("a\nb\nc", 0)).toEqual({ shown: "a", hidden: 2 });
   });
 });
+
+// WS-27: the URL-mode elicitation card — server, message and host; "o" opens, anything else declines.
+describe("PendingCards — elicitation", () => {
+  const card: PendingCard = { kind: "elicitation", elicitationId: "el_1", serverName: "linear", message: "Connect your workspace", host: "linear.app" };
+
+  test("shows the server, the message and the host", async () => {
+    const { lastFrame } = render(<PendingCards pending={card} onApprove={() => {}} onAnswer={() => {}} onPlan={() => {}} />);
+    await wait();
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("linear asks you to open a link");
+    expect(frame).toContain("Connect your workspace");
+    expect(frame).toContain("linear.app");
+    expect(frame).toContain("[o] open");
+  });
+
+  test("'o'/'open' open; 'y', 'yes', 'n' and a bare Enter decline", async () => {
+    for (const [keys, open] of [["o", true], ["open", true], ["", false], ["n", false], ["y", false], ["yes", false]] as const) {
+      const calls: [string, boolean, string][] = [];
+      const { stdin } = render(<PendingCards pending={card} onApprove={() => {}} onAnswer={() => {}} onPlan={() => {}} onElicitation={(id, o, h) => calls.push([id, o, h])} />);
+      await wait();
+      if (keys.length > 0) { stdin.write(keys); await wait(); }
+      stdin.write("\r");
+      await wait();
+      expect(calls).toEqual([["el_1", open, "linear.app"]]);
+    }
+  });
+});

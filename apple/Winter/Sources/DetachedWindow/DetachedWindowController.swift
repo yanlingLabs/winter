@@ -191,6 +191,17 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
                 if !ok { adapter?.interactionErrors[callId] = "couldn't send — try again" }
             }
         }
+        // WS-27: a URL-mode elicitation card — `answerElicitation` opens the link, then this sends.
+        adapter.onElicitationRespond = { [weak self, weak adapter] elicitationId, accept, host, expiresAt in
+            adapter?.answerElicitation(elicitationId, accept: accept, host: host, expiresAt: expiresAt, fetchURL: {
+                guard let sid = self?.sessionId else { return nil }
+                return try? await client.elicitationURL(sessionId: sid, elicitationId: elicitationId)
+            }, send: { accept in
+                guard let sid = self?.sessionId else { return .failed }
+                // `alreadyResolved: true` is a card the daemon stopped waiting on: resolved locally.
+                return elicitationSendResult(alreadyResolved: try? await client.elicitationRespond(sessionId: sid, elicitationId: elicitationId, accept: accept))
+            })
+        }
         adapter.onQuestionRespond = { [weak self, weak adapter] callId, answers, notes, childSessionId in
             guard let adapter else { return }
             adapter.interactionInFlight.insert(callId)

@@ -601,6 +601,17 @@ final class FieldStateAdapter: ObservableObject {
     /// card itself disappears once the daemon's `*_resolved` event removes it from
     /// `pendingInteractions` via the reducer; there is no optimistic dismiss.
     @Published var interactionErrors: [String: String] = [:]
+    /// WS-27: URL-mode elicitation cards whose request this surface found no longer active (the url
+    /// fetch or the answer came back "not active") — resolved LOCALLY, since no `elicitation_resolved`
+    /// reached this surface for them. The card freezes with `elicitationInactiveNote`.
+    @Published var inactiveElicitations: Set<String> = []
+
+    /// WS-27: resolves a no-longer-active elicitation card locally — the card freezes, and it leaves
+    /// the session's outstanding list so the orb's approval-needed count drops with it.
+    func markElicitationInactive(_ elicitationId: String) {
+        inactiveElicitations.insert(elicitationId)
+        session.dismissInactiveElicitation(elicitationId)
+    }
 
     /// panel-shell T10b: a pending question/plan card's typed-but-unsubmitted answer, keyed by
     /// `pendingCardDraftKey(sessionId:callId:)` — NOT bare callId (`pendingInteractions` is a
@@ -670,6 +681,10 @@ final class FieldStateAdapter: ObservableObject {
     var onQuestionRespond: (String, [String: String], [String: String], String?) -> Void = { _, _, _, _ in }
     /// callId, approved, autoAccept, feedback.
     var onPlanRespond: (String, Bool, Bool, String?) -> Void = { _, _, _, _ in }
+    /// WS-27: elicitationId, accept, host, expiresAt — a URL-mode elicitation card's "Open link"/
+    /// "Decline". Each surface routes it through `answerElicitation` (`ElicitationAnswer.swift`), which
+    /// fetches and checks the link, opens it, and only then tells the daemon.
+    var onElicitationRespond: (String, Bool, String, Int) -> Void = { _, _, _, _ in }
 
     // MARK: - Task 4 (2d-iii): ⋯ menu — per-session approval-mode policy
 
