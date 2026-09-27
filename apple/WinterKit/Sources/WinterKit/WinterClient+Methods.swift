@@ -793,6 +793,16 @@ extension WinterClient {
         ]))["alreadyResolved"]?.boolValue ?? false
     }
 
+    /// WS-27: answers a URL-mode elicitation card (`SessionEvent.ElicitationRequested`). `accept`
+    /// tells the MCP server the user chose to open the link — opening it is the CALLER's job; the
+    /// daemon opens nothing. `false` → `"decline"`. Local clients only (never remote-allowed).
+    public func elicitationRespond(sessionId: String, elicitationId: String, accept: Bool) async throws -> Bool {
+        try await request("elicitation.respond", params: obj([
+            "sessionId": .string(sessionId), "elicitationId": .string(elicitationId),
+            "action": .string(accept ? "accept" : "decline"),
+        ]))["alreadyResolved"]?.boolValue ?? false
+    }
+
     /// `notes` — CC AskUserQuestion parity, free-text notes keyed by question text like `answers`
     /// (`packages/protocol/src/methods.ts`'s `AskUserRespondParams.notes`). Optional/defaulted so
     /// existing no-notes call sites keep compiling unchanged; `obj(...)`'s `compactMapValues`
