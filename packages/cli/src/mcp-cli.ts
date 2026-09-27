@@ -1261,11 +1261,13 @@ async function setSecretFromClipboard(name: string, scope: McpScope | undefined,
 
 // ── WS-26: `winter mcp permissions` — the connector permissions from the terminal ──────────────────────
 //
-// `winter mcp permissions <server> [<tool>] [allow|ask|deny|default] [--reset]`:
+// `winter mcp permissions <server> [<tool>] [allow|ask|deny|default]`:
 //   - no verb: list — the server's actions with what applies and why (`mcp.tools`), or one action;
-//   - a verb: store it for `<tool>`, or for every action of the server when `<tool>` is `*` or omitted
-//     (`winter mcp permissions cf deny` = all of cf's actions); `--reset` (all-actions only) also clears
-//     every per-action value, so "deny" means every action. `default` clears the value.
+//   - a verb: store it for `<tool>`, or for EVERY action of the server when `<tool>` is `*` or omitted
+//     (`winter mcp permissions cf deny` = all of cf's actions). A server-wide value also clears every
+//     per-action value (`resetTools`), exactly as the Mac's "All actions" control does — so "deny" means
+//     every action, and the line printed says what applies (review r1, minor 8). `default` clears the
+//     value (and, server-wide, only the server-wide value).
 // Non-interactive by construction (the user runs these from Claude Code's `!` shell): no prompt, no TTY.
 // Through the daemon when it is live (`openCredentialDaemonDoor` — never `connect()`'s auto-launch); with no
 // daemon a SET writes `settings.json` directly through the same transform the daemon's handler uses (the
@@ -1275,15 +1277,13 @@ async function setSecretFromClipboard(name: string, scope: McpScope | undefined,
 export const MCP_PERMISSION_VERBS = ["allow", "ask", "deny", "default"] as const;
 export type McpPermissionVerb = (typeof MCP_PERMISSION_VERBS)[number];
 
-export interface McpPermissionsParsed { server: string; tool?: string; verb?: McpPermissionVerb; reset: boolean }
+export interface McpPermissionsParsed { server: string; tool?: string; verb?: McpPermissionVerb }
 
 export function parseMcpPermissionsArgs(args: string[]): { kind: "ok"; parsed: McpPermissionsParsed } | { kind: "usageError"; message: string } {
-  const usage = "usage: winter mcp permissions <server> [<tool> | '*'] [allow|ask|deny|default] [--reset]";
-  const reset = args.includes("--reset");
-  const positional = args.filter((a) => a !== "--reset");
-  if (positional.some((a) => a.startsWith("-"))) return { kind: "usageError", message: usage };
-  if (positional.length === 0 || positional.length > 3) return { kind: "usageError", message: usage };
-  const [server, second, third] = positional as [string, string | undefined, string | undefined];
+  const usage = "usage: winter mcp permissions <server> [<tool> | '*'] [allow|ask|deny|default]";
+  if (args.some((a) => a.startsWith("-"))) return { kind: "usageError", message: usage };
+  if (args.length === 0 || args.length > 3) return { kind: "usageError", message: usage };
+  const [server, second, third] = args as [string, string | undefined, string | undefined];
   const isVerb = (v: string | undefined): v is McpPermissionVerb => v !== undefined && (MCP_PERMISSION_VERBS as readonly string[]).includes(v);
   let tool: string | undefined;
   let verb: McpPermissionVerb | undefined;
@@ -1297,8 +1297,7 @@ export function parseMcpPermissionsArgs(args: string[]): { kind: "ok"; parsed: M
   } else {
     tool = second;
   }
-  if (reset && (verb === undefined || tool !== "*")) return { kind: "usageError", message: `--reset applies only when setting all of a server's actions\n${usage}` };
-  return { kind: "ok", parsed: { server, ...(tool !== undefined ? { tool } : {}), ...(verb !== undefined ? { verb } : {}), reset } };
+  return { kind: "ok", parsed: { server, ...(tool !== undefined ? { tool } : {}), ...(verb !== undefined ? { verb } : {}) } };
 }
 
 /** One action as `mcp.tools` reports it. */
@@ -1324,11 +1323,14 @@ export type McpPermissionsOutcome =
 export async function runMcpPermissionsRoute(args: string[], deps: McpPermissionsDeps): Promise<McpPermissionsOutcome> {
   const p = parseMcpPermissionsArgs(args);
   if (p.kind === "usageError") return { ok: false, message: p.message };
-  const { server, tool, verb, reset } = p.parsed;
+  const { server, tool, verb } = p.parsed;
   const { METHODS } = await import("@yanlinglabs/winter-protocol");
   try {
     if (verb !== undefined) {
       const target = tool ?? "*";
+      // A server-wide VALUE sets every action (per-action values cleared, as the Mac's All actions does);
+      // clearing the server-wide value to the default leaves the per-action values alone.
+      const reset = target === "*" && verb !== "default";
       if (deps.door !== undefined) {
         await deps.door.request(METHODS.mcpSetToolPermission, { server, tool: target, permission: verb, ...(reset ? { resetTools: true } : {}) });
         return { ok: true, kind: "set", via: "daemon", server, tool: target, permission: verb, reset };
@@ -1362,12 +1364,16 @@ const PERMISSION_LABEL: Record<"allow" | "ask" | "deny", string> = { allow: "Alw
 export function renderMcpPermissionsOutcome(outcome: McpPermissionsOutcome): string {
   if (!outcome.ok) return outcome.message;
   if (outcome.kind === "set") {
-    const what = outcome.tool === "*" ? `every action of ${outcome.server}` : `mcp__${outcome.server}__${outcome.tool}`;
-    const value = outcome.permission === "default" ? "the default (read-only → allow, otherwise ask)" : PERMISSION_LABEL[outcome.permission];
     const note = outcome.via === "daemon"
       ? " — in effect on the next call of every session, in every mode"
       : " — written to settings.json (no daemon was running)";
-    return `${what}: ${value}${outcome.tool === "*" && outcome.reset ? " (per-action values cleared)" : ""}${note}`;
+    if (outcome.tool === "*") {
+      return outcome.permission === "default"
+        ? `${outcome.server}'s all-actions value cleared — each action follows its own value, else the default (read-only → allow, otherwise ask)${note}`
+        : `every action of ${outcome.server}: ${PERMISSION_LABEL[outcome.permission]} (per-action values cleared)${note}`;
+    }
+    const value = outcome.permission === "default" ? "the default (read-only → allow, otherwise ask)" : PERMISSION_LABEL[outcome.permission];
+    return `mcp__${outcome.server}__${outcome.tool}: ${value}${note}`;
   }
   const s = outcome.server;
   const lines: string[] = [];

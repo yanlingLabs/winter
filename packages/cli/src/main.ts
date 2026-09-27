@@ -2000,7 +2000,7 @@ if (import.meta.main) {
     // `add-from-claude-desktop` (an Ink dialog over Claude Desktop's OWN config format — not
     // trivially mappable), `reset-project-choices` (Winter has no per-project approve/reject ledger
     // for `.mcp.json` servers — `winter trust`'s directory-level TrustStore is the only gate).
-    console.error("usage: winter mcp [list] | get <name> | login <name> [--yes] [--confirm-issuer-change] | logout <name> [--forget-client] | set-secret <name> [--from-clipboard [--issuer <issuer>]] | add [-s local|user|project] [-t stdio|sse|http] [-e KEY=value...] [-H \"Name: value\"...] [--version-negotiation legacy|auto|<revision>] <name> <commandOrUrl> [-- args...] | add-json [-s local|user|project] <name> <json> | remove <name> [-s local|user|project] | permissions <server> [<tool> | '*'] [allow|ask|deny|default] [--reset]");
+    console.error("usage: winter mcp [list] | get <name> | login <name> [--yes] [--confirm-issuer-change] | logout <name> [--forget-client] | set-secret <name> [--from-clipboard [--issuer <issuer>]] | add [-s local|user|project] [-t stdio|sse|http] [-e KEY=value...] [-H \"Name: value\"...] [--version-negotiation legacy|auto|<revision>] <name> <commandOrUrl> [-- args...] | add-json [-s local|user|project] <name> <json> | remove <name> [-s local|user|project] | permissions <server> [<tool> | '*'] [allow|ask|deny|default]");
     process.exit(1);
   }
   case "plugin": {

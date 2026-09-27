@@ -37,9 +37,10 @@
 //     only layer that sees a call the child decides natively: a deny (under `bypass` too), an allow
 //     under `dont-ask` (whose runtime denies an unresolved MCP call without ever calling `canUseTool`),
 //     and an explicit ask over a saved allow rule or `bypass` (a hook `ask` is evaluated before both).
-//  2. `runtime-sdk/approval-bridge.ts` — for every call that does reach `canUseTool`, the same verdict
-//     replaces the gate's, and a chat or dispatch session (never a dispatch child) CARDS a connector
-//     action instead of refusing it.
+//  2. `runtime-sdk/approval-bridge.ts` — for every call that does reach `canUseTool`, the verdict's DENY
+//     and ASK (never its allow: the floor is the one layer that allows, and a call that reached the bridge
+//     anyway was sent there by another layer's mandatory prompt), and a chat or dispatch session (never a
+//     dispatch child) CARDS a connector action instead of refusing it.
 //
 // ── The matrix (policy × stored setting), stated once — `connectorVerdict` is its code ──────────────
 //   stored deny     deny, every policy and mode, `bypass` included.
@@ -80,18 +81,34 @@ const MCP_PREFIX = "mcp__";
 const CAPABILITY_PREFIX = "mcp__winter__";
 
 /**
- * `mcp__<server>__<tool>` → its halves, or `undefined` for anything that is not a connector action (see
- * this file's header). Split at the FIRST `__` after the prefix — the runtime's own spelling
- * (`mcp__${server}__${tool.name}`) puts the server first, and a tool name may itself contain `__`.
+ * EVERY way `mcp__<server>__<tool>` can be split into a server and a tool, first split first — or `[]`
+ * for anything that is not a connector action (see this file's header).
+ *
+ * WHY EVERY SPLIT (review r1, CRITICAL 1): the runtime names a tool `mcp__${server}__${tool.name}` and
+ * neither half is forbidden to contain `__` — `winter mcp add` accepts a server named `cf__prod`, and a
+ * hand-edited `sdk/.winter.json` or a project's `.winter/mcp.json` can name anything. So
+ * `mcp__cf__prod__delete_worker` is EITHER server `cf` + tool `prod__delete_worker` OR server `cf__prod` +
+ * tool `delete_worker`, and nothing in the name says which. Splitting at the first `__` alone let a stored
+ * deny on `cf__prod` never match (the call ran under `bypass`) while `mcp.tools`, which looks up by the
+ * real name, reported it denied. `resolveConnector` below weighs every candidate.
  */
-export function parseConnectorToolName(name: string): { server: string; tool: string } | undefined {
-  if (typeof name !== "string" || !name.startsWith(MCP_PREFIX) || name.startsWith(CAPABILITY_PREFIX)) return undefined;
+export function connectorCandidates(name: string): Array<{ server: string; tool: string }> {
+  if (typeof name !== "string" || !name.startsWith(MCP_PREFIX) || name.startsWith(CAPABILITY_PREFIX)) return [];
   const rest = name.slice(MCP_PREFIX.length);
-  const sep = rest.indexOf("__");
-  if (sep <= 0 || sep + 2 >= rest.length) return undefined;
-  const server = rest.slice(0, sep);
-  if (server === "winter") return undefined;
-  return { server, tool: rest.slice(sep + 2) };
+  const out: Array<{ server: string; tool: string }> = [];
+  for (let sep = rest.indexOf("__"); sep !== -1; sep = rest.indexOf("__", sep + 1)) {
+    if (sep <= 0 || sep + 2 >= rest.length) continue;
+    const server = rest.slice(0, sep);
+    if (server === "winter") continue;
+    out.push({ server, tool: rest.slice(sep + 2) });
+  }
+  return out;
+}
+
+/** The FIRST split (a server name without `__`), or `undefined` for a non-connector name. Display and
+ *  messages only — every decision goes through `resolveConnector`, which weighs every split. */
+export function parseConnectorToolName(name: string): { server: string; tool: string } | undefined {
+  return connectorCandidates(name)[0];
 }
 
 /** Is `name` a connector action? The narrow predicate the chat exception keys on (never `isExternalToolName`). */
@@ -113,7 +130,9 @@ export function normalizeConnectorTable(raw: unknown): ConnectorPermissionTable 
   const out: ConnectorPermissionTable = {};
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return out;
   for (const [server, tools] of Object.entries(raw as Record<string, unknown>)) {
-    if (tools === null || typeof tools !== "object" || Array.isArray(tools)) continue;
+    // A row that is not an object (`"cf": "deny"`, a hand edit) is read as `{"*": "ask"}`: toward ask for
+    // every action of the server — never as unset, which could silently allow (review r1, minor 3).
+    if (tools === null || typeof tools !== "object" || Array.isArray(tools)) { out[server] = { [CONNECTOR_ALL_TOOLS]: "ask" }; continue; }
     const row: Record<string, ConnectorPermission> = {};
     for (const [tool, value] of Object.entries(tools as Record<string, unknown>)) {
       row[tool] = value === "allow" || value === "ask" || value === "deny" ? value : "ask";
@@ -147,15 +166,6 @@ export interface ConnectorVerdictInput {
   mode: SessionMode;
   /** `SessionMeta.origin`; `"dispatch-child"` keeps the never-prompt rule. */
   origin?: string;
-}
-
-/**
- * **Does this session card a connector action?** A chat or dispatch session does (WS-26, reversing
- * "chat and dispatch never ask" for connector actions ONLY); code always did; a dispatch CHILD does not —
- * it is a code session nobody is watching (`approval-bridge.ts`'s `neverPromptsAs`).
- */
-export function connectorCardsIn(deps: { mode: SessionMode; origin?: string }): boolean {
-  return deps.origin !== "dispatch-child";
 }
 
 /** The matrix in this file's header, as code. Pure. */
@@ -206,6 +216,8 @@ export interface ConnectorPermissionSource {
 }
 
 export interface ConnectorFacts {
+  /** The split the decision is about (the one whose setting won, else the one whose listing names the
+   *  tool, else the first split) — what messages and cards name. */
   server: string;
   tool: string;
   setting?: ConnectorPermission;
@@ -213,15 +225,57 @@ export interface ConnectorFacts {
   readOnly: boolean;
 }
 
-/** `toolName` → the live facts about it, or `undefined` when it is not a connector action. */
+const STRICTNESS: Record<ConnectorPermission, number> = { deny: 3, ask: 2, allow: 0 };
+
+/**
+ * `toolName` → the live facts about it, weighing EVERY split (`connectorCandidates`), or `undefined` when
+ * it is not a connector action. The one resolver: the hook, the bridge and `mcp.tools` all call it.
+ *
+ * One split (the ordinary case, no `__` in the server name): that split's stored value and listing, as is.
+ *
+ * Several splits — ambiguous, so fail toward the stricter answer:
+ *  - a candidate is CONFIRMED when its server's listing names the tool (`source.readOnly` answers
+ *    `true`/`false`, never `undefined`);
+ *  - a stored `deny` or `ask` from ANY candidate counts (a `"*"` on `cf` also covers `cf__prod`'s tools
+ *    — over-strict at worst, never a silent run);
+ *  - a stored `allow` counts only from a confirmed candidate or from an entry that names the tool exactly
+ *    (never from an unconfirmed server's `"*"`, which may be a different server's blanket allow);
+ *  - a confirmed candidate with nothing stored contributes the DEFAULT, which outranks an allow;
+ *  - the strictest wins: deny > ask > default > allow;
+ *  - read-only only when at least one candidate is confirmed and every confirmed listing says read-only.
+ */
 export function connectorFactsFor(source: ConnectorPermissionSource, toolName: string, cwd?: string): ConnectorFacts | undefined {
-  const parsed = parseConnectorToolName(toolName);
-  if (parsed === undefined) return undefined;
-  const stored = connectorSettingFor(source.table(), parsed.server, parsed.tool);
+  const candidates = connectorCandidates(toolName);
+  if (candidates.length === 0) return undefined;
+  const table = source.table();
+  const weighed = candidates.map((c) => ({ ...c, stored: connectorSettingFor(table, c.server, c.tool), listed: source.readOnly(c.server, c.tool, cwd) }));
+  if (weighed.length === 1) {
+    const only = weighed[0]!;
+    return {
+      server: only.server, tool: only.tool,
+      ...(only.stored === undefined ? {} : { setting: only.stored.permission, settingSource: only.stored.source }),
+      readOnly: only.listed === true,
+    };
+  }
+  const confirmed = weighed.filter((c) => c.listed !== undefined);
+  type Vote = { rank: number; c: (typeof weighed)[number]; setting?: ConnectorPermission };
+  const votes: Vote[] = [];
+  for (const c of weighed) {
+    const isConfirmed = c.listed !== undefined;
+    if (c.stored !== undefined) {
+      const p = c.stored.permission;
+      if (p !== "allow" || isConfirmed || c.stored.source === "tool") votes.push({ rank: STRICTNESS[p], c, setting: p });
+    } else if (isConfirmed) {
+      votes.push({ rank: 1, c });   // the default
+    }
+  }
+  const winner = votes.sort((a, b) => b.rank - a.rank)[0];
+  const named = winner?.c ?? confirmed[0] ?? weighed[0]!;
+  const readOnly = confirmed.length > 0 && confirmed.every((c) => c.listed === true);
   return {
-    ...parsed,
-    ...(stored === undefined ? {} : { setting: stored.permission, settingSource: stored.source }),
-    readOnly: source.readOnly(parsed.server, parsed.tool, cwd) === true,
+    server: named.server, tool: named.tool,
+    ...(winner?.setting === undefined ? {} : { setting: winner.setting, settingSource: winner.c.stored!.source }),
+    readOnly,
   };
 }
 

@@ -350,6 +350,24 @@ export class McpManager {
     return answer;
   }
 
+  /**
+   * WS-26 (review r1, minor 6): the read-only answer from ONE scope's listing — the user scope's, or the
+   * project's for `cwd` — for a caller that knows which scope the name resolves to for a session (local >
+   * project > user). `undefined` when that scope has no listing naming the tool (a project whose servers
+   * were never probed included): toward ask, never borrowed from another scope's same-named server.
+   */
+  readOnlyHintIn(scope: "user" | { project: string }, server: string, tool: string): boolean | undefined {
+    let row: McpProbedTool[] | undefined;
+    if (scope === "user") {
+      row = this.userTools.get(server);
+    } else {
+      let dir: string;
+      try { dir = realpathSync(scope.project); } catch { dir = scope.project; }
+      row = this.projectTools.get(dir)?.get(server);
+    }
+    return row?.find((t) => t.name === tool)?.readOnly;
+  }
+
   /** WS-26: whether any status (any probe outcome) is recorded for a USER server of this name. */
   hasUserStatus(name: string): boolean {
     return this.statuses.has(name);

@@ -19,7 +19,7 @@ import { ensureOutdir } from "./sessions/outdir";
 import { writeDiff, type DiffHeader } from "./diffs/store";
 import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
-import { loadSettings, loadPermissionDirs, effortRefusalFor, hooksEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, retiredRuntimeSettingKeys, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, pinsFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, connectorPermissionTable, computerUseEnabledFrom, lspEnabledFrom, sdkAllowRules, sdkAutoMemory, sdkLocalMcpServers, sdkOutputStyle, sdkUserMcpServers, liveSettingsView, type Settings } from "./settings";
+import { loadSettings, loadPermissionDirs, effortRefusalFor, hooksEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, retiredRuntimeSettingKeys, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, pinsFor, INTERNAL_PROVIDER_IDS, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, sdkAllowRules, sdkAutoMemory, sdkLocalMcpServers, sdkOutputStyle, sdkUserMcpServers, liveSettingsView, type Settings } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
@@ -36,8 +36,8 @@ import { MemoryStore } from "./agent/memory";
 import { registerComputerTool } from "./agent/tools/computer";
 import { ComputerUseService } from "./agent/computer-use";
 import { SessionTitler } from "./agent/titles";
-import { McpManager, type McpServerConfig } from "./agent/mcp/manager";
-import type { ConnectorPermissionSource, ConnectorPermissionTable } from "./agent/mcp/connector-permissions";
+import { McpManager } from "./agent/mcp/manager";
+import { daemonConnectorSource } from "./agent/mcp/connector-source";
 import { notifyHeadless } from "./agent/notify-fallback";
 import { LspManager } from "./agent/lsp/manager";
 import { PermissionGate, type SessionApprovalPolicy } from "./agent/gate";
@@ -1748,42 +1748,10 @@ export async function startDaemon(opts: {
         model: reviewerModel, effort: reviewerEffort,
         boundProviderId: boundProviderIdForRoles, roleHealth,
       });
-  // WS-26: the connector permissions' live facts (`agent/mcp/connector-permissions.ts`) — the stored table
-  // from the daemon's in-memory settings (swapped by the watcher, so a flip reaches the next call), and
-  // read-only from the MCP manager's probe cache. A decision never waits on a probe: a miss answers
-  // "not read-only" (toward ask) and, at most once a minute per server, starts the probe in the
-  // background — an http/sse USER server is otherwise probed only when something calls `mcp.list`, and a
-  // project's only on the first `mcp.list {cwd}`.
-  const connectorProbeKicks = new Map<string, number>();
-  const kickConnectorProbe = (server: string, cwd: string | undefined): void => {
-    const manager = mcp;
-    if (manager === null) return;
-    const key = `${server}\u0000${cwd ?? ""}`;
-    const now = Date.now();
-    if (now - (connectorProbeKicks.get(key) ?? 0) < 60_000) return;
-    connectorProbeKicks.set(key, now);
-    try {
-      const entry = sdkUserMcpServers(winterHome)[server];
-      const disabled = new Set(settings?.mcp?.disabled ?? []);
-      if (entry !== undefined && entry.type !== "stdio" && !disabled.has(server) && manager.probesRemote && !manager.hasUserStatus(server)) {
-        void manager.ensureRemote({ [server]: entry as McpServerConfig }).catch(() => { /* reported by the probe itself */ });
-      }
-      if (cwd) void manager.ensureProject(cwd).catch(() => { /* reported by the probe itself */ });
-    } catch { /* a background kick never fails a decision */ }
-  };
-  // `mcp.setToolPermission`'s write, held until the settings watcher swaps `settings` (its identity is the
-  // basis): the watcher debounces (150 ms), and a flip must reach the very next call.
-  let connectorPermissionsWritten: { basis: typeof settings; table: ConnectorPermissionTable } | undefined;
-  const connectorPermissions: ConnectorPermissionSource = {
-    table: () => (connectorPermissionsWritten !== undefined && connectorPermissionsWritten.basis === settings
-      ? connectorPermissionsWritten.table
-      : connectorPermissionTable(settings)),
-    readOnly: (server, tool, cwd) => {
-      const hint = mcp?.readOnlyHint(server, tool, cwd);
-      if (hint === undefined) kickConnectorProbe(server, cwd);
-      return hint;
-    },
-  };
+  // WS-26: the connector permissions' live facts — the stored table from the daemon's in-memory settings and
+  // the scope-aware read-only answers (`agent/mcp/connector-source.ts` has the rules: which listing, the
+  // background kick, and why nothing on a call path ever spawns a server).
+  const connectorPermissions = daemonConnectorSource({ home: winterHome, trust: trustStore, settings: () => settings, manager: () => mcp });
   const hooksFor = (session: CapabilitySession) =>
     sessionHooksFor({
       sessionId: session.sessionId,
@@ -2787,7 +2755,8 @@ export async function startDaemon(opts: {
     // settings write to trigger the next `refresh()`.
     mcp: mcp ?? undefined,
     // WS-26: a connector-permission write reaches the next decision without waiting on the watcher.
-    onConnectorPermissionsSaved: (next) => { connectorPermissionsWritten = { basis: settings, table: connectorPermissionTable(next) }; },
+    onConnectorPermissionsSaved: (next) => { connectorPermissions.noteWritten(next); },
+    connectorPermissions,
     // WS-25: the sign-in doors use the daemon's ONE MCP OAuth store (see `oauthStoreForThisDaemon`) — handed
     // over explicitly, so the server never derives a Keychain store of its own for a test daemon.
     mcpOAuth: { store: daemonOAuthStore() },

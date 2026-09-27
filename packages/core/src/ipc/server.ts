@@ -128,7 +128,7 @@ import { daemonMcpOAuthStore } from "../runtime-sdk/mcp-oauth-store";
 import { keychainService, resolveWinterProfile } from "../profile";
 import type { McpOAuthStore } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
 import { liveSdkSettings, readSdkGlobalConfig, SdkFileUnreadable, updateSdkSettings } from "../sdk-files";
-import { CONNECTOR_ALL_TOOLS, connectorSettingFor, connectorToolName, sdkRulesFor, type ConnectorPermission } from "../agent/mcp/connector-permissions";
+import { CONNECTOR_ALL_TOOLS, connectorFactsFor, connectorToolName, sdkRulesFor, type ConnectorPermission, type ConnectorPermissionSource } from "../agent/mcp/connector-permissions";
 import { bypassAllowedAtSpawn, disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
 import { diagnoseRuntimes } from "../runtime-sdk/runtimes-doctor";
@@ -334,6 +334,12 @@ export interface IpcServerOptions {
    * watcher still applies the same file right after; this only closes that window.
    */
   onConnectorPermissionsSaved?: (next: Settings) => void;
+  /**
+   * WS-26 (review r1, minor 4): the SAME live connector-permission facts the hook and the bridge decide
+   * on (the daemon's in-memory table, the scope-aware read-only answers), so `mcp.tools` reports what is
+   * enforced. Absent (a bare test server): `settings.json` from disk and the manager's merged listings.
+   */
+  connectorPermissions?: ConnectorPermissionSource;
   /**
    * WS-25: the MCP sign-in doors' seams. `store` is the daemon's ONE MCP OAuth store; absent, it is
    * derived exactly as the rest of the daemon derives it (`daemonMcpOAuthStore(keychainService(profile,
@@ -2424,7 +2430,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const p = parseParams(McpToolsParams, params);
         const settings = liveSettingsFor(opts);
         const disabled = new Set(settings?.mcp?.disabled ?? []);
-        const table = connectorPermissionTable(settings);
+        const connectorSource: ConnectorPermissionSource = opts.connectorPermissions ?? {
+          table: () => connectorPermissionTable(settings),
+          readOnly: (server, tool, cwd) => opts.mcp?.readOnlyHint(server, tool, cwd),
+        };
+        const table = connectorSource.table();
         const userServers = opts.winterHome ? sdkUserMcpServers(opts.winterHome) : {};
         if (opts.mcp?.probesRemote) {
           await opts.mcp.ensureRemote(Object.fromEntries(Object.entries(userServers).filter(([name, entry]) => entry.type !== "stdio" && !disabled.has(name) && (p.server === undefined || name === p.server))));
@@ -2447,16 +2457,18 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           const toolNames = [...new Set([...(listing ?? []).map((t) => t.name), ...Object.keys(stored).filter((t) => t !== CONNECTOR_ALL_TOOLS)])];
           const tools = toolNames.map((tool) => {
             const probed = listing?.find((t) => t.name === tool);
-            const readOnly = probed?.readOnly === true;
             const wire = connectorToolName(name, tool);
             const own = Object.hasOwn(stored, tool) ? stored[tool] : undefined;
-            const applied = connectorSettingFor(table, name, tool);
+            // The enforcement's own resolver (every `__` split, the resolving scope's listing), so this
+            // report says what the hook and the bridge will do — never a second derivation of it.
+            const facts = connectorFactsFor(connectorSource, wire, p.cwd);
+            const readOnly = facts?.readOnly === true;
             const rules = sdkRulesFor(sdkPermissions, wire);
             const sdkDeny = rules.find((r) => r.behavior === "deny");
             // A deny rule in sdk/settings.json binds natively in every mode, ahead of anything a hook says.
             const [permission, source]: [ConnectorPermission, "tool" | "server" | "rule" | "default"] =
               sdkDeny !== undefined ? ["deny", "rule"]
-              : applied !== undefined ? [applied.permission, applied.source]
+              : facts?.setting !== undefined ? [facts.setting, facts.settingSource ?? "tool"]
               : [readOnly ? "allow" : "ask", "default"];
             return {
               name: tool, toolName: wire,

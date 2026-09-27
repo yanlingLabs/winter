@@ -336,7 +336,8 @@ export function approvalOptionsFromSuggestions(suggestions: readonly PermissionU
  *  3. `PermissionGate.evaluate` decides, on the NORMALIZED tool name (`tool-names.ts`).
  *  4. `dont-ask` converts a still-`"ask"` verdict to a deny — the flip that lives in `engine.ts`
  *     rather than the gate (`engine.ts:4341`).
- *  4c. a CONNECTOR action takes the connector-permission verdict instead (WS-26).
+ *  4c. a CONNECTOR action's connector-permission deny refuses and its ask cards (WS-26); its allow is the
+ *      PreToolUse floor's to give, never this bridge's.
  *  5. `"deny"` → a typed deny with today's mode-aware text; `"allow"` → allow, silently, no event;
  *     `"ask"` → a card in CODE mode, a typed deny in DISPATCH/CHAT (P8b-7) — except a connector action,
  *     which cards in chat and dispatch too (never in a dispatch child).
@@ -530,11 +531,15 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     const classificationName = gateClassFor(toolName);
     let decision = deps.gate.evaluate(classificationName, policy);
 
-    // (4c) WS-26 — A CONNECTOR ACTION TAKES THE CONNECTOR VERDICT. The user's stored allow/ask/deny and the
-    // server's read-only mark (`agent/mcp/connector-permissions.ts`, read live) decide it in every mode;
-    // `"gate"` (unset, not read-only, in code or a dispatch child) keeps the gate's verdict above, exactly
-    // as before. The PreToolUse floor (`hooks.ts`) answers the same verdict for the calls this bridge never
-    // sees (a `bypass` child, a saved allow rule, `dont-ask`); this is its half for the calls it does.
+    // (4c) WS-26 — A CONNECTOR ACTION'S DENY AND ASK VERDICTS. The user's stored allow/ask/deny and the
+    // server's read-only mark (`agent/mcp/connector-permissions.ts`, read live) are applied here ONLY in the
+    // narrowing direction: a `deny` refuses, an `ask` cards (it also turns a `bypass`/`auto` gate allow into
+    // a card — the hook's `ask` is what made such a child reach this bridge). An `allow` verdict does NOT
+    // replace the gate's answer (review r1, IMPORTANT 2): the PreToolUse floor (`hooks.ts`) already allowed a
+    // stored allow and an unset read-only action before the runtime's mode stage, so if the call reached
+    // `canUseTool` anyway, something else demanded a prompt — an `sdk/settings.json` `permissions.ask` rule,
+    // a plugin's PreToolUse `ask`, a server's `requiresUserInteraction` — and turning that into a silent
+    // allow would answer another layer's mandatory prompt with a yes. `"gate"` keeps the gate's verdict.
     const connector = deps.connectors !== undefined ? connectorFactsFor(deps.connectors, toolName, deps.cwd) : undefined;
     if (connector !== undefined) {
       const verdict = connectorVerdict({ setting: connector.setting, readOnly: connector.readOnly, policy, mode: deps.mode, ...(deps.origin !== undefined ? { origin: deps.origin } : {}) });
@@ -542,7 +547,7 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
         log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} policy=${policy} reason=connector-permission setting=${connector.setting ?? "default"}`);
         return { behavior: "deny", message: connectorDenialMessage(connector.server, connector.tool, { setting: connector.setting, policy }) };
       }
-      if (verdict !== "gate") decision = verdict;
+      if (verdict === "ask") decision = "ask";   // incl. plan + a stored ask on a read-only action (the matrix)
     }
 
     // (5) engine.ts:4341 — dont-ask declines everything it would otherwise card, with no prompt.
