@@ -3,8 +3,12 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.30";
-/** Bumped to 0.0.30 (2026-09-27, WS-25: MCP OAuth + prompt-free credentials): the `mcp-auth` subpath
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.31";
+/** Bumped to 0.0.31 (2026-09-27, WS-25 live gate): the runtime holds every runtime->host request until its
+ *  `type:"init"` handshake is written (a code session with a signed-in OAuth MCP server sent its
+ *  `credential_resolve` first and the host refused it), and an alwaysLoad server that needs a host answer
+ *  no longer deadlocks startup.
+ *  Earlier: bumped to 0.0.30 (2026-09-27, WS-25: MCP OAuth + prompt-free credentials): the `mcp-auth` subpath
  *  (sign-in, refresh, revoke, the Keychain store, the issuer checks, the needs-auth notice), the
  *  `onMcpOAuthRefresh`/`onCredentialResolve` host hooks (a code child resolves every credential over its
  *  control channel and never reads the Keychain), and `Query.reconnectMcpServer`.
