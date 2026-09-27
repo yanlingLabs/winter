@@ -2740,6 +2740,8 @@ export async function startDaemon(opts: {
     // own doc comment for why a credential add needs this rather than waiting for an unrelated
     // settings write to trigger the next `refresh()`.
     mcp: mcp ?? undefined,
+    // WS-25: an injected MCP OAuth store (a test daemon) is also the sign-in doors' store, so the doors, the
+    // probe and the session answers share ONE instance; absent, the server derives the same Keychain one.
     ...(opts.mcpOAuthStore === undefined ? {} : { mcpOAuth: { store: opts.mcpOAuthStore } }),
     // Phase 4b Task 4: the plugin tool bridge. `registry` is undefined whenever agentProvider is
     // null (see `sharedRegistry`'s doc comment above). `supervisor`, unlike `registry`, is now
