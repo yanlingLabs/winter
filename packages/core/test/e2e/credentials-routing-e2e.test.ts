@@ -259,6 +259,10 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
     // …and nowhere in the child's argv (`--config-json` included) or environment.
     expect(childCommandLine).toContain("--config-json");
     expect(childCommandLine).toContain("WINTER_HOME="); // the environment really was captured
+    // The zero-prompt switch, as the child received it: with `hostCredentials` set the runtime builds no
+    // Keychain store at all (SDK `production-wiring.ts`), which the key above arriving from a store the
+    // Keychain never held already proves behaviourally.
+    expect(childCommandLine).toMatch(/"hostCredentials":\s*true/);
     expect(childCommandLine).not.toContain(SENTINEL);
     const rt = daemon!.runtimeState;
     if ("unavailable" in rt) throw rt.unavailable;
