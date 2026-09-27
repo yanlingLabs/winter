@@ -139,6 +139,12 @@ final class MethodWrapperTests: XCTestCase {
             try await client.elicitationRespond(sessionId: "s_1", elicitationId: "el_1", accept: false)
         }
         XCTAssertEqual((declined["params"] as? [String: Any])?["action"] as? String, "decline")
+        let (fetch, url) = try await roundTrip(t, sentIndex: 3, result: #"{"url":"https://linear.app/oauth?code=1"}"#) {
+            try await client.elicitationURL(sessionId: "s_1", elicitationId: "el_1")
+        }
+        XCTAssertEqual(fetch["method"] as? String, "elicitation.url")
+        XCTAssertEqual((fetch["params"] as? [String: Any])?["elicitationId"] as? String, "el_1")
+        XCTAssertEqual(url, "https://linear.app/oauth?code=1")
     }
 
     /// Chat Slice D task 1: `session.setModel`'s wire shape — a set carries the string; a clear

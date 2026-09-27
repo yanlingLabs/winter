@@ -131,8 +131,10 @@ final class OrbWindowController: ObservableObject {
     var onApprovalRespond: ((String, Bool, String?, String?) async -> Bool)?  // callId, approved, optionId, childSessionId
     var onQuestionRespond: ((String, [String: String], [String: String], String?) async -> Bool)?
     var onPlanRespond: ((String, Bool, Bool, String?) async -> Bool)?
-    /// WS-27: elicitationId, accept — `AppModel.respondElicitation` (the link is opened before this).
-    var onElicitationRespond: ((String, Bool) async -> Bool)?
+    /// WS-27: elicitationId, accept — `AppModel.respondElicitation` (the link is opened before this);
+    /// and elicitationId → the pending card's url (`AppModel.elicitationURL`), fetched only to open it.
+    var onElicitationRespond: ((String, Bool) async -> ElicitationSendResult)?
+    var onElicitationURL: ((String) async -> String?)?
 
     /// Dispatch (Phase 7), Task 8: fired by `GlassRootView.wireCallbacks()` (relaying
     /// `FieldStateAdapter.onOpenChild`) when the field's own child-status circle is tapped —

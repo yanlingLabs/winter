@@ -1180,7 +1180,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             await self?.appModel?.respondPlan(callId: callId, approved: approved, autoAccept: autoAccept, feedback: feedback) ?? false
         }
         orb.onElicitationRespond = { [weak self] elicitationId, accept in
-            await self?.appModel?.respondElicitation(elicitationId: elicitationId, accept: accept) ?? false
+            await self?.appModel?.respondElicitation(elicitationId: elicitationId, accept: accept) ?? .failed
+        }
+        orb.onElicitationURL = { [weak self] elicitationId in
+            await self?.appModel?.elicitationURL(elicitationId: elicitationId)
         }
 
         // Task 4 (2d-iii): the ⋯ menu's approval-mode picker — same seam as the three respond
