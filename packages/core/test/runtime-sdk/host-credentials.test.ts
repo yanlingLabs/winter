@@ -70,7 +70,7 @@ describe("credential_resolve", () => {
     const counting: SecretStore = { get: async (n) => { reads++; return secrets.get(n); }, set: (n, v) => secrets.set(n, v), delete: (n) => secrets.delete(n) };
     await secrets.set("harness-token", SECRET);
     const { resolve } = broker({}, counting);
-    for (const account of ["harness-token", "remote-token.migrating", "zai:default-not-a-slot", "exa-api-key-typo", mcpOAuthClientAccount(MCP_URL), mcpOAuthClientSecretAccount(MCP_URL), mcpOAuthTokenAccount("https://other.example.test/mcp")]) {
+    for (const account of ["harness-token", "remote-token.migrating", "zai:default-not-a-slot", "exa-api-key-typo", mcpOAuthClientAccount(MCP_URL), mcpOAuthClientSecretAccount(MCP_URL)]) {
       expect(await resolve({ ref: { kind: "keychain", account } }, { signal })).toEqual({ ok: false, reason: "not_allowed" });
     }
     // An allowed account under ANOTHER Keychain service is not read either.
@@ -193,6 +193,18 @@ describe("MCP sign-ins", () => {
     expect(answer).toMatchObject({ ok: true, generation: 7 });
     expect(JSON.stringify(answer)).not.toContain(SECRET);
     expect(JSON.parse((answer as { material: string }).material).refreshToken).toBe(MCP_OAUTH_HOST_HELD_REFRESH_TOKEN);
+  });
+
+  test("a sign-in outside the session's fold reads as SIGNED OUT (not_found), never its token — so that server still connects", async () => {
+    const other = mcpOAuthTokenAccount("https://plugin.example.test/mcp");
+    const store = createMemoryMcpOAuthStore({ [other]: record({ serverUrl: "https://plugin.example.test/mcp" }) });
+    const { resolve, logs } = broker({ mcpOAuthStore: store });
+    const answer = await resolve({ ref: { kind: "keychain", account: other } }, { signal });
+    expect(answer).toEqual({ ok: false, reason: "not_found" });
+    await resolve({ ref: { kind: "keychain", account: other } }, { signal });
+    // One line per account, naming it and never a value.
+    expect(logs.filter((l) => l.includes(other))).toHaveLength(1);
+    expect(logs.join("\n")).not.toContain(SECRET);
   });
 
   test("no store, no item, or a malformed item reads as signed out; the client items are never answerable", async () => {
