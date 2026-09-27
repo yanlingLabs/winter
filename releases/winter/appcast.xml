@@ -332,5 +332,40 @@
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
       <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.119.0/Winter-0.119.0.zip" sparkle:edSignature="CUS/EIOrsarNOejejpub85OhCBkSKBBB/dbYmLw0mpesSJo2DRxZzx+8A9dTEwRskidZCorszafJifbT98c5Ag==" length="425872235" type="application/octet-stream"/>
     </item>
+      <item>
+      <title>0.120.0</title>
+      <description><![CDATA[<p>Winter agent SDK 0.0.32</p>
+<h2>Sign in to MCP servers</h2>
+<ul>
+  <li><strong>MCP servers that need a sign-in now work.</strong> Add a server such as GitHub or Cloudflare, then sign in from Library → MCP on the Mac, or with <code>winter mcp login &lt;name&gt;</code> in the terminal. Winter opens your browser, you approve it there, and the server's tools appear.</li>
+  <li><strong>Servers that register themselves, servers that use Winter's published client, and servers that need your own OAuth app</strong> are all supported. For your own app, store its client secret with <code>winter mcp set-secret &lt;name&gt;</code>, or with <code>--from-clipboard</code> from a shell that can't prompt. The secret is sent only to the sign-in server you confirmed.</li>
+  <li><strong>Until you sign in, a server's tools stay hidden</strong> and the model is told the server needs a sign-in, instead of failing mid-task.</li>
+  <li><strong>Signing in or out takes effect in sessions that are already open.</strong> The server reconnects on its own; nothing restarts.</li>
+  <li><strong>Winter keeps you signed in.</strong> A sign-in is refreshed only when it has expired, and only by Winter itself. Sign out with <code>winter mcp logout &lt;name&gt;</code>.</li>
+  <li><code>winter mcp list</code> shows whether each server is signed in.</li>
+</ul>
+<h2>Choose what each connector may do</h2>
+<ul>
+  <li><strong>Every connector action can be set to Always allow, Always ask or Always deny.</strong> Set them per action or for a whole server in Library → MCP, or with <code>winter mcp permissions &lt;server&gt;</code>. A change applies to the next call in every session, with nothing to restart.</li>
+  <li><strong>Chat and Dispatch can now use connectors.</strong> An action that needs your approval shows a card in the conversation (Dispatch cards reach the iPhone too). Chat still never asks about anything else.</li>
+  <li><strong>Actions the server marks as read-only run without asking</strong> until you choose otherwise. Everything else asks.</li>
+  <li><strong>Always deny holds everywhere</strong>, including in Bypass mode and over approvals you saved earlier.</li>
+</ul>
+<h2>No more Keychain prompts</h2>
+<ul>
+  <li><strong>Sessions no longer read the Keychain themselves.</strong> Winter hands each session the one credential it needs, so macOS stops asking you to allow access for every rebuilt or updated runtime.</li>
+  <li><strong>The Mac app reads its pairing tokens without asking.</strong> Winter re-creates them once after this update so the app is trusted to read them.</li>
+  <li><code>winter doctor</code> checks for leftover credentials without opening them, so it never prompts either.</li>
+</ul>
+<h2>Fixes</h2>
+<ul>
+  <li><strong>Adding, showing or removing an MCP server for your user</strong> (<code>winter mcp add -s user</code>) works again while Winter is running. It used to be refused.</li>
+</ul>
+<p>This release runs on Winter agent SDK 0.0.32 and runtime SDK 0.0.15.</p>]]></description>
+      <sparkle:version>0.120.0</sparkle:version>
+      <sparkle:shortVersionString>0.120.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.120.0/Winter-0.120.0.zip" sparkle:edSignature="DymBiPpQckb6FQAHtrbmptDE7rY2U+U30KFyCOHdg6hckDyEuHfrqZ8jY53RHvFA8BZc3Uvix8eJibvapWyMBg==" length="426174622" type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>
