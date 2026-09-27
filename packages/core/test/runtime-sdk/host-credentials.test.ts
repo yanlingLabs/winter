@@ -8,7 +8,7 @@ import { join } from "node:path";
 import type { Options } from "@yanlinglabs/winter-agent-sdk";
 import { createMemoryMcpOAuthStore, encodeMcpOAuthTokenRecord, MCP_OAUTH_HOST_HELD_REFRESH_TOKEN, mcpOAuthClientAccount, mcpOAuthClientSecretAccount, mcpOAuthTokenAccount } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
 import { FileSecretStore, type SecretStore } from "../../src/auth/secret-store";
-import { createHostCredentialBroker, isNeverBrokered, sessionCredentialAllowlist, type HostCredentialDeps } from "../../src/runtime-sdk/host-credentials";
+import { createHostCredentialBroker, HOST_RENEWAL_BACKOFF_MS, isNeverBrokered, sessionCredentialAllowlist, type HostCredentialDeps } from "../../src/runtime-sdk/host-credentials";
 
 const SERVICE = "ws25.host-credentials.test";
 const SECRET = "WS25-HOST-SENTINEL-8f1c";
@@ -56,6 +56,14 @@ describe("the allowlist", () => {
     const opts = sessionOptions();
     (opts as { web: { search?: unknown } }).web.search = undefined;
     expect(sessionCredentialAllowlist(opts, {}).accounts.has("exa-api-key")).toBe(false);
+  });
+
+  test("narrowed to the permitted, credentialed providers when the caller knows them — the Options' own refs always stay", () => {
+    const allow = sessionCredentialAllowlist(sessionOptions(), {}, new Set(["codex-oauth"]));
+    expect(allow.accounts.has("codex-oauth:default")).toBe(true);
+    expect(allow.accounts.has("anthropic:console")).toBe(false);
+    expect(allow.accounts.has("zai:default")).toBe(false);
+    for (const own of ["deepseek:default", "openai:default", "exa-api-key"]) expect(allow.accounts.has(own)).toBe(true);
   });
 
   test("isNeverBrokered: pairing tokens, their migration shadows, MCP client items, the retired Brave key", () => {
@@ -162,6 +170,19 @@ describe("credential_resolve", () => {
     const answer = await resolve({ ref: { kind: "keychain", account: "codex-oauth:default" } }, { signal });
     expect(posts).toBe(1);
     expect(JSON.parse((answer as { material: string }).material).accessToken).toBe("fresh");
+  });
+
+  test("after a FAILED renewal the item is not renewed again for the backoff window (a dead Console profile never re-runs ant per resolve)", async () => {
+    let clock = Date.now();
+    let runs = 0;
+    const refresh = async (): Promise<void> => { runs++; throw new Error("ant failed"); };
+    await secrets.set("anthropic:console", JSON.stringify({ kind: "bearer", token: "b", expiresAt: clock + 10_000 }));
+    const { resolve } = broker({ refreshers: { "anthropic:console": refresh }, now: () => clock });
+    for (let i = 0; i < 3; i++) await resolve({ ref: { kind: "keychain", account: "anthropic:console" } }, { signal });
+    expect(runs).toBe(1);
+    clock += HOST_RENEWAL_BACKOFF_MS + 1;
+    await resolve({ ref: { kind: "keychain", account: "anthropic:console" } }, { signal });
+    expect(runs).toBe(2);
   });
 
   test("a failed renewal is stale, logged by account and class only — never a value", async () => {

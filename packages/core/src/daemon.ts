@@ -104,7 +104,7 @@ import { convertLegacyPluginsForMigration } from "./plugins/convert-legacy";
 import { localScopeKeyFor, projectScopeRootFor, projectScopeTrust, projectScopeTrusted, runHomeInputFor } from "./runtime-sdk/run-home-input";
 import { reservedMcpServerNames } from "./capabilities/names";
 import { projectScopeAllowRulesFor, winterGateRulesFromSdk } from "./runtime-sdk/mode-options";
-import { configuredMcpServersFor } from "./runtime-sdk/external-mcp";
+import { configuredMcpServersFor, pluginMcpServersFor } from "./runtime-sdk/external-mcp";
 import { planBridgeFor, type PlanBridge } from "./runtime-sdk/plan-bridge";
 import { importEngineEraSession } from "./runtime-sdk/import-legacy";
 import { planAndApplySwitch } from "./runtime-sdk/handoff";
@@ -1913,6 +1913,8 @@ export async function startDaemon(opts: {
     // `refreshOauthMaterial`, whose merge rule keeps an unrotated refresh token), the Console bearer
     // through the broker that already renews it from `ant`'s profile.
     ...(sessionMcpOAuthStore === undefined ? {} : { mcpOAuthStore: sessionMcpOAuthStore }),
+    // Review r1 (i): the enabled plugins' http/sse servers join the MCP sign-in allowlist (live per incarnation).
+    pluginMcpServers: () => pluginMcpServersFor(pluginStore.list().filter((p) => !p.disabled).map((p) => p.installPath)),
     credentialRefreshers: {
       // The ref is spelled EXACTLY as the internal jobs' (`providers/internal-provider.ts`: no `service`),
       // because `refreshOauthMaterial`'s own single-flight is keyed on (service, account, token URL): the

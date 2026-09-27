@@ -1008,6 +1008,8 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
       // A run-home incarnation (the table's default): the configured servers ride the run folder, so the
       // broker must read them from the same fold rather than off `options.mcpServers`.
       extraMcpServers: () => ({ linear: { type: "http", url: "https://mcp.linear.example/mcp" } }),
+      // Review r1 (i): an enabled plugin's http server joins the fold on a run-home incarnation.
+      pluginMcpServers: () => ({ "plugin-srv": { type: "http", url: "https://plugin.example/mcp" } }),
     });
     try {
       const secrets = new FileSecretStore(join(t.home, "secrets.json"));
@@ -1027,6 +1029,12 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
         // The configured MCP server's sign-in is answerable (signed out here: no store wired).
         const { mcpOAuthTokenAccount } = await import("@yanlinglabs/winter-agent-runtime/mcp-auth");
         expect(await options.onCredentialResolve!({ ref: { kind: "keychain", account: mcpOAuthTokenAccount("https://mcp.linear.example/mcp") } }, { signal })).toEqual({ ok: false, reason: "not_found" });
+        // The plugin's server can refresh its sign-in (it is in the fold); a server under another name cannot.
+        const pluginAccount = mcpOAuthTokenAccount("https://plugin.example/mcp");
+        expect(await options.onMcpOAuthRefresh!({ server: "plugin-srv", account: pluginAccount, generation: 1 }, { signal })).toEqual({ ok: false, reason: "needs_auth" });
+        expect(session.mcpServerNamesFor!("https://plugin.example/mcp")).toEqual(["plugin-srv"]);
+        // Review r1 (h): a catalog slot with no stored credential is not granted; one that has it is.
+        expect(await options.onCredentialResolve!({ ref: { kind: "keychain", account: "zai:default" } }, { signal })).toEqual({ ok: false, reason: "not_allowed" });
         // A server outside the fold reads as signed out too — never its token (see `host-credentials.ts`).
         expect(await options.onCredentialResolve!({ ref: { kind: "keychain", account: mcpOAuthTokenAccount("https://evil.example/mcp") } }, { signal })).toEqual({ ok: false, reason: "not_found" });
         // The Options themselves name locators only — the value is in no serialisable field.

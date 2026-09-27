@@ -51,6 +51,10 @@ import { credentialInventory } from "./keychain";
  *  for it — the same 60 s window spec §1.2 names for an MCP token and `refreshOauthMaterial`'s callers use. */
 export const HOST_REFRESH_SKEW_MS = 60_000;
 
+/** After a renewal FAILS, how long the same item is not renewed again (review r1 (f)): a dead Console
+ *  profile would otherwise spawn `ant` on every resolve a retrying child makes. */
+export const HOST_RENEWAL_BACKOFF_MS = 30_000;
+
 /** The client-secret prefix (`mcp-oauth-client-secret:<id>`) — it also starts with `mcp-oauth-client`,
  *  so the one prefix check below covers both daemon-only item families; spelled here for the doc. */
 const MCP_CLIENT_ITEM_PREFIX = MCP_OAUTH_CLIENT_ACCOUNT_PREFIX.replace(/:$/, "");
@@ -92,14 +96,18 @@ function keychainAccountOf(ref: unknown): string | undefined {
  * capability servers. A server whose URL does not canonicalise (userinfo, a non-http scheme) contributes
  * nothing: the SDK refuses to key a sign-in for it either.
  */
-export function sessionCredentialAllowlist(options: Options, mcpServers: Readonly<Record<string, McpServerConfig>>): SessionCredentialAllowlist {
+export function sessionCredentialAllowlist(options: Options, mcpServers: Readonly<Record<string, McpServerConfig>>, slotProviders?: ReadonlySet<string>): SessionCredentialAllowlist {
   const accounts = new Set<string>();
   const named = [options.provider?.authRef, options.advisor?.authRef, options.web?.search?.authRef, options.web?.fetch?.authRef];
   for (const ref of named) {
     const account = keychainAccountOf(ref);
     if (account !== undefined) accounts.add(account);
   }
-  for (const slot of credentialInventory()) accounts.add(slot.secretName);
+  // The catalog slots a cross-provider subagent may resolve — narrowed, when the caller knows it, to the
+  // providers that are PERMITTED and CREDENTIALED at spawn (`slotProviders`, review r1 (h)): a slot with no
+  // item could only answer `not_found`, and the narrower grant leaves nothing to probe. The trade-off: a
+  // key added for ANOTHER provider mid-session reaches this session's subagents at its next incarnation.
+  for (const slot of credentialInventory()) if (slotProviders === undefined || slotProviders.has(slot.provider)) accounts.add(slot.secretName);
   const mcpAccounts = new Map<string, Set<string>>();
   for (const [name, config] of Object.entries({ ...mcpServers, ...(options.mcpServers ?? {}) })) {
     const url = (config as { type?: unknown; url?: unknown }).url;
@@ -200,6 +208,8 @@ export function createHostCredentialBroker(deps: HostCredentialDeps): HostCreden
   const seen = new Map<string, { digest: string; generation: number }>();
   /** account → the refresh in flight (a second asker joins it; a failed one is never cached). */
   const refreshing = new Map<string, Promise<void>>();
+  /** account → when its last renewal failed (`HOST_RENEWAL_BACKOFF_MS`). Cleared by a renewal that works. */
+  const failedAt = new Map<string, number>();
   /** MCP sign-in accounts already logged as outside a session's fold (one line each, not one per connect). */
   const outsideFold = new Set<string>();
 
@@ -219,7 +229,11 @@ export function createHostCredentialBroker(deps: HostCredentialDeps): HostCreden
     const running = refreshing.get(account);
     if (running !== undefined) return running;
     const run = refresher(account)
+      .then(() => {
+        failedAt.delete(account);
+      })
       .catch((err: unknown) => {
+        failedAt.set(account, now());
         // The class only — a refresh error may quote the grant it failed (refreshOauthMaterial never
         // does, a broker might), so no message ever reaches the log.
         log(`host credentials: refreshing ${account} failed (${err instanceof Error ? err.name : "error"})`);
@@ -243,7 +257,8 @@ export function createHostCredentialBroker(deps: HostCredentialDeps): HostCreden
     // A renewal is attempted when the asker needs newer material than is stored, or when what is stored
     // is about to expire and can be renewed. Never for a still-valid item at a plain read (spec §1.2's
     // "never refresh a still-valid token" rule, applied to provider credentials too).
-    if (refresher !== undefined && current !== null && renewable(current.raw) && (short(current) || due(current))) {
+    const backingOff = (failedAt.get(account) ?? -Infinity) + HOST_RENEWAL_BACKOFF_MS > now();
+    if (refresher !== undefined && current !== null && !backingOff && renewable(current.raw) && (short(current) || due(current))) {
       await refreshOnce(account, refresher);
       if (signal.aborted) return { ok: false, reason: "unavailable" };
       current = await read(account);
