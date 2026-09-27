@@ -100,6 +100,14 @@ export function daemonConnectorSource(deps: DaemonConnectorSourceDeps): DaemonCo
       if (hint === undefined && scope === "user") kick(manager, server);
       return hint;
     },
+    // Configured for this session: the local or trusted project scope defines it, or the user scope does.
+    // A plugin's own servers are not visible here (they live in the runtime's plugin loader) — such a
+    // split is weighed only when stored or listed.
+    configured: (server, cwd) => {
+      const scope = scopeFor(server, cwd);
+      if (scope !== "user") return true;
+      try { return Object.hasOwn(sdkUserMcpServers(deps.home), server); } catch { return false; }
+    },
     noteWritten: (next) => { written = { basis: deps.settings(), table: connectorPermissionTable(next) }; },
     scopeFor,
   };

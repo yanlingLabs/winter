@@ -60,6 +60,11 @@ describe("which listing answers read-only", () => {
     expect(f.source.readOnly("cf", "list", f.localOnly)).toBeUndefined();
     // A name the project does not define resolves to the user scope even from the project.
     expect(f.source.scopeFor("remote", f.project)).toBe("user");
+    // configured: in any scope that resolves for the session; nowhere else.
+    expect(f.source.configured?.("cf", f.localOnly)).toBe(true);
+    expect(f.source.configured?.("cf", f.project)).toBe(true);
+    expect(f.source.configured?.("remote")).toBe(true);
+    expect(f.source.configured?.("cf__prod", f.project)).toBe(false);
   });
 
   test("the call-path kick probes an unprobed http USER server at most once a minute — and never spawns a project's servers", async () => {

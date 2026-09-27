@@ -1303,7 +1303,7 @@ export function parseMcpPermissionsArgs(args: string[]): { kind: "ok"; parsed: M
 /** One action as `mcp.tools` reports it. */
 export interface McpToolPermissionRow {
   name: string; toolName: string; description?: string; readOnly: boolean;
-  setting?: "allow" | "ask" | "deny"; permission: "allow" | "ask" | "deny"; source: "tool" | "server" | "rule" | "default";
+  setting?: "allow" | "ask" | "deny"; permission: "allow" | "ask" | "deny"; source: "tool" | "server" | "rule" | "default"; from?: string;
   rules?: Array<{ behavior: "allow" | "ask" | "deny"; rule: string }>;
 }
 export interface McpToolPermissionServer { name: string; status: string; allTools?: "allow" | "ask" | "deny"; listed: boolean; tools: McpToolPermissionRow[] }
@@ -1386,7 +1386,9 @@ export function renderMcpPermissionsOutcome(outcome: McpPermissionsOutcome): str
   const rows = outcome.tool !== undefined ? s.tools.filter((t) => t.name === outcome.tool) : s.tools;
   if (outcome.tool !== undefined && rows.length === 0) lines.push(`  ${outcome.tool}: not listed and nothing stored — the default applies`);
   for (const t of rows) {
-    const why = t.source === "tool" ? "set for this action"
+    const why = t.from !== undefined
+      ? (t.source === "server" ? `set for all actions of ${t.from}` : `set for ${t.from}'s ${t.toolName.slice(`mcp__${t.from}__`.length)}`)
+      : t.source === "tool" ? "set for this action"
       : t.source === "server" ? "set for all actions"
       : t.source === "rule" ? `deny rule in sdk/settings.json (${t.rules?.find((r) => r.behavior === "deny")?.rule ?? ""})`
       : t.readOnly ? "default: read-only" : "default: not read-only (code sessions follow their approval policy)";

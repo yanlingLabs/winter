@@ -181,6 +181,17 @@ describe("mcp.tools / mcp.setToolPermission", () => {
     c.close();
   });
 
+  test("re-review minor: a value stored under ANOTHER server name says whose (`from`)", async () => {
+    // cf's own `workers_list` is only cf's; a cf tool whose name starts `prod__` is ALSO cf__prod's.
+    const table = { cf__prod: { "*": "deny" as const }, cf: { prod__x: "ask" as const } };
+    const live: ConnectorPermissionSource = { table: () => table, readOnly: () => undefined };
+    const { c: c2 } = await boot({ settings: { mcp: { toolPermissions: table } }, connectorPermissions: live });
+    const tools = (await c2.request(METHODS.mcpTools, { server: "cf" })).result.servers[0].tools;
+    expect(tools.find((t: { name: string }) => t.name === "prod__x")).toMatchObject({ setting: "ask", permission: "deny", source: "server", from: "cf__prod" });
+    expect(tools.find((t: { name: string }) => t.name === "workers_list").from).toBeUndefined();
+    c2.close();
+  });
+
   test("not remote-allowed — local role only", () => {
     expect(REMOTE_ALLOWED_METHODS.has(METHODS.mcpTools)).toBe(false);
     expect(REMOTE_ALLOWED_METHODS.has(METHODS.mcpSetToolPermission)).toBe(false);

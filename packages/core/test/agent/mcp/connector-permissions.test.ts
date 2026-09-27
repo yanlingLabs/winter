@@ -413,6 +413,36 @@ describe("a server name containing `__` (every split is weighed)", () => {
   });
 });
 
+describe("re-review: a CONFIGURED but unconfirmed split still votes", () => {
+  const DEL = "mcp__cf__prod__delete";
+  const withConfigured = (table: ConnectorPermissionTable, ro: Record<string, boolean | undefined>, configured: string[]): ConnectorPermissionSource => ({
+    table: () => table, readOnly: (sv, t) => ro[`${sv}/${t}`], configured: (sv) => configured.includes(sv),
+  });
+
+  test("cf lists a read-only `prod__delete`, cf__prod is configured but unlisted: NOT read-only (the call may be cf__prod's)", async () => {
+    const source = withConfigured({}, { "cf/prod__delete": true }, ["cf", "cf__prod"]);
+    expect(connectorFactsFor(source, DEL)).toMatchObject({ readOnly: false });
+    expect(connectorFactsFor(source, DEL)?.setting).toBeUndefined();
+    const session: Session = { label: "chat", mode: "chat", policy: "chat" };
+    expect(await childDecides(session, connectorHookOf(session, source), bridgeOf(session, source), DEL, { id: "c1" })).toBe("card");
+  });
+
+  test("cf's `*` allow and a listed `prod__delete`, cf__prod configured and unlisted: the default outranks the allow", () => {
+    const source = withConfigured({ cf: { "*": "allow" } }, { "cf/prod__delete": false }, ["cf", "cf__prod"]);
+    expect(connectorFactsFor(source, DEL)?.setting).toBeUndefined();
+  });
+
+  test("a split configured nowhere is still skipped — an ordinary tool name containing `__` keeps cf's answers", () => {
+    const source = withConfigured({ cf: { "*": "allow" } }, { "cf/prod__delete": true }, ["cf"]);
+    expect(connectorFactsFor(source, DEL)).toMatchObject({ server: "cf", tool: "prod__delete", setting: "allow", readOnly: true });
+  });
+
+  test("a configured server's own blanket allow counts even unlisted", () => {
+    const source = withConfigured({ cf__prod: { "*": "allow" } }, {}, ["cf__prod"]);
+    expect(connectorFactsFor(source, DEL)?.setting).toBe("allow");
+  });
+});
+
 // ── review r1, IMPORTANT 2: the bridge never turns a forced prompt into a silent allow ───────────────────
 
 describe("a prompt another layer forced is never answered by a connector allow", () => {
