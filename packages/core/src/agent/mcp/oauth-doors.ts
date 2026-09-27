@@ -40,6 +40,23 @@ export class McpOAuthDoorRefusal extends Error {
   }
 }
 
+/**
+ * A started sign-in. Besides the flow (`loginId`, `authUrl`) it names WHAT the user is about to authorize,
+ * so a client can show it and ask BEFORE opening the browser (WS-25 security review M1): the server the
+ * name resolved to -- a trusted project's or a local entry can shadow a user-scope name -- its URL, and
+ * the authorization server's full issuer.
+ */
+export interface McpLoginStarted {
+  loginId: string;
+  authUrl: string;
+  issuerOrigin: string;
+  authorizeOrigin: string;
+  issuer: string;
+  name: string;
+  scope: McpDoorScope;
+  url: string;
+}
+
 /** An http/sse server as a door resolved it. */
 export interface ResolvedMcpServer {
   name: string;
@@ -213,7 +230,7 @@ export class McpOAuthDoors {
    * phases one after the other, so the second never snapshots a registration the first wrote but has not
    * yet had confirmed (or put back).
    */
-  async login(server: ResolvedMcpServer, opts: { confirmIssuerChange?: boolean } = {}): Promise<{ loginId: string; authUrl: string; issuerOrigin: string; authorizeOrigin: string }> {
+  async login(server: ResolvedMcpServer, opts: { confirmIssuerChange?: boolean } = {}): Promise<McpLoginStarted> {
     const account = mcpOAuthTokenAccount(server.url);
     return this.serialised(account, () => this.startLoginSerialised(server, account, opts));
   }
@@ -232,7 +249,7 @@ export class McpOAuthDoors {
     return run;
   }
 
-  private async startLoginSerialised(server: ResolvedMcpServer, account: string, opts: { confirmIssuerChange?: boolean }): Promise<{ loginId: string; authUrl: string; issuerOrigin: string; authorizeOrigin: string }> {
+  private async startLoginSerialised(server: ResolvedMcpServer, account: string, opts: { confirmIssuerChange?: boolean }): Promise<McpLoginStarted> {
     const store = this.deps.store();
     const clientAccount = mcpOAuthClientAccount(server.url);
     const snapshot = await store.read(clientAccount).catch(() => null);
@@ -310,7 +327,7 @@ export class McpOAuthDoors {
   }
 
   /** Hands a started flow to the login table: its expiry timer, its settlement, its follow-up. */
-  private handToLoginTable(server: ResolvedMcpServer, account: string, login: McpOAuthLogin): { loginId: string; authUrl: string; issuerOrigin: string; authorizeOrigin: string } {
+  private handToLoginTable(server: ResolvedMcpServer, account: string, login: McpOAuthLogin): McpLoginStarted {
     const loginId = `ml_${randomBytes(12).toString("hex")}`;
     const entry: LoginEntry = { account, state: "pending", login };
     this.logins.set(loginId, entry);
@@ -342,7 +359,10 @@ export class McpOAuthDoors {
       if (outcome.ok) this.track(this.deps.onSignInChanged?.(server.url));
     });
     this.deps.log?.(`mcp: sign-in to '${server.name}' started (authorization server ${login.issuerOrigin})`);
-    return { loginId, authUrl: login.authUrl, issuerOrigin: login.issuerOrigin, authorizeOrigin: login.authorizeOrigin };
+    return {
+      loginId, authUrl: login.authUrl, issuerOrigin: login.issuerOrigin, authorizeOrigin: login.authorizeOrigin,
+      issuer: login.issuer, name: server.name, scope: server.scope, url: server.url,
+    };
   }
 
   /** `pending` | `done` | `failed` (with a code-shaped `error`) | `expired`. An unknown id is `expired`. */

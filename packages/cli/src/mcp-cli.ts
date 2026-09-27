@@ -889,10 +889,23 @@ export interface McpAuthRpcDoor {
   close(): void;
 }
 
+/** What `mcp.login` answers (`McpLoginResult`). The WHAT-fields (`issuer`, `name`, `scope`, `url`) are
+ *  optional here only so an older daemon's reply still signs in; the confirmation then shows what it has. */
+export interface McpLoginStartedView {
+  loginId: string;
+  authUrl: string;
+  issuerOrigin: string;
+  authorizeOrigin?: string;
+  issuer?: string;
+  name?: string;
+  scope?: McpScope;
+  url?: string;
+}
+
 /** The in-process doors (`McpOAuthDoors` from core) — structural, so a test can hand in a fake. */
 export interface McpAuthLocalDoors {
   resolve(p: { name: string; scope?: McpScope; cwd?: string }): unknown;
-  login(server: unknown, opts?: { confirmIssuerChange?: boolean }): Promise<{ loginId: string; authUrl: string; issuerOrigin: string; authorizeOrigin: string }>;
+  login(server: unknown, opts?: { confirmIssuerChange?: boolean }): Promise<McpLoginStartedView>;
   loginStatus(loginId: string): { state: "pending" | "done" | "failed" | "expired"; error?: string };
   logout(server: unknown, opts?: { forgetClient?: boolean }): Promise<void>;
   clientSecretIssuer(server: unknown): Promise<{ name: string; issuer: string; issuerOrigin: string; authorizeOrigin: string }>;
@@ -975,7 +988,7 @@ export async function runMcpLoginRoute(args: string[], deps: McpAuthDeps): Promi
   const pollMs = deps.pollMs ?? 1_000;
   const local = deps.door === undefined ? deps.local() : undefined;
   try {
-    const start = async (confirmIssuerChange: boolean): Promise<{ loginId: string; authUrl: string; issuerOrigin: string; authorizeOrigin?: string }> => {
+    const start = async (confirmIssuerChange: boolean): Promise<McpLoginStartedView> => {
       if (deps.door !== undefined) {
         const { METHODS } = await import("@yanlinglabs/winter-protocol");
         return deps.door.request(METHODS.mcpLogin, { name, ...(scope !== undefined ? { scope } : {}), cwd: deps.cwd, ...(confirmIssuerChange ? { confirmIssuerChange: true } : {}) });
@@ -995,7 +1008,15 @@ export async function runMcpLoginRoute(args: string[], deps: McpAuthDeps): Promi
       if (!(await deps.confirm(question))) return { ok: false, message: "sign-in cancelled — the authorization server changed and was not confirmed", code: ISSUER_CHANGE };
       started = await start(true);
     }
-    deps.print(`Signing in to "${name}" at ${started.issuerOrigin}${started.authorizeOrigin !== undefined && started.authorizeOrigin !== started.issuerOrigin ? ` (the sign-in page is on ${started.authorizeOrigin})` : ""}.`);
+    // WS-25 security review M1: say WHAT is about to be authorized and ask BEFORE the browser opens. The name
+    // resolves like a session's fold, so a trusted project's (or a local) entry can shadow a user-scope server
+    // of the same name -- the user sees which scope, which URL and which authorization server it is. A
+    // declined flow is simply never opened; its listener closes when the daemon expires it (5 minutes).
+    const target = `${started.scope ?? "?"} ${started.url ?? "(url not reported)"}`;
+    deps.print(`"${name}" → ${target} → issuer ${started.issuer ?? started.issuerOrigin}${started.authorizeOrigin !== undefined && started.authorizeOrigin !== started.issuerOrigin ? ` (the sign-in page is on ${started.authorizeOrigin})` : ""}`);
+    if (!(await deps.confirm("Open the browser to sign in? [y/N] "))) {
+      return { ok: false, message: `sign-in to "${name}" cancelled — nothing was opened`, code: "cancelled" };
+    }
     deps.print(`Opening your browser. If it does not open, visit:\n  ${started.authUrl}`);
     await deps.openBrowser(started.authUrl);
     for (;;) {
