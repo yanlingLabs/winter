@@ -40,6 +40,24 @@ import Foundation
 //   with (`RpcError.mcpAuthCode`), same "closed enum + `.unknown`-less because the app-side mapper
 //   already has its own `nil`-falls-back-to-generic-text rule" posture as `HandoffRpcCode`/
 //   `CredentialRpcCode` beside this file.
+//
+// Polish round 3 (daemon-oauth lane's client-secret contract): a client secret is a bearer credential
+// for whoever the daemon says holds it, so this file no longer lets the SecureField appear before the
+// user has seen and agreed to WHO that is.
+// - NEW read-only `clientSecretIssuer(name:)` (`mcp.clientSecretIssuer`, writes nothing) — the client-
+//   secret sheet's FIRST call, before it ever shows the field. Answers the FULL `issuer` (the identity
+//   the secret is actually bound to) plus `issuerOrigin`/`authorizeOrigin` for context.
+// - `setClientSecret` now REQUIRES `expectedIssuer` — the issuer the user just confirmed — and can be
+//   refused `mcp_expected_issuer_required` (`RpcError.mcpExpectedIssuerRequired`, carrying the issuer
+//   it needed) or `mcp_issuer_changed` (`RpcError.mcpIssuerChanged`, the NEW issuer) when it no longer
+//   matches; either sends the sheet back to a re-confirm step, never a silent resubmit with the old
+//   value — the secret was already cleared by then (`McpClientSecretSheetModel`'s own discipline), so
+//   "re-confirm" necessarily means the user re-enters it too. The result gained `issuer` (alongside the
+//   pre-existing `issuerOrigin`) — `McpClientSecretSaved` — and "Secret saved for <origin>" became
+//   "Secret saved for <issuer>".
+// - `McpIssuerChangeConfirmation` (`mcp.login`'s own issuer-change refusal) gained `storedIssuer`/
+//   `newIssuer` alongside its two origins — the sign-in sheet shows the full issuers now, origins
+//   demoted to a secondary line.
 // -----------------------------------------------------------------------------------------------
 
 /// `mcp.login`'s reply: `{loginId, authUrl, issuerOrigin, authorizeOrigin}`. `issuerOrigin` here is
@@ -63,15 +81,63 @@ public struct McpLoginStart: Equatable, Sendable {
 }
 
 /// `mcp.login`'s typed refusal when the server's issuer changed since a prior sign-in (`error.data`
-/// on `mcp_issuer_change_requires_confirmation`) — both origins, so the confirmation sheet can show
-/// "this server now signs in through NEW; it used to be STORED" rather than a bare refusal.
+/// on `mcp_issuer_change_requires_confirmation`) — both FULL issuers (`storedIssuer`/`newIssuer`,
+/// polish round 3) plus both origins, so the confirmation sheet can show "this server now signs in
+/// through NEW; it used to be STORED" with the issuers as the primary fact and the origins secondary,
+/// rather than a bare refusal.
 public struct McpIssuerChangeConfirmation: Equatable, Sendable {
+    public let storedIssuer: String
+    public let newIssuer: String
     public let storedIssuerOrigin: String
     public let newIssuerOrigin: String
 
-    public init(storedIssuerOrigin: String, newIssuerOrigin: String) {
+    public init(storedIssuer: String, newIssuer: String, storedIssuerOrigin: String, newIssuerOrigin: String) {
+        self.storedIssuer = storedIssuer
+        self.newIssuer = newIssuer
         self.storedIssuerOrigin = storedIssuerOrigin
         self.newIssuerOrigin = newIssuerOrigin
+    }
+}
+
+/// `mcp.clientSecretIssuer`'s reply (read-only, writes nothing) — the client-secret sheet's FIRST
+/// call, before it ever shows the SecureField. `issuer` is the FULL identity the secret is actually
+/// bound to (what the sheet's confirm step names as the primary fact); `issuerOrigin`/
+/// `authorizeOrigin` are secondary context, same relationship as `McpLoginStart`'s own pair.
+public struct McpClientSecretIssuer: Equatable, Sendable {
+    public let name: String
+    public let issuer: String
+    public let issuerOrigin: String
+    public let authorizeOrigin: String
+
+    public init(name: String, issuer: String, issuerOrigin: String, authorizeOrigin: String) {
+        self.name = name
+        self.issuer = issuer
+        self.issuerOrigin = issuerOrigin
+        self.authorizeOrigin = authorizeOrigin
+    }
+}
+
+/// `mcp.setClientSecret`'s successful reply (polish round 3: gained `issuer` alongside the
+/// pre-existing `issuerOrigin`) — "Secret saved for `<issuer>`" reads the former, never the latter.
+public struct McpClientSecretSaved: Equatable, Sendable {
+    public let issuer: String
+    public let issuerOrigin: String
+
+    public init(issuer: String, issuerOrigin: String) {
+        self.issuer = issuer
+        self.issuerOrigin = issuerOrigin
+    }
+}
+
+/// `mcp.setClientSecret`'s `mcp_expected_issuer_required` refusal data — the daemon needed
+/// `expectedIssuer` to match ITS issuer, and names what that is so the sheet can re-confirm.
+public struct McpExpectedIssuerRequired: Equatable, Sendable {
+    public let issuer: String
+    public let issuerOrigin: String
+
+    public init(issuer: String, issuerOrigin: String) {
+        self.issuer = issuer
+        self.issuerOrigin = issuerOrigin
     }
 }
 
@@ -96,6 +162,15 @@ public enum McpAuthRpcCode: String, Equatable, Sendable {
     case discoveryFailed = "mcp_discovery_failed"
     case sdkClientSecretIssuerMismatch = "client_secret_issuer_mismatch"
     case sdkMetadataIssuerMismatch = "metadata_issuer_mismatch"
+    /// Polish round 3: `setClientSecret` refused because it was called without `expectedIssuer`
+    /// matching what the daemon expects — carries the issuer/origin it needed
+    /// (`RpcError.mcpExpectedIssuerRequired`). The Mac client always sends `expectedIssuer` (the
+    /// confirm step made it mandatory), so this is a defensive case, not the ordinary door — the
+    /// ordinary "it changed since you confirmed" door is `issuerChanged` below.
+    case expectedIssuerRequired = "mcp_expected_issuer_required"
+    /// `setClientSecret` refused because the issuer changed between the confirm step and the
+    /// submit — carries only the NEW issuer (`RpcError.mcpIssuerChanged`), no origin.
+    case issuerChanged = "mcp_issuer_changed"
 }
 
 extension RpcError {
@@ -107,15 +182,34 @@ extension RpcError {
         return McpAuthRpcCode(rawValue: code)
     }
 
-    /// Non-`nil` only for `mcp_issuer_change_requires_confirmation`, and only when both origins are
-    /// actually present — a malformed refusal (the code but not the data it promises) falls through
-    /// to `nil` rather than this type inventing an empty origin.
+    /// Non-`nil` only for `mcp_issuer_change_requires_confirmation`, and only when all four fields
+    /// are actually present — a malformed refusal (the code but not the data it promises) falls
+    /// through to `nil` rather than this type inventing an empty issuer or origin.
     public var mcpIssuerChangeConfirmation: McpIssuerChangeConfirmation? {
         guard mcpAuthCode == .issuerChangeRequiresConfirmation,
-              let stored = data?["storedIssuerOrigin"]?.stringValue,
-              let new = data?["newIssuerOrigin"]?.stringValue
+              let storedIssuer = data?["storedIssuer"]?.stringValue,
+              let newIssuer = data?["newIssuer"]?.stringValue,
+              let storedOrigin = data?["storedIssuerOrigin"]?.stringValue,
+              let newOrigin = data?["newIssuerOrigin"]?.stringValue
         else { return nil }
-        return McpIssuerChangeConfirmation(storedIssuerOrigin: stored, newIssuerOrigin: new)
+        return McpIssuerChangeConfirmation(storedIssuer: storedIssuer, newIssuer: newIssuer,
+                                            storedIssuerOrigin: storedOrigin, newIssuerOrigin: newOrigin)
+    }
+
+    /// Non-`nil` only for `mcp_expected_issuer_required`, and only when both fields are present.
+    public var mcpExpectedIssuerRequired: McpExpectedIssuerRequired? {
+        guard mcpAuthCode == .expectedIssuerRequired,
+              let issuer = data?["issuer"]?.stringValue,
+              let issuerOrigin = data?["issuerOrigin"]?.stringValue
+        else { return nil }
+        return McpExpectedIssuerRequired(issuer: issuer, issuerOrigin: issuerOrigin)
+    }
+
+    /// Non-`nil` only for `mcp_issuer_changed`, and only when `data.issuer` is present. No origin —
+    /// this refusal's own contract carries just the new issuer.
+    public var mcpIssuerChanged: String? {
+        guard mcpAuthCode == .issuerChanged else { return nil }
+        return data?["issuer"]?.stringValue
     }
 }
 
@@ -171,11 +265,18 @@ public protocol McpAuthClient: Sendable {
     /// key entirely (the daemon's own default, a best-effort token revoke that KEEPS the client
     /// registration) rather than this client inventing a default of its own.
     func logout(name: String, forgetClient: Bool?) async throws
+    /// Read-only (writes nothing) — the client-secret sheet's FIRST call, before it ever shows the
+    /// SecureField. Answers who the secret would actually be bound to, so the sheet can ask the user
+    /// to confirm before asking for anything sensitive.
+    func clientSecretIssuer(name: String) async throws -> McpClientSecretIssuer
     /// For a server configured with a pre-registered `oauth.clientId`. Never logged, never retained
-    /// past this one call — see `McpClientSecretSheetModel`'s own discipline. Returns the
-    /// `issuerOrigin` the daemon saved the secret against, for "Secret saved for <origin>".
+    /// past this one call — see `McpClientSecretSheetModel`'s own discipline. `expectedIssuer` is the
+    /// issuer the user confirmed via `clientSecretIssuer(name:)`; a mismatch by the time this call
+    /// reaches the daemon refuses typed (`RpcError.mcpExpectedIssuerRequired`/`.mcpIssuerChanged`)
+    /// rather than silently saving against a DIFFERENT issuer than what was shown. Returns the
+    /// issuer/origin the daemon actually saved against, for "Secret saved for <issuer>".
     @discardableResult
-    func setClientSecret(name: String, secret: String) async throws -> String
+    func setClientSecret(name: String, secret: String, expectedIssuer: String) async throws -> McpClientSecretSaved
 }
 
 extension McpAuthClient {
@@ -227,14 +328,29 @@ public final class LiveMcpAuthClient: McpAuthClient, Sendable {
         }
     }
 
+    public func clientSecretIssuer(name: String) async throws -> McpClientSecretIssuer {
+        let r = try await client.request("mcp.clientSecretIssuer", params: .object(["name": .string(name)]))
+        guard let n = r["name"]?.stringValue,
+              let issuer = r["issuer"]?.stringValue,
+              let issuerOrigin = r["issuerOrigin"]?.stringValue,
+              let authorizeOrigin = r["authorizeOrigin"]?.stringValue
+        else {
+            throw RpcError(code: -3, message: "invalid result from server for mcp.clientSecretIssuer")
+        }
+        return McpClientSecretIssuer(name: n, issuer: issuer, issuerOrigin: issuerOrigin, authorizeOrigin: authorizeOrigin)
+    }
+
     @discardableResult
-    public func setClientSecret(name: String, secret: String) async throws -> String {
+    public func setClientSecret(name: String, secret: String, expectedIssuer: String) async throws -> McpClientSecretSaved {
         let r = try await client.request("mcp.setClientSecret", params: .object([
-            "name": .string(name), "secret": .string(secret),
+            "name": .string(name), "secret": .string(secret), "expectedIssuer": .string(expectedIssuer),
         ]))
-        guard r["ok"]?.boolValue == true, let issuerOrigin = r["issuerOrigin"]?.stringValue else {
+        guard r["ok"]?.boolValue == true,
+              let issuer = r["issuer"]?.stringValue,
+              let issuerOrigin = r["issuerOrigin"]?.stringValue
+        else {
             throw RpcError(code: -3, message: "invalid result from server for mcp.setClientSecret")
         }
-        return issuerOrigin
+        return McpClientSecretSaved(issuer: issuer, issuerOrigin: issuerOrigin)
     }
 }

@@ -101,8 +101,35 @@ final class LiveMcpAuthClientTests: XCTestCase {
     }
 
     /// `mcp_issuer_change_requires_confirmation`'s `data` decodes through `RpcError.mcpAuthCode`/
-    /// `mcpIssuerChangeConfirmation` — the sign-in sheet's ONLY way to learn both origins.
+    /// `mcpIssuerChangeConfirmation` — the sign-in sheet's ONLY way to learn both FULL issuers
+    /// (polish round 3) and both origins.
     func testLoginRefusedWithIssuerChangeDataDecodesThroughRpcError() async throws {
+        let (client, t) = try await connectedClient()
+        let live = LiveMcpAuthClient(client: client)
+
+        async let loginTask = live.login(name: "linear")
+        await feedWaitUntil { t.sent.count >= 2 }
+        let req = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"error":{"code":-1,"message":"issuer changed","data":{"code":"mcp_issuer_change_requires_confirmation","storedIssuer":"https://old.example/issuer","newIssuer":"https://new.example/issuer","storedIssuerOrigin":"https://old.example","newIssuerOrigin":"https://new.example"}}}"#)
+
+        do {
+            _ = try await loginTask
+            XCTFail("must throw")
+        } catch {
+            let rpc = try XCTUnwrap(error as? RpcError)
+            XCTAssertEqual(rpc.mcpAuthCode, .issuerChangeRequiresConfirmation)
+            let confirmation = try XCTUnwrap(rpc.mcpIssuerChangeConfirmation)
+            XCTAssertEqual(confirmation.storedIssuer, "https://old.example/issuer")
+            XCTAssertEqual(confirmation.newIssuer, "https://new.example/issuer")
+            XCTAssertEqual(confirmation.storedIssuerOrigin, "https://old.example")
+            XCTAssertEqual(confirmation.newIssuerOrigin, "https://new.example")
+        }
+    }
+
+    /// A refusal missing the NEW `storedIssuer`/`newIssuer` fields (an older daemon that only sends
+    /// the two origins) decodes `mcpIssuerChangeConfirmation` as `nil` — both issuer fields are
+    /// required together with the origins, never a half-built confirmation.
+    func testLoginRefusedWithIssuerChangeDataMissingTheIssuerFieldsDecodesNil() async throws {
         let (client, t) = try await connectedClient()
         let live = LiveMcpAuthClient(client: client)
 
@@ -116,10 +143,7 @@ final class LiveMcpAuthClientTests: XCTestCase {
             XCTFail("must throw")
         } catch {
             let rpc = try XCTUnwrap(error as? RpcError)
-            XCTAssertEqual(rpc.mcpAuthCode, .issuerChangeRequiresConfirmation)
-            let confirmation = try XCTUnwrap(rpc.mcpIssuerChangeConfirmation)
-            XCTAssertEqual(confirmation.storedIssuerOrigin, "https://old.example")
-            XCTAssertEqual(confirmation.newIssuerOrigin, "https://new.example")
+            XCTAssertNil(rpc.mcpIssuerChangeConfirmation)
         }
     }
 
@@ -206,31 +230,74 @@ final class LiveMcpAuthClientTests: XCTestCase {
         }
     }
 
-    // MARK: - setClientSecret
+    // MARK: - clientSecretIssuer (polish round 3, item 1: the read-only lookup)
 
-    /// The secret reaches the wire exactly once, as this call's own argument — never logged,
-    /// never echoed back into anything this test could observe elsewhere. The reply's own
-    /// `issuerOrigin` (item 3, polish round 2) is returned — the secret never is.
-    func testSetClientSecretSendsNameAndSecretAndReturnsIssuerOrigin() async throws {
+    /// `mcp.clientSecretIssuer` sends `{name}` — writes nothing — and decodes
+    /// `{name, issuer, issuerOrigin, authorizeOrigin}`.
+    func testClientSecretIssuerSendsNameAndDecodesTheResult() async throws {
         let (client, t) = try await connectedClient()
         let live = LiveMcpAuthClient(client: client)
 
-        async let setTask = live.setClientSecret(name: "github", secret: "shhh-secret")
+        async let task = live.clientSecretIssuer(name: "github")
+        await feedWaitUntil { t.sent.count >= 2 }
+        let req = feedLineJSON(t.sent[1])
+        XCTAssertEqual(req["method"] as? String, "mcp.clientSecretIssuer")
+        XCTAssertEqual((req["params"] as? [String: Any])?["name"] as? String, "github")
+
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"name":"github","issuer":"https://github.example/issuer","issuerOrigin":"https://github.example","authorizeOrigin":"https://github.example"}}"#)
+        let info = try await task
+
+        XCTAssertEqual(info.name, "github")
+        XCTAssertEqual(info.issuer, "https://github.example/issuer")
+        XCTAssertEqual(info.issuerOrigin, "https://github.example")
+        XCTAssertEqual(info.authorizeOrigin, "https://github.example")
+    }
+
+    /// A malformed reply (missing `issuer`) throws rather than returning a half-built value.
+    func testClientSecretIssuerThrowsOnAMalformedResult() async throws {
+        let (client, t) = try await connectedClient()
+        let live = LiveMcpAuthClient(client: client)
+
+        async let task = live.clientSecretIssuer(name: "github")
+        await feedWaitUntil { t.sent.count >= 2 }
+        let req = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"name":"github"}}"#)
+
+        do {
+            _ = try await task
+            XCTFail("a missing issuer must throw")
+        } catch {
+            // expected
+        }
+    }
+
+    // MARK: - setClientSecret
+
+    /// The secret AND `expectedIssuer` reach the wire, as this call's own arguments — the secret
+    /// never logged, never echoed back into anything this test could observe elsewhere. The
+    /// reply's own `issuer`/`issuerOrigin` (polish round 3) are returned — the secret never is.
+    func testSetClientSecretSendsExpectedIssuerAndReturnsIssuer() async throws {
+        let (client, t) = try await connectedClient()
+        let live = LiveMcpAuthClient(client: client)
+
+        async let setTask = live.setClientSecret(name: "github", secret: "shhh-secret", expectedIssuer: "https://github.example/issuer")
         await feedWaitUntil { t.sent.count >= 2 }
         let req = feedLineJSON(t.sent[1])
         XCTAssertEqual(req["method"] as? String, "mcp.setClientSecret")
         XCTAssertEqual((req["params"] as? [String: Any])?["name"] as? String, "github")
         XCTAssertEqual((req["params"] as? [String: Any])?["secret"] as? String, "shhh-secret")
-        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"ok":true,"issuerOrigin":"https://github.example"}}"#)
-        let issuerOrigin = try await setTask
-        XCTAssertEqual(issuerOrigin, "https://github.example")
+        XCTAssertEqual((req["params"] as? [String: Any])?["expectedIssuer"] as? String, "https://github.example/issuer")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"ok":true,"issuer":"https://github.example/issuer","issuerOrigin":"https://github.example"}}"#)
+        let saved = try await setTask
+        XCTAssertEqual(saved.issuer, "https://github.example/issuer")
+        XCTAssertEqual(saved.issuerOrigin, "https://github.example")
     }
 
     func testSetClientSecretOkFalseThrows() async throws {
         let (client, t) = try await connectedClient()
         let live = LiveMcpAuthClient(client: client)
 
-        async let setTask = live.setClientSecret(name: "github", secret: "shhh-secret")
+        async let setTask = live.setClientSecret(name: "github", secret: "shhh-secret", expectedIssuer: "https://github.example/issuer")
         await feedWaitUntil { t.sent.count >= 2 }
         let req = feedLineJSON(t.sent[1])
         t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"ok":false}}"#)
@@ -243,21 +310,63 @@ final class LiveMcpAuthClientTests: XCTestCase {
         }
     }
 
-    /// `ok:true` but no `issuerOrigin` also throws — the field is required, not additive.
-    func testSetClientSecretThrowsWhenIssuerOriginIsMissing() async throws {
+    /// `ok:true` but no `issuer` also throws — the field is required, not additive.
+    func testSetClientSecretThrowsWhenIssuerIsMissing() async throws {
         let (client, t) = try await connectedClient()
         let live = LiveMcpAuthClient(client: client)
 
-        async let setTask = live.setClientSecret(name: "github", secret: "shhh-secret")
+        async let setTask = live.setClientSecret(name: "github", secret: "shhh-secret", expectedIssuer: "https://github.example/issuer")
         await feedWaitUntil { t.sent.count >= 2 }
         let req = feedLineJSON(t.sent[1])
-        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"ok":true}}"#)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"ok":true,"issuerOrigin":"https://github.example"}}"#)
 
         do {
             _ = try await setTask
-            XCTFail("a missing issuerOrigin must throw")
+            XCTFail("a missing issuer must throw")
         } catch {
             // expected
+        }
+    }
+
+    /// `mcp_issuer_changed`'s `data.issuer` decodes through `RpcError.mcpIssuerChanged` — the ONLY
+    /// field that refusal carries.
+    func testSetClientSecretRefusedIssuerChangedDecodesThroughRpcError() async throws {
+        let (client, t) = try await connectedClient()
+        let live = LiveMcpAuthClient(client: client)
+
+        async let setTask = live.setClientSecret(name: "github", secret: "shhh-secret", expectedIssuer: "https://old.example/issuer")
+        await feedWaitUntil { t.sent.count >= 2 }
+        let req = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"error":{"code":-1,"message":"issuer changed","data":{"code":"mcp_issuer_changed","issuer":"https://new.example/issuer"}}}"#)
+
+        do {
+            _ = try await setTask
+            XCTFail("must throw")
+        } catch {
+            let rpc = try XCTUnwrap(error as? RpcError)
+            XCTAssertEqual(rpc.mcpIssuerChanged, "https://new.example/issuer")
+        }
+    }
+
+    /// `mcp_expected_issuer_required`'s `data` (`issuer` + `issuerOrigin`) decodes through
+    /// `RpcError.mcpExpectedIssuerRequired`.
+    func testSetClientSecretRefusedExpectedIssuerRequiredDecodesThroughRpcError() async throws {
+        let (client, t) = try await connectedClient()
+        let live = LiveMcpAuthClient(client: client)
+
+        async let setTask = live.setClientSecret(name: "github", secret: "shhh-secret", expectedIssuer: "")
+        await feedWaitUntil { t.sent.count >= 2 }
+        let req = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"error":{"code":-1,"message":"needs confirmation","data":{"code":"mcp_expected_issuer_required","issuer":"https://correct.example/issuer","issuerOrigin":"https://correct.example"}}}"#)
+
+        do {
+            _ = try await setTask
+            XCTFail("must throw")
+        } catch {
+            let rpc = try XCTUnwrap(error as? RpcError)
+            let needed = try XCTUnwrap(rpc.mcpExpectedIssuerRequired)
+            XCTAssertEqual(needed.issuer, "https://correct.example/issuer")
+            XCTAssertEqual(needed.issuerOrigin, "https://correct.example")
         }
     }
 }

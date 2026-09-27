@@ -35,9 +35,24 @@ final class FakeMcpAuthClient: McpAuthClient, @unchecked Sendable {
     var logoutResult: Result<Void, Error> = .success(())
     private(set) var logoutCalls: [(name: String, forgetClient: Bool?)] = []
 
-    // setClientSecret(name:secret:)
-    var setClientSecretResult: Result<String, Error> = .success("https://example.test")
-    private(set) var setClientSecretCalls: [(name: String, secret: String)] = []
+    // clientSecretIssuer(name:)
+    var clientSecretIssuerResult: Result<McpClientSecretIssuer, Error> = .success(
+        McpClientSecretIssuer(name: "github", issuer: "https://github.example/issuer",
+                              issuerOrigin: "https://github.example", authorizeOrigin: "https://github.example")
+    )
+    private(set) var clientSecretIssuerCalls: [String] = []
+
+    // setClientSecret(name:secret:expectedIssuer:) — a QUEUE, so a test can script a refusal
+    // (mcp_issuer_changed/mcp_expected_issuer_required) followed by the retry's own success.
+    var setClientSecretResults: [Result<McpClientSecretSaved, Error>] = [.success(
+        McpClientSecretSaved(issuer: "https://example.test/issuer", issuerOrigin: "https://example.test")
+    )]
+    /// Convenience for the common one-scripted-answer case.
+    var setClientSecretResult: Result<McpClientSecretSaved, Error> {
+        get { setClientSecretResults[0] }
+        set { setClientSecretResults = [newValue] }
+    }
+    private(set) var setClientSecretCalls: [(name: String, secret: String, expectedIssuer: String)] = []
 
     func login(name: String, confirmIssuerChange: Bool) async throws -> McpLoginStart {
         let index = loginCalls.count
@@ -65,9 +80,18 @@ final class FakeMcpAuthClient: McpAuthClient, @unchecked Sendable {
         try logoutResult.get()
     }
 
+    func clientSecretIssuer(name: String) async throws -> McpClientSecretIssuer {
+        clientSecretIssuerCalls.append(name)
+        return try clientSecretIssuerResult.get()
+    }
+
     @discardableResult
-    func setClientSecret(name: String, secret: String) async throws -> String {
-        setClientSecretCalls.append((name, secret))
-        return try setClientSecretResult.get()
+    func setClientSecret(name: String, secret: String, expectedIssuer: String) async throws -> McpClientSecretSaved {
+        let index = setClientSecretCalls.count
+        setClientSecretCalls.append((name, secret, expectedIssuer))
+        let result = index < setClientSecretResults.count ? setClientSecretResults[index] : (setClientSecretResults.last ?? .success(
+            McpClientSecretSaved(issuer: "https://example.test/issuer", issuerOrigin: "https://example.test")
+        ))
+        return try result.get()
     }
 }
