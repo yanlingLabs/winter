@@ -201,7 +201,7 @@ describe("McpOAuthDoors client secrets — discovered, confirmed, then written (
 
   test("clientSecretIssuer names the full issuer and writes nothing", async () => {
     const { store, doors } = setup();
-    expect(await doors.clientSecretIssuer(doors.resolve({ name: "gh" }))).toEqual({ name: "gh", issuer: ISSUER, issuerOrigin: "https://login.example.test", authorizeOrigin: "https://login.example.test" });
+    expect(await doors.clientSecretIssuer(doors.resolve({ name: "gh" }))).toEqual({ name: "gh", scope: "user", url: URL_, issuer: ISSUER, issuerOrigin: "https://login.example.test", authorizeOrigin: "https://login.example.test" });
     expect(store.entries.size).toBe(0);
   });
 

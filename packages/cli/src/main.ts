@@ -1958,6 +1958,21 @@ if (import.meta.main) {
         confirm: (question) => (process.stdin.isTTY ? askYesNo(question) : Promise.resolve(false)),
         readSecret: (prompt) => readSecret(prompt),
         stdinIsTTY: process.stdin.isTTY === true,
+        // `set-secret --from-clipboard`: the macOS pasteboard through its own tools, spawned HERE by absolute
+        // path — the secret never passes through an argument, the environment or the caller's shell.
+        clipboard: {
+          read: async () => {
+            const proc = Bun.spawn(["/usr/bin/pbpaste"], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+            const text = await new Response(proc.stdout).text();
+            if ((await proc.exited) !== 0) throw new Error("pbpaste failed");
+            return text;
+          },
+          clear: async () => {
+            const proc = Bun.spawn(["/usr/bin/pbcopy"], { stdin: new Blob([""]), stdout: "ignore", stderr: "ignore" });
+            if ((await proc.exited) !== 0) throw new Error("pbcopy failed");
+          },
+        },
+        platform: process.platform,
         print: (line) => console.log(line),
         poke: () => notifyDaemonOfOutOfBandCredentialChange(openCredentialDaemonDoor),
       };
@@ -1972,7 +1987,7 @@ if (import.meta.main) {
     // `add-from-claude-desktop` (an Ink dialog over Claude Desktop's OWN config format — not
     // trivially mappable), `reset-project-choices` (Winter has no per-project approve/reject ledger
     // for `.mcp.json` servers — `winter trust`'s directory-level TrustStore is the only gate).
-    console.error("usage: winter mcp [list] | get <name> | login <name> | logout <name> [--forget-client] | set-secret <name> | add [-s local|user|project] [-t stdio|sse|http] [-e KEY=value...] [-H \"Name: value\"...] [--version-negotiation legacy|auto|<revision>] <name> <commandOrUrl> [-- args...] | add-json [-s local|user|project] <name> <json> | remove <name> [-s local|user|project]");
+    console.error("usage: winter mcp [list] | get <name> | login <name> [--yes] [--confirm-issuer-change] | logout <name> [--forget-client] | set-secret <name> [--from-clipboard [--issuer <issuer>]] | add [-s local|user|project] [-t stdio|sse|http] [-e KEY=value...] [-H \"Name: value\"...] [--version-negotiation legacy|auto|<revision>] <name> <commandOrUrl> [-- args...] | add-json [-s local|user|project] <name> <json> | remove <name> [-s local|user|project]");
     process.exit(1);
   }
   case "plugin": {

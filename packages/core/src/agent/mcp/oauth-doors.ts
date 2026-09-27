@@ -460,10 +460,12 @@ export class McpOAuthDoors {
    * `mcp.clientSecretIssuer` (fix round 1, minor 4): the issuer a client secret for this server WOULD be
    * bound to, for the client to show and confirm BEFORE the secret is asked for or sent. Writes nothing.
    */
-  async clientSecretIssuer(server: ResolvedMcpServer): Promise<{ name: string; issuer: string; issuerOrigin: string; authorizeOrigin: string }> {
+  async clientSecretIssuer(server: ResolvedMcpServer): Promise<{ name: string; scope: McpDoorScope; url: string; issuer: string; issuerOrigin: string; authorizeOrigin: string }> {
     const user = this.clientSecretTarget(server);
     const found = await this.discoverFor(user);
-    return { name: user.name, ...found };
+    // `scope`/`url` (WS-25 integration): which server the secret belongs to, for a client that must show it
+    // before asking (the CLI's non-interactive `--from-clipboard` prints it and asks for `--issuer`).
+    return { name: user.name, scope: user.scope, url: user.url, ...found };
   }
 
   /**
