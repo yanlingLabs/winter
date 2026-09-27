@@ -744,6 +744,13 @@ export const McpLoginResult = z.object({
   // WS-25 integration: REQUIRED -- the daemon always sends it and the Mac's decoder refuses a reply
   // without it, so the schema says so rather than letting a future daemon drop it silently.
   authorizeOrigin: z.string(),
+  // WS-25 security review M1: WHAT is being signed in to, for a client to show and confirm before it opens
+  // the browser -- the server the name resolved to (a project or local entry can shadow a user-scope name),
+  // its URL and the authorization server's full issuer.
+  issuer: z.string(),
+  name: z.string(),
+  scope: McpScopeSchema,
+  url: z.string(),
 });
 /** `mcp.loginStatus`: `pending` until the callback arrives; `expired` when nobody completed it within 5
  *  minutes (the listener is closed); `failed` with a bounded, code-shaped `error` otherwise. A login id

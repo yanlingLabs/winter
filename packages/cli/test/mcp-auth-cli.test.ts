@@ -46,17 +46,33 @@ describe("winter mcp login (WS-25)", () => {
   test("through the daemon: login with the cwd, show the issuer, open the browser, poll to done", async () => {
     let polls = 0;
     const door = scriptedDoor((method) => {
-      if (method === METHODS.mcpLogin) return { loginId: "ml_1", authUrl: "https://as.example.test/authorize?state=S", issuerOrigin: "https://as.example.test", authorizeOrigin: "https://as.example.test" };
+      if (method === METHODS.mcpLogin) return { loginId: "ml_1", authUrl: "https://as.example.test/authorize?state=S", issuerOrigin: "https://as.example.test", authorizeOrigin: "https://as.example.test", issuer: "https://as.example.test/tenant", name: "linear", scope: "user", url: "https://mcp.example.test/mcp" };
       if (method === METHODS.mcpLoginStatus) return { state: ++polls < 3 ? "pending" : "done" };
       throw new Error(`unexpected ${method}`);
     });
-    const d = deps({ door });
+    const d = deps({ door, confirm: async () => true });
     const outcome = await runMcpLoginRoute(["linear"], d);
     expect(outcome).toEqual({ ok: true, kind: "login", name: "linear", via: "daemon", issuerOrigin: "https://as.example.test" });
     expect(door.calls[0]).toEqual({ method: METHODS.mcpLogin, params: { name: "linear", cwd: "/work/proj" } });
     expect(d.opened).toEqual(["https://as.example.test/authorize?state=S"]);
     expect(d.printed.join("\n")).toContain("https://as.example.test");
     expect(d.pokes).toBe(0); // the daemon did it itself
+  });
+
+  test("the resolved scope, URL and issuer are shown and confirmed BEFORE the browser opens; declined → nothing opened, nothing polled (security review M1)", async () => {
+    const door = scriptedDoor((method) => {
+      if (method === METHODS.mcpLogin) return { loginId: "ml_p", authUrl: "https://as.evil.test/authorize?state=S", issuerOrigin: "https://as.evil.test", authorizeOrigin: "https://as.evil.test", issuer: "https://as.evil.test", name: "linear", scope: "project", url: "https://mcp.evil.test/mcp" };
+      throw new Error(`unexpected ${method}`);
+    });
+    const order: string[] = [];
+    const d = deps({ door, confirm: async (q) => { order.push(`confirm:${q}`); return false; }, openBrowser: (u) => { order.push(`open:${u}`); } });
+    d.print = (line) => { order.push(`print:${line}`); };
+    const outcome = await runMcpLoginRoute(["linear"], d);
+    expect(outcome).toMatchObject({ ok: false, code: "cancelled" });
+    expect(order[0]).toBe("print:\"linear\" → project https://mcp.evil.test/mcp → issuer https://as.evil.test");
+    expect(order[1]!.startsWith("confirm:")).toBe(true);
+    expect(order.some((e) => e.startsWith("open:"))).toBe(false);
+    expect(door.calls.map((c) => c.method)).toEqual([METHODS.mcpLogin]); // never polled
   });
 
   test("a changed authorization server asks first; confirmed → the call repeats with confirmIssuerChange", async () => {
@@ -80,9 +96,9 @@ describe("winter mcp login (WS-25)", () => {
     const changed = scriptedDoor(() => rpcError("changed", { code: "mcp_issuer_change_requires_confirmation", storedIssuerOrigin: "a", newIssuerOrigin: "b" }));
     expect(await runMcpLoginRoute(["x"], deps({ door: changed }))).toMatchObject({ ok: false, code: "mcp_issuer_change_requires_confirmation" });
     const expired = scriptedDoor((m) => (m === METHODS.mcpLogin ? { loginId: "l", authUrl: "u", issuerOrigin: "o" } : { state: "expired" }));
-    expect(await runMcpLoginRoute(["x"], deps({ door: expired }))).toMatchObject({ ok: false, code: "expired" });
+    expect(await runMcpLoginRoute(["x"], deps({ door: expired, confirm: async () => true }))).toMatchObject({ ok: false, code: "expired" });
     const failed = scriptedDoor((m) => (m === METHODS.mcpLogin ? { loginId: "l", authUrl: "u", issuerOrigin: "o" } : { state: "failed", error: "authorization_denied:access_denied" }));
-    const f = await runMcpLoginRoute(["x"], deps({ door: failed }));
+    const f = await runMcpLoginRoute(["x"], deps({ door: failed, confirm: async () => true }));
     expect(f).toMatchObject({ ok: false, code: "failed" });
     expect(renderMcpAuthOutcome(f)).toContain("authorization_denied");
   });
@@ -98,7 +114,7 @@ describe("winter mcp login (WS-25)", () => {
       setClientSecret: async () => ({ issuer: "https://as", issuerOrigin: "https://as" }),
       dispose: () => { disposed = true; },
     };
-    const d = deps({ local: () => local });
+    const d = deps({ local: () => local, confirm: async () => true });
     expect(await runMcpLoginRoute(["linear"], d)).toMatchObject({ ok: true, via: "in-process" });
     expect(disposed).toBe(true);
     expect(d.pokes).toBe(1);
