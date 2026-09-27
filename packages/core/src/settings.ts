@@ -24,7 +24,7 @@ import { credentialInventory } from "./runtime-sdk/keychain";
 import { internalDrivableAdapterIds } from "./providers/internal-adapters";
 import { liveSdkGlobalConfig, liveSdkSettings } from "./sdk-files";
 import { sdkSettingsPath } from "./agent/paths";
-import { McpVersionNegotiationSetting } from "./agent/mcp/project-file";
+import { McpOAuthSetting, McpVersionNegotiationSetting, mcpOAuthIssue } from "./agent/mcp/project-file";
 
 /** Reasoning-effort slugs valid on the wire — measured LIVE against the Codex OAuth endpoint
  *  (2026-07-30), one model at a time, NOT read off the /models catalogue text. That distinction
@@ -355,13 +355,18 @@ const McpHttpServerSettings = refuseCredentialShapedHeaders(z.object({
   url: z.string().url(),
   headers: z.record(z.string(), z.string()).optional(),
   versionNegotiation: McpVersionNegotiationSetting.optional(),
-}));
+  // WS-25 (spec §2): the server's OAuth sign-in settings, validated with the runtime's own
+  // `validateMcpOAuthConfig(oauth, url)` (`McpOAuthSetting`'s doc, agent/mcp/project-file.ts). Declared so
+  // zod does not strip it on every read and write; it never carries a secret (a value is refused by name).
+  oauth: McpOAuthSetting.optional(),
+})).superRefine(mcpOAuthIssue);
 const McpSSEServerSettings = refuseCredentialShapedHeaders(z.object({
   type: z.literal("sse"),
   url: z.string().url(),
   headers: z.record(z.string(), z.string()).optional(),
   versionNegotiation: McpVersionNegotiationSetting.optional(),
-}));
+  oauth: McpOAuthSetting.optional(),
+})).superRefine(mcpOAuthIssue);
 /** A pre-item-3b entry (no `type` field at all) is stdio — the shape every `settings.mcpServers`
  *  entry has always had — normalized to the explicit-discriminant form BEFORE the discriminated
  *  union runs, so an existing home's settings.json keeps parsing byte-for-byte with no migration.

@@ -98,6 +98,10 @@ function toMcpServerConfig(entry: McpServerSettingsEntry): McpServerConfig {
     url: entry.url,
     ...(entry.headers === undefined ? {} : { headers: { ...entry.headers } }),
     ...negotiation(entry.versionNegotiation),
+    // WS-25: the server's sign-in settings, forwarded (a copy, never shared) so the child's session
+    // provider finds a pre-registered client, its scopes and its metadata URL. Already validated by the
+    // entry schema (`validateMcpOAuthConfig`); it never carries a secret.
+    ...(entry.oauth === undefined ? {} : { oauth: structuredClone(entry.oauth) as NonNullable<Extract<McpServerConfig, { type: "http" }>["oauth"]> }),
   };
 }
 
