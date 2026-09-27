@@ -17,6 +17,7 @@ import type { SecretStore } from "../../src/auth/secret-store";
 import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
+import { nativeSiblingRow, toolsGatedNoneRow } from "../helpers/tools-refused-catalog-row";
 
 // Chat Slice D task 3 — the two remaining sync surfaces, for the phone's OWN standalone chat
 // rather than log replication:
@@ -539,19 +540,23 @@ describe("sync.config model catalogue (provider-correctness T3, WS-20)", () => {
   // conflated the two and hid ~470 working rows on the OpenAI-shaped families; these three cases
   // pin the corrected boundary directly against real catalog rows.
   test("pickerModels() hides an anthropic-family toolCalling:none row (a real turn there throws)", async () => {
+    // Picked dynamically (`tools-refused-catalog-row.ts`) rather than a hand-named example: 0.0.33
+    // re-measured `zai-anthropic` (this test's original example) to `toolCalling: "native"` across
+    // the board, which would have silently made this test pass for the wrong reason forever.
+    const row = toolsGatedNoneRow({ withNativeSibling: true });
+    const sibling = nativeSiblingRow(row);
     const secrets = new FakeSecretStore();
-    await writeCredentialMaterial(secrets, "zai-anthropic:default", { kind: "api-key", key: "sk-zai-test" });
+    await writeCredentialMaterial(secrets, `${row.providerId}:default`, { kind: "api-key", key: "sk-test" });
     const { credentialPresenceFrom } = await import("../../src/runtime-sdk/keychain");
     const credentials = await credentialPresenceFrom(secrets);
     const home = mkdtempSync(join(tmpdir(), "winter-picker-models-anthropic-family-"));
     const models = pickerModels({ credentials, home });
-    const ids = models.filter((m) => m.providerId === "zai-anthropic").map((m) => m.id);
-    // `zai-anthropic/glm-5` is `toolCalling: "none"` at `confidence: "unknown"` on the
-    // `winter.anthropic-messages` adapter — one of the four families that actually THROWS on a
-    // non-native row asking for tools, so it stays hidden.
-    expect(ids).not.toContain("zai-anthropic/glm-5");
-    // `zai-anthropic/glm-5.3` is `toolCalling: "native"` (`official-doc`/`declared`) — still offered.
-    expect(ids).toContain("zai-anthropic/glm-5.3");
+    const ids = models.filter((m) => m.providerId === row.providerId).map((m) => m.id);
+    // `row` is `toolCalling: "none"` at `confidence: "unknown"` on one of the four adapter families
+    // that actually THROWS on a non-native row asking for tools, so it stays hidden.
+    expect(ids).not.toContain(row.key);
+    // `sibling` is `toolCalling: "native"` in the SAME provider — still offered.
+    expect(ids).toContain(sibling.key);
   });
 
   test("pickerModels() still offers a chat-completions toolCalling:none row at confidence:unknown — that family sends tools regardless", async () => {

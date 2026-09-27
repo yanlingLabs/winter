@@ -148,7 +148,7 @@ async function main(): Promise<void> {
 
     // ---- Step 5 -------------------------------------------------------------------------------
     log(`\n--- Step 5: ${probeBinary} __runtime-workflow-worker (no --bridge), inside the runtime's own worker seatbelt ---`);
-    // The RUNTIME's own worker profile (rendered from the installed package: it does not export its builder).
+    // The RUNTIME's own worker profile (the package's exported `buildWorkflowWorkerSeatbeltProfile`).
     const wf = await runChild("/usr/bin/sandbox-exec", ["-p", renderRuntimeWorkflowProfile(probeBinary), probeBinary, "__runtime-workflow-worker"], env);
     log(`exit=${wf.code} stderr=${wf.stderr.trim()}`);
 
