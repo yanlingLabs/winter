@@ -646,8 +646,8 @@ describe("PendingCards — elicitation", () => {
     expect(frame).toContain("[o] open");
   });
 
-  test("'o\\r' opens; a bare Enter declines", async () => {
-    for (const [keys, open] of [["o", true], ["", false], ["n", false]] as const) {
+  test("'o'/'open' open; 'y', 'yes', 'n' and a bare Enter decline", async () => {
+    for (const [keys, open] of [["o", true], ["open", true], ["", false], ["n", false], ["y", false], ["yes", false]] as const) {
       const calls: [string, boolean, string][] = [];
       const { stdin } = render(<PendingCards pending={card} onApprove={() => {}} onAnswer={() => {}} onPlan={() => {}} onElicitation={(id, o, h) => calls.push([id, o, h])} />);
       await wait();

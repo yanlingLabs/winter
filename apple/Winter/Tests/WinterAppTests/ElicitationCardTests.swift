@@ -54,12 +54,42 @@ final class ElicitationCardTests: XCTestCase {
         XCTAssertEqual(records(s).count, 1)
     }
 
-    func testTheTurnEndingFreezesAnUnansweredCardAndTheDaemonsCancelThenOutranksIt() {
+    private func turnCompleted(_ seq: Int) -> SessionEvent {
+        ev(#"{"type":"turn_completed","seq":\#(seq),"sessionId":"s","ts":0,"threadId":"main","stopReason":"end_turn","inputTokens":1,"outputTokens":1}"#)
+    }
+
+    /// The daemon resolves every elicitation card itself (turn-ended, timeout, aborted), so the turn
+    /// ending does not freeze one: the card waits for its `elicitation_resolved`.
+    func testTheTurnEndingDoesNotFreezeACardTheDaemonResolvesItself() {
         var s = SessionReducer.reduce(openTurn(), ev(requested))
-        s = SessionReducer.reduce(s, ev(#"{"type":"turn_completed","seq":5,"sessionId":"s","ts":0,"threadId":"main","stopReason":"aborted","inputTokens":1,"outputTokens":1}"#))
-        XCTAssertEqual(records(s).first?.outcome, .ended)
+        s = SessionReducer.reduce(s, turnCompleted(5))
+        XCTAssertNil(records(s).first?.outcome)
+        XCTAssertFalse(interactionEndsWithItsTurn(InteractionRecord(callId: "el_1", ask: ask)))
         s = SessionReducer.reduce(s, ev(resolved("cancel", by: "turn-ended")))
         XCTAssertEqual(records(s).first?.outcome, .elicitation(action: "cancel", by: "turn-ended"))
+    }
+
+    /// A card raised BETWEEN turns is still answerable after the next turn completes.
+    func testACardRaisedBetweenTurnsStaysAnswerableAfterTheNextTurnCompletes() {
+        var s = SessionReducer.reduce(openTurn(), turnCompleted(3))
+        s = SessionReducer.reduce(s, ev(requested.replacingOccurrences(of: #""seq":3"#, with: #""seq":4"#)))
+        s = SessionReducer.reduce(s, ev(#"{"type":"user_message","seq":5,"sessionId":"s","ts":0,"threadId":"main","text":"next","clientName":"cli"}"#))
+        s = SessionReducer.reduce(s, ev(#"{"type":"turn_started","seq":6,"sessionId":"s","ts":0,"threadId":"main"}"#))
+        s = SessionReducer.reduce(s, turnCompleted(7))
+        guard let record = records(s).first(where: { $0.callId == "el_1" }) else { return XCTFail("the card left the transcript") }
+        XCTAssertTrue(interactionIsPending(record), "the card must keep its live buttons")
+    }
+
+    /// Resolving a stale card locally also drops it from the outstanding list — the orb's count.
+    func testDismissingAnInactiveCardDropsTheApprovalNeededCount() {
+        var s = SessionReducer.reduce(openTurn(), ev(requested))
+        s = SessionReducer.reduce(s, ev(#"{"type":"approval_requested","seq":4,"sessionId":"s","ts":0,"threadId":"main","callId":"a1","toolName":"bash","summary":"ls"}"#))
+        XCTAssertEqual(s.status, .approvalNeeded(count: 2))
+        XCTAssertEqual(SessionReducer.dismissInactiveElicitation(s, callId: "a1").status, .approvalNeeded(count: 2), "only an elicitation card is dismissed locally")
+        s = SessionReducer.dismissInactiveElicitation(s, callId: "el_1")
+        XCTAssertEqual(s.status, .approvalNeeded(count: 1))
+        XCTAssertEqual(s.pendingInteractions.map(\.callId), ["a1"])
+        XCTAssertNil(records(s).first(where: { $0.callId == "el_1" })?.outcome, "the record is untouched — the daemon's truth still lands on it")
     }
 
     // MARK: Wording
@@ -115,6 +145,9 @@ final class ElicitationCardTests: XCTestCase {
         XCTAssertEqual(elicitationURLToOpen("https://linear.app/oauth?code=1", expectedHost: "linear.app")?.absoluteString, "https://linear.app/oauth?code=1")
         XCTAssertNotNil(elicitationURLToOpen("https://LINEAR.app/x", expectedHost: "linear.app"))
         XCTAssertNotNil(elicitationURLToOpen("https://linear.app:8443/x", expectedHost: "linear.app:8443"))
+        // An internationalized host: the card holds the daemon's punycode, and so must the comparison.
+        XCTAssertNotNil(elicitationURLToOpen("https://xn--mnchen-3ya.de/login", expectedHost: "xn--mnchen-3ya.de"))
+        XCTAssertNil(elicitationURLToOpen("https://xn--mnchen-3ya.de/login", expectedHost: "münchen.de"))
         for bad in ["https://evil.example/", "https://linear.app.evil.example/", "https://linear.app:8443/x", "http://linear.app/",
                     "javascript:alert(1)", "https://u:p@linear.app/", "https:///nohost", "not a url", ""] {
             XCTAssertNil(elicitationURLToOpen(bad, expectedHost: "linear.app"), bad)

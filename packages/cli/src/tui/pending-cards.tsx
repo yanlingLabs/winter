@@ -324,11 +324,12 @@ function QuestionCard({ pending, onAnswer }: { pending: Extract<PendingCard, { k
   );
 }
 
-/** WS-27: "o"/"open"/"y" opens; anything else (a bare Enter included) declines — fail-safe, like the
- *  approval card. Exported for unit tests. */
+/** WS-27: only "o"/"open" opens — not "y"/"yes", so a reflexive approval keystroke never opens a
+ *  browser; anything else (a bare Enter included) declines — fail-safe, like the approval card.
+ *  Exported for unit tests. */
 export function parseElicitationChoice(line: string): boolean {
   const t = line.trim().toLowerCase();
-  return t === "o" || t === "open" || t === "y" || t === "yes";
+  return t === "o" || t === "open";
 }
 
 type ElicitationCardPending = Extract<PendingCard, { kind: "elicitation" }>;

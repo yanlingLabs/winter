@@ -33,7 +33,9 @@ func elicitationIsExpired(expiresAt: Int, now: Date = Date()) -> Bool {
 func elicitationURLToOpen(_ raw: String, expectedHost: String) -> URL? {
     guard let parts = URLComponents(string: raw),
           parts.scheme?.lowercased() == "https",
-          let host = parts.host, !host.isEmpty,
+          // `encodedHost`, never `host`: `host` decodes punycode to Unicode, so a card for
+          // `xn--mnchen-3ya.de` (the daemon's host is always the parser's ASCII form) would never match.
+          let host = parts.encodedHost, !host.isEmpty,
           parts.user == nil, parts.password == nil,
           let url = parts.url else { return nil }
     let shown = parts.port.map { "\(host):\($0)" } ?? host
@@ -92,7 +94,7 @@ extension FieldStateAdapter {
             self?.interactionInFlight.remove(elicitationId)
             switch result {
             case .done: break
-            case .inactive: self?.inactiveElicitations.insert(elicitationId)
+            case .inactive: self?.markElicitationInactive(elicitationId)
             case .error(let line): self?.interactionErrors[elicitationId] = line
             }
         }
