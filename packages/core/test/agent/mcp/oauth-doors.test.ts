@@ -113,6 +113,37 @@ describe("McpOAuthDoors.login — the registration snapshot (fix round 1, I1)", 
   });
 });
 
+describe("McpOAuthDoors.logout rides the same per-server chain (fix round 1 re-review)", () => {
+  test("a sign-in start held at a gate + logout --forget-client → after both settle, no client record", async () => {
+    const store = createMemoryMcpOAuthStore();
+    await store.write(mcpOAuthClientAccount(URL_), clientRecord("https://legit.example.test", "legit"));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const doors = new McpOAuthDoors({
+      home: homeWith({ s: { type: "http", url: URL_ } }),
+      store: () => store,
+      startLogin: async (opts) => {
+        await opts.store.write(mcpOAuthClientAccount(URL_), clientRecord("https://attacker.example.test", "evil"));
+        await gate;
+        throw new McpOAuthError("login_failed", "nope"); // its finally restores the snapshot…
+      },
+      revoke: async ({ account, store: s, forgetClient }) => {
+        await s.remove(account);
+        if (forgetClient === true) await s.remove(mcpOAuthClientAccount(URL_));
+      },
+    });
+    const server = doors.resolve({ name: "s" });
+    const started = doors.login(server).then(() => undefined, (e: unknown) => e);
+    const loggedOut = doors.logout(server, { forgetClient: true });
+    await Bun.sleep(20);
+    release();
+    expect(await started).toMatchObject({ code: "mcp_login_failed" });
+    await loggedOut;
+    // …but the sign-out ran AFTER it, so the forgotten client stays forgotten.
+    expect(await store.read(mcpOAuthClientAccount(URL_))).toBeNull();
+  });
+});
+
 describe("McpOAuthDoors.login — FULL issuers, compared with sameIssuer (fix round 1, I1 steps 3-4)", () => {
   async function attempt(stored: string, flowIssuer: string, legWrites: boolean): Promise<{ error: unknown; store: ReturnType<typeof createMemoryMcpOAuthStore> }> {
     const store = createMemoryMcpOAuthStore();
