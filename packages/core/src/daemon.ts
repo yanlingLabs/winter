@@ -7,7 +7,9 @@ import { keychainService, resolveWinterProfile } from "./profile";
 import { describeHomePristineness, legacyHomeFor, planMigrationB, runMigrationB, MigrationRefused } from "./migration/migrate-b";
 import { manifestFileState, manifestPath } from "./migration/manifest";
 import { LegacyKeychainSecretStore } from "./migration/legacy-keychain-store";
-import { TokenAuthority } from "./auth/tokens";
+import { TOKEN_NAMES, TokenAuthority } from "./auth/tokens";
+import { appTokenAclBootTarget, migrateAppTokenAcl, recoverAppTokenShadows, type AppTokenAclTarget } from "./auth/app-token-acl";
+import { applicationPathsForBundleId } from "./auth/keychain-ffi";
 import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 import { migrateLegacyCredentialMaterial } from "./auth/credential-material";
 import { SessionStore } from "./sessions/store";
@@ -519,8 +521,32 @@ export async function startDaemon(opts: {
   if (deadLegacyLine !== undefined) console.error(deadLegacyLine);
 
 
+  // WS-25 §7 B: the app reads `harness-token`/`remote-token` without a Keychain prompt once their access
+  // list names the app too (`auth/app-token-acl.ts`). Real production boot only — no injected `secrets`,
+  // AND the profile's own default home (the app's daemon; any other home is a test's or an operator's
+  // experiment, and the items are per-profile, not per-home) — macOS only, never fatal. The shadow
+  // recovery runs FIRST: `ensureTokens` would otherwise mint a fresh token for an original an interrupted
+  // migration deleted.
+  let appTokenAcl: AppTokenAclTarget | undefined;
+  if (opts.secrets === undefined && process.platform === "darwin" && isDefaultWinterHome(home, profile)) {
+    try {
+      appTokenAcl = appTokenAclBootTarget({ home, service: keychainService(), profile, log: (line) => console.error(line), lookup: applicationPathsForBundleId });
+      if (appTokenAcl !== undefined) recoverAppTokenShadows(appTokenAcl);
+    } catch (err) {
+      console.error(`keychain: the app-token access lists were not checked (${err instanceof Error ? err.name : "error"})`);
+      appTokenAcl = undefined;
+    }
+  }
+
   const authority = new TokenAuthority(secrets);
   const tokens = await authority.ensureTokens();
+  if (appTokenAcl !== undefined) {
+    try {
+      migrateAppTokenAcl(appTokenAcl, { [TOKEN_NAMES.harness]: tokens.harness, [TOKEN_NAMES.remote]: tokens.remote });
+    } catch (err) {
+      console.error(`keychain: the app-token access lists were not updated (${err instanceof Error ? err.name : "error"})`);
+    }
+  }
 
   // The user's login-shell PATH, merged into THIS process's environment before anything below can
   // spawn — an app/Sparkle/launchd-launched daemon otherwise inherits LaunchServices' bare
