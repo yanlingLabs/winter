@@ -100,14 +100,19 @@ export class McpManager {
     connect?: McpConnect;
   }) {}
 
-  /** The probe's whole budget: WINTER_MCP_START_TIMEOUT_MS (default 10 s) — a hung server is a `"failed"` probe, never a hung `mcp.list`. */
+  /**
+   * The probe's WHOLE budget — the connect AND the `tools/list` together (fix round 1, I2):
+   * WINTER_MCP_START_TIMEOUT_MS (default 10 s). A server that hangs at either step is a `"failed"` probe
+   * within it, never a stalled daemon boot or a hung `mcp.list` (the MCP client's own request timeout is 60 s).
+   */
   private timeoutMs(): number {
     const raw = Number(process.env.WINTER_MCP_START_TIMEOUT_MS ?? 10_000);
     return Number.isFinite(raw) && raw > 0 ? raw : 10_000;
   }
 
   /**
-   * One server's probe: connect it under the start timeout, read its `tools/list`, and close it again —
+   * One server's probe: connect it and read its `tools/list`, both inside ONE budget (`timeoutMs`), and
+   * close it again —
    * ALWAYS, whether or not the listing succeeded (WS-24: nothing is left running; the SDK's stdio close
    * ends the server's whole process group). Every failure is caught HERE and reported (`"failed"`, or
    * `"needs-auth"` for a refused sign-in), so one bad server never rejects the `Promise.all` its caller runs
@@ -117,17 +122,25 @@ export class McpManager {
   private async probe(name: string, cfg: McpServerConfig, cwd: string, opts?: { label?: string; context?: string }): Promise<ProbeResult> {
     const remote = cfg.type === "http" || cfg.type === "sse";
     let client: ConnectedMcpClient | undefined;
+    const budget = this.timeoutMs();
+    const deadline = Date.now() + budget;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       client = await (this.deps.connect ?? sdkConnectMcpServer)({
         name,
         config: toSdkConfig(cfg),
-        connectTimeoutMs: this.timeoutMs(),
+        connectTimeoutMs: budget,
         // No host UI answers a probe's elicitation: every one is declined deterministically, never left hanging.
         elicitationAsk: createElicitationAsker(undefined),
         ...(remote ? {} : { cwd }),
         ...(remote && this.deps.remote !== undefined ? { oauthStore: this.deps.remote.oauthStore() } : {}),
       });
-      const tools = await client.listTools();
+      // What is LEFT of the one budget bounds the listing: the connect's timeout never covered it.
+      const remaining = Math.max(0, deadline - Date.now());
+      const expired = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new McpConnectError("timeout", `mcp probe: '${name}' did not list its tools within ${budget}ms`)), remaining);
+      });
+      const tools = await Promise.race([client.listTools(), expired]);
       return { status: "connected", toolNames: tools.map((t) => t.name) };
     } catch (e) {
       const code = e instanceof McpConnectError ? e.code : e instanceof Error ? e.name : "unknown";
@@ -138,6 +151,7 @@ export class McpManager {
       this.deps.log?.(`mcp: ${opts?.label ?? "server"} '${name}'${opts?.context ?? ""} failed to start (${code})`);
       return { status: "failed", toolNames: [] };
     } finally {
+      clearTimeout(timer);
       await client?.close().catch(() => { /* a probe's close never fails the probe */ });
     }
   }
