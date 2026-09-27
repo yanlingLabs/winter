@@ -99,23 +99,30 @@ const WIRE_NAME_MAX = 64;
  * different plugins — EVERY one of them is qualified by its owning plugin's spec (`"<name>@<marketplace>"`):
  * `<tool>__<spec with each run of other characters as "_">`, e.g. `search__notes_acme`. A registered tool
  * name never contains `__` (`ToolRegisterParams`), so a qualified name can never equal a bare one. The
- * qualifier falls back to a short digest of the spec when two sanitised specs coincide or the wire name
- * would exceed 64 characters. Stable: it depends only on the tool name and the set of plugins registering
+ * qualifier falls back to a short digest (of the spec and the tool name) when two sanitised specs coincide or
+ * the wire name would exceed 64 characters — the tool part then cut so the whole name is at most 64, whatever
+ * the tool name's length. A tool name a SECOND plugin also registers is qualified for both, so a saved rule
+ * on its bare name stops matching (the name had become ambiguous). Stable: it depends only on the tool name and the set of plugins registering
  * it (never on registration order or on the session's mode), so the same plugins give the same names in
  * every session.
  */
 export function externalToolNames(sources: readonly Pick<ExternalToolSource, "pluginId" | "name">[]): string[] {
   const owners = new Map<string, string[]>();
   for (const s of sources) owners.set(s.name, [...(owners.get(s.name) ?? []), s.pluginId]);
-  const digest = (spec: string): string => createHash("sha256").update(spec).digest("hex").slice(0, 8);
+  const digest = (text: string): string => createHash("sha256").update(text).digest("hex").slice(0, 8);
   const readable = (spec: string): string => spec.replace(/[^A-Za-z0-9-]+/g, "_").replace(/^_+|_+$/g, "") || digest(spec);
+  // The digest form fits whatever the tool name's length: its tool part is cut to what is left of 64 once the
+  // prefix, `__` and the 8-character digest are counted — and the digest covers the spec AND the whole tool
+  // name, so two long names of one plugin that share their first characters still differ.
+  const toolRoom = WIRE_NAME_MAX - EXTERNAL_WIRE_PREFIX_LENGTH - 2 - 8;
+  const digested = (s: Pick<ExternalToolSource, "pluginId" | "name">): string => `${s.name.slice(0, toolRoom).replace(/_+$/, "")}__${digest(`${s.pluginId}\u0000${s.name}`)}`;
   return sources.map((s) => {
     const plugins = owners.get(s.name)!;
     if (plugins.length === 1) return s.name;
     const q = readable(s.pluginId);
     const shared = plugins.filter((id) => readable(id) === q).length > 1;
     const name = `${s.name}__${q}`;
-    return shared || EXTERNAL_WIRE_PREFIX_LENGTH + name.length > WIRE_NAME_MAX ? `${s.name}__${digest(s.pluginId)}` : name;
+    return shared || EXTERNAL_WIRE_PREFIX_LENGTH + name.length > WIRE_NAME_MAX ? digested(s) : name;
   });
 }
 
