@@ -177,6 +177,46 @@ export const ApprovalResolvedEvent = ThreadBase.extend({
   // Dispatch relay (Phase 7): see approval_requested.
   childSessionId: z.string().optional(),
 });
+
+/** WS-27: the caps on a URL-mode elicitation card. The producer declines a request whose url is
+ *  over its cap (a truncated url is a different url) and truncates the server name and message for
+ *  display; the schema holds the same bounds so a stored line can never exceed them. */
+export const ELICITATION_URL_MAX_LENGTH = 2048;
+export const ELICITATION_MESSAGE_MAX_LENGTH = 2000;
+export const ELICITATION_SERVER_NAME_MAX_LENGTH = 128;
+export const ELICITATION_HOST_MAX_LENGTH = 300;
+
+/** WS-27: an MCP server asked the user to open a link (MCP URL-mode elicitation) — for example to
+ *  finish an authorization with a third party. The card shows `serverName`, `message` and `url`, with
+ *  `host` (the parser's own, so an internationalized name reads in punycode) set apart so the
+ *  destination is plain. Answered by `elicitation.respond` (methods.ts, local clients only): accept
+ *  means the user chose to open the link, and the Mac opens it; nothing opens it by itself.
+ *
+ *  URL mode only (`mode` is a literal so a later form mode is an additive widening); the daemon
+ *  declines every form-mode request without a card. Persisted like `approval_requested` so a replay
+ *  rebuilds the card and its outcome, but in neither `HISTORY_EVENT_TYPES` nor
+ *  `TRANSIENT_EVENT_TYPES`, so it never reaches a remote (phone) stream: the phone cannot open a link
+ *  on the Mac. `url` may carry a one-time code, which is why the daemon's log names its origin only. */
+export const ElicitationRequestedEvent = ThreadBase.extend({
+  type: z.literal("elicitation_requested"),
+  elicitationId: z.string().min(1),
+  mode: z.literal("url"),
+  serverName: z.string().min(1).max(ELICITATION_SERVER_NAME_MAX_LENGTH),
+  message: z.string().max(ELICITATION_MESSAGE_MAX_LENGTH),
+  url: z.string().min(1).max(ELICITATION_URL_MAX_LENGTH).regex(/^https:\/\//),
+  host: z.string().min(1).max(ELICITATION_HOST_MAX_LENGTH),
+  issuedAt: z.number().int(),
+  expiresAt: z.number().int(),
+});
+/** WS-27: how a URL-mode elicitation ended. `accept`/`decline` are the user's answers (`by` is the
+ *  answering client's name); `cancel` is the daemon's own — the session ended, the turn ended, or the
+ *  card timed out (`by` says which). */
+export const ElicitationResolvedEvent = ThreadBase.extend({
+  type: z.literal("elicitation_resolved"),
+  elicitationId: z.string().min(1),
+  action: z.enum(["accept", "decline", "cancel"]),
+  by: z.string().min(1),
+});
 /** `inputTokens`/`outputTokens` are the turn's TOTALS — summed across every tool round — which is
  *  what a "tokens billed this turn" readout means (the CLI/TUI turn-summary line renders exactly
  *  this). They are NOT the size of the context, and must never be used as such: a turn with N tool
@@ -879,6 +919,8 @@ export const SessionEvent = z.discriminatedUnion("type", [
   ReasoningItemEvent,
   ApprovalRequestedEvent,
   ApprovalResolvedEvent,
+  ElicitationRequestedEvent,
+  ElicitationResolvedEvent,
   TurnCompletedEvent,
   AgentErrorEvent,
   DirectoryAddedEvent,
