@@ -28,7 +28,7 @@ export function rowForTag(tag: string): WinterModelDescriptor | undefined {
 /**
  * WS-24 (pickers lane, fix round 1): the adapter families whose `buildRequestBody` actually THROWS a
  * capability refusal when a turn asks for tools and the row's `toolCalling` is not `"native"` —
- * measured directly against the pinned SDK (0.0.27), never assumed from the field's NAME:
+ * measured directly against the pinned SDK (0.0.28), never assumed from the field's NAME:
  *
  *   - `winter.anthropic-messages`  (`adapters/anthropic/messages.ts`'s `buildRequestBody`)
  *   - `winter.google-generate-content` (`adapters/google/generate-content.ts`'s `buildRequestBody`)

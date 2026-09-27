@@ -193,9 +193,11 @@ export interface EmbeddedSessionHostDeps {
 // daemon SIGKILLs them (`-pgid`, the whole group). A healthy close leaves nothing listed (every removal is
 // posted before the Worker's exit message), so this reaps exactly what a dead Worker orphaned.
 //
-// FEATURE-DETECTED, so this compiles and runs against 0.0.27, whose host bridge has no
-// `processGroups()` and whose Worker posts no such message: there, nothing is reported and nothing is
-// reaped -- the pre-WS-24 behaviour, never an error.
+// LIVE at this build's pin (0.0.28): `embeddedVersionCheck` refuses every embedded session on any other
+// wrapper/runtime version, so production never actually runs the fallback below. The check stays
+// FEATURE-DETECTED anyway (`processGroups` read off the object, never assumed) because the shape
+// predates the pin -- 0.0.27's host bridge had no `processGroups()` and posted no such message; there,
+// nothing is reported and nothing is reaped -- the pre-WS-24 behaviour, never an error.
 //
 // What cannot be reaped: a SIGKILLed child of a terminated Worker stays a zombie of this process (the
 // Worker loop that would have waited on it is gone) -- it runs nothing and holds only its process-table

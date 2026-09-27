@@ -89,7 +89,7 @@ describe("projector: a subagent's informational frame (WS-24)", () => {
     expect(end[0]).toMatchObject({ threadId: MAIN_THREAD, text: "Stopped by a hook: budget review required" });
   });
 
-  test("a frame without the id (0.0.27) behaves exactly as before", () => {
+  test("a frame without the id (a main-thread frame at this pin, or any frame from the pre-WS-24 0.0.27 shape) behaves exactly as before", () => {
     const { projector } = makeProjector();
     accept(projector, init());
     beginTurn(projector, "go");
