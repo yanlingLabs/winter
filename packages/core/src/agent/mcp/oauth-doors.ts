@@ -104,7 +104,7 @@ function reasonOf(err: unknown): string {
 
 export class McpOAuthDoors {
   private readonly logins = new Map<string, LoginEntry>();
-  /** Per token account: the tail of the sign-in start phases queued for it (fix round 1, I1). */
+  /** Per token account: the tail of the sign-in starts and sign-outs queued for it (fix round 1, I1). */
   private readonly startChains = new Map<string, Promise<void>>();
   /** The last sign-in change's follow-up (reconnects), for tests and an orderly shutdown. */
   private followUps = new Set<Promise<void>>();
@@ -215,8 +215,17 @@ export class McpOAuthDoors {
    */
   async login(server: ResolvedMcpServer, opts: { confirmIssuerChange?: boolean } = {}): Promise<{ loginId: string; authUrl: string; issuerOrigin: string; authorizeOrigin: string }> {
     const account = mcpOAuthTokenAccount(server.url);
+    return this.serialised(account, () => this.startLoginSerialised(server, account, opts));
+  }
+
+  /**
+   * Runs `work` after every sign-in start and sign-out already queued for this token account (fix round
+   * 1). A sign-out rides the same chain as a start: a start's `finally` restores its registration snapshot,
+   * and running concurrently it could bring back a client registration `--forget-client` just removed.
+   */
+  private serialised<T>(account: string, work: () => Promise<T>): Promise<T> {
     const previous = this.startChains.get(account) ?? Promise.resolve();
-    const run = previous.then(() => this.startLoginSerialised(server, account, opts));
+    const run = previous.then(work);
     const tail = run.then(() => undefined, () => undefined);
     this.startChains.set(account, tail);
     void tail.then(() => { if (this.startChains.get(account) === tail) this.startChains.delete(account); });
@@ -352,6 +361,12 @@ export class McpOAuthDoors {
    */
   async logout(server: ResolvedMcpServer, opts: { forgetClient?: boolean } = {}): Promise<void> {
     const account = mcpOAuthTokenAccount(server.url);
+    // Serialised with sign-in STARTS for the same server (`serialised`): never interleaved with a start's
+    // snapshot restore.
+    await this.serialised(account, () => this.logoutSerialised(server, account, opts));
+  }
+
+  private async logoutSerialised(server: ResolvedMcpServer, account: string, opts: { forgetClient?: boolean }): Promise<void> {
     for (const entry of this.logins.values()) {
       if (entry.account === account && entry.state === "pending") entry.login.cancel();
     }
