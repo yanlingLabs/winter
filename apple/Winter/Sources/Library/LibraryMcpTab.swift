@@ -62,6 +62,12 @@ import WinterKit
 // the three new `McpServerRow` fields and the detail page's OAuth section. See that file's header
 // for why sign-in/out has its own protocol (`McpAuthClient`, `WinterKit`) rather than riding
 // `McpToolsModel`'s bare-closure `Lister`.
+//
+// WS-26 (connector permissions, 2026-09-27) turned the detail page's plain tool list into the permission
+// page: each action with Always allow / Always ask / Always deny and a per-server All actions control,
+// read from `mcp.tools` and written through `mcp.setToolPermission`. It lives in
+// `LibraryMcpPermissions.swift`; this file only hosts it (and keeps the plain list for a daemon that
+// predates `mcp.tools`, or an app with no door).
 // -----------------------------------------------------------------------------------------------
 
 // MARK: - Pure display helpers
@@ -560,18 +566,26 @@ struct LibraryMcpServerDetail: View {
     /// sheet is modal over this page, so there is no "come back and find it still open" case to
     /// preserve, unlike the list's own scroll position.
     @StateObject private var oauthActions: McpOAuthActionsModel
+    /// WS-26: this server's connector permissions (`LibraryMcpPermissions.swift`), per server for the same
+    /// reason `oauthActions` is.
+    @StateObject private var permissions: McpToolPermissionsModel
 
     init(model: McpToolsModel, name: String, oauthClient: McpAuthClient?,
+         permissionsClient: McpPermissionsClient? = nil,
          onBack: @escaping () -> Void, onVanished: @escaping () -> Void) {
         self.model = model
         self.name = name
         self.onBack = onBack
         self.onVanished = onVanished
+        let permissions = McpToolPermissionsModel(serverName: name, client: permissionsClient)
+        _permissions = StateObject(wrappedValue: permissions)
         // `[weak model]`: the closure outlives neither `model` nor this view in practice, but a
         // weak capture costs nothing and matches this codebase's usual caution around a class held
         // by an escaping closure (`AnthropicLoginSheetModel.start()`'s own `[weak self]`).
-        _oauthActions = StateObject(wrappedValue: McpOAuthActionsModel(client: oauthClient) { [weak model] in
+        // WS-26: a sign-in or sign-out changes what the daemon can list, so the permissions re-read too.
+        _oauthActions = StateObject(wrappedValue: McpOAuthActionsModel(client: oauthClient) { [weak model, weak permissions] in
             await model?.refresh()
+            await permissions?.refresh()
         })
     }
 
@@ -591,7 +605,13 @@ struct LibraryMcpServerDetail: View {
             }
             if let server {
                 oauthSection(server)
-                if server.toolNames.isEmpty {
+                if mcpPermissionsNeedSignIn(status: server.status, auth: server.auth) {
+                    // WS-26: no action list for a server that needs a sign-in — the section above is the
+                    // whole story until it is signed in.
+                    LibraryStateLine(text: "Sign in to see this server's actions and set their permissions.")
+                } else if !permissions.showsPlainList {
+                    McpToolPermissionsSection(model: permissions)
+                } else if server.toolNames.isEmpty {
                     LibraryStateLine(text: "This server reports no tools.")
                 } else {
                     LibraryGroupHeader(title: "Tools", detail: "\(server.toolNames.count)")
@@ -613,6 +633,8 @@ struct LibraryMcpServerDetail: View {
         .onChange(of: model.servers.map(\.name)) { _, names in
             if !names.contains(name) { onVanished() }
         }
+        // WS-26: read on appear (`mcp.tools` with no cwd, like `mcp.list`'s — it starts nothing new).
+        .task { await permissions.refresh() }
         .sheet(item: $oauthActions.signInSheet) { sheet in
             McpSignInSheet(model: sheet, onDone: { oauthActions.signInSheetClosed() })
         }

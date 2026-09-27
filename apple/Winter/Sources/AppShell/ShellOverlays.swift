@@ -750,6 +750,7 @@ struct LibraryPanel: View {
                                    onVanished: { vanished(item) })
             case let .mcpServer(name):
                 LibraryMcpServerDetail(model: mcpModel, name: name, oauthClient: wiring.mcpOAuthClient,
+                                       permissionsClient: wiring.mcpPermissionsClient,
                                        onBack: back, onVanished: { vanished(item) })
             case let .winterCapability(key):
                 LibraryWinterCapabilityDetail(capabilities: capabilitiesModel, key: key,
