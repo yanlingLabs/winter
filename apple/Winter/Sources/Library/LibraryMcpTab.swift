@@ -53,6 +53,14 @@ import WinterKit
 //    `mcp__<server>__<tool>`. A user matching a transcript's tool call against this list needs the
 //    qualified form, so both are rendered — bare as the row title, qualified as its monospaced
 //    subtitle (`mcpWireToolName`).
+//
+// WS-25 (MCP OAuth, 2026-09-27) added a THIRD thing this file is built around: an external server's
+// sign-in state (`auth`/`oauthIssuerOrigin`, both additive+optional on `mcp.list`'s row) and the
+// sign-in/out/client-secret actions themselves. That whole vocabulary — the badge mapping, the sign-
+// in sheet's polling state machine, the sign-out and client-secret sheets — lives in
+// `LibraryMcpOAuth.swift` beside this file; this file only carries the two new `McpServerRow` fields
+// and the detail page's OAuth section. See that file's header for why sign-in/out has its own
+// protocol (`McpAuthClient`, `WinterKit`) rather than riding `McpToolsModel`'s bare-closure `Lister`.
 // -----------------------------------------------------------------------------------------------
 
 // MARK: - Pure display helpers
@@ -69,6 +77,25 @@ struct McpServerRow: Equatable, Identifiable {
     let toolNames: [String]
     /// `user` | `project` | `plugin`.
     let source: String
+    /// WS-25 (MCP OAuth): `"none"` | `"signed-in"` | `"needs-auth"`, or `nil` on a daemon that
+    /// predates these two fields — see `mcpAuthBadge` (`LibraryMcpOAuth.swift`) for how this
+    /// renders. Defaulted `nil` so every existing construction site (tests included) is unchanged.
+    let auth: String?
+    /// WS-25: the authorization server's origin, when the daemon already knows it. A HINT shown at
+    /// the sign-in sheet's confirm step before `mcp.login` is even called — `mcp.login`'s own
+    /// (authoritative, always-present) `issuerOrigin` is what the sheet shows once sign-in actually
+    /// starts, never this one (`LibraryMcpOAuth.swift`'s `McpSignInSheetModel`).
+    let oauthIssuerOrigin: String?
+
+    init(name: String, status: String, toolNames: [String], source: String,
+         auth: String? = nil, oauthIssuerOrigin: String? = nil) {
+        self.name = name
+        self.status = status
+        self.toolNames = toolNames
+        self.source = source
+        self.auth = auth
+        self.oauthIssuerOrigin = oauthIssuerOrigin
+    }
 }
 
 /// PURE: the fully-qualified name the model sees for a tool on an external server. This is the
@@ -220,8 +247,10 @@ func winterCapabilityBadge(_ capability: WinterCapability) -> String? {
 @MainActor
 final class McpToolsModel: ObservableObject {
     /// `() async throws -> [...]` shaped to `WinterClient.mcpList`'s own return tuple, so the
-    /// eventual wiring is a one-line pass-through with no adapter in between.
-    typealias Lister = () async throws -> [(name: String, status: String, toolNames: [String], source: String)]
+    /// eventual wiring is a one-line pass-through with no adapter in between. WS-25 added the
+    /// tuple's trailing `auth`/`oauthIssuerOrigin` — both `nil` on an older daemon (`mcpList`'s own
+    /// doc comment), which this typealias mirrors exactly.
+    typealias Lister = () async throws -> [(name: String, status: String, toolNames: [String], source: String, auth: String?, oauthIssuerOrigin: String?)]
 
     /// NO `cwd` anywhere in this type, deliberately — see caveat 1 in the file header.
     private let lister: Lister?
@@ -248,7 +277,8 @@ final class McpToolsModel: ObservableObject {
         defer { loading = false }
         do {
             servers = try await lister().map {
-                McpServerRow(name: $0.name, status: $0.status, toolNames: $0.toolNames, source: $0.source)
+                McpServerRow(name: $0.name, status: $0.status, toolNames: $0.toolNames, source: $0.source,
+                             auth: $0.auth, oauthIssuerOrigin: $0.oauthIssuerOrigin)
             }
             errorText = nil
             hasLoaded = true
@@ -413,7 +443,17 @@ struct LibraryMcpList: View {
                                     isSelected: selected == ref,
                                     action: { onOpen(ref) }
                                 ) {
-                                    LibraryRowBadge(text: server.status)
+                                    HStack(spacing: 4) {
+                                        // WS-25: the sign-in badge sits BEFORE the status badge —
+                                        // whether you can sign in is the more actionable fact of
+                                        // the two. `nil` (an older daemon, or `auth == "none"`)
+                                        // renders nothing here, same "don't invent a badge from
+                                        // silence" posture as `winterCapabilityBadge` below.
+                                        if let authBadge = mcpAuthBadge(server.auth) {
+                                            LibraryRowBadge(text: authBadge)
+                                        }
+                                        LibraryRowBadge(text: server.status)
+                                    }
                                 }
                             }
                         }
@@ -505,6 +545,27 @@ struct LibraryMcpServerDetail: View {
     let onBack: () -> Void
     let onVanished: () -> Void
 
+    /// WS-25: owns the sign-in/out and client-secret sheets for THIS server. Built here rather than
+    /// hoisted to `LibraryPanel` (unlike `mcpModel`/`capabilitiesModel`) because a sign-in attempt in
+    /// flight has no reason to survive navigating away from this one server's detail page — the
+    /// sheet is modal over this page, so there is no "come back and find it still open" case to
+    /// preserve, unlike the list's own scroll position.
+    @StateObject private var oauthActions: McpOAuthActionsModel
+
+    init(model: McpToolsModel, name: String, oauthClient: McpAuthClient?,
+         onBack: @escaping () -> Void, onVanished: @escaping () -> Void) {
+        self.model = model
+        self.name = name
+        self.onBack = onBack
+        self.onVanished = onVanished
+        // `[weak model]`: the closure outlives neither `model` nor this view in practice, but a
+        // weak capture costs nothing and matches this codebase's usual caution around a class held
+        // by an escaping closure (`AnthropicLoginSheetModel.start()`'s own `[weak self]`).
+        _oauthActions = StateObject(wrappedValue: McpOAuthActionsModel(client: oauthClient) { [weak model] in
+            await model?.refresh()
+        })
+    }
+
     private var server: McpServerRow? { model.servers.first { $0.name == name } }
 
     var body: some View {
@@ -520,6 +581,7 @@ struct LibraryMcpServerDetail: View {
                 LibraryErrorLine(text: errorText)
             }
             if let server {
+                oauthSection(server)
                 if server.toolNames.isEmpty {
                     LibraryStateLine(text: "This server reports no tools.")
                 } else {
@@ -541,6 +603,59 @@ struct LibraryMcpServerDetail: View {
         }
         .onChange(of: model.servers.map(\.name)) { _, names in
             if !names.contains(name) { onVanished() }
+        }
+        .sheet(item: $oauthActions.signInSheet) { sheet in
+            McpSignInSheet(model: sheet, onDone: { oauthActions.signInSheetClosed() })
+        }
+        .sheet(item: $oauthActions.signOutSheet) { sheet in
+            McpSignOutSheet(
+                model: sheet,
+                onCancel: { oauthActions.signOutSheet = nil },
+                onDone: { oauthActions.signOutSheetClosed() }
+            )
+        }
+        .sheet(item: $oauthActions.clientSecretSheet) { sheet in
+            McpClientSecretSheet(
+                model: sheet,
+                onCancel: { oauthActions.clientSecretSheet = nil },
+                onDone: { oauthActions.clientSecretSheetClosed() }
+            )
+        }
+    }
+
+    /// WS-25: the sign-in/out affordance, keyed on `server.auth` — the same three-way branch
+    /// `mcpAuthBadge` renders as a badge, spelled out here as actions instead. `nil`/`"none"` renders
+    /// nothing: a server with no OAuth at all gets no section, not an empty one.
+    ///
+    /// "Set client secret…" is offered whenever the OTHER two rows would be (`auth != nil &&
+    /// auth != "none"`) rather than only for a server actually configured with a pre-registered
+    /// `oauth.clientId` — `mcp.list`'s contract carries no field this pane could key that on (see
+    /// this file's WS-25 header note and the report's cross-lane request). A server for which the
+    /// action doesn't apply gets the daemon's own typed refusal, shown plainly, same as every other
+    /// action here — never a silently-vanished button guessing at a fact this pane doesn't have.
+    @ViewBuilder
+    private func oauthSection(_ server: McpServerRow) -> some View {
+        if server.auth != nil && server.auth != "none" {
+            LibraryGroupHeader(title: "Sign-in")
+            if let issuerOrigin = server.oauthIssuerOrigin {
+                LibraryDetailField(label: "Authorization server", value: issuerOrigin)
+            }
+            HStack(spacing: 8) {
+                if server.auth == "signed-in" {
+                    Button("Sign out") { oauthActions.startSignOut(serverName: server.name) }
+                        .disabled(oauthActions.isUnwired)
+                        .accessibilityLabel("Sign out of \(server.name)")
+                } else {
+                    Button("Sign in") {
+                        oauthActions.startSignIn(serverName: server.name, issuerOriginHint: server.oauthIssuerOrigin)
+                    }
+                    .disabled(oauthActions.isUnwired)
+                    .accessibilityLabel("Sign in to \(server.name)")
+                }
+                Button("Set client secret…") { oauthActions.startClientSecret(serverName: server.name) }
+                    .disabled(oauthActions.isUnwired)
+                    .accessibilityLabel("Set the client secret for \(server.name)")
+            }
         }
     }
 }
