@@ -272,8 +272,10 @@ export function statedServerFromCanUseTool(options: unknown): StatedMcpServer | 
  * `mcp__<name>__` — or `mcp__<configName>__`: a rule or matcher naming the DECLARED spelling of a renamed
  * server (`cf` for an inline `cf` connected as `cf_2`) reaches the hook under that spelling. The stored value
  * is the config name's; a value stored under the renamed name only ever TIGHTENS it, in the pinned order
- * deny > ask > default (unset) > allow — so `cf_2`'s allow never loosens an unset `cf`. Read-only is the
- * stated hint. `undefined` when the statement fits neither spelling (the caller then falls back).
+ * deny > ask > default (unset) > allow — so `cf_2`'s allow never loosens an unset `cf`. And a renamed server
+ * (`name !== configName`: a subagent's inline server that clashed, so a different server) takes the config
+ * name's deny and ask but never its allow — every allow for it counts as the default. Read-only is the stated
+ * hint (so an unset, read-only action still runs unasked). `undefined` when the statement fits neither spelling (the caller then falls back).
  */
 function statedFacts(table: ConnectorPermissionTable, toolName: string, stated: StatedMcpServer): ConnectorFacts | undefined {
   let tool: string | undefined;
@@ -282,8 +284,13 @@ function statedFacts(table: ConnectorPermissionTable, toolName: string, stated: 
     if (toolName.startsWith(prefix) && toolName.length > prefix.length) { tool = toolName.slice(prefix.length); break; }
   }
   if (tool === undefined) return undefined;
-  const byConfig = connectorSettingFor(table, stated.configName, tool);
-  const byName = stated.name === stated.configName ? undefined : connectorSettingFor(table, stated.name, tool);
+  const renamed = stated.name !== stated.configName;
+  const configured = connectorSettingFor(table, stated.configName, tool);
+  // A RENAMED server is a subagent's inline one that clashed with a server of its config name — a DIFFERENT
+  // server. It takes that name's deny and ask, never its allow: the user's "Always allow" on their own `cf`
+  // must not widen to a subagent's unrelated `cf` (its allow counts as the default).
+  const byConfig = renamed && configured?.permission === "allow" ? undefined : configured;
+  const byName = renamed ? connectorSettingFor(table, stated.name, tool) : undefined;
   const rank = (s: { permission: ConnectorPermission } | undefined): number => (s === undefined ? 1 : STRICTNESS[s.permission]);
   const applied = byName !== undefined && byName.permission !== "allow" && rank(byName) > rank(byConfig) ? byName : byConfig;
   return {
