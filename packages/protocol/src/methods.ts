@@ -743,9 +743,10 @@ export const McpRemoveParams = z.object({
  *  (`settings.json` → `mcp.toolPermissions`) — only once no other scope, plugin or subagent definition still
  *  defines a server of that name, and no live session has it connected (the values are keyed by name across
  *  scopes). Claude-grammar rules are never dropped (claude parity): `rulesNotFollowed` lists every rule, in any
- *  file, that could name the server (`"<file>: <rule>"`) — they remain. `permissionsNote`: the server WAS removed,
+ *  file, that could name the server (`"<file>: <rule>"`) — they remain; with `nameStillInUse` (another scope or a
+ *  live session still has a server of this name) they still apply to it. `permissionsNote`: the server WAS removed,
  *  but clearing its permissions failed. */
-export const McpRemoveResult = z.object({ ok: z.literal(true), name: z.string(), removed: z.boolean(), scope: McpScopeSchema.optional(), permissionsCleared: z.boolean().optional(), rulesNotFollowed: z.array(z.string()).optional(), permissionsNote: z.string().optional() });
+export const McpRemoveResult = z.object({ ok: z.literal(true), name: z.string(), removed: z.boolean(), scope: McpScopeSchema.optional(), permissionsCleared: z.boolean().optional(), rulesNotFollowed: z.array(z.string()).optional(), nameStillInUse: z.boolean().optional(), permissionsNote: z.string().optional() });
 
 /**
  * WS-27 — `winter mcp rename <old> <new>`: rename a server WITHIN one scope, its entry unchanged. Refused typed
@@ -758,7 +759,8 @@ export const McpRemoveResult = z.object({ ok: z.literal(true), name: z.string(),
  * copied to the new name first (`carried`), then dropped from the old name unless something still uses it
  * (`keptOld` — a live session's child included). Claude-grammar rules are NEVER rewritten: `rulesNotFollowed`
  * lists every rule, in any file, that could name the old server (every `__` split, and globs such as
- * `mcp__cf__*`) as `"<file>: <rule>"` — they still name the old server, for the user to edit. `note`: something
+ * `mcp__cf__*`) as `"<file>: <rule>"` — they still name the old server, for the user to edit; the deny/ask ones
+ * among them (which no longer protect the renamed server) are also in `protectiveRulesNotFollowed`. `note`: something
  * after the rename failed (the rename stands). A sign-in is keyed by the server's URL, so it follows by itself.
  * LOCAL role only.
  */
@@ -771,7 +773,7 @@ export const McpRenameParams = z.object({
 export const McpRenameResult = z.object({
   ok: z.literal(true), name: z.string(), newName: z.string(), scope: McpScopeSchema,
   carried: z.boolean(), keptOld: z.boolean(),
-  rulesNotFollowed: z.array(z.string()), note: z.string().optional(),
+  rulesNotFollowed: z.array(z.string()), protectiveRulesNotFollowed: z.array(z.string()).optional(), note: z.string().optional(),
 });
 
 /**

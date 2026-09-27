@@ -2586,6 +2586,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         return {
           ok: true, name: p.name, removed: outcome.removed, scope: p.scope, permissionsCleared: outcome.permissionsCleared,
           ...(outcome.rulesNotFollowed.length > 0 ? { rulesNotFollowed: outcome.rulesNotFollowed } : {}),
+          ...(outcome.nameStillInUse === true ? { nameStillInUse: true } : {}),
           ...(outcome.permissionsNote !== undefined ? { permissionsNote: outcome.permissionsNote } : {}),
         };
       }
@@ -2613,7 +2614,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         }
         return {
           ok: true, name: p.name, newName: p.newName, scope: p.scope, carried: outcome.carried, keptOld: outcome.keptOld,
-          rulesNotFollowed: outcome.rulesNotFollowed, ...(outcome.note !== undefined ? { note: outcome.note } : {}),
+          rulesNotFollowed: outcome.rulesNotFollowed,
+          ...(outcome.protectiveRulesNotFollowed.length > 0 ? { protectiveRulesNotFollowed: outcome.protectiveRulesNotFollowed } : {}), ...(outcome.note !== undefined ? { note: outcome.note } : {}),
         };
       }
       // -----------------------------------------------------------------------------------------
