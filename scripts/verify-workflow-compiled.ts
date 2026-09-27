@@ -37,6 +37,14 @@
  *      {op:"agent"} request, and assert {op:"phase"} then {op:"done", result:"[hi]"} come back before
  *      the child exits 0. The run completing at all IS the C1 regression check (step 7 of the brief):
  *      under the OLD Worker transport this could not even start on a compiled binary.
+ *   5. WS-27, the Keychain-sandbox guard, for BOTH workers the binary carries (`__workflow-worker` and
+ *      the runtime's `__runtime-workflow-worker --bridge`): each must REFUSE (exit 77, nothing on stdout,
+ *      its input unread) when run bare, and when run under the workflow profile plus an allowance for
+ *      either Keychain mach service. The allowance legs are the discriminating ones: `sandbox_check`'s name
+ *      is a variadic argument bound by hand (`sandbox-guard.ts`), and a mis-passed name would be denied by
+ *      any deny-default profile — only a name that arrives intact can be ALLOWED, and so refused. The
+ *      positive legs are step 4 (the daemon's worker ran a script) and the runtime worker reaching its own
+ *      "undriven" exit 78 under the plain profile.
  *
  * If this ever fails again: STOP, do not weaken these assertions — see the diagnosis hints printed
  * alongside FAIL below.
@@ -206,11 +214,47 @@ async function main(): Promise<void> {
     );
   }
 
+  // ---- Step 5: WS-27 — each worker refuses outside a sandbox that denies the Keychain ------------
+  log("\n--- Step 5: the Keychain-sandbox guard (both workers) ---");
+  const REFUSED = 77;
+  const initLine = `${JSON.stringify({ source: "phase('must-not-run'); return 1;", args: null, concurrency: 1 })}\n`;
+  const runWorker = (argv: string[], sandbox: string | null): { code: number | null; stdout: string; stderr: string } => {
+    const cmd = sandbox === null ? [DIST_BINARY, ...argv] : ["/usr/bin/sandbox-exec", "-p", sandbox, DIST_BINARY, ...argv];
+    const r = spawnSync(cmd[0]!, cmd.slice(1), { input: initLine, encoding: "utf8", timeout: ROUNDTRIP_TIMEOUT_MS });
+    return { code: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  };
+  const guardChecks: Array<[string, boolean]> = [];
+  const workers: Array<[string, string[]]> = [["__workflow-worker", ["__workflow-worker"]], ["__runtime-workflow-worker --bridge", ["__runtime-workflow-worker", "--bridge"]]];
+  const refusalLegs: Array<[string, string | null]> = [
+    ["no sandbox", null],
+    ["the workflow profile + com.apple.SecurityServer allowed", `${profile}(allow mach-lookup (global-name "com.apple.SecurityServer"))\n`],
+    ["the workflow profile + com.apple.securityd.xpc allowed", `${profile}(allow mach-lookup (global-name "com.apple.securityd.xpc"))\n`],
+  ];
+  for (const [label, argv] of workers) {
+    for (const [leg, sandbox] of refusalLegs) {
+      const r = runWorker(argv, sandbox);
+      log(`  ${label} under ${leg}: exit=${r.code} stdout=${JSON.stringify(r.stdout.slice(0, 120))} stderr=${JSON.stringify(r.stderr.trim().slice(0, 200))}`);
+      guardChecks.push([`${label} REFUSES under ${leg} (exit ${REFUSED}, no output, input unread)`, r.code === REFUSED && r.stdout === "" && r.stderr.includes("refuses to run")]);
+    }
+  }
+  const undriven = runWorker(["__runtime-workflow-worker"], profile);
+  log(`  __runtime-workflow-worker (no --bridge) under the workflow profile: exit=${undriven.code} stderr=${JSON.stringify(undriven.stderr.trim().slice(0, 200))}`);
+  guardChecks.push(["__runtime-workflow-worker passes the guard under the workflow profile and reaches the runtime (exit 78, undriven)", undriven.code === 78 && undriven.stderr.includes("without --bridge")]);
+  for (const [name, ok] of guardChecks) log(`  [${ok ? "PASS" : "FAIL"}] ${name}`);
+  if (!guardChecks.every(([, ok]) => ok)) {
+    fail(
+      "the workflow workers' Keychain-sandbox guard misbehaved on the compiled binary. A refusal leg that RAN " +
+      "means the guard is missing from that route or `sandbox_check`'s arguments are mis-passed (the " +
+      "allowance legs catch a garbled service name); a positive leg that exited 77 means the check " +
+      "misreads a correct sandbox; a crash under the hardened runtime points at bun:ffi (see __keychain-ffi-probe)."
+    );
+  }
+
   log(
     "\nRESULT: PASS — dist/winter-core (the real `bun build --compile` Release artifact) self-spawned " +
     "a sandboxed __workflow-worker subprocess, ran the workflow script, round-tripped one agent() " +
     "call over the NDJSON stdio bridge, and exited 0. C1 (workflows dead in the compiled binary) is " +
-    "fixed on the actual shipped artifact."
+    "fixed on the actual shipped artifact. Both workers refuse to run outside a sandbox that denies the Keychain."
   );
   process.exit(0);
 }

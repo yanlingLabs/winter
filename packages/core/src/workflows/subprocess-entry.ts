@@ -1,8 +1,11 @@
+import { refuseUnlessKeychainSandboxed } from "./sandbox-guard";
 import { runWorkflow } from "./worker-harness";
 import type { BridgeRequest, BridgeResponse, WorkerInit } from "./bridge";
 import type { AgentOpts } from "./types";
 
 export function runWorkflowSubprocess(): void {
+  // WS-27: before any input is read — outside a sandbox that denies the Keychain, never run a script.
+  refuseUnlessKeychainSandboxed("workflow worker");
   const IN = process.stdin;
   const OUT = process.stdout;
   // Defense-in-depth (belt-and-suspenders under the seatbelt). Do NOT null `process` — the entry
