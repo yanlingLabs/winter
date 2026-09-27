@@ -1449,7 +1449,7 @@ export async function runMcpPermissionsRoute(args: string[], deps: McpPermission
 
 const PERMISSION_LABEL: Record<"allow" | "ask" | "deny", string> = { allow: "Always allow", ask: "Always ask", deny: "Always deny" };
 
-export function renderMcpPermissionsOutcome(outcome: McpPermissionsOutcome): string {
+export function renderMcpPermissionsOutcome(outcome: McpPermissionsOutcome, commandName = "winter"): string {
   if (!outcome.ok) return outcome.message;
   if (outcome.kind === "set") {
     const note = outcome.via === "daemon"
@@ -1469,7 +1469,7 @@ export function renderMcpPermissionsOutcome(outcome: McpPermissionsOutcome): str
   if (!s.listed) {
     lines.push(outcome.via === "local"
       ? "  (no daemon running — only stored values are shown; the action list comes from the daemon's probe)"
-      : "  (no action list yet — the server has not been probed, or it needs a sign-in: winter mcp login " + s.name + ")");
+      : `  (no action list yet — the server has not been probed, or it needs a sign-in: ${commandName} mcp login ${s.name})`);
   }
   const rows = outcome.tool !== undefined ? s.tools.filter((t) => t.name === outcome.tool) : s.tools;
   if (outcome.tool !== undefined && rows.length === 0) lines.push(`  ${outcome.tool}: not listed and nothing stored — the default applies`);

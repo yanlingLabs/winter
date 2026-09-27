@@ -74,6 +74,13 @@ describe("through the daemon", () => {
     expect(text).toContain("kv_put  ask  — set for all actions");
   });
 
+  test("an unlisted server's sign-in hint names the command actually in use", async () => {
+    const door = scriptedDoor(() => ({ ok: true, servers: [{ name: "cf", status: "failed", listed: false, tools: [] }] }));
+    const out = await runMcpPermissionsRoute(["cf"], { door, winterHome: "/nowhere", cwd: "/work" });
+    expect(renderMcpPermissionsOutcome(out)).toContain("needs a sign-in: winter mcp login cf)");
+    expect(renderMcpPermissionsOutcome(out, "winter-dev")).toContain("needs a sign-in: winter-dev mcp login cf)");
+  });
+
   test("a daemon refusal is reported, not thrown", async () => {
     const door = scriptedDoor(() => Object.assign(new Error("bad"), { rpc: { message: "\"winter\" names Winter's own capability servers, not a connector", data: {} } }));
     const out = await runMcpPermissionsRoute(["winter", "x", "deny"], { door, winterHome: "/nowhere", cwd: "/work" });
