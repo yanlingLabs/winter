@@ -17,6 +17,7 @@ import { outdirPath } from "../sessions/outdir";
 import { askUserQuestionBridge, ASK_USER_QUESTION_TOOL } from "./question-bridge";
 import { consoleBridgeLogger, NO_PARK_TIMEOUT_MS, REVIEWER_ESCALATION_REASON, takeReviewerCleared, type BridgeLogger } from "./bridge-common";
 import type { BridgedPlanRequest } from "./plan-bridge";
+import { connectorDenialMessage, connectorFactsFor, connectorVerdict, isConnectorToolName, type ConnectorPermissionSource } from "../agent/mcp/connector-permissions";
 
 export { NO_PARK_TIMEOUT_MS, type BridgeLogger } from "./bridge-common";
 
@@ -111,6 +112,14 @@ export interface CanUseToolDeps {
    * tolerated. Absent ⇒ `ExitPlanMode` falls through to the ordinary gate path (today: an
    * unclassified tool name, `"ask"`-shaped) — never a crash, matching every other optional dep in
    * this file. */
+  /**
+   * WS-26: the connector permissions (`agent/mcp/connector-permissions.ts`) — the user's stored
+   * allow/ask/deny per connector action and the probe's read-only answers, read LIVE on every call. Their
+   * verdict replaces the gate's for a connector action (see (4c)). Absent: no stored values and nothing
+   * known to be read-only — a connector action still cards in chat (the gate's own answer), and code and
+   * dispatch keep their gate verdicts.
+   */
+  connectors?: ConnectorPermissionSource;
   planBridge?: {
     onExitPlanMode(req: BridgedPlanRequest): Promise<PermissionResult>;
     /** `plan-bridge.ts`'s `respond` — present on the real bridge; used ONLY by `withdrawPending`
@@ -142,7 +151,14 @@ function deniedByPolicyMessage(policy: SessionApprovalPolicy): string {
  * not raised in the first place. Chat reaches this only from a stale row (a chat session created
  * before the create-time coercion, whose stored policy is still `auto` — the same case
  * `buildLeasePolicy` guards on `meta.mode === "chat"`); a chat session with its coerced `"chat"`
- * policy never resolves to `"ask"` at all, because `gate.evaluate`'s chat branch is allow-or-deny.
+ * policy resolves to `"ask"` for nothing but a connector action (below).
+ *
+ * **WS-26 (USER RULING 2026-09-27) — the one exception: CONNECTOR actions** (`isConnectorToolName`, a
+ * tool of a user-configured MCP server). A chat or dispatch session CARDS one — the same
+ * `approval_requested` event and `approval.respond` RPC code uses, rendered in the chat and dispatch
+ * windows and on the phone — and waits for the human. A dispatch CHILD does not: it is a code session
+ * nobody is watching, so its connector "ask" stays this typed deny. Nothing else in chat or dispatch
+ * ever cards.
  *
  * CODE mode is untouched and prompts exactly as it does today.
  */
@@ -320,8 +336,10 @@ export function approvalOptionsFromSuggestions(suggestions: readonly PermissionU
  *  3. `PermissionGate.evaluate` decides, on the NORMALIZED tool name (`tool-names.ts`).
  *  4. `dont-ask` converts a still-`"ask"` verdict to a deny — the flip that lives in `engine.ts`
  *     rather than the gate (`engine.ts:4341`).
+ *  4c. a CONNECTOR action takes the connector-permission verdict instead (WS-26).
  *  5. `"deny"` → a typed deny with today's mode-aware text; `"allow"` → allow, silently, no event;
- *     `"ask"` → a card in CODE mode, a typed deny in DISPATCH/CHAT (P8b-7).
+ *     `"ask"` → a card in CODE mode, a typed deny in DISPATCH/CHAT (P8b-7) — except a connector action,
+ *     which cards in chat and dispatch too (never in a dispatch child).
  *
  * **Fail-closed everywhere** (SDK surface map §5.1: a `canUseTool` that throws is turned into a
  * typed deny by the runtime anyway — this bridge never relies on that, it returns the deny itself).
@@ -512,6 +530,21 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     const classificationName = gateClassFor(toolName);
     let decision = deps.gate.evaluate(classificationName, policy);
 
+    // (4c) WS-26 — A CONNECTOR ACTION TAKES THE CONNECTOR VERDICT. The user's stored allow/ask/deny and the
+    // server's read-only mark (`agent/mcp/connector-permissions.ts`, read live) decide it in every mode;
+    // `"gate"` (unset, not read-only, in code or a dispatch child) keeps the gate's verdict above, exactly
+    // as before. The PreToolUse floor (`hooks.ts`) answers the same verdict for the calls this bridge never
+    // sees (a `bypass` child, a saved allow rule, `dont-ask`); this is its half for the calls it does.
+    const connector = deps.connectors !== undefined ? connectorFactsFor(deps.connectors, toolName, deps.cwd) : undefined;
+    if (connector !== undefined) {
+      const verdict = connectorVerdict({ setting: connector.setting, readOnly: connector.readOnly, policy, mode: deps.mode, ...(deps.origin !== undefined ? { origin: deps.origin } : {}) });
+      if (verdict === "deny") {
+        log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} policy=${policy} reason=connector-permission setting=${connector.setting ?? "default"}`);
+        return { behavior: "deny", message: connectorDenialMessage(connector.server, connector.tool, { setting: connector.setting, policy }) };
+      }
+      if (verdict !== "gate") decision = verdict;
+    }
+
     // (5) engine.ts:4341 — dont-ask declines everything it would otherwise card, with no prompt.
     if (decision === "ask" && policy === "dont-ask") decision = "deny";
 
@@ -679,8 +712,11 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
       return { behavior: "allow", updatedInput: input };
     }
 
-    // (6) "ask" — and a session that never prompts denies instead (P8b-7 / P8b-26).
-    const never = neverPromptsAs(deps);
+    // (6) "ask" — and a session that never prompts denies instead (P8b-7 / P8b-26) — except a CONNECTOR
+    // action in a chat or dispatch session, which cards (WS-26; see `neverPromptsMessage`'s doc). A
+    // dispatch child keeps the deny.
+    const connectorCards = isConnectorToolName(toolName) && deps.origin !== "dispatch-child";
+    const never = connectorCards ? undefined : neverPromptsAs(deps);
     if (never) {
       log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} policy=${policy} reason=never-prompts mode=${deps.mode} origin=${deps.origin ?? "none"}`);
       // Named as the MODEL called it: this message is a tool result the model reads, and naming a
@@ -688,7 +724,12 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
       return { behavior: "deny", message: neverPromptsMessage(toolName, never, policy) };
     }
 
-    return await raiseCard(deps, { log, now, threadId, policy, state, privateTarget }, toolName, gateToolName, input, ctx);
+    // WS-26: a connector card offers Allow / Deny and no rule, wherever a rule would not do what it says —
+    // chat and dispatch (the router strips a saved allow rule from their run folders, so "Allow everywhere"
+    // would never apply there) and any action with a stored connector permission (a stored "Always ask"
+    // outranks a saved allow rule, so remembering one would change nothing).
+    const plainCard = isConnectorToolName(toolName) && (deps.mode !== "code" || connector?.setting !== undefined);
+    return await raiseCard(deps, { log, now, threadId, policy, state, privateTarget, plainCard }, toolName, gateToolName, input, ctx);
   };
   return Object.assign(canUse, { withdrawPending });
 }
@@ -731,6 +772,8 @@ async function raiseCard(
     log: BridgeLogger; now: () => number; threadId: string; policy: SessionApprovalPolicy; state: BridgeState;
     /** Set when this card is (5d)'s private-address escalation — see the `options` line below. */
     privateTarget?: { host: string; reason: string };
+    /** WS-26: a connector card that must offer no rule-bearing option (see the call site). */
+    plainCard?: boolean;
   },
   toolName: string,
   gateToolName: string,
@@ -794,7 +837,7 @@ async function raiseCard(
   // the single place that closes both halves: the respond handler resolves an `optionId` against the
   // options THIS record stored (an unknown id persists nothing), and `updatedPermissionsFor` reads
   // the same list. `undefined` is the plain approve/deny card every non-`bash` tool already gets.
-  const offered = env.privateTarget !== undefined
+  const offered = env.privateTarget !== undefined || env.plainCard === true
     ? undefined
     : approvalOptionsFromSuggestions(ctx.suggestions) ?? approvalOptionsFor({ name: gateToolName, argsJson });
   // WS-21 (spec §4.3): "in this project" is offered only for a trusted project (see `projectTrusted`).
