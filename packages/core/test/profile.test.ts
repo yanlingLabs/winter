@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { keychainService, profileDisplayName, resolveWinterProfile } from "../src/profile";
+import { cliCommandName, keychainService, profileDisplayName, resolveWinterProfile } from "../src/profile";
 
 describe("profile", () => {
+  test("cliCommandName: the command a hint names — winter-dev on the dev profile (the wrapper's), else winter", () => {
+    expect(cliCommandName("dev")).toBe("winter-dev");
+    expect(cliCommandName("dist")).toBe("winter");
+  });
   test("resolveWinterProfile: dev only on exact WINTER_PROFILE=dev", () => {
     expect(resolveWinterProfile({} as NodeJS.ProcessEnv)).toBe("dist");
     expect(resolveWinterProfile({ WINTER_PROFILE: "dev" } as NodeJS.ProcessEnv)).toBe("dev");

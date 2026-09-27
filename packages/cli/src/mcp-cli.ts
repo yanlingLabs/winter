@@ -939,6 +939,8 @@ export interface McpAuthDeps {
   poke: () => Promise<boolean>;
   sleep?: (ms: number) => Promise<void>;
   pollMs?: number;
+  /** The command a hint names (`cliCommandName`: `winter-dev` on the dev profile); default `winter`. */
+  commandName?: string;
 }
 
 export type McpAuthOutcome =
@@ -1043,7 +1045,7 @@ export async function runMcpLoginRoute(args: string[], deps: McpAuthDeps): Promi
       // `--confirm-issuer-change` is the ONLY non-interactive answer to this: `--yes` never implies it.
       if (confirmIssuerChange) deps.print(`${change} Continuing (--confirm-issuer-change).`);
       else if (!(await deps.confirm(`${change} Continue with the new authorization server? [y/N] `))) {
-        return { ok: false, message: `sign-in cancelled — the authorization server changed and was not confirmed (to accept it without a prompt: winter mcp login ${name} --confirm-issuer-change)`, code: ISSUER_CHANGE };
+        return { ok: false, message: `sign-in cancelled — the authorization server changed and was not confirmed (to accept it without a prompt: ${deps.commandName ?? "winter"} mcp login ${name} --confirm-issuer-change)`, code: ISSUER_CHANGE };
       }
       started = await start(true);
     }
@@ -1073,7 +1075,7 @@ export async function runMcpLoginRoute(args: string[], deps: McpAuthDeps): Promi
         if (deps.door === undefined) await deps.poke();
         return { ok: true, kind: "login", name, via: deps.door !== undefined ? "daemon" : "in-process", issuerOrigin: started.issuerOrigin };
       }
-      if (status.state === "expired") return { ok: false, message: `the sign-in to "${name}" expired before it was completed in the browser — run winter mcp login ${name} again`, code: "expired" };
+      if (status.state === "expired") return { ok: false, message: `the sign-in to "${name}" expired before it was completed in the browser — run ${deps.commandName ?? "winter"} mcp login ${name} again`, code: "expired" };
       return { ok: false, message: `the sign-in to "${name}" failed${status.error !== undefined ? ` (${status.error})` : ""}`, code: "failed" };
     }
   } catch (err) {
@@ -1211,7 +1213,7 @@ async function setSecretFromClipboard(name: string, scope: McpScope | undefined,
     if (confirmedIssuer === undefined) {
       return {
         ok: false,
-        message: `nothing was read or stored — if that is the right authorization server, copy the secret and re-run: winter mcp set-secret ${target.name} --from-clipboard --issuer ${target.issuer}`,
+        message: `nothing was read or stored — if that is the right authorization server, copy the secret and re-run: ${deps.commandName ?? "winter"} mcp set-secret ${target.name} --from-clipboard --issuer ${target.issuer}`,
         code: "issuer_confirmation_required",
       };
     }

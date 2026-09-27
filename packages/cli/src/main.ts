@@ -1958,7 +1958,7 @@ if (import.meta.main) {
     if (sub === "login" || sub === "logout" || sub === "set-secret") {
       const winterHome = resolveWinterHome();
       const door = await openCredentialDaemonDoor();
-      const { McpOAuthDoors, daemonMcpOAuthStore, keychainService, TrustStore } = await import("@yanlinglabs/winter-core");
+      const { McpOAuthDoors, daemonMcpOAuthStore, keychainService, TrustStore, cliCommandName } = await import("@yanlinglabs/winter-core");
       const deps: McpAuthDeps = {
         cwd: process.cwd(),
         ...(door !== undefined ? { door } : {}),
@@ -1988,6 +1988,7 @@ if (import.meta.main) {
         platform: process.platform,
         print: (line) => console.log(line),
         poke: () => notifyDaemonOfOutOfBandCredentialChange(openCredentialDaemonDoor),
+        commandName: cliCommandName(),
       };
       const outcome = sub === "login" ? await runMcpLoginRoute(rest, deps) : sub === "logout" ? await runMcpLogoutRoute(rest, deps) : await runMcpSetSecretRoute(rest, deps);
       if (outcome.ok) console.log(renderMcpAuthOutcome(outcome));
