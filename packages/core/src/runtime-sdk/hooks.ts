@@ -69,7 +69,7 @@ import { ESCAPE_FENCED_FILENAMES, PROJECT_FENCED_SEGMENTS, homeFenceFor, homeFen
 import { controlPlaneDenialMessage, controlPlaneTargetForCall } from "./control-plane";
 import { protectedPathsFor, protectedReadDenial, protectedWriteDecision, storeWriteDenial } from "./protected-paths";
 import type { Mode as SessionMode } from "../agent/tools/registry";
-import { connectorAskReason, connectorDenialMessage, connectorFactsFor, connectorVerdict, type ConnectorPermissionSource } from "../agent/mcp/connector-permissions";
+import { connectorAskReason, connectorDenialMessage, connectorFactsFor, connectorVerdict, statedServerFromHookInput, type ConnectorPermissionSource } from "../agent/mcp/connector-permissions";
 
 /** The subset of `plugins/hook-registry.ts`'s `HookFacade` this module depends on — injected
  *  rather than imported concretely so a fake can stand in for tests with no real plugin process
@@ -1334,7 +1334,8 @@ function connectorPermissionHook(deps: SessionHooksDeps): HookCallback {
     if (source === undefined) return allow();
     const pre = input as PreToolUseHookInput;
     const toolName = typeof pre.tool_name === "string" ? pre.tool_name : "";
-    const facts = connectorFactsFor(source, toolName, hookCwd(input) ?? deps.cwd);
+    // WS-27: the runtime's own statement of the call's server (`winter_mcp_server`), when it makes one.
+    const facts = connectorFactsFor(source, toolName, hookCwd(input) ?? deps.cwd, statedServerFromHookInput(input));
     if (facts === undefined) return allow();
     // An unwired policy reads as `ask`: the answer under which every stored value means what it says.
     const policy = deps.policy?.() ?? "ask";

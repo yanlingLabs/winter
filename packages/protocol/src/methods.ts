@@ -572,7 +572,9 @@ export const McpServerStatusSchema = z.object({
   name: z.string(),
   status: z.enum(["connected", "failed", "disabled", "unmanaged", "needs-auth"]),
   toolNames: z.array(z.string()),
-  source: z.enum(["user", "project", "plugin"]),
+  /** WS-27: `"agent"` — a server a subagent definition declares inline (user, trusted-project or plugin
+   *  `agents/*.md`), listed by its config name so its connector permissions can be set; never probed. */
+  source: z.enum(["user", "project", "plugin", "agent"]),
   transport: z.enum(["stdio", "http", "sse"]).optional(),
   strippedHeaders: z.array(z.string()).optional(),
   auth: McpAuthStateSchema.optional(),
@@ -640,7 +642,7 @@ export const McpToolRowSchema = z.object({
 export const McpToolsServerSchema = z.object({
   name: z.string(),
   status: z.enum(["connected", "failed", "disabled", "unmanaged", "needs-auth", "unknown"]),
-  source: z.enum(["user", "project", "plugin"]).optional(),
+  source: z.enum(["user", "project", "plugin", "agent"]).optional(),
   allTools: McpToolPermissionSchema.optional(),
   listed: z.boolean(),
   tools: z.array(McpToolRowSchema),
