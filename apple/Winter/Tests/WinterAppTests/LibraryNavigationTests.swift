@@ -198,6 +198,26 @@ final class LibraryDisplayHelperTests: XCTestCase {
         XCTAssertEqual(libraryMcpServerSubtitle(many), "2 tools · Plugin")
     }
 
+    // MARK: MCP OAuth badge (WS-25)
+
+    /// `nil` (an older daemon) and `"none"` (the daemon looked and there's no OAuth here) both
+    /// render nothing — a badge would claim a fact neither silence nor "not applicable" carries.
+    func testMcpAuthBadgeRendersNothingForNilOrNone() {
+        XCTAssertNil(mcpAuthBadge(nil))
+        XCTAssertNil(mcpAuthBadge("none"))
+    }
+
+    func testMcpAuthBadgeMapsTheTwoKnownActionableStates() {
+        XCTAssertEqual(mcpAuthBadge("signed-in"), "Signed in")
+        XCTAssertEqual(mcpAuthBadge("needs-auth"), "Needs sign-in")
+    }
+
+    /// An unrecognized word from a newer daemon survives verbatim rather than vanishing — same
+    /// "unknown reads as itself, not as an error" posture `McpServerRow.status` already has.
+    func testMcpAuthBadgeSurvivesAnUnrecognizedWordVerbatim() {
+        XCTAssertEqual(mcpAuthBadge("pending-review"), "pending-review")
+    }
+
     // MARK: Agents
 
     func testARejectedAgentIsAddressedByPathAndExplainsItself() {
