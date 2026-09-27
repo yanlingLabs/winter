@@ -206,7 +206,9 @@ const MAX_WORKTREES = 64;
  * The OTHER worktrees of the repository at `root`, read straight from git's own bookkeeping — no `git` process
  * on an IPC path: `<common git dir>/worktrees/*\/gitdir` names each linked worktree's `.git` file, and the main
  * worktree is the common dir's parent. `root` may itself be a linked worktree (its `.git` FILE points into the
- * common dir, whose `commondir` names it). A directory with no `.git` has none. `"unknown"` — the caller then
+ * common dir, whose `commondir` names it), a submodule or a `--separate-git-dir` checkout (its `.git` FILE
+ * points at a git dir with no `commondir`, which is then the common dir itself). A worktree entry without a
+ * `gitdir` file is skipped. A directory with no `.git` has none. `"unknown"` — the caller then
  * answers "defined" — on any read error, an unexpected layout, or more than `MAX_WORKTREES`.
  */
 function linkedWorktrees(root: string): string[] | "unknown" {
@@ -218,7 +220,11 @@ function linkedWorktrees(root: string): string[] | "unknown" {
       const pointer = /^gitdir:\s*(.+)$/m.exec(readFileSync(dotGit, "utf8"))?.[1]?.trim();
       if (pointer === undefined) return "unknown";
       const gitdir = resolve(root, pointer);
-      common = resolve(gitdir, readFileSync(join(gitdir, "commondir"), "utf8").trim());
+      if (!statSync(gitdir).isDirectory()) return "unknown";
+      // A linked worktree's git dir names the common dir in `commondir`; a submodule's or a
+      // `--separate-git-dir` checkout's has none — its git dir IS the common dir.
+      const commondir = join(gitdir, "commondir");
+      common = existsSync(commondir) ? resolve(gitdir, readFileSync(commondir, "utf8").trim()) : gitdir;
     }
     const out = new Set<string>();
     if (basename(common) === ".git") out.add(canonical(dirname(common)));
@@ -227,7 +233,9 @@ function linkedWorktrees(root: string): string[] | "unknown" {
       const entries = readdirSync(worktrees);
       if (entries.length > MAX_WORKTREES) return "unknown";
       for (const entry of entries) {
-        const gitFile = readFileSync(join(worktrees, entry, "gitdir"), "utf8").trim();
+        const gitdirFile = join(worktrees, entry, "gitdir");
+        if (!existsSync(gitdirFile)) continue;   // a half-made or pruned entry names no worktree
+        const gitFile = readFileSync(gitdirFile, "utf8").trim();
         out.add(canonical(dirname(resolve(join(worktrees, entry), gitFile))));
       }
     }

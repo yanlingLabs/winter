@@ -184,14 +184,24 @@ describe("WS-27 review 7: write order and honest results", () => {
   });
 });
 
-describe("WS-27 round 2 N1: ruleServerCandidates", () => {
-  test("every `__` split of the rest, plus the whole rest; none for the bare server or a glob piece", async () => {
-    const { ruleServerCandidates } = await import("../../../src/agent/mcp/mcp-write");
-    expect(ruleServerCandidates("mcp__cf__prod__x", "cf")).toEqual(["cf__prod", "cf__prod__x"]);
-    expect(ruleServerCandidates("mcp__cf__prod(*)", "cf")).toEqual(["cf__prod"]);
-    expect(ruleServerCandidates("mcp__cf__list", "cf")).toEqual(["cf__list"]);
-    expect(ruleServerCandidates("mcp__cf", "cf")).toEqual([]);
-    expect(ruleServerCandidates("mcp__cf__*", "cf")).toEqual([]);
-    expect(ruleServerCandidates("mcp__cfx__a", "cf")).toEqual([]);
+describe("WS-27 round 3: ruleCouldNameMcpServer — which rules a rename or a remove lists", () => {
+  test("literal rules name the server at every `__` split; globs when their server part can match", async () => {
+    const { ruleCouldNameMcpServer } = await import("../../../src/agent/mcp/mcp-write");
+    // Literal: the server itself, or any tool under it (so `mcp__cf__prod__x` for both `cf` and `cf__prod`).
+    expect(ruleCouldNameMcpServer("mcp__cf", "cf")).toBe(true);
+    expect(ruleCouldNameMcpServer("mcp__cf__list", "cf")).toBe(true);
+    expect(ruleCouldNameMcpServer("mcp__cf__prod__x", "cf__prod")).toBe(true);
+    expect(ruleCouldNameMcpServer("mcp__cf__prod__x", "cf")).toBe(true);
+    expect(ruleCouldNameMcpServer("mcp__cf__admin__delete(*)", "cf")).toBe(true);
+    expect(ruleCouldNameMcpServer("mcp__cfx__a", "cf")).toBe(false);
+    expect(ruleCouldNameMcpServer("Bash(npm test)", "cf")).toBe(false);
+    // Globs: `mcp__cf__*` also matches `cf__prod`'s tools; `mcp__*` any server; `mcp__c*__list` a `cf` tool.
+    expect(ruleCouldNameMcpServer("mcp__cf__*", "cf__prod")).toBe(true);
+    expect(ruleCouldNameMcpServer("mcp__*", "gh")).toBe(true);
+    expect(ruleCouldNameMcpServer("mcp__c*__list", "cf")).toBe(true);
+    expect(ruleCouldNameMcpServer("mcp__c*", "cf")).toBe(true);
+    expect(ruleCouldNameMcpServer("mcp__d*", "cf")).toBe(false);
+    expect(ruleCouldNameMcpServer("mcp__cf__prod__*", "cf")).toBe(true);
+    expect(ruleCouldNameMcpServer("mcp__gh__*", "cf")).toBe(false);
   });
 });

@@ -562,7 +562,7 @@ describe("WS-27: remove and rename carry the connector settings", () => {
   test("rename (no -s: the one scope defining it) moves the entry and its permissions", async () => {
     const f = setup({ mcpServers: { cf: { type: "stdio", command: "cf" } } }, { mcp: { toolPermissions: { cf: { "*": "ask" } } } });
     const outcome = await runMcpRenameRoute(["cf", "cloudflare"], f.deps);
-    expect(outcome).toEqual({ ok: true, scope: "user", name: "cf", newName: "cloudflare", carried: true, keptOld: false, rulesCarried: 0, rulesNotFollowed: [], via: "local" });
+    expect(outcome).toEqual({ ok: true, scope: "user", name: "cf", newName: "cloudflare", carried: true, keptOld: false, rulesNotFollowed: [], via: "local" });
     expect(JSON.parse(readFileSync(join(f.winterHome, "sdk", ".winter.json"), "utf8")).mcpServers).toEqual({ cloudflare: { type: "stdio", command: "cf" } });
     expect(f.perms()).toEqual({ cloudflare: { "*": "ask" } });
     expect(renderMcpRenameOutcome(outcome)).toContain('Renamed MCP server "cf" to "cloudflare"');
@@ -604,18 +604,18 @@ describe("WS-27 review 6: with a live daemon, remove goes through mcp.remove for
     expect(calls).toEqual([["x", "local", cwd], ["x", "project", cwd]]);
   });
 
-  test("rename lists rules that will not follow, and says a note plainly", () => {
-    const text = renderMcpRenameOutcome({ ok: true, scope: "user", name: "cf", newName: "cfx", carried: true, keptOld: false, rulesCarried: 2, rulesNotFollowed: ["/p/.winter/settings.json: mcp__cf__list"], via: "daemon" });
-    expect(text).toContain('2 rules in sdk/settings.json now name "cfx"');
+  test("rename lists the rules that still name the old server, and says they were not rewritten", () => {
+    const text = renderMcpRenameOutcome({ ok: true, scope: "user", name: "cf", newName: "cfx", carried: true, keptOld: false, rulesNotFollowed: ["/p/.winter/settings.json: mcp__cf__list"], via: "daemon" });
+    expect(text).toContain('These rules could still name "cf" — Winter never rewrites a rule');
     expect(text).toContain("/p/.winter/settings.json: mcp__cf__list");
   });
 });
 
-describe("WS-27 round 2: remove reports the rules it dropped and the ones it left", () => {
+describe("WS-27 round 3: remove lists the rules that remain (it never drops one)", () => {
   test("rendered plainly", () => {
-    const text = renderMcpRemoveOutcome({ ok: true, scope: "user", name: "cf", removed: true, permissionsCleared: true, rulesDropped: 2, rulesNotFollowed: ["/h/sdk/settings.json: mcp__cf__prod(*) (ambiguous — …)"] });
+    const text = renderMcpRemoveOutcome({ ok: true, scope: "user", name: "cf", removed: true, permissionsCleared: true, rulesNotFollowed: ["/h/sdk/settings.json: mcp__cf__list"] });
     expect(text).toContain("and cleared its connector permissions");
-    expect(text).toContain("2 rules naming it dropped from sdk/settings.json.");
-    expect(text).toContain("mcp__cf__prod(*)");
+    expect(text).toContain('These rules could still name "cf" and remain as they are');
+    expect(text).toContain("/h/sdk/settings.json: mcp__cf__list");
   });
 });
