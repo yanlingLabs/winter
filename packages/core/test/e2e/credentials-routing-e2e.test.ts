@@ -396,8 +396,18 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
     const before = authHeaders.length;
     const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "chat", model: DEEPSEEK_MODEL });
     await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
-    await client.call(METHODS.sessionSend, { sessionId, text: "hello from chat" });
-    await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 90_000);
+    // The daemon's console during the embedded turn (review r1 (g)): the Worker runs IN this process, so
+    // anything it logged would land here.
+    const lines: string[] = [];
+    const push = (...a: unknown[]): void => { lines.push(a.map(String).join(" ")); };
+    const spies = [spyOn(console, "error").mockImplementation(push), spyOn(console, "warn").mockImplementation(push), spyOn(console, "log").mockImplementation(push)];
+    try {
+      await client.call(METHODS.sessionSend, { sessionId, text: "hello from chat" });
+      await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 90_000);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+    for (const line of lines) expect(line).not.toContain(SENTINEL);
     const chatHeaders = authHeaders.slice(before);
     expect(chatHeaders.length).toBeGreaterThan(0);
     expect(chatHeaders.every((h) => h === `Bearer ${SENTINEL}`)).toBe(true);

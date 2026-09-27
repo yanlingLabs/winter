@@ -50,7 +50,7 @@ import { moveTranscriptFiles, transcriptEntriesOf, type TranscriptMoveResult } f
 import { recordLazyRekey } from "../migration/migrate-c";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
-import { CLAUDE_FIRST_PARTY_PROVIDER_IDS, DEFAULT_PROVIDER, effortRefusalFor, effortToSpendForRole, ownProviderFor, pinsFor, providerBaseUrlFor, sdkAllowRules, sdkDenyRules, winterOptionsFromSettings, type Settings } from "../settings";
+import { CLAUDE_FIRST_PARTY_PROVIDER_IDS, DEFAULT_PROVIDER, effortRefusalFor, effortToSpendForRole, ownProviderFor, permittedProviders, pinsFor, providerBaseUrlFor, sdkAllowRules, sdkDenyRules, winterOptionsFromSettings, type Settings } from "../settings";
 import { d30DefaultModel } from "./advisor-reviewer";
 import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
 import type { WinterRuntimeSdk, SessionMode } from "./create";
@@ -422,6 +422,13 @@ export interface WinterLegDeps {
    * Absent: nothing is renewed, and a `minGeneration` the store cannot meet answers `stale`.
    */
   credentialRefreshers?: Readonly<Record<string, ProviderRefresher>>;
+  /**
+   * WS-25 (review r1 (i)): the http/sse MCP servers the enabled plugins ship (`external-mcp.ts`'s
+   * `pluginMcpServersFor`), read live per incarnation. A run-home child loads plugins natively, so their
+   * servers join the MCP sign-in allowlist and the session's server list (never `options.mcpServers`).
+   * Absent: none.
+   */
+  pluginMcpServers?: () => Record<string, McpServerConfig>;
   /**
    * WS-21 (spec §4.3): the daemon's `TrustStore.isTrusted`. An approval card offers "Allow … in this
    * project" only for a trusted project (the answer is saved to its `.winter/settings.local.json`, a tier
@@ -1145,8 +1152,13 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // digest pin) is not answerable either. The configured MCP servers are passed separately because a
       // run-home incarnation's `options.mcpServers` carries only the capability servers (`extra` is
       // empty above) while the run folder carries the rest; the same fold is read here for its URLs.
-      const configuredMcp = runHomeApplied ? (deps.extraMcpServers?.(capSession) ?? {}) : extra;
-      const allowlist = sessionCredentialAllowlist(options, configuredMcp);
+      // Plugin servers join only on a run-home incarnation (the only one whose child loads plugins
+      // natively); the configured servers win a name, as the runtime's own precedence has it.
+      const configuredMcp = runHomeApplied ? { ...(deps.pluginMcpServers?.() ?? {}), ...(deps.extraMcpServers?.(capSession) ?? {}) } : extra;
+      // Review r1 (h): the catalog slots a subagent may resolve — permitted AND credentialed at spawn.
+      const permitted = new Set(permittedProviders().map((p) => p.providerId));
+      const slotProviders = new Set(Object.entries(credentials.byProvider).filter(([id, kind]) => kind !== undefined && permitted.has(id)).map(([id]) => id));
+      const allowlist = sessionCredentialAllowlist(options, configuredMcp, slotProviders);
       options.onCredentialResolve = hostCredentials.resolverFor(allowlist);
       options.onMcpOAuthRefresh = hostCredentials.mcpRefresherFor(allowlist);
       // WS-25: the same fold, kept with the incarnation (a symbol key — never on the wire), so a sign-in
