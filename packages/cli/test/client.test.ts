@@ -160,6 +160,20 @@ describe("WinterClient", () => {
     client.close();
   });
 
+  // WS-21 made `mcp.add`/`mcp.remove`/`mcp.get` default a missing scope to "local" (which needs a
+  // project cwd); the CLI's user-scope doors sent no scope, so `winter mcp add -s user` through a live
+  // daemon was refused. A user-scope add/get/remove must round-trip against a real daemon.
+  test("mcpAdd/mcpGet/mcpRemove round-trip at USER scope through a live daemon", async () => {
+    await boot();
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "mcp", onEvent: () => {} });
+    const added = await client.mcpAdd("probe", { type: "http", url: "https://example.invalid/mcp" });
+    expect(added).toMatchObject({ ok: true, name: "probe", transport: "http" });
+    expect(await client.mcpGet("probe")).toMatchObject({ ok: true, found: true, transport: "http", url: "https://example.invalid/mcp" });
+    expect(await client.mcpRemove("probe")).toMatchObject({ ok: true, removed: true });
+    expect(await client.mcpGet("probe")).toMatchObject({ found: false });
+    client.close();
+  });
+
   test("pluginList client method round-trip (no plugins installed)", async () => {
     await boot();
     const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "pl", onEvent: () => {} });
