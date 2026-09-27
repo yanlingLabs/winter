@@ -9,7 +9,8 @@ import { manifestFileState, manifestPath } from "./migration/manifest";
 import { LegacyKeychainSecretStore } from "./migration/legacy-keychain-store";
 import { TOKEN_NAMES, TokenAuthority } from "./auth/tokens";
 import { appTokenAclBootTrust, migrateAppTokenAcl, prepareAppTokenAccess, recoverAppTokenShadows, type AppTokenAccess, type AppTokenKeychain, type AppTokenTrust } from "./auth/app-token-acl";
-import { applicationPathsForBundleId, keychainUnlocked, withKeychainUserInteractionDisabled } from "./auth/keychain-ffi";
+import { applicationPathsForBundleId, keychainUnlocked, withKeychainUserInteractionDisabled, type KeychainAccess } from "./auth/keychain-ffi";
+import { migrateCredentialAcl, prepareCredentialAccess, recoverCredentialShadows, type CredentialKeychain } from "./auth/credential-acl";
 import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 import { migrateLegacyCredentialMaterial } from "./auth/credential-material";
 import { SessionStore } from "./sessions/store";
@@ -435,6 +436,24 @@ export async function startDaemon(opts: {
 
   const secrets = opts.secrets ?? new KeychainSecretStore();
 
+  // WS-27: the credential items' access lists (`auth/credential-acl.ts`) — same guards as the app-token
+  // slot below: real production boot, the profile's own default home, macOS, never fatal, skipped when the
+  // default keychain is locked, every call with user interaction disabled. HERE, before the lock, only the
+  // restore half of the shadow recovery, because `credentialPresenceFrom` just below is the first read that
+  // would treat an item an interrupted migration deleted as missing; the migration itself runs after the lock.
+  let credentialAcl: { kc: CredentialKeychain; access: KeychainAccess | undefined } | undefined;
+  if (opts.secrets === undefined && process.platform === "darwin" && isDefaultWinterHome(home, profile)) {
+    try {
+      if (!keychainUnlocked(null)) throw Object.assign(new Error("the default keychain is locked"), { name: "KeychainLocked" });
+      const kc: CredentialKeychain = { keychain: null, service: keychainService(), log: (line) => console.error(line) };
+      const access = withKeychainUserInteractionDisabled(() => prepareCredentialAccess(kc));
+      credentialAcl = { kc, access };
+      withKeychainUserInteractionDisabled(() => recoverCredentialShadows(kc, access, { dropEqualShadows: false }));
+    } catch (err) {
+      console.error(`keychain: the credential access lists were not checked (${err instanceof Error ? err.name : "error"})`);
+    }
+  }
+
   // WS-20 (review round 2, M5): computed HERE — before the settings migration, before
   // `SessionStore` construction, before the runtime-state spine's own model_ref rewrite — so all
   // three can prefer a provider this HOME actually holds a credential for, rather than the old
@@ -531,6 +550,23 @@ export async function startDaemon(opts: {
   // The shadow recovery runs FIRST and whatever the trust target — `ensureTokens` would otherwise mint a
   // fresh token for an original an interrupted migration deleted. The access objects are built once and
   // released after.
+  // WS-27, after the lock and before anything reads or refreshes a credential (the brokers, `ensureTokens`,
+  // every session): the full shadow recovery, then the once-only migration. Synchronous, so nothing in this
+  // process can run between an item's delete and its add; the lock keeps a second daemon out.
+  if (credentialAcl !== undefined) {
+    const { kc, access } = credentialAcl;
+    try {
+      withKeychainUserInteractionDisabled(() => {
+        recoverCredentialShadows(kc, access, { dropEqualShadows: true });
+        migrateCredentialAcl(kc, access, home);
+      });
+    } catch (err) {
+      console.error(`keychain: the credential access lists were not updated (${err instanceof Error ? err.name : "error"})`);
+    } finally {
+      access?.release();
+    }
+  }
+
   let appTokens: { kc: AppTokenKeychain; trust: AppTokenTrust | undefined; access: AppTokenAccess } | undefined;
   if (opts.secrets === undefined && process.platform === "darwin" && isDefaultWinterHome(home, profile)) {
     try {

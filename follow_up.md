@@ -13,7 +13,6 @@ The canonical list of known, deliberately parked work. Nothing here blocks a rel
 - [ ] `winter mcp set-secret`'s hint names `winter` even when invoked as `winter-dev`.
 
 ## Credentials and Keychain
-- [ ] Re-create the provider Keychain items with an ACL naming only `winter-core`, so "Always Allow" grants older runtime binaries collected are dropped.
 - [ ] Harden the compiled binaries so another process running as the same user can't drive them to run arbitrary code (a custom Bun base binary, or an upstream opt-out).
 - [ ] The dev daemon runs as Homebrew `bun`, so the pairing tokens it re-creates carry bun's team and Winter Dev asks once per token; run the dev daemon as a Winter-signed compiled `winter-core` instead.
 
