@@ -523,15 +523,15 @@ export const SettingsSetSkillDeniedResult = z.object({ ok: z.literal(true), name
 /**
  * Daemon settings surface batch 3 (item 3a): `status` gains two values — `"disabled"` (named in
  * `settings.mcp.disabled`; withheld from both legs) and `"unmanaged"` (a configured HTTP/SSE server
- * the DAEMON never itself connects to — no in-daemon client for those transports, see
- * `external-mcp.ts`'s header — reported so the panel can distinguish "never even attempted" from
- * "attempted and failed"). Both are ADDITIVE enum members on an existing RPC result field (not a
+ * the daemon has not connected — reported so the panel can distinguish "never even attempted" from
+ * "attempted and failed"; WS-25: a daemon whose status probe covers http/sse — production — probes them
+ * lazily and reports their real status, so `"unmanaged"` remains only where that probe is not wired). Both are ADDITIVE enum members on an existing RPC result field (not a
  * `SessionEvent` variant), so this needs none of the protocol-change checklist's event steps; the
  * Swift side stores this field as a plain `String`, never an exhaustive `switch`, so widening it
  * here cannot break `apple/WinterKit`'s build. `source`'s own enum is untouched (still
  * `"user"|"project"|"plugin"` — no "the daemon itself" slot, per this schema's neighboring RPCs'
- * own precedent). `transport` is new and optional — set ONLY on a row this daemon SYNTHESIZES rather
- * than tracks live: a configured HTTP/SSE entry the manager never itself attempted
+ * own precedent). `transport` is new and optional — set on every http/sse row (WS-25: including one
+ * the probe tracks live), and on a stdio row only where this daemon SYNTHESIZES it: a configured HTTP/SSE entry the manager never itself attempted
  * (`status: "unmanaged"`/`"disabled"`, ipc/server.ts's `mcp.list` handler), OR (fix wave, pre-merge
  * review, finding 3) a DISABLED stdio entry the manager actually stopped and dropped tracking for
  * (`McpManager.stopServer`, called from `mcp.disable`'s handler) — without this synthesis a disabled
@@ -663,8 +663,8 @@ export const McpAddParams = z.object({
 });
 /** `started`: true only when this call ALSO probed a stdio user server right now
  *  (`McpManager.startOneUserServer`, mirroring `mcp.enable`'s own re-probe; WS-24: the daemon connects,
- *  lists and closes — each session's child connects its own copy) — false for an http/sse entry (no
- *  in-daemon client for those transports) or a name also listed in `mcp.disabled`. */
+ *  lists and closes — each session's child connects its own copy) — false for an http/sse entry (WS-25:
+ *  probed lazily by the next `mcp.list` instead) or a name also listed in `mcp.disabled`. */
 export const McpAddResult = z.object({ ok: z.literal(true), name: z.string(), transport: z.enum(["stdio", "http", "sse"]), started: z.boolean(), scope: McpScopeSchema.optional() });
 
 export const McpRemoveParams = z.object({

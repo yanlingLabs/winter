@@ -2314,8 +2314,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // which would show a withheld project server as still "connected"):
       //  - a NOW-disabled server (`settings.mcp.disabled`) is reported `status: "disabled"`
       //    regardless of whatever status the manager cached at boot/ensureProject;
-      //  - a configured HTTP/SSE server is UNION'D IN even though the manager never attempted it at
-      //    all (no in-daemon client for those transports) — `status: "unmanaged"` (or `"disabled"`
+      //  - a configured HTTP/SSE server the manager has not probed is UNION'D IN (WS-25: production
+      //    probes them lazily just above; a manager without `remote` never does) — `status: "unmanaged"` (or `"disabled"`
       //    if also named in `settings.mcp.disabled`), `transport` set from its own `type`.
       // A stdio server added to settings AFTER boot is NOT synthesized here — the manager's own
       // "started at boot" gap is unrelated to this item and stays exactly as wide as it already was.
@@ -2413,7 +2413,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // recorded status — so re-enabling re-probes it, or a disable/enable round trip would need a
         // daemon restart to report a USER-tier stdio server again (the no-restart-for-settings rule).
         // Only the CONFIGURED stdio user-tier shape is probed this way (`stdioMcpServersFor`'s own
-        // narrowing — the one shape `McpManager` can connect at all); an HTTP/SSE or project
+        // narrowing — WS-25: an http/sse user server is re-probed lazily by the next `mcp.list`); an HTTP/SSE or project
         // `.winter/mcp.json` name is a no-op here, same as it always was for `mcp.enable`.
         const cfg = stdioMcpServersFor(sdkUserMcpServers(opts.winterHome), next.mcp?.disabled)[p.name];
         if (cfg) await opts.mcp?.startOneUserServer(p.name, cfg);
@@ -2446,7 +2446,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // reports a real status on the very next `mcp.list`, never after a daemon restart — the daemon's
         // status probe (`McpManager`, WS-24: it connects, lists and closes; each session's child connects
         // its own copy) covers user stdio servers only (a local or project server reaches each session's
-        // child through its own configuration), an http/sse entry has no in-daemon client, and a name
+        // child through its own configuration), an http/sse entry is probed lazily by the next `mcp.list` (WS-25), and a name
         // ALSO listed in `mcp.disabled` is not probed until enabled — `started: false` says so honestly.
         let started = false;
         if (target.scope === "user" && entry.type === "stdio") {
