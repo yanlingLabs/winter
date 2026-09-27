@@ -268,19 +268,24 @@ export function statedServerFromCanUseTool(options: unknown): StatedMcpServer | 
 }
 
 /**
- * The facts for a call whose server the runtime STATED — no split guessing: the tool is what follows
- * `mcp__<name>__`, the stored value is the config name's (and, when the server was renamed in the session,
- * the stricter of the config name's and the renamed name's — a value someone stored under `cf_2` before the
- * runtime stated the mapping keeps binding), and read-only is the stated hint. `undefined` when the statement
- * does not fit the tool name (the caller then falls back to the split resolver).
+ * The facts for a call whose server the runtime STATED — no split guessing. The tool is what follows
+ * `mcp__<name>__` — or `mcp__<configName>__`: a rule or matcher naming the DECLARED spelling of a renamed
+ * server (`cf` for an inline `cf` connected as `cf_2`) reaches the hook under that spelling. The stored value
+ * is the config name's; a value stored under the renamed name only ever TIGHTENS it, in the pinned order
+ * deny > ask > default (unset) > allow — so `cf_2`'s allow never loosens an unset `cf`. Read-only is the
+ * stated hint. `undefined` when the statement fits neither spelling (the caller then falls back).
  */
 function statedFacts(table: ConnectorPermissionTable, toolName: string, stated: StatedMcpServer): ConnectorFacts | undefined {
-  const prefix = connectorToolName(stated.name, "");
-  if (!toolName.startsWith(prefix) || toolName.length === prefix.length) return undefined;
-  const tool = toolName.slice(prefix.length);
+  let tool: string | undefined;
+  for (const server of [stated.name, stated.configName]) {
+    const prefix = connectorToolName(server, "");
+    if (toolName.startsWith(prefix) && toolName.length > prefix.length) { tool = toolName.slice(prefix.length); break; }
+  }
+  if (tool === undefined) return undefined;
   const byConfig = connectorSettingFor(table, stated.configName, tool);
   const byName = stated.name === stated.configName ? undefined : connectorSettingFor(table, stated.name, tool);
-  const applied = byName !== undefined && (byConfig === undefined || STRICTNESS[byName.permission] > STRICTNESS[byConfig.permission]) ? byName : byConfig;
+  const rank = (s: { permission: ConnectorPermission } | undefined): number => (s === undefined ? 1 : STRICTNESS[s.permission]);
+  const applied = byName !== undefined && byName.permission !== "allow" && rank(byName) > rank(byConfig) ? byName : byConfig;
   return {
     server: stated.configName, tool,
     ...(applied === undefined ? {} : { setting: applied.permission, settingSource: applied.source }),
