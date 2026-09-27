@@ -17,7 +17,6 @@ The canonical list of known, deliberately parked work. Nothing here blocks a rel
 
 ## Models and providers
 - [ ] Catalog tool-calling evidence: the 48 Anthropic-dialect rows on third-party hosts (e.g. `zai-anthropic`, `qianfan-*-anthropic`, `tencent-*-anthropic`) are hidden from session pickers only because upstream never stated tool support; probe or overlay them. Same for `nvidia/openai/gpt-oss-{120b,20b}` and the two NVIDIA Llama rows marked tool-less by a third-party registry.
-- [ ] `reviewModelSwitch` accepts `midTurnAbort`, but no caller passes it yet.
 
 ## Plan mode
 - [ ] A one-line plan-mode reminder every few turns in long plan-mode sessions (the `entered` notice drifts further from the tail).

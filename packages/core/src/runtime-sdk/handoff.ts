@@ -383,6 +383,9 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
   let sourceFit: { estimatedTokens?: number; window?: number } | undefined;
   if (sessionKey !== undefined && reviewer !== undefined) {
     let review: SwitchReview;
+    // No `midTurnAbort` (`reviewModelSwitch`'s flag for a switch that aborts a running turn): Winter never
+    // applies a switch that way — a model change is `Query.setModel`, and a provider change evicts the child
+    // at its next idle boundary (below), so the turn in flight always finishes on the source.
     try {
       review = await reviewer.reviewSwitch(sessionKey, decided);
     } catch (err) {
