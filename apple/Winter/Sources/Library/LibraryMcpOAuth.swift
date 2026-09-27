@@ -58,6 +58,11 @@ func mcpShowsClientSecretAction(_ server: McpServerRow) -> Bool {
     server.oauthPreregistered == true
 }
 
+/// The SDK codes (`data.reason`) that mean the sign-in would go to an authorization server this
+/// server's configuration must not name.
+let mcpIssuerMismatchReasons: Set<String> = ["metadata_issuer_mismatch", "client_secret_issuer_mismatch"]
+let mcpIssuerMismatchText = "this server's sign-in configuration points somewhere it shouldn't"
+
 /// PURE: maps a typed MCP-auth refusal (`error.data.code`, `RpcError.mcpAuthCode`) to plain, shown-
 /// to-the-user text — polish round 2 (daemon-oauth lane's contract addition). `nil` when `error`
 /// carries no code this build recognizes (a transport error, an untyped RPC failure, or a newer
@@ -67,13 +72,22 @@ func mcpShowsClientSecretAction(_ server: McpServerRow) -> Bool {
 /// shown as flat text; reaching this function with it unhandled would only be a caller that forgot
 /// to check `RpcError.mcpIssuerChangeConfirmation` first.
 ///
-/// The two SDK-raw codes (`sdkClientSecretIssuerMismatch`/`sdkMetadataIssuerMismatch`) share the
-/// daemon's own `clientSecretIssuerMismatch` wording rather than each getting a sentence: all three
-/// describe the same underlying fact (this server's sign-in configuration names an issuer/authorizer
-/// that doesn't match what it should) from different layers, and a user has no use for which layer
-/// caught it.
+/// The SDK's two issuer-mismatch codes arrive as `data.reason` behind a generic door code (WS-25
+/// integration: the daemon never puts an SDK code in `data.code`) and share the daemon's own
+/// `clientSecretIssuerMismatch` wording: all three describe the same fact (this server's sign-in
+/// configuration names an authorization server it shouldn't) from different layers, and a user has no
+/// use for which layer caught it.
 func mcpAuthErrorText(_ error: Error) -> String? {
-    guard let code = (error as? RpcError)?.mcpAuthCode else { return nil }
+    guard let rpc = error as? RpcError, let code = rpc.mcpAuthCode else { return nil }
+    // WS-25 integration: the daemon wraps the SDK's issuer checks under a generic door code
+    // (`mcp_login_failed`, `mcp_discovery_failed`) with the SDK's own code in `data.reason`. Both
+    // mismatches mean the same thing to the user — the server's sign-in configuration (a project's
+    // `authServerMetadataUrl`, a secret bound elsewhere) names an authorization server it must not —
+    // so the specific sentence wins over the generic one whatever door raised it.
+    if code != .issuerChangeRequiresConfirmation, code != .expectedIssuerRequired, code != .issuerChanged,
+       let reason = rpc.mcpAuthReason, mcpIssuerMismatchReasons.contains(reason) {
+        return mcpIssuerMismatchText
+    }
     switch code {
     case .issuerChangeRequiresConfirmation:
         return nil
@@ -89,8 +103,8 @@ func mcpAuthErrorText(_ error: Error) -> String? {
         return "this action needs a project directory this panel doesn't have"
     case .clientSecretUnavailable:
         return "no client secret is stored for this server"
-    case .clientSecretIssuerMismatch, .sdkClientSecretIssuerMismatch, .sdkMetadataIssuerMismatch:
-        return "this server's sign-in configuration points somewhere it shouldn't"
+    case .clientSecretIssuerMismatch:
+        return mcpIssuerMismatchText
     case .loginFailed:
         return "sign-in failed"
     case .secretNeedsUserScope:
