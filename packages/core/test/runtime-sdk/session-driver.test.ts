@@ -1059,13 +1059,17 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
       const request = { serverName: "linear", message: "Connect", mode: "url" as const, url: "https://linear.app/oauth?code=OTC-1" };
       const answered = options.onElicitation!(request, { signal, requestId: "r1" });
       await Bun.sleep(5);
-      const [card] = t.store.read(sid).filter((e) => e.type === "elicitation_requested") as Array<{ elicitationId: string; url: string; host: string }>;
-      expect(card).toMatchObject({ url: "https://linear.app/oauth?code=OTC-1", host: "linear.app" });
+      const [card] = t.store.read(sid).filter((e) => e.type === "elicitation_requested") as Array<{ elicitationId: string; host: string }>;
+      expect(card).toMatchObject({ host: "linear.app", origin: "https://linear.app" });
+      // The url is held in memory for the local client that opens it, never written to the log.
+      expect(elicitations.urlFor(sid, card!.elicitationId)?.url).toBe("https://linear.app/oauth?code=OTC-1");
+      expect(JSON.stringify(t.store.read(sid))).not.toContain("OTC-1");
       elicitations.respond(sid, card!.elicitationId, "accept", "orb");
       expect(await answered).toEqual({ action: "accept" });
       expect(t.store.read(sid).filter((e) => e.type === "elicitation_resolved")).toMatchObject([{ action: "accept", by: "orb" }]);
-      // A card still open when the main turn completes is cancelled with it.
+      // A card raised during a main turn is cancelled when that turn completes.
       await session.send("hello", "cli");
+      await Bun.sleep(5);
       const open = options.onElicitation!(request, { signal, requestId: "r2" });
       await Bun.sleep(5);
       t.q().emit(result());

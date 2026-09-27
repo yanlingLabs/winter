@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { SessionEvent, type NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import { ELICITATION_MESSAGE_MAX_LENGTH, ELICITATION_URL_MAX_LENGTH } from "@yanlinglabs/winter-protocol";
-import { checkElicitationUrl, elicitationHandlerFor, ElicitationBroker, type UrlElicitationDeps } from "../../src/runtime-sdk/url-elicitation";
+import { checkElicitationUrl, elicitationHandlerFor, elicitationTurnTracker, ElicitationBroker, type UrlElicitationDeps } from "../../src/runtime-sdk/url-elicitation";
 
 /** A distinctive one-time code: every url below carries it, so "not in the log" is never vacuous. */
 const CODE = "OTC-9f3a-NOTINLOG";
@@ -76,13 +76,16 @@ describe("elicitationHandlerFor", () => {
     const id = await cardRaised(h);
     expect(h.events[0]).toMatchObject({
       type: "elicitation_requested", sessionId: "s1", threadId: "main", mode: "url",
-      serverName: "linear", message: "Connect your workspace", url: URL_OK, host: "auth.example.com",
+      serverName: "linear", message: "Connect your workspace", host: "auth.example.com", origin: "https://auth.example.com",
       issuedAt: 1_000,
     });
     expect(h.broker.pendingIds("s1")).toEqual([id]);
+    // The url lives in the broker while the card is pending — and only then.
+    expect(h.broker.urlFor("s1", id)).toEqual({ url: URL_OK, host: "auth.example.com" });
     expect(h.broker.respond("s1", id, "accept", "orb")).toEqual({ ok: true, alreadyResolved: false });
     expect(await pending).toEqual({ action: "accept" });
     expect(h.events[1]).toEqual({ type: "elicitation_resolved", sessionId: "s1", threadId: "main", elicitationId: id, action: "accept", by: "orb" });
+    expect(h.broker.urlFor("s1", id)).toBeUndefined();
     // First response wins.
     expect(h.broker.respond("s1", id, "decline", "orb")).toEqual({ ok: true, alreadyResolved: true });
   });
@@ -95,13 +98,15 @@ describe("elicitationHandlerFor", () => {
     expect(h.events[1]).toMatchObject({ type: "elicitation_resolved", action: "decline" });
   });
 
-  test("the full url is on the card but never in a log line — the origin at most", async () => {
+  test("the full url is never persisted and never in a log line — the origin at most", async () => {
     const h = harness();
     const pending = h.ask(urlRequest());
     const id = await cardRaised(h);
+    expect(h.broker.urlFor("s1", id)?.url).toContain(CODE);
     h.broker.respond("s1", id, "accept", "orb");
     await pending;
-    expect(JSON.stringify(h.events)).toContain(CODE);
+    expect(JSON.stringify(h.events)).not.toContain(CODE);
+    expect(JSON.stringify(h.events)).not.toContain("/connect");
     expect(h.logs.length).toBeGreaterThan(0);
     for (const line of h.logs) expect(line).not.toContain(CODE);
     expect(h.logs.some((l) => l.includes("origin=https://auth.example.com"))).toBe(true);
@@ -142,6 +147,18 @@ describe("elicitationHandlerFor", () => {
     expect(card.message.endsWith("…")).toBe(true);
     expect(card.serverName.length).toBe(128);
     expect(card.serverName).not.toContain("\n");
+    h.broker.respond("s1", id, "decline", "orb");
+    await pending;
+  });
+
+  test("bidi override, isolate and mark characters are stripped from the server name and the message", async () => {
+    const h = harness();
+    const bidi = "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200e\u200f";
+    const pending = h.ask(urlRequest(URL_OK, { serverName: `li${bidi}near`, message: `Con${bidi}nect\nnow` }));
+    const id = await cardRaised(h);
+    const card = h.events[0] as Extract<NewSessionEvent, { type: "elicitation_requested" }>;
+    expect(card.serverName).toBe("linear");
+    expect(card.message).toBe("Connect\nnow");
     h.broker.respond("s1", id, "decline", "orb");
     await pending;
   });
@@ -188,19 +205,58 @@ describe("elicitationHandlerFor", () => {
     expect(pre.events).toEqual([]);
   });
 
-  test("an unanswered card is cancelled at its timeout; the session's turn end cancels what is left", async () => {
+  test("an unanswered card is cancelled at its timeout", async () => {
     const h = harness({ timeoutMs: 20 });
     const pending = h.ask(urlRequest());
-    await cardRaised(h);
+    const id = await cardRaised(h);
     expect(await pending).toEqual({ action: "cancel" });
     expect(h.events[1]).toMatchObject({ type: "elicitation_resolved", action: "cancel", by: "timeout" });
-    const t = harness();
-    const open = t.ask(urlRequest());
+    expect(h.broker.urlFor("s1", id)).toBeUndefined();
+  });
+
+  test("a card is tagged with the turn running when it was raised; a turn's end cancels only its own cards", async () => {
+    let turn: number | undefined = 1;
+    const t = harness({ currentTurn: () => turn });
+    const first = t.ask(urlRequest());
     await cardRaised(t);
-    expect(t.broker.cancelSession("other", "turn-ended")).toBe(0);
-    expect(t.broker.cancelSession("s1", "turn-ended")).toBe(1);
-    expect(await open).toEqual({ action: "cancel" });
-    expect(t.events[1]).toMatchObject({ action: "cancel", by: "turn-ended" });
+    turn = undefined; // raised between turns
+    const between = t.handler(urlRequest(), { signal: new AbortController().signal, requestId: "r2" });
+    await Bun.sleep(5);
+    expect(t.broker.pendingIds("s1")).toHaveLength(2);
+    expect(t.broker.cancelTurn("other", 1, "turn-ended")).toBe(0);
+    expect(t.broker.cancelTurn("s1", 2, "turn-ended")).toBe(0);
+    expect(t.broker.cancelTurn("s1", 1, "turn-ended")).toBe(1);
+    expect(await first).toEqual({ action: "cancel" });
+    expect(t.broker.pendingIds("s1")).toEqual(["el_r2"]);
+    t.broker.respond("s1", "el_r2", "decline", "orb");
+    expect(await between).toEqual({ action: "decline" });
+  });
+
+  test("the turn tracker: a main turn's end cancels its cards; a subagent's turn end and a card between turns are left alone", async () => {
+    const broker = new ElicitationBroker();
+    const turns = elicitationTurnTracker(broker, "s1");
+    const tagged = elicitationHandlerFor({ sessionId: "s1", mode: "code", policy: () => "ask", broker, emit: () => {}, log: { info: () => {}, error: () => {} }, currentTurn: () => turns.current() });
+    const ask = (id: string) => tagged(urlRequest(), { signal: new AbortController().signal, requestId: id });
+    turns.observe({ type: "turn_started", threadId: "main" });
+    expect(turns.current()).toBe(1);
+    const inTurn = ask("a");
+    await Bun.sleep(2);
+    // A subagent's turn events are not the main turn's: nothing is cancelled, the count is untouched.
+    turns.observe({ type: "turn_started", threadId: "toolu_child" });
+    turns.observe({ type: "turn_completed", threadId: "toolu_child" });
+    expect(turns.current()).toBe(1);
+    expect(broker.pendingIds("s1")).toEqual(["el_a"]);
+    turns.observe({ type: "turn_completed", threadId: "main" });
+    expect(await inTurn).toEqual({ action: "cancel" });
+    expect(turns.current()).toBeUndefined();
+    // Raised between turns: the next turn's end leaves it alone.
+    const between = ask("b");
+    await Bun.sleep(2);
+    turns.observe({ type: "turn_started", threadId: "main" });
+    turns.observe({ type: "turn_completed", threadId: "main" });
+    expect(broker.pendingIds("s1")).toEqual(["el_b"]);
+    broker.respond("s1", "el_b", "decline", "orb");
+    expect(await between).toEqual({ action: "decline" });
   });
 
   test("a card that cannot be raised declines and leaves nothing pending", async () => {

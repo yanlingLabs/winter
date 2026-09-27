@@ -11,7 +11,9 @@
 //     opens it (the Mac does). The daemon opens nothing.
 //   - It is a connector prompt (WS-26): it cards in code, chat and dispatch sessions alike, while a
 //     dispatch CHILD keeps its never-prompt rule and declines, as does a `dont-ask` session.
-//   - The url may carry a one-time code, so no log line here ever names more than its origin.
+//   - The url may carry a one-time code: it is never PERSISTED (the card carries its host and origin)
+//     and no log line names more than its origin. The broker holds it in memory while the card is
+//     pending, and a local client about to open it asks for it (`elicitation.url`).
 //
 // Its own broker rather than `ApprovalBroker`: `approval.respond` and `approval.list` are reachable
 // from the phone (`REMOTE_ALLOWED_METHODS`), and neither may answer or list one of these — the phone
@@ -38,7 +40,11 @@ export interface ElicitationOutcome { action: ElicitationAction; by: string }
  *  server's own request timeout usually ends the wait on its side well before). */
 export const ELICITATION_CARD_TIMEOUT_MS = 10 * 60_000;
 
-interface PendingEntry {
+/** What a pending card keeps in memory only. `turn` is the main turn in progress when the card was
+ *  raised (the driver's own count), or `undefined` for one raised between turns. */
+export interface ElicitationPendingMeta { url: string; host: string; turn?: number }
+
+interface PendingEntry extends ElicitationPendingMeta {
   sessionId: string;
   elicitationId: string;
   resolve: (o: ElicitationOutcome) => void;
@@ -52,7 +58,7 @@ export class ElicitationBroker {
 
   private key(sessionId: string, elicitationId: string): string { return `${sessionId}:${elicitationId}`; }
 
-  wait(sessionId: string, elicitationId: string, timeoutMs: number): Promise<ElicitationOutcome> {
+  wait(sessionId: string, elicitationId: string, timeoutMs: number, meta: ElicitationPendingMeta): Promise<ElicitationOutcome> {
     return new Promise((resolve) => {
       const k = this.key(sessionId, elicitationId);
       const timer = setTimeout(() => {
@@ -60,8 +66,14 @@ export class ElicitationBroker {
         resolve({ action: "cancel", by: "timeout" });
       }, timeoutMs);
       timer.unref?.();
-      this.pending.set(k, { sessionId, elicitationId, resolve, timer });
+      this.pending.set(k, { ...meta, sessionId, elicitationId, resolve, timer });
     });
+  }
+
+  /** The url of a card that is STILL pending — the only moment it exists anywhere (`elicitation.url`). */
+  urlFor(sessionId: string, elicitationId: string): { url: string; host: string } | undefined {
+    const e = this.pending.get(this.key(sessionId, elicitationId));
+    return e === undefined ? undefined : { url: e.url, host: e.host };
   }
 
   respond(sessionId: string, elicitationId: string, action: ElicitationAction, by: string): { ok: true; alreadyResolved: boolean } {
@@ -74,11 +86,12 @@ export class ElicitationBroker {
     return { ok: true, alreadyResolved: false };
   }
 
-  /** Cancels every card still pending for a session (its turn ended with them outstanding). */
-  cancelSession(sessionId: string, by: string): number {
+  /** Cancels the cards raised during one main turn of a session (that turn ended with them open).
+   *  A card raised between turns (`turn` undefined) is left for its own timeout or the session's end. */
+  cancelTurn(sessionId: string, turn: number, by: string): number {
     let n = 0;
     for (const e of [...this.pending.values()]) {
-      if (e.sessionId !== sessionId) continue;
+      if (e.sessionId !== sessionId || e.turn !== turn) continue;
       this.respond(sessionId, e.elicitationId, "cancel", by);
       n++;
     }
@@ -113,6 +126,9 @@ export function checkElicitationUrl(raw: unknown): ElicitationUrlCheck {
   const url = parsed.href;
   if (url.length > ELICITATION_URL_MAX_LENGTH) return { ok: false, reason: `url longer than ${ELICITATION_URL_MAX_LENGTH} characters` };
   if (parsed.host.length > ELICITATION_HOST_MAX_LENGTH) return { ok: false, reason: "host too long" };
+  // `host` and `origin` both come from this one parse, never from the request's own fields; the
+  // event schema refuses a line where they disagree.
+  if (parsed.origin !== `https://${parsed.host}`) return { ok: false, reason: "origin does not match host" };
   return { ok: true, url, host: parsed.host, origin: parsed.origin };
 }
 
@@ -121,10 +137,19 @@ function capText(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
-/** A server name for a log line or a card: one line, bounded, never empty. */
+/** Bidi embedding/override/isolate controls and the directional marks (U+202A–202E, U+2066–2069,
+ *  U+200E/200F): a server could otherwise reorder how its own name or message reads on the card. */
+const BIDI_CONTROLS = /[\u202a-\u202e\u2066-\u2069\u200e\u200f]/g;
+
+/** A server name for a log line or a card: one line, no bidi controls, bounded, never empty. */
 function displayServerName(name: string): string {
-  const oneLine = name.replace(/[\u0000-\u001f\u007f]/g, " ").trim();
+  const oneLine = name.replace(BIDI_CONTROLS, "").replace(/[\u0000-\u001f\u007f]/g, " ").trim();
   return capText(oneLine === "" ? "unnamed server" : oneLine, ELICITATION_SERVER_NAME_MAX_LENGTH);
+}
+
+/** A message for a card: no bidi controls, bounded. Line breaks stay (the card shows paragraphs). */
+function displayMessage(message: unknown): string {
+  return capText(typeof message === "string" ? message.replace(BIDI_CONTROLS, "") : "", ELICITATION_MESSAGE_MAX_LENGTH);
 }
 
 export interface UrlElicitationDeps {
@@ -140,6 +165,33 @@ export interface UrlElicitationDeps {
   now?: () => number;
   timeoutMs?: number;
   threadId?: string;
+  /** The main turn in progress right now, if any (the driver's count — see `ElicitationPendingMeta.turn`).
+   *  The SDK's request names no turn or tool call, so the daemon tags a card by timing: the turn
+   *  running when it was raised. */
+  currentTurn?: () => number | undefined;
+}
+
+/** Which main turn a session is in, for tagging cards and cancelling a finished turn's cards. Fed
+ *  every event the driver appends. The SDK's request names no turn or tool call, so a card is tagged
+ *  by timing — the main turn running when it was raised — and a main `turn_completed` cancels exactly
+ *  that turn's cards. A card raised between turns is left for its timeout or the session's end; a
+ *  subagent's (non-main) turn events touch nothing. */
+export function elicitationTurnTracker(broker: ElicitationBroker, sessionId: string): {
+  observe(event: { type: string; threadId?: string }): void;
+  current(): number | undefined;
+} {
+  let count = 0;
+  let current: number | undefined;
+  return {
+    observe(event) {
+      if (event.type !== "turn_started" && event.type !== "turn_completed") return;
+      if (event.threadId !== undefined && event.threadId !== "main") return;
+      if (event.type === "turn_started") { current = ++count; return; }
+      if (current !== undefined) broker.cancelTurn(sessionId, current, "turn-ended");
+      current = undefined;
+    },
+    current: () => current,
+  };
 }
 
 const DECLINE = { action: "decline" } as const;
@@ -165,16 +217,18 @@ export function elicitationHandlerFor(deps: UrlElicitationDeps): OnElicitation {
     if (signal.aborted) return { action: "cancel" };
 
     const elicitationId = `el_${requestId}`;
-    const message = capText(typeof request.message === "string" ? request.message : "", ELICITATION_MESSAGE_MAX_LENGTH);
+    const message = displayMessage(request.message);
     const timeoutMs = deps.timeoutMs ?? ELICITATION_CARD_TIMEOUT_MS;
     const issuedAt = now();
     // Wait registered BEFORE the emit: the append is synchronous, and a client answering the moment
     // it sees the card would otherwise answer an unregistered wait.
-    const waiting = deps.broker.wait(sessionId, elicitationId, timeoutMs);
+    const turn = deps.currentTurn?.();
+    const waiting = deps.broker.wait(sessionId, elicitationId, timeoutMs, { url: check.url, host: check.host, ...(turn === undefined ? {} : { turn }) });
     try {
+      // The url itself stays in the broker: it is never written to the session log.
       deps.emit({
         type: "elicitation_requested", sessionId, threadId, elicitationId, mode: "url",
-        serverName: server, message, url: check.url, host: check.host,
+        serverName: server, message, host: check.host, origin: check.origin,
         issuedAt, expiresAt: issuedAt + timeoutMs,
       });
     } catch (err) {

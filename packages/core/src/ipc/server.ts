@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { z } from "zod";
 import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
-  HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams,
+  HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE,
   SessionHistoryParams,
   ApprovalListParams,
   SessionAddDirParams, SessionSetCwdParams, TrustDirParams,
@@ -3102,6 +3102,16 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "elicitation.respond is available to local clients only");
         const p = parseParams(ElicitationRespondParams, params);
         return opts.elicitations?.respond(p.sessionId, p.elicitationId, p.action, socket.data.clientName) ?? { ok: true, alreadyResolved: true };
+      }
+      case METHODS.elicitationUrl: {
+        // WS-27: the full url of a PENDING card, for the local client about to open it — the url is
+        // never persisted, so this is the only door to it, and it closes when the card does. Same
+        // harness-only gate as `elicitation.respond`. Never logged.
+        if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "elicitation.url is available to local clients only");
+        const p = parseParams(ElicitationUrlParams, params);
+        const pending = opts.elicitations?.urlFor(p.sessionId, p.elicitationId);
+        if (pending === undefined) throw new RpcFailure(ERR.NOT_FOUND, "this link request is no longer active", { code: ELICITATION_NOT_ACTIVE });
+        return { url: pending.url };
       }
       case METHODS.approvalList: {
         // SP3 T4b: queryable pending-approval state (remote-allowlisted so a phone can render live
