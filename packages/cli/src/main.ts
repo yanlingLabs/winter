@@ -48,6 +48,7 @@ import {
   runMcpAddRoute, runMcpAddJsonRoute, runMcpRemoveRoute, runMcpGetRoute,
   renderMcpAddOutcome, renderMcpRemoveOutcome, renderMcpGetOutcome,
   runMcpLoginRoute, runMcpLogoutRoute, runMcpSetSecretRoute, renderMcpAuthOutcome, mcpAuthNote, type McpAuthDeps,
+  runMcpPermissionsRoute, renderMcpPermissionsOutcome,
 } from "./mcp-cli";
 import { formatElapsed, formatTokens } from "./task-display";
 import { formatRoutineDetail } from "./routines-cli";
@@ -1984,11 +1985,22 @@ if (import.meta.main) {
       process.exit(outcome.ok ? 0 : 1);
     }
 
+    // WS-26: `permissions` — the connector permissions (`mcp-cli.ts`'s section says how). Non-interactive,
+    // through the daemon when it is live (never `connect()`'s auto-launch), else settings.json directly.
+    if (sub === "permissions") {
+      const door = await openCredentialDaemonDoor();
+      const outcome = await runMcpPermissionsRoute(rest, { cwd: process.cwd(), winterHome: resolveWinterHome(), ...(door !== undefined ? { door } : {}) });
+      if (outcome.ok) console.log(renderMcpPermissionsOutcome(outcome));
+      else console.error(renderMcpPermissionsOutcome(outcome));
+      door?.close();
+      process.exit(outcome.ok ? 0 : 1);
+    }
+
     // Skipped, deliberately (see the report): `serve` (Winter has no "act as an MCP server" mode),
     // `add-from-claude-desktop` (an Ink dialog over Claude Desktop's OWN config format — not
     // trivially mappable), `reset-project-choices` (Winter has no per-project approve/reject ledger
     // for `.mcp.json` servers — `winter trust`'s directory-level TrustStore is the only gate).
-    console.error("usage: winter mcp [list] | get <name> | login <name> [--yes] [--confirm-issuer-change] | logout <name> [--forget-client] | set-secret <name> [--from-clipboard [--issuer <issuer>]] | add [-s local|user|project] [-t stdio|sse|http] [-e KEY=value...] [-H \"Name: value\"...] [--version-negotiation legacy|auto|<revision>] <name> <commandOrUrl> [-- args...] | add-json [-s local|user|project] <name> <json> | remove <name> [-s local|user|project]");
+    console.error("usage: winter mcp [list] | get <name> | login <name> [--yes] [--confirm-issuer-change] | logout <name> [--forget-client] | set-secret <name> [--from-clipboard [--issuer <issuer>]] | add [-s local|user|project] [-t stdio|sse|http] [-e KEY=value...] [-H \"Name: value\"...] [--version-negotiation legacy|auto|<revision>] <name> <commandOrUrl> [-- args...] | add-json [-s local|user|project] <name> <json> | remove <name> [-s local|user|project] | permissions <server> [<tool> | '*'] [allow|ask|deny|default] [--reset]");
     process.exit(1);
   }
   case "plugin": {
