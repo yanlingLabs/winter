@@ -41,6 +41,10 @@ export interface PendingCardsProps {
   onApprove: (callId: string, yes: boolean, optionId?: string) => void;
   onAnswer: (callId: string, payload: AnswerPayload) => void;
   onPlan: (callId: string, resp: ReturnType<typeof parsePlanResponse>) => void;
+  /** WS-27: a URL-mode elicitation card's answer — `open` true = the user chose to open the link
+   *  (the App fetches, checks and opens it, then accepts). Optional so older call sites compile;
+   *  absent, the card declines. */
+  onElicitation?: (elicitationId: string, open: boolean, host: string) => void;
   /** TUI renderer T3 — the PLAN card's visible body-line budget (App passes
    *  `bottomBarLayout(...).planBodyRows`, its share of the ≤50% chrome cap): past it, the body
    *  truncates to its FIRST lines plus one dim `… +N more lines` disclosure (`capPlanBody`).
@@ -320,7 +324,35 @@ function QuestionCard({ pending, onAnswer }: { pending: Extract<PendingCard, { k
   );
 }
 
-export function PendingCards({ pending, onApprove, onAnswer, onPlan, planBodyRows }: PendingCardsProps) {
+/** WS-27: only "o"/"open" opens — not "y"/"yes", so a reflexive approval keystroke never opens a
+ *  browser; anything else (a bare Enter included) declines — fail-safe, like the approval card.
+ *  Exported for unit tests. */
+export function parseElicitationChoice(line: string): boolean {
+  const t = line.trim().toLowerCase();
+  return t === "o" || t === "open";
+}
+
+type ElicitationCardPending = Extract<PendingCard, { kind: "elicitation" }>;
+
+/** WS-27: an MCP server asks the user to open a link. Server, message and the link's HOST — never the
+ *  url, which is not on the card at all (the App fetches it only to open it). */
+function ElicitationCard({ pending, onElicitation }: { pending: ElicitationCardPending; onElicitation?: PendingCardsProps["onElicitation"] }) {
+  const [buffer, setBuffer] = useBufferedInput((line) => {
+    const open = parseElicitationChoice(line);
+    if (onElicitation) onElicitation(pending.elicitationId, open, pending.host);
+    setBuffer("");
+  });
+  return (
+    <Box flexDirection="column">
+      <Text color={theme.permission}>{pending.serverName} asks you to open a link</Text>
+      {pending.message.length > 0 ? <Text dimColor>{pending.message}</Text> : null}
+      <Text>{"  → "}<Text bold>{pending.host}</Text></Text>
+      <Text>[o] open in your browser  [N] decline {buffer}</Text>
+    </Box>
+  );
+}
+
+export function PendingCards({ pending, onApprove, onAnswer, onPlan, onElicitation, planBodyRows }: PendingCardsProps) {
   switch (pending.kind) {
     case "approval":
       return <ApprovalCard pending={pending} onApprove={onApprove} />;
@@ -328,6 +360,8 @@ export function PendingCards({ pending, onApprove, onAnswer, onPlan, planBodyRow
       return <QuestionCard pending={pending} onAnswer={onAnswer} />;
     case "plan":
       return <PlanCard pending={pending} onPlan={onPlan} planBodyRows={planBodyRows} />;
+    case "elicitation":
+      return <ElicitationCard pending={pending} onElicitation={onElicitation} />;
     default: {
       const _exhaustive: never = pending;
       return _exhaustive;

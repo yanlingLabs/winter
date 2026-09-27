@@ -227,7 +227,9 @@ struct WindowContentView<Accessory: View>: View {
                 draftBinding: { callId in adapter.pendingCardDraftBinding(for: callId) },
                 onApproval: adapter.onApprovalRespond,
                 onQuestion: adapter.onQuestionRespond,
-                onPlan: adapter.onPlanRespond
+                onPlan: adapter.onPlanRespond,
+                onElicitation: adapter.onElicitationRespond,
+                inactiveElicitations: adapter.inactiveElicitations
             ), onOpenDiff: onOpenDiff, onOpenFile: onOpenFile,
             sessionHasWorkingDirectory: sessionHasWorkingDirectory,
             bottomOverlayInset: topBleed > 0 ? composerClusterHeight : 0)

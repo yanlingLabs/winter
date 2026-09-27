@@ -12,6 +12,9 @@ export function applyEvent(s: WatchdogState, e: { type: string }, now: number): 
     case "tool_result": s.toolsInFlight = Math.max(0, s.toolsInFlight - 1); break;
     case "approval_requested": s.approvalsPending++; break;
     case "approval_resolved": s.approvalsPending = Math.max(0, s.approvalsPending - 1); break;
+    // WS-27: a link card waiting on a human is legitimate silence too.
+    case "elicitation_requested": s.approvalsPending++; break;
+    case "elicitation_resolved": s.approvalsPending = Math.max(0, s.approvalsPending - 1); break;
   }
 }
 

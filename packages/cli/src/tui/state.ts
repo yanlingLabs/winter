@@ -72,7 +72,11 @@ export type Block =
  *  App's child view uses this to surface `thread.send`'s queued/resumed feedback and RPC-error
  *  notes (unknown agent, resume-refused) right where the user is looking, never crashing the TUI.
  *  Omitted (main transcript) is the pre-existing behavior, byte-identical. */
-export type LocalEvent = { type: "local_note"; text: string; threadId?: string };
+export type LocalEvent =
+  | { type: "local_note"; text: string; threadId?: string }
+  // WS-27: the App found a URL-mode elicitation card no longer active (its url fetch or its answer
+  // said so) — clear the card locally, since no `elicitation_resolved` reached this client for it.
+  | { type: "local_elicitation_inactive"; elicitationId: string };
 
 /** `AgentRow` IS `CliSubagent`-shaped (the brief's interface matches it field-for-field) — reuse the
  *  type directly rather than re-declaring an equivalent interface that could drift out of lockstep.
@@ -94,7 +98,10 @@ export type PendingCard =
   // exactly as before this field existed (pending-cards.tsx's (d1a) byte-identical pin).
   | { kind: "approval"; callId: string; toolName: string; summary: string; reviewerReason?: string; options?: ApprovalOption[] }
   | { kind: "question"; callId: string; questions: unknown[] }
-  | { kind: "plan"; callId: string; plan: string };
+  | { kind: "plan"; callId: string; plan: string }
+  // WS-27: an MCP server's URL-mode elicitation. The link itself is never here — only its host; the
+  // App fetches it (`elicitation.url`) only when the user chooses to open it.
+  | { kind: "elicitation"; elicitationId: string; serverName: string; message: string; host: string };
 
 export interface TuiState {
   committed: Block[]; // → <Static> (Task 3)
@@ -513,6 +520,27 @@ function reduceCore(s: TuiState, e: WireEvent, nowMs: number): TuiState {
 
     case "plan_presented":
       return { ...s, pending: { kind: "plan", callId: str(e.callId), plan: str(e.plan) } };
+
+    case "elicitation_requested": {
+      if (e.threadId !== undefined && e.threadId !== MAIN) return s;
+      return {
+        ...s,
+        pending: { kind: "elicitation", elicitationId: str(e.elicitationId), serverName: str(e.serverName), message: str(e.message), host: str(e.host) },
+      };
+    }
+
+    case "elicitation_resolved": {
+      // Host only — the url is never on the wire here, and never printed.
+      const card = s.pending?.kind === "elicitation" && s.pending.elicitationId === e.elicitationId ? s.pending : undefined;
+      const what = e.action === "accept" ? "opened" : e.action === "decline" ? "declined" : "cancelled";
+      const text = `link request${card ? ` from ${card.serverName} (${card.host})` : ""} ${what}`;
+      return { ...s, pending: card ? null : s.pending, committed: [...s.committed, { kind: "note", text }] };
+    }
+
+    case "local_elicitation_inactive": {
+      if (s.pending?.kind !== "elicitation" || s.pending.elicitationId !== e.elicitationId) return s;
+      return { ...s, pending: null };
+    }
 
     case "plan_resolved": {
       // Same wording as main.ts:618 (minus ANSI): "plan approved[ (auto-accept edits)]" / "plan rejected".

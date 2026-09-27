@@ -349,6 +349,21 @@ final class AppModel: ObservableObject {
         return (try? await client.askUserRespond(sessionId: sid, callId: callId, answers: answers, notes: notes.isEmpty ? nil : notes)) != nil
     }
 
+    /// WS-27: the focused session's URL-mode elicitation card. The link was already opened by the
+    /// surface (`answerElicitation`) when `accept` is true; this only tells the daemon.
+    /// `alreadyResolved: true` → `.inactive`: the card is resolved locally.
+    func respondElicitation(elicitationId: String, accept: Bool) async -> ElicitationSendResult {
+        guard let sid = focusedSessionId, pendingCallIdIsCurrent(elicitationId) else { return .failed }
+        return elicitationSendResult(alreadyResolved: try? await client.elicitationRespond(sessionId: sid, elicitationId: elicitationId, accept: accept))
+    }
+
+    /// WS-27: the focused session's pending card url, fetched only to open it; `nil` once it is no
+    /// longer active. Never logged.
+    func elicitationURL(elicitationId: String) async -> String? {
+        guard let sid = focusedSessionId, pendingCallIdIsCurrent(elicitationId) else { return nil }
+        return try? await client.elicitationURL(sessionId: sid, elicitationId: elicitationId)
+    }
+
     func respondPlan(callId: String, approved: Bool, autoAccept: Bool, feedback: String?) async -> Bool {
         guard let sid = focusedSessionId, pendingCallIdIsCurrent(callId) else { return false }
         return (try? await client.planRespond(sessionId: sid, callId: callId, approved: approved, autoAccept: autoAccept, feedback: feedback)) != nil

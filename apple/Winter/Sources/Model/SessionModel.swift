@@ -88,12 +88,17 @@ enum PendingInteraction: Equatable {
     case approval(callId: String, toolName: String, summary: String, reviewerReason: String? = nil, childSessionId: String? = nil, options: [SessionEvent.ApprovalOption]? = nil)
     case question(callId: String, questions: [SessionEvent.Question], childSessionId: String? = nil)
     case plan(callId: String, plan: String)
+    /// WS-27: an MCP server's URL-mode elicitation — "open this link". `callId` is the wire's
+    /// `elicitationId`. The link itself is never on the wire here — only its `host` and `origin`
+    /// (always https); the surface fetches it (`elicitation.url`) only when the user opens it.
+    case urlElicitation(callId: String, serverName: String, message: String, host: String, origin: String, expiresAt: Int)
 
     var callId: String {
         switch self {
         case .approval(let callId, _, _, _, _, _): return callId
         case .question(let callId, _, _): return callId
         case .plan(let callId, _): return callId
+        case .urlElicitation(let callId, _, _, _, _, _): return callId
         }
     }
 }
@@ -119,6 +124,8 @@ struct InteractionRecord: Equatable {
         case approval(toolName: String, summary: String, reviewerReason: String? = nil, options: [SessionEvent.ApprovalOption]? = nil)
         case question(questions: [SessionEvent.Question])
         case plan(plan: String)
+        /// WS-27: `elicitation_requested` — an MCP server asked the user to open a link.
+        case urlElicitation(serverName: String, message: String, host: String, origin: String, expiresAt: Int)
     }
 
     /// How the ask ended. `nil` on the record means STILL PENDING, and that is the single source of
@@ -157,6 +164,9 @@ struct InteractionRecord: Equatable {
         case question(answers: [String: String], notes: [String: String], by: String)
         /// `plan_resolved`.
         case plan(approved: Bool, autoAccept: Bool, feedback: String?, by: String)
+        /// WS-27: `elicitation_resolved` — `action` is `"accept"` (the user opened the link),
+        /// `"decline"`, or the daemon's own `"cancel"` (the turn or session ended, or it timed out).
+        case elicitation(action: String, by: String)
         /// The turn ended (`turn_completed`/`agent_error`) while this ask was still outstanding, so
         /// no `*_resolved` will ever arrive for it. Terminal, and deliberately NOT an outcome: the
         /// card freezes saying nothing was recorded rather than claiming a decision nobody made.
@@ -189,6 +199,7 @@ struct InteractionRecord: Equatable {
         case .approval(_, let summary, _, _): return summary
         case .question(let questions): return questions.first?.question ?? "question"
         case .plan: return "plan presented"
+        case .urlElicitation(let serverName, _, let host, _, _): return "\(serverName) asks to open \(host)"
         }
     }
 }
@@ -214,7 +225,15 @@ func interactionIsPending(_ record: InteractionRecord) -> Bool { record.outcome 
 /// approval the child was actively blocked on) AND it closed the Mac's only door to answering it,
 /// since `onApproval`/`onQuestion` already thread `childSessionId` straight through to the child.
 /// Not stamping keeps the card live, which is what it honestly is.
-func interactionEndsWithItsTurn(_ record: InteractionRecord) -> Bool { record.childSessionId == nil }
+///
+/// **Also false for a URL-mode elicitation card** (WS-27): the daemon resolves every one of those
+/// itself — `turn-ended` for a card raised during the main turn, `timeout`, `aborted` — so the turn
+/// ending is no evidence here either, and a card raised BETWEEN turns is still live (and answerable)
+/// after the next turn completes. Its `elicitation_resolved` is what freezes it.
+func interactionEndsWithItsTurn(_ record: InteractionRecord) -> Bool {
+    if case .urlElicitation = record.ask { return false }
+    return record.childSessionId == nil
+}
 
 /// Whether a newly-arrived outcome may be written over what a record already holds.
 ///
@@ -544,6 +563,19 @@ struct OrbSessionState: Equatable {
 
 /// PURE state derivation — every UI face (orb now; field/chat in 2c/2e) reads this.
 enum SessionReducer {
+    /// WS-27: drops a URL-mode elicitation card this surface found no longer active from the
+    /// OUTSTANDING list (the orb's approval-needed count), re-deriving `status` exactly as a
+    /// `*_resolved` would. Any other kind of ask, or an unknown id, is left alone. The transcript card
+    /// freezes separately (`FieldStateAdapter.inactiveElicitations`); the record is not touched, so the
+    /// daemon's own resolution — if one ever arrives — still lands on it.
+    static func dismissInactiveElicitation(_ state: OrbSessionState, callId: String) -> OrbSessionState {
+        guard state.pendingInteractions.contains(where: {
+            if case .urlElicitation(let id, _, _, _, _, _) = $0 { return id == callId }
+            return false
+        }) else { return state }
+        return resolvePending(state, callId: callId)
+    }
+
     private static let mainThread = "main"
 
     /// Per-`tool_result` retention cap for `ActivityItem.Kind.tool`'s `output` (mac-chat-parity
@@ -669,6 +701,17 @@ enum SessionReducer {
         case .planPresented(let v) where v.threadId == mainThread:
             appendPending(.plan(callId: v.callId, plan: v.plan), to: &s)
             appendInteraction(InteractionRecord(callId: v.callId, ask: .plan(plan: v.plan)), to: &s)
+        case .elicitationRequested(let v) where v.threadId == mainThread:
+            // WS-27: keyed by `elicitationId` in the same callId space — the daemon mints it
+            // (`el_<uuid>`), so it cannot collide with a tool call's id.
+            appendPending(.urlElicitation(callId: v.elicitationId, serverName: v.serverName, message: v.message, host: v.host, origin: v.origin, expiresAt: v.expiresAt), to: &s)
+            appendInteraction(InteractionRecord(
+                callId: v.elicitationId,
+                ask: .urlElicitation(serverName: v.serverName, message: v.message, host: v.host, origin: v.origin, expiresAt: v.expiresAt)
+            ), to: &s)
+        case .elicitationResolved(let v):
+            s = resolvePending(s, callId: v.elicitationId)
+            foldInteractionOutcome(&s, callId: v.elicitationId, outcome: .elicitation(action: v.action, by: v.by))
         case .approvalResolved(let v):
             s = resolvePending(s, callId: v.callId)
             foldInteractionOutcome(&s, callId: v.callId, outcome: .approval(approved: v.approved, by: v.by))
@@ -1392,6 +1435,11 @@ final class SessionModel: ObservableObject {
     /// — see `TRANSIENT_EVENT_TYPES`'s doc in `packages/protocol/src/events.ts`), and folding it
     /// into the pure reducer would mean special-casing something explicitly designed not to
     /// survive replay. Fires synchronously from `apply`, after the reducer has already run.
+    /// WS-27: see `SessionReducer.dismissInactiveElicitation`.
+    func dismissInactiveElicitation(_ callId: String) {
+        state = SessionReducer.dismissInactiveElicitation(state, callId: callId)
+    }
+
     let events = PassthroughSubject<SessionEvent, Never>()
 
     /// task-30 (push-notification track): how fresh `notificationRequested.ts` must be (wall-clock

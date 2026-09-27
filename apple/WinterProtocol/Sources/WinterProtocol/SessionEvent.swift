@@ -13,6 +13,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     case toolResult(ToolResult)
     case approvalRequested(ApprovalRequested)
     case approvalResolved(ApprovalResolved)
+    case elicitationRequested(ElicitationRequested)
+    case elicitationResolved(ElicitationResolved)
     case turnCompleted(TurnCompleted)
     case agentError(AgentError)
     case directoryAdded(DirectoryAdded)
@@ -259,6 +261,40 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let by: String
         /// Dispatch relay (Phase 7): see ApprovalRequested.
         public let childSessionId: String?
+    }
+
+    /// WS-27: an MCP server asked the user to open a link (MCP URL-mode elicitation) — for example to
+    /// finish an authorization with a third party. The link itself is NEVER on the wire here (it may
+    /// carry a one-time code): `host` and `origin` (`https://host[:port]`, always https) are the
+    /// daemon's parse of it, and a local client about to open it fetches the full url with
+    /// `elicitation.url` while the card is pending. Answered with `elicitation.respond` (local clients
+    /// only): accept means the user chose to open the link, and the CLIENT opens it. `mode` is always
+    /// `"url"` today.
+    public struct ElicitationRequested: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let threadId: String
+        public let elicitationId: String
+        public let mode: String
+        public let serverName: String
+        public let message: String
+        public let host: String
+        public let origin: String
+        public let issuedAt: Int
+        public let expiresAt: Int
+    }
+
+    /// WS-27: how a URL-mode elicitation ended — `action` is `"accept"`, `"decline"` or `"cancel"`
+    /// (the daemon's own: the session or turn ended, or the card timed out; `by` says which).
+    public struct ElicitationResolved: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let threadId: String
+        public let elicitationId: String
+        public let action: String
+        public let by: String
     }
 
     public struct TurnCompleted: Codable, Equatable, Sendable {
@@ -956,6 +992,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case tool_result
         case approval_requested
         case approval_resolved
+        case elicitation_requested
+        case elicitation_resolved
         case turn_completed
         case agent_error
         case directory_added
@@ -1017,6 +1055,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case .tool_result:          self = .toolResult(try ToolResult(from: decoder))
         case .approval_requested:   self = .approvalRequested(try ApprovalRequested(from: decoder))
         case .approval_resolved:    self = .approvalResolved(try ApprovalResolved(from: decoder))
+        case .elicitation_requested: self = .elicitationRequested(try ElicitationRequested(from: decoder))
+        case .elicitation_resolved: self = .elicitationResolved(try ElicitationResolved(from: decoder))
         case .turn_completed:       self = .turnCompleted(try TurnCompleted(from: decoder))
         case .agent_error:          self = .agentError(try AgentError(from: decoder))
         case .directory_added:      self = .directoryAdded(try DirectoryAdded(from: decoder))
@@ -1112,6 +1152,14 @@ public enum SessionEvent: Codable, Equatable, Sendable {
             try v.encode(to: encoder)
             var c = encoder.container(keyedBy: TypeKey.self)
             try c.encode(Discriminator.approval_resolved.rawValue, forKey: .type)
+        case .elicitationRequested(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.elicitation_requested.rawValue, forKey: .type)
+        case .elicitationResolved(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.elicitation_resolved.rawValue, forKey: .type)
         case .turnCompleted(let v):
             try v.encode(to: encoder)
             var c = encoder.container(keyedBy: TypeKey.self)

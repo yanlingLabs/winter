@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { z } from "zod";
 import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
-  HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams,
+  HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams, ElicitationRespondParams, ElicitationUrlParams, ELICITATION_NOT_ACTIVE,
   SessionHistoryParams,
   ApprovalListParams,
   SessionAddDirParams, SessionSetCwdParams, TrustDirParams,
@@ -88,6 +88,7 @@ import { rowForTag } from "../runtime-sdk/provider-selection";
 import { parseModelTag, canonicalizeModelTag, splitTag, UNSTATED_TAG, type ModelTag } from "../runtime-sdk/model-tag";
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import type { ApprovalBroker } from "../agent/approvals";
+import type { ElicitationBroker } from "../runtime-sdk/url-elicitation";
 import type { PermissionRules } from "../agent/permission-rules";
 import type { QuestionBroker } from "../agent/questions";
 import type { TaskStore } from "../agent/task-store";
@@ -312,6 +313,8 @@ export interface IpcServerOptions {
   /** `thread.send` / `agent.stop` over Winter children (`runtime-sdk/children-rpc.ts`). */
   agents?: ChildrenRpc;
   broker?: ApprovalBroker | null;
+  /** WS-27: URL-mode elicitation cards; `elicitation.respond` (local clients only). */
+  elicitations?: ElicitationBroker;
   // SP-approvals Task 5: the CC-grammar allow-rules store (Task 1) — daemon.ts hoists ONE instance
   // shared with the engine's own ask-policy rule-consult path, so `approval.respond`'s optionId-
   // driven `append()` below and the dispatch loop's `decision()` reads share the SAME mtime cache,
@@ -3091,6 +3094,24 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // beside `allow_once` — can learn WHICH one was chosen. Purely a plumbing forward: this
         // handler still has no per-id knowledge of what any option DOES (that stays engine-side).
         return opts.broker?.resolve(p.sessionId, p.callId, p.approved, socket.data.clientName, p.optionId) ?? { ok: true, alreadyResolved: true };
+      }
+      case METHODS.elicitationRespond: {
+        // WS-27: LOCAL clients only. Already outside `REMOTE_ALLOWED_METHODS` and the plugin list; the
+        // explicit check keeps it so if either list ever widens — the phone cannot open a link on the
+        // Mac, so it must never accept one. `accept` opens nothing here: the client opens the link.
+        if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "elicitation.respond is available to local clients only");
+        const p = parseParams(ElicitationRespondParams, params);
+        return opts.elicitations?.respond(p.sessionId, p.elicitationId, p.action, socket.data.clientName) ?? { ok: true, alreadyResolved: true };
+      }
+      case METHODS.elicitationUrl: {
+        // WS-27: the full url of a PENDING card, for the local client about to open it — the url is
+        // never persisted, so this is the only door to it, and it closes when the card does. Same
+        // harness-only gate as `elicitation.respond`. Never logged.
+        if (socket.data.authedRole !== "harness") throw new RpcFailure(ERR.UNAUTHORIZED, "elicitation.url is available to local clients only");
+        const p = parseParams(ElicitationUrlParams, params);
+        const pending = opts.elicitations?.urlFor(p.sessionId, p.elicitationId);
+        if (pending === undefined) throw new RpcFailure(ERR.NOT_FOUND, "this link request is no longer active", { code: ELICITATION_NOT_ACTIVE });
+        return { url: pending.url };
       }
       case METHODS.approvalList: {
         // SP3 T4b: queryable pending-approval state (remote-allowlisted so a phone can render live

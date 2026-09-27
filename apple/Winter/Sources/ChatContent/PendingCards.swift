@@ -45,6 +45,13 @@ struct InteractionCardWiring {
     let onApproval: (String, Bool, String?, String?) -> Void  // callId, approved, optionId, childSessionId
     let onQuestion: (String, [String: String], [String: String], String?) -> Void  // callId, answers, notes (both keyed by question text), childSessionId
     let onPlan: (String, Bool, Bool, String?) -> Void   // callId, approved, autoAccept, feedback
+    /// WS-27: elicitationId, accept (the user chose "Open link"), host, expiresAt. Defaulted so a
+    /// surface or test that predates URL-mode elicitation keeps compiling; the surface's closure
+    /// fetches, checks and opens the link.
+    var onElicitation: (String, Bool, String, Int) -> Void = { _, _, _, _ in }
+    /// WS-27: elicitation cards this surface resolved LOCALLY as no longer active (see
+    /// `FieldStateAdapter.inactiveElicitations`).
+    var inactiveElicitations: Set<String> = []
 }
 
 // MARK: - panel-shell T10b: PendingCardDraft — the hoisted, externally-owned per-card answer
@@ -270,6 +277,8 @@ func cardTitle(_ ask: InteractionRecord.Ask) -> String {
         return first.header ?? first.question
     case .plan:
         return "Plan for approval"
+    case .urlElicitation(let serverName, _, _, _, _):
+        return "\(serverName) asks you to open a link"
     }
 }
 
@@ -331,6 +340,7 @@ func cardGlyphSymbol(_ ask: InteractionRecord.Ask) -> String {
     case .approval: return "hand.raised.fill"
     case .question: return "questionmark.circle.fill"
     case .plan: return "list.bullet.rectangle"
+    case .urlElicitation: return "link"
     }
 }
 
@@ -436,6 +446,11 @@ func outcomeLabel(_ outcome: InteractionRecord.Outcome) -> InteractionOutcomeLab
     case .question(_, _, let by):
         if by == "timeout" { return .init(symbol: "clock.badge.xmark", text: "Timed out", isAffirmative: false) }
         return .init(symbol: "checkmark.circle.fill", text: "Answered", isAffirmative: true)
+    case .elicitation(let action, let by):
+        if action == "accept" { return .init(symbol: "arrow.up.right.square", text: "Link opened", isAffirmative: true) }
+        if action == "decline" { return .init(symbol: "nosign", text: "Declined", isAffirmative: false) }
+        if by == "timeout" { return .init(symbol: "clock.badge.xmark", text: "Cancelled — timed out", isAffirmative: false) }
+        return .init(symbol: "clock.badge.xmark", text: "Cancelled", isAffirmative: false)
     case .ended:
         // The turn ended with this ask outstanding — see `InteractionRecord.Outcome.ended`. Says
         // that nothing was recorded rather than claiming a decision nobody made.
@@ -468,6 +483,15 @@ func interactionProvenance(_ outcome: InteractionRecord.Outcome) -> String? {
     let by: String
     switch outcome {
     case .approval(_, let value), .question(_, _, let value), .plan(_, _, _, let value): by = value
+    case .elicitation(let action, let value):
+        // WS-27: a daemon-side cancel names what ended it, never a person; a card this surface found
+        // no longer active (`elicitationLocalOutcome`) says exactly that.
+        if action == "cancel" {
+            if value == elicitationInactiveBy { return elicitationInactiveNote }
+            if value == "timeout" { return "no answer before the deadline — cancelled" }
+            return "cancelled — the \(value == "turn-ended" ? "turn" : "session") ended before an answer"
+        }
+        by = value
     case .ended: return nil
     }
     if by == "timeout" { return "no answer before the deadline — resolved by timeout" }
@@ -535,7 +559,7 @@ struct TranscriptInteractionCard: View {
                 .font(Typography.control(.semibold))
             }
 
-            if let outcome = record.outcome {
+            if let outcome = record.outcome ?? elicitationLocalOutcome(record, inactive: wiring.inactiveElicitations) {
                 resolvedBody(outcome)
             } else {
                 pendingBody
@@ -568,6 +592,8 @@ struct TranscriptInteractionCard: View {
             PendingQuestionBody(callId: record.callId, questions: questions, childSessionId: record.childSessionId, isInFlight: isInFlight, onQuestion: wiring.onQuestion, onClose: nil, draft: wiring.draftBinding(record.callId))
         case .plan(let plan):
             PendingPlanBody(callId: record.callId, plan: plan, isInFlight: isInFlight, onPlan: wiring.onPlan, draft: wiring.draftBinding(record.callId))
+        case .urlElicitation(let serverName, let message, let host, let origin, let expiresAt):
+            PendingElicitationBody(elicitationId: record.callId, serverName: serverName, message: message, host: host, origin: origin, expiresAt: expiresAt, isInFlight: isInFlight, onElicitation: wiring.onElicitation)
         }
     }
 
@@ -580,6 +606,8 @@ struct TranscriptInteractionCard: View {
             ResolvedQuestionBody(questions: questions, outcome: outcome)
         case .plan(let plan):
             ResolvedPlanBody(plan: plan, outcome: outcome)
+        case .urlElicitation(let serverName, let message, let host, _, _):
+            ResolvedElicitationBody(serverName: serverName, message: message, host: host, outcome: outcome)
         }
     }
 }
@@ -1102,6 +1130,124 @@ private struct PendingApprovalBody: View {
                     }
                 }
             }
+        }
+    }
+}
+
+// MARK: - URL-mode elicitation card (WS-27)
+
+/// The `by` of a locally-resolved (no longer active) elicitation card — never a client name the daemon
+/// sends (clients answer as themselves; the daemon cancels as "aborted"/"turn-ended"/"timeout").
+let elicitationInactiveBy = "inactive"
+
+/// WS-27: the outcome a PENDING elicitation card shows once this surface found its request no longer
+/// active — "resolve the card locally", since no `elicitation_resolved` reached it. `nil` for every
+/// other record, and for a record the daemon already resolved (its truth stands).
+func elicitationLocalOutcome(_ record: InteractionRecord, inactive: Set<String>) -> InteractionRecord.Outcome? {
+    guard record.outcome == nil, case .urlElicitation = record.ask, inactive.contains(record.callId) else { return nil }
+    return .elicitation(action: "cancel", by: elicitationInactiveBy)
+}
+
+/// An MCP server asking the user to open a link. The card names the server, shows its message, and
+/// shows where the link goes — its HOST, on its own line, the one thing the user must read before
+/// clicking. The link itself is not on the card at all (it may carry a one-time code): "Open link"
+/// fetches it from the daemon, checks it against this host, opens it, and only then accepts
+/// (`performElicitationAnswer`). Nothing opens it by itself, no keystroke answers the card
+/// (`cardKeyAction`), and once `expiresAt` has passed "Open link" is disabled.
+/// Internal rather than `private` so `InteractionCardTests` can construct it, like its siblings.
+struct PendingElicitationBody: View {
+    let elicitationId: String
+    let serverName: String
+    let message: String
+    let host: String
+    let origin: String
+    let expiresAt: Int
+    let isInFlight: Bool
+    let onElicitation: (String, Bool, String, Int) -> Void  // elicitationId, accept, host, expiresAt
+
+    private var expiry: Date { Date(timeIntervalSince1970: Double(expiresAt) / 1000) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !message.isEmpty {
+                Text(message)
+                    .font(Typography.label())
+                    .foregroundStyle(.primary)
+                    .lineLimit(8)
+                    .textSelection(.enabled)
+            }
+            ElicitationDestination(host: host, origin: origin)
+
+            if isInFlight {
+                Label("Sending…", systemImage: "hourglass")
+                    .font(Typography.label(.medium))
+                    .foregroundStyle(.secondary)
+            } else {
+                // One scheduled redraw at the deadline — not a repeating timer or animation.
+                TimelineView(.explicit([expiry])) { context in
+                    let expired = elicitationIsExpired(expiresAt: expiresAt, now: context.date)
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 8) {
+                            Button("Open link") { onElicitation(elicitationId, true, host, expiresAt) }
+                                .buttonStyle(.borderedProminent)
+                                .frame(maxWidth: .infinity)
+                                .disabled(expired)
+                            Button("Decline") { onElicitation(elicitationId, false, host, expiresAt) }
+                                .buttonStyle(.bordered)
+                                .frame(maxWidth: .infinity)
+                        }
+                        .controlSize(.small)
+                        if expired {
+                            Text("this request has expired")
+                                .font(Typography.caption())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Where the link goes: the host alone and emphasised, its https origin small beneath it.
+private struct ElicitationDestination: View {
+    let host: String
+    let origin: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Label(host, systemImage: "lock.fill")
+                .font(Typography.labelMono(.semibold))
+                .foregroundStyle(.primary)
+            Text(origin)
+                .font(Typography.caption())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+    }
+}
+
+/// The frozen record: which server asked, where it pointed, and what happened. No `Button`, no link:
+/// a resolved card never opens anything, and there is only ever a host to show.
+struct ResolvedElicitationBody: View {
+    let serverName: String
+    let message: String
+    let host: String
+    let outcome: InteractionRecord.Outcome
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !message.isEmpty {
+                Text(message)
+                    .font(Typography.label())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+            Label(host, systemImage: "link")
+                .font(Typography.labelMono())
+                .foregroundStyle(.secondary)
+            ResolvedOutcomeRow(outcome: outcome)
         }
     }
 }

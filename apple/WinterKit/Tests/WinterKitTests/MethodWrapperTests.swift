@@ -122,6 +122,31 @@ final class MethodWrapperTests: XCTestCase {
         }
     }
 
+    /// WS-27: `elicitation.respond`'s wire shape — `accept` maps to the literal action strings the
+    /// daemon's schema takes (`"accept"`/`"decline"`; `"cancel"` is the daemon's own, never sent).
+    func testElicitationRespondEncodesTheAction() async throws {
+        let (client, t) = try await connected()
+        let (accepted, res) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true,"alreadyResolved":false}"#) {
+            try await client.elicitationRespond(sessionId: "s_1", elicitationId: "el_1", accept: true)
+        }
+        XCTAssertEqual(accepted["method"] as? String, "elicitation.respond")
+        let params = accepted["params"] as? [String: Any]
+        XCTAssertEqual(params?["sessionId"] as? String, "s_1")
+        XCTAssertEqual(params?["elicitationId"] as? String, "el_1")
+        XCTAssertEqual(params?["action"] as? String, "accept")
+        XCTAssertFalse(res)
+        let (declined, _) = try await roundTrip(t, sentIndex: 2, result: #"{"ok":true,"alreadyResolved":true}"#) {
+            try await client.elicitationRespond(sessionId: "s_1", elicitationId: "el_1", accept: false)
+        }
+        XCTAssertEqual((declined["params"] as? [String: Any])?["action"] as? String, "decline")
+        let (fetch, url) = try await roundTrip(t, sentIndex: 3, result: #"{"url":"https://linear.app/oauth?code=1"}"#) {
+            try await client.elicitationURL(sessionId: "s_1", elicitationId: "el_1")
+        }
+        XCTAssertEqual(fetch["method"] as? String, "elicitation.url")
+        XCTAssertEqual((fetch["params"] as? [String: Any])?["elicitationId"] as? String, "el_1")
+        XCTAssertEqual(url, "https://linear.app/oauth?code=1")
+    }
+
     /// Chat Slice D task 1: `session.setModel`'s wire shape — a set carries the string; a clear
     /// carries a LITERAL JSON `null` for `"model"`, never an omitted key (the wire param is
     /// required-but-nullable, `SessionSetModelParams.model: z.string().min(1).nullable()` — NOT
