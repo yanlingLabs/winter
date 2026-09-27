@@ -1,0 +1,11 @@
+{
+  "$schema": "https://unpkg.com/wrangler@4.141.0/config-schema.json",
+  // Serves Winter's OAuth Client ID Metadata Document (CIMD) for MCP sign-in. The document's own
+  // `client_id` MUST equal the URL it is served from, and it must be served directly (a redirect is not
+  // a valid CIMD location), so this Worker owns the bare yanlinglabs.com hostname.
+  "name": "winter-oauth-client",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-20",
+  "workers_dev": false,
+  "routes": [{ "pattern": "yanlinglabs.com", "custom_domain": true }]
+}
