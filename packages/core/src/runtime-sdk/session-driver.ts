@@ -97,6 +97,9 @@ import { startWinterSession, unconsumedUserMessages, withRunHome, type CompactOp
 import { RunHomeError, type RunHome, type RunHomeErrorCode, type RunHomeFor, type RunHomeInput } from "@yanlinglabs/winter-runtime-sdk";
 import { projectScopeTrusted, type RunHomeSessionFacts } from "./run-home-input";
 import { readWinterTasks } from "./tasks-reader";
+import { keychainService } from "../profile";
+import type { McpOAuthStore } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
+import { createHostCredentialBroker, sessionCredentialAllowlist, type ProviderRefresher } from "./host-credentials";
 
 export type WinterLegRefusalCode =
   | "winter_executable_unavailable"   // P8b-2: no `winter` binary resolves (setting → env → bundle → home)
@@ -404,6 +407,18 @@ export interface WinterLegDeps {
     inputFor: (facts: RunHomeSessionFacts) => RunHomeInput;
   };
   /**
+   * WS-25 §7: the daemon's ONE MCP OAuth store (`mcp-oauth-store.ts`'s `daemonMcpOAuthStore`), which a
+   * session's `credential_resolve` for `mcp-oauth:<id>` and its `mcp_oauth_refresh` both read through.
+   * Absent (a test double): every MCP sign-in reads as signed out.
+   */
+  mcpOAuthStore?: McpOAuthStore;
+  /**
+   * WS-25 §7: per provider account, how the daemon renews it when a session needs newer material
+   * (`host-credentials.ts`'s `ProviderRefresher`; `daemon.ts` wires codex-oauth and the Console broker).
+   * Absent: nothing is renewed, and a `minGeneration` the store cannot meet answers `stale`.
+   */
+  credentialRefreshers?: Readonly<Record<string, ProviderRefresher>>;
+  /**
    * WS-21 (spec §4.3): the daemon's `TrustStore.isTrusted`. An approval card offers "Allow … in this
    * project" only for a trusted project (the answer is saved to its `.winter/settings.local.json`, a tier
    * the runtimes read for a trusted project alone). Absent (a test double): offered as before.
@@ -607,6 +622,15 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
   const advisorProviders = new Map<string, string>();
   const log = deps.log ?? ((): void => {});
   const sdkVersion = WINTER_PEER_VERSIONS.winterAgentSdk;
+  // WS-25 §7: ONE broker for the whole table — its generation registry and its refresh single-flights are
+  // per item, not per session, so two sessions asking for the same Console bearer share one `ant` run.
+  const hostCredentials = createHostCredentialBroker({
+    secrets: deps.secrets,
+    keychainService: keychainService(undefined, deps.home),
+    ...(deps.mcpOAuthStore === undefined ? {} : { mcpOAuthStore: deps.mcpOAuthStore }),
+    ...(deps.credentialRefreshers === undefined ? {} : { refreshers: deps.credentialRefreshers }),
+    log,
+  });
 
   const catalogVersion = (): string => {
     try { return loadCatalog().catalogVersion; } catch { return "unstated"; }
@@ -1109,6 +1133,17 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         ...userRulesFrom(home, runHomeApplied),
         ...(runHomeApplied ? { runHomeApplied: true } : {}),
       });
+      // WS-25 §7 (prompt-free credentials): the child asks THIS process for every Keychain credential
+      // (`hostCredentials: true` on the wire, set by the SDK because the handler exists) and builds no
+      // Keychain store of its own — so it never raises the consent prompt a child reading winter-core's
+      // items did. Attached HERE, not in `buildWinterOptions` (which stays pure and serializable): the
+      // allowlist is read off the FINAL options, so a ref the builder dropped (an unusable advisor or
+      // digest pin) is not answerable either. The configured MCP servers are passed separately because a
+      // run-home incarnation's `options.mcpServers` carries only the capability servers (`extra` is
+      // empty above) while the run folder carries the rest; the same fold is read here for its URLs.
+      const allowlist = sessionCredentialAllowlist(options, runHomeApplied ? (deps.extraMcpServers?.(capSession) ?? {}) : extra);
+      options.onCredentialResolve = hostCredentials.resolverFor(allowlist);
+      options.onMcpOAuthRefresh = hostCredentials.mcpRefresherFor(allowlist);
       // WS-21 (spec §3.1): LAST, so a refusal above never leaves a run folder behind. The router's Winter
       // overload reads `options.runtime.runHome` and applies it synchronously; `WinterSession` disposes it
       // when the incarnation ends (or at once, if the open fails before the child iterates).

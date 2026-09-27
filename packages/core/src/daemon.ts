@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { bootstrapWinterDir, resolveWinterHome, isDefaultWinterHome } from "./winter-dir";
 import { acquireLock, type Lock } from "./lock";
-import { resolveWinterProfile } from "./profile";
+import { keychainService, resolveWinterProfile } from "./profile";
 import { describeHomePristineness, legacyHomeFor, planMigrationB, runMigrationB, MigrationRefused } from "./migration/migrate-b";
 import { manifestFileState, manifestPath } from "./migration/manifest";
 import { LegacyKeychainSecretStore } from "./migration/legacy-keychain-store";
@@ -53,7 +53,13 @@ import { OutputStyleStore } from "./agent/output-styles";
 import { Dreamer } from "./agent/dreamer";
 import { SessionCleaner } from "./sessions/cleaner";
 import { pickerModels } from "./ipc/picker-models";
-import { credentialPresenceFrom } from "./runtime-sdk/keychain";
+import { ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, credentialPresenceFrom } from "./runtime-sdk/keychain";
+import { refreshOauthMaterial } from "@yanlinglabs/winter-provider-runtime";
+import type { McpOAuthStore } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
+import { CREDENTIAL_MATERIAL_NAMES } from "./auth/credential-material";
+import { credentialStoreOverSecretStore } from "./providers/credential-store";
+import { CODEX } from "./providers/codex-config";
+import { daemonMcpOAuthStore } from "./runtime-sdk/mcp-oauth-store";
 import { splitTag, type ModelTag } from "./runtime-sdk/model-tag";
 import { SessionDirectories } from "./agent/dirs";
 import { TrustStore } from "./agent/trust";
@@ -374,6 +380,11 @@ export async function startDaemon(opts: {
    *  sweep and in Migration C's phase 2 — when set it takes precedence over the linked router's own door, so
    *  a test can observe the reconcile's ordering or make it fail. A production caller never sets it. */
   runRootReconcileForTests?: RootReconcile;
+  /** WS-25 §7 TEST SEAM: the MCP OAuth store sessions' `mcp-oauth:<id>` sign-ins are brokered from (a
+   *  memory store). Absent: production reads `daemonMcpOAuthStore(<this home's Keychain service>)`, and a
+   *  caller that injected its own `secrets` gets NO store (every MCP sign-in reads as signed out) — so no
+   *  test daemon ever reads the Keychain for one. */
+  mcpOAuthStore?: McpOAuthStore;
 } = {}): Promise<RunningDaemon> {
   const startedAt = Date.now();
   const home = opts.home ?? resolveWinterHome();
@@ -1787,6 +1798,8 @@ export async function startDaemon(opts: {
   // without `agentProvider`, since `Query.supportedAgents()` is entirely a Winter-runtime-SDK fact,
   // unrelated to the daemon's own internal Provider.
   const supportedAgentsCache = new SupportedAgentsCache();
+  // WS-25 §7: see `opts.mcpOAuthStore` — a test daemon (its own `secrets`) never reads the Keychain for one.
+  const sessionMcpOAuthStore = opts.mcpOAuthStore ?? (opts.secrets === undefined ? daemonMcpOAuthStore(keychainService(undefined, winterHome)) : undefined);
   const winterDrivers: WinterSessionDrivers = createWinterSessionDrivers({
     home: winterHome,
     // WS-21: every incarnation's run home, when the linked router applies them (see `runHomeDeps`).
@@ -1858,6 +1871,22 @@ export async function startDaemon(opts: {
     // `buildWinterOptions`); `planBridge` answers `ExitPlanMode` through the approval-bridge deps.
     planBridge,
     hooksFor,
+    // WS-25 §7 (prompt-free credentials): every session's Keychain credentials are brokered by THIS
+    // process (`runtime-sdk/host-credentials.ts`). The MCP sign-ins come from the daemon's one MCP OAuth
+    // store for this home's service (`mcp-oauth-store.ts`), and the two renewable provider items are
+    // renewed here and only here: codex-oauth through its refresh-token grant (the SDK's own
+    // `refreshOauthMaterial`, whose merge rule keeps an unrotated refresh token), the Console bearer
+    // through the broker that already renews it from `ant`'s profile.
+    ...(sessionMcpOAuthStore === undefined ? {} : { mcpOAuthStore: sessionMcpOAuthStore }),
+    credentialRefreshers: {
+      [CREDENTIAL_MATERIAL_NAMES.codexOauth]: async (account: string) => {
+        await refreshOauthMaterial({ store: credentialStoreOverSecretStore(secrets), ref: { kind: "keychain", account }, tokenUrl: CODEX.tokenUrl, clientId: CODEX.clientId });
+      },
+      [ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME]: async () => {
+        const result = await consoleBroker.refreshBearer();
+        if (!result.ok) throw new Error("console_bearer_refresh_failed");
+      },
+    },
   });
   // Wiring 1: fills the forward reference `planBridge`'s `setPolicy` closes over (declared above,
   // before `winterDrivers` existed) — see that block's own comment for why the cycle is broken here.
