@@ -245,8 +245,8 @@ const STRICTNESS: Record<ConnectorPermission, number> = { deny: 3, ask: 2, allow
  *    `true`/`false`, never `undefined`);
  *  - a stored `deny` or `ask` from ANY candidate counts (a `"*"` on `cf` also covers `cf__prod`'s tools
  *    — over-strict at worst, never a silent run);
- *  - a stored `allow` counts only from a confirmed or configured candidate or from an entry that names the
- *    tool exactly (never from an unknown server's `"*"`, which may be a different server's blanket allow);
+ *  - a stored `allow` counts only from a confirmed candidate or from an entry that names the tool exactly
+ *    (never from an unconfirmed server's `"*"`, which may be a different server's blanket allow);
  *  - a confirmed candidate with nothing stored contributes the DEFAULT, which outranks an allow — and so
  *    does an UNCONFIRMED one whose server is configured for the session (`source.configured`; re-review:
  *    the runtime gives a clashing tool name to whichever server registers first, so the call may really be
@@ -279,9 +279,11 @@ export function connectorFactsFor(source: ConnectorPermissionSource, toolName: s
     const isConfirmed = c.listed !== undefined;
     if (c.stored !== undefined) {
       const p = c.stored.permission;
-      // A configured server's own blanket allow counts (it is that server's value); an unconfigured,
-      // unconfirmed server's `"*"` allow may be someone else's and never allows.
-      if (p !== "allow" || isConfirmed || c.configured || c.stored.source === "tool") votes.push({ rank: STRICTNESS[p], c, setting: p });
+      // An unconfirmed server's `"*"` allow never allows — whether or not the server is configured: the
+      // call may belong to another split's server (final review: a `cf` blanket allow must not reach a
+      // plugin's `cf__prod` tool that `cf` never listed).
+      if (p !== "allow" || isConfirmed || c.stored.source === "tool") votes.push({ rank: STRICTNESS[p], c, setting: p });
+      else if (c.configured) votes.push({ rank: 1, c });   // configured and unconfirmed: the default
     } else if (isConfirmed || c.configured) {
       votes.push({ rank: 1, c });   // the default
     }
