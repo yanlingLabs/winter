@@ -8,8 +8,8 @@ import { describeHomePristineness, legacyHomeFor, planMigrationB, runMigrationB,
 import { manifestFileState, manifestPath } from "./migration/manifest";
 import { LegacyKeychainSecretStore } from "./migration/legacy-keychain-store";
 import { TOKEN_NAMES, TokenAuthority } from "./auth/tokens";
-import { appTokenAclBootTarget, migrateAppTokenAcl, recoverAppTokenShadows, type AppTokenAclTarget } from "./auth/app-token-acl";
-import { applicationPathsForBundleId } from "./auth/keychain-ffi";
+import { appTokenAclBootTrust, migrateAppTokenAcl, prepareAppTokenAccess, recoverAppTokenShadows, type AppTokenAccess, type AppTokenKeychain, type AppTokenTrust } from "./auth/app-token-acl";
+import { applicationPathsForBundleId, keychainUnlocked, withKeychainUserInteractionDisabled } from "./auth/keychain-ffi";
 import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 import { migrateLegacyCredentialMaterial } from "./auth/credential-material";
 import { SessionStore } from "./sessions/store";
@@ -524,27 +524,36 @@ export async function startDaemon(opts: {
   // WS-25 §7 B: the app reads `harness-token`/`remote-token` without a Keychain prompt once their access
   // list names the app too (`auth/app-token-acl.ts`). Real production boot only — no injected `secrets`,
   // AND the profile's own default home (the app's daemon; any other home is a test's or an operator's
-  // experiment, and the items are per-profile, not per-home) — macOS only, never fatal. The shadow
-  // recovery runs FIRST: `ensureTokens` would otherwise mint a fresh token for an original an interrupted
-  // migration deleted.
-  let appTokenAcl: AppTokenAclTarget | undefined;
+  // experiment, and the items are per-profile, not per-home) — macOS only, never fatal. Skipped outright when
+  // the default keychain is LOCKED (a data read there blocks on an unlock dialog, measured even with user
+  // interaction disabled — which every call here still runs under, belt and braces).
+  // The shadow recovery runs FIRST and whatever the trust target — `ensureTokens` would otherwise mint a
+  // fresh token for an original an interrupted migration deleted. The access objects are built once and
+  // released after.
+  let appTokens: { kc: AppTokenKeychain; trust: AppTokenTrust | undefined; access: AppTokenAccess } | undefined;
   if (opts.secrets === undefined && process.platform === "darwin" && isDefaultWinterHome(home, profile)) {
     try {
-      appTokenAcl = appTokenAclBootTarget({ home, service: keychainService(), profile, log: (line) => console.error(line), lookup: applicationPathsForBundleId });
-      if (appTokenAcl !== undefined) recoverAppTokenShadows(appTokenAcl);
+      if (!keychainUnlocked(null)) throw Object.assign(new Error("the default keychain is locked"), { name: "KeychainLocked" });
+      const kc: AppTokenKeychain = { keychain: null, service: keychainService(), log: (line) => console.error(line) };
+      const trust = appTokenAclBootTrust({ profile, log: (line) => console.error(line), lookup: applicationPathsForBundleId });
+      const access = withKeychainUserInteractionDisabled(() => prepareAppTokenAccess(kc, trust));
+      appTokens = { kc, trust, access };
+      withKeychainUserInteractionDisabled(() => recoverAppTokenShadows(kc, access));
     } catch (err) {
       console.error(`keychain: the app-token access lists were not checked (${err instanceof Error ? err.name : "error"})`);
-      appTokenAcl = undefined;
     }
   }
 
   const authority = new TokenAuthority(secrets);
-  const tokens = await authority.ensureTokens();
-  if (appTokenAcl !== undefined) {
+  const { tokens, minted } = await authority.ensureTokensReporting();
+  if (appTokens !== undefined) {
+    const { kc, trust, access } = appTokens;
     try {
-      migrateAppTokenAcl(appTokenAcl, { [TOKEN_NAMES.harness]: tokens.harness, [TOKEN_NAMES.remote]: tokens.remote });
+      if (trust !== undefined) withKeychainUserInteractionDisabled(() => migrateAppTokenAcl(kc, access, trust, home, { [TOKEN_NAMES.harness]: tokens.harness, [TOKEN_NAMES.remote]: tokens.remote }, minted));
     } catch (err) {
       console.error(`keychain: the app-token access lists were not updated (${err instanceof Error ? err.name : "error"})`);
+    } finally {
+      access.release();
     }
   }
 

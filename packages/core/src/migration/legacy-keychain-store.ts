@@ -8,7 +8,7 @@
 import type { SecretStore } from "../auth/secret-store";
 import type { WinterProfile } from "../profile";
 import { LEGACY_KEYCHAIN_SERVICE, LEGACY_KEYCHAIN_SERVICE_DEV } from "../legacy-names";
-import { genericPasswordPresent } from "../auth/keychain-ffi";
+import { genericPasswordPresent, withKeychainUserInteractionDisabled } from "../auth/keychain-ffi";
 
 export function legacyKeychainServiceFor(profile: WinterProfile): string {
   return profile === "dev" ? LEGACY_KEYCHAIN_SERVICE_DEV : LEGACY_KEYCHAIN_SERVICE;
@@ -45,5 +45,7 @@ export class LegacyKeychainSecretStore implements SecretStore {
  */
 export function legacyKeychainPresence(profile: WinterProfile): (name: string) => boolean {
   const service = legacyKeychainServiceFor(profile);
-  return (name) => genericPasswordPresent(null, service, name);
+  // User interaction off for each probe (restored after): a locked keychain answers without an unlock
+  // dialog (measured: locating an item in a locked keychain is silent; this keeps it so).
+  return (name) => withKeychainUserInteractionDisabled(() => genericPasswordPresent(null, service, name));
 }
