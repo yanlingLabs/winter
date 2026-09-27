@@ -224,8 +224,18 @@ export async function runDevKeychainAdopt(env: NodeJS.ProcessEnv = process.env):
     return fatal(`the access list could not be built (${describe(err)})`);
   }
   const handle = createAdoptHandler(kc, access, home);
+  await serveAdoptRequests(handle, process.stdin, (line) => process.stdout.write(line));
+  access.release();
+  // As `workflows/subprocess-entry.ts` does: let the last response line flush before the process ends.
+  setTimeout(() => process.exit(0), 50);
+  return await new Promise<never>(() => {});
+}
+
+/** The child's request loop over any byte stream: one NDJSON response per NDJSON request, until `done` or
+ *  the end of input. Separate from `runDevKeychainAdopt` so a test drives the very same loop over a pipe. */
+export async function serveAdoptRequests(handle: (req: AdoptRequest) => AdoptResponse, input: AsyncIterable<unknown>, write: (line: string) => void): Promise<void> {
   let buf = "";
-  for await (const chunk of process.stdin) {
+  for await (const chunk of input) {
     buf += Buffer.from(chunk as Uint8Array).toString("utf8");
     let i: number;
     while ((i = buf.indexOf("\n")) >= 0) {
@@ -236,23 +246,21 @@ export async function runDevKeychainAdopt(env: NodeJS.ProcessEnv = process.env):
       try {
         req = JSON.parse(line) as AdoptRequest;
       } catch {
-        process.stdout.write(`${JSON.stringify({ ok: false, reason: "unparsable request" })}\n`);
+        write(`${JSON.stringify({ ok: false, reason: "unparsable request" })}\n`);
         continue;
       }
-      process.stdout.write(`${JSON.stringify(handle(req))}\n`);
-      if (req.op === "done") {
-        access.release();
-        process.exit(0);
-      }
+      write(`${JSON.stringify(handle(req))}\n`);
+      if (req.op === "done") return;
     }
   }
-  access.release();
-  process.exit(0);
 }
 
+/** How long the orchestrator waits for any one response before it treats the child as gone. */
+export const ADOPT_REQUEST_TIMEOUT_MS = 30_000;
+
 /** A running child's request door: sequential, one response per request. */
-export function spawnAdoptChild(binary: string, env: NodeJS.ProcessEnv): { send: (req: AdoptRequest) => Promise<AdoptResponse>; close: () => Promise<number | null> } {
-  const child = spawn(binary, [DEV_KEYCHAIN_ADOPT_ARG], { stdio: ["pipe", "pipe", "inherit"], env });
+export function spawnAdoptChild(command: { file: string; args: string[] }, env: NodeJS.ProcessEnv, timeoutMs: number = ADOPT_REQUEST_TIMEOUT_MS): { send: (req: AdoptRequest) => Promise<AdoptResponse>; close: () => Promise<number | null> } {
+  const child = spawn(command.file, command.args, { stdio: ["pipe", "pipe", "inherit"], env });
   const waiting: Array<(r: AdoptResponse) => void> = [];
   let buf = "";
   let exited = false;
@@ -272,7 +280,16 @@ export function spawnAdoptChild(binary: string, env: NodeJS.ProcessEnv): { send:
   return {
     send: (req) => new Promise((resolve) => {
       if (exited) return resolve({ ok: false, reason: "the child has exited" });
-      waiting.push(resolve);
+      // A child that stops answering must not hold the home's lock forever: time out, and kill it so no
+      // later response can be paired with the wrong request.
+      const timer = setTimeout(() => {
+        const at = waiting.indexOf(answer);
+        if (at >= 0) waiting.splice(at, 1);
+        try { child.kill("SIGKILL"); } catch { /* gone */ }
+        resolve({ ok: false, reason: `no answer to ${req.op} within ${timeoutMs} ms` });
+      }, timeoutMs);
+      const answer = (r: AdoptResponse): void => { clearTimeout(timer); resolve(r); };
+      waiting.push(answer);
       child.stdin!.write(`${JSON.stringify(req)}\n`);
     }),
     close: async () => {
@@ -292,7 +309,7 @@ export async function transitionDevKeychain(input: { binary: string; home: strin
   if (!keychainUnlocked(null)) throw new Error("the default keychain is locked — unlock it and run again");
   const lock = await acquireLock(join(input.home, "run", "core.lock"), join(input.home, "run", "core.sock"));
   try {
-    const child = spawnAdoptChild(input.binary, input.env);
+    const child = spawnAdoptChild({ file: input.binary, args: [DEV_KEYCHAIN_ADOPT_ARG] }, input.env);
     try {
       return await runDevKeychainTransition({ keychain: null, service: DEV_KEYCHAIN_SERVICE, log: input.log }, child.send, input.log);
     } finally {

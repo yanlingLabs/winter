@@ -7,7 +7,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { credentialAclMarkerPath, REAL_CREDENTIAL_KEYCHAIN_OPS, type CredentialKeychain, type CredentialKeychainOps } from "../../src/auth/credential-acl";
-import { createAdoptHandler, DEV_KEYCHAIN_SERVICE, devTransitionRefusal, oldCreatorStillOwnsItems, runDevKeychainTransition, type AdoptRequest, type AdoptResponse } from "../../src/auth/dev-keychain-transition";
+import { createAdoptHandler, DEV_KEYCHAIN_SERVICE, devTransitionRefusal, oldCreatorStillOwnsItems, runDevKeychainTransition, spawnAdoptChild, type AdoptRequest, type AdoptResponse } from "../../src/auth/dev-keychain-transition";
 import {
   addGenericPasswordWithAccess, createKeychainAccess, deleteGenericPassword, ERR_SEC_INTERACTION_NOT_ALLOWED, genericPasswordPresent, KeychainFfiError, listGenericPasswordAccounts,
   openKeychainFile, readGenericPassword, type KeychainAccess, type KeychainFile,
@@ -205,6 +205,45 @@ describe.skipIf(!darwin)("the dev Keychain transition (throwaway keychain file)"
     const refusedAll = opsWith(ITEMS.map((account) => ({ op: "read" as const, account, status: ERR_SEC_INTERACTION_NOT_ALLOWED })));
     expect(oldCreatorStillOwnsItems({ keychain: kc, service: SERVICE, ops: refusedAll })).toBe(false);
     clean();
+  }, SLOW);
+
+  test("over a REAL pipe: the child's own request loop (`serveAdoptRequests`) in a separate process, driven through `spawnAdoptChild`", async () => {
+    clean();
+    seed();
+    const home = mkdtempSync(join(dir, "home-"));
+    const entry = join(dir, "adopt-child.ts");
+    const src = join(import.meta.dir, "../../src/auth");
+    writeFileSync(entry, [
+      `import { createAdoptHandler, serveAdoptRequests } from ${JSON.stringify(join(src, "dev-keychain-transition.ts"))};`,
+      `import { createKeychainAccess, openKeychainFile } from ${JSON.stringify(join(src, "keychain-ffi.ts"))};`,
+      `const kc = openKeychainFile(process.env.KC_PATH!, process.env.KC_PASSWORD!);`,
+      `const access = createKeychainAccess("Winter credential", [null]);`,
+      `await serveAdoptRequests(createAdoptHandler({ keychain: kc, service: process.env.KC_SERVICE! }, access, process.env.KC_HOME!), process.stdin, (l) => process.stdout.write(l));`,
+      `setTimeout(() => process.exit(0), 50);`,
+    ].join("\n"));
+    const child = spawnAdoptChild({ file: process.execPath, args: [entry] }, { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? "", KC_PATH: kcPath, KC_PASSWORD: PASSWORD, KC_SERVICE: SERVICE, KC_HOME: home });
+    let outcome;
+    try {
+      outcome = await runDevKeychainTransition({ keychain: kc, service: SERVICE }, child.send);
+    } finally {
+      expect(await child.close()).toBe(0);
+    }
+    expect(outcome).toEqual({ kind: "done", adopted: [...ITEMS].sort(), skipped: [], restored: [] });
+    const after = dump();
+    for (const name of ITEMS) {
+      expect(readGenericPassword(kc, SERVICE, name)).toBe(`v-${name}`);
+      expect(aclIn(after, name)).not.toContain(CALCULATOR);
+      expect(genericPasswordPresent(kc, SERVICE, `${name}.migrating`)).toBe(false);
+    }
+    expect(JSON.parse(readFileSync(credentialAclMarkerPath(home), "utf8"))).toMatchObject({ migrated: ITEMS.length });
+    clean();
+  }, SLOW);
+
+  test("a child that stops answering times out (and is killed) instead of holding the home's lock forever", async () => {
+    const child = spawnAdoptChild({ file: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"] }, { PATH: process.env.PATH ?? "/usr/bin:/bin" }, 300);
+    expect(await child.send({ op: "hello" })).toEqual({ ok: false, reason: "no answer to hello within 300 ms" });
+    expect(await child.close()).not.toBe(0);
+    expect(await child.send({ op: "hello" })).toMatchObject({ ok: false });
   }, SLOW);
 
   test("a shadow holding a DIFFERENT value is never overwritten: that item is skipped", async () => {
