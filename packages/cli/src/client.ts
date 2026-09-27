@@ -252,7 +252,7 @@ export class WinterClient {
   async listSkills(cwd?: string): Promise<Array<{ name: string; description: string; source: string; path: string; loadsInSessions?: boolean; sessionNote?: string }>> {
     return this.validated(SkillsListResult, await this.request(METHODS.skillsList, { cwd }), METHODS.skillsList).skills;
   }
-  async listMcp(cwd?: string): Promise<Array<{ name: string; status: string; toolNames: string[]; source: string }>> {
+  async listMcp(cwd?: string): Promise<Array<{ name: string; status: string; toolNames: string[]; source: string; auth?: string; oauthIssuerOrigin?: string; oauthPreregistered?: boolean }>> {
     const r = await this.request(METHODS.mcpList, { cwd });
     return r.servers;
   }
