@@ -131,7 +131,11 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     // 0.0.27 → 0.0.28 (WS-24 follow-ups): `git diff v0.0.27 v0.0.28 --
     // packages/runtime/src/provider/keychain-store.ts` came back EMPTY (0 lines); the mirror stands
     // unchanged.
-    expect(pkg.version).toBe("0.0.28");
+    //
+    // 0.0.28 → 0.0.29 (security: no-autoload build flags): `git diff v0.0.28 v0.0.29 --
+    // packages/runtime/src/provider/keychain-store.ts` came back EMPTY (0 lines); the mirror stands
+    // unchanged.
+    expect(pkg.version).toBe("0.0.29");
   });
 
 

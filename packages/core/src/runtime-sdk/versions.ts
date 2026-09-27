@@ -3,8 +3,12 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.28";
-/** Bumped to 0.0.28 (2026-09-27, WS-24 follow-ups): the published SDK the WS-24 daemon lanes already
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.29";
+/** Bumped to 0.0.29 (2026-09-27, security): 0.0.28 plus the compiled `winter` runtime built with
+ *  `--no-compile-autoload-bunfig --no-compile-autoload-dotenv`, so a code-session child started in a
+ *  user's repository no longer reads that repository's `bunfig.toml` (a `preload` would have run as
+ *  Winter) or `.env`. Winter's own `compile`/`compile:core` carry the same two flags.
+ *  Earlier: bumped to 0.0.28 (2026-09-27, WS-24 follow-ups): the published SDK the WS-24 daemon lanes already
  *  feature-detected against a dev build — a Worker that closes without running its own teardown has its
  *  orphaned process groups reaped (`processGroups()` on `EmbeddedWorkerProcess`); a subagent's forwarded
  *  system frames (hook notices, model switches, compaction, stop) carry `parent_tool_use_id`, so they file
