@@ -29,6 +29,7 @@ final class McpPermissionsClientTests: XCTestCase {
         let result = #"""
         {"ok":true,"servers":[{"name":"cf","status":"connected","allTools":"ask","listed":true,"tools":[
           {"name":"workers_list","toolName":"mcp__cf__workers_list","description":"List","readOnly":true,"permission":"allow","source":"default"},
+          {"name":"prod__x","toolName":"mcp__cf__prod__x","readOnly":false,"permission":"deny","source":"server","from":"cf__prod"},
           {"name":"d1_delete","toolName":"mcp__cf__d1_delete","readOnly":false,"setting":"allow","permission":"deny","source":"rule","rules":[{"behavior":"deny","rule":"mcp__cf__d1_*"},{"behavior":"sometimes","rule":"x"}]},
           {"name":"weird","toolName":"mcp__cf__weird","readOnly":false,"permission":"maybe","source":"default"}
         ]}]}
@@ -39,11 +40,12 @@ final class McpPermissionsClientTests: XCTestCase {
         let s = try XCTUnwrap(server)
         XCTAssertEqual(s.allTools, .ask)
         XCTAssertTrue(s.listed)
-        XCTAssertEqual(s.tools.map(\.name), ["workers_list", "d1_delete"])
+        XCTAssertEqual(s.tools.map(\.name), ["workers_list", "prod__x", "d1_delete"])
+        XCTAssertEqual(s.tools[1].from, "cf__prod")
         XCTAssertEqual(s.tools[0], McpToolPermissionRow(name: "workers_list", toolName: "mcp__cf__workers_list", description: "List", readOnly: true, permission: .allow, source: "default"))
-        XCTAssertEqual(s.tools[1].setting, .allow)
-        XCTAssertEqual(s.tools[1].permission, .deny)
-        XCTAssertEqual(s.tools[1].rules, [McpToolRule(behavior: .deny, rule: "mcp__cf__d1_*")])
+        XCTAssertEqual(s.tools[2].setting, .allow)
+        XCTAssertEqual(s.tools[2].permission, .deny)
+        XCTAssertEqual(s.tools[2].rules, [McpToolRule(behavior: .deny, rule: "mcp__cf__d1_*")])
     }
 
     func testSetToolPermissionSendsDefaultForNilAndResetOnlyWhenAsked() async throws {

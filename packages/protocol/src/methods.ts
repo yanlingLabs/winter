@@ -631,6 +631,10 @@ export const McpToolRowSchema = z.object({
   setting: McpToolPermissionSchema.optional(),
   permission: McpToolPermissionSchema,
   source: z.enum(["tool", "server", "rule", "default"]),
+  /** Set when the value that applies was stored under a DIFFERENT server name than this row's — a
+   *  server name containing `__` makes `mcp__cf__prod__x` also `cf`'s `prod__x`, and the strictest value of
+   *  either applies (`connectorFactsFor`); names which server's value it was. */
+  from: z.string().optional(),
   rules: z.array(McpToolRuleSchema).optional(),
 });
 export const McpToolsServerSchema = z.object({

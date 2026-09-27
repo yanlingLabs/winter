@@ -51,11 +51,14 @@ public struct McpToolPermissionRow: Equatable, Identifiable, Sendable {
     public let permission: McpToolPermission
     /// `"tool"` | `"server"` | `"rule"` | `"default"` — an open string (a newer daemon may grow one).
     public let source: String
+    /// The server name the applying value was stored under, when it is not this row's own (a server name
+    /// containing `__` makes one tool name two servers' — the strictest applies).
+    public let from: String?
     public let rules: [McpToolRule]
 
     public init(name: String, toolName: String, description: String? = nil, readOnly: Bool,
                 setting: McpToolPermission? = nil, permission: McpToolPermission, source: String,
-                rules: [McpToolRule] = []) {
+                from: String? = nil, rules: [McpToolRule] = []) {
         self.name = name
         self.toolName = toolName
         self.description = description
@@ -63,6 +66,7 @@ public struct McpToolPermissionRow: Equatable, Identifiable, Sendable {
         self.setting = setting
         self.permission = permission
         self.source = source
+        self.from = from
         self.rules = rules
     }
 }
@@ -106,7 +110,7 @@ public struct McpToolsServer: Equatable, Sendable {
                 name: n, toolName: wire, description: t["description"]?.stringValue,
                 readOnly: t["readOnly"]?.boolValue ?? false,
                 setting: t["setting"]?.stringValue.flatMap(McpToolPermission.init(rawValue:)),
-                permission: permission, source: source, rules: rules)
+                permission: permission, source: source, from: t["from"]?.stringValue, rules: rules)
         }
         return McpToolsServer(
             name: name, status: status,

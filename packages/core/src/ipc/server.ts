@@ -2476,6 +2476,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
               readOnly,
               ...(own !== undefined ? { setting: own } : {}),
               permission, source,
+              ...(source !== "rule" && source !== "default" && facts !== undefined && facts.server !== name ? { from: facts.server } : {}),
               ...(rules.length > 0 ? { rules } : {}),
             };
           });

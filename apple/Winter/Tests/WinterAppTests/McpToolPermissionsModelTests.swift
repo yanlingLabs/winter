@@ -143,6 +143,8 @@ final class McpToolPermissionsModelTests: XCTestCase {
                                          rules: [McpToolRule(behavior: .deny, rule: "mcp__cf__z"), McpToolRule(behavior: .allow, rule: "mcp__cf__*")])
         XCTAssertEqual(mcpToolPermissionCaption(ruled), "Denied by mcp__cf__z in sdk/settings.json — it applies in every mode")
         XCTAssertEqual(mcpToolRuleNotes(ruled), ["allow rule mcp__cf__* in sdk/settings.json — code sessions only"])
+        let borrowed = McpToolPermissionRow(name: "delete", toolName: "mcp__cf__prod__delete", readOnly: false, permission: .deny, source: "server", from: "cf")
+        XCTAssertEqual(mcpToolPermissionCaption(borrowed), "Always deny — from All actions of cf")
     }
 
     func testASignInHidesTheActionList() {

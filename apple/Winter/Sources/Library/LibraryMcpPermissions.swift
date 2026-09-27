@@ -53,6 +53,12 @@ func mcpPermissionAfterTap(current: McpToolPermission?, tapped: McpToolPermissio
 /// PURE: the row's caption — what applies and why. A `"rule"` (a deny rule in `sdk/settings.json`) is
 /// named, because no setting on this page can undo it.
 func mcpToolPermissionCaption(_ row: McpToolPermissionRow) -> String {
+    // The value came from ANOTHER server name (`cf`'s for this `cf__prod` action): say whose.
+    if let from = row.from, row.source == "tool" || row.source == "server" {
+        return row.source == "server"
+            ? "\(mcpPermissionLabel(row.permission)) — from All actions of \(from)"
+            : "\(mcpPermissionLabel(row.permission)) — set on \(from)"
+    }
     switch row.source {
     case "tool":
         return "\(mcpPermissionLabel(row.permission)) — set for this action"

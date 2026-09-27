@@ -213,6 +213,13 @@ export interface ConnectorPermissionSource {
   table(): ConnectorPermissionTable;
   /** The probe's `readOnlyHint` for this action: `true`/`false` when a listing named it, else `undefined`. */
   readOnly(server: string, tool: string, cwd?: string): boolean | undefined;
+  /**
+   * Is a server of this name CONFIGURED for a session at `cwd` (any scope)? Consulted only when a name splits
+   * several ways (`connectorFactsFor`): a configured server whose listing does not (yet) name the tool —
+   * never probed, needs a sign-in, local scope — may still be the one the call goes to, so it votes the
+   * DEFAULT and forbids read-only. Absent: no split is known to be configured.
+   */
+  configured?(server: string, cwd?: string): boolean;
 }
 
 export interface ConnectorFacts {
@@ -238,17 +245,25 @@ const STRICTNESS: Record<ConnectorPermission, number> = { deny: 3, ask: 2, allow
  *    `true`/`false`, never `undefined`);
  *  - a stored `deny` or `ask` from ANY candidate counts (a `"*"` on `cf` also covers `cf__prod`'s tools
  *    — over-strict at worst, never a silent run);
- *  - a stored `allow` counts only from a confirmed candidate or from an entry that names the tool exactly
- *    (never from an unconfirmed server's `"*"`, which may be a different server's blanket allow);
- *  - a confirmed candidate with nothing stored contributes the DEFAULT, which outranks an allow;
+ *  - a stored `allow` counts only from a confirmed or configured candidate or from an entry that names the
+ *    tool exactly (never from an unknown server's `"*"`, which may be a different server's blanket allow);
+ *  - a confirmed candidate with nothing stored contributes the DEFAULT, which outranks an allow — and so
+ *    does an UNCONFIRMED one whose server is configured for the session (`source.configured`; re-review:
+ *    the runtime gives a clashing tool name to whichever server registers first, so the call may really be
+ *    `cf__prod`'s while only `cf` has listed a `prod__delete`); a candidate configured nowhere is skipped
+ *    (the ordinary case of a tool name that itself contains `__`);
  *  - the strictest wins: deny > ask > default > allow;
- *  - read-only only when at least one candidate is confirmed and every confirmed listing says read-only.
+ *  - read-only only when at least one candidate is confirmed, every confirmed listing says read-only, and no
+ *    configured candidate is unconfirmed.
  */
 export function connectorFactsFor(source: ConnectorPermissionSource, toolName: string, cwd?: string): ConnectorFacts | undefined {
   const candidates = connectorCandidates(toolName);
   if (candidates.length === 0) return undefined;
   const table = source.table();
-  const weighed = candidates.map((c) => ({ ...c, stored: connectorSettingFor(table, c.server, c.tool), listed: source.readOnly(c.server, c.tool, cwd) }));
+  const weighed = candidates.map((c) => ({
+    ...c, stored: connectorSettingFor(table, c.server, c.tool), listed: source.readOnly(c.server, c.tool, cwd),
+    configured: candidates.length > 1 && source.configured?.(c.server, cwd) === true,
+  }));
   if (weighed.length === 1) {
     const only = weighed[0]!;
     return {
@@ -264,14 +279,17 @@ export function connectorFactsFor(source: ConnectorPermissionSource, toolName: s
     const isConfirmed = c.listed !== undefined;
     if (c.stored !== undefined) {
       const p = c.stored.permission;
-      if (p !== "allow" || isConfirmed || c.stored.source === "tool") votes.push({ rank: STRICTNESS[p], c, setting: p });
-    } else if (isConfirmed) {
+      // A configured server's own blanket allow counts (it is that server's value); an unconfigured,
+      // unconfirmed server's `"*"` allow may be someone else's and never allows.
+      if (p !== "allow" || isConfirmed || c.configured || c.stored.source === "tool") votes.push({ rank: STRICTNESS[p], c, setting: p });
+    } else if (isConfirmed || c.configured) {
       votes.push({ rank: 1, c });   // the default
     }
   }
   const winner = votes.sort((a, b) => b.rank - a.rank)[0];
   const named = winner?.c ?? confirmed[0] ?? weighed[0]!;
-  const readOnly = confirmed.length > 0 && confirmed.every((c) => c.listed === true);
+  const readOnly = confirmed.length > 0 && confirmed.every((c) => c.listed === true)
+    && !weighed.some((c) => c.listed === undefined && c.configured);
   return {
     server: named.server, tool: named.tool,
     ...(winner?.setting === undefined ? {} : { setting: winner.setting, settingSource: winner.c.stored!.source }),
