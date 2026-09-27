@@ -13,16 +13,24 @@ export class TokenAuthority {
   constructor(private readonly store: SecretStore) {}
 
   async ensureTokens(): Promise<{ harness: string; admin: string; remote: string }> {
+    return (await this.ensureTokensReporting()).tokens;
+  }
+
+  /** `ensureTokens`, also naming the items it had to MINT this call (WS-25 §7 B: a freshly minted item
+   *  carries only the creator's access list, so the app-token ACL migration must run again for it). */
+  async ensureTokensReporting(): Promise<{ tokens: { harness: string; admin: string; remote: string }; minted: string[] }> {
     const out: Record<string, string> = {};
+    const minted: string[] = [];
     for (const [role, name] of Object.entries(TOKEN_NAMES)) {
       let v = await this.store.get(name);
       if (!v) {
         v = randomBytes(32).toString("hex");
         await this.store.set(name, v);
+        minted.push(name);
       }
       out[role] = v;
     }
-    return out as { harness: string; admin: string; remote: string };
+    return { tokens: out as { harness: string; admin: string; remote: string }, minted };
   }
 
   async verify(role: Role, token: string): Promise<boolean> {
