@@ -189,6 +189,8 @@ export interface LegSession {
   setPolicy(policy: SessionApprovalPolicy): Promise<void>;
   /** WS-25: see `WinterSession.mcpServerNamesFor` (optional so a test double need not implement it). */
   mcpServerNamesFor?(serverUrl: string): string[];
+  /** WS-27: see `WinterSession.mcpServerNames` (optional so a test double need not implement it). */
+  mcpServerNames?(): string[];
   /** WS-25: see `WinterSession.reconnectMcpServer` (optional so a test double need not implement it). */
   reconnectMcpServer?(name: string): Promise<void>;
   end(): Promise<void>;

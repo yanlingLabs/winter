@@ -741,17 +741,23 @@ export const McpRemoveParams = z.object({
  *  posture `mcp.enable`/`mcp.disable` already take on an absent/never-disabled name.
  *  WS-27 `permissionsCleared`: the removal also dropped the name's connector permissions
  *  (`settings.json` → `mcp.toolPermissions`) — only once no other scope, plugin or subagent definition still
- *  defines a server of that name (the values are keyed by name across scopes). */
-export const McpRemoveResult = z.object({ ok: z.literal(true), name: z.string(), removed: z.boolean(), scope: McpScopeSchema.optional(), permissionsCleared: z.boolean().optional() });
+ *  defines a server of that name, and no live session has it connected (the values are keyed by name across
+ *  scopes). `permissionsNote`: the server WAS removed, but clearing its permissions failed. */
+export const McpRemoveResult = z.object({ ok: z.literal(true), name: z.string(), removed: z.boolean(), scope: McpScopeSchema.optional(), permissionsCleared: z.boolean().optional(), permissionsNote: z.string().optional() });
 
 /**
  * WS-27 — `winter mcp rename <old> <new>`: rename a server WITHIN one scope, its entry unchanged. Refused typed
  * (nothing written) when the new name is invalid (`mcp_invalid_name`), the scope does not define the old one
- * (`mcp_server_not_found`), the scope already defines the new one (`mcp_server_exists`), or BOTH names already
- * hold stored connector permissions (`mcp_rename_permissions_conflict` — clear one first). The old name's
- * connector permissions and `mcp.disabled` membership are copied to the new name (`carried`), and dropped from
- * the old name unless another scope, a plugin or a subagent definition still defines it (`keptOld`). A sign-in
- * is keyed by the server's URL, so it follows the rename by itself. LOCAL role only.
+ * (`mcp_server_not_found`), the scope already defines the new one (`mcp_server_exists`), anything else uses
+ * the new name — another scope, a plugin, a subagent definition, a live session (`mcp_server_name_in_use`) —
+ * or the new name already holds stored connector permissions (`mcp_rename_target_has_permissions`).
+ * The old name's connector permissions, `mcp.disabled` membership and `sdk/settings.json` rules naming
+ * `mcp__<old>`/`mcp__<old>__…` are copied to the new name first (`carried`, `rulesCarried`), then dropped from
+ * the old name unless something still uses it (`keptOld` — a live session's child included). Rules in files
+ * Winter does not edit (a project's `.winter/settings*.json`/`permissions.local.json`, the read-only
+ * approved-rules record) are listed in `rulesNotFollowed` as `"<file>: <rule>"`. `note`: something after the
+ * rename failed (the rename stands). A sign-in is keyed by the server's URL, so it follows by itself. LOCAL
+ * role only.
  */
 export const McpRenameParams = z.object({
   name: z.string().min(1),
@@ -762,6 +768,7 @@ export const McpRenameParams = z.object({
 export const McpRenameResult = z.object({
   ok: z.literal(true), name: z.string(), newName: z.string(), scope: McpScopeSchema,
   carried: z.boolean(), keptOld: z.boolean(),
+  rulesCarried: z.number().int(), rulesNotFollowed: z.array(z.string()), note: z.string().optional(),
 });
 
 /**

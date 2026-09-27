@@ -378,6 +378,12 @@ export interface WinterSession {
    */
   mcpServerNamesFor(serverUrl: string): string[];
   /**
+   * WS-27: every MCP server name the LIVE incarnation was spawned with (the same fold `mcpServerNamesFor`
+   * reads) — `[]` when not live. `mcp.remove`/`mcp.rename` keep a name's connector settings while a live child
+   * still has it connected (the child keeps its servers until it restarts; the settings are read live).
+   */
+  mcpServerNames(): string[];
+  /**
    * WS-25: reconnect one of the live child's MCP servers (`Query.reconnectMcpServer`, the runtime's
    * `mcp_reconnect` control) — how a new sign-in reaches a session without replacing its child (a
    * Keychain write never evicts, spec §1). Code children and embedded chat/dispatch alike. A typed
@@ -611,6 +617,11 @@ class WinterSessionImpl implements WinterSession {
       if ((c.type === "http" || c.type === "sse") && typeof c.url === "string" && canonicalOrUndefined(c.url) === wanted) names.push(name);
     }
     return names;
+  }
+
+  mcpServerNames(): string[] {
+    const inc = this.stateValue === "live" ? this.inc : undefined;
+    return inc === undefined ? [] : Object.keys(inc.mcpServers);
   }
 
   async reconnectMcpServer(name: string): Promise<void> {

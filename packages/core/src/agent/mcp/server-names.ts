@@ -27,7 +27,7 @@
 // agent file yet (only a programmatic definition carries them), so these rows anticipate the runtime.
 //
 // Never throws: an unreadable file or directory is simply not there.
-import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 import { resolveMarketplacePluginPath } from "@yanlinglabs/winter-agent-sdk";
 import { sdkEnabledPlugins, sdkLocalMcpServers, sdkUserMcpServers } from "../../settings";
@@ -199,11 +199,34 @@ export function agentInlineMcpServers(home: string, projectRoots: readonly strin
   return out;
 }
 
+/** How many worktrees of one trusted repository `mcpServerNameDefined` reads before it answers "defined". */
+const MAX_WORKTREES = 64;
+const WORKTREE_LIST_TIMEOUT_MS = 2_000;
+
+/**
+ * The OTHER worktrees of the repository at `root` (`git worktree list --porcelain`), or `"unknown"` when git
+ * could not answer for a repository that has one (a failure, a timeout, more than `MAX_WORKTREES`) — the
+ * caller then treats the name as defined. A directory with no `.git` has none.
+ */
+function linkedWorktrees(root: string): string[] | "unknown" {
+  if (!existsSync(join(root, ".git"))) return [];
+  try {
+    const r = Bun.spawnSync(["git", "-C", root, "worktree", "list", "--porcelain"], { stdout: "pipe", stderr: "ignore", stdin: "ignore", timeout: WORKTREE_LIST_TIMEOUT_MS });
+    if (r.exitCode !== 0) return "unknown";
+    const paths = r.stdout.toString().split("\n").filter((l) => l.startsWith("worktree ")).map((l) => canonical(l.slice("worktree ".length)));
+    if (paths.length > MAX_WORKTREES) return "unknown";
+    return paths.filter((p) => p !== canonical(root));
+  } catch {
+    return "unknown";
+  }
+}
+
 /**
  * Does anything still define an MCP server named `name` — the user scope, ANY project's local scope, the
- * `.winter/mcp.json` of the cwd's trusted project or of any trusted project, a plugin, or a subagent
- * definition? `mcp.remove`/`mcp.rename` keep the name's connector permissions while it does. Unreadable
- * files count as "not defined there" — except `sdk/.winter.json`, which a remove has just rewritten.
+ * `.winter/mcp.json` of the cwd's trusted project, of any trusted project or of any linked worktree of one
+ * (a worktree's project scope is its own top), a plugin, or a subagent definition? `mcp.remove`/`mcp.rename`
+ * keep a name's connector settings while it does. Fail-safe toward "defined": git failing to list a trusted
+ * repository's worktrees answers `true`. Unreadable files count as "not defined there".
  */
 export function mcpServerNameDefined(home: string, name: string, opts: { cwd?: string | undefined; trust?: Pick<TrustStore, "isTrusted" | "list"> | undefined } = {}): boolean {
   try { if (Object.hasOwn(sdkUserMcpServers(home), name)) return true; } catch { /* unreadable */ }
@@ -212,8 +235,15 @@ export function mcpServerNameDefined(home: string, name: string, opts: { cwd?: s
     for (const key of Object.keys(projects)) if (Object.hasOwn(sdkLocalMcpServers(home, key), name)) return true;
   } catch { /* unreadable */ }
   const roots = trustedProjectRoots({ cwd: opts.cwd, trust: opts.trust, allTrusted: true });
+  const projectFiles = new Set(roots);
   for (const root of roots) {
+    const worktrees = linkedWorktrees(root);
+    if (worktrees === "unknown") return true;
+    for (const wt of worktrees) projectFiles.add(wt);
+  }
+  for (const root of projectFiles) {
     const read = readRawProjectMcpConfig(root);
+    if (read.kind === "malformed") return true;   // cannot tell: keep the settings
     if (read.kind === "ok" && Object.hasOwn(read.servers, name)) return true;
   }
   if (pluginMcpServerNames(home, roots).has(name)) return true;

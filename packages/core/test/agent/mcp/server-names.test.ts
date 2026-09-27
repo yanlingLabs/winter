@@ -118,3 +118,27 @@ describe("configured(): an agent-inline or project-enabled plugin server votes i
     expect(facts?.readOnly).toBe(false);
   });
 });
+
+describe("review 8: a trusted repository's LINKED WORKTREES count", () => {
+  test("a server only a linked worktree's .winter/mcp.json defines is still defined", () => {
+    const f = fixture();
+    const git = (args: string[]) => expect(Bun.spawnSync(["git", "-C", f.project, ...args], { stdout: "ignore", stderr: "ignore" }).exitCode).toBe(0);
+    git(["-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "i"]);
+    const wt = join(dir("winter-srvnames-wt-"), "wt");
+    git(["worktree", "add", "-q", "-b", `r8-${Math.random().toString(16).slice(2)}`, wt]);
+    expect(mcpServerNameDefined(f.home, "wt_only", { trust: f.trust })).toBe(false);
+    write(join(wt, ".winter", "mcp.json"), { mcpServers: { wt_only: { type: "stdio", command: "w" } } });
+    expect(mcpServerNameDefined(f.home, "wt_only", { trust: f.trust })).toBe(true);
+  });
+
+  test("fail-safe: a trusted repository git cannot list reads as defined; a plain directory has no worktrees", () => {
+    const f = fixture();
+    const broken = dir("winter-srvnames-broken-");
+    writeFileSync(join(broken, ".git"), "gitdir: /nonexistent/place\n");   // a .git git cannot use
+    f.trusted.add(broken);
+    expect(mcpServerNameDefined(f.home, "anything", { trust: f.trust })).toBe(true);
+    f.trusted.delete(broken);
+    f.trusted.add(dir("winter-srvnames-plain-"));
+    expect(mcpServerNameDefined(f.home, "anything", { trust: f.trust })).toBe(false);
+  });
+});
