@@ -42,13 +42,14 @@ export class KeychainSecretStore implements SecretStore {
   /** `Bun.secrets.delete` already answers the exact boolean this interface promises ("true if a
    *  credential was deleted, false if not found"), so nothing is re-derived here. WS-27: a migration
    *  shadow of the item (`<name>.migrating`, `auth/credential-acl.ts`) goes with it, so a removed
-   *  credential can never be restored from one; its own result does not change the answer. */
+   *  credential can never be restored from one — deleted FIRST; its own result does not change the answer. */
   async delete(name: string): Promise<boolean> {
-    const removed = await this.backend.delete({ service: this.service, name });
+    // The shadow FIRST: a crash between the two deletes must never leave a shadow beside a missing original,
+    // which recovery would restore.
     if (!name.endsWith(MIGRATION_SHADOW_SUFFIX)) {
       try { await this.backend.delete({ service: this.service, name: `${name}${MIGRATION_SHADOW_SUFFIX}` }); } catch { /* none, or not ours */ }
     }
-    return removed;
+    return await this.backend.delete({ service: this.service, name });
   }
 }
 

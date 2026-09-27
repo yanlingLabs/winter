@@ -46,6 +46,9 @@ final class MenuBarController {
     // `statusLine()` update is suppressed while this is true, so it never stomps the "engine
     // stopped — Restart" title/action `setEngineFailed(true)` installs below.
     private var engineFailed = false
+    // WS-27: true while the daemon supervisor is `.waitingForCredentials` (another Winter process holds the
+    // credential migration lock) — the state line says so instead of the periodic status.
+    private(set) var engineWaitingForCredentials = false
     private let orbItem = NSMenuItem(title: "Hide Orb", action: #selector(didToggleOrb), keyEquivalent: "o")
     private let summonFieldItem = NSMenuItem(title: "Summon Field", action: #selector(didSummonField), keyEquivalent: "")
     let openCliItem = NSMenuItem(title: "Open CLI", action: #selector(didOpenCli), keyEquivalent: "")
@@ -337,7 +340,7 @@ final class MenuBarController {
         // Lifecycle T6: never overwrite the "engine stopped — Restart" title/action while failed —
         // this runs on a 2s Timer (`AppDelegate.boot()`), which would otherwise stomp it right back
         // to the plain status line on the very next tick.
-        if !engineFailed {
+        if !engineFailed && !engineWaitingForCredentials {
             stateItem.title = statusLine()
         }
         // Lifecycle T4: the checkbox tracks `SMAppService.mainApp`'s live status (e.g. the user
@@ -366,6 +369,17 @@ final class MenuBarController {
             stateItem.action = nil
             stateItem.title = statusLine()
         }
+    }
+
+    /// WS-27: the daemon supervisor is backing off because another Winter process is updating credentials
+    /// (`DaemonSupervisor.waitingForCredentialsMessage`), or has left that state. Idempotent; an inert line
+    /// — nothing to click, the supervisor retries by itself. `.failed` wins while both are set.
+    func setEngineWaitingForCredentials(_ waiting: Bool) {
+        guard waiting != engineWaitingForCredentials else { return }
+        engineWaitingForCredentials = waiting
+        guard !engineFailed else { return }
+        stateItem.isEnabled = false
+        stateItem.title = waiting ? DaemonSupervisor.waitingForCredentialsMessage : statusLine()
     }
 
     func setOrbVisible(_ visible: Bool) {

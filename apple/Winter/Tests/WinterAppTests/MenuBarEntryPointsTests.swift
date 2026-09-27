@@ -492,6 +492,24 @@ final class MenuBarEntryPointsTests: XCTestCase {
         XCTAssertTrue(controller.stateItem.isEnabled)
     }
 
+    // MARK: - WS-27: ".waitingForCredentials" -> its own inert state line
+
+    func testWaitingForCredentialsShowsItsOwnInertLineThatRefreshKeepsAndClears() {
+        let controller = makeController()
+        controller.install()
+        controller.setEngineWaitingForCredentials(true)
+        XCTAssertEqual(controller.stateItem.title, "waiting for another Winter process to finish updating credentials")
+        XCTAssertFalse(controller.stateItem.isEnabled, "nothing to click: the supervisor retries by itself")
+        controller.refresh()
+        XCTAssertEqual(controller.stateItem.title, "waiting for another Winter process to finish updating credentials")
+        controller.setEngineWaitingForCredentials(false)
+        XCTAssertEqual(controller.stateItem.title, "idle")
+        // `.failed` wins over a stale waiting flag.
+        controller.setEngineFailed(true)
+        controller.setEngineWaitingForCredentials(true)
+        XCTAssertEqual(controller.stateItem.title, "engine stopped — Restart")
+    }
+
     func testSetEngineFailedIsIdempotent() {
         var restarted = 0
         let controller = makeController(onRestartDaemon: { restarted += 1 })

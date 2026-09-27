@@ -38,10 +38,19 @@ export async function beginKeychainPass(input: BeginKeychainPassInput): Promise<
     return undefined;
   }
   const lock = await (input.waitForLock ?? ((h: string) => waitForCredentialMigrationLock(h, { log: input.log })))(input.home);
-  const kc: CredentialKeychain = input.kc ?? { keychain: null, service: input.service, log: input.log };
-  const access = withKeychainUserInteractionDisabled(() => prepareCredentialAccess(kc));
-  withKeychainUserInteractionDisabled(() => recoverCredentialShadows(kc, access, { dropShadowsBesideOriginals: false }));
-  return { lock, kc, access };
+  // Anything that throws from here on must not leave the lock held by a process that will not finish.
+  let access: KeychainAccess | undefined;
+  try {
+    const kc: CredentialKeychain = input.kc ?? { keychain: null, service: input.service, log: input.log };
+    access = withKeychainUserInteractionDisabled(() => prepareCredentialAccess(kc));
+    const built = access;
+    withKeychainUserInteractionDisabled(() => recoverCredentialShadows(kc, built, { dropShadowsBesideOriginals: false }));
+    return { lock, kc, access };
+  } catch (err) {
+    access?.release();
+    lock.release();
+    throw err;
+  }
 }
 
 /** This process's designated requirement, or `undefined` when code signing cannot say (a failed or timed-out

@@ -5,6 +5,7 @@
 import { expect, test } from "bun:test";
 import { join } from "node:path";
 import { CredentialMigrationBusy, waitForCredentialMigrationLock } from "../src/auth/credential-migration-lock";
+import type { CredentialKeychain } from "../src/auth/credential-acl";
 import { beginKeychainPass } from "../src/auth/keychain-boot";
 import { FileSecretStore, type SecretStore } from "../src/auth/secret-store";
 import { startDaemon } from "../src/daemon";
@@ -35,4 +36,18 @@ test("a live foreign holder of the credential migration lock: the boot waits, th
     // `ensureTokens` reads harness-token/admin-token/remote-token; the presence probe reads the provider slots.
     expect(reads).toEqual([]);
   });
+});
+
+test("M-C: a pass that throws after taking the lock releases it", async () => {
+  let released = 0;
+  const lock = { release() { released++; } };
+  const failing = { keychain: null, service: "ws27.never-used", ops: { createAccess: () => { throw new Error("boom"); }, list: () => { throw new Error("recovery must not run"); } } } as unknown as CredentialKeychain;
+  let thrown: unknown;
+  try {
+    // Everything after the lock is built never to throw, so force it: the access list fails to build and
+    // the log line reporting that throws — an exception escaping the pass after the lock was taken.
+    await beginKeychainPass({ home: "/x", service: "s", log: () => {}, unlocked: () => true, waitForLock: async () => lock, kc: { ...failing, log: () => { throw new Error("log failed"); } } });
+  } catch (err) { thrown = err; }
+  expect(thrown).toBeInstanceOf(Error);
+  expect(released).toBe(1);
 });

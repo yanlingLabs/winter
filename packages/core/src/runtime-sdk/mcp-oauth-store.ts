@@ -22,9 +22,11 @@ export function withShadowRemoval(base: McpOAuthStore): McpOAuthStore {
     read: (account) => base.read(account),
     write: (account, value) => base.write(account, value),
     async remove(account) {
+      // The shadow FIRST, so a crash between the two never leaves a shadow beside a missing original.
+      if (!account.endsWith(MIGRATION_SHADOW_SUFFIX)) {
+        try { await base.remove(`${account}${MIGRATION_SHADOW_SUFFIX}`); } catch { /* none, or not ours */ }
+      }
       await base.remove(account);
-      if (account.endsWith(MIGRATION_SHADOW_SUFFIX)) return;
-      try { await base.remove(`${account}${MIGRATION_SHADOW_SUFFIX}`); } catch { /* none, or not ours */ }
     },
   };
 }

@@ -1509,11 +1509,12 @@ if (import.meta.main) {
       daemon = await startDaemon();
     } catch (err) {
       // Migration B's `MigrationRefused` and (WS-21) Migration C's `MigrationCRefused`: a message and exit 1.
-      const { migrationRefusalMessage } = await import("./daemon-boot-refusal");
+      const { bootRefusalExitCode, migrationRefusalMessage } = await import("./daemon-boot-refusal");
       const refusal = migrationRefusalMessage(err);
       if (refusal !== undefined) {
         console.error(refusal);
-        process.exit(1);
+        // WS-27: 75 for a held credential migration lock (the app backs off and retries), else 1.
+        process.exit(bootRefusalExitCode(err));
       }
       throw err;
     }
