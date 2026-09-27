@@ -241,6 +241,14 @@ struct McpSignInSheet: View {
         }
         .padding(20)
         .frame(width: 420)
+        // The belt to `cancel()`'s suspender: Cancel/Done route through `onDone()`, but SwiftUI's
+        // OWN interactive dismissal (Esc, clicking outside the sheet) nils the parent's binding
+        // directly and calls neither — without this, the poll `Task` keeps `model` alive and
+        // polling for up to its own cap (item 2's 5-min timeout) after the sheet is already gone,
+        // since `poll()` captures `self` STRONGLY for its own duration (only the spawning `Task {
+        // [weak self] in … }` is weak). `cancel()` is idempotent, so this fires harmlessly even
+        // when Cancel/Done already called it.
+        .onDisappear { model.cancel() }
     }
 
     private func startingBody(issuerOriginHint: String?) -> some View {
