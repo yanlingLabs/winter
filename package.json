@@ -22,6 +22,7 @@
     "typecheck:core": "tsc --noEmit -p packages/core",
     "typecheck:protocol": "tsc --noEmit -p packages/protocol",
     "verify:office-agent": "bun run scripts/office-agent-gate.ts",
+    "dev:daemon": "bun run scripts/dev-daemon.ts",
     "icons:render": "bun run scripts/render-icons.ts",
     "cef:fetch": "bun run scripts/fetch-cef.ts",
     "monaco:fetch": "bun run scripts/fetch-monaco.ts",

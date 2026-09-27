@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
-import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeWorkflowWorker, RUNTIME_WORKFLOW_WORKER_ARG, runRuntimeStateProbe, runRuntimesProbe, keychainUnlocked, runEmbeddedProbe, resolveWinterProfile, splitTag, sdkLocalMcpServers } from "@yanlinglabs/winter-core";
+import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeWorkflowWorker, RUNTIME_WORKFLOW_WORKER_ARG, runRuntimeStateProbe, runRuntimesProbe, keychainUnlocked, runEmbeddedProbe, runDevKeychainAdopt, DEV_KEYCHAIN_ADOPT_ARG, resolveWinterProfile, splitTag, sdkLocalMcpServers } from "@yanlinglabs/winter-core";
 import type { CredentialRow, SecretStore, Settings } from "@yanlinglabs/winter-core";
 import { METHODS, type ApprovalPolicy, type Task } from "@yanlinglabs/winter-protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
@@ -1416,6 +1416,12 @@ if (import.meta.main) {
     const unlocked = keychainUnlocked(null);
     process.stdout.write(`keychain-ffi: ok (default keychain ${unlocked ? "unlocked" : "locked"})\n`);
     process.exit(0);
+  }
+  // WS-27: the NEW creator's side of the one-time dev Keychain transition (`auth/dev-keychain-transition.ts`),
+  // driven over stdio by `scripts/dev-daemon.ts --transition` running under `bun`. Refuses anything but the
+  // dev profile on its default home; never prints a value.
+  if (process.argv[2] === DEV_KEYCHAIN_ADOPT_ARG) {
+    await runDevKeychainAdopt();
   }
   if (process.argv[2] === "__runtime-state-probe") {
     const result = await runRuntimeStateProbe({ home: process.env.WINTER_HOME });

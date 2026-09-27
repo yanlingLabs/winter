@@ -14,7 +14,6 @@ The canonical list of known, deliberately parked work. Nothing here blocks a rel
 
 ## Credentials and Keychain
 - [ ] Bun's own environment-level launcher switches still let another process running as the same user make a compiled Bun binary (`winter-core` included) run arbitrary code under its signed identity; closing that needs a patched Bun build. (The workflow workers already refuse to run outside a sandbox that denies them the Keychain.)
-- [ ] The dev daemon runs as Homebrew `bun`, so the pairing tokens it re-creates carry bun's team and Winter Dev asks once per token; run the dev daemon as a Winter-signed compiled `winter-core` instead.
 
 ## Models and providers
 - [ ] Catalog tool-calling evidence: the 48 Anthropic-dialect rows on third-party hosts (e.g. `zai-anthropic`, `qianfan-*-anthropic`, `tencent-*-anthropic`) are hidden from session pickers only because upstream never stated tool support; probe or overlay them. Same for `nvidia/openai/gpt-oss-{120b,20b}` and the two NVIDIA Llama rows marked tool-less by a third-party registry.
