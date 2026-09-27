@@ -380,5 +380,37 @@
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
       <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.120.1/Winter-0.120.1.zip" sparkle:edSignature="bzDdU2MRAQoLl7WE/3ab8y+7JGRJF2YLKmxdZdGcftYegJwMNjTqKu7Wuxf7sKyT/pRxulYktcqGzstu9m91AA==" length="426174687" type="application/octet-stream"/>
     </item>
+      <item>
+      <title>0.121.0</title>
+      <description><![CDATA[<p>Winter agent SDK 0.0.33</p>
+<h2>New models</h2>
+<ul>
+  <li><strong>Space Bunny</strong>, an anonymous preview model, is available free on OpenCode Zen (<code>opencode/space-bunny-free</code>) and on OpenRouter (<code>openrouter/stealth/space-bunny-alpha</code>). Who makes it has not been announced. OpenCode says its provider keeps no data; OpenRouter's terms for stealth models allow prompts to be collected for training.</li>
+  <li><strong>About seventy more models can run sessions</strong>: NVIDIA-hosted models, and Claude-compatible endpoints from Tencent, Baidu Qianfan, Z.AI, Wafer and AgentRouter, wherever the provider documents tool support. Models with no documented tool support stay hidden.</li>
+</ul>
+<h2>Connectors</h2>
+<ul>
+  <li><strong>A connector that asks you to open a link now shows a card</strong> with the site it goes to, instead of being refused. Choose Open link or Decline. The link is never saved, and the terminal can answer it too.</li>
+  <li><strong>Rename a connector</strong> with <code>winter mcp rename</code>; it keeps the connector's permissions. <code>winter mcp remove</code> now also clears the connector's permissions when nothing else uses that name. Both list any saved allow or deny rules that still mention the old name, so you can edit them.</li>
+  <li><strong>Permissions follow the exact connector</strong> that runs an action. A subagent's own connector that shares a name with one of yours never inherits your Always allow.</li>
+  <li>A message sent while a connector is reconnecting now waits briefly for it instead of missing its tools, and a connector that withdraws a request removes its card.</li>
+  <li>Two plugins that add a tool with the same name no longer clash.</li>
+</ul>
+<h2>Keychain</h2>
+<ul>
+  <li><strong>Only Winter itself can read your saved keys and sign-ins.</strong> On first launch Winter saves each one again so that access older Winter builds were given is dropped. Nothing is lost if this is interrupted, and nothing prompts.</li>
+  <li>If another Winter process is still updating credentials, Winter waits for it and says so in the menu bar.</li>
+  <li>Workflows refuse to run unless they are sandboxed away from the Keychain.</li>
+</ul>
+<h2>Fixes</h2>
+<ul>
+  <li><code>winter-dev</code> sign-in hints name the command you actually ran.</li>
+</ul>
+<p>This release runs on Winter agent SDK 0.0.33 and runtime SDK 0.0.15.</p>]]></description>
+      <sparkle:version>0.121.0</sparkle:version>
+      <sparkle:shortVersionString>0.121.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.121.0/Winter-0.121.0.zip" sparkle:edSignature="N9OoZn6clmMgtPHQb5oDGnSGasZXMCUrfqWPXRAr91hXcYAlIaNuY0oxDiDvsbVF14399/MdwOV3q39Prf6GDg==" length="426235976" type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>
