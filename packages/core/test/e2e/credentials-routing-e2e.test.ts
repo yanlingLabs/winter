@@ -133,6 +133,8 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
    *  environment as `ps` reports them. */
   const turnLines: string[] = [];
   let childCommandLine = "";
+  /** B-1's code session — the LIVE one MAJOR 1 and B-3 re-open (the list also holds the §7 chat session). */
+  let codeSessionId: string | undefined;
 
   beforeAll(async () => {
     home = realpathSync(mkdtempSync(join(tmpdir(), "ws19-route-")));
@@ -216,6 +218,7 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ws19-route-cwd-")));
     liveCwd = cwd;
     const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: DEEPSEEK_MODEL, cwd });
+    codeSessionId = sessionId;
     await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
     // WS-25 §7: every console line the daemon writes during the real turn, for B-8's sweep.
     const push = (...a: unknown[]): void => { turnLines.push(a.map(String).join(" ")); };
@@ -382,9 +385,26 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
     expect(everyFileUnder(secretsDir).some((p) => readFileSync(p, "utf8").includes(SENTINEL))).toBe(true);
   }, 120_000);
 
+  // WS-25 §7: the EMBEDDED topology (chat and dispatch run the runtime in a Worker inside the daemon) is
+  // host-brokered the same way — one handler site (`optionsFor`), one `query()`. Before §7 this Worker read
+  // the Keychain in-process under the throwaway service, found nothing, and sent no key.
+  test("WS-25 §7: an embedded chat session's key also arrives over the control channel, and only on the wire", async () => {
+    const before = authHeaders.length;
+    const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "chat", model: DEEPSEEK_MODEL });
+    await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+    await client.call(METHODS.sessionSend, { sessionId, text: "hello from chat" });
+    await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 90_000);
+    const chatHeaders = authHeaders.slice(before);
+    expect(chatHeaders.length).toBeGreaterThan(0);
+    expect(chatHeaders.every((h) => h === `Bearer ${SENTINEL}`)).toBe(true);
+    expect(client.frames.some((f) => f.includes(SENTINEL))).toBe(false);
+    // A client attaches to one session at a time: hand the fixture back to B-1's code session for B-3.
+    await client.call(METHODS.sessionAttach, { sessionId: codeSessionId!, fromSeq: 0 });
+  }, 120_000);
+
   test("B-3: removing the credential leaves the LIVE session alone, and refuses the NEXT one typed", async () => {
     const sessions = await client.call<{ sessions: Array<{ sessionId: string }> }>(METHODS.sessionList, {});
-    const liveSessionId = sessions.sessions[0]!.sessionId;
+    const liveSessionId = codeSessionId ?? sessions.sessions[0]!.sessionId;
 
     expect(await client.call<{ ok: boolean; removed: boolean }>(METHODS.credentialRemove, { providerId: "deepseek" })).toEqual({ ok: true, removed: true });
     const list = await client.call<{ providers: Array<{ providerId: string; present: boolean }> }>(METHODS.credentialList, {});
