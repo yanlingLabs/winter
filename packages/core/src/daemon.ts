@@ -1905,6 +1905,9 @@ export async function startDaemon(opts: {
     // through the broker that already renews it from `ant`'s profile.
     ...(sessionMcpOAuthStore === undefined ? {} : { mcpOAuthStore: sessionMcpOAuthStore }),
     credentialRefreshers: {
+      // The ref is spelled EXACTLY as the internal jobs' (`providers/internal-provider.ts`: no `service`),
+      // because `refreshOauthMaterial`'s own single-flight is keyed on (service, account, token URL): the
+      // titler renewing codex and a session asking for newer material then share ONE grant in this process.
       [CREDENTIAL_MATERIAL_NAMES.codexOauth]: async (account: string) => {
         await refreshOauthMaterial({ store: credentialStoreOverSecretStore(secrets), ref: { kind: "keychain", account }, tokenUrl: CODEX.tokenUrl, clientId: CODEX.clientId });
       },
