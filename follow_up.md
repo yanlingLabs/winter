@@ -3,10 +3,19 @@
 The canonical list of known, deliberately parked work. Nothing here blocks a release. When an item ships, delete its line in the same commit; when new work gets parked, add it here rather than in a private note.
 
 ## MCP
-- [ ] MCP OAuth (in progress as WS-25: sign-in, refresh, Mac sign-in buttons, pre-registered clients, CIMD).
 - [ ] Move the daemon's `McpManager` status probe onto the public `@yanlinglabs/winter-agent-runtime/mcp-client` (the SDK exports it since 0.0.28) and retire the hand-written stdio client.
 - [ ] URL-mode elicitation (`onElicitation` is unwired in the daemon), a second auth path some newer MCP servers use.
 - [ ] Two same-named plugins from different marketplaces that register the same tool name still collide in the chat-side external tool name (`mcp__winter__external__<tool>`).
+- [ ] `winter mcp remove` leaves the server's connector permissions behind, and there is no `winter mcp rename` (permissions are keyed by server name, so they don't follow a rename).
+- [ ] Connector permissions don't reach a subagent definition's own inline MCP servers (renamed `<name>_2` on a clash, or unique names) or a plugin server enabled only for a project from a directory marketplace without an install record, until a value is stored under that exact name.
+- [ ] A turn that starts while a server is reconnecting doesn't see that server's tools (the next turn does).
+- [ ] `oauth-doors.ts`'s follow-up failure path still logs only the error's name.
+- [ ] `winter mcp set-secret`'s hint names `winter` even when invoked as `winter-dev`.
+
+## Credentials and Keychain
+- [ ] Re-create the provider Keychain items with an ACL naming only `winter-core`, so "Always Allow" grants older runtime binaries collected are dropped.
+- [ ] Harden the compiled binaries so another process running as the same user can't drive them to run arbitrary code (a custom Bun base binary, or an upstream opt-out).
+- [ ] The dev daemon runs as Homebrew `bun`, so the pairing tokens it re-creates carry bun's team and Winter Dev asks once per token; run the dev daemon as a Winter-signed compiled `winter-core` instead.
 
 ## Models and providers
 - [ ] Catalog tool-calling evidence: the 48 Anthropic-dialect rows on third-party hosts (e.g. `zai-anthropic`, `qianfan-*-anthropic`, `tencent-*-anthropic`) are hidden from session pickers only because upstream never stated tool support; probe or overlay them. Same for `nvidia/openai/gpt-oss-{120b,20b}` and the two NVIDIA Llama rows marked tool-less by a third-party registry.
@@ -31,3 +40,4 @@ The canonical list of known, deliberately parked work. Nothing here blocks a rel
 
 ## Tests and infrastructure
 - [ ] WinterKit's `FakePhoneConformanceTests.testStreamingDeltasReachThePhone…` fails on `main` (timing-sensitive, real-daemon).
+- [ ] The core suite prints "Cannot use a closed database" lines from teardown ordering (no test fails).
