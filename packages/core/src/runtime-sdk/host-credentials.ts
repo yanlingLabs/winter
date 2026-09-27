@@ -55,6 +55,13 @@ export const HOST_REFRESH_SKEW_MS = 60_000;
  *  profile would otherwise spawn `ant` on every resolve a retrying child makes. */
 export const HOST_RENEWAL_BACKOFF_MS = 30_000;
 
+/** After a SUCCESSFUL renewal, how long the same item is not renewed again (WS-25 security review M2). A
+ *  session that keeps asking for "newer than N" -- a child whose provider or MCP server keeps answering 401
+ *  to fresh material, or one that simply loops -- would otherwise drive a refresh-token grant per ask. Inside
+ *  the window a `minGeneration` the stored item cannot meet answers `stale` (and `mcp_oauth_refresh`
+ *  answers `transient`) instead of renewing again; the material renewed moments ago is what there is. */
+export const HOST_RENEWAL_MIN_INTERVAL_MS = 30_000;
+
 /** The client-secret prefix (`mcp-oauth-client-secret:<id>`) — it also starts with `mcp-oauth-client`,
  *  so the one prefix check below covers both daemon-only item families; spelled here for the doc. */
 const MCP_CLIENT_ITEM_PREFIX = MCP_OAUTH_CLIENT_ACCOUNT_PREFIX.replace(/:$/, "");
@@ -145,6 +152,8 @@ export interface HostCredentialDeps {
   refreshers?: Readonly<Record<string, ProviderRefresher>>;
   now?: () => number;
   log?: (line: string) => void;
+  /** TEST SEAM: the SDK's MCP refresh (`refreshMcpOAuthToken`), so a test can count grants without a network. */
+  refreshMcp?: typeof refreshMcpOAuthToken;
 }
 
 export interface HostCredentialBroker {
@@ -210,6 +219,19 @@ export function createHostCredentialBroker(deps: HostCredentialDeps): HostCreden
   const refreshing = new Map<string, Promise<void>>();
   /** account → when its last renewal failed (`HOST_RENEWAL_BACKOFF_MS`). Cleared by a renewal that works. */
   const failedAt = new Map<string, number>();
+  /** account → when its last renewal SUCCEEDED (`HOST_RENEWAL_MIN_INTERVAL_MS`). */
+  const renewedAt = new Map<string, number>();
+  const recentlyRenewed = (account: string): boolean => (renewedAt.get(account) ?? -Infinity) + HOST_RENEWAL_MIN_INTERVAL_MS > now();
+  const refreshMcp = deps.refreshMcp ?? refreshMcpOAuthToken;
+  /** The generation an MCP token record carries now (`undefined`: no readable record). */
+  const storedMcpGeneration = async (store: McpOAuthStore, account: string): Promise<number | undefined> => {
+    try {
+      const raw = await store.read(account);
+      return raw === null ? undefined : decodeMcpOAuthTokenRecord(raw).generation;
+    } catch {
+      return undefined;
+    }
+  };
   /** MCP sign-in accounts already logged as outside a session's fold (one line each, not one per connect). */
   const outsideFold = new Set<string>();
 
@@ -231,6 +253,7 @@ export function createHostCredentialBroker(deps: HostCredentialDeps): HostCreden
     const run = refresher(account)
       .then(() => {
         failedAt.delete(account);
+        renewedAt.set(account, now());
       })
       .catch((err: unknown) => {
         failedAt.set(account, now());
@@ -258,7 +281,7 @@ export function createHostCredentialBroker(deps: HostCredentialDeps): HostCreden
     // is about to expire and can be renewed. Never for a still-valid item at a plain read (spec §1.2's
     // "never refresh a still-valid token" rule, applied to provider credentials too).
     const backingOff = (failedAt.get(account) ?? -Infinity) + HOST_RENEWAL_BACKOFF_MS > now();
-    if (refresher !== undefined && current !== null && !backingOff && renewable(current.raw) && (short(current) || due(current))) {
+    if (refresher !== undefined && current !== null && !backingOff && !recentlyRenewed(account) && renewable(current.raw) && (short(current) || due(current))) {
       await refreshOnce(account, refresher);
       if (signal.aborted) return { ok: false, reason: "unavailable" };
       current = await read(account);
@@ -296,9 +319,11 @@ export function createHostCredentialBroker(deps: HostCredentialDeps): HostCreden
     const first = await readMcp(store, account);
     if (minGeneration === undefined || (first.generation !== undefined && first.generation >= minGeneration)) return first.answer;
     if (first.generation === undefined) return first.answer.ok === false && first.answer.reason === "unavailable" ? first.answer : { ok: false, reason: "stale" };
-    const refreshed = await refreshMcpOAuthToken({ account, store, generation: first.generation });
+    if (recentlyRenewed(account)) return { ok: false, reason: "stale" };
+    const refreshed = await refreshMcp({ account, store, generation: first.generation });
     if (signal.aborted) return { ok: false, reason: "unavailable" };
     if (!refreshed.ok) return { ok: false, reason: refreshed.reason === "transient" ? "unavailable" : "stale" };
+    if (refreshed.generation > first.generation) renewedAt.set(account, now());
     const second = await readMcp(store, account);
     if (second.generation === undefined || second.generation < minGeneration) return second.answer.ok ? { ok: false, reason: "stale" } : second.answer;
     return second.answer;
@@ -350,12 +375,22 @@ export function createHostCredentialBroker(deps: HostCredentialDeps): HostCreden
         const store = deps.mcpOAuthStore;
         if (store === undefined) return { ok: false, reason: "needs_auth" };
         try {
-          const result = await refreshMcpOAuthToken({
+          const before = await storedMcpGeneration(store, request.account);
+          // Already newer than the asker's copy: nothing to post (the SDK would answer the same without one).
+          // Otherwise, inside the minimum interval after a renewal, the fresh token is what there is. A
+          // step-up (a 403 asking for more scope) is its own need, throttled per scope: a plain renewal a
+          // moment ago must not block the one grant that adds the scope, and a looping step-up still is.
+          const throttleKey = request.stepUpScope !== undefined ? `${request.account}#${request.stepUpScope}` : request.account;
+          if (recentlyRenewed(throttleKey)) {
+            return before !== undefined && before > request.generation ? { ok: true } : { ok: false, reason: "transient" };
+          }
+          const result = await refreshMcp({
             account: request.account,
             store,
             generation: request.generation,
             ...(request.stepUpScope !== undefined ? { stepUpScope: request.stepUpScope } : {}),
           });
+          if (result.ok && (before === undefined || result.generation > before)) renewedAt.set(throttleKey, now());
           return result.ok ? { ok: true } : { ok: false, reason: result.reason };
         } catch (err) {
           log(`host credentials: refreshing ${request.account} failed (${err instanceof McpOAuthError ? err.code : err instanceof Error ? err.name : "error"})`);

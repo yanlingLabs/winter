@@ -8,7 +8,7 @@ import { join } from "node:path";
 import type { Options } from "@yanlinglabs/winter-agent-sdk";
 import { createMemoryMcpOAuthStore, encodeMcpOAuthTokenRecord, MCP_OAUTH_HOST_HELD_REFRESH_TOKEN, mcpOAuthClientAccount, mcpOAuthClientSecretAccount, mcpOAuthTokenAccount } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
 import { FileSecretStore, type SecretStore } from "../../src/auth/secret-store";
-import { createHostCredentialBroker, HOST_RENEWAL_BACKOFF_MS, isNeverBrokered, sessionCredentialAllowlist, type HostCredentialDeps } from "../../src/runtime-sdk/host-credentials";
+import { createHostCredentialBroker, HOST_RENEWAL_BACKOFF_MS, HOST_RENEWAL_MIN_INTERVAL_MS, isNeverBrokered, sessionCredentialAllowlist, type HostCredentialDeps } from "../../src/runtime-sdk/host-credentials";
 
 const SERVICE = "ws25.host-credentials.test";
 const SECRET = "WS25-HOST-SENTINEL-8f1c";
@@ -185,6 +185,30 @@ describe("credential_resolve", () => {
     expect(runs).toBe(2);
   });
 
+  test("after a SUCCESSFUL renewal, a newer-than ask inside the minimum interval is stale rather than another grant (security review M2)", async () => {
+    let clock = 1_000_000;
+    let runs = 0;
+    const refresh = async (account: string): Promise<void> => {
+      runs++;
+      await secrets.set(account, JSON.stringify({ kind: "oauth", accessToken: `at-${runs}`, refreshToken: `rt-${runs}`, expiresAt: clock + 3_600_000 }));
+    };
+    await secrets.set("codex-oauth:default", JSON.stringify({ kind: "oauth", accessToken: "at-0", refreshToken: "rt-0", expiresAt: clock + 3_600_000 }));
+    const { resolve } = broker({ refreshers: { "codex-oauth:default": refresh }, now: () => clock });
+    const ref = { kind: "keychain" as const, account: "codex-oauth:default" };
+    expect(await resolve({ ref }, { signal })).toMatchObject({ ok: true, generation: 1 });
+    expect(await resolve({ ref, minGeneration: 2 }, { signal })).toMatchObject({ ok: true, generation: 2 });
+    expect(runs).toBe(1);
+    // A child that got a 401 on the fresh token asks again at once: no second grant inside the window.
+    clock += HOST_RENEWAL_MIN_INTERVAL_MS - 1;
+    expect(await resolve({ ref, minGeneration: 3 }, { signal })).toEqual({ ok: false, reason: "stale" });
+    expect(runs).toBe(1);
+    // What it already has is still answered.
+    expect(await resolve({ ref, minGeneration: 2 }, { signal })).toMatchObject({ ok: true, generation: 2 });
+    clock += 2;
+    expect(await resolve({ ref, minGeneration: 3 }, { signal })).toMatchObject({ ok: true, generation: 3 });
+    expect(runs).toBe(2);
+  });
+
   test("a failed renewal is stale, logged by account and class only — never a value", async () => {
     const refresh = async (): Promise<void> => { throw new Error(`the grant ${SECRET} was rejected`); };
     await secrets.set("codex-oauth:default", JSON.stringify({ kind: "oauth", accessToken: SECRET, refreshToken: SECRET, expiresAt: Date.now() + 3_600_000 }));
@@ -243,6 +267,38 @@ describe("MCP sign-ins", () => {
     const store = createMemoryMcpOAuthStore({ [MCP_ACCOUNT]: record({ refreshToken: undefined }) });
     const { resolve } = broker({ mcpOAuthStore: store });
     expect(await resolve({ ref: { kind: "keychain", account: MCP_ACCOUNT }, minGeneration: 8 }, { signal })).toEqual({ ok: false, reason: "stale" });
+  });
+
+  test("MCP renewals keep the same minimum interval: credential_resolve answers stale, mcp_oauth_refresh transient; a step-up is throttled per scope (security review M2)", async () => {
+    let clock = 1_000_000;
+    let posts = 0;
+    const store = createMemoryMcpOAuthStore({ [MCP_ACCOUNT]: record() });
+    // The SDK's refresh as far as the broker can see it: one grant, the record's generation moves on.
+    const refreshMcp = (async (opts: { account: string; generation: number }) => {
+      posts++;
+      const current = JSON.parse(store.entries.get(opts.account)!) as { generation: number };
+      const generation = current.generation + 1;
+      store.entries.set(opts.account, record({ accessToken: `mcp-at-${generation}`, generation }));
+      return { ok: true, generation };
+    }) as never;
+    const { resolve, refreshMcp: ask } = broker({ mcpOAuthStore: store, now: () => clock, refreshMcp });
+    const ref = { kind: "keychain" as const, account: MCP_ACCOUNT };
+    expect(await resolve({ ref, minGeneration: 8 }, { signal })).toMatchObject({ ok: true, generation: 8 });
+    expect(posts).toBe(1);
+    clock += HOST_RENEWAL_MIN_INTERVAL_MS - 1;
+    expect(await resolve({ ref, minGeneration: 9 }, { signal })).toEqual({ ok: false, reason: "stale" });
+    expect(await ask({ server: "linear", account: MCP_ACCOUNT, generation: 8 }, { signal })).toEqual({ ok: false, reason: "transient" });
+    // An asker still on the OLD generation is simply told a newer one exists -- no grant needed.
+    expect(await ask({ server: "linear", account: MCP_ACCOUNT, generation: 7 }, { signal })).toEqual({ ok: true });
+    expect(posts).toBe(1);
+    // A step-up for more scope is its own need: one grant, then that scope is throttled too.
+    expect(await ask({ server: "linear", account: MCP_ACCOUNT, generation: 8, stepUpScope: "admin" }, { signal })).toEqual({ ok: true });
+    expect(posts).toBe(2);
+    expect(await ask({ server: "linear", account: MCP_ACCOUNT, generation: 9, stepUpScope: "admin" }, { signal })).toEqual({ ok: false, reason: "transient" });
+    expect(posts).toBe(2);
+    clock += HOST_RENEWAL_MIN_INTERVAL_MS + 1;
+    expect(await ask({ server: "linear", account: MCP_ACCOUNT, generation: 9 }, { signal })).toEqual({ ok: true });
+    expect(posts).toBe(3);
   });
 
   test("mcp_oauth_refresh: only for this session's server at that URL; the SDK's refresh decides the rest", async () => {
