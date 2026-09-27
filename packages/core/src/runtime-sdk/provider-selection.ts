@@ -41,6 +41,11 @@ export function rowForTag(tag: string): WinterModelDescriptor | undefined {
  * `winter.azure-openai`, `winter.local-openai` on chat-completions) — sends the turn's tools
  * regardless of what `toolCalling` says; neither file so much as reads the field. `toolCalling` is
  * evidence there, never enforced.
+ *
+ * Re-measured at 0.0.28 (WS-24 follow-ups, pins-0028): `git diff v0.0.27 v0.0.28 --
+ * packages/provider-runtime/src/adapters/` touches only the openai chat-completions/responses
+ * adapters (a URL-fallback fix and a stale-family fix, neither reading `toolCalling`) — none of the
+ * four throwing files above moved at all. The set stands unchanged.
  */
 const TOOLS_GATED_ADAPTER_IDS: ReadonlySet<string> = new Set([
   "winter.anthropic-messages",
