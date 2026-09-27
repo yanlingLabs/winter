@@ -31,6 +31,50 @@ export function declineElicitationHeadless(
   void doors.request(METHODS.elicitationRespond, { sessionId, elicitationId: e.elicitationId, action: "decline" }).catch(() => {});
 }
 
+export interface HeadlessCardEvent { type: string; seq: number; threadId?: string; elicitationId?: string; serverName?: string; host?: string }
+
+/** Which cards `winter -p` (and the plain shell) may decline: only those raised during a turn THIS
+ *  shell started — never one it merely sees (a card the user may be answering on the Mac, in a turn the
+ *  Mac started, must not be declined by `winter resume <id> "text"` attaching to the same session).
+ *  A turn is this shell's when its main `turn_started` follows this shell's own `user_message` (its
+ *  seq, from `session.send`); it stays so until that turn's `turn_completed`. Events that arrive while
+ *  the send is still in flight are held and judged once its seq is known. Pure: `observe` returns the
+ *  cards to decline now. */
+export class HeadlessElicitationGate {
+  private ownSince: number | undefined;
+  private ownTurnActive = false;
+  private sending = false;
+  private held: HeadlessCardEvent[] = [];
+
+  /** Call just before `session.send`. */
+  beginSend(): void { this.sending = true; }
+
+  /** `session.send` answered with the seq of this shell's own `user_message`. */
+  sent(seq: number): HeadlessCardEvent[] {
+    this.sending = false;
+    this.ownSince = seq;
+    this.ownTurnActive = false;
+    const held = this.held;
+    this.held = [];
+    return held.flatMap((e) => this.observe(e));
+  }
+
+  observe(e: HeadlessCardEvent): HeadlessCardEvent[] {
+    const onMain = e.threadId === undefined || e.threadId === "main";
+    if (!onMain || (e.type !== "turn_started" && e.type !== "turn_completed" && e.type !== "elicitation_requested")) return [];
+    if (this.sending) { this.held.push(e); return []; }
+    if (e.type === "turn_started") {
+      if (this.ownSince !== undefined && e.seq > this.ownSince) this.ownTurnActive = true;
+      return [];
+    }
+    if (e.type === "turn_completed") {
+      if (this.ownTurnActive) { this.ownTurnActive = false; this.ownSince = undefined; }
+      return [];
+    }
+    return this.ownTurnActive ? [e] : [];
+  }
+}
+
 /** Opens a link in the browser: `/usr/bin/open <url>` as an argv array — never a shell. */
 export async function openInBrowser(
   url: string,

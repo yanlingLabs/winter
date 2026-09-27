@@ -606,6 +606,13 @@ final class FieldStateAdapter: ObservableObject {
     /// reached this surface for them. The card freezes with `elicitationInactiveNote`.
     @Published var inactiveElicitations: Set<String> = []
 
+    /// WS-27: resolves a no-longer-active elicitation card locally — the card freezes, and it leaves
+    /// the session's outstanding list so the orb's approval-needed count drops with it.
+    func markElicitationInactive(_ elicitationId: String) {
+        inactiveElicitations.insert(elicitationId)
+        session.dismissInactiveElicitation(elicitationId)
+    }
+
     /// panel-shell T10b: a pending question/plan card's typed-but-unsubmitted answer, keyed by
     /// `pendingCardDraftKey(sessionId:callId:)` — NOT bare callId (`pendingInteractions` is a
     /// list — more than one card can be open at once, and callIds can repeat across sessions; see

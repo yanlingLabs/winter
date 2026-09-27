@@ -9,7 +9,7 @@ import { policySwitchNotes } from "./tui/policy-switch-notes";
 import { WinterClient } from "./client";
 import { checkCodeSession, filterCodeSessions, sessionModeMarker, sessionRuntimeMarker } from "./session-mode";
 import { applyEvent, isStalled, type WatchdogState } from "./watchdog";
-import { declineElicitationHeadless } from "./elicitation";
+import { declineElicitationHeadless, HeadlessElicitationGate, type HeadlessCardEvent } from "./elicitation";
 import { streamAction } from "./stream-state";
 import { updateSubagents, type CliSubagent } from "./subagent-state";
 import { decodeKey, footerKeyAction } from "./keys";
@@ -691,6 +691,15 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
     process.stdout.on("resize", () => { if (process.stdout.isTTY) refreshBlock(); });
   }
 
+  // WS-27: which link cards this plain shell may decline (see `HeadlessElicitationGate`).
+  const elicitationGate = new HeadlessElicitationGate();
+  const declineCard = (card: HeadlessCardEvent): void => {
+    if (card.elicitationId === undefined) return;
+    declineElicitationHeadless({ elicitationId: card.elicitationId, serverName: card.serverName ?? "an MCP server", host: card.host ?? "" }, sessionId, {
+      emitLine: (line) => emit(`${DIM}${line}${RESET}\n`),
+      request: (m, p) => c.request(m, p),
+    });
+  };
   const c = await connect(chat ? "cli-chat" : "cli-p", inkMode ? (e) => bridge!.push(e) : (e) => {
     const sa = streamAction(streaming, e as { type: string; threadId?: string }, selection.selectedThreadId);
     streaming = sa.streaming;
@@ -704,6 +713,11 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
       emit(`${AQUA}${(e as { delta: string }).delta}${RESET}`);
     } else if (sa.action === "close_line") emit("\n");
     applyEvent(wd, e, Date.now());
+    // WS-27: this plain shell never opens links — it declines a card at once, naming the server and
+    // the link's host (the url is not on the wire here, and is never printed), but ONLY a card raised
+    // during a turn this shell started (`HeadlessElicitationGate`), never one another client may be
+    // answering.
+    for (const card of elicitationGate.observe(e as HeadlessCardEvent)) declineCard(card);
     const nextSubagents = updateSubagents(subagents, e as { type: string; threadId?: string });
     if (nextSubagents !== subagents) {
       subagents = nextSubagents;
@@ -751,10 +765,6 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
         pending.splice(idx, 1);
         if (pending.length === 0) activeKeyListener?.resume();
       }
-    } else if (e.type === "elicitation_requested" && e.threadId === "main") {
-      // WS-27: this plain shell never opens links — it declines the card at once, naming the server
-      // and the link's host (the url is not on the wire here, and is never printed).
-      declineElicitationHeadless(e, sessionId, { emitLine: (line) => emit(`${DIM}${line}${RESET}\n`), request: (m, p) => c.request(m, p) });
     } else if (e.type === "directory_added") emit(`${DIM}+ dir ${e.path}${e.persisted ? " (remembered)" : ""}${RESET}\n`);
     else if (e.type === "bg_task_started") emit(`${DIM}▶ bg ${e.taskId} started: ${e.command.slice(0, 80)}${RESET}\n`);
     else if (e.type === "bg_task_output") emit(`${DIM}${e.chunk}${RESET}`);
@@ -1032,7 +1042,10 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
   async function runOneTurn(text: string): Promise<void> {
     keyListener.beginTurn();
     const done = new Promise<void>((resolve) => { resolveTurn = resolve; });
-    await c.send(sessionId, text);
+    elicitationGate.beginSend();
+    let seq: number;
+    try { seq = await c.send(sessionId, text); } catch (err) { elicitationGate.sent(Number.MAX_SAFE_INTEGER); throw err; }
+    for (const card of elicitationGate.sent(seq)) declineCard(card);
     await done;
   }
 

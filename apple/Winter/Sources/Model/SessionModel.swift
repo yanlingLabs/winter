@@ -225,7 +225,15 @@ func interactionIsPending(_ record: InteractionRecord) -> Bool { record.outcome 
 /// approval the child was actively blocked on) AND it closed the Mac's only door to answering it,
 /// since `onApproval`/`onQuestion` already thread `childSessionId` straight through to the child.
 /// Not stamping keeps the card live, which is what it honestly is.
-func interactionEndsWithItsTurn(_ record: InteractionRecord) -> Bool { record.childSessionId == nil }
+///
+/// **Also false for a URL-mode elicitation card** (WS-27): the daemon resolves every one of those
+/// itself — `turn-ended` for a card raised during the main turn, `timeout`, `aborted` — so the turn
+/// ending is no evidence here either, and a card raised BETWEEN turns is still live (and answerable)
+/// after the next turn completes. Its `elicitation_resolved` is what freezes it.
+func interactionEndsWithItsTurn(_ record: InteractionRecord) -> Bool {
+    if case .urlElicitation = record.ask { return false }
+    return record.childSessionId == nil
+}
 
 /// Whether a newly-arrived outcome may be written over what a record already holds.
 ///
@@ -555,6 +563,19 @@ struct OrbSessionState: Equatable {
 
 /// PURE state derivation — every UI face (orb now; field/chat in 2c/2e) reads this.
 enum SessionReducer {
+    /// WS-27: drops a URL-mode elicitation card this surface found no longer active from the
+    /// OUTSTANDING list (the orb's approval-needed count), re-deriving `status` exactly as a
+    /// `*_resolved` would. Any other kind of ask, or an unknown id, is left alone. The transcript card
+    /// freezes separately (`FieldStateAdapter.inactiveElicitations`); the record is not touched, so the
+    /// daemon's own resolution — if one ever arrives — still lands on it.
+    static func dismissInactiveElicitation(_ state: OrbSessionState, callId: String) -> OrbSessionState {
+        guard state.pendingInteractions.contains(where: {
+            if case .urlElicitation(let id, _, _, _, _, _) = $0 { return id == callId }
+            return false
+        }) else { return state }
+        return resolvePending(state, callId: callId)
+    }
+
     private static let mainThread = "main"
 
     /// Per-`tool_result` retention cap for `ActivityItem.Kind.tool`'s `output` (mac-chat-parity
@@ -1414,6 +1435,11 @@ final class SessionModel: ObservableObject {
     /// — see `TRANSIENT_EVENT_TYPES`'s doc in `packages/protocol/src/events.ts`), and folding it
     /// into the pure reducer would mean special-casing something explicitly designed not to
     /// survive replay. Fires synchronously from `apply`, after the reducer has already run.
+    /// WS-27: see `SessionReducer.dismissInactiveElicitation`.
+    func dismissInactiveElicitation(_ callId: String) {
+        state = SessionReducer.dismissInactiveElicitation(state, callId: callId)
+    }
+
     let events = PassthroughSubject<SessionEvent, Never>()
 
     /// task-30 (push-notification track): how fresh `notificationRequested.ts` must be (wall-clock

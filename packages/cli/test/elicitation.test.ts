@@ -1,7 +1,7 @@
 // WS-27: URL-mode elicitation on the terminal — the -p decline, the TUI's open/decline flow, the checks.
 import { describe, expect, test } from "bun:test";
 import { METHODS } from "@yanlinglabs/winter-protocol";
-import { answerElicitation, declineElicitationHeadless, elicitationAnswerNote, elicitationUrlToOpen, openInBrowser, type ElicitationDoors } from "../src/elicitation";
+import { answerElicitation, declineElicitationHeadless, elicitationAnswerNote, elicitationUrlToOpen, HeadlessElicitationGate, openInBrowser, type ElicitationDoors } from "../src/elicitation";
 import { applyEvent, isStalled, type WatchdogState } from "../src/watchdog";
 
 const CODE = "OTC-cli-NOTPRINTED";
@@ -24,6 +24,42 @@ describe("winter -p declines a card at once", () => {
       emitLine: () => {}, request: async () => { throw new Error("socket closed"); },
     });
     await Bun.sleep(1);
+  });
+});
+
+describe("HeadlessElicitationGate — only this shell's own turn's cards", () => {
+  const card = (seq: number, id = `el_${seq}`) => ({ type: "elicitation_requested", seq, threadId: "main", elicitationId: id, serverName: "linear", host: "linear.app" });
+  const started = (seq: number) => ({ type: "turn_started", seq, threadId: "main" });
+  const completed = (seq: number) => ({ type: "turn_completed", seq, threadId: "main" });
+
+  test("a card in a turn this shell started is declined; one before it, or after it, is not", () => {
+    const g = new HeadlessElicitationGate();
+    // Another client's turn is running when this shell attaches (winter resume <id> "text").
+    expect(g.observe(started(10))).toEqual([]);
+    expect(g.observe(card(11))).toEqual([]);       // the Mac's card: never declined here
+    g.beginSend();
+    expect(g.sent(12)).toEqual([]);               // this shell's user_message, queued behind that turn
+    expect(g.observe(card(13))).toEqual([]);       // still the Mac's turn
+    expect(g.observe(completed(14))).toEqual([]);
+    expect(g.observe(started(15))).toEqual([]);    // this shell's own turn
+    expect(g.observe(card(16)).map((e) => e.elicitationId)).toEqual(["el_16"]);
+    expect(g.observe({ ...card(17), threadId: "toolu_child" })).toEqual([]);
+    expect(g.observe(completed(18))).toEqual([]);
+    expect(g.observe(card(19))).toEqual([]);       // between turns: not this shell's
+  });
+
+  test("events that arrive while the send is in flight are judged once its seq is known", () => {
+    const g = new HeadlessElicitationGate();
+    g.beginSend();
+    expect(g.observe(card(5))).toEqual([]);        // before this shell's message: another turn's
+    expect(g.observe(started(7))).toEqual([]);
+    expect(g.observe(card(8))).toEqual([]);
+    expect(g.sent(6).map((e) => e.elicitationId)).toEqual(["el_8"]);
+  });
+
+  test("replayed history alone never declines anything", () => {
+    const g = new HeadlessElicitationGate();
+    for (const e of [started(1), card(2), completed(3), started(4), card(5)]) expect(g.observe(e)).toEqual([]);
   });
 });
 
