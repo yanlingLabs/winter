@@ -409,26 +409,35 @@ function readJson(path: string): unknown {
  * `.winter/settings.local.json` and `.winter/permissions.local.json`; and the read-only approved-rules record
  * `<home>/permissions/projects.json`. Read only — nothing here writes.
  */
-function rulesIn(home: string, server: string, ctx: McpNameContext, matches: (rule: string, server: string) => boolean, opts: { sdk: boolean }): string[] {
+function rulesIn(home: string, server: string, ctx: McpNameContext, matches: (rule: string, server: string) => boolean, opts: { sdk: boolean }, protective?: string[]): string[] {
   const out: string[] = [];
-  const collect = (file: string, value: unknown): void => {
+  // `isProtective`: a deny/ask rule (those are what stop or card a call); allow rules and the stores that hold
+  // only allow rules (`permissions.local.json`, the approved-rules record) are not.
+  const collect = (file: string, value: unknown, isProtective = false): void => {
     if (value === undefined) return;
     const found: string[] = [];
     stringsIn(value, found);
-    for (const r of new Set(found)) if (matches(r, server)) out.push(`${file}: ${r}`);
+    for (const r of new Set(found)) {
+      if (!matches(r, server)) continue;
+      out.push(`${file}: ${r}`);
+      if (isProtective) protective?.push(`${file}: ${r}`);
+    }
+  };
+  const collectPermissions = (file: string, perms: unknown): void => {
+    if (!isRecord(perms)) return;
+    collect(file, perms.allow);
+    collect(file, [perms.ask, perms.deny], true);
   };
   if (opts.sdk) {
     const current = readSdkSettingsDetailed(home);
-    if (current.state === "ok" && isRecord(current.value.permissions)) {
-      const perms = current.value.permissions as Record<string, unknown>;
-      collect(sdkSettingsPath(home), RULE_KINDS.map((k) => perms[k]));
-    }
+    if (current.state === "ok") collectPermissions(sdkSettingsPath(home), current.value.permissions);
   }
   for (const root of trustedProjectRoots({ cwd: ctx.cwd, trust: ctx.trust, allTrusted: true })) {
     for (const f of ["settings.json", "settings.local.json", "permissions.local.json"]) {
       const file = join(root, ".winter", f);
       const json = readJson(file);
-      collect(file, f === "permissions.local.json" ? json : (isRecord(json) ? json.permissions : undefined));
+      if (f === "permissions.local.json") collect(file, json);
+      else collectPermissions(file, isRecord(json) ? json.permissions : undefined);
     }
   }
   const record = join(approvedProjectRulesDir(home), "projects.json");
@@ -438,9 +447,11 @@ function rulesIn(home: string, server: string, ctx: McpNameContext, matches: (ru
 }
 
 /** Every rule, in every file, that COULD name `server` (`ruleCouldNameMcpServer`) — what a rename or a
- *  remove lists as `rulesNotFollowed`, since neither ever edits a rule. */
-export function rulesNamingServer(home: string, server: string, ctx: McpNameContext): string[] {
-  return rulesIn(home, server, ctx, ruleCouldNameMcpServer, { sdk: true });
+ *  remove lists as `rulesNotFollowed`, since neither ever edits a rule — and, among them, the deny/ask ones. */
+export function rulesNamingServer(home: string, server: string, ctx: McpNameContext): { rules: string[]; protective: string[] } {
+  const protective: string[] = [];
+  const rules = rulesIn(home, server, ctx, ruleCouldNameMcpServer, { sdk: true }, protective);
+  return { rules, protective };
 }
 
 /** The rules that LITERALLY name `server` (`mcp__<server>`, `mcp__<server>__…`) — the rename target check. */
@@ -481,6 +492,8 @@ export interface McpRemoveOutcomeCore {
   permissionsCleared: boolean;
   /** Rules that could name the server; they remain (nothing here edits a rule). */
   rulesNotFollowed: string[];
+  /** Something else still defines or has connected a server of this name: the rules still apply to it. */
+  nameStillInUse?: true;
   permissionsNote?: string;
   settings?: Settings;
 }
@@ -490,8 +503,8 @@ export function removeMcpServerForgettingPermissions(t: McpScopeTarget, name: st
   if (!removed) return { removed, permissionsCleared: false, rulesNotFollowed: [] };
   let rulesNotFollowed: string[] = [];
   try {
-    rulesNotFollowed = rulesNamingServer(t.home, name, ctx);
-    if (nameInUse(t.home, name, ctx)) return { removed, permissionsCleared: false, rulesNotFollowed };
+    rulesNotFollowed = rulesNamingServer(t.home, name, ctx).rules;
+    if (nameInUse(t.home, name, ctx)) return { removed, permissionsCleared: false, rulesNotFollowed, nameStillInUse: true };
     const path = join(t.home, "settings.json");
     const current = settingsIfPresent(path);
     if (current === undefined) return { removed, permissionsCleared: false, rulesNotFollowed };
@@ -510,6 +523,8 @@ export interface McpRenameOutcomeCore {
   keptOld: boolean;
   /** Every rule that could name the OLD server (`rulesNamingServer`): never rewritten, it still names it. */
   rulesNotFollowed: string[];
+  /** The deny/ask ones among them — they no longer protect the renamed server. */
+  protectiveRulesNotFollowed: string[];
   /** A failure AFTER the rename (dropping the old name's settings) — the rename itself stands. */
   note?: string;
   settings?: Settings;
@@ -570,7 +585,7 @@ export function renameMcpServerCarryingSettings(t: McpScopeTarget, from: string,
     } catch { /* best effort: settings on a name nothing defines are inert */ }
     throw err;
   }
-  const rulesNotFollowed = rulesNamingServer(t.home, from, ctx);
+  const { rules: rulesNotFollowed, protective: protectiveRulesNotFollowed } = rulesNamingServer(t.home, from, ctx);
   // 4. Drop the old name's settings — unless it is still in use.
   let keptOld = true;
   let note: string | undefined;
@@ -586,5 +601,5 @@ export function renameMcpServerCarryingSettings(t: McpScopeTarget, from: string,
   } catch (err) {
     note = `renamed, but the old name's connector settings could not be dropped (${err instanceof Error ? err.message : "unknown"}) — they apply to nothing now`;
   }
-  return { type, carried, keptOld, rulesNotFollowed, ...(note !== undefined ? { note } : {}), ...(written !== undefined ? { settings: written } : {}) };
+  return { type, carried, keptOld, rulesNotFollowed, protectiveRulesNotFollowed, ...(note !== undefined ? { note } : {}), ...(written !== undefined ? { settings: written } : {}) };
 }
