@@ -47,6 +47,9 @@ type Frame = Record<string, unknown>;
 /** The wire, minimal: frames a test emits, texts the driver pushed. Ends on stdin close. */
 class FakeQuery {
   readonly pushed: string[] = [];
+  /** WS-25: the server names `reconnectMcpServer` was called with. */
+  readonly reconnected: string[] = [];
+  async reconnectMcpServer(name: string): Promise<void> { this.reconnected.push(name); }
   results = 0;
   private readonly buffer: Frame[] = [];
   private waiter: ((r: IteratorResult<Frame>) => void) | undefined;
@@ -989,6 +992,83 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
       // …and the value never appears anywhere in the child's Options.
       expect(JSON.stringify(t.q().options)).not.toContain("\"x\"");
       await second.end();
+    } finally { t.close(); }
+  });
+
+  // WS-25 §7 (prompt-free credentials): every incarnation's Options carry the daemon's credential
+  // broker, and it answers ONLY what that incarnation's Options (and its MCP configuration) named.
+  test("optionsFor attaches the host credential broker: answers the session's own refs, refuses the rest, carries no material", async () => {
+    const settings = {
+      provider: { model: "openai/gpt-5.6-sol" },
+      runtimes: { winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 },
+    } as unknown as Settings;
+    const key = "WS25-DRIVER-SENTINEL-5e0b";
+    const t = table({
+      settings: () => settings,
+      // A run-home incarnation (the table's default): the configured servers ride the run folder, so the
+      // broker must read them from the same fold rather than off `options.mcpServers`.
+      extraMcpServers: () => ({ linear: { type: "http", url: "https://mcp.linear.example/mcp" } }),
+      // Review r1 (i): an enabled plugin's http server joins the fold on a run-home incarnation.
+      pluginMcpServers: () => ({ "plugin-srv": { type: "http", url: "https://plugin.example/mcp" } }),
+    });
+    try {
+      const secrets = new FileSecretStore(join(t.home, "secrets.json"));
+      await secrets.set("openai:default", JSON.stringify({ kind: "api-key", key }));
+      await secrets.set("harness-token", key);
+      for (const mode of ["chat", "code"] as const) {
+        const session = await t.drivers.create(t.store.createSession(`t-${mode}`, { mode, ...(mode === "code" ? { cwd: t.home } : {}) }));
+        const options = t.q().options;
+        expect(typeof options.onCredentialResolve).toBe("function");
+        expect(typeof options.onMcpOAuthRefresh).toBe("function");
+        const signal = new AbortController().signal;
+        const service = (options.provider?.authRef as { service?: string }).service;
+        const own = await options.onCredentialResolve!({ ref: { kind: "keychain", account: "openai:default", service } }, { signal });
+        expect(own).toMatchObject({ ok: true, generation: 1 });
+        expect(JSON.parse((own as { material: string }).material).key).toBe(key);
+        expect(await options.onCredentialResolve!({ ref: { kind: "keychain", account: "harness-token" } }, { signal })).toEqual({ ok: false, reason: "not_allowed" });
+        // The configured MCP server's sign-in is answerable (signed out here: no store wired).
+        const { mcpOAuthTokenAccount } = await import("@yanlinglabs/winter-agent-runtime/mcp-auth");
+        expect(await options.onCredentialResolve!({ ref: { kind: "keychain", account: mcpOAuthTokenAccount("https://mcp.linear.example/mcp") } }, { signal })).toEqual({ ok: false, reason: "not_found" });
+        // The plugin's server can refresh its sign-in (it is in the fold); a server under another name cannot.
+        const pluginAccount = mcpOAuthTokenAccount("https://plugin.example/mcp");
+        expect(await options.onMcpOAuthRefresh!({ server: "plugin-srv", account: pluginAccount, generation: 1 }, { signal })).toEqual({ ok: false, reason: "needs_auth" });
+        expect(session.mcpServerNamesFor!("https://plugin.example/mcp")).toEqual(["plugin-srv"]);
+        // Review r1 (h): a catalog slot with no stored credential is not granted; one that has it is.
+        expect(await options.onCredentialResolve!({ ref: { kind: "keychain", account: "zai:default" } }, { signal })).toEqual({ ok: false, reason: "not_allowed" });
+        // A server outside the fold reads as signed out too — never its token (see `host-credentials.ts`).
+        expect(await options.onCredentialResolve!({ ref: { kind: "keychain", account: mcpOAuthTokenAccount("https://evil.example/mcp") } }, { signal })).toEqual({ ok: false, reason: "not_found" });
+        // The Options themselves name locators only — the value is in no serialisable field.
+        expect(JSON.stringify(options)).not.toContain(key);
+        await session.end();
+      }
+    } finally { t.close(); }
+  });
+
+  // WS-25 (cross-lane, for the sign-in doors): a live session names its servers at a URL and reconnects one.
+  test("a live session answers which of its MCP servers sit at a URL, and reconnects one on its live child", async () => {
+    const t = table({
+      extraMcpServers: () => ({
+        linear: { type: "http", url: "https://mcp.linear.example/mcp" },
+        "linear-2": { type: "sse", url: "https://MCP.linear.example/mcp/" },
+        other: { type: "http", url: "https://other.example/mcp" },
+        local: { type: "stdio", command: "x" },
+      }),
+    });
+    try {
+      const session = await t.drivers.create(t.store.createSession("t", { mode: "chat", model: "winter-test/echo" }));
+      // Canonical comparison (scheme/host case, trailing slash), http and sse alike; nothing for stdio.
+      expect(session.mcpServerNamesFor!("https://mcp.linear.example/mcp/").sort()).toEqual(["linear", "linear-2"]);
+      expect(session.mcpServerNamesFor!("https://nowhere.example/mcp")).toEqual([]);
+      expect(session.mcpServerNamesFor!("not a url")).toEqual([]);
+      await session.reconnectMcpServer!("linear");
+      expect(t.q().reconnected).toEqual(["linear"]);
+      // The fold rides a symbol key: never in the serialisable Options.
+      expect(JSON.stringify(t.q().options)).not.toContain("mcp.linear.example");
+      await session.end();
+      expect(session.mcpServerNamesFor!("https://mcp.linear.example/mcp")).toEqual([]);
+      let refused: unknown;
+      try { await session.reconnectMcpServer!("linear"); } catch (err) { refused = err; }
+      expect((refused as { code?: string }).code).toBe("not_supported_on_winter_leg");
     } finally { t.close(); }
   });
 

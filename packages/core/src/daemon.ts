@@ -3,11 +3,13 @@ import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { bootstrapWinterDir, resolveWinterHome, isDefaultWinterHome } from "./winter-dir";
 import { acquireLock, type Lock } from "./lock";
-import { resolveWinterProfile } from "./profile";
+import { keychainService, resolveWinterProfile } from "./profile";
 import { describeHomePristineness, legacyHomeFor, planMigrationB, runMigrationB, MigrationRefused } from "./migration/migrate-b";
 import { manifestFileState, manifestPath } from "./migration/manifest";
 import { LegacyKeychainSecretStore } from "./migration/legacy-keychain-store";
-import { TokenAuthority } from "./auth/tokens";
+import { TOKEN_NAMES, TokenAuthority } from "./auth/tokens";
+import { appTokenAclBootTrust, migrateAppTokenAcl, prepareAppTokenAccess, recoverAppTokenShadows, type AppTokenAccess, type AppTokenKeychain, type AppTokenTrust } from "./auth/app-token-acl";
+import { applicationPathsForBundleId, keychainUnlocked, withKeychainUserInteractionDisabled } from "./auth/keychain-ffi";
 import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 import { migrateLegacyCredentialMaterial } from "./auth/credential-material";
 import { SessionStore } from "./sessions/store";
@@ -53,7 +55,13 @@ import { OutputStyleStore } from "./agent/output-styles";
 import { Dreamer } from "./agent/dreamer";
 import { SessionCleaner } from "./sessions/cleaner";
 import { pickerModels } from "./ipc/picker-models";
-import { credentialPresenceFrom } from "./runtime-sdk/keychain";
+import { ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, credentialPresenceFrom } from "./runtime-sdk/keychain";
+import { refreshOauthMaterial } from "@yanlinglabs/winter-provider-runtime";
+import type { McpOAuthStore } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
+import { CREDENTIAL_MATERIAL_NAMES } from "./auth/credential-material";
+import { credentialStoreOverSecretStore } from "./providers/credential-store";
+import { CODEX } from "./providers/codex-config";
+import { daemonMcpOAuthStore } from "./runtime-sdk/mcp-oauth-store";
 import { splitTag, type ModelTag } from "./runtime-sdk/model-tag";
 import { SessionDirectories } from "./agent/dirs";
 import { TrustStore } from "./agent/trust";
@@ -96,7 +104,7 @@ import { convertLegacyPluginsForMigration } from "./plugins/convert-legacy";
 import { localScopeKeyFor, projectScopeRootFor, projectScopeTrust, projectScopeTrusted, runHomeInputFor } from "./runtime-sdk/run-home-input";
 import { reservedMcpServerNames } from "./capabilities/names";
 import { projectScopeAllowRulesFor, winterGateRulesFromSdk } from "./runtime-sdk/mode-options";
-import { configuredMcpServersFor } from "./runtime-sdk/external-mcp";
+import { configuredMcpServersFor, pluginMcpServersFor } from "./runtime-sdk/external-mcp";
 import { planBridgeFor, type PlanBridge } from "./runtime-sdk/plan-bridge";
 import { importEngineEraSession } from "./runtime-sdk/import-legacy";
 import { planAndApplySwitch } from "./runtime-sdk/handoff";
@@ -374,6 +382,11 @@ export async function startDaemon(opts: {
    *  sweep and in Migration C's phase 2 — when set it takes precedence over the linked router's own door, so
    *  a test can observe the reconcile's ordering or make it fail. A production caller never sets it. */
   runRootReconcileForTests?: RootReconcile;
+  /** WS-25 §7 TEST SEAM: the MCP OAuth store sessions' `mcp-oauth:<id>` sign-ins are brokered from (a
+   *  memory store). Absent: production reads `daemonMcpOAuthStore(<this home's Keychain service>)`, and a
+   *  caller that injected its own `secrets` gets NO store (every MCP sign-in reads as signed out) — so no
+   *  test daemon ever reads the Keychain for one. */
+  mcpOAuthStore?: McpOAuthStore;
 } = {}): Promise<RunningDaemon> {
   const startedAt = Date.now();
   const home = opts.home ?? resolveWinterHome();
@@ -508,8 +521,41 @@ export async function startDaemon(opts: {
   if (deadLegacyLine !== undefined) console.error(deadLegacyLine);
 
 
+  // WS-25 §7 B: the app reads `harness-token`/`remote-token` without a Keychain prompt once their access
+  // list names the app too (`auth/app-token-acl.ts`). Real production boot only — no injected `secrets`,
+  // AND the profile's own default home (the app's daemon; any other home is a test's or an operator's
+  // experiment, and the items are per-profile, not per-home) — macOS only, never fatal. Skipped outright when
+  // the default keychain is LOCKED (a data read there blocks on an unlock dialog, measured even with user
+  // interaction disabled — which every call here still runs under, belt and braces).
+  // The shadow recovery runs FIRST and whatever the trust target — `ensureTokens` would otherwise mint a
+  // fresh token for an original an interrupted migration deleted. The access objects are built once and
+  // released after.
+  let appTokens: { kc: AppTokenKeychain; trust: AppTokenTrust | undefined; access: AppTokenAccess } | undefined;
+  if (opts.secrets === undefined && process.platform === "darwin" && isDefaultWinterHome(home, profile)) {
+    try {
+      if (!keychainUnlocked(null)) throw Object.assign(new Error("the default keychain is locked"), { name: "KeychainLocked" });
+      const kc: AppTokenKeychain = { keychain: null, service: keychainService(), log: (line) => console.error(line) };
+      const trust = appTokenAclBootTrust({ profile, log: (line) => console.error(line), lookup: applicationPathsForBundleId });
+      const access = withKeychainUserInteractionDisabled(() => prepareAppTokenAccess(kc, trust));
+      appTokens = { kc, trust, access };
+      withKeychainUserInteractionDisabled(() => recoverAppTokenShadows(kc, access));
+    } catch (err) {
+      console.error(`keychain: the app-token access lists were not checked (${err instanceof Error ? err.name : "error"})`);
+    }
+  }
+
   const authority = new TokenAuthority(secrets);
-  const tokens = await authority.ensureTokens();
+  const { tokens, minted } = await authority.ensureTokensReporting();
+  if (appTokens !== undefined) {
+    const { kc, trust, access } = appTokens;
+    try {
+      if (trust !== undefined) withKeychainUserInteractionDisabled(() => migrateAppTokenAcl(kc, access, trust, home, { [TOKEN_NAMES.harness]: tokens.harness, [TOKEN_NAMES.remote]: tokens.remote }, minted));
+    } catch (err) {
+      console.error(`keychain: the app-token access lists were not updated (${err instanceof Error ? err.name : "error"})`);
+    } finally {
+      access.release();
+    }
+  }
 
   // The user's login-shell PATH, merged into THIS process's environment before anything below can
   // spawn — an app/Sparkle/launchd-launched daemon otherwise inherits LaunchServices' bare
@@ -1787,6 +1833,8 @@ export async function startDaemon(opts: {
   // without `agentProvider`, since `Query.supportedAgents()` is entirely a Winter-runtime-SDK fact,
   // unrelated to the daemon's own internal Provider.
   const supportedAgentsCache = new SupportedAgentsCache();
+  // WS-25 §7: see `opts.mcpOAuthStore` — a test daemon (its own `secrets`) never reads the Keychain for one.
+  const sessionMcpOAuthStore = opts.mcpOAuthStore ?? (opts.secrets === undefined ? daemonMcpOAuthStore(keychainService(undefined, winterHome)) : undefined);
   const winterDrivers: WinterSessionDrivers = createWinterSessionDrivers({
     home: winterHome,
     // WS-21: every incarnation's run home, when the linked router applies them (see `runHomeDeps`).
@@ -1858,6 +1906,27 @@ export async function startDaemon(opts: {
     // `buildWinterOptions`); `planBridge` answers `ExitPlanMode` through the approval-bridge deps.
     planBridge,
     hooksFor,
+    // WS-25 §7 (prompt-free credentials): every session's Keychain credentials are brokered by THIS
+    // process (`runtime-sdk/host-credentials.ts`). The MCP sign-ins come from the daemon's one MCP OAuth
+    // store for this home's service (`mcp-oauth-store.ts`), and the two renewable provider items are
+    // renewed here and only here: codex-oauth through its refresh-token grant (the SDK's own
+    // `refreshOauthMaterial`, whose merge rule keeps an unrotated refresh token), the Console bearer
+    // through the broker that already renews it from `ant`'s profile.
+    ...(sessionMcpOAuthStore === undefined ? {} : { mcpOAuthStore: sessionMcpOAuthStore }),
+    // Review r1 (i): the enabled plugins' http/sse servers join the MCP sign-in allowlist (live per incarnation).
+    pluginMcpServers: () => pluginMcpServersFor(pluginStore.list().filter((p) => !p.disabled).map((p) => p.installPath)),
+    credentialRefreshers: {
+      // The ref is spelled EXACTLY as the internal jobs' (`providers/internal-provider.ts`: no `service`),
+      // because `refreshOauthMaterial`'s own single-flight is keyed on (service, account, token URL): the
+      // titler renewing codex and a session asking for newer material then share ONE grant in this process.
+      [CREDENTIAL_MATERIAL_NAMES.codexOauth]: async (account: string) => {
+        await refreshOauthMaterial({ store: credentialStoreOverSecretStore(secrets), ref: { kind: "keychain", account }, tokenUrl: CODEX.tokenUrl, clientId: CODEX.clientId });
+      },
+      [ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME]: async () => {
+        const result = await consoleBroker.refreshBearer();
+        if (!result.ok) throw new Error("console_bearer_refresh_failed");
+      },
+    },
   });
   // Wiring 1: fills the forward reference `planBridge`'s `setPolicy` closes over (declared above,
   // before `winterDrivers` existed) — see that block's own comment for why the cycle is broken here.

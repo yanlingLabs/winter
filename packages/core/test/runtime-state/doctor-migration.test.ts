@@ -16,6 +16,11 @@ function tempDir(): string {
 afterEach(() => {
   while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true });
 });
+/** A presence probe over a test store (`get` stands in for "is there an item" — the fixture holds no real
+ *  Keychain; production passes `legacyKeychainPresence`, which never decrypts). */
+function presentIn(store: { get(name: string): Promise<string | null> }): (name: string) => Promise<boolean> {
+  return async (name) => (await store.get(name)) !== null;
+}
 
 describe("diagnoseMigration / formatMigrationDoctorLines", () => {
   test("absent: no manifest, no legacy home present, zero legacy keychain items", async () => {
@@ -24,7 +29,7 @@ describe("diagnoseMigration / formatMigrationDoctorLines", () => {
       home: join(parent, "home"),
       legacyHome: join(parent, "legacy"),
       legacyKeychainService: "com.example.legacy",
-      legacyStore: new FileSecretStore(join(parent, "legacy-secrets")),
+      legacyItemPresent: presentIn(new FileSecretStore(join(parent, "legacy-secrets"))),
     });
     expect(report.status).toBe("absent");
     expect(report.legacyHomePresent).toBe(false);
@@ -40,7 +45,7 @@ describe("diagnoseMigration / formatMigrationDoctorLines", () => {
       home: join(parent, "home"),
       legacyHome: join(parent, "legacy"),
       legacyKeychainService: "com.example.legacy",
-      legacyStore: spyingStore,
+      legacyItemPresent: presentIn(spyingStore),
     });
     expect(reads).toBe(0);
   });
@@ -55,7 +60,7 @@ describe("diagnoseMigration / formatMigrationDoctorLines", () => {
       home: join(parent, "home"),
       legacyHome,
       legacyKeychainService: "com.example.legacy",
-      legacyStore: legacySecrets,
+      legacyItemPresent: presentIn(legacySecrets),
     });
     expect(report.status).toBe("absent");
     expect(report.legacyHomePresent).toBe(true);
@@ -82,7 +87,7 @@ describe("diagnoseMigration / formatMigrationDoctorLines", () => {
       home,
       legacyHome,
       legacyKeychainService: "com.example.legacy",
-      legacyStore: legacySecrets,
+      legacyItemPresent: presentIn(legacySecrets),
     });
     expect(report.status).toBe("complete");
     expect(report.legacyHomePresent).toBe(true);
@@ -108,7 +113,7 @@ describe("diagnoseMigration / formatMigrationDoctorLines", () => {
       home,
       legacyHome,
       legacyKeychainService: "com.example.legacy",
-      legacyStore: new FileSecretStore(join(parent, "legacy-secrets")),
+      legacyItemPresent: presentIn(new FileSecretStore(join(parent, "legacy-secrets"))),
     });
     expect(report.status).toBe("absent");
     expect(report.home).toBe(home);
@@ -136,7 +141,7 @@ describe("diagnoseMigration / formatMigrationDoctorLines", () => {
       home,
       legacyHome,
       legacyKeychainService: "com.example.legacy",
-      legacyStore: new FileSecretStore(join(parent, "legacy-secrets")),
+      legacyItemPresent: presentIn(new FileSecretStore(join(parent, "legacy-secrets"))),
     });
     expect(report.homeNotPristineReason).toBeUndefined();
     expect(formatMigrationDoctorLines(report).some((l) => l.includes("not pristine"))).toBe(false);
@@ -152,7 +157,7 @@ describe("diagnoseMigration / formatMigrationDoctorLines", () => {
     const plan = await planMigrationB({ legacyHome, home, profile: "dev" });
     await runMigrationB(plan, { from: legacySecrets, to: new FileSecretStore(join(parent, "secrets-to")), log: () => {} });
 
-    const report = await diagnoseMigration({ home, legacyHome, legacyKeychainService: "com.example.legacy", legacyStore: legacySecrets });
+    const report = await diagnoseMigration({ home, legacyHome, legacyKeychainService: "com.example.legacy", legacyItemPresent: presentIn(legacySecrets) });
     expect(report.status).toBe("complete");
     expect(report.homeNotPristineReason).toBeUndefined();
   });
@@ -169,7 +174,7 @@ describe("diagnoseMigration / formatMigrationDoctorLines", () => {
       home,
       legacyHome: join(parent, "legacy"),
       legacyKeychainService: "com.example.legacy",
-      legacyStore: new FileSecretStore(join(parent, "legacy-secrets")),
+      legacyItemPresent: presentIn(new FileSecretStore(join(parent, "legacy-secrets"))),
     });
     expect(report.status).toBe("in-progress");
     const lines = formatMigrationDoctorLines(report);

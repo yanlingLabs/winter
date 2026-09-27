@@ -81,7 +81,8 @@
 // second wait is already aborted and its iteration will close its own books, but the session is
 // `resumable` from the moment `end()` returns — the next `open()` awaits that iteration before it
 // spawns (finding 3), and no push can reach the closed queue in between.
-import type { AgentInfo, Options, Query } from "@yanlinglabs/winter-agent-sdk";
+import type { AgentInfo, McpServerConfig, Options, Query } from "@yanlinglabs/winter-agent-sdk";
+import { canonicalMcpServerUrl } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
 import type { NewSessionEvent, SessionEvent } from "@yanlinglabs/winter-protocol";
 import { MAIN_THREAD, ProjectorRefusedError, classifyThrown, type ProjectedBatch, type Projector, type ProtocolSdkMessage } from "../projector";
 import { PROJECTOR_PASSTHROUGH_CLIENT } from "../projector/index";
@@ -109,6 +110,33 @@ export function runHomeOf(options: Options): RunHome | undefined {
 export function withRunHome(options: Options, runHome: RunHome): Options {
   const runtime = (options as { runtime?: Record<string, unknown> }).runtime;
   return { ...options, runtime: { ...(runtime ?? {}), runHome } } as Options;
+}
+
+/**
+ * WS-25: the session's CONFIGURED MCP servers for one incarnation (user, local and trusted-project — the
+ * fold `external-mcp.ts` builds), riding the `Options` object the driver built under a SYMBOL key. A symbol,
+ * because on a run-home incarnation those servers are the run folder's and NOT in `options.mcpServers`, yet
+ * the session must still know them (a sign-in names a server by URL); and a symbol key is never serialized
+ * (`JSON.stringify`, the SDK's wire config) nor forwarded by the router (it copies string keys), while an
+ * object spread (`withRunHome`) keeps it. Absent: `options.mcpServers` is the whole configuration.
+ */
+export const SESSION_MCP_SERVERS: unique symbol = Symbol("winter.sessionMcpServers");
+
+export function withSessionMcpServers(options: Options, servers: Readonly<Record<string, McpServerConfig>>): Options {
+  return Object.assign(options, { [SESSION_MCP_SERVERS]: servers });
+}
+
+function sessionMcpServersOf(options: Options): Readonly<Record<string, McpServerConfig>> {
+  const own = (options as { [SESSION_MCP_SERVERS]?: Readonly<Record<string, McpServerConfig>> })[SESSION_MCP_SERVERS];
+  return { ...(own ?? {}), ...(options.mcpServers ?? {}) };
+}
+
+function canonicalOrUndefined(url: string): string | undefined {
+  try {
+    return canonicalMcpServerUrl(url);
+  } catch {
+    return undefined;
+  }
 }
 
 export type WinterSessionState = "live" | "resumable" | "ended";
@@ -342,6 +370,21 @@ export interface WinterSession {
    *  (the 1:1 map of P8b-7); the bridge's policy getter is live already, and a resumable session
    *  re-reads the stored policy when it reopens. */
   setPolicy(policy: SessionApprovalPolicy): Promise<void>;
+  /**
+   * WS-25: the names under which the LIVE incarnation configured an http/sse MCP server at `serverUrl`
+   * (compared canonically — `canonicalMcpServerUrl`, the key a sign-in is stored under). `[]` while not
+   * live, for a URL that does not canonicalise, or when no server matches. A sign-in/sign-out door uses it
+   * to find which live sessions to reconnect, and under which name.
+   */
+  mcpServerNamesFor(serverUrl: string): string[];
+  /**
+   * WS-25: reconnect one of the live child's MCP servers (`Query.reconnectMcpServer`, the runtime's
+   * `mcp_reconnect` control) — how a new sign-in reaches a session without replacing its child (a
+   * Keychain write never evicts, spec §1). Code children and embedded chat/dispatch alike. A typed
+   * `WinterLegUnsupported` when there is no live child or its SDK has no reconnect control; the SDK's own
+   * error (an unknown server name) propagates.
+   */
+  reconnectMcpServer(name: string): Promise<void>;
   /** Close the queue, wait, abort stragglers; `resumable` afterwards. Idempotent; never rejects. */
   end(): Promise<void>;
   /** The messaging push sink: a delivered envelope becomes this session's next user turn. */
@@ -366,8 +409,8 @@ export interface CompactOptions {
 /** A driver operation the Winter leg cannot perform. Carried to the RPC layer as `data.code`. */
 export class WinterLegUnsupported extends Error {
   readonly code = "not_supported_on_winter_leg" as const;
-  constructor(what: string) {
-    super(`${what} is not supported here (no live Winter child, or its SDK has no compaction control)`);
+  constructor(what: string, why = "no live Winter child, or its SDK has no compaction control") {
+    super(`${what} is not supported here (${why})`);
     this.name = "WinterLegUnsupported";
   }
 }
@@ -388,6 +431,8 @@ interface Incarnation extends WinterIncarnation {
   done: Promise<void>;
   /** WS-21: the run home this incarnation runs on (settled when it ends), when the router applies them. */
   runHome: RunHome | undefined;
+  /** WS-25: the MCP servers this incarnation was configured with (`sessionMcpServersOf`). */
+  mcpServers: Readonly<Record<string, McpServerConfig>>;
   attachment: WinterSessionAttachHandle | undefined;
   /** Frames seen — a child that never reached init is a spawn failure, not a turn failure. */
   sawInit: boolean;
@@ -556,6 +601,25 @@ class WinterSessionImpl implements WinterSession {
     }
   }
 
+  mcpServerNamesFor(serverUrl: string): string[] {
+    const inc = this.stateValue === "live" ? this.inc : undefined;
+    const wanted = canonicalOrUndefined(serverUrl);
+    if (inc === undefined || wanted === undefined) return [];
+    const names: string[] = [];
+    for (const [name, config] of Object.entries(inc.mcpServers)) {
+      const c = config as { type?: unknown; url?: unknown };
+      if ((c.type === "http" || c.type === "sse") && typeof c.url === "string" && canonicalOrUndefined(c.url) === wanted) names.push(name);
+    }
+    return names;
+  }
+
+  async reconnectMcpServer(name: string): Promise<void> {
+    const inc = this.stateValue === "live" && !this.ending ? this.inc : undefined;
+    const reconnect = inc?.query.reconnectMcpServer;
+    if (inc === undefined || reconnect === undefined) throw new WinterLegUnsupported("an MCP reconnect", "no live Winter child, or its SDK has no reconnect control");
+    await reconnect.call(inc.query, name);
+  }
+
   beginHandoff(work: () => Promise<void>): Promise<{ heldTurns: number }> {
     const previous = this.handoff ?? Promise.resolve();
     const mine: Promise<void> = previous.then(work).catch((err: unknown) => {
@@ -705,7 +769,7 @@ class WinterSessionImpl implements WinterSession {
           /* best-effort only */
         }
       }
-      const inc: Incarnation = { ...shape, queue, projector, query, attachment: undefined, sawInit: false, done: Promise.resolve(), runHome };
+      const inc: Incarnation = { ...shape, queue, projector, query, attachment: undefined, sawInit: false, done: Promise.resolve(), runHome, mcpServers: sessionMcpServersOf(options) };
       this.inc = inc;
       this.gen = generation;
       this.resumedValue = resume;

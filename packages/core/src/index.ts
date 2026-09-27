@@ -235,7 +235,7 @@ export {
   type MigrationPlan,
   type MigrationPlanFileEntry,
 } from "./migration/migrate-b";
-export { LegacyKeychainSecretStore, legacyKeychainServiceFor } from "./migration/legacy-keychain-store";
+export { LegacyKeychainSecretStore, legacyKeychainPresence, legacyKeychainServiceFor } from "./migration/legacy-keychain-store";
 export { DEAD_LEGACY_TOP_LEVEL_FILES, findDeadLegacyFiles, describeDeadLegacyFiles, type DeadLegacyFile } from "./migration/dead-legacy-files";
 export { rekeySettings, type RekeyChange, type RekeyResult } from "./migration/rekey-settings";
 // WS-21 (spec §8): Migration C and the settings split — the CLI's `winter migrate --sdk-home` and
