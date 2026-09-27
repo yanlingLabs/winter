@@ -34,7 +34,13 @@ export const REQUIRED_WINTER_AGENT_SDK = "0.0.28";
  *  v0.0.21 first; that release's CI run failed on pre-existing, unrelated test/build defects (no
  *  behavioural change), so the fixed build published as v0.0.22 instead — v0.0.21 was never
  *  published and this pin skips straight to it. */
-/** Bumped to 0.0.13 (R.4, WS-21 publish, 2026-09-24): 0.0.12 raised the router's own SDK peer floor
+/** Bumped to 0.0.15 (WS-24, 2026-09-27): run-home repository-tier hardening -- a repository-shipped
+ *  (git-tracked, symlinked or submodule) `.winter/settings.local.json` is filtered as the project tier,
+ *  so it can't raise the permission mode; repository tiers can't set the effort/thinking keys or the
+ *  output style, and a project output style never redefines a user or built-in one; repository files
+ *  (settings, rules, instructions, output styles, agents) are read without following swapped links.
+ *  No API change; built against agent SDK 0.0.28.
+ *  Earlier: bumped to 0.0.13 (R.4, WS-21 publish, 2026-09-24): 0.0.12 raised the router's own SDK peer floor
  *  to `>=0.0.21 <0.1.0` and shipped the SV-12/F2 fix — a claude turn's parallel tool-call batch is
  *  spliced back together by `tool_use_id` (siblings, then results after the batch's last assistant
  *  entry) in both `rebuildProviderMessages` and `switchFactsFor`, so a same-session Claude → GPT
@@ -60,7 +66,7 @@ export const REQUIRED_WINTER_AGENT_SDK = "0.0.28";
  *  Readonly<Record<string, unknown>>` — the router-package wall `official-options.ts`'s own comment
  *  on `OfficialInputDeps.agents` used to name (a router version this low has no field to forward the
  *  daemon's merged subagent definitions through) is CLOSED as of that pin. */
-export const REQUIRED_WINTER_RUNTIME_SDK = "0.0.14";
+export const REQUIRED_WINTER_RUNTIME_SDK = "0.0.15";
 // WS-23: `REQUIRED_CLAUDE_AGENT_SDK`, `installedClaudeAgentSdkVersion` (and the embedded manifest it
 // read) and `OFFICIAL_SUBSCRIPTION_AUTH_APPROVED` are gone with the official `claude` leg; the daemon
 // no longer depends on `@anthropic-ai/claude-agent-sdk` at all.
