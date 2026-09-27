@@ -1015,3 +1015,27 @@ describe("provider_retry → TuiState.retry (transient progress, cleared by the 
     expect(retryVerb({ attempt: 1, maxRetries: 10, retryDelayMs: 0, status: null })).toBe("Provider busy — retrying 1 of 10");
   });
 });
+
+// WS-27: an MCP server's URL-mode elicitation card in the TUI — host only, never a url.
+describe("reduce — elicitation cards", () => {
+  const requested = { type: "elicitation_requested", sessionId: "s", threadId: "main", seq: 3, ts: 0, elicitationId: "el_1", mode: "url", serverName: "linear", message: "Connect", host: "linear.app", origin: "https://linear.app", issuedAt: 0, expiresAt: 1 };
+
+  test("a main-thread request takes the pending card; its resolution clears it with a host-only note", () => {
+    let s = reduce(initialState(), requested, 0);
+    expect(s.pending).toEqual({ kind: "elicitation", elicitationId: "el_1", serverName: "linear", message: "Connect", host: "linear.app" });
+    s = reduce(s, { type: "elicitation_resolved", sessionId: "s", threadId: "main", seq: 4, ts: 0, elicitationId: "el_1", action: "accept", by: "cli-chat" }, 0);
+    expect(s.pending).toBeNull();
+    expect(s.committed.at(-1)).toEqual({ kind: "note", text: "link request from linear (linear.app) opened" });
+  });
+
+  test("a card this client found no longer active is cleared locally; another pending card is untouched", () => {
+    let s = reduce(initialState(), requested, 0);
+    expect(reduce(s, { type: "local_elicitation_inactive", elicitationId: "el_other" }, 0).pending).not.toBeNull();
+    s = reduce(s, { type: "local_elicitation_inactive", elicitationId: "el_1" }, 0);
+    expect(s.pending).toBeNull();
+  });
+
+  test("a non-main request is not a card", () => {
+    expect(reduce(initialState(), { ...requested, threadId: "toolu_child" }, 0).pending).toBeNull();
+  });
+});
