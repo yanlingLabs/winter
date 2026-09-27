@@ -16,7 +16,7 @@
  *   3. Take a signature of the user's REAL homes (`~/.winter`, `~/.winter-dev`) BEFORE the run —
  *      WHAT EXISTS there, never when it was written (see `homeSignature`).
  *   3b. (A2) Copy the binary to a temp dir and sign the copy the way the Release app signs
- *      winter-core: ad-hoc identity, `--options runtime`, `--entitlements scripts/bun-jit.entitlements`.
+ *      winter-core: ad-hoc identity, `--options runtime`, `--entitlements scripts/winter-core.entitlements`.
  *   4. `spawn(<signed copy>, ["__runtime-state-probe"], { env: { WINTER_HOME: tmp, ... } })` —
  *      the static argv route in packages/cli/src/main.ts, beside `__workflow-worker`.
  *   5. Parse the one JSON line it prints; assert `ok`, `online`, `userVersion` ===
@@ -48,7 +48,9 @@ import { RUNTIME_STATE_SCHEMA_VERSION } from "../packages/core/src/runtime-state
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(SCRIPTS_DIR, "..");
 const DIST_BINARY = join(REPO_ROOT, "dist", "winter-core");
-/** The entitlements the Release app signs winter-core (and the embedded `winter` runtime) with. */
+/** The entitlements the Release app signs winter-core with (0.120.1: allow-jit + allow-unsigned-executable-memory). */
+const WINTER_CORE_ENTITLEMENTS = join(REPO_ROOT, "scripts", "winter-core.entitlements");
+/** The embedded `winter` runtime's (allow-jit only) — used here only as the NEGATIVE leg of the bun:ffi check. */
 const BUN_JIT_ENTITLEMENTS = join(REPO_ROOT, "scripts", "bun-jit.entitlements");
 const COMPILE_TIMEOUT_MS = 180_000;
 /** The probe boots a whole daemon (lock, store, twelve recovery steps, retention sweep) and stops
@@ -166,8 +168,8 @@ async function main(): Promise<void> {
   const probeBinary = join(signedDir, "winter-core");
   copyFileSync(DIST_BINARY, probeBinary);
   chmodSync(probeBinary, 0o755);
-  log(`\n--- Step 3b: codesign ${probeBinary} (ad-hoc, --options runtime, --entitlements ${BUN_JIT_ENTITLEMENTS}) ---`);
-  const sign = spawnSync("codesign", ["--force", "--sign", "-", "--options", "runtime", "--entitlements", BUN_JIT_ENTITLEMENTS, probeBinary], { encoding: "utf8" });
+  log(`\n--- Step 3b: codesign ${probeBinary} (ad-hoc, --options runtime, --entitlements ${WINTER_CORE_ENTITLEMENTS}) ---`);
+  const sign = spawnSync("codesign", ["--force", "--sign", "-", "--options", "runtime", "--entitlements", WINTER_CORE_ENTITLEMENTS, probeBinary], { encoding: "utf8" });
   if (sign.status !== 0) {
     rmSync(tmpHome, { recursive: true, force: true });
     rmSync(signedDir, { recursive: true, force: true });
@@ -175,6 +177,35 @@ async function main(): Promise<void> {
   }
   const dvv = spawnSync("codesign", ["-dvv", probeBinary], { encoding: "utf8" });
   log(`(info) ${`${dvv.stdout ?? ""}${dvv.stderr ?? ""}`.split("\n").filter((l) => l.startsWith("CodeDirectory") || l.startsWith("Identifier")).join(" | ")}`);
+
+  // ---- Step 3c (0.120.1): bun:ffi on the signed copy, both ways ------------------------------------
+  // 0.120.0 shipped winter-core with allow-jit only; `bun:ffi`'s dlopen (auth/keychain-ffi.ts, the
+  // app-token access lists) builds trampolines in non-MAP_JIT memory and the hardened runtime killed the
+  // daemon at its first Keychain call. `__keychain-ffi-probe` loads the three libraries and asks only
+  // whether the default keychain is unlocked (no item read, no prompt). POSITIVE: the release's
+  // entitlements run it. NEGATIVE: a copy signed with allow-jit alone must be killed — proof this leg
+  // can see the failure at all.
+  {
+    const ffiEnv = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir(), WINTER_HOME: tmpHome, WINTER_PROFILE: "dev", WINTER_LOGIN_SHELL_PATH: "off" };
+    const pos = spawnSync(probeBinary, ["__keychain-ffi-probe"], { encoding: "utf8", env: ffiEnv, timeout: 30_000 });
+    if (pos.status !== 0 || !(pos.stdout ?? "").includes("keychain-ffi: ok")) {
+      rmSync(tmpHome, { recursive: true, force: true });
+      rmSync(signedDir, { recursive: true, force: true });
+      fail(`bun:ffi does not run on winter-core signed with ${WINTER_CORE_ENTITLEMENTS} (exit ${pos.status ?? pos.signal}): ${`${pos.stdout ?? ""}${pos.stderr ?? ""}`.trim().slice(0, 300)}`);
+    }
+    log(`--- Step 3c: signed copy runs bun:ffi: ${(pos.stdout ?? "").trim()} ---`);
+    const negBinary = join(signedDir, "winter-core-jit-only");
+    copyFileSync(DIST_BINARY, negBinary);
+    chmodSync(negBinary, 0o755);
+    const negSign = spawnSync("codesign", ["--force", "--sign", "-", "--options", "runtime", "--entitlements", BUN_JIT_ENTITLEMENTS, negBinary], { encoding: "utf8" });
+    const neg = negSign.status === 0 ? spawnSync(negBinary, ["__keychain-ffi-probe"], { encoding: "utf8", env: ffiEnv, timeout: 30_000 }) : undefined;
+    if (neg === undefined || neg.status === 0) {
+      rmSync(tmpHome, { recursive: true, force: true });
+      rmSync(signedDir, { recursive: true, force: true });
+      fail(`NEGATIVE leg: winter-core signed with allow-jit alone was expected to be killed by bun:ffi and was not (${neg === undefined ? "codesign failed" : `exit ${neg.status}`}) — this check can no longer see the 0.120.0 crash`);
+    }
+    log(`--- Step 3c: allow-jit alone is killed as expected (${neg.signal ?? `exit ${neg.status}`}) ---`);
+  }
 
   try {
     // ---- Step 4: run the compiled binary's probe route ----------------------------------------
