@@ -31,7 +31,8 @@
  * `bun`, and the compiled binary's first read of each would prompt. This script — running under `bun`, their
  * creator — reads each value and hands it over a pipe to `dist/dev/winter-core __dev-keychain-adopt`, which
  * re-creates the item as itself (shadow, delete, add, read back; `auth/dev-keychain-transition.ts`). It is
- * crash-safe and idempotent: if interrupted, run it again. It is ONE-WAY: afterwards a `bun`-run dev CLI or
+ * crash-safe and idempotent: if interrupted, run it again; until it has run, this script refuses to start the
+ * signed binary on the default dev home. It is ONE-WAY: afterwards a `bun`-run dev CLI or
  * daemon is prompted for every item, so dev-profile commands go through the signed binary from then on.
  */
 import { spawn, spawnSync } from "node:child_process";
@@ -39,7 +40,9 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WINTER_TEAM_ID } from "../packages/core/src/auth/app-token-acl";
-import { transitionDevKeychain } from "../packages/core/src/auth/dev-keychain-transition";
+import { DEV_KEYCHAIN_SERVICE, oldCreatorStillOwnsItems, transitionDevKeychain } from "../packages/core/src/auth/dev-keychain-transition";
+import { keychainUnlocked } from "../packages/core/src/auth/keychain-ffi";
+import { isDefaultWinterHome } from "../packages/core/src/winter-dir";
 import { resolvePlatformPackageWinter } from "../packages/core/src/runtime-sdk/executable";
 import { DEV_DAEMON_IDENTIFIER, devCompileCommand, devDaemonHome, resolveDevSigningIdentity, signedFacts } from "./dev-daemon-lib";
 
@@ -142,6 +145,12 @@ async function main(): Promise<void> {
     if (outcome.kind === "stopped") die(`transition stopped at ${outcome.account} (${outcome.reason}); ${outcome.adopted.length} adopted so far — run it again`);
     console.error(`dev:daemon: transition done — ${outcome.adopted.length} adopted, ${outcome.skipped.length} left as they were${outcome.skipped.length > 0 ? ` (${outcome.skipped.join(", ")})` : ""}${outcome.restored.length > 0 ? `, ${outcome.restored.length} restored from an earlier run` : ""}`);
     process.exit(0);
+  }
+
+  // Before the transition, every item on the dev home is bun's, and the signed binary's first read of each
+  // would prompt: refuse and say what to run. (Only the default dev home holds the dev service's items.)
+  if (isDefaultWinterHome(home, "dev") && keychainUnlocked(null) && oldCreatorStillOwnsItems({ keychain: null, service: DEV_KEYCHAIN_SERVICE })) {
+    die("the dev Keychain items still belong to bun — stop any bun-run dev daemon, then run `bun run dev:daemon --transition` once");
   }
 
   const args = passthrough.length > 0 ? passthrough : ["daemon", "run"];
