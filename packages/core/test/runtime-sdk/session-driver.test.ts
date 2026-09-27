@@ -1085,6 +1085,27 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
     } finally { t.close(); }
   });
 
+  // WS-27 (review item 4): the turn tracker assumes a mid-turn push's held `turn_started` lands AFTER the
+  // running turn's `turn_completed` — pinned here, so a card raised in the second turn is that turn's.
+  test("a queued second turn's turn_started is appended after the first turn's turn_completed", async () => {
+    const t = table({ elicitations: new ElicitationBroker() });
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const session = await t.drivers.create(sid);
+      await session.send("one", "cli");
+      await Bun.sleep(5);
+      await session.send("two", "cli");
+      await Bun.sleep(5);
+      t.q().emit(result());
+      await Bun.sleep(10);
+      t.q().emit(result());
+      await Bun.sleep(10);
+      const turns = t.store.read(sid).filter((e) => e.type === "turn_started" || e.type === "turn_completed").map((e) => e.type);
+      expect(turns).toEqual(["turn_started", "turn_completed", "turn_started", "turn_completed"]);
+      await session.end();
+    } finally { t.close(); }
+  });
+
   test("with no elicitation broker wired, no onElicitation is set (the SDK declines every request)", async () => {
     const t = table();
     try {
