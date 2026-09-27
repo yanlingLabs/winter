@@ -357,15 +357,23 @@ public final class RemoteHost {
 
         let socketPath = config.socketPath
         let daemonFactory: @Sendable () -> WinterClient
+        // Bounded retry (`KeychainToken.readWithBoundedRetry`'s own doc): the daemon's once-per-
+        // boot ACL refresh (delete + re-add `remote-token` with a new ACL) can land right under
+        // this read — without it, a race here failed the gateway start outright with no retry
+        // short of the next pairing attempt, even though the daemon is up or seconds from it.
         #if DEBUG
         if let makeDaemonFactory {
             daemonFactory = makeDaemonFactory
         } else {
-            let token = try KeychainToken.readRemoteToken(service: config.keychainService)
+            let token = try KeychainToken.readWithBoundedRetry {
+                try KeychainToken.readRemoteToken(service: config.keychainService)
+            }
             daemonFactory = { WinterClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: token, clientName: "iphone-gateway") }
         }
         #else
-        let token = try KeychainToken.readRemoteToken(service: config.keychainService)
+        let token = try KeychainToken.readWithBoundedRetry {
+            try KeychainToken.readRemoteToken(service: config.keychainService)
+        }
         daemonFactory = { WinterClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: token, clientName: "iphone-gateway") }
         #endif
 

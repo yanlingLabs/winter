@@ -454,6 +454,16 @@ export interface CredentialEvictionDeps {
  *
  * `web-search` (the legacy Brave key) still evicts nothing — no child's `Options` names it.
  *
+ * **STILL NEEDED SINCE THE CHILDREN ARE HOST-BROKERED** (WS-25 §7, reconciled deliberately). A child now
+ * asks the daemon for its material over `credential_resolve` (`host-credentials.ts`), so a ROTATED key
+ * would reach its next request with no eviction at all. The eviction stays because the `Options` of an
+ * incarnation carry facts DERIVED from the key's presence, which only a new incarnation re-reads: the
+ * Exa key decides the tool surface (above); a cross-provider advisor pin and a `pins.research` digest
+ * model are stated only while their slot holds material (`refMaterialPresent` in `optionsFor`); and a
+ * REMOVAL must stop a child that already holds the old material in memory, which no later resolve can
+ * take back. What does NOT evict is an MCP sign-in written to the Keychain (spec §1): those children are
+ * reconnected, never replaced.
+ *
  * Returns the session ids it acted on (evicted now or scheduled), for the log and the tests.
  */
 export async function evictSessionsForCredential(deps: CredentialEvictionDeps, providerId: string): Promise<string[]> {

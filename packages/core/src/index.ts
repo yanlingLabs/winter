@@ -210,6 +210,10 @@ export { BackgroundTaskRegistry, type BgDeps } from "./agent/bg-registry";
 export { Compactor, SUMMARIZE_INSTRUCTION } from "./agent/compactor";
 export { bashLooksSafe, BashReviewer, REVIEW_INSTRUCTION, type ReviewVerdict } from "./agent/reviewer";
 export { McpManager, type McpServerStatus, type McpServerConfig } from "./agent/mcp/manager";
+// WS-25 (MCP OAuth): the sign-in doors, for `winter mcp login|logout|set-secret`'s no-daemon path — the
+// SAME code the daemon's `mcp.*` handlers run — and the daemon's one MCP OAuth store per Keychain service.
+export { McpOAuthDoors, McpOAuthDoorRefusal, type McpOAuthDoorDeps, type ResolvedMcpServer } from "./agent/mcp/oauth-doors";
+export { daemonMcpOAuthStore } from "./runtime-sdk/mcp-oauth-store";
 export { WorktreeManager, type ActiveWorktree } from "./agent/worktree";
 // Phase 9c Migration B (WS-16 §18) — the `winter migrate`/`winter migrate-project` CLI commands'
 // only door into the migrator; see `migration/migrate-b.ts`'s own header for the module layout.
@@ -235,7 +239,7 @@ export {
   type MigrationPlan,
   type MigrationPlanFileEntry,
 } from "./migration/migrate-b";
-export { LegacyKeychainSecretStore, legacyKeychainServiceFor } from "./migration/legacy-keychain-store";
+export { LegacyKeychainSecretStore, legacyKeychainPresence, legacyKeychainServiceFor } from "./migration/legacy-keychain-store";
 export { DEAD_LEGACY_TOP_LEVEL_FILES, findDeadLegacyFiles, describeDeadLegacyFiles, type DeadLegacyFile } from "./migration/dead-legacy-files";
 export { rekeySettings, type RekeyChange, type RekeyResult } from "./migration/rekey-settings";
 // WS-21 (spec §8): Migration C and the settings split — the CLI's `winter migrate --sdk-home` and

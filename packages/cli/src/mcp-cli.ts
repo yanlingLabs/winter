@@ -864,3 +864,395 @@ export function renderMcpGetOutcome(outcome: McpGetOutcome): string {
   lines.push("", `To remove this server, run: winter mcp remove "${outcome.name}" -s ${outcome.scope}`);
   return lines.join("\n");
 }
+
+// ------------------------------------------------------------------------------------------------
+// WS-25 (MCP OAuth): `winter mcp login <name>` / `logout <name> [--forget-client]` / `set-secret <name>`
+// ------------------------------------------------------------------------------------------------
+//
+// THROUGH THE DAEMON WHEN IT IS LIVE (`mcp.login`/`mcp.loginStatus`/`mcp.logout`/`mcp.setClientSecret`):
+// the daemon keeps the sign-in's loopback listener, owns the ONE store the sessions' refresh single-flight
+// is keyed on, and reconnects the server in every live session afterwards. With no daemon the SAME code
+// runs in this process (`McpOAuthDoors`, the core module behind those RPCs) against the same Keychain
+// service, and a daemon that comes up later reads the result; `poke` tells a live one anyway (the
+// `winter login` pattern, `notifyDaemonOfOutOfBandCredentialChange`).
+//
+// A CLIENT SECRET is read ONLY at the masked prompt (`readSecret`) or, where there is no terminal to prompt
+// in (an agent's `!` shell), from the macOS clipboard with `--from-clipboard` — spawned `pbpaste` inside this
+// process: never an argument, never a pipe, never an environment variable (an argument lands in shell
+// history and `ps`, a pipe in a script). The non-interactive path replaces the y/N with an explicit
+// `--issuer <issuer>` the user copies from the first run's output, and clears the clipboard after a
+// successful store. The secret (and its length) is never printed.
+//
+// Scope: `-s local|user|project` names one scope; without it the name resolves as a session in this
+// directory would see it (local > trusted project > user).
+
+/** The daemon's JSON-RPC door, narrowed to what these verbs call (`openCredentialDaemonDoor`'s shape). */
+export interface McpAuthRpcDoor {
+  request(method: string, params?: unknown): Promise<any>;
+  close(): void;
+}
+
+/** What `mcp.login` answers (`McpLoginResult`). The WHAT-fields (`issuer`, `name`, `scope`, `url`) are
+ *  optional here only so an older daemon's reply still signs in; the confirmation then shows what it has. */
+export interface McpLoginStartedView {
+  loginId: string;
+  authUrl: string;
+  issuerOrigin: string;
+  authorizeOrigin?: string;
+  issuer?: string;
+  name?: string;
+  scope?: McpScope;
+  url?: string;
+}
+
+/** The in-process doors (`McpOAuthDoors` from core) — structural, so a test can hand in a fake. */
+export interface McpAuthLocalDoors {
+  resolve(p: { name: string; scope?: McpScope; cwd?: string }): unknown;
+  login(server: unknown, opts?: { confirmIssuerChange?: boolean }): Promise<McpLoginStartedView>;
+  loginStatus(loginId: string): { state: "pending" | "done" | "failed" | "expired"; error?: string };
+  logout(server: unknown, opts?: { forgetClient?: boolean }): Promise<void>;
+  clientSecretIssuer(server: unknown): Promise<{ name: string; scope?: McpScope; url?: string; issuer: string; issuerOrigin: string; authorizeOrigin: string }>;
+  setClientSecret(server: unknown, secret: string, expectedIssuer: string | undefined): Promise<{ issuer: string; issuerOrigin: string }>;
+  dispose(): void;
+}
+
+export interface McpAuthDeps {
+  cwd: string;
+  door?: McpAuthRpcDoor;
+  /** Builds the in-process doors (no daemon). */
+  local: () => McpAuthLocalDoors;
+  /** Opens a URL in the user's browser (`open` on macOS). */
+  openBrowser: (url: string) => void | Promise<void>;
+  /** A y/N question (a TTY); resolves false when it cannot be asked. */
+  confirm: (question: string) => Promise<boolean>;
+  /** The MASKED prompt — the only way a client secret comes in. */
+  readSecret: (prompt: string) => Promise<string>;
+  /** Whether stdin is a terminal (a secret is refused otherwise). */
+  stdinIsTTY: boolean;
+  /** The clipboard, for `set-secret --from-clipboard` (production: spawned `pbpaste`/`pbcopy`). */
+  clipboard?: { read(): Promise<string>; clear(): Promise<void> };
+  /** `process.platform`; `--from-clipboard` is macOS-only. */
+  platform?: string;
+  print: (line: string) => void;
+  /** Tell a live daemon the Keychain moved (after an in-process change). */
+  poke: () => Promise<boolean>;
+  sleep?: (ms: number) => Promise<void>;
+  pollMs?: number;
+}
+
+export type McpAuthOutcome =
+  | { ok: true; kind: "login" | "logout" | "set-secret"; name: string; via: "daemon" | "in-process"; issuerOrigin?: string; issuer?: string; clipboardCleared?: boolean }
+  | { ok: false; message: string; code?: string };
+
+interface McpAuthArgs {
+  name: string;
+  scope?: McpScope;
+  forgetClient: boolean;
+  /** login: skip the "open the browser?" y/N (the target line is still printed). Never implies `confirmIssuerChange`. */
+  yes: boolean;
+  /** login: accept an authorization-server change without asking (it is still printed). */
+  confirmIssuerChange: boolean;
+  /** set-secret: read the secret from the macOS clipboard instead of the masked prompt. */
+  fromClipboard: boolean;
+  /** set-secret --from-clipboard: the issuer the user confirmed (printed by a run without it). */
+  issuer?: string;
+}
+
+function parseMcpAuthArgs(verb: "login" | "logout" | "set-secret", args: string[]): { kind: "ok"; parsed: McpAuthArgs } | { kind: "usageError"; message: string } {
+  const usage = verb === "logout" ? "usage: winter mcp logout <name> [--forget-client] [-s local|user|project]"
+    : verb === "login" ? "usage: winter mcp login <name> [--yes] [--confirm-issuer-change] [-s local|user|project]"
+    : "usage: winter mcp set-secret <name> [--from-clipboard [--issuer <issuer>]] [-s local|user|project]";
+  let scopeRaw: string | undefined;
+  let forgetClient = false;
+  let yes = false;
+  let confirmIssuerChange = false;
+  let fromClipboard = false;
+  let issuer: string | undefined;
+  const positionals: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const tok = args[i]!;
+    if (tok === "-s" || tok === "--scope") { scopeRaw = args[++i]; continue; }
+    if (verb === "logout" && tok === "--forget-client") { forgetClient = true; continue; }
+    if (verb === "login" && (tok === "--yes" || tok === "-y")) { yes = true; continue; }
+    if (verb === "login" && tok === "--confirm-issuer-change") { confirmIssuerChange = true; continue; }
+    if (verb === "set-secret" && tok === "--from-clipboard") { fromClipboard = true; continue; }
+    if (verb === "set-secret" && tok === "--issuer") {
+      issuer = args[++i];
+      if (issuer === undefined || issuer === "") return { kind: "usageError", message: `--issuer needs the issuer the first run printed\n${usage}` };
+      continue;
+    }
+    if (tok.startsWith("-")) return { kind: "usageError", message: `unknown option ${tok}\n${usage}` };
+    positionals.push(tok);
+  }
+  if (positionals.length === 0) return { kind: "usageError", message: usage };
+  if (positionals.length > 1) {
+    return {
+      kind: "usageError",
+      message: verb === "set-secret" ? `the client secret is read at a masked prompt, never from an argument\n${usage}` : usage,
+    };
+  }
+  let scope: McpScope | undefined;
+  if (scopeRaw !== undefined) {
+    const r = ensureMcpScope(scopeRaw);
+    if (r.kind === "invalid") return { kind: "usageError", message: r.message };
+    scope = r.scope;
+  }
+  if (issuer !== undefined && !fromClipboard) return { kind: "usageError", message: `--issuer goes with --from-clipboard (the interactive prompt asks instead)\n${usage}` };
+  return { kind: "ok", parsed: { name: positionals[0]!, ...(scope !== undefined ? { scope } : {}), forgetClient, yes, confirmIssuerChange, fromClipboard, ...(issuer !== undefined ? { issuer } : {}) } };
+}
+
+/** A door refusal's typed code + fields, from an RPC rejection (`client.ts` attaches `rpc`) or an in-process `McpOAuthDoorRefusal`. */
+function refusalOf(err: unknown): { message: string; code?: string; data: Record<string, unknown> } {
+  const rpc = (err as { rpc?: { message?: string; data?: Record<string, unknown> } } | null)?.rpc;
+  if (rpc !== undefined) return { message: rpc.message ?? "refused", ...(typeof rpc.data?.code === "string" ? { code: rpc.data.code } : {}), data: rpc.data ?? {} };
+  const local = err as { code?: unknown; data?: Record<string, unknown>; message?: string } | null;
+  if (local !== null && typeof local === "object" && typeof local.code === "string" && local.data !== undefined) {
+    return { message: local.message ?? "refused", code: local.code, data: { ...local.data, code: local.code } };
+  }
+  return { message: err instanceof Error ? err.message : String(err), data: {} };
+}
+
+const ISSUER_CHANGE = "mcp_issuer_change_requires_confirmation";
+
+export async function runMcpLoginRoute(args: string[], deps: McpAuthDeps): Promise<McpAuthOutcome> {
+  const p = parseMcpAuthArgs("login", args);
+  if (p.kind === "usageError") return { ok: false, message: p.message };
+  const { name, scope, yes, confirmIssuerChange } = p.parsed;
+  const sleep = deps.sleep ?? ((ms: number) => Bun.sleep(ms));
+  const pollMs = deps.pollMs ?? 1_000;
+  const local = deps.door === undefined ? deps.local() : undefined;
+  try {
+    const start = async (confirmIssuerChange: boolean): Promise<McpLoginStartedView> => {
+      if (deps.door !== undefined) {
+        const { METHODS } = await import("@yanlinglabs/winter-protocol");
+        return deps.door.request(METHODS.mcpLogin, { name, ...(scope !== undefined ? { scope } : {}), cwd: deps.cwd, ...(confirmIssuerChange ? { confirmIssuerChange: true } : {}) });
+      }
+      return local!.login(local!.resolve({ name, ...(scope !== undefined ? { scope } : {}), cwd: deps.cwd }), confirmIssuerChange ? { confirmIssuerChange: true } : {});
+    };
+    let started: Awaited<ReturnType<typeof start>>;
+    try {
+      started = await start(false);
+    } catch (err) {
+      const r = refusalOf(err);
+      if (r.code !== ISSUER_CHANGE) throw err;
+      // Full issuers when the daemon sends them (fix round 1: one origin can host several tenants).
+      const now = String(r.data.newIssuer ?? r.data.newIssuerOrigin);
+      const before = String(r.data.storedIssuer ?? r.data.storedIssuerOrigin);
+      const change = `"${name}" now signs in at ${now}, but its stored registration belongs to ${before}.`;
+      // `--confirm-issuer-change` is the ONLY non-interactive answer to this: `--yes` never implies it.
+      if (confirmIssuerChange) deps.print(`${change} Continuing (--confirm-issuer-change).`);
+      else if (!(await deps.confirm(`${change} Continue with the new authorization server? [y/N] `))) {
+        return { ok: false, message: `sign-in cancelled — the authorization server changed and was not confirmed (to accept it without a prompt: winter mcp login ${name} --confirm-issuer-change)`, code: ISSUER_CHANGE };
+      }
+      started = await start(true);
+    }
+    // WS-25 security review M1: say WHAT is about to be authorized and ask BEFORE the browser opens. The name
+    // resolves like a session's fold, so a trusted project's (or a local) entry can shadow a user-scope server
+    // of the same name -- the user sees which scope, which URL and which authorization server it is. A
+    // declined flow is simply never opened; its listener closes when the daemon expires it (5 minutes).
+    const target = `${started.scope ?? "?"} ${started.url ?? "(url not reported)"}`;
+    deps.print(`"${name}" → ${target} → issuer ${started.issuer ?? started.issuerOrigin}${started.authorizeOrigin !== undefined && started.authorizeOrigin !== started.issuerOrigin ? ` (the sign-in page is on ${started.authorizeOrigin})` : ""}`);
+    // `--yes` skips only this question (a non-interactive shell cannot answer it); the line above is still printed.
+    if (!yes && !(await deps.confirm("Open the browser to sign in? [y/N] "))) {
+      return { ok: false, message: `sign-in to "${name}" cancelled — nothing was opened (from a shell that cannot answer: add --yes)`, code: "cancelled" };
+    }
+    deps.print(`Opening your browser. If it does not open, visit:\n  ${started.authUrl}`);
+    await deps.openBrowser(started.authUrl);
+    for (;;) {
+      await sleep(pollMs);
+      let status: { state: string; error?: string };
+      if (deps.door !== undefined) {
+        const { METHODS } = await import("@yanlinglabs/winter-protocol");
+        status = await deps.door.request(METHODS.mcpLoginStatus, { loginId: started.loginId });
+      } else {
+        status = local!.loginStatus(started.loginId);
+      }
+      if (status.state === "pending") continue;
+      if (status.state === "done") {
+        if (deps.door === undefined) await deps.poke();
+        return { ok: true, kind: "login", name, via: deps.door !== undefined ? "daemon" : "in-process", issuerOrigin: started.issuerOrigin };
+      }
+      if (status.state === "expired") return { ok: false, message: `the sign-in to "${name}" expired before it was completed in the browser — run winter mcp login ${name} again`, code: "expired" };
+      return { ok: false, message: `the sign-in to "${name}" failed${status.error !== undefined ? ` (${status.error})` : ""}`, code: "failed" };
+    }
+  } catch (err) {
+    const r = refusalOf(err);
+    return { ok: false, message: r.message, ...(r.code !== undefined ? { code: r.code } : {}) };
+  } finally {
+    local?.dispose();
+  }
+}
+
+export async function runMcpLogoutRoute(args: string[], deps: McpAuthDeps): Promise<McpAuthOutcome> {
+  const p = parseMcpAuthArgs("logout", args);
+  if (p.kind === "usageError") return { ok: false, message: p.message };
+  const { name, scope, forgetClient } = p.parsed;
+  try {
+    if (deps.door !== undefined) {
+      const { METHODS } = await import("@yanlinglabs/winter-protocol");
+      await deps.door.request(METHODS.mcpLogout, { name, ...(scope !== undefined ? { scope } : {}), cwd: deps.cwd, ...(forgetClient ? { forgetClient: true } : {}) });
+      return { ok: true, kind: "logout", name, via: "daemon" };
+    }
+    const local = deps.local();
+    try {
+      await local.logout(local.resolve({ name, ...(scope !== undefined ? { scope } : {}), cwd: deps.cwd }), forgetClient ? { forgetClient: true } : {});
+    } finally {
+      local.dispose();
+    }
+    await deps.poke();
+    return { ok: true, kind: "logout", name, via: "in-process" };
+  } catch (err) {
+    const r = refusalOf(err);
+    return { ok: false, message: r.message, ...(r.code !== undefined ? { code: r.code } : {}) };
+  }
+}
+
+/**
+ * `winter mcp set-secret <name>` (fix round 1, minor 4): WHERE the secret may go is shown and confirmed
+ * BEFORE the secret is asked for — `mcp.clientSecretIssuer` names the authorization server the user-scope
+ * config discovers, the user answers y/N, then the masked prompt, then `mcp.setClientSecret` with that
+ * confirmed `expectedIssuer` (the daemon discovers again and refuses `mcp_issuer_changed` if it moved).
+ */
+export async function runMcpSetSecretRoute(args: string[], deps: McpAuthDeps): Promise<McpAuthOutcome> {
+  const p = parseMcpAuthArgs("set-secret", args);
+  if (p.kind === "usageError") return { ok: false, message: p.message };
+  const { name, scope, fromClipboard, issuer: confirmedIssuer } = p.parsed;
+  if (fromClipboard) return setSecretFromClipboard(name, scope, confirmedIssuer, deps);
+  if (!deps.stdinIsTTY) return { ok: false, message: "the client secret is read at a masked prompt, and stdin is not a terminal — run this in an interactive shell (never a pipe), or copy the secret and use --from-clipboard" };
+  const ref = { name, ...(scope !== undefined ? { scope } : {}), cwd: deps.cwd };
+  const local = deps.door === undefined ? deps.local() : undefined;
+  let secret = "";
+  try {
+    let target: { name: string; issuer: string; issuerOrigin: string };
+    if (deps.door !== undefined) {
+      const { METHODS } = await import("@yanlinglabs/winter-protocol");
+      target = await deps.door.request(METHODS.mcpClientSecretIssuer, ref);
+    } else {
+      target = await local!.clientSecretIssuer(local!.resolve(ref));
+    }
+    const ok = await deps.confirm(`The client secret for "${target.name}" will be sent only to the authorization server ${target.issuer}. Is that the right one? [y/N] `);
+    if (!ok) return { ok: false, message: "not confirmed — nothing stored", code: "not_confirmed" };
+    secret = (await deps.readSecret(`Client secret for "${target.name}": `)).trim();
+    if (secret === "") return { ok: false, message: "no client secret entered — nothing stored" };
+    if (deps.door !== undefined) {
+      const { METHODS } = await import("@yanlinglabs/winter-protocol");
+      const r = await deps.door.request(METHODS.mcpSetClientSecret, { ...ref, secret, expectedIssuer: target.issuer });
+      return { ok: true, kind: "set-secret", name: target.name, via: "daemon", issuer: typeof r?.issuer === "string" ? r.issuer : target.issuer };
+    }
+    const r = await local!.setClientSecret(local!.resolve(ref), secret, target.issuer);
+    return { ok: true, kind: "set-secret", name: target.name, via: "in-process", issuer: r.issuer };
+  } catch (err) {
+    const r = refusalOf(err);
+    // The daemon's and the doors' messages never quote the secret; this is belt and braces.
+    const message = secret === "" ? r.message : r.message.split(secret).join("<redacted>");
+    return { ok: false, message, ...(r.code !== undefined ? { code: r.code } : {}) };
+  } finally {
+    local?.dispose();
+  }
+}
+
+export function renderMcpAuthOutcome(outcome: McpAuthOutcome): string {
+  if (!outcome.ok) return outcome.code !== undefined ? `${outcome.message} (${outcome.code})` : outcome.message;
+  const where = outcome.via === "daemon" ? "" : " (the daemon isn't running; live sessions pick it up when they next connect the server)";
+  if (outcome.kind === "login") return `Signed in to "${outcome.name}"${outcome.issuerOrigin !== undefined ? ` at ${outcome.issuerOrigin}` : ""}${where}.`;
+  if (outcome.kind === "logout") return `Signed out of "${outcome.name}"${where}.`;
+  const clip = outcome.clipboardCleared === true ? " The clipboard was cleared." : outcome.clipboardCleared === false ? " The clipboard could NOT be cleared — clear it yourself." : "";
+  return `Client secret stored for "${outcome.name}"${outcome.issuer !== undefined ? `; it is sent only to ${outcome.issuer}` : ""}${where}.${clip}`;
+}
+
+/** `winter mcp list`'s auth note for one row (WS-25): empty when the daemon reported no auth column. */
+export function mcpAuthNote(row: { auth?: string; oauthIssuerOrigin?: string; oauthPreregistered?: boolean }): string {
+  if (row.auth === undefined || row.auth === "none") return "";
+  const at = row.oauthIssuerOrigin !== undefined ? ` at ${row.oauthIssuerOrigin}` : "";
+  return row.auth === "signed-in" ? `signed in${at}` : `needs sign-in${at} (winter mcp login)`;
+}
+
+/** The longest clipboard value `--from-clipboard` accepts as a client secret: real ones are tens of
+ *  characters; anything this long is a document someone copied, not a secret. */
+export const MCP_CLIPBOARD_SECRET_MAX = 512;
+
+/** Two issuers the same authorization server? Exact, or differing only by one trailing slash (the SDK's
+ *  `sameIssuer` rule; the daemon applies the real one again before it writes). */
+function sameIssuerLoose(a: string, b: string): boolean {
+  const strip = (s: string): string => (s.endsWith("/") ? s.slice(0, -1) : s);
+  return strip(a) === strip(b);
+}
+
+/**
+ * `winter mcp set-secret <name> --from-clipboard [--issuer <issuer>]` — the NON-INTERACTIVE door (an agent's
+ * `!` shell has no terminal for the masked prompt or the y/N).
+ *   - Without `--issuer`: the read-only `mcp.clientSecretIssuer`, one line naming the server and the
+ *     authorization server the secret would be bound to, and an instruction to re-run with that exact issuer.
+ *     Nothing is read from the clipboard and nothing is written.
+ *   - With `--issuer`: refused at once when it is not the issuer discovery names now (the clipboard is not
+ *     touched); else the clipboard is read by `pbpaste` spawned HERE, one trailing newline trimmed, an empty,
+ *     multi-line or implausibly long value refused typed, and `mcp.setClientSecret` is called with
+ *     `expectedIssuer` = the flag (the daemon re-discovers and refuses a mismatch). On success the clipboard is
+ *     cleared; on any failure it is left alone. The value and its length are never printed.
+ */
+async function setSecretFromClipboard(name: string, scope: McpScope | undefined, confirmedIssuer: string | undefined, deps: McpAuthDeps): Promise<McpAuthOutcome> {
+  if ((deps.platform ?? process.platform) !== "darwin" || deps.clipboard === undefined) {
+    return { ok: false, message: "--from-clipboard reads the macOS clipboard, which this system does not have — use the interactive prompt", code: "clipboard_unsupported" };
+  }
+  const clipboard = deps.clipboard;
+  const ref = { name, ...(scope !== undefined ? { scope } : {}), cwd: deps.cwd };
+  const local = deps.door === undefined ? deps.local() : undefined;
+  let secret = "";
+  try {
+    let target: { name: string; scope?: string; url?: string; issuer: string };
+    if (deps.door !== undefined) {
+      const { METHODS } = await import("@yanlinglabs/winter-protocol");
+      target = await deps.door.request(METHODS.mcpClientSecretIssuer, ref);
+    } else {
+      target = await local!.clientSecretIssuer(local!.resolve(ref));
+    }
+    deps.print(`"${target.name}" → ${target.scope ?? "?"} ${target.url ?? "(url not reported)"} → issuer ${target.issuer}`);
+    if (confirmedIssuer === undefined) {
+      return {
+        ok: false,
+        message: `nothing was read or stored — if that is the right authorization server, copy the secret and re-run: winter mcp set-secret ${target.name} --from-clipboard --issuer ${target.issuer}`,
+        code: "issuer_confirmation_required",
+      };
+    }
+    if (!sameIssuerLoose(confirmedIssuer, target.issuer)) {
+      return { ok: false, message: `the authorization server for "${target.name}" is ${target.issuer}, not the ${confirmedIssuer} given — nothing was read or stored`, code: "mcp_issuer_changed" };
+    }
+    let raw: string;
+    try {
+      raw = await clipboard.read();
+    } catch {
+      return { ok: false, message: "the clipboard could not be read — nothing stored", code: "clipboard_unreadable" };
+    }
+    secret = raw.replace(/\r?\n$/, "");
+    if (secret.trim() === "") return { ok: false, message: "the clipboard is empty — copy the client secret first; nothing stored", code: "clipboard_empty" };
+    if (/[\r\n]/.test(secret)) return { ok: false, message: "the clipboard holds several lines, not one client secret — nothing stored", code: "clipboard_not_a_secret" };
+    // eslint-disable-next-line no-control-regex
+    if (secret.length > MCP_CLIPBOARD_SECRET_MAX || /[\u0000-\u001f\u007f]/.test(secret) || secret !== secret.trim()) {
+      return { ok: false, message: "the clipboard does not hold something that looks like a client secret — nothing stored", code: "clipboard_not_a_secret" };
+    }
+    let stored: { name: string; via: "daemon" | "in-process"; issuer: string };
+    if (deps.door !== undefined) {
+      const { METHODS } = await import("@yanlinglabs/winter-protocol");
+      const r = await deps.door.request(METHODS.mcpSetClientSecret, { ...ref, secret, expectedIssuer: confirmedIssuer });
+      stored = { name: target.name, via: "daemon", issuer: typeof r?.issuer === "string" ? r.issuer : target.issuer };
+    } else {
+      const r = await local!.setClientSecret(local!.resolve(ref), secret, confirmedIssuer);
+      await deps.poke();
+      stored = { name: target.name, via: "in-process", issuer: r.issuer };
+    }
+    let clipboardCleared = true;
+    try {
+      await clipboard.clear();
+    } catch {
+      clipboardCleared = false;
+    }
+    return { ok: true, kind: "set-secret", ...stored, clipboardCleared };
+  } catch (err) {
+    const r = refusalOf(err);
+    const message = secret === "" ? r.message : r.message.split(secret).join("<redacted>");
+    return { ok: false, message, ...(r.code !== undefined ? { code: r.code } : {}) };
+  } finally {
+    secret = "";
+    local?.dispose();
+  }
+}

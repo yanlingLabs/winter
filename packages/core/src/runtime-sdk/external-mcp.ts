@@ -12,10 +12,9 @@
 // child names their tools `mcp__<key>__<tool>` — the names `tool.list` and the Mac's tool rows
 // already carry.
 //
-// THE CHILD SPAWNS/CONNECTS ITS OWN COPY. The daemon's `McpManager` still runs stdio servers for the
-// shared registry (`tool.list`, `mcp.*` RPCs) — it has no HTTP/SSE client of its own (`daemon.ts`
-// filters those out before `McpManager.startAll`, see that call site's own comment); a Winter child
-// cannot reach an in-daemon stdio client either, so each session's child starts/connects the
+// THE CHILD SPAWNS/CONNECTS ITS OWN COPY. The daemon's `McpManager` only PROBES servers for `mcp.list`
+// (WS-24: connect, list, close; WS-25: http/sse too, lazily, through the runtime's `/mcp-client`) — it
+// keeps nothing running a child could reach, so each session's child starts/connects the
 // configured servers itself from these configs. One extra process/connection per configured server
 // per live session — recorded in the fix-wave report as the cost of this door for stdio; unchanged
 // for HTTP/SSE, which were never proxied through the daemon to begin with.
@@ -28,6 +27,7 @@
 // refuses the SESSION (typed) rather than choose. (This is the pre-run-home path: once the router applies
 // run homes, the run folder's `.winter.json` carries the same fold and the daemon hands over none.)
 import { readFileSync, realpathSync } from "node:fs";
+import { join } from "node:path";
 import type { McpServerConfig } from "@yanlinglabs/winter-agent-sdk";
 import type { McpServerSettingsEntry, Settings } from "../settings";
 import { extractRawMcpServers, parseProjectMcpServers, projectMcpConfigPath } from "../agent/mcp/project-file";
@@ -98,6 +98,10 @@ function toMcpServerConfig(entry: McpServerSettingsEntry): McpServerConfig {
     url: entry.url,
     ...(entry.headers === undefined ? {} : { headers: { ...entry.headers } }),
     ...negotiation(entry.versionNegotiation),
+    // WS-25: the server's sign-in settings, forwarded (a copy, never shared) so the child's session
+    // provider finds a pre-registered client, its scopes and its metadata URL. Already validated by the
+    // entry schema (`validateMcpOAuthConfig`); it never carries a secret.
+    ...(entry.oauth === undefined ? {} : { oauth: structuredClone(entry.oauth) as NonNullable<Extract<McpServerConfig, { type: "http" }>["oauth"]> }),
   };
 }
 
@@ -142,5 +146,40 @@ export function configuredMcpServersFor(input: ConfiguredMcpInput): Record<strin
   Object.assign(out, project);
   for (const [name, sc] of Object.entries(input.localMcpServers ?? {})) out[name] = toMcpServerConfig(sc);
   for (const name of disabled) delete out[name];
+  return out;
+}
+
+/**
+ * WS-25 (review r1 (i)): the http/sse MCP servers the ENABLED plugins ship, read the way the Winter runtime's
+ * own plugin loader reads them (`runtime/src/plugins/loader.ts`: the first of `<root>/.mcp.json` and
+ * `<root>/mcp.json`, a `{ mcpServers }` wrapper or a bare name→config map, then the manifest's own
+ * `mcpServers`, which wins) and named as it names them (the raw key). Only the URL-bearing servers are
+ * returned — this is for the MCP sign-in allowlist, which keys a sign-in by its server URL; the child loads
+ * the plugins itself from the run folder. First plugin wins a name. Never throws: an unreadable plugin
+ * contributes nothing.
+ */
+export function pluginMcpServersFor(pluginRoots: readonly string[], readFile: (path: string) => string = (p) => readFileSync(p, "utf8")): Record<string, McpServerConfig> {
+  const out: Record<string, McpServerConfig> = {};
+  const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+  const parse = (path: string): unknown => {
+    try { return JSON.parse(readFile(path)); } catch { return undefined; }
+  };
+  for (const root of pluginRoots) {
+    const servers: Record<string, unknown> = {};
+    for (const file of [".mcp.json", "mcp.json"]) {
+      const parsed = parse(join(root, file));
+      if (!isObject(parsed)) continue;
+      const block = isObject(parsed.mcpServers) ? parsed.mcpServers : parsed;
+      for (const [name, config] of Object.entries(block)) servers[name] ??= config;
+      break;
+    }
+    const manifest = parse(join(root, ".claude-plugin", "plugin.json")) ?? parse(join(root, "plugin.json"));
+    if (isObject(manifest) && isObject(manifest.mcpServers)) Object.assign(servers, manifest.mcpServers);
+    for (const [name, config] of Object.entries(servers)) {
+      if (out[name] !== undefined || !isObject(config)) continue;
+      const type = config.type;
+      if ((type === "http" || type === "sse") && typeof config.url === "string") out[name] = { type, url: config.url };
+    }
+  }
   return out;
 }
