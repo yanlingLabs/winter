@@ -11,7 +11,7 @@ import {
   BgListParams, BgPeekParams, BgKillParams, BgKillAllParams,
   SessionSteerParams, SessionInterruptParams, SessionCompactParams, SkillsListParams, McpListParams, McpEnableParams, McpDisableParams,
   McpAddParams, McpRemoveParams, McpGetParams,
-  McpLoginParams, McpLoginStatusParams, McpLogoutParams, McpSetClientSecretParams,
+  McpLoginParams, McpLoginStatusParams, McpLogoutParams, McpSetClientSecretParams, McpClientSecretIssuerParams,
   SkillsReadParams, SkillsWriteParams, SkillsDeleteParams,
   AskUserRespondParams, TaskListParams, PlanRespondParams, SessionSetPolicyParams,
   SessionSetModelParams, SessionSetEffortParams, SessionSetActivityParams, SessionSetDirsParams,
@@ -333,7 +333,7 @@ export interface IpcServerOptions {
    * winterHome))` -- the same instance, so the refresh single-flight is shared). The rest are test seams
    * (`McpOAuthDoorDeps`). Local role only: none of the `mcp.*` sign-in methods is remote-reachable.
    */
-  mcpOAuth?: { store?: McpOAuthStore } & Pick<McpOAuthDoorDeps, "startLogin" | "revoke" | "fetch" | "clientMetadataUrl" | "loginTtlMs" | "now">;
+  mcpOAuth?: { store?: McpOAuthStore } & Pick<McpOAuthDoorDeps, "startLogin" | "discoverIssuer" | "revoke" | "fetch" | "clientMetadataUrl" | "loginTtlMs" | "now">;
   plugins?: PluginStore;     // discovered ~/.winter/plugins/*; plugins.list
   // Phase 4d-ii Task 2: `<winterHome>/settings.json` + `<winterHome>/plugins/` — the SAME
   // convention `bootstrapWinterDir` (winter-dir.ts) and every other winterHome-taking store
@@ -955,6 +955,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     ...(opts.trust !== undefined ? { trust: opts.trust } : {}),
     onSignInChanged: onMcpSignInChanged,
     ...(opts.mcpOAuth?.startLogin !== undefined ? { startLogin: opts.mcpOAuth.startLogin } : {}),
+    ...(opts.mcpOAuth?.discoverIssuer !== undefined ? { discoverIssuer: opts.mcpOAuth.discoverIssuer } : {}),
     ...(opts.mcpOAuth?.revoke !== undefined ? { revoke: opts.mcpOAuth.revoke } : {}),
     ...(opts.mcpOAuth?.fetch !== undefined ? { fetch: opts.mcpOAuth.fetch } : {}),
     ...(opts.mcpOAuth?.clientMetadataUrl !== undefined ? { clientMetadataUrl: opts.mcpOAuth.clientMetadataUrl } : {}),
@@ -2539,8 +2540,18 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const p = parseParams(McpSetClientSecretParams, params);
         const doors = signInDoors("mcp.setClientSecret");
         try {
-          const { issuerOrigin } = await doors.setClientSecret(doors.resolve(p), p.secret);
-          return { ok: true, issuerOrigin };
+          const { issuer, issuerOrigin } = await doors.setClientSecret(doors.resolve(p), p.secret, p.expectedIssuer);
+          return { ok: true, issuer, issuerOrigin };
+        } catch (err) {
+          throw mcpDoorFailure(err);
+        }
+      }
+      case METHODS.mcpClientSecretIssuer: {
+        // Fix round 1 (minor 4): what a client shows and the user confirms BEFORE a secret is asked for.
+        const p = parseParams(McpClientSecretIssuerParams, params);
+        const doors = signInDoors("mcp.clientSecretIssuer");
+        try {
+          return await doors.clientSecretIssuer(doors.resolve(p));
         } catch (err) {
           throw mcpDoorFailure(err);
         }

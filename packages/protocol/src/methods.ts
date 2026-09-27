@@ -729,10 +729,12 @@ export const McpServerRefParams = z.object({
  * (usually the same; a client shows both when they differ).
  *
  * `confirmIssuerChange` (WS-25 contract addition): when this server already has a stored client
- * registration and THIS sign-in's authorization server is a different one, the call is refused typed --
- * JSON-RPC error `data.code: "mcp_issuer_change_requires_confirmation"` with `data.storedIssuerOrigin`
- * and `data.newIssuerOrigin` -- and nothing is left behind; the client shows both origins and repeats the
- * call with `confirmIssuerChange: true`. A one-shot confirmation for that call only, never stored.
+ * registration and THIS sign-in's authorization server is a different one (FULL issuers, compared with the
+ * SDK's `sameIssuer` -- one origin can host several authorization servers behind tenant paths), the call
+ * is refused typed -- JSON-RPC error `data.code: "mcp_issuer_change_requires_confirmation"` with
+ * `data.storedIssuer`/`data.newIssuer` (the full issuers, what a client should show) and
+ * `data.storedIssuerOrigin`/`data.newIssuerOrigin` -- and nothing is left behind; the client shows both and
+ * repeats the call with `confirmIssuerChange: true`. A one-shot confirmation for that call only.
  */
 export const McpLoginParams = McpServerRefParams.extend({ confirmIssuerChange: z.boolean().optional() });
 export const McpLoginResult = z.object({
@@ -754,14 +756,31 @@ export const McpLoginStatusResult = z.object({
 export const McpLogoutParams = McpServerRefParams.extend({ forgetClient: z.boolean().optional() });
 export const McpLogoutResult = z.object({ ok: z.literal(true) });
 /**
+ * `mcp.clientSecretIssuer` (WS-25 fix round 1, contract addition): the authorization server a client
+ * secret for this server WOULD be bound to -- the USER-scope server's own discovery (side-effect free: no
+ * registration, no sign-in, nothing written). A client shows `issuer` and asks the user to confirm BEFORE
+ * it asks for the secret; the confirmed string is `mcp.setClientSecret`'s `expectedIssuer`. Same refusals
+ * as `mcp.setClientSecret` (`mcp_secret_needs_user_scope`, `mcp_not_preregistered`,
+ * `mcp_discovery_failed`, ...). `name` is the user-scope server the secret belongs to.
+ */
+export const McpClientSecretIssuerParams = McpServerRefParams;
+export const McpClientSecretIssuerResult = z.object({ name: z.string(), issuer: z.string(), issuerOrigin: z.string(), authorizeOrigin: z.string() });
+/**
  * `mcp.setClientSecret`: a pre-registered client's secret, straight to the Keychain under the DERIVED
  * account `mcp-oauth-client-secret:<id>` (never a config-named one), bound to the authorization server it
- * belongs to. Never echoed, never logged. Refused typed for a server whose config has no `oauth.clientId`,
- * and for a project-/local-scope server with no user-scope counterpart (a repository must not be able to
- * steer where the user's secret is sent).
+ * belongs to. Never echoed, never logged. Refused typed for a server whose config has no `oauth.clientId`
+ * + `oauth.clientSecretRef`, and for a project-/local-scope server with no user-scope counterpart (a
+ * repository must not be able to steer where the user's secret is sent).
+ *
+ * `expectedIssuer` (WS-25 fix round 1, contract change): the issuer the user CONFIRMED
+ * (`mcp.clientSecretIssuer`). The daemon discovers again and writes only when it names the same
+ * authorization server (`sameIssuer`). Absent -> `data.code: "mcp_expected_issuer_required"` with
+ * `data.issuer`/`data.issuerOrigin`; moved since -> `"mcp_issuer_changed"` with the new `data.issuer`.
+ * Nothing is written on either refusal. Optional in the schema only so the refusal is typed rather than a
+ * bare invalid-params error.
  */
-export const McpSetClientSecretParams = McpServerRefParams.extend({ secret: z.string().min(1) });
-export const McpSetClientSecretResult = z.object({ ok: z.literal(true), issuerOrigin: z.string().optional() });
+export const McpSetClientSecretParams = McpServerRefParams.extend({ secret: z.string().min(1), expectedIssuer: z.string().min(1).optional() });
+export const McpSetClientSecretResult = z.object({ ok: z.literal(true), issuer: z.string().optional(), issuerOrigin: z.string().optional() });
 
 /**
  * Daemon settings surface (2026-09-17 plan, item 2): `capabilities.list` — the daemon's OWN
@@ -2802,6 +2821,7 @@ export const METHODS = {
   mcpLoginStatus: "mcp.loginStatus",
   mcpLogout: "mcp.logout",
   mcpSetClientSecret: "mcp.setClientSecret",
+  mcpClientSecretIssuer: "mcp.clientSecretIssuer",
   askUserRespond: "ask_user.respond",
   taskList: "task.list",
   planRespond: "plan.respond",
