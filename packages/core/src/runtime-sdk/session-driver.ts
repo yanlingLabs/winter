@@ -190,6 +190,8 @@ export interface LegSession {
   setPolicy(policy: SessionApprovalPolicy): Promise<void>;
   /** WS-25: see `WinterSession.mcpServerNamesFor` (optional so a test double need not implement it). */
   mcpServerNamesFor?(serverUrl: string): string[];
+  /** WS-27: see `WinterSession.mcpServerNames` (optional so a test double need not implement it). */
+  mcpServerNames?(): string[];
   /** WS-25: see `WinterSession.reconnectMcpServer` (optional so a test double need not implement it). */
   reconnectMcpServer?(name: string): Promise<void>;
   end(): Promise<void>;
@@ -1001,6 +1003,13 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       try { assertNoCapabilityCollision(extra, capabilities); } catch (err) {
         throw new WinterLegRefusal("winter_leg_unavailable", err instanceof Error ? err.message : String(err));
       }
+      // WS-25/27: the fold this incarnation's child will have — on a run-home incarnation the configured servers
+      // ride the run folder (plugins load natively there), the configured servers win a name as the runtime's
+      // own precedence has it; otherwise it is `extra`. Reported AT ONCE (WS-27), before the credential probes'
+      // awaits below and the spawn, so a remove or a rename in that window already sees these names as in use
+      // (`WinterSession.mcpServerNames`).
+      const configuredMcp = runHomeApplied ? { ...(deps.pluginMcpServers?.() ?? {}), ...(deps.extraMcpServers?.(capSession) ?? {}) } : extra;
+      inc.noteMcpServers?.(Object.keys(configuredMcp));
       // P8d-8 (D30), computed ONCE (review Minor fix): `runtimes.advisorModel` when the user set
       // one, else Winter's own D30 default for this session's model family.
       //
@@ -1174,10 +1183,8 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // allowlist is read off the FINAL options, so a ref the builder dropped (an unusable advisor or
       // digest pin) is not answerable either. The configured MCP servers are passed separately because a
       // run-home incarnation's `options.mcpServers` carries only the capability servers (`extra` is
-      // empty above) while the run folder carries the rest; the same fold is read here for its URLs.
-      // Plugin servers join only on a run-home incarnation (the only one whose child loads plugins
-      // natively); the configured servers win a name, as the runtime's own precedence has it.
-      const configuredMcp = runHomeApplied ? { ...(deps.pluginMcpServers?.() ?? {}), ...(deps.extraMcpServers?.(capSession) ?? {}) } : extra;
+      // empty above) while the run folder carries the rest; the same fold (`configuredMcp`, computed above)
+      // is read here for its URLs.
       // Review r1 (h): the catalog slots a subagent may resolve — permitted AND credentialed at spawn.
       const permitted = new Set(permittedProviders().map((p) => p.providerId));
       const slotProviders = new Set(Object.entries(credentials.byProvider).filter(([id, kind]) => kind !== undefined && permitted.has(id)).map(([id]) => id));

@@ -271,3 +271,28 @@ describe("the copied fixture authorization server (fix round 1, minor 7)", () =>
     expect(ours.slice(header.length)).toBe(readFileSync(sdkSource!, "utf8"));
   });
 });
+
+describe("McpOAuthDoors follow-up failures are described, not just named (WS-27)", () => {
+  test("a rejecting onSignInChanged logs name, code and the masked, capped message", async () => {
+    const store = createMemoryMcpOAuthStore();
+    const lines: string[] = [];
+    const failure = Object.assign(new Error(`reconnect refused: Bearer abc.def token=xyz ${"x".repeat(400)}`), { code: "mcp_reconnect_failed" });
+    const doors = new McpOAuthDoors({
+      home: homeWith({ s: { type: "http", url: URL_ } }),
+      store: () => store,
+      revoke: async ({ account, store: s }) => { await s.remove(account); },
+      onSignInChanged: async () => { throw failure; },
+      log: (line) => lines.push(line),
+    });
+    await doors.logout(doors.resolve({ name: "s" }));
+    await doors.settled();
+    const line = lines.find((l) => l.startsWith("mcp: reconnecting live sessions failed"));
+    expect(line).toBeDefined();
+    expect(line).toContain("Error mcp_reconnect_failed: reconnect refused");
+    expect(line).toContain("Bearer [redacted]");
+    expect(line).toContain("token=[redacted]");
+    expect(line).not.toContain("abc.def");
+    expect(line).not.toContain("xyz");
+    expect(line!.length).toBeLessThan(400);
+  });
+});

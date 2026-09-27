@@ -596,7 +596,9 @@ export const McpServerStatusSchema = z.object({
   name: z.string(),
   status: z.enum(["connected", "failed", "disabled", "unmanaged", "needs-auth"]),
   toolNames: z.array(z.string()),
-  source: z.enum(["user", "project", "plugin"]),
+  /** WS-27: `"agent"` — a server a subagent definition declares inline (user, trusted-project or plugin
+   *  `agents/*.md`), listed by its config name so its connector permissions can be set; never probed. */
+  source: z.enum(["user", "project", "plugin", "agent"]),
   transport: z.enum(["stdio", "http", "sse"]).optional(),
   strippedHeaders: z.array(z.string()).optional(),
   auth: McpAuthStateSchema.optional(),
@@ -664,7 +666,7 @@ export const McpToolRowSchema = z.object({
 export const McpToolsServerSchema = z.object({
   name: z.string(),
   status: z.enum(["connected", "failed", "disabled", "unmanaged", "needs-auth", "unknown"]),
-  source: z.enum(["user", "project", "plugin"]).optional(),
+  source: z.enum(["user", "project", "plugin", "agent"]).optional(),
   allTools: McpToolPermissionSchema.optional(),
   listed: z.boolean(),
   tools: z.array(McpToolRowSchema),
@@ -760,8 +762,43 @@ export const McpRemoveParams = z.object({
   cwd: z.string().min(1).optional(),
 });
 /** `removed`: false when the name was not present in that scope at all — an idempotent no-op, same
- *  posture `mcp.enable`/`mcp.disable` already take on an absent/never-disabled name. */
-export const McpRemoveResult = z.object({ ok: z.literal(true), name: z.string(), removed: z.boolean(), scope: McpScopeSchema.optional() });
+ *  posture `mcp.enable`/`mcp.disable` already take on an absent/never-disabled name.
+ *  WS-27 `permissionsCleared`: the removal also dropped the name's connector permissions
+ *  (`settings.json` → `mcp.toolPermissions`) — only once no other scope, plugin or subagent definition still
+ *  defines a server of that name, and no live session has it connected (the values are keyed by name across
+ *  scopes). Claude-grammar rules are never dropped (claude parity): `rulesNotFollowed` lists every rule, in any
+ *  file, that could name the server (`"<file>: <rule>"`) — they remain; with `nameStillInUse` (another scope or a
+ *  live session still has a server of this name) they still apply to it. `permissionsNote`: the server WAS removed,
+ *  but clearing its permissions failed. */
+export const McpRemoveResult = z.object({ ok: z.literal(true), name: z.string(), removed: z.boolean(), scope: McpScopeSchema.optional(), permissionsCleared: z.boolean().optional(), rulesNotFollowed: z.array(z.string()).optional(), nameStillInUse: z.boolean().optional(), permissionsNote: z.string().optional() });
+
+/**
+ * WS-27 — `winter mcp rename <old> <new>`: rename a server WITHIN one scope, its entry unchanged. Refused typed
+ * (nothing written) when the new name is invalid (`mcp_invalid_name`), the scope does not define the old one
+ * (`mcp_server_not_found`), the scope already defines the new one (`mcp_server_exists`), anything else uses
+ * the new name — another scope, a plugin, a subagent definition, a live session (`mcp_server_name_in_use`) —
+ * or the new name already holds stored connector permissions or rules naming `mcp__<new>`/`mcp__<new>__…` — in
+ * `sdk/settings.json`, a trusted project's settings files or the approved-rules record
+ * (`mcp_rename_target_has_permissions`). The old name's connector permissions and `mcp.disabled` membership are
+ * copied to the new name first (`carried`), then dropped from the old name unless something still uses it
+ * (`keptOld` — a live session's child included). Claude-grammar rules are NEVER rewritten: `rulesNotFollowed`
+ * lists every rule, in any file, that could name the old server (every `__` split, and globs such as
+ * `mcp__cf__*`) as `"<file>: <rule>"` — they still name the old server, for the user to edit; the deny/ask ones
+ * among them (which no longer protect the renamed server) are also in `protectiveRulesNotFollowed`. `note`: something
+ * after the rename failed (the rename stands). A sign-in is keyed by the server's URL, so it follows by itself.
+ * LOCAL role only.
+ */
+export const McpRenameParams = z.object({
+  name: z.string().min(1),
+  newName: z.string().min(1),
+  scope: McpScopeSchema.default("local"),
+  cwd: z.string().min(1).optional(),
+});
+export const McpRenameResult = z.object({
+  ok: z.literal(true), name: z.string(), newName: z.string(), scope: McpScopeSchema,
+  carried: z.boolean(), keptOld: z.boolean(),
+  rulesNotFollowed: z.array(z.string()), protectiveRulesNotFollowed: z.array(z.string()).optional(), note: z.string().optional(),
+});
 
 /**
  * `winter mcp get <name>` in one of the three scopes (WS-21, `McpScopeSchema`). Read-only — LOCAL role
@@ -2916,6 +2953,7 @@ export const METHODS = {
   mcpDisable: "mcp.disable",
   mcpAdd: "mcp.add",
   mcpRemove: "mcp.remove",
+  mcpRename: "mcp.rename",
   mcpGet: "mcp.get",
   mcpLogin: "mcp.login",
   mcpLoginStatus: "mcp.loginStatus",

@@ -1,6 +1,6 @@
 export { startDaemon, CORE_VERSION, type RunningDaemon } from "./daemon";
 export { bootstrapWinterDir, resolveWinterHome, isDefaultWinterHome } from "./winter-dir";
-export { resolveWinterProfile, keychainService, profileDisplayName, type WinterProfile } from "./profile";
+export { resolveWinterProfile, keychainService, profileDisplayName, cliCommandName, type WinterProfile } from "./profile";
 export {
   LEGACY_LAUNCHD_LABEL, LEGACY_HOME_DIR, LEGACY_DEV_HOME_DIR, LEGACY_HOME_ENV, LEGACY_PROFILE_ENV,
   LEGACY_TMPDIR_ENV, LEGACY_KEYCHAIN_SERVICE, LEGACY_KEYCHAIN_SERVICE_DEV, LEGACY_CLI_LINK,
@@ -44,6 +44,7 @@ export { linkedRouterSupportsRunHome, routerSupportsRunHome } from "./runtime-sd
 export {
   validateMcpServerName, addUserMcpServer, removeUserMcpServer, addProjectMcpServer, removeProjectMcpServer,
   addSdkUserMcpServer, removeSdkUserMcpServer,
+  removeMcpServerForgettingPermissions, renameMcpServerCarryingSettings, McpRenameRefusal,
 } from "./agent/mcp/mcp-write";
 export {
   readProjectMcpConfig, writeProjectMcpConfig, projectMcpConfigPath, projectMcpConfigExists,

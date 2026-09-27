@@ -48,6 +48,16 @@ export function keychainService(
   return override;
 }
 
+/**
+ * The CLI command a hint should name: `winter-dev` on the dev profile, `winter` otherwise. The CLI cannot
+ * see the name it was invoked by — the `winter-dev` wrapper execs `bun …/main.ts`, and the dist `winter`
+ * is a link to `winter-core` — so the profile the wrapper exports is the signal (a dev-profile process is
+ * only ever reached through `winter-dev`; a plain `winter` is always the dist CLI).
+ */
+export function cliCommandName(profile: WinterProfile = resolveWinterProfile()): string {
+  return profile === "dev" ? "winter-dev" : "winter";
+}
+
 export function profileDisplayName(profile: WinterProfile = resolveWinterProfile()): string {
   return profile === "dev" ? "Winter Dev" : "Winter";
 }

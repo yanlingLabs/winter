@@ -162,7 +162,13 @@ export interface WinterIncarnation {
  *  generation is bumped only after the options were built (a refused executable must not leave a
  *  generation row with no child behind it), so the thunk cannot see it — and needs nothing but
  *  the resume decision and the abort controller. */
-export type WinterIncarnationShape = Pick<WinterIncarnation, "resume" | "abort">;
+export type WinterIncarnationShape = Pick<WinterIncarnation, "resume" | "abort"> & {
+  /**
+   * WS-27: the options thunk reports the MCP server fold the moment it has computed it — before its remaining
+   * awaits (the run home) and the spawn — so `mcpServerNames()` covers an incarnation still being opened.
+   */
+  noteMcpServers?: (names: readonly string[]) => void;
+};
 
 /** The last `system/init` the child reported — the id proves a resume landed on the same backend
  *  session, and `tools` is the integration tripwire's subject (Task 16's e2e). */
@@ -378,6 +384,12 @@ export interface WinterSession {
    */
   mcpServerNamesFor(serverUrl: string): string[];
   /**
+   * WS-27: every MCP server name the LIVE incarnation was spawned with (the same fold `mcpServerNamesFor`
+   * reads) — `[]` when not live. `mcp.remove`/`mcp.rename` keep a name's connector settings while a live child
+   * still has it connected (the child keeps its servers until it restarts; the settings are read live).
+   */
+  mcpServerNames(): string[];
+  /**
    * WS-25: reconnect one of the live child's MCP servers (`Query.reconnectMcpServer`, the runtime's
    * `mcp_reconnect` control) — how a new sign-in reaches a session without replacing its child (a
    * Keychain write never evicts, spec §1). Code children and embedded chat/dispatch alike. A typed
@@ -475,6 +487,8 @@ class WinterSessionImpl implements WinterSession {
   private endedReason: string | undefined;
   /** The open() in flight, so two concurrent sends resume ONE child, not two. */
   private opening: Promise<void> | undefined;
+  /** WS-27: the fold of an incarnation still being opened (`WinterIncarnationShape.noteMcpServers`). */
+  private pendingMcpServerNames: string[] = [];
   private idleWaiters: Array<() => void> = [];
   private turnStart: number | undefined;
   /** Review r1 M-4: a `compact` control is running -- the idle clock must not end the child under it. */
@@ -613,6 +627,11 @@ class WinterSessionImpl implements WinterSession {
     return names;
   }
 
+  mcpServerNames(): string[] {
+    const inc = this.stateValue === "live" ? this.inc : undefined;
+    return [...new Set([...(inc === undefined ? [] : Object.keys(inc.mcpServers)), ...this.pendingMcpServerNames])];
+  }
+
   async reconnectMcpServer(name: string): Promise<void> {
     const inc = this.stateValue === "live" && !this.ending ? this.inc : undefined;
     const reconnect = inc?.query.reconnectMcpServer;
@@ -730,7 +749,14 @@ class WinterSessionImpl implements WinterSession {
       const abort = new AbortController();
       const resume = await this.deps.hasTranscript();
       // Options FIRST: a refused executable throws here and leaves NO generation row behind it.
-      const options = await this.deps.options({ resume, abort });
+      // WS-27: the fold is recorded as PENDING as soon as the thunk has computed it (`mcpServerNames`).
+      let options: Options;
+      try {
+        options = await this.deps.options({ resume, abort, noteMcpServers: (names) => { this.pendingMcpServerNames = [...names]; } });
+      } catch (err) {
+        this.pendingMcpServerNames = [];
+        throw err;
+      }
       // WS-21: the run home `optionsFor` built for THIS incarnation (built last, so a refusal above never
       // leaves one behind). An open that fails from here to the iteration's start disposes it at once —
       // nothing ran on it (spec §3.8 r3).
@@ -748,6 +774,7 @@ class WinterSessionImpl implements WinterSession {
         projector = this.deps.projector(shape);
         query = this.deps.runtime.sdk.query({ prompt: queue, options });
       } catch (err) {
+        this.pendingMcpServerNames = [];
         await disposeFailedRunHome(runHome, (line) => this.log(line));
         if (runHome !== undefined) this.deps.records?.noteRunFolder?.(this.sessionId, undefined, runHome.dir);
         throw err;
@@ -771,6 +798,7 @@ class WinterSessionImpl implements WinterSession {
       }
       const inc: Incarnation = { ...shape, queue, projector, query, attachment: undefined, sawInit: false, done: Promise.resolve(), runHome, mcpServers: sessionMcpServersOf(options) };
       this.inc = inc;
+      this.pendingMcpServerNames = [];
       this.gen = generation;
       this.resumedValue = resume;
       this.ending = false;
