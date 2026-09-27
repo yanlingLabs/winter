@@ -16,6 +16,7 @@ import { Settings, saveSettings, MODEL_ROLES } from "../../src/settings";
 import { costBasisFor } from "../../src/providers/model-catalog-wire";
 import { writeCredentialMaterial } from "../../src/auth/credential-material";
 import { consoleProfileCredentialFile } from "../../src/runtime-sdk/anthropic-paths";
+import { toolsGatedNoneRow } from "../helpers/tools-refused-catalog-row";
 
 class TestClient {
   private decoder = new LineDecoder();
@@ -288,11 +289,14 @@ describe("models.catalog", () => {
     const result = await c.request(METHODS.modelsCatalog, {});
     const codexTerra = result.result.models.find((m: any) => m.tag === "codex-oauth/gpt-5.6-terra");
     expect(codexTerra.sessionUsable).toBe(true);
-    // `agentrouter/claude-opus-4-8` is `toolCalling: "none"` at `confidence: "unknown"` on the
-    // `winter.anthropic-messages` adapter — one of the four families that actually throws on a
-    // non-native row asking for tools — so `sessionUsable` is false, but the row is still PRESENT
-    // here (unlike `pickerModels()`'s session-picker listing, which excludes it — sync-config.test.ts).
-    const anthropicFamily = result.result.models.find((m: any) => m.tag === "agentrouter/claude-opus-4-8");
+    // A row `toolCalling: "none"` at `confidence: "unknown"` on one of the four adapter families
+    // that actually throws on a non-native row asking for tools — picked dynamically
+    // (`tools-refused-catalog-row.ts`) so a catalog refresh re-measuring one example (as 0.0.33 did
+    // to this test's original `agentrouter/claude-opus-4-8`) cannot silently break the boundary this
+    // pins — so `sessionUsable` is false, but the row is still PRESENT here (unlike
+    // `pickerModels()`'s session-picker listing, which excludes it — sync-config.test.ts).
+    const gatedRow = toolsGatedNoneRow();
+    const anthropicFamily = result.result.models.find((m: any) => m.tag === gatedRow.key);
     expect(anthropicFamily).toBeDefined();
     expect(anthropicFamily.sessionUsable).toBe(false);
     // `groq/openai/gpt-oss-120b` is the SAME `toolCalling: "none"`/`confidence: "unknown"` shape, but

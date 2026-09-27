@@ -27,7 +27,7 @@ describe("the workflow worker's Keychain-sandbox check (decision)", () => {
     expect(keychainSandboxState(answering(1, 1))).toEqual({ ok: true });
   });
 
-  test("the runtime's own worker profile (not exported; read from the installed package) is byte-identical to core's, which these tests and verify:embedded run the worker under — and names no Keychain service", () => {
+  test("the runtime's own worker profile (the package's exported builder) is byte-identical to core's, which these tests and verify:embedded run the worker under — and names no Keychain service", () => {
     expect(renderRuntimeWorkflowProfile(process.execPath)).toBe(buildWorkflowSeatbeltProfile(process.execPath));
     for (const service of KEYCHAIN_MACH_SERVICES) expect(WORKFLOW_MACH_SERVICES).not.toContain(service);
   });

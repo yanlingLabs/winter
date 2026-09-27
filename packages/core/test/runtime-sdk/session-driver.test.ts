@@ -16,6 +16,7 @@ import { Database } from "bun:sqlite";
 import { migrationCManifestPath, migrationCState, rollbackMigrationC } from "../../src/migration/migrate-c";
 import { setRunHomeSupportForTests } from "../../src/runtime-sdk/run-home-support";
 import { recordedRunHomes } from "../helpers/run-homes";
+import { toolsGatedNoneRow } from "../helpers/tools-refused-catalog-row";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Options, Query } from "@yanlinglabs/winter-agent-sdk";
@@ -844,12 +845,13 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
       await session.send("A", "cli");
       const held = await session.send("B", "cli");
       expect(held.queued).toBe(true);
-      // `zai-anthropic/glm-5` is a real, non-retired ("candidate") catalog row whose `toolCalling` is
-      // `"none"` at `confidence: "unknown"`, on the `winter.anthropic-messages` adapter — one of the
-      // four families that actually THROWS on a non-native row asking for tools. Bypasses the RPC's
-      // own picker, as a hand-edited settings file or a session recorded before the pickers lane's
-      // filter landed would.
-      t.store.setModel(sid, "zai-anthropic/glm-5");
+      // A real, live ("candidate") catalog row whose `toolCalling` is `"none"` at
+      // `confidence: "unknown"`, on one of the four adapter families that actually THROWS on a
+      // non-native row asking for tools — picked dynamically (`tools-refused-catalog-row.ts`) so a
+      // catalog refresh re-measuring one example (as 0.0.33 did to `zai-anthropic/glm-5`) cannot
+      // silently break this test. Bypasses the RPC's own picker, as a hand-edited settings file or a
+      // session recorded before the pickers lane's filter landed would.
+      t.store.setModel(sid, toolsGatedNoneRow().key);
       await t.drivers.evict(sid);
       const spawnsBefore = t.queries.length;
       let caught: unknown;
@@ -868,7 +870,7 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
       // No resume/eviction dance this time — a session created directly on the refused tag (a stored
       // `settings.provider.model` or a hand-typed `session.create` naming it) must refuse the very
       // first turn, not just a later resume.
-      const sid = t.store.createSession("t", { mode: "chat", model: "zai-anthropic/glm-5" });
+      const sid = t.store.createSession("t", { mode: "chat", model: toolsGatedNoneRow().key });
       const session = await t.drivers.create(sid);
       const spawnsBefore = t.queries.length;
       let caught: unknown;
