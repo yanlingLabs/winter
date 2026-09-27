@@ -62,7 +62,7 @@ describe("winter mcp login (WS-25)", () => {
   test("a changed authorization server asks first; confirmed → the call repeats with confirmIssuerChange", async () => {
     const door = scriptedDoor((method, params) => {
       if (method === METHODS.mcpLogin && params.confirmIssuerChange !== true) {
-        return rpcError("changed", { code: "mcp_issuer_change_requires_confirmation", storedIssuerOrigin: "https://old.example.test", newIssuerOrigin: "https://new.example.test" });
+        return rpcError("changed", { code: "mcp_issuer_change_requires_confirmation", storedIssuer: "https://old.example.test/t1", newIssuer: "https://new.example.test/t2", storedIssuerOrigin: "https://old.example.test", newIssuerOrigin: "https://new.example.test" });
       }
       if (method === METHODS.mcpLogin) return { loginId: "ml_2", authUrl: "https://new.example.test/a", issuerOrigin: "https://new.example.test" };
       return { state: "done" };
@@ -70,8 +70,9 @@ describe("winter mcp login (WS-25)", () => {
     const questions: string[] = [];
     const outcome = await runMcpLoginRoute(["linear", "-s", "user"], deps({ door, confirm: async (q) => { questions.push(q); return true; } }));
     expect(outcome.ok).toBe(true);
-    expect(questions[0]).toContain("https://old.example.test");
-    expect(questions[0]).toContain("https://new.example.test");
+    // The FULL issuers are what the user is shown.
+    expect(questions[0]).toContain("https://old.example.test/t1");
+    expect(questions[0]).toContain("https://new.example.test/t2");
     expect(door.calls[1]!.params).toEqual({ name: "linear", scope: "user", cwd: "/work/proj", confirmIssuerChange: true });
   });
 
@@ -93,7 +94,8 @@ describe("winter mcp login (WS-25)", () => {
       login: async () => ({ loginId: "ml_l", authUrl: "https://as/a", issuerOrigin: "https://as", authorizeOrigin: "https://as" }),
       loginStatus: () => ({ state: "done" }),
       logout: async () => {},
-      setClientSecret: async () => ({ issuerOrigin: "https://as" }),
+      clientSecretIssuer: async () => ({ name: "linear", issuer: "https://as", issuerOrigin: "https://as", authorizeOrigin: "https://as" }),
+      setClientSecret: async () => ({ issuer: "https://as", issuerOrigin: "https://as" }),
       dispose: () => { disposed = true; },
     };
     const d = deps({ local: () => local });
@@ -117,36 +119,79 @@ describe("winter mcp logout (WS-25)", () => {
   });
 });
 
-describe("winter mcp set-secret (WS-25)", () => {
+describe("winter mcp set-secret (WS-25, fix round 1: confirm the issuer BEFORE the secret)", () => {
   const SECRET = "the-client-secret-VALUE";
+  const ISSUER = "https://github.com/login/oauth";
 
-  test("the secret comes in ONLY at the masked prompt and goes to mcp.setClientSecret; never printed", async () => {
-    const door = scriptedDoor(() => ({ ok: true, issuerOrigin: "https://github.com" }));
-    const prompts: string[] = [];
-    const outcome = await runMcpSetSecretRoute(["gh"], deps({ door, readSecret: async (p) => { prompts.push(p); return `${SECRET}\n`; } }));
-    expect(prompts).toEqual([`Client secret for "gh": `]);
-    expect(door.calls[0]).toEqual({ method: METHODS.mcpSetClientSecret, params: { name: "gh", cwd: "/work/proj", secret: SECRET } });
-    expect(outcome).toEqual({ ok: true, kind: "set-secret", name: "gh", via: "daemon", issuerOrigin: "https://github.com" });
+  function secretDoor(over: (method: string, params: any) => unknown = () => undefined) {
+    return scriptedDoor((method, params) => {
+      const r = over(method, params);
+      if (r !== undefined) return r;
+      if (method === METHODS.mcpClientSecretIssuer) return { name: "gh", issuer: ISSUER, issuerOrigin: "https://github.com", authorizeOrigin: "https://github.com" };
+      if (method === METHODS.mcpSetClientSecret) return { ok: true, issuer: ISSUER, issuerOrigin: "https://github.com" };
+      throw new Error(`unexpected ${method}`);
+    });
+  }
+
+  test("issuer shown and confirmed FIRST, then the masked prompt, then mcp.setClientSecret with the confirmed expectedIssuer", async () => {
+    const door = secretDoor();
+    const order: string[] = [];
+    const outcome = await runMcpSetSecretRoute(["gh"], deps({
+      door,
+      confirm: async (q) => { order.push(`confirm:${q}`); return true; },
+      readSecret: async (p) => { order.push(`prompt:${p}`); return `${SECRET}\n`; },
+    }));
+    expect(order[0]).toContain(ISSUER);
+    expect(order[1]).toBe(`prompt:Client secret for "gh": `);
+    expect(door.calls.map((c) => c.method)).toEqual([METHODS.mcpClientSecretIssuer, METHODS.mcpSetClientSecret]);
+    expect(door.calls[1]!.params).toEqual({ name: "gh", cwd: "/work/proj", secret: SECRET, expectedIssuer: ISSUER });
+    expect(outcome).toEqual({ ok: true, kind: "set-secret", name: "gh", via: "daemon", issuer: ISSUER });
     expect(renderMcpAuthOutcome(outcome)).not.toContain(SECRET);
-    expect(renderMcpAuthOutcome(outcome)).toContain("https://github.com");
+    expect(renderMcpAuthOutcome(outcome)).toContain(ISSUER);
   });
 
-  test("never an argument, never a pipe: an extra positional and a non-TTY stdin are refused before any prompt", async () => {
+  test("declined → the secret is never asked for and nothing is sent", async () => {
     let prompted = false;
-    const d = deps({ door: scriptedDoor(() => ({ ok: true })), readSecret: async () => { prompted = true; return SECRET; } });
+    const door = secretDoor();
+    const outcome = await runMcpSetSecretRoute(["gh"], deps({ door, confirm: async () => false, readSecret: async () => { prompted = true; return SECRET; } }));
+    expect(outcome).toMatchObject({ ok: false, code: "not_confirmed" });
+    expect(prompted).toBe(false);
+    expect(door.calls.map((c) => c.method)).toEqual([METHODS.mcpClientSecretIssuer]);
+  });
+
+  test("never an argument, never a pipe: an extra positional and a non-TTY stdin are refused before anything", async () => {
+    let prompted = false;
+    const door = secretDoor();
+    const d = deps({ door, confirm: async () => true, readSecret: async () => { prompted = true; return SECRET; } });
     const arg = await runMcpSetSecretRoute(["gh", SECRET], d);
     expect(arg).toMatchObject({ ok: false });
     expect((arg as { message: string }).message).toContain("masked prompt");
-    const piped = await runMcpSetSecretRoute(["gh"], { ...d, stdinIsTTY: false });
-    expect(piped).toMatchObject({ ok: false });
+    expect(await runMcpSetSecretRoute(["gh"], { ...d, stdinIsTTY: false })).toMatchObject({ ok: false });
     expect(prompted).toBe(false);
+    expect(door.calls).toEqual([]);
   });
 
-  test("a refusal never echoes the secret, even if a message quoted it", async () => {
-    const door = scriptedDoor(() => rpcError(`refused ${SECRET}`, { code: "mcp_not_preregistered" }));
-    const outcome = await runMcpSetSecretRoute(["gh"], deps({ door, readSecret: async () => SECRET }));
-    expect(outcome).toMatchObject({ ok: false, code: "mcp_not_preregistered" });
+  test("a refusal never echoes the secret, even if a message quoted it; a moved issuer is typed", async () => {
+    const quoting = secretDoor((m) => (m === METHODS.mcpSetClientSecret ? rpcError(`refused ${SECRET}`, { code: "mcp_issuer_changed", issuer: "https://elsewhere" }) : undefined));
+    const outcome = await runMcpSetSecretRoute(["gh"], deps({ door: quoting, confirm: async () => true, readSecret: async () => SECRET }));
+    expect(outcome).toMatchObject({ ok: false, code: "mcp_issuer_changed" });
     expect(JSON.stringify(outcome)).not.toContain(SECRET);
+  });
+
+  test("with no daemon the same order runs in-process", async () => {
+    const calls: string[] = [];
+    const local: McpAuthLocalDoors = {
+      resolve: (p) => p,
+      login: async () => { throw new Error("unused"); },
+      loginStatus: () => ({ state: "done" }),
+      logout: async () => {},
+      clientSecretIssuer: async () => { calls.push("issuer"); return { name: "gh", issuer: ISSUER, issuerOrigin: "https://github.com", authorizeOrigin: "https://github.com" }; },
+      setClientSecret: async (_s, secret, expected) => { calls.push(`set:${secret}:${expected}`); return { issuer: ISSUER, issuerOrigin: "https://github.com" }; },
+      dispose: () => { calls.push("dispose"); },
+    };
+    const outcome = await runMcpSetSecretRoute(["gh"], deps({ local: () => local, confirm: async () => true, readSecret: async () => SECRET }));
+    expect(outcome).toMatchObject({ ok: true, via: "in-process", issuer: ISSUER });
+    expect(calls).toEqual(["issuer", `set:${SECRET}:${ISSUER}`, "dispose"]);
   });
 });
 
