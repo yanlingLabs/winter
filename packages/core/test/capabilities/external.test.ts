@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
 import { z } from "zod";
 import type { WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
 import { capabilityServerName, capabilityToolName } from "../../src/capabilities/names";
-import { externalCapability, type ExternalCapabilityDeps, type ExternalToolSource } from "../../src/capabilities/external";
+import { externalCapability, externalToolNames, type ExternalCapabilityDeps, type ExternalToolSource } from "../../src/capabilities/external";
 import type { CapabilitySession } from "../../src/capabilities/server";
 import { ToolRegistry } from "../../src/agent/tools/registry";
 import { pluginToolNameParts } from "../../src/daemon";
@@ -168,5 +168,39 @@ describe("externalCapability", () => {
     const result = await instance.callTool("flaky", {});
     expect(result.isError).toBe(true);
     expect((result.content[0] as { text: string }).text).toContain("plugin timed out");
+  });
+});
+
+describe("externalCapability — two plugins registering one tool name (WS-27)", () => {
+  const src = (pluginId: string, name: string, reply = pluginId): ExternalToolSource => ({
+    pluginId, name, description: `${name} from ${pluginId}`,
+    async invoke() { return { ok: true, resultJson: reply }; },
+  });
+
+  test("same-named plugins from two marketplaces: both tools get unique, spec-qualified names; an unclashed tool keeps its bare name", async () => {
+    const instance = instanceOf([src("notes@acme", "search"), src("notes@globex", "search"), src("notes@acme", "open")]);
+    const names = instance.listTools().map((t) => t.name);
+    expect(names).toEqual(["search__notes_acme", "search__notes_globex", "open"]);
+    const a = await instance.callTool("search__notes_acme", {}) as { content: Array<{ text: string }> };
+    const b = await instance.callTool("search__notes_globex", {}) as { content: Array<{ text: string }> };
+    expect(a.content[0]!.text).toBe("notes@acme");
+    expect(b.content[0]!.text).toBe("notes@globex");
+  });
+
+  test("stable: registration order and the session's mode never change a name", () => {
+    const one = externalToolNames([src("notes@acme", "search"), src("notes@globex", "search")]);
+    const two = externalToolNames([src("notes@globex", "search"), src("notes@acme", "search")]);
+    expect(one).toEqual(["search__notes_acme", "search__notes_globex"]);
+    expect(two).toEqual(["search__notes_globex", "search__notes_acme"]);
+  });
+
+  test("specs that sanitise alike, or a name past 64 characters, fall back to a digest of the spec", () => {
+    const [x, y] = externalToolNames([src("a@b.c", "t"), src("a@b_c", "t")]);
+    expect(x).toMatch(/^t__[0-9a-f]{8}$/);
+    expect(y).toMatch(/^t__[0-9a-f]{8}$/);
+    expect(x).not.toBe(y);
+    const long = externalToolNames([src(`${"p".repeat(40)}@m`, "tool"), src("q@m", "tool")]);
+    expect(long[0]).toMatch(/^tool__[0-9a-f]{8}$/);
+    expect(long[1]).toBe("tool__q_m");
   });
 });
