@@ -260,7 +260,7 @@ describe.skipIf(!darwin)("the Keychain FFI and the app-token migration (throwawa
 });
 
 describe("who the wide ACL trusts", () => {
-  const signed = (map: Record<string, { teamId?: string; requirement?: string }>) => (p: string) => map[p] ?? {};
+  const signed = (map: Record<string, { teamId?: string; requirement?: string }>) => (p: string, _timeoutMs: number) => map[p] ?? {};
 
   test("dist: only the bundle winter-core itself lives in — never a Launch Services guess", () => {
     expect(enclosingAppBundle("/Applications/Winter.app/Contents/Resources/winter-core")).toBe("/Applications/Winter.app");
@@ -288,7 +288,28 @@ describe("who the wide ACL trusts", () => {
     expect(lookups).toEqual(["com.winter.app.dev"]);
     expect(t).toEqual({ apps: ["/dd/a/Winter Dev.app"], requirements: ["R-bun", "R-dev"] });
     // A DerivedData move or a bun upgrade keeps the SAME requirement set, so the marker stays current.
-    const moved = trustFor({ profile: "dev", executable: "/opt/homebrew/Cellar/bun/1.3.15/bin/bun", lookup: () => ["/dd/c/Winter Dev.app"], exists: () => true, inspect: (p) => (p.endsWith(".app") ? { teamId: WINTER_TEAM_ID, requirement: "R-dev" } : { requirement: "R-bun" }) });
+    const moved = trustFor({ profile: "dev", executable: "/opt/homebrew/Cellar/bun/1.3.15/bin/bun", lookup: () => ["/dd/c/Winter Dev.app"], exists: () => true, inspect: (p: string) => (p.endsWith(".app") ? { teamId: WINTER_TEAM_ID, requirement: "R-dev" } : { requirement: "R-bun" }) });
     expect(moved?.requirements).toEqual(t!.requirements);
+  });
+
+  test("the scan has ONE budget: a slow inspector stops the dev-bundle scan once it is spent, and an uninspected bundle is never trusted", () => {
+    let clock = 0;
+    const inspected: string[] = [];
+    const timeouts: number[] = [];
+    const slow = (p: string, timeoutMs: number) => {
+      inspected.push(p);
+      timeouts.push(timeoutMs);
+      clock += 3_000; // every codesign takes 3 s
+      return p.endsWith(".app") ? { teamId: WINTER_TEAM_ID, requirement: `R-${p}` } : { requirement: "R-bun" };
+    };
+    const t = trustFor({
+      profile: "dev", executable: "/bin/bun", exists: () => true, now: () => clock, budgetMs: 5_000, inspect: slow,
+      lookup: () => ["/dd/1/Winter Dev.app", "/dd/2/Winter Dev.app", "/dd/3/Winter Dev.app"],
+    });
+    // bun (3 s) + the first bundle (3 s) spend the 5 s budget; bundles 2 and 3 are never inspected nor trusted.
+    expect(inspected).toEqual(["/bin/bun", "/dd/1/Winter Dev.app"]);
+    expect(t).toEqual({ apps: ["/dd/1/Winter Dev.app"], requirements: ["R-/dd/1/Winter Dev.app", "R-bun"] });
+    // Each codesign got only what was left of the budget.
+    expect(timeouts).toEqual([5_000, 2_000]);
   });
 });

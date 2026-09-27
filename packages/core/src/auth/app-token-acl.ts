@@ -291,37 +291,56 @@ export interface CodeSigningFacts {
   requirement?: string;
 }
 
-/** `codesign -d -v -r-` (read-only, never prompts): `TeamIdentifier=` and `designated => `. */
-export function codeSigningFacts(path: string): CodeSigningFacts {
-  const r = spawnSync("/usr/bin/codesign", ["-d", "-v", "-r-", path], { encoding: "utf8", timeout: 10_000 });
+/** `codesign -d -v -r-` (read-only, never prompts): `TeamIdentifier=` and `designated => `. Bounded by
+ *  `timeoutMs`; a timed-out inspection answers nothing (unsigned, as far as trust is concerned). */
+export function codeSigningFacts(path: string, timeoutMs = 5_000): CodeSigningFacts {
+  const r = spawnSync("/usr/bin/codesign", ["-d", "-v", "-r-", path], { encoding: "utf8", timeout: Math.max(1, timeoutMs) });
   const text = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
   const team = /^TeamIdentifier=(.+)$/m.exec(text)?.[1]?.trim();
   const requirement = /^designated => (.+)$/m.exec(text)?.[1]?.trim();
   return { ...(team !== undefined && team !== "not set" ? { teamId: team } : {}), ...(requirement !== undefined ? { requirement } : {}) };
 }
 
+/** The whole trust scan's budget at boot (Launch Services + every `codesign`): the scan runs before the IPC
+ *  server listens, so it must never hold the daemon's first clients for long. */
+export const TRUST_SCAN_BUDGET_MS = 5_000;
+/** The floor any single inspection still gets once the budget is spent (this process and its own bundle
+ *  are always inspected — their requirements key the marker). */
+const MIN_INSPECT_MS = 1_000;
+
 /**
  * Who to trust (see this file's header). `lookup` is Launch Services by bundle id, `inspect` code signing —
  * both injected so the rule is testable. `undefined` when there is no app to trust.
+ *
+ * BOUNDED (re-review item 1): the scan runs at boot BEFORE the IPC server listens — kept there rather than
+ * moved after `listen`, because the shadow recovery must precede `ensureTokens` and the migration must run
+ * before a client can read a token mid-rewrite. So it gets ONE budget (`budgetMs`, default
+ * `TRUST_SCAN_BUDGET_MS`): once spent, no further Winter Dev bundle is inspected and the scan proceeds with
+ * what is known — an UNINSPECTED bundle is never trusted. Each `codesign` gets only what is left.
  */
-export function trustFor(input: { profile: "dist" | "dev"; executable: string; lookup: (bundleId: string) => string[]; inspect?: (path: string) => CodeSigningFacts; exists?: (p: string) => boolean }): AppTokenTrust | undefined {
+export function trustFor(input: { profile: "dist" | "dev"; executable: string; lookup: (bundleId: string) => string[]; inspect?: (path: string, timeoutMs: number) => CodeSigningFacts; exists?: (p: string) => boolean; budgetMs?: number; now?: () => number }): AppTokenTrust | undefined {
   const exists = input.exists ?? existsSync;
   const inspect = input.inspect ?? codeSigningFacts;
+  const now = input.now ?? Date.now;
+  const deadline = now() + (input.budgetMs ?? TRUST_SCAN_BUDGET_MS);
+  const left = (): number => deadline - now();
   const requirementOf = (path: string, facts: CodeSigningFacts): string => facts.requirement ?? `path ${path}`;
   const byRequirement = new Map<string, string>();
   const own = enclosingAppBundle(input.executable);
-  if (own !== undefined && exists(own)) byRequirement.set(requirementOf(own, inspect(own)), own);
-  if (input.profile === "dev") {
+  // Dist trusts the bundle winter-core RUNS FROM — this process's own app, never a Launch Services lookup.
+  if (own !== undefined && exists(own)) byRequirement.set(requirementOf(own, inspect(own, Math.max(MIN_INSPECT_MS, left()))), own);
+  const self = requirementOf(input.executable, inspect(input.executable, Math.max(MIN_INSPECT_MS, left())));
+  if (input.profile === "dev" && left() > 0) {
     for (const path of [...input.lookup("com.winter.app.dev")].sort()) {
+      if (left() <= 0) break; // budget spent: what is not inspected is not trusted
       if (!exists(path)) continue;
-      const facts = inspect(path);
+      const facts = inspect(path, left());
       if (facts.teamId !== WINTER_TEAM_ID) continue;
       const req = requirementOf(path, facts);
       if (!byRequirement.has(req)) byRequirement.set(req, path);
     }
   }
   if (byRequirement.size === 0) return undefined;
-  const self = requirementOf(input.executable, inspect(input.executable));
   return { apps: [...byRequirement.values()], requirements: [...new Set([self, ...byRequirement.keys()])].sort() };
 }
 
