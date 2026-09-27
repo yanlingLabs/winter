@@ -89,15 +89,16 @@ enum PendingInteraction: Equatable {
     case question(callId: String, questions: [SessionEvent.Question], childSessionId: String? = nil)
     case plan(callId: String, plan: String)
     /// WS-27: an MCP server's URL-mode elicitation — "open this link". `callId` is the wire's
-    /// `elicitationId`; `url` is always https (the daemon declines anything else without a card).
-    case urlElicitation(callId: String, serverName: String, message: String, url: String, host: String)
+    /// `elicitationId`. The link itself is never on the wire here — only its `host` and `origin`
+    /// (always https); the surface fetches it (`elicitation.url`) only when the user opens it.
+    case urlElicitation(callId: String, serverName: String, message: String, host: String, origin: String, expiresAt: Int)
 
     var callId: String {
         switch self {
         case .approval(let callId, _, _, _, _, _): return callId
         case .question(let callId, _, _): return callId
         case .plan(let callId, _): return callId
-        case .urlElicitation(let callId, _, _, _, _): return callId
+        case .urlElicitation(let callId, _, _, _, _, _): return callId
         }
     }
 }
@@ -124,7 +125,7 @@ struct InteractionRecord: Equatable {
         case question(questions: [SessionEvent.Question])
         case plan(plan: String)
         /// WS-27: `elicitation_requested` — an MCP server asked the user to open a link.
-        case urlElicitation(serverName: String, message: String, url: String, host: String)
+        case urlElicitation(serverName: String, message: String, host: String, origin: String, expiresAt: Int)
     }
 
     /// How the ask ended. `nil` on the record means STILL PENDING, and that is the single source of
@@ -198,7 +199,7 @@ struct InteractionRecord: Equatable {
         case .approval(_, let summary, _, _): return summary
         case .question(let questions): return questions.first?.question ?? "question"
         case .plan: return "plan presented"
-        case .urlElicitation(let serverName, _, _, let host): return "\(serverName) asks to open \(host)"
+        case .urlElicitation(let serverName, _, let host, _, _): return "\(serverName) asks to open \(host)"
         }
     }
 }
@@ -682,10 +683,10 @@ enum SessionReducer {
         case .elicitationRequested(let v) where v.threadId == mainThread:
             // WS-27: keyed by `elicitationId` in the same callId space — the daemon mints it
             // (`el_<uuid>`), so it cannot collide with a tool call's id.
-            appendPending(.urlElicitation(callId: v.elicitationId, serverName: v.serverName, message: v.message, url: v.url, host: v.host), to: &s)
+            appendPending(.urlElicitation(callId: v.elicitationId, serverName: v.serverName, message: v.message, host: v.host, origin: v.origin, expiresAt: v.expiresAt), to: &s)
             appendInteraction(InteractionRecord(
                 callId: v.elicitationId,
-                ask: .urlElicitation(serverName: v.serverName, message: v.message, url: v.url, host: v.host)
+                ask: .urlElicitation(serverName: v.serverName, message: v.message, host: v.host, origin: v.origin, expiresAt: v.expiresAt)
             ), to: &s)
         case .elicitationResolved(let v):
             s = resolvePending(s, callId: v.elicitationId)

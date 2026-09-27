@@ -228,7 +228,8 @@ struct WindowContentView<Accessory: View>: View {
                 onApproval: adapter.onApprovalRespond,
                 onQuestion: adapter.onQuestionRespond,
                 onPlan: adapter.onPlanRespond,
-                onElicitation: adapter.onElicitationRespond
+                onElicitation: adapter.onElicitationRespond,
+                inactiveElicitations: adapter.inactiveElicitations
             ), onOpenDiff: onOpenDiff, onOpenFile: onOpenFile,
             sessionHasWorkingDirectory: sessionHasWorkingDirectory,
             bottomOverlayInset: topBleed > 0 ? composerClusterHeight : 0)
