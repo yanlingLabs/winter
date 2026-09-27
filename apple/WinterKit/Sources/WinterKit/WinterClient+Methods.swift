@@ -1021,11 +1021,18 @@ extension WinterClient {
         try await request("bg.killAll", params: obj(["sessionId": .string(sessionId)]))["killed"]?.intValue ?? 0
     }
 
-    public func mcpList(cwd: String? = nil) async throws -> [(name: String, status: String, toolNames: [String], source: String)] {
+    /// WS-25 (MCP OAuth): rows gain two ADDITIVE, OPTIONAL fields — `auth` (`"none"` |
+    /// `"signed-in"` | `"needs-auth"`, the daemon's own vocabulary, rendered verbatim same as
+    /// `status`) and `oauthIssuerOrigin` (the authorization server's origin, when the daemon already
+    /// knows it). Both are `nil` on a daemon that predates this — no `-32601`, since `mcp.list`
+    /// itself is unchanged, just a daemon that has never heard of these two keys — and `nil` is
+    /// exactly what a caller should show nothing for (`McpToolsModel`'s own posture).
+    public func mcpList(cwd: String? = nil) async throws -> [(name: String, status: String, toolNames: [String], source: String, auth: String?, oauthIssuerOrigin: String?)] {
         let r = try await request("mcp.list", params: obj(["cwd": cwd.map { .string($0) }]))
         return (r["servers"]?.arrayValue ?? []).compactMap { s in
             guard let n = s["name"]?.stringValue, let st = s["status"]?.stringValue, let src = s["source"]?.stringValue else { return nil }
-            return (n, st, (s["toolNames"]?.arrayValue ?? []).compactMap { $0.stringValue }, src)
+            return (n, st, (s["toolNames"]?.arrayValue ?? []).compactMap { $0.stringValue }, src,
+                    s["auth"]?.stringValue, s["oauthIssuerOrigin"]?.stringValue)
         }
     }
 
