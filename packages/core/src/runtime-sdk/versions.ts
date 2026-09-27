@@ -3,8 +3,17 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.27";
-/** Bumped to 0.0.27 (2026-09-26, WS-23; 0.0.25 and 0.0.26 were tagged but their release CI stopped at the
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.28";
+/** Bumped to 0.0.28 (2026-09-27, WS-24 follow-ups): the published SDK the WS-24 daemon lanes already
+ *  feature-detected against a dev build — a Worker that closes without running its own teardown has its
+ *  orphaned process groups reaped (`processGroups()` on `EmbeddedWorkerProcess`); a subagent's forwarded
+ *  system frames (hook notices, model switches, compaction, stop) carry `parent_tool_use_id`, so they file
+ *  on the child's thread instead of re-keying the main turn; the bash reviewer's model call is actually
+ *  aborted when the hook runner's timeout fires its `signal`; and `@yanlinglabs/winter-agent-runtime` exports
+ *  its MCP client from a public `./mcp-client` subpath. See 0.0.28's own CHANGELOG for the rest of the
+ *  WS-24 list (async hooks, `mcp_server_name`/`mcp_tool_name` on hook inputs, per-provider feature-rejected
+ *  persistence, a subagent's own inline MCP servers, …), most of which this daemon does not yet consume.
+ *  Before that, bumped to 0.0.27 (2026-09-26, WS-23; 0.0.25 and 0.0.26 were tagged but their release CI stopped at the
  *  test step, so neither was published): every model on the Winter SDK (xAI Responses, MCP v2, hooks, the
  *  Anthropic hardening + caching, per-message effort, mid-conversation tool changes, the reasoning-state
  *  sidecar, and the embedded runtime `@yanlinglabs/winter-agent-runtime`).
