@@ -959,6 +959,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let supervisor = DaemonSupervisor(deps: supervisorDeps)
         supervisor.onStateChange = { [weak self] state in
             self?.menuBar?.setEngineFailed(state == .failed)
+            // WS-27: the daemon exited 75 (another process holds the credential migration lock) — its own
+            // state line, while the supervisor backs off and retries.
+            if case .waitingForCredentials = state {
+                self?.menuBar?.setEngineWaitingForCredentials(true)
+            } else {
+                self?.menuBar?.setEngineWaitingForCredentials(false)
+            }
         }
         supervisor.start()
         daemonSupervisor = supervisor

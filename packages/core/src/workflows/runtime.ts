@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { promptKey, RunJournal } from "./journal";
 import { WorkflowRegistry } from "./registry";
 import { buildWorkflowSeatbeltProfile, sandboxAvailable } from "./sandbox";
+import { WORKER_NOT_SANDBOXED_EXIT_CODE, WORKER_NOT_SANDBOXED_MESSAGE } from "./sandbox-guard";
 import { makeSemaphore, type Semaphore } from "./semaphore";
 import type { BridgeRequest, BridgeResponse, WorkerInit } from "./bridge";
 import type { AgentOpts, WorkflowProgress, WorkflowRunView } from "./types";
@@ -137,7 +138,7 @@ export class WorkflowRuntime {
     // (killed externally, OOM, sandbox-exec itself failing to start it), fail here instead of hanging
     // await() forever. Guarded on `live.has` since a normal done/error/stop already tore this down.
     child.on("close", (code) => {
-      if (this.live.has(runId)) this.teardown(runId, () => this.finish(runId, "failed", `workflow worker exited (code ${code ?? "signal"})`));
+      if (this.live.has(runId)) this.teardown(runId, () => this.finish(runId, "failed", code === WORKER_NOT_SANDBOXED_EXIT_CODE ? `${WORKER_NOT_SANDBOXED_MESSAGE} — the workflow worker refused to run (exit ${code})` : `workflow worker exited (code ${code ?? "signal"})`));
     });
     child.on("error", (err) => {
       if (this.live.has(runId)) this.teardown(runId, () => this.finish(runId, "failed", `workflow worker failed to spawn: ${(err as Error).message}`));

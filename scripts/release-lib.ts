@@ -822,3 +822,14 @@ export function row16Gate(input: { identity: Row16IdentityResult; dryRun: boolea
       "(`bun install` once it is published).",
   };
 }
+
+/**
+ * WS-27: does `winter-core __keychain-ffi-probe`'s output say BOTH of its bun:ffi libraries ran on this
+ * signed binary — Security.framework (the keychain status) and libSystem's `sysctl` (the credential
+ * migration lock's process start time, a positive epoch-seconds number)? The 0.120.0 lesson: an ffi the
+ * release gate does not call is an ffi a missing entitlement can kill in the field.
+ */
+export function keychainFfiProbeOk(stdout: string): boolean {
+  const m = /keychain-ffi: ok \(default keychain (?:un)?locked; process start (\d+)\)/.exec(stdout);
+  return m !== null && Number(m[1]) > 0;
+}

@@ -26,18 +26,30 @@ export interface SecretStore {
 // `packages/cli/src/launchd.ts` `renderPlist`) rather than relying on any later mutation.
 const SERVICE = keychainService();
 
+/** `app-token-acl.ts`'s `APP_TOKEN_SHADOW_SUFFIX`, spelled here so this module stays free of the FFI. */
+export const MIGRATION_SHADOW_SUFFIX = ".migrating";
+
 /** Production store: macOS Keychain via Bun.secrets. */
 export class KeychainSecretStore implements SecretStore {
+  /** `backend`/`service` exist for tests only (a recording fake — never the real Keychain). */
+  constructor(private readonly backend: Pick<typeof Bun.secrets, "get" | "set" | "delete"> = Bun.secrets, private readonly service: string = SERVICE) {}
   async get(name: string): Promise<string | null> {
-    return (await Bun.secrets.get({ service: SERVICE, name })) ?? null;
+    return (await this.backend.get({ service: this.service, name })) ?? null;
   }
   async set(name: string, value: string): Promise<void> {
-    await Bun.secrets.set({ service: SERVICE, name, value });
+    await this.backend.set({ service: this.service, name, value });
   }
   /** `Bun.secrets.delete` already answers the exact boolean this interface promises ("true if a
-   *  credential was deleted, false if not found"), so nothing is re-derived here. */
+   *  credential was deleted, false if not found"), so nothing is re-derived here. WS-27: a migration
+   *  shadow of the item (`<name>.migrating`, `auth/credential-acl.ts`) goes with it, so a removed
+   *  credential can never be restored from one — deleted FIRST; its own result does not change the answer. */
   async delete(name: string): Promise<boolean> {
-    return await Bun.secrets.delete({ service: SERVICE, name });
+    // The shadow FIRST: a crash between the two deletes must never leave a shadow beside a missing original,
+    // which recovery would restore.
+    if (!name.endsWith(MIGRATION_SHADOW_SUFFIX)) {
+      try { await this.backend.delete({ service: this.service, name: `${name}${MIGRATION_SHADOW_SUFFIX}` }); } catch { /* none, or not ours */ }
+    }
+    return await this.backend.delete({ service: this.service, name });
   }
 }
 

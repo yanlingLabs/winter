@@ -10,6 +10,7 @@
 // A future edit that silently drops, weakens, or reorders the wiring fails a test instead of only
 // ever being caught by a human re-reading a 1300+ line script during a real release.
 import { describe, expect, test } from "bun:test";
+import { keychainFfiProbeOk } from "./release-lib";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -171,7 +172,19 @@ describe("A2: winter-core and winter are signed with their bun entitlements, and
 
   test("release.ts runs the signed winter-core's __keychain-ffi-probe and fails the release when it does not print ok", () => {
     expect(source).toContain('__keychain-ffi-probe 2>&1`');
-    expect(source).toContain('if (!probed.ok || !probed.stdout.includes("keychain-ffi: ok")) {');
+    expect(source).toContain("if (!probed.ok || !keychainFfiProbeOk(probed.stdout)) {");
+  });
+
+  test("WS-27: the probe passes only when BOTH ffi libraries answered — the keychain status AND sysctl's start time", () => {
+    expect(keychainFfiProbeOk("keychain-ffi: ok (default keychain unlocked; process start 1790538364)\n")).toBe(true);
+    expect(keychainFfiProbeOk("keychain-ffi: ok (default keychain locked; process start 1790538364)")).toBe(true);
+    // 0.120.x's line (no sysctl answer), a zero start, and the probe's own failure line are all refusals.
+    expect(keychainFfiProbeOk("keychain-ffi: ok (default keychain unlocked)")).toBe(false);
+    expect(keychainFfiProbeOk("keychain-ffi: ok (default keychain unlocked; process start 0)")).toBe(false);
+    expect(keychainFfiProbeOk("keychain-ffi: FAILED (sysctl kern.proc.pid gave no start time)")).toBe(false);
+    // The route prints that exact shape.
+    const main = readFileSync(join(REPO_ROOT, "packages", "cli", "src", "main.ts"), "utf8");
+    expect(main).toContain("keychain-ffi: ok (default keychain ${unlocked ? \"unlocked\" : \"locked\"}; process start ${started})");
   });
 
   // The embedded `winter` runtime is a bun binary too (measured: `Bun v1.4.2` in the shipped

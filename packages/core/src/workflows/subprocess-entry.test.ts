@@ -2,17 +2,22 @@ import { expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import type { BridgeRequest, BridgeResponse, WorkerInit } from "./bridge";
+import { buildWorkflowSeatbeltProfile } from "./sandbox";
+import { WORKER_NOT_SANDBOXED_EXIT_CODE } from "./sandbox-guard";
 
 const ENTRY = join(import.meta.dir, "subprocess-entry.ts");
+const darwin = process.platform === "darwin";
 
-/** Spawns the entry as a REAL child process — `bun subprocess-entry.ts`, no sandbox wrapping (that's
- *  the runtime's concern, A3′; this test only exercises the stdio↔runWorkflow bridge). Writes `init`
- *  as the first NDJSON line, auto-replies to every `agent` request with `[<prompt>]` (mirrors
+/** Spawns the entry as a REAL child process — `bun subprocess-entry.ts` inside the workflow seatbelt the
+ *  runtime uses (WS-27: the worker refuses to run outside one), or bare when `sandboxed` is false. Writes
+ *  `init` as the first NDJSON line, auto-replies to every `agent` request with `[<prompt>]` (mirrors
  *  worker-harness.test.ts's fake agent), and resolves once the child's stdio closes with every
  *  BridgeRequest line it emitted plus its exit code. */
-function runChild(init: WorkerInit): Promise<{ messages: BridgeRequest[]; exitCode: number | null; stderr: string }> {
+function runChild(init: WorkerInit, sandboxed = true): Promise<{ messages: BridgeRequest[]; exitCode: number | null; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [ENTRY], { stdio: ["pipe", "pipe", "pipe"] });
+    const child = sandboxed
+      ? spawn("/usr/bin/sandbox-exec", ["-p", buildWorkflowSeatbeltProfile(process.execPath), process.execPath, ENTRY], { stdio: ["pipe", "pipe", "pipe"] })
+      : spawn(process.execPath, [ENTRY], { stdio: ["pipe", "pipe", "pipe"] });
     const messages: BridgeRequest[] = [];
     let buf = "";
     let stderr = "";
@@ -38,7 +43,7 @@ function runChild(init: WorkerInit): Promise<{ messages: BridgeRequest[]; exitCo
   });
 }
 
-test("agent() round-trips twice over stdio NDJSON; phase + done (script's return value) arrive; exits 0", async () => {
+test.skipIf(!darwin)("agent() round-trips twice over stdio NDJSON; phase + done (script's return value) arrive; exits 0", async () => {
   const { messages, exitCode, stderr } = await runChild({
     source: `
       const a = await agent("hi");
@@ -65,7 +70,7 @@ test("agent() round-trips twice over stdio NDJSON; phase + done (script's return
   void stderr;
 });
 
-test('a syntactically broken source yields {op:"error"}, and the process still exits 0', async () => {
+test.skipIf(!darwin)('a syntactically broken source yields {op:"error"}, and the process still exits 0', async () => {
   const { messages, exitCode } = await runChild({ source: `return (;`, args: null, concurrency: 4 });
 
   const errMsg = messages.find((m) => m.op === "error") as Extract<BridgeRequest, { op: "error" }> | undefined;
@@ -73,4 +78,11 @@ test('a syntactically broken source yields {op:"error"}, and the process still e
   expect(errMsg!.message).toBeTruthy();
   expect(messages.some((m) => m.op === "done")).toBe(false);
   expect(exitCode).toBe(0);
+});
+
+test("WS-27: outside the sandbox the worker refuses before it reads its input — no bridge message, exit 77", async () => {
+  const { messages, exitCode, stderr } = await runChild({ source: `phase("ran"); return 1;`, args: null, concurrency: 1 }, false);
+  expect(exitCode).toBe(WORKER_NOT_SANDBOXED_EXIT_CODE);
+  expect(messages).toEqual([]);
+  expect(stderr).toContain("refuses to run");
 });

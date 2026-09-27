@@ -6,9 +6,7 @@ The canonical list of known, deliberately parked work. Nothing here blocks a rel
 - [ ] A turn that starts while a server is reconnecting doesn't see that server's tools (the next turn does).
 
 ## Credentials and Keychain
-- [ ] Re-create the provider Keychain items with an ACL naming only `winter-core`, so "Always Allow" grants older runtime binaries collected are dropped.
-- [ ] Harden the compiled binaries so another process running as the same user can't drive them to run arbitrary code (a custom Bun base binary, or an upstream opt-out).
-- [ ] The dev daemon runs as Homebrew `bun`, so the pairing tokens it re-creates carry bun's team and Winter Dev asks once per token; run the dev daemon as a Winter-signed compiled `winter-core` instead.
+- [ ] Bun's own environment-level launcher switches still let another process running as the same user make a compiled Bun binary (`winter-core` included) run arbitrary code under its signed identity; closing that needs a patched Bun build. (The workflow workers already refuse to run outside a sandbox that denies them the Keychain.)
 
 ## Models and providers
 - [ ] Catalog tool-calling evidence: the 48 Anthropic-dialect rows on third-party hosts (e.g. `zai-anthropic`, `qianfan-*-anthropic`, `tencent-*-anthropic`) are hidden from session pickers only because upstream never stated tool support; probe or overlay them. Same for `nvidia/openai/gpt-oss-{120b,20b}` and the two NVIDIA Llama rows marked tool-less by a third-party registry.

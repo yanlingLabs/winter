@@ -47,6 +47,14 @@ test("stop() terminates a mid-run Worker", async () => {
   expect(view.status).toBe("stopped");
 });
 
+test("WS-27: a worker that refuses to run outside its sandbox (exit 77) is reported as the sandbox not being in effect", async () => {
+  const { rt } = makeRuntime({ workerCommand: () => ({ file: process.execPath, args: ["-e", "process.exit(77)"] }) });
+  const runId = rt.launch({ sessionId: "s_1", source: `return 1;` });
+  const view = await rt.await(runId);
+  expect(view.status).toBe("failed");
+  expect(view.error).toBe("workflow sandbox not in effect — the workflow worker refused to run (exit 77)");
+});
+
 test("a script eval error → failed, never crashes the process", async () => {
   const { rt } = makeRuntime();
   const runId = rt.launch({ sessionId: "s_1", source: `return (;` });
