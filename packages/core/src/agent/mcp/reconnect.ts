@@ -64,7 +64,7 @@ export async function reconnectLiveSessionsFor(deps: ReconnectDeps, serverUrl: s
         } catch (err) {
           // After a sign-out this is the expected answer (the server is needs-auth now); a
           // `WinterLegUnsupported` means the child ended meanwhile -- its next incarnation reads the Keychain.
-          deps.log?.(`mcp: ${session.sessionId} reconnected '${name}', which did not connect (${err instanceof Error ? err.name : "unknown"})`);
+          deps.log?.(`mcp: ${session.sessionId} reconnected '${name}', which did not connect (${describeReconnectError(err)})`);
         }
       }
     };
@@ -77,4 +77,28 @@ export async function reconnectLiveSessionsFor(deps: ReconnectDeps, serverUrl: s
   }
   await Promise.all(now);
   return acted;
+}
+
+/** Longest reason a log line carries: the runtime's connect-error text is diagnostic, never unbounded. */
+const REASON_MAX = 240;
+
+/**
+ * One log-safe reason for a failed reconnect: the error's name, its typed `code` when it has one (the
+ * runtime's `mcp_reconnect_failed`, `not_supported_on_winter_leg`, ...), and its message -- the runtime's
+ * own connect-error text (a needs-auth verdict, a timeout, a refused handshake), which is what a live
+ * failure needs and what `err.name` alone lost. No material reaches it (the runtime never puts a token in
+ * a connect error), but it is still defended: a `Bearer` credential or a token-shaped query/form value is
+ * masked, whitespace is collapsed and the text is capped.
+ */
+export function describeReconnectError(err: unknown): string {
+  if (!(err instanceof Error)) return "unknown";
+  const code = (err as { code?: unknown }).code;
+  const head = typeof code === "string" && code.length > 0 && code !== err.name ? `${err.name} ${code}` : err.name;
+  let message = err.message
+    .replace(/\bBearer\s+[^\s,;"']+/gi, "Bearer [redacted]")
+    .replace(/\b(access_token|refresh_token|id_token|client_secret|code|token)=([^&\s"']+)/gi, "$1=[redacted]")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (message.length > REASON_MAX) message = `${message.slice(0, REASON_MAX)}…`;
+  return message.length > 0 ? `${head}: ${message}` : head;
 }
