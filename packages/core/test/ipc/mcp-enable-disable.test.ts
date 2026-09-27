@@ -143,7 +143,8 @@ describe("mcp.enable / mcp.disable / mcp.list settings overlay", () => {
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     const { result } = await c.request(METHODS.mcpList, {});
-    expect(result.servers).toEqual([{ name: "remote", status: "unmanaged", toolNames: [], source: "user", transport: "http" }]);
+    // WS-25: every http/sse row carries its auth column (nothing stored, no oauth block → "none").
+    expect(result.servers).toEqual([{ name: "remote", status: "unmanaged", toolNames: [], source: "user", transport: "http", auth: "none" }]);
     c.close();
   });
 
@@ -155,7 +156,7 @@ describe("mcp.enable / mcp.disable / mcp.list settings overlay", () => {
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     const { result } = await c.request(METHODS.mcpList, {});
-    expect(result.servers).toEqual([{ name: "remote", status: "disabled", toolNames: [], source: "user", transport: "sse" }]);
+    expect(result.servers).toEqual([{ name: "remote", status: "disabled", toolNames: [], source: "user", transport: "sse", auth: "none" }]);
     c.close();
   });
 
@@ -205,7 +206,7 @@ describe("mcp.enable / mcp.disable / mcp.list settings overlay", () => {
       errSpy.mockRestore();
     }
     expect(result.servers).toEqual([
-      { name: "remote", status: "unmanaged", toolNames: [], source: "user", transport: "http", strippedHeaders: ["Authorization"] },
+      { name: "remote", status: "unmanaged", toolNames: [], source: "user", transport: "http", strippedHeaders: ["Authorization"], auth: "none" },
     ]);
     // `mcp.list`'s row shape never carries header VALUES at all (only `strippedHeaders`' names) —
     // this assertion is the belt to that suspenders: the secret is absent from the serialized RPC

@@ -12,10 +12,9 @@
 // child names their tools `mcp__<key>__<tool>` — the names `tool.list` and the Mac's tool rows
 // already carry.
 //
-// THE CHILD SPAWNS/CONNECTS ITS OWN COPY. The daemon's `McpManager` still runs stdio servers for the
-// shared registry (`tool.list`, `mcp.*` RPCs) — it has no HTTP/SSE client of its own (`daemon.ts`
-// filters those out before `McpManager.startAll`, see that call site's own comment); a Winter child
-// cannot reach an in-daemon stdio client either, so each session's child starts/connects the
+// THE CHILD SPAWNS/CONNECTS ITS OWN COPY. The daemon's `McpManager` only PROBES servers for `mcp.list`
+// (WS-24: connect, list, close; WS-25: http/sse too, lazily, through the runtime's `/mcp-client`) — it
+// keeps nothing running a child could reach, so each session's child starts/connects the
 // configured servers itself from these configs. One extra process/connection per configured server
 // per live session — recorded in the fix-wave report as the cost of this door for stdio; unchanged
 // for HTTP/SSE, which were never proxied through the daemon to begin with.
@@ -99,6 +98,10 @@ function toMcpServerConfig(entry: McpServerSettingsEntry): McpServerConfig {
     url: entry.url,
     ...(entry.headers === undefined ? {} : { headers: { ...entry.headers } }),
     ...negotiation(entry.versionNegotiation),
+    // WS-25: the server's sign-in settings, forwarded (a copy, never shared) so the child's session
+    // provider finds a pre-registered client, its scopes and its metadata URL. Already validated by the
+    // entry schema (`validateMcpOAuthConfig`); it never carries a secret.
+    ...(entry.oauth === undefined ? {} : { oauth: structuredClone(entry.oauth) as NonNullable<Extract<McpServerConfig, { type: "http" }>["oauth"]> }),
   };
 }
 

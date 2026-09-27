@@ -72,6 +72,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import { join, dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
+import { validateMcpOAuthConfig } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
 
 /**
  * The per-entry shape `parseProjectMcpServers` validates a project's `.mcp.json` entries against.
@@ -98,6 +99,38 @@ export const McpVersionNegotiationSetting = z.union([
   z.object({ pin: z.string().min(1) }),
 ]);
 
+/**
+ * WS-25 (spec §2): an http/sse server's OAuth sign-in settings -- the agent SDK's own `McpOAuthConfig`
+ * (`clientId`, `clientSecretRef: { kind: "keychain" }`, `callbackPort`, `authServerMetadataUrl`,
+ * `scopes`). Declared on every MCP config surface (this file's project entries, `settings.ts`'s user and
+ * local entries, the `mcp.add`/`mcp.get` wire) for the same reason `versionNegotiation` is: zod strips an
+ * undeclared key, and a stripped `oauth` block would silently turn a pre-registered client into DCR.
+ *
+ * The structure here is LOOSE on purpose, and the rules are the SDK's: `refineMcpOAuth` hands the block to
+ * `validateMcpOAuthConfig(oauth, url)` (`@yanlinglabs/winter-agent-runtime/mcp-auth`), the ONE validator the
+ * runtime itself applies -- so an unknown key, a `clientSecret` VALUE (refused by name: a config is
+ * model-readable and echoed by `mcp.get`), a `clientSecretRef` that names an account or a service (review
+ * C1: the secret's Keychain account is DERIVED from the server URL, never config-named), a loopback
+ * metadata URL for a non-loopback server, or a bad port are refused with the runtime's own words rather
+ * than a second, drifting copy of its rules.
+ */
+export const McpOAuthSetting = z.object({
+  clientId: z.string().optional(),
+  clientSecretRef: z.object({ kind: z.literal("keychain") }).loose().optional(),
+  callbackPort: z.number().optional(),
+  authServerMetadataUrl: z.string().optional(),
+  scopes: z.array(z.string()).optional(),
+}).loose();
+export type McpOAuthSetting = z.infer<typeof McpOAuthSetting>;
+
+/** WS-25: `validateMcpOAuthConfig(entry.oauth, entry.url)` as a zod refinement on an http/sse entry
+ *  (`McpOAuthSetting`'s doc). An entry without `oauth` passes untouched. */
+export function mcpOAuthIssue(value: { url: string; oauth?: unknown }, ctx: z.RefinementCtx): void {
+  if (value.oauth === undefined) return;
+  const problem = validateMcpOAuthConfig(value.oauth, value.url);
+  if (problem !== undefined) ctx.addIssue({ code: "custom", path: ["oauth"], message: problem });
+}
+
 const ProjectMcpEntryStdio = z.object({
   type: z.literal("stdio"),
   command: z.string().min(1),
@@ -110,13 +143,18 @@ const ProjectMcpEntryHttp = z.object({
   url: z.string().url(),
   headers: z.record(z.string(), z.string()).optional(),
   versionNegotiation: McpVersionNegotiationSetting.optional(),
-});
+  // WS-25: validated with the runtime's own rules (`McpOAuthSetting`). A project may declare a sign-in;
+  // it can never name where a secret lives (the account is derived), and the Winter doors show the
+  // authorization server's origin before any sign-in.
+  oauth: McpOAuthSetting.optional(),
+}).superRefine(mcpOAuthIssue);
 const ProjectMcpEntrySse = z.object({
   type: z.literal("sse"),
   url: z.string().url(),
   headers: z.record(z.string(), z.string()).optional(),
   versionNegotiation: McpVersionNegotiationSetting.optional(),
-});
+  oauth: McpOAuthSetting.optional(),
+}).superRefine(mcpOAuthIssue);
 /** A pre-item-3b-shaped entry (no `type` field at all) is stdio — mirrors `settings.ts`'s own
  *  preprocess step, same rationale: it's the shape every project `.mcp.json` stdio entry has always
  *  had (claude's own `type` field is optional on a stdio entry too, `McpStdioServerConfigSchema`,

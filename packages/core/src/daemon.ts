@@ -1833,8 +1833,13 @@ export async function startDaemon(opts: {
   // without `agentProvider`, since `Query.supportedAgents()` is entirely a Winter-runtime-SDK fact,
   // unrelated to the daemon's own internal Provider.
   const supportedAgentsCache = new SupportedAgentsCache();
+  // WS-25: the daemon's ONE MCP OAuth store for this home (`runtime-sdk/mcp-oauth-store.ts`), spelled once so
+  // the session credential answers, the `mcp.list` probe and the sign-in doors (`ipc/server.ts`, which derives
+  // the identical `keychainService(profile, winterHome)` when not handed one) share the instance and so the
+  // refresh single-flight. An injected `opts.mcpOAuthStore` is that one instance everywhere.
+  const daemonOAuthStore = (): McpOAuthStore => opts.mcpOAuthStore ?? daemonMcpOAuthStore(keychainService(profile, winterHome));
   // WS-25 §7: see `opts.mcpOAuthStore` — a test daemon (its own `secrets`) never reads the Keychain for one.
-  const sessionMcpOAuthStore = opts.mcpOAuthStore ?? (opts.secrets === undefined ? daemonMcpOAuthStore(keychainService(undefined, winterHome)) : undefined);
+  const sessionMcpOAuthStore = opts.mcpOAuthStore ?? (opts.secrets === undefined ? daemonOAuthStore() : undefined);
   const winterDrivers: WinterSessionDrivers = createWinterSessionDrivers({
     home: winterHome,
     // WS-21: every incarnation's run home, when the linked router applies them (see `runHomeDeps`).
@@ -2237,10 +2242,18 @@ export async function startDaemon(opts: {
     // WS-24: a STATUS PROBE for `mcp.list` (`agent/mcp/manager.ts`'s header) — it connects, lists and
     // closes each server, and registers nothing: every session's child connects its own copy, and no
     // session ever read the `mcp__…` rows this used to write into the shared registry.
-    mcp = new McpManager({ trust: trustStore, log: (m) => console.error(m), disabled: () => new Set(settings?.mcp?.disabled ?? []) });
-    // Daemon settings surface batch 3 (item 3): the daemon can only ever probe STDIO servers (no
-    // in-daemon HTTP/SSE client — `external-mcp.ts`'s header explains why that's fine, the spawned
-    // child connects to those itself) and must not start anything the user has disabled
+    // WS-25: http/sse servers are probed too (lazily, on `mcp.list` — never here at boot), with the daemon's
+    // ONE MCP OAuth store (`runtime-sdk/mcp-oauth-store.ts`: the instance the sign-in doors and the session
+    // hooks share, so a probe and a session refreshing at once post one refresh).
+    mcp = new McpManager({
+      trust: trustStore,
+      log: (m) => console.error(m),
+      disabled: () => new Set(settings?.mcp?.disabled ?? []),
+      remote: { oauthStore: daemonOAuthStore },
+    });
+    // Daemon settings surface batch 3 (item 3): the BOOT probe covers STDIO servers only (WS-25: http/sse
+    // ones are probed lazily on `mcp.list`, never here — boot awaits this and must not wait on the
+    // network) and must not start anything the user has disabled
     // (`settings.mcp.disabled`) — `stdioMcpServersFor` is the one filter both facts go through
     // (settings.ts).
     await mcp.startAll(stdioMcpServersFor(sdkUserMcpServers(winterHome), settings?.mcp?.disabled));
@@ -2727,6 +2740,7 @@ export async function startDaemon(opts: {
     // own doc comment for why a credential add needs this rather than waiting for an unrelated
     // settings write to trigger the next `refresh()`.
     mcp: mcp ?? undefined,
+    ...(opts.mcpOAuthStore === undefined ? {} : { mcpOAuth: { store: opts.mcpOAuthStore } }),
     // Phase 4b Task 4: the plugin tool bridge. `registry` is undefined whenever agentProvider is
     // null (see `sharedRegistry`'s doc comment above). `supervisor`, unlike `registry`, is now
     // ALWAYS defined (Phase 4d-cleanup Task 2 hoisted its construction out of the agentProvider

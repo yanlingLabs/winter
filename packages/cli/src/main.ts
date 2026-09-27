@@ -47,6 +47,7 @@ import { parseModelArgs, validateEffort, validateModelTag, internalProviderNote,
 import {
   runMcpAddRoute, runMcpAddJsonRoute, runMcpRemoveRoute, runMcpGetRoute,
   renderMcpAddOutcome, renderMcpRemoveOutcome, renderMcpGetOutcome,
+  runMcpLoginRoute, runMcpLogoutRoute, runMcpSetSecretRoute, renderMcpAuthOutcome, mcpAuthNote, type McpAuthDeps,
 } from "./mcp-cli";
 import { formatElapsed, formatTokens } from "./task-display";
 import { formatRoutineDetail } from "./routines-cli";
@@ -1881,7 +1882,9 @@ if (import.meta.main) {
         console.log(`${AQUA}${name}${RESET}  ${DIM}(local, ${entry.type})${RESET}`);
       }
       for (const s of servers) {
-        console.log(`${AQUA}${s.name}${RESET}  ${DIM}(${s.source}, ${s.status})${RESET}  ${s.toolNames.map((t) => `mcp__${s.name}__${t}`).join(", ")}`);
+        // WS-25: the auth column (`mcp.list`'s `auth`/`oauthIssuerOrigin`) for an http/sse server.
+        const auth = mcpAuthNote(s);
+        console.log(`${AQUA}${s.name}${RESET}  ${DIM}(${s.source}, ${s.status}${auth !== "" ? `, ${auth}` : ""})${RESET}  ${s.toolNames.map((t) => `mcp__${s.name}__${t}`).join(", ")}`);
       }
       c.close();
       process.exit(0);
@@ -1935,11 +1938,41 @@ if (import.meta.main) {
       process.exit(outcome.found ? 0 : 1);
     }
 
+    // WS-25 (MCP OAuth): `login` / `logout [--forget-client]` / `set-secret` — through the daemon when it is
+    // live (never `connect()`'s auto-launch: a sign-in must not launch Winter.app as a side effect), else
+    // the same doors in-process (`mcp-cli.ts`'s WS-25 section says why both, and why a secret comes in
+    // only at the masked prompt).
+    if (sub === "login" || sub === "logout" || sub === "set-secret") {
+      const winterHome = resolveWinterHome();
+      const door = await openCredentialDaemonDoor();
+      const { McpOAuthDoors, daemonMcpOAuthStore, keychainService, TrustStore } = await import("@yanlinglabs/winter-core");
+      const deps: McpAuthDeps = {
+        cwd: process.cwd(),
+        ...(door !== undefined ? { door } : {}),
+        local: () => new McpOAuthDoors({
+          home: winterHome,
+          store: () => daemonMcpOAuthStore(keychainService(resolveWinterProfile(), winterHome)),
+          trust: new TrustStore(join(winterHome, "trust.json")),
+        }),
+        openBrowser: (url) => { try { Bun.spawn(["open", url], { stdout: "ignore", stderr: "ignore" }); } catch { /* the URL is printed too */ } },
+        confirm: (question) => (process.stdin.isTTY ? askYesNo(question) : Promise.resolve(false)),
+        readSecret: (prompt) => readSecret(prompt),
+        stdinIsTTY: process.stdin.isTTY === true,
+        print: (line) => console.log(line),
+        poke: () => notifyDaemonOfOutOfBandCredentialChange(openCredentialDaemonDoor),
+      };
+      const outcome = sub === "login" ? await runMcpLoginRoute(rest, deps) : sub === "logout" ? await runMcpLogoutRoute(rest, deps) : await runMcpSetSecretRoute(rest, deps);
+      if (outcome.ok) console.log(renderMcpAuthOutcome(outcome));
+      else console.error(renderMcpAuthOutcome(outcome));
+      door?.close();
+      process.exit(outcome.ok ? 0 : 1);
+    }
+
     // Skipped, deliberately (see the report): `serve` (Winter has no "act as an MCP server" mode),
     // `add-from-claude-desktop` (an Ink dialog over Claude Desktop's OWN config format — not
     // trivially mappable), `reset-project-choices` (Winter has no per-project approve/reject ledger
     // for `.mcp.json` servers — `winter trust`'s directory-level TrustStore is the only gate).
-    console.error("usage: winter mcp [list] | get <name> | add [-s local|user|project] [-t stdio|sse|http] [-e KEY=value...] [-H \"Name: value\"...] [--version-negotiation legacy|auto|<revision>] <name> <commandOrUrl> [-- args...] | add-json [-s local|user|project] <name> <json> | remove <name> [-s local|user|project]");
+    console.error("usage: winter mcp [list] | get <name> | login <name> | logout <name> [--forget-client] | set-secret <name> | add [-s local|user|project] [-t stdio|sse|http] [-e KEY=value...] [-H \"Name: value\"...] [--version-negotiation legacy|auto|<revision>] <name> <commandOrUrl> [-- args...] | add-json [-s local|user|project] <name> <json> | remove <name> [-s local|user|project]");
     process.exit(1);
   }
   case "plugin": {
