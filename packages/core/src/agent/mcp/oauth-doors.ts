@@ -29,6 +29,7 @@ import { realpathSync } from "node:fs";
 import { sdkLocalMcpServers, sdkUserMcpServers } from "../../settings";
 import { localScopeKeyFor, projectScopeRootFor, projectScopeTrusted } from "../../runtime-sdk/run-home-input";
 import { parseProjectMcpServers, readRawProjectMcpConfig, type McpOAuthSetting } from "./project-file";
+import { describeReconnectError } from "./reconnect";
 
 export type McpDoorScope = "local" | "user" | "project";
 
@@ -543,9 +544,10 @@ export class McpOAuthDoors {
 
   // --- lifecycle -------------------------------------------------------------------------------------
 
+  /** A follow-up's failure is logged the way a failed reconnect is (`describeReconnectError`: name, code, masked and capped message). */
   private track(p: Promise<void> | void): void {
     if (p === undefined) return;
-    const tracked = Promise.resolve(p).catch((err) => this.deps.log?.(`mcp: reconnecting live sessions failed (${err instanceof Error ? err.name : "unknown"})`)).finally(() => this.followUps.delete(tracked));
+    const tracked = Promise.resolve(p).catch((err) => this.deps.log?.(`mcp: reconnecting live sessions failed (${describeReconnectError(err)})`)).finally(() => this.followUps.delete(tracked));
     this.followUps.add(tracked);
   }
 

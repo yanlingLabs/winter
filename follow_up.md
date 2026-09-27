@@ -9,7 +9,6 @@ The canonical list of known, deliberately parked work. Nothing here blocks a rel
 - [ ] `winter mcp remove` leaves the server's connector permissions behind, and there is no `winter mcp rename` (permissions are keyed by server name, so they don't follow a rename).
 - [ ] Connector permissions don't reach a subagent definition's own inline MCP servers (renamed `<name>_2` on a clash, or unique names) or a plugin server enabled only for a project from a directory marketplace without an install record, until a value is stored under that exact name.
 - [ ] A turn that starts while a server is reconnecting doesn't see that server's tools (the next turn does).
-- [ ] `oauth-doors.ts`'s follow-up failure path still logs only the error's name.
 - [ ] `winter mcp set-secret`'s hint names `winter` even when invoked as `winter-dev`.
 
 ## Credentials and Keychain
