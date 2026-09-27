@@ -42,6 +42,18 @@ describe("compile:core carries the embedded Worker entry (WS-23)", () => {
     }
   });
 
+  // SECURITY (no-autoload): by default a `bun build --compile` binary reads the bunfig.toml (its
+  // `preload` runs as the binary) and .env of the directory it is STARTED in. `winter` is a symlink to
+  // `winter-core` that users run inside arbitrary repositories, so both are switched off at compile
+  // time; the setting is baked into the executable, so every self-spawn (`__workflow-worker`,
+  // `__runtime-workflow-worker`) inherits it. `bun run verify:runtimes` proves it on the real binary.
+  test("both compile scripts switch off the cwd bunfig.toml and .env autoloads", () => {
+    for (const name of ["compile", "compile:core"]) {
+      const compile = manifest.scripts[name]!.split("&&").map((s) => s.trim().split(/\s+/))[1]!;
+      expect([name, compile.includes("--no-compile-autoload-bunfig"), compile.includes("--no-compile-autoload-dotenv")]).toEqual([name, true, true]);
+    }
+  });
+
   test("the worker file imports only the pre-built bundle, and the bundle's source is the daemon package's own Worker entry", () => {
     const importsOf = (file: string): string[] => [...readFileSync(file, "utf8").matchAll(/^import\s+"([^"]+)";$/gm)].map((m) => m[1]!);
     expect(importsOf(WORKER_FILE)).toEqual([`../${WORKER_BUNDLE_REL}`]);
