@@ -7,7 +7,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { credentialAclMarkerPath, REAL_CREDENTIAL_KEYCHAIN_OPS, type CredentialKeychain, type CredentialKeychainOps } from "../../src/auth/credential-acl";
-import { createAdoptHandler, DEV_KEYCHAIN_SERVICE, devTransitionRefusal, runDevKeychainTransition, type AdoptRequest, type AdoptResponse } from "../../src/auth/dev-keychain-transition";
+import { createAdoptHandler, DEV_KEYCHAIN_SERVICE, devTransitionRefusal, oldCreatorStillOwnsItems, runDevKeychainTransition, type AdoptRequest, type AdoptResponse } from "../../src/auth/dev-keychain-transition";
 import {
   addGenericPasswordWithAccess, createKeychainAccess, deleteGenericPassword, ERR_SEC_INTERACTION_NOT_ALLOWED, genericPasswordPresent, KeychainFfiError, listGenericPasswordAccounts,
   openKeychainFile, readGenericPassword, type KeychainAccess, type KeychainFile,
@@ -194,6 +194,16 @@ describe.skipIf(!darwin)("the dev Keychain transition (throwaway keychain file)"
     expect(await sides().run()).toMatchObject({ kind: "done", adopted: [...ITEMS].sort() });
     expect(genericPasswordPresent(kc, SERVICE, "openai:default.migrating")).toBe(false);
     expect(readGenericPassword(kc, SERVICE, "openai:default")).toBe("v-openai:default");
+    clean();
+  }, SLOW);
+
+  test("the pre-start check: items the old creator still reads mean the transition has not run; none (or none readable) means go", () => {
+    clean();
+    expect(oldCreatorStillOwnsItems({ keychain: kc, service: SERVICE })).toBe(false);
+    seed();
+    expect(oldCreatorStillOwnsItems({ keychain: kc, service: SERVICE })).toBe(true);
+    const refusedAll = opsWith(ITEMS.map((account) => ({ op: "read" as const, account, status: ERR_SEC_INTERACTION_NOT_ALLOWED })));
+    expect(oldCreatorStillOwnsItems({ keychain: kc, service: SERVICE, ops: refusedAll })).toBe(false);
     clean();
   }, SLOW);
 

@@ -182,6 +182,28 @@ export async function runDevKeychainTransition(kc: CredentialKeychain, send: (re
   return { kind: "done", adopted, skipped, restored };
 }
 
+/**
+ * Run under `bun` BEFORE starting the signed binary on the dev home: `true` when an item there is still one
+ * THIS process reads silently — i.e. bun still owns the items, the transition has not run, and the signed
+ * binary's first reads would prompt. Reads at most one item, with interaction disabled; the value is
+ * discarded. `false` on a fresh home (no items) or once every item belongs to the signed binary.
+ */
+export function oldCreatorStillOwnsItems(kc: CredentialKeychain): boolean {
+  const ops = kc.ops ?? REAL_CREDENTIAL_KEYCHAIN_OPS;
+  return withKeychainUserInteractionDisabled(() => {
+    const accounts = ops.list(kc.keychain, kc.service).filter(isItem).sort((a, b) => (a === "admin-token" ? -1 : b === "admin-token" ? 1 : a.localeCompare(b)));
+    for (const account of accounts.slice(0, 3)) {
+      try {
+        const value = ops.read(kc.keychain, kc.service, account);
+        if (value !== null && value !== "") return true;
+      } catch {
+        /* not this process's: look at the next one */
+      }
+    }
+    return false;
+  });
+}
+
 /** The child's process loop: NDJSON requests on stdin, one NDJSON response each on stdout. */
 export async function runDevKeychainAdopt(env: NodeJS.ProcessEnv = process.env): Promise<never> {
   const profile = resolveWinterProfile(env);
