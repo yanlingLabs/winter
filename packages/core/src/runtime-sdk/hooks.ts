@@ -69,6 +69,7 @@ import { ESCAPE_FENCED_FILENAMES, PROJECT_FENCED_SEGMENTS, homeFenceFor, homeFen
 import { controlPlaneDenialMessage, controlPlaneTargetForCall } from "./control-plane";
 import { protectedPathsFor, protectedReadDenial, protectedWriteDecision, storeWriteDenial } from "./protected-paths";
 import type { Mode as SessionMode } from "../agent/tools/registry";
+import { connectorAskReason, connectorDenialMessage, connectorFactsFor, connectorVerdict, type ConnectorPermissionSource } from "../agent/mcp/connector-permissions";
 
 /** The subset of `plugins/hook-registry.ts`'s `HookFacade` this module depends on — injected
  *  rather than imported concretely so a fake can stand in for tests with no real plugin process
@@ -149,6 +150,13 @@ export interface SessionHooksDeps {
   mode?: SessionMode;
   cwd?: string;
   trustedProjectRoot?: () => string | null;
+
+  /**
+   * WS-26: the connector permissions — the user's stored allow/ask/deny per connector action and the
+   * probe's read-only answers, both read LIVE per call (`agent/mcp/connector-permissions.ts`). Absent ⇒ the
+   * connector-permission hook is not registered (every existing test wiring, unchanged).
+   */
+  connectors?: ConnectorPermissionSource;
 }
 
 function readRootsOf(roots: string[], tmpDir?: string): string[] {
@@ -167,6 +175,14 @@ function deny(reason: string): HookJSONOutput {
 
 function ask(reason: string): HookJSONOutput {
   return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask", permissionDecisionReason: reason } };
+}
+
+/** An EXPLICIT allow — unlike `allow()` above, which is no opinion at all. The child's hook reducer ranks it
+ *  below every deny/defer/ask, so it can never un-deny a floor; what it adds is that the runtime allows the
+ *  call before its mode stage (WS-26: a `dont-ask` child denies an unresolved MCP call without ever calling
+ *  `canUseTool`, so this is the only way a stored allow or a read-only default reaches one). */
+function allowExplicitly(reason: string): HookJSONOutput {
+  return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: reason } };
 }
 
 /** A `PreToolUse` INPUT TRANSFORM and NOTHING ELSE — deliberately with no `permissionDecision` at
@@ -1296,6 +1312,44 @@ function pathFenceHook(deps: SessionHooksDeps): HookCallback {
   };
 }
 
+/**
+ * WS-26 — THE CONNECTOR-PERMISSION FLOOR (`agent/mcp/connector-permissions.ts` has the store and the
+ * matrix). Unmatched, like the path fence (one callback per call; a non-connector name is an immediate
+ * no-opinion), and in EVERY mode. It answers `connectorVerdict`'s verdict to the child directly, because
+ * the approval bridge only ever sees calls the child did not already decide:
+ *  - `deny` — a stored "Always deny", and plan's refusal of a stored allow/ask on an action not marked
+ *    read-only: denied here, ahead of every allow rule and under `bypass` (the hook stage runs first).
+ *  - `allow` — a stored "Always allow" or an unset read-only action: an EXPLICIT allow, the only answer a
+ *    `dont-ask` child accepts for an MCP call (it denies an unresolved one without asking the bridge).
+ *  - `ask` — a stored "Always ask" (and an unset non-read-only action in chat/dispatch): forces the child to
+ *    `canUseTool` ahead of a saved allow rule and of `bypass`'s mode stage; the bridge then cards it. Under
+ *    `dont-ask` the child denies it with this hook's reason.
+ *  - `gate` — no opinion: the child and the gate decide exactly as they did before WS-26.
+ * The policy is read live (`deps.policy`), so a `session.setPolicy` reaches the next call; the table and the
+ * read-only answers are read live too, so a flip in the settings page reaches the next call with no respawn.
+ */
+function connectorPermissionHook(deps: SessionHooksDeps): HookCallback {
+  return async (input) => {
+    const source = deps.connectors;
+    if (source === undefined) return allow();
+    const pre = input as PreToolUseHookInput;
+    const toolName = typeof pre.tool_name === "string" ? pre.tool_name : "";
+    const facts = connectorFactsFor(source, toolName, hookCwd(input) ?? deps.cwd);
+    if (facts === undefined) return allow();
+    // An unwired policy reads as `ask`: the answer under which every stored value means what it says.
+    const policy = deps.policy?.() ?? "ask";
+    const verdict = connectorVerdict({ setting: facts.setting, readOnly: facts.readOnly, policy, mode: deps.mode ?? "code" });
+    switch (verdict) {
+      case "deny": return deny(connectorDenialMessage(facts.server, facts.tool, { setting: facts.setting, policy }));
+      case "allow": return allowExplicitly(facts.setting === "allow"
+        ? `${facts.tool} (the ${facts.server} connector) is set to "Always allow" in Winter's connector permissions.`
+        : `${facts.tool} (the ${facts.server} connector) is marked read-only by its server.`);
+      case "ask": return ask(connectorAskReason(facts.server, facts.tool, facts.setting));
+      case "gate": return allow();
+    }
+  };
+}
+
 const bashEscapeInput = (input: unknown): { command: string; escape: boolean; description?: string } => {
   const ti = (input as PreToolUseHookInput).tool_input as { command?: unknown; dangerouslyDisableSandbox?: unknown; description?: unknown } | null | undefined;
   return {
@@ -1752,6 +1806,8 @@ export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hook
   // WS-21 (spec §7.1, §7.2): the path fence — every policy. Unmatched (one callback per tool
   // call) because the write and read tools carry two vocabularies; anything else is an immediate allow.
   if (deps.home) preToolUse.push({ failClosed: true, hooks: [failClosed("path fence", pathFenceHook(deps))] });
+  // WS-26: the connector-permission floor — every mode, every policy; see `connectorPermissionHook`.
+  if (deps.connectors) preToolUse.push({ failClosed: true, hooks: [failClosed("connector-permission floor", connectorPermissionHook(deps))] });
   if (deps.home) {
     for (const tool of Object.keys(DIFF_TOOL_FILE_PATH_ARG)) {
       preToolUse.push({ matcher: tool, hooks: [fileDiffPreToolUseHook(deps, pending)] });

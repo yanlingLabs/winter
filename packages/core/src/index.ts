@@ -21,6 +21,8 @@ export {
   // WS-21: the runtime-facing keys live in `sdk/` now — these are their only doors (spec §4.1).
   MOVED_SETTINGS_KEYS, withoutMovedKeys, sdkAllowRules, sdkDenyRules, sdkAdditionalDirectories, sdkOutputStyle,
   sdkAutoMemory, sdkEnabledPlugins, sdkUserMcpServers, sdkLocalMcpServers, validateMcpServerEntryForWrite,
+  // WS-26: `winter mcp permissions`'s no-daemon path writes and reads the same table the daemon enforces.
+  setConnectorToolPermission, connectorPermissionTable,
   type Settings, type McpServerSettingsEntry,
 } from "./settings";
 // WS-21 (Contract C): the shared runtime home's paths and its two claude-format files.

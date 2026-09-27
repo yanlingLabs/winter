@@ -37,6 +37,7 @@ import { registerComputerTool } from "./agent/tools/computer";
 import { ComputerUseService } from "./agent/computer-use";
 import { SessionTitler } from "./agent/titles";
 import { McpManager } from "./agent/mcp/manager";
+import { daemonConnectorSource } from "./agent/mcp/connector-source";
 import { notifyHeadless } from "./agent/notify-fallback";
 import { LspManager } from "./agent/lsp/manager";
 import { PermissionGate, type SessionApprovalPolicy } from "./agent/gate";
@@ -1747,6 +1748,10 @@ export async function startDaemon(opts: {
         model: reviewerModel, effort: reviewerEffort,
         boundProviderId: boundProviderIdForRoles, roleHealth,
       });
+  // WS-26: the connector permissions' live facts — the stored table from the daemon's in-memory settings and
+  // the scope-aware read-only answers (`agent/mcp/connector-source.ts` has the rules: which listing, the
+  // background kick, and why nothing on a call path ever spawns a server).
+  const connectorPermissions = daemonConnectorSource({ home: winterHome, trust: trustStore, settings: () => settings, manager: () => mcp });
   const hooksFor = (session: CapabilitySession) =>
     sessionHooksFor({
       sessionId: session.sessionId,
@@ -1771,6 +1776,8 @@ export async function startDaemon(opts: {
       cwd: session.cwd,
       // R.3 I-1: the SAME root and trust the run home's project tier uses (`runHomeInputFor`).
       trustedProjectRoot: () => (projectScopeTrusted(session.cwd, trustStore) ? projectScopeRootFor(session.cwd) : null),
+      // WS-26: the connector-permission floor (every mode; `hooks.ts`'s `connectorPermissionHook`).
+      connectors: connectorPermissions,
     });
   // ── P8c integration Wiring 2: the notification/schedule sinks (lane 2's `sinks.ts`, P8c-11) ────
   // `hub.addObserver` (Dispatch/Phase 7's existing fan-out of every appended event of EVERY
@@ -1915,6 +1922,8 @@ export async function startDaemon(opts: {
     // built above. `hooksFor(...).winter` becomes the child's `Options.hooks` (`optionsFor` →
     // `buildWinterOptions`); `planBridge` answers `ExitPlanMode` through the approval-bridge deps.
     planBridge,
+    // WS-26: the bridge's half of the connector permissions (the hook above is the floor's).
+    connectors: connectorPermissions,
     hooksFor,
     // WS-25 §7 (prompt-free credentials): every session's Keychain credentials are brokered by THIS
     // process (`runtime-sdk/host-credentials.ts`). The MCP sign-ins come from the daemon's one MCP OAuth
@@ -2745,6 +2754,9 @@ export async function startDaemon(opts: {
     // own doc comment for why a credential add needs this rather than waiting for an unrelated
     // settings write to trigger the next `refresh()`.
     mcp: mcp ?? undefined,
+    // WS-26: a connector-permission write reaches the next decision without waiting on the watcher.
+    onConnectorPermissionsSaved: (next) => { connectorPermissions.noteWritten(next); },
+    connectorPermissions,
     // WS-25: the sign-in doors use the daemon's ONE MCP OAuth store (see `oauthStoreForThisDaemon`) — handed
     // over explicitly, so the server never derives a Keychain store of its own for a test daemon.
     mcpOAuth: { store: daemonOAuthStore() },

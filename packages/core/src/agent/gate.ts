@@ -1,4 +1,5 @@
 import { isExternalToolName } from "./tools/registry";
+import { isConnectorToolName } from "./mcp/connector-permissions";
 
 export type GateDecision = "allow" | "ask" | "deny";
 // Plan-immunity (2026-07-28 design, USER-REVISED mid-implementation): "chat" is chat-mode's OWN
@@ -382,12 +383,21 @@ export class PermissionGate {
   evaluate(toolName: string, policy: SessionApprovalPolicy): GateDecision {
     // Plan-immunity (2026-07-28, USER-REVISED design): "chat" — chat-mode's fixed, immutable
     // policy — is checked FIRST, before ALWAYS_ASK/MUTATING/everything below, because the user's
-    // directive ("chat simply wouldn't ever ask permissions") means NOTHING may resolve to "ask"
+    // directive ("chat simply wouldn't ever ask permissions") meant NOTHING could resolve to "ask"
     // under it, not even a future ALWAYS_ASK-classified addition. Chat's own allowlisted tools
     // (AskQuestion/Search/ReadPage, and B2-T6's `browser`) all live in READ_ONLY/NETWORK, so this is exactly "allow the
-    // read-only/network classes, deny everything else outright" — never a card, matching "never
-    // asks" literally rather than degrading to a stricter-but-still-asking policy.
+    // read-only/network classes, deny everything else outright" — never a card.
+    //
+    // WS-26 (USER RULING 2026-09-27) reverses that directive for ONE class, and only that class: a
+    // CONNECTOR action (`isConnectorToolName` — a tool of a user-configured MCP server, never the
+    // daemon's own `mcp__winter__*` capability tools, never a built-in) answers "ask" here, and the
+    // approval bridge CARDS it in a chat session instead of refusing it. This is the gate's default for
+    // such an action; the connector-permission layer (`agent/mcp/connector-permissions.ts`, applied by
+    // the bridge and the PreToolUse hook) replaces it with the user's stored allow/deny, or with an allow
+    // for an action its server marks read-only. Every other chat answer is unchanged: the browser,
+    // Search and every non-connector name stay allow-or-deny, never a card.
     if (policy === "chat") {
+      if (isConnectorToolName(toolName)) return "ask";
       // Minor 2 (fix round 1 review finding): enter_plan_mode/exit_plan_mode are READ_ONLY (no fs/
       // process mutation of their own), so the blanket READ_ONLY/NETWORK allow just below would
       // otherwise ALLOW them here. Denied explicitly instead: if either ever became chat-eligible,
