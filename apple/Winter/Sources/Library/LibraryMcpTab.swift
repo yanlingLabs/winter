@@ -54,13 +54,14 @@ import WinterKit
 //    qualified form, so both are rendered — bare as the row title, qualified as its monospaced
 //    subtitle (`mcpWireToolName`).
 //
-// WS-25 (MCP OAuth, 2026-09-27) added a THIRD thing this file is built around: an external server's
-// sign-in state (`auth`/`oauthIssuerOrigin`, both additive+optional on `mcp.list`'s row) and the
-// sign-in/out/client-secret actions themselves. That whole vocabulary — the badge mapping, the sign-
-// in sheet's polling state machine, the sign-out and client-secret sheets — lives in
-// `LibraryMcpOAuth.swift` beside this file; this file only carries the two new `McpServerRow` fields
-// and the detail page's OAuth section. See that file's header for why sign-in/out has its own
-// protocol (`McpAuthClient`, `WinterKit`) rather than riding `McpToolsModel`'s bare-closure `Lister`.
+// WS-25 (MCP OAuth, 2026-09-27, polish round 2026-09-27) added a THIRD thing this file is built
+// around: an external server's sign-in state (`auth`/`oauthIssuerOrigin`/`oauthPreregistered`, all
+// additive+optional on `mcp.list`'s row) and the sign-in/out/client-secret actions themselves. That
+// whole vocabulary — the badge mapping, the sign-in sheet's polling state machine, the sign-out and
+// client-secret sheets — lives in `LibraryMcpOAuth.swift` beside this file; this file only carries
+// the three new `McpServerRow` fields and the detail page's OAuth section. See that file's header
+// for why sign-in/out has its own protocol (`McpAuthClient`, `WinterKit`) rather than riding
+// `McpToolsModel`'s bare-closure `Lister`.
 // -----------------------------------------------------------------------------------------------
 
 // MARK: - Pure display helpers
@@ -86,15 +87,22 @@ struct McpServerRow: Equatable, Identifiable {
     /// (authoritative, always-present) `issuerOrigin` is what the sheet shows once sign-in actually
     /// starts, never this one (`LibraryMcpOAuth.swift`'s `McpSignInSheetModel`).
     let oauthIssuerOrigin: String?
+    /// WS-25 polish round: whether this server is configured with a pre-registered `oauth.clientId`
+    /// — what "Set client secret…" gates on (`LibraryMcpOAuth.swift`'s `oauthSection`). `nil` (an
+    /// older daemon) and `false` both hide the action; only `true` shows it. Replaces the earlier
+    /// "offer it whenever `auth != \"none\"`" guess, which had no way to tell a DCR/CIMD server
+    /// (no client secret exists) from a pre-registered one.
+    let oauthPreregistered: Bool?
 
     init(name: String, status: String, toolNames: [String], source: String,
-         auth: String? = nil, oauthIssuerOrigin: String? = nil) {
+         auth: String? = nil, oauthIssuerOrigin: String? = nil, oauthPreregistered: Bool? = nil) {
         self.name = name
         self.status = status
         self.toolNames = toolNames
         self.source = source
         self.auth = auth
         self.oauthIssuerOrigin = oauthIssuerOrigin
+        self.oauthPreregistered = oauthPreregistered
     }
 }
 
@@ -248,9 +256,9 @@ func winterCapabilityBadge(_ capability: WinterCapability) -> String? {
 final class McpToolsModel: ObservableObject {
     /// `() async throws -> [...]` shaped to `WinterClient.mcpList`'s own return tuple, so the
     /// eventual wiring is a one-line pass-through with no adapter in between. WS-25 added the
-    /// tuple's trailing `auth`/`oauthIssuerOrigin` — both `nil` on an older daemon (`mcpList`'s own
-    /// doc comment), which this typealias mirrors exactly.
-    typealias Lister = () async throws -> [(name: String, status: String, toolNames: [String], source: String, auth: String?, oauthIssuerOrigin: String?)]
+    /// tuple's trailing `auth`/`oauthIssuerOrigin`/`oauthPreregistered` — all `nil` on an older
+    /// daemon (`mcpList`'s own doc comment), which this typealias mirrors exactly.
+    typealias Lister = () async throws -> [(name: String, status: String, toolNames: [String], source: String, auth: String?, oauthIssuerOrigin: String?, oauthPreregistered: Bool?)]
 
     /// NO `cwd` anywhere in this type, deliberately — see caveat 1 in the file header.
     private let lister: Lister?
@@ -278,7 +286,8 @@ final class McpToolsModel: ObservableObject {
         do {
             servers = try await lister().map {
                 McpServerRow(name: $0.name, status: $0.status, toolNames: $0.toolNames, source: $0.source,
-                             auth: $0.auth, oauthIssuerOrigin: $0.oauthIssuerOrigin)
+                             auth: $0.auth, oauthIssuerOrigin: $0.oauthIssuerOrigin,
+                             oauthPreregistered: $0.oauthPreregistered)
             }
             errorText = nil
             hasLoaded = true
@@ -627,12 +636,11 @@ struct LibraryMcpServerDetail: View {
     /// `mcpAuthBadge` renders as a badge, spelled out here as actions instead. `nil`/`"none"` renders
     /// nothing: a server with no OAuth at all gets no section, not an empty one.
     ///
-    /// "Set client secret…" is offered whenever the OTHER two rows would be (`auth != nil &&
-    /// auth != "none"`) rather than only for a server actually configured with a pre-registered
-    /// `oauth.clientId` — `mcp.list`'s contract carries no field this pane could key that on (see
-    /// this file's WS-25 header note and the report's cross-lane request). A server for which the
-    /// action doesn't apply gets the daemon's own typed refusal, shown plainly, same as every other
-    /// action here — never a silently-vanished button guessing at a fact this pane doesn't have.
+    /// "Set client secret…" is gated on `oauthPreregistered == true` (polish round) — the daemon's
+    /// own fact about THIS server, replacing the earlier "offer it whenever `auth != \"none\""
+    /// guess (there was no field to key on before this). `nil` (an older daemon) and `false` both
+    /// hide the button: a DCR/CIMD server has no client secret to set at all, and showing the
+    /// button there would only ever produce a refusal.
     @ViewBuilder
     private func oauthSection(_ server: McpServerRow) -> some View {
         if server.auth != nil && server.auth != "none" {
@@ -652,9 +660,11 @@ struct LibraryMcpServerDetail: View {
                     .disabled(oauthActions.isUnwired)
                     .accessibilityLabel("Sign in to \(server.name)")
                 }
-                Button("Set client secret…") { oauthActions.startClientSecret(serverName: server.name) }
-                    .disabled(oauthActions.isUnwired)
-                    .accessibilityLabel("Set the client secret for \(server.name)")
+                if mcpShowsClientSecretAction(server) {
+                    Button("Set client secret…") { oauthActions.startClientSecret(serverName: server.name) }
+                        .disabled(oauthActions.isUnwired)
+                        .accessibilityLabel("Set the client secret for \(server.name)")
+                }
             }
         }
     }

@@ -218,6 +218,24 @@ final class LibraryDisplayHelperTests: XCTestCase {
         XCTAssertEqual(mcpAuthBadge("pending-review"), "pending-review")
     }
 
+    // MARK: MCP OAuth client-secret gate (polish round)
+
+    /// `oauthPreregistered == true` is the ONLY case that shows the action — `nil` (an older
+    /// daemon) and `false` both hide it, same "don't offer an action that would only ever refuse"
+    /// posture as everywhere else in this tab.
+    func testMcpShowsClientSecretActionOnlyWhenPreregisteredIsTrue() {
+        let preregistered = McpServerRow(name: "github", status: "running", toolNames: [], source: "user",
+                                          auth: "needs-auth", oauthPreregistered: true)
+        let dcr = McpServerRow(name: "linear", status: "running", toolNames: [], source: "user",
+                                auth: "needs-auth", oauthPreregistered: false)
+        let olderDaemon = McpServerRow(name: "notion", status: "running", toolNames: [], source: "user",
+                                        auth: "needs-auth", oauthPreregistered: nil)
+
+        XCTAssertTrue(mcpShowsClientSecretAction(preregistered))
+        XCTAssertFalse(mcpShowsClientSecretAction(dcr))
+        XCTAssertFalse(mcpShowsClientSecretAction(olderDaemon))
+    }
+
     // MARK: Agents
 
     func testARejectedAgentIsAddressedByPathAndExplainsItself() {

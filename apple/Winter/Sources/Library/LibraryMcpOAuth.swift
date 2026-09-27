@@ -49,6 +49,15 @@ func mcpAuthBadge(_ auth: String?) -> String? {
     }
 }
 
+/// PURE: whether the detail page's "Set client secret…" action should show at all — polish round.
+/// Gated on the daemon's own `oauthPreregistered` fact for THIS server, never inferred from `auth`:
+/// a DCR/CIMD server has no client secret to set, and `nil` (an older daemon that has never heard of
+/// this field) reads the same as `false` — hide it, rather than offering an action that would only
+/// ever produce a refusal.
+func mcpShowsClientSecretAction(_ server: McpServerRow) -> Bool {
+    server.oauthPreregistered == true
+}
+
 // MARK: - The sign-in poll's pure state machine
 
 /// One step's outcome — PURE, no async, no `Task`, no clock: `McpSignInSheetModel.poll(loginId:)`
@@ -201,6 +210,28 @@ final class McpSignInSheetModel: ObservableObject, Identifiable {
         pollTask = nil
     }
 
+    /// Set the first time THIS attempt's close is reported to `McpOAuthActionsModel` — lives on the
+    /// attempt itself rather than being inferred from `McpOAuthActionsModel.signInSheet`'s own
+    /// nil-ness, because SwiftUI's interactive dismissal (Esc, clicking outside the sheet) nils that
+    /// binding directly, BEFORE `McpSignInSheet`'s `onDisappear` ever runs — by the time it does,
+    /// the binding is already nil whether or not a button reported the close first, so it cannot
+    /// tell the two apart. This flag can.
+    private(set) var closeReported = false
+
+    /// Always cancels; returns `true` only the FIRST time this attempt reports its close (`false`
+    /// on every call after — the caller should treat that as "already handled, do nothing more").
+    /// Called from every door a sheet can close through — Cancel, Done, and `onDisappear` — so
+    /// whichever one runs first wins and the other's `onDisappear` (which always follows a button
+    /// tap too, once SwiftUI tears the sheet down) becomes a harmless no-op rather than a second
+    /// `onAuthChanged()` round-trip.
+    @discardableResult
+    func reportClose() -> Bool {
+        cancel()
+        guard !closeReported else { return false }
+        closeReported = true
+        return true
+    }
+
     /// Direct property access, not a call to `cancel()` — same nonisolated-`deinit` rule
     /// `EditorFileWatcher.deinit` documents (an isolated method can't be called from a nonisolated
     /// deinit, but touching this type's own stored property can).
@@ -241,14 +272,22 @@ struct McpSignInSheet: View {
         }
         .padding(20)
         .frame(width: 420)
-        // The belt to `cancel()`'s suspender: Cancel/Done route through `onDone()`, but SwiftUI's
-        // OWN interactive dismissal (Esc, clicking outside the sheet) nils the parent's binding
-        // directly and calls neither — without this, the poll `Task` keeps `model` alive and
-        // polling for up to its own cap (item 2's 5-min timeout) after the sheet is already gone,
-        // since `poll()` captures `self` STRONGLY for its own duration (only the spawning `Task {
-        // [weak self] in … }` is weak). `cancel()` is idempotent, so this fires harmlessly even
-        // when Cancel/Done already called it.
-        .onDisappear { model.cancel() }
+        // The belt to `cancel()`'s suspender, AND the door `onAuthChanged()` needs for a completed
+        // sign-in the user dismissed by Esc/click-outside rather than Done: SwiftUI's interactive
+        // dismissal nils the parent's binding directly and calls neither the buttons below nor their
+        // `onDone()` — so this is the only place that path is ever seen. `model.reportClose()` is
+        // idempotent (`closeReported`), so when a button already ran it (every button below also
+        // calls it, before `onDone()`), this fires again here as SwiftUI tears the sheet down and is
+        // a harmless no-op — no second `onAuthChanged()` round-trip. Scoped to `.success` on purpose:
+        // an Esc during `.starting`/`.confirmOrigin`/`.waiting`/`.failure` has nothing new for a
+        // refresh to pick up, so it stays a plain cancel.
+        .onDisappear {
+            if model.phase == .success, model.reportClose() {
+                onDone()
+            } else {
+                model.cancel()
+            }
+        }
     }
 
     private func startingBody(issuerOriginHint: String?) -> some View {
@@ -259,7 +298,7 @@ struct McpSignInSheet: View {
             HStack {
                 ProgressView().controlSize(.small)
                 Spacer()
-                Button("Cancel") { model.cancel(); onDone() }
+                Button("Cancel") { model.reportClose(); onDone() }
                     .keyboardShortcut(.cancelAction)
             }
         }
@@ -273,7 +312,7 @@ struct McpSignInSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
             HStack {
                 Spacer()
-                Button("Cancel") { model.cancel(); onDone() }
+                Button("Cancel") { model.reportClose(); onDone() }
                     .keyboardShortcut(.cancelAction)
                 Button("Continue") { model.continueSignIn() }
                     .accessibilityLabel("Continue signing in to \(model.serverName) through \(issuerOrigin)")
@@ -290,7 +329,7 @@ struct McpSignInSheet: View {
             HStack {
                 ProgressView().controlSize(.small)
                 Spacer()
-                Button("Cancel") { model.cancel(); onDone() }
+                Button("Cancel") { model.reportClose(); onDone() }
                     .keyboardShortcut(.cancelAction)
             }
         }
@@ -299,7 +338,7 @@ struct McpSignInSheet: View {
     private var doneButton: some View {
         HStack {
             Spacer()
-            Button("Done") { onDone() }
+            Button("Done") { model.reportClose(); onDone() }
         }
     }
 }
