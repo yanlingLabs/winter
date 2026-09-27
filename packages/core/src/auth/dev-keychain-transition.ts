@@ -20,8 +20,16 @@
 // CRASH SAFETY. Every shadow is the CHILD's, so the compiled binary can read it silently: an interrupted run
 // leaves either the pair (shadow + bun's original — re-run the transition: the `shadow` step is idempotent
 // for an equal value) or the shadow alone (the child's `recover` at the start of a re-run, or the compiled
-// daemon's own boot recovery, puts the original back). The orchestrator holds the home's daemon lock for the
-// whole run, so no daemon can boot mid-transition and mint fresh pairing tokens.
+// daemon's own boot recovery, puts the original back). Before anything else the orchestrator runs its own
+// recovery as `bun`, so shadows a crashed `bun`-run migration left are restored (or, beside their original,
+// dropped as stale) and then adopted like any other item.
+//
+// EXCLUSION. The orchestrator holds the home's CREDENTIAL MIGRATION LOCK (`credential-migration-lock.ts`,
+// judged on pid liveness — a booting daemon, which has no socket yet, cannot slip past it) for the whole
+// run, and the child refuses to act unless its parent holds it. It also takes the daemon's boot lock, so a
+// RUNNING dev daemon refuses the transition. A daemon booting mid-run finds the migration lock held and does
+// no Keychain pass. The run stops — writing no marker — the moment the child exits, stops answering, or
+// fails its recovery or the marker.
 //
 // ONE-WAY. After it, a dev-profile process that is NOT the compiled binary (a `bun`-run CLI, a `bun`-run
 // daemon) is prompted for every item it reads. Both sides refuse anything but the dev profile on its default
@@ -30,10 +38,12 @@ import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { acquireLock } from "../lock";
 import { resolveWinterProfile, type WinterProfile } from "../profile";
+import { codeSigningFacts, realExecutable } from "./app-token-acl";
+import { acquireCredentialMigrationLock, credentialMigrationLockHolder } from "./credential-migration-lock";
 import { isDefaultWinterHome } from "../winter-dir";
 import { APP_TOKEN_SHADOW_SUFFIX } from "./app-token-acl";
-import { recoverCredentialShadows, REAL_CREDENTIAL_KEYCHAIN_OPS, writeCredentialAclMarker, type CredentialKeychain } from "./credential-acl";
-import { ERR_SEC_DUPLICATE_ITEM, KeychainFfiError, keychainUnlocked, withKeychainUserInteractionDisabled, type KeychainAccess } from "./keychain-ffi";
+import { putBack, readStoredValue, recoverCredentialShadows, REAL_CREDENTIAL_KEYCHAIN_OPS, sameBytes, writeCredentialAclMarker, type CredentialKeychain } from "./credential-acl";
+import { KeychainFfiError, keychainUnlocked, withKeychainUserInteractionDisabled, type KeychainAccess } from "./keychain-ffi";
 
 /** The compiled binary's route for the child side. */
 export const DEV_KEYCHAIN_ADOPT_ARG = "__dev-keychain-adopt";
@@ -49,7 +59,8 @@ export type AdoptRequest =
   | { op: "marker"; migrated: number; skipped: number }
   | { op: "done" };
 
-export type AdoptResponse = { ok: true; service?: string; restored?: string[] } | { ok: false; reason: string };
+/** `fatal`: the CHANNEL failed (the child exited, stopped answering, or answered garbage) — the run stops. */
+export type AdoptResponse = { ok: true; service?: string; restored?: string[] } | { ok: false; reason: string; fatal?: true };
 
 /** Why this process must not take part, or `undefined`. Both sides check it. */
 export function devTransitionRefusal(input: { profile: WinterProfile; home: string; service: string; platform?: NodeJS.Platform }): string | undefined {
@@ -73,7 +84,7 @@ function isItem(account: string): boolean {
  * THE CHILD (the new creator): one request, one response, synchronously. `access` is the self-only access
  * object (this process). Every Keychain call runs with user interaction disabled. Never logs a value.
  */
-export function createAdoptHandler(kc: CredentialKeychain, access: KeychainAccess, home: string): (req: AdoptRequest) => AdoptResponse {
+export function createAdoptHandler(kc: CredentialKeychain, access: KeychainAccess, home: string, requirement: string): (req: AdoptRequest) => AdoptResponse {
   const ops = kc.ops ?? REAL_CREDENTIAL_KEYCHAIN_OPS;
   const q = <T>(fn: () => T): T => withKeychainUserInteractionDisabled(fn);
   return (req) => {
@@ -82,28 +93,26 @@ export function createAdoptHandler(kc: CredentialKeychain, access: KeychainAcces
         case "hello":
           return { ok: true, service: kc.service };
         case "recover":
-          return { ok: true, restored: q(() => recoverCredentialShadows(kc, access, { dropEqualShadows: false, owns: isItem })) };
+          return { ok: true, restored: q(() => recoverCredentialShadows(kc, access, { dropShadowsBesideOriginals: false, owns: isItem })) };
         case "shadow": {
           if (!isItem(req.account)) return { ok: false, reason: "not an item" };
           const shadow = `${req.account}${APP_TOKEN_SHADOW_SUFFIX}`;
+          const bytes = new Uint8Array(Buffer.from(req.value, "utf8"));
           if (q(() => ops.present(kc.keychain, kc.service, shadow))) {
-            // A re-run after an interruption: the same value is the same step, done already.
-            return q(() => ops.read(kc.keychain, kc.service, shadow)) === req.value ? { ok: true } : { ok: false, reason: `${shadow} holds a different value` };
+            // A re-run after an interruption: the same value is the same step, done already. A different one is
+            // stale (the original beside it is the newer write): replaced.
+            if (sameBytes(q(() => ops.readBytes(kc.keychain, kc.service, shadow)), bytes)) return { ok: true };
+            q(() => ops.remove(kc.keychain, kc.service, shadow));
           }
           q(() => ops.add(kc.keychain, { service: kc.service, account: shadow, value: req.value, access }));
-          return q(() => ops.read(kc.keychain, kc.service, shadow)) === req.value ? { ok: true } : { ok: false, reason: `${shadow} did not read back` };
+          return sameBytes(q(() => ops.readBytes(kc.keychain, kc.service, shadow)), bytes) ? { ok: true } : { ok: false, reason: `${shadow} did not read back` };
         }
         case "commit": {
           const shadow = `${req.account}${APP_TOKEN_SHADOW_SUFFIX}`;
-          const value = q(() => ops.read(kc.keychain, kc.service, shadow));
-          if (value === null || value === "") return { ok: false, reason: `${shadow} is missing` };
+          const value = q(() => readStoredValue(kc, shadow));
+          if (value === null) return { ok: false, reason: `${shadow} is missing` };
           if (q(() => ops.present(kc.keychain, kc.service, req.account))) return { ok: false, reason: `${req.account} is still there` };
-          try {
-            q(() => ops.add(kc.keychain, { service: kc.service, account: req.account, value, access }));
-          } catch (err) {
-            if (!(err instanceof KeychainFfiError && err.status === ERR_SEC_DUPLICATE_ITEM)) throw err;
-          }
-          if (q(() => ops.read(kc.keychain, kc.service, req.account)) !== value) return { ok: false, reason: `${req.account} did not read back` };
+          q(() => putBack(kc, access, req.account, value));
           q(() => ops.remove(kc.keychain, kc.service, shadow));
           return { ok: true };
         }
@@ -111,7 +120,8 @@ export function createAdoptHandler(kc: CredentialKeychain, access: KeychainAcces
           q(() => ops.remove(kc.keychain, kc.service, `${req.account}${APP_TOKEN_SHADOW_SUFFIX}`));
           return { ok: true };
         case "marker":
-          writeCredentialAclMarker(home, kc.service, { migrated: req.migrated, skipped: req.skipped });
+          if (req.migrated === 0 && req.skipped > 0) return { ok: true }; // nothing landed here: not "done"
+          writeCredentialAclMarker(home, kc.service, requirement, { migrated: req.migrated, skipped: req.skipped });
           return { ok: true };
         case "done":
           return { ok: true };
@@ -129,35 +139,48 @@ export type DevTransitionOutcome =
 /**
  * THE ORCHESTRATOR (the old creator — run it under `bun`): moves every item under `kc.service` to the child's
  * creation (see the header). `send` is the child's handler, over a pipe or in-process. The caller holds the
- * home's daemon lock. Never throws for a Keychain failure: an item it cannot read, shadow or delete is
- * skipped (it keeps bun as its creator); a failed commit stops the run with that item's shadow in place.
+ * credential migration lock. An item it cannot read (or whose value is not valid UTF-8), shadow or delete is
+ * skipped (it keeps bun as its creator); a failed commit, a failed recovery or marker, or a channel failure
+ * stops the run — without a marker.
  */
 export async function runDevKeychainTransition(kc: CredentialKeychain, send: (req: AdoptRequest) => Promise<AdoptResponse>, log: (line: string) => void = () => {}): Promise<DevTransitionOutcome> {
   const ops = kc.ops ?? REAL_CREDENTIAL_KEYCHAIN_OPS;
   const q = <T>(fn: () => T): T => withKeychainUserInteractionDisabled(fn);
-  const hello = await send({ op: "hello" });
-  if (!hello.ok) return { kind: "stopped", account: "(child)", reason: hello.reason, adopted: [], skipped: [] };
-  if (hello.service !== kc.service) return { kind: "stopped", account: "(child)", reason: `the child uses ${hello.service ?? "no service"}, not ${kc.service}`, adopted: [], skipped: [] };
-  const recovered = await send({ op: "recover" });
-  const restored = recovered.ok ? recovered.restored ?? [] : [];
-  if (restored.length > 0) log(`restored from an earlier run's shadows: ${restored.join(", ")}`);
-  const accounts = [...new Set(q(() => ops.list(kc.keychain, kc.service)))].filter(isItem).sort();
   const adopted: string[] = [];
   const skipped: string[] = [];
+  const stop = (account: string, reason: string): DevTransitionOutcome => ({ kind: "stopped", account, reason, adopted, skipped });
+  const hello = await send({ op: "hello" });
+  if (!hello.ok) return stop("(child)", hello.reason);
+  if (hello.service !== kc.service) return stop("(child)", `the child uses ${hello.service ?? "no service"}, not ${kc.service}`);
+  // The OLD creator's own recovery first: shadows a crashed bun-run migration left are bun's, which the child
+  // cannot read. Restored (or, beside their original, dropped as stale), they are then adopted below.
+  const oldAccess = q(() => ops.createAccess("Winter credential", [null]));
+  let restored: string[];
+  try {
+    restored = q(() => recoverCredentialShadows({ ...kc, log: (line) => log(line) }, oldAccess, { dropShadowsBesideOriginals: true, owns: isItem }));
+  } finally {
+    oldAccess.release();
+  }
+  const recovered = await send({ op: "recover" });
+  if (!recovered.ok) return stop("(recover)", recovered.reason);
+  restored = [...restored, ...(recovered.restored ?? [])];
+  if (restored.length > 0) log(`restored from an earlier run's shadows: ${restored.join(", ")}`);
+  const accounts = [...new Set(q(() => ops.list(kc.keychain, kc.service)))].filter(isItem).sort();
   for (const account of accounts) {
     let value: string | null;
     try {
-      value = q(() => ops.read(kc.keychain, kc.service, account));
+      value = q(() => readStoredValue(kc, account))?.text ?? null;
     } catch (err) {
       // Most often an item an earlier run already adopted (the child created it: this process may not read it).
       skipped.push(account);
-      log(`${account}: not readable by this process without a prompt (${describe(err)}) — left as it is`);
+      log(`${account}: not readable by this process without a prompt, or not UTF-8 (${describe(err)}) — left as it is`);
       continue;
     }
-    if (value === null || value === "") continue;
+    if (value === null) continue;
     const shadowed = await send({ op: "shadow", account, value });
     value = null;
     if (!shadowed.ok) {
+      if (shadowed.fatal) return stop(account, shadowed.reason);
       skipped.push(account);
       log(`${account}: the new creator could not write its shadow (${shadowed.reason}) — left as it is`);
       continue;
@@ -165,7 +188,8 @@ export async function runDevKeychainTransition(kc: CredentialKeychain, send: (re
     try {
       q(() => ops.remove(kc.keychain, kc.service, account));
     } catch (err) {
-      await send({ op: "drop", account });
+      const dropped = await send({ op: "drop", account });
+      if (!dropped.ok && dropped.fatal) return stop(account, dropped.reason);
       skipped.push(account);
       log(`${account}: could not be deleted by this process (${describe(err)}) — left as it is`);
       continue;
@@ -173,35 +197,43 @@ export async function runDevKeychainTransition(kc: CredentialKeychain, send: (re
     const committed = await send({ op: "commit", account });
     if (!committed.ok) {
       log(`${account}: the new creator could not re-create it (${committed.reason}) — its shadow holds the value; re-run the transition (or start the compiled daemon, whose boot restores it)`);
-      return { kind: "stopped", account, reason: committed.reason, adopted, skipped };
+      return stop(account, committed.reason);
     }
     adopted.push(account);
   }
-  await send({ op: "marker", migrated: adopted.length, skipped: skipped.length });
+  if (!(adopted.length === 0 && skipped.length > 0)) {
+    const marked = await send({ op: "marker", migrated: adopted.length, skipped: skipped.length });
+    if (!marked.ok) return stop("(marker)", marked.reason);
+  }
   await send({ op: "done" });
   return { kind: "done", adopted, skipped, restored };
 }
 
 /**
- * Run under `bun` BEFORE starting the signed binary on the dev home: `true` when an item there is still one
- * THIS process reads silently — i.e. bun still owns the items, the transition has not run, and the signed
- * binary's first reads would prompt. Reads at most one item, with interaction disabled; the value is
- * discarded. `false` on a fresh home (no items) or once every item belongs to the signed binary.
+ * Run under `bun` BEFORE starting the signed binary on the dev home: `true` when ANY item there is still one
+ * THIS process reads silently — i.e. bun still owns it, and the signed binary's first read of it would
+ * prompt. Every account is tried, with interaction disabled; values are discarded. `false` on a fresh home
+ * (no items) or once every item belongs to the signed binary.
  */
 export function oldCreatorStillOwnsItems(kc: CredentialKeychain): boolean {
   const ops = kc.ops ?? REAL_CREDENTIAL_KEYCHAIN_OPS;
   return withKeychainUserInteractionDisabled(() => {
-    const accounts = ops.list(kc.keychain, kc.service).filter(isItem).sort((a, b) => (a === "admin-token" ? -1 : b === "admin-token" ? 1 : a.localeCompare(b)));
-    for (const account of accounts.slice(0, 3)) {
+    for (const account of ops.list(kc.keychain, kc.service).filter(isItem)) {
       try {
-        const value = ops.read(kc.keychain, kc.service, account);
-        if (value !== null && value !== "") return true;
+        const bytes = ops.readBytes(kc.keychain, kc.service, account);
+        if (bytes !== null && bytes.length > 0) return true;
       } catch {
         /* not this process's: look at the next one */
       }
     }
     return false;
   });
+}
+
+/** The child acts only while the orchestrator — its PARENT — holds the home's credential migration lock. */
+export function adoptLockRefusal(home: string, parentPid: number): string | undefined {
+  const holder = credentialMigrationLockHolder(home);
+  return holder !== undefined && holder === parentPid ? undefined : `the credential migration lock is not held by the parent process (${holder ?? "no holder"})`;
 }
 
 /** The child's process loop: NDJSON requests on stdin, one NDJSON response each on stdout. */
@@ -216,6 +248,10 @@ export async function runDevKeychainAdopt(env: NodeJS.ProcessEnv = process.env):
   };
   if (refusal !== undefined) fatal(refusal);
   if (!keychainUnlocked(null)) fatal("the default keychain is locked");
+  const lockRefusal = adoptLockRefusal(home, process.ppid);
+  if (lockRefusal !== undefined) fatal(lockRefusal);
+  const self = realExecutable();
+  const requirement = codeSigningFacts(self, 2_000).requirement ?? `path ${self}`;
   const kc: CredentialKeychain = { keychain: null, service, log: (line) => process.stderr.write(`${line}\n`) };
   let access: KeychainAccess;
   try {
@@ -223,7 +259,7 @@ export async function runDevKeychainAdopt(env: NodeJS.ProcessEnv = process.env):
   } catch (err) {
     return fatal(`the access list could not be built (${describe(err)})`);
   }
-  const handle = createAdoptHandler(kc, access, home);
+  const handle = createAdoptHandler(kc, access, home, requirement);
   await serveAdoptRequests(handle, process.stdin, (line) => process.stdout.write(line));
   access.release();
   // As `workflows/subprocess-entry.ts` does: let the last response line flush before the process ends.
@@ -264,7 +300,7 @@ export function spawnAdoptChild(command: { file: string; args: string[] }, env: 
   const waiting: Array<(r: AdoptResponse) => void> = [];
   let buf = "";
   let exited = false;
-  const exit = new Promise<number | null>((resolve) => child.on("close", (code) => { exited = true; for (const w of waiting.splice(0)) w({ ok: false, reason: `the child exited (${code ?? "signal"})` }); resolve(code); }));
+  const exit = new Promise<number | null>((resolve) => child.on("close", (code) => { exited = true; for (const w of waiting.splice(0)) w({ ok: false, reason: `the child exited (${code ?? "signal"})`, fatal: true }); resolve(code); }));
   child.stdout!.on("data", (d: Buffer) => {
     buf += d.toString("utf8");
     let i: number;
@@ -273,20 +309,20 @@ export function spawnAdoptChild(command: { file: string; args: string[] }, env: 
       buf = buf.slice(i + 1);
       if (!line.trim()) continue;
       let r: AdoptResponse;
-      try { r = JSON.parse(line) as AdoptResponse; } catch { r = { ok: false, reason: "unparsable response" }; }
+      try { r = JSON.parse(line) as AdoptResponse; } catch { r = { ok: false, reason: "unparsable response", fatal: true }; }
       waiting.shift()?.(r);
     }
   });
   return {
     send: (req) => new Promise((resolve) => {
-      if (exited) return resolve({ ok: false, reason: "the child has exited" });
+      if (exited) return resolve({ ok: false, reason: "the child has exited", fatal: true });
       // A child that stops answering must not hold the home's lock forever: time out, and kill it so no
       // later response can be paired with the wrong request.
       const timer = setTimeout(() => {
         const at = waiting.indexOf(answer);
         if (at >= 0) waiting.splice(at, 1);
         try { child.kill("SIGKILL"); } catch { /* gone */ }
-        resolve({ ok: false, reason: `no answer to ${req.op} within ${timeoutMs} ms` });
+        resolve({ ok: false, reason: `no answer to ${req.op} within ${timeoutMs} ms`, fatal: true });
       }, timeoutMs);
       const answer = (r: AdoptResponse): void => { clearTimeout(timer); resolve(r); };
       waiting.push(answer);
@@ -300,14 +336,23 @@ export function spawnAdoptChild(command: { file: string; args: string[] }, env: 
 }
 
 /**
- * The whole transition, as `scripts/dev-daemon.ts --transition` runs it: guards, the home's daemon lock (a
- * live dev daemon refuses it), the child, the run. `binary` is the signed compiled `winter-core`.
+ * The whole transition, as `scripts/dev-daemon.ts --transition` runs it: guards, the home's credential
+ * migration lock (pid liveness: a daemon mid-boot refuses it too) and its boot lock (a running dev daemon
+ * refuses it), the child, the run. `binary` is the signed compiled `winter-core`.
  */
 export async function transitionDevKeychain(input: { binary: string; home: string; env: NodeJS.ProcessEnv; log: (line: string) => void }): Promise<DevTransitionOutcome> {
   const refusal = devTransitionRefusal({ profile: resolveWinterProfile(input.env), home: input.home, service: DEV_KEYCHAIN_SERVICE });
   if (refusal !== undefined) throw new Error(refusal);
   if (!keychainUnlocked(null)) throw new Error("the default keychain is locked — unlock it and run again");
-  const lock = await acquireLock(join(input.home, "run", "core.lock"), join(input.home, "run", "core.sock"));
+  const migrationLock = acquireCredentialMigrationLock(input.home);
+  if ("heldBy" in migrationLock) throw new Error(`pid ${migrationLock.heldBy} holds the credential migration lock (a dev daemon booting, or another transition) — wait for it and run again`);
+  let lock;
+  try {
+    lock = await acquireLock(join(input.home, "run", "core.lock"), join(input.home, "run", "core.sock"));
+  } catch (err) {
+    migrationLock.release();
+    throw err;
+  }
   try {
     const child = spawnAdoptChild({ file: input.binary, args: [DEV_KEYCHAIN_ADOPT_ARG] }, input.env);
     try {
@@ -317,5 +362,6 @@ export async function transitionDevKeychain(input: { binary: string; home: strin
     }
   } finally {
     lock.release();
+    migrationLock.release();
   }
 }

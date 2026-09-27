@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { DEV_DAEMON_IDENTIFIER, devCompileCommand, devDaemonHome, resolveDevSigningIdentity, signedFacts } from "./dev-daemon-lib";
+import { designatedRequirementOf, DEV_DAEMON_IDENTIFIER, devCompileCommand, devDaemonHome, devDaemonRequirement, resolveDevSigningIdentity, signedFacts } from "./dev-daemon-lib";
 
 const TEAM = "37N77U9RSZ";
 const IDENTITIES = `  1) ${"A".repeat(40)} "Apple Development: someone@example.invalid (AAAAAAAAAA)"
@@ -41,6 +41,12 @@ describe("the dev daemon's build and home", () => {
     expect(devDaemonHome({}, "/Users/u")).toBe("/Users/u/.winter-dev");
     expect(devDaemonHome({ WINTER_HOME: "/tmp/h" }, "/Users/u")).toBe("/tmp/h");
     expect(() => devDaemonHome({ WINTER_HOME: "/Users/u/.winter/" }, "/Users/u")).toThrow("dist home");
+  });
+
+  test("the stated designated requirement: identifier + Winter's team under Apple's anchor, never a certificate's name; and how codesign prints it back", () => {
+    expect(devDaemonRequirement(TEAM)).toBe(`identifier "com.winter.core.dev" and anchor apple generic and certificate leaf[subject.OU] = "${TEAM}"`);
+    expect(designatedRequirementOf(`Executable=/x\ndesignated => ${devDaemonRequirement(TEAM)}\n`)).toBe(devDaemonRequirement(TEAM));
+    expect(designatedRequirementOf("# no requirement\n")).toBeUndefined();
   });
 
   test("the signature facts the build insists on", () => {
