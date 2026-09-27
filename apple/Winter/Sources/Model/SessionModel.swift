@@ -88,12 +88,16 @@ enum PendingInteraction: Equatable {
     case approval(callId: String, toolName: String, summary: String, reviewerReason: String? = nil, childSessionId: String? = nil, options: [SessionEvent.ApprovalOption]? = nil)
     case question(callId: String, questions: [SessionEvent.Question], childSessionId: String? = nil)
     case plan(callId: String, plan: String)
+    /// WS-27: an MCP server's URL-mode elicitation — "open this link". `callId` is the wire's
+    /// `elicitationId`; `url` is always https (the daemon declines anything else without a card).
+    case urlElicitation(callId: String, serverName: String, message: String, url: String, host: String)
 
     var callId: String {
         switch self {
         case .approval(let callId, _, _, _, _, _): return callId
         case .question(let callId, _, _): return callId
         case .plan(let callId, _): return callId
+        case .urlElicitation(let callId, _, _, _, _): return callId
         }
     }
 }
@@ -119,6 +123,8 @@ struct InteractionRecord: Equatable {
         case approval(toolName: String, summary: String, reviewerReason: String? = nil, options: [SessionEvent.ApprovalOption]? = nil)
         case question(questions: [SessionEvent.Question])
         case plan(plan: String)
+        /// WS-27: `elicitation_requested` — an MCP server asked the user to open a link.
+        case urlElicitation(serverName: String, message: String, url: String, host: String)
     }
 
     /// How the ask ended. `nil` on the record means STILL PENDING, and that is the single source of
@@ -157,6 +163,9 @@ struct InteractionRecord: Equatable {
         case question(answers: [String: String], notes: [String: String], by: String)
         /// `plan_resolved`.
         case plan(approved: Bool, autoAccept: Bool, feedback: String?, by: String)
+        /// WS-27: `elicitation_resolved` — `action` is `"accept"` (the user opened the link),
+        /// `"decline"`, or the daemon's own `"cancel"` (the turn or session ended, or it timed out).
+        case elicitation(action: String, by: String)
         /// The turn ended (`turn_completed`/`agent_error`) while this ask was still outstanding, so
         /// no `*_resolved` will ever arrive for it. Terminal, and deliberately NOT an outcome: the
         /// card freezes saying nothing was recorded rather than claiming a decision nobody made.
@@ -189,6 +198,7 @@ struct InteractionRecord: Equatable {
         case .approval(_, let summary, _, _): return summary
         case .question(let questions): return questions.first?.question ?? "question"
         case .plan: return "plan presented"
+        case .urlElicitation(let serverName, _, _, let host): return "\(serverName) asks to open \(host)"
         }
     }
 }
@@ -669,6 +679,17 @@ enum SessionReducer {
         case .planPresented(let v) where v.threadId == mainThread:
             appendPending(.plan(callId: v.callId, plan: v.plan), to: &s)
             appendInteraction(InteractionRecord(callId: v.callId, ask: .plan(plan: v.plan)), to: &s)
+        case .elicitationRequested(let v) where v.threadId == mainThread:
+            // WS-27: keyed by `elicitationId` in the same callId space — the daemon mints it
+            // (`el_<uuid>`), so it cannot collide with a tool call's id.
+            appendPending(.urlElicitation(callId: v.elicitationId, serverName: v.serverName, message: v.message, url: v.url, host: v.host), to: &s)
+            appendInteraction(InteractionRecord(
+                callId: v.elicitationId,
+                ask: .urlElicitation(serverName: v.serverName, message: v.message, url: v.url, host: v.host)
+            ), to: &s)
+        case .elicitationResolved(let v):
+            s = resolvePending(s, callId: v.elicitationId)
+            foldInteractionOutcome(&s, callId: v.elicitationId, outcome: .elicitation(action: v.action, by: v.by))
         case .approvalResolved(let v):
             s = resolvePending(s, callId: v.callId)
             foldInteractionOutcome(&s, callId: v.callId, outcome: .approval(approved: v.approved, by: v.by))

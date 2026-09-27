@@ -3393,6 +3393,13 @@ final class ShellSessionHost: ObservableObject {
                 if !ok { adapter?.interactionErrors[callId] = "couldn't send — try again" }
             }
         }
+        // WS-27: a URL-mode elicitation card — `answerElicitation` opens the link, then this sends.
+        adapter.onElicitationRespond = { [weak self, weak adapter] elicitationId, accept, url in
+            adapter?.answerElicitation(elicitationId, accept: accept, url: url) { accept in
+                guard let sid = self?.attachedSessionId else { return false }
+                return (try? await client.elicitationRespond(sessionId: sid, elicitationId: elicitationId, accept: accept)) != nil
+            }
+        }
         adapter.onQuestionRespond = { [weak self, weak adapter] callId, answers, notes, childSessionId in
             guard let adapter else { return }
             adapter.interactionInFlight.insert(callId)

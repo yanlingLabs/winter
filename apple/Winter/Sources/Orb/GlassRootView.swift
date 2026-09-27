@@ -68,6 +68,12 @@ struct GlassRootView: View {
                 if !ok { adapter.interactionErrors[callId] = "couldn't send — try again" }
             }
         }
+        // WS-27: a URL-mode elicitation card — `answerElicitation` opens the link, then this sends.
+        adapter.onElicitationRespond = { [adapter, controller] elicitationId, accept, url in
+            adapter.answerElicitation(elicitationId, accept: accept, url: url) { accept in
+                await controller.onElicitationRespond?(elicitationId, accept) ?? false
+            }
+        }
         adapter.onQuestionRespond = { [adapter, controller] callId, answers, notes, childSessionId in
             adapter.interactionInFlight.insert(callId)
             adapter.interactionErrors[callId] = nil
