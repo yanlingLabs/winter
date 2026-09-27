@@ -29,27 +29,33 @@ function tempHome(): string {
 
 describe("parseMcpPermissionsArgs", () => {
   test("list, one action, a verb for one action, a verb for every action", () => {
-    expect(parseMcpPermissionsArgs(["cf"])).toEqual({ kind: "ok", parsed: { server: "cf", reset: false } });
-    expect(parseMcpPermissionsArgs(["cf", "workers_list"])).toEqual({ kind: "ok", parsed: { server: "cf", tool: "workers_list", reset: false } });
-    expect(parseMcpPermissionsArgs(["cf", "workers_list", "deny"])).toEqual({ kind: "ok", parsed: { server: "cf", tool: "workers_list", verb: "deny", reset: false } });
-    expect(parseMcpPermissionsArgs(["cf", "ask"])).toEqual({ kind: "ok", parsed: { server: "cf", tool: "*", verb: "ask", reset: false } });
-    expect(parseMcpPermissionsArgs(["cf", "*", "deny", "--reset"])).toEqual({ kind: "ok", parsed: { server: "cf", tool: "*", verb: "deny", reset: true } });
+    expect(parseMcpPermissionsArgs(["cf"])).toEqual({ kind: "ok", parsed: { server: "cf" } });
+    expect(parseMcpPermissionsArgs(["cf", "workers_list"])).toEqual({ kind: "ok", parsed: { server: "cf", tool: "workers_list" } });
+    expect(parseMcpPermissionsArgs(["cf", "workers_list", "deny"])).toEqual({ kind: "ok", parsed: { server: "cf", tool: "workers_list", verb: "deny" } });
+    expect(parseMcpPermissionsArgs(["cf", "ask"])).toEqual({ kind: "ok", parsed: { server: "cf", tool: "*", verb: "ask" } });
+    expect(parseMcpPermissionsArgs(["cf", "*", "deny"])).toEqual({ kind: "ok", parsed: { server: "cf", tool: "*", verb: "deny" } });
   });
 
-  test("usage errors: nothing, too much, an unknown verb, an unknown flag, --reset on one action", () => {
-    for (const args of [[], ["a", "b", "c", "d"], ["cf", "x", "always"], ["cf", "-y"], ["cf", "x", "deny", "--reset"], ["cf", "--reset"]]) {
+  test("usage errors: nothing, too much, an unknown verb, any flag", () => {
+    for (const args of [[], ["a", "b", "c", "d"], ["cf", "x", "always"], ["cf", "-y"], ["cf", "*", "deny", "--reset"]]) {
       expect(parseMcpPermissionsArgs(args).kind).toBe("usageError");
     }
   });
 });
 
 describe("through the daemon", () => {
-  test("a set goes to mcp.setToolPermission, non-interactively", async () => {
+  test("a server-wide value clears per-action values (as the Mac's All actions does) and says so; one action does not", async () => {
     const door = scriptedDoor(() => ({ ok: true }));
-    const out = await runMcpPermissionsRoute(["cf", "deny", "--reset"], { door, winterHome: "/nowhere", cwd: "/work" });
+    const out = await runMcpPermissionsRoute(["cf", "deny"], { door, winterHome: "/nowhere", cwd: "/work" });
     expect(door.calls).toEqual([{ method: METHODS.mcpSetToolPermission, params: { server: "cf", tool: "*", permission: "deny", resetTools: true } }]);
     expect(out).toEqual({ ok: true, kind: "set", via: "daemon", server: "cf", tool: "*", permission: "deny", reset: true });
     expect(renderMcpPermissionsOutcome(out)).toContain("every action of cf: Always deny (per-action values cleared)");
+    await runMcpPermissionsRoute(["cf", "x", "allow"], { door, winterHome: "/nowhere", cwd: "/work" });
+    expect(door.calls[1]).toEqual({ method: METHODS.mcpSetToolPermission, params: { server: "cf", tool: "x", permission: "allow" } });
+    // Clearing the server-wide value leaves the per-action values alone, and says what then applies.
+    const cleared = await runMcpPermissionsRoute(["cf", "*", "default"], { door, winterHome: "/nowhere", cwd: "/work" });
+    expect(door.calls[2]).toEqual({ method: METHODS.mcpSetToolPermission, params: { server: "cf", tool: "*", permission: "default" } });
+    expect(renderMcpPermissionsOutcome(cleared)).toContain("cf's all-actions value cleared — each action follows its own value");
   });
 
   test("a list renders each action with what applies and why", async () => {
@@ -80,14 +86,15 @@ describe("with no daemon", () => {
   test("a set writes settings.json with the daemon's own transform; a list shows the stored values only", async () => {
     const home = tempHome();
     expect((await runMcpPermissionsRoute(["cf", "workers_delete", "deny"], { winterHome: home, cwd: "/work" })).ok).toBe(true);
-    expect((await runMcpPermissionsRoute(["cf", "ask"], { winterHome: home, cwd: "/work" })).ok).toBe(true);
-    expect(JSON.parse(readFileSync(join(home, "settings.json"), "utf8")).mcp.toolPermissions).toEqual({ cf: { workers_delete: "deny", "*": "ask" } });
+    expect(JSON.parse(readFileSync(join(home, "settings.json"), "utf8")).mcp.toolPermissions).toEqual({ cf: { workers_delete: "deny" } });
+    expect((await runMcpPermissionsRoute(["gh", "ask"], { winterHome: home, cwd: "/work" })).ok).toBe(true);
+    expect(JSON.parse(readFileSync(join(home, "settings.json"), "utf8")).mcp.toolPermissions).toEqual({ cf: { workers_delete: "deny" }, gh: { "*": "ask" } });
     const list = await runMcpPermissionsRoute(["cf"], { winterHome: home, cwd: "/work" });
     const text = renderMcpPermissionsOutcome(list);
     expect(text).toContain("no daemon running");
     expect(text).toContain("workers_delete  deny  — set for this action");
-    await runMcpPermissionsRoute(["cf", "workers_delete", "default"], { winterHome: home, cwd: "/work" });
-    expect(JSON.parse(readFileSync(join(home, "settings.json"), "utf8")).mcp.toolPermissions).toEqual({ cf: { "*": "ask" } });
+    await runMcpPermissionsRoute(["cf", "deny"], { winterHome: home, cwd: "/work" });
+    expect(JSON.parse(readFileSync(join(home, "settings.json"), "utf8")).mcp.toolPermissions).toEqual({ cf: { "*": "deny" }, gh: { "*": "ask" } });
   });
 
   test("Winter's own namespace is refused here too", async () => {

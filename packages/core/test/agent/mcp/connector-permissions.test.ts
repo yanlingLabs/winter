@@ -12,10 +12,10 @@ import { sessionHooksFor } from "../../../src/runtime-sdk/hooks";
 import { McpManager } from "../../../src/agent/mcp/manager";
 import type { TrustStore } from "../../../src/agent/trust";
 import {
-  connectorFactsFor, connectorSettingFor, connectorVerdict, isConnectorToolName, normalizeConnectorTable,
+  connectorCandidates, connectorFactsFor, connectorSettingFor, connectorVerdict, isConnectorToolName, normalizeConnectorTable,
   parseConnectorToolName, sdkRulesFor, type ConnectorPermission, type ConnectorPermissionSource, type ConnectorPermissionTable,
 } from "../../../src/agent/mcp/connector-permissions";
-import { connectorPermissionTable, setConnectorToolPermission, type Settings } from "../../../src/settings";
+import { Settings, connectorPermissionTable, setConnectorToolPermission } from "../../../src/settings";
 import type { Mode as SessionMode } from "../../../src/agent/tools/registry";
 
 const silent: BridgeLogger = { info: () => {}, error: () => {} };
@@ -24,6 +24,8 @@ describe("the connector predicate", () => {
   test("a user server's tool is a connector action; the daemon's capability tools and built-ins are not", () => {
     expect(parseConnectorToolName("mcp__cf__workers_list")).toEqual({ server: "cf", tool: "workers_list" });
     expect(parseConnectorToolName("mcp__gh__create__issue")).toEqual({ server: "gh", tool: "create__issue" });
+    expect(connectorCandidates("mcp__cf__prod__delete_worker")).toEqual([{ server: "cf", tool: "prod__delete_worker" }, { server: "cf__prod", tool: "delete_worker" }]);
+    expect(connectorCandidates("mcp__winter__x__y")).toEqual([]);
     for (const name of ["mcp__winter__research__Search", "mcp__winter__external__battery", "mcp__winter__x", "plugin__battery__status", "Bash", "WebFetch", "mcp__", "mcp__cf", "mcp__cf__", "mcp____x"]) {
       expect(isConnectorToolName(name)).toBe(false);
     }
@@ -39,13 +41,19 @@ describe("the stored table", () => {
     expect(connectorSettingFor(t, "toString", "x")).toBeUndefined();
   });
 
-  test("an unrecognised stored value reads as ask — never as unset, never a crash", () => {
-    expect(normalizeConnectorTable({ cf: { a: "Deny", b: 3, c: "allow" }, bad: "x", arr: [] })).toEqual({ cf: { a: "ask", b: "ask", c: "allow" } });
+  test("an unrecognised stored value reads as ask; a row that is not an object reads as all-actions ask — never unset, never a crash", () => {
+    expect(normalizeConnectorTable({ cf: { a: "Deny", b: 3, c: "allow" }, bad: "deny", arr: [] })).toEqual({ cf: { a: "ask", b: "ask", c: "allow" }, bad: { "*": "ask" }, arr: { "*": "ask" } });
     expect(normalizeConnectorTable(undefined)).toEqual({});
   });
 
+  test("review r1 minor 3: a hand-edited `\"cf\": \"deny\"` row does not reject the settings file, and a write replaces it", () => {
+    const parsed = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" }, mcp: { toolPermissions: { cf: "deny", gh: { x: "allow" } } } });
+    expect(connectorPermissionTable(parsed)).toEqual({ cf: { "*": "ask" }, gh: { x: "allow" } });
+    expect(connectorPermissionTable(setConnectorToolPermission(parsed, "cf", "x", "deny"))).toEqual({ cf: { x: "deny" }, gh: { x: "allow" } });
+  });
+
   test("setConnectorToolPermission writes, clears to default, and resets a server's actions with `*`", () => {
-    const base = { schemaVersion: 3, provider: {} } as unknown as Settings;
+    const base = { schemaVersion: 3, provider: {} } as unknown as Settings;  // a bare value, as the transform sees it
     let s = setConnectorToolPermission(base, "cf", "workers_list", "allow");
     s = setConnectorToolPermission(s, "cf", "d1_delete", "deny");
     expect(connectorPermissionTable(s)).toEqual({ cf: { workers_list: "allow", d1_delete: "deny" } });
@@ -357,4 +365,75 @@ test("connectorFactsFor reads the table and the probe live, and ignores non-conn
   expect(connectorFactsFor(source, "mcp__cf__a")).toEqual({ server: "cf", tool: "a", setting: "ask", settingSource: "server", readOnly: true });
   expect(connectorFactsFor(source, "mcp__cf__b")).toEqual({ server: "cf", tool: "b", setting: "ask", settingSource: "server", readOnly: false });
   expect(connectorFactsFor(source, "Bash")).toBeUndefined();
+});
+
+
+// ── review r1, CRITICAL 1: a `__` inside a server name ──────────────────────────────────────────────────
+
+describe("a server name containing `__` (every split is weighed)", () => {
+  const DEL = "mcp__cf__prod__delete_worker";
+
+  test("a stored deny on cf__prod binds its tool — under bypass, with nothing probed", async () => {
+    const session: Session = { label: "bypass", mode: "code", policy: "bypass" };
+    const source = liveSource({ cf__prod: { delete_worker: "deny" } });
+    expect(connectorFactsFor(source, DEL)).toMatchObject({ server: "cf__prod", tool: "delete_worker", setting: "deny" });
+    expect(await childDecides(session, connectorHookOf(session, source), bridgeOf(session, source), DEL, { allowRule: true })).toBe("deny");
+    // …and a server-wide deny on cf__prod too.
+    expect(connectorFactsFor(liveSource({ cf__prod: { "*": "deny" } }), DEL)?.setting).toBe("deny");
+  });
+
+  test("`cf` + `cf__prod` overlap: the strictest wins; an unconfirmed server's blanket allow never allows", () => {
+    // cf's "*" deny also covers cf__prod's tools (over-strict at worst, never a silent run).
+    expect(connectorFactsFor(liveSource({ cf: { "*": "deny" } }, { "cf__prod/delete_worker": true }), DEL)?.setting).toBe("deny");
+    // cf's "*" allow, nothing probed: ambiguous — the allow is not applied (the default decides: toward ask).
+    expect(connectorFactsFor(liveSource({ cf: { "*": "allow" } }), DEL)?.setting).toBeUndefined();
+    // cf's "*" allow, cf__prod listed and unset: the default outranks the allow.
+    const both = connectorFactsFor(liveSource({ cf: { "*": "allow" } }, { "cf__prod/delete_worker": false }), DEL);
+    expect(both).toMatchObject({ server: "cf__prod", readOnly: false });
+    expect(both?.setting).toBeUndefined();
+    // an allow naming the tool exactly counts even unprobed; a deny elsewhere still beats it.
+    expect(connectorFactsFor(liveSource({ cf__prod: { delete_worker: "allow" } }), DEL)?.setting).toBe("allow");
+    expect(connectorFactsFor(liveSource({ cf__prod: { delete_worker: "allow" }, cf: { prod__delete_worker: "ask" } }), DEL)?.setting).toBe("ask");
+  });
+
+  test("read-only only from a candidate whose listing names the tool, and only if every such listing says so", () => {
+    expect(connectorFactsFor(liveSource({}, { "cf__prod/delete_worker": true }), DEL)?.readOnly).toBe(true);
+    expect(connectorFactsFor(liveSource({}, { "cf__prod/delete_worker": true, "cf/prod__delete_worker": false }), DEL)?.readOnly).toBe(false);
+    expect(connectorFactsFor(liveSource({}, {}), DEL)?.readOnly).toBe(false);
+  });
+
+  test("a chat session cards an unset cf__prod action and allows it unasked once its listing marks it read-only", async () => {
+    const session: Session = { label: "chat", mode: "chat", policy: "chat" };
+    const source = liveSource({}, {});
+    const hook = connectorHookOf(session, source);
+    const bridge = bridgeOf(session, source);
+    expect(await childDecides(session, hook, bridge, DEL, { id: "p1" })).toBe("card");
+    const ro = liveSource({}, { "cf__prod/delete_worker": true });
+    expect(await childDecides(session, connectorHookOf(session, ro), bridgeOf(session, ro), DEL, { id: "p2" })).toBe("allow");
+  });
+});
+
+// ── review r1, IMPORTANT 2: the bridge never turns a forced prompt into a silent allow ───────────────────
+
+describe("a prompt another layer forced is never answered by a connector allow", () => {
+  test("code/ask, an unset read-only action that still reaches canUseTool (an sdk ask rule, a plugin ask) cards", async () => {
+    const bridge = bridgeOf({ label: "code", mode: "code", policy: "ask" }, liveSource({}, { "cf/workers_list": true }));
+    const pending = bridge.canUse(TOOL, {}, { ...ctx("f1"), matchedAskRule: { source: "userSettings", toolName: TOOL } } as Parameters<CanUseTool>[2]);
+    expect(bridge.events.some((e) => e.type === "approval_requested")).toBe(true);
+    bridge.approvals.resolve("s_1", "f1", false, "user");
+    await pending;
+    // …and with no ask rule at all: the gate's own `ask` verdict stands (the hook, not the bridge, allows).
+    const again = bridge.canUse(TOOL, {}, ctx("f2"));
+    expect(bridge.events.filter((e) => e.type === "approval_requested")).toHaveLength(2);
+    bridge.approvals.resolve("s_1", "f2", false, "user");
+    await again;
+  });
+
+  test("chat: a stored allow that still reaches the bridge cards (the gate's chat answer), never a silent run", async () => {
+    const bridge = bridgeOf({ label: "chat", mode: "chat", policy: "chat" }, liveSource({ cf: { workers_list: "allow" } }));
+    const pending = bridge.canUse(TOOL, {}, ctx("f3"));
+    expect(bridge.events.some((e) => e.type === "approval_requested")).toBe(true);
+    bridge.approvals.resolve("s_1", "f3", true, "user");
+    expect(((await pending) as PermissionResult).behavior).toBe("allow");
+  });
 });

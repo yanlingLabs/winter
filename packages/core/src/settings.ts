@@ -406,10 +406,11 @@ export const Settings = z.object({
     disabled: z.array(z.string()).optional(),
     /** WS-26: connector permissions — server → (tool | `"*"`) → `"allow"|"ask"|"deny"`, read live by the
      *  connector-permission hook and the approval bridge (`agent/mcp/connector-permissions.ts` has the
-     *  store's reasoning and the matrix). Typed LOOSELY on purpose, like `plugins.consents`: one mistyped
-     *  value must not roll the whole settings file back to keep-last-good. The one reader,
-     *  `connectorPermissionTable`, reads an unrecognised value as `"ask"`. */
-    toolPermissions: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
+     *  store's reasoning and the matrix). Typed LOOSELY on purpose, like `plugins.consents` — down to the
+     *  row (`"cf": "deny"` must not roll the whole settings file back to keep-last-good, nor refuse boot).
+     *  The one reader, `connectorPermissionTable`, reads an unrecognised value as `"ask"` and a row that is
+     *  not an object as `{"*": "ask"}`. */
+    toolPermissions: z.record(z.string(), z.unknown()).optional(),
   }).optional(),
   reviewer: z.object({
     enabled: z.boolean().optional(),
@@ -1131,8 +1132,11 @@ export function connectorPermissionTable(settings: Settings | null | undefined):
  * added is a legitimate pre-emptive choice.
  */
 export function setConnectorToolPermission(settings: Settings, server: string, tool: string, permission: ConnectorPermission | undefined, opts: { resetTools?: boolean } = {}): Settings {
-  const table = { ...(settings.mcp?.toolPermissions ?? {}) } as Record<string, Record<string, unknown>>;
-  const row: Record<string, unknown> = opts.resetTools === true && tool === CONNECTOR_ALL_TOOLS ? {} : { ...(Object.hasOwn(table, server) ? table[server] : {}) };
+  const table = { ...(settings.mcp?.toolPermissions ?? {}) } as Record<string, unknown>;
+  const existing = Object.hasOwn(table, server) ? table[server] : undefined;
+  // A hand-edited row that is not an object is replaced, never spread (a string would spread into indices).
+  const base = existing !== null && typeof existing === "object" && !Array.isArray(existing) ? existing as Record<string, unknown> : {};
+  const row: Record<string, unknown> = opts.resetTools === true && tool === CONNECTOR_ALL_TOOLS ? {} : { ...base };
   if (permission === undefined) delete row[tool];
   else row[tool] = permission;
   if (Object.keys(row).length === 0) delete table[server];

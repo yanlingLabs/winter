@@ -14,6 +14,7 @@ import { TokenAuthority } from "../../src/auth/tokens";
 import { Settings, saveSettings } from "../../src/settings";
 import { McpManager } from "../../src/agent/mcp/manager";
 import { TrustStore } from "../../src/agent/trust";
+import type { ConnectorPermissionSource } from "../../src/agent/mcp/connector-permissions";
 
 class TestClient {
   private decoder = new LineDecoder();
@@ -66,7 +67,7 @@ describe("mcp.tools / mcp.setToolPermission", () => {
   let stop: (() => void) | undefined;
   afterEach(() => { stop?.(); stop = undefined; });
 
-  async function boot(opts: { settings?: Record<string, unknown>; sdkSettings?: Record<string, unknown> } = {}) {
+  async function boot(opts: { settings?: Record<string, unknown>; sdkSettings?: Record<string, unknown>; connectorPermissions?: ConnectorPermissionSource } = {}) {
     const home = mkdtempSync(join(tmpdir(), "winter-mcp-tools-"));
     saveSettings(join(home, "settings.json"), Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" }, ...opts.settings }));
     mkdirSync(join(home, "sdk"), { recursive: true });
@@ -84,7 +85,7 @@ describe("mcp.tools / mcp.setToolPermission", () => {
     const authority = new TokenAuthority(secrets);
     const tokens = await authority.ensureTokens();
     const saved: unknown[] = [];
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets, mcp, onConnectorPermissionsSaved: (next) => { saved.push(next.mcp?.toolPermissions); } });
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets, mcp, onConnectorPermissionsSaved: (next) => { saved.push(next.mcp?.toolPermissions); }, ...(opts.connectorPermissions ? { connectorPermissions: opts.connectorPermissions } : {}) });
     stop = () => { server.stop(); store.close(); };
     const c = await TestClient.connect(socketPath);
     await c.hello(tokens.harness, "cli");
@@ -167,6 +168,16 @@ describe("mcp.tools / mcp.setToolPermission", () => {
       expect(r.error?.code).toBe(-32602);
     }
     expect(JSON.parse(readFileSync(join(home, "settings.json"), "utf8")).mcp?.toolPermissions).toBeUndefined();
+    c.close();
+  });
+
+  test("review r1 minor 4: mcp.tools reports what enforcement reads — the daemon's live table and its scope-aware read-only answers", async () => {
+    // Disk says nothing; the live source (what the hook and the bridge decide on) says deny, and read-only false.
+    const live: ConnectorPermissionSource = { table: () => ({ cf: { workers_list: "deny" } }), readOnly: () => false };
+    const { c } = await boot({ connectorPermissions: live });
+    const tools = (await c.request(METHODS.mcpTools, { server: "cf" })).result.servers[0].tools;
+    expect(tools.find((t: { name: string }) => t.name === "workers_list")).toMatchObject({ setting: "deny", permission: "deny", source: "tool", readOnly: false });
+    expect(tools.find((t: { name: string }) => t.name === "kv_put")).toMatchObject({ permission: "ask", source: "default" });
     c.close();
   });
 
