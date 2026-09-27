@@ -40,7 +40,7 @@ import { join } from "node:path";
 import { acquireLock } from "../lock";
 import { resolveWinterProfile, type WinterProfile } from "../profile";
 import { codeSigningFacts, realExecutable } from "./app-token-acl";
-import { acquireCredentialMigrationLock, credentialMigrationLockHolder } from "./credential-migration-lock";
+import { acquireCredentialMigrationLock, credentialMigrationLockHolder, processStartSeconds } from "./credential-migration-lock";
 import { isDefaultWinterHome } from "../winter-dir";
 import { APP_TOKEN_SHADOW_SUFFIX } from "./app-token-acl";
 import { isCredentialAccount, putBack, readStoredValue, recoverCredentialShadows, REAL_CREDENTIAL_KEYCHAIN_OPS, sameBytes, writeCredentialAclMarker, type CredentialKeychain } from "./credential-acl";
@@ -244,17 +244,25 @@ export function oldCreatorStillOwnsItems(kc: CredentialKeychain): boolean {
 }
 
 /** The transition refuses while `core.lock` names ANY live process — answering socket or not (a daemon
- *  mid-boot has none yet). */
-export function bootLockHolderRefusal(home: string): string | undefined {
-  let pid: unknown;
-  try { pid = (JSON.parse(readFileSync(join(home, "run", "core.lock"), "utf8")) as { pid?: unknown }).pid; } catch { return undefined; }
+ *  mid-boot has none yet). `core.lock` records when it was written (`startedAt`, after its writer started),
+ *  so a live pid whose process STARTED later than that is a reused pid, and the lock is stale. */
+export function bootLockHolderRefusal(home: string, startOf: (pid: number) => number | undefined = processStartSeconds): string | undefined {
+  const path = join(home, "run", "core.lock");
+  let record: { pid?: unknown; startedAt?: unknown };
+  try { record = JSON.parse(readFileSync(path, "utf8")) as typeof record; } catch { return undefined; }
+  const pid = record.pid;
   if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0 || pid === process.pid) return undefined;
   try {
     process.kill(pid, 0);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "EPERM") return undefined;
   }
-  return `pid ${pid} holds ${join(home, "run", "core.lock")} (a dev daemon running or booting) — stop it and run again`;
+  if (typeof record.startedAt === "number") {
+    const started = startOf(pid);
+    // One second of slack for the two clocks' rounding.
+    if (started !== undefined && started > Math.floor(record.startedAt / 1000) + 1) return undefined;
+  }
+  return `pid ${pid} holds ${path} (a dev daemon running or booting) — stop it and run again, or remove run/core.lock if no dev daemon is running`;
 }
 
 /** The child acts only while the orchestrator — its PARENT — holds the home's credential migration lock. */

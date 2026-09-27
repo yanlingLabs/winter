@@ -4,8 +4,9 @@
 // stale, and a booting daemon has no socket until well after its Keychain work — so a second daemon (or a
 // transition, which never listens at all) could run recovery and drop a shadow that a first one's in-flight
 // migration still needs. This lock is judged on the HOLDER PROCESS alone: an exclusive file
-// `<home>/run/credential-migration.lock` naming its holder's pid AND that process's start time
-// (`ps -o lstart=`), stale exactly when that pid is gone or now belongs to a process started at another time
+// `<home>/run/credential-migration.lock` naming its holder's pid AND that process's start time, in epoch
+// SECONDS (`kern.proc.pid`'s `p_starttime` through sysctl; `ps` under `LC_ALL=C TZ=UTC` only as a fallback —
+// never a formatted date, which varies with the reader's locale and zone), stale exactly when that pid is gone or now belongs to a process started at another time
 // (a reused pid). It is created ATOMICALLY with its content (written to a temp file, then `link`ed into
 // place), so a reader never sees it empty; an unreadable one younger than `UNREADABLE_GRACE_MS` is taken to
 // be held. A file naming THIS pid is stale unless this process took it (a previous process with our pid).
@@ -13,6 +14,7 @@
 // Held around: the daemon's early restore pass through its credential migration and the pairing-token
 // passes (a daemon that finds it held WAITS, bounded, then refuses to boot — `waitForCredentialMigrationLock`);
 // the dev transition's whole run (the adopt child checks its PARENT holds it before acting).
+import { dlopen, FFIType, ptr } from "bun:ffi";
 import { spawnSync } from "node:child_process";
 import { linkSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -43,23 +45,61 @@ function alive(pid: number): boolean {
   }
 }
 
-/** A process's start time as `ps` prints it (`lstart`), or `undefined` when it cannot be asked. */
-export function processStartTime(pid: number): string | undefined {
-  const r = spawnSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 2_000 });
-  const text = (r.stdout ?? "").trim();
-  return r.status === 0 && text !== "" ? text : undefined;
+type Sysctl = (mib: Int32Array, out: Buffer, len: BigUint64Array) => number;
+let sysctlFn: Sysctl | null | undefined;
+function sysctl(): Sysctl | null {
+  if (sysctlFn !== undefined) return sysctlFn;
+  try {
+    const lib = dlopen("/usr/lib/libSystem.B.dylib", { sysctl: { args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.u64], returns: FFIType.i32 } });
+    sysctlFn = (mib, out, len) => lib.symbols.sysctl(ptr(mib), mib.length, ptr(out), ptr(len), null, 0n);
+  } catch {
+    sysctlFn = null;
+  }
+  return sysctlFn;
+}
+
+/** `kern.proc.pid`'s start time (`kinfo_proc.kp_proc.p_starttime.tv_sec`, the struct's first field —
+ *  measured), or `undefined` when there is no such process or sysctl cannot be reached. */
+export function processStartSecondsViaSysctl(pid: number): number | undefined {
+  if (process.platform !== "darwin") return undefined;
+  const call = sysctl();
+  if (call === null) return undefined;
+  const mib = new Int32Array([1 /* CTL_KERN */, 14 /* KERN_PROC */, 1 /* KERN_PROC_PID */, pid]);
+  const out = Buffer.alloc(1024); // sizeof(struct kinfo_proc) is 648 on arm64 and x86_64
+  const len = new BigUint64Array([BigInt(out.length)]);
+  if (call(mib, out, len) !== 0 || len[0]! < 16n) return undefined;
+  const sec = Number(out.readBigInt64LE(0));
+  return sec > 0 ? sec : undefined;
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** The fallback: `ps -o lstart=` pinned to the C locale and UTC, parsed to epoch seconds. */
+export function processStartSecondsViaPs(pid: number): number | undefined {
+  const r = spawnSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 2_000, env: { ...process.env, LC_ALL: "C", TZ: "UTC" } });
+  const m = /^\w{3}\s+(\w{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})$/.exec((r.stdout ?? "").trim());
+  if (r.status !== 0 || m === null) return undefined;
+  const month = MONTHS.indexOf(m[1]!);
+  if (month < 0) return undefined;
+  return Math.floor(Date.UTC(Number(m[6]), month, Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5])) / 1000);
+}
+
+/** A process's start time in epoch seconds (sysctl, else `ps` in the C locale), or `undefined`. */
+export function processStartSeconds(pid: number): number | undefined {
+  return processStartSecondsViaSysctl(pid) ?? processStartSecondsViaPs(pid);
 }
 
 interface LockRecord {
   pid: number;
-  start?: string;
+  /** The holder's start time, epoch seconds. */
+  startSec?: number;
 }
 
 function readRecord(home: string): LockRecord | undefined {
   try {
-    const parsed = JSON.parse(readFileSync(credentialMigrationLockPath(home), "utf8")) as { pid?: unknown; start?: unknown };
+    const parsed = JSON.parse(readFileSync(credentialMigrationLockPath(home), "utf8")) as { pid?: unknown; startSec?: unknown };
     if (typeof parsed.pid !== "number" || !Number.isInteger(parsed.pid) || parsed.pid <= 0) return undefined;
-    return { pid: parsed.pid, ...(typeof parsed.start === "string" ? { start: parsed.start } : {}) };
+    return { pid: parsed.pid, ...(typeof parsed.startSec === "number" && Number.isInteger(parsed.startSec) ? { startSec: parsed.startSec } : {}) };
   } catch {
     return undefined;
   }
@@ -71,12 +111,12 @@ export function credentialMigrationLockHolder(home: string): number | undefined 
 }
 
 /** Is the process a record names still the one that wrote it? */
-function recordLive(home: string, record: LockRecord, startOf: (pid: number) => string | undefined): boolean {
+function recordLive(home: string, record: LockRecord, startOf: (pid: number) => number | undefined): boolean {
   if (record.pid === process.pid) return takenHere.has(home);
   if (!alive(record.pid)) return false;
-  if (record.start === undefined) return true; // an older record: pid liveness is all there is
+  if (record.startSec === undefined) return true; // no start time recorded: pid liveness is all there is
   const now = startOf(record.pid);
-  return now === undefined || now === record.start; // cannot ask: held (the safe side)
+  return now === undefined || now === record.startSec; // cannot ask: held (the safe side)
 }
 
 /**
@@ -84,12 +124,12 @@ function recordLive(home: string, record: LockRecord, startOf: (pid: number) => 
  * replaced; the create itself is exclusive (`link` fails when the name exists), so two takers cannot both win.
  * `startOf` is injectable for tests.
  */
-export function acquireCredentialMigrationLock(home: string, deps: { startOf?: (pid: number) => string | undefined } = {}): CredentialMigrationLock | { heldBy: number } {
-  const startOf = deps.startOf ?? processStartTime;
+export function acquireCredentialMigrationLock(home: string, deps: { startOf?: (pid: number) => number | undefined } = {}): CredentialMigrationLock | { heldBy: number } {
+  const startOf = deps.startOf ?? processStartSeconds;
   const path = credentialMigrationLockPath(home);
   mkdirSync(join(home, "run"), { recursive: true, mode: 0o700 });
-  const start = startOf(process.pid);
-  const content = JSON.stringify({ pid: process.pid, ...(start !== undefined ? { start } : {}), startedAt: Date.now() });
+  const startSec = startOf(process.pid);
+  const content = JSON.stringify({ pid: process.pid, ...(startSec !== undefined ? { startSec } : {}), startedAt: Date.now() });
   for (let attempt = 0; attempt < 3; attempt++) {
     const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
     writeFileSync(tmp, content, { mode: 0o600 });
@@ -125,7 +165,7 @@ export function acquireCredentialMigrationLock(home: string, deps: { startOf?: (
       const parsed = JSON.parse(readFileSync(aside, "utf8")) as LockRecord;
       moved = typeof parsed.pid === "number" ? parsed : undefined;
     } catch { moved = undefined; }
-    if (moved !== undefined && (record === undefined || moved.pid !== record.pid || moved.start !== record.start) && recordLive(home, moved, startOf)) {
+    if (moved !== undefined && (record === undefined || moved.pid !== record.pid || moved.startSec !== record.startSec) && recordLive(home, moved, startOf)) {
       // We moved a live racer's lock: put it back (exclusively) and defer to it.
       try { linkSync(aside, path); } catch { /* another lock is there now */ }
       try { unlinkSync(aside); } catch { /* gone */ }

@@ -181,6 +181,68 @@ final class DaemonSupervisorTests: XCTestCase {
         XCTAssertEqual(spawned, 7) // initial + all 6 crashes respawned
         XCTAssertEqual(s.state, .respawning(attempt: 5)) // the in-window count excludes crash 1
     }
+
+    // MARK: - WS-27: exit 75 = another Winter process is updating credentials — back off, never a crash
+
+    /// A supervisor whose back-off timer is captured instead of run, so each test fires it by hand.
+    private func busySupervisor() -> (DaemonSupervisor, () -> [FakeDaemonProcess], () -> [(TimeInterval, @MainActor () -> Void)]) {
+        var procs: [FakeDaemonProcess] = []
+        var scheduled: [(TimeInterval, @MainActor () -> Void)] = []
+        let s = DaemonSupervisor(deps: .init(bundledDaemonPath: { "/x/winter-core" }, socketExists: { false },
+            isDevEnv: { false }, spawn: { _ in let p = FakeDaemonProcess(); procs.append(p); return p }, now: { Date() },
+            schedule: { delay, work in scheduled.append((delay, work)) }))
+        s.start()
+        return (s, { procs }, { scheduled })
+    }
+
+    func testBusyExitWaitsWithItsOwnStateAndRespawnsAfterTheBackoffNotAtOnce() {
+        let (s, procs, scheduled) = busySupervisor()
+        procs().last!.simulateExit(intentional: false, exitCode: DaemonSupervisor.credentialMigrationBusyExitCode)
+        XCTAssertEqual(s.state, .waitingForCredentials(attempt: 1))
+        XCTAssertEqual(procs().count, 1, "no immediate respawn")
+        XCTAssertEqual(scheduled().count, 1)
+        XCTAssertEqual(scheduled()[0].0, 5)
+        scheduled()[0].1()
+        XCTAssertEqual(procs().count, 2)
+        XCTAssertEqual(s.state, .running)
+        XCTAssertEqual(DaemonSupervisor.waitingForCredentialsMessage, "waiting for another Winter process to finish updating credentials")
+    }
+
+    func testRepeatedBusyExitsBackOffUpToAMinuteAndNeverTripFailed() {
+        let (s, procs, scheduled) = busySupervisor()
+        for _ in 0..<(DaemonSupervisor.maxRapidRespawns + 3) {
+            procs().last!.simulateExit(intentional: false, exitCode: DaemonSupervisor.credentialMigrationBusyExitCode)
+            XCTAssertNotEqual(s.state, .failed)
+            scheduled().last!.1()
+        }
+        XCTAssertEqual(scheduled().map(\.0), [5, 10, 20, 40, 60, 60, 60, 60])
+        XCTAssertEqual(s.state, .running)
+        // Any other exit is an ordinary crash again, and the back-off count starts over after it.
+        procs().last!.simulateExit(intentional: false)
+        XCTAssertEqual(s.state, .respawning(attempt: 1))
+        procs().last!.simulateExit(intentional: false, exitCode: DaemonSupervisor.credentialMigrationBusyExitCode)
+        XCTAssertEqual(s.state, .waitingForCredentials(attempt: 1))
+    }
+
+    func testStopWhileWaitingCancelsTheBackoffRespawn() {
+        let (s, procs, scheduled) = busySupervisor()
+        procs().last!.simulateExit(intentional: false, exitCode: DaemonSupervisor.credentialMigrationBusyExitCode)
+        s.stop()
+        XCTAssertEqual(s.state, .stopped)
+        scheduled().last!.1() // the timer fires after the quit
+        XCTAssertEqual(procs().count, 1, "a quit is never undone by a pending back-off")
+        XCTAssertEqual(s.state, .stopped)
+    }
+
+    func testRestartWhileWaitingSpawnsAtOnceAndTheOldTimerDoesNothing() {
+        let (s, procs, scheduled) = busySupervisor()
+        procs().last!.simulateExit(intentional: false, exitCode: DaemonSupervisor.credentialMigrationBusyExitCode)
+        s.restart()
+        XCTAssertEqual(procs().count, 2)
+        XCTAssertEqual(s.state, .running)
+        scheduled().last!.1()
+        XCTAssertEqual(procs().count, 2, "no second daemon from the stale timer")
+    }
 }
 
 /// `DaemonProcess` test double: a child process that never actually runs. `simulateExit` is the
@@ -188,6 +250,7 @@ final class DaemonSupervisorTests: XCTestCase {
 final class FakeDaemonProcess: DaemonProcess {
     private(set) var isRunning = true
     var onExit: ((_ intentional: Bool) -> Void)?
+    private(set) var exitCode: Int32?
     private(set) var terminateGracefullyCallCount = 0
     private(set) var forceStopCallCount = 0
 
@@ -203,8 +266,9 @@ final class FakeDaemonProcess: DaemonProcess {
     /// Test-only trigger standing in for the real process's actual exit — `intentional` mirrors
     /// exactly what a real termination-handler wrapper would report (true only when the exit
     /// followed OUR OWN `terminateGracefully()`/`forceStop()` call).
-    func simulateExit(intentional: Bool) {
+    func simulateExit(intentional: Bool, exitCode: Int32? = nil) {
         isRunning = false
+        self.exitCode = exitCode
         onExit?(intentional)
     }
 }

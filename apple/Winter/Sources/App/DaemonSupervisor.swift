@@ -14,6 +14,11 @@ struct DaemonSupervisorDeps {
     var isDevEnv: () -> Bool
     var spawn: (_ path: String) -> DaemonProcess
     var now: () -> Date
+    /// Runs `work` on the main actor after `delay` seconds — the back-off timer for a daemon that is
+    /// waiting on another process's credential migration (WS-27). Injectable so tests run it at once.
+    var schedule: (_ delay: TimeInterval, _ work: @escaping @MainActor () -> Void) -> Void = { delay, work in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { MainActor.assumeIsolated { work() } }
+    }
 }
 
 /// The running daemon child, narrowed to exactly what `DaemonSupervisor` needs — mockable so tests
@@ -31,6 +36,12 @@ protocol DaemonProcess: AnyObject {
     /// task (no timeout/scheduler seam yet); reserved for a future graceful-timeout upgrade.
     func forceStop()
     var onExit: ((_ intentional: Bool) -> Void)? { get set }
+    /// The exit status when the process EXITED (not signalled), read after `onExit` fires; `nil` otherwise.
+    var exitCode: Int32? { get }
+}
+
+extension DaemonProcess {
+    var exitCode: Int32? { nil }
 }
 
 /// Owns the bundled `winter-core` daemon's lifecycle for a SHIPPED app: spawns it once, quietly
@@ -42,10 +53,24 @@ protocol DaemonProcess: AnyObject {
 @MainActor
 final class DaemonSupervisor {
     enum Mode: Equatable { case supervising, connectOnly }
-    enum State: Equatable { case idle, running, respawning(attempt: Int), stopped, failed }
+    /// `waitingForCredentials`: the daemon refused to boot because another Winter process holds the
+    /// credential migration lock (WS-27, `winter-core` exit 75) — respawned after a back-off, never counted
+    /// as a crash.
+    enum State: Equatable { case idle, running, respawning(attempt: Int), waitingForCredentials(attempt: Int), stopped, failed }
 
     static let maxRapidRespawns = 5
     static let rapidWindowSeconds = 10.0
+    /// `winter-core daemon run`'s exit code when another process holds the credential migration lock
+    /// (`packages/cli/src/daemon-boot-refusal.ts`'s `CREDENTIAL_MIGRATION_BUSY_EXIT_CODE`, `EX_TEMPFAIL`).
+    static let credentialMigrationBusyExitCode: Int32 = 75
+    /// The user-facing line for `.waitingForCredentials`.
+    static let waitingForCredentialsMessage = "waiting for another Winter process to finish updating credentials"
+
+    /// Back-off before the `attempt`th respawn after a busy exit: 5 s, doubling, capped at 60 s. (The daemon
+    /// itself already waited up to 60 s for the lock before it exited.)
+    static func credentialWaitDelay(attempt: Int) -> TimeInterval {
+        min(60, 5 * pow(2, Double(max(0, attempt - 1))))
+    }
 
     /// Decided once, by `start()`; `.connectOnly` until then.
     private(set) var mode: Mode = .connectOnly
@@ -72,6 +97,11 @@ final class DaemonSupervisor {
     /// again doesn't inherit the earlier crash toward the cap.
     private var recentCrashes: [Date] = []
 
+    /// Consecutive busy exits (reset by any other exit or a deliberate spawn), and the token of the one
+    /// scheduled back-off respawn — bumped by `stop()`/`restart()` so a timer that fires afterwards does nothing.
+    private var credentialWaits = 0
+    private var backoffToken = 0
+
     init(deps: DaemonSupervisorDeps) {
         self.deps = deps
     }
@@ -92,6 +122,7 @@ final class DaemonSupervisor {
     /// Intentional full teardown (app quit). Safe to call with nothing running (already
     /// `.connectOnly`, already stopped, or already `.failed`).
     func stop() {
+        backoffToken += 1 // a pending back-off respawn must not bring the daemon back after a quit
         guard let process, process.isRunning else {
             // Leave a tripped .failed diagnosis visible rather than clobbering it on quit.
             if state != .failed { state = .stopped }
@@ -117,6 +148,11 @@ final class DaemonSupervisor {
 
     private func handleExit(intentional: Bool) {
         guard intentional else {
+            if process?.exitCode == Self.credentialMigrationBusyExitCode {
+                waitForCredentials()
+                return
+            }
+            credentialWaits = 0
             respawnAfterCrash()
             return
         }
@@ -145,9 +181,26 @@ final class DaemonSupervisor {
         state = .respawning(attempt: recentCrashes.count)
     }
 
+    /// The daemon refused to boot because another process is updating credentials: not a crash (never counted
+    /// toward the rapid-respawn cap), and not respawned at once — after `credentialWaitDelay`.
+    private func waitForCredentials() {
+        credentialWaits += 1
+        process = nil
+        state = .waitingForCredentials(attempt: credentialWaits)
+        backoffToken += 1
+        let token = backoffToken
+        deps.schedule(Self.credentialWaitDelay(attempt: credentialWaits)) { [weak self] in
+            guard let self, self.backoffToken == token, case .waitingForCredentials = self.state else { return }
+            self.performSpawn()
+            self.state = .running
+        }
+    }
+
     /// A fresh, deliberate launch — the very first spawn from `start()`, or a manual `restart()`
     /// (including recovery from `.failed`). Resets the rapid-crash tracker.
     private func spawnFresh() {
+        backoffToken += 1
+        credentialWaits = 0
         recentCrashes.removeAll()
         performSpawn()
         state = .running
@@ -199,6 +252,9 @@ final class RealDaemonProcess: DaemonProcess {
     /// `Task { @MainActor }` hop below) — T6 review FIX 1. Same actor read+write, no cross-thread race.
     private var stoppedByUs = false
     var onExit: ((_ intentional: Bool) -> Void)?
+    /// Set on the main actor just before `onExit` fires (WS-27: exit 75 = another process is updating
+    /// credentials).
+    private(set) var exitCode: Int32?
 
     var isRunning: Bool { process.isRunning }
 
@@ -207,12 +263,16 @@ final class RealDaemonProcess: DaemonProcess {
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = ["daemon", "run"]
         process = p
-        p.terminationHandler = { [weak self] _ in
+        p.terminationHandler = { [weak self] finished in
             guard let self else { return }
+            let code: Int32? = finished.terminationReason == .exit ? finished.terminationStatus : nil
             // T6 review FIX 1: read `stoppedByUs` INSIDE the main-actor hop, not on Foundation's
             // background termination thread — the flag is written on the main actor, so reading it
             // anywhere else is an unsynchronized cross-thread read (ThreadSanitizer would flag it).
-            Task { @MainActor in self.onExit?(self.stoppedByUs) }
+            Task { @MainActor in
+                self.exitCode = code
+                self.onExit?(self.stoppedByUs)
+            }
         }
         do {
             try p.run()
