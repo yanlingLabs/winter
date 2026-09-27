@@ -119,26 +119,6 @@ describe("SECURITY DECISION: sync.pull replicates reasoning_item; session.histor
     c.close();
   });
 
-  // WS-27: the same decision covers a chat session's URL-mode elicitation card. Its url is persisted
-  // (a replay rebuilds the Mac's card), so the verbatim replica carries it to the already-paired
-  // phone like every other line — a filtered replica would leave seq holes the phone's next push
-  // could never close. Display surfaces (session.history, the remote stream) still omit it.
-  test("WS-27: sync.pull replicates an elicitation card verbatim; session.history omits it", async () => {
-    const { store, socketPath, token, sessionId } = await bootWithChatSession();
-    store.append(sessionId, {
-      type: "elicitation_requested", sessionId, threadId: "main", elicitationId: "el_1", mode: "url",
-      serverName: "linear", message: "Connect", url: "https://linear.app/oauth?code=OTC", host: "linear.app",
-      issuedAt: 1, expiresAt: 2,
-    });
-    const c = await TestClient.connect(socketPath);
-    await c.hello(token, "sync-client");
-    const pulled = await c.request(METHODS.syncPull, { sessionId, fromSeq: 0 });
-    expect(Buffer.from(pulled.result.data, "base64").toString("utf8")).toContain("elicitation_requested");
-    const history = await c.request(METHODS.sessionHistory, { sessionId });
-    expect(history.result.events.some((e: any) => e.type === "elicitation_requested")).toBe(false);
-    c.close();
-  });
-
   test("CONTROL: session.history over the SAME session still omits it, and HISTORY_EVENT_TYPES is untouched", async () => {
     const { store, socketPath, token, sessionId } = await bootWithChatSession();
     const c = await TestClient.connect(socketPath);

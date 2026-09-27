@@ -421,6 +421,27 @@ describe("sync.heads / sync.pull / sync.push (Chat Slice D task 2)", () => {
     c.close();
   });
 
+  // WS-27: a pushed elicitation card whose origin names another host than its `host` is refused —
+  // the card shows the host, and nothing may make it read one destination while pointing at another.
+  test("an elicitation_requested whose origin and host disagree rejects the whole batch", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "sync-client");
+    const id = uuid();
+    await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 0, data: b64(jsonl([created(id)])), complete: true });
+    const card = (origin: string, seq: number) => ev(id, seq, {
+      type: "elicitation_requested", threadId: "main", elicitationId: "el_1", mode: "url",
+      serverName: "linear", message: "Connect", host: "linear.app", origin, issuedAt: 1, expiresAt: 2,
+    });
+    const bad = await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 1, data: b64(jsonl([card("https://evil.example", 2)])), complete: true });
+    expect(bad.error?.code).toBe(ERR.INVALID_PARAMS);
+    expect(store.lastSeq(id)).toBe(1);
+    const good = await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 1, data: b64(jsonl([card("https://linear.app", 2)])), complete: true });
+    expect(good.error).toBeUndefined();
+    expect(store.lastSeq(id)).toBe(2);
+    c.close();
+  });
+
   test("a schema-invalid event (unknown type) rejects the whole batch", async () => {
     const { store, socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);

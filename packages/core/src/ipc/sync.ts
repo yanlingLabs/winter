@@ -364,8 +364,7 @@ export function syncHeads(store: SessionStore): SyncHeadsResult {
  *  refuses it, and this task changed neither `HISTORY_EVENT_TYPES` nor its security sweep. The
  *  difference is the point: this is STORE REPLICATION to an already-paired device over the same
  *  end-to-end-encrypted link, and a filtered replica is not a replica — a phone that later pushes
- *  its copy back would rewrite the Mac's log with holes in it. The same holds for a chat session's
- *  WS-27 `elicitation_requested` card (its url included): replicated, never displayed remotely. */
+ *  its copy back would rewrite the Mac's log with holes in it. */
 export function syncPull(store: SessionStore, p: SyncPullParams): SyncPullResult {
   resolveChatSession(store, p.sessionId, false);
   let page: { bytes: Buffer; nextCursor?: number };
