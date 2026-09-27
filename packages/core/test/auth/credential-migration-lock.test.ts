@@ -65,6 +65,24 @@ describe("the credential migration lock (the holder process itself, never a sock
     }
   });
 
+  test("a live holder whose start time cannot be read, or reads garbled, is HELD — only a clear different start time is stale", () => {
+    for (const reading of [undefined, Number.NaN, -1, 0, 1.5]) {
+      const h = home();
+      record(h, JSON.stringify({ pid: process.ppid, startSec: PARENT_START }));
+      expect({ reading, taken: acquireCredentialMigrationLock(h, { startOf: () => reading }) }).toEqual({ reading, taken: { heldBy: process.ppid } });
+    }
+    // A garbled RECORD (no usable start time in the file): the live pid alone decides — held.
+    for (const startSec of ["Sun Sep 27 19:46:04 2026", null, 1.5, -3]) {
+      const h = home();
+      record(h, JSON.stringify({ pid: process.ppid, startSec }));
+      expect(acquireCredentialMigrationLock(h)).toEqual({ heldBy: process.ppid });
+    }
+    // And the clear case still decides the other way.
+    const h = home();
+    record(h, JSON.stringify({ pid: process.ppid, startSec: PARENT_START }));
+    expect("release" in acquireCredentialMigrationLock(h, { startOf: (pid) => (pid === process.ppid ? PARENT_START + 60 : processStartSeconds(pid)) })).toBe(true);
+  });
+
   test("an unreadable file younger than the grace is taken to be held (a writer mid-way)", () => {
     const h = home();
     record(h, "");

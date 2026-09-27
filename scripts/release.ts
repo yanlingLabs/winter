@@ -111,6 +111,7 @@ import {
   row16ProvenanceCheck,
   verifyAntEmbed,
   verifyVersionsJsonAgainstPins,
+  keychainFfiProbeOk,
 } from "./release-lib";
 import { fetchAnt, parseAntPin } from "./fetch-ant";
 import { winterSourceOf } from "../packages/core/src/runtime-sdk/bundle-layout";
@@ -910,7 +911,8 @@ console.log(
 // this proves it does). A missing entitlement is a SIGKILL here, never a published crash loop.
 {
   const probed = probe(`"${join(app, "Contents", "Resources", "winter-core")}" __keychain-ffi-probe 2>&1`);
-  if (!probed.ok || !probed.stdout.includes("keychain-ffi: ok")) {
+  // WS-27: `keychainFfiProbeOk` also requires the libSystem sysctl ffi's answer (the lock's start time).
+  if (!probed.ok || !keychainFfiProbeOk(probed.stdout)) {
     fail(`winter-core __keychain-ffi-probe failed on the signed binary — bun:ffi is killed under the hardened runtime without ${UNSIGNED_EXEC_MEMORY}:\n${probed.stdout.slice(0, 400)}`);
   }
   console.log(`Signed winter-core runs bun:ffi: ${probed.stdout.trim()}`);
