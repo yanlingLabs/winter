@@ -93,7 +93,7 @@ function mergedAgentDefinitions(
 import type { AgentRegistry } from "../agent/bg-agent-registry";
 import type { ContextAssembler } from "../agent/context";
 import type { SkillStore } from "../agent/skills";
-import { startWinterSession, unconsumedUserMessages, withRunHome, type CompactOptions, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
+import { startWinterSession, unconsumedUserMessages, withRunHome, withSessionMcpServers, type CompactOptions, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
 import { RunHomeError, type RunHome, type RunHomeErrorCode, type RunHomeFor, type RunHomeInput } from "@yanlinglabs/winter-runtime-sdk";
 import { projectScopeTrusted, type RunHomeSessionFacts } from "./run-home-input";
 import { readWinterTasks } from "./tasks-reader";
@@ -186,6 +186,10 @@ export interface LegSession {
   readonly handoffPending?: boolean;
   setModel(model?: string): Promise<void>;
   setPolicy(policy: SessionApprovalPolicy): Promise<void>;
+  /** WS-25: see `WinterSession.mcpServerNamesFor` (optional so a test double need not implement it). */
+  mcpServerNamesFor?(serverUrl: string): string[];
+  /** WS-25: see `WinterSession.reconnectMcpServer` (optional so a test double need not implement it). */
+  reconnectMcpServer?(name: string): Promise<void>;
   end(): Promise<void>;
   deliver(text: string): void;
   open(): Promise<void>;
@@ -1141,9 +1145,13 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // digest pin) is not answerable either. The configured MCP servers are passed separately because a
       // run-home incarnation's `options.mcpServers` carries only the capability servers (`extra` is
       // empty above) while the run folder carries the rest; the same fold is read here for its URLs.
-      const allowlist = sessionCredentialAllowlist(options, runHomeApplied ? (deps.extraMcpServers?.(capSession) ?? {}) : extra);
+      const configuredMcp = runHomeApplied ? (deps.extraMcpServers?.(capSession) ?? {}) : extra;
+      const allowlist = sessionCredentialAllowlist(options, configuredMcp);
       options.onCredentialResolve = hostCredentials.resolverFor(allowlist);
       options.onMcpOAuthRefresh = hostCredentials.mcpRefresherFor(allowlist);
+      // WS-25: the same fold, kept with the incarnation (a symbol key — never on the wire), so a sign-in
+      // door can ask a live session which of its servers sit at a URL (`WinterSession.mcpServerNamesFor`).
+      withSessionMcpServers(options, configuredMcp);
       // WS-21 (spec §3.1): LAST, so a refusal above never leaves a run folder behind. The router's Winter
       // overload reads `options.runtime.runHome` and applies it synchronously; `WinterSession` disposes it
       // when the incarnation ends (or at once, if the open fails before the child iterates).
