@@ -1905,10 +1905,11 @@ if (import.meta.main) {
       // convenience methods (`client.ts`) aren't visible through it here. Adapted onto `mcp-cli.ts`'s
       // own `McpDoor` shape via the SAME generic `.request()` every verb on this connection uses —
       // no behavior difference from calling the typed methods directly, just a narrower door type.
+      // Each names `scope: "user"`: `mcp.add`/`remove`/`get` default a missing scope to "local" since WS-21.
       const mcpDoor = door ? {
-        mcpAdd: (name: string, entry: unknown) => door.request(METHODS.mcpAdd, { name, entry }),
-        mcpRemove: (name: string) => door.request(METHODS.mcpRemove, { name }),
-        mcpGet: (name: string) => door.request(METHODS.mcpGet, { name }),
+        mcpAdd: (name: string, entry: unknown) => door.request(METHODS.mcpAdd, { name, entry, scope: "user" }),
+        mcpRemove: (name: string) => door.request(METHODS.mcpRemove, { name, scope: "user" }),
+        mcpGet: (name: string) => door.request(METHODS.mcpGet, { name, scope: "user" }),
       } : undefined;
       const deps = { cwd: process.cwd(), winterHome, door: mcpDoor };
       if (sub === "add") {
