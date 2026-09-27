@@ -599,6 +599,65 @@ export const McpDisableParams = z.object({ name: z.string().min(1) });
 export const McpDisableResult = z.object({ ok: z.literal(true), name: z.string(), enabled: z.literal(false) });
 
 /**
+ * WS-26 — CONNECTOR PERMISSIONS (`core/src/agent/mcp/connector-permissions.ts` has the store, the matrix and
+ * the reasoning). LOCAL role only — never in `REMOTE_ALLOWED_METHODS`: the phone answers the cards these
+ * settings produce (`approval.respond`), it does not change the settings.
+ *
+ * `mcp.tools`: each server's actions as the daemon's last probe listed them, with the stored value and
+ * what applies. Per action:
+ *  - `setting` — the action's OWN stored value (absent: none); the server's all-actions value is the
+ *    server row's `allTools`.
+ *  - `permission` + `source` — what a chat or dispatch session does with it: the action's own value
+ *    (`"tool"`), else its server's all-actions value (`"server"`), else a `permissions.deny` rule in
+ *    `sdk/settings.json` that names it (`"rule"` — it binds natively in every mode, and no connector setting
+ *    can undo it), else the default (`"default"`: `"allow"` when `readOnly`, otherwise `"ask"`). In a CODE
+ *    session an unset, not-read-only action instead follows the session's approval policy, as it always did.
+ *  - `readOnly` — the server marked it `readOnlyHint: true` in its last `tools/list`.
+ *  - `rules` — every claude-grammar rule in `sdk/settings.json` that names it (deny/ask/allow, the runtime's
+ *    own matching). An `ask`/`allow` rule binds in CODE sessions only (the router strips both from chat and
+ *    dispatch run folders); a stored "Always deny" or "Always ask" still wins over an allow rule there.
+ * `listed: false` — the daemon has no listing for the server yet (never probed, or it needs a sign-in);
+ * `tools` then holds only actions that have a stored value.
+ */
+export const McpToolPermissionSchema = z.enum(["allow", "ask", "deny"]);
+export const McpToolPermissionChoiceSchema = z.enum(["allow", "ask", "deny", "default"]);
+export const McpToolsParams = z.object({ server: z.string().min(1).optional(), cwd: z.string().optional() });
+export const McpToolRuleSchema = z.object({ behavior: McpToolPermissionSchema, rule: z.string() });
+export const McpToolRowSchema = z.object({
+  name: z.string(),
+  toolName: z.string(),
+  description: z.string().optional(),
+  readOnly: z.boolean(),
+  setting: McpToolPermissionSchema.optional(),
+  permission: McpToolPermissionSchema,
+  source: z.enum(["tool", "server", "rule", "default"]),
+  rules: z.array(McpToolRuleSchema).optional(),
+});
+export const McpToolsServerSchema = z.object({
+  name: z.string(),
+  status: z.enum(["connected", "failed", "disabled", "unmanaged", "needs-auth", "unknown"]),
+  source: z.enum(["user", "project", "plugin"]).optional(),
+  allTools: McpToolPermissionSchema.optional(),
+  listed: z.boolean(),
+  tools: z.array(McpToolRowSchema),
+});
+export const McpToolsResult = z.object({ ok: z.literal(true), servers: z.array(McpToolsServerSchema) });
+/**
+ * `mcp.setToolPermission`: store one action's permission (`tool`), or its server's all-actions value
+ * (`tool: "*"`); `"default"` clears it. `resetTools` (all-actions only) also clears every per-action value
+ * of the server, so "all actions → Always deny" means every action. Written atomically to `settings.json`
+ * and read live: the next call of a live session sees it, with no respawn. A server need not be configured
+ * yet; `winter` (the daemon's own capability namespace) is refused.
+ */
+export const McpSetToolPermissionParams = z.object({
+  server: z.string().min(1).max(256).regex(/^\S+$/, "a server name has no whitespace"),
+  tool: z.string().min(1).max(256).regex(/^\S+$/, "a tool name has no whitespace"),
+  permission: McpToolPermissionChoiceSchema,
+  resetTools: z.boolean().optional(),
+});
+export const McpSetToolPermissionResult = z.object({ ok: z.literal(true), server: z.string(), tool: z.string(), permission: McpToolPermissionChoiceSchema });
+
+/**
  * `winter mcp add`/`add-json` (CLI parity with `claude mcp add`) — all three of claude's scopes since
  * WS-21 (`McpScopeSchema` below). `entry` hand-mirrors `settings.ts`'s `McpServerSettingsEntry`
  * discriminated union field-for-field — protocol never imports from core (same cross-package
@@ -2833,6 +2892,8 @@ export const METHODS = {
   mcpLogout: "mcp.logout",
   mcpSetClientSecret: "mcp.setClientSecret",
   mcpClientSecretIssuer: "mcp.clientSecretIssuer",
+  mcpTools: "mcp.tools",
+  mcpSetToolPermission: "mcp.setToolPermission",
   askUserRespond: "ask_user.respond",
   taskList: "task.list",
   planRespond: "plan.respond",

@@ -37,7 +37,7 @@ import { registerComputerTool } from "./agent/tools/computer";
 import { ComputerUseService } from "./agent/computer-use";
 import { SessionTitler } from "./agent/titles";
 import { McpManager, type McpServerConfig } from "./agent/mcp/manager";
-import type { ConnectorPermissionSource } from "./agent/mcp/connector-permissions";
+import type { ConnectorPermissionSource, ConnectorPermissionTable } from "./agent/mcp/connector-permissions";
 import { notifyHeadless } from "./agent/notify-fallback";
 import { LspManager } from "./agent/lsp/manager";
 import { PermissionGate, type SessionApprovalPolicy } from "./agent/gate";
@@ -1771,8 +1771,13 @@ export async function startDaemon(opts: {
       if (cwd) void manager.ensureProject(cwd).catch(() => { /* reported by the probe itself */ });
     } catch { /* a background kick never fails a decision */ }
   };
+  // `mcp.setToolPermission`'s write, held until the settings watcher swaps `settings` (its identity is the
+  // basis): the watcher debounces (150 ms), and a flip must reach the very next call.
+  let connectorPermissionsWritten: { basis: typeof settings; table: ConnectorPermissionTable } | undefined;
   const connectorPermissions: ConnectorPermissionSource = {
-    table: () => connectorPermissionTable(settings),
+    table: () => (connectorPermissionsWritten !== undefined && connectorPermissionsWritten.basis === settings
+      ? connectorPermissionsWritten.table
+      : connectorPermissionTable(settings)),
     readOnly: (server, tool, cwd) => {
       const hint = mcp?.readOnlyHint(server, tool, cwd);
       if (hint === undefined) kickConnectorProbe(server, cwd);
@@ -2781,6 +2786,8 @@ export async function startDaemon(opts: {
     // own doc comment for why a credential add needs this rather than waiting for an unrelated
     // settings write to trigger the next `refresh()`.
     mcp: mcp ?? undefined,
+    // WS-26: a connector-permission write reaches the next decision without waiting on the watcher.
+    onConnectorPermissionsSaved: (next) => { connectorPermissionsWritten = { basis: settings, table: connectorPermissionTable(next) }; },
     // WS-25: the sign-in doors use the daemon's ONE MCP OAuth store (see `oauthStoreForThisDaemon`) — handed
     // over explicitly, so the server never derives a Keychain store of its own for a test daemon.
     mcpOAuth: { store: daemonOAuthStore() },

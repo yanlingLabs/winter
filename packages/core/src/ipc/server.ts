@@ -12,6 +12,7 @@ import {
   SessionSteerParams, SessionInterruptParams, SessionCompactParams, SkillsListParams, McpListParams, McpEnableParams, McpDisableParams,
   McpAddParams, McpRemoveParams, McpGetParams,
   McpLoginParams, McpLoginStatusParams, McpLogoutParams, McpSetClientSecretParams, McpClientSecretIssuerParams,
+  McpToolsParams, McpSetToolPermissionParams,
   SkillsReadParams, SkillsWriteParams, SkillsDeleteParams,
   AskUserRespondParams, TaskListParams, PlanRespondParams, SessionSetPolicyParams,
   SessionSetModelParams, SessionSetEffortParams, SessionSetActivityParams, SessionSetDirsParams,
@@ -116,7 +117,7 @@ import { withProblemsForRoles, type RoleHealthRegistry } from "../providers/role
 import type { InternalRouter } from "../providers/internal-router";
 import { internalRoleProblemsFor } from "../providers/internal-role-problems";
 import { catalogRoleProblemsFor } from "../providers/catalog-role-problems";
-import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, type McpServerSettingsEntry } from "../settings";
+import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, setConnectorToolPermission, connectorPermissionTable, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, type McpServerSettingsEntry } from "../settings";
 import { addMcpServerInScope, mcpServerInScope, removeMcpServerInScope, type McpScope, type McpScopeTarget } from "../agent/mcp/mcp-write";
 import { saveAnswerEverywhere, saveAnswerInProject, SavedAnswerRefused } from "../agent/saved-answers";
 import { localScopeKeyFor, projectScopeRootFor, projectScopeTrusted } from "../runtime-sdk/run-home-input";
@@ -126,7 +127,8 @@ import { parseProjectMcpServers, readRawProjectMcpConfig } from "../agent/mcp/pr
 import { daemonMcpOAuthStore } from "../runtime-sdk/mcp-oauth-store";
 import { keychainService, resolveWinterProfile } from "../profile";
 import type { McpOAuthStore } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
-import { readSdkGlobalConfig, SdkFileUnreadable, updateSdkSettings } from "../sdk-files";
+import { liveSdkSettings, readSdkGlobalConfig, SdkFileUnreadable, updateSdkSettings } from "../sdk-files";
+import { CONNECTOR_ALL_TOOLS, connectorSettingFor, connectorToolName, sdkRulesFor, type ConnectorPermission } from "../agent/mcp/connector-permissions";
 import { bypassAllowedAtSpawn, disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
 import { diagnoseRuntimes } from "../runtime-sdk/runtimes-doctor";
@@ -326,6 +328,12 @@ export interface IpcServerOptions {
   bg?: BackgroundTaskRegistry; // background bash tasks; bg.list/peek/kill/killAll
   skills?: SkillStore;       // discovered SKILL.md skills; skills.list/read/write/delete (5c T3)
   mcp?: McpManager;          // MCP servers started at boot; mcp.list
+  /**
+   * WS-26: told the settings `mcp.setToolPermission` just wrote, so the connector permissions the daemon
+   * enforces see the flip on the very next call rather than after the settings watcher's debounce. The
+   * watcher still applies the same file right after; this only closes that window.
+   */
+  onConnectorPermissionsSaved?: (next: Settings) => void;
   /**
    * WS-25: the MCP sign-in doors' seams. `store` is the daemon's ONE MCP OAuth store; absent, it is
    * derived exactly as the rest of the daemon derives it (`daemonMcpOAuthStore(keychainService(profile,
@@ -2404,6 +2412,87 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const cfg = stdioMcpServersFor(sdkUserMcpServers(opts.winterHome), next.mcp?.disabled)[p.name];
         if (cfg) await opts.mcp?.startOneUserServer(p.name, cfg);
         return { ok: true, name: p.name, enabled: true };
+      }
+      // -----------------------------------------------------------------------------------------
+      // WS-26 — connector permissions (`agent/mcp/connector-permissions.ts`; the wire contract is
+      // `McpToolsResult`'s doc in protocol/methods.ts). LOCAL role only. `mcp.tools` reads the probe's
+      // listings the way `mcp.list` does (the lazy http/sse probe of the live user scope and the trusted
+      // project's, awaited here like there — an RPC, never a turn); it never probes anything `mcp.list`
+      // would not.
+      // -----------------------------------------------------------------------------------------
+      case METHODS.mcpTools: {
+        const p = parseParams(McpToolsParams, params);
+        const settings = liveSettingsFor(opts);
+        const disabled = new Set(settings?.mcp?.disabled ?? []);
+        const table = connectorPermissionTable(settings);
+        const userServers = opts.winterHome ? sdkUserMcpServers(opts.winterHome) : {};
+        if (opts.mcp?.probesRemote) {
+          await opts.mcp.ensureRemote(Object.fromEntries(Object.entries(userServers).filter(([name, entry]) => entry.type !== "stdio" && !disabled.has(name) && (p.server === undefined || name === p.server))));
+        }
+        if (p.cwd) await opts.mcp?.ensureProject(p.cwd);
+        const tracked = opts.mcp?.list(p.cwd) ?? [];
+        const sdkPermissions = opts.winterHome ? liveSdkSettings(opts.winterHome).permissions : undefined;
+        // Every server anyone could name: probed ones, configured user ones not (yet) probed, and names that
+        // only have stored values (so a stale value for a removed server can still be seen and cleared).
+        const names = [...new Set([...tracked.map((r) => r.name), ...Object.keys(userServers), ...Object.keys(table)])]
+          .filter((name) => p.server === undefined || name === p.server);
+        const servers = names.map((name) => {
+          const row = tracked.find((r) => r.name === name);
+          const status = disabled.has(name) ? "disabled" as const
+            : row !== undefined ? row.status
+            : userServers[name] !== undefined ? (userServers[name]!.type === "stdio" ? "unknown" as const : "unmanaged" as const)
+            : "unknown" as const;
+          const listing = opts.mcp?.toolsFor(name, p.cwd);
+          const stored = Object.hasOwn(table, name) ? table[name]! : {};
+          const toolNames = [...new Set([...(listing ?? []).map((t) => t.name), ...Object.keys(stored).filter((t) => t !== CONNECTOR_ALL_TOOLS)])];
+          const tools = toolNames.map((tool) => {
+            const probed = listing?.find((t) => t.name === tool);
+            const readOnly = probed?.readOnly === true;
+            const wire = connectorToolName(name, tool);
+            const own = Object.hasOwn(stored, tool) ? stored[tool] : undefined;
+            const applied = connectorSettingFor(table, name, tool);
+            const rules = sdkRulesFor(sdkPermissions, wire);
+            const sdkDeny = rules.find((r) => r.behavior === "deny");
+            // A deny rule in sdk/settings.json binds natively in every mode, ahead of anything a hook says.
+            const [permission, source]: [ConnectorPermission, "tool" | "server" | "rule" | "default"] =
+              sdkDeny !== undefined ? ["deny", "rule"]
+              : applied !== undefined ? [applied.permission, applied.source]
+              : [readOnly ? "allow" : "ask", "default"];
+            return {
+              name: tool, toolName: wire,
+              ...(probed?.description !== undefined ? { description: probed.description } : {}),
+              readOnly,
+              ...(own !== undefined ? { setting: own } : {}),
+              permission, source,
+              ...(rules.length > 0 ? { rules } : {}),
+            };
+          });
+          return {
+            name, status,
+            ...(row !== undefined ? { source: row.source } : userServers[name] !== undefined ? { source: "user" as const } : {}),
+            ...(Object.hasOwn(stored, CONNECTOR_ALL_TOOLS) ? { allTools: stored[CONNECTOR_ALL_TOOLS]! } : {}),
+            listed: listing !== undefined,
+            tools,
+          };
+        });
+        return { ok: true, servers };
+      }
+      case METHODS.mcpSetToolPermission: {
+        const p = parseParams(McpSetToolPermissionParams, params);
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "mcp.setToolPermission is not available on this server (no winterHome configured)");
+        // The daemon's own capability tools are `mcp__winter__…`, which is never a connector action — a value
+        // stored under `winter` would be inert, so it is refused rather than silently kept.
+        if (p.server === "winter" || p.server.startsWith("winter__")) {
+          throw new RpcFailure(ERR.INVALID_PARAMS, `"${p.server}" names Winter's own capability servers, not a connector`);
+        }
+        if (p.resetTools === true && p.tool !== CONNECTOR_ALL_TOOLS) {
+          throw new RpcFailure(ERR.INVALID_PARAMS, "resetTools applies only to the all-actions value (tool \"*\")");
+        }
+        const settingsPath = join(opts.winterHome, "settings.json");
+        const next = setConnectorToolPermission(loadSettings(settingsPath), p.server, p.tool, p.permission === "default" ? undefined : p.permission, { resetTools: p.resetTools === true });
+        saveSettings(settingsPath, next);
+        opts.onConnectorPermissionsSaved?.(next);
+        return { ok: true, server: p.server, tool: p.tool, permission: p.permission };
       }
       // -----------------------------------------------------------------------------------------
       // `winter mcp add`/`add-json`/`remove` (CLI parity with `claude mcp add`/`remove`), over claude's
