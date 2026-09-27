@@ -741,7 +741,9 @@ export const McpLoginResult = z.object({
   loginId: z.string(),
   authUrl: z.string(),
   issuerOrigin: z.string(),
-  authorizeOrigin: z.string().optional(),
+  // WS-25 integration: REQUIRED -- the daemon always sends it and the Mac's decoder refuses a reply
+  // without it, so the schema says so rather than letting a future daemon drop it silently.
+  authorizeOrigin: z.string(),
 });
 /** `mcp.loginStatus`: `pending` until the callback arrives; `expired` when nobody completed it within 5
  *  minutes (the listener is closed); `failed` with a bounded, code-shaped `error` otherwise. A login id
@@ -780,7 +782,9 @@ export const McpClientSecretIssuerResult = z.object({ name: z.string(), issuer: 
  * bare invalid-params error.
  */
 export const McpSetClientSecretParams = McpServerRefParams.extend({ secret: z.string().min(1), expectedIssuer: z.string().min(1).optional() });
-export const McpSetClientSecretResult = z.object({ ok: z.literal(true), issuer: z.string().optional(), issuerOrigin: z.string().optional() });
+// WS-25 integration: `issuer`/`issuerOrigin` REQUIRED -- the daemon always answers the issuer it bound the
+// secret to (the Mac's decoder refuses a reply without them, and the CLI shows it).
+export const McpSetClientSecretResult = z.object({ ok: z.literal(true), issuer: z.string(), issuerOrigin: z.string() });
 
 /**
  * Daemon settings surface (2026-09-17 plan, item 2): `capabilities.list` — the daemon's OWN

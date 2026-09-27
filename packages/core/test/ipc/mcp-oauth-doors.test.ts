@@ -6,7 +6,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@yanlinglabs/winter-protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, McpLoginResult, McpSetClientSecretResult, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { canonicalMcpServerUrl, createMemoryMcpOAuthStore, decodeMcpOAuthClientSecretItem, encodeMcpOAuthClientRecord, mcpOAuthClientAccount, mcpOAuthClientSecretAccount, mcpOAuthTokenAccount } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
 import { startIpcServer, REMOTE_ALLOWED_METHODS } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
@@ -126,6 +126,9 @@ describe("the MCP sign-in doors (WS-25)", () => {
     const start = await c.request(METHODS.mcpLogin, { name: "linear" });
     expect(start.error).toBeUndefined();
     expect(start.result).toMatchObject({ issuerOrigin: fx.origin, authorizeOrigin: fx.origin });
+    // WS-25 integration: the reply satisfies the protocol schema, whose `authorizeOrigin` is REQUIRED
+    // (the Mac's decoder refuses a reply without it).
+    expect(McpLoginResult.strict().safeParse(start.result).success).toBe(true);
     expect(start.result.loginId).toMatch(/^ml_[0-9a-f]{24}$/);
     expect((await c.request(METHODS.mcpLoginStatus, { loginId: start.result.loginId })).result).toEqual({ state: "pending" });
 
@@ -219,6 +222,7 @@ describe("the MCP sign-in doors (WS-25)", () => {
       expect(await oauthStore.read(mcpOAuthClientSecretAccount(fx.mcpUrl))).toBeNull();
       const set = await c.request(METHODS.mcpSetClientSecret, { name: "gh", secret: SECRET, expectedIssuer: shown.result.issuer });
       expect(set.result).toEqual({ ok: true, issuer: fx.issuer, issuerOrigin: fx.origin });
+      expect(McpSetClientSecretResult.strict().safeParse(set.result).success).toBe(true); // issuer/issuerOrigin REQUIRED
       expect(JSON.stringify(set)).not.toContain(SECRET);
       const item = decodeMcpOAuthClientSecretItem((await oauthStore.read(mcpOAuthClientSecretAccount(fx.mcpUrl)))!);
       expect(item).toEqual({ secret: SECRET, issuer: fx.issuer });
