@@ -250,8 +250,8 @@ describe("review round 1", () => {
 
 // WS-24: a Worker that closes WITHOUT its own teardown (terminated while spinning, or crashed) leaves its
 // session's process groups running with no parent to reap them; the daemon SIGKILLs whatever the SDK
-// reported still live. Feature-detected: the SDK this commit is built against (0.0.27) reports nothing,
-// so these drive a fake Worker process that does.
+// reported still live. The SDK this commit is built against (0.0.28) DOES report it, but these still
+// drive a fake Worker process rather than a real one, for a deterministic `processGroups()` answer.
 describe("WS-24: process groups a Worker leaves behind are killed when it closes", () => {
   /** A stand-in for the SDK's EmbeddedWorkerProcess whose Worker "closes" when `close()` is called. */
   function fakeWorker(groups: () => unknown): { proc: EmbeddedWorkerProcess; close: () => void } {

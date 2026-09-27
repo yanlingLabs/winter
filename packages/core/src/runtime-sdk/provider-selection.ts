@@ -28,7 +28,7 @@ export function rowForTag(tag: string): WinterModelDescriptor | undefined {
 /**
  * WS-24 (pickers lane, fix round 1): the adapter families whose `buildRequestBody` actually THROWS a
  * capability refusal when a turn asks for tools and the row's `toolCalling` is not `"native"` —
- * measured directly against the pinned SDK (0.0.27), never assumed from the field's NAME:
+ * measured directly against the pinned SDK (0.0.28), never assumed from the field's NAME:
  *
  *   - `winter.anthropic-messages`  (`adapters/anthropic/messages.ts`'s `buildRequestBody`)
  *   - `winter.google-generate-content` (`adapters/google/generate-content.ts`'s `buildRequestBody`)
@@ -41,6 +41,11 @@ export function rowForTag(tag: string): WinterModelDescriptor | undefined {
  * `winter.azure-openai`, `winter.local-openai` on chat-completions) — sends the turn's tools
  * regardless of what `toolCalling` says; neither file so much as reads the field. `toolCalling` is
  * evidence there, never enforced.
+ *
+ * Re-measured at 0.0.28 (WS-24 follow-ups, pins-0028): `git diff v0.0.27 v0.0.28 --
+ * packages/provider-runtime/src/adapters/` touches only the openai chat-completions/responses
+ * adapters (a URL-fallback fix and a stale-family fix, neither reading `toolCalling`) — none of the
+ * four throwing files above moved at all. The set stands unchanged.
  */
 const TOOLS_GATED_ADAPTER_IDS: ReadonlySet<string> = new Set([
   "winter.anthropic-messages",

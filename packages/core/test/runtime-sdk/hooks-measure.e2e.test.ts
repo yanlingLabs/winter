@@ -82,7 +82,7 @@ async function driveWithHooks(bin: string, hooks: Options["hooks"]): Promise<{
 
 /**
  * WS-23: does the INSTALLED wrapper carry `HookCallbackMatcher.failClosed` onto the wire? The pinned agent
- * SDK (0.0.27) does; the check stays, detected from the wrapper's own source, so a future pin that dropped
+ * SDK (0.0.28) does; the check stays, detected from the wrapper's own source, so a future pin that dropped
  * the field would skip this test loudly rather than measure nothing.
  */
 function installedWrapperCarriesFailClosed(): boolean {
@@ -161,7 +161,7 @@ describeWithWinterBinary("P8c-7 measurement — Options.hooks against a real win
   // WS-23: the daemon's floors mark their groups `failClosed` (`runtime-sdk/hooks.ts`). A floor that
   // never answers -- a hung bridge, a wedged callback -- must DENY the call on the real binary, not
   // time out open. Gated twice: on the binary (like every test here) and on the installed wrapper
-  // actually serialising the field (0.0.27, the current pin, does).
+  // actually serialising the field (0.0.28, the current pin, does).
   test.skipIf(!installedWrapperCarriesFailClosed())("WS-23: a fail-closed floor that TIMES OUT denies the Bash call — it never runs", async () => {
     const hangingFloor: HookCallback = () => new Promise(() => { /* never answers */ });
     const failClosedGroup = { matcher: "Bash", timeout: 2, failClosed: true, hooks: [hangingFloor] };
