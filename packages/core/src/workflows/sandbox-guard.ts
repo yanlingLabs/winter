@@ -24,6 +24,9 @@ import { dlopen, FFIType } from "bun:ffi";
 /** The worker's exit code when it refuses (`EX_NOPERM`). */
 export const WORKER_NOT_SANDBOXED_EXIT_CODE = 77;
 
+/** What a PARENT reports for a worker that exited `WORKER_NOT_SANDBOXED_EXIT_CODE`. */
+export const WORKER_NOT_SANDBOXED_MESSAGE = "workflow sandbox not in effect";
+
 /** The mach services a sandboxed worker must be denied. */
 export const KEYCHAIN_MACH_SERVICES = ["com.apple.SecurityServer", "com.apple.securityd.xpc"] as const;
 
@@ -75,11 +78,14 @@ export function keychainSandboxState(check?: SandboxCheck): KeychainSandboxState
     return { ok: false, reason: `the sandbox could not be inspected (${err instanceof Error ? err.message : "error"})` };
   }
   const pid = process.pid;
-  if (sandboxCheck(pid, null, SANDBOX_FILTER_NONE, null) !== 1) return { ok: false, reason: "this process is not sandboxed" };
+  const sandboxed = sandboxCheck(pid, null, SANDBOX_FILTER_NONE, null);
+  if (sandboxed === 0) return { ok: false, reason: "this process is not sandboxed" };
+  if (sandboxed !== 1) return { ok: false, reason: `the sandbox gave no clear answer (${sandboxed})` };
   for (const service of KEYCHAIN_MACH_SERVICES) {
-    if (sandboxCheck(pid, "mach-lookup", SANDBOX_FILTER_GLOBAL_NAME | SANDBOX_CHECK_NO_REPORT, service) === 0) {
-      return { ok: false, reason: `the sandbox allows ${service} (the Keychain)` };
-    }
+    // Exactly 1 is "denied". 0 is "allowed", and anything else (an error, an unknown answer) fails closed.
+    const answer = sandboxCheck(pid, "mach-lookup", SANDBOX_FILTER_GLOBAL_NAME | SANDBOX_CHECK_NO_REPORT, service);
+    if (answer === 0) return { ok: false, reason: `the sandbox allows ${service} (the Keychain)` };
+    if (answer !== 1) return { ok: false, reason: `the sandbox gave no clear answer for ${service} (${answer})` };
   }
   return { ok: true };
 }

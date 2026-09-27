@@ -2,7 +2,8 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildWorkflowSeatbeltProfile } from "./sandbox";
+import { renderRuntimeWorkflowProfile } from "../../test/helpers/runtime-workflow-profile";
+import { buildWorkflowSeatbeltProfile, WORKFLOW_MACH_SERVICES } from "./sandbox";
 import { KEYCHAIN_MACH_SERVICES, keychainSandboxState } from "./sandbox-guard";
 
 const darwin = process.platform === "darwin";
@@ -16,6 +17,19 @@ describe("the workflow worker's Keychain-sandbox check (decision)", () => {
     for (const service of KEYCHAIN_MACH_SERVICES) {
       expect(keychainSandboxState(fake(1, [service]))).toEqual({ ok: false, reason: `the sandbox allows ${service} (the Keychain)` });
     }
+  });
+
+  test("only an answer of exactly 1 (denied) passes: any other answer fails closed", () => {
+    const answering = (sandboxed: number, lookup: number) => (_pid: number, op: string | null) => (op === null ? sandboxed : lookup);
+    expect(keychainSandboxState(answering(1, -1))).toEqual({ ok: false, reason: "the sandbox gave no clear answer for com.apple.SecurityServer (-1)" });
+    expect(keychainSandboxState(answering(1, 2))).toMatchObject({ ok: false });
+    expect(keychainSandboxState(answering(-1, 1))).toEqual({ ok: false, reason: "the sandbox gave no clear answer (-1)" });
+    expect(keychainSandboxState(answering(1, 1))).toEqual({ ok: true });
+  });
+
+  test("the runtime's own worker profile (not exported; read from the installed package) is byte-identical to core's, which these tests and verify:embedded run the worker under — and names no Keychain service", () => {
+    expect(renderRuntimeWorkflowProfile(process.execPath)).toBe(buildWorkflowSeatbeltProfile(process.execPath));
+    for (const service of KEYCHAIN_MACH_SERVICES) expect(WORKFLOW_MACH_SERVICES).not.toContain(service);
   });
 
   test.skipIf(!darwin)("this test process itself is not sandboxed (the real FFI)", () => {

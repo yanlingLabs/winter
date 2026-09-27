@@ -31,7 +31,7 @@ import type { EmbeddedLifecycleEvent } from "../../src/runtime-sdk/embedded";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { RUNTIME_SHUTDOWN_DRAIN_MS } from "../../src/runtime-state";
 import { REQUIRED_WINTER_AGENT_SDK } from "../../src/runtime-sdk/versions";
-import { buildWorkflowSeatbeltProfile } from "../../src/workflows/sandbox";
+import { renderRuntimeWorkflowProfile } from "../helpers/runtime-workflow-profile";
 import { WORKER_NOT_SANDBOXED_EXIT_CODE } from "../../src/workflows/sandbox-guard";
 
 const TEMP: string[] = [];
@@ -80,8 +80,8 @@ describe("the topology", () => {
 
   test.skipIf(process.platform !== "darwin")("the dev workflow command really reaches the RUNTIME's worker: undriven (no --bridge), it answers its own not-driven code", () => {
     const dev = runtimeWorkflowWorkerCommand(false, process.execPath);
-    // Inside the workflow seatbelt, as its parent runs it (WS-27: it refuses to run outside one).
-    const run = Bun.spawnSync(["/usr/bin/sandbox-exec", "-p", buildWorkflowSeatbeltProfile(dev.file), dev.file, ...dev.args.filter((a) => a !== "--bridge")], { stdout: "pipe", stderr: "pipe" });
+    // Inside the RUNTIME's own worker seatbelt, as its parent runs it (WS-27: it refuses to run outside one).
+    const run = Bun.spawnSync(["/usr/bin/sandbox-exec", "-p", renderRuntimeWorkflowProfile(dev.file), dev.file, ...dev.args.filter((a) => a !== "--bridge")], { stdout: "pipe", stderr: "pipe" });
     // 78 = WORKFLOW_WORKER_NOT_IMPLEMENTED_EXIT_CODE: "the dispatch works, nothing is driving the bridge".
     expect(run.exitCode).toBe(78);
     expect(run.stderr.toString()).toContain("was invoked without --bridge");
