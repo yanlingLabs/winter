@@ -194,7 +194,21 @@ describe("externalCapability — two plugins registering one tool name (WS-27)",
     expect(two).toEqual(["search__notes_globex", "search__notes_acme"]);
   });
 
-  test("specs that sanitise alike, or a name past 64 characters, fall back to a digest of the spec", () => {
+  test("review 9: the digest form is at most 64 characters on the wire for ANY tool name length, and still unique", () => {
+    for (const len of [1, 20, 31, 32, 60, 200]) {
+      const tool = "t".repeat(len - 1) + "x";
+      const names = externalToolNames([src(`${"p".repeat(50)}@m`, tool), src(`${"q".repeat(50)}@m`, tool)]);
+      for (const n of names) expect(`mcp__winter__external__${n}`.length).toBeLessThanOrEqual(64);
+      expect(new Set(names).size).toBe(2);
+    }
+    // One plugin's two long names sharing their first characters, both clashing: still distinct.
+    const long = (end: string) => "a".repeat(40) + end;
+    const names = externalToolNames([src("p@m", long("1")), src("q@m", long("1")), src("p@m", long("2")), src("q@m", long("2"))]);
+    expect(new Set(names).size).toBe(4);
+    for (const n of names) expect(`mcp__winter__external__${n}`.length).toBeLessThanOrEqual(64);
+  });
+
+  test("specs that sanitise alike, or a name past 64 characters, fall back to a digest", () => {
     const [x, y] = externalToolNames([src("a@b.c", "t"), src("a@b_c", "t")]);
     expect(x).toMatch(/^t__[0-9a-f]{8}$/);
     expect(y).toMatch(/^t__[0-9a-f]{8}$/);
