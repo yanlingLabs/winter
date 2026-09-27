@@ -701,10 +701,11 @@ export async function startDaemon(opts: {
   // project-supplied name escaping the output-styles dir) lives in OutputStyleStore.resolve — this is
   // just the name lookup.
   const outputStyleStore = new OutputStyleStore({ winterHome, trust: trustStore, legacySettings: () => settings });
-  // WS-21: a trusted project's overlay still wins (its `.winter/settings.json` `outputStyle`); the user
-  // tier moved to `sdk/settings.json` (`sdkOutputStyle`) — the live holder no longer carries one.
-  const outputStyleFor = (cwd?: string | null): string | undefined =>
-    projectSettings.effective(projectRootOf(cwd ?? null))?.outputStyle ?? sdkOutputStyle(winterHome);
+  // WS-24 (router 0.0.15): a repository never picks the output style -- the run-home builder drops a
+  // project or local tier's `outputStyle` (and never lets a project style redefine a user/built-in
+  // name), so the daemon reads the user tier alone (`sdk/settings.json`, `sdkOutputStyle`) and what it
+  // reports can't disagree with what the child runs. (WS-21 had let a trusted project's overlay win.)
+  const outputStyleFor = (_cwd?: string | null): string | undefined => sdkOutputStyle(winterHome);
   // CC-parity phase 3 (Workflows, Track C Task C2): built unconditionally, same "no engine
   // dependency" precedent as `outputStyleStore` just above — workflow.list's "saved" section and
   // workflow.run's by-name resolution work even on a no-agentProvider daemon (only launching a

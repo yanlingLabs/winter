@@ -31,9 +31,9 @@ export interface McpServerConfig { command: string; args?: string[]; env?: Recor
 //
 // The client is still the daemon's own hand-written stdio client (`client.ts`, protocol 2024-11-05, stdio
 // only). Replacing it with the agent SDK's `connectMcpServer` — every transport, the runtime's own
-// version negotiation, the status a session's child would see — waits on the SDK exporting it from a
-// public subpath (0.0.27 keeps it inside `winter-agent-runtime`'s `dist/mcp/client.js`, behind the
-// package's `exports` map).
+// version negotiation, the status a session's child would see — is now POSSIBLE: this build's pin
+// (0.0.28) exports it from a public subpath, `@yanlinglabs/winter-agent-runtime/mcp-client`. WS-25 does
+// the refactor; this manager is untouched here.
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
 type ProjectState = { kind: "none" } | { kind: "probed"; servers: McpServerStatus[] };
