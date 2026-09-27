@@ -895,7 +895,8 @@ export interface McpAuthLocalDoors {
   login(server: unknown, opts?: { confirmIssuerChange?: boolean }): Promise<{ loginId: string; authUrl: string; issuerOrigin: string; authorizeOrigin: string }>;
   loginStatus(loginId: string): { state: "pending" | "done" | "failed" | "expired"; error?: string };
   logout(server: unknown, opts?: { forgetClient?: boolean }): Promise<void>;
-  setClientSecret(server: unknown, secret: string): Promise<{ issuerOrigin: string }>;
+  clientSecretIssuer(server: unknown): Promise<{ name: string; issuer: string; issuerOrigin: string; authorizeOrigin: string }>;
+  setClientSecret(server: unknown, secret: string, expectedIssuer: string | undefined): Promise<{ issuer: string; issuerOrigin: string }>;
   dispose(): void;
 }
 
@@ -920,7 +921,7 @@ export interface McpAuthDeps {
 }
 
 export type McpAuthOutcome =
-  | { ok: true; kind: "login" | "logout" | "set-secret"; name: string; via: "daemon" | "in-process"; issuerOrigin?: string }
+  | { ok: true; kind: "login" | "logout" | "set-secret"; name: string; via: "daemon" | "in-process"; issuerOrigin?: string; issuer?: string }
   | { ok: false; message: string; code?: string };
 
 interface McpAuthArgs { name: string; scope?: McpScope; forgetClient: boolean }
@@ -987,7 +988,10 @@ export async function runMcpLoginRoute(args: string[], deps: McpAuthDeps): Promi
     } catch (err) {
       const r = refusalOf(err);
       if (r.code !== ISSUER_CHANGE) throw err;
-      const question = `"${name}" now signs in at ${String(r.data.newIssuerOrigin)}, but its stored registration belongs to ${String(r.data.storedIssuerOrigin)}. Continue with the new authorization server? [y/N] `;
+      // Full issuers when the daemon sends them (fix round 1: one origin can host several tenants).
+      const now = String(r.data.newIssuer ?? r.data.newIssuerOrigin);
+      const before = String(r.data.storedIssuer ?? r.data.storedIssuerOrigin);
+      const question = `"${name}" now signs in at ${now}, but its stored registration belongs to ${before}. Continue with the new authorization server? [y/N] `;
       if (!(await deps.confirm(question))) return { ok: false, message: "sign-in cancelled — the authorization server changed and was not confirmed", code: ISSUER_CHANGE };
       started = await start(true);
     }
@@ -1043,30 +1047,46 @@ export async function runMcpLogoutRoute(args: string[], deps: McpAuthDeps): Prom
   }
 }
 
+/**
+ * `winter mcp set-secret <name>` (fix round 1, minor 4): WHERE the secret may go is shown and confirmed
+ * BEFORE the secret is asked for — `mcp.clientSecretIssuer` names the authorization server the user-scope
+ * config discovers, the user answers y/N, then the masked prompt, then `mcp.setClientSecret` with that
+ * confirmed `expectedIssuer` (the daemon discovers again and refuses `mcp_issuer_changed` if it moved).
+ */
 export async function runMcpSetSecretRoute(args: string[], deps: McpAuthDeps): Promise<McpAuthOutcome> {
   const p = parseMcpAuthArgs("set-secret", args);
   if (p.kind === "usageError") return { ok: false, message: p.message };
   const { name, scope } = p.parsed;
   if (!deps.stdinIsTTY) return { ok: false, message: "the client secret is read at a masked prompt, and stdin is not a terminal — run this in an interactive shell (never a pipe)" };
-  const secret = (await deps.readSecret(`Client secret for "${name}": `)).trim();
-  if (secret === "") return { ok: false, message: "no client secret entered — nothing stored" };
+  const ref = { name, ...(scope !== undefined ? { scope } : {}), cwd: deps.cwd };
+  const local = deps.door === undefined ? deps.local() : undefined;
+  let secret = "";
   try {
+    let target: { name: string; issuer: string; issuerOrigin: string };
     if (deps.door !== undefined) {
       const { METHODS } = await import("@yanlinglabs/winter-protocol");
-      const r = await deps.door.request(METHODS.mcpSetClientSecret, { name, ...(scope !== undefined ? { scope } : {}), cwd: deps.cwd, secret });
-      return { ok: true, kind: "set-secret", name, via: "daemon", ...(typeof r?.issuerOrigin === "string" ? { issuerOrigin: r.issuerOrigin } : {}) };
+      target = await deps.door.request(METHODS.mcpClientSecretIssuer, ref);
+    } else {
+      target = await local!.clientSecretIssuer(local!.resolve(ref));
     }
-    const local = deps.local();
-    try {
-      const { issuerOrigin } = await local.setClientSecret(local.resolve({ name, ...(scope !== undefined ? { scope } : {}), cwd: deps.cwd }), secret);
-      return { ok: true, kind: "set-secret", name, via: "in-process", issuerOrigin };
-    } finally {
-      local.dispose();
+    const ok = await deps.confirm(`The client secret for "${target.name}" will be sent only to the authorization server ${target.issuer}. Is that the right one? [y/N] `);
+    if (!ok) return { ok: false, message: "not confirmed — nothing stored", code: "not_confirmed" };
+    secret = (await deps.readSecret(`Client secret for "${target.name}": `)).trim();
+    if (secret === "") return { ok: false, message: "no client secret entered — nothing stored" };
+    if (deps.door !== undefined) {
+      const { METHODS } = await import("@yanlinglabs/winter-protocol");
+      const r = await deps.door.request(METHODS.mcpSetClientSecret, { ...ref, secret, expectedIssuer: target.issuer });
+      return { ok: true, kind: "set-secret", name: target.name, via: "daemon", issuer: typeof r?.issuer === "string" ? r.issuer : target.issuer };
     }
+    const r = await local!.setClientSecret(local!.resolve(ref), secret, target.issuer);
+    return { ok: true, kind: "set-secret", name: target.name, via: "in-process", issuer: r.issuer };
   } catch (err) {
     const r = refusalOf(err);
     // The daemon's and the doors' messages never quote the secret; this is belt and braces.
-    return { ok: false, message: r.message.split(secret).join("<redacted>"), ...(r.code !== undefined ? { code: r.code } : {}) };
+    const message = secret === "" ? r.message : r.message.split(secret).join("<redacted>");
+    return { ok: false, message, ...(r.code !== undefined ? { code: r.code } : {}) };
+  } finally {
+    local?.dispose();
   }
 }
 
@@ -1075,7 +1095,7 @@ export function renderMcpAuthOutcome(outcome: McpAuthOutcome): string {
   const where = outcome.via === "daemon" ? "" : " (the daemon isn't running; live sessions pick it up when they next connect the server)";
   if (outcome.kind === "login") return `Signed in to "${outcome.name}"${outcome.issuerOrigin !== undefined ? ` at ${outcome.issuerOrigin}` : ""}${where}.`;
   if (outcome.kind === "logout") return `Signed out of "${outcome.name}"${where}.`;
-  return `Client secret stored for "${outcome.name}"${outcome.issuerOrigin !== undefined ? `; it is sent only to ${outcome.issuerOrigin}` : ""}${where}.`;
+  return `Client secret stored for "${outcome.name}"${outcome.issuer !== undefined ? `; it is sent only to ${outcome.issuer}` : ""}${where}.`;
 }
 
 /** `winter mcp list`'s auth note for one row (WS-25): empty when the daemon reported no auth column. */
