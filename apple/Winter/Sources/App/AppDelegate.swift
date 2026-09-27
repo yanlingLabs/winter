@@ -762,6 +762,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // makes `mcp.list` spawn that project's servers, and a tab must not do that merely by
             // being opened.
             mcpList: { try await client.mcpList() },
+            // WS-25 (MCP OAuth): the same live connection, wrapped behind `McpAuthClient` —
+            // `ProviderPaneModel`'s own `LiveAnthropicAuthClient(client:)` precedent.
+            mcpOAuthClient: LiveMcpAuthClient(client: client),
             // 2026-09-18: the Updates panel reads this presenter directly. Handed over even in
             // Debug (where it will report `.unavailable`) so the panel never has a nil case to
             // invent copy for.
