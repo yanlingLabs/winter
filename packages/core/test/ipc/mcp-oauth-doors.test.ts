@@ -283,6 +283,26 @@ describe("the MCP sign-in doors (WS-25)", () => {
     expect(loopback.message).toMatch(/authServerMetadataUrl/);
   });
 
+  test("an SDK issuer check that refuses a sign-in surfaces as the door's code with the SDK's own code in data.reason (the Mac reads it there)", async () => {
+    const fx = fixture();
+    // A metadata document that claims the REAL authorization server's issuer while being served from
+    // somewhere else: RFC 8414 §3.3 says its issuer must equal the URL it was fetched from.
+    const liar = Bun.serve({
+      port: 0, hostname: "127.0.0.1",
+      fetch: async () => {
+        const real = await (await fetch(`${fx.origin}/.well-known/oauth-authorization-server`)).json();
+        return Response.json(real);
+      },
+    });
+    cleanup.push(() => liar.stop(true));
+    const metadataUrl = `http://127.0.0.1:${liar.port}/.well-known/oauth-authorization-server`;
+    const { c } = await boot({ userServers: { linear: { type: "http", url: fx.mcpUrl, oauth: { authServerMetadataUrl: metadataUrl } } } });
+    const refused = await c.request(METHODS.mcpLogin, { name: "linear" });
+    expect(refused.error.data).toMatchObject({ code: "mcp_login_failed", reason: "metadata_issuer_mismatch" });
+    expect(fx.registrations).toEqual([]);
+    expect(fx.tokenPosts).toEqual([]);
+  });
+
   test("the sign-in doors are LOCAL role only, and the credential inventory never lists an MCP sign-in item", () => {
     for (const m of [METHODS.mcpLogin, METHODS.mcpLoginStatus, METHODS.mcpLogout, METHODS.mcpSetClientSecret, METHODS.mcpClientSecretIssuer]) {
       expect(REMOTE_ALLOWED_METHODS.has(m)).toBe(false);

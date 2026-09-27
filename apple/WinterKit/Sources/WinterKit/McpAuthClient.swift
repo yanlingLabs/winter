@@ -142,11 +142,12 @@ public struct McpExpectedIssuerRequired: Equatable, Sendable {
 }
 
 /// The closed set of `error.data.code` values `login`/`loginStatus`/`logout`/`setClientSecret` can
-/// refuse with (daemon-oauth lane's contract). Two members (`sdkClientSecretIssuerMismatch`/
-/// `sdkMetadataIssuerMismatch`) are the SDK's OWN raw codes rather than the daemon's `mcp_`-prefixed
-/// wrapper — carried here as their own cases (not folded into `clientSecretIssuerMismatch`) because
-/// they are literally different wire strings; `mcpAuthErrorText` (`LibraryMcpOAuth.swift`) is what
-/// gives all three the same user-facing sentence.
+/// refuse with (daemon-oauth lane's contract). Every one is the daemon's own `mcp_`-prefixed code: the
+/// SDK's raw codes (`client_secret_issuer_mismatch`, `metadata_issuer_mismatch`, ...) never reach
+/// `data.code` — the daemon wraps them (`mcp_login_failed`, `mcp_discovery_failed`,
+/// `mcp_client_secret_issuer_mismatch`) and carries the SDK's code in `data.reason`
+/// (`RpcError.mcpAuthReason`, WS-25 integration). An earlier draft matched the raw codes at the top
+/// level, which could never fire.
 public enum McpAuthRpcCode: String, Equatable, Sendable {
     case issuerChangeRequiresConfirmation = "mcp_issuer_change_requires_confirmation"
     case serverNotFound = "mcp_server_not_found"
@@ -160,8 +161,6 @@ public enum McpAuthRpcCode: String, Equatable, Sendable {
     case secretNeedsUserScope = "mcp_secret_needs_user_scope"
     case notPreregistered = "mcp_not_preregistered"
     case discoveryFailed = "mcp_discovery_failed"
-    case sdkClientSecretIssuerMismatch = "client_secret_issuer_mismatch"
-    case sdkMetadataIssuerMismatch = "metadata_issuer_mismatch"
     /// Polish round 3: `setClientSecret` refused because it was called without `expectedIssuer`
     /// matching what the daemon expects — carries the issuer/origin it needed
     /// (`RpcError.mcpExpectedIssuerRequired`). The Mac client always sends `expectedIssuer` (the
@@ -180,6 +179,14 @@ extension RpcError {
     public var mcpAuthCode: McpAuthRpcCode? {
         guard let code = data?["code"]?.stringValue else { return nil }
         return McpAuthRpcCode(rawValue: code)
+    }
+
+    /// The SDK's own failure code a daemon refusal wraps (`error.data.reason`, e.g.
+    /// `metadata_issuer_mismatch` under `mcp_login_failed`/`mcp_discovery_failed`) — the specific
+    /// cause behind a generic door code. `nil` when absent. An open string, not an enum: the SDK's
+    /// vocabulary grows independently of this build, and only a few reasons change what the user reads.
+    public var mcpAuthReason: String? {
+        data?["reason"]?.stringValue
     }
 
     /// Non-`nil` only for `mcp_issuer_change_requires_confirmation`, and only when all four fields

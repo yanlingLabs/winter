@@ -126,6 +126,29 @@ final class LiveMcpAuthClientTests: XCTestCase {
         }
     }
 
+    /// WS-25 integration: a login refused by the SDK's issuer check arrives as the daemon's own door
+    /// code with the SDK code in `data.reason` (exactly `McpOAuthDoorRefusal`'s wire shape) — it decodes
+    /// through `mcpAuthCode` + `mcpAuthReason`, and the sheet shows the specific mismatch sentence.
+    func testLoginRefusedWithAnSdkReasonDecodesTheReason() async throws {
+        let (client, t) = try await connectedClient()
+        let live = LiveMcpAuthClient(client: client)
+
+        async let loginTask = live.login(name: "linear")
+        await feedWaitUntil { t.sent.count >= 2 }
+        let req = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"error":{"code":-32602,"message":"the sign-in could not start","data":{"code":"mcp_login_failed","reason":"metadata_issuer_mismatch"}}}"#)
+
+        do {
+            _ = try await loginTask
+            XCTFail("must throw")
+        } catch {
+            let rpc = try XCTUnwrap(error as? RpcError)
+            XCTAssertEqual(rpc.mcpAuthCode, .loginFailed)
+            XCTAssertEqual(rpc.mcpAuthReason, "metadata_issuer_mismatch")
+            XCTAssertEqual(mcpAuthErrorText(rpc), "this server's sign-in configuration points somewhere it shouldn't")
+        }
+    }
+
     /// A refusal missing the NEW `storedIssuer`/`newIssuer` fields (an older daemon that only sends
     /// the two origins) decodes `mcpIssuerChangeConfirmation` as `nil` — both issuer fields are
     /// required together with the origins, never a half-built confirmation.

@@ -73,13 +73,36 @@ final class McpSignInSheetModelTests: XCTestCase {
             ("mcp_secret_needs_user_scope", "client secrets can only be set at user scope"),
             ("mcp_not_preregistered", "this server has no pre-registered client to set a secret for"),
             ("mcp_discovery_failed", "couldn't discover this server's sign-in details"),
-            // The SDK's own raw codes share the daemon-wrapped mismatch's wording.
-            ("client_secret_issuer_mismatch", "this server's sign-in configuration points somewhere it shouldn't"),
-            ("metadata_issuer_mismatch", "this server's sign-in configuration points somewhere it shouldn't"),
         ]
         for (code, expected) in cases {
             let error = RpcError(code: -1, message: "refused", data: .object(["code": .string(code)]))
             XCTAssertEqual(mcpAuthErrorText(error), expected, "code \(code)")
+        }
+    }
+
+    /// WS-25 integration: the SDK's issuer-mismatch codes arrive in `data.reason` under a generic door
+    /// code, and the specific sentence wins; any other reason keeps the door's own sentence. The raw
+    /// SDK codes at the TOP level are not a daemon code at all (never sent) and read as untyped.
+    func testMcpAuthErrorTextReadsTheSdkReasonBehindAGenericDoorCode() {
+        let mismatch = "this server's sign-in configuration points somewhere it shouldn't"
+        for door in ["mcp_login_failed", "mcp_discovery_failed", "mcp_client_secret_issuer_mismatch"] {
+            for reason in ["metadata_issuer_mismatch", "client_secret_issuer_mismatch"] {
+                let error = RpcError(code: -32602, message: "refused", data: .object([
+                    "code": .string(door), "reason": .string(reason),
+                ]))
+                XCTAssertEqual(mcpAuthErrorText(error), mismatch, "\(door) / \(reason)")
+            }
+        }
+        let other = RpcError(code: -32602, message: "refused", data: .object([
+            "code": .string("mcp_login_failed"), "reason": .string("discovery_failed"),
+        ]))
+        XCTAssertEqual(mcpAuthErrorText(other), "sign-in failed")
+        let confirm = RpcError(code: -32602, message: "refused", data: .object([
+            "code": .string("mcp_issuer_change_requires_confirmation"), "reason": .string("metadata_issuer_mismatch"),
+        ]))
+        XCTAssertNil(mcpAuthErrorText(confirm), "a confirmation refusal drives its own phase, whatever its reason")
+        for raw in ["metadata_issuer_mismatch", "client_secret_issuer_mismatch"] {
+            XCTAssertNil(mcpAuthErrorText(RpcError(code: -1, message: "raw", data: .object(["code": .string(raw)]))))
         }
     }
 
