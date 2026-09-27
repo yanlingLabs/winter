@@ -1,4 +1,4 @@
-import { chmodSync, statSync } from "node:fs";
+import { chmodSync, realpathSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { z } from "zod";
@@ -11,6 +11,7 @@ import {
   BgListParams, BgPeekParams, BgKillParams, BgKillAllParams,
   SessionSteerParams, SessionInterruptParams, SessionCompactParams, SkillsListParams, McpListParams, McpEnableParams, McpDisableParams,
   McpAddParams, McpRemoveParams, McpGetParams,
+  McpLoginParams, McpLoginStatusParams, McpLogoutParams, McpSetClientSecretParams,
   SkillsReadParams, SkillsWriteParams, SkillsDeleteParams,
   AskUserRespondParams, TaskListParams, PlanRespondParams, SessionSetPolicyParams,
   SessionSetModelParams, SessionSetEffortParams, SessionSetActivityParams, SessionSetDirsParams,
@@ -115,10 +116,17 @@ import { withProblemsForRoles, type RoleHealthRegistry } from "../providers/role
 import type { InternalRouter } from "../providers/internal-router";
 import { internalRoleProblemsFor } from "../providers/internal-role-problems";
 import { catalogRoleProblemsFor } from "../providers/catalog-role-problems";
-import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, type McpServerSettingsEntry } from "../settings";
+import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, sdkLocalMcpServers, liveSettingsView, type McpServerSettingsEntry } from "../settings";
 import { addMcpServerInScope, mcpServerInScope, removeMcpServerInScope, type McpScope, type McpScopeTarget } from "../agent/mcp/mcp-write";
 import { saveAnswerEverywhere, saveAnswerInProject, SavedAnswerRefused } from "../agent/saved-answers";
 import { localScopeKeyFor, projectScopeRootFor, projectScopeTrusted } from "../runtime-sdk/run-home-input";
+import { McpOAuthDoorRefusal, McpOAuthDoors, type McpOAuthDoorDeps } from "../agent/mcp/oauth-doors";
+import { reconnectLiveSessionsFor } from "../agent/mcp/reconnect";
+import { parseProjectMcpServers, readRawProjectMcpConfig } from "../agent/mcp/project-file";
+import { configuredMcpServersFor } from "../runtime-sdk/external-mcp";
+import { daemonMcpOAuthStore } from "../runtime-sdk/mcp-oauth-store";
+import { keychainService, resolveWinterProfile } from "../profile";
+import type { McpOAuthStore } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
 import { readSdkGlobalConfig, SdkFileUnreadable, updateSdkSettings } from "../sdk-files";
 import { bypassAllowedAtSpawn, disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
@@ -319,6 +327,13 @@ export interface IpcServerOptions {
   bg?: BackgroundTaskRegistry; // background bash tasks; bg.list/peek/kill/killAll
   skills?: SkillStore;       // discovered SKILL.md skills; skills.list/read/write/delete (5c T3)
   mcp?: McpManager;          // MCP servers started at boot; mcp.list
+  /**
+   * WS-25: the MCP sign-in doors' seams. `store` is the daemon's ONE MCP OAuth store; absent, it is
+   * derived exactly as the rest of the daemon derives it (`daemonMcpOAuthStore(keychainService(profile,
+   * winterHome))` -- the same instance, so the refresh single-flight is shared). The rest are test seams
+   * (`McpOAuthDoorDeps`). Local role only: none of the `mcp.*` sign-in methods is remote-reachable.
+   */
+  mcpOAuth?: { store?: McpOAuthStore } & Pick<McpOAuthDoorDeps, "startLogin" | "revoke" | "fetch" | "clientMetadataUrl" | "loginTtlMs" | "now">;
   plugins?: PluginStore;     // discovered ~/.winter/plugins/*; plugins.list
   // Phase 4d-ii Task 2: `<winterHome>/settings.json` + `<winterHome>/plugins/` — the SAME
   // convention `bootstrapWinterDir` (winter-dir.ts) and every other winterHome-taking store
@@ -896,6 +911,68 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     } catch (err) {
       console.error(`credentials: replacing live children for ${providerId} failed (${err instanceof Error ? err.name : "unknown"}) — the change lands at the next incarnation`);
     }
+  }
+
+  /**
+   * WS-25 (MCP OAuth): the daemon's ONE MCP OAuth store -- the SAME instance the session hooks' refresh and
+   * credential answers use (`daemonMcpOAuthStore` caches one per Keychain service, derived here exactly as
+   * the rest of the daemon derives it), because `refreshMcpOAuthToken`'s single-flight is keyed on the
+   * store object. A test injects a memory store.
+   */
+  const mcpOAuthStore = (): McpOAuthStore => opts.mcpOAuth?.store ?? daemonMcpOAuthStore(keychainService(resolveWinterProfile(), opts.winterHome));
+
+  /** The MCP servers ONE live session configures, named as its own fold names them (local > trusted
+   *  project > user, for its own cwd) -- the same `configuredMcpServersFor` a pre-run-home spawn uses. */
+  function mcpServersForSession(sessionId: string): Record<string, { type?: string; url?: string }> {
+    const home = opts.winterHome;
+    if (home === undefined) return {};
+    const cwd = opts.store.meta(sessionId).cwd ?? undefined;
+    return configuredMcpServersFor({
+      settings: liveSettingsFor(opts),
+      userMcpServers: sdkUserMcpServers(home),
+      ...(cwd !== undefined ? { localMcpServers: sdkLocalMcpServers(home, localScopeKeyFor(cwd)) } : {}),
+      cwd,
+      trusted: (dir) => opts.trust?.isTrusted(dir) ?? false,
+    }) as Record<string, { type?: string; url?: string }>;
+  }
+
+  /**
+   * WS-25: a sign-in finished or a sign-out ran for `serverUrl`. The daemon's status probe forgets its
+   * http/sse answers (the next `mcp.list` re-probes), and every LIVE child that configures the server is
+   * asked to reconnect it (`agent/mcp/reconnect.ts`: turn-safe, never an eviction or a restart -- a
+   * Keychain write never restarts a child). Best-effort: the sign-in itself already stands.
+   */
+  async function onMcpSignInChanged(serverUrl: string): Promise<void> {
+    opts.mcp?.forgetRemote();
+    const winter = opts.winter;
+    if (winter === undefined) return;
+    await reconnectLiveSessionsFor({ list: () => winter.list(), serversFor: mcpServersForSession, log: (line) => console.error(line) }, serverUrl);
+  }
+
+  const mcpOAuthDoors = opts.winterHome === undefined ? undefined : new McpOAuthDoors({
+    home: opts.winterHome,
+    store: mcpOAuthStore,
+    ...(opts.trust !== undefined ? { trust: opts.trust } : {}),
+    onSignInChanged: onMcpSignInChanged,
+    ...(opts.mcpOAuth?.startLogin !== undefined ? { startLogin: opts.mcpOAuth.startLogin } : {}),
+    ...(opts.mcpOAuth?.revoke !== undefined ? { revoke: opts.mcpOAuth.revoke } : {}),
+    ...(opts.mcpOAuth?.fetch !== undefined ? { fetch: opts.mcpOAuth.fetch } : {}),
+    ...(opts.mcpOAuth?.clientMetadataUrl !== undefined ? { clientMetadataUrl: opts.mcpOAuth.clientMetadataUrl } : {}),
+    ...(opts.mcpOAuth?.loginTtlMs !== undefined ? { loginTtlMs: opts.mcpOAuth.loginTtlMs } : {}),
+    ...(opts.mcpOAuth?.now !== undefined ? { now: opts.mcpOAuth.now } : {}),
+    log: (line) => console.error(line),
+  });
+
+  /** The sign-in doors, or a typed refusal on a server built without a `winterHome`. */
+  function signInDoors(method: string): McpOAuthDoors {
+    if (mcpOAuthDoors === undefined) throw new RpcFailure(ERR.INTERNAL, `${method} is not available on this server (no winterHome configured)`);
+    return mcpOAuthDoors;
+  }
+
+  /** A door's typed refusal as the JSON-RPC error: `data.code` plus the refusal's own fields. */
+  function mcpDoorFailure(err: unknown): unknown {
+    if (err instanceof McpOAuthDoorRefusal) return new RpcFailure(ERR.INVALID_PARAMS, err.message, { code: err.code, ...err.data });
+    return err;
   }
 
   /**
@@ -2247,10 +2324,17 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // -----------------------------------------------------------------------------------------
       case METHODS.mcpList: {
         const p = parseParams(McpListParams, params);
-        if (p.cwd) await opts.mcp?.ensureProject(p.cwd);
-        const tracked = opts.mcp?.list(p.cwd) ?? [];
         const settings = liveSettingsFor(opts);
         const disabled = new Set(settings?.mcp?.disabled ?? []);
+        const userServers = opts.winterHome ? sdkUserMcpServers(opts.winterHome) : {};
+        // WS-25: the LAZY http/sse probe of the live user scope (`McpManager.ensureRemote`; never at boot) —
+        // a recorded answer is reused until a sign-in, a sign-out, an add or an enable forgets it. A
+        // disabled name is never probed (the child is never handed it either).
+        if (opts.mcp?.probesRemote) {
+          await opts.mcp.ensureRemote(Object.fromEntries(Object.entries(userServers).filter(([name, entry]) => entry.type !== "stdio" && !disabled.has(name))));
+        }
+        if (p.cwd) await opts.mcp?.ensureProject(p.cwd);
+        const tracked = opts.mcp?.list(p.cwd) ?? [];
         // Read-door correction (item 6 follow-up): which credential-shaped headers `loadSettings`
         // silently dropped, per server — read fresh off the RAW file (never off `settings` above,
         // which by construction can no longer say what it removed) so a hand-edited header shows up
@@ -2269,7 +2353,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // so a disabled stdio server is no longer in `tracked` at all and would otherwise vanish from
         // this report entirely rather than reading "disabled" — the same "reported, not silently
         // absent" posture every other disabled entry in this list already has.
-        const unmanaged = Object.entries(opts.winterHome ? sdkUserMcpServers(opts.winterHome) : {})
+        const unmanaged = Object.entries(userServers)
           .filter(([name, entry]) => (entry.type !== "stdio" || disabled.has(name)) && !trackedNames.has(name))
           .map(([name, entry]) => withStripped({
             name,
@@ -2278,7 +2362,29 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             source: "user" as const,
             transport: entry.type,
           }));
-        return { ok: true, servers: [...overlaid, ...unmanaged] };
+        // WS-25 (spec §2): the auth columns for every http/sse row — `auth`, `oauthIssuerOrigin`,
+        // `oauthPreregistered` — from the daemon's own store and the row's last probe (`McpOAuthDoors.
+        // authColumns`: presence and expiry only, never material). A project row's config is read from the
+        // same trusted project file the probe read.
+        let projectServers: Record<string, { type: string; url?: unknown; headers?: unknown; oauth?: unknown }> | undefined;
+        const projectEntry = (name: string): { type: string; url?: unknown; headers?: unknown; oauth?: unknown } | undefined => {
+          if (!p.cwd) return undefined;
+          if (projectServers === undefined) {
+            let dir = p.cwd;
+            try { dir = realpathSync(p.cwd); } catch { /* a vanished cwd: its spelling */ }
+            const read = readRawProjectMcpConfig(projectScopeRootFor(dir));
+            projectServers = read.kind === "ok" ? parseProjectMcpServers(read.servers).servers : {};
+          }
+          return projectServers[name];
+        };
+        const rows = await Promise.all([...overlaid, ...unmanaged].map(async (row) => {
+          if (mcpOAuthDoors === undefined || row.transport === undefined || row.transport === "stdio") return row;
+          const entry = (row.source === "project" ? projectEntry(row.name) : userServers[row.name]) as { type: string; url?: unknown; headers?: unknown; oauth?: unknown } | undefined;
+          if (entry === undefined || entry.type === "stdio" || typeof entry.url !== "string") return row;
+          const columns = await mcpOAuthDoors.authColumns({ url: entry.url, ...(entry.headers !== undefined ? { headers: entry.headers as Record<string, string> } : {}), ...(entry.oauth !== undefined ? { oauth: entry.oauth as { clientId?: string } } : {}) }, row.status);
+          return { ...row, ...columns };
+        }));
+        return { ok: true, servers: rows };
       }
       // -----------------------------------------------------------------------------------------
       // Daemon settings surface batch 3 (item 3a) — the enable/disable door for a configured MCP
@@ -2395,7 +2501,49 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (entry.type === "stdio") {
           return { ...base, command: entry.command, ...(entry.args ? { args: entry.args } : {}), ...(entry.env ? { env: entry.env } : {}) };
         }
-        return { ...base, url: entry.url, ...(entry.headers ? { headers: entry.headers } : {}) };
+        // WS-25: the server's sign-in settings, echoed as stored (validated on the way in; never a secret).
+        return { ...base, url: entry.url, ...(entry.headers ? { headers: entry.headers } : {}), ...(entry.oauth !== undefined ? { oauth: entry.oauth } : {}) };
+      }
+      // -----------------------------------------------------------------------------------------
+      // WS-25 (MCP OAuth, spec §2): the sign-in doors. LOCAL ROLE ONLY (none is in
+      // `REMOTE_ALLOWED_METHODS`: the phone signs in on the Mac). `agent/mcp/oauth-doors.ts` owns what they
+      // do; a door's refusal is typed (`data.code`), and nothing here ever logs an authorize URL, a token
+      // or a secret. `name` resolves as a session folds it (`McpOAuthDoors.resolve`).
+      // -----------------------------------------------------------------------------------------
+      case METHODS.mcpLogin: {
+        const p = parseParams(McpLoginParams, params);
+        const doors = signInDoors("mcp.login");
+        try {
+          const server = doors.resolve(p);
+          return await doors.login(server, { ...(p.confirmIssuerChange === true ? { confirmIssuerChange: true } : {}) });
+        } catch (err) {
+          throw mcpDoorFailure(err);
+        }
+      }
+      case METHODS.mcpLoginStatus: {
+        const p = parseParams(McpLoginStatusParams, params);
+        return signInDoors("mcp.loginStatus").loginStatus(p.loginId);
+      }
+      case METHODS.mcpLogout: {
+        const p = parseParams(McpLogoutParams, params);
+        const doors = signInDoors("mcp.logout");
+        try {
+          await doors.logout(doors.resolve(p), { ...(p.forgetClient === true ? { forgetClient: true } : {}) });
+          return { ok: true };
+        } catch (err) {
+          throw mcpDoorFailure(err);
+        }
+      }
+      case METHODS.mcpSetClientSecret: {
+        // The secret is in `params` only: it is never logged, never echoed, never in an error.
+        const p = parseParams(McpSetClientSecretParams, params);
+        const doors = signInDoors("mcp.setClientSecret");
+        try {
+          const { issuerOrigin } = await doors.setClientSecret(doors.resolve(p), p.secret);
+          return { ok: true, issuerOrigin };
+        } catch (err) {
+          throw mcpDoorFailure(err);
+        }
       }
       // -----------------------------------------------------------------------------------------
       // Daemon settings surface (2026-09-17 plan, item 2). LOCAL-ROLE ONLY: never added to
@@ -4413,5 +4561,5 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   // T5: the enforcement owns real timers (the demotion sweep interval, plus any pending post-turn
   // grace) — a server torn down without stopping them leaves callbacks that fire against a dead
   // store, which in a test run is a cross-test leak rather than a crash (they're unref'd).
-  return { stop() { enforcement.stop(); server.stop(true); } };
+  return { stop() { enforcement.stop(); mcpOAuthDoors?.dispose(); server.stop(true); } };
 }

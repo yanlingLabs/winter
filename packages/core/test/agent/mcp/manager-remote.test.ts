@@ -70,7 +70,7 @@ describe("McpManager's http/sse probe (WS-25)", () => {
     // A still-valid token is never refreshed at connect (spec §1.2).
     expect(fx.tokenPosts.filter((g) => g === "refresh_token")).toEqual([]);
     await store.remove([...(store as unknown as { entries: Map<string, string> }).entries.keys()].find((k) => k.startsWith("mcp-oauth:"))!);
-    mgr.forget(["remote"]);
+    mgr.forgetRemote();
     await mgr.ensureRemote({ remote: { type: "http", url: fx.mcpUrl } });
     expect(mgr.list()[0]).toMatchObject({ status: "needs-auth" });
   });
