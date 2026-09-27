@@ -652,6 +652,12 @@ const MATRIX: { mode: "code" | "dispatch" | "chat"; policy: SessionApprovalPolic
   { mode: "chat", policy: "chat", tool: "TotallyUnknownTool", want: "deny", note: "chat denies, never asks" },
   // a session created before the create-time coercion keeps `auto` on its row — the stale-row case
   { mode: "chat", policy: "auto", tool: "Workflow", want: "deny", note: "DIVERGENCE (stale row): never prompts" },
+  // WS-26: a CONNECTOR action (a user-configured MCP server's tool) cards in chat and dispatch — the one
+  // exception to "never prompts"; nothing else moves (the full connector matrix, with the stored
+  // permissions and the read-only default, is `agent/mcp/connector-permissions.test.ts`'s).
+  { mode: "chat", policy: "chat", tool: "mcp__github__create_issue", want: "ask", note: "WS-26: a connector action cards in chat" },
+  { mode: "chat", policy: "chat", tool: "mcp__winter__external__battery", want: "deny", note: "a plugin's extras-tier tool is not a connector" },
+  { mode: "dispatch", policy: "ask", tool: "mcp__github__create_issue", want: "ask", note: "WS-26: a connector action cards in dispatch" },
 ];
 
 for (const row of MATRIX) {

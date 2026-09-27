@@ -29,6 +29,7 @@
 // record write that fails after the row exists is rolled back by the caller (the row is deleted —
 // it was never announced to any client). Every refusal is a `WinterLegRefusal` whose `code` the IPC
 // layer forwards as the JSON-RPC error's `data.code`.
+import type { ConnectorPermissionSource } from "../agent/mcp/connector-permissions";
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { join } from "node:path";
@@ -387,6 +388,8 @@ export interface WinterLegDeps {
    * `canUseToolFor` below.
    */
   planBridge?: { onExitPlanMode(req: BridgedApprovalRequest): Promise<PermissionResult> };
+  /** WS-26: the connector permissions, threaded straight into `CanUseToolDeps.connectors` (live reads). */
+  connectors?: ConnectorPermissionSource;
   /**
    * P8c-14 (integration round 2): lane 3's `sessionHooksFor(...)` module — this file never imports
    * it, only threads its result through: `.winter` goes into every incarnation's
@@ -806,6 +809,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // P8c-14 (integration round 2): `ExitPlanMode` on the Winter leg now answers through the
       // controller-wired plan bridge (see `WinterLegDeps.planBridge`'s own doc comment).
       ...(deps.planBridge === undefined ? {} : { planBridge: deps.planBridge }),
+      ...(deps.connectors === undefined ? {} : { connectors: deps.connectors }),
     });
 
     /** Predictive, and exact: the driver appends every batch synchronously right after the projector
