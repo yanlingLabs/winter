@@ -74,6 +74,8 @@ export { RUNTIME_WORKFLOW_WORKER_ARG } from "./runtime-sdk/embedded";
 // WS-27: the child side of the one-time dev Keychain transition (`scripts/dev-daemon.ts --transition`),
 // reached by the CLI's positional `__dev-keychain-adopt` route.
 export { runDevKeychainAdopt, DEV_KEYCHAIN_ADOPT_ARG } from "./auth/dev-keychain-transition";
+// WS-27 review: the typed boot refusal when another process holds the credential migration lock too long.
+export { CredentialMigrationBusy } from "./auth/credential-migration-lock";
 // P8b-18: reached only by the CLI's static `__runtime-state-probe` argv route, which imports it
 // from THIS barrel — the same shape `runWorkflowSubprocess` above uses, and the only shape that
 // survives `bun build --compile` (a dynamic import keyed on a string does not resolve in $bunfs).

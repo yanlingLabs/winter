@@ -11,6 +11,7 @@ import {
   credentialAclMarkerPath, isCredentialAccount, migrateCredentialAcl, prepareCredentialAccess, recoverCredentialShadows, REAL_CREDENTIAL_KEYCHAIN_OPS, runCredentialMigration,
   type CredentialKeychain, type CredentialKeychainOps,
 } from "../../src/auth/credential-acl";
+import { finishCredentialPass } from "../../src/auth/keychain-boot";
 import {
   addGenericPasswordWithAccess, deleteGenericPassword, ERR_SEC_INTERACTION_NOT_ALLOWED, genericPasswordPresent, KeychainFfiError, listGenericPasswordAccounts, openKeychainFile,
   readGenericPassword, readGenericPasswordBytes, withKeychainUserInteractionDisabled, type KeychainFile,
@@ -62,6 +63,10 @@ function clean(): void {
 
 type Failure = { op: "read" | "add" | "remove"; account: string; status?: number; times?: number };
 
+/** `remove` of `account` deletes it but answers `false` — the original vanished between the re-read and the
+ *  delete (a removal that landed first). */
+let vanishOnRemove: string | undefined;
+
 /** A keychain handle whose calls fail on cue (each failure `times` times, default always). `onAdd` runs
  *  after each successful add (a test's way to land a concurrent write at an exact point). */
 function keychainWith(failures: Failure[] = [], logs?: string[], onAdd?: (account: string) => void): CredentialKeychain {
@@ -77,7 +82,11 @@ function keychainWith(failures: Failure[] = [], logs?: string[], onAdd?: (accoun
     read(target, service, account) { trip("read", account); return REAL_CREDENTIAL_KEYCHAIN_OPS.read(target, service, account); },
     readBytes(target, service, account) { trip("read", account); return REAL_CREDENTIAL_KEYCHAIN_OPS.readBytes(target, service, account); },
     add(target, item) { trip("add", item.account); REAL_CREDENTIAL_KEYCHAIN_OPS.add(target, item); onAdd?.(item.account); },
-    remove(target, service, account) { trip("remove", account); return REAL_CREDENTIAL_KEYCHAIN_OPS.remove(target, service, account); },
+    remove(target, service, account) {
+      trip("remove", account);
+      const removed = REAL_CREDENTIAL_KEYCHAIN_OPS.remove(target, service, account);
+      return account === vanishOnRemove ? false : removed;
+    },
   };
   return { keychain: kc, service: SERVICE, ops, ...(logs !== undefined ? { log: (l: string) => logs.push(l) } : {}) };
 }
@@ -323,6 +332,57 @@ describe.skipIf(!darwin)("the credential ACL migration (throwaway keychain file)
     } finally { access?.release(); }
     expect(readGenericPassword(kc, SERVICE, "admin-token")).toBe("v-admin-token");
     expect(genericPasswordPresent(kc, SERVICE, "admin-token.migrating")).toBe(false);
+    expect(existsSync(credentialAclMarkerPath(home))).toBe(false);
+    clean();
+  }, SLOW);
+
+  test("N6: the marker is keyed on the requirement AND the service: another requirement runs again; the same requirement on another service is no no-op", () => {
+    clean();
+    seed();
+    const home = mkdtempSync(join(dir, "home-"));
+    expect(migrate(keychainWith(), home)).toMatchObject({ kind: "migrated" });
+    expect(migrate(keychainWith(), home)).toEqual({ kind: "current" });
+    expect(migrate(keychainWith(), home, 'identifier "a-differently-signed-core"')).toMatchObject({ kind: "migrated", names: [...CREDENTIALS].sort() });
+    // The marker now names the other requirement; ours runs again too.
+    expect(migrate(keychainWith(), home)).toMatchObject({ kind: "migrated" });
+    // Same requirement, the other service (which holds an old-grant item): it migrates, it is not "current".
+    const other: CredentialKeychain = { ...keychainWith(), service: OTHER_SERVICE };
+    expect(migrate(other, home)).toEqual({ kind: "migrated", names: ["openai:default"], skipped: [] });
+    expect(aclOf("openai:default", OTHER_SERVICE)).not.toContain(CALCULATOR);
+    clean();
+  }, SLOW);
+
+  test("N7: the original vanishes between the re-read and the delete (remove answers false) — that item stops: nothing put back, its shadow dropped", () => {
+    clean();
+    seed();
+    const home = mkdtempSync(join(dir, "home-"));
+    vanishOnRemove = "exa-api-key";
+    try {
+      expect(migrate(keychainWith(), home)).toMatchObject({ kind: "migrated", skipped: ["exa-api-key"] });
+    } finally { vanishOnRemove = undefined; }
+    expect(genericPasswordPresent(kc, SERVICE, "exa-api-key")).toBe(false);
+    expect(genericPasswordPresent(kc, SERVICE, "exa-api-key.migrating")).toBe(false);
+    expect(aclOf("openai:default")).not.toContain(CALCULATOR);
+    clean();
+  }, SLOW);
+
+  test("N5: when the designated requirement cannot be read, the boot's second half runs the recovery only — no migration, no marker", () => {
+    clean();
+    seed();
+    deleteGenericPassword(kc, SERVICE, "admin-token");
+    addGenericPasswordWithAccess(kc, { service: SERVICE, account: "admin-token.migrating", value: "v-admin-token", trustedApplications: [null] });
+    const home = mkdtempSync(join(dir, "home-"));
+    const logs: string[] = [];
+    const k = keychainWith([], logs);
+    const pass = { lock: { release() {} }, kc: k, access: prepareCredentialAccess(k) };
+    expect(finishCredentialPass(pass, home, { unlocked: () => true, requirement: () => undefined })).toBe("skipped");
+    expect(readGenericPassword(kc, SERVICE, "admin-token")).toBe("v-admin-token");
+    expect(aclOf("openai:default")).toContain(CALCULATOR);
+    expect(existsSync(credentialAclMarkerPath(home))).toBe(false);
+    expect(logs.join("\n")).toContain("designated requirement could not be read");
+    // And the keychain locking meanwhile: nothing at all.
+    const pass2 = { lock: { release() {} }, kc: k, access: prepareCredentialAccess(k) };
+    expect(finishCredentialPass(pass2, home, { unlocked: () => false, requirement: () => SELF })).toBe("skipped");
     expect(existsSync(credentialAclMarkerPath(home))).toBe(false);
     clean();
   }, SLOW);

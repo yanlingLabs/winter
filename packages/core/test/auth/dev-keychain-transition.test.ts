@@ -291,6 +291,49 @@ describe.skipIf(!darwin)("the dev Keychain transition (throwaway keychain file)"
     clean();
   }, SLOW);
 
+  test("N4: a pairing token's DIFFERING shadow is never dropped — kept by bun's recovery and by the child's shadow step; the token is left alone", async () => {
+    clean();
+    seed();
+    addGenericPasswordWithAccess(kc, { service: SERVICE, account: "remote-token.migrating", value: "r-other-value", trustedApplications: [null] });
+    const s1 = sides();
+    const outcome = await s1.run();
+    expect(outcome).toMatchObject({ kind: "done", skipped: ["remote-token"] });
+    expect(readGenericPassword(kc, SERVICE, "remote-token.migrating")).toBe("r-other-value");
+    expect(readGenericPassword(kc, SERVICE, "remote-token")).toBe("v-remote-token");
+    expect(aclIn(dump(), "remote-token")).toContain(CALCULATOR);
+    expect(s1.logs.join("\n")).toContain("hold DIFFERENT values — both kept");
+    // The child alone, too.
+    const handle = createAdoptHandler({ keychain: kc, service: SERVICE }, access, mkdtempSync(join(dir, "home-")), CHILD_REQUIREMENT);
+    expect(handle({ op: "shadow", account: "remote-token", value: "v-remote-token" })).toEqual({ ok: false, reason: "remote-token.migrating holds a different value — kept" });
+    expect(readGenericPassword(kc, SERVICE, "remote-token.migrating")).toBe("r-other-value");
+    clean();
+  }, SLOW);
+
+  test("N5: a child that cannot read its own designated requirement adopts, but writes no marker", async () => {
+    clean();
+    seed();
+    const home = mkdtempSync(join(dir, "home-"));
+    const handle = createAdoptHandler({ keychain: kc, service: SERVICE }, access, home, undefined);
+    expect(handle({ op: "marker", migrated: 3, skipped: 0 })).toEqual({ ok: true });
+    expect(existsSync(credentialAclMarkerPath(home))).toBe(false);
+    clean();
+  }, SLOW);
+
+  test("N7: an item that vanishes before bun deletes it (remove answers false) is left removed; the child's shadow goes", async () => {
+    clean();
+    seed();
+    const home = mkdtempSync(join(dir, "home-"));
+    const logs: string[] = [];
+    const oldOps = { ...opsWith([]), remove: (t: never, s: string, a: string) => { const r = REAL_CREDENTIAL_KEYCHAIN_OPS.remove(t, s, a); return a === "openai:default" ? false : r; } };
+    const handle = createAdoptHandler({ keychain: kc, service: SERVICE }, access, home, CHILD_REQUIREMENT);
+    const outcome = await runDevKeychainTransition({ keychain: kc, service: SERVICE, ops: oldOps as never }, async (r) => handle(r), (l) => logs.push(l));
+    expect(outcome).toMatchObject({ kind: "done", skipped: ["openai:default"] });
+    expect(genericPasswordPresent(kc, SERVICE, "openai:default")).toBe(false);
+    expect(genericPasswordPresent(kc, SERVICE, "openai:default.migrating")).toBe(false);
+    expect(logs.join("\n")).toContain("vanished before the delete");
+    clean();
+  }, SLOW);
+
   test("nothing adopted and something skipped (a re-run over already-adopted items): no marker", async () => {
     clean();
     seed();
