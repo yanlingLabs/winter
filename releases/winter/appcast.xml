@@ -271,5 +271,66 @@
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
       <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.118.0/Winter-0.118.0.zip" sparkle:edSignature="u35aRjs6xKe/YhMawvHchAoyunrS31sE1x3CvvgVjp9alxs/ODYvOXppTI5GG7D/cKP9YJapFKcsLbhKWdntCA==" length="425847323" type="application/octet-stream"/>
     </item>
+      <item>
+      <title>0.119.0</title>
+      <description><![CDATA[<p>Winter agent SDK 0.0.29</p>
+<h2>Faster, cheaper turns</h2>
+<ul>
+  <li><strong>Plan mode keeps the prompt cache.</strong> Entering or leaving plan mode used to throw away the whole cache on OpenAI models (and most of it elsewhere). The plan-mode instructions now arrive as a message at the end of the conversation, so the start of the prompt never changes.</li>
+  <li><strong>Reasoning token counts</strong> are now reported for OpenAI, Codex, xAI and other reasoning models that report them.</li>
+</ul>
+<h2>Subagents and MCP</h2>
+<ul>
+  <li><strong>A subagent waits for its own MCP servers</strong> (briefly, as the main session does), so their tools are there on its first turn.</li>
+  <li><strong>A subagent's MCP server with the same name as yours no longer replaces yours.</strong> It gets its own name, and your rules and hooks for the server still apply to it.</li>
+  <li><strong>Interrupts and model switches answer right away</strong> while MCP servers are still connecting.</li>
+  <li><strong>Forked agents can run tools they load themselves</strong> on Claude Opus 5.5, Claude Sonnet 5 and DeepSeek Flash, and on OpenAI models with tool search.</li>
+  <li><strong>MCP servers loaded from the discovery cache pick up tool changes</strong> once they connect.</li>
+  <li><strong>Adding an MCP server keeps its protocol-version setting.</strong> <code>winter mcp add</code> now keeps <code>versionNegotiation</code>, and <code>auto</code> negotiation is safe on stdio servers: one that exits on the probe is restarted once in legacy mode.</li>
+</ul>
+<h2>Hooks</h2>
+<ul>
+  <li><strong>Async hooks</strong> (<code>async: true</code>) run in the background without holding up the tool call. Their messages reach the model at the next safe point. They can never allow or deny a call, and security hooks always stay synchronous.</li>
+  <li><strong>Hooks know which MCP server a tool came from</strong> (<code>mcp_server_name</code>, <code>mcp_tool_name</code>).</li>
+  <li><strong>A hook that times out is cancelled</strong>, and the shell-command reviewer stops its model call.</li>
+</ul>
+<h2>Model pickers</h2>
+<ul>
+  <li><strong>Models that can't use tools are hidden from session pickers</strong> (Mac, terminal and iPhone). A session already set to one gets a clear message on its next turn instead of breaking.</li>
+  <li><strong>The shell-command safety reviewer works on Claude Opus 5.5 and Fable 5.1.</strong></li>
+  <li><strong>Fewer wrong "this switch loses context" prompts.</strong></li>
+  <li>A chat-completions provider with no endpoint configured now says so, instead of quietly falling back to OpenAI's address.</li>
+</ul>
+<h2>iPhone</h2>
+<ul>
+  <li><strong>Hook notices and continuity warnings appear on the iPhone</strong> once you update the iOS app.</li>
+</ul>
+<h2>Security</h2>
+<ul>
+  <li><strong>A project folder can no longer change how Winter starts.</strong> Winter's programs used to read a <code>bunfig.toml</code> and a <code>.env</code> file from the folder they were started in, so opening a code session in a repository, or running <code>winter</code> inside one, could let that repository's files run code as Winter. Both are now ignored.</li>
+  <li><strong>Writes to protected folders are checked through symbolic and hard links</strong>, after a failed <code>cd</code>, and in many more command spellings. When a command is too complex to judge, Winter asks instead of guessing.</li>
+  <li><strong>A saved approval is re-checked against where a link points</strong> when the command runs.</li>
+  <li><strong>A repository can't raise your permission mode or change your settings behind your back.</strong> A <code>.winter/settings.local.json</code> that the repository ships (tracked in git, linked or in a submodule) is treated like the project's own settings. Repository settings can't set the effort level or thinking options either.</li>
+  <li><strong>The output style comes from your own settings only.</strong> A project can no longer pick your output style or redefine one of yours, and its styles always keep the coding instructions. If you set a style in a project's settings, set it in Winter's settings instead.</li>
+</ul>
+<h2>Plugins</h2>
+<ul>
+  <li><strong>Plugins with the same name from different marketplaces</strong> no longer collide.</li>
+  <li><strong>Keyboard shortcuts saved for a plugin carry over</strong> after this update.</li>
+  <li><strong>A revoked plugin consent stays revoked</strong>, and a stray folder in the plugins directory no longer triggers a migration.</li>
+  <li><strong>The consent sheet says when a plugin's background process won't start</strong> (it runs only for plugins installed for you, not for a project).</li>
+</ul>
+<h2>Everything else</h2>
+<ul>
+  <li><strong>Worktrees:</strong> agents, output styles, workflows and memory listings now show what a session in a worktree actually loads.</li>
+  <li><strong>Chat and dispatch clean up background processes</strong> left behind when a session stops unexpectedly.</li>
+  <li><strong>Subagent notices and model switches stay with the subagent</strong> instead of touching the main conversation.</li>
+</ul>
+<p>This release runs on Winter agent SDK 0.0.29 and runtime SDK 0.0.15.</p>]]></description>
+      <sparkle:version>0.119.0</sparkle:version>
+      <sparkle:shortVersionString>0.119.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.119.0/Winter-0.119.0.zip" sparkle:edSignature="CUS/EIOrsarNOejejpub85OhCBkSKBBB/dbYmLw0mpesSJo2DRxZzx+8A9dTEwRskidZCorszafJifbT98c5Ag==" length="425872235" type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>
