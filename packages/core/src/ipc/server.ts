@@ -863,6 +863,11 @@ function agentInlineRowsFor(winterHome: string, cwd: string | undefined, trust: 
   }
 }
 
+/** WS-27: every server name a LIVE session's child has connected (`WinterSession.mcpServerNames`). */
+function liveMcpServerNames(winter: { list(): ReadonlyArray<{ mcpServerNames?(): string[] }> } | undefined): () => string[] {
+  return () => (winter?.list() ?? []).flatMap((s) => s.mcpServerNames?.() ?? []);
+}
+
 function mcpScopeTarget(method: string, winterHome: string, p: { scope: McpScope; cwd?: string | undefined }): McpScopeTarget {
   if (p.scope === "user") return { home: winterHome, scope: "user" };
   if (p.cwd === undefined || p.cwd === "") {
@@ -2570,7 +2575,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         let outcome: ReturnType<typeof removeMcpServerForgettingPermissions>;
         try {
           // WS-27: the name's connector permissions go too — once nothing else defines a server of that name.
-          outcome = removeMcpServerForgettingPermissions(target, p.name, { cwd: p.cwd, trust: opts.trust });
+          outcome = removeMcpServerForgettingPermissions(target, p.name, { cwd: p.cwd, trust: opts.trust, liveNames: liveMcpServerNames(opts.winter) });
         } catch (err) {
           throw sdkWriteFailure(err);
         }
@@ -2578,7 +2583,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // Drop a user server's recorded probe status now, same as `mcp.disable` — a removed server must not
         // go on being reported until the next daemon restart.
         if (outcome.removed && target.scope === "user") opts.mcp?.stopServer(p.name);
-        return { ok: true, name: p.name, removed: outcome.removed, scope: p.scope, permissionsCleared: outcome.permissionsCleared };
+        return { ok: true, name: p.name, removed: outcome.removed, scope: p.scope, permissionsCleared: outcome.permissionsCleared, ...(outcome.permissionsNote !== undefined ? { permissionsNote: outcome.permissionsNote } : {}) };
       }
       // -----------------------------------------------------------------------------------------
       // WS-27 — `winter mcp rename <old> <new>` (`McpRenameParams`' doc): within one scope, carrying the
@@ -2591,7 +2596,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const target = mcpScopeTarget("mcp.rename", opts.winterHome, p);
         let outcome: ReturnType<typeof renameMcpServerCarryingSettings>;
         try {
-          outcome = renameMcpServerCarryingSettings(target, p.name, p.newName, { cwd: p.cwd, trust: opts.trust });
+          outcome = renameMcpServerCarryingSettings(target, p.name, p.newName, { cwd: p.cwd, trust: opts.trust, liveNames: liveMcpServerNames(opts.winter) });
         } catch (err) {
           if (err instanceof McpRenameRefusal) throw new RpcFailure(ERR.INVALID_PARAMS, err.message, { code: err.code });
           throw sdkWriteFailure(err);
@@ -2602,7 +2607,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           const cfg = stdioMcpServersFor(sdkUserMcpServers(opts.winterHome), (outcome.settings ?? liveSettingsFor(opts))?.mcp?.disabled)[p.newName];
           if (cfg) await opts.mcp?.startOneUserServer(p.newName, cfg);
         }
-        return { ok: true, name: p.name, newName: p.newName, scope: p.scope, carried: outcome.carried, keptOld: outcome.keptOld };
+        return {
+          ok: true, name: p.name, newName: p.newName, scope: p.scope, carried: outcome.carried, keptOld: outcome.keptOld,
+          rulesCarried: outcome.rulesCarried, rulesNotFollowed: outcome.rulesNotFollowed, ...(outcome.note !== undefined ? { note: outcome.note } : {}),
+        };
       }
       // -----------------------------------------------------------------------------------------
       // `winter mcp get <name>` — read-only, degrades to `found: false` rather than throwing on a

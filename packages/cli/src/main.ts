@@ -1920,8 +1920,9 @@ if (import.meta.main) {
       // Each names `scope: "user"`: `mcp.add`/`remove`/`get` default a missing scope to "local" since WS-21.
       const mcpDoor = door ? {
         mcpAdd: (name: string, entry: unknown) => door.request(METHODS.mcpAdd, { name, entry, scope: "user" }),
-        mcpRemove: (name: string) => door.request(METHODS.mcpRemove, { name, scope: "user" }),
-        mcpRename: (name: string, newName: string) => door.request(METHODS.mcpRename, { name, newName, scope: "user" }),
+        // WS-27 (review 6): remove and rename go through the daemon for EVERY scope, as `permissions` does.
+        mcpRemove: (name: string, scope: "user" | "local" | "project" = "user", cwd?: string) => door.request(METHODS.mcpRemove, { name, scope, ...(cwd !== undefined ? { cwd } : {}) }),
+        mcpRename: (name: string, newName: string, scope: "user" | "local" | "project" = "user", cwd?: string) => door.request(METHODS.mcpRename, { name, newName, scope, ...(cwd !== undefined ? { cwd } : {}) }),
         mcpGet: (name: string) => door.request(METHODS.mcpGet, { name, scope: "user" }),
       } : undefined;
       const deps = { cwd: process.cwd(), winterHome, door: mcpDoor };

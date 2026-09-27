@@ -60,7 +60,7 @@ describe("mcp.remove / mcp.rename and the connector settings", () => {
   let stop: (() => void) | undefined;
   afterEach(() => { stop?.(); stop = undefined; });
 
-  async function boot(config: Record<string, unknown>, settings: Record<string, unknown> = {}) {
+  async function boot(config: Record<string, unknown>, settings: Record<string, unknown> = {}, live: string[] = []) {
     const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-mcp-rename-")));
     saveSettings(join(home, "settings.json"), Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" }, ...settings }));
     mkdirSync(join(home, "sdk"), { recursive: true });
@@ -75,7 +75,7 @@ describe("mcp.remove / mcp.rename and the connector settings", () => {
     const tokens = await authority.ensureTokens();
     const oauth = createMemoryMcpOAuthStore();
     const saved: unknown[] = [];
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets, mcp, trust, mcpOAuth: { store: oauth }, onConnectorPermissionsSaved: (next) => { saved.push(next.mcp?.toolPermissions); } });
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets, mcp, trust, mcpOAuth: { store: oauth }, winter: { list: () => [{ mcpServerNames: () => live }] } as never, onConnectorPermissionsSaved: (next) => { saved.push(next.mcp?.toolPermissions); } });
     stop = () => { server.stop(); store.close(); };
     const c = await TestClient.connect(socketPath);
     await c.hello(tokens.harness, "cli");
@@ -122,7 +122,7 @@ describe("mcp.remove / mcp.rename and the connector settings", () => {
       { mcp: { toolPermissions: { cf: { list: "allow", "*": "ask" } }, disabled: ["other"] } },
     );
     const r = await c.request(METHODS.mcpRename, { name: "cf", newName: "cloudflare", scope: "user" });
-    expect(McpRenameResult.parse(r.result)).toEqual({ ok: true, name: "cf", newName: "cloudflare", scope: "user", carried: true, keptOld: false });
+    expect(McpRenameResult.parse(r.result)).toEqual({ ok: true, name: "cf", newName: "cloudflare", scope: "user", carried: true, keptOld: false, rulesCarried: 0, rulesNotFollowed: [] });
     const config = configOf(home);
     expect(Object.keys(config.mcpServers)).toEqual(["a", "cloudflare", "z"]);
     expect(config.mcpServers.cloudflare).toEqual({ type: "stdio", command: "cf" });
@@ -144,14 +144,14 @@ describe("mcp.remove / mcp.rename and the connector settings", () => {
     c.close();
   });
 
-  test("refused typed, writing nothing: a taken name, a missing name, an invalid name, two permission rows", async () => {
+  test("refused typed, writing nothing: a taken name, a missing name, an invalid name, a target with stored values", async () => {
     const config = { mcpServers: { cf: { type: "stdio", command: "cf" }, gh: { type: "stdio", command: "gh" } } };
     const { home, c } = await boot(config, { mcp: { toolPermissions: { cf: { "*": "deny" }, stale: { x: "ask" } } } });
     const before = readFileSync(join(home, "sdk", ".winter.json"), "utf8");
     expect((await c.request(METHODS.mcpRename, { name: "cf", newName: "gh", scope: "user" })).error?.data?.code).toBe("mcp_server_exists");
     expect((await c.request(METHODS.mcpRename, { name: "nope", newName: "x", scope: "user" })).error?.data?.code).toBe("mcp_server_not_found");
     expect((await c.request(METHODS.mcpRename, { name: "cf", newName: "bad name", scope: "user" })).error?.data?.code).toBe("mcp_invalid_name");
-    expect((await c.request(METHODS.mcpRename, { name: "cf", newName: "stale", scope: "user" })).error?.data?.code).toBe("mcp_rename_permissions_conflict");
+    expect((await c.request(METHODS.mcpRename, { name: "cf", newName: "stale", scope: "user" })).error?.data?.code).toBe("mcp_rename_target_has_permissions");
     expect(readFileSync(join(home, "sdk", ".winter.json"), "utf8")).toBe(before);
     expect(settingsOf(home).mcp.toolPermissions).toEqual({ cf: { "*": "deny" }, stale: { x: "ask" } });
     c.close();
@@ -176,6 +176,56 @@ describe("mcp.remove / mcp.rename and the connector settings", () => {
     expect((await c.request(METHODS.mcpRename, { name: "linear", newName: "linear-work", scope: "user" })).result.ok).toBe(true);
     expect(await auth("linear-work")).toBe("signed-in");
     expect(await oauth.read(mcpOAuthTokenAccount(URL_))).not.toBeNull();
+    c.close();
+  });
+
+  test("review 2: a name a LIVE session still has connected keeps its permissions on remove and on rename", async () => {
+    const { home, c } = await boot({ mcpServers: { cf: { type: "stdio", command: "cf" }, gh: { type: "stdio", command: "gh" } } }, { mcp: { toolPermissions: { cf: { "*": "deny" }, gh: { "*": "ask" } } } }, ["cf", "gh"]);
+    expect((await c.request(METHODS.mcpRemove, { name: "cf", scope: "user" })).result).toMatchObject({ removed: true, permissionsCleared: false });
+    expect((await c.request(METHODS.mcpRename, { name: "gh", newName: "github", scope: "user" })).result).toMatchObject({ carried: true, keptOld: true });
+    expect(settingsOf(home).mcp.toolPermissions).toEqual({ cf: { "*": "deny" }, gh: { "*": "ask" }, github: { "*": "ask" } });
+    c.close();
+  });
+
+  test("review 3: rename into a name another scope defines, or a live session uses, is refused and writes nothing", async () => {
+    const project = realpathSync(mkdtempSync(join(tmpdir(), "winter-mcp-rename-proj-")));
+    const { home, c } = await boot({ mcpServers: { cf: { type: "stdio", command: "cf" } }, projects: { [project]: { mcpServers: { taken: { type: "stdio", command: "t" } } } } }, { mcp: { toolPermissions: { cf: { "*": "deny" } } } }, ["busy"]);
+    const before = readFileSync(join(home, "sdk", ".winter.json"), "utf8");
+    expect((await c.request(METHODS.mcpRename, { name: "cf", newName: "taken", scope: "user" })).error?.data?.code).toBe("mcp_server_name_in_use");
+    expect((await c.request(METHODS.mcpRename, { name: "cf", newName: "busy", scope: "user" })).error?.data?.code).toBe("mcp_server_name_in_use");
+    expect(readFileSync(join(home, "sdk", ".winter.json"), "utf8")).toBe(before);
+    expect(settingsOf(home).mcp.toolPermissions).toEqual({ cf: { "*": "deny" } });
+    c.close();
+  });
+
+  test("review 4: rename rewrites sdk/settings.json rules naming the server, and lists the ones in files Winter does not edit", async () => {
+    const project = realpathSync(mkdtempSync(join(tmpdir(), "winter-mcp-rename-proj-")));
+    mkdirSync(join(project, ".winter"), { recursive: true });
+    writeFileSync(join(project, ".winter", "settings.json"), JSON.stringify({ permissions: { allow: ["mcp__cf__list", "Bash(ls)"] } }));
+    const { home, c, trust } = await boot({ mcpServers: { cf: { type: "stdio", command: "cf" } } });
+    trust.trust(project);
+    writeFileSync(join(home, "sdk", "settings.json"), JSON.stringify({ permissions: { allow: ["mcp__cf__list", "mcp__cf__*", "mcp__cfx__a", "Read"], deny: ["mcp__cf"], ask: ["mcp__cf__prod(*)"] } }));
+    mkdirSync(join(home, "permissions"), { recursive: true });
+    writeFileSync(join(home, "permissions", "projects.json"), JSON.stringify({ version: 1, projects: { [project]: ["mcp__cf__write", "Bash(npm test)"] } }));
+    const r = await c.request(METHODS.mcpRename, { name: "cf", newName: "cloudflare", scope: "user", cwd: project });
+    expect(r.result).toMatchObject({ rulesCarried: 4, keptOld: false });
+    expect(JSON.parse(readFileSync(join(home, "sdk", "settings.json"), "utf8")).permissions).toEqual({
+      allow: ["mcp__cloudflare__list", "mcp__cloudflare__*", "mcp__cfx__a", "Read"], deny: ["mcp__cloudflare"], ask: ["mcp__cloudflare__prod(*)"],
+    });
+    expect(r.result.rulesNotFollowed.sort()).toEqual([
+      `${join(home, "permissions", "projects.json")}: mcp__cf__write`,
+      `${join(project, ".winter", "settings.json")}: mcp__cf__list`,
+    ].sort());
+    // The repository file and the record are untouched.
+    expect(JSON.parse(readFileSync(join(project, ".winter", "settings.json"), "utf8")).permissions.allow).toEqual(["mcp__cf__list", "Bash(ls)"]);
+    c.close();
+  });
+
+  test("review 4: while the old name stays in use, the rules are COPIED (both spellings kept)", async () => {
+    const { home, c } = await boot({ mcpServers: { cf: { type: "stdio", command: "cf" } } }, {}, ["cf"]);
+    writeFileSync(join(home, "sdk", "settings.json"), JSON.stringify({ permissions: { deny: ["mcp__cf__drop"] } }));
+    expect((await c.request(METHODS.mcpRename, { name: "cf", newName: "cf2", scope: "user" })).result).toMatchObject({ rulesCarried: 1, keptOld: true });
+    expect(JSON.parse(readFileSync(join(home, "sdk", "settings.json"), "utf8")).permissions.deny).toEqual(["mcp__cf__drop", "mcp__cf2__drop"]);
     c.close();
   });
 
