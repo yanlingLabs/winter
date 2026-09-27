@@ -2082,3 +2082,39 @@ extension MethodWrapperTests {
         XCTAssertFalse(try XCTUnwrap(real as? RpcError).isMethodNotFound)
     }
 }
+
+// MARK: - WS-25 (MCP OAuth): `mcp.list`'s two additive fields
+
+extension MethodWrapperTests {
+    /// A daemon that knows about MCP OAuth sends `auth`/`oauthIssuerOrigin` alongside the
+    /// pre-existing four fields; both decode straight through, same as every other field here.
+    func testMcpListDecodesTheAuthAndIssuerOriginFields() async throws {
+        let (client, t) = try await connected()
+
+        let body = #"{"servers":[{"name":"linear","status":"running","toolNames":["search"],"source":"user","auth":"needs-auth","oauthIssuerOrigin":"https://mcp.linear.app"}]}"#
+        let (req, servers) = try await roundTrip(t, sentIndex: 1, result: body) {
+            try await client.mcpList()
+        }
+        XCTAssertEqual(req["method"] as? String, "mcp.list")
+        XCTAssertEqual(servers.count, 1)
+        XCTAssertEqual(servers[0].name, "linear")
+        XCTAssertEqual(servers[0].auth, "needs-auth")
+        XCTAssertEqual(servers[0].oauthIssuerOrigin, "https://mcp.linear.app")
+    }
+
+    /// An OLDER daemon's row (pre-WS-25) carries neither key at all — both fields decode to `nil`,
+    /// never a thrown error and never a fabricated default, same "a newer/older daemon's field
+    /// absence reads as nil, not as a fault" posture as every other optional wire field in this
+    /// file.
+    func testMcpListDecodesNilAuthFieldsFromAnOlderDaemon() async throws {
+        let (client, t) = try await connected()
+
+        let body = #"{"servers":[{"name":"linear","status":"running","toolNames":[],"source":"user"}]}"#
+        let (_, servers) = try await roundTrip(t, sentIndex: 1, result: body) {
+            try await client.mcpList()
+        }
+        XCTAssertEqual(servers.count, 1)
+        XCTAssertNil(servers[0].auth)
+        XCTAssertNil(servers[0].oauthIssuerOrigin)
+    }
+}
