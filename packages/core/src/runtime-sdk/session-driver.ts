@@ -1170,6 +1170,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // WS-25: the same fold, kept with the incarnation (a symbol key — never on the wire), so a sign-in
       // door can ask a live session which of its servers sit at a URL (`WinterSession.mcpServerNamesFor`).
       withSessionMcpServers(options, configuredMcp);
+      // WS-27: …and reported now, before the run home's await and the spawn, so a remove or a rename in that
+      // window already sees these names as in use (`WinterSession.mcpServerNames`).
+      inc.noteMcpServers?.(Object.keys(configuredMcp));
       // WS-21 (spec §3.1): LAST, so a refusal above never leaves a run folder behind. The router's Winter
       // overload reads `options.runtime.runHome` and applies it synchronously; `WinterSession` disposes it
       // when the incarnation ends (or at once, if the open fails before the child iterates).
