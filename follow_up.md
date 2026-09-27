@@ -3,7 +3,6 @@
 The canonical list of known, deliberately parked work. Nothing here blocks a release. When an item ships, delete its line in the same commit; when new work gets parked, add it here rather than in a private note.
 
 ## MCP
-- [ ] Move the daemon's `McpManager` status probe onto the public `@yanlinglabs/winter-agent-runtime/mcp-client` (the SDK exports it since 0.0.28) and retire the hand-written stdio client.
 - [ ] URL-mode elicitation (`onElicitation` is unwired in the daemon), a second auth path some newer MCP servers use.
 - [ ] Two same-named plugins from different marketplaces that register the same tool name still collide in the chat-side external tool name (`mcp__winter__external__<tool>`).
 - [ ] `winter mcp remove` leaves the server's connector permissions behind, and there is no `winter mcp rename` (permissions are keyed by server name, so they don't follow a rename).
