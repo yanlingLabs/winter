@@ -101,6 +101,7 @@ import type { TrustStore } from "../agent/trust";
 import type { BackgroundTaskRegistry } from "../agent/bg-registry";
 import type { SkillStore, SkillErrorKind } from "../agent/skills";
 import type { McpManager } from "../agent/mcp/manager";
+import { agentInlineMcpServers, trustedProjectRoots } from "../agent/mcp/server-names";
 import { PluginStore, type PluginInfo } from "../agent/plugins";
 import { pluginSpawnEligible } from "../agent/plugins";
 import type { ToolRegistry } from "../agent/tools/registry";
@@ -852,6 +853,16 @@ function liveSettingsFor(opts: { winterHome?: string }): Settings | undefined {
  *  so they need the caller's `cwd`. The local entry in `sdk/.winter.json` is keyed by `localScopeKeyFor`
  *  (review I5 — exactly the run home's key); the project file lives at the project root the run home reads
  *  it from (`projectScopeRootFor`, R.3 residual: a linked worktree's own top). Refused typed without a cwd. */
+/** WS-27: the config names of the inline servers subagent definitions declare, for a session at `cwd`. */
+function agentInlineRowsFor(winterHome: string, cwd: string | undefined, trust: TrustStore | undefined): string[] {
+  try {
+    const roots = trustedProjectRoots({ cwd, trust });
+    return [...new Set(agentInlineMcpServers(winterHome, roots, cwd).map((s) => s.name))];
+  } catch {
+    return [];
+  }
+}
+
 function mcpScopeTarget(method: string, winterHome: string, p: { scope: McpScope; cwd?: string | undefined }): McpScopeTarget {
   if (p.scope === "user") return { home: winterHome, scope: "user" };
   if (p.cwd === undefined || p.cwd === "") {
@@ -2377,8 +2388,14 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           }
           return projectServers[name];
         };
-        const rows = await Promise.all([...overlaid, ...unmanaged].map(async (row) => {
-          if (mcpOAuthDoors === undefined || row.transport === undefined || row.transport === "stdio") return row;
+        // WS-27: the servers subagent definitions declare inline (`server-names.ts`) — never probed (the runtime
+        // connects them per subagent), listed so their connector permissions can be set under the config name.
+        const rowNames = new Set([...overlaid, ...unmanaged].map((r) => r.name));
+        const agentRows = opts.winterHome === undefined ? [] : agentInlineRowsFor(opts.winterHome, p.cwd, opts.trust)
+          .filter((name) => !rowNames.has(name))
+          .map((name) => ({ name, status: (disabled.has(name) ? "disabled" : "unmanaged") as "disabled" | "unmanaged", toolNames: [] as string[], source: "agent" as const }));
+        const rows = await Promise.all([...overlaid, ...unmanaged, ...agentRows].map(async (row) => {
+          if (mcpOAuthDoors === undefined || !("transport" in row) || row.transport === undefined || row.transport === "stdio") return row;
           const entry = (row.source === "project" ? projectEntry(row.name) : userServers[row.name]) as { type: string; url?: unknown; headers?: unknown; oauth?: unknown } | undefined;
           if (entry === undefined || entry.type === "stdio" || typeof entry.url !== "string") return row;
           const columns = await mcpOAuthDoors.authColumns({ url: entry.url, ...(entry.headers !== undefined ? { headers: entry.headers as Record<string, string> } : {}), ...(entry.oauth !== undefined ? { oauth: entry.oauth as { clientId?: string } } : {}) }, row.status);
@@ -2444,7 +2461,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const sdkPermissions = opts.winterHome ? liveSdkSettings(opts.winterHome).permissions : undefined;
         // Every server anyone could name: probed ones, configured user ones not (yet) probed, and names that
         // only have stored values (so a stale value for a removed server can still be seen and cleared).
-        const names = [...new Set([...tracked.map((r) => r.name), ...Object.keys(userServers), ...Object.keys(table)])]
+        // WS-27: plus the servers subagent definitions declare inline, by config name (`server-names.ts`).
+        const agentNames = new Set(opts.winterHome !== undefined ? agentInlineRowsFor(opts.winterHome, p.cwd, opts.trust) : []);
+        const names = [...new Set([...tracked.map((r) => r.name), ...Object.keys(userServers), ...agentNames, ...Object.keys(table)])]
           .filter((name) => p.server === undefined || name === p.server);
         const servers = names.map((name) => {
           const row = tracked.find((r) => r.name === name);
@@ -2482,7 +2501,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           });
           return {
             name, status,
-            ...(row !== undefined ? { source: row.source } : userServers[name] !== undefined ? { source: "user" as const } : {}),
+            ...(row !== undefined ? { source: row.source } : userServers[name] !== undefined ? { source: "user" as const } : agentNames.has(name) ? { source: "agent" as const } : {}),
             ...(Object.hasOwn(stored, CONNECTOR_ALL_TOOLS) ? { allTools: stored[CONNECTOR_ALL_TOOLS]! } : {}),
             listed: listing !== undefined,
             tools,

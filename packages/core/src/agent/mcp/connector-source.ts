@@ -17,13 +17,12 @@
 //    permissions` run there) — never borrowed from a same-named user server;
 //  - anything else, from the user scope's listing.
 // The STORED permissions stay keyed by name alone, like `mcp.disabled`: a project's `cf` takes the same
-// settings as the user's `cf`. And a SUBAGENT definition's own inline `mcpServers` entry that collides with
-// a session server is renamed by the runtime inside the child (`<name>_2`, its `allocateChildScopedServers`);
-// the hook sees only the renamed tool (`mcp__cf_2__…`) and the daemon cannot see the mapping, so such an
-// action takes the stored values of `cf_2`, if any — none, ordinarily: it gets the default (toward ask).
-// A subagent's inline server is also invisible to `configured` (agent definitions are the runtime's to
-// resolve, per subagent): an inline `cf__prod` weighs in an ambiguous `__` split only once stored or
-// listed — and it is never listed, since the daemon never probes one.
+// settings as the user's `cf`. WS-27: when the runtime states which server a call belongs to
+// (`winter_mcp_server` / `mcpServer`, `connectorFactsFor`'s `stated`), that fact wins over every guess here —
+// a SUBAGENT definition's inline `cf` renamed `cf_2` inside the child is keyed by its config name `cf`, and
+// read-only comes from the runtime's own listing. Without it (an older runtime) a renamed action takes
+// `cf_2`'s values, if any. An inline server the daemon can see — a user, trusted-project or plugin agent
+// definition (`server-names.ts`) — counts as `configured`, as do the plugins a trusted project enables.
 //
 // THE BACKGROUND KICK (review r1, minor 7): on a user-scope miss, at most once a minute per server, an
 // http/sse USER server with no recorded status is probed in the background (such a server is otherwise
@@ -35,11 +34,9 @@ import type { ConnectorPermissionSource, ConnectorPermissionTable } from "./conn
 import type { McpManager, McpServerConfig } from "./manager";
 import { readRawProjectMcpConfig } from "./project-file";
 import type { TrustStore } from "../trust";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { connectorPermissionTable, sdkEnabledPlugins, sdkLocalMcpServers, sdkUserMcpServers, type Settings } from "../../settings";
-import { sdkPluginsRoot } from "../paths";
+import { connectorPermissionTable, sdkLocalMcpServers, sdkUserMcpServers, type Settings } from "../../settings";
 import { localScopeKeyFor, projectScopeRootFor, projectScopeTrusted } from "../../runtime-sdk/run-home-input";
+import { agentInlineMcpServers, pluginMcpServerNames, trustedProjectRoots } from "./server-names";
 
 export interface DaemonConnectorSourceDeps {
   home: string;
@@ -60,73 +57,11 @@ export interface DaemonConnectorSource extends ConnectorPermissionSource {
 }
 
 const KICK_INTERVAL_MS = 60_000;
-/** How long a read of the plugins' server names is reused (a handful of small files per read). */
+/** How long a read of the plugins' and subagent definitions' server names is reused (a handful of small files per read). */
 const PLUGIN_NAMES_TTL_MS = 5_000;
 
-function readJsonObject(path: string): Record<string, unknown> | undefined {
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
-
-/**
- * The MCP server names plugins ship (final review), read SYNCHRONOUSLY the way the runtime's own plugin
- * loader reads them (`collectMcpServers`: the first of `.mcp.json`/`mcp.json` in the plugin root —
- * its `mcpServers` block or the bare map — plus the manifest's `mcpServers` object), from:
- *  - every plugin in `<home>/sdk/plugins/installed_plugins.json`, at every scope, ENABLED OR NOT — a
- *    deliberate SUPERSET: enablement is per scope and per project, and an extra name only ever makes an
- *    ambiguous `__` split ask instead of being skipped (the conservative direction);
- *  - the user scope's enabled keys a directory marketplace resolves (`known_marketplaces.json`), which the
- *    runtime loads without an install record.
- * A project- or local-scope enabled key of a NOT-installed directory-marketplace plugin is not seen (such a
- * name is weighed only when stored or listed). Never throws.
- */
-export function pluginMcpServerNames(home: string): ReadonlySet<string> {
-  const names = new Set<string>();
-  const root = sdkPluginsRoot(home);
-  const addFrom = (installPath: string): void => {
-    for (const file of [".mcp.json", "mcp.json"]) {
-      const parsed = readJsonObject(join(installPath, file));
-      if (parsed === undefined) continue;
-      const block = isObject(parsed["mcpServers"]) ? parsed["mcpServers"] : parsed;
-      for (const name of Object.keys(block)) names.add(name);
-      break;
-    }
-    for (const manifest of [join(installPath, ".claude-plugin", "plugin.json"), join(installPath, "plugin.json")]) {
-      const declared = readJsonObject(manifest)?.["mcpServers"];
-      if (isObject(declared)) for (const name of Object.keys(declared)) names.add(name);
-    }
-  };
-  const installed = readJsonObject(join(root, "installed_plugins.json"))?.["plugins"];
-  const installedIds = new Set<string>();
-  if (isObject(installed)) {
-    for (const [id, entries] of Object.entries(installed)) {
-      installedIds.add(id);
-      if (!Array.isArray(entries)) continue;
-      for (const e of entries) if (isObject(e) && typeof e["installPath"] === "string" && e["installPath"] !== "") addFrom(e["installPath"]);
-    }
-  }
-  let marketplaces: Record<string, unknown> | undefined;
-  for (const [key, on] of Object.entries(sdkEnabledPlugins(home))) {
-    if (!on || installedIds.has(key)) continue;
-    const at = key.lastIndexOf("@");
-    if (at <= 0 || at === key.length - 1) continue;
-    marketplaces ??= readJsonObject(join(root, "known_marketplaces.json")) ?? {};
-    const rec = marketplaces[key.slice(at + 1)];
-    if (!isObject(rec) || !isObject(rec["source"]) || rec["source"]["source"] !== "directory" || typeof rec["installLocation"] !== "string") continue;
-    const manifest = readJsonObject(join(rec["installLocation"], ".claude-plugin", "marketplace.json"));
-    const entry = Array.isArray(manifest?.["plugins"]) ? (manifest!["plugins"] as unknown[]).find((p) => isObject(p) && p["name"] === key.slice(0, at)) : undefined;
-    const source = isObject(entry) ? entry["source"] : undefined;
-    // The common case, a relative directory source; anything else is left to the stored/listed rule.
-    if (typeof source === "string") addFrom(join(rec["installLocation"], source));
-  }
-  return names;
-}
+/** Moved to `server-names.ts` (WS-27); re-exported for existing callers. */
+export { pluginMcpServerNames } from "./server-names";
 
 export function daemonConnectorSource(deps: DaemonConnectorSourceDeps): DaemonConnectorSource {
   const now = deps.now ?? (() => Date.now());
@@ -147,11 +82,20 @@ export function daemonConnectorSource(deps: DaemonConnectorSourceDeps): DaemonCo
     } catch { /* a background kick never fails a decision */ }
   };
 
-  let pluginCache: { at: number; names: ReadonlySet<string> } | undefined;
-  const pluginNames = (): ReadonlySet<string> => {
+  // WS-27: per project root (a trusted project's own enabled plugins and agent definitions count), so the
+  // cache is keyed by the roots the cwd contributes.
+  const nameCache = new Map<string, { at: number; names: ReadonlySet<string> }>();
+  const otherNames = (cwd: string | undefined): ReadonlySet<string> => {
+    const roots = trustedProjectRoots({ cwd, trust: deps.trust });
+    const key = roots.join("\u0000");
     const t = now();
-    if (pluginCache === undefined || t - pluginCache.at > PLUGIN_NAMES_TTL_MS) pluginCache = { at: t, names: pluginMcpServerNames(deps.home) };
-    return pluginCache.names;
+    const hit = nameCache.get(key);
+    if (hit !== undefined && t - hit.at <= PLUGIN_NAMES_TTL_MS) return hit.names;
+    const names = new Set(pluginMcpServerNames(deps.home, roots));
+    for (const s of agentInlineMcpServers(deps.home, roots, cwd)) names.add(s.name);
+    if (nameCache.size > 64) nameCache.clear();
+    nameCache.set(key, { at: t, names });
+    return names;
   };
 
   const scopeFor = (server: string, cwd: string | undefined): ConnectorListingScope => {
@@ -180,14 +124,14 @@ export function daemonConnectorSource(deps: DaemonConnectorSourceDeps): DaemonCo
       if (hint === undefined && scope === "user") kick(manager, server);
       return hint;
     },
-    // Configured for this session: the local or trusted project scope defines it, the user scope does, or an
-    // installed plugin ships it (`pluginMcpServerNames`).
+    // Configured for this session: the local or trusted project scope defines it, the user scope does, a
+    // plugin the session can load ships it, or a subagent definition declares it inline (`server-names.ts`).
     configured: (server, cwd) => {
       const scope = scopeFor(server, cwd);
       if (scope !== "user") return true;
       try {
         if (Object.hasOwn(sdkUserMcpServers(deps.home), server)) return true;
-        return pluginNames().has(server);
+        return otherNames(cwd).has(server);
       } catch { return false; }
     },
     noteWritten: (next) => { written = { basis: deps.settings(), table: connectorPermissionTable(next) }; },

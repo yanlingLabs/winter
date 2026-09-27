@@ -63,6 +63,8 @@
 // READ-ONLY comes from the daemon's own probe (`McpManager`'s per-server `tools/list`): an action is
 // read-only only when the server's `annotations.readOnlyHint === true` in the last listing that named it.
 // An unknown server, an unprobed tool or a missing annotation is NOT read-only — it fails toward ask.
+// WS-27: when the runtime states the call's server (`StatedMcpServer`), read-only is ITS `readOnlyHint` (the
+// listing the child actually connected to), and the stored value is looked up under the server's config name.
 
 import type { SessionApprovalPolicy } from "../gate";
 import type { Mode as SessionMode } from "../tools/registry";
@@ -235,8 +237,64 @@ export interface ConnectorFacts {
 const STRICTNESS: Record<ConnectorPermission, number> = { deny: 3, ask: 2, allow: 0 };
 
 /**
+ * WS-27 — which server a call belongs to, as the RUNTIME states it (agent SDK 0.0.33+, optional): the hook
+ * input's `winter_mcp_server` / `canUseTool`'s `mcpServer`. `name` is the server as the tool name spells it
+ * (`mcp__<name>__<tool>`, after any in-session rename such as `cf_2`); `configName` the key its config gave it
+ * (`cf`, or a plugin's raw `.mcp.json` name); `readOnlyHint` the tool's own `annotations.readOnlyHint` from
+ * that server's listing, when stated.
+ */
+export interface StatedMcpServer {
+  name: string;
+  configName: string;
+  readOnlyHint?: boolean;
+}
+
+/** The hook input's `winter_mcp_server` (snake_case), read defensively; `undefined` when absent or malformed. */
+export function statedServerFromHookInput(input: unknown): StatedMcpServer | undefined {
+  const raw = (input as { winter_mcp_server?: unknown } | null | undefined)?.winter_mcp_server;
+  if (raw === null || typeof raw !== "object") return undefined;
+  const r = raw as { name?: unknown; config_name?: unknown; read_only_hint?: unknown };
+  if (typeof r.name !== "string" || r.name === "" || typeof r.config_name !== "string" || r.config_name === "") return undefined;
+  return { name: r.name, configName: r.config_name, ...(typeof r.read_only_hint === "boolean" ? { readOnlyHint: r.read_only_hint } : {}) };
+}
+
+/** `canUseTool`'s `mcpServer` option (camelCase), read defensively; `undefined` when absent or malformed. */
+export function statedServerFromCanUseTool(options: unknown): StatedMcpServer | undefined {
+  const raw = (options as { mcpServer?: unknown } | null | undefined)?.mcpServer;
+  if (raw === null || typeof raw !== "object") return undefined;
+  const r = raw as { name?: unknown; configName?: unknown; readOnlyHint?: unknown };
+  if (typeof r.name !== "string" || r.name === "" || typeof r.configName !== "string" || r.configName === "") return undefined;
+  return { name: r.name, configName: r.configName, ...(typeof r.readOnlyHint === "boolean" ? { readOnlyHint: r.readOnlyHint } : {}) };
+}
+
+/**
+ * The facts for a call whose server the runtime STATED — no split guessing: the tool is what follows
+ * `mcp__<name>__`, the stored value is the config name's (and, when the server was renamed in the session,
+ * the stricter of the config name's and the renamed name's — a value someone stored under `cf_2` before the
+ * runtime stated the mapping keeps binding), and read-only is the stated hint. `undefined` when the statement
+ * does not fit the tool name (the caller then falls back to the split resolver).
+ */
+function statedFacts(table: ConnectorPermissionTable, toolName: string, stated: StatedMcpServer): ConnectorFacts | undefined {
+  const prefix = connectorToolName(stated.name, "");
+  if (!toolName.startsWith(prefix) || toolName.length === prefix.length) return undefined;
+  const tool = toolName.slice(prefix.length);
+  const byConfig = connectorSettingFor(table, stated.configName, tool);
+  const byName = stated.name === stated.configName ? undefined : connectorSettingFor(table, stated.name, tool);
+  const applied = byName !== undefined && (byConfig === undefined || STRICTNESS[byName.permission] > STRICTNESS[byConfig.permission]) ? byName : byConfig;
+  return {
+    server: stated.configName, tool,
+    ...(applied === undefined ? {} : { setting: applied.permission, settingSource: applied.source }),
+    readOnly: stated.readOnlyHint === true,
+  };
+}
+
+/**
  * `toolName` → the live facts about it, weighing EVERY split (`connectorCandidates`), or `undefined` when
  * it is not a connector action. The one resolver: the hook, the bridge and `mcp.tools` all call it.
+ *
+ * WS-27: with `stated` (the runtime named the call's server — `StatedMcpServer`), no split is weighed at all:
+ * `statedFacts` answers from the exact server. Everything below is the fallback for a runtime that does not
+ * state it.
  *
  * One split (the ordinary case, no `__` in the server name): that split's stored value and listing, as is.
  *
@@ -256,10 +314,14 @@ const STRICTNESS: Record<ConnectorPermission, number> = { deny: 3, ask: 2, allow
  *  - read-only only when at least one candidate is confirmed, every confirmed listing says read-only, and no
  *    configured candidate is unconfirmed.
  */
-export function connectorFactsFor(source: ConnectorPermissionSource, toolName: string, cwd?: string): ConnectorFacts | undefined {
+export function connectorFactsFor(source: ConnectorPermissionSource, toolName: string, cwd?: string, stated?: StatedMcpServer): ConnectorFacts | undefined {
   const candidates = connectorCandidates(toolName);
   if (candidates.length === 0) return undefined;
   const table = source.table();
+  if (stated !== undefined) {
+    const facts = statedFacts(table, toolName, stated);
+    if (facts !== undefined) return facts;
+  }
   const weighed = candidates.map((c) => ({
     ...c, stored: connectorSettingFor(table, c.server, c.tool), listed: source.readOnly(c.server, c.tool, cwd),
     configured: candidates.length > 1 && source.configured?.(c.server, cwd) === true,

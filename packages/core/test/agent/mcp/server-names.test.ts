@@ -1,0 +1,120 @@
+// WS-27 — the MCP server names outside the three config scopes (`agent/mcp/server-names.ts`): the plugins a
+// session can load (a trusted project's own enabled keys from a directory marketplace included) and the
+// servers subagent definitions declare inline — and `mcpServerNameDefined`, which `mcp.remove`/`mcp.rename`
+// consult before dropping a name's connector permissions.
+import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  agentFileInlineServerNames, agentInlineMcpServers, mcpServerNameDefined, pluginMcpServerNames, trustedProjectRoots,
+} from "../../../src/agent/mcp/server-names";
+import { daemonConnectorSource } from "../../../src/agent/mcp/connector-source";
+import { connectorFactsFor } from "../../../src/agent/mcp/connector-permissions";
+import { McpManager } from "../../../src/agent/mcp/manager";
+import type { TrustStore } from "../../../src/agent/trust";
+import { Settings, setConnectorToolPermission } from "../../../src/settings";
+
+const dir = (prefix: string): string => realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+const write = (path: string, body: unknown): void => {
+  mkdirSync(join(path, ".."), { recursive: true });
+  writeFileSync(path, typeof body === "string" ? body : JSON.stringify(body));
+};
+const agentFile = (servers: string): string => `---\nname: helper\ndescription: helps\nmcpServers:\n${servers}\n---\nDo the thing.\n`;
+
+function fixture() {
+  const home = dir("winter-srvnames-home-");
+  const project = dir("winter-srvnames-proj-");
+  const other = dir("winter-srvnames-other-");
+  Bun.spawnSync(["git", "init", "-q", project]);
+  Bun.spawnSync(["git", "init", "-q", other]);
+  mkdirSync(join(home, "sdk", "plugins"), { recursive: true });
+  // A directory marketplace `mkt` with one plugin `p`, never installed (no installed_plugins.json record).
+  const market = dir("winter-srvnames-mkt-");
+  write(join(market, ".claude-plugin", "marketplace.json"), { name: "mkt", plugins: [{ name: "p", source: "./p" }, { name: "escape", source: "../../etc" }] });
+  write(join(market, "p", ".mcp.json"), { mcpServers: { "cf__prod": { command: "x" } } });
+  write(join(market, "p", "agents", "planner.md"), agentFile("  - cf\n  - plugin_inline:\n      command: y"));
+  write(join(home, "sdk", "plugins", "known_marketplaces.json"), { mkt: { source: { source: "directory", path: market }, installLocation: market } });
+  const trusted = new Set([project]);
+  const trust = { isTrusted: (d: string) => trusted.has(d), list: () => [...trusted] } as unknown as TrustStore;
+  return { home, project, other, market, trust, trusted };
+}
+
+describe("plugins a trusted project enables from a directory marketplace, with no install record", () => {
+  test("a project-scope enabled key counts only for that trusted project; the local tier counts too", () => {
+    const f = fixture();
+    expect(pluginMcpServerNames(f.home).has("cf__prod")).toBe(false);
+    write(join(f.project, ".winter", "settings.json"), { enabledPlugins: { "p@mkt": true } });
+    expect(pluginMcpServerNames(f.home, trustedProjectRoots({ cwd: f.project, trust: f.trust })).has("cf__prod")).toBe(true);
+    // The same key in an UNTRUSTED project is not read.
+    write(join(f.other, ".winter", "settings.local.json"), { enabledPlugins: { "p@mkt": true } });
+    expect(trustedProjectRoots({ cwd: f.other, trust: f.trust })).toEqual([]);
+    f.trusted.add(f.other);
+    expect(pluginMcpServerNames(f.home, trustedProjectRoots({ cwd: f.other, trust: f.trust })).has("cf__prod")).toBe(true);
+  });
+
+  test("a marketplace source that escapes the marketplace is refused, as the runtime refuses it", () => {
+    const f = fixture();
+    write(join(f.project, ".winter", "settings.json"), { enabledPlugins: { "escape@mkt": true } });
+    expect(pluginMcpServerNames(f.home, [f.project]).size).toBe(0);
+  });
+});
+
+describe("subagent definitions' inline servers", () => {
+  test("frontmatter: object entries declare a server; a string only names one the session already has", () => {
+    expect(agentFileInlineServerNames(agentFile("  - github\n  - cf:\n      command: cf\n  - { db: { type: http, url: 'https://db.test/mcp' } }"))).toEqual(["cf", "db"]);
+    expect(agentFileInlineServerNames("no frontmatter at all")).toEqual([]);
+    expect(agentFileInlineServerNames("---\nname: x\n---\nbody")).toEqual([]);
+    expect(agentFileInlineServerNames("---\nmcpServers: [unterminated\n---\nbody")).toEqual([]);
+  });
+
+  test("user, trusted-project and plugin tiers, each named by its CONFIG name", () => {
+    const f = fixture();
+    write(join(f.home, "sdk", "agents", "a.md"), agentFile("  - user_inline:\n      command: u"));
+    write(join(f.project, ".winter", "agents", "b.md"), agentFile("  - project_inline:\n      command: p"));
+    write(join(f.project, ".winter", "settings.json"), { enabledPlugins: { "p@mkt": true } });
+    const roots = trustedProjectRoots({ cwd: f.project, trust: f.trust });
+    const found = agentInlineMcpServers(f.home, roots, f.project).map((s) => `${s.scope}:${s.name}`).sort();
+    expect(found).toEqual(["plugin:plugin_inline", "project:project_inline", "user:user_inline"]);
+    // An untrusted project's agents are not read.
+    expect(agentInlineMcpServers(f.home, [], f.project).map((s) => s.name)).toEqual(["user_inline"]);
+  });
+});
+
+describe("mcpServerNameDefined — is the name still defined anywhere?", () => {
+  test("the user scope, any project's local scope, any trusted project's file, a plugin, an agent definition", () => {
+    const f = fixture();
+    expect(mcpServerNameDefined(f.home, "cf", { trust: f.trust })).toBe(false);
+    write(join(f.home, "sdk", ".winter.json"), { projects: { [f.other]: { mcpServers: { cf: { type: "stdio", command: "cf" } } } } });
+    expect(mcpServerNameDefined(f.home, "cf", { trust: f.trust })).toBe(true);
+    write(join(f.home, "sdk", ".winter.json"), {});
+    write(join(f.project, ".winter", "mcp.json"), { mcpServers: { cf: { type: "stdio", command: "cf" } } });
+    expect(mcpServerNameDefined(f.home, "cf", { trust: f.trust })).toBe(true);
+    expect(mcpServerNameDefined(f.home, "cf", { trust: { isTrusted: () => false, list: () => [] } as unknown as TrustStore })).toBe(false);
+    write(join(f.home, "sdk", "agents", "a.md"), agentFile("  - agent_only:\n      command: a"));
+    expect(mcpServerNameDefined(f.home, "agent_only", { trust: f.trust })).toBe(true);
+    write(join(f.home, "sdk", "settings.json"), { enabledPlugins: { "p@mkt": true } });
+    expect(mcpServerNameDefined(f.home, "cf__prod", { trust: f.trust })).toBe(true);
+  });
+});
+
+describe("configured(): an agent-inline or project-enabled plugin server votes in an ambiguous split", () => {
+  test("cf's blanket allow and a read-only `prod__delete` listing: an inline cf__prod makes it the default, not read-only", async () => {
+    const f = fixture();
+    write(join(f.home, "sdk", ".winter.json"), { mcpServers: { cf: { type: "stdio", command: "cf" } } });
+    const manager = new McpManager({
+      trust: f.trust, stdioCwd: f.home,
+      connect: async (opts) => ({ serverName: opts.name, listTools: async () => [{ name: "prod__delete", inputSchema: {}, annotations: { readOnlyHint: true } }], close: async () => {} }) as never,
+    });
+    await manager.startAll({ cf: { command: "cf" } });
+    let t = 0;
+    const settings = setConnectorToolPermission(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } }), "cf", "*", "allow");
+    const source = daemonConnectorSource({ home: f.home, trust: f.trust, settings: () => settings, manager: () => manager, now: () => t });
+    expect(connectorFactsFor(source, "mcp__cf__prod__delete", f.project)).toMatchObject({ server: "cf", setting: "allow", readOnly: true });
+    write(join(f.project, ".winter", "agents", "b.md"), agentFile("  - cf__prod:\n      command: p"));
+    t += 10_000;   // past the names cache
+    const facts = connectorFactsFor(source, "mcp__cf__prod__delete", f.project);
+    expect(facts?.setting).toBeUndefined();
+    expect(facts?.readOnly).toBe(false);
+  });
+});
