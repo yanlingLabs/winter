@@ -21,7 +21,7 @@
 //
 // NOTHING SECRET LEAVES. No token, code, verifier, `state`, secret or authorize URL is ever logged: the
 // `authUrl` goes back to the caller that asked for it and nowhere else. Errors carry codes and origins.
-import { canonicalMcpServerUrl, createMemoryMcpOAuthStore, decodeMcpOAuthClientRecord, decodeMcpOAuthTokenRecord, encodeMcpOAuthClientSecretItem, McpOAuthError, MCP_OAUTH_EXPIRY_SKEW_MS, MCP_OAUTH_LOGIN_TIMEOUT_MS, mcpOAuthClientAccount, mcpOAuthClientSecretAccount, mcpOAuthTokenAccount, revokeMcpOAuth, startMcpOAuthLogin, validateMcpOAuthConfig, type McpOAuthConfig, type McpOAuthLogin, type McpOAuthStore } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
+import { canonicalMcpServerUrl, createMemoryMcpOAuthStore, decodeMcpOAuthClientRecord, decodeMcpOAuthTokenRecord, encodeMcpOAuthClientSecretItem, McpOAuthError, MCP_OAUTH_LOGIN_TIMEOUT_MS, mcpOAuthClientAccount, mcpOAuthClientSecretAccount, mcpOAuthTokenAccount, revokeMcpOAuth, startMcpOAuthLogin, validateMcpOAuthConfig, type McpOAuthConfig, type McpOAuthLogin, type McpOAuthStore } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
 import { randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { sdkLocalMcpServers, sdkUserMcpServers } from "../../settings";
@@ -101,6 +101,8 @@ function reasonOf(err: unknown): string {
 
 export class McpOAuthDoors {
   private readonly logins = new Map<string, LoginEntry>();
+  /** Per token account: the tail of the sign-in start phases queued for it (fix round 1, I1). */
+  private readonly startChains = new Map<string, Promise<void>>();
   /** The last sign-in change's follow-up (reconnects), for tests and an orderly shutdown. */
   private followUps = new Set<Promise<void>>();
 
@@ -195,13 +197,31 @@ export class McpOAuthDoors {
    * sign-in for the same server supersedes it.
    *
    * ISSUER CHANGE: the stored client registration is snapshotted FIRST, because the SDK persists a new DCR
-   * registration during the flow's first leg -- before this door learns the issuer. When the new issuer's
-   * origin differs from the stored one's and the call did not confirm, the flow is cancelled, the snapshot
-   * written back, and the call refused typed with both origins (`mcp_issuer_change_requires_confirmation`).
+   * or CIMD registration during the flow's first leg -- before this door learns the issuer, and before the
+   * SDK's own authorize-URL policy check can still throw. So the snapshot is put back on EVERY exit that
+   * does not hand the flow to the login table (fix round 1, I1): a refused issuer change, and equally a
+   * first leg that failed after registering -- otherwise a failing flow toward another authorization
+   * server would leave ITS registration stored, and the next sign-in would compare against that one and
+   * skip the confirmation. When the new issuer's origin differs from the stored one's and the call did not
+   * confirm, the flow is cancelled and the call refused typed with both origins
+   * (`mcp_issuer_change_requires_confirmation`).
+   *
+   * SERIALISED PER SERVER (fix round 1, I1): two `mcp.login` calls for one token account run their start
+   * phases one after the other, so the second never snapshots a registration the first wrote but has not
+   * yet had confirmed (or put back).
    */
   async login(server: ResolvedMcpServer, opts: { confirmIssuerChange?: boolean } = {}): Promise<{ loginId: string; authUrl: string; issuerOrigin: string; authorizeOrigin: string }> {
-    const store = this.deps.store();
     const account = mcpOAuthTokenAccount(server.url);
+    const previous = this.startChains.get(account) ?? Promise.resolve();
+    const run = previous.then(() => this.startLoginSerialised(server, account, opts));
+    const tail = run.then(() => undefined, () => undefined);
+    this.startChains.set(account, tail);
+    void tail.then(() => { if (this.startChains.get(account) === tail) this.startChains.delete(account); });
+    return run;
+  }
+
+  private async startLoginSerialised(server: ResolvedMcpServer, account: string, opts: { confirmIssuerChange?: boolean }): Promise<{ loginId: string; authUrl: string; issuerOrigin: string; authorizeOrigin: string }> {
+    const store = this.deps.store();
     const clientAccount = mcpOAuthClientAccount(server.url);
     const snapshot = await store.read(clientAccount).catch(() => null);
     let storedIssuer: string | undefined;
@@ -209,44 +229,60 @@ export class McpOAuthDoors {
       try { storedIssuer = decodeMcpOAuthClientRecord(snapshot).issuer; } catch { /* a malformed registration is treated as none, as the SDK treats it */ }
     }
 
-    let login: McpOAuthLogin;
+    // Cleared only once the flow is handed to the login table; every other exit puts the snapshot back.
+    let restoreSnapshot = true;
     try {
-      login = await (this.deps.startLogin ?? startMcpOAuthLogin)({
-        serverUrl: server.url,
-        ...(server.oauth !== undefined ? { oauth: server.oauth as McpOAuthConfig } : {}),
-        store,
-        ...(this.deps.clientMetadataUrl !== undefined ? { clientMetadataUrl: this.deps.clientMetadataUrl } : {}),
-        ...(this.deps.fetch !== undefined ? { fetch: this.deps.fetch } : {}),
-        ...(this.deps.now !== undefined ? { now: this.deps.now } : {}),
-        timeoutMs: this.deps.loginTtlMs ?? MCP_OAUTH_LOGIN_TIMEOUT_MS,
-      });
-    } catch (err) {
-      const code = reasonOf(err);
-      if (code === "client_secret_issuer_mismatch") {
-        throw new McpOAuthDoorRefusal("mcp_client_secret_issuer_mismatch", `${err instanceof Error ? err.message : "the client secret belongs to another authorization server"} — set the client secret again for this server (winter mcp set-secret ${server.name})`, { reason: code });
-      }
-      if (code === "client_secret_unavailable") {
-        throw new McpOAuthDoorRefusal("mcp_client_secret_unavailable", `MCP server "${server.name}" is a pre-registered client with a client secret, and none is stored — set it first (winter mcp set-secret ${server.name}, or Settings → MCP)`, { reason: code });
-      }
-      // The SDK's messages carry codes, origins and bounded text only (never a token or a URL's query).
-      throw new McpOAuthDoorRefusal("mcp_login_failed", `the sign-in to "${server.name}" could not start: ${err instanceof Error ? err.message.slice(0, 300) : "failed"}`, { reason: code });
-    }
-
-    const storedOrigin = storedIssuer !== undefined ? originOf(storedIssuer) : undefined;
-    if (storedOrigin !== undefined && storedOrigin !== login.issuerOrigin && opts.confirmIssuerChange !== true) {
-      login.cancel();
-      // Put back the registration the first leg may have replaced: nothing is left behind by a refusal.
+      let login: McpOAuthLogin;
       try {
-        const now = await store.read(clientAccount);
-        if (now !== snapshot && snapshot !== null) await store.write(clientAccount, snapshot);
-      } catch { /* best effort: the next sign-in re-registers either way */ }
-      throw new McpOAuthDoorRefusal(
-        "mcp_issuer_change_requires_confirmation",
-        `MCP server "${server.name}" now signs in at ${login.issuerOrigin}, but its stored registration belongs to ${storedOrigin} — confirm the change to continue`,
-        { storedIssuerOrigin: storedOrigin, newIssuerOrigin: login.issuerOrigin },
-      );
-    }
+        login = await (this.deps.startLogin ?? startMcpOAuthLogin)({
+          serverUrl: server.url,
+          ...(server.oauth !== undefined ? { oauth: server.oauth as McpOAuthConfig } : {}),
+          store,
+          ...(this.deps.clientMetadataUrl !== undefined ? { clientMetadataUrl: this.deps.clientMetadataUrl } : {}),
+          ...(this.deps.fetch !== undefined ? { fetch: this.deps.fetch } : {}),
+          ...(this.deps.now !== undefined ? { now: this.deps.now } : {}),
+          timeoutMs: this.deps.loginTtlMs ?? MCP_OAUTH_LOGIN_TIMEOUT_MS,
+        });
+      } catch (err) {
+        const code = reasonOf(err);
+        if (code === "client_secret_issuer_mismatch") {
+          throw new McpOAuthDoorRefusal("mcp_client_secret_issuer_mismatch", `${err instanceof Error ? err.message : "the client secret belongs to another authorization server"} — set the client secret again for this server (winter mcp set-secret ${server.name})`, { reason: code });
+        }
+        if (code === "client_secret_unavailable") {
+          throw new McpOAuthDoorRefusal("mcp_client_secret_unavailable", `MCP server "${server.name}" is a pre-registered client with a client secret, and none is stored — set it first (winter mcp set-secret ${server.name}, or Settings → MCP)`, { reason: code });
+        }
+        // The SDK's messages carry codes, origins and bounded text only (never a token or a URL's query).
+        throw new McpOAuthDoorRefusal("mcp_login_failed", `the sign-in to "${server.name}" could not start: ${err instanceof Error ? err.message.slice(0, 300) : "failed"}`, { reason: code });
+      }
 
+      const storedOrigin = storedIssuer !== undefined ? originOf(storedIssuer) : undefined;
+      if (storedOrigin !== undefined && storedOrigin !== login.issuerOrigin && opts.confirmIssuerChange !== true) {
+        login.cancel();
+        throw new McpOAuthDoorRefusal(
+          "mcp_issuer_change_requires_confirmation",
+          `MCP server "${server.name}" now signs in at ${login.issuerOrigin}, but its stored registration belongs to ${storedOrigin} — confirm the change to continue`,
+          { storedIssuerOrigin: storedOrigin, newIssuerOrigin: login.issuerOrigin },
+        );
+      }
+      restoreSnapshot = false;
+      return this.handToLoginTable(server, account, login);
+    } finally {
+      if (restoreSnapshot) {
+        // Put back the registration the first leg may have replaced (or remove the one it added to a
+        // server that had none): nothing is left behind by a sign-in that never started.
+        try {
+          const now = await store.read(clientAccount);
+          if (now !== snapshot) {
+            if (snapshot === null) await store.remove(clientAccount);
+            else await store.write(clientAccount, snapshot);
+          }
+        } catch { /* best effort: the next sign-in re-registers either way */ }
+      }
+    }
+  }
+
+  /** Hands a started flow to the login table: its expiry timer, its settlement, its follow-up. */
+  private handToLoginTable(server: ResolvedMcpServer, account: string, login: McpOAuthLogin): { loginId: string; authUrl: string; issuerOrigin: string; authorizeOrigin: string } {
     const loginId = `ml_${randomBytes(12).toString("hex")}`;
     const entry: LoginEntry = { account, state: "pending", login };
     this.logins.set(loginId, entry);
@@ -347,6 +383,11 @@ export class McpOAuthDoors {
     if (user.oauth?.clientId === undefined) {
       throw new McpOAuthDoorRefusal("mcp_not_preregistered", `MCP server "${user.name}" is not configured as a pre-registered client (oauth.clientId), so it has no client secret`);
     }
+    // Fix round 1 (minor 1): the SDK reads a secret only when the config MARKS one (`clientSecretRef`); a
+    // secret stored for a public pre-registered client would sit in the Keychain, never used.
+    if (user.oauth.clientSecretRef === undefined) {
+      throw new McpOAuthDoorRefusal("mcp_not_preregistered", `MCP server "${user.name}" is a public pre-registered client (its config has oauth.clientId but no oauth.clientSecretRef: { kind: "keychain" }), so a client secret would never be used — add the marker first`);
+    }
     const issuer = await this.discoverIssuer(user);
     await this.deps.store().write(mcpOAuthClientSecretAccount(user.url), encodeMcpOAuthClientSecretItem(secret, issuer));
     const issuerOrigin = originOf(issuer) ?? issuer;
@@ -414,8 +455,10 @@ export class McpOAuthDoors {
    * `auth` / `oauthIssuerOrigin` / `oauthPreregistered` for one configured http/sse server (spec §2):
    *   - `none` -- a static `Authorization` header, or no sign-in stored, no `oauth` block and a probe that
    *     did not ask for one;
-   *   - `signed-in` -- a stored sign-in that is not DEAD (spec §1.2: dead = expired, or within the 60 s
-   *     skew, with no refresh token; an absent expiry is valid until the server says 401);
+   *   - `signed-in` -- a stored sign-in that is not DEAD (spec §1.2: dead = expired with no refresh token;
+   *     an absent expiry is valid until the server says 401). Fix round 1 (minor 2): the 60 s early-refresh
+   *     margin applies only to a REFRESHABLE token (the SDK's own `usable()`): a token without a refresh
+   *     token is used until it actually expires, so it is not dead inside its last minute;
    *   - `needs-auth` -- a dead or unreadable sign-in, or none while the config declares `oauth` or the last
    *     probe was refused for want of one.
    * Reads the daemon's own store; never refreshes, never returns material.
@@ -442,7 +485,7 @@ export class McpOAuthDoors {
       try {
         const record = decodeMcpOAuthTokenRecord(raw);
         const now = (this.deps.now ?? Date.now)();
-        const dead = record.expiresAt !== undefined && record.expiresAt - MCP_OAUTH_EXPIRY_SKEW_MS <= now && record.refreshToken === undefined;
+        const dead = record.refreshToken === undefined && record.expiresAt !== undefined && record.expiresAt <= now;
         return { auth: dead ? "needs-auth" : "signed-in", ...withOrigin };
       } catch {
         return { auth: "needs-auth", ...withOrigin };
