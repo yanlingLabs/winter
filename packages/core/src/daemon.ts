@@ -46,6 +46,7 @@ import { ApprovedProjectRules } from "./agent/approved-project-rules";
 import { sdkGlobalConfigPath, sdkHomeFor, sdkSettingsPath, trustRecordFile } from "./agent/paths";
 import { forgetSdkFile, liveSdkGlobalConfig, liveSdkSettings, readSdkGlobalConfigDetailed, readSdkSettingsDetailed } from "./sdk-files";
 import { ApprovalBroker } from "./agent/approvals";
+import { ElicitationBroker } from "./runtime-sdk/url-elicitation";
 import { QuestionBroker } from "./agent/questions";
 import { createPersistedChildren, type AgentRegistry } from "./agent/bg-agent-registry";
 import { createChildrenRpc } from "./runtime-sdk/children-rpc";
@@ -975,6 +976,9 @@ export async function startDaemon(opts: {
   // an independent feature (spec §A1). An unused, empty broker behaves identically to the
   // previous `null` for approval.respond (nothing pending either way).
   const approvalBroker = new ApprovalBroker();
+  // WS-27: MCP URL-mode elicitation cards — their own broker, answered only by the local-only
+  // `elicitation.respond` (never `approval.respond`, which the phone can reach).
+  const elicitationBroker = new ElicitationBroker();
 
   // Hotfix (credential material, P8b): boot-time, idempotent, one-way — promotes the legacy raw
   // openai-api-key / codex-access-token(+4) records into the JSON material records the spawned
@@ -1866,6 +1870,7 @@ export async function startDaemon(opts: {
     store, hub, secrets,
     buildSessionCapabilities,
     approvals: approvalBroker,
+    elicitations: elicitationBroker,
     questions,
     gate: new PermissionGate(),
     rootsOf: (sid) => sessionDirs.roots(sid),
@@ -2702,6 +2707,7 @@ export async function startDaemon(opts: {
     // demotion) that exist only inside the server's own enforcement scope.
     onActivityDeriver: (derive) => { activityDeriver = derive; },
     broker: approvalBroker,
+    elicitations: elicitationBroker,
     // SP-approvals Task 5: the SAME PermissionRules instance the engine's ask-policy rule-consult
     // path reads (hoisted above, assigned inside the `if (agentProvider)` gate) — lets
     // `approval.respond`'s optionId-driven rule persistence share one mtime cache rather than a
