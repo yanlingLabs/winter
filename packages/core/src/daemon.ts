@@ -2178,9 +2178,9 @@ export async function startDaemon(opts: {
       disabled: () => new Set(settings?.mcp?.disabled ?? []),
       remote: { oauthStore: () => daemonMcpOAuthStore(keychainService(profile, winterHome)) },
     });
-    // Daemon settings surface batch 3 (item 3): the daemon can only ever probe STDIO servers (no
-    // in-daemon HTTP/SSE client — `external-mcp.ts`'s header explains why that's fine, the spawned
-    // child connects to those itself) and must not start anything the user has disabled
+    // Daemon settings surface batch 3 (item 3): the BOOT probe covers STDIO servers only (WS-25: http/sse
+    // ones are probed lazily on `mcp.list`, never here — boot awaits this and must not wait on the
+    // network) and must not start anything the user has disabled
     // (`settings.mcp.disabled`) — `stdioMcpServersFor` is the one filter both facts go through
     // (settings.ts).
     await mcp.startAll(stdioMcpServersFor(sdkUserMcpServers(winterHome), settings?.mcp?.disabled));

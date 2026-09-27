@@ -399,6 +399,12 @@ export class McpOAuthDoors {
     if (matching.length > 1) {
       throw new McpOAuthDoorRefusal("mcp_discovery_failed", `the authorization server for "${user.name}" published conflicting issuers at ${login.issuerOrigin}, so the client secret was not stored`);
     }
+    // Documents were seen but none names the issuer the leg reports: refuse rather than bind the secret to
+    // a guess (a wrong binding would refuse every later sign-in). The origin itself is the issuer only for
+    // a server that publishes no metadata at all (the legacy variant), which is what the SDK uses there.
+    if (matching.length === 0 && seen.length > 0) {
+      throw new McpOAuthDoorRefusal("mcp_discovery_failed", `the authorization server for "${user.name}" did not publish an issuer at ${login.issuerOrigin}, so the client secret was not stored`);
+    }
     return matching[0] ?? login.issuerOrigin;
   }
 

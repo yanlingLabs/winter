@@ -12,10 +12,9 @@
 // child names their tools `mcp__<key>__<tool>` — the names `tool.list` and the Mac's tool rows
 // already carry.
 //
-// THE CHILD SPAWNS/CONNECTS ITS OWN COPY. The daemon's `McpManager` still runs stdio servers for the
-// shared registry (`tool.list`, `mcp.*` RPCs) — it has no HTTP/SSE client of its own (`daemon.ts`
-// filters those out before `McpManager.startAll`, see that call site's own comment); a Winter child
-// cannot reach an in-daemon stdio client either, so each session's child starts/connects the
+// THE CHILD SPAWNS/CONNECTS ITS OWN COPY. The daemon's `McpManager` only PROBES servers for `mcp.list`
+// (WS-24: connect, list, close; WS-25: http/sse too, lazily, through the runtime's `/mcp-client`) — it
+// keeps nothing running a child could reach, so each session's child starts/connects the
 // configured servers itself from these configs. One extra process/connection per configured server
 // per live session — recorded in the fix-wave report as the cost of this door for stdio; unchanged
 // for HTTP/SSE, which were never proxied through the daemon to begin with.
