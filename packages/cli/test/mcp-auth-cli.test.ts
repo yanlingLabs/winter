@@ -257,6 +257,14 @@ describe("the non-interactive doors (an agent's `!` shell): set-secret --from-cl
     expect(door.calls.map((c) => c.method)).toEqual([METHODS.mcpClientSecretIssuer]);
   });
 
+  test("the re-run hint names the command actually used (winter-dev on the dev profile)", async () => {
+    const d = deps({ door: secretDoor(), clipboard: fakeClipboard(SECRET), ...noAsk, commandName: "winter-dev" });
+    const outcome = await runMcpSetSecretRoute(["gh", "--from-clipboard"], d);
+    expect((outcome as { message: string }).message).toContain(`re-run: winter-dev mcp set-secret gh --from-clipboard --issuer ${ISSUER}`);
+    const plain = await runMcpSetSecretRoute(["gh", "--from-clipboard"], deps({ door: secretDoor(), clipboard: fakeClipboard(SECRET), ...noAsk }));
+    expect((plain as { message: string }).message).toContain("re-run: winter mcp set-secret gh");
+  });
+
   test("a --issuer that is not the discovered one is refused before the clipboard is touched", async () => {
     const clip = fakeClipboard(SECRET);
     const door = secretDoor();
