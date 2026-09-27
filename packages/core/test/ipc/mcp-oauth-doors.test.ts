@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@yanlinglabs/winter-protocol";
-import { createMemoryMcpOAuthStore, decodeMcpOAuthClientSecretItem, encodeMcpOAuthClientRecord, mcpOAuthClientAccount, mcpOAuthClientSecretAccount, mcpOAuthTokenAccount } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
+import { canonicalMcpServerUrl, createMemoryMcpOAuthStore, decodeMcpOAuthClientSecretItem, encodeMcpOAuthClientRecord, mcpOAuthClientAccount, mcpOAuthClientSecretAccount, mcpOAuthTokenAccount } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
 import { startIpcServer, REMOTE_ALLOWED_METHODS } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -296,9 +296,14 @@ describe("the MCP sign-in doors (WS-25)", () => {
     const { c, store } = await boot({ userServers: { linear: { type: "http", url: fx.mcpUrl }, unrelated: { type: "http", url: `${fx.origin}/elsewhere` } }, winter });
     const idle = store.createSession("u", { cwd: tmpdir() });
     const busy = store.createSession("u", { cwd: tmpdir() });
+    // Each double answers like `WinterSession.mcpServerNamesFor` (its live incarnation's own names, compared
+    // canonically) -- the busy one names the server differently, so the door must use each session's own name.
+    const namesAt = (names: Record<string, string>) => (url: string): string[] =>
+      Object.entries(names).filter(([, u]) => canonicalMcpServerUrl(u) === canonicalMcpServerUrl(url)).map(([n]) => n);
+    const unrelated = `${fx.origin}/elsewhere`;
     sessions.push(
-      { sessionId: idle, turnRunning: false, idle: async () => {}, query: { reconnectMcpServer: async (n: string) => { calls.push(`${idle}:${n}`); } } },
-      { sessionId: busy, turnRunning: true, idle: () => idleGate, query: { reconnectMcpServer: async (n: string) => { calls.push(`${busy}:${n}`); } } },
+      { sessionId: idle, turnRunning: false, idle: async () => {}, mcpServerNamesFor: namesAt({ linear: fx.mcpUrl, other: unrelated }), reconnectMcpServer: async (n: string) => { calls.push(`${idle}:${n}`); } },
+      { sessionId: busy, turnRunning: true, idle: () => idleGate, mcpServerNamesFor: namesAt({ "linear-work": `${fx.mcpUrl}/` }), reconnectMcpServer: async (n: string) => { calls.push(`${busy}:${n}`); } },
     );
     const start = await c.request(METHODS.mcpLogin, { name: "linear" });
     await fx.approve(start.result.authUrl);
@@ -306,6 +311,6 @@ describe("the MCP sign-in doors (WS-25)", () => {
     expect(calls).toEqual([`${idle}:linear`]);
     releaseIdle();
     await until(async () => calls.length >= 2);
-    expect(calls).toEqual([`${idle}:linear`, `${busy}:linear`]);
+    expect(calls).toEqual([`${idle}:linear`, `${busy}:linear-work`]);
   });
 });

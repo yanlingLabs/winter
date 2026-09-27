@@ -116,14 +116,13 @@ import { withProblemsForRoles, type RoleHealthRegistry } from "../providers/role
 import type { InternalRouter } from "../providers/internal-router";
 import { internalRoleProblemsFor } from "../providers/internal-role-problems";
 import { catalogRoleProblemsFor } from "../providers/catalog-role-problems";
-import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, sdkLocalMcpServers, liveSettingsView, type McpServerSettingsEntry } from "../settings";
+import { addLocalDir, effortRefusalFor, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule, setMcpServerDisabled, stdioMcpServersFor, computerUseEnabledFrom, lspEnabledFrom, stripCredentialShapedMcpHeaders, sdkDenyRules, sdkUserMcpServers, liveSettingsView, type McpServerSettingsEntry } from "../settings";
 import { addMcpServerInScope, mcpServerInScope, removeMcpServerInScope, type McpScope, type McpScopeTarget } from "../agent/mcp/mcp-write";
 import { saveAnswerEverywhere, saveAnswerInProject, SavedAnswerRefused } from "../agent/saved-answers";
 import { localScopeKeyFor, projectScopeRootFor, projectScopeTrusted } from "../runtime-sdk/run-home-input";
 import { McpOAuthDoorRefusal, McpOAuthDoors, type McpOAuthDoorDeps } from "../agent/mcp/oauth-doors";
 import { reconnectLiveSessionsFor } from "../agent/mcp/reconnect";
 import { parseProjectMcpServers, readRawProjectMcpConfig } from "../agent/mcp/project-file";
-import { configuredMcpServersFor } from "../runtime-sdk/external-mcp";
 import { daemonMcpOAuthStore } from "../runtime-sdk/mcp-oauth-store";
 import { keychainService, resolveWinterProfile } from "../profile";
 import type { McpOAuthStore } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
@@ -921,32 +920,18 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
    */
   const mcpOAuthStore = (): McpOAuthStore => opts.mcpOAuth?.store ?? daemonMcpOAuthStore(keychainService(resolveWinterProfile(), opts.winterHome));
 
-  /** The MCP servers ONE live session configures, named as its own fold names them (local > trusted
-   *  project > user, for its own cwd) -- the same `configuredMcpServersFor` a pre-run-home spawn uses. */
-  function mcpServersForSession(sessionId: string): Record<string, { type?: string; url?: string }> {
-    const home = opts.winterHome;
-    if (home === undefined) return {};
-    const cwd = opts.store.meta(sessionId).cwd ?? undefined;
-    return configuredMcpServersFor({
-      settings: liveSettingsFor(opts),
-      userMcpServers: sdkUserMcpServers(home),
-      ...(cwd !== undefined ? { localMcpServers: sdkLocalMcpServers(home, localScopeKeyFor(cwd)) } : {}),
-      cwd,
-      trusted: (dir) => opts.trust?.isTrusted(dir) ?? false,
-    }) as Record<string, { type?: string; url?: string }>;
-  }
-
   /**
    * WS-25: a sign-in finished or a sign-out ran for `serverUrl`. The daemon's status probe forgets its
    * http/sse answers (the next `mcp.list` re-probes), and every LIVE child that configures the server is
-   * asked to reconnect it (`agent/mcp/reconnect.ts`: turn-safe, never an eviction or a restart -- a
+   * asked to reconnect it under the names its own live incarnation gave it (`agent/mcp/reconnect.ts` over
+   * `WinterSession.mcpServerNamesFor`/`reconnectMcpServer`: turn-safe, never an eviction or a restart -- a
    * Keychain write never restarts a child). Best-effort: the sign-in itself already stands.
    */
   async function onMcpSignInChanged(serverUrl: string): Promise<void> {
     opts.mcp?.forgetRemote();
     const winter = opts.winter;
     if (winter === undefined) return;
-    await reconnectLiveSessionsFor({ list: () => winter.list(), serversFor: mcpServersForSession, log: (line) => console.error(line) }, serverUrl);
+    await reconnectLiveSessionsFor({ list: () => winter.list(), log: (line) => console.error(line) }, serverUrl);
   }
 
   const mcpOAuthDoors = opts.winterHome === undefined ? undefined : new McpOAuthDoors({
