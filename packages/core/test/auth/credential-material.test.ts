@@ -56,7 +56,7 @@ function coerceMaterial(value: unknown): CredentialMaterial | undefined {
   }
 }
 
-/** Mirror of winter-agent-sdk v0.0.31 keychain-store.ts `parseStoredCredentialMaterial` (not exported):
+/** Mirror of winter-agent-sdk v0.0.32 keychain-store.ts `parseStoredCredentialMaterial` (not exported):
  *  the child's parse of a credential string the HOST answered over `credential_resolve`. */
 function parseStoredMaterialMirror(raw: string): CredentialMaterial {
   let parsed: unknown;
@@ -184,7 +184,8 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     //
     // 0.0.30 → 0.0.31 (init-order fix): `git diff v0.0.30 v0.0.31 --
     // packages/runtime/src/provider/keychain-store.ts` came back EMPTY (0 lines); the mirror stands unchanged.
-    expect(pkg.version).toBe("0.0.31");
+    // 0.0.31 → 0.0.32 (reconnect deadlock fix): keychain-store.ts diff EMPTY again; the mirror stands.
+    expect(pkg.version).toBe("0.0.32");
   });
 
 
