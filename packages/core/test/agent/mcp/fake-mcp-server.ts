@@ -30,6 +30,8 @@ function handle(msg: any) {
     send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2024-11-05", capabilities, serverInfo: { name: "fake", version: "1" } } });
   }
   else if (msg.method === "notifications/initialized") { /* notification, no reply */ }
+  // WS-25 fix round 1 (I2): WINTER_FAKE_HANG_TOOLS_LIST=1 answers the handshake but never `tools/list`.
+  else if (msg.method === "tools/list" && process.env.WINTER_FAKE_HANG_TOOLS_LIST === "1") { /* never answered */ }
   else if (msg.method === "tools/list") {
     const echoTool = { name: "echo", description: "Echo the msg back", inputSchema: { type: "object", properties: { msg: { type: "string" } }, required: ["msg"] } };
     const tools = process.env.WINTER_FAKE_DUP === "1" ? [echoTool, echoTool] : [echoTool];
