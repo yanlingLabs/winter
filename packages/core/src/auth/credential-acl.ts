@@ -104,9 +104,11 @@ function putBack(kc: CredentialKeychain, access: KeychainAccess, account: string
  * Finishes what an interrupted migration (or dev transition) left: an original missing beside its shadow is
  * put back from the shadow, self-only, and the shadow dropped. With `dropEqualShadows`, a shadow beside an
  * original holding the same value is dropped too; a differing pair is always kept and logged. The app-read
- * tokens' shadows are `app-token-acl.ts`'s. Returns the accounts it restored. Never throws.
+ * tokens' shadows are `app-token-acl.ts`'s, unless `owns` (default `isCredentialAccount`) says otherwise —
+ * the dev transition owns every shadow it wrote. Returns the accounts it restored. Never throws.
  */
-export function recoverCredentialShadows(kc: CredentialKeychain, access: KeychainAccess | undefined, opts: { dropEqualShadows: boolean }): string[] {
+export function recoverCredentialShadows(kc: CredentialKeychain, access: KeychainAccess | undefined, opts: { dropEqualShadows: boolean; owns?: (account: string) => boolean }): string[] {
+  const owns = opts.owns ?? isCredentialAccount;
   const ops = opsOf(kc);
   const restored: string[] = [];
   let accounts: string[];
@@ -119,7 +121,7 @@ export function recoverCredentialShadows(kc: CredentialKeychain, access: Keychai
   for (const shadow of accounts) {
     if (!shadow.endsWith(APP_TOKEN_SHADOW_SUFFIX)) continue;
     const name = shadow.slice(0, -APP_TOKEN_SHADOW_SUFFIX.length);
-    if (!isCredentialAccount(name)) continue;
+    if (!owns(name)) continue;
     try {
       const value = ops.read(kc.keychain, kc.service, shadow);
       if (value === null || value === "") {

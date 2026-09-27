@@ -55,9 +55,22 @@ bun src/main.ts                      # interactive TUI (Ink)
 
 The home and the profile are set INDEPENDENTLY, and the home is profile-blind: `resolveWinterHome()` reads only `WINTER_HOME` and defaults to `~/.winter` — the user's live daily driver (`winter-dir.ts`). `WINTER_PROFILE=dev` changes only the Keychain service (`com.winter.core.dev`) and the app identity ("Winter Dev", `com.winter.app.dev`); it does NOT move the home. So `WINTER_PROFILE=dev` alone would run dev-profile tooling against `~/.winter` — always set BOTH (`WINTER_HOME=~/.winter-dev WINTER_PROFILE=dev …`). The `~/.winter-dev` convention is supplied by the `winter-dev` wrapper script (it exports `WINTER_HOME` for you), not by core code. The `dist` profile is `~/.winter` + `com.winter.core` + `Winter.app` (`com.winter.app`). `profile.ts`'s `keychainService()` honours `WINTER_KEYCHAIN_SERVICE` only when the caller passes a home that is *not* the profile's default, which is how tests stay off the real Keychain.
 
+**The dev daemon is a compiled `winter-core` signed by Winter's team** (WS-27), never Homebrew `bun`: a Keychain item's partition list is its CREATOR's team (`auth/app-token-acl.ts`'s header), so a `bun`-run daemon creates items Winter Dev is asked about once per pairing token. `bun run dev:daemon` (`scripts/dev-daemon.ts`) runs `compile:core` into `dist/dev/winter-core` (never `dist/winter-core`, which the `verify:*` gates rebuild; built to a temp file and renamed, so never over a running daemon), signs it with the codesigning identity whose certificate's OU is `WINTER_TEAM_ID` (Apple Development preferred; `WINTER_DEV_SIGN_IDENTITY` overrides) under the stable identifier `com.winter.core.dev`, hardened runtime + `scripts/winter-core.entitlements`, checks the team and runs `__keychain-ffi-probe`, then runs `daemon run` with `WINTER_HOME=~/.winter-dev WINTER_PROFILE=dev` — and `WINTER_RUNTIME_EXECUTABLE`/`WINTER_ANT_EXECUTABLE` resolved under bun, since a compiled binary cannot reach the npm platform package or search `$PATH` for `ant`. `--no-build` reuses the binary; any other arguments are run through it instead of `daemon run` (`bun run dev:daemon credentials list`).
+
 ```sh
-WINTER_HOME=~/.winter-dev WINTER_PROFILE=dev bun src/main.ts daemon run   # or: winter-dev daemon run
+bun run dev:daemon                  # build + sign + run the dev daemon
+bun run dev:daemon --transition     # ONCE, dev daemon stopped: move the bun-created dev items to the signed binary
 ```
+
+**The transition is one-way.** Items `bun` created would prompt the signed binary once each, so `--transition` (run under `bun`, their creator) reads each value and hands it over a pipe to `dist/dev/winter-core __dev-keychain-adopt`, which re-creates the item as itself — shadow, delete (by bun), add, read back, drop the shadow (`auth/dev-keychain-transition.ts`), holding the home's daemon lock. Crash-safe and idempotent: if interrupted, run it again. Afterwards EVERY dev-profile process must be that binary — a `bun`-run dev CLI or daemon (`bun src/main.ts` with the dev env, the old `winter-dev` wrapper) is prompted for each item it reads, the admin token first. Point `winter-dev` at the signed binary:
+
+```sh
+#!/bin/sh
+export WINTER_HOME="${WINTER_HOME:-$HOME/.winter-dev}" WINTER_PROFILE="${WINTER_PROFILE:-dev}"
+exec "<repo>/dist/dev/winter-core" "$@"
+```
+
+(`bun run dev:daemon` still owns building it and supplying the runtime paths the daemon needs.) Tests are unaffected: they use temp homes, file stores and the throwaway Keychain service.
 
 Two traps: a plain `winter` is the DIST CLI and, on a dead socket, auto-launches the dist app — never use it for dev or test work. Debug app builds embed neither `winter-core` nor the runtimes, so "Winter Dev" cannot spawn its own daemon; start the dev daemon first or the orb shows disconnected.
 
