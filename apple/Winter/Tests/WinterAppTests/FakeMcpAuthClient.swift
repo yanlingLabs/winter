@@ -12,12 +12,20 @@ import WinterKit
 final class FakeMcpAuthClient: McpAuthClient, @unchecked Sendable {
     struct SimpleError: Error, Equatable {}
 
-    // login(name:)
-    var loginResult: Result<McpLoginStart, Error> = .success(
+    // login(name:confirmIssuerChange:) — a QUEUE, so a test can script the FIRST call refused
+    // `mcp_issuer_change_requires_confirmation` and the RETRY (confirmIssuerChange: true)
+    // succeeding, without the two calls sharing one scripted answer.
+    var loginResults: [Result<McpLoginStart, Error>] = [.success(
         McpLoginStart(loginId: "lg_1", authUrl: URL(string: "https://example.test/authorize?state=abc")!,
-                      issuerOrigin: "https://example.test")
-    )
-    private(set) var loginCalls: [String] = []
+                      issuerOrigin: "https://example.test", authorizeOrigin: "https://example.test")
+    )]
+    /// Convenience for the common one-scripted-answer case — every existing test that sets this
+    /// keeps working unchanged.
+    var loginResult: Result<McpLoginStart, Error> {
+        get { loginResults[0] }
+        set { loginResults = [newValue] }
+    }
+    private(set) var loginCalls: [(name: String, confirmIssuerChange: Bool)] = []
 
     // loginStatus(loginId:) — a QUEUE, so a test can script a sequence of polls.
     var loginStatusResults: [Result<McpLoginStatus, Error>] = [.success(McpLoginStatus(state: .pending))]
@@ -28,12 +36,18 @@ final class FakeMcpAuthClient: McpAuthClient, @unchecked Sendable {
     private(set) var logoutCalls: [(name: String, forgetClient: Bool?)] = []
 
     // setClientSecret(name:secret:)
-    var setClientSecretResult: Result<Void, Error> = .success(())
+    var setClientSecretResult: Result<String, Error> = .success("https://example.test")
     private(set) var setClientSecretCalls: [(name: String, secret: String)] = []
 
-    func login(name: String) async throws -> McpLoginStart {
-        loginCalls.append(name)
-        return try loginResult.get()
+    func login(name: String, confirmIssuerChange: Bool) async throws -> McpLoginStart {
+        let index = loginCalls.count
+        loginCalls.append((name, confirmIssuerChange))
+        // Same "last scripted answer repeats" posture as `loginStatus` below.
+        let result = index < loginResults.count ? loginResults[index] : (loginResults.last ?? .success(
+            McpLoginStart(loginId: "lg_1", authUrl: URL(string: "https://example.test/authorize")!,
+                          issuerOrigin: "https://example.test", authorizeOrigin: "https://example.test")
+        ))
+        return try result.get()
     }
 
     func loginStatus(loginId: String) async throws -> McpLoginStatus {
@@ -51,8 +65,9 @@ final class FakeMcpAuthClient: McpAuthClient, @unchecked Sendable {
         try logoutResult.get()
     }
 
-    func setClientSecret(name: String, secret: String) async throws {
+    @discardableResult
+    func setClientSecret(name: String, secret: String) async throws -> String {
         setClientSecretCalls.append((name, secret))
-        try setClientSecretResult.get()
+        return try setClientSecretResult.get()
     }
 }

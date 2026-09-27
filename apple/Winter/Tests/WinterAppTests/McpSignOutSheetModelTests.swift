@@ -43,6 +43,19 @@ final class McpSignOutSheetModelTests: XCTestCase {
         XCTAssertFalse(model.done)
     }
 
+    /// A TYPED refusal (e.g. `mcp_server_not_found`) is mapped through `mcpAuthErrorText` instead
+    /// of the generic "couldn't sign out" sentence.
+    func testConfirmUsesTheTypedErrorTextWhenTheCodeIsRecognized() async {
+        let fake = FakeMcpAuthClient()
+        fake.logoutResult = .failure(RpcError(code: -1, message: "gone",
+                                               data: .object(["code": .string("mcp_server_not_found")])))
+        let model = McpSignOutSheetModel(client: fake, serverName: "linear")
+
+        await model.confirm()
+
+        XCTAssertEqual(model.errorText, "this server isn't configured")
+    }
+
     /// A second `confirm()` while the first is still "in flight" (modeled here by checking the
     /// guard synchronously) never double-submits.
     func testConfirmGuardsAgainstDoubleSubmitFlagged() async {

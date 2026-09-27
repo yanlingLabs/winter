@@ -23,7 +23,8 @@ final class LiveMcpAuthClientTests: XCTestCase {
     // MARK: - login
 
     /// `mcp.login` sends `{name}` — no `scope`/`cwd` key at all (this client never has a cwd; see
-    /// `McpAuthClient.swift`'s header) — and decodes `{loginId, authUrl, issuerOrigin}`.
+    /// `McpAuthClient.swift`'s header), and no `confirmIssuerChange` key either via the one-arg
+    /// convenience — and decodes `{loginId, authUrl, issuerOrigin, authorizeOrigin}`.
     func testLoginSendsBareNameAndDecodesTheStartResult() async throws {
         let (client, t) = try await connectedClient()
         let live = LiveMcpAuthClient(client: client)
@@ -35,8 +36,9 @@ final class LiveMcpAuthClientTests: XCTestCase {
         XCTAssertEqual((req["params"] as? [String: Any])?["name"] as? String, "linear")
         XCTAssertNil((req["params"] as? [String: Any])?["scope"])
         XCTAssertNil((req["params"] as? [String: Any])?["cwd"])
+        XCTAssertNil((req["params"] as? [String: Any])?["confirmIssuerChange"])
 
-        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"loginId":"lg_1","authUrl":"https://mcp.linear.app/authorize?state=abc","issuerOrigin":"https://mcp.linear.app"}}"#)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"loginId":"lg_1","authUrl":"https://mcp.linear.app/authorize?state=abc","issuerOrigin":"https://mcp.linear.app","authorizeOrigin":"https://mcp.linear.app"}}"#)
         let start = try await loginTask
 
         XCTAssertEqual(start.loginId, "lg_1")
@@ -44,6 +46,21 @@ final class LiveMcpAuthClientTests: XCTestCase {
         // login's `urlHint`.
         XCTAssertEqual(start.authUrl.absoluteString, "https://mcp.linear.app/authorize?state=abc")
         XCTAssertEqual(start.issuerOrigin, "https://mcp.linear.app")
+        XCTAssertEqual(start.authorizeOrigin, "https://mcp.linear.app")
+    }
+
+    /// The explicit two-arg call with `confirmIssuerChange: true` sends the key — the sign-in
+    /// sheet's retry after an issuer-change confirmation.
+    func testLoginSendsConfirmIssuerChangeWhenTrue() async throws {
+        let (client, t) = try await connectedClient()
+        let live = LiveMcpAuthClient(client: client)
+
+        async let loginTask = live.login(name: "linear", confirmIssuerChange: true)
+        await feedWaitUntil { t.sent.count >= 2 }
+        let req = feedLineJSON(t.sent[1])
+        XCTAssertEqual((req["params"] as? [String: Any])?["confirmIssuerChange"] as? Bool, true)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"loginId":"lg_1","authUrl":"https://mcp.linear.app/authorize","issuerOrigin":"https://mcp.linear.app","authorizeOrigin":"https://mcp.linear.app"}}"#)
+        _ = try await loginTask
     }
 
     /// A malformed reply (missing `authUrl`) throws rather than returning a half-built value.
@@ -61,6 +78,48 @@ final class LiveMcpAuthClientTests: XCTestCase {
             XCTFail("a missing authUrl must throw")
         } catch {
             // expected
+        }
+    }
+
+    /// A reply missing ONLY `authorizeOrigin` (an older/partial daemon) also throws — this field is
+    /// required, not additive, since the whole RPC is new.
+    func testLoginThrowsWhenAuthorizeOriginIsMissing() async throws {
+        let (client, t) = try await connectedClient()
+        let live = LiveMcpAuthClient(client: client)
+
+        async let loginTask = live.login(name: "linear")
+        await feedWaitUntil { t.sent.count >= 2 }
+        let req = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"loginId":"lg_1","authUrl":"https://mcp.linear.app/authorize","issuerOrigin":"https://mcp.linear.app"}}"#)
+
+        do {
+            _ = try await loginTask
+            XCTFail("a missing authorizeOrigin must throw")
+        } catch {
+            // expected
+        }
+    }
+
+    /// `mcp_issuer_change_requires_confirmation`'s `data` decodes through `RpcError.mcpAuthCode`/
+    /// `mcpIssuerChangeConfirmation` — the sign-in sheet's ONLY way to learn both origins.
+    func testLoginRefusedWithIssuerChangeDataDecodesThroughRpcError() async throws {
+        let (client, t) = try await connectedClient()
+        let live = LiveMcpAuthClient(client: client)
+
+        async let loginTask = live.login(name: "linear")
+        await feedWaitUntil { t.sent.count >= 2 }
+        let req = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"error":{"code":-1,"message":"issuer changed","data":{"code":"mcp_issuer_change_requires_confirmation","storedIssuerOrigin":"https://old.example","newIssuerOrigin":"https://new.example"}}}"#)
+
+        do {
+            _ = try await loginTask
+            XCTFail("must throw")
+        } catch {
+            let rpc = try XCTUnwrap(error as? RpcError)
+            XCTAssertEqual(rpc.mcpAuthCode, .issuerChangeRequiresConfirmation)
+            let confirmation = try XCTUnwrap(rpc.mcpIssuerChangeConfirmation)
+            XCTAssertEqual(confirmation.storedIssuerOrigin, "https://old.example")
+            XCTAssertEqual(confirmation.newIssuerOrigin, "https://new.example")
         }
     }
 
@@ -150,33 +209,53 @@ final class LiveMcpAuthClientTests: XCTestCase {
     // MARK: - setClientSecret
 
     /// The secret reaches the wire exactly once, as this call's own argument — never logged,
-    /// never echoed back into anything this test could observe elsewhere.
-    func testSetClientSecretSendsNameAndSecret() async throws {
+    /// never echoed back into anything this test could observe elsewhere. The reply's own
+    /// `issuerOrigin` (item 3, polish round 2) is returned — the secret never is.
+    func testSetClientSecretSendsNameAndSecretAndReturnsIssuerOrigin() async throws {
         let (client, t) = try await connectedClient()
         let live = LiveMcpAuthClient(client: client)
 
-        async let setTask: () = live.setClientSecret(name: "github", secret: "shhh-secret")
+        async let setTask = live.setClientSecret(name: "github", secret: "shhh-secret")
         await feedWaitUntil { t.sent.count >= 2 }
         let req = feedLineJSON(t.sent[1])
         XCTAssertEqual(req["method"] as? String, "mcp.setClientSecret")
         XCTAssertEqual((req["params"] as? [String: Any])?["name"] as? String, "github")
         XCTAssertEqual((req["params"] as? [String: Any])?["secret"] as? String, "shhh-secret")
-        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"ok":true}}"#)
-        try await setTask
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"ok":true,"issuerOrigin":"https://github.example"}}"#)
+        let issuerOrigin = try await setTask
+        XCTAssertEqual(issuerOrigin, "https://github.example")
     }
 
     func testSetClientSecretOkFalseThrows() async throws {
         let (client, t) = try await connectedClient()
         let live = LiveMcpAuthClient(client: client)
 
-        async let setTask: () = live.setClientSecret(name: "github", secret: "shhh-secret")
+        async let setTask = live.setClientSecret(name: "github", secret: "shhh-secret")
         await feedWaitUntil { t.sent.count >= 2 }
         let req = feedLineJSON(t.sent[1])
         t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"ok":false}}"#)
 
         do {
-            try await setTask
+            _ = try await setTask
             XCTFail("ok:false must throw")
+        } catch {
+            // expected
+        }
+    }
+
+    /// `ok:true` but no `issuerOrigin` also throws — the field is required, not additive.
+    func testSetClientSecretThrowsWhenIssuerOriginIsMissing() async throws {
+        let (client, t) = try await connectedClient()
+        let live = LiveMcpAuthClient(client: client)
+
+        async let setTask = live.setClientSecret(name: "github", secret: "shhh-secret")
+        await feedWaitUntil { t.sent.count >= 2 }
+        let req = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"ok":true}}"#)
+
+        do {
+            _ = try await setTask
+            XCTFail("a missing issuerOrigin must throw")
         } catch {
             // expected
         }

@@ -30,7 +30,8 @@ final class McpOAuthActionsModelTests: XCTestCase {
         model.startSignIn(serverName: "linear", issuerOriginHint: "https://mcp.linear.app")
         XCTAssertNotNil(model.signInSheet)
 
-        await feedWaitUntil { fake.loginCalls == ["linear"] }
+        await feedWaitUntil { fake.loginCalls.count == 1 }
+        XCTAssertEqual(fake.loginCalls[0].name, "linear")
         model.signInSheet?.cancel()
     }
 
