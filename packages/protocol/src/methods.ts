@@ -382,6 +382,19 @@ export const PendingApprovalSchema = z.object({
 });
 export const ApprovalListResult = z.object({ pending: z.array(PendingApprovalSchema) });
 
+/** WS-27: the user's answer to a URL-mode elicitation card (`elicitation_requested`, events.ts).
+ *  `accept` means the user chose to open the link — the CLIENT opens it (the Mac does, in the
+ *  browser); the daemon opens nothing. `cancel` is never a client's answer: the daemon mints it when
+ *  the session or the turn ends, or the card times out. LOCAL clients only — deliberately absent from
+ *  `REMOTE_ALLOWED_METHODS`, since the phone cannot open a link on the Mac. First response wins,
+ *  like `approval.respond`. */
+export const ElicitationRespondParams = z.object({
+  sessionId: z.string().min(1),
+  elicitationId: z.string().min(1),
+  action: z.enum(["accept", "decline"]),
+});
+export const ElicitationRespondResult = z.object({ ok: z.literal(true), alreadyResolved: z.boolean() });
+
 export const SessionAddDirParams = z.object({
   sessionId: z.string(),
   path: z.string().min(1),
@@ -2869,6 +2882,7 @@ export const METHODS = {
   sessionDispatch: "session.dispatch",
   approvalRespond: "approval.respond",
   approvalList: "approval.list",
+  elicitationRespond: "elicitation.respond",
   sessionAddDir: "session.addDir",
   sessionSetCwd: "session.setCwd",
   trustDir: "daemon.trustDir",
