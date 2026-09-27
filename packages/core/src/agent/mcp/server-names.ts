@@ -28,7 +28,7 @@
 //
 // Never throws: an unreadable file or directory is simply not there.
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { join, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { resolveMarketplacePluginPath } from "@yanlinglabs/winter-agent-sdk";
 import { sdkEnabledPlugins, sdkLocalMcpServers, sdkUserMcpServers } from "../../settings";
 import { readSdkGlobalConfig } from "../../sdk-files";
@@ -201,21 +201,38 @@ export function agentInlineMcpServers(home: string, projectRoots: readonly strin
 
 /** How many worktrees of one trusted repository `mcpServerNameDefined` reads before it answers "defined". */
 const MAX_WORKTREES = 64;
-const WORKTREE_LIST_TIMEOUT_MS = 2_000;
 
 /**
- * The OTHER worktrees of the repository at `root` (`git worktree list --porcelain`), or `"unknown"` when git
- * could not answer for a repository that has one (a failure, a timeout, more than `MAX_WORKTREES`) — the
- * caller then treats the name as defined. A directory with no `.git` has none.
+ * The OTHER worktrees of the repository at `root`, read straight from git's own bookkeeping — no `git` process
+ * on an IPC path: `<common git dir>/worktrees/*\/gitdir` names each linked worktree's `.git` file, and the main
+ * worktree is the common dir's parent. `root` may itself be a linked worktree (its `.git` FILE points into the
+ * common dir, whose `commondir` names it). A directory with no `.git` has none. `"unknown"` — the caller then
+ * answers "defined" — on any read error, an unexpected layout, or more than `MAX_WORKTREES`.
  */
 function linkedWorktrees(root: string): string[] | "unknown" {
-  if (!existsSync(join(root, ".git"))) return [];
+  const dotGit = join(root, ".git");
+  if (!existsSync(dotGit)) return [];
   try {
-    const r = Bun.spawnSync(["git", "-C", root, "worktree", "list", "--porcelain"], { stdout: "pipe", stderr: "ignore", stdin: "ignore", timeout: WORKTREE_LIST_TIMEOUT_MS });
-    if (r.exitCode !== 0) return "unknown";
-    const paths = r.stdout.toString().split("\n").filter((l) => l.startsWith("worktree ")).map((l) => canonical(l.slice("worktree ".length)));
-    if (paths.length > MAX_WORKTREES) return "unknown";
-    return paths.filter((p) => p !== canonical(root));
+    let common = dotGit;
+    if (!statSync(dotGit).isDirectory()) {
+      const pointer = /^gitdir:\s*(.+)$/m.exec(readFileSync(dotGit, "utf8"))?.[1]?.trim();
+      if (pointer === undefined) return "unknown";
+      const gitdir = resolve(root, pointer);
+      common = resolve(gitdir, readFileSync(join(gitdir, "commondir"), "utf8").trim());
+    }
+    const out = new Set<string>();
+    if (basename(common) === ".git") out.add(canonical(dirname(common)));
+    const worktrees = join(common, "worktrees");
+    if (existsSync(worktrees)) {
+      const entries = readdirSync(worktrees);
+      if (entries.length > MAX_WORKTREES) return "unknown";
+      for (const entry of entries) {
+        const gitFile = readFileSync(join(worktrees, entry, "gitdir"), "utf8").trim();
+        out.add(canonical(dirname(resolve(join(worktrees, entry), gitFile))));
+      }
+    }
+    out.delete(canonical(root));
+    return [...out];
   } catch {
     return "unknown";
   }

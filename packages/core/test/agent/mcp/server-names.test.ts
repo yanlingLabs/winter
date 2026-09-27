@@ -2,7 +2,7 @@
 // session can load (a trusted project's own enabled keys from a directory marketplace included) and the
 // servers subagent definitions declare inline — and `mcpServerNameDefined`, which `mcp.remove`/`mcp.rename`
 // consult before dropping a name's connector permissions.
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -129,6 +129,21 @@ describe("review 8: a trusted repository's LINKED WORKTREES count", () => {
     expect(mcpServerNameDefined(f.home, "wt_only", { trust: f.trust })).toBe(false);
     write(join(wt, ".winter", "mcp.json"), { mcpServers: { wt_only: { type: "stdio", command: "w" } } });
     expect(mcpServerNameDefined(f.home, "wt_only", { trust: f.trust })).toBe(true);
+  });
+
+  test("read from git's own files, no git process: trusting a LINKED worktree still sees the main checkout's servers", () => {
+    const f = fixture();
+    const git = (args: string[]) => expect(Bun.spawnSync(["git", "-C", f.project, ...args], { stdout: "ignore", stderr: "ignore" }).exitCode).toBe(0);
+    git(["-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "i"]);
+    const wt = realpathSync(join(dir("winter-srvnames-wt2-"))) + "/wt";
+    git(["worktree", "add", "-q", "-b", `r8b-${Math.random().toString(16).slice(2)}`, wt]);
+    write(join(f.project, ".winter", "mcp.json"), { mcpServers: { main_only: { type: "stdio", command: "m" } } });
+    const onlyWorktree = { isTrusted: (d: string) => d === realpathSync(wt), list: () => [realpathSync(wt)] } as unknown as TrustStore;
+    const spawn = spyOn(Bun, "spawnSync");
+    try {
+      expect(mcpServerNameDefined(f.home, "main_only", { trust: onlyWorktree })).toBe(true);
+      expect(spawn).not.toHaveBeenCalled();
+    } finally { spawn.mockRestore(); }
   });
 
   test("fail-safe: a trusted repository git cannot list reads as defined; a plain directory has no worktrees", () => {

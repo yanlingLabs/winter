@@ -1072,6 +1072,34 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
     } finally { t.close(); }
   });
 
+  // WS-27 (review round 2, minor 1): `mcpServerNames` covers the spawn window — the fold is reported by the
+  // options thunk before the run home's await, so a remove/rename landing mid-open still sees the names.
+  test("mcpServerNames: the live fold, and the PENDING fold while an incarnation is still being opened", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let gated = false;
+    const t = table(
+      { extraMcpServers: () => ({ cf: { type: "stdio", command: "cf" }, linear: { type: "http", url: "https://mcp.linear.example/mcp" } }) },
+      {}, undefined,
+      { runHomes: { build: async (input, real) => { if (!gated) { gated = true; await gate; } return real(input); } } },
+    );
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const creating = t.drivers.create(sid);
+      for (let i = 0; i < 200 && !gated; i++) await Bun.sleep(5);
+      expect(gated).toBe(true);
+      const opening = t.drivers.get(sid);
+      // Mid-open (the run home still building): the pending fold is already reported.
+      expect(opening).toBeDefined();
+      expect(opening!.mcpServerNames!().sort()).toEqual(["cf", "linear"]);
+      release();
+      const session = await creating;
+      expect(session.mcpServerNames!().sort()).toEqual(["cf", "linear"]);
+      await session.end();
+      expect(session.mcpServerNames!()).toEqual([]);
+    } finally { t.close(); }
+  });
+
   // Whole-branch review M1: an OFF-CATALOG `pins.research` used to be stated whenever a credential for
   // its provider happened to be stored — and the child advertises `WebFetch` only while its digest
   // model resolves, so that one hand-edited settings line WITHDREW THE TOOL from every Winter session,
