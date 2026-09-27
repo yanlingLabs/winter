@@ -3,56 +3,31 @@
 The canonical list of known, deliberately parked work. Nothing here blocks a release. When an item ships, delete its line in the same commit; when new work gets parked, add it here rather than in a private note.
 
 ## MCP
-- [ ] MCP OAuth.
-- [ ] Retire or replace the daemon's own `McpManager` stdio client in favour of the SDK's.
-- [ ] `mcp.add`'s wire schema drops a server's `versionNegotiation` (the settings file and `external-mcp.ts` carry it; the RPC does not).
-- [ ] The SDK's `auto` version negotiation has caveats on SSE and stdio transports.
-- [ ] Classify `EraNegotiationFailed` by its cause; add an HTTP server leg to `verify:mcp-compiled`; test a server parked while still connecting.
-
-## Hooks
-- [ ] `async` hooks.
-- [ ] A direct hook invoker for embedded (Worker) sessions.
-- [ ] `mcp_server` provenance on hook inputs.
-- [ ] The bash reviewer's classifier forced choice (fails safe today: it escalates).
+- [ ] MCP OAuth (in progress as WS-25: sign-in, refresh, Mac sign-in buttons, pre-registered clients, CIMD).
+- [ ] Move the daemon's `McpManager` status probe onto the public `@yanlinglabs/winter-agent-runtime/mcp-client` (the SDK exports it since 0.0.28) and retire the hand-written stdio client.
+- [ ] URL-mode elicitation (`onElicitation` is unwired in the daemon), a second auth path some newer MCP servers use.
+- [ ] Two same-named plugins from different marketplaces that register the same tool name still collide in the chat-side external tool name (`mcp__winter__external__<tool>`).
 
 ## Models and providers
-- [ ] xAI `reasoning_tokens` in the usage event.
-- [ ] The chat-completions adapters' OpenAI-URL fallback pattern.
-- [ ] Session pickers should hide `toolCalling: none` rows.
-- [ ] Persist the one-time sticky fallback flags (a rejected beta or feature) across process restarts; they are per-process today.
-- [ ] Watch: on OpenAI, the request right after a plan-mode switch reads no cache (`cached=0`).
-- [ ] The Mac/CLI renderer assumes `anthropic` for `console/*` entries.
-- [ ] `provider-runtime`'s `createEndpointResolver2` caches by `modelKey` alone and echoes the first caller's `family`/`continuationDomain`, which can raise a spurious lossy-switch prompt. Key the cache on the whole origin (the daemon can mirror `memoisedPerOrigin` in `providers/registry.ts` meanwhile).
-- [ ] A parallel tool batch sent to a chat-completions provider (DeepSeek, GLM, other OpenAI-compatible endpoints) goes out as one assistant message per call; those providers may reject it. Merge the batch for those dialects.
+- [ ] Catalog tool-calling evidence: the 48 Anthropic-dialect rows on third-party hosts (e.g. `zai-anthropic`, `qianfan-*-anthropic`, `tencent-*-anthropic`) are hidden from session pickers only because upstream never stated tool support; probe or overlay them. Same for `nvidia/openai/gpt-oss-{120b,20b}` and the two NVIDIA Llama rows marked tool-less by a third-party registry.
+- [ ] `reviewModelSwitch` accepts `midTurnAbort`, but no caller passes it yet.
+
+## Plan mode
+- [ ] A one-line plan-mode reminder every few turns in long plan-mode sessions (the `entered` notice drifts further from the tail).
+- [ ] Deliver the plan-mode notice as an OpenAI `developer` input item instead of a user reminder.
+- [ ] `SystemPromptInput.hostPlanBody` is never set by the engine, so a host's `planModeInstructions` never reaches the model.
+- [ ] An engine test for the plan-mode notice as a `role: "system"` message on a row with mid-conversation system messages.
 
 ## Subagents and forks
-- [ ] A subagent's own object-form MCP servers get no first-turn wait, so a slow server's tools miss its first request.
-- [ ] A subagent's MCP server with the same name as a parent server replaces the parent's registrations for everyone while it runs, and its teardown unregisters them.
-- [ ] Control requests queue during the startup MCP wait (the input loop starts after it).
-- [ ] A fork that loads a tool through ToolSearch mid-run gets "No such tool" (its offered set is the parent's exact request layout).
+- [ ] A grandchild that declares a server name while the root's same-named server is still pending doesn't see the name as taken.
+- [ ] Forks don't inherit the parent's rejected features, so each wastes one request per feature.
+- [ ] Restoring the client-tool-search refusal on resume is reasoned, not tested.
 
-## Worktrees
-- [ ] Listing surfaces check trust on the cwd's own path and read `<cwd>/.winter/…` only, so in a worktree of a trusted repo they under-report what a session loads: `agents.list`, the output-style listing, project workflows, the project memory RPC and `loadPermissionDirs`. Move them to `projectScopeRootFor`/`projectScopeTrusted`.
-
-## Plugins
-- [ ] The plugin supervisor is keyed by bare plugin name, so two marketplaces' same-named plugins collide.
-- [ ] Project- and local-scope plugins can show as consented yet never run (only user scope hot-starts); the consent sheet should say so.
-- [ ] A stray folder under `<home>/plugins` triggers Migration C.
-- [ ] A revoked consent resurrects after a Migration C rollback and re-migrate.
-- [ ] Dead code: `pluginMcpEligible` / `pluginSkillsEligible`.
-
-## Model switching
-- [ ] An end-to-end test for the compaction-on-switch prompt.
-- [ ] `reviewSwitch`'s hard-coded mid-turn-abort flag.
-
-## Embedded runtime
-- [ ] Orphaned process groups when a session's Worker is terminated.
-
-## Phone
-- [ ] `hook_notice` and `continuity_warning` on the phone: the history/remote-stream allowlists, a kit tag and the iOS bump.
+## Run homes (router)
+- [ ] Project skills and commands are still live links into the repository, not snapshots.
+- [ ] The local settings tier is read before the "shipped by the repository" check (a local-process race only).
+- [ ] The daemon's `gitRootFor` could tell "not a git repository" apart from "git failed" and pass it to the router, retiring the router's `.git`-walk heuristic.
+- [ ] Retire the router: fold run homes and messaging into the SDK.
 
 ## Tests and infrastructure
-- [ ] The SDK test network guard does not cover shell children (`exec`/`execSync`).
-- [ ] The SDK N2 RSS test asserts absolute process RSS, so it fails inside the shared-process full suite; measure a delta or run it in a child process.
-- [ ] Retire the router: fold run homes and messaging into the SDK.
-- [ ] The pre-existing `mock-module-tripwire` (`checkMockModuleLeaks`) test failure, also on `main`.
+- [ ] WinterKit's `FakePhoneConformanceTests.testStreamingDeltasReachThePhone…` fails on `main` (timing-sensitive, real-daemon).
