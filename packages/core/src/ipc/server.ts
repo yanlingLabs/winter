@@ -2470,6 +2470,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           const status = disabled.has(name) ? "disabled" as const
             : row !== undefined ? row.status
             : userServers[name] !== undefined ? (userServers[name]!.type === "stdio" ? "unknown" as const : "unmanaged" as const)
+            : agentNames.has(name) ? "unmanaged" as const   // WS-27: as mcp.list reports it
             : "unknown" as const;
           const listing = opts.mcp?.toolsFor(name, p.cwd);
           const stored = Object.hasOwn(table, name) ? table[name]! : {};
