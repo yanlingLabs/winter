@@ -214,10 +214,10 @@ struct DashboardWiring {
     /// servers — and the tab must never do that as a side effect of being looked at. The cost,
     /// stated in the tab itself: project-scoped servers cannot appear there.
     ///
-    /// WS-25 (MCP OAuth) widened the tuple with two trailing, additive `String?` fields (`auth`,
-    /// `oauthIssuerOrigin`) — `WinterClient.mcpList`'s own doc comment; both are `nil` on a daemon
-    /// that predates them.
-    var mcpList: (() async throws -> [(name: String, status: String, toolNames: [String], source: String, auth: String?, oauthIssuerOrigin: String?)])? = nil
+    /// WS-25 (MCP OAuth) widened the tuple with three trailing, additive fields (`auth`,
+    /// `oauthIssuerOrigin`, `oauthPreregistered`) — `WinterClient.mcpList`'s own doc comment; all
+    /// three are `nil` on a daemon that predates them.
+    var mcpList: (() async throws -> [(name: String, status: String, toolNames: [String], source: String, auth: String?, oauthIssuerOrigin: String?, oauthPreregistered: Bool?)])? = nil
 
     /// WS-25 (MCP OAuth) — the Library MCP tab's sign-in/out/client-secret door
     /// (`mcp.login`/`mcp.loginStatus`/`mcp.logout`/`mcp.setClientSecret`), behind the `McpAuthClient`

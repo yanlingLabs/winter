@@ -200,4 +200,38 @@ final class McpSignInSheetModelTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertEqual(fake.loginStatusCalls.count, countAtCancel, "no poll may land after cancel()")
     }
+
+    // MARK: - reportClose (polish round: Esc-after-done still refreshes)
+
+    /// `reportClose()` returns `true` the FIRST time only — this is the guard
+    /// `McpSignInSheet`'s `onDisappear` relies on to avoid a second `onAuthChanged()` round-trip
+    /// when a button already reported the close before SwiftUI tore the sheet down.
+    func testReportCloseReturnsTrueOnceThenFalse() {
+        let fake = FakeMcpAuthClient()
+        let model = makeModel(fake: fake)
+
+        XCTAssertTrue(model.reportClose())
+        XCTAssertFalse(model.reportClose())
+        XCTAssertFalse(model.reportClose())
+    }
+
+    /// `reportClose()` stops polling too — same guarantee as `cancel()`, since it calls it.
+    func testReportCloseStopsFurtherPolling() async {
+        let fake = FakeMcpAuthClient()
+        fake.loginStatusResults = [.success(McpLoginStatus(state: .pending))]
+        let model = McpSignInSheetModel(
+            client: fake, serverName: "linear", issuerOriginHint: nil,
+            maxAttempts: 100_000, pollIntervalNanos: 20_000_000,
+            openURL: { _ in },
+            sleep: { try? await Task.sleep(nanoseconds: $0) }
+        )
+        await model.start()
+        model.continueSignIn()
+
+        await feedWaitUntil(2) { fake.loginStatusCalls.count >= 1 }
+        model.reportClose()
+        let countAtClose = fake.loginStatusCalls.count
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(fake.loginStatusCalls.count, countAtClose, "no poll may land after reportClose()")
+    }
 }

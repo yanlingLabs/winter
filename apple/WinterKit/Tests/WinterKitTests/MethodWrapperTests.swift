@@ -2091,7 +2091,7 @@ extension MethodWrapperTests {
     func testMcpListDecodesTheAuthAndIssuerOriginFields() async throws {
         let (client, t) = try await connected()
 
-        let body = #"{"servers":[{"name":"linear","status":"running","toolNames":["search"],"source":"user","auth":"needs-auth","oauthIssuerOrigin":"https://mcp.linear.app"}]}"#
+        let body = #"{"servers":[{"name":"linear","status":"running","toolNames":["search"],"source":"user","auth":"needs-auth","oauthIssuerOrigin":"https://mcp.linear.app","oauthPreregistered":false}]}"#
         let (req, servers) = try await roundTrip(t, sentIndex: 1, result: body) {
             try await client.mcpList()
         }
@@ -2100,12 +2100,25 @@ extension MethodWrapperTests {
         XCTAssertEqual(servers[0].name, "linear")
         XCTAssertEqual(servers[0].auth, "needs-auth")
         XCTAssertEqual(servers[0].oauthIssuerOrigin, "https://mcp.linear.app")
+        XCTAssertEqual(servers[0].oauthPreregistered, false)
     }
 
-    /// An OLDER daemon's row (pre-WS-25) carries neither key at all — both fields decode to `nil`,
-    /// never a thrown error and never a fabricated default, same "a newer/older daemon's field
-    /// absence reads as nil, not as a fault" posture as every other optional wire field in this
-    /// file.
+    /// A server configured with a pre-registered `oauth.clientId` sends `oauthPreregistered: true`
+    /// — the fact the client-secret sheet gates on (polish round: no longer inferred from `auth`).
+    func testMcpListDecodesOauthPreregisteredTrue() async throws {
+        let (client, t) = try await connected()
+
+        let body = #"{"servers":[{"name":"github","status":"running","toolNames":[],"source":"user","auth":"needs-auth","oauthPreregistered":true}]}"#
+        let (_, servers) = try await roundTrip(t, sentIndex: 1, result: body) {
+            try await client.mcpList()
+        }
+        XCTAssertEqual(servers[0].oauthPreregistered, true)
+    }
+
+    /// An OLDER daemon's row (pre-WS-25) carries none of the three keys at all — every one decodes
+    /// to `nil`, never a thrown error and never a fabricated default, same "a newer/older daemon's
+    /// field absence reads as nil, not as a fault" posture as every other optional wire field in
+    /// this file.
     func testMcpListDecodesNilAuthFieldsFromAnOlderDaemon() async throws {
         let (client, t) = try await connected()
 
@@ -2116,5 +2129,6 @@ extension MethodWrapperTests {
         XCTAssertEqual(servers.count, 1)
         XCTAssertNil(servers[0].auth)
         XCTAssertNil(servers[0].oauthIssuerOrigin)
+        XCTAssertNil(servers[0].oauthPreregistered)
     }
 }
