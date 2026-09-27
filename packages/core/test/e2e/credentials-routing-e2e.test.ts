@@ -17,6 +17,17 @@
 //
 // ISOLATION: a mkdtemp home, a `FileSecretStore` under it, loopback fakes on 127.0.0.1, and
 // `WS19-SENTINEL-…` dummy values. No Keychain, no `com.winter.core*`, no network.
+//
+// WS-25 §7 (prompt-free credentials) turned this file's recorded LIMITATION into its proof. The child is
+// host-brokered now (`Options.onCredentialResolve`, `runtime-sdk/host-credentials.ts`): it builds no
+// Keychain store and asks the daemon for every `{ kind: "keychain" }` credential over its control channel.
+// The sentinel lives ONLY in the test's `FileSecretStore`; the child's own Keychain service (the preload's
+// throwaway `com.winter.core.test-isolated`) holds nothing. So a request reaching the fake with
+// `Bearer <sentinel>` is the zero-prompt proof read the other way: the value can only have come from the
+// daemon, over the frame — the child never read a Keychain item, which is what raised the prompt. The same
+// sentinel is then hunted in every other sink: the child's argv and environment, the Options, every file
+// under the home (runtime-state.db, the session JSONL, the runtime's transcripts, daemon.log), the
+// daemon's console, the local and remote frames and every error string.
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -118,6 +129,10 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
   // that same session, and a session whose cwd is gone is now refused before any child
   // (`session_cwd_unavailable`) — which would mask the credential behaviour those tests pin.
   let liveCwd: string | undefined;
+  /** WS-25 §7: the daemon's console during B-1's real turn (swept in B-8), and the live child's argv +
+   *  environment as `ps` reports them. */
+  const turnLines: string[] = [];
+  let childCommandLine = "";
 
   beforeAll(async () => {
     home = realpathSync(mkdtempSync(join(tmpdir(), "ws19-route-")));
@@ -202,8 +217,23 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
     liveCwd = cwd;
     const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: DEEPSEEK_MODEL, cwd });
     await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
-    await client.call(METHODS.sessionSend, { sessionId, text: "say hello" });
-    await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 90_000);
+    // WS-25 §7: every console line the daemon writes during the real turn, for B-8's sweep.
+    const push = (...a: unknown[]): void => { turnLines.push(a.map(String).join(" ")); };
+    const spies = [spyOn(console, "error").mockImplementation(push), spyOn(console, "warn").mockImplementation(push), spyOn(console, "log").mockImplementation(push)];
+    try {
+      await client.call(METHODS.sessionSend, { sessionId, text: "say hello" });
+      await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 90_000);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+    // The LIVE child's argv and environment (`ps -E` prints a same-user process's environment after its
+    // command): the child of THIS process that runs the winter binary.
+    const kids = Bun.spawnSync(["pgrep", "-P", String(process.pid)]).stdout.toString().split("\n").filter(Boolean);
+    for (const pid of kids) {
+      const line = Bun.spawnSync(["ps", "-wwwE", "-o", "command=", "-p", pid]).stdout.toString();
+      if (line.includes(winterBin)) childCommandLine += line;
+    }
+    expect(childCommandLine).toContain(winterBin);
 
     // (4) THE ROUTING, measured on the wire: the turn reached the CONFIGURED loopback endpoint,
     // asking for the DeepSeek row's own upstream model id. Before W19-1/W19-6 neither was possible —
@@ -216,25 +246,24 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
     // not just an outbound request.
     expect(client.events.some((e) => e.type === "assistant_message" && JSON.stringify(e).includes("hello from the loopback provider"))).toBe(true);
 
-    // (5) THE CREDENTIAL, measured on the daemon's own half of the chain — which is the half this
-    // lane owns and the only half a hermetic test can reach.
-    //
-    // MEASURED LIMITATION, recorded deliberately rather than worked around: the spawned `winter`
-    // child resolves a `CredentialRef { kind: "keychain" }` by reading the macOS Keychain ITSELF
-    // (the SDK's own `keychain-store.ts`, never through the daemon), so a test whose store is a
-    // `FileSecretStore` can never put a value on the wire — the request above carries NO
-    // `Authorization` header, which is asserted below so this stays honest rather than aspirational.
-    // Writing a sentinel into a real Keychain service is the one thing these tests may never do.
-    // What IS provable is everything the daemon is responsible for: the two links either side of
-    // that gap.
-    expect(authHeaders).toEqual([""]);
+    // (5) THE CREDENTIAL, on the wire (WS-25 §7). Until the child was host-brokered this read `[""]`:
+    // the child resolved its `keychain` ref by reading the macOS Keychain ITSELF, and a test whose store
+    // is a `FileSecretStore` could never put a value on the wire. Now the daemon answers the child's
+    // `credential_resolve` from that store, and the key reaches the provider — once, in the one header
+    // it is for. The child's own Keychain service holds no item at all, so this is also the proof that
+    // it never read one (a read would have found nothing and the request would carry no key).
+    expect(authHeaders).toEqual([`Bearer ${SENTINEL}`]);
+    // …and nowhere in the child's argv (`--config-json` included) or environment.
+    expect(childCommandLine).toContain("--config-json");
+    expect(childCommandLine).toContain("WINTER_HOME="); // the environment really was captured
+    expect(childCommandLine).not.toContain(SENTINEL);
     const rt = daemon!.runtimeState;
     if ("unavailable" in rt) throw rt.unavailable;
     // The durable record names the right credential LOCATOR (never material — records.ts's own rule).
     expect(rt.records.get(sessionId)?.authRef).toBe("keychain:deepseek:default");
     expect(rt.records.get(sessionId)?.providerId).toBe("deepseek");
-    // ...and that locator names exactly the record that was stored (the child resolves it itself; WS-23
-    // retired the daemon-side seam that used to read it for the official leg).
+    // ...and that locator names exactly the record that was stored (the daemon resolves it for the child
+    // over its control channel since WS-25 §7).
     const ref = credentialRefFor("deepseek", home)!;
     expect(ref).toEqual({ kind: "keychain", account: "deepseek:default", service: keychainService(undefined, home) });
     const stored = await readCredentialMaterial(secretsRef!, "deepseek:default");
@@ -283,12 +312,11 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
     // second request", blamed on the Keychain read). It was not the Keychain: B-1 deleted this
     // session's working directory at its end, and a child spawned in a missing cwd dies before init —
     // the exact failure the `session_cwd_unavailable` refusal now names. With the cwd kept alive
-    // (`liveCwd`), the new incarnation runs its turn. The credential itself still never reaches the
-    // wire in this harness (the child reads the macOS Keychain, the store here is a `FileSecretStore`),
-    // as B-1 records. The rule's own shape — which sessions match, turn-safety, tool rows — is pinned
-    // in `test/runtime-sdk/credentials.test.ts`.
+    // (`liveCwd`), the new incarnation runs its turn — and, host-brokered (WS-25 §7), it carries the
+    // rotated key the daemon now holds. The rule's own shape — which sessions match, turn-safety, tool
+    // rows — is pinned in `test/runtime-sdk/credentials.test.ts`.
     expect(fake!.requests.filter((r) => r.path.endsWith("/chat/completions")).length).toBe(requestsBefore + 1);
-    expect(authHeaders.every((h) => h === "")).toBe(true);
+    expect(authHeaders.every((h) => h === `Bearer ${SENTINEL}`)).toBe(true);
   }, 120_000);
 
   test("B-8 / W19-14: the sentinel appears in NO log line, NO session file, NO history page, NO replay frame and NO credential.list", async () => {
@@ -330,6 +358,9 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
       remote.close();
 
       for (const line of lines) expect(line).not.toContain(SENTINEL);
+      // WS-25 §7: and the daemon's console during B-1's real, host-brokered turn.
+      expect(turnLines.length).toBeGreaterThan(0);
+      for (const line of turnLines) expect(line).not.toContain(SENTINEL);
     } finally {
       errSpy.mockRestore();
       warnSpy.mockRestore();
