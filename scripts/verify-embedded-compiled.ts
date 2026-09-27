@@ -19,8 +19,8 @@
  *   4. `<copy> __embedded-probe`: a REAL daemon on the temp home with a FileSecretStore (never the
  *      Keychain), settings naming a `winter` executable that does NOT exist, one chat turn on the
  *      scripted `winter-test/echo` double over the daemon's own socket (`runtime-sdk/embedded-probe.ts`).
- *   5. `<copy> __runtime-workflow-worker` with no `--bridge`, inside the workflow seatbelt its parent
- *      uses (WS-27: outside one it refuses, exit 77): the route must reach the RUNTIME's workflow
+ *   5. `<copy> __runtime-workflow-worker` with no `--bridge`, inside the runtime's own worker seatbelt
+ *      (the one its parent uses) (WS-27: outside one it refuses, exit 77): the route must reach the RUNTIME's workflow
  *      worker (exit 78, "invoked without --bridge"), not the daemon's own `__workflow-worker` — and
  *      its Keychain-sandbox check (bun:ffi) must survive the hardened runtime.
  *   6. Re-take the real-home signatures and assert them unchanged; `rm -rf` every temp dir in a
@@ -40,7 +40,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSyn
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildWorkflowSeatbeltProfile } from "../packages/core/src/workflows/sandbox";
+import { renderRuntimeWorkflowProfile } from "../packages/core/test/helpers/runtime-workflow-profile";
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(SCRIPTS_DIR, "..");
@@ -147,8 +147,9 @@ async function main(): Promise<void> {
     log(`probe result: ${JSON.stringify(result)}`);
 
     // ---- Step 5 -------------------------------------------------------------------------------
-    log(`\n--- Step 5: ${probeBinary} __runtime-workflow-worker (no --bridge), inside the workflow seatbelt ---`);
-    const wf = await runChild("/usr/bin/sandbox-exec", ["-p", buildWorkflowSeatbeltProfile(probeBinary), probeBinary, "__runtime-workflow-worker"], env);
+    log(`\n--- Step 5: ${probeBinary} __runtime-workflow-worker (no --bridge), inside the runtime's own worker seatbelt ---`);
+    // The RUNTIME's own worker profile (rendered from the installed package: it does not export its builder).
+    const wf = await runChild("/usr/bin/sandbox-exec", ["-p", renderRuntimeWorkflowProfile(probeBinary), probeBinary, "__runtime-workflow-worker"], env);
     log(`exit=${wf.code} stderr=${wf.stderr.trim()}`);
 
     // ---- Step 6 -------------------------------------------------------------------------------
