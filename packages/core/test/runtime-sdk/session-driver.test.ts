@@ -992,6 +992,46 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
     } finally { t.close(); }
   });
 
+  // WS-25 §7 (prompt-free credentials): every incarnation's Options carry the daemon's credential
+  // broker, and it answers ONLY what that incarnation's Options (and its MCP configuration) named.
+  test("optionsFor attaches the host credential broker: answers the session's own refs, refuses the rest, carries no material", async () => {
+    const settings = {
+      provider: { model: "openai/gpt-5.6-sol" },
+      runtimes: { winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 },
+    } as unknown as Settings;
+    const key = "WS25-DRIVER-SENTINEL-5e0b";
+    const t = table({
+      settings: () => settings,
+      // A run-home incarnation (the table's default): the configured servers ride the run folder, so the
+      // broker must read them from the same fold rather than off `options.mcpServers`.
+      extraMcpServers: () => ({ linear: { type: "http", url: "https://mcp.linear.example/mcp" } }),
+    });
+    try {
+      const secrets = new FileSecretStore(join(t.home, "secrets.json"));
+      await secrets.set("openai:default", JSON.stringify({ kind: "api-key", key }));
+      await secrets.set("harness-token", key);
+      for (const mode of ["chat", "code"] as const) {
+        const session = await t.drivers.create(t.store.createSession(`t-${mode}`, { mode, ...(mode === "code" ? { cwd: t.home } : {}) }));
+        const options = t.q().options;
+        expect(typeof options.onCredentialResolve).toBe("function");
+        expect(typeof options.onMcpOAuthRefresh).toBe("function");
+        const signal = new AbortController().signal;
+        const service = (options.provider?.authRef as { service?: string }).service;
+        const own = await options.onCredentialResolve!({ ref: { kind: "keychain", account: "openai:default", service } }, { signal });
+        expect(own).toMatchObject({ ok: true, generation: 1 });
+        expect(JSON.parse((own as { material: string }).material).key).toBe(key);
+        expect(await options.onCredentialResolve!({ ref: { kind: "keychain", account: "harness-token" } }, { signal })).toEqual({ ok: false, reason: "not_allowed" });
+        // The configured MCP server's sign-in is answerable (signed out here: no store wired); another's is not.
+        const { mcpOAuthTokenAccount } = await import("@yanlinglabs/winter-agent-runtime/mcp-auth");
+        expect(await options.onCredentialResolve!({ ref: { kind: "keychain", account: mcpOAuthTokenAccount("https://mcp.linear.example/mcp") } }, { signal })).toEqual({ ok: false, reason: "not_found" });
+        expect(await options.onCredentialResolve!({ ref: { kind: "keychain", account: mcpOAuthTokenAccount("https://evil.example/mcp") } }, { signal })).toEqual({ ok: false, reason: "not_allowed" });
+        // The Options themselves name locators only — the value is in no serialisable field.
+        expect(JSON.stringify(options)).not.toContain(key);
+        await session.end();
+      }
+    } finally { t.close(); }
+  });
+
   // Whole-branch review M1: an OFF-CATALOG `pins.research` used to be stated whenever a credential for
   // its provider happened to be stored — and the child advertises `WebFetch` only while its digest
   // model resolves, so that one hand-edited settings line WITHDREW THE TOOL from every Winter session,
