@@ -10,6 +10,8 @@ import { LegacyKeychainSecretStore } from "./migration/legacy-keychain-store";
 import { TOKEN_NAMES, TokenAuthority } from "./auth/tokens";
 import { appTokenAclBootTrust, migrateAppTokenAcl, prepareAppTokenAccess, recoverAppTokenShadows, type AppTokenAccess, type AppTokenKeychain, type AppTokenTrust } from "./auth/app-token-acl";
 import { applicationPathsForBundleId, keychainUnlocked, withKeychainUserInteractionDisabled } from "./auth/keychain-ffi";
+import { CredentialMigrationBusy } from "./auth/credential-migration-lock";
+import { beginKeychainPass, finishCredentialPass, type KeychainPass } from "./auth/keychain-boot";
 import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 import { migrateLegacyCredentialMaterial } from "./auth/credential-material";
 import { SessionStore } from "./sessions/store";
@@ -389,6 +391,10 @@ export async function startDaemon(opts: {
    *  caller that injected its own `secrets` gets a per-daemon MEMORY store (WS-25 integration: shared by the
    *  sign-in doors, the probe and the session answers) — so no test daemon ever reads the Keychain for one. */
   mcpOAuthStore?: McpOAuthStore;
+  /** WS-27 TEST SEAM: stands in for the production Keychain pass's first half (`beginKeychainPass`), which
+   *  otherwise runs only on the profile's default home with no injected `secrets`. A test uses it to prove a
+   *  held credential migration lock ends the boot before any credential is read. */
+  keychainPassForTests?: (home: string) => Promise<KeychainPass | undefined>;
 } = {}): Promise<RunningDaemon> {
   const startedAt = Date.now();
   const home = opts.home ?? resolveWinterHome();
@@ -435,6 +441,29 @@ export async function startDaemon(opts: {
   }
 
   const secrets = opts.secrets ?? new KeychainSecretStore();
+
+  // WS-27: the credential items' access lists (`auth/credential-acl.ts`) — same guards as the app-token
+  // slot below: real production boot, the profile's own default home, macOS, never fatal, skipped when the
+  // default keychain is locked, every call with user interaction disabled. Every Keychain shadow pass and
+  // migration of this boot — these and the pairing tokens' — runs under the CREDENTIAL MIGRATION LOCK
+  // (`auth/credential-migration-lock.ts`), taken here and released after the pairing tokens: the boot lock
+  // cannot serve (a booting daemon has no socket yet, so a second one would judge it stale). A live holder
+  // is WAITED for (bounded, `auth/keychain-boot.ts`); still held at the end, the boot is refused
+  // (`CredentialMigrationBusy`) — never run on to `ensureTokens` without the recovery. HERE, only the restore half of the shadow recovery, because
+  // `credentialPresenceFrom` just below is the first read that would treat an item an interrupted migration
+  // deleted as missing; the migration runs after the boot lock and Migration B.
+  let keychainPass: KeychainPass | undefined;
+  if (opts.keychainPassForTests !== undefined) {
+    keychainPass = await opts.keychainPassForTests(home);
+  } else if (opts.secrets === undefined && process.platform === "darwin" && isDefaultWinterHome(home, profile)) {
+    try {
+      keychainPass = await beginKeychainPass({ home, service: keychainService(), log: (line) => console.error(line) });
+    } catch (err) {
+      // Held by a live process past the bound: refuse the boot rather than run unprotected.
+      if (err instanceof CredentialMigrationBusy) throw err;
+      console.error(`keychain: the credential access lists were not checked (${err instanceof Error ? err.name : "error"})`);
+    }
+  }
 
   // WS-20 (review round 2, M5): computed HERE — before the settings migration, before
   // `SessionStore` construction, before the runtime-state spine's own model_ref rewrite — so all
@@ -532,8 +561,16 @@ export async function startDaemon(opts: {
   // The shadow recovery runs FIRST and whatever the trust target — `ensureTokens` would otherwise mint a
   // fresh token for an original an interrupted migration deleted. The access objects are built once and
   // released after.
+  // WS-27, after the boot lock and Migration B, before anything reads or refreshes a credential (the brokers,
+  // `ensureTokens`, every session), still under the credential migration lock: the full shadow recovery,
+  // then the once-only migration — skipped (recovery kept, no marker) if the keychain locked meanwhile or this
+  // process's designated requirement cannot be read. Synchronous, so nothing in
+  // this process runs between an item's delete and its add. A failed migration is followed at once by a
+  // restore pass, so an item it could not put back is restored from its shadow before `ensureTokens`.
+  if (keychainPass !== undefined) finishCredentialPass(keychainPass, home);
+
   let appTokens: { kc: AppTokenKeychain; trust: AppTokenTrust | undefined; access: AppTokenAccess } | undefined;
-  if (opts.secrets === undefined && process.platform === "darwin" && isDefaultWinterHome(home, profile)) {
+  if (keychainPass !== undefined) { // the same guards, and the credential migration lock is held
     try {
       if (!keychainUnlocked(null)) throw Object.assign(new Error("the default keychain is locked"), { name: "KeychainLocked" });
       const kc: AppTokenKeychain = { keychain: null, service: keychainService(), log: (line) => console.error(line) };
@@ -558,6 +595,7 @@ export async function startDaemon(opts: {
       access.release();
     }
   }
+  keychainPass?.lock.release();
 
   // The user's login-shell PATH, merged into THIS process's environment before anything below can
   // spawn — an app/Sparkle/launchd-launched daemon otherwise inherits LaunchServices' bare

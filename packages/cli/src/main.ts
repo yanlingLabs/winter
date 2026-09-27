@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
-import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeWorkflowWorker, RUNTIME_WORKFLOW_WORKER_ARG, runRuntimeStateProbe, runRuntimesProbe, keychainUnlocked, runEmbeddedProbe, resolveWinterProfile, splitTag, sdkLocalMcpServers } from "@yanlinglabs/winter-core";
+import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeWorkflowWorker, RUNTIME_WORKFLOW_WORKER_ARG, runRuntimeStateProbe, runRuntimesProbe, keychainUnlocked, processStartSecondsViaSysctl, runEmbeddedProbe, runDevKeychainAdopt, DEV_KEYCHAIN_ADOPT_ARG, resolveWinterProfile, splitTag, sdkLocalMcpServers } from "@yanlinglabs/winter-core";
 import type { CredentialRow, SecretStore, Settings } from "@yanlinglabs/winter-core";
 import { METHODS, type ApprovalPolicy, type Task } from "@yanlinglabs/winter-protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
@@ -1430,10 +1430,23 @@ if (import.meta.main) {
   // `allow-unsigned-executable-memory` — 0.120.0 shipped without it and the daemon crash-looped at its
   // first Keychain call (the app-token access lists, `auth/keychain-ffi.ts`). This loads all three
   // libraries and asks only whether the default keychain is unlocked: no item is read, nothing prompts.
+  // WS-27: also the credential migration lock's libSystem `sysctl` ffi (its own start time) — the release
+  // gate must run every ffi the daemon boots through.
   if (process.argv[2] === "__keychain-ffi-probe") {
     const unlocked = keychainUnlocked(null);
-    process.stdout.write(`keychain-ffi: ok (default keychain ${unlocked ? "unlocked" : "locked"})\n`);
+    const started = processStartSecondsViaSysctl(process.pid);
+    if (started === undefined) {
+      process.stdout.write("keychain-ffi: FAILED (sysctl kern.proc.pid gave no start time)\n");
+      process.exit(1);
+    }
+    process.stdout.write(`keychain-ffi: ok (default keychain ${unlocked ? "unlocked" : "locked"}; process start ${started})\n`);
     process.exit(0);
+  }
+  // WS-27: the NEW creator's side of the one-time dev Keychain transition (`auth/dev-keychain-transition.ts`),
+  // driven over stdio by `scripts/dev-daemon.ts --transition` running under `bun`. Refuses anything but the
+  // dev profile on its default home; never prints a value.
+  if (process.argv[2] === DEV_KEYCHAIN_ADOPT_ARG) {
+    await runDevKeychainAdopt();
   }
   if (process.argv[2] === "__runtime-state-probe") {
     const result = await runRuntimeStateProbe({ home: process.env.WINTER_HOME });
@@ -1521,11 +1534,12 @@ if (import.meta.main) {
       daemon = await startDaemon();
     } catch (err) {
       // Migration B's `MigrationRefused` and (WS-21) Migration C's `MigrationCRefused`: a message and exit 1.
-      const { migrationRefusalMessage } = await import("./daemon-boot-refusal");
+      const { bootRefusalExitCode, migrationRefusalMessage } = await import("./daemon-boot-refusal");
       const refusal = migrationRefusalMessage(err);
       if (refusal !== undefined) {
         console.error(refusal);
-        process.exit(1);
+        // WS-27: 75 for a held credential migration lock (the app backs off and retries), else 1.
+        process.exit(bootRefusalExitCode(err));
       }
       throw err;
     }

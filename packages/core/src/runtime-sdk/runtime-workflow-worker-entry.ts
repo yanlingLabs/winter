@@ -6,9 +6,12 @@
 // NOT the daemon's own workflow worker (`workflows/subprocess-entry.ts`, argv `__workflow-worker`):
 // the runtime's worker speaks the runtime's bridge (`workflowWorkerMain`, R5-15), a different program.
 import { workflowWorkerMain } from "@yanlinglabs/winter-agent-runtime/workflow-worker";
+import { refuseUnlessKeychainSandboxed } from "../workflows/sandbox-guard";
 
 /** Run the runtime's workflow worker on this process's stdio, then exit with its code. */
 export async function runRuntimeWorkflowWorker(): Promise<never> {
+  // WS-27: before `workflowWorkerMain` reads stdin — see `workflows/sandbox-guard.ts`.
+  refuseUnlessKeychainSandboxed("runtime workflow worker");
   let code: number;
   try {
     code = await workflowWorkerMain(process.argv, { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr });

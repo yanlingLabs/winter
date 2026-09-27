@@ -59,12 +59,13 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { MIGRATION_SHADOW_SUFFIX } from "./secret-store";
 import { TOKEN_NAMES } from "./tokens";
 import { addGenericPassword, createKeychainAccess, deleteGenericPassword, genericPasswordPresent, readGenericPassword, ERR_SEC_DUPLICATE_ITEM, KeychainFfiError, type KeychainAccess, type KeychainTarget } from "./keychain-ffi";
 
 /** The two items the APP reads (the admin token is the CLI's, the same binary as the daemon). */
 export const APP_READ_TOKEN_NAMES: readonly string[] = [TOKEN_NAMES.harness, TOKEN_NAMES.remote];
-export const APP_TOKEN_SHADOW_SUFFIX = ".migrating";
+export const APP_TOKEN_SHADOW_SUFFIX = MIGRATION_SHADOW_SUFFIX;
 export const APP_TOKEN_ACL_MARKER_VERSION = 2;
 /** The Apple developer team Winter's apps are signed by (`apple/Winter/project.yml`'s `DEVELOPMENT_TEAM`). */
 export const WINTER_TEAM_ID = "37N77U9RSZ";
@@ -262,8 +263,8 @@ export function migrateAppTokenAcl(kc: AppTokenKeychain, access: AppTokenAccess,
       try {
         ops.add(kc.keychain, { service: kc.service, account: name, value, access: access.wide });
       } catch (err) {
-        // Re-created between our delete and add (only a human with `security` could: the boot lock keeps a
-        // second daemon out). The read-back below decides whether it holds our value.
+        // Re-created between our delete and add (only a human with `security` could: the credential
+        // migration lock keeps a second daemon out). The read-back below decides whether it holds our value.
         if (!(err instanceof KeychainFfiError && err.status === ERR_SEC_DUPLICATE_ITEM)) throw err;
       }
       if (ops.read(kc.keychain, kc.service, name) !== value) throw new KeychainFfiError("verify", -1, name);

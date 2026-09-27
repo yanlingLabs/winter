@@ -3,8 +3,9 @@
 // WHY FFI AT ALL. `Bun.secrets` can read, write and delete a generic password, and that is all: it cannot
 // (a) find an item WITHOUT decrypting it, which is what `winter doctor` needs to count legacy items without
 // raising a consent prompt per item, or (b) create an item with an explicit access-control list, which is
-// what lets the Mac app read the daemon's two pairing tokens without a prompt (`app-token-acl.ts`). Both
-// live in the file-based keychain API (`SecKeychain*`), which is where `Bun.secrets` keeps its items too
+// what lets the Mac app read the daemon's two pairing tokens without a prompt (`app-token-acl.ts`), or
+// (c) list a service's accounts without their data, which the credential ACL migration enumerates with
+// (`credential-acl.ts`). All three live in the file-based keychain API (`SecKeychain*`), which is where `Bun.secrets` keeps its items too
 // (measured 2026-09-27: a `Bun.secrets.set` lands in `login.keychain-db`, class `genp`, label = service).
 //
 // WHAT THIS FILE NEVER DOES:
@@ -73,6 +74,9 @@ function loadLibs() {
     SecKeychainCopyDefault: { args: [FFIType.ptr], returns: FFIType.i32 },
     SecKeychainGetStatus: { args: [REF, FFIType.ptr], returns: FFIType.i32 },
     SecKeychainSetUserInteractionAllowed: { args: [FFIType.bool], returns: FFIType.i32 },
+    SecKeychainSearchCreateFromAttributes: { args: [REF, FFIType.u32, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+    SecKeychainSearchCopyNext: { args: [REF, FFIType.ptr], returns: FFIType.i32 },
+    SecKeychainItemCopyContent: { args: [REF, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
   });
   const ls = dlopen(CORE_SERVICES, {
     LSCopyApplicationURLsForBundleIdentifier: { args: [REF, REF], returns: REF },
@@ -143,7 +147,7 @@ function kcRef(target: KeychainTarget): Ref {
 
 /** One `SecKeychainFindGenericPassword`. With `withData: false` the item is located WITHOUT its data being
  *  requested — no decrypt, so no consent prompt whatever the item's ACL says. */
-function find(target: KeychainTarget, service: string, account: string, withData: boolean): { status: number; item?: Ref; value?: string } {
+function find(target: KeychainTarget, service: string, account: string, withData: boolean): { status: number; item?: Ref; bytes?: Uint8Array } {
   const svc = Buffer.from(service, "utf8");
   const acct = Buffer.from(account, "utf8");
   const itemOut = outPtr();
@@ -152,15 +156,16 @@ function find(target: KeychainTarget, service: string, account: string, withData
   const status = L().sec.SecKeychainFindGenericPassword(kcRef(target), svc.length, ptr(svc), acct.length, ptr(acct), withData ? ptr(lenOut) : null, withData ? ptr(dataOut) : null, ptr(itemOut));
   void [svc, acct].length; // alive until the call returned (see `addGenericPassword`)
   if (status !== 0) return { status };
-  let value: string | undefined;
+  let bytes: Uint8Array | undefined;
   if (withData) {
     const data = dataOut[0]!;
     const length = lenOut[0]!;
-    // A heap address (never a tagged pointer), so the number form `toArrayBuffer` takes is exact.
-    value = length === 0 || data === 0n ? "" : Buffer.from(toArrayBuffer(Number(data) as never, 0, length)).toString("utf8");
+    // A heap address (never a tagged pointer), so the number form `toArrayBuffer` takes is exact. Copied
+    // before the content is freed.
+    bytes = length === 0 || data === 0n ? new Uint8Array(0) : new Uint8Array(Buffer.from(toArrayBuffer(Number(data) as never, 0, length)));
     if (data !== 0n) L().sec.SecKeychainItemFreeContent(0n, data);
   }
-  return { status, item: itemOut[0]!, ...(value !== undefined ? { value } : {}) };
+  return { status, item: itemOut[0]!, ...(bytes !== undefined ? { bytes } : {}) };
 }
 
 /** Is there a generic password at (service, account)? Never decrypts, never prompts. */
@@ -175,11 +180,75 @@ export function genericPasswordPresent(target: KeychainTarget, service: string, 
 /** The item's value, or `null` when there is none. DECRYPTS — used only on items this process created
  *  (its own ACL entry), where the read is silent. */
 export function readGenericPassword(target: KeychainTarget, service: string, account: string): string | null {
+  const bytes = readGenericPasswordBytes(target, service, account);
+  return bytes === null ? null : Buffer.from(bytes).toString("utf8");
+}
+
+/** `readGenericPassword`'s exact bytes — what a migration compares, so a value that is not valid UTF-8 can
+ *  never be "verified" through a lossy decode. */
+export function readGenericPasswordBytes(target: KeychainTarget, service: string, account: string): Uint8Array | null {
   const found = find(target, service, account, true);
   if (found.status === ERR_SEC_ITEM_NOT_FOUND) return null;
   if (found.status !== 0) throw new KeychainFfiError("read", found.status, account);
   release(found.item);
-  return found.value ?? null;
+  return found.bytes ?? null;
+}
+
+/**
+ * Every generic-password ACCOUNT under `service`, located and described WITHOUT their data: the search
+ * (`SecKeychainSearchCreateFromAttributes`) and each item's attributes (`SecKeychainItemCopyContent` with
+ * no data out-parameter) never decrypt, so no item's access list is consulted and nothing prompts. The
+ * credential ACL migration enumerates with this before it reads anything.
+ */
+export function listGenericPasswordAccounts(target: KeychainTarget, service: string): string[] {
+  const { sec } = L();
+  const svc = Buffer.from(service, "utf8");
+  // One SecKeychainAttribute { tag; length; data } in a SecKeychainAttributeList { count; attr }.
+  const attr = Buffer.alloc(16);
+  attr.writeUInt32LE(SERVICE_ATTR, 0);
+  attr.writeUInt32LE(svc.length, 4);
+  attr.writeBigUInt64LE(BigInt(ptr(svc)), 8);
+  const list = Buffer.alloc(16);
+  list.writeUInt32LE(1, 0);
+  list.writeBigUInt64LE(BigInt(ptr(attr)), 8);
+  const searchOut = outPtr();
+  const created = sec.SecKeychainSearchCreateFromAttributes(kcRef(target), GENERIC_PASSWORD_CLASS, ptr(list), ptr(searchOut));
+  void [svc, attr, list].length;
+  if (created === ERR_SEC_ITEM_NOT_FOUND) return [];
+  if (created !== 0) throw new KeychainFfiError("search", created);
+  const search = searchOut[0]!;
+  const accounts: string[] = [];
+  try {
+    for (;;) {
+      const itemOut = outPtr();
+      const next = sec.SecKeychainSearchCopyNext(search, ptr(itemOut));
+      if (next === ERR_SEC_ITEM_NOT_FOUND) break;
+      if (next !== 0) throw new KeychainFfiError("search next", next);
+      const item = itemOut[0]!;
+      try {
+        // The API fills `data`/`length` of the attribute we name, allocating; FreeContent releases it.
+        const want = Buffer.alloc(16);
+        want.writeUInt32LE(ACCOUNT_ATTR, 0);
+        const wantList = Buffer.alloc(16);
+        wantList.writeUInt32LE(1, 0);
+        wantList.writeBigUInt64LE(BigInt(ptr(want)), 8);
+        const copied = sec.SecKeychainItemCopyContent(item, null, ptr(wantList), null, null);
+        // An item whose attributes cannot be read is not listed (nothing can be done with it anyway).
+        if (copied !== 0) continue;
+        const length = want.readUInt32LE(4);
+        const data = want.readBigUInt64LE(8);
+        // A heap address (never a tagged pointer), as in `find`.
+        accounts.push(length === 0 || data === 0n ? "" : Buffer.from(toArrayBuffer(Number(data) as never, 0, length)).toString("utf8"));
+        sec.SecKeychainItemFreeContent(BigInt(ptr(wantList)), 0n);
+        void [want, wantList].length;
+      } finally {
+        release(item);
+      }
+    }
+  } finally {
+    release(search);
+  }
+  return accounts;
 }
 
 /** Deletes the item; `false` when there was none. */

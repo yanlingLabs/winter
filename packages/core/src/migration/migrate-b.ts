@@ -137,7 +137,9 @@ function firstOffendingRunEntry(path: string): string | undefined {
   } catch {
     return undefined;
   }
-  const offender = entries.find((e) => e !== "core.lock" && e !== "core.sock");
+  // WS-27: the credential migration lock is taken before Migration B runs (it guards the Keychain shadow
+  // passes), so it — like the boot lock — never makes a home non-pristine.
+  const offender = entries.find((e) => e !== "core.lock" && e !== "core.sock" && !e.startsWith("credential-migration.lock"));
   return offender ? join(path, offender) : undefined;
 }
 

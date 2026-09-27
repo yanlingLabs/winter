@@ -8,6 +8,15 @@ function sbplString(p: string): string {
 }
 function canon(p: string): string { try { return realpathSync(p); } catch { return p; } }
 
+/** The only mach services a workflow worker may look up — identical to the runtime's own worker profile
+ *  (`sandbox-guard.test.ts` pins that against the installed runtime), and never a Keychain service. */
+export const WORKFLOW_MACH_SERVICES: readonly string[] = [
+  "com.apple.system.notification_center",
+  "com.apple.system.logger",
+  "com.apple.CoreServices.coreservicesd",
+  "com.apple.bsd.dirhelper",
+];
+
 /**
  * Tight Seatbelt (SBPL) profile for a workflow-worker subprocess. Strictly tighter than bash's:
  *   - deny file-write* EVERYWHERE (the child writes nothing — the journal is appended parent-side),
@@ -24,12 +33,7 @@ function canon(p: string): string { try { return realpathSync(p); } catch { retu
  */
 export function buildWorkflowSeatbeltProfile(selfExecPath: string): string {
   const self = canon(selfExecPath);
-  const machRules = [
-    "com.apple.system.notification_center",
-    "com.apple.system.logger",
-    "com.apple.CoreServices.coreservicesd",
-    "com.apple.bsd.dirhelper",
-  ].map((s) => `  (global-name "${sbplString(s)}")`).join("\n");
+  const machRules = WORKFLOW_MACH_SERVICES.map((s) => `  (global-name "${sbplString(s)}")`).join("\n");
   return `(version 1)
 (deny default)
 (allow process-exec (literal "${sbplString(self)}"))

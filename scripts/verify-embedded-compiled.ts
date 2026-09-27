@@ -14,12 +14,15 @@
  *   2. `mkdtemp` a throwaway WINTER_HOME; take a NAME signature of the real homes (`~/.winter`,
  *      `~/.winter-dev`) before the run.
  *   3. Copy the binary and sign the copy the way the Release app signs winter-core (ad-hoc, hardened
- *      runtime, `scripts/bun-jit.entitlements`) — the Workers must run under the shipped posture.
+ *      runtime, `scripts/winter-core.entitlements` — allow-jit plus the unsigned executable memory
+ *      bun:ffi needs) — the Workers must run under the shipped posture.
  *   4. `<copy> __embedded-probe`: a REAL daemon on the temp home with a FileSecretStore (never the
  *      Keychain), settings naming a `winter` executable that does NOT exist, one chat turn on the
  *      scripted `winter-test/echo` double over the daemon's own socket (`runtime-sdk/embedded-probe.ts`).
- *   5. `<copy> __runtime-workflow-worker` with no `--bridge`: the route must reach the RUNTIME's
- *      workflow worker (exit 78, "invoked without --bridge"), not the daemon's own `__workflow-worker`.
+ *   5. `<copy> __runtime-workflow-worker` with no `--bridge`, inside the runtime's own worker seatbelt
+ *      (the one its parent uses) (WS-27: outside one it refuses, exit 77): the route must reach the RUNTIME's workflow
+ *      worker (exit 78, "invoked without --bridge"), not the daemon's own `__workflow-worker` — and
+ *      its Keychain-sandbox check (bun:ffi) must survive the hardened runtime.
  *   6. Re-take the real-home signatures and assert them unchanged; `rm -rf` every temp dir in a
  *      `finally`.
  *
@@ -37,11 +40,12 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSyn
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { renderRuntimeWorkflowProfile } from "../packages/core/test/helpers/runtime-workflow-profile";
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(SCRIPTS_DIR, "..");
 const DIST_BINARY = join(REPO_ROOT, "dist", "winter-core");
-const BUN_JIT_ENTITLEMENTS = join(REPO_ROOT, "scripts", "bun-jit.entitlements");
+const WINTER_CORE_ENTITLEMENTS = join(REPO_ROOT, "scripts", "winter-core.entitlements");
 const COMPILE_TIMEOUT_MS = 180_000;
 const PROBE_TIMEOUT_MS = 90_000;
 const REAL_HOMES = [join(homedir(), ".winter"), join(homedir(), ".winter-dev")];
@@ -105,7 +109,7 @@ async function main(): Promise<void> {
   const probeBinary = join(scratch, "winter-core");
   copyFileSync(DIST_BINARY, probeBinary);
   chmodSync(probeBinary, 0o755);
-  const sign = spawnSync("codesign", ["--force", "--sign", "-", "--options", "runtime", "--entitlements", BUN_JIT_ENTITLEMENTS, probeBinary], { encoding: "utf8" });
+  const sign = spawnSync("codesign", ["--force", "--sign", "-", "--options", "runtime", "--entitlements", WINTER_CORE_ENTITLEMENTS, probeBinary], { encoding: "utf8" });
   if (sign.status !== 0) {
     rmSync(scratch, { recursive: true, force: true });
     fail(`codesign of the probe copy failed: ${(sign.stderr ?? "").trim()}`);
@@ -143,8 +147,9 @@ async function main(): Promise<void> {
     log(`probe result: ${JSON.stringify(result)}`);
 
     // ---- Step 5 -------------------------------------------------------------------------------
-    log(`\n--- Step 5: ${probeBinary} __runtime-workflow-worker (no --bridge) ---`);
-    const wf = await runChild(probeBinary, ["__runtime-workflow-worker"], env);
+    log(`\n--- Step 5: ${probeBinary} __runtime-workflow-worker (no --bridge), inside the runtime's own worker seatbelt ---`);
+    // The RUNTIME's own worker profile (rendered from the installed package: it does not export its builder).
+    const wf = await runChild("/usr/bin/sandbox-exec", ["-p", renderRuntimeWorkflowProfile(probeBinary), probeBinary, "__runtime-workflow-worker"], env);
     log(`exit=${wf.code} stderr=${wf.stderr.trim()}`);
 
     // ---- Step 6 -------------------------------------------------------------------------------
