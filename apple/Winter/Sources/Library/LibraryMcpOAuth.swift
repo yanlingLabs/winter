@@ -58,6 +58,57 @@ func mcpShowsClientSecretAction(_ server: McpServerRow) -> Bool {
     server.oauthPreregistered == true
 }
 
+/// PURE: maps a typed MCP-auth refusal (`error.data.code`, `RpcError.mcpAuthCode`) to plain, shown-
+/// to-the-user text — polish round 2 (daemon-oauth lane's contract addition). `nil` when `error`
+/// carries no code this build recognizes (a transport error, an untyped RPC failure, or a newer
+/// daemon's code), so every catch site below falls back to ITS OWN generic wording rather than this
+/// function inventing one. `.issuerChangeRequiresConfirmation` also answers `nil` — that refusal
+/// drives its OWN confirmation phase (`McpSignInSheetModel.attemptLogin`) rather than ever being
+/// shown as flat text; reaching this function with it unhandled would only be a caller that forgot
+/// to check `RpcError.mcpIssuerChangeConfirmation` first.
+///
+/// The two SDK-raw codes (`sdkClientSecretIssuerMismatch`/`sdkMetadataIssuerMismatch`) share the
+/// daemon's own `clientSecretIssuerMismatch` wording rather than each getting a sentence: all three
+/// describe the same underlying fact (this server's sign-in configuration names an issuer/authorizer
+/// that doesn't match what it should) from different layers, and a user has no use for which layer
+/// caught it.
+func mcpAuthErrorText(_ error: Error) -> String? {
+    guard let code = (error as? RpcError)?.mcpAuthCode else { return nil }
+    switch code {
+    case .issuerChangeRequiresConfirmation:
+        return nil
+    case .serverNotFound:
+        return "this server isn't configured"
+    case .oauthNotApplicable:
+        return "this server doesn't use sign-in"
+    case .oauthConfigInvalid:
+        return "this server's sign-in configuration is invalid"
+    case .projectUntrusted:
+        return "trust this project first"
+    case .scopeNeedsCwd:
+        return "this action needs a project directory this panel doesn't have"
+    case .clientSecretUnavailable:
+        return "no client secret is stored for this server"
+    case .clientSecretIssuerMismatch, .sdkClientSecretIssuerMismatch, .sdkMetadataIssuerMismatch:
+        return "this server's sign-in configuration points somewhere it shouldn't"
+    case .loginFailed:
+        return "sign-in failed"
+    case .secretNeedsUserScope:
+        return "client secrets can only be set at user scope"
+    case .notPreregistered:
+        return "this server has no pre-registered client to set a secret for"
+    case .discoveryFailed:
+        return "couldn't discover this server's sign-in details"
+    }
+}
+
+/// PURE: the confirm sheet's second line about where the browser actually lands, or `nil` when it's
+/// the same place as `issuerOrigin` and saying so twice would be noise (item 2, polish round 2).
+func mcpAuthorizeOriginNote(issuerOrigin: String, authorizeOrigin: String) -> String? {
+    guard authorizeOrigin != issuerOrigin else { return nil }
+    return "You'll sign in at \(authorizeOrigin)."
+}
+
 // MARK: - The sign-in poll's pure state machine
 
 /// One step's outcome — PURE, no async, no `Task`, no clock: `McpSignInSheetModel.poll(loginId:)`
@@ -107,9 +158,15 @@ final class McpSignInSheetModel: ObservableObject, Identifiable {
         /// `mcp.login` is in flight. `issuerOriginHint` (the row's OWN, possibly stale/absent
         /// value) is shown here as placeholder text — see this file's header note on ordering.
         case starting(issuerOriginHint: String?)
-        /// `mcp.login` answered; `issuerOrigin` here is ITS authoritative value. Waiting on the
-        /// user's "Continue" tap before anything reaches a browser.
-        case confirmOrigin(issuerOrigin: String)
+        /// `mcp.login` was refused `mcp_issuer_change_requires_confirmation` — the server's issuer
+        /// moved since a prior sign-in. Both origins, so the sheet can show "this server now signs
+        /// in through NEW; it used to be STORED"; the user's "Continue" retries with
+        /// `confirmIssuerChange: true` (`confirmIssuerChangeAndRetry()`).
+        case confirmIssuerChange(storedIssuerOrigin: String, newIssuerOrigin: String)
+        /// `mcp.login` answered; `issuerOrigin`/`authorizeOrigin` here are ITS authoritative values
+        /// (never the row's hint). Waiting on the user's "Continue" tap before anything reaches a
+        /// browser.
+        case confirmOrigin(issuerOrigin: String, authorizeOrigin: String)
         /// The browser is open (or the user can open it again via `authUrl`); polling
         /// `mcp.loginStatus` every `pollIntervalNanos`.
         case waiting
@@ -152,17 +209,37 @@ final class McpSignInSheetModel: ObservableObject, Identifiable {
 
     /// Called once, right after the sheet is presented (mirrors `AnthropicLoginSheetModel.start()`'s
     /// own "construction opens the sheet; `start()` is fired off as its own task" split at the call
-    /// site — `McpOAuthActionsModel.startSignIn`). Calls `mcp.login`; a thrown error is a `.failure`
-    /// with the SAME terminal shape a later poll failure would produce, discovered synchronously
-    /// instead.
+    /// site — `McpOAuthActionsModel.startSignIn`).
     func start() async {
+        await attemptLogin(confirmIssuerChange: false)
+    }
+
+    /// The user's "Continue" tap on the issuer-change confirmation (`.confirmIssuerChange`) — retries
+    /// with `confirmIssuerChange: true` now that the user has seen and accepted both origins. A
+    /// no-op from any other phase.
+    func confirmIssuerChangeAndRetry() async {
+        guard case .confirmIssuerChange = phase else { return }
+        await attemptLogin(confirmIssuerChange: true)
+    }
+
+    /// Calls `mcp.login`. `mcp_issuer_change_requires_confirmation` moves to its own confirmation
+    /// phase rather than being treated as an ordinary failure; every other thrown error is a
+    /// `.failure` with the SAME terminal shape a later poll failure would produce, discovered
+    /// synchronously instead — mapped through `mcpAuthErrorText` where it recognizes the refusal,
+    /// falling back to a generic sentence otherwise.
+    private func attemptLogin(confirmIssuerChange: Bool) async {
         do {
-            let begun = try await client.login(name: serverName)
+            let begun = try await client.login(name: serverName, confirmIssuerChange: confirmIssuerChange)
             loginId = begun.loginId
             authUrl = begun.authUrl
-            phase = .confirmOrigin(issuerOrigin: begun.issuerOrigin)
+            phase = .confirmOrigin(issuerOrigin: begun.issuerOrigin, authorizeOrigin: begun.authorizeOrigin)
         } catch {
-            phase = .failure(reason: "couldn't start sign-in")
+            if let confirmation = (error as? RpcError)?.mcpIssuerChangeConfirmation {
+                phase = .confirmIssuerChange(storedIssuerOrigin: confirmation.storedIssuerOrigin,
+                                              newIssuerOrigin: confirmation.newIssuerOrigin)
+            } else {
+                phase = .failure(reason: mcpAuthErrorText(error) ?? "couldn't start sign-in")
+            }
         }
     }
 
@@ -186,7 +263,7 @@ final class McpSignInSheetModel: ObservableObject, Identifiable {
             do {
                 status = try await client.loginStatus(loginId: loginId)
             } catch {
-                phase = .failure(reason: "couldn't check the sign-in status")
+                phase = .failure(reason: mcpAuthErrorText(error) ?? "couldn't check the sign-in status")
                 return
             }
             switch mcpSignInPollOutcome(status: status, attempt: attempt, maxAttempts: maxAttempts) {
@@ -254,8 +331,10 @@ struct McpSignInSheet: View {
             switch model.phase {
             case .starting(let issuerOriginHint):
                 startingBody(issuerOriginHint: issuerOriginHint)
-            case .confirmOrigin(let issuerOrigin):
-                confirmBody(issuerOrigin: issuerOrigin)
+            case .confirmIssuerChange(let stored, let new):
+                confirmIssuerChangeBody(storedIssuerOrigin: stored, newIssuerOrigin: new)
+            case .confirmOrigin(let issuerOrigin, let authorizeOrigin):
+                confirmBody(issuerOrigin: issuerOrigin, authorizeOrigin: authorizeOrigin)
             case .waiting:
                 waitingBody
             case .success:
@@ -304,12 +383,38 @@ struct McpSignInSheet: View {
         }
     }
 
-    private func confirmBody(issuerOrigin: String) -> some View {
+    /// The issuer-change confirmation — shown INSTEAD of the ordinary confirm step when `mcp.login`
+    /// was refused `mcp_issuer_change_requires_confirmation` (a server's issuer moved since a prior
+    /// sign-in). "Continue" retries with `confirmIssuerChange: true`.
+    private func confirmIssuerChangeBody(storedIssuerOrigin: String, newIssuerOrigin: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("This server now signs in through \(newIssuerOrigin); it used to be \(storedIssuerOrigin).")
+                .font(Typography.label())
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("Cancel") { model.reportClose(); onDone() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Continue") { Task { await model.confirmIssuerChangeAndRetry() } }
+                    .accessibilityLabel("Continue signing in to \(model.serverName) at its new address, \(newIssuerOrigin)")
+            }
+        }
+    }
+
+    private func confirmBody(issuerOrigin: String, authorizeOrigin: String) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("You'll be redirected to \(issuerOrigin) to sign in.")
                 .font(Typography.label())
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            // Item 2 (polish round 2): only when the browser actually lands somewhere ELSE — saying
+            // the same origin twice would be noise, not information.
+            if let note = mcpAuthorizeOriginNote(issuerOrigin: issuerOrigin, authorizeOrigin: authorizeOrigin) {
+                Text(note)
+                    .font(Typography.label())
+                    .foregroundStyle(.secondary)
+            }
             HStack {
                 Spacer()
                 Button("Cancel") { model.reportClose(); onDone() }
@@ -376,7 +481,7 @@ final class McpSignOutSheetModel: ObservableObject, Identifiable {
             errorText = nil
             done = true
         } catch {
-            errorText = "couldn't sign out — try again"
+            errorText = mcpAuthErrorText(error) ?? "couldn't sign out — try again"
         }
     }
 }
@@ -437,6 +542,9 @@ final class McpClientSecretSheetModel: ObservableObject, Identifiable {
     @Published private(set) var submitting = false
     @Published var errorText: String?
     @Published private(set) var done = false
+    /// Item 3 (polish round 2): the origin `mcp.setClientSecret` saved the secret against — shown as
+    /// "Secret saved for <origin>" once `done`. `nil` until then.
+    @Published private(set) var savedIssuerOrigin: String?
 
     private let client: McpAuthClient
 
@@ -452,11 +560,11 @@ final class McpClientSecretSheetModel: ObservableObject, Identifiable {
         secret = ""
         defer { submitting = false }
         do {
-            try await client.setClientSecret(name: serverName, secret: trimmed)
+            savedIssuerOrigin = try await client.setClientSecret(name: serverName, secret: trimmed)
             errorText = nil
             done = true
         } catch {
-            errorText = "couldn't save the client secret — try again"
+            errorText = mcpAuthErrorText(error) ?? "couldn't save the client secret — try again"
         }
     }
 }
@@ -470,34 +578,44 @@ struct McpClientSecretSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Client secret for \(model.serverName)")
                 .font(Typography.paneTitle)
-            Text("For a server already registered with a client id. Stored in the Keychain; never shown again.")
-                .font(Typography.label())
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            SecureField("Client secret", text: $model.secret)
-                .textFieldStyle(.roundedBorder)
-                .disabled(model.submitting)
-                .accessibilityLabel("Client secret for \(model.serverName)")
-            if let errorText = model.errorText {
-                Text(errorText).foregroundStyle(.red).font(Typography.label())
-            }
-            HStack {
-                Spacer()
-                Button("Cancel", action: onCancel)
-                    .keyboardShortcut(.cancelAction)
-                    .disabled(model.submitting)
-                Button {
-                    Task {
-                        await model.submit()
-                        if model.done { onDone() }
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        if model.submitting { ProgressView().controlSize(.small) }
-                        Text("Save")
-                    }
+            if model.done {
+                // Item 3 (polish round 2): the ORIGIN the daemon actually saved it against, not
+                // just "saved" — the same "say the concrete fact, not a bare acknowledgement"
+                // posture as the sign-in sheet's own success line.
+                Text("Secret saved for \(model.savedIssuerOrigin ?? model.serverName).")
+                    .foregroundStyle(.green)
+                    .font(Typography.label())
+                HStack {
+                    Spacer()
+                    Button("Done") { onDone() }
                 }
-                .disabled(model.submitting || model.secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            } else {
+                Text("For a server already registered with a client id. Stored in the Keychain; never shown again.")
+                    .font(Typography.label())
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                SecureField("Client secret", text: $model.secret)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(model.submitting)
+                    .accessibilityLabel("Client secret for \(model.serverName)")
+                if let errorText = model.errorText {
+                    Text(errorText).foregroundStyle(.red).font(Typography.label())
+                }
+                HStack {
+                    Spacer()
+                    Button("Cancel", action: onCancel)
+                        .keyboardShortcut(.cancelAction)
+                        .disabled(model.submitting)
+                    Button {
+                        Task { await model.submit() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            if model.submitting { ProgressView().controlSize(.small) }
+                            Text("Save")
+                        }
+                    }
+                    .disabled(model.submitting || model.secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
             }
         }
         .padding(20)
@@ -505,7 +623,9 @@ struct McpClientSecretSheet: View {
         .interactiveDismissDisabled(model.submitting)
         // The secret in the field is exactly as sensitive right up until submit as it is after —
         // leaving the sheet any other way (Esc past the guard above, once not submitting; the
-        // panel's own Back) must not leave it sitting in a dismissed-but-still-alive model.
+        // panel's own Back) must not leave it sitting in a dismissed-but-still-alive model. Always
+        // empty by the time this fires regardless (`submit()` clears it before its own `await`), so
+        // this is belt-and-suspenders, not the primary clearing door.
         .onDisappear { model.secret = "" }
     }
 }
