@@ -5,7 +5,11 @@
 // `security dump-keychain -a`, which prints access lists without decrypting anything.
 //
 // What these tests do NOT prove: that the Mac app then reads without a prompt. That is the ACL's design
-// (designated-requirement entries, no partition list — inspected below) plus the controller's live gate.
+// (designated-requirement entries, inspected below) plus the controller's live gate. A throwaway keychain
+// is NOT partition-enabled (its blob predates `version_partition`; securityd upgrades only a keychain
+// migrating under ~/Library/Keychains), so no item here carries a `partition_id` entry and
+// `security set-generic-password-partition-list` is a silent no-op on it (measured 2026-09-27). On the
+// login keychain securityd adds one naming the CREATOR's team alone — see `app-token-acl.ts`'s header.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -91,8 +95,8 @@ describe.skipIf(!darwin)("the Keychain FFI and the app-token migration (throwawa
     addGenericPasswordWithAccess(kc, { service: SERVICE, account: "probe", value: "v-1", trustedApplications: [null, CALCULATOR] });
     expect(genericPasswordPresent(kc, SERVICE, "probe")).toBe(true);
     expect(readGenericPassword(kc, SERVICE, "probe")).toBe("v-1");
-    // The decrypt entry names this process AND the app, each by its designated requirement; there is no
-    // partition-id entry (the check that made a dev app's "Always Allow" ask for the password).
+    // The decrypt entry names this process AND the app, each by its designated requirement. No partition-id
+    // entry: this keychain is not partition-enabled (see the header), not something the ACL controls.
     const acl = aclOf("probe");
     expect(acl).toContain("decrypt");
     expect(acl).toContain(CALCULATOR);
@@ -144,6 +148,26 @@ describe.skipIf(!darwin)("the Keychain FFI and the app-token migration (throwawa
     expect(aclOf("harness-token")).toContain(CHESS);
     expect(aclOf("harness-token")).not.toContain(CALCULATOR);
     expect(readGenericPassword(kc, SERVICE, "harness-token")).toBe("h-1");
+    clean();
+  });
+
+  test("a partition gap (the creator is not the app's team) is logged at the migration and never re-runs it", () => {
+    clean();
+    const home = mkdtempSync(join(dir, "home-"));
+    for (const [name, value] of [["harness-token", "h-1"], ["remote-token", "r-1"]] as const) {
+      addGenericPasswordWithAccess(kc, { service: SERVICE, account: name, value, trustedApplications: [null] });
+    }
+    const logs: string[] = [];
+    const { k, access } = keychainWith({ logs });
+    const gap: AppTokenTrust = { ...trust(CALCULATOR), unpartitionedTeams: [WINTER_TEAM_ID] };
+    const a = access(gap);
+    try {
+      expect(migrateAppTokenAcl(k, a, gap, home, { "harness-token": "h-1", "remote-token": "r-1" })).toMatchObject({ kind: "migrated" });
+      expect(logs.at(-1)).toContain(`not teamid:${WINTER_TEAM_ID}`);
+      // Re-creating cannot widen the partition list (securityd keys it to the creator), and would drop a
+      // team the user's "Always Allow" appended — so the same trusted set is current, gap or not.
+      expect(migrateAppTokenAcl(k, a, gap, home, { "harness-token": "h-1", "remote-token": "r-1" })).toEqual({ kind: "current" });
+    } finally { a.release(); }
     clean();
   });
 
@@ -265,9 +289,13 @@ describe("who the wide ACL trusts", () => {
   test("dist: only the bundle winter-core itself lives in — never a Launch Services guess", () => {
     expect(enclosingAppBundle("/Applications/Winter.app/Contents/Resources/winter-core")).toBe("/Applications/Winter.app");
     expect(enclosingAppBundle("/usr/local/bin/winter-core")).toBeUndefined();
-    const inspect = signed({ "/Applications/Winter.app": { teamId: WINTER_TEAM_ID, requirement: "R-app" }, "/Applications/Winter.app/Contents/Resources/winter-core": { requirement: "R-core" } });
+    const inspect = signed({ "/Applications/Winter.app": { teamId: WINTER_TEAM_ID, requirement: "R-app" }, "/Applications/Winter.app/Contents/Resources/winter-core": { teamId: WINTER_TEAM_ID, requirement: "R-core" } });
     const t = trustFor({ profile: "dist", executable: "/Applications/Winter.app/Contents/Resources/winter-core", lookup: () => ["/out/release/Winter.app"], inspect, exists: () => true });
+    // winter-core and the app share Winter's team, so the partition list securityd gives the items covers it.
     expect(t).toEqual({ apps: ["/Applications/Winter.app"], requirements: ["R-app", "R-core"] });
+    // An unsigned embedded winter-core (a broken build) would partition by cdhash: reported, not hidden.
+    const unsignedCore = signed({ "/Applications/Winter.app": { teamId: WINTER_TEAM_ID, requirement: "R-app" } });
+    expect(trustFor({ profile: "dist", executable: "/Applications/Winter.app/Contents/Resources/winter-core", lookup: () => [], inspect: unsignedCore, exists: () => true })?.unpartitionedTeams).toEqual([WINTER_TEAM_ID]);
     expect(trustFor({ profile: "dist", executable: "/opt/dist/winter-core", lookup: () => ["/x/Winter.app"], inspect, exists: () => true })).toBeUndefined();
   });
 
@@ -286,10 +314,15 @@ describe("who the wide ACL trusts", () => {
       inspect, exists: (p) => !p.includes("gone"),
     });
     expect(lookups).toEqual(["com.winter.app.dev"]);
-    expect(t).toEqual({ apps: ["/dd/a/Winter Dev.app"], requirements: ["R-bun", "R-dev"] });
+    // bun is another team's binary: the items it creates are partitioned `teamid:7FRXF46ZSN` alone, so the
+    // Winter Dev team is named as the gap (the app is asked once per item — see `app-token-acl.ts`).
+    expect(t).toEqual({ apps: ["/dd/a/Winter Dev.app"], requirements: ["R-bun", "R-dev"], unpartitionedTeams: [WINTER_TEAM_ID] });
     // A DerivedData move or a bun upgrade keeps the SAME requirement set, so the marker stays current.
     const moved = trustFor({ profile: "dev", executable: "/opt/homebrew/Cellar/bun/1.3.15/bin/bun", lookup: () => ["/dd/c/Winter Dev.app"], exists: () => true, inspect: (p: string) => (p.endsWith(".app") ? { teamId: WINTER_TEAM_ID, requirement: "R-dev" } : { requirement: "R-bun" }) });
     expect(moved?.requirements).toEqual(t!.requirements);
+    // A dev daemon signed by Winter's team (a compiled winter-core) partitions its items by that team: no gap.
+    const teamSigned = trustFor({ profile: "dev", executable: "/src/dist/winter-core", lookup: () => ["/dd/a/Winter Dev.app"], exists: () => true, inspect: (p: string) => (p.endsWith(".app") ? { teamId: WINTER_TEAM_ID, requirement: "R-dev" } : { teamId: WINTER_TEAM_ID, requirement: "R-core-dev" }) });
+    expect(teamSigned).toEqual({ apps: ["/dd/a/Winter Dev.app"], requirements: ["R-core-dev", "R-dev"] });
   });
 
   test("the scan has ONE budget: a slow inspector stops the dev-bundle scan once it is spent, and an uninspected bundle is never trusted", () => {
@@ -308,7 +341,7 @@ describe("who the wide ACL trusts", () => {
     });
     // bun (3 s) + the first bundle (3 s) spend the 5 s budget; bundles 2 and 3 are never inspected nor trusted.
     expect(inspected).toEqual(["/bin/bun", "/dd/1/Winter Dev.app"]);
-    expect(t).toEqual({ apps: ["/dd/1/Winter Dev.app"], requirements: ["R-/dd/1/Winter Dev.app", "R-bun"] });
+    expect(t).toEqual({ apps: ["/dd/1/Winter Dev.app"], requirements: ["R-/dd/1/Winter Dev.app", "R-bun"], unpartitionedTeams: [WINTER_TEAM_ID] });
     // Each codesign got only what was left of the budget.
     expect(timeouts).toEqual([5_000, 2_000]);
   });

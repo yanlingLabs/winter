@@ -35,6 +35,27 @@
 // `com.winter.app.dev` bundles Launch Services knows THAT ARE SIGNED BY WINTER'S TEAM (`WINTER_TEAM_ID`,
 // `project.yml`'s `DEVELOPMENT_TEAM`), one per designated requirement. Never a path from an environment
 // variable: a dev daemon runs under `bun` from a repository checkout, and `bun` autoloads that `.env`.
+//
+// THE PARTITION LIST IS THE CREATOR'S, AND ONLY THE CREATOR'S (measured live 2026-09-27; Apple's Security
+// sources). Beside the decrypt entry, a partition-enabled keychain (the login keychain) gives every item a
+// `partition_id` entry, and a reader whose partition (`teamid:<team>`, `apple:`, or `cdhash:<hash>` for
+// ad-hoc code — securityd `clientid.cpp`'s `partitionIdForProcess`) is not listed is PROMPTED even when the
+// decrypt entry trusts it. That entry cannot be chosen here:
+//   - securityd writes it itself when the item is created, from the creating process alone
+//     (`localkey.cpp`'s `LocalKey::setOwner` → `acls.cpp`'s `createClientPartitionID`);
+//   - every client ACL edit — the ones `SecKeychainItemCreateFromContent` makes to apply our `SecAccess`
+//     included (`Access.cpp`'s `setAccess(target, maker)`, under the maker's credential) — runs with the
+//     partition tag PRESERVED unless the credential carries the keychain PASSWORD (`acls.cpp`'s
+//     `changeAcl`), and `objectacl.cpp`'s `cssmChangeAcl` refuses an add, replace or delete of a tagged
+//     entry (`CSSM_ERRCODE_OPERATION_AUTH_DENIED`);
+//   - the public API cannot even build a tagged entry: `SecACLCreateWithSimpleContents` +
+//     `SecACLUpdateAuthorizations(partition-id)` makes an UNTAGGED entry that `dump-keychain -a` prints as
+//     `partition_id` but securityd never consults (`findPartitionSubject` looks up by tag) — a trap.
+// So the list is exactly `teamid:<creator's team>`. Dist: `winter-core` and Winter.app share Winter's team,
+// so the app is never prompted. Dev under Homebrew `bun` (another team): Winter Dev is asked once per item
+// after every re-creation, and "Always Allow" appends its team — re-creating drops it again, so the
+// migration must never re-run merely because the list lacks a team. The cure is the creator: a dev daemon
+// signed by Winter's team (`unpartitionedTeams` below names the gap in the boot log).
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -83,6 +104,9 @@ export interface AppTokenKeychain {
 export interface AppTokenTrust {
   apps: string[];
   requirements: string[];
+  /** The trusted apps' teams that the re-created items' partition list will NOT hold, because this process
+   *  (the creator) is not signed by that team (see the header). Absent when there is none (dist). */
+  unpartitionedTeams?: string[];
 }
 
 /** The two access objects, built once per boot (see the header, step 0). `wide` is absent when there is no
@@ -273,7 +297,11 @@ export function migrateAppTokenAcl(kc: AppTokenKeychain, access: AppTokenAccess,
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
   renameSync(tmp, path);
-  kc.log?.(`keychain: ${done.join(" and ")} readable by ${trust.apps.length === 1 ? trust.apps[0] : `${trust.apps.length} app bundles`} without a prompt`);
+  if (trust.unpartitionedTeams === undefined) {
+    kc.log?.(`keychain: ${done.join(" and ")} readable by ${trust.apps.length === 1 ? trust.apps[0] : `${trust.apps.length} app bundles`} without a prompt`);
+  } else {
+    kc.log?.(`keychain: ${done.join(" and ")} re-created with the app in the access list, but their partition list names only this process's team (not ${trust.unpartitionedTeams.map((t) => `teamid:${t}`).join(", ")}) — the app is asked once per item; a dev daemon signed by team ${WINTER_TEAM_ID} avoids it`);
+  }
   return { kind: "migrated", names: done };
 }
 
@@ -326,10 +354,16 @@ export function trustFor(input: { profile: "dist" | "dev"; executable: string; l
   const left = (): number => deadline - now();
   const requirementOf = (path: string, facts: CodeSigningFacts): string => facts.requirement ?? `path ${path}`;
   const byRequirement = new Map<string, string>();
+  const appTeams = new Set<string>();
   const own = enclosingAppBundle(input.executable);
   // Dist trusts the bundle winter-core RUNS FROM — this process's own app, never a Launch Services lookup.
-  if (own !== undefined && exists(own)) byRequirement.set(requirementOf(own, inspect(own, Math.max(MIN_INSPECT_MS, left()))), own);
-  const self = requirementOf(input.executable, inspect(input.executable, Math.max(MIN_INSPECT_MS, left())));
+  if (own !== undefined && exists(own)) {
+    const facts = inspect(own, Math.max(MIN_INSPECT_MS, left()));
+    byRequirement.set(requirementOf(own, facts), own);
+    if (facts.teamId !== undefined) appTeams.add(facts.teamId);
+  }
+  const selfFacts = inspect(input.executable, Math.max(MIN_INSPECT_MS, left()));
+  const self = requirementOf(input.executable, selfFacts);
   if (input.profile === "dev" && left() > 0) {
     for (const path of [...input.lookup("com.winter.app.dev")].sort()) {
       if (left() <= 0) break; // budget spent: what is not inspected is not trusted
@@ -337,11 +371,17 @@ export function trustFor(input: { profile: "dist" | "dev"; executable: string; l
       const facts = inspect(path, left());
       if (facts.teamId !== WINTER_TEAM_ID) continue;
       const req = requirementOf(path, facts);
-      if (!byRequirement.has(req)) byRequirement.set(req, path);
+      if (!byRequirement.has(req)) {
+        byRequirement.set(req, path);
+        appTeams.add(facts.teamId);
+      }
     }
   }
   if (byRequirement.size === 0) return undefined;
-  return { apps: [...byRequirement.values()], requirements: [...new Set([self, ...byRequirement.keys()])].sort() };
+  // securityd partitions an item by its creator's team (the header); an unsigned or ad-hoc creator
+  // (`cdhash:`) shares no team with anyone. A report only: nothing re-runs over it.
+  const unpartitioned = [...appTeams].filter((team) => team !== selfFacts.teamId).sort();
+  return { apps: [...byRequirement.values()], requirements: [...new Set([self, ...byRequirement.keys()])].sort(), ...(unpartitioned.length > 0 ? { unpartitionedTeams: unpartitioned } : {}) };
 }
 
 /** `process.execPath`, symlinks resolved (the Homebrew `winter` link → the app's `winter-core`). */
