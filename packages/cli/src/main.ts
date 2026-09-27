@@ -1558,7 +1558,7 @@ if (import.meta.main) {
     // repair refuses while the lock is held, on the same probe `lock.ts` uses.
     const {
       diagnoseRuntimeState, repairRuntimeState, isDaemonLockHeld, DAEMON_RUNNING_REFUSAL, diagnoseRuntimes, loadSettings,
-      diagnoseMigration, formatMigrationDoctorLines, legacyHomeFor, legacyKeychainServiceFor, LegacyKeychainSecretStore,
+      diagnoseMigration, formatMigrationDoctorLines, legacyHomeFor, legacyKeychainPresence, legacyKeychainServiceFor,
     } = await import("@yanlinglabs/winter-core");
     const home = resolveWinterHome();
     const args = process.argv.slice(3);
@@ -1616,7 +1616,8 @@ if (import.meta.main) {
           home,
           legacyHome,
           legacyKeychainService: legacyKeychainServiceFor(profile),
-          legacyStore: new LegacyKeychainSecretStore(profile),
+          // WS-25 §7: presence without a decrypt — no consent dialog per legacy item.
+          legacyItemPresent: legacyKeychainPresence(profile),
         });
         for (const line of formatMigrationDoctorLines(report)) console.log(`${AQUA}${line}${RESET}`);
       } catch (err) {
