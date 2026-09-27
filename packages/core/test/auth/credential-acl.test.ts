@@ -8,12 +8,12 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  credentialAclMarkerPath, isCredentialAccount, migrateCredentialAcl, prepareCredentialAccess, recoverCredentialShadows, REAL_CREDENTIAL_KEYCHAIN_OPS,
+  credentialAclMarkerPath, isCredentialAccount, migrateCredentialAcl, prepareCredentialAccess, recoverCredentialShadows, REAL_CREDENTIAL_KEYCHAIN_OPS, runCredentialMigration,
   type CredentialKeychain, type CredentialKeychainOps,
 } from "../../src/auth/credential-acl";
 import {
   addGenericPasswordWithAccess, deleteGenericPassword, ERR_SEC_INTERACTION_NOT_ALLOWED, genericPasswordPresent, KeychainFfiError, listGenericPasswordAccounts, openKeychainFile,
-  readGenericPassword, withKeychainUserInteractionDisabled, type KeychainFile,
+  readGenericPassword, readGenericPasswordBytes, withKeychainUserInteractionDisabled, type KeychainFile,
 } from "../../src/auth/keychain-ffi";
 
 const SERVICE = "ws27.credential-acl.test";
@@ -62,8 +62,9 @@ function clean(): void {
 
 type Failure = { op: "read" | "add" | "remove"; account: string; status?: number; times?: number };
 
-/** A keychain handle whose calls fail on cue (each failure `times` times, default always). */
-function keychainWith(failures: Failure[] = [], logs?: string[]): CredentialKeychain {
+/** A keychain handle whose calls fail on cue (each failure `times` times, default always). `onAdd` runs
+ *  after each successful add (a test's way to land a concurrent write at an exact point). */
+function keychainWith(failures: Failure[] = [], logs?: string[], onAdd?: (account: string) => void): CredentialKeychain {
   const left = failures.map((f) => ({ ...f, times: f.times ?? Number.POSITIVE_INFINITY }));
   const trip = (op: Failure["op"], account: string): void => {
     const f = left.find((x) => x.op === op && x.account === account && x.times > 0);
@@ -74,25 +75,28 @@ function keychainWith(failures: Failure[] = [], logs?: string[]): CredentialKeyc
   const ops: CredentialKeychainOps = {
     ...REAL_CREDENTIAL_KEYCHAIN_OPS,
     read(target, service, account) { trip("read", account); return REAL_CREDENTIAL_KEYCHAIN_OPS.read(target, service, account); },
-    add(target, item) { trip("add", item.account); REAL_CREDENTIAL_KEYCHAIN_OPS.add(target, item); },
+    readBytes(target, service, account) { trip("read", account); return REAL_CREDENTIAL_KEYCHAIN_OPS.readBytes(target, service, account); },
+    add(target, item) { trip("add", item.account); REAL_CREDENTIAL_KEYCHAIN_OPS.add(target, item); onAdd?.(item.account); },
     remove(target, service, account) { trip("remove", account); return REAL_CREDENTIAL_KEYCHAIN_OPS.remove(target, service, account); },
   };
   return { keychain: kc, service: SERVICE, ops, ...(logs !== undefined ? { log: (l: string) => logs.push(l) } : {}) };
 }
 
-function migrate(k: CredentialKeychain, home: string) {
+const SELF = "identifier \"test-self\"";
+
+function migrate(k: CredentialKeychain, home: string, requirement = SELF) {
   const access = prepareCredentialAccess(k);
   try {
-    return withKeychainUserInteractionDisabled(() => migrateCredentialAcl(k, access, home));
+    return withKeychainUserInteractionDisabled(() => migrateCredentialAcl(k, access, home, requirement));
   } finally {
     access?.release();
   }
 }
 
-function recover(k: CredentialKeychain, dropEqualShadows: boolean): string[] {
+function recover(k: CredentialKeychain, dropShadowsBesideOriginals: boolean): string[] {
   const access = prepareCredentialAccess(k);
   try {
-    return withKeychainUserInteractionDisabled(() => recoverCredentialShadows(k, access, { dropEqualShadows }));
+    return withKeychainUserInteractionDisabled(() => recoverCredentialShadows(k, access, { dropShadowsBesideOriginals }));
   } finally {
     access?.release();
   }
@@ -155,11 +159,12 @@ describe.skipIf(!darwin)("the credential ACL migration (throwaway keychain file)
     expect(aclIn(after, "harness-token")).toContain(CALCULATOR);
     expect(aclIn(after, "remote-token")).toContain(CALCULATOR);
     expect(aclIn(after, "openai:default", OTHER_SERVICE)).toContain(CALCULATOR);
-    expect(JSON.parse(readFileSync(credentialAclMarkerPath(home), "utf8"))).toMatchObject({ v: 1, service: SERVICE, migrated: CREDENTIALS.length, skipped: 0 });
+    expect(JSON.parse(readFileSync(credentialAclMarkerPath(home), "utf8"))).toMatchObject({ v: 2, service: SERVICE, requirement: SELF, migrated: CREDENTIALS.length, skipped: 0 });
     expect(logs.join("\n")).not.toContain("v-");
     expect(migrate(keychainWith(), home)).toEqual({ kind: "current" });
-    // Another service's marker is not this one's.
-    expect(migrateCredentialAcl({ ...keychainWith(), service: OTHER_SERVICE }, undefined, home)).toMatchObject({ kind: "failed", reason: "no access list" });
+    // Another service's marker is not this one's; nor is another binary's (a differently signed winter-core).
+    expect(migrateCredentialAcl({ ...keychainWith(), service: OTHER_SERVICE }, undefined, home, SELF)).toMatchObject({ kind: "failed", reason: "no access list" });
+    expect(migrate(keychainWith(), home, "identifier \"someone-else\"")).toMatchObject({ kind: "migrated", names: [...CREDENTIALS].sort() });
     clean();
   }, SLOW);
 
@@ -232,7 +237,7 @@ describe.skipIf(!darwin)("the credential ACL migration (throwaway keychain file)
     clean();
   }, SLOW);
 
-  test("recovery: the pre-lock pass never drops a shadow beside its original (an in-flight migration looks like that); the full pass drops an equal one and keeps a differing pair; app-token shadows are not its business", () => {
+  test("recovery: the restore-only pass never drops a shadow beside its original (an in-flight migration looks like that); the full pass drops it, equal or not (the original is the newer write); app-token shadows are not its business", () => {
     clean();
     for (const [account, value] of [["openai:default", "same"], ["openai:default.migrating", "same"], ["exa-api-key", "value-current"], ["exa-api-key.migrating", "value-shadowed"], ["harness-token.migrating", "h"]] as const) {
       addGenericPasswordWithAccess(kc, { service: SERVICE, account, value, trustedApplications: [null] });
@@ -240,19 +245,85 @@ describe.skipIf(!darwin)("the credential ACL migration (throwaway keychain file)
     const logs: string[] = [];
     expect(recover(keychainWith([], logs), false)).toEqual([]);
     expect(genericPasswordPresent(kc, SERVICE, "openai:default.migrating")).toBe(true);
+    expect(genericPasswordPresent(kc, SERVICE, "exa-api-key.migrating")).toBe(true);
     expect(recover(keychainWith([], logs), true)).toEqual([]);
     expect(genericPasswordPresent(kc, SERVICE, "openai:default.migrating")).toBe(false);
-    expect(readGenericPassword(kc, SERVICE, "exa-api-key.migrating")).toBe("value-shadowed");
+    // A stale shadow can never resurrect an old value: dropped, the newer original kept.
+    expect(genericPasswordPresent(kc, SERVICE, "exa-api-key.migrating")).toBe(false);
     expect(readGenericPassword(kc, SERVICE, "exa-api-key")).toBe("value-current");
-    expect(logs.join("\n")).toContain("hold DIFFERENT values");
+    expect(logs.join("\n")).toContain("the stale shadow was dropped");
     expect(logs.join("\n")).not.toContain("value-");
     // The app-token shadow is left for `recoverAppTokenShadows` (it restores with the app's access list).
     expect(genericPasswordPresent(kc, SERVICE, "harness-token.migrating")).toBe(true);
     expect(genericPasswordPresent(kc, SERVICE, "harness-token")).toBe(false);
-    // And the migration never overwrites the differing shadow: that item keeps its ACL.
+    clean();
+  }, SLOW);
+
+  test("a stale shadow found by the MIGRATION beside its original is dropped too, and the item migrated from the original", () => {
+    clean();
+    seed();
+    addGenericPasswordWithAccess(kc, { service: SERVICE, account: "exa-api-key.migrating", value: "value-old", trustedApplications: [null] });
     const home = mkdtempSync(join(dir, "home-"));
-    expect(migrate(keychainWith(), home)).toMatchObject({ kind: "migrated", skipped: ["exa-api-key"] });
-    expect(readGenericPassword(kc, SERVICE, "exa-api-key.migrating")).toBe("value-shadowed");
+    expect(migrate(keychainWith(), home)).toMatchObject({ kind: "migrated", skipped: [] });
+    expect(readGenericPassword(kc, SERVICE, "exa-api-key")).toBe("v-exa-api-key");
+    expect(genericPasswordPresent(kc, SERVICE, "exa-api-key.migrating")).toBe(false);
+    clean();
+  }, SLOW);
+
+  test("the original is re-read just before the delete: a write that landed after the shadow skips the item, the new value intact, no shadow left", () => {
+    clean();
+    seed();
+    const home = mkdtempSync(join(dir, "home-"));
+    const land = (account: string): void => {
+      if (account !== "openai:default.migrating") return;
+      deleteGenericPassword(kc, SERVICE, "openai:default");
+      addGenericPasswordWithAccess(kc, { service: SERVICE, account: "openai:default", value: "v-rotated", trustedApplications: [null, CALCULATOR] });
+    };
+    expect(migrate(keychainWith([], undefined, land), home)).toMatchObject({ kind: "migrated", skipped: ["openai:default"] });
+    expect(readGenericPassword(kc, SERVICE, "openai:default")).toBe("v-rotated");
+    expect(genericPasswordPresent(kc, SERVICE, "openai:default.migrating")).toBe(false);
+    clean();
+  }, SLOW);
+
+  test("a value that is not valid UTF-8 is skipped and never re-added; the comparison is of raw bytes", () => {
+    clean();
+    const add = Bun.spawnSync(["security", "add-generic-password", "-s", SERVICE, "-a", "binary:default", "-X", "fffe41", "-A", kcPath]);
+    expect(add.exitCode).toBe(0);
+    const before = readGenericPasswordBytes(kc, SERVICE, "binary:default");
+    expect([...before!]).toEqual([0xff, 0xfe, 0x41]);
+    const home = mkdtempSync(join(dir, "home-"));
+    const logs: string[] = [];
+    expect(migrate(keychainWith([], logs), home)).toMatchObject({ kind: "migrated", names: [], skipped: ["binary:default"] });
+    expect([...readGenericPasswordBytes(kc, SERVICE, "binary:default")!]).toEqual([0xff, 0xfe, 0x41]);
+    expect(genericPasswordPresent(kc, SERVICE, "binary:default.migrating")).toBe(false);
+    expect(logs.join("\n")).toContain("not UTF-8");
+    clean();
+  }, SLOW);
+
+  test("nothing migrated and something skipped: no marker (the next boot, or another binary, tries again)", () => {
+    clean();
+    addGenericPasswordWithAccess(kc, { service: SERVICE, account: "openai:default", value: "v", trustedApplications: [null] });
+    const home = mkdtempSync(join(dir, "home-"));
+    const logs: string[] = [];
+    expect(migrate(keychainWith([{ op: "read", account: "openai:default", status: ERR_SEC_INTERACTION_NOT_ALLOWED }], logs), home)).toMatchObject({ kind: "migrated", names: [], skipped: ["openai:default"] });
+    expect(existsSync(credentialAclMarkerPath(home))).toBe(false);
+    expect(logs.join("\n")).toContain("no marker written");
+    clean();
+  }, SLOW);
+
+  test("the boot pass: when the migration fails with a deleted original it could not restore, a restore-only pass puts it back at once", () => {
+    clean();
+    seed();
+    const home = mkdtempSync(join(dir, "home-"));
+    // The migration's own add and its in-process restore both fail; the third add (the restore pass) works.
+    const k = keychainWith([{ op: "add", account: "admin-token", times: 2 }]);
+    const access = prepareCredentialAccess(k);
+    try {
+      expect(withKeychainUserInteractionDisabled(() => runCredentialMigration(k, access, home, SELF))).toMatchObject({ kind: "failed", name: "admin-token" });
+    } finally { access?.release(); }
+    expect(readGenericPassword(kc, SERVICE, "admin-token")).toBe("v-admin-token");
+    expect(genericPasswordPresent(kc, SERVICE, "admin-token.migrating")).toBe(false);
+    expect(existsSync(credentialAclMarkerPath(home))).toBe(false);
     clean();
   }, SLOW);
 

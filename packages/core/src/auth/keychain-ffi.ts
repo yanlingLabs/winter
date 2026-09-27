@@ -147,7 +147,7 @@ function kcRef(target: KeychainTarget): Ref {
 
 /** One `SecKeychainFindGenericPassword`. With `withData: false` the item is located WITHOUT its data being
  *  requested — no decrypt, so no consent prompt whatever the item's ACL says. */
-function find(target: KeychainTarget, service: string, account: string, withData: boolean): { status: number; item?: Ref; value?: string } {
+function find(target: KeychainTarget, service: string, account: string, withData: boolean): { status: number; item?: Ref; bytes?: Uint8Array } {
   const svc = Buffer.from(service, "utf8");
   const acct = Buffer.from(account, "utf8");
   const itemOut = outPtr();
@@ -156,15 +156,16 @@ function find(target: KeychainTarget, service: string, account: string, withData
   const status = L().sec.SecKeychainFindGenericPassword(kcRef(target), svc.length, ptr(svc), acct.length, ptr(acct), withData ? ptr(lenOut) : null, withData ? ptr(dataOut) : null, ptr(itemOut));
   void [svc, acct].length; // alive until the call returned (see `addGenericPassword`)
   if (status !== 0) return { status };
-  let value: string | undefined;
+  let bytes: Uint8Array | undefined;
   if (withData) {
     const data = dataOut[0]!;
     const length = lenOut[0]!;
-    // A heap address (never a tagged pointer), so the number form `toArrayBuffer` takes is exact.
-    value = length === 0 || data === 0n ? "" : Buffer.from(toArrayBuffer(Number(data) as never, 0, length)).toString("utf8");
+    // A heap address (never a tagged pointer), so the number form `toArrayBuffer` takes is exact. Copied
+    // before the content is freed.
+    bytes = length === 0 || data === 0n ? new Uint8Array(0) : new Uint8Array(Buffer.from(toArrayBuffer(Number(data) as never, 0, length)));
     if (data !== 0n) L().sec.SecKeychainItemFreeContent(0n, data);
   }
-  return { status, item: itemOut[0]!, ...(value !== undefined ? { value } : {}) };
+  return { status, item: itemOut[0]!, ...(bytes !== undefined ? { bytes } : {}) };
 }
 
 /** Is there a generic password at (service, account)? Never decrypts, never prompts. */
@@ -179,11 +180,18 @@ export function genericPasswordPresent(target: KeychainTarget, service: string, 
 /** The item's value, or `null` when there is none. DECRYPTS — used only on items this process created
  *  (its own ACL entry), where the read is silent. */
 export function readGenericPassword(target: KeychainTarget, service: string, account: string): string | null {
+  const bytes = readGenericPasswordBytes(target, service, account);
+  return bytes === null ? null : Buffer.from(bytes).toString("utf8");
+}
+
+/** `readGenericPassword`'s exact bytes — what a migration compares, so a value that is not valid UTF-8 can
+ *  never be "verified" through a lossy decode. */
+export function readGenericPasswordBytes(target: KeychainTarget, service: string, account: string): Uint8Array | null {
   const found = find(target, service, account, true);
   if (found.status === ERR_SEC_ITEM_NOT_FOUND) return null;
   if (found.status !== 0) throw new KeychainFfiError("read", found.status, account);
   release(found.item);
-  return found.value ?? null;
+  return found.bytes ?? null;
 }
 
 /**

@@ -3,7 +3,7 @@
 // The "old creator can not read what the new one made" fact is simulated with fake ops where it matters;
 // the real cross-binary behaviour is the controller's live run.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { credentialAclMarkerPath, REAL_CREDENTIAL_KEYCHAIN_OPS, type CredentialKeychain, type CredentialKeychainOps } from "../../src/auth/credential-acl";
@@ -51,6 +51,7 @@ function opsWith(failures: Failure[]): CredentialKeychainOps {
   return {
     ...REAL_CREDENTIAL_KEYCHAIN_OPS,
     read(t, s, a) { trip("read", a); return REAL_CREDENTIAL_KEYCHAIN_OPS.read(t, s, a); },
+    readBytes(t, s, a) { trip("read", a); return REAL_CREDENTIAL_KEYCHAIN_OPS.readBytes(t, s, a); },
     add(t, item) { trip("add", item.account); REAL_CREDENTIAL_KEYCHAIN_OPS.add(t, item); },
     remove(t, s, a) { trip("remove", a); return REAL_CREDENTIAL_KEYCHAIN_OPS.remove(t, s, a); },
   };
@@ -58,15 +59,19 @@ function opsWith(failures: Failure[]): CredentialKeychainOps {
 
 /** The two sides: the orchestrator's keychain view and the child's handler, joined by a JSON round trip
  *  (what the pipe does). `sent` records every request, so a test can check no value crossed twice. */
-function sides(opts: { old?: Failure[]; child?: Failure[]; childService?: string } = {}) {
+const CHILD_REQUIREMENT = 'identifier "com.winter.core.dev"';
+
+function sides(opts: { old?: Failure[]; child?: Failure[]; childService?: string; channel?: (req: AdoptRequest) => AdoptResponse | undefined } = {}) {
   const home = mkdtempSync(join(dir, "home-"));
   const logs: string[] = [];
   const sent: AdoptRequest[] = [];
   const oldKc: CredentialKeychain = { keychain: kc, service: SERVICE, ops: opsWith(opts.old ?? []) };
   const childKc: CredentialKeychain = { keychain: kc, service: opts.childService ?? SERVICE, ops: opsWith(opts.child ?? []), log: (l) => logs.push(l) };
-  const handle = createAdoptHandler(childKc, access, home);
+  const handle = createAdoptHandler(childKc, access, home, CHILD_REQUIREMENT);
   const send = async (req: AdoptRequest): Promise<AdoptResponse> => {
     sent.push(req);
+    const intercepted = opts.channel?.(req);
+    if (intercepted !== undefined) return intercepted;
     return JSON.parse(JSON.stringify(handle(JSON.parse(JSON.stringify(req)) as AdoptRequest))) as AdoptResponse;
   };
   return { home, logs, sent, run: () => runDevKeychainTransition(oldKc, send, (l) => logs.push(l)) };
@@ -125,7 +130,7 @@ describe.skipIf(!darwin)("the dev Keychain transition (throwaway keychain file)"
       expect(aclIn(after, name)).not.toContain(CALCULATOR);
       expect(genericPasswordPresent(kc, SERVICE, `${name}.migrating`)).toBe(false);
     }
-    expect(JSON.parse(readFileSync(credentialAclMarkerPath(s.home), "utf8"))).toMatchObject({ v: 1, service: SERVICE, migrated: ITEMS.length, skipped: 0 });
+    expect(JSON.parse(readFileSync(credentialAclMarkerPath(s.home), "utf8"))).toMatchObject({ v: 2, service: SERVICE, requirement: CHILD_REQUIREMENT, migrated: ITEMS.length, skipped: 0 });
     const carrying = s.sent.filter((r) => r.op === "shadow").map((r) => (r as { account: string }).account);
     expect(carrying).toEqual([...ITEMS].sort());
     expect(JSON.stringify(s.sent.filter((r) => r.op !== "shadow"))).not.toContain("v-");
@@ -204,6 +209,9 @@ describe.skipIf(!darwin)("the dev Keychain transition (throwaway keychain file)"
     expect(oldCreatorStillOwnsItems({ keychain: kc, service: SERVICE })).toBe(true);
     const refusedAll = opsWith(ITEMS.map((account) => ({ op: "read" as const, account, status: ERR_SEC_INTERACTION_NOT_ALLOWED })));
     expect(oldCreatorStillOwnsItems({ keychain: kc, service: SERVICE, ops: refusedAll })).toBe(false);
+    // EVERY account is looked at: only the last one (sorted or not) still bun's is enough.
+    const allButLast = opsWith(ITEMS.slice(0, -1).map((account) => ({ op: "read" as const, account, status: ERR_SEC_INTERACTION_NOT_ALLOWED })));
+    expect(oldCreatorStillOwnsItems({ keychain: kc, service: SERVICE, ops: allButLast })).toBe(true);
     clean();
   }, SLOW);
 
@@ -218,7 +226,7 @@ describe.skipIf(!darwin)("the dev Keychain transition (throwaway keychain file)"
       `import { createKeychainAccess, openKeychainFile } from ${JSON.stringify(join(src, "keychain-ffi.ts"))};`,
       `const kc = openKeychainFile(process.env.KC_PATH!, process.env.KC_PASSWORD!);`,
       `const access = createKeychainAccess("Winter credential", [null]);`,
-      `await serveAdoptRequests(createAdoptHandler({ keychain: kc, service: process.env.KC_SERVICE! }, access, process.env.KC_HOME!), process.stdin, (l) => process.stdout.write(l));`,
+      `await serveAdoptRequests(createAdoptHandler({ keychain: kc, service: process.env.KC_SERVICE! }, access, process.env.KC_HOME!, "identifier \\"child\\""), process.stdin, (l) => process.stdout.write(l));`,
       `setTimeout(() => process.exit(0), 50);`,
     ].join("\n"));
     const child = spawnAdoptChild({ file: process.execPath, args: [entry] }, { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? "", KC_PATH: kcPath, KC_PASSWORD: PASSWORD, KC_SERVICE: SERVICE, KC_HOME: home });
@@ -241,18 +249,55 @@ describe.skipIf(!darwin)("the dev Keychain transition (throwaway keychain file)"
 
   test("a child that stops answering times out (and is killed) instead of holding the home's lock forever", async () => {
     const child = spawnAdoptChild({ file: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"] }, { PATH: process.env.PATH ?? "/usr/bin:/bin" }, 300);
-    expect(await child.send({ op: "hello" })).toEqual({ ok: false, reason: "no answer to hello within 300 ms" });
+    expect(await child.send({ op: "hello" })).toEqual({ ok: false, reason: "no answer to hello within 300 ms", fatal: true });
     expect(await child.close()).not.toBe(0);
     expect(await child.send({ op: "hello" })).toMatchObject({ ok: false });
   }, SLOW);
 
-  test("a shadow holding a DIFFERENT value is never overwritten: that item is skipped", async () => {
+  test("bun's own leftover shadows (a crashed bun-run migration) are recovered first — restored, or dropped beside their original as stale — and then adopted", async () => {
     clean();
     seed();
+    // An interrupted bun migration of admin-token: the original gone, only bun's shadow left.
+    deleteGenericPassword(kc, SERVICE, "admin-token");
+    addGenericPasswordWithAccess(kc, { service: SERVICE, account: "admin-token.migrating", value: "v-admin-token", trustedApplications: [null] });
+    // A stale bun shadow beside a newer original.
     addGenericPasswordWithAccess(kc, { service: SERVICE, account: "openai:default.migrating", value: "value-elsewhere", trustedApplications: [null] });
-    expect(await sides().run()).toMatchObject({ kind: "done", skipped: ["openai:default"] });
-    expect(readGenericPassword(kc, SERVICE, "openai:default.migrating")).toBe("value-elsewhere");
+    const s1 = sides();
+    const outcome = await s1.run();
+    expect(outcome).toMatchObject({ kind: "done", adopted: [...ITEMS].sort(), skipped: [], restored: ["admin-token"] });
+    expect(readGenericPassword(kc, SERVICE, "admin-token")).toBe("v-admin-token");
     expect(readGenericPassword(kc, SERVICE, "openai:default")).toBe("v-openai:default");
+    for (const name of ITEMS) expect(genericPasswordPresent(kc, SERVICE, `${name}.migrating`)).toBe(false);
+    expect(s1.logs.join("\n")).not.toContain("value-elsewhere");
+    clean();
+  }, SLOW);
+
+  test("the run STOPS, writing no marker, when the child exits or stops answering mid-run, or its recovery or the marker fails", async () => {
+    const fatal = { ok: false as const, reason: "the child exited (1)", fatal: true as const };
+    for (const [label, channel] of [
+      ["channel lost on a shadow", (r: AdoptRequest) => (r.op === "shadow" && r.account === "harness-token" ? fatal : undefined)],
+      ["channel lost on a drop", (r: AdoptRequest) => (r.op === "drop" ? fatal : undefined)],
+      ["recovery failed", (r: AdoptRequest) => (r.op === "recover" ? { ok: false as const, reason: "recover: OSStatus -1" } : undefined)],
+      ["marker failed", (r: AdoptRequest) => (r.op === "marker" ? { ok: false as const, reason: "EACCES" } : undefined)],
+    ] as const) {
+      clean();
+      seed();
+      const s1 = sides({ channel, ...(label === "channel lost on a drop" ? { old: [{ op: "remove" as const, account: "admin-token" }] } : {}) });
+      const outcome = await s1.run();
+      expect({ label, kind: outcome.kind }).toEqual({ label, kind: "stopped" });
+      expect(existsSync(credentialAclMarkerPath(s1.home))).toBe(false);
+      for (const name of ITEMS) expect(readGenericPassword(kc, SERVICE, name)).toBe(`v-${name}`);
+    }
+    clean();
+  }, SLOW);
+
+  test("nothing adopted and something skipped (a re-run over already-adopted items): no marker", async () => {
+    clean();
+    seed();
+    const s1 = sides({ old: ITEMS.map((account) => ({ op: "read" as const, account, status: ERR_SEC_INTERACTION_NOT_ALLOWED })) });
+    expect(await s1.run()).toMatchObject({ kind: "done", adopted: [], skipped: [...ITEMS].sort() });
+    expect(existsSync(credentialAclMarkerPath(s1.home))).toBe(false);
+    expect(s1.sent.some((r) => r.op === "marker")).toBe(false);
     clean();
   }, SLOW);
 
@@ -261,7 +306,7 @@ describe.skipIf(!darwin)("the dev Keychain transition (throwaway keychain file)"
     seed();
     expect(await sides({ childService: "ws27.somewhere-else" }).run()).toMatchObject({ kind: "stopped", account: "(child)" });
     expect(readGenericPassword(kc, SERVICE, "openai:default")).toBe("v-openai:default");
-    const handle = createAdoptHandler({ keychain: kc, service: SERVICE }, access, mkdtempSync(join(dir, "home-")));
+    const handle = createAdoptHandler({ keychain: kc, service: SERVICE }, access, mkdtempSync(join(dir, "home-")), CHILD_REQUIREMENT);
     expect(handle({ op: "shadow", account: "openai:default", value: "v-openai:default" })).toEqual({ ok: true });
     expect(handle({ op: "commit", account: "openai:default" })).toEqual({ ok: false, reason: "openai:default is still there" });
     expect(handle({ op: "shadow", account: "x.migrating", value: "v" })).toEqual({ ok: false, reason: "not an item" });

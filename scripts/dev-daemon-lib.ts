@@ -7,6 +7,16 @@ import { join, resolve } from "node:path";
  *  binary's (`winter-core`), which is signed in the app bundle. */
 export const DEV_DAEMON_IDENTIFIER = "com.winter.core.dev";
 
+/**
+ * The dev daemon's designated requirement, stated rather than derived: its identifier and Winter's team
+ * (the certificate's OU), under Apple's anchor. The derived one would name the signing certificate's common
+ * name, which changes with the person or the certificate type; this one holds for any Winter-team
+ * certificate, so the Keychain keeps trusting every rebuild whoever signs it.
+ */
+export function devDaemonRequirement(teamId: string): string {
+  return `identifier "${DEV_DAEMON_IDENTIFIER}" and anchor apple generic and certificate leaf[subject.OU] = "${teamId}"`;
+}
+
 /** `compile:core`'s own output, which the `verify:*` gates overwrite — the dev daemon is never built there. */
 const COMPILE_CORE_OUTFILE = "--outfile ../../dist/winter-core";
 
@@ -58,6 +68,10 @@ export function devDaemonHome(env: NodeJS.ProcessEnv, home: string = homedir()):
 }
 
 /** `codesign -dv` facts the build checks after signing. */
+export function designatedRequirementOf(codesignDr: string): string | undefined {
+  return /^designated => (.+)$/m.exec(codesignDr)?.[1]?.trim();
+}
+
 export function signedFacts(codesignDv: string): { identifier?: string; teamId?: string; runtime: boolean } {
   const identifier = /^Identifier=(.+)$/m.exec(codesignDv)?.[1]?.trim();
   const teamId = /^TeamIdentifier=(.+)$/m.exec(codesignDv)?.[1]?.trim();
