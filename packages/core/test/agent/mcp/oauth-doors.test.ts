@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createMemoryMcpOAuthStore, encodeMcpOAuthClientRecord, encodeMcpOAuthTokenRecord, mcpOAuthClientAccount, mcpOAuthTokenAccount, McpOAuthError, type McpOAuthLogin } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
+import { createMemoryMcpOAuthStore, decodeMcpOAuthClientSecretItem, encodeMcpOAuthClientRecord, encodeMcpOAuthTokenRecord, mcpOAuthClientAccount, mcpOAuthClientSecretAccount, mcpOAuthTokenAccount, McpOAuthError, type McpOAuthLogin } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
 import { McpOAuthDoors } from "../../../src/agent/mcp/oauth-doors";
 
 const URL_ = "https://mcp.example.test/mcp";
@@ -22,8 +22,9 @@ function clientRecord(issuer: string, clientId: string): string {
   return encodeMcpOAuthClientRecord({ v: 1, kind: "mcp-oauth-client", serverUrl: URL_, issuer, clientId, registeredVia: "dcr", redirectUri: "http://127.0.0.1:1/callback" });
 }
 
-function fakeLogin(issuerOrigin: string): McpOAuthLogin {
-  return { authUrl: `${issuerOrigin}/authorize?state=x`, issuerOrigin, authorizeOrigin: issuerOrigin, done: new Promise(() => {}), cancel: () => {} };
+function fakeLogin(issuer: string): McpOAuthLogin {
+  const issuerOrigin = new URL(issuer).origin;
+  return { authUrl: `${issuerOrigin}/authorize?state=x`, issuer, issuerOrigin, authorizeOrigin: issuerOrigin, done: new Promise(() => {}), cancel: () => {} };
 }
 
 describe("McpOAuthDoors.login — the registration snapshot (fix round 1, I1)", () => {
@@ -106,9 +107,90 @@ describe("McpOAuthDoors.login — the registration snapshot (fix round 1, I1)", 
     release();
     expect(await first).toMatchObject({ code: "mcp_issuer_change_requires_confirmation" });
     // The second snapshotted the RESTORED legit registration, so it is refused too — not waved through.
-    expect(await second).toMatchObject({ code: "mcp_issuer_change_requires_confirmation", data: { storedIssuerOrigin: "https://legit.example.test" } });
+    expect(await second).toMatchObject({ code: "mcp_issuer_change_requires_confirmation", data: { storedIssuer: "https://legit.example.test", storedIssuerOrigin: "https://legit.example.test" } });
     expect(order).toEqual(["start1", "end1", "start2", "end2"]);
     expect(await store.read(mcpOAuthClientAccount(URL_))).toBe(original);
+  });
+});
+
+describe("McpOAuthDoors.login — FULL issuers, compared with sameIssuer (fix round 1, I1 steps 3-4)", () => {
+  async function attempt(stored: string, flowIssuer: string, legWrites: boolean): Promise<{ error: unknown; store: ReturnType<typeof createMemoryMcpOAuthStore> }> {
+    const store = createMemoryMcpOAuthStore();
+    await store.write(mcpOAuthClientAccount(URL_), clientRecord(stored, "old"));
+    const doors = new McpOAuthDoors({
+      home: homeWith({ s: { type: "http", url: URL_ } }),
+      store: () => store,
+      startLogin: async (opts) => {
+        if (legWrites) await opts.store.write(mcpOAuthClientAccount(URL_), clientRecord(flowIssuer, "new"));
+        // The flow's own issuer deliberately disagrees when the leg wrote one: the READ-BACK record wins.
+        return fakeLogin(legWrites ? "https://ignored.example.test" : flowIssuer);
+      },
+    });
+    const error = await doors.login(doors.resolve({ name: "s" })).then(() => undefined, (e: unknown) => e);
+    doors.dispose();
+    return { error, store };
+  }
+
+  test("another TENANT on the same origin is an issuer change (an origin compare would miss it); both full issuers in the data", async () => {
+    const { error } = await attempt("https://login.example.test/tenant-a", "https://login.example.test/tenant-b", true);
+    expect(error).toMatchObject({
+      code: "mcp_issuer_change_requires_confirmation",
+      data: { storedIssuer: "https://login.example.test/tenant-a", newIssuer: "https://login.example.test/tenant-b", storedIssuerOrigin: "https://login.example.test", newIssuerOrigin: "https://login.example.test" },
+    });
+  });
+
+  test("the same issuer ±1 trailing slash is NOT a change", async () => {
+    expect((await attempt("https://as.example.test/t", "https://as.example.test/t/", true)).error).toBeUndefined();
+  });
+
+  test("the pre-registered path (leg 1 writes nothing) compares McpOAuthLogin.issuer", async () => {
+    expect((await attempt("https://as.example.test/t1", "https://as.example.test/t2", false)).error).toMatchObject({ code: "mcp_issuer_change_requires_confirmation", data: { newIssuer: "https://as.example.test/t2" } });
+    expect((await attempt("https://as.example.test/t1", "https://as.example.test/t1", false)).error).toBeUndefined();
+  });
+});
+
+describe("McpOAuthDoors client secrets — discovered, confirmed, then written (fix round 1, minors 3-4)", () => {
+  const ISSUER = "https://login.example.test/tenant-a";
+  function setup(discovered = ISSUER) {
+    const store = createMemoryMcpOAuthStore();
+    let discoveries = 0;
+    const doors = new McpOAuthDoors({
+      home: homeWith({ gh: { type: "http", url: URL_, oauth: { clientId: "c", clientSecretRef: { kind: "keychain" } } } }),
+      store: () => store,
+      // No flow may start for a secret: a sign-in in flight would be superseded.
+      startLogin: async () => { throw new Error("no sign-in flow for a client secret"); },
+      discoverIssuer: async (opts) => {
+        discoveries++;
+        expect(opts.serverUrl).toBe(URL_);
+        return { issuer: discovered, issuerOrigin: new URL(discovered).origin, authorizeOrigin: new URL(discovered).origin };
+      },
+    });
+    return { store, doors, discoveries: () => discoveries };
+  }
+
+  test("clientSecretIssuer names the full issuer and writes nothing", async () => {
+    const { store, doors } = setup();
+    expect(await doors.clientSecretIssuer(doors.resolve({ name: "gh" }))).toEqual({ name: "gh", issuer: ISSUER, issuerOrigin: "https://login.example.test", authorizeOrigin: "https://login.example.test" });
+    expect(store.entries.size).toBe(0);
+  });
+
+  test("without expectedIssuer nothing is written; the refusal carries the issuer to confirm", async () => {
+    const { store, doors } = setup();
+    await expect(doors.setClientSecret(doors.resolve({ name: "gh" }), "s3cret", undefined)).rejects.toMatchObject({ code: "mcp_expected_issuer_required", data: { issuer: ISSUER } });
+    expect(store.entries.size).toBe(0);
+  });
+
+  test("a server that moved since the confirmation is refused (another tenant, same origin); nothing written", async () => {
+    const { store, doors } = setup("https://login.example.test/tenant-b");
+    await expect(doors.setClientSecret(doors.resolve({ name: "gh" }), "s3cret", ISSUER)).rejects.toMatchObject({ code: "mcp_issuer_changed", data: { issuer: "https://login.example.test/tenant-b" } });
+    expect(store.entries.size).toBe(0);
+  });
+
+  test("confirmed → bound to the DISCOVERED issuer at the derived account, via discovery only", async () => {
+    const { store, doors, discoveries } = setup();
+    expect(await doors.setClientSecret(doors.resolve({ name: "gh" }), "s3cret", `${ISSUER}/`)).toEqual({ issuer: ISSUER, issuerOrigin: "https://login.example.test" });
+    expect(decodeMcpOAuthClientSecretItem((await store.read(mcpOAuthClientSecretAccount(URL_)))!)).toEqual({ secret: "s3cret", issuer: ISSUER });
+    expect(discoveries()).toBe(1);
   });
 });
 
@@ -116,7 +198,7 @@ describe("McpOAuthDoors.setClientSecret — a public pre-registered client (fix 
   test("clientId without clientSecretRef is refused mcp_not_preregistered, and nothing is written", async () => {
     const store = createMemoryMcpOAuthStore();
     const doors = new McpOAuthDoors({ home: homeWith({ s: { type: "http", url: URL_, oauth: { clientId: "pub" } } }), store: () => store, startLogin: async () => { throw new Error("no discovery expected"); } });
-    await expect(doors.setClientSecret(doors.resolve({ name: "s" }), "x")).rejects.toMatchObject({ code: "mcp_not_preregistered" });
+    await expect(doors.setClientSecret(doors.resolve({ name: "s" }), "x", "https://as.example.test")).rejects.toMatchObject({ code: "mcp_not_preregistered" });
     expect(store.entries.size).toBe(0);
   });
 });

@@ -14,14 +14,16 @@
 //   - the ISSUER-CHANGE CONFIRMATION (review, binding): a sign-in whose authorization server is not the one
 //     the stored client registration names is refused typed until the caller confirms, showing both
 //     origins -- a redeclared server URL (a project overriding the user's scope with its own
-//     `authServerMetadataUrl`) must not silently replace the user's registration;
-//   - the CLIENT SECRET's door, bound to the issuer the USER's own config discovers (`setClientSecret`);
+//     `authServerMetadataUrl`) must not silently replace the user's registration. Issuers are compared
+//     in FULL with the SDK's `sameIssuer`, never by origin (tenant paths share an origin);
+//   - the CLIENT SECRET's door, bound to the issuer the USER's own config discovers, which the caller
+//     shows and the user confirms before the secret is sent (`clientSecretIssuer`, `setClientSecret`);
 //   - telling live sessions: after a sign-in or a sign-out every live child that configures the server is
 //     asked to RECONNECT it (`onSignInChanged`) -- a Keychain write never evicts or restarts a child.
 //
 // NOTHING SECRET LEAVES. No token, code, verifier, `state`, secret or authorize URL is ever logged: the
 // `authUrl` goes back to the caller that asked for it and nowhere else. Errors carry codes and origins.
-import { canonicalMcpServerUrl, createMemoryMcpOAuthStore, decodeMcpOAuthClientRecord, decodeMcpOAuthTokenRecord, encodeMcpOAuthClientSecretItem, McpOAuthError, MCP_OAUTH_LOGIN_TIMEOUT_MS, mcpOAuthClientAccount, mcpOAuthClientSecretAccount, mcpOAuthTokenAccount, revokeMcpOAuth, startMcpOAuthLogin, validateMcpOAuthConfig, type McpOAuthConfig, type McpOAuthLogin, type McpOAuthStore } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
+import { canonicalMcpServerUrl, discoverMcpOAuthIssuer, sameIssuer, decodeMcpOAuthClientRecord, decodeMcpOAuthTokenRecord, encodeMcpOAuthClientSecretItem, McpOAuthError, MCP_OAUTH_LOGIN_TIMEOUT_MS, mcpOAuthClientAccount, mcpOAuthClientSecretAccount, mcpOAuthTokenAccount, revokeMcpOAuth, startMcpOAuthLogin, validateMcpOAuthConfig, type McpOAuthConfig, type McpOAuthLogin, type McpOAuthStore } from "@yanlinglabs/winter-agent-runtime/mcp-auth";
 import { randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { sdkLocalMcpServers, sdkUserMcpServers } from "../../settings";
@@ -60,6 +62,7 @@ export interface McpOAuthDoorDeps {
   onSignInChanged?: (serverUrl: string) => Promise<void> | void;
   /** Test seams: the SDK doors, the network under the SDK's auth policy, the CIMD URL, the clock. */
   startLogin?: typeof startMcpOAuthLogin;
+  discoverIssuer?: typeof discoverMcpOAuthIssuer;
   revoke?: typeof revokeMcpOAuth;
   fetch?: typeof fetch;
   clientMetadataUrl?: string;
@@ -255,13 +258,20 @@ export class McpOAuthDoors {
         throw new McpOAuthDoorRefusal("mcp_login_failed", `the sign-in to "${server.name}" could not start: ${err instanceof Error ? err.message.slice(0, 300) : "failed"}`, { reason: code });
       }
 
-      const storedOrigin = storedIssuer !== undefined ? originOf(storedIssuer) : undefined;
-      if (storedOrigin !== undefined && storedOrigin !== login.issuerOrigin && opts.confirmIssuerChange !== true) {
+      // Fix round 1 (I1 steps 3-4): FULL issuers, compared with the SDK's own `sameIssuer` (exact, ±1
+      // trailing slash — the comparison a secret's binding uses), never origins: one origin can host many
+      // authorization servers behind tenant paths. The new issuer is what leg 1 actually registered with
+      // when it wrote a registration (read back), else the flow's own verified `issuer` (the pre-registered
+      // path, and a reused registration, write nothing in leg 1).
+      const newIssuer = await this.issuerAfterLeg1(store, clientAccount, snapshot, login);
+      if (storedIssuer !== undefined && !sameIssuer(storedIssuer, newIssuer) && opts.confirmIssuerChange !== true) {
         login.cancel();
+        const storedOrigin = originOf(storedIssuer) ?? storedIssuer;
+        const newOrigin = originOf(newIssuer) ?? login.issuerOrigin;
         throw new McpOAuthDoorRefusal(
           "mcp_issuer_change_requires_confirmation",
-          `MCP server "${server.name}" now signs in at ${login.issuerOrigin}, but its stored registration belongs to ${storedOrigin} — confirm the change to continue`,
-          { storedIssuerOrigin: storedOrigin, newIssuerOrigin: login.issuerOrigin },
+          `MCP server "${server.name}" now signs in at ${newIssuer}, but its stored registration belongs to ${storedIssuer} — confirm the change to continue`,
+          { storedIssuer, newIssuer, storedIssuerOrigin: storedOrigin, newIssuerOrigin: newOrigin },
         );
       }
       restoreSnapshot = false;
@@ -279,6 +289,15 @@ export class McpOAuthDoors {
         } catch { /* best effort: the next sign-in re-registers either way */ }
       }
     }
+  }
+
+  /** The issuer this flow signs in with: the registration leg 1 wrote, when it wrote one; else `login.issuer`. */
+  private async issuerAfterLeg1(store: McpOAuthStore, clientAccount: string, snapshot: string | null, login: McpOAuthLogin): Promise<string> {
+    try {
+      const now = await store.read(clientAccount);
+      if (now !== null && now !== snapshot) return decodeMcpOAuthClientRecord(now).issuer;
+    } catch { /* unreadable: the flow's own issuer */ }
+    return login.issuer;
   }
 
   /** Hands a started flow to the login table: its expiry timer, its settlement, its follow-up. */
@@ -346,22 +365,17 @@ export class McpOAuthDoors {
     this.track(this.deps.onSignInChanged?.(server.url));
   }
 
-  // --- mcp.setClientSecret ---------------------------------------------------------------------------
+  // --- mcp.clientSecretIssuer / mcp.setClientSecret ---------------------------------------------------
 
   /**
-   * A pre-registered client's secret, to the Keychain under the DERIVED account
-   * `mcp-oauth-client-secret:<id>` (review C1: never a config-named account), BOUND to the issuer the
-   * USER-scope server's own discovery names (review I-A, binding: never a project's
-   * `authServerMetadataUrl`) -- so the SDK sends it to that authorization server only.
-   *
-   * The server named may be resolved in any scope, but the binding always comes from a USER-scope server
-   * with the same canonical URL: the user's own configuration is the only source trusted to say where the
-   * secret belongs. None there -> refused typed (`mcp_secret_needs_user_scope`); a user config without
-   * `oauth.clientId` (not a pre-registered client) -> refused (`mcp_not_preregistered`).
-   *
-   * Returns the issuer's origin, which the caller shows. The secret is never echoed and never logged.
+   * The USER-scope server a client secret for `server` belongs to (review I-A, binding): the user's own
+   * configuration is the only source trusted to say where a secret may be sent, so whichever scope the
+   * name resolved in, the target is the user-scope server with the same canonical URL. None there ->
+   * `mcp_secret_needs_user_scope`; a user config without `oauth.clientId` + `oauth.clientSecretRef` (not a
+   * confidential pre-registered client, fix round 1 minor 1: the SDK reads a secret only when the config
+   * marks one) -> `mcp_not_preregistered`.
    */
-  async setClientSecret(server: ResolvedMcpServer, secret: string): Promise<{ issuerOrigin: string }> {
+  private clientSecretTarget(server: ResolvedMcpServer): ResolvedMcpServer {
     const canonical = canonicalMcpServerUrl(server.url);
     let user: ResolvedMcpServer | undefined;
     if (server.scope === "user") {
@@ -383,70 +397,66 @@ export class McpOAuthDoors {
     if (user.oauth?.clientId === undefined) {
       throw new McpOAuthDoorRefusal("mcp_not_preregistered", `MCP server "${user.name}" is not configured as a pre-registered client (oauth.clientId), so it has no client secret`);
     }
-    // Fix round 1 (minor 1): the SDK reads a secret only when the config MARKS one (`clientSecretRef`); a
-    // secret stored for a public pre-registered client would sit in the Keychain, never used.
     if (user.oauth.clientSecretRef === undefined) {
       throw new McpOAuthDoorRefusal("mcp_not_preregistered", `MCP server "${user.name}" is a public pre-registered client (its config has oauth.clientId but no oauth.clientSecretRef: { kind: "keychain" }), so a client secret would never be used — add the marker first`);
     }
-    const issuer = await this.discoverIssuer(user);
-    await this.deps.store().write(mcpOAuthClientSecretAccount(user.url), encodeMcpOAuthClientSecretItem(secret, issuer));
-    const issuerOrigin = originOf(issuer) ?? issuer;
-    this.deps.log?.(`mcp: client secret stored for '${user.name}' (bound to ${issuerOrigin})`);
-    return { issuerOrigin };
+    return user;
   }
 
   /**
-   * The authorization server a USER-scope, pre-registered server's own discovery names -- its full issuer
-   * string (a path-bearing issuer included), found by the SDK's OWN discovery under its auth-HTTP policy.
-   *
-   * WHY A DRY RUN. `/mcp-auth` exports no discovery door (a cross-lane request asks for one), and core must
-   * not re-derive RFC 9728/8414 discovery or its SSRF policy. So this runs the first leg of a sign-in as a
-   * PRE-REGISTERED client -- which registers nothing (no DCR, no CIMD) and redeems nothing -- into a
-   * throwaway memory store, without the secret and without a fixed callback port, then cancels it. The
-   * issuer is read off the RFC 8414 / OIDC document that leg fetched (observed on the network seam the SDK
-   * takes for tests; the SDK has already checked it was published at its own issuer's location), and must
-   * agree with the origin the leg reports. A server with no metadata document at all (the legacy
-   * variant) is its own origin, which is what the SDK then treats as the issuer too.
-   *
-   * Side effect, accepted and documented: a sign-in for the same server in flight in THIS process is
-   * superseded (the SDK keeps one flow per server) -- a new secret makes that flow's client stale anyway.
+   * The authorization server the USER-scope server's own discovery names (the SDK's side-effect-free
+   * `discoverMcpOAuthIssuer`: no registration, no listener, no store, no secret — so it never supersedes a
+   * sign-in in flight). Honours the user config's own `authServerMetadataUrl` (with the SDK's RFC 8414
+   * issuer-location check), never a project's.
    */
-  private async discoverIssuer(user: ResolvedMcpServer): Promise<string> {
-    const seen: string[] = [];
-    const network = this.deps.fetch ?? fetch;
-    const observe = (async (input: string | URL | Request, init?: RequestInit) => {
-      const response = await network(input, init);
-      try {
-        if (response.ok) {
-          const doc = (await response.clone().json()) as { issuer?: unknown; authorization_endpoint?: unknown };
-          if (typeof doc.issuer === "string" && typeof doc.authorization_endpoint === "string") seen.push(doc.issuer);
-        }
-      } catch { /* not a JSON document: not a metadata document */ }
-      return response;
-    }) as typeof fetch;
-    const oauth: McpOAuthConfig = {
-      clientId: user.oauth!.clientId!,
-      ...(user.oauth?.scopes !== undefined ? { scopes: [...user.oauth.scopes] } : {}),
-      ...(user.oauth?.authServerMetadataUrl !== undefined ? { authServerMetadataUrl: user.oauth.authServerMetadataUrl } : {}),
-    };
-    let login: McpOAuthLogin;
+  private async discoverFor(user: ResolvedMcpServer): Promise<{ issuer: string; issuerOrigin: string; authorizeOrigin: string }> {
     try {
-      login = await (this.deps.startLogin ?? startMcpOAuthLogin)({ serverUrl: user.url, oauth, store: createMemoryMcpOAuthStore(), fetch: observe });
+      return await (this.deps.discoverIssuer ?? discoverMcpOAuthIssuer)({
+        serverUrl: user.url,
+        ...(user.oauth !== undefined ? { oauth: user.oauth as McpOAuthConfig } : {}),
+        ...(this.deps.fetch !== undefined ? { fetch: this.deps.fetch } : {}),
+      });
     } catch (err) {
-      throw new McpOAuthDoorRefusal("mcp_discovery_failed", `could not discover the authorization server for "${user.name}", so the client secret was not stored: ${err instanceof Error ? err.message.slice(0, 300) : "failed"}`, { reason: reasonOf(err) });
+      throw new McpOAuthDoorRefusal("mcp_discovery_failed", `could not discover the authorization server for "${user.name}": ${err instanceof Error ? err.message.slice(0, 300) : "failed"}`, { reason: reasonOf(err) });
     }
-    login.cancel();
-    const matching = [...new Set(seen)].filter((issuer) => originOf(issuer) === login.issuerOrigin);
-    if (matching.length > 1) {
-      throw new McpOAuthDoorRefusal("mcp_discovery_failed", `the authorization server for "${user.name}" published conflicting issuers at ${login.issuerOrigin}, so the client secret was not stored`);
+  }
+
+  /**
+   * `mcp.clientSecretIssuer` (fix round 1, minor 4): the issuer a client secret for this server WOULD be
+   * bound to, for the client to show and confirm BEFORE the secret is asked for or sent. Writes nothing.
+   */
+  async clientSecretIssuer(server: ResolvedMcpServer): Promise<{ name: string; issuer: string; issuerOrigin: string; authorizeOrigin: string }> {
+    const user = this.clientSecretTarget(server);
+    const found = await this.discoverFor(user);
+    return { name: user.name, ...found };
+  }
+
+  /**
+   * A pre-registered client's secret, to the Keychain under the DERIVED account
+   * `mcp-oauth-client-secret:<id>` (review C1: never a config-named account), BOUND to the issuer the
+   * USER-scope server's own discovery names (review I-A) -- so the SDK sends it to that authorization
+   * server only.
+   *
+   * CONFIRMED FIRST (fix round 1, minor 4): `expectedIssuer` is the issuer the caller showed the user and
+   * the user accepted (`clientSecretIssuer`). It is required: absent -> `mcp_expected_issuer_required`
+   * (carrying the discovered issuer), and nothing is written. Discovery runs again here and must name the
+   * same authorization server (`sameIssuer`), else `mcp_issuer_changed` -- a server that moved between the
+   * confirmation and the write is confirmed again, never bound silently.
+   *
+   * Returns the issuer it bound to. The secret is never echoed and never logged.
+   */
+  async setClientSecret(server: ResolvedMcpServer, secret: string, expectedIssuer: string | undefined): Promise<{ issuer: string; issuerOrigin: string }> {
+    const user = this.clientSecretTarget(server);
+    const found = await this.discoverFor(user);
+    if (expectedIssuer === undefined) {
+      throw new McpOAuthDoorRefusal("mcp_expected_issuer_required", `confirm where the client secret for "${user.name}" may be sent (${found.issuer}) and pass it as expectedIssuer — nothing was stored`, { issuer: found.issuer, issuerOrigin: found.issuerOrigin });
     }
-    // Documents were seen but none names the issuer the leg reports: refuse rather than bind the secret to
-    // a guess (a wrong binding would refuse every later sign-in). The origin itself is the issuer only for
-    // a server that publishes no metadata at all (the legacy variant), which is what the SDK uses there.
-    if (matching.length === 0 && seen.length > 0) {
-      throw new McpOAuthDoorRefusal("mcp_discovery_failed", `the authorization server for "${user.name}" did not publish an issuer at ${login.issuerOrigin}, so the client secret was not stored`);
+    if (!sameIssuer(expectedIssuer, found.issuer)) {
+      throw new McpOAuthDoorRefusal("mcp_issuer_changed", `the authorization server for "${user.name}" is now ${found.issuer}, not the ${expectedIssuer} you confirmed — nothing was stored; confirm again`, { issuer: found.issuer, issuerOrigin: found.issuerOrigin, expectedIssuer });
     }
-    return matching[0] ?? login.issuerOrigin;
+    await this.deps.store().write(mcpOAuthClientSecretAccount(user.url), encodeMcpOAuthClientSecretItem(secret, found.issuer));
+    this.deps.log?.(`mcp: client secret stored for '${user.name}' (bound to ${found.issuer})`);
+    return { issuer: found.issuer, issuerOrigin: found.issuerOrigin };
   }
 
   // --- mcp.list's auth columns -----------------------------------------------------------------------

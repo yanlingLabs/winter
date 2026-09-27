@@ -164,7 +164,7 @@ describe("the MCP sign-in doors (WS-25)", () => {
 
     const refused = await c.request(METHODS.mcpLogin, { name: "linear" });
     expect(refused.result).toBeUndefined();
-    expect(refused.error.data).toEqual({ code: "mcp_issuer_change_requires_confirmation", storedIssuerOrigin: "https://old-issuer.example.test", newIssuerOrigin: fx.origin });
+    expect(refused.error.data).toEqual({ code: "mcp_issuer_change_requires_confirmation", storedIssuer: "https://old-issuer.example.test", newIssuer: fx.issuer, storedIssuerOrigin: "https://old-issuer.example.test", newIssuerOrigin: fx.origin });
     expect(await oauthStore.read(mcpOAuthClientAccount(fx.mcpUrl))).toBe(stored); // nothing left behind
 
     const confirmed = await c.request(METHODS.mcpLogin, { name: "linear", confirmIssuerChange: true });
@@ -210,12 +210,19 @@ describe("the MCP sign-in doors (WS-25)", () => {
       const early = await c.request(METHODS.mcpLogin, { name: "gh" });
       expect(early.error.data.code).toBe("mcp_client_secret_unavailable");
 
-      const set = await c.request(METHODS.mcpSetClientSecret, { name: "gh", secret: SECRET });
-      expect(set.result).toEqual({ ok: true, issuerOrigin: fx.origin });
+      // Confirm first: the issuer the secret would be bound to, discovered without a flow.
+      const shown = await c.request(METHODS.mcpClientSecretIssuer, { name: "gh" });
+      expect(shown.result).toEqual({ name: "gh", issuer: fx.issuer, issuerOrigin: fx.origin, authorizeOrigin: fx.origin });
+      const unconfirmed = await c.request(METHODS.mcpSetClientSecret, { name: "gh", secret: SECRET });
+      expect(unconfirmed.error.data).toEqual({ code: "mcp_expected_issuer_required", issuer: fx.issuer, issuerOrigin: fx.origin });
+      expect(JSON.stringify(unconfirmed)).not.toContain(SECRET);
+      expect(await oauthStore.read(mcpOAuthClientSecretAccount(fx.mcpUrl))).toBeNull();
+      const set = await c.request(METHODS.mcpSetClientSecret, { name: "gh", secret: SECRET, expectedIssuer: shown.result.issuer });
+      expect(set.result).toEqual({ ok: true, issuer: fx.issuer, issuerOrigin: fx.origin });
       expect(JSON.stringify(set)).not.toContain(SECRET);
       const item = decodeMcpOAuthClientSecretItem((await oauthStore.read(mcpOAuthClientSecretAccount(fx.mcpUrl)))!);
       expect(item).toEqual({ secret: SECRET, issuer: fx.issuer });
-      // The dry-run discovery registered nothing and posted nothing.
+      // Discovery registered nothing and posted nothing.
       expect(fx.registrations).toEqual([]);
       expect(fx.tokenPosts).toEqual([]);
 
@@ -235,7 +242,7 @@ describe("the MCP sign-in doors (WS-25)", () => {
       userServers: { plain: { type: "http", url: fx.mcpUrl }, tool: { type: "stdio", command: "true" } },
       project: { servers: { repo: { type: "http", url: `${fx.origin}/other-mcp`, oauth: { clientId: "c", clientSecretRef: { kind: "keychain" }, authServerMetadataUrl: `${fx.origin}/.well-known/oauth-authorization-server` } } }, trusted: true },
     });
-    const code = async (params: Record<string, unknown>): Promise<string> => (await c.request(METHODS.mcpSetClientSecret, { secret: "s", ...params })).error?.data?.code;
+    const code = async (params: Record<string, unknown>): Promise<string> => (await c.request(METHODS.mcpSetClientSecret, { secret: "s", expectedIssuer: fx.issuer, ...params })).error?.data?.code;
     expect(await code({ name: "repo", cwd: projectDir })).toBe("mcp_secret_needs_user_scope");
     expect(await code({ name: "plain" })).toBe("mcp_not_preregistered");
     expect(await code({ name: "tool" })).toBe("mcp_oauth_not_applicable");
@@ -273,7 +280,7 @@ describe("the MCP sign-in doors (WS-25)", () => {
   });
 
   test("the sign-in doors are LOCAL role only, and the credential inventory never lists an MCP sign-in item", () => {
-    for (const m of [METHODS.mcpLogin, METHODS.mcpLoginStatus, METHODS.mcpLogout, METHODS.mcpSetClientSecret]) {
+    for (const m of [METHODS.mcpLogin, METHODS.mcpLoginStatus, METHODS.mcpLogout, METHODS.mcpSetClientSecret, METHODS.mcpClientSecretIssuer]) {
       expect(REMOTE_ALLOWED_METHODS.has(m)).toBe(false);
     }
     expect(credentialInventory().some((slot) => slot.secretName.startsWith("mcp-oauth") || slot.provider.startsWith("mcp-oauth"))).toBe(false);
