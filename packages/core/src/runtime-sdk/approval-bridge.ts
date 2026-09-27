@@ -17,7 +17,7 @@ import { outdirPath } from "../sessions/outdir";
 import { askUserQuestionBridge, ASK_USER_QUESTION_TOOL } from "./question-bridge";
 import { consoleBridgeLogger, NO_PARK_TIMEOUT_MS, REVIEWER_ESCALATION_REASON, takeReviewerCleared, type BridgeLogger } from "./bridge-common";
 import type { BridgedPlanRequest } from "./plan-bridge";
-import { connectorDenialMessage, connectorFactsFor, connectorVerdict, isConnectorToolName, type ConnectorPermissionSource } from "../agent/mcp/connector-permissions";
+import { connectorDenialMessage, connectorFactsFor, connectorVerdict, isConnectorToolName, statedServerFromCanUseTool, type ConnectorPermissionSource } from "../agent/mcp/connector-permissions";
 
 export { NO_PARK_TIMEOUT_MS, type BridgeLogger } from "./bridge-common";
 
@@ -540,7 +540,9 @@ export function canUseToolFor(deps: CanUseToolDeps): ApprovalBridge {
     // `canUseTool` anyway, something else demanded a prompt — an `sdk/settings.json` `permissions.ask` rule,
     // a plugin's PreToolUse `ask`, a server's `requiresUserInteraction` — and turning that into a silent
     // allow would answer another layer's mandatory prompt with a yes. `"gate"` keeps the gate's verdict.
-    const connector = deps.connectors !== undefined ? connectorFactsFor(deps.connectors, toolName, deps.cwd) : undefined;
+    // WS-27: `ctx.mcpServer` — the runtime's own statement of the call's server (agent SDK 0.0.33+; absent on
+    // an older runtime, when the split resolver decides).
+    const connector = deps.connectors !== undefined ? connectorFactsFor(deps.connectors, toolName, deps.cwd, statedServerFromCanUseTool(ctx)) : undefined;
     if (connector !== undefined) {
       const verdict = connectorVerdict({ setting: connector.setting, readOnly: connector.readOnly, policy, mode: deps.mode, ...(deps.origin !== undefined ? { origin: deps.origin } : {}) });
       if (verdict === "deny") {

@@ -24,9 +24,15 @@
 // "refuse a silent overwrite" (mirrors claude's own `addMcpConfig`, `services/mcp/config.ts` in the
 // reference clone — it throws "already exists in <scope> config" rather than replace).
 import type { Settings, McpServerSettingsEntry } from "../../settings";
-import { setMcpServerEntry, removeMcpServerEntry, sdkLocalMcpServers, sdkUserMcpServers, validateMcpServerEntryForWrite } from "../../settings";
+import { loadSettings, saveSettings, setConnectorToolPermission, setMcpServerEntry, removeMcpServerEntry, sdkLocalMcpServers, sdkUserMcpServers, validateMcpServerEntryForWrite } from "../../settings";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { CONNECTOR_ALL_TOOLS } from "./connector-permissions";
+import { mcpServerNameDefined, trustedProjectRoots } from "./server-names";
+import { approvedProjectRulesDir, sdkSettingsPath } from "../paths";
+import type { TrustStore } from "../trust";
 import { ProjectMcpEntrySchema, parseProjectMcpServers, projectMcpConfigPath, readRawProjectMcpConfig, writeRawProjectMcpConfig } from "./project-file";
-import { readSdkGlobalConfigDetailed, updateSdkGlobalConfig, type SdkGlobalConfigFile } from "../../sdk-files";
+import { readSdkGlobalConfigDetailed, readSdkSettingsDetailed, updateSdkGlobalConfig, type SdkGlobalConfigFile } from "../../sdk-files";
 import { reservedMcpServerNames } from "../../capabilities/names";
 import type { ProjectMcpServerEntry } from "./project-file";
 
@@ -240,4 +246,360 @@ export function removeMcpServerInScope(t: McpScopeTarget, name: string): boolean
   const { servers, removed } = removeProjectMcpServer(read.servers, name);
   if (removed) writeRawProjectMcpConfig(root, read.raw, servers);
   return removed;
+}
+
+// ── WS-27: rename within a scope, and the connector settings a remove or a rename leaves behind ─────
+//
+// `settings.json`'s `mcp.toolPermissions` and `mcp.disabled` are Winter's own and keyed by server NAME across
+// every scope, so a remove or a rename cannot simply take the name's settings with it: another scope, a
+// plugin, a subagent definition or a LIVE session (whose child keeps the servers it was spawned with until it
+// restarts, while the table is read live) may still use the name. So a remove clears the row only once
+// nothing uses the name (`mcpServerNameDefined` + the caller's `liveNames`), and a rename COPIES the row and
+// `mcp.disabled` to the new name first, renames the entry, and only then drops the old ones on the same
+// condition — every intermediate state is at least as strict as the one before. A rename INTO a name
+// something else already uses, or one that already holds stored values or rules, is refused: the renamed
+// server would silently take over another server's settings. A sign-in is keyed by the server's URL
+// (`mcp-oauth:<url>`), never its name, so it follows a rename by itself and a remove leaves it for a re-add.
+//
+// CLAUDE-GRAMMAR RULES (`permissions.allow/ask/deny`, in `sdk/settings.json`, a project's settings files or the
+// approved-rules record) are NEVER rewritten or dropped — claude parity, and because a rule cannot be moved
+// safely: `mcp__cf__*` also matches `cf__prod`'s tools, and `mcp__cf__admin__delete` renamed for `cf` could
+// land on a server named `cloudflare__admin`. Both doors LIST every rule that could name the server instead
+// (`rulesNamingServer`), so the user edits them.
+
+/** A rename refused before anything was written; `code` rides the RPC error's `data.code`. */
+export class McpRenameRefusal extends Error {
+  constructor(readonly code: "mcp_server_not_found" | "mcp_server_exists" | "mcp_server_name_in_use" | "mcp_rename_target_has_permissions" | "mcp_invalid_name", message: string) {
+    super(message);
+    this.name = "McpRenameRefusal";
+  }
+}
+
+/** The scope's RAW server map (every entry, valid there or not). */
+function rawServersInScope(t: McpScopeTarget): Record<string, unknown> {
+  if (t.scope === "project") {
+    const root = projectRootOf(t);
+    const read = readRawProjectMcpConfig(root);
+    if (read.kind === "malformed") throw new Error(`${projectMcpConfigPath(root)} is not a readable MCP config — it was left untouched`);
+    return read.kind === "ok" ? read.servers : {};
+  }
+  const current = readSdkGlobalConfigDetailed(t.home);
+  const config = current.state === "ok" ? current.value : {};
+  if (t.scope === "user") return isRecord(config.mcpServers) ? config.mcpServers : {};
+  const project = isRecord(config.projects) ? config.projects[projectRootOf(t)] : undefined;
+  return isRecord(project) && isRecord(project.mcpServers) ? project.mcpServers : {};
+}
+
+/** Rename one server within a scope, keeping its entry byte-for-byte and its position. Throws `McpRenameRefusal`
+ *  (a missing old name, a taken new one) or a plain `Error` (an unreadable file), writing nothing then. */
+export function renameMcpServerInScope(t: McpScopeTarget, from: string, to: string): { type: "stdio" | "http" | "sse" } {
+  const nameErr = validateMcpServerName(to);
+  if (nameErr) throw new McpRenameRefusal("mcp_invalid_name", nameErr);
+  const where = t.scope === "project" ? "this project's .winter/mcp.json" : t.scope === "local" ? `local config for ${projectRootOf(t)}` : "user config";
+  const moveIn = (servers: Record<string, unknown>): Record<string, unknown> => {
+    if (!Object.hasOwn(servers, from)) throw new McpRenameRefusal("mcp_server_not_found", `no MCP server named "${from}" in ${where}`);
+    if (Object.hasOwn(servers, to)) throw new McpRenameRefusal("mcp_server_exists", `MCP server "${to}" already exists in ${where} — pick another name, or remove that one first`);
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(servers)) out[k === from ? to : k] = v;   // same position, same entry
+    return out;
+  };
+  const entry = mcpServerInScope(t, from);
+  if (t.scope === "project") {
+    const root = projectRootOf(t);
+    const read = readRawProjectMcpConfig(root);
+    if (read.kind === "malformed") throw new Error(`${projectMcpConfigPath(root)} is not a readable MCP config — it was left untouched`);
+    writeRawProjectMcpConfig(root, read.kind === "ok" ? read.raw : {}, moveIn(read.kind === "ok" ? read.servers : {}));
+  } else {
+    updateSdkGlobalConfig(t.home, (config) => {
+      if (t.scope === "user") return { ...config, mcpServers: moveIn(isRecord(config.mcpServers) ? config.mcpServers : {}) };
+      const root = projectRootOf(t);
+      const projects = isRecord(config.projects) ? config.projects : {};
+      const project = isRecord(projects[root]) ? projects[root]! : {};
+      return { ...config, projects: { ...projects, [root]: { ...project, mcpServers: moveIn(isRecord(project.mcpServers) ? project.mcpServers : {}) } } };
+    });
+  }
+  return { type: entry?.type ?? "stdio" };
+}
+
+/** `settings` without any connector permission stored under `name` (every action and the all-actions value). */
+export function forgetConnectorPermissions(settings: Settings, name: string): Settings {
+  if (!Object.hasOwn(settings.mcp?.toolPermissions ?? {}, name)) return settings;
+  return setConnectorToolPermission(settings, name, CONNECTOR_ALL_TOOLS, undefined, { resetTools: true });
+}
+
+/** `from`'s permission row and `mcp.disabled` membership, COPIED to `to` (never replacing a row `to` has). */
+export function copyConnectorSettings(settings: Settings, from: string, to: string): { settings: Settings; carried: boolean } {
+  let next = settings;
+  let carried = false;
+  const row = settings.mcp?.toolPermissions?.[from];
+  if (row !== undefined && !Object.hasOwn(settings.mcp?.toolPermissions ?? {}, to)) {
+    const table = { ...(settings.mcp?.toolPermissions ?? {}), [to]: row } as NonNullable<NonNullable<Settings["mcp"]>["toolPermissions"]>;
+    next = { ...next, mcp: { ...next.mcp, toolPermissions: table } };
+    carried = true;
+  }
+  const disabled = next.mcp?.disabled ?? [];
+  if (disabled.includes(from) && !disabled.includes(to)) {
+    next = { ...next, mcp: { ...next.mcp, disabled: [...disabled, to] } };
+    carried = true;
+  }
+  return { settings: next, carried };
+}
+
+/** `from`'s permission row and `mcp.disabled` membership, dropped. */
+export function dropConnectorSettings(settings: Settings, from: string): Settings {
+  let next = forgetConnectorPermissions(settings, from);
+  if ((next.mcp?.disabled ?? []).includes(from)) next = { ...next, mcp: { ...next.mcp, disabled: next.mcp!.disabled!.filter((n) => n !== from) } };
+  return next;
+}
+
+// ── Claude-grammar rules that name a server (`mcp__<server>` or `mcp__<server>__…`) ──────────────────
+
+/** A rule's tool-name half (before any parenthesised specifier), trimmed. */
+function ruleToolName(rule: string): string {
+  const open = rule.indexOf("(");
+  return (open === -1 ? rule : rule.slice(0, open)).trim();
+}
+
+/** Does a claude-grammar rule LITERALLY name `server` (its tool-name half is `mcp__<server>` or `mcp__<server>__…`)? */
+export function ruleNamesMcpServer(rule: string, server: string): boolean {
+  const name = ruleToolName(rule);
+  const base = `mcp__${server}`;
+  return name === base || name.startsWith(`${base}__`);
+}
+
+/**
+ * Could a claude-grammar rule name `server` at all? A literal rule: `ruleNamesMcpServer` — which already covers
+ * every `__` split (`mcp__cf__prod__x` could be `cf`'s or `cf__prod`'s, so it is listed for either). A glob:
+ * when it can match `mcp__<server>` itself, or SOME `mcp__<server>__<tool>` — its literal characters agree with
+ * the prefix `mcp__<server>__` up to its first `*`, or all the way through the prefix (the tool is arbitrary).
+ * So `mcp__cf__*` could name `cf__prod`, and `mcp__*` any server.
+ */
+export function ruleCouldNameMcpServer(rule: string, server: string): boolean {
+  const name = ruleToolName(rule);
+  if (!name.includes("*")) return ruleNamesMcpServer(rule, server);
+  const bare = `mcp__${server}`;
+  const source = name.split("*").map((p) => p.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*");
+  if (new RegExp(`^${source}$`, "s").test(bare)) return true;
+  const prefix = `${bare}__`;
+  for (let i = 0; i < prefix.length; i++) {
+    if (i >= name.length) return false;
+    if (name[i] === "*") return true;
+    if (name[i] !== prefix[i]) return false;
+  }
+  return true;
+}
+
+const RULE_KINDS = ["allow", "ask", "deny"] as const;
+
+/** Every string in a JSON value (bounded depth) — rules are LISTED, never edited, wherever they sit. */
+function stringsIn(value: unknown, out: string[], depth = 0): void {
+  if (depth > 6) return;
+  if (typeof value === "string") out.push(value);
+  else if (Array.isArray(value)) for (const v of value) stringsIn(v, out, depth + 1);
+  else if (isRecord(value)) for (const v of Object.values(value)) stringsIn(v, out, depth + 1);
+}
+
+function readJson(path: string): unknown {
+  try { return JSON.parse(readFileSync(path, "utf8")); } catch { return undefined; }
+}
+
+/**
+ * The rules matching `matches` (for `server`), each as `"<file>: <rule>"`, from: `sdk/settings.json`
+ * (`permissions.allow/ask/deny`) unless `sdk: false`; every trusted project's own `.winter/settings.json`,
+ * `.winter/settings.local.json` and `.winter/permissions.local.json`; and the read-only approved-rules record
+ * `<home>/permissions/projects.json`. Read only — nothing here writes.
+ */
+function rulesIn(home: string, server: string, ctx: McpNameContext, matches: (rule: string, server: string) => boolean, opts: { sdk: boolean }, protective?: string[]): string[] {
+  const out: string[] = [];
+  // `isProtective`: a deny/ask rule (those are what stop or card a call); allow rules and the stores that hold
+  // only allow rules (`permissions.local.json`, the approved-rules record) are not.
+  const collect = (file: string, value: unknown, isProtective = false): void => {
+    if (value === undefined) return;
+    const found: string[] = [];
+    stringsIn(value, found);
+    for (const r of new Set(found)) {
+      if (!matches(r, server)) continue;
+      out.push(`${file}: ${r}`);
+      if (isProtective) protective?.push(`${file}: ${r}`);
+    }
+  };
+  const collectPermissions = (file: string, perms: unknown): void => {
+    if (!isRecord(perms)) return;
+    collect(file, perms.allow);
+    collect(file, [perms.ask, perms.deny], true);
+  };
+  if (opts.sdk) {
+    const current = readSdkSettingsDetailed(home);
+    if (current.state === "ok") collectPermissions(sdkSettingsPath(home), current.value.permissions);
+  }
+  for (const root of trustedProjectRoots({ cwd: ctx.cwd, trust: ctx.trust, allTrusted: true })) {
+    for (const f of ["settings.json", "settings.local.json", "permissions.local.json"]) {
+      const file = join(root, ".winter", f);
+      const json = readJson(file);
+      if (f === "permissions.local.json") collect(file, json);
+      else collectPermissions(file, isRecord(json) ? json.permissions : undefined);
+    }
+  }
+  const record = join(approvedProjectRulesDir(home), "projects.json");
+  const json = readJson(record);
+  collect(record, isRecord(json) ? json.projects : undefined);
+  return out;
+}
+
+/** Every rule, in every file, that COULD name `server` (`ruleCouldNameMcpServer`) — what a rename or a
+ *  remove lists as `rulesNotFollowed`, since neither ever edits a rule — and, among them, the deny/ask ones. */
+export function rulesNamingServer(home: string, server: string, ctx: McpNameContext): { rules: string[]; protective: string[] } {
+  const protective: string[] = [];
+  const rules = rulesIn(home, server, ctx, ruleCouldNameMcpServer, { sdk: true }, protective);
+  return { rules, protective };
+}
+
+/** The rules that LITERALLY name `server` (`mcp__<server>`, `mcp__<server>__…`) — the rename target check. */
+function rulesLiterallyNaming(home: string, server: string, ctx: McpNameContext): string[] {
+  return rulesIn(home, server, ctx, ruleNamesMcpServer, { sdk: true });
+}
+
+/** `<home>/settings.json`, or `undefined` when the home has none yet (nothing is stored in it then). */
+function settingsIfPresent(path: string): Settings | undefined {
+  return existsSync(path) ? loadSettings(path) : undefined;
+}
+
+/** What a remove or a rename saw of the name's other users, and where to read trust. */
+export interface McpNameContext {
+  cwd?: string | undefined;
+  trust?: Pick<TrustStore, "isTrusted" | "list"> | undefined;
+  /** The daemon's LIVE sessions' server names (a child keeps its servers until it restarts). */
+  liveNames?: (() => Iterable<string>) | undefined;
+}
+
+/** Is `name` still used — defined anywhere (`mcpServerNameDefined`) or connected in a live session? */
+function nameInUse(home: string, name: string, ctx: McpNameContext): boolean {
+  try {
+    for (const live of ctx.liveNames?.() ?? []) if (live === name) return true;
+  } catch { return true; }   // cannot tell: keep the settings
+  return mcpServerNameDefined(home, name, ctx);
+}
+
+/**
+ * THE remove door with its settings half, shared by `mcp.remove` and the CLI's no-daemon path: remove `name`
+ * from the scope, then — when something was removed and nothing uses the name any more — drop its connector
+ * permission row. Claude-grammar rules are never dropped (claude parity): every one that could name the server
+ * is LISTED (`rulesNotFollowed`) — they remain. Once the entry is removed the call reports it removed: a failure
+ * on the settings half is `permissionsNote`, never an error. `settings` is the written file when it changed.
+ */
+export interface McpRemoveOutcomeCore {
+  removed: boolean;
+  permissionsCleared: boolean;
+  /** Rules that could name the server; they remain (nothing here edits a rule). */
+  rulesNotFollowed: string[];
+  /** Something else still defines or has connected a server of this name: the rules still apply to it. */
+  nameStillInUse?: true;
+  permissionsNote?: string;
+  settings?: Settings;
+}
+
+export function removeMcpServerForgettingPermissions(t: McpScopeTarget, name: string, ctx: McpNameContext): McpRemoveOutcomeCore {
+  const removed = removeMcpServerInScope(t, name);
+  if (!removed) return { removed, permissionsCleared: false, rulesNotFollowed: [] };
+  let rulesNotFollowed: string[] = [];
+  try {
+    rulesNotFollowed = rulesNamingServer(t.home, name, ctx).rules;
+    if (nameInUse(t.home, name, ctx)) return { removed, permissionsCleared: false, rulesNotFollowed, nameStillInUse: true };
+    const path = join(t.home, "settings.json");
+    const current = settingsIfPresent(path);
+    if (current === undefined) return { removed, permissionsCleared: false, rulesNotFollowed };
+    const next = forgetConnectorPermissions(current, name);
+    if (next === current) return { removed, permissionsCleared: false, rulesNotFollowed };
+    saveSettings(path, next);
+    return { removed, permissionsCleared: true, rulesNotFollowed, settings: next };
+  } catch (err) {
+    return { removed, permissionsCleared: false, rulesNotFollowed, permissionsNote: `the server was removed, but its connector permissions could not be cleared (${err instanceof Error ? err.message : "unknown"}) — clear them with winter mcp permissions ${name} '*' default` };
+  }
+}
+
+export interface McpRenameOutcomeCore {
+  type: "stdio" | "http" | "sse";
+  carried: boolean;
+  keptOld: boolean;
+  /** Every rule that could name the OLD server (`rulesNamingServer`): never rewritten, it still names it. */
+  rulesNotFollowed: string[];
+  /** The deny/ask ones among them — they no longer protect the renamed server. */
+  protectiveRulesNotFollowed: string[];
+  /** A failure AFTER the rename (dropping the old name's settings) — the rename itself stands. */
+  note?: string;
+  settings?: Settings;
+}
+
+/**
+ * THE rename door with its settings half, shared by `mcp.rename` and the CLI's no-daemon path.
+ *   1. Refuse (typed, nothing written): an invalid new name, an old name the scope lacks, a new name the scope
+ *      has, a new name anything else uses (`mcp_server_name_in_use`), or one that already holds a stored row or
+ *      rules literally naming it (`mcp_rename_target_has_permissions`).
+ *   2. COPY the old name's permission row and `mcp.disabled` membership to the new name (the old ones stay —
+ *      never less strict).
+ *   3. Rename the entry in the scope (a failure here takes the copies back, best effort, and rethrows).
+ *   4. Drop the old name's row and `mcp.disabled` entry unless something still uses the old name (`keptOld`).
+ * Claude-grammar rules are never rewritten (this file's WS-27 header): the ones that could name the old server
+ * are listed in `rulesNotFollowed` for the user to edit.
+ */
+export function renameMcpServerCarryingSettings(t: McpScopeTarget, from: string, to: string, ctx: McpNameContext): McpRenameOutcomeCore {
+  const nameErr = validateMcpServerName(to);
+  if (nameErr) throw new McpRenameRefusal("mcp_invalid_name", nameErr);
+  const scopeServers = rawServersInScope(t);
+  const where = t.scope === "project" ? "this project's .winter/mcp.json" : t.scope === "local" ? "local config" : "user config";
+  if (!Object.hasOwn(scopeServers, from)) throw new McpRenameRefusal("mcp_server_not_found", `no MCP server named "${from}" in ${where}`);
+  if (Object.hasOwn(scopeServers, to)) throw new McpRenameRefusal("mcp_server_exists", `MCP server "${to}" already exists in ${where} — pick another name, or remove that one first`);
+  if (nameInUse(t.home, to, ctx)) {
+    throw new McpRenameRefusal("mcp_server_name_in_use", `"${to}" is already a server's name elsewhere (another scope, a plugin, a subagent definition or a live session) — connector settings are keyed by name, so the renamed server would take over that one's; pick another name`);
+  }
+  const path = join(t.home, "settings.json");
+  const before = settingsIfPresent(path);
+  if (before !== undefined && Object.hasOwn(before.mcp?.toolPermissions ?? {}, to)) {
+    throw new McpRenameRefusal("mcp_rename_target_has_permissions", `"${to}" already has connector permissions stored — clear them first (winter mcp permissions ${to} '*' default)`);
+  }
+  // …or leftover RULES literally naming it (`mcp__<to>`, `mcp__<to>__…`), in `sdk/settings.json` or in files
+  // Winter does not edit: the renamed server would silently take them over.
+  const leftover = rulesLiterallyNaming(t.home, to, ctx);
+  if (leftover.length > 0) {
+    throw new McpRenameRefusal("mcp_rename_target_has_permissions", `rules already name "${to}" (${leftover.join("; ")}) — remove them first, or pick another name`);
+  }
+  // 2. Copy first.
+  let carried = false;
+  let written: Settings | undefined;
+  if (before !== undefined) {
+    const copy = copyConnectorSettings(before, from, to);
+    if (copy.settings !== before) { saveSettings(path, copy.settings); written = copy.settings; }
+    carried = copy.carried;
+  }
+  // 3. Rename the entry. A failure takes the copies back.
+  let type: McpRenameOutcomeCore["type"];
+  try {
+    ({ type } = renameMcpServerInScope(t, from, to));
+  } catch (err) {
+    try {
+      if (written !== undefined) {
+        const now = loadSettings(path);
+        saveSettings(path, before?.mcp?.disabled?.includes(to) === true ? forgetConnectorPermissions(now, to) : dropConnectorSettings(now, to));
+        written = undefined;
+      }
+    } catch { /* best effort: settings on a name nothing defines are inert */ }
+    throw err;
+  }
+  const { rules: rulesNotFollowed, protective: protectiveRulesNotFollowed } = rulesNamingServer(t.home, from, ctx);
+  // 4. Drop the old name's settings — unless it is still in use.
+  let keptOld = true;
+  let note: string | undefined;
+  try {
+    keptOld = nameInUse(t.home, from, ctx);
+    if (!keptOld) {
+      const current = settingsIfPresent(path);
+      if (current !== undefined) {
+        const next = dropConnectorSettings(current, from);
+        if (next !== current) { saveSettings(path, next); written = next; }
+      }
+    }
+  } catch (err) {
+    note = `renamed, but the old name's connector settings could not be dropped (${err instanceof Error ? err.message : "unknown"}) — they apply to nothing now`;
+  }
+  return { type, carried, keptOld, rulesNotFollowed, protectiveRulesNotFollowed, ...(note !== undefined ? { note } : {}), ...(written !== undefined ? { settings: written } : {}) };
 }

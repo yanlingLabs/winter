@@ -27,8 +27,10 @@ import { canonicalMcpServerUrl, discoverMcpOAuthIssuer, sameIssuer, decodeMcpOAu
 import { randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { sdkLocalMcpServers, sdkUserMcpServers } from "../../settings";
+import { cliCommandName } from "../../profile";
 import { localScopeKeyFor, projectScopeRootFor, projectScopeTrusted } from "../../runtime-sdk/run-home-input";
 import { parseProjectMcpServers, readRawProjectMcpConfig, type McpOAuthSetting } from "./project-file";
+import { describeReconnectError } from "./reconnect";
 
 export type McpDoorScope = "local" | "user" | "project";
 
@@ -275,10 +277,10 @@ export class McpOAuthDoors {
       } catch (err) {
         const code = reasonOf(err);
         if (code === "client_secret_issuer_mismatch") {
-          throw new McpOAuthDoorRefusal("mcp_client_secret_issuer_mismatch", `${err instanceof Error ? err.message : "the client secret belongs to another authorization server"} — set the client secret again for this server (winter mcp set-secret ${server.name})`, { reason: code });
+          throw new McpOAuthDoorRefusal("mcp_client_secret_issuer_mismatch", `${err instanceof Error ? err.message : "the client secret belongs to another authorization server"} — set the client secret again for this server (${cliCommandName()} mcp set-secret ${server.name})`, { reason: code });
         }
         if (code === "client_secret_unavailable") {
-          throw new McpOAuthDoorRefusal("mcp_client_secret_unavailable", `MCP server "${server.name}" is a pre-registered client with a client secret, and none is stored — set it first (winter mcp set-secret ${server.name}, or Settings → MCP)`, { reason: code });
+          throw new McpOAuthDoorRefusal("mcp_client_secret_unavailable", `MCP server "${server.name}" is a pre-registered client with a client secret, and none is stored — set it first (${cliCommandName()} mcp set-secret ${server.name}, or Settings → MCP)`, { reason: code });
         }
         // The SDK's messages carry codes, origins and bounded text only (never a token or a URL's query).
         throw new McpOAuthDoorRefusal("mcp_login_failed", `the sign-in to "${server.name}" could not start: ${err instanceof Error ? err.message.slice(0, 300) : "failed"}`, { reason: code });
@@ -543,9 +545,10 @@ export class McpOAuthDoors {
 
   // --- lifecycle -------------------------------------------------------------------------------------
 
+  /** A follow-up's failure is logged the way a failed reconnect is (`describeReconnectError`: name, code, masked and capped message). */
   private track(p: Promise<void> | void): void {
     if (p === undefined) return;
-    const tracked = Promise.resolve(p).catch((err) => this.deps.log?.(`mcp: reconnecting live sessions failed (${err instanceof Error ? err.name : "unknown"})`)).finally(() => this.followUps.delete(tracked));
+    const tracked = Promise.resolve(p).catch((err) => this.deps.log?.(`mcp: reconnecting live sessions failed (${describeReconnectError(err)})`)).finally(() => this.followUps.delete(tracked));
     this.followUps.add(tracked);
   }
 

@@ -468,3 +468,135 @@ describe("a prompt another layer forced is never answered by a connector allow",
     expect(((await pending) as PermissionResult).behavior).toBe("allow");
   });
 });
+
+describe("WS-27: the runtime states the call's server (winter_mcp_server / mcpServer)", () => {
+  const hookWith = async (hook: HookCallback, toolName: string, stated: unknown): Promise<string> => {
+    const r = await hook({ hook_event_name: "PreToolUse", tool_name: toolName, tool_input: {}, session_id: "b", transcript_path: "", cwd: "/tmp", ...(stated !== undefined ? { winter_mcp_server: stated } : {}) } as never, "tu1", { signal: new AbortController().signal }) as { hookSpecificOutput?: { permissionDecision?: string } };
+    return r.hookSpecificOutput?.permissionDecision ?? "none";
+  };
+  const statedCtx = (mcpServer: unknown): Parameters<CanUseTool>[2] => ({ ...ctx(), mcpServer }) as Parameters<CanUseTool>[2];
+
+  test("the exact server, no split: `cf__prod`'s deny binds and `cf`'s blanket allow never reaches it", () => {
+    const source = liveSource({ cf: { "*": "allow" }, cf__prod: { delete: "deny" } });
+    expect(connectorFactsFor(source, "mcp__cf__prod__delete", undefined, { name: "cf__prod", configName: "cf__prod" })).toEqual({ server: "cf__prod", tool: "delete", setting: "deny", settingSource: "tool", readOnly: false });
+    // …and a call the runtime says is `cf`'s tool `prod__delete` takes `cf`'s value.
+    expect(connectorFactsFor(source, "mcp__cf__prod__delete", undefined, { name: "cf", configName: "cf" })).toMatchObject({ server: "cf", tool: "prod__delete", setting: "allow" });
+  });
+
+  test("a subagent's renamed server (cf_2) is keyed by its config name (cf); a stricter value stored under cf_2 still binds", () => {
+    const stated = { name: "cf_2", configName: "cf" };
+    expect(connectorFactsFor(liveSource({ cf: { list: "ask" } }), "mcp__cf_2__list", undefined, stated)).toMatchObject({ server: "cf", tool: "list", setting: "ask" });
+    expect(connectorFactsFor(liveSource({ cf: { list: "allow" }, cf_2: { "*": "deny" } }), "mcp__cf_2__list", undefined, stated)).toMatchObject({ setting: "deny", settingSource: "server" });
+    expect(connectorFactsFor(liveSource({ cf: { list: "deny" }, cf_2: { list: "allow" } }), "mcp__cf_2__list", undefined, stated)).toMatchObject({ setting: "deny" });
+  });
+
+  test("read-only is the stated hint, never the daemon's probe", () => {
+    const probedReadOnly = liveSource({}, { "cf/list": true });
+    expect(connectorFactsFor(probedReadOnly, "mcp__cf__list", undefined, { name: "cf", configName: "cf" })?.readOnly).toBe(false);
+    expect(connectorFactsFor(liveSource({}), "mcp__cf__list", undefined, { name: "cf", configName: "cf", readOnlyHint: true })?.readOnly).toBe(true);
+  });
+
+  test("a statement that does not fit the tool name, and a capability tool, fall back / stay excluded", () => {
+    const source = liveSource({ cf: { list: "deny" } });
+    expect(connectorFactsFor(source, "mcp__cf__list", undefined, { name: "other", configName: "other" })).toMatchObject({ server: "cf", setting: "deny" });
+    expect(connectorFactsFor(source, "mcp__winter__external__x", undefined, { name: "winter__external", configName: "winter__external" })).toBeUndefined();
+  });
+
+  test("the hook floor reads winter_mcp_server: a subagent's renamed inline server (cf_2) takes its config name's deny, even under bypass", async () => {
+    const session: Session = { label: "bypass", mode: "code", policy: "bypass" };
+    const hook = connectorHookOf(session, liveSource({ cf: { "*": "deny" } }));
+    expect(await hookWith(hook, "mcp__cf_2__list", { name: "cf_2", config_name: "cf" })).toBe("deny");
+    // Absent (an older runtime): the split resolver — `cf_2` has no value, so bypass runs it (no opinion).
+    expect(await hookWith(hook, "mcp__cf_2__list", undefined)).toBe("none");
+    // Malformed: ignored, same fallback.
+    expect(await hookWith(hook, "mcp__cf_2__list", { name: "cf_2" })).toBe("none");
+  });
+
+  test("the hook floor allows an unset action the runtime says is read-only, in chat", async () => {
+    const session: Session = { label: "chat", mode: "chat", policy: "chat" };
+    const hook = connectorHookOf(session, liveSource({}));
+    expect(await hookWith(hook, "mcp__cf__list", { name: "cf", config_name: "cf", read_only_hint: true })).toBe("allow");
+    expect(await hookWith(hook, "mcp__cf__list", { name: "cf", config_name: "cf", read_only_hint: false })).toBe("ask");
+  });
+
+  test("review fix 1: the DECLARED spelling (mcp__cf__x, stated cf_2/cf) is resolved from the statement, never the parent's probe", async () => {
+    const stated = { name: "cf_2", configName: "cf", readOnlyHint: false };
+    const probedReadOnly = liveSource({}, { "cf/x": true });
+    expect(connectorFactsFor(probedReadOnly, "mcp__cf__x", undefined, stated)).toEqual({ server: "cf", tool: "x", readOnly: false });
+    // A deny stored under the renamed name is found through the declared spelling too.
+    expect(connectorFactsFor(liveSource({ cf_2: { x: "deny" } }), "mcp__cf__x", undefined, stated)).toMatchObject({ setting: "deny" });
+    // Through the real hook, in chat: the probe's read-only would have allowed it unasked; the statement cards it.
+    const chat: Session = { label: "chat", mode: "chat", policy: "chat" };
+    expect(await hookWith(connectorHookOf(chat, probedReadOnly), "mcp__cf__x", { name: "cf_2", config_name: "cf", read_only_hint: false })).toBe("ask");
+    const bypass: Session = { label: "bypass", mode: "code", policy: "bypass" };
+    expect(await hookWith(connectorHookOf(bypass, liveSource({ cf_2: { "*": "deny" } })), "mcp__cf__x", { name: "cf_2", config_name: "cf", read_only_hint: false })).toBe("deny");
+    // …and through the real bridge (canUseTool's mcpServer), in chat: a card, not the probe's silent allow.
+    const { canUse, events, approvals } = bridgeOf(chat, probedReadOnly);
+    const pending = canUse("mcp__cf__x", {}, statedCtx({ name: "cf_2", configName: "cf", readOnlyHint: false }));
+    const card = events.find((e) => e.type === "approval_requested") as { callId: string } | undefined;
+    expect(card).toBeDefined();
+    approvals.resolve("s_1", card!.callId, false, "test");
+    await pending;
+    const denied = await bridgeOf({ label: "ask", mode: "code", policy: "ask" }, liveSource({ cf_2: { x: "deny" } })).canUse("mcp__cf__x", {}, statedCtx({ name: "cf_2", configName: "cf" })) as PermissionResult;
+    expect(denied.behavior).toBe("deny");
+  });
+
+  test("review fix 5: the renamed name only tightens — deny > ask > default > allow", () => {
+    const stated = { name: "cf_2", configName: "cf" };
+    // Unset cf + cf_2's blanket allow: NOT allow (the default stands).
+    expect(connectorFactsFor(liveSource({ cf_2: { "*": "allow" } }), "mcp__cf_2__x", undefined, stated)?.setting).toBeUndefined();
+    // cf's ask + cf_2's allow: ask. cf's allow + cf_2's ask: ask. Unset cf + cf_2's ask: ask.
+    expect(connectorFactsFor(liveSource({ cf: { x: "ask" }, cf_2: { x: "allow" } }), "mcp__cf_2__x", undefined, stated)?.setting).toBe("ask");
+    expect(connectorFactsFor(liveSource({ cf: { x: "allow" }, cf_2: { x: "ask" } }), "mcp__cf_2__x", undefined, stated)?.setting).toBe("ask");
+    expect(connectorFactsFor(liveSource({ cf_2: { x: "ask" } }), "mcp__cf_2__x", undefined, stated)?.setting).toBe("ask");
+    // cf's allow does NOT reach a renamed (different) server: the default.
+    expect(connectorFactsFor(liveSource({ cf: { x: "allow" } }), "mcp__cf_2__x", undefined, stated)?.setting).toBeUndefined();
+    // …while a server that was not renamed takes its own allow as ever.
+    expect(connectorFactsFor(liveSource({ cf: { x: "allow" } }), "mcp__cf__x", undefined, { name: "cf", configName: "cf" })?.setting).toBe("allow");
+  });
+
+  test("SDK review: a RENAMED server never inherits an allow stored under its config name (hook and bridge, chat and code)", async () => {
+    const source = liveSource({ cf: { "*": "allow" } });
+    const hookStated = { name: "cf_2", config_name: "cf", read_only_hint: false };
+    const bridgeStated = { name: "cf_2", configName: "cf", readOnlyHint: false };
+    // Chat: the user's own `cf` would run unasked; the subagent's renamed `cf` cards (the default).
+    const chat: Session = { label: "chat", mode: "chat", policy: "chat" };
+    expect(await hookWith(connectorHookOf(chat, source), "mcp__cf__x", { name: "cf", config_name: "cf" })).toBe("allow");
+    expect(await hookWith(connectorHookOf(chat, source), "mcp__cf_2__x", hookStated)).toBe("ask");
+    {
+      const { canUse, events, approvals } = bridgeOf(chat, source);
+      const pending = canUse("mcp__cf_2__x", {}, statedCtx(bridgeStated));
+      const card = events.find((e) => e.type === "approval_requested") as { callId: string } | undefined;
+      expect(card).toBeDefined();
+      approvals.resolve("s_1", card!.callId, false, "test");
+      await pending;
+    }
+    // Code/ask: no allow — the gate's own verdict (a card), not the explicit allow the floor gives `cf`.
+    const code: Session = { label: "ask", mode: "code", policy: "ask" };
+    expect(await hookWith(connectorHookOf(code, source), "mcp__cf__x", { name: "cf", config_name: "cf" })).toBe("allow");
+    expect(await hookWith(connectorHookOf(code, source), "mcp__cf_2__x", hookStated)).toBe("none");
+    {
+      const { canUse, events, approvals } = bridgeOf(code, source);
+      const pending = canUse("mcp__cf_2__x", {}, statedCtx(bridgeStated));
+      const card = events.find((e) => e.type === "approval_requested") as { callId: string } | undefined;
+      expect(card).toBeDefined();
+      approvals.resolve("s_1", card!.callId, false, "test");
+      await pending;
+    }
+    // Deny and ask under the config name still bind the renamed server; its stated read-only hint still
+    // makes an unset action run unasked.
+    expect(await hookWith(connectorHookOf(code, liveSource({ cf: { x: "deny" } })), "mcp__cf_2__x", hookStated)).toBe("deny");
+    expect(await hookWith(connectorHookOf(code, liveSource({ cf: { x: "ask" } })), "mcp__cf_2__x", hookStated)).toBe("ask");
+    expect(await hookWith(connectorHookOf(chat, source), "mcp__cf_2__x", { ...hookStated, read_only_hint: true })).toBe("allow");
+    const denied = await bridgeOf(code, liveSource({ cf: { x: "deny" } })).canUse("mcp__cf_2__x", {}, statedCtx(bridgeStated)) as PermissionResult;
+    expect(denied.behavior).toBe("deny");
+  });
+
+  test("the bridge reads canUseTool's mcpServer: a stored deny under the config name refuses the renamed call", async () => {
+    const session: Session = { label: "ask", mode: "code", policy: "ask" };
+    const { canUse } = bridgeOf(session, liveSource({ cf: { list: "deny" } }));
+    const denied = await canUse("mcp__cf_2__list", {}, statedCtx({ name: "cf_2", configName: "cf" })) as PermissionResult;
+    expect(denied.behavior).toBe("deny");
+    expect((denied as { message: string }).message).toContain("the cf connector");
+  });
+});

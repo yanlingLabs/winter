@@ -46,8 +46,8 @@ import {
 } from "./plugin-cli";
 import { parseModelArgs, validateEffort, validateModelTag, internalProviderNote, validateAdvisorSlug, renderModelListing, modelDisplayWithHint, type ModelListingRow } from "./model-cli";
 import {
-  runMcpAddRoute, runMcpAddJsonRoute, runMcpRemoveRoute, runMcpGetRoute,
-  renderMcpAddOutcome, renderMcpRemoveOutcome, renderMcpGetOutcome,
+  runMcpAddRoute, runMcpAddJsonRoute, runMcpRemoveRoute, runMcpRenameRoute, runMcpGetRoute,
+  renderMcpAddOutcome, renderMcpRemoveOutcome, renderMcpRenameOutcome, renderMcpGetOutcome,
   runMcpLoginRoute, runMcpLogoutRoute, runMcpSetSecretRoute, renderMcpAuthOutcome, mcpAuthNote, type McpAuthDeps,
   runMcpPermissionsRoute, renderMcpPermissionsOutcome,
 } from "./mcp-cli";
@@ -1927,7 +1927,7 @@ if (import.meta.main) {
     // `connect()`: these are write verbs, and `connect()` auto-launches the dist app on a dead
     // socket — exactly the "surprise, not a service" `openCredentialDaemonDoor`'s own doc warns
     // against for `winter login`/`credentials`.
-    if (sub === "add" || sub === "add-json" || sub === "remove" || sub === "get") {
+    if (sub === "add" || sub === "add-json" || sub === "remove" || sub === "rename" || sub === "get") {
       const winterHome = resolveWinterHome();
       const door = await openCredentialDaemonDoor();
       // `openCredentialDaemonDoor` is typed narrowly (`CredentialRpcDoor`: `request`/`close` only —
@@ -1938,7 +1938,9 @@ if (import.meta.main) {
       // Each names `scope: "user"`: `mcp.add`/`remove`/`get` default a missing scope to "local" since WS-21.
       const mcpDoor = door ? {
         mcpAdd: (name: string, entry: unknown) => door.request(METHODS.mcpAdd, { name, entry, scope: "user" }),
-        mcpRemove: (name: string) => door.request(METHODS.mcpRemove, { name, scope: "user" }),
+        // WS-27 (review 6): remove and rename go through the daemon for EVERY scope, as `permissions` does.
+        mcpRemove: (name: string, scope: "user" | "local" | "project" = "user", cwd?: string) => door.request(METHODS.mcpRemove, { name, scope, ...(cwd !== undefined ? { cwd } : {}) }),
+        mcpRename: (name: string, newName: string, scope: "user" | "local" | "project" = "user", cwd?: string) => door.request(METHODS.mcpRename, { name, newName, scope, ...(cwd !== undefined ? { cwd } : {}) }),
         mcpGet: (name: string) => door.request(METHODS.mcpGet, { name, scope: "user" }),
       } : undefined;
       const deps = { cwd: process.cwd(), winterHome, door: mcpDoor };
@@ -1960,6 +1962,14 @@ if (import.meta.main) {
         door?.close();
         process.exit(outcome.ok ? 0 : 1);
       }
+      if (sub === "rename") {
+        // WS-27: within one scope, carrying the connector permissions and `mcp.disabled` (`mcp-cli.ts`).
+        const outcome = await runMcpRenameRoute(rest, deps);
+        if (outcome.ok) console.log(renderMcpRenameOutcome(outcome));
+        else console.error(renderMcpRenameOutcome(outcome));
+        door?.close();
+        process.exit(outcome.ok ? 0 : 1);
+      }
       // sub === "get" — "not found" is a typed, non-throwing result (`found: false`), but still
       // exits 1 (mirrors claude's own `mcpGetHandler`, which `cliError`s on a missing name).
       const outcome = await runMcpGetRoute(rest, deps);
@@ -1976,7 +1986,7 @@ if (import.meta.main) {
     if (sub === "login" || sub === "logout" || sub === "set-secret") {
       const winterHome = resolveWinterHome();
       const door = await openCredentialDaemonDoor();
-      const { McpOAuthDoors, daemonMcpOAuthStore, keychainService, TrustStore } = await import("@yanlinglabs/winter-core");
+      const { McpOAuthDoors, daemonMcpOAuthStore, keychainService, TrustStore, cliCommandName } = await import("@yanlinglabs/winter-core");
       const deps: McpAuthDeps = {
         cwd: process.cwd(),
         ...(door !== undefined ? { door } : {}),
@@ -2006,6 +2016,7 @@ if (import.meta.main) {
         platform: process.platform,
         print: (line) => console.log(line),
         poke: () => notifyDaemonOfOutOfBandCredentialChange(openCredentialDaemonDoor),
+        commandName: cliCommandName(),
       };
       const outcome = sub === "login" ? await runMcpLoginRoute(rest, deps) : sub === "logout" ? await runMcpLogoutRoute(rest, deps) : await runMcpSetSecretRoute(rest, deps);
       if (outcome.ok) console.log(renderMcpAuthOutcome(outcome));
@@ -2029,7 +2040,7 @@ if (import.meta.main) {
     // `add-from-claude-desktop` (an Ink dialog over Claude Desktop's OWN config format — not
     // trivially mappable), `reset-project-choices` (Winter has no per-project approve/reject ledger
     // for `.mcp.json` servers — `winter trust`'s directory-level TrustStore is the only gate).
-    console.error("usage: winter mcp [list] | get <name> | login <name> [--yes] [--confirm-issuer-change] | logout <name> [--forget-client] | set-secret <name> [--from-clipboard [--issuer <issuer>]] | add [-s local|user|project] [-t stdio|sse|http] [-e KEY=value...] [-H \"Name: value\"...] [--version-negotiation legacy|auto|<revision>] <name> <commandOrUrl> [-- args...] | add-json [-s local|user|project] <name> <json> | remove <name> [-s local|user|project] | permissions <server> [<tool> | '*'] [allow|ask|deny|default]");
+    console.error("usage: winter mcp [list] | get <name> | login <name> [--yes] [--confirm-issuer-change] | logout <name> [--forget-client] | set-secret <name> [--from-clipboard [--issuer <issuer>]] | add [-s local|user|project] [-t stdio|sse|http] [-e KEY=value...] [-H \"Name: value\"...] [--version-negotiation legacy|auto|<revision>] <name> <commandOrUrl> [-- args...] | add-json [-s local|user|project] <name> <json> | remove <name> [-s local|user|project] | rename <old> <new> [-s local|user|project] | permissions <server> [<tool> | '*'] [allow|ask|deny|default]");
     process.exit(1);
   }
   case "plugin": {

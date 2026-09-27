@@ -192,6 +192,23 @@ describe("mcp.tools / mcp.setToolPermission", () => {
     c2.close();
   });
 
+  test("WS-27: a subagent definition's inline server is listed (mcp.list source agent) and its values set by config name", async () => {
+    const { home, c } = await boot();
+    mkdirSync(join(home, "sdk", "agents"), { recursive: true });
+    writeFileSync(join(home, "sdk", "agents", "helper.md"), "---\nname: helper\ndescription: helps\nmcpServers:\n  - cf\n  - db:\n      command: db-mcp\n---\nHelp.\n");
+    const list = (await c.request(METHODS.mcpList, {})).result.servers;
+    expect(list.find((s: { name: string }) => s.name === "db")).toEqual({ name: "db", status: "unmanaged", toolNames: [], source: "agent" });
+    // `cf` is also referenced by name — the user server's row stands, no duplicate agent row.
+    expect(list.filter((s: { name: string }) => s.name === "cf").map((s: { source: string }) => s.source)).toEqual(["user"]);
+    await c.request(METHODS.mcpSetToolPermission, { server: "db", tool: "query", permission: "deny" });
+    const r = await c.request(METHODS.mcpTools, { server: "db" });
+    expect(McpToolsResult.parse(r.result)).toBeTruthy();
+    expect(r.result.servers).toEqual([{ name: "db", status: "unmanaged", source: "agent", listed: false, tools: [
+      { name: "query", toolName: "mcp__db__query", readOnly: false, setting: "deny", permission: "deny", source: "tool" },
+    ] }]);
+    c.close();
+  });
+
   test("not remote-allowed — local role only", () => {
     expect(REMOTE_ALLOWED_METHODS.has(METHODS.mcpTools)).toBe(false);
     expect(REMOTE_ALLOWED_METHODS.has(METHODS.mcpSetToolPermission)).toBe(false);

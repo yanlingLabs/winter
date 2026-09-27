@@ -6,7 +6,7 @@ import { readSdkGlobalConfig } from "@yanlinglabs/winter-core";
 import {
   parseMcpAddArgs, parseMcpAddJsonArgs, parseMcpRemoveArgs, parseMcpGetArgs,
   ensureMcpScope, ensureMcpTransport, parseMcpHeaders, parseMcpEnv, looksLikeMcpUrl,
-  buildMcpEntry, parseMcpVersionNegotiation, runMcpAddRoute, runMcpAddJsonRoute, runMcpRemoveRoute, runMcpGetRoute,
+  buildMcpEntry, parseMcpVersionNegotiation, runMcpAddRoute, runMcpAddJsonRoute, runMcpRemoveRoute, runMcpRenameRoute, renderMcpRenameOutcome, runMcpGetRoute,
   renderMcpAddOutcome, renderMcpRemoveOutcome, renderMcpGetOutcome, winterMcpConfigPath,
   type McpDoor, type McpRouteDeps,
 } from "../src/mcp-cli";
@@ -528,5 +528,131 @@ describe("R.3 residual: mcp --scope project from a linked worktree of a trusted 
     const fromMain = await runMcpAddRoute(["-s", "project", "mainsrv", "node", "m.js"], { cwd: main, winterHome });
     expect(fromMain).toEqual({ ok: true, scope: "project", name: "mainsrv", transport: "stdio", cwd: main, trusted: true });
     expect(Object.keys(JSON.parse(readFileSync(join(main, ".winter", "mcp.json"), "utf8")).mcpServers)).toEqual(["mainsrv"]);
+  });
+});
+
+describe("WS-27: remove and rename carry the connector settings", () => {
+  function setup(servers: Record<string, unknown>, settings: Record<string, unknown>) {
+    const winterHome = realpathSync(mkdtempSync(join(tmpdir(), "winter-mcp-cli-ws27-home-")));
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-mcp-cli-ws27-cwd-")));
+    mkdirSync(join(winterHome, "sdk"), { recursive: true });
+    writeFileSync(join(winterHome, "sdk", ".winter.json"), JSON.stringify(servers));
+    writeFileSync(join(winterHome, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" }, ...settings }));
+    const perms = () => JSON.parse(readFileSync(join(winterHome, "settings.json"), "utf8")).mcp?.toolPermissions;
+    return { deps: { cwd, winterHome }, winterHome, cwd, perms };
+  }
+
+  test("remove with no daemon clears the permissions of a name nothing else defines", async () => {
+    const f = setup({ mcpServers: { cf: { type: "stdio", command: "cf" } } }, { mcp: { toolPermissions: { cf: { "*": "deny" } } } });
+    const outcome = await runMcpRemoveRoute(["cf", "-s", "user"], f.deps);
+    expect(outcome).toEqual({ ok: true, scope: "user", name: "cf", removed: true, permissionsCleared: true });
+    expect(f.perms()).toBeUndefined();
+    expect(renderMcpRemoveOutcome(outcome)).toContain("and cleared its connector permissions");
+  });
+
+  test("remove at local scope keeps the permissions while the user scope still defines the name", async () => {
+    const f = setup({}, { mcp: { toolPermissions: { cf: { list: "ask" } } } });
+    writeFileSync(join(f.winterHome, "sdk", ".winter.json"), JSON.stringify({ mcpServers: { cf: { type: "stdio", command: "cf" } }, projects: { [f.cwd]: { mcpServers: { cf: { type: "stdio", command: "cf-local" } } } } }));
+    const outcome = await runMcpRemoveRoute(["cf", "-s", "local"], f.deps);
+    expect(outcome).toMatchObject({ ok: true, scope: "local", removed: true });
+    expect("permissionsCleared" in outcome).toBe(false);
+    expect(f.perms()).toEqual({ cf: { list: "ask" } });
+  });
+
+  test("rename (no -s: the one scope defining it) moves the entry and its permissions", async () => {
+    const f = setup({ mcpServers: { cf: { type: "stdio", command: "cf" } } }, { mcp: { toolPermissions: { cf: { "*": "ask" } } } });
+    const outcome = await runMcpRenameRoute(["cf", "cloudflare"], f.deps);
+    expect(outcome).toEqual({ ok: true, scope: "user", name: "cf", newName: "cloudflare", carried: true, keptOld: false, rulesNotFollowed: [], via: "local" });
+    expect(JSON.parse(readFileSync(join(f.winterHome, "sdk", ".winter.json"), "utf8")).mcpServers).toEqual({ cloudflare: { type: "stdio", command: "cf" } });
+    expect(f.perms()).toEqual({ cloudflare: { "*": "ask" } });
+    expect(renderMcpRenameOutcome(outcome)).toContain('Renamed MCP server "cf" to "cloudflare"');
+  });
+
+  test("rename refuses a taken name and a missing one; a live door handles the user scope", async () => {
+    const f = setup({ mcpServers: { cf: { type: "stdio", command: "cf" }, gh: { type: "stdio", command: "gh" } } }, {});
+    expect(await runMcpRenameRoute(["cf", "gh", "-s", "user"], f.deps)).toMatchObject({ ok: false, code: "mcp_server_exists" });
+    expect(await runMcpRenameRoute(["nope", "x"], f.deps)).toMatchObject({ ok: false, code: "mcp_server_not_found" });
+    expect(await runMcpRenameRoute(["cf"], f.deps)).toMatchObject({ ok: false, message: expect.stringContaining("usage: winter mcp rename") });
+    const calls: unknown[] = [];
+    const door: McpDoor = {
+      mcpAdd: async () => { throw new Error("unused"); },
+      mcpRemove: async (name) => ({ ok: true, name, removed: false }),
+      mcpGet: async (name) => ({ ok: true, name, found: name === "cf" }),
+      mcpRename: async (name, newName, scope, cwd) => { calls.push([name, newName, scope, cwd]); return { ok: true, name, newName, carried: false, keptOld: false }; },
+    };
+    expect(await runMcpRenameRoute(["cf", "cf2"], { ...f.deps, door })).toMatchObject({ ok: true, scope: "user", via: "daemon" });
+    // Review 6: a live daemon takes local and project scope too, with the cwd.
+    expect(await runMcpRenameRoute(["cf", "cf3", "-s", "local"], { ...f.deps, door })).toMatchObject({ ok: true, scope: "local", via: "daemon" });
+    expect(calls).toEqual([["cf", "cf2", "user", undefined], ["cf", "cf3", "local", f.cwd]]);
+  });
+});
+
+describe("WS-27 review 6: with a live daemon, remove goes through mcp.remove for every scope", () => {
+  test("local and project removes call the door with scope and cwd, and report its permissionsCleared", async () => {
+    const winterHome = realpathSync(mkdtempSync(join(tmpdir(), "winter-mcp-cli-r6-home-")));
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-mcp-cli-r6-cwd-")));
+    const calls: unknown[] = [];
+    const door: McpDoor = {
+      mcpAdd: async () => { throw new Error("unused"); },
+      mcpRemove: async (name, scope, c) => { calls.push([name, scope, c]); return { ok: true, name, removed: true, permissionsCleared: true }; },
+      mcpGet: async (name) => ({ ok: true, name, found: false }),
+    };
+    expect(await runMcpRemoveRoute(["x", "-s", "local"], { cwd, winterHome, door })).toEqual({ ok: true, scope: "local", name: "x", removed: true, permissionsCleared: true, root: cwd });
+    mkdirSync(join(cwd, ".winter"), { recursive: true });
+    writeFileSync(join(cwd, ".winter", "mcp.json"), JSON.stringify({ mcpServers: { x: { command: "x" } } }));
+    expect(await runMcpRemoveRoute(["x", "-s", "project"], { cwd, winterHome, door })).toMatchObject({ ok: true, scope: "project", removed: true });
+    expect(calls).toEqual([["x", "local", cwd], ["x", "project", cwd]]);
+  });
+
+  test("rename lists the rules that still name the old server, and says they were not rewritten", () => {
+    const text = renderMcpRenameOutcome({ ok: true, scope: "user", name: "cf", newName: "cfx", carried: true, keptOld: false, rulesNotFollowed: ["/p/.winter/settings.json: mcp__cf__list"], via: "daemon" });
+    expect(text).toContain('These rules could still name "cf" — Winter never rewrites a rule');
+    expect(text).toContain("/p/.winter/settings.json: mcp__cf__list");
+  });
+});
+
+describe("WS-27 round 3: remove lists the rules that remain (it never drops one)", () => {
+  test("rendered plainly", () => {
+    const text = renderMcpRemoveOutcome({ ok: true, scope: "user", name: "cf", removed: true, permissionsCleared: true, rulesNotFollowed: ["/h/sdk/settings.json: mcp__cf__list"] });
+    expect(text).toContain("and cleared its connector permissions");
+    expect(text).toContain('These rules could still name "cf" and remain as they are');
+    expect(text).toContain("/h/sdk/settings.json: mcp__cf__list");
+  });
+});
+
+describe("WS-27 wording: deny/ask rules on a rename, and rules that still apply after a remove", () => {
+  test("rename calls out the deny/ask rules left on the old name on their own line", () => {
+    const text = renderMcpRenameOutcome({
+      ok: true, scope: "user", name: "cf", newName: "cloudflare", carried: true, keptOld: false,
+      rulesNotFollowed: ["/h/sdk/settings.json: mcp__cf__list", "/h/sdk/settings.json: mcp__cf__drop"],
+      protectiveRulesNotFollowed: ["/h/sdk/settings.json: mcp__cf__drop"], via: "daemon",
+    });
+    const line = text.split("\n").find((l) => l.startsWith("These deny/ask rules"));
+    expect(line).toBe('These deny/ask rules no longer protect "cloudflare": /h/sdk/settings.json: mcp__cf__drop — add them for "cloudflare" if you still want them.');
+    // No deny/ask rule: no such line.
+    expect(renderMcpRenameOutcome({ ok: true, scope: "user", name: "cf", newName: "cfx", carried: false, keptOld: false, rulesNotFollowed: ["/h/sdk/settings.json: mcp__cf__list"], via: "daemon" })).not.toContain("no longer protect");
+  });
+
+  test("remove, with the name still in use elsewhere, says the rules still apply to that server (and not to edit them away)", () => {
+    const text = renderMcpRemoveOutcome({ ok: true, scope: "local", name: "cf", removed: true, root: "/p", rulesNotFollowed: ["/h/sdk/settings.json: mcp__cf__drop"], nameStillInUse: true });
+    expect(text).toContain("a server of that name remains (another scope or a live session), and they still apply to it");
+    expect(text).not.toContain("if you want them gone");
+  });
+
+  test("both facts come through the in-process doors", async () => {
+    const winterHome = realpathSync(mkdtempSync(join(tmpdir(), "winter-mcp-cli-wording-")));
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-mcp-cli-wording-cwd-")));
+    mkdirSync(join(winterHome, "sdk"), { recursive: true });
+    const config = { mcpServers: { cf: { type: "stdio", command: "cf" }, gh: { type: "stdio", command: "gh" } }, projects: { [cwd]: { mcpServers: { cf: { type: "stdio", command: "cf-local" } } } } };
+    writeFileSync(join(winterHome, "sdk", ".winter.json"), JSON.stringify(config));
+    const sdk = join(winterHome, "sdk", "settings.json");
+    writeFileSync(sdk, JSON.stringify({ permissions: { allow: ["mcp__gh__list"], deny: ["mcp__gh__drop"], ask: ["mcp__gh__push"], } }));
+    const renamed = await runMcpRenameRoute(["gh", "github", "-s", "user"], { cwd, winterHome });
+    expect(renamed).toMatchObject({ ok: true });
+    expect((renamed as { protectiveRulesNotFollowed?: string[] }).protectiveRulesNotFollowed?.sort()).toEqual([`${sdk}: mcp__gh__drop`, `${sdk}: mcp__gh__push`].sort());
+    // `cf` is also defined in the local scope: removing the user one leaves a server of that name.
+    writeFileSync(sdk, JSON.stringify({ permissions: { deny: ["mcp__cf__drop"] } }));
+    const removed = await runMcpRemoveRoute(["cf", "-s", "user"], { cwd, winterHome });
+    expect(removed).toMatchObject({ ok: true, removed: true, nameStillInUse: true, rulesNotFollowed: [`${sdk}: mcp__cf__drop`] });
   });
 });

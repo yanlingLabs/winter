@@ -32,15 +32,23 @@
 //   - `project` has always been direct (this file's own precedent, pre-WS-21): `.winter/mcp.json`
 //     isn't daemon state either — no watcher, no settings-schema validation, just a project file the
 //     router reads live off disk when trusted (spec §3.4.5).
+//
+// WS-27: `remove` and the new `rename` also carry the name's CONNECTOR SETTINGS (`settings.json` →
+// `mcp.toolPermissions` and `mcp.disabled`), keyed by name across every scope; claude-grammar rules are never
+// edited, only listed (`rulesNotFollowed`). So with a live daemon they go through `mcp.remove`/`mcp.rename` for EVERY scope (scope + cwd,
+// as `permissions` does) — only the daemon knows which servers its live sessions still have connected. With
+// no daemon, the same core doors run in-process (`removeMcpServerForgettingPermissions`,
+// `renameMcpServerCarryingSettings`).
 import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
-  addSdkUserMcpServer, removeSdkUserMcpServer, sdkUserMcpServers, sdkLocalMcpServers,
+  addSdkUserMcpServer, sdkUserMcpServers, sdkLocalMcpServers,
   readSdkGlobalConfig, updateSdkGlobalConfig, sdkGlobalConfigPath, validateMcpServerEntryForWrite, validateMcpServerName,
   parseProjectMcpServers, TrustStore,
   stripCredentialShapedMcpHeaders, readRawSettings,
   localScopeKeyFor, projectScopeRootFor, projectScopeTrusted,
   loadSettings, saveSettings, setConnectorToolPermission, connectorPermissionTable,
+  removeMcpServerForgettingPermissions, renameMcpServerCarryingSettings, McpRenameRefusal,
   type McpServerSettingsEntry, type ProjectMcpServerEntry,
 } from "@yanlinglabs/winter-core";
 import { McpAddEntrySchema } from "@yanlinglabs/winter-protocol";
@@ -53,7 +61,10 @@ export type McpTransport = "stdio" | "http" | "sse";
  *  header for why `local`/`project` never reach this door on this branch). */
 export interface McpDoor {
   mcpAdd(name: string, entry: McpServerSettingsEntry): Promise<{ ok: true; name: string; transport: McpTransport; started: boolean }>;
-  mcpRemove(name: string): Promise<{ ok: true; name: string; removed: boolean }>;
+  /** WS-27: every scope (`cwd` for local/project) — the daemon decides whether the permissions may go. */
+  mcpRemove(name: string, scope?: McpScope, cwd?: string): Promise<{ ok: true; name: string; removed: boolean; permissionsCleared?: boolean; rulesNotFollowed?: string[]; nameStillInUse?: boolean; permissionsNote?: string }>;
+  /** WS-27: `mcp.rename`, every scope (optional, so a door built before it still fits). */
+  mcpRename?(name: string, newName: string, scope?: McpScope, cwd?: string): Promise<McpRenameDoorResult>;
   mcpGet(name: string): Promise<{
     ok: true; name: string; found: boolean; transport?: McpTransport;
     command?: string; args?: string[]; env?: Record<string, string>;
@@ -318,25 +329,6 @@ function addSdkLocalMcpServer(home: string, root: string, name: string, entry: u
   return valid;
 }
 
-function removeSdkLocalMcpServer(home: string, root: string, name: string): boolean {
-  const current = readSdkGlobalConfig(home);
-  const currentServers = current.projects?.[root]?.mcpServers as Record<string, unknown> | undefined;
-  if (!currentServers || !Object.hasOwn(currentServers, name)) return false;
-  let removed = false;
-  updateSdkGlobalConfig(home, (config) => {
-    const projects = { ...(config.projects ?? {}) };
-    const existing = projects[root];
-    const servers = existing?.mcpServers as Record<string, unknown> | undefined;
-    if (!existing || !servers || !Object.hasOwn(servers, name)) return config;
-    removed = true;
-    const rest = { ...servers };
-    delete rest[name];
-    projects[root] = { ...existing, mcpServers: rest };
-    return { ...config, projects };
-  });
-  return removed;
-}
-
 function sdkLocalServer(home: string, root: string, name: string): McpServerSettingsEntry | undefined {
   const servers = readSdkGlobalConfig(home).projects?.[root]?.mcpServers as Record<string, McpServerSettingsEntry> | undefined;
   return servers?.[name];
@@ -399,13 +391,6 @@ function addProjectMcpServer(servers: Record<string, unknown>, name: string, ent
     throw new Error(`MCP server "${name}" already exists in project config — remove it first ("winter mcp remove ${name} --scope project") or edit .winter/mcp.json directly`);
   }
   return { ...servers, [name]: entry };
-}
-
-function removeProjectMcpServerEntry(servers: Record<string, unknown>, name: string): { servers: Record<string, unknown>; removed: boolean } {
-  if (!Object.hasOwn(servers, name)) return { servers, removed: false };
-  const next = { ...servers };
-  delete next[name];
-  return { servers: next, removed: true };
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -586,10 +571,12 @@ export async function runMcpAddJsonRoute(args: string[], deps: McpRouteDeps): Pr
   return addUserScope(deps, parsed.name, shaped.data, shaped.data.type);
 }
 
+/** WS-27: `permissionsCleared` is set (true) only when the removal also dropped the name's connector
+ *  permissions — nothing else defined a server of that name any more. */
 export type McpRemoveOutcome =
-  | { ok: true; scope: "user"; name: string; removed: boolean }
-  | { ok: true; scope: "local"; name: string; removed: boolean; root: string }
-  | { ok: true; scope: "project"; name: string; removed: boolean; cwd: string }
+  | { ok: true; scope: "user"; name: string; removed: boolean; permissionsCleared?: true; permissionsNote?: string; rulesNotFollowed?: string[]; nameStillInUse?: true }
+  | { ok: true; scope: "local"; name: string; removed: boolean; root: string; permissionsCleared?: true; permissionsNote?: string; rulesNotFollowed?: string[]; nameStillInUse?: true }
+  | { ok: true; scope: "project"; name: string; removed: boolean; cwd: string; permissionsCleared?: true; permissionsNote?: string; rulesNotFollowed?: string[]; nameStillInUse?: true }
   | { ok: false; message: string }
   | { ok: false; multi: true; name: string; scopes: McpScope[] };
 
@@ -617,29 +604,49 @@ function projectScopeHasServer(deps: McpRouteDeps, name: string): ProjectScopeCh
   return { kind: Object.hasOwn(read.servers, name) ? "found" : "absent" };
 }
 
-async function removeUserScope(deps: McpRouteDeps, name: string): Promise<{ removed: boolean }> {
-  if (deps.door) {
-    const r = await deps.door.mcpRemove(name);
-    return { removed: r.removed };
+/** WS-27: where a direct (no-daemon, or local/project) remove or rename reads trust — the same file the daemon's
+ *  own `TrustStore` reads — so it can tell whether a trusted project still defines the name. */
+function nameContext(deps: McpRouteDeps): { cwd: string; trust: TrustStore } {
+  return { cwd: deps.cwd, trust: new TrustStore(join(deps.winterHome, "trust.json")) };
+}
+
+type ScopeRemoveResult = { ok: true; removed: boolean; permissionsCleared?: true; permissionsNote?: string; rulesNotFollowed?: string[]; nameStillInUse?: true } | { ok: false; message: string };
+
+/**
+ * WS-27 (review 6): one scope's remove. With a live daemon EVERY scope goes through `mcp.remove` (scope + cwd),
+ * so the daemon's view of live sessions decides whether the name's connector permissions may go; with none,
+ * the same core door runs in-process. A malformed project file is reported before either.
+ */
+async function removeInScope(deps: McpRouteDeps, scope: McpScope, name: string): Promise<ScopeRemoveResult> {
+  if (scope === "project") {
+    const root = projectScopeRootFor(deps.cwd);
+    const read = readRawWinterMcpConfig(root);
+    if (read.kind === "malformed") return { ok: false, message: malformedProjectFileMessage(root, `removing "${name}"`) };
+    if (read.kind === "absent") return { ok: true, removed: false };
   }
-  return { removed: removeSdkUserMcpServer(deps.winterHome, name) };
+  let r: { removed: boolean; permissionsCleared?: boolean; permissionsNote?: string; rulesNotFollowed?: string[]; nameStillInUse?: boolean };
+  if (deps.door) {
+    r = await deps.door.mcpRemove(name, scope, scope === "user" ? undefined : deps.cwd);
+  } else {
+    const root = scope === "local" ? localScopeKeyFor(deps.cwd) : scope === "project" ? projectScopeRootFor(deps.cwd) : undefined;
+    r = removeMcpServerForgettingPermissions({ home: deps.winterHome, scope, ...(root !== undefined ? { root } : {}) }, name, nameContext(deps));
+  }
+  return {
+    ok: true, removed: r.removed,
+    ...(r.permissionsCleared === true ? { permissionsCleared: true as const } : {}),
+    ...(r.rulesNotFollowed !== undefined && r.rulesNotFollowed.length > 0 ? { rulesNotFollowed: r.rulesNotFollowed } : {}),
+    ...(r.nameStillInUse === true ? { nameStillInUse: true as const } : {}),
+    ...(r.permissionsNote !== undefined ? { permissionsNote: r.permissionsNote } : {}),
+  };
 }
 
-function removeLocalScope(deps: McpRouteDeps, name: string): { removed: boolean; root: string } {
-  const root = localScopeKeyFor(deps.cwd);
-  return { removed: removeSdkLocalMcpServer(deps.winterHome, root, name), root };
-}
-
-type ProjectRemoveResult = { ok: true; removed: boolean } | { ok: false; message: string };
-
-function removeProjectScope(deps: McpRouteDeps, name: string): ProjectRemoveResult {
-  const root = projectScopeRootFor(deps.cwd);
-  const read = readRawWinterMcpConfig(root);
-  if (read.kind === "malformed") return { ok: false, message: malformedProjectFileMessage(root, `removing "${name}"`) };
-  if (read.kind === "absent") return { ok: true, removed: false };
-  const { servers: next, removed } = removeProjectMcpServerEntry(read.servers, name);
-  if (removed) writeRawWinterMcpConfig(root, read.raw, next);
-  return { ok: true, removed };
+async function removeOutcome(deps: McpRouteDeps, scope: McpScope, name: string): Promise<McpRemoveOutcome> {
+  const r = await removeInScope(deps, scope, name);
+  if (!r.ok) return r;
+  const { ok: _ok, ...rest } = r;
+  if (scope === "user") return { ok: true, scope, name, ...rest };
+  if (scope === "local") return { ok: true, scope, name, ...rest, root: localScopeKeyFor(deps.cwd) };
+  return { ok: true, scope, name, ...rest, cwd: projectScopeRootFor(deps.cwd) };
 }
 
 /** `winter mcp remove` — with an explicit `-s`, removes from just that scope (a "not found there"
@@ -655,17 +662,7 @@ export async function runMcpRemoveRoute(args: string[], deps: McpRouteDeps): Pro
   if (parsed.scopeRaw) {
     const scopeResult = ensureMcpScope(parsed.scopeRaw);
     if (scopeResult.kind !== "ok") return { ok: false, message: scopeResult.message };
-    if (scopeResult.scope === "user") {
-      const { removed } = await removeUserScope(deps, parsed.name);
-      return { ok: true, scope: "user", name: parsed.name, removed };
-    }
-    if (scopeResult.scope === "local") {
-      const { removed, root } = removeLocalScope(deps, parsed.name);
-      return { ok: true, scope: "local", name: parsed.name, removed, root };
-    }
-    const projectResult = removeProjectScope(deps, parsed.name);
-    if (!projectResult.ok) return { ok: false, message: projectResult.message };
-    return { ok: true, scope: "project", name: parsed.name, removed: projectResult.removed, cwd: projectScopeRootFor(deps.cwd) };
+    return removeOutcome(deps, scopeResult.scope, parsed.name);
   }
 
   const [inUser, inLocal, projectCheck] = await Promise.all([
@@ -679,20 +676,99 @@ export async function runMcpRemoveRoute(args: string[], deps: McpRouteDeps): Pro
   const inProject = projectCheck.kind === "found";
   const foundIn: McpScope[] = [...(inLocal ? (["local"] as const) : []), ...(inUser ? (["user"] as const) : []), ...(inProject ? (["project"] as const) : [])];
   if (foundIn.length > 1) return { ok: false, multi: true, name: parsed.name, scopes: foundIn };
-  if (inLocal) {
-    const { removed, root } = removeLocalScope(deps, parsed.name);
-    return { ok: true, scope: "local", name: parsed.name, removed, root };
-  }
-  if (inUser) {
-    const { removed } = await removeUserScope(deps, parsed.name);
-    return { ok: true, scope: "user", name: parsed.name, removed };
-  }
-  if (inProject) {
-    const projectResult = removeProjectScope(deps, parsed.name);
-    if (!projectResult.ok) return { ok: false, message: projectResult.message };
-    return { ok: true, scope: "project", name: parsed.name, removed: projectResult.removed, cwd: projectScopeRootFor(deps.cwd) };
-  }
+  if (foundIn.length === 1) return removeOutcome(deps, foundIn[0]!, parsed.name);
   return { ok: false, message: `No MCP server found with name: "${parsed.name}"` };
+}
+
+// ------------------------------------------------------------------------------------------------
+// WS-27: `winter mcp rename <old> <new> [-s local|user|project]`
+// ------------------------------------------------------------------------------------------------
+
+const RENAME_USAGE = "usage: winter mcp rename <old> <new> [-s local|user|project]";
+
+export interface McpRenameDoorResult {
+  ok: true; name: string; newName: string; carried: boolean; keptOld: boolean;
+  rulesNotFollowed?: string[]; protectiveRulesNotFollowed?: string[]; note?: string;
+}
+
+export type McpRenameOutcome =
+  | { ok: true; scope: McpScope; name: string; newName: string; carried: boolean; keptOld: boolean; rulesNotFollowed: string[]; protectiveRulesNotFollowed?: string[]; note?: string; via: "daemon" | "local" }
+  | { ok: false; message: string; code?: string }
+  | { ok: false; multi: true; name: string; scopes: McpScope[] };
+
+/**
+ * `winter mcp rename` — within one scope (with no `-s`, the one scope that defines the name, as `remove`
+ * finds it; several → the "which scope" listing). Routed like `remove`: the USER scope through the daemon's
+ * `mcp.rename` when it is live, every other case through the same core door in-process
+ * (`renameMcpServerCarryingSettings`), so the connector permissions and `mcp.disabled` follow the rename
+ * either way. A sign-in is keyed by URL and follows by itself.
+ */
+export async function runMcpRenameRoute(args: string[], deps: McpRouteDeps): Promise<McpRenameOutcome> {
+  let scopeRaw: string | undefined;
+  const positionals: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const tok = args[i]!;
+    if (tok === "-s" || tok === "--scope") { scopeRaw = args[++i]; continue; }
+    positionals.push(tok);
+  }
+  const [name, newName] = positionals;
+  if (!name || !newName || positionals.length !== 2) return { ok: false, message: RENAME_USAGE };
+  let scope: McpScope;
+  if (scopeRaw !== undefined) {
+    const r = ensureMcpScope(scopeRaw);
+    if (r.kind !== "ok") return { ok: false, message: r.message };
+    scope = r.scope;
+  } else {
+    const [inUser, inLocal, projectCheck] = [await userScopeHasServer(deps, name), localScopeHasServer(deps, name), projectScopeHasServer(deps, name)];
+    if (projectCheck.kind === "malformed") return { ok: false, message: projectCheck.message };
+    const foundIn: McpScope[] = [...(inLocal ? (["local"] as const) : []), ...(inUser ? (["user"] as const) : []), ...(projectCheck.kind === "found" ? (["project"] as const) : [])];
+    if (foundIn.length > 1) return { ok: false, multi: true, name, scopes: foundIn };
+    if (foundIn.length === 0) return { ok: false, message: `No MCP server found with name: "${name}"`, code: "mcp_server_not_found" };
+    scope = foundIn[0]!;
+  }
+  try {
+    // Review 6: with a live daemon, every scope goes through `mcp.rename` (scope + cwd).
+    if (deps.door !== undefined) {
+      if (deps.door.mcpRename === undefined) return { ok: false, message: "this daemon has no mcp.rename — update Winter, or stop the daemon to rename in-process" };
+      const r = await deps.door.mcpRename(name, newName, scope, scope === "user" ? undefined : deps.cwd);
+      return { ok: true, scope, name, newName, carried: r.carried, keptOld: r.keptOld, rulesNotFollowed: r.rulesNotFollowed ?? [], ...(r.protectiveRulesNotFollowed !== undefined && r.protectiveRulesNotFollowed.length > 0 ? { protectiveRulesNotFollowed: r.protectiveRulesNotFollowed } : {}), ...(r.note !== undefined ? { note: r.note } : {}), via: "daemon" };
+    }
+    const root = scope === "local" ? localScopeKeyFor(deps.cwd) : scope === "project" ? projectScopeRootFor(deps.cwd) : undefined;
+    const r = renameMcpServerCarryingSettings({ home: deps.winterHome, scope, ...(root !== undefined ? { root } : {}) }, name, newName, nameContext(deps));
+    return { ok: true, scope, name, newName, carried: r.carried, keptOld: r.keptOld, rulesNotFollowed: r.rulesNotFollowed, ...(r.protectiveRulesNotFollowed.length > 0 ? { protectiveRulesNotFollowed: r.protectiveRulesNotFollowed } : {}), ...(r.note !== undefined ? { note: r.note } : {}), via: "local" };
+  } catch (err) {
+    if (err instanceof McpRenameRefusal) return { ok: false, message: err.message, code: err.code };
+    const r = refusalOf(err);
+    return { ok: false, message: r.message, ...(r.code !== undefined ? { code: r.code } : {}) };
+  }
+}
+
+export function renderMcpRenameOutcome(outcome: McpRenameOutcome): string {
+  if (!outcome.ok) {
+    if ("multi" in outcome) {
+      const lines = [`MCP server "${outcome.name}" exists in multiple scopes:`];
+      for (const s of outcome.scopes) lines.push(`  - ${scopeLabel(s)}`);
+      lines.push("", "To rename in a specific scope, use:");
+      for (const s of outcome.scopes) lines.push(`  winter mcp rename "${outcome.name}" <new> -s ${s}`);
+      return lines.join("\n");
+    }
+    return outcome.message;
+  }
+  const settings = !outcome.carried ? ""
+    : outcome.keptOld ? ` — its connector settings were copied to "${outcome.newName}" (another scope still defines "${outcome.name}", so its own stay)`
+    : ` — its connector settings moved with it`;
+  const where = outcome.via === "daemon" ? "" : " (no daemon was running; live sessions pick it up at their next start)";
+  const lines = [`Renamed MCP server "${outcome.name}" to "${outcome.newName}" in ${scopeLabel(outcome.scope)}${settings}${where}.`];
+  if (outcome.rulesNotFollowed.length > 0) {
+    lines.push(`These rules could still name "${outcome.name}" — Winter never rewrites a rule, so they do not follow the rename; edit them yourself:`);
+    for (const r of outcome.rulesNotFollowed) lines.push(`  ${r}`);
+  }
+  // Called out apart: a deny or ask rule left on the old name no longer stops or cards the renamed server.
+  if (outcome.protectiveRulesNotFollowed !== undefined && outcome.protectiveRulesNotFollowed.length > 0) {
+    lines.push(`These deny/ask rules no longer protect "${outcome.newName}": ${outcome.protectiveRulesNotFollowed.join("; ")} — add them for "${outcome.newName}" if you still want them.`);
+  }
+  if (outcome.note !== undefined) lines.push(outcome.note);
+  return lines.join("\n");
 }
 
 export type McpGetOutcome =
@@ -825,8 +901,18 @@ export function renderMcpRemoveOutcome(outcome: McpRemoveOutcome): string {
     return outcome.message;
   }
   const location = outcome.scope === "project" ? outcome.cwd : outcome.scope === "local" ? outcome.root : undefined;
+  const cleared = outcome.permissionsCleared === true ? " and cleared its connector permissions" : "";
+  const extra: string[] = [];
+  if (outcome.rulesNotFollowed !== undefined) {
+    extra.push(outcome.nameStillInUse === true
+      ? `These rules could still name "${outcome.name}" — a server of that name remains (another scope or a live session), and they still apply to it:`
+      : `These rules could still name "${outcome.name}" and remain as they are (Winter never edits a rule) — edit them if you want them gone:`);
+    for (const r of outcome.rulesNotFollowed) extra.push(`  ${r}`);
+  }
+  if (outcome.permissionsNote !== undefined) extra.push(outcome.permissionsNote);
+  const note = extra.length > 0 ? `\n${extra.join("\n")}` : "";
   return outcome.removed
-    ? `Removed MCP server "${outcome.name}" from ${scopeLabel(outcome.scope, location)}`
+    ? `Removed MCP server "${outcome.name}" from ${scopeLabel(outcome.scope, location)}${cleared}${note}`
     : `no MCP server named "${outcome.name}" in ${scopeLabel(outcome.scope, location)} — nothing removed`;
 }
 
@@ -939,6 +1025,8 @@ export interface McpAuthDeps {
   poke: () => Promise<boolean>;
   sleep?: (ms: number) => Promise<void>;
   pollMs?: number;
+  /** The command a hint names (`cliCommandName`: `winter-dev` on the dev profile); default `winter`. */
+  commandName?: string;
 }
 
 export type McpAuthOutcome =
@@ -1043,7 +1131,7 @@ export async function runMcpLoginRoute(args: string[], deps: McpAuthDeps): Promi
       // `--confirm-issuer-change` is the ONLY non-interactive answer to this: `--yes` never implies it.
       if (confirmIssuerChange) deps.print(`${change} Continuing (--confirm-issuer-change).`);
       else if (!(await deps.confirm(`${change} Continue with the new authorization server? [y/N] `))) {
-        return { ok: false, message: `sign-in cancelled — the authorization server changed and was not confirmed (to accept it without a prompt: winter mcp login ${name} --confirm-issuer-change)`, code: ISSUER_CHANGE };
+        return { ok: false, message: `sign-in cancelled — the authorization server changed and was not confirmed (to accept it without a prompt: ${deps.commandName ?? "winter"} mcp login ${name} --confirm-issuer-change)`, code: ISSUER_CHANGE };
       }
       started = await start(true);
     }
@@ -1073,7 +1161,7 @@ export async function runMcpLoginRoute(args: string[], deps: McpAuthDeps): Promi
         if (deps.door === undefined) await deps.poke();
         return { ok: true, kind: "login", name, via: deps.door !== undefined ? "daemon" : "in-process", issuerOrigin: started.issuerOrigin };
       }
-      if (status.state === "expired") return { ok: false, message: `the sign-in to "${name}" expired before it was completed in the browser — run winter mcp login ${name} again`, code: "expired" };
+      if (status.state === "expired") return { ok: false, message: `the sign-in to "${name}" expired before it was completed in the browser — run ${deps.commandName ?? "winter"} mcp login ${name} again`, code: "expired" };
       return { ok: false, message: `the sign-in to "${name}" failed${status.error !== undefined ? ` (${status.error})` : ""}`, code: "failed" };
     }
   } catch (err) {
@@ -1211,7 +1299,7 @@ async function setSecretFromClipboard(name: string, scope: McpScope | undefined,
     if (confirmedIssuer === undefined) {
       return {
         ok: false,
-        message: `nothing was read or stored — if that is the right authorization server, copy the secret and re-run: winter mcp set-secret ${target.name} --from-clipboard --issuer ${target.issuer}`,
+        message: `nothing was read or stored — if that is the right authorization server, copy the secret and re-run: ${deps.commandName ?? "winter"} mcp set-secret ${target.name} --from-clipboard --issuer ${target.issuer}`,
         code: "issuer_confirmation_required",
       };
     }

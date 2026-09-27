@@ -1143,6 +1143,62 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
     } finally { t.close(); }
   });
 
+  // WS-27 (review round 2, minor 1): `mcpServerNames` covers the spawn window — the fold is reported by the
+  // options thunk before the run home's await, so a remove/rename landing mid-open still sees the names.
+  test("mcpServerNames: the live fold, and the PENDING fold while an incarnation is still being opened", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let gated = false;
+    const t = table(
+      { extraMcpServers: () => ({ cf: { type: "stdio", command: "cf" }, linear: { type: "http", url: "https://mcp.linear.example/mcp" } }) },
+      {}, undefined,
+      { runHomes: { build: async (input, real) => { if (!gated) { gated = true; await gate; } return real(input); } } },
+    );
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const creating = t.drivers.create(sid);
+      for (let i = 0; i < 200 && !gated; i++) await Bun.sleep(5);
+      expect(gated).toBe(true);
+      const opening = t.drivers.get(sid);
+      // Mid-open (the run home still building): the pending fold is already reported.
+      expect(opening).toBeDefined();
+      expect(opening!.mcpServerNames!().sort()).toEqual(["cf", "linear"]);
+      release();
+      const session = await creating;
+      expect(session.mcpServerNames!().sort()).toEqual(["cf", "linear"]);
+      await session.end();
+      expect(session.mcpServerNames!()).toEqual([]);
+    } finally { t.close(); }
+  });
+
+  // WS-27 (review round 3, item 4): the PRE-run-home path (router 0.0.11) reports the fold as soon as it is
+  // computed too — before the credential probes' awaits (`refMaterialPresent`), not only at the end.
+  test("mcpServerNames on the pre-run-home path: the fold is pending before the credential probes run", async () => {
+    let sid = "";
+    const seen: string[][] = [];
+    const drivers: { current?: ReturnType<typeof table>["drivers"] } = {};
+    const real = new FileSecretStore(join(mkdtempSync(join(tmpdir(), "winter-secrets-")), "secrets.json"));
+    const note = (): void => { const s = drivers.current?.get(sid); if (s !== undefined) seen.push(s.mcpServerNames!().sort()); };
+    const secrets = new Proxy(real, { get(target, prop, recv) {
+      const v = Reflect.get(target, prop, recv);
+      return typeof v === "function" ? (...args: unknown[]) => { note(); return (v as (...a: unknown[]) => unknown).apply(target, args); } : v;
+    } });
+    const t = table({
+      extraMcpServers: () => ({ cf: { type: "stdio", command: "cf" } }),
+      // An advisor pin makes the incarnation probe its credential slot (an awaited Keychain read).
+      settings: () => ({ provider: { model: "winter-test/echo" }, runtimes: { winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10, advisorModel: "openai/gpt-5.6-sol" } }) as unknown as Settings,
+      secrets,
+    }, {}, undefined, { legacyRouter: true });
+    drivers.current = t.drivers;
+    try {
+      sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const session = await t.drivers.create(sid);
+      expect(seen.some((names) => names.includes("cf"))).toBe(true);
+      expect(session.mcpServerNames!()).toEqual(["cf"]);
+      await session.end();
+    } finally { t.close(); }
+  });
+
   // Whole-branch review M1: an OFF-CATALOG `pins.research` used to be stated whenever a credential for
   // its provider happened to be stored — and the child advertises `WebFetch` only while its digest
   // model resolves, so that one hand-edited settings line WITHDREW THE TOOL from every Winter session,
