@@ -5,7 +5,8 @@ import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { McpManager } from "../../../src/agent/mcp/manager";
-import { daemonConnectorSource } from "../../../src/agent/mcp/connector-source";
+import { daemonConnectorSource, pluginMcpServerNames } from "../../../src/agent/mcp/connector-source";
+import { connectorFactsFor } from "../../../src/agent/mcp/connector-permissions";
 import type { TrustStore } from "../../../src/agent/trust";
 import { Settings, setConnectorToolPermission } from "../../../src/settings";
 
@@ -35,7 +36,10 @@ function fixture() {
       connects.push(`${opts.name}:${"command" in opts.config ? opts.config.command : "http"}`);
       // the user cf marks `list` read-only; the PROJECT's cf does not.
       const ro = "command" in opts.config && opts.config.command === "cf";
-      return { serverName: opts.name, listTools: async () => [{ name: "list", inputSchema: {}, annotations: { readOnlyHint: ro } }], close: async () => {} } as never;
+      return { serverName: opts.name, listTools: async () => [
+        { name: "list", inputSchema: {}, annotations: { readOnlyHint: ro } },
+        { name: "prod__delete", inputSchema: {}, annotations: { readOnlyHint: ro } },
+      ], close: async () => {} } as never;
     },
   });
   let settings: Settings = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } });
@@ -88,5 +92,43 @@ describe("the table", () => {
     expect(f.source.table()).toEqual({ cf: { list: "deny" } });
     f.setSettings(setConnectorToolPermission(f.getSettings(), "cf", "list", "allow"));   // the watcher's swap
     expect(f.source.table()).toEqual({ cf: { list: "allow" } });
+  });
+});
+
+
+describe("final review: a PLUGIN's server is configured too", () => {
+  const DEL = "mcp__cf__prod__delete";
+
+  function installPlugin(home: string, servers: Record<string, unknown>, where: ".mcp.json" | "manifest" = ".mcp.json"): void {
+    const installPath = join(home, "sdk", "plugins", "cache", "mkt", "p", "1.0.0");
+    mkdirSync(join(installPath, ".claude-plugin"), { recursive: true });
+    if (where === ".mcp.json") writeFileSync(join(installPath, ".mcp.json"), JSON.stringify({ mcpServers: servers }));
+    else writeFileSync(join(installPath, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "p", mcpServers: servers }));
+    writeFileSync(join(home, "sdk", "plugins", "installed_plugins.json"), JSON.stringify({ version: 2, plugins: { "p@mkt": [{ scope: "user", installPath }] } }));
+  }
+
+  test("the names are read from .mcp.json and from the manifest", () => {
+    const f = fixture();
+    expect(pluginMcpServerNames(f.home).size).toBe(0);
+    installPlugin(f.home, { cf__prod: { command: "x" } });
+    expect([...pluginMcpServerNames(f.home)]).toEqual(["cf__prod"]);
+    installPlugin(f.home, { other: { command: "y" } }, "manifest");
+    expect(pluginMcpServerNames(f.home).has("other")).toBe(true);
+  });
+
+  test("cf's `*` allow and cf's read-only listed `prod__delete`: with a plugin `cf__prod` it is the default and NOT read-only; without, cf decides", async () => {
+    const f = fixture();
+    await f.manager.startAll({ cf: { command: "cf" } });
+    f.setSettings(setConnectorToolPermission(f.getSettings(), "cf", "*", "allow"));
+    // No cf__prod anywhere: an ordinary tool name containing `__` — cf's allow and cf's read-only stand.
+    expect(connectorFactsFor(f.source, DEL)).toMatchObject({ server: "cf", setting: "allow", readOnly: true });
+    installPlugin(f.home, { cf__prod: { command: "x" } });
+    f.advance(10_000);   // past the plugin-names cache
+    const facts = connectorFactsFor(f.source, DEL);
+    expect(facts?.setting).toBeUndefined();
+    expect(facts?.readOnly).toBe(false);
+    // …and with no stored value at all, still not read-only.
+    f.setSettings(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } }));
+    expect(connectorFactsFor(f.source, DEL)?.readOnly).toBe(false);
   });
 });

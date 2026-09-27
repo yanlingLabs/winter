@@ -437,9 +437,10 @@ describe("re-review: a CONFIGURED but unconfirmed split still votes", () => {
     expect(connectorFactsFor(source, DEL)).toMatchObject({ server: "cf", tool: "prod__delete", setting: "allow", readOnly: true });
   });
 
-  test("a configured server's own blanket allow counts even unlisted", () => {
-    const source = withConfigured({ cf__prod: { "*": "allow" } }, {}, ["cf__prod"]);
-    expect(connectorFactsFor(source, DEL)?.setting).toBe("allow");
+  test("final review: an unconfirmed server's blanket allow never allows — configured or not; an exact entry does", () => {
+    expect(connectorFactsFor(withConfigured({ cf__prod: { "*": "allow" } }, {}, ["cf__prod"]), DEL)?.setting).toBeUndefined();
+    expect(connectorFactsFor(withConfigured({ cf: { "*": "allow" } }, {}, ["cf", "cf__prod"]), DEL)?.setting).toBeUndefined();
+    expect(connectorFactsFor(withConfigured({ cf__prod: { delete: "allow" } }, {}, ["cf__prod"]), DEL)?.setting).toBe("allow");
   });
 });
 
