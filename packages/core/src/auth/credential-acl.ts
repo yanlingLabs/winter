@@ -139,7 +139,8 @@ export function putBack(kc: CredentialKeychain, access: KeychainAccess, account:
 /**
  * Finishes what an interrupted migration (or dev transition) left: an original missing beside its shadow is
  * put back from the shadow, self-only, and the shadow dropped. With `dropShadowsBesideOriginals`, a shadow
- * beside its original is dropped too — equal or not (see the header: the original is the newer write). The
+ * beside its original is dropped too — equal or not for a credential account (see the header: the original is
+ * the newer write); a pairing token's DIFFERING pair is kept (either could be what clients hold). The
  * app-read tokens' shadows are `app-token-acl.ts`'s, unless `owns` (default `isCredentialAccount`) says
  * otherwise — the dev transition owns every shadow it wrote. The caller holds the credential migration lock.
  * Returns the accounts it restored. Never throws.
@@ -168,6 +169,12 @@ export function recoverCredentialShadows(kc: CredentialKeychain, access: Keychai
       if (ops.present(kc.keychain, kc.service, name)) {
         if (!opts.dropShadowsBesideOriginals) continue;
         const same = sameBytes(ops.readBytes(kc.keychain, kc.service, name), value.bytes);
+        if (!same && !isCredentialAccount(name)) {
+          // A pairing token (the dev transition owns those too): either value could be the one the paired
+          // clients hold, so a differing pair is kept, as `app-token-acl.ts` keeps it.
+          kc.log?.(`keychain: ${shadow} and ${name} hold DIFFERENT values — both kept; remove the shadow once the paired clients work`);
+          continue;
+        }
         ops.remove(kc.keychain, kc.service, shadow);
         if (!same) kc.log?.(`keychain: ${shadow} differed from ${name}, which is the newer write — the stale shadow was dropped`);
         continue;
@@ -255,8 +262,10 @@ export function migrateCredentialAcl(kc: CredentialKeychain, access: KeychainAcc
       if (!sameBytes(ops.readBytes(kc.keychain, kc.service, shadow), value.bytes)) throw new KeychainFfiError("verify shadow", -1, shadow);
       // 2. Still the value the shadow holds? A write that landed since would otherwise be undone.
       if (!sameBytes(ops.readBytes(kc.keychain, kc.service, name), value.bytes)) throw new KeychainFfiError("changed since it was read", -1, name);
-      // 3. Delete. A delete that needs consent fails here (interaction disabled): still before the delete.
-      ops.remove(kc.keychain, kc.service, name);
+      // 3. Delete. A delete that needs consent fails here (interaction disabled): still before the delete. One
+      // that finds nothing (the original vanished since the re-read — a removal that landed) stops this item
+      // without putting anything back: the removal wins, and the shadow is dropped below.
+      if (!ops.remove(kc.keychain, kc.service, name)) throw new KeychainFfiError("vanished before the delete", -1, name);
       originalDeleted = true;
       // 4–5. Re-add self-only, read back.
       putBack(kc, access, name, value);

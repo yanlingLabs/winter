@@ -35,6 +35,7 @@
 // daemon) is prompted for every item it reads. Both sides refuse anything but the dev profile on its default
 // home and the dev Keychain service.
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { acquireLock } from "../lock";
 import { resolveWinterProfile, type WinterProfile } from "../profile";
@@ -42,7 +43,7 @@ import { codeSigningFacts, realExecutable } from "./app-token-acl";
 import { acquireCredentialMigrationLock, credentialMigrationLockHolder } from "./credential-migration-lock";
 import { isDefaultWinterHome } from "../winter-dir";
 import { APP_TOKEN_SHADOW_SUFFIX } from "./app-token-acl";
-import { putBack, readStoredValue, recoverCredentialShadows, REAL_CREDENTIAL_KEYCHAIN_OPS, sameBytes, writeCredentialAclMarker, type CredentialKeychain } from "./credential-acl";
+import { isCredentialAccount, putBack, readStoredValue, recoverCredentialShadows, REAL_CREDENTIAL_KEYCHAIN_OPS, sameBytes, writeCredentialAclMarker, type CredentialKeychain } from "./credential-acl";
 import { KeychainFfiError, keychainUnlocked, withKeychainUserInteractionDisabled, type KeychainAccess } from "./keychain-ffi";
 
 /** The compiled binary's route for the child side. */
@@ -84,7 +85,7 @@ function isItem(account: string): boolean {
  * THE CHILD (the new creator): one request, one response, synchronously. `access` is the self-only access
  * object (this process). Every Keychain call runs with user interaction disabled. Never logs a value.
  */
-export function createAdoptHandler(kc: CredentialKeychain, access: KeychainAccess, home: string, requirement: string): (req: AdoptRequest) => AdoptResponse {
+export function createAdoptHandler(kc: CredentialKeychain, access: KeychainAccess, home: string, requirement: string | undefined): (req: AdoptRequest) => AdoptResponse {
   const ops = kc.ops ?? REAL_CREDENTIAL_KEYCHAIN_OPS;
   const q = <T>(fn: () => T): T => withKeychainUserInteractionDisabled(fn);
   return (req) => {
@@ -99,9 +100,11 @@ export function createAdoptHandler(kc: CredentialKeychain, access: KeychainAcces
           const shadow = `${req.account}${APP_TOKEN_SHADOW_SUFFIX}`;
           const bytes = new Uint8Array(Buffer.from(req.value, "utf8"));
           if (q(() => ops.present(kc.keychain, kc.service, shadow))) {
-            // A re-run after an interruption: the same value is the same step, done already. A different one is
-            // stale (the original beside it is the newer write): replaced.
+            // A re-run after an interruption: the same value is the same step, done already. A different one
+            // beside a credential is stale (the original is the newer write): replaced. Beside a pairing token
+            // it is kept — either value could be what the paired clients hold — and the item is left alone.
             if (sameBytes(q(() => ops.readBytes(kc.keychain, kc.service, shadow)), bytes)) return { ok: true };
+            if (!isCredentialAccount(req.account)) return { ok: false, reason: `${shadow} holds a different value — kept` };
             q(() => ops.remove(kc.keychain, kc.service, shadow));
           }
           q(() => ops.add(kc.keychain, { service: kc.service, account: shadow, value: req.value, access }));
@@ -121,6 +124,7 @@ export function createAdoptHandler(kc: CredentialKeychain, access: KeychainAcces
           return { ok: true };
         case "marker":
           if (req.migrated === 0 && req.skipped > 0) return { ok: true }; // nothing landed here: not "done"
+          if (requirement === undefined) return { ok: true }; // never a marker keyed on a path
           writeCredentialAclMarker(home, kc.service, requirement, { migrated: req.migrated, skipped: req.skipped });
           return { ok: true };
         case "done":
@@ -185,13 +189,22 @@ export async function runDevKeychainTransition(kc: CredentialKeychain, send: (re
       log(`${account}: the new creator could not write its shadow (${shadowed.reason}) — left as it is`);
       continue;
     }
+    let removed: boolean;
     try {
-      q(() => ops.remove(kc.keychain, kc.service, account));
+      removed = q(() => ops.remove(kc.keychain, kc.service, account));
     } catch (err) {
       const dropped = await send({ op: "drop", account });
       if (!dropped.ok && dropped.fatal) return stop(account, dropped.reason);
       skipped.push(account);
       log(`${account}: could not be deleted by this process (${describe(err)}) — left as it is`);
+      continue;
+    }
+    if (!removed) {
+      // It vanished since the read (a removal landed): nothing to re-create; the child's shadow goes.
+      const dropped = await send({ op: "drop", account });
+      if (!dropped.ok && dropped.fatal) return stop(account, dropped.reason);
+      skipped.push(account);
+      log(`${account}: vanished before the delete — left removed`);
       continue;
     }
     const committed = await send({ op: "commit", account });
@@ -230,6 +243,20 @@ export function oldCreatorStillOwnsItems(kc: CredentialKeychain): boolean {
   });
 }
 
+/** The transition refuses while `core.lock` names ANY live process — answering socket or not (a daemon
+ *  mid-boot has none yet). */
+export function bootLockHolderRefusal(home: string): string | undefined {
+  let pid: unknown;
+  try { pid = (JSON.parse(readFileSync(join(home, "run", "core.lock"), "utf8")) as { pid?: unknown }).pid; } catch { return undefined; }
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0 || pid === process.pid) return undefined;
+  try {
+    process.kill(pid, 0);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EPERM") return undefined;
+  }
+  return `pid ${pid} holds ${join(home, "run", "core.lock")} (a dev daemon running or booting) — stop it and run again`;
+}
+
 /** The child acts only while the orchestrator — its PARENT — holds the home's credential migration lock. */
 export function adoptLockRefusal(home: string, parentPid: number): string | undefined {
   const holder = credentialMigrationLockHolder(home);
@@ -250,8 +277,8 @@ export async function runDevKeychainAdopt(env: NodeJS.ProcessEnv = process.env):
   if (!keychainUnlocked(null)) fatal("the default keychain is locked");
   const lockRefusal = adoptLockRefusal(home, process.ppid);
   if (lockRefusal !== undefined) fatal(lockRefusal);
-  const self = realExecutable();
-  const requirement = codeSigningFacts(self, 2_000).requirement ?? `path ${self}`;
+  // No path stand-in: without a designated requirement the child adopts but writes no marker.
+  const requirement = codeSigningFacts(realExecutable(), 2_000).requirement;
   const kc: CredentialKeychain = { keychain: null, service, log: (line) => process.stderr.write(`${line}\n`) };
   let access: KeychainAccess;
   try {
@@ -348,6 +375,8 @@ export async function transitionDevKeychain(input: { binary: string; home: strin
   if ("heldBy" in migrationLock) throw new Error(`pid ${migrationLock.heldBy} holds the credential migration lock (a dev daemon booting, or another transition) — wait for it and run again`);
   let lock;
   try {
+    const busy = bootLockHolderRefusal(input.home);
+    if (busy !== undefined) throw new Error(busy);
     lock = await acquireLock(join(input.home, "run", "core.lock"), join(input.home, "run", "core.sock"));
   } catch (err) {
     migrationLock.release();

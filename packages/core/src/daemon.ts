@@ -8,10 +8,10 @@ import { describeHomePristineness, legacyHomeFor, planMigrationB, runMigrationB,
 import { manifestFileState, manifestPath } from "./migration/manifest";
 import { LegacyKeychainSecretStore } from "./migration/legacy-keychain-store";
 import { TOKEN_NAMES, TokenAuthority } from "./auth/tokens";
-import { appTokenAclBootTrust, codeSigningFacts, realExecutable, migrateAppTokenAcl, prepareAppTokenAccess, recoverAppTokenShadows, type AppTokenAccess, type AppTokenKeychain, type AppTokenTrust } from "./auth/app-token-acl";
-import { applicationPathsForBundleId, keychainUnlocked, withKeychainUserInteractionDisabled, type KeychainAccess } from "./auth/keychain-ffi";
-import { prepareCredentialAccess, recoverCredentialShadows, runCredentialMigration, type CredentialKeychain } from "./auth/credential-acl";
-import { acquireCredentialMigrationLock, type CredentialMigrationLock } from "./auth/credential-migration-lock";
+import { appTokenAclBootTrust, migrateAppTokenAcl, prepareAppTokenAccess, recoverAppTokenShadows, type AppTokenAccess, type AppTokenKeychain, type AppTokenTrust } from "./auth/app-token-acl";
+import { applicationPathsForBundleId, keychainUnlocked, withKeychainUserInteractionDisabled } from "./auth/keychain-ffi";
+import { CredentialMigrationBusy } from "./auth/credential-migration-lock";
+import { beginKeychainPass, finishCredentialPass, type KeychainPass } from "./auth/keychain-boot";
 import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 import { migrateLegacyCredentialMaterial } from "./auth/credential-material";
 import { SessionStore } from "./sessions/store";
@@ -390,6 +390,10 @@ export async function startDaemon(opts: {
    *  caller that injected its own `secrets` gets a per-daemon MEMORY store (WS-25 integration: shared by the
    *  sign-in doors, the probe and the session answers) — so no test daemon ever reads the Keychain for one. */
   mcpOAuthStore?: McpOAuthStore;
+  /** WS-27 TEST SEAM: stands in for the production Keychain pass's first half (`beginKeychainPass`), which
+   *  otherwise runs only on the profile's default home with no injected `secrets`. A test uses it to prove a
+   *  held credential migration lock ends the boot before any credential is read. */
+  keychainPassForTests?: (home: string) => Promise<KeychainPass | undefined>;
 } = {}): Promise<RunningDaemon> {
   const startedAt = Date.now();
   const home = opts.home ?? resolveWinterHome();
@@ -443,23 +447,19 @@ export async function startDaemon(opts: {
   // migration of this boot — these and the pairing tokens' — runs under the CREDENTIAL MIGRATION LOCK
   // (`auth/credential-migration-lock.ts`), taken here and released after the pairing tokens: the boot lock
   // cannot serve (a booting daemon has no socket yet, so a second one would judge it stale). A live holder
-  // means this boot does no Keychain pass at all. HERE, only the restore half of the shadow recovery, because
+  // is WAITED for (bounded, `auth/keychain-boot.ts`); still held at the end, the boot is refused
+  // (`CredentialMigrationBusy`) — never run on to `ensureTokens` without the recovery. HERE, only the restore half of the shadow recovery, because
   // `credentialPresenceFrom` just below is the first read that would treat an item an interrupted migration
   // deleted as missing; the migration runs after the boot lock and Migration B.
-  let keychainPass: { lock: CredentialMigrationLock; kc: CredentialKeychain; access: KeychainAccess | undefined } | undefined;
-  if (opts.secrets === undefined && process.platform === "darwin" && isDefaultWinterHome(home, profile)) {
+  let keychainPass: KeychainPass | undefined;
+  if (opts.keychainPassForTests !== undefined) {
+    keychainPass = await opts.keychainPassForTests(home);
+  } else if (opts.secrets === undefined && process.platform === "darwin" && isDefaultWinterHome(home, profile)) {
     try {
-      if (!keychainUnlocked(null)) throw Object.assign(new Error("the default keychain is locked"), { name: "KeychainLocked" });
-      const taken = acquireCredentialMigrationLock(home);
-      if ("heldBy" in taken) {
-        console.error(`keychain: pid ${taken.heldBy} holds the credential migration lock — no Keychain shadow pass or migration this boot`);
-      } else {
-        const kc: CredentialKeychain = { keychain: null, service: keychainService(), log: (line) => console.error(line) };
-        const access = withKeychainUserInteractionDisabled(() => prepareCredentialAccess(kc));
-        keychainPass = { lock: taken, kc, access };
-        withKeychainUserInteractionDisabled(() => recoverCredentialShadows(kc, access, { dropShadowsBesideOriginals: false }));
-      }
+      keychainPass = await beginKeychainPass({ home, service: keychainService(), log: (line) => console.error(line) });
     } catch (err) {
+      // Held by a live process past the bound: refuse the boot rather than run unprotected.
+      if (err instanceof CredentialMigrationBusy) throw err;
       console.error(`keychain: the credential access lists were not checked (${err instanceof Error ? err.name : "error"})`);
     }
   }
@@ -562,25 +562,11 @@ export async function startDaemon(opts: {
   // released after.
   // WS-27, after the boot lock and Migration B, before anything reads or refreshes a credential (the brokers,
   // `ensureTokens`, every session), still under the credential migration lock: the full shadow recovery,
-  // then the once-only migration — skipped if the keychain locked meanwhile. Synchronous, so nothing in
+  // then the once-only migration — skipped (recovery kept, no marker) if the keychain locked meanwhile or this
+  // process's designated requirement cannot be read. Synchronous, so nothing in
   // this process runs between an item's delete and its add. A failed migration is followed at once by a
   // restore pass, so an item it could not put back is restored from its shadow before `ensureTokens`.
-  if (keychainPass !== undefined) {
-    const { kc, access } = keychainPass;
-    try {
-      if (!keychainUnlocked(null)) {
-        console.error("keychain: the default keychain locked during boot — the credential migration waits for the next boot");
-      } else {
-        const self = realExecutable();
-        const requirement = codeSigningFacts(self, 2_000).requirement ?? `path ${self}`;
-        withKeychainUserInteractionDisabled(() => runCredentialMigration(kc, access, home, requirement));
-      }
-    } catch (err) {
-      console.error(`keychain: the credential access lists were not updated (${err instanceof Error ? err.name : "error"})`);
-    } finally {
-      access?.release();
-    }
-  }
+  if (keychainPass !== undefined) finishCredentialPass(keychainPass, home);
 
   let appTokens: { kc: AppTokenKeychain; trust: AppTokenTrust | undefined; access: AppTokenAccess } | undefined;
   if (keychainPass !== undefined) { // the same guards, and the credential migration lock is held
