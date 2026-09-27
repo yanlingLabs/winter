@@ -1,0 +1,26 @@
+name: CIMD live check
+
+# WS-25: the Client ID Metadata Document at https://yanlinglabs.com/winter/oauth-client.json must match
+# infra/winter-oauth-client/src/oauth-client.json (scripts/check-cimd-live.ts). It needs the network, so it
+# runs on a schedule and on demand -- never as part of ordinary CI.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # The script uses only Bun's built-ins: no dependency install.
+      - name: Compare the live document with the committed one
+        run: bun run scripts/check-cimd-live.ts

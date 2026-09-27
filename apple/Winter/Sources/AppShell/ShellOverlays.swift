@@ -749,7 +749,7 @@ struct LibraryPanel: View {
                                    onOpenPlugin: { open(.plugin(name: pluginName)) },
                                    onVanished: { vanished(item) })
             case let .mcpServer(name):
-                LibraryMcpServerDetail(model: mcpModel, name: name,
+                LibraryMcpServerDetail(model: mcpModel, name: name, oauthClient: wiring.mcpOAuthClient,
                                        onBack: back, onVanished: { vanished(item) })
             case let .winterCapability(key):
                 LibraryWinterCapabilityDetail(capabilities: capabilitiesModel, key: key,

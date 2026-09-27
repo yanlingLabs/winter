@@ -29,7 +29,6 @@ import { rollbackMemoryKeyMigration } from "./migrations/memory-keys";
 import { readMigrationManifest } from "../migration/manifest";
 import { describeHomePristineness } from "../migration/migrate-b";
 import { MIGRATION_B_SECRET_NAMES } from "../auth/legacy-secret-names";
-import type { SecretStore } from "../auth/secret-store";
 import { storeProjectsDir } from "../agent/paths";
 import { quarantinedRunRoots } from "./root-recovery";
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
@@ -1015,10 +1014,10 @@ function restoreBackup(home: string, backupPath: string): RepairResult {
 // ── Migration B rows (P9c, Task M Step 10) ──────────────────────────────────────────────────────
 //
 // Same read-only posture as the rest of this file: `readMigrationManifest` only parses JSON off
-// disk, and `legacyStore.get(name)` is called purely to test PRESENCE — the count is the only thing
-// that ever leaves this function; a secret's VALUE never reaches the returned report, a log line, or
-// anywhere else. Callers pass a real `LegacyKeychainSecretStore` in production and a fake in tests
-// (this file itself constructs neither — see `migration/legacy-keychain-store.ts`).
+// disk, and the legacy items are only ever tested for PRESENCE (`legacyItemPresent`, WS-25 §7: a probe
+// that never decrypts) — the count is the only thing that ever leaves this function. Callers pass
+// `legacyKeychainPresence(profile)` in production and a fake in tests (this file itself constructs
+// neither — see `migration/legacy-keychain-store.ts`).
 
 export interface MigrationDoctorReport {
   /** `"complete"` / `"in-progress"` mirror the manifest's own status; `"absent"` means no manifest
@@ -1052,19 +1051,25 @@ export async function diagnoseMigration(input: {
   home: string;
   legacyHome: string;
   legacyKeychainService: string;
-  legacyStore: SecretStore;
+  /**
+   * WS-25 §7: is `name` present under `legacyKeychainService`? A PRESENCE probe, never a read: the CLI
+   * passes `legacyKeychainPresence(profile)` (`migration/legacy-keychain-store.ts`), which locates each item
+   * without requesting its data. The earlier `legacyStore.get` DECRYPTED all fourteen legacy items to count
+   * them — one macOS consent dialog per item for a binary that did not create them, for a number.
+   */
+  legacyItemPresent: (name: string) => boolean | Promise<boolean>;
 }): Promise<MigrationDoctorReport> {
   const manifest = readMigrationManifest(input.home);
   const status: MigrationDoctorReport["status"] = manifest?.status === "complete" || manifest?.status === "in-progress" ? manifest.status : "absent";
   const legacyHomePresent = existsSync(input.legacyHome);
-  // Skip the 14 Bun.secrets.get calls (one macOS consent dialog EACH, the first time) when there is
-  // nothing to report anyway: a machine that never had a legacy home and never ran Migration B has
-  // no legacy Keychain items to find, by construction — `winter doctor` would otherwise touch the
-  // Keychain on every single run, forever, for a count that can only ever come back zero.
+  // Skip the 14 presence probes when there is nothing to report anyway: a machine that never had a
+  // legacy home and never ran Migration B has no legacy Keychain items to find, by construction —
+  // `winter doctor` would otherwise touch the Keychain on every single run, forever, for a count that can
+  // only ever come back zero. (Since WS-25 §7 a probe raises no dialog either: it never decrypts.)
   let legacyKeychainRemaining = 0;
   if (legacyHomePresent || status !== "absent") {
     for (const name of MIGRATION_B_SECRET_NAMES) {
-      if ((await input.legacyStore.get(name)) !== null) legacyKeychainRemaining++;
+      if (await input.legacyItemPresent(name)) legacyKeychainRemaining++;
     }
   }
   // Review M2: only worth explaining when there's a live mystery — a legacy home sits right there,

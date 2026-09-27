@@ -17,6 +17,7 @@ import {
   type CredentialMaterial,
 } from "../../src/auth/credential-material";
 import { OPENAI_API_KEY_SECRET } from "../../src/providers/manager";
+import { createHostCredentialBroker, sessionCredentialAllowlist } from "../../src/runtime-sdk/host-credentials";
 
 function store(): FileSecretStore {
   return new FileSecretStore(mkdtempSync(join(tmpdir(), "winter-cred-material-")));
@@ -55,7 +56,40 @@ function coerceMaterial(value: unknown): CredentialMaterial | undefined {
   }
 }
 
+/** Mirror of winter-agent-sdk v0.0.30 keychain-store.ts `parseStoredCredentialMaterial` (not exported):
+ *  the child's parse of a credential string the HOST answered over `credential_resolve`. */
+function parseStoredMaterialMirror(raw: string): CredentialMaterial {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("malformed: not valid JSON credential material");
+  }
+  const material = coerceMaterial(parsed);
+  if (material === undefined) throw new Error("malformed: not a recognized credential material shape");
+  return material;
+}
+
 describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
+  test("WS-25 §7: what the daemon's credential_resolve answers for a stored oauth record parses on the child (refresh token withheld), and an api key too", async () => {
+    const s = store();
+    await new CodexAuthStore(s).save({
+      accessToken: "a", refreshToken: "r", idToken: "i", accountId: "acc", expiresAt: 1_800_000_000_000,
+    });
+    await writeCredentialMaterial(s, "deepseek:default", { kind: "api-key", key: "sk-test" });
+    const broker = createHostCredentialBroker({ secrets: s, keychainService: "ws25.credential-material.test" });
+    const allow = sessionCredentialAllowlist({ provider: { providerId: "codex-oauth", authRef: { kind: "keychain", account: "codex-oauth:default" } } } as never, {});
+    const resolve = broker.resolverFor(allow);
+    const signal = new AbortController().signal;
+    const oauth = await resolve({ ref: { kind: "keychain", account: "codex-oauth:default" } }, { signal });
+    if (!oauth.ok) throw new Error(`expected an answer, got ${oauth.reason}`);
+    expect(parseStoredMaterialMirror(oauth.material)).toEqual({ kind: "oauth", accessToken: "a", expiresAt: 1_800_000_000_000, accountId: "acc", idToken: "i" });
+    const key = await resolve({ ref: { kind: "keychain", account: "deepseek:default" } }, { signal });
+    if (!key.ok) throw new Error(`expected an answer, got ${key.reason}`);
+    expect(parseStoredMaterialMirror(key.material)).toEqual({ kind: "api-key", key: "sk-test" });
+    expect(() => parseStoredMaterialMirror("{not json")).toThrow("malformed");
+  });
+
   test("tripwire (hotfix review r1, m2): the installed winter-agent-sdk is the version the coerceMaterial mirror above was copied from — re-diff it on a bump", () => {
     // the coerceMaterial mirror above was copied from this version — re-diff it on a bump
     const req = createRequire(import.meta.url);
@@ -135,7 +169,19 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     // 0.0.28 → 0.0.29 (security: no-autoload build flags): `git diff v0.0.28 v0.0.29 --
     // packages/runtime/src/provider/keychain-store.ts` came back EMPTY (0 lines); the mirror stands
     // unchanged.
-    expect(pkg.version).toBe("0.0.29");
+    //
+    // 0.0.29 → 0.0.30 (WS-25: MCP OAuth + prompt-free credentials): `git diff v0.0.29 v0.0.30 --
+    // packages/runtime/src/provider/keychain-store.ts` is +70/-0 and changes NOTHING the mirror covers:
+    // `coerceMaterial`, `MATERIAL_KINDS` and every arm are byte-identical. It ADDS (1) `KeychainRawStore` /
+    // `createKeychainRawStore`, an uninterpreted read/write/remove store (the MCP OAuth token and client
+    // records, JSON the SDK validates itself -- no `CredentialMaterial` parse on that path), and (2)
+    // `parseStoredCredentialMaterial(raw, ref)`: `JSON.parse` then `coerceMaterial`, "malformed" when either
+    // fails -- the SAME interpretation `get` applies, now for a string that arrives OVER THE CONTROL CHANNEL
+    // (a host-brokered child receives the item's string from the daemon's `credential_resolve` instead of
+    // reading the Keychain). That makes the daemon's ANSWER a second producer this contract must hold for:
+    // `parseStoredMaterialMirror` below mirrors it, and the test after this one sends the broker's real
+    // answer for an oauth record (refresh token withheld) through it.
+    expect(pkg.version).toBe("0.0.30");
   });
 
 

@@ -72,10 +72,28 @@ describe.if(isMac)("McpManager (a status probe)", () => {
     expect(mgr.list().find((s) => s.name === "good")!.status).toBe("connected");
   });
 
+  test("a server that completes the handshake but hangs on tools/list is a failed probe within the ONE budget (WS-25 fix round 1, I2)", async () => {
+    const pidFile = join(realDir(), "pid");
+    const prev = process.env.WINTER_MCP_START_TIMEOUT_MS;
+    process.env.WINTER_MCP_START_TIMEOUT_MS = "800";
+    try {
+      const mgr = new McpManager({ trust: trustNone() });
+      const t0 = Date.now();
+      await mgr.startAll({ slow: { command: "bun", args: ["run", FIXTURE], env: { WINTER_FAKE_HANG_TOOLS_LIST: "1", WINTER_FAKE_PID_FILE: pidFile } } });
+      expect(Date.now() - t0).toBeLessThan(5_000); // never the MCP client's 60 s request timeout
+      expect(mgr.list()).toEqual([{ name: "slow", status: "failed", toolNames: [], source: "user" }]);
+      expect(await stillRunning(Number(readFileSync(pidFile, "utf8")))).toBe(false); // and it was closed
+    } finally {
+      if (prev === undefined) delete process.env.WINTER_MCP_START_TIMEOUT_MS; else process.env.WINTER_MCP_START_TIMEOUT_MS = prev;
+    }
+  });
+
   test("a server whose tool list repeats a name still probes connected — the probe registers nothing to collide (WS-24)", async () => {
     const mgr = new McpManager({ trust: trustNone() });
     await mgr.startAll({ dup: { command: "bun", args: ["run", FIXTURE], env: { WINTER_FAKE_DUP: "1" } } });
-    expect(mgr.list().find((s) => s.name === "dup")).toMatchObject({ status: "connected", toolNames: ["echo", "echo"] });
+    // WS-25: the probe speaks through the runtime's own MCP client, which keeps the FIRST of a repeated
+    // tool name (the listing a session's child sees) — so the status line reports what a session gets.
+    expect(mgr.list().find((s) => s.name === "dup")).toMatchObject({ status: "connected", toolNames: ["echo"] });
   });
 });
 

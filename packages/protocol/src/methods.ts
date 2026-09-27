@@ -523,15 +523,15 @@ export const SettingsSetSkillDeniedResult = z.object({ ok: z.literal(true), name
 /**
  * Daemon settings surface batch 3 (item 3a): `status` gains two values — `"disabled"` (named in
  * `settings.mcp.disabled`; withheld from both legs) and `"unmanaged"` (a configured HTTP/SSE server
- * the DAEMON never itself connects to — no in-daemon client for those transports, see
- * `external-mcp.ts`'s header — reported so the panel can distinguish "never even attempted" from
- * "attempted and failed"). Both are ADDITIVE enum members on an existing RPC result field (not a
+ * the daemon has not connected — reported so the panel can distinguish "never even attempted" from
+ * "attempted and failed"; WS-25: a daemon whose status probe covers http/sse — production — probes them
+ * lazily and reports their real status, so `"unmanaged"` remains only where that probe is not wired). Both are ADDITIVE enum members on an existing RPC result field (not a
  * `SessionEvent` variant), so this needs none of the protocol-change checklist's event steps; the
  * Swift side stores this field as a plain `String`, never an exhaustive `switch`, so widening it
  * here cannot break `apple/WinterKit`'s build. `source`'s own enum is untouched (still
  * `"user"|"project"|"plugin"` — no "the daemon itself" slot, per this schema's neighboring RPCs'
- * own precedent). `transport` is new and optional — set ONLY on a row this daemon SYNTHESIZES rather
- * than tracks live: a configured HTTP/SSE entry the manager never itself attempted
+ * own precedent). `transport` is new and optional — set on every http/sse row (WS-25: including one
+ * the probe tracks live), and on a stdio row only where this daemon SYNTHESIZES it: a configured HTTP/SSE entry the manager never itself attempted
  * (`status: "unmanaged"`/`"disabled"`, ipc/server.ts's `mcp.list` handler), OR (fix wave, pre-merge
  * review, finding 3) a DISABLED stdio entry the manager actually stopped and dropped tracking for
  * (`McpManager.stopServer`, called from `mcp.disable`'s handler) — without this synthesis a disabled
@@ -553,13 +553,31 @@ export const SettingsSetSkillDeniedResult = z.object({ ok: z.literal(true), name
  * tools and closes, at boot (user servers), on the first `mcp.list {cwd}` for a project's, and on every
  * `mcp.enable`/`mcp.add` — not a live connection's state. `"failed"` = that probe failed (or timed out).
  */
+/**
+ * WS-25 (MCP OAuth, spec §2): three additive, optional fields and one additive status value.
+ *  - `status: "needs-auth"` -- the last probe of an http/sse server was refused for want of a (new)
+ *    sign-in (no stored token, a dead one, or the server's 401), rather than failing for another reason.
+ *  - `auth` -- on an http/sse row only: `"none"` (a static `Authorization` header, or nothing stored, no
+ *    `oauth` block and a probe that did not ask for a sign-in), `"signed-in"` (a stored sign-in that is not
+ *    dead: unexpired, no expiry, or refreshable) or `"needs-auth"`. Read from the daemon's own store and the
+ *    last probe; never a token. A stdio row has no sign-in and omits it.
+ *  - `oauthIssuerOrigin` -- the ORIGIN of the authorization server the stored client registration names
+ *    (what the user signed in with), when there is one.
+ *  - `oauthPreregistered` -- the server's config carries `oauth.clientId` (a pre-registered client), so a
+ *    client offers "Set client secret" only there.
+ * Omitted on a row they do not apply to, so pre-WS-25 fixtures are unchanged.
+ */
+export const McpAuthStateSchema = z.enum(["none", "signed-in", "needs-auth"]);
 export const McpServerStatusSchema = z.object({
   name: z.string(),
-  status: z.enum(["connected", "failed", "disabled", "unmanaged"]),
+  status: z.enum(["connected", "failed", "disabled", "unmanaged", "needs-auth"]),
   toolNames: z.array(z.string()),
   source: z.enum(["user", "project", "plugin"]),
   transport: z.enum(["stdio", "http", "sse"]).optional(),
   strippedHeaders: z.array(z.string()).optional(),
+  auth: McpAuthStateSchema.optional(),
+  oauthIssuerOrigin: z.string().optional(),
+  oauthPreregistered: z.boolean().optional(),
 });
 export const McpListParams = z.object({ cwd: z.string().optional() });
 export const McpListResult = z.object({ ok: z.literal(true), servers: z.array(McpServerStatusSchema) });
@@ -602,10 +620,25 @@ export const McpVersionNegotiationSchema = z.union([
   z.literal("auto"),
   z.object({ pin: z.string().min(1) }),
 ]);
+/**
+ * WS-25 (spec §2): an http/sse server's OAuth sign-in settings -- hand-mirrors the agent SDK's
+ * `McpOAuthConfig` (core's `McpOAuthSetting`). This only BOUNDS the wire shape: the daemon validates the
+ * block with the runtime's own `validateMcpOAuthConfig(oauth, url)` before anything is written.
+ * `clientSecretRef` is a MARKER (`{ kind: "keychain" }`, strict): the secret's Keychain account is derived
+ * from the server URL and is never named by a config (review C1), and a secret VALUE never rides here at
+ * all -- `mcp.setClientSecret` is its only door.
+ */
+export const McpOAuthConfigSchema = z.object({
+  clientId: z.string().min(1).optional(),
+  clientSecretRef: z.object({ kind: z.literal("keychain") }).strict().optional(),
+  callbackPort: z.number().int().min(1).max(65535).optional(),
+  authServerMetadataUrl: z.string().min(1).optional(),
+  scopes: z.array(z.string().min(1)).optional(),
+}).strict();
 export const McpAddEntrySchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("stdio"), command: z.string().min(1), args: z.array(z.string()).optional(), env: z.record(z.string(), z.string()).optional(), versionNegotiation: McpVersionNegotiationSchema.optional() }),
-  z.object({ type: z.literal("http"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional(), versionNegotiation: McpVersionNegotiationSchema.optional() }),
-  z.object({ type: z.literal("sse"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional(), versionNegotiation: McpVersionNegotiationSchema.optional() }),
+  z.object({ type: z.literal("http"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional(), versionNegotiation: McpVersionNegotiationSchema.optional(), oauth: McpOAuthConfigSchema.optional() }),
+  z.object({ type: z.literal("sse"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional(), versionNegotiation: McpVersionNegotiationSchema.optional(), oauth: McpOAuthConfigSchema.optional() }),
 ]);
 /**
  * WS-21 (spec §4.4, `winter mcp add` = `claude mcp add`): the three MCP scopes, claude's names and
@@ -630,8 +663,8 @@ export const McpAddParams = z.object({
 });
 /** `started`: true only when this call ALSO probed a stdio user server right now
  *  (`McpManager.startOneUserServer`, mirroring `mcp.enable`'s own re-probe; WS-24: the daemon connects,
- *  lists and closes — each session's child connects its own copy) — false for an http/sse entry (no
- *  in-daemon client for those transports) or a name also listed in `mcp.disabled`. */
+ *  lists and closes — each session's child connects its own copy) — false for an http/sse entry (WS-25:
+ *  probed lazily by the next `mcp.list` instead) or a name also listed in `mcp.disabled`. */
 export const McpAddResult = z.object({ ok: z.literal(true), name: z.string(), transport: z.enum(["stdio", "http", "sse"]), started: z.boolean(), scope: McpScopeSchema.optional() });
 
 export const McpRemoveParams = z.object({
@@ -671,7 +704,94 @@ export const McpGetResult = z.object({
   strippedHeaders: z.array(z.string()).optional(),
   /** WS-24: the server's own protocol-era choice, when it has one (`McpVersionNegotiationSchema`). */
   versionNegotiation: McpVersionNegotiationSchema.optional(),
+  /** WS-25: the server's OAuth sign-in settings, echoed as stored (`McpOAuthConfigSchema`; never a secret). */
+  oauth: McpOAuthConfigSchema.optional(),
 });
+
+/**
+ * WS-25 (MCP OAuth, spec §2): the sign-in doors -- LOCAL role only (never added to
+ * `REMOTE_ALLOWED_METHODS`: the phone signs in on the Mac, spec §1.6). A server is named as the other
+ * `mcp.*` doors name it. `scope` is OPTIONAL here, unlike `mcp.get`'s: absent, the name resolves through
+ * the SAME precedence a session folds (local > trusted project > user) for `cwd`, or the user scope when
+ * there is no `cwd` (the Mac's MCP pane sends a bare `{ name }`). Every door acts on the server's
+ * canonical URL -- a sign-in is keyed by it (spec §1.6), not by the name or the scope.
+ */
+export const McpServerRefParams = z.object({
+  name: z.string().min(1),
+  scope: McpScopeSchema.optional(),
+  cwd: z.string().min(1).optional(),
+});
+
+/**
+ * `mcp.login`: discovery, registration and the authorize URL (the SDK's `startMcpOAuthLogin`); the daemon
+ * keeps the flow (its loopback listener) for up to 5 minutes and the CLIENT opens `authUrl` in a browser.
+ * `issuerOrigin` is the authorization server's origin and `authorizeOrigin` the origin of `authUrl` itself
+ * (usually the same; a client shows both when they differ).
+ *
+ * `confirmIssuerChange` (WS-25 contract addition): when this server already has a stored client
+ * registration and THIS sign-in's authorization server is a different one (FULL issuers, compared with the
+ * SDK's `sameIssuer` -- one origin can host several authorization servers behind tenant paths), the call
+ * is refused typed -- JSON-RPC error `data.code: "mcp_issuer_change_requires_confirmation"` with
+ * `data.storedIssuer`/`data.newIssuer` (the full issuers, what a client should show) and
+ * `data.storedIssuerOrigin`/`data.newIssuerOrigin` -- and nothing is left behind; the client shows both and
+ * repeats the call with `confirmIssuerChange: true`. A one-shot confirmation for that call only.
+ */
+export const McpLoginParams = McpServerRefParams.extend({ confirmIssuerChange: z.boolean().optional() });
+export const McpLoginResult = z.object({
+  loginId: z.string(),
+  authUrl: z.string(),
+  issuerOrigin: z.string(),
+  // WS-25 integration: REQUIRED -- the daemon always sends it and the Mac's decoder refuses a reply
+  // without it, so the schema says so rather than letting a future daemon drop it silently.
+  authorizeOrigin: z.string(),
+  // WS-25 security review M1: WHAT is being signed in to, for a client to show and confirm before it opens
+  // the browser -- the server the name resolved to (a project or local entry can shadow a user-scope name),
+  // its URL and the authorization server's full issuer.
+  issuer: z.string(),
+  name: z.string(),
+  scope: McpScopeSchema,
+  url: z.string(),
+});
+/** `mcp.loginStatus`: `pending` until the callback arrives; `expired` when nobody completed it within 5
+ *  minutes (the listener is closed); `failed` with a bounded, code-shaped `error` otherwise. A login id
+ *  the daemon does not know (never issued, or forgotten after it settled long ago) is `expired`. */
+export const McpLoginStatusParams = z.object({ loginId: z.string().min(1) });
+export const McpLoginStatusResult = z.object({
+  state: z.enum(["pending", "done", "failed", "expired"]),
+  error: z.string().optional(),
+});
+/** `mcp.logout`: best-effort RFC 7009 revocation, then the local sign-in is removed. The client
+ *  registration is KEPT unless `forgetClient` (spec §1.6). Live sessions reconnect the server. */
+export const McpLogoutParams = McpServerRefParams.extend({ forgetClient: z.boolean().optional() });
+export const McpLogoutResult = z.object({ ok: z.literal(true) });
+/**
+ * `mcp.clientSecretIssuer` (WS-25 fix round 1, contract addition): the authorization server a client
+ * secret for this server WOULD be bound to -- the USER-scope server's own discovery (side-effect free: no
+ * registration, no sign-in, nothing written). A client shows `issuer` and asks the user to confirm BEFORE
+ * it asks for the secret; the confirmed string is `mcp.setClientSecret`'s `expectedIssuer`. Same refusals
+ * as `mcp.setClientSecret` (`mcp_secret_needs_user_scope`, `mcp_not_preregistered`,
+ * `mcp_discovery_failed`, ...). `name` is the user-scope server the secret belongs to.
+ */
+export const McpClientSecretIssuerParams = McpServerRefParams;
+export const McpClientSecretIssuerResult = z.object({ name: z.string(), scope: McpScopeSchema, url: z.string(), issuer: z.string(), issuerOrigin: z.string(), authorizeOrigin: z.string() });
+/**
+ * `mcp.setClientSecret`: a pre-registered client's secret, straight to the Keychain under the DERIVED
+ * account `mcp-oauth-client-secret:<id>` (never a config-named one), bound to the authorization server it
+ * belongs to. Never echoed, never logged. Refused typed for a server whose config has no `oauth.clientId`
+ * + `oauth.clientSecretRef`, and for a project-/local-scope server with no user-scope counterpart (a
+ * repository must not be able to steer where the user's secret is sent).
+ *
+ * `expectedIssuer` (WS-25 fix round 1, contract change): the issuer the user CONFIRMED
+ * (`mcp.clientSecretIssuer`). The daemon discovers again and writes only when it names the same
+ * authorization server (`sameIssuer`). Absent -> `data.code: "mcp_expected_issuer_required"` with
+ * `data.issuer`/`data.issuerOrigin`; moved since -> `"mcp_issuer_changed"` with the new `data.issuer`.
+ * Nothing is written on either refusal. Optional in the schema only so the refusal is typed rather than a
+ * bare invalid-params error.
+ */
+export const McpSetClientSecretParams = McpServerRefParams.extend({ secret: z.string().min(1), expectedIssuer: z.string().min(1).optional() });
+// WS-25 integration: `issuer`/`issuerOrigin` REQUIRED -- the daemon always answers the issuer it bound the
+// secret to (the Mac's decoder refuses a reply without them, and the CLI shows it).
+export const McpSetClientSecretResult = z.object({ ok: z.literal(true), issuer: z.string(), issuerOrigin: z.string() });
 
 /**
  * Daemon settings surface (2026-09-17 plan, item 2): `capabilities.list` — the daemon's OWN
@@ -2708,6 +2828,11 @@ export const METHODS = {
   mcpAdd: "mcp.add",
   mcpRemove: "mcp.remove",
   mcpGet: "mcp.get",
+  mcpLogin: "mcp.login",
+  mcpLoginStatus: "mcp.loginStatus",
+  mcpLogout: "mcp.logout",
+  mcpSetClientSecret: "mcp.setClientSecret",
+  mcpClientSecretIssuer: "mcp.clientSecretIssuer",
   askUserRespond: "ask_user.respond",
   taskList: "task.list",
   planRespond: "plan.respond",

@@ -4,7 +4,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { configuredMcpServersFor } from "../../src/runtime-sdk/external-mcp";
+import { configuredMcpServersFor, pluginMcpServersFor } from "../../src/runtime-sdk/external-mcp";
 import { Settings, sdkUserMcpServers, validateMcpServerEntryForWrite } from "../../src/settings";
 
 // WS-21: the project MCP file is `<root>/.winter/mcp.json` (the repo-root `.mcp.json` is never read).
@@ -244,4 +244,30 @@ test("versionNegotiation survives the write door, and a value the SDK does not d
     expect(servers.bad).toBeUndefined();
     expect(servers.good).toEqual({ type: "stdio", command: "y", versionNegotiation: "auto" });
   } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+// WS-25 (review r1 (i)): the enabled plugins' http/sse servers, for the MCP sign-in allowlist — read as the
+// runtime's own plugin loader reads them.
+test("pluginMcpServersFor: .mcp.json (wrapper or bare map) then the manifest; http/sse only; first plugin wins a name", () => {
+  const base = mkdtempSync(join(tmpdir(), "ws25-plugin-mcp-"));
+  try {
+    const a = join(base, "a");
+    const b = join(base, "b");
+    const c = join(base, "c");
+    mkdirSync(join(a, ".claude-plugin"), { recursive: true });
+    mkdirSync(b, { recursive: true });
+    mkdirSync(c, { recursive: true });
+    writeFileSync(join(a, ".mcp.json"), JSON.stringify({ mcpServers: { linear: { type: "http", url: "https://mcp.linear.example/mcp" }, tool: { type: "stdio", command: "x" } } }));
+    writeFileSync(join(a, "mcp.json"), JSON.stringify({ ignored: { type: "http", url: "https://never.example" } }));
+    writeFileSync(join(a, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "a", mcpServers: { events: { type: "sse", url: "https://events.example/sse" } } }));
+    writeFileSync(join(b, "mcp.json"), JSON.stringify({ linear: { type: "http", url: "https://shadowed.example" }, notion: { type: "http", url: "https://mcp.notion.example/mcp" } }));
+    writeFileSync(join(c, ".mcp.json"), "{not json");
+    expect(pluginMcpServersFor([a, b, c, join(base, "missing")])).toEqual({
+      linear: { type: "http", url: "https://mcp.linear.example/mcp" },
+      events: { type: "sse", url: "https://events.example/sse" },
+      notion: { type: "http", url: "https://mcp.notion.example/mcp" },
+    });
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });
