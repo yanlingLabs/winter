@@ -69,6 +69,10 @@ function loadLibs() {
     SecKeychainItemCreateFromContent: { args: [FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.ptr, REF, REF, FFIType.ptr], returns: FFIType.i32 },
     SecTrustedApplicationCreateFromPath: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
     SecAccessCreate: { args: [REF, REF, FFIType.ptr], returns: FFIType.i32 },
+    SecKeychainGetUserInteractionAllowed: { args: [FFIType.ptr], returns: FFIType.i32 },
+    SecKeychainCopyDefault: { args: [FFIType.ptr], returns: FFIType.i32 },
+    SecKeychainGetStatus: { args: [REF, FFIType.ptr], returns: FFIType.i32 },
+    SecKeychainSetUserInteractionAllowed: { args: [FFIType.bool], returns: FFIType.i32 },
   });
   const ls = dlopen(CORE_SERVICES, {
     LSCopyApplicationURLsForBundleIdentifier: { args: [REF, REF], returns: REF },
@@ -125,6 +129,7 @@ export function openKeychainFile(path: string, password: string): KeychainFile {
   const ref = out[0]!;
   const pw = Buffer.from(password, "utf8");
   const unlocked = L().sec.SecKeychainUnlock(ref, pw.length, ptr(pw), true);
+  void pw.length;
   if (unlocked !== 0) {
     release(ref);
     throw new KeychainFfiError("unlock", unlocked);
@@ -145,6 +150,7 @@ function find(target: KeychainTarget, service: string, account: string, withData
   const lenOut = new Uint32Array(1);
   const dataOut = outPtr();
   const status = L().sec.SecKeychainFindGenericPassword(kcRef(target), svc.length, ptr(svc), acct.length, ptr(acct), withData ? ptr(lenOut) : null, withData ? ptr(dataOut) : null, ptr(itemOut));
+  void [svc, acct].length; // alive until the call returned (see `addGenericPassword`)
   if (status !== 0) return { status };
   let value: string | undefined;
   if (withData) {
@@ -190,63 +196,142 @@ export function deleteGenericPassword(target: KeychainTarget, service: string, a
   }
 }
 
+/** An access object (`SecAccessRef`) built ONCE and reused for every item it is added with. */
+export interface KeychainAccess {
+  readonly ref: Ref;
+  release(): void;
+}
+
 /**
- * Creates a generic password whose decrypt ACL names exactly `trustedApplications` (`null` = the calling
- * process's own executable). Refuses typed (`ERR_SEC_DUPLICATE_ITEM`) when the item exists — the caller
- * deletes first. The item carries the same attributes a `Bun.secrets.set` item does (service, account,
- * label = service), so `Bun.secrets` and the Swift `SecItemCopyMatching` reader both find it.
+ * A `SecAccessRef` whose decrypt entry names exactly `trustedApplications` (`null` = the calling process's
+ * own executable), each recorded by its designated requirement. Built BEFORE any item is touched, so a
+ * failure here (a missing application path) costs nothing; the caller releases it.
  */
-export function addGenericPasswordWithAccess(target: KeychainTarget, item: { service: string; account: string; value: string; trustedApplications: readonly (string | null)[] }): void {
+export function createKeychainAccess(description: string, trustedApplications: readonly (string | null)[]): KeychainAccess {
   const { cf, sec } = L();
   const apps: Ref[] = [];
   let array: Ref = 0n;
-  let description: Ref = 0n;
-  let access: Ref = 0n;
+  let label: Ref = 0n;
   try {
-    for (const path of item.trustedApplications) {
+    for (const path of trustedApplications) {
       const out = outPtr();
-      const status = sec.SecTrustedApplicationCreateFromPath(path === null ? null : cstr(path), ptr(out));
-      if (status !== 0) throw new KeychainFfiError("trusted application", status, item.account);
+      const cpath = path === null ? null : cstr(path);
+      const status = sec.SecTrustedApplicationCreateFromPath(cpath, ptr(out));
+      void cpath?.length; // keep the C string alive past the call
+      if (status !== 0) throw new KeychainFfiError("trusted application", status);
       apps.push(out[0]!);
     }
     const values = new BigUint64Array(apps);
     // No callbacks: the array does not retain its values, and they are released below after `access`
     // (which retains what it needs) is created.
     array = BigInt(cf.CFArrayCreate(0n, apps.length === 0 ? null : ptr(values), apps.length, 0n));
-    description = cfString(item.account);
+    void values.length;
+    label = cfString(description);
     const accessOut = outPtr();
-    const created = sec.SecAccessCreate(description, array, ptr(accessOut));
-    if (created !== 0) throw new KeychainFfiError("access", created, item.account);
-    access = accessOut[0]!;
-
-    const svc = Buffer.from(item.service, "utf8");
-    const acct = Buffer.from(item.account, "utf8");
-    // SecKeychainAttributeList { UInt32 count; SecKeychainAttribute *attr } and three
-    // SecKeychainAttribute { UInt32 tag; UInt32 length; void *data } (16 bytes each on arm64/x86_64).
-    const attrs = Buffer.alloc(48);
-    const put = (i: number, tag: number, data: Buffer): void => {
-      attrs.writeUInt32LE(tag, i * 16);
-      attrs.writeUInt32LE(data.length, i * 16 + 4);
-      attrs.writeBigUInt64LE(BigInt(ptr(data)), i * 16 + 8);
-    };
-    put(0, SERVICE_ATTR, svc);
-    put(1, ACCOUNT_ATTR, acct);
-    put(2, LABEL_ATTR, svc);
-    const list = Buffer.alloc(16);
-    list.writeUInt32LE(3, 0);
-    list.writeBigUInt64LE(BigInt(ptr(attrs)), 8);
-    const data = Buffer.from(item.value, "utf8");
-    const itemOut = outPtr();
-    const status = sec.SecKeychainItemCreateFromContent(GENERIC_PASSWORD_CLASS, ptr(list), data.length, ptr(data), kcRef(target), access, ptr(itemOut));
-    if (status !== 0) throw new KeychainFfiError("create", status, item.account);
-    release(itemOut[0]!);
+    const created = sec.SecAccessCreate(label, array, ptr(accessOut));
+    if (created !== 0) throw new KeychainFfiError("access", created);
+    const ref = accessOut[0]!;
+    let released = false;
+    return { ref, release: () => { if (!released) { released = true; release(ref); } } };
   } finally {
-    release(access);
-    release(description);
+    release(label);
     release(array);
     for (const app of apps) release(app);
   }
 }
+
+/**
+ * Creates a generic password with `access` as its initial ACL. Refuses typed (`ERR_SEC_DUPLICATE_ITEM`)
+ * when the item exists — the caller deletes first. The item carries the same attributes a
+ * `Bun.secrets.set` item does (service, account, label = service), so `Bun.secrets` and the Swift
+ * `SecItemCopyMatching` reader both find it.
+ */
+export function addGenericPassword(target: KeychainTarget, item: { service: string; account: string; value: string; access: KeychainAccess }): void {
+  const svc = Buffer.from(item.service, "utf8");
+  const acct = Buffer.from(item.account, "utf8");
+  // SecKeychainAttributeList { UInt32 count; SecKeychainAttribute *attr } and three
+  // SecKeychainAttribute { UInt32 tag; UInt32 length; void *data } (16 bytes each on arm64/x86_64).
+  const attrs = Buffer.alloc(48);
+  const put = (i: number, tag: number, data: Buffer): void => {
+    attrs.writeUInt32LE(tag, i * 16);
+    attrs.writeUInt32LE(data.length, i * 16 + 4);
+    attrs.writeBigUInt64LE(BigInt(ptr(data)), i * 16 + 8);
+  };
+  put(0, SERVICE_ATTR, svc);
+  put(1, ACCOUNT_ATTR, acct);
+  put(2, LABEL_ATTR, svc);
+  const list = Buffer.alloc(16);
+  list.writeUInt32LE(3, 0);
+  list.writeBigUInt64LE(BigInt(ptr(attrs)), 8);
+  const data = Buffer.from(item.value, "utf8");
+  const itemOut = outPtr();
+  const status = L().sec.SecKeychainItemCreateFromContent(GENERIC_PASSWORD_CLASS, ptr(list), data.length, ptr(data), kcRef(target), item.access.ref, ptr(itemOut));
+  // The buffers above are reachable only through raw addresses the call read; keep every one alive until
+  // it has returned, so no collection can move or free them mid-call.
+  void [svc, acct, attrs, list, data].length;
+  if (status !== 0) throw new KeychainFfiError("create", status, item.account);
+  release(itemOut[0]!);
+}
+
+/** `createKeychainAccess` + `addGenericPassword` for one item (tests; one-off items). */
+export function addGenericPasswordWithAccess(target: KeychainTarget, item: { service: string; account: string; value: string; trustedApplications: readonly (string | null)[] }): void {
+  const access = createKeychainAccess(item.account, item.trustedApplications);
+  try {
+    addGenericPassword(target, { service: item.service, account: item.account, value: item.value, access });
+  } finally {
+    access.release();
+  }
+}
+
+/**
+ * Is the keychain UNLOCKED (`kSecUnlockStateStatus`)? `null` = the user's default keychain. A read of an
+ * item's DATA from a locked keychain blocks on an unlock dialog — MEASURED 2026-09-27 to do so even with
+ * user interaction disabled (below) — so a caller that will read data checks this first and skips when it
+ * answers `false`. Locating an item (no data) on a locked keychain was measured silent.
+ */
+export function keychainUnlocked(target: KeychainTarget): boolean {
+  const { sec } = L();
+  let ref = kcRef(target);
+  let owned = false;
+  if (ref === 0n) {
+    const out = outPtr();
+    const status = sec.SecKeychainCopyDefault(ptr(out));
+    if (status !== 0) throw new KeychainFfiError("default keychain", status);
+    ref = out[0]!;
+    owned = true;
+  }
+  try {
+    const state = new Uint32Array(1);
+    const status = sec.SecKeychainGetStatus(ref, ptr(state));
+    if (status !== 0) throw new KeychainFfiError("status", status);
+    return (state[0]! & 1) !== 0;
+  } finally {
+    if (owned) release(ref);
+  }
+}
+
+/**
+ * Runs `fn` with the keychain's user interaction DISABLED (`SecKeychainSetUserInteractionAllowed(false)`),
+ * restoring the previous setting after — belt and braces for the presence probes and the boot migration.
+ * It is NOT a complete guard: a DATA read of a locked keychain still blocked on its unlock dialog when
+ * measured, which is why `keychainUnlocked` exists and the data-reading callers check it first. The setting is
+ * process-wide, so `fn` must be synchronous (every call in this file is): nothing else can run while it is
+ * off.
+ */
+export function withKeychainUserInteractionDisabled<T>(fn: () => T): T {
+  const { sec } = L();
+  const was = new Uint8Array(1);
+  const got = sec.SecKeychainGetUserInteractionAllowed(ptr(was));
+  sec.SecKeychainSetUserInteractionAllowed(false);
+  try {
+    return fn();
+  } finally {
+    sec.SecKeychainSetUserInteractionAllowed(got === 0 ? was[0] !== 0 : true);
+  }
+}
+
+/** `errSecInteractionNotAllowed`: an operation that needed UI while interaction was disabled. */
+export const ERR_SEC_INTERACTION_NOT_ALLOWED = -25308;
 
 /** The file paths Launch Services knows for an application bundle id (`[]` when none). */
 export function applicationPathsForBundleId(bundleId: string): string[] {
