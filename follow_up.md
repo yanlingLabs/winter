@@ -4,7 +4,6 @@ The canonical list of known, deliberately parked work. Nothing here blocks a rel
 
 ## MCP
 - [ ] URL-mode elicitation (`onElicitation` is unwired in the daemon), a second auth path some newer MCP servers use.
-- [ ] `winter mcp remove` leaves the server's connector permissions behind, and there is no `winter mcp rename` (permissions are keyed by server name, so they don't follow a rename).
 - [ ] A turn that starts while a server is reconnecting doesn't see that server's tools (the next turn does).
 
 ## Credentials and Keychain

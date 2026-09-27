@@ -83,7 +83,7 @@ describe("mcp.add / remove / get over the three scopes", () => {
     expect(sdkLocalMcpServers(home, project).loc).toEqual(stdio);
     const got = await c.request(METHODS.mcpGet, { name: "loc", cwd: project });
     expect(got.result).toMatchObject({ found: true, scope: "local", command: "node" });
-    expect((await c.request(METHODS.mcpRemove, { name: "loc", cwd: project })).result).toEqual({ ok: true, name: "loc", removed: true, scope: "local" });
+    expect((await c.request(METHODS.mcpRemove, { name: "loc", cwd: project })).result).toEqual({ ok: true, name: "loc", removed: true, scope: "local", permissionsCleared: false });
     expect(config().projects[project].mcpServers).toEqual({});
   });
 

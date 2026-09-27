@@ -178,10 +178,10 @@ describe("mcp.add / mcp.remove / mcp.get", () => {
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     const first = await c.request(METHODS.mcpRemove, { name: "existing", scope: "user" });
-    expect(first.result).toEqual({ ok: true, name: "existing", removed: true, scope: "user" });
+    expect(first.result).toEqual({ ok: true, name: "existing", removed: true, scope: "user", permissionsCleared: false });
     expect(globalConfig(home).mcpServers).toEqual({});
     const second = await c.request(METHODS.mcpRemove, { name: "existing", scope: "user" });
-    expect(second.result).toEqual({ ok: true, name: "existing", removed: false, scope: "user" });
+    expect(second.result).toEqual({ ok: true, name: "existing", removed: false, scope: "user", permissionsCleared: false });
     c.close();
   });
 

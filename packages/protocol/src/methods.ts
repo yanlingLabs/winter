@@ -738,8 +738,31 @@ export const McpRemoveParams = z.object({
   cwd: z.string().min(1).optional(),
 });
 /** `removed`: false when the name was not present in that scope at all — an idempotent no-op, same
- *  posture `mcp.enable`/`mcp.disable` already take on an absent/never-disabled name. */
-export const McpRemoveResult = z.object({ ok: z.literal(true), name: z.string(), removed: z.boolean(), scope: McpScopeSchema.optional() });
+ *  posture `mcp.enable`/`mcp.disable` already take on an absent/never-disabled name.
+ *  WS-27 `permissionsCleared`: the removal also dropped the name's connector permissions
+ *  (`settings.json` → `mcp.toolPermissions`) — only once no other scope, plugin or subagent definition still
+ *  defines a server of that name (the values are keyed by name across scopes). */
+export const McpRemoveResult = z.object({ ok: z.literal(true), name: z.string(), removed: z.boolean(), scope: McpScopeSchema.optional(), permissionsCleared: z.boolean().optional() });
+
+/**
+ * WS-27 — `winter mcp rename <old> <new>`: rename a server WITHIN one scope, its entry unchanged. Refused typed
+ * (nothing written) when the new name is invalid (`mcp_invalid_name`), the scope does not define the old one
+ * (`mcp_server_not_found`), the scope already defines the new one (`mcp_server_exists`), or BOTH names already
+ * hold stored connector permissions (`mcp_rename_permissions_conflict` — clear one first). The old name's
+ * connector permissions and `mcp.disabled` membership are copied to the new name (`carried`), and dropped from
+ * the old name unless another scope, a plugin or a subagent definition still defines it (`keptOld`). A sign-in
+ * is keyed by the server's URL, so it follows the rename by itself. LOCAL role only.
+ */
+export const McpRenameParams = z.object({
+  name: z.string().min(1),
+  newName: z.string().min(1),
+  scope: McpScopeSchema.default("local"),
+  cwd: z.string().min(1).optional(),
+});
+export const McpRenameResult = z.object({
+  ok: z.literal(true), name: z.string(), newName: z.string(), scope: McpScopeSchema,
+  carried: z.boolean(), keptOld: z.boolean(),
+});
 
 /**
  * `winter mcp get <name>` in one of the three scopes (WS-21, `McpScopeSchema`). Read-only — LOCAL role
@@ -2892,6 +2915,7 @@ export const METHODS = {
   mcpDisable: "mcp.disable",
   mcpAdd: "mcp.add",
   mcpRemove: "mcp.remove",
+  mcpRename: "mcp.rename",
   mcpGet: "mcp.get",
   mcpLogin: "mcp.login",
   mcpLoginStatus: "mcp.loginStatus",
