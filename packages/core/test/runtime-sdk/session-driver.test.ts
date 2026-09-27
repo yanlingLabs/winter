@@ -47,6 +47,9 @@ type Frame = Record<string, unknown>;
 /** The wire, minimal: frames a test emits, texts the driver pushed. Ends on stdin close. */
 class FakeQuery {
   readonly pushed: string[] = [];
+  /** WS-25: the server names `reconnectMcpServer` was called with. */
+  readonly reconnected: string[] = [];
+  async reconnectMcpServer(name: string): Promise<void> { this.reconnected.push(name); }
   results = 0;
   private readonly buffer: Frame[] = [];
   private waiter: ((r: IteratorResult<Frame>) => void) | undefined;
@@ -1030,6 +1033,34 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
         expect(JSON.stringify(options)).not.toContain(key);
         await session.end();
       }
+    } finally { t.close(); }
+  });
+
+  // WS-25 (cross-lane, for the sign-in doors): a live session names its servers at a URL and reconnects one.
+  test("a live session answers which of its MCP servers sit at a URL, and reconnects one on its live child", async () => {
+    const t = table({
+      extraMcpServers: () => ({
+        linear: { type: "http", url: "https://mcp.linear.example/mcp" },
+        "linear-2": { type: "sse", url: "https://MCP.linear.example/mcp/" },
+        other: { type: "http", url: "https://other.example/mcp" },
+        local: { type: "stdio", command: "x" },
+      }),
+    });
+    try {
+      const session = await t.drivers.create(t.store.createSession("t", { mode: "chat", model: "winter-test/echo" }));
+      // Canonical comparison (scheme/host case, trailing slash), http and sse alike; nothing for stdio.
+      expect(session.mcpServerNamesFor!("https://mcp.linear.example/mcp/").sort()).toEqual(["linear", "linear-2"]);
+      expect(session.mcpServerNamesFor!("https://nowhere.example/mcp")).toEqual([]);
+      expect(session.mcpServerNamesFor!("not a url")).toEqual([]);
+      await session.reconnectMcpServer!("linear");
+      expect(t.q().reconnected).toEqual(["linear"]);
+      // The fold rides a symbol key: never in the serialisable Options.
+      expect(JSON.stringify(t.q().options)).not.toContain("mcp.linear.example");
+      await session.end();
+      expect(session.mcpServerNamesFor!("https://mcp.linear.example/mcp")).toEqual([]);
+      let refused: unknown;
+      try { await session.reconnectMcpServer!("linear"); } catch (err) { refused = err; }
+      expect((refused as { code?: string }).code).toBe("not_supported_on_winter_leg");
     } finally { t.close(); }
   });
 
