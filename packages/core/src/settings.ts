@@ -25,6 +25,7 @@ import { internalDrivableAdapterIds } from "./providers/internal-adapters";
 import { liveSdkGlobalConfig, liveSdkSettings } from "./sdk-files";
 import { sdkSettingsPath } from "./agent/paths";
 import { McpOAuthSetting, McpVersionNegotiationSetting, mcpOAuthIssue } from "./agent/mcp/project-file";
+import { CONNECTOR_ALL_TOOLS, normalizeConnectorTable, type ConnectorPermission, type ConnectorPermissionTable } from "./agent/mcp/connector-permissions";
 
 /** Reasoning-effort slugs valid on the wire — measured LIVE against the Codex OAuth endpoint
  *  (2026-07-30), one model at a time, NOT read off the /models catalogue text. That distinction
@@ -403,6 +404,13 @@ export const Settings = z.object({
    *  `McpManager.startAll` (`daemon.ts`), and `mcp.list` reports it as `status: "disabled"`. */
   mcp: z.object({
     disabled: z.array(z.string()).optional(),
+    /** WS-26: connector permissions — server → (tool | `"*"`) → `"allow"|"ask"|"deny"`, read live by the
+     *  connector-permission hook and the approval bridge (`agent/mcp/connector-permissions.ts` has the
+     *  store's reasoning and the matrix). Typed LOOSELY on purpose, like `plugins.consents` — down to the
+     *  row (`"cf": "deny"` must not roll the whole settings file back to keep-last-good, nor refuse boot).
+     *  The one reader, `connectorPermissionTable`, reads an unrecognised value as `"ask"` and a row that is
+     *  not an object as `{"*": "ask"}`. */
+    toolPermissions: z.record(z.string(), z.unknown()).optional(),
   }).optional(),
   reviewer: z.object({
     enabled: z.boolean().optional(),
@@ -1107,6 +1115,34 @@ export function validateMcpServerEntryForWrite(entry: unknown): McpServerSetting
   const parsed = McpServerSettingsEntry.safeParse(entry);
   if (!parsed.success) throw new Error(parsed.error.issues.map((i) => i.message).join("; "));
   return parsed.data;
+}
+
+/** WS-26: the live connector-permission table (`settings.mcp.toolPermissions`), normalised — the ONE
+ *  reader (an absent block is an empty table: every action at its default). */
+export function connectorPermissionTable(settings: Settings | null | undefined): ConnectorPermissionTable {
+  return normalizeConnectorTable(settings?.mcp?.toolPermissions);
+}
+
+/**
+ * WS-26: pure `Settings -> Settings` transform setting ONE connector action's permission (`tool`), or its
+ * server's all-actions value (`tool === "*"`), in `settings.mcp.toolPermissions`. `permission: undefined`
+ * clears the entry ("default"); a server left with no entries is dropped. `resetTools` (all-actions only)
+ * also clears every per-action entry of the server, so "all actions → deny" means every action. Like
+ * `setMcpServerDisabled`, never validated against the configured servers: naming a server before it is
+ * added is a legitimate pre-emptive choice.
+ */
+export function setConnectorToolPermission(settings: Settings, server: string, tool: string, permission: ConnectorPermission | undefined, opts: { resetTools?: boolean } = {}): Settings {
+  const table = { ...(settings.mcp?.toolPermissions ?? {}) } as Record<string, unknown>;
+  const existing = Object.hasOwn(table, server) ? table[server] : undefined;
+  // A hand-edited row that is not an object is replaced, never spread (a string would spread into indices).
+  const base = existing !== null && typeof existing === "object" && !Array.isArray(existing) ? existing as Record<string, unknown> : {};
+  const row: Record<string, unknown> = opts.resetTools === true && tool === CONNECTOR_ALL_TOOLS ? {} : { ...base };
+  if (permission === undefined) delete row[tool];
+  else row[tool] = permission;
+  if (Object.keys(row).length === 0) delete table[server];
+  else table[server] = row;
+  const { toolPermissions: _previous, ...rest } = settings.mcp ?? {};
+  return { ...settings, mcp: Object.keys(table).length === 0 ? rest : { ...rest, toolPermissions: table } };
 }
 
 /**

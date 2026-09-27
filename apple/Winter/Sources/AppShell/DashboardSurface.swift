@@ -227,6 +227,11 @@ struct DashboardWiring {
     /// sign-in section `isUnwired`: no button does anything, nothing crashes.
     var mcpOAuthClient: McpAuthClient? = nil
 
+    /// WS-26 — the connector permissions door (`mcp.tools`/`mcp.setToolPermission`) behind the
+    /// `McpPermissionsClient` protocol (`WinterKit`), for the same fake-based testability as
+    /// `mcpOAuthClient`. `nil` keeps the detail page's plain tool list.
+    var mcpPermissionsClient: McpPermissionsClient? = nil
+
     /// 2026-09-18 — the Updates panel's observable. `var` with a `nil` default for the same reason
     /// `mcpList` above is one: this struct is also constructed by pure-construction tests, and a
     /// required field would break every one of them for a panel that treats "no presenter" as a

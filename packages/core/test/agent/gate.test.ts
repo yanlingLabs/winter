@@ -348,9 +348,10 @@ describe("PermissionGate v1", () => {
 
   // Plan-immunity (2026-07-28, USER-REVISED design): "chat" is chat-mode's own fixed, immutable
   // internal policy (never crosses the wire — see gate.ts's SessionApprovalPolicy doc comment).
-  // The user's directive ("chat simply wouldn't ever ask permissions") means this policy must
-  // never resolve to "ask" for ANYTHING — chat's own three allowlisted tools (AskQuestion/Search/
-  // ReadPage, all READ_ONLY or NETWORK) allow; everything else DENIES outright, never cards.
+  // The user's directive ("chat simply wouldn't ever ask permissions") meant this policy never
+  // resolved to "ask" — chat's own three allowlisted tools (AskQuestion/Search/ReadPage, all
+  // READ_ONLY or NETWORK) allow; everything else DENIES outright, never cards. WS-26 reverses it for
+  // connector actions ONLY (the last test in this block).
   describe("policy 'chat': chat's own tools allow, everything else DENIES (never asks)", () => {
     test("chat's allowlisted tools (READ_ONLY/NETWORK classes) allow under 'chat'", () => {
       // B2-T6 adds `browser` to this list — it is chat's PRIMARY web surface per spec §1 and a
@@ -372,6 +373,19 @@ describe("PermissionGate v1", () => {
 
     test("an unrecognized/unclassified tool also DENIES under 'chat' (fail-closed, same direction as 'plan')", () => {
       expect(gate.evaluate("mystery", "chat")).toBe("deny");
+    });
+
+    // WS-26 (USER RULING 2026-09-27): the ONE reversal of "chat never asks" — a CONNECTOR action (a tool
+    // of a user-configured MCP server) answers "ask", and the bridge cards it. Deliberately narrower than
+    // `isExternalToolName`: the daemon's own capability tools, Winter's extras-tier plugin tools
+    // (`plugin__*`, which reach a child as `mcp__winter__external__*`) and a spoofed `mcp__winter__…` name
+    // keep chat's allow-or-deny.
+    test("a connector action ASKS under 'chat'; every other external-looking name still denies", () => {
+      expect(gate.evaluate("mcp__cf__workers_list", "chat")).toBe("ask");
+      expect(gate.evaluate("mcp__github__create_issue", "chat")).toBe("ask");
+      for (const name of ["plugin__x__y", "mcp__winter__external__battery", "mcp__winter__x", "mcp__winter__computer__computer"]) {
+        expect(gate.evaluate(name, "chat")).toBe("deny");
+      }
     });
 
     // Fix round 1, Minor 2 (reviewer finding): enter_plan_mode/exit_plan_mode are READ_ONLY

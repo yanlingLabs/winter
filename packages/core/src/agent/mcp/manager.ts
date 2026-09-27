@@ -67,7 +67,19 @@ export type McpServerConfig =
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
 type ProjectState = { kind: "none" } | { kind: "probed"; servers: McpServerStatus[] };
-type ProbeResult = { status: McpServerStatus["status"]; toolNames: string[] };
+type ProbeResult = { status: McpServerStatus["status"]; toolNames: string[]; tools?: McpProbedTool[] };
+
+/**
+ * WS-26: one action as the server's last successful `tools/list` described it — kept for the connector
+ * permissions (`agent/mcp/connector-permissions.ts`): its description for the settings page, and whether
+ * the server marked it read-only (`annotations.readOnlyHint === true`; anything else — false, absent, no
+ * annotations at all — is `false`, which fails toward ask).
+ */
+export interface McpProbedTool {
+  name: string;
+  description?: string;
+  readOnly: boolean;
+}
 export type McpConnect = (opts: ConnectMcpServerOptions) => Promise<ConnectedMcpClient>;
 
 export class McpManager {
@@ -76,6 +88,15 @@ export class McpManager {
   private inFlight = new Map<string, Promise<void>>();
   /** WS-25: user http/sse probes in flight, by name — two `mcp.list` calls join one probe. */
   private remoteInFlight = new Map<string, Promise<void>>();
+  /**
+   * WS-26: each server's actions as its last SUCCESSFUL probe listed them — user servers by name, a
+   * project's by canonical dir then name. Kept apart from `statuses` (whose rows `mcp.list` returns as
+   * they are) and deliberately STALE-TOLERANT: a failed or `needs-auth` probe, and `forgetRemote` (a
+   * sign-in or sign-out), leave the last listing in place, because a stale answer about read-only is fine
+   * while a missing one fails toward ask. Only `stopServer` (disable/remove) and `stopAll` drop it.
+   */
+  private userTools = new Map<string, McpProbedTool[]>();
+  private projectTools = new Map<string, Map<string, McpProbedTool[]>>();
   constructor(private readonly deps: {
     trust: TrustStore;
     log?: (m: string) => void;
@@ -141,7 +162,15 @@ export class McpManager {
         timer = setTimeout(() => reject(new McpConnectError("timeout", `mcp probe: '${name}' did not list its tools within ${budget}ms`)), remaining);
       });
       const tools = await Promise.race([client.listTools(), expired]);
-      return { status: "connected", toolNames: tools.map((t) => t.name) };
+      return {
+        status: "connected",
+        toolNames: tools.map((t) => t.name),
+        tools: tools.map((t) => ({
+          name: t.name,
+          ...(typeof t.description === "string" && t.description !== "" ? { description: t.description } : {}),
+          readOnly: t.annotations?.readOnlyHint === true,
+        })),
+      };
     } catch (e) {
       const code = e instanceof McpConnectError ? e.code : e instanceof Error ? e.name : "unknown";
       if (code === "needs_auth") {
@@ -157,13 +186,20 @@ export class McpManager {
   }
 
   private row(name: string, cfg: McpServerConfig, result: ProbeResult, source: McpServerStatus["source"]): McpServerStatus {
-    return { name, ...result, source, ...(cfg.type === "http" || cfg.type === "sse" ? { transport: cfg.type } : {}) };
+    return { name, status: result.status, toolNames: result.toolNames, source, ...(cfg.type === "http" || cfg.type === "sse" ? { transport: cfg.type } : {}) };
+  }
+
+  /** WS-26: record a user server's listing — only a successful probe replaces the last one. */
+  private noteUserTools(name: string, result: ProbeResult): void {
+    if (result.tools !== undefined) this.userTools.set(name, result.tools);
   }
 
   /** Boot: probe the user servers given (the daemon passes its stdio ones — `stdioMcpServersFor`). */
   async startAll(servers: Record<string, McpServerConfig>): Promise<void> {
     await Promise.all(Object.entries(servers).map(async ([name, cfg]) => {
-      this.statuses.set(name, this.row(name, cfg, await this.probe(name, cfg, this.userCwd()), "user"));
+      const result = await this.probe(name, cfg, this.userCwd());
+      this.noteUserTools(name, result);
+      this.statuses.set(name, this.row(name, cfg, result, "user"));
     }));
   }
 
@@ -177,7 +213,9 @@ export class McpManager {
    * USER-tier server reports a fresh status at once, never needing a daemon restart. WS-24: a re-probe.
    */
   async startOneUserServer(name: string, cfg: McpServerConfig): Promise<void> {
-    this.statuses.set(name, this.row(name, cfg, await this.probe(name, cfg, this.userCwd()), "user"));
+    const result = await this.probe(name, cfg, this.userCwd());
+    this.noteUserTools(name, result);
+    this.statuses.set(name, this.row(name, cfg, result, "user"));
   }
 
   /** WS-25: whether this manager probes http/sse servers at all (`deps.remote`). */
@@ -198,7 +236,7 @@ export class McpManager {
       const pending = this.remoteInFlight.get(name);
       if (pending) return pending;
       const p = this.probe(name, cfg, this.userCwd())
-        .then((result) => { this.statuses.set(name, this.row(name, cfg, result, "user")); })
+        .then((result) => { this.noteUserTools(name, result); this.statuses.set(name, this.row(name, cfg, result, "user")); })
         .finally(() => this.remoteInFlight.delete(name));
       this.remoteInFlight.set(name, p);
       return p;
@@ -254,6 +292,7 @@ export class McpManager {
     // `mcp.list`'s own settings overlay has a row to rewrite to `status: "disabled"`.
     const disabled = this.deps.disabled?.() ?? new Set<string>();
     const servers: McpServerStatus[] = [];
+    const tools = this.projectTools.get(dir) ?? new Map<string, McpProbedTool[]>();
     await Promise.all(Object.entries(validated).map(async ([name, entry]) => {
       const remote = entry.type !== "stdio";
       // Transport checked BEFORE `disabled` (deliberately): without `deps.remote` an http/sse entry is
@@ -269,9 +308,82 @@ export class McpManager {
       }
       // A project's stdio server starts in the project directory, as a session's child would start it.
       const result = await this.probe(name, cfg, dir, { label: "project server", context: ` (${dir})` });
+      if (result.tools !== undefined) tools.set(name, result.tools);
       servers.push(this.row(name, cfg, result, "project"));
     }));
+    if (tools.size > 0) this.projectTools.set(dir, tools);
     this.projects.set(dir, { kind: "probed", servers });
+  }
+
+  /**
+   * WS-26: a server's actions as its last successful probe listed them — the user-scope listing and, with a
+   * `cwd`, that project's (already probed; this never probes). `undefined` when no listing of the name is
+   * known. SYNC — a permission decision reads it on every connector call and must never wait on a probe.
+   */
+  toolsFor(server: string, cwd?: string): McpProbedTool[] | undefined {
+    const rows = this.listingsFor(server, cwd);
+    if (rows.length === 0) return undefined;
+    if (rows.length === 1) return rows[0];
+    const merged = new Map<string, McpProbedTool>();
+    for (const row of rows) {
+      for (const t of row) {
+        const seen = merged.get(t.name);
+        // The same name in two scopes: read-only only if EVERY listing says so (fail toward ask).
+        merged.set(t.name, seen === undefined ? t : { ...seen, readOnly: seen.readOnly && t.readOnly });
+      }
+    }
+    return [...merged.values()];
+  }
+
+  /**
+   * WS-26: did the server mark this action read-only? `true`/`false` when a listing names the action,
+   * `undefined` when none does (an unknown server, an unprobed one, a tool its listing lacks). When the
+   * name is listed in more than one scope, every listing that names the tool must say read-only.
+   */
+  readOnlyHint(server: string, tool: string, cwd?: string): boolean | undefined {
+    let answer: boolean | undefined;
+    for (const row of this.listingsFor(server, cwd)) {
+      const t = row.find((x) => x.name === tool);
+      if (t === undefined) continue;
+      answer = (answer ?? true) && t.readOnly;
+    }
+    return answer;
+  }
+
+  /**
+   * WS-26 (review r1, minor 6): the read-only answer from ONE scope's listing — the user scope's, or the
+   * project's for `cwd` — for a caller that knows which scope the name resolves to for a session (local >
+   * project > user). `undefined` when that scope has no listing naming the tool (a project whose servers
+   * were never probed included): toward ask, never borrowed from another scope's same-named server.
+   */
+  readOnlyHintIn(scope: "user" | { project: string }, server: string, tool: string): boolean | undefined {
+    let row: McpProbedTool[] | undefined;
+    if (scope === "user") {
+      row = this.userTools.get(server);
+    } else {
+      let dir: string;
+      try { dir = realpathSync(scope.project); } catch { dir = scope.project; }
+      row = this.projectTools.get(dir)?.get(server);
+    }
+    return row?.find((t) => t.name === tool)?.readOnly;
+  }
+
+  /** WS-26: whether any status (any probe outcome) is recorded for a USER server of this name. */
+  hasUserStatus(name: string): boolean {
+    return this.statuses.has(name);
+  }
+
+  private listingsFor(server: string, cwd?: string): McpProbedTool[][] {
+    const out: McpProbedTool[][] = [];
+    const user = this.userTools.get(server);
+    if (user !== undefined) out.push(user);
+    if (cwd) {
+      let dir: string;
+      try { dir = realpathSync(cwd); } catch { dir = cwd; }
+      const project = this.projectTools.get(dir)?.get(server);
+      if (project !== undefined) out.push(project);
+    }
+    return out;
   }
 
   /**
@@ -301,6 +413,8 @@ export class McpManager {
    */
   stopServer(name: string): void {
     this.statuses.delete(name);
+    this.userTools.delete(name);
+    for (const tools of this.projectTools.values()) tools.delete(name);
     for (const state of this.projects.values()) {
       if (state.kind === "probed") state.servers = state.servers.filter((s) => s.name !== name);
     }
@@ -326,6 +440,8 @@ export class McpManager {
   stopAll(): void {
     this.statuses.clear();
     this.projects.clear();
+    this.userTools.clear();
+    this.projectTools.clear();
   }
 }
 
