@@ -21,7 +21,9 @@
  *      `claude` binary is staged — the official leg is retired. `ant` is staged beside it with its
  *      own record when a vendored copy exists (step 3b).
  *   4. Take a signature of the REAL homes (`~/.winter`, `~/.winter-dev`) BEFORE the run.
- *   5. `spawn(<tmp>/Resources/winter-core, ["__runtimes-probe"], { env: { WINTER_HOME: <tmp>/home } })`.
+ *   5. `spawn(<tmp>/Resources/winter-core, ["__runtimes-probe"], { env: { WINTER_HOME: <tmp>/home } })`,
+ *      with cwd = a HOSTILE directory (a `bunfig.toml` whose `preload` writes a marker, and a `.env`
+ *      naming a `WINTER_RUNTIME_EXECUTABLE`) — the no-autoload proof, see `hostileCwd` below.
  *   6. Parse the one JSON result line; assert the ladders resolved via "bundle" and the staged
  *      `VERSIONS.json` records parsed and match this build's pins.
  *   7. Re-take the real-home signature and assert it is UNCHANGED.
@@ -36,7 +38,7 @@
  * NEVER run the compiled binary against a real home — see step 4/7 above.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { copyFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,6 +88,67 @@ function homeSignature(dir: string): string {
   };
   walk(dir, "");
   return `${dir}: present\n${names.join("\n")}`;
+}
+
+/**
+ * SECURITY (no-autoload): by default a `bun build --compile` binary loads the `bunfig.toml` (whose
+ * `preload` runs AS the binary) and the `.env` of the directory it is STARTED in. `winter` is a
+ * symlink to `winter-core` that users run inside arbitrary repositories, so `compile`/`compile:core`
+ * pass `--no-compile-autoload-bunfig --no-compile-autoload-dotenv`. This builds the directory that
+ * would exploit each, for the probe to run in:
+ *   - `bunfig.toml` preloads `preload.ts`, which writes `preloadMarker`;
+ *   - `.env` sets `WINTER_RUNTIME_EXECUTABLE` to `envMarker` (a path that does not exist). The
+ *     probe's env is narrow and never sets it, and an explicit env path is AUTHORITATIVE in the
+ *     winter ladder (`resolveWinterExecutable`), so a loaded `.env` turns `winter.source` away from
+ *     `bundle` and names the marker in `errors`.
+ * Both fixtures are shown live under plain `bun` first (positive controls), so a green result can
+ * never be a probe that could not have seen them.
+ */
+function hostileCwd(root: string): { dir: string; preloadMarker: string; envMarker: string } {
+  const dir = join(root, "hostile-cwd");
+  mkdirSync(dir, { recursive: true });
+  const preloadMarker = join(dir, "PRELOAD_RAN");
+  const envMarker = join(dir, "not-a-winter-from-dotenv");
+  writeFileSync(join(dir, "bunfig.toml"), 'preload = ["./preload.ts"]\n');
+  writeFileSync(join(dir, "preload.ts"), `require("node:fs").writeFileSync(${JSON.stringify(preloadMarker)}, "ran");\n`);
+  writeFileSync(join(dir, ".env"), `WINTER_RUNTIME_EXECUTABLE=${envMarker}\n`);
+  writeFileSync(join(dir, "show-env.ts"), 'console.log(process.env.WINTER_RUNTIME_EXECUTABLE ?? "");\n');
+  return { dir, preloadMarker, envMarker };
+}
+
+async function runProbe(binary: string, env: Record<string, string>, cwd: string): Promise<{ stdout: string; stderr: string; exitCode: number | null; result: Record<string, unknown> | undefined }> {
+  const child = spawn(binary, ["__runtimes-probe"], { stdio: ["ignore", "pipe", "pipe"], env, cwd });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (d: Buffer) => { stdout += d.toString("utf8"); });
+  child.stderr.on("data", (d: Buffer) => { stderr += d.toString("utf8"); });
+
+  let exitCode: number | null;
+  try {
+    exitCode = await new Promise<number | null>((resolvePromise, reject) => {
+      const timer = setTimeout(() => {
+        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+        reject(new Error(`timed out after ${PROBE_TIMEOUT_MS}ms waiting for the probe to exit`));
+      }, PROBE_TIMEOUT_MS);
+      child.on("error", (err) => { clearTimeout(timer); reject(err); });
+      child.on("close", (code) => { clearTimeout(timer); resolvePromise(code); });
+    });
+  } catch (err) {
+    if (stdout.trim()) log(`[stdout]\n${stdout.trim()}`);
+    if (stderr.trim()) log(`[stderr]\n${stderr.trim()}`);
+    fail((err as Error).message);
+  }
+
+  let result: Record<string, unknown> | undefined;
+  for (const line of stdout.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    try {
+      const parsed: unknown = JSON.parse(t);
+      if (parsed && typeof parsed === "object" && "ok" in parsed) result = parsed as Record<string, unknown>;
+    } catch { /* narration, not the result line */ }
+  }
+  return { stdout, stderr, exitCode, result };
 }
 
 async function main(): Promise<void> {
@@ -175,49 +238,35 @@ async function main(): Promise<void> {
   const before = REAL_HOMES.map(homeSignature);
 
   try {
-    // ---- Step 5: run the compiled binary's probe route ------------------------------------------
-    log(`\n--- Step 5: spawn ${stagedBinary} __runtimes-probe ---`);
-    const child = spawn(stagedBinary, ["__runtimes-probe"], {
-      stdio: ["ignore", "pipe", "pipe"],
-      // Narrow env, same reasoning as verify-runtime-state-compiled.ts: inheriting process.env
-      // could drag this shell's own WINTER_HOME/WINTER_RUNTIME_EXECUTABLE/WINTER_ANT_EXECUTABLE in,
-      // which would defeat the entire point of proving the BUNDLE rung resolves.
-      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir(), WINTER_HOME: tmpHome },
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (d: Buffer) => { stdout += d.toString("utf8"); });
-    child.stderr.on("data", (d: Buffer) => { stderr += d.toString("utf8"); });
+    // ---- Step 5: run the compiled binary's probe route, from a hostile cwd -----------------------
+    const hostile = hostileCwd(tmpRoot);
+    // Narrow env, same reasoning as verify-runtime-state-compiled.ts: inheriting process.env
+    // could drag this shell's own WINTER_HOME/WINTER_RUNTIME_EXECUTABLE/WINTER_ANT_EXECUTABLE in,
+    // which would defeat the entire point of proving the BUNDLE rung resolves (and, for the hostile
+    // cwd, a `.env` never overrides a variable that is already set).
+    const probeEnv = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir(), WINTER_HOME: tmpHome };
 
-    let exitCode: number | null;
-    try {
-      exitCode = await new Promise<number | null>((resolvePromise, reject) => {
-        const timer = setTimeout(() => {
-          try { child.kill("SIGKILL"); } catch { /* already gone */ }
-          reject(new Error(`timed out after ${PROBE_TIMEOUT_MS}ms waiting for the probe to exit`));
-        }, PROBE_TIMEOUT_MS);
-        child.on("error", (err) => { clearTimeout(timer); reject(err); });
-        child.on("close", (code) => { clearTimeout(timer); resolvePromise(code); });
-      });
-    } catch (err) {
-      if (stdout.trim()) log(`[stdout]\n${stdout.trim()}`);
-      if (stderr.trim()) log(`[stderr]\n${stderr.trim()}`);
-      fail((err as Error).message);
-    }
+    // Positive controls: plain bun, in the same directory, DOES run the preload and load the .env.
+    const bunControl = spawnSync(process.execPath, ["run", "show-env.ts"], { cwd: hostile.dir, env: probeEnv, encoding: "utf8", timeout: PROBE_TIMEOUT_MS });
+    const bunRanPreload = existsSync(hostile.preloadMarker);
+    const bunLoadedDotenv = (bunControl.stdout ?? "").trim() === hostile.envMarker;
+    rmSync(hostile.preloadMarker, { force: true });
+    log(`\n--- Step 5a: hostile cwd ${hostile.dir} — plain bun ran its preload: ${bunRanPreload}, loaded its .env: ${bunLoadedDotenv} (both must be true) ---`);
+    // And the variable, really in the environment, is observable through the probe.
+    const exported = await runProbe(stagedBinary, { ...probeEnv, WINTER_RUNTIME_EXECUTABLE: hostile.envMarker }, hostile.dir);
+    const exportedWinter = exported.result?.winter as Record<string, unknown> | undefined;
+    const exportedObservable = exportedWinter?.source !== "bundle" && JSON.stringify(exported.result ?? {}).includes(hostile.envMarker);
+    const preloadAfterExported = existsSync(hostile.preloadMarker);
+    rmSync(hostile.preloadMarker, { force: true });
+
+    log(`\n--- Step 5b: spawn ${stagedBinary} __runtimes-probe (cwd = the hostile dir) ---`);
+    const { stdout, stderr, exitCode, result } = await runProbe(stagedBinary, probeEnv, hostile.dir);
+    const preloadRanInBinary = preloadAfterExported || existsSync(hostile.preloadMarker);
+    const dotenvReachedBinary = `${stdout}\n${stderr}`.includes(hostile.envMarker);
 
     if (stderr.trim()) log(`[stderr from probe]\n${stderr.trim()}`);
     log(`[stdout from probe]\n${stdout.trim()}`);
     log(`probe exited: ${exitCode}`);
-
-    let result: Record<string, unknown> | undefined;
-    for (const line of stdout.split("\n")) {
-      const t = line.trim();
-      if (!t.startsWith("{")) continue;
-      try {
-        const parsed: unknown = JSON.parse(t);
-        if (parsed && typeof parsed === "object" && "ok" in parsed) result = parsed as Record<string, unknown>;
-      } catch { /* narration, not the result line */ }
-    }
     if (!result) fail("the probe printed no JSON result line — see its stdout/stderr above (a bundling gap looks exactly like this)");
     log(`\nprobe result line: ${JSON.stringify(result)}`);
 
@@ -264,6 +313,13 @@ async function main(): Promise<void> {
         antStaged ? "result.antVersions.checksums.antPreSign === VERSIONS.json ant.binarySha256 (the pin)" : "ant record SHA vs pin (SKIPPED — no vendored ant staged, see WARNING above)",
         antStaged ? (antVersions?.checksums as { antPreSign?: string } | undefined)?.antPreSign === antStaged.binarySha256 : true,
       ],
+      // SECURITY (no-autoload): the hostile cwd's bunfig.toml and .env had no effect on the binary,
+      // while each fixture was demonstrably live (the controls) — see `hostileCwd`.
+      ["control: plain bun in the hostile cwd RAN its bunfig.toml preload (the fixture is live)", bunRanPreload],
+      ["control: plain bun in the hostile cwd LOADED its .env (the fixture is live)", bunLoadedDotenv],
+      ["control: an EXPORTED WINTER_RUNTIME_EXECUTABLE is observable through the probe", exportedObservable],
+      ["no-autoload: winter-core did NOT run the hostile cwd's bunfig.toml preload", !preloadRanInBinary],
+      ["no-autoload: winter-core did NOT load the hostile cwd's .env (the marker path appears nowhere)", !dotenvReachedBinary],
       ...untouched.map(([dir, ok]) => [`${dir}: unchanged`, ok] as [string, boolean]),
     ];
 
@@ -278,14 +334,17 @@ async function main(): Promise<void> {
           "`bun build --compile`; (b) source !== 'bundle' -> bundleRuntimePath's execPath math is " +
           "wrong for this layout, or stageRuntimes wrote somewhere else; (c) a real home changed -> " +
           "the probe resolved a home instead of reading WINTER_HOME, the one failure this script must " +
-          "never let through.",
+          "never let through; (d) a no-autoload row -> compile/compile:core lost " +
+          "`--no-compile-autoload-bunfig`/`--no-compile-autoload-dotenv` (a control row failing instead " +
+          "means the fixture, not the binary, is wrong).",
       );
     }
 
     log(
       "\nRESULT: PASS — dist/winter-core (the real `bun build --compile` Release artifact), laid out " +
         "exactly as the app bundle will be, resolved the runtime executables through the P8d-1 " +
-        "'bundle' rung and parsed matching VERSIONS.json records — the user's real homes were left " +
+        "'bundle' rung and parsed matching VERSIONS.json records, ignoring a hostile cwd's " +
+        "bunfig.toml and .env — the user's real homes were left " +
         "untouched throughout.",
     );
   } finally {
