@@ -248,9 +248,15 @@ describe("AgentList — tree rows (phase 3b Task 6, c)", () => {
   });
 
   test("the stalled line reports the REAL silence span, formatted like every other elapsed span", () => {
+    // 44d30aeb bumped ROSTER_STALL_MS 60s -> 180s (matching the daemon's own turn-stall watchdog
+    // window, so a slow-reasoning child stops crying "Stalled" while it's still the most worth
+    // waiting for) but left this test's 125s silence unmoved — under the new threshold that no
+    // longer stalls at all, so the row read "Working…", not the elapsed-span line under test.
+    // Push the silence past the current threshold; the span itself stays "formatted like every
+    // other elapsed span" (task-display.ts's formatElapsed), just a bigger number.
     const row = agent({ status: "working", lastEventAt: 0 });
-    const frame = render(<AgentList agents={[row]} nowMs={125_000} />).lastFrame() ?? "";
-    expect(frame).toContain("no output for 2m 5s");
+    const frame = render(<AgentList agents={[row]} nowMs={ROSTER_STALL_MS + 5_000} />).lastFrame() ?? "";
+    expect(frame).toContain("no output for 3m 5s");
   });
 
   test("under the threshold the row is untouched — the activity verb still shows", () => {

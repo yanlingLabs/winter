@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { render } from "ink-testing-library";
 import { Composer, computeFileQuery, computeFileToken, computeSlashQuery } from "../../src/tui/composer";
+import { filterCommands } from "../../src/tui/commands";
 import { appendHistory } from "../../src/tui/history-store";
 
 // useInput wires its stdin listener inside a React effect, which runs on the next tick after
@@ -13,8 +14,9 @@ import { appendHistory } from "../../src/tui/history-store";
 const wait = (ms = 10) => new Promise((r) => setTimeout(r, ms));
 
 // T3 introduced an inverse-video cursor (`<Text inverse>`), which wraps its character in SGI escape
-// codes (`\x1b[7m` ... `\x1b[27m`) even though the rest of the frame carries no color codes in this
-// non-TTY test harness — same convention as flatten-blocks.test.ts's local stripAnsi helper.
+// codes (`\x1b[7m` ... `\x1b[27m`) — carried by chalk's shared singleton, whose color level the
+// suite's preload pins to 3 so this is present regardless of the host terminal — same convention
+// as flatten-blocks.test.ts's local stripAnsi helper.
 const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
 
 const historyPath = (): string => join(mkdtempSync(join(tmpdir(), "winter-composer-")), "history.jsonl");
@@ -885,16 +887,31 @@ describe("Composer — slash-command completion menu (Phase 3d T2)", () => {
     expect((lastFrame() ?? "").split("\n")[lines.indexOf(sessionsLine)]).toContain("\x1b[7m");
     expect((lastFrame() ?? "").split("\n")[lines.indexOf(statusLine)]).not.toContain("\x1b[7m");
 
-    stdin.write("\x1b[B"); // down -> skills
+    stdin.write("\x1b[B"); // down -> skills (index 2 of the "/s" set)
     await wait();
-    stdin.write("\x1b[B"); // down -> routines (phase 5 T4: fuzzy-matches "s" — 4th/last of the "/s" set)
-    await wait();
-    stdin.write("\x1b[B"); // down again -> bounded, stays on routines (only 4 matches)
-    await wait();
-    let routinesLineIdx = stripAnsi(lastFrame() ?? "").split("\n").findIndex((l) => l.includes("/routines"));
-    expect((lastFrame() ?? "").split("\n")[routinesLineIdx]).toContain("\x1b[7m");
 
-    stdin.write("\x1b[A"); // up -> back to skills — never touched history (buffer still "/s")
+    // Phase 5 T4 hardcoded "routines" as the 4th/last "/s" fuzzy match; the registry has grown
+    // past it since (output-style, dirs, workflows, background, archive all joined — see
+    // app.test.tsx's help-surfacing test for the same drift), so "routines" is no longer last.
+    // Derive the CURRENT last match from filterCommands itself — composer.tsx's own filter — so
+    // this walks to the true end and stays correct as the registry keeps growing.
+    const matches = filterCommands("s");
+    expect(matches.map((c) => c.name)).toEqual(["status", "sessions", "skills", "output-style", "dirs", "routines", "workflows"]);
+    const lastMatch = matches[matches.length - 1]!;
+    const findSelectedIdx = (name: string) => stripAnsi(lastFrame() ?? "").split("\n").findIndex((l) => l.includes(`/${name}`));
+
+    // Already sent 2 downs (to sessions, then skills); walk the rest of the way to the last match.
+    for (let i = 0; i < matches.length - 1 - 2; i++) {
+      stdin.write("\x1b[B");
+      await wait();
+    }
+    expect((lastFrame() ?? "").split("\n")[findSelectedIdx(lastMatch.name)]).toContain("\x1b[7m");
+
+    stdin.write("\x1b[B"); // down again -> bounded, stays on the last match
+    await wait();
+    expect((lastFrame() ?? "").split("\n")[findSelectedIdx(lastMatch.name)]).toContain("\x1b[7m");
+
+    stdin.write("\x1b[A"); // up -> steps back one from the bounded end — never touched history (buffer still "/s")
     await wait();
     expect(stripAnsi(lastFrame() ?? "")).toContain("/s");
   });
