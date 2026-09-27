@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { bootstrapWinterDir, resolveWinterHome, isDefaultWinterHome } from "./winter-dir";
 import { acquireLock, type Lock } from "./lock";
-import { resolveWinterProfile } from "./profile";
+import { keychainService, resolveWinterProfile } from "./profile";
+import { daemonMcpOAuthStore } from "./runtime-sdk/mcp-oauth-store";
 import { describeHomePristineness, legacyHomeFor, planMigrationB, runMigrationB, MigrationRefused } from "./migration/migrate-b";
 import { manifestFileState, manifestPath } from "./migration/manifest";
 import { LegacyKeychainSecretStore } from "./migration/legacy-keychain-store";
@@ -2168,7 +2169,15 @@ export async function startDaemon(opts: {
     // WS-24: a STATUS PROBE for `mcp.list` (`agent/mcp/manager.ts`'s header) — it connects, lists and
     // closes each server, and registers nothing: every session's child connects its own copy, and no
     // session ever read the `mcp__…` rows this used to write into the shared registry.
-    mcp = new McpManager({ trust: trustStore, log: (m) => console.error(m), disabled: () => new Set(settings?.mcp?.disabled ?? []) });
+    // WS-25: http/sse servers are probed too (lazily, on `mcp.list` — never here at boot), with the daemon's
+    // ONE MCP OAuth store (`runtime-sdk/mcp-oauth-store.ts`: the instance the sign-in doors and the session
+    // hooks share, so a probe and a session refreshing at once post one refresh).
+    mcp = new McpManager({
+      trust: trustStore,
+      log: (m) => console.error(m),
+      disabled: () => new Set(settings?.mcp?.disabled ?? []),
+      remote: { oauthStore: () => daemonMcpOAuthStore(keychainService(profile, winterHome)) },
+    });
     // Daemon settings surface batch 3 (item 3): the daemon can only ever probe STDIO servers (no
     // in-daemon HTTP/SSE client — `external-mcp.ts`'s header explains why that's fine, the spawned
     // child connects to those itself) and must not start anything the user has disabled

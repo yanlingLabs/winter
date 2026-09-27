@@ -50,7 +50,7 @@ export type McpServerConfig =
 //
 //   - HTTP/SSE servers are probed too, LAZILY: never at boot (`startAll` is awaited by the daemon's boot and
 //     must not wait on the network), but on the first `mcp.list` that finds one unprobed
-//     (`ensureRemote`), and again after anything that changes its answer (`forget` — a sign-in or a
+//     (`ensureRemote`), and again after anything that changes its answer (`forgetRemote` — a sign-in or a
 //     sign-out, an add, an enable). Only when the daemon wires `remote` (production does); a manager
 //     without it keeps the pre-WS-25 behaviour of never connecting an http/sse server (the `mcp.list`
 //     overlay reports it `"unmanaged"`), which is what every bare test harness gets.
@@ -173,7 +173,7 @@ export class McpManager {
 
   /**
    * WS-25: the LAZY http/sse probe of the USER servers given (`mcp.list` passes the live user scope's,
-   * disabled ones excluded). Probes each name not yet recorded; a recorded one is kept until `forget`.
+   * disabled ones excluded). Probes each name not yet recorded; a recorded one is kept until `forgetRemote`.
    * A no-op without `deps.remote`. Concurrent calls for one name join one probe.
    */
   async ensureRemote(servers: Record<string, McpServerConfig>): Promise<void> {
@@ -293,19 +293,18 @@ export class McpManager {
   }
 
   /**
-   * WS-25: a sign-in or a sign-out changed what a probe of these servers would answer — forget their
-   * recorded status so the next `mcp.list` probes them again. User rows are dropped by name (an http/sse
-   * one is re-probed by `ensureRemote`; a stdio one never carries a sign-in); every probed PROJECT is
-   * forgotten whole when it records one of the names, so its next `ensureProject` re-reads it.
+   * WS-25: a sign-in or a sign-out changed what a probe of an http/sse server would answer — forget every
+   * recorded http/sse status so the next `mcp.list` probes them again: user rows are dropped (re-probed by
+   * `ensureRemote`), and every probed PROJECT that recorded one is forgotten whole (its next
+   * `ensureProject` re-reads it). A sign-in is keyed by URL and the manager keeps no URLs, so this forgets
+   * them all rather than guess — a re-probe is one `tools/list`. Stdio rows never carry a sign-in and stay.
    */
-  forget(names: Iterable<string>): void {
-    const set = new Set(names);
-    for (const name of set) {
-      const row = this.statuses.get(name);
-      if (row?.transport !== undefined) this.statuses.delete(name);
+  forgetRemote(): void {
+    for (const [name, row] of this.statuses) {
+      if (row.transport !== undefined) this.statuses.delete(name);
     }
     for (const [dir, state] of this.projects) {
-      if (state.kind === "probed" && state.servers.some((s) => set.has(s.name) && s.transport !== undefined)) this.projects.delete(dir);
+      if (state.kind === "probed" && state.servers.some((s) => s.transport !== undefined)) this.projects.delete(dir);
     }
   }
 

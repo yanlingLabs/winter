@@ -553,13 +553,31 @@ export const SettingsSetSkillDeniedResult = z.object({ ok: z.literal(true), name
  * tools and closes, at boot (user servers), on the first `mcp.list {cwd}` for a project's, and on every
  * `mcp.enable`/`mcp.add` — not a live connection's state. `"failed"` = that probe failed (or timed out).
  */
+/**
+ * WS-25 (MCP OAuth, spec §2): three additive, optional fields and one additive status value.
+ *  - `status: "needs-auth"` -- the last probe of an http/sse server was refused for want of a (new)
+ *    sign-in (no stored token, a dead one, or the server's 401), rather than failing for another reason.
+ *  - `auth` -- on an http/sse row only: `"none"` (a static `Authorization` header, or nothing stored, no
+ *    `oauth` block and a probe that did not ask for a sign-in), `"signed-in"` (a stored sign-in that is not
+ *    dead: unexpired, no expiry, or refreshable) or `"needs-auth"`. Read from the daemon's own store and the
+ *    last probe; never a token. A stdio row has no sign-in and omits it.
+ *  - `oauthIssuerOrigin` -- the ORIGIN of the authorization server the stored client registration names
+ *    (what the user signed in with), when there is one.
+ *  - `oauthPreregistered` -- the server's config carries `oauth.clientId` (a pre-registered client), so a
+ *    client offers "Set client secret" only there.
+ * Omitted on a row they do not apply to, so pre-WS-25 fixtures are unchanged.
+ */
+export const McpAuthStateSchema = z.enum(["none", "signed-in", "needs-auth"]);
 export const McpServerStatusSchema = z.object({
   name: z.string(),
-  status: z.enum(["connected", "failed", "disabled", "unmanaged"]),
+  status: z.enum(["connected", "failed", "disabled", "unmanaged", "needs-auth"]),
   toolNames: z.array(z.string()),
   source: z.enum(["user", "project", "plugin"]),
   transport: z.enum(["stdio", "http", "sse"]).optional(),
   strippedHeaders: z.array(z.string()).optional(),
+  auth: McpAuthStateSchema.optional(),
+  oauthIssuerOrigin: z.string().optional(),
+  oauthPreregistered: z.boolean().optional(),
 });
 export const McpListParams = z.object({ cwd: z.string().optional() });
 export const McpListResult = z.object({ ok: z.literal(true), servers: z.array(McpServerStatusSchema) });
@@ -602,10 +620,25 @@ export const McpVersionNegotiationSchema = z.union([
   z.literal("auto"),
   z.object({ pin: z.string().min(1) }),
 ]);
+/**
+ * WS-25 (spec §2): an http/sse server's OAuth sign-in settings -- hand-mirrors the agent SDK's
+ * `McpOAuthConfig` (core's `McpOAuthSetting`). This only BOUNDS the wire shape: the daemon validates the
+ * block with the runtime's own `validateMcpOAuthConfig(oauth, url)` before anything is written.
+ * `clientSecretRef` is a MARKER (`{ kind: "keychain" }`, strict): the secret's Keychain account is derived
+ * from the server URL and is never named by a config (review C1), and a secret VALUE never rides here at
+ * all -- `mcp.setClientSecret` is its only door.
+ */
+export const McpOAuthConfigSchema = z.object({
+  clientId: z.string().min(1).optional(),
+  clientSecretRef: z.object({ kind: z.literal("keychain") }).strict().optional(),
+  callbackPort: z.number().int().min(1).max(65535).optional(),
+  authServerMetadataUrl: z.string().min(1).optional(),
+  scopes: z.array(z.string().min(1)).optional(),
+}).strict();
 export const McpAddEntrySchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("stdio"), command: z.string().min(1), args: z.array(z.string()).optional(), env: z.record(z.string(), z.string()).optional(), versionNegotiation: McpVersionNegotiationSchema.optional() }),
-  z.object({ type: z.literal("http"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional(), versionNegotiation: McpVersionNegotiationSchema.optional() }),
-  z.object({ type: z.literal("sse"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional(), versionNegotiation: McpVersionNegotiationSchema.optional() }),
+  z.object({ type: z.literal("http"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional(), versionNegotiation: McpVersionNegotiationSchema.optional(), oauth: McpOAuthConfigSchema.optional() }),
+  z.object({ type: z.literal("sse"), url: z.string().url(), headers: z.record(z.string(), z.string()).optional(), versionNegotiation: McpVersionNegotiationSchema.optional(), oauth: McpOAuthConfigSchema.optional() }),
 ]);
 /**
  * WS-21 (spec §4.4, `winter mcp add` = `claude mcp add`): the three MCP scopes, claude's names and
@@ -671,7 +704,64 @@ export const McpGetResult = z.object({
   strippedHeaders: z.array(z.string()).optional(),
   /** WS-24: the server's own protocol-era choice, when it has one (`McpVersionNegotiationSchema`). */
   versionNegotiation: McpVersionNegotiationSchema.optional(),
+  /** WS-25: the server's OAuth sign-in settings, echoed as stored (`McpOAuthConfigSchema`; never a secret). */
+  oauth: McpOAuthConfigSchema.optional(),
 });
+
+/**
+ * WS-25 (MCP OAuth, spec §2): the sign-in doors -- LOCAL role only (never added to
+ * `REMOTE_ALLOWED_METHODS`: the phone signs in on the Mac, spec §1.6). A server is named as the other
+ * `mcp.*` doors name it. `scope` is OPTIONAL here, unlike `mcp.get`'s: absent, the name resolves through
+ * the SAME precedence a session folds (local > trusted project > user) for `cwd`, or the user scope when
+ * there is no `cwd` (the Mac's MCP pane sends a bare `{ name }`). Every door acts on the server's
+ * canonical URL -- a sign-in is keyed by it (spec §1.6), not by the name or the scope.
+ */
+export const McpServerRefParams = z.object({
+  name: z.string().min(1),
+  scope: McpScopeSchema.optional(),
+  cwd: z.string().min(1).optional(),
+});
+
+/**
+ * `mcp.login`: discovery, registration and the authorize URL (the SDK's `startMcpOAuthLogin`); the daemon
+ * keeps the flow (its loopback listener) for up to 5 minutes and the CLIENT opens `authUrl` in a browser.
+ * `issuerOrigin` is the authorization server's origin and `authorizeOrigin` the origin of `authUrl` itself
+ * (usually the same; a client shows both when they differ).
+ *
+ * `confirmIssuerChange` (WS-25 contract addition): when this server already has a stored client
+ * registration and THIS sign-in's authorization server is a different one, the call is refused typed --
+ * JSON-RPC error `data.code: "mcp_issuer_change_requires_confirmation"` with `data.storedIssuerOrigin`
+ * and `data.newIssuerOrigin` -- and nothing is left behind; the client shows both origins and repeats the
+ * call with `confirmIssuerChange: true`. A one-shot confirmation for that call only, never stored.
+ */
+export const McpLoginParams = McpServerRefParams.extend({ confirmIssuerChange: z.boolean().optional() });
+export const McpLoginResult = z.object({
+  loginId: z.string(),
+  authUrl: z.string(),
+  issuerOrigin: z.string(),
+  authorizeOrigin: z.string().optional(),
+});
+/** `mcp.loginStatus`: `pending` until the callback arrives; `expired` when nobody completed it within 5
+ *  minutes (the listener is closed); `failed` with a bounded, code-shaped `error` otherwise. A login id
+ *  the daemon does not know (never issued, or forgotten after it settled long ago) is `expired`. */
+export const McpLoginStatusParams = z.object({ loginId: z.string().min(1) });
+export const McpLoginStatusResult = z.object({
+  state: z.enum(["pending", "done", "failed", "expired"]),
+  error: z.string().optional(),
+});
+/** `mcp.logout`: best-effort RFC 7009 revocation, then the local sign-in is removed. The client
+ *  registration is KEPT unless `forgetClient` (spec §1.6). Live sessions reconnect the server. */
+export const McpLogoutParams = McpServerRefParams.extend({ forgetClient: z.boolean().optional() });
+export const McpLogoutResult = z.object({ ok: z.literal(true) });
+/**
+ * `mcp.setClientSecret`: a pre-registered client's secret, straight to the Keychain under the DERIVED
+ * account `mcp-oauth-client-secret:<id>` (never a config-named one), bound to the authorization server it
+ * belongs to. Never echoed, never logged. Refused typed for a server whose config has no `oauth.clientId`,
+ * and for a project-/local-scope server with no user-scope counterpart (a repository must not be able to
+ * steer where the user's secret is sent).
+ */
+export const McpSetClientSecretParams = McpServerRefParams.extend({ secret: z.string().min(1) });
+export const McpSetClientSecretResult = z.object({ ok: z.literal(true), issuerOrigin: z.string().optional() });
 
 /**
  * Daemon settings surface (2026-09-17 plan, item 2): `capabilities.list` — the daemon's OWN
@@ -2708,6 +2798,10 @@ export const METHODS = {
   mcpAdd: "mcp.add",
   mcpRemove: "mcp.remove",
   mcpGet: "mcp.get",
+  mcpLogin: "mcp.login",
+  mcpLoginStatus: "mcp.loginStatus",
+  mcpLogout: "mcp.logout",
+  mcpSetClientSecret: "mcp.setClientSecret",
   askUserRespond: "ask_user.respond",
   taskList: "task.list",
   planRespond: "plan.respond",
