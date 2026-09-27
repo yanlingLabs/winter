@@ -8,6 +8,7 @@
 import type { SecretStore } from "../auth/secret-store";
 import type { WinterProfile } from "../profile";
 import { LEGACY_KEYCHAIN_SERVICE, LEGACY_KEYCHAIN_SERVICE_DEV } from "../legacy-names";
+import { genericPasswordPresent } from "../auth/keychain-ffi";
 
 export function legacyKeychainServiceFor(profile: WinterProfile): string {
   return profile === "dev" ? LEGACY_KEYCHAIN_SERVICE_DEV : LEGACY_KEYCHAIN_SERVICE;
@@ -34,4 +35,15 @@ export class LegacyKeychainSecretStore implements SecretStore {
   async delete(name: string): Promise<boolean> {
     return await Bun.secrets.delete({ service: this.service, name });
   }
+}
+
+/**
+ * WS-25 §7: `winter doctor`'s legacy-item COUNT, by presence alone — each item is located in the user's
+ * keychains WITHOUT requesting its data (`keychain-ffi.ts`), so no decrypt happens and no consent dialog
+ * can appear, whichever binary created the item. Production wiring only (the CLI's doctor); tests pass
+ * their own probe.
+ */
+export function legacyKeychainPresence(profile: WinterProfile): (name: string) => boolean {
+  const service = legacyKeychainServiceFor(profile);
+  return (name) => genericPasswordPresent(null, service, name);
 }

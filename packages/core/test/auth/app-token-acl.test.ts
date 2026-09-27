@@ -71,6 +71,15 @@ describe.skipIf(!darwin)("the Keychain FFI (throwaway keychain file)", () => {
     expect(readGenericPassword(kc, SERVICE, "probe")).toBeNull();
   });
 
+  test("presence never decrypts: an item whose ACL does NOT trust this process is still found, silently (the doctor's count)", () => {
+    // Were the probe to request the data, this item (decryptable by Calculator alone) would raise a consent
+    // dialog and the call would block; `winter doctor`'s legacy count rides exactly this probe.
+    addGenericPasswordWithAccess(kc, { service: SERVICE, account: "foreign", value: "v", trustedApplications: [CALCULATOR] });
+    expect(genericPasswordPresent(kc, SERVICE, "foreign")).toBe(true);
+    expect(genericPasswordPresent(kc, SERVICE, "absent")).toBe(false);
+    deleteGenericPassword(kc, SERVICE, "foreign");
+  });
+
   test("migrate: both app-read tokens re-created with the app in their ACL, the same values, a marker; then a no-op", () => {
     const home = mkdtempSync(join(dir, "home-"));
     // As `ensureTokens` leaves them: created by this process, trusting only it.
