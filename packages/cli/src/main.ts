@@ -2044,8 +2044,8 @@ if (import.meta.main) {
     if (sub === "permissions") {
       const door = await openCredentialDaemonDoor();
       const outcome = await runMcpPermissionsRoute(rest, { cwd: process.cwd(), winterHome: resolveWinterHome(), ...(door !== undefined ? { door } : {}) });
-      if (outcome.ok) console.log(renderMcpPermissionsOutcome(outcome));
-      else console.error(renderMcpPermissionsOutcome(outcome));
+      if (outcome.ok) console.log(renderMcpPermissionsOutcome(outcome, cliCommandName()));
+      else console.error(renderMcpPermissionsOutcome(outcome, cliCommandName()));
       door?.close();
       process.exit(outcome.ok ? 0 : 1);
     }
