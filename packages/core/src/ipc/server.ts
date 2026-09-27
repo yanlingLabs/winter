@@ -2583,7 +2583,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // Drop a user server's recorded probe status now, same as `mcp.disable` — a removed server must not
         // go on being reported until the next daemon restart.
         if (outcome.removed && target.scope === "user") opts.mcp?.stopServer(p.name);
-        return { ok: true, name: p.name, removed: outcome.removed, scope: p.scope, permissionsCleared: outcome.permissionsCleared, ...(outcome.permissionsNote !== undefined ? { permissionsNote: outcome.permissionsNote } : {}) };
+        return {
+          ok: true, name: p.name, removed: outcome.removed, scope: p.scope, permissionsCleared: outcome.permissionsCleared,
+          ...(outcome.rulesDropped > 0 ? { rulesDropped: outcome.rulesDropped } : {}),
+          ...(outcome.rulesNotFollowed.length > 0 ? { rulesNotFollowed: outcome.rulesNotFollowed } : {}),
+          ...(outcome.permissionsNote !== undefined ? { permissionsNote: outcome.permissionsNote } : {}),
+        };
       }
       // -----------------------------------------------------------------------------------------
       // WS-27 — `winter mcp rename <old> <new>` (`McpRenameParams`' doc): within one scope, carrying the

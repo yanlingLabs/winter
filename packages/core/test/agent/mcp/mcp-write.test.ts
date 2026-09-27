@@ -183,3 +183,15 @@ describe("WS-27 review 7: write order and honest results", () => {
     expect(Object.keys(JSON.parse(readFileSync(join(h, "sdk", ".winter.json"), "utf8")).mcpServers)).toEqual(["a", "cf2"]);
   });
 });
+
+describe("WS-27 round 2 N1: ruleServerCandidates", () => {
+  test("every `__` split of the rest, plus the whole rest; none for the bare server or a glob piece", async () => {
+    const { ruleServerCandidates } = await import("../../../src/agent/mcp/mcp-write");
+    expect(ruleServerCandidates("mcp__cf__prod__x", "cf")).toEqual(["cf__prod", "cf__prod__x"]);
+    expect(ruleServerCandidates("mcp__cf__prod(*)", "cf")).toEqual(["cf__prod"]);
+    expect(ruleServerCandidates("mcp__cf__list", "cf")).toEqual(["cf__list"]);
+    expect(ruleServerCandidates("mcp__cf", "cf")).toEqual([]);
+    expect(ruleServerCandidates("mcp__cf__*", "cf")).toEqual([]);
+    expect(ruleServerCandidates("mcp__cfx__a", "cf")).toEqual([]);
+  });
+});

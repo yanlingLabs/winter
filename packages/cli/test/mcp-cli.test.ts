@@ -610,3 +610,12 @@ describe("WS-27 review 6: with a live daemon, remove goes through mcp.remove for
     expect(text).toContain("/p/.winter/settings.json: mcp__cf__list");
   });
 });
+
+describe("WS-27 round 2: remove reports the rules it dropped and the ones it left", () => {
+  test("rendered plainly", () => {
+    const text = renderMcpRemoveOutcome({ ok: true, scope: "user", name: "cf", removed: true, permissionsCleared: true, rulesDropped: 2, rulesNotFollowed: ["/h/sdk/settings.json: mcp__cf__prod(*) (ambiguous — …)"] });
+    expect(text).toContain("and cleared its connector permissions");
+    expect(text).toContain("2 rules naming it dropped from sdk/settings.json.");
+    expect(text).toContain("mcp__cf__prod(*)");
+  });
+});
