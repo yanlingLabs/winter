@@ -116,7 +116,13 @@ final class AppModel: ObservableObject {
     /// no-arg `socketPath()`, so a dev-profile app dials its OWN daemon's socket instead of
     /// whatever `$WINTER_HOME` independently resolves to).
     static func production() throws -> AppModel {
-        let token = try KeychainToken.readHarnessToken(service: AppProfile.keychainService)
+        // Bounded retry (`KeychainToken.readWithBoundedRetry`'s own doc): the daemon deletes and
+        // re-adds this item once per ITS OWN boot (a new ACL, so the app can read it without a
+        // prompt) — a read landing in that brief window would otherwise read `.notFound` and boot
+        // straight into `tokenMissing` with no retry until relaunch, even though the daemon is up.
+        let token = try KeychainToken.readWithBoundedRetry {
+            try KeychainToken.readHarnessToken(service: AppProfile.keychainService)
+        }
         let path = WinterPaths.socketPath(home: AppProfile.winterHome)
         return AppModel(makeTransport: { UnixSocketTransport(path: path) }, token: token)
     }
