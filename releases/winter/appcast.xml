@@ -367,5 +367,18 @@
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
       <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.120.0/Winter-0.120.0.zip" sparkle:edSignature="DymBiPpQckb6FQAHtrbmptDE7rY2U+U30KFyCOHdg6hckDyEuHfrqZ8jY53RHvFA8BZc3Uvix8eJibvapWyMBg==" length="426174622" type="application/octet-stream"/>
     </item>
+      <item>
+      <title>0.120.1</title>
+      <description><![CDATA[<p>Winter agent SDK 0.0.32</p>
+<h2>Fixes</h2>
+<ul>
+  <li><strong>Winter 0.120.0 could not start its background service</strong>, so the menu-bar orb showed "Disconnected" right after the update. macOS stopped the service the first time it touched the Keychain. This update gives it the permission it needs, and every release now checks for it before shipping. Nothing in your Keychain was changed.</li>
+</ul>
+<p>This release runs on Winter agent SDK 0.0.32 and runtime SDK 0.0.15.</p>]]></description>
+      <sparkle:version>0.120.1</sparkle:version>
+      <sparkle:shortVersionString>0.120.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.120.1/Winter-0.120.1.zip" sparkle:edSignature="bzDdU2MRAQoLl7WE/3ab8y+7JGRJF2YLKmxdZdGcftYegJwMNjTqKu7Wuxf7sKyT/pRxulYktcqGzstu9m91AA==" length="426174687" type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>
