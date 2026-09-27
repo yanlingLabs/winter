@@ -742,17 +742,23 @@ export const McpRemoveParams = z.object({
  *  WS-27 `permissionsCleared`: the removal also dropped the name's connector permissions
  *  (`settings.json` → `mcp.toolPermissions`) — only once no other scope, plugin or subagent definition still
  *  defines a server of that name, and no live session has it connected (the values are keyed by name across
- *  scopes). `permissionsNote`: the server WAS removed, but clearing its permissions failed. */
-export const McpRemoveResult = z.object({ ok: z.literal(true), name: z.string(), removed: z.boolean(), scope: McpScopeSchema.optional(), permissionsCleared: z.boolean().optional(), permissionsNote: z.string().optional() });
+ *  scopes). With them go the `sdk/settings.json` rules naming the server (`rulesDropped`); `rulesNotFollowed`
+ *  lists the ones that stay — in files Winter does not edit, or ambiguous (a rule `mcp__<name>__<rest>` may name
+ *  another server `<name>__<prefix>` that is in use). `permissionsNote`: the server WAS removed, but clearing
+ *  its settings failed. */
+export const McpRemoveResult = z.object({ ok: z.literal(true), name: z.string(), removed: z.boolean(), scope: McpScopeSchema.optional(), permissionsCleared: z.boolean().optional(), rulesDropped: z.number().int().optional(), rulesNotFollowed: z.array(z.string()).optional(), permissionsNote: z.string().optional() });
 
 /**
  * WS-27 — `winter mcp rename <old> <new>`: rename a server WITHIN one scope, its entry unchanged. Refused typed
  * (nothing written) when the new name is invalid (`mcp_invalid_name`), the scope does not define the old one
  * (`mcp_server_not_found`), the scope already defines the new one (`mcp_server_exists`), anything else uses
  * the new name — another scope, a plugin, a subagent definition, a live session (`mcp_server_name_in_use`) —
- * or the new name already holds stored connector permissions (`mcp_rename_target_has_permissions`).
+ * or the new name already holds stored connector permissions or rules naming `mcp__<new>`/`mcp__<new>__…` — in
+ * `sdk/settings.json`, a trusted project's settings files or the approved-rules record
+ * (`mcp_rename_target_has_permissions`).
  * The old name's connector permissions, `mcp.disabled` membership and `sdk/settings.json` rules naming
- * `mcp__<old>`/`mcp__<old>__…` are copied to the new name first (`carried`, `rulesCarried`), then dropped from
+ * `mcp__<old>`/`mcp__<old>__…` are copied to the new name first (`carried`, `rulesCarried` — an AMBIGUOUS rule, one that
+ * may name another in-use server `<old>__<prefix>`, is neither copied nor dropped and is listed), then dropped from
  * the old name unless something still uses it (`keptOld` — a live session's child included). Rules in files
  * Winter does not edit (a project's `.winter/settings*.json`/`permissions.local.json`, the read-only
  * approved-rules record) are listed in `rulesNotFollowed` as `"<file>: <rule>"`. `note`: something after the

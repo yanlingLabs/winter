@@ -29,7 +29,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CONNECTOR_ALL_TOOLS } from "./connector-permissions";
 import { mcpServerNameDefined, trustedProjectRoots } from "./server-names";
-import { approvedProjectRulesDir } from "../paths";
+import { approvedProjectRulesDir, sdkSettingsPath } from "../paths";
 import type { TrustStore } from "../trust";
 import { ProjectMcpEntrySchema, parseProjectMcpServers, projectMcpConfigPath, readRawProjectMcpConfig, writeRawProjectMcpConfig } from "./project-file";
 import { readSdkGlobalConfigDetailed, readSdkSettingsDetailed, updateSdkGlobalConfig, updateSdkSettings, type SdkGlobalConfigFile, type SdkSettingsFile } from "../../sdk-files";
@@ -366,14 +366,49 @@ export function renameRuleServer(rule: string, from: string, to: string): string
 
 const RULE_KINDS = ["allow", "ask", "deny"] as const;
 
-/** `sdk/settings.json` `permissions.{allow,ask,deny}` with every rule naming `from` also written for `to`. */
-function withCopiedSdkRules(home: string, from: string, to: string): number {
+/**
+ * The OTHER servers a rule naming `mcp__<server>__<rest>` may name: a server name may itself contain `__`, so
+ * `mcp__cf__prod__x` is `cf`'s `prod__x` OR `cf__prod`'s `x`, and a bare `mcp__cf__prod` may be server
+ * `cf__prod` itself — one candidate `<server>__<prefix>` per `__` split of `<rest>`, plus `<server>__<rest>`.
+ * Glob pieces are not candidates (no server is literally named with a `*`). `[]` for `mcp__<server>` itself.
+ */
+export function ruleServerCandidates(rule: string, server: string): string[] {
+  const open = rule.indexOf("(");
+  const name = (open === -1 ? rule : rule.slice(0, open)).trim();
+  const base = `mcp__${server}__`;
+  if (!name.startsWith(base)) return [];
+  const rest = name.slice(base.length);
+  const out: string[] = [];
+  for (let sep = rest.indexOf("__"); sep !== -1; sep = rest.indexOf("__", sep + 1)) if (sep > 0) out.push(`${server}__${rest.slice(0, sep)}`);
+  if (rest !== "") out.push(`${server}__${rest}`);
+  return out.filter((c) => !c.includes("*"));
+}
+
+/** Is some OTHER server a rule may name in use? Returns that server (the rule is then ambiguous). */
+type ServerInUse = (name: string) => boolean;
+function ambiguousFor(rule: string, server: string, inUse: ServerInUse): string | undefined {
+  return ruleServerCandidates(rule, server).find((c) => inUse(c));
+}
+
+const ambiguityNote = (file: string, rule: string, candidate: string): string =>
+  `${file}: ${rule} (ambiguous — it may name server "${candidate}", which is in use; left as it is)`;
+
+/**
+ * `sdk/settings.json` `permissions.{allow,ask,deny}` with every rule naming `from` ALSO written for `to` —
+ * except an AMBIGUOUS one (`ruleServerCandidates`: it may name another server that is in use), which is
+ * neither copied nor later dropped and is reported in `ambiguous` instead.
+ */
+function withCopiedSdkRules(home: string, from: string, to: string, inUse: ServerInUse): { added: number; ambiguous: string[] } {
   let added = 0;
+  const ambiguous: string[] = [];
   const current = readSdkSettingsDetailed(home);
-  if (current.state !== "ok" || !isRecord(current.value.permissions)) return 0;
-  const needs = RULE_KINDS.some((k) => Array.isArray((current.value.permissions as Record<string, unknown>)[k]) && ((current.value.permissions as Record<string, unknown>)[k] as unknown[]).some((r) => typeof r === "string" && ruleNamesMcpServer(r, from)));
-  if (!needs) return 0;
+  if (current.state !== "ok" || !isRecord(current.value.permissions)) return { added, ambiguous };
+  const perms0 = current.value.permissions as Record<string, unknown>;
+  const needs = RULE_KINDS.some((k) => Array.isArray(perms0[k]) && (perms0[k] as unknown[]).some((r) => typeof r === "string" && ruleNamesMcpServer(r, from)));
+  if (!needs) return { added, ambiguous };
   updateSdkSettings(home, (settings) => {
+    added = 0;
+    ambiguous.length = 0;
     const perms: Record<string, unknown> = isRecord(settings.permissions) ? { ...settings.permissions } : {};
     for (const k of RULE_KINDS) {
       const list = perms[k];
@@ -382,6 +417,8 @@ function withCopiedSdkRules(home: string, from: string, to: string): number {
       for (const r of list) {
         next.push(r);
         if (typeof r !== "string" || !ruleNamesMcpServer(r, from)) continue;
+        const other = ambiguousFor(r, from, inUse);
+        if (other !== undefined) { ambiguous.push(ambiguityNote(sdkSettingsPath(home), r, other)); continue; }
         const renamed = renameRuleServer(r, from, to);
         if (!list.includes(renamed) && !next.includes(renamed)) { next.push(renamed); added++; }
       }
@@ -389,21 +426,48 @@ function withCopiedSdkRules(home: string, from: string, to: string): number {
     }
     return { ...settings, permissions: perms as SdkSettingsFile["permissions"] };
   });
-  return added;
+  return { added, ambiguous };
 }
 
-/** `sdk/settings.json` without the rules that name `from`. */
-function withoutSdkRules(home: string, from: string): void {
+/**
+ * `sdk/settings.json` without the rules that name `server`. With `inUse`, an AMBIGUOUS rule (it may name
+ * another server in use) is kept and reported. Without it every rule naming `server` goes — used only for a
+ * rename's rollback, where the new name provably had no rules before (the rename refuses otherwise), so the
+ * rules naming it are exactly the ones the rename copied.
+ */
+function withoutSdkRules(home: string, server: string, inUse?: ServerInUse): { dropped: number; ambiguous: string[] } {
+  let dropped = 0;
+  const ambiguous: string[] = [];
   const current = readSdkSettingsDetailed(home);
-  if (current.state !== "ok" || !isRecord(current.value.permissions)) return;
+  if (current.state !== "ok" || !isRecord(current.value.permissions)) return { dropped, ambiguous };
+  const perms0 = current.value.permissions as Record<string, unknown>;
+  if (!RULE_KINDS.some((k) => Array.isArray(perms0[k]) && (perms0[k] as unknown[]).some((r) => typeof r === "string" && ruleNamesMcpServer(r, server)))) return { dropped, ambiguous };
   updateSdkSettings(home, (settings) => {
+    dropped = 0;
+    ambiguous.length = 0;
     const perms: Record<string, unknown> = isRecord(settings.permissions) ? { ...settings.permissions } : {};
     for (const k of RULE_KINDS) {
       const list = perms[k];
-      if (Array.isArray(list)) perms[k] = list.filter((r) => typeof r !== "string" || !ruleNamesMcpServer(r, from));
+      if (!Array.isArray(list)) continue;
+      perms[k] = list.filter((r) => {
+        if (typeof r !== "string" || !ruleNamesMcpServer(r, server)) return true;
+        const other = inUse === undefined ? undefined : ambiguousFor(r, server, inUse);
+        if (other !== undefined) { ambiguous.push(ambiguityNote(sdkSettingsPath(home), r, other)); return true; }
+        dropped++;
+        return false;
+      });
     }
     return { ...settings, permissions: perms as SdkSettingsFile["permissions"] };
   });
+  return { dropped, ambiguous };
+}
+
+/** Does `sdk/settings.json` hold any rule naming `server`? */
+function sdkHasRulesNaming(home: string, server: string): boolean {
+  const current = readSdkSettingsDetailed(home);
+  if (current.state !== "ok" || !isRecord(current.value.permissions)) return false;
+  const perms = current.value.permissions as Record<string, unknown>;
+  return RULE_KINDS.some((k) => Array.isArray(perms[k]) && (perms[k] as unknown[]).some((r) => typeof r === "string" && ruleNamesMcpServer(r, server)));
 }
 
 /** Every string in a JSON value (bounded depth) — for LISTING rules in files Winter never edits. */
@@ -465,26 +529,56 @@ function nameInUse(home: string, name: string, ctx: McpNameContext): boolean {
   return mcpServerNameDefined(home, name, ctx);
 }
 
+/** `inUse` for a rule's other candidate servers: defined or live (`nameInUse`), or holding a stored row. */
+function candidateInUse(home: string, ctx: McpNameContext, settings: Settings | undefined): ServerInUse {
+  const seen = new Map<string, boolean>();
+  return (name) => {
+    let v = seen.get(name);
+    if (v === undefined) {
+      v = Object.hasOwn(settings?.mcp?.toolPermissions ?? {}, name) || nameInUse(home, name, ctx);
+      seen.set(name, v);
+    }
+    return v;
+  };
+}
+
 /**
  * THE remove door with its settings half, shared by `mcp.remove` and the CLI's no-daemon path: remove `name`
  * from the scope, then — when something was removed and nothing uses the name any more — drop its connector
- * permissions. Once the entry is removed the call reports it removed: a failure on the settings half is
+ * permissions and the `sdk/settings.json` rules naming it (an ambiguous rule stays and is listed, as are rules
+ * in files Winter does not edit). Once the entry is removed the call reports it removed: a failure on the settings half is
  * `permissionsNote`, never an error. `settings` is the written file when it changed.
  */
-export function removeMcpServerForgettingPermissions(t: McpScopeTarget, name: string, ctx: McpNameContext): { removed: boolean; permissionsCleared: boolean; permissionsNote?: string; settings?: Settings } {
+export interface McpRemoveOutcomeCore {
+  removed: boolean;
+  permissionsCleared: boolean;
+  /** Rules naming the server dropped from `sdk/settings.json` (only once the name is unused). */
+  rulesDropped: number;
+  /** Rules naming it that stay: in files Winter does not edit, or ambiguous in `sdk/settings.json`. */
+  rulesNotFollowed: string[];
+  permissionsNote?: string;
+  settings?: Settings;
+}
+
+export function removeMcpServerForgettingPermissions(t: McpScopeTarget, name: string, ctx: McpNameContext): McpRemoveOutcomeCore {
   const removed = removeMcpServerInScope(t, name);
-  if (!removed) return { removed, permissionsCleared: false };
+  const none = { removed, permissionsCleared: false, rulesDropped: 0, rulesNotFollowed: [] as string[] };
+  if (!removed) return none;
   try {
-    if (nameInUse(t.home, name, ctx)) return { removed, permissionsCleared: false };
+    if (nameInUse(t.home, name, ctx)) return none;
     const path = join(t.home, "settings.json");
     const current = settingsIfPresent(path);
-    if (current === undefined) return { removed, permissionsCleared: false };
+    // The rules first (they reference the row's server only by name), then the row.
+    const rules = withoutSdkRules(t.home, name, candidateInUse(t.home, ctx, current));
+    const rulesNotFollowed = [...rules.ambiguous, ...rulesThatWillNotFollow(t.home, name, ctx)];
+    const base = { removed, rulesDropped: rules.dropped, rulesNotFollowed };
+    if (current === undefined) return { ...base, permissionsCleared: false };
     const next = forgetConnectorPermissions(current, name);
-    if (next === current) return { removed, permissionsCleared: false };
+    if (next === current) return { ...base, permissionsCleared: false };
     saveSettings(path, next);
-    return { removed, permissionsCleared: true, settings: next };
+    return { ...base, permissionsCleared: true, settings: next };
   } catch (err) {
-    return { removed, permissionsCleared: false, permissionsNote: `the server was removed, but its connector permissions could not be cleared (${err instanceof Error ? err.message : "unknown"}) — clear them with winter mcp permissions ${name} '*' default` };
+    return { ...none, permissionsNote: `the server was removed, but its connector settings could not be cleared (${err instanceof Error ? err.message : "unknown"}) — clear them with winter mcp permissions ${name} '*' default` };
   }
 }
 
@@ -526,6 +620,12 @@ export function renameMcpServerCarryingSettings(t: McpScopeTarget, from: string,
   if (before !== undefined && Object.hasOwn(before.mcp?.toolPermissions ?? {}, to)) {
     throw new McpRenameRefusal("mcp_rename_target_has_permissions", `"${to}" already has connector permissions stored — clear them first (winter mcp permissions ${to} '*' default)`);
   }
+  // …or leftover RULES naming it (`mcp__<to>`, `mcp__<to>__…`), in Winter's own `sdk/settings.json` or in files
+  // Winter does not edit: the renamed server would silently take them over.
+  const leftover = [...(sdkHasRulesNaming(t.home, to) ? [sdkSettingsPath(t.home)] : []), ...rulesThatWillNotFollow(t.home, to, ctx)];
+  if (leftover.length > 0) {
+    throw new McpRenameRefusal("mcp_rename_target_has_permissions", `rules already name "${to}" (${leftover.join("; ")}) — remove them first, or pick another name`);
+  }
   // 2. Copy first.
   let carried = false;
   let written: Settings | undefined;
@@ -536,9 +636,11 @@ export function renameMcpServerCarryingSettings(t: McpScopeTarget, from: string,
   }
   // 3. Rename the entry (after the rules are copied too). Any failure from here takes the copies back.
   let rulesCarried = 0;
+  let ambiguous: string[] = [];
   let type: McpRenameOutcomeCore["type"];
+  const inUse = candidateInUse(t.home, ctx, before);
   try {
-    rulesCarried = withCopiedSdkRules(t.home, from, to);
+    ({ added: rulesCarried, ambiguous } = withCopiedSdkRules(t.home, from, to, inUse));
     ({ type } = renameMcpServerInScope(t, from, to));
   } catch (err) {
     try {
@@ -547,11 +649,13 @@ export function renameMcpServerCarryingSettings(t: McpScopeTarget, from: string,
         saveSettings(path, before?.mcp?.disabled?.includes(to) === true ? forgetConnectorPermissions(now, to) : dropConnectorSettings(now, to));
         written = undefined;
       }
+      // Exact: `to` provably had no rules before (refused above otherwise), so every rule naming it now is
+      // one this rename copied.
       if (rulesCarried > 0) withoutSdkRules(t.home, to);
     } catch { /* best effort: settings on a name nothing defines are inert */ }
     throw err;
   }
-  const rulesNotFollowed = rulesThatWillNotFollow(t.home, from, ctx);
+  const rulesNotFollowed = [...ambiguous, ...rulesThatWillNotFollow(t.home, from, ctx)];
   // 4. Drop the old name's settings — unless it is still in use.
   let keptOld = true;
   let note: string | undefined;
@@ -563,7 +667,8 @@ export function renameMcpServerCarryingSettings(t: McpScopeTarget, from: string,
         const next = dropConnectorSettings(current, from);
         if (next !== current) { saveSettings(path, next); written = next; }
       }
-      if (rulesCarried > 0) withoutSdkRules(t.home, from);
+      // Every unambiguous rule naming `from` was copied; the ambiguous ones stay (same `inUse`).
+      if (rulesCarried > 0) withoutSdkRules(t.home, from, inUse);
     }
   } catch (err) {
     note = `renamed, but the old name's connector settings could not be dropped (${err instanceof Error ? err.message : "unknown"}) — they apply to nothing now`;
