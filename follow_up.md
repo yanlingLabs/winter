@@ -12,7 +12,8 @@ The canonical list of known, deliberately parked work. Nothing here blocks a rel
 
 ## Models and providers
 - [ ] Catalog tool-calling evidence still missing (no vendor statement found 2026-09-27): the ERNIE rows on `qianfan-anthropic`, the two role-play rows on `tencent-tokenhub-anthropic`, `tabitoken`'s four, three `wafer` rows absent from its live list, `agentrouter/gpt-5.6-sol`, `nvidia/stockmark/stockmark-2-100b-instruct` and `nvidia/meta/llama-4-maverick-17b-128e-instruct`; each needs a keyed live probe.
-- [ ] Catalog refresh from the 2026-09-27 research: missing providers (Databricks, Cloudflare Workers AI, Replicate, Snowflake Cortex, IBM watsonx, OVHcloud, Crusoe, Parasail, GMI, Tinfoil, Aleph Alpha), missing and retired models per provider (DeepInfra lists none), and the core fields (context, max output, reasoning, pricing) still missing on about 700 rows.
+- [ ] Providers the 0.0.34 catalog refresh left out: Replicate and IBM watsonx (native APIs need their own adapter), Databricks (no public model ids for its gateway), Parasail and GMI (model ids need a key to list), Aleph Alpha (enterprise only), and Pioneer re-admitted at its new host api.fastino.ai.
+- [ ] Declaring reasoning on Claude Haiku 4.5 and Gemini 2.5 Flash / Flash-Lite gives each its own continuation domain and breaks same-domain fallbacks; held back in 0.0.34 until the fallback rule accounts for it.
 
 ## Plan mode
 - [ ] A one-line plan-mode reminder every few turns in long plan-mode sessions (the `entered` notice drifts further from the tail).

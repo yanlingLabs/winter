@@ -214,6 +214,11 @@ export function internalEffortNoEscalationFor(tag: string, wanted: string): stri
  *               but this model takes no effort SETTING (98 of 618 rows — the population
  *               `implicitEffortFor` above exists for).
  *
+ * A block that states reasoning is NOT supported (`reasoning.supported.value === false`, 110 rows since
+ * the agent SDK 0.0.34 catalog refresh stated it from vendor pages, e.g. `openai/gpt-4.1`) is the first
+ * case, not the second: the model has no effort concept, so it reports `null` — never "reasoning that is
+ * not adjustable".
+ *
  * A UI renders those two differently ("no such control" vs "this model's reasoning is not
  * adjustable"), which is why `effortsForModel` (ipc/sync.ts, ipc/picker-models.ts) — whose `[]` means
  * "nothing to offer" for BOTH — cannot serve a surface that needs the distinction.
@@ -226,6 +231,7 @@ export function internalEffortNoEscalationFor(tag: string, wanted: string): stri
  */
 export function effortVocabularyOf(row: WinterModelDescriptor | undefined): string[] | null {
   if (row === undefined) return null;
+  if (row.reasoning?.supported.value === false) return null;
   const efforts = row.reasoning?.efforts;
   return efforts === undefined ? null : [...efforts];
 }
