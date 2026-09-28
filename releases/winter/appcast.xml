@@ -412,5 +412,22 @@
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
       <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.121.0/Winter-0.121.0.zip" sparkle:edSignature="N9OoZn6clmMgtPHQb5oDGnSGasZXMCUrfqWPXRAr91hXcYAlIaNuY0oxDiDvsbVF14399/MdwOV3q39Prf6GDg==" length="426235976" type="application/octet-stream"/>
     </item>
+      <item>
+      <title>0.122.0</title>
+      <description><![CDATA[<p>Winter agent SDK 0.0.34</p>
+<h2>Models and providers</h2>
+<ul>
+  <li><strong>Nearly three hundred more models.</strong> DeepInfra's full chat lineup, recent OpenAI models (GPT-5.3 Codex, GPT-5.2 and GPT-5.2 Pro, GPT-5.1, GPT-5 and GPT-5 Pro), GPT-6 Sol and Luna on Azure OpenAI, Kimi K3 on eleven hosts, Qwen 3.8 Omni Flash, Step 5 preview, Doubao Seed 2.1, Palmyra X6, and the latest frontier models on OpenRouter.</li>
+  <li><strong>New providers:</strong> OVHcloud AI Endpoints, Crusoe and Tinfoil. Snowflake Cortex and Cloudflare Workers AI work with your own account's address, the way Azure does.</li>
+  <li><strong>More complete details.</strong> Context size, output limits, reasoning support, tool support and prices are filled in for hundreds of models from each provider's own documentation, and almost twice as many models now show a price.</li>
+  <li><strong>Retired models are marked</strong>, including Perplexity Sonar and Groq's Llama 3.3 70B. Winter's Llama picks now point at hosts that still serve them.</li>
+  <li><strong>Providers whose service has shut down are no longer offered:</strong> Yi, Pioneer, Modal and Hyperbolic. A key you stored for one of them stays in your Keychain, but Winter no longer lists it.</li>
+</ul>
+<p>This release runs on Winter agent SDK 0.0.34 and runtime SDK 0.0.15.</p>]]></description>
+      <sparkle:version>0.122.0</sparkle:version>
+      <sparkle:shortVersionString>0.122.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.122.0/Winter-0.122.0.zip" sparkle:edSignature="qjrbAqp5sslmQ2CZwgyFRzvrkXL15kngyk09P+10wNnN0JNUSDBnXXiZP5nNDDqK1yLGKGL5Npq8g/dslbZfDA==" length="426733001" type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>
