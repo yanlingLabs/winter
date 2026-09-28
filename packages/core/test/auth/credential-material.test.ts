@@ -186,7 +186,9 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     // packages/runtime/src/provider/keychain-store.ts` came back EMPTY (0 lines); the mirror stands unchanged.
     // 0.0.31 → 0.0.32 (reconnect deadlock fix): keychain-store.ts diff EMPTY again; the mirror stands.
     // 0.0.32 → 0.0.33 (WS-27): keychain-store.ts diff EMPTY again; the mirror stands.
-    expect(pkg.version).toBe("0.0.33");
+    // 0.0.33 → 0.0.34: keychain-store.ts gained only the test-only WINTER_TEST_KEYCHAIN in-memory backend;
+    // parseStoredCredentialMaterial is untouched, so the mirror stands.
+    expect(pkg.version).toBe("0.0.34");
   });
 
 

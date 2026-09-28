@@ -13,6 +13,7 @@ import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 import { Settings, saveSettings, MODEL_ROLES } from "../../src/settings";
+import { noReasoningBlockTag, reasoningUnsupportedTag } from "../helpers/reasoning-catalog-rows";
 import { costBasisFor } from "../../src/providers/model-catalog-wire";
 import { writeCredentialMaterial } from "../../src/auth/credential-material";
 import { consoleProfileCredentialFile } from "../../src/runtime-sdk/anthropic-paths";
@@ -219,15 +220,15 @@ describe("models.catalog", () => {
   // "this model has no effort concept" and "this model's reasoning is not adjustable" differently,
   // and `effortsForModel` (ipc/sync.ts), which collapses both to `[]`, cannot serve that.
   // -----------------------------------------------------------------------------------------------
-  test("efforts: a real row with NO `reasoning` block at all reports null (never [])", async () => {
+  test("efforts: a real row with NO `reasoning` block, or one stating reasoning unsupported, reports null (never [])", async () => {
     const { socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     const result = await c.request(METHODS.modelsCatalog, {});
-    // `agentrouter/claude-opus-5` carries no `reasoning` block (472 of 618 rows are shaped like this
-    // in catalog v3.8.50+winter.1). `openai/gpt-5.4` is a second one, and the tag the sibling
-    // role-write tests already use.
-    for (const tag of ["agentrouter/claude-opus-5", "openai/gpt-4.1"]) { // R.1: gpt-5.4 has a vocabulary now
+    // Picked by shape (the 0.0.34 refresh stated reasoning for the rows this test used to name): one row
+    // with no `reasoning` block, and one whose block says reasoning is unsupported (`openai/gpt-4.1`-like) —
+    // neither has an effort concept.
+    for (const tag of [noReasoningBlockTag(), reasoningUnsupportedTag()]) {
       const row = result.result.models.find((m: any) => m.tag === tag);
       expect(row).toBeDefined();
       expect(row.efforts).toBeNull();

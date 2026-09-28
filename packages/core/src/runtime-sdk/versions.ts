@@ -3,8 +3,11 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.33";
-/** Bumped to 0.0.33 (2026-09-27, WS-27): a turn waits, bounded and interruptible, for MCP servers mid-reconnect;
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.34";
+/** Bumped to 0.0.34 (2026-09-28): the catalog refresh (218 providers / 1293 models: fields filled from official
+ *  sources, DeepInfra and ~210 missing models, OVHcloud/Crusoe/Tinfoil/Snowflake Cortex/Cloudflare Workers AI, dead
+ *  providers blocked, retired rows deprecated) and the SDK's test Keychain isolation.
+ *  Earlier: bumped to 0.0.33 (2026-09-27, WS-27): a turn waits, bounded and interruptible, for MCP servers mid-reconnect;
  *  the runtime states each MCP tool call's exact server (`winter_mcp_server` / `mcpServer`), which connector
  *  permissions read; elicitation cancellation reaches `onElicitation`; the catalog's tool evidence and Space Bunny.
  *  Earlier: bumped to 0.0.32 (2026-09-27, WS-25 live gate): the MCP control requests (`mcp_reconnect`, `mcp_toggle`,

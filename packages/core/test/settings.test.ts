@@ -7,6 +7,7 @@ import { ModelRole as ProtocolModelRole } from "@yanlinglabs/winter-protocol";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
 import { UNSTATED_TAG, type ModelTag } from "../src/runtime-sdk/model-tag";
 import { setPluginEnabled } from "../src/plugins/lifecycle";
+import { noReasoningBlockTag, reasoningUnsupportedTag } from "./helpers/reasoning-catalog-rows";
 
 // WS-20: the pre-migration default bare id — used ONLY inside a raw v2 (or v1) fixture that
 // exercises `loadSettings`'s OWN migration; every v3 fixture below uses `DEFAULT_PROVIDER.model`
@@ -1191,9 +1192,12 @@ describe("role reasoning efforts (roleEfforts / roleEffortFor / roleAcceptsClien
   test("modelRoleInfo: efforts carries the CURRENT model's vocabulary, with null and [] kept apart", () => {
     // A row with a vocabulary, in the catalog's own order and with no "none" prepended.
     expect(modelRoleInfo(base, "provider.model").efforts).toEqual(["low", "medium", "high", "xhigh", "max"]);
-    // A row with NO `reasoning` block at all (R.1: gpt-4.1 — the refreshed catalog gave gpt-5.4 a vocabulary).
-    const noBlock = setModelRole(base, "provider.model", "openai/gpt-4.1");
-    expect(modelRoleInfo(noBlock, "provider.model").efforts).toBeNull();
+    // A row with NO `reasoning` block at all, and one whose block states reasoning unsupported: no effort
+    // concept either way (picked by shape — a catalog refresh keeps stating reasoning for named rows).
+    for (const tag of [noReasoningBlockTag(), reasoningUnsupportedTag()]) {
+      const noBlock = setModelRole(base, "provider.model", tag);
+      expect(modelRoleInfo(noBlock, "provider.model").efforts).toBeNull();
+    }
     // A row WITH a `reasoning` block whose vocabulary is empty — a different fact, a different answer.
     const emptyVocab = setModelRole(base, "pins.dispatch", "agnes/agnes-2.0-flash");
     expect(modelRoleInfo(emptyVocab, "pins.dispatch").efforts).toEqual([]);
