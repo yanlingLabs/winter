@@ -7,10 +7,10 @@
  *     op count is bounded by DAMAGE, never by frame height (a 5,000-row pair differing in one row
  *     is exactly one op; asserted mechanically on op COUNT, not timing).
  *
- *   - `renderOps(ops, totalRows)` — the deterministic serializer: one BSU/ESU-wrapped string of
- *     absolute cursor-position (CSI row;1H) + row text + EL (clear-to-EOL) per op, cursor parked
- *     on the frame's last row at the end. Golden-string tests — byte-exact, like the alt-screen
- *     escapes' own tests.
+ *   - `renderOps(ops, totalRows, columns?)` — the deterministic serializer: one BSU/ESU-wrapped
+ *     string of absolute cursor-position (CSI row;1H) + row text + EL (clear-to-EOL) for short
+ *     rows, omitting EL for full-width rows, then parking on the last row. Golden-string tests
+ *     are byte-exact, like the alt-screen escapes' own tests.
  *
  *  Pure data in, pure string out — no Ink, no React, no stream. The writer/stream half
  *  (`makeDiffingWriter` & co) is tested further down once it exists. */
@@ -124,6 +124,13 @@ describe("renderOps — deterministic serialization (golden strings)", () => {
       BSU + pos(1) + "x" + EL + pos(1) + ESU,
     );
   });
+
+  test("a full-width styled row skips EL, while a shorter row still clears its tail", () => {
+    const styled = "\x1b[38;2;255;255;255m────\x1b[39m";
+    expect(renderOps([{ row: 0, text: styled }, { row: 1, text: "abc" }], 2, 4)).toBe(
+      BSU + pos(1) + styled + pos(2) + "abc" + EL + pos(2) + ESU,
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -187,6 +194,18 @@ function fakeOut(rows?: number): { out: NodeJS.WriteStream; writes: string[] } {
 }
 
 describe("makeDiffingWriter — full repaint on first write and after reset(), else damage", () => {
+  test("full-width rows retain their final cell on both initial and damage paints", () => {
+    const { out, writes } = fakeOut();
+    (out as unknown as { columns: number }).columns = 4;
+    const w = makeDiffingWriter(out);
+    w.write("────\nx");
+    expect(writes[0]).toBe(BSU + ERASE_SCREEN + pos(1) + "────" + pos(2) + "x" + EL + pos(2) + ESU);
+    w.write("abcd\nx");
+    expect(writes[1]).toBe(BSU + pos(1) + "abcd" + pos(2) + ESU);
+    w.write("abc\nx");
+    expect(writes[2]).toBe(BSU + pos(1) + "abc" + EL + pos(2) + ESU);
+  });
+
   test("first write: erase-screen INSIDE the sync envelope + every row + park, byte-exact", () => {
     const { out, writes } = fakeOut();
     makeDiffingWriter(out).write("a\nb");

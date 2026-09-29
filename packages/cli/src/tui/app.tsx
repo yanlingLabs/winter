@@ -41,7 +41,8 @@
  *       ctrl+d half-page-down binding double-firing with the exit flow — scroll AND arm on one
  *       press — so ctrl+d was ceded to the exit hook entirely. Half-page-DOWN is covered by PgDn;
  *       ctrl+u keeps half-page-up. Spec §5 amended to match).
- *    2. The EXIT hook (Task 5, `isActive: true` UNCONDITIONALLY): double-press ctrl+C (800ms window,
+ *    2. The EXIT hook (Task 5, `isActive: true` UNCONDITIONALLY): ctrl+C copies an active
+ *       composer/transcript selection; otherwise double-press ctrl+C (800ms window,
  *       timed off the ticking `nowMs`, never `Date.now`) — first press arms + (if a turn is running)
  *       ALSO interrupts; second press of the SAME key within the window calls `onExitRequest` (a
  *       DIFFERENT eligible key inside the window re-arms under that key instead of exiting); window
@@ -54,10 +55,10 @@
  *  calls back into this App's `scrollToTop`/`followBottom` scroll updates instead of running its
  *  cursor ops; with text in the buffer they keep their cursor semantics and never scroll.
  *  Mouse reports (SGR or legacy X10; wheel + any button/motion) are intercepted at the shared stdin
- *  input emitter and swallowed BEFORE any `useInput` consumer (either hook here, the composer's, or
- *  a pending card's) sees them — wheel arrives as a first-class `WheelEvent` (input-model.ts, TUI
- *  renderer T1) scrolling by its `lines`, every other mouse report is dropped (so no mouse bytes
- *  ever land in the composer buffer). Neither that emitter patch nor the composer's own T3 raw side-
+ *  input emitter and consumed BEFORE any `useInput` consumer (either hook here, the composer's, or
+ *  a pending card's) sees them — wheel scrolls, pointer reports select transcript text or edit the
+ *  composer, and unknown mouse reports are dropped (so no mouse bytes land in the buffer).
+ *  Neither that emitter patch nor the composer's own T3 raw side-
  *  channel ever matches \x03/\x04, so neither interferes with the exit hook.
  *
  *  CHILD-TRANSCRIPT VIEW (child-transcript-view T3, CC sub-agents parity): ctrl+a (intercepted at
@@ -94,14 +95,18 @@ import { modelIdPortion } from "../model-cli";
 import { initialState, reduce, statusChromeModel, type AgentRow, type Block, type LocalEvent, type PendingCard, type TuiState } from "./state";
 import { makeFlattenCache, makeStreamRenderer } from "./flatten-blocks";
 import { applyWheel, followBottom, onContentGrown, scrollToTop, type ScrollState } from "./scroll-model";
-import { TranscriptViewport } from "./transcript";
+import { TranscriptViewport, selectedTranscriptText, transcriptLineAt, type TranscriptPoint, type TranscriptSelection } from "./transcript";
 import { collapseCompleted, sortTasksForDisplay, type TaskRow } from "../task-display";
-import { createMouseFilter, isMouseArtifact, renderWithCursor, type InputState } from "./input-model";
+import { createMouseFilter, isMouseArtifact, makePointerCoalescer, renderDisplayWithCursor, selectedText, selectionRange, type InputState, type PointerEvent } from "./input-model";
+import { copyToClipboard } from "./clipboard";
 import { Spinner } from "./spinner";
 import { TaskList } from "./task-list";
 import { AgentList, FINISH_LABEL } from "./agent-list";
 import { Footer, type ExitKey } from "./footer";
 import { Composer } from "./composer";
+import { makeDraftWrapper } from "./draft-wrap";
+import { makePasteBatch } from "./paste-batch";
+import { transcriptFileAtCell, openLocalFile } from "./file-links";
 import { PendingCards, type AnswerPayload } from "./pending-cards";
 import { theme } from "./theme";
 import { loadSafeHighlighter } from "./highlight-guard";
@@ -181,6 +186,9 @@ export interface AppProps {
    *  processed, or never shown at all if this is `undefined` (a fresh session — today's behavior,
    *  byte-identical) or `0` (a resumed session with no prior events — nothing to wait for). */
   resumeTargetSeq?: number;
+  /** Injectable clipboard writer for UI tests; production uses the macOS pasteboard. */
+  copyText?: (text: string) => void;
+  openFile?: (path: string) => void;
 }
 
 // Re-exported from the zero-dep `./policy-order` module (SP-policies): main.ts's cycler imports the
@@ -255,7 +263,7 @@ function pendingCardRows(pending: PendingCard): number {
   return 3 + options * 2 + 1; // header/question + per-option lines + prompt
 }
 
-/** Rendered line count of the IDLE composer's bordered box: the top/bottom border rules (2) + the
+/** Rendered line count of the IDLE composer: top/bottom rules (2) + the
  *  content line's WRAP-AWARE row count (Phase 3c Task 5 review fix — the flat `3` this replaced
  *  assumed the content line never wraps, undercounting `bottomBarRows` the moment typed text +
  *  prompt/cursor overflowed `columns`, which risks the exact Yoga shrink-distortion the module doc
@@ -266,10 +274,10 @@ function pendingCardRows(pending: PendingCard): number {
  *  ANSI codes the real render bakes in are omitted here on purpose: `wrap-ansi` measures ANSI-aware
  *  (via `string-width`), so they don't change the wrap point either way — only the plain text needs
  *  to be reconstructed for an accurate row count. */
-function composerRows(text: string, cursor: number, columns: number): number {
-  const { before, at, after } = renderWithCursor({ text, cursor });
+function composerRows(text: string, cursor: number, columns: number, wrap = makeDraftWrapper()): number {
+  const { before, at, after } = renderDisplayWithCursor({ text, cursor });
   const content = `❯ ${before}${at || " "}${after}`;
-  const contentRows = wrapAnsi(content, Math.max(1, columns), { hard: true, trim: false }).split("\n").length;
+  const contentRows = wrap(content, columns).length;
   return 2 + Math.max(1, contentRows);
 }
 
@@ -307,7 +315,7 @@ export interface BottomBarLayout {
  *
  *  T3 CAP SEMANTICS: `totalRows` (the terminal's rows) bounds the bar at
  *  `floor(totalRows × BAR_MAX_FRACTION)`. Essentials are never shed — footer, spinner, resuming,
- *  the completion menu (R4: its behavior is untouchable), the composer's borders + at least ONE
+ *  the completion menu (R4: its behavior is untouchable), the composer's rules + at least ONE
  *  content row, a card's fixed rows — so on absurdly tiny terminals the essentials floor wins over
  *  the cap (rows ≤ max(cap, floor), pinned). Grant order above the floor: input-slot content
  *  (composer window / plan body) first, then agents (windowed, +1 overflow line), then tasks
@@ -347,8 +355,11 @@ export function bottomBarLayout(input: {
    *  dismisses the picker the moment a card takes input. Optional, defaulting to 0, so every
    *  legacy call site is byte-identical. */
   pickerRows?: number;
+  /** Optional memoized natural composer height. App supplies this so its 100ms activity tick does
+   * not re-wrap a large draft merely to recompute an unchanged bottom-bar budget. */
+  composerNaturalRows?: number;
 }, totalRows: number = Number.POSITIVE_INFINITY): BottomBarLayout {
-  const { tasksVisible, tasks, agents, running, pending, columns, composerText, composerCursor, resuming, menuRows, chromeRows = 1, pickerRows = 0 } = input;
+  const { tasksVisible, tasks, agents, running, pending, columns, composerText, composerCursor, resuming, menuRows, chromeRows = 1, pickerRows = 0, composerNaturalRows } = input;
   // TUI renderer T3: the in-flight streaming turn no longer lives in this bar — it renders inside
   // the transcript's line log (`makeStreamRenderer` rows appended to `lineLog` in App below), so
   // this model counts only chrome: tasks · spinner · resuming · card|composer+menu · agents · chrome.
@@ -369,8 +380,8 @@ export function bottomBarLayout(input: {
       used += pendingCardRows(pending); // approval/question: natural estimate (see doc above)
     }
   } else {
-    used += 2 + menuRows; // border rules + the completion menu (both essential — R4)
-    const natural = composerRows(composerText, composerCursor, columns) - 2; // content rows only
+    used += 2 + menuRows; // composer rules + the completion menu (both essential — R4)
+    const natural = (composerNaturalRows ?? composerRows(composerText, composerCursor, columns)) - 2; // content rows only
     composerContentRows = Math.min(natural, Math.max(1, cap - used));
     used += composerContentRows;
   }
@@ -419,7 +430,7 @@ export function agentWindowStart(total: number, shown: number, selIdx: number | 
 export function App({
   client, bridge, sessionId, cwd, initialPolicy, version, model,
   effort, sessionModelOverride, sessionEffortOverride, initialActivity,
-  now = Date.now, onExitRequest, resumeTargetSeq,
+  now = Date.now, onExitRequest, resumeTargetSeq, copyText = copyToClipboard, openFile = openLocalFile,
 }: AppProps) {
   const [state, dispatch] = useReducer(
     (s: TuiState, e: AppEvent) => reduce(s, e, now()),
@@ -439,7 +450,23 @@ export function App({
   // lay the composer out on, or the JS height model could transiently under-count a just-typed
   // wrapped line (the exact Yoga shrink-distortion risk this task's hard requirement fixes).
   const [composerState, setComposerState] = useState<InputState>({ text: "", cursor: 0 });
-  const onComposerStateChange = useCallback((s: InputState) => setComposerState(s), []);
+  const composerStateRef = useRef<InputState>(composerState);
+  const onComposerStateChange = useCallback((s: InputState) => {
+    composerStateRef.current = s;
+    setTranscriptSelection(null);
+    // Input chunks are batched before Ink. Keep geometry in sync with the committed draft;
+    // delaying this separately would paint new content using the preceding draft's height.
+    setComposerState(s);
+  }, []);
+  const [transcriptSelection, setTranscriptSelection] = useState<TranscriptSelection | null>(null);
+  const transcriptAnchorRef = useRef<TranscriptPoint | null>(null);
+  const mouseOwnerRef = useRef<"composer" | "transcript" | null>(null);
+  const composerPointerRef = useRef<((event: PointerEvent) => void) | null>(null);
+  const registerComposerPointer = useCallback((handler: ((event: PointerEvent) => void) | null) => { composerPointerRef.current = handler; }, []);
+  const composerWheelRef = useRef<((delta: number) => void) | null>(null);
+  const registerComposerWheel = useCallback((handler: ((delta: number) => void) | null) => { composerWheelRef.current = handler; }, []);
+  const dragEventRef = useRef<PointerEvent | null>(null);
+  const pointerMovedRef = useRef(false);
 
   // Phase 3d T2: mirrors the completion menu's visible row count off `Composer`'s
   // `onMenuRowsChange` — same reasoning as `composerState` above (`bottomBarRows` must recompute on
@@ -690,8 +717,21 @@ export function App({
   // T6 spacing rhythm: `precededByContent` tells the stream renderer whether committed rows sit
   // above it — its assistant rows then open with the same single blank a committed assistant block
   // gets from the flatten cache, so the turn-end swap stays byte-identical spacer-and-all.
-  const streamRows = streamRenderer.lines(state.activeAssistant, state.activeTools, { columns, highlight, dimToolDot, precededByContent: bodyLines.length > 0 });
-  const lineLog = childLines ?? welcome.concat(bodyLines, streamRows);
+  const streamRows = useMemo(
+    () => streamRenderer.lines(state.activeAssistant, state.activeTools, { columns, highlight, dimToolDot, precededByContent: bodyLines.length > 0 }),
+    [streamRenderer, state.activeAssistant, state.activeTools, columns, highlight, dimToolDot, bodyLines.length],
+  );
+  // Keep one empty transcript row between the latest content (including a turn summary) and the
+  // pinned composer. It scrolls with the transcript, so the gap is visible only at the live tail.
+  const lineLog = useMemo(
+    () => (childLines ?? welcome.concat(bodyLines, streamRows)).concat(""),
+    [childLines, welcome, bodyLines, streamRows],
+  );
+  useEffect(() => {
+    // A rewrap, view swap, or appended content can invalidate screen-cell selection coordinates.
+    setTranscriptSelection(null);
+    transcriptAnchorRef.current = null;
+  }, [lineLog.length, columns, verbose, childViewId]);
 
   // TUI renderer T5 — the bottom status chrome's content, from the ONE pure selector
   // (`statusChromeModel`, state.ts): policy + esc-hint + agents pill + activity chip + live
@@ -709,6 +749,7 @@ export function App({
     activity: state.activity ?? initialActivity,
     exitArmed: exitArmedKey,
     nowMs,
+    selectionActive: selectionRange(composerState) !== null || transcriptSelection !== null,
   });
 
   // TUI renderer T3: the capped layout model — the bar's allotments AND its height come from the
@@ -716,12 +757,18 @@ export function App({
   // exactly what it granted (JS-windowing, HARD CONSTRAINT 2) so the height model never lies.
   // T5: the chrome's rendered row count feeds the accounting — the selector's output IS the
   // rendered height (one truncate-capped row per line), so model and render can't disagree.
+  const wrapComposerHeight = useMemo(() => makeDraftWrapper(), []);
+  const composerNaturalRows = useMemo(
+    () => composerRows(composerState.text, composerState.cursor, columns, wrapComposerHeight),
+    [composerState.text, composerState.cursor, columns],
+  );
   const layout = bottomBarLayout({
     tasksVisible, tasks: state.tasks, agents: visibleAgents,
     running: state.turnRunning, pending: state.pending,
     columns, composerText: composerState.text, composerCursor: composerState.cursor, resuming,
     menuRows,
     chromeRows: chrome.lines.length,
+    composerNaturalRows,
     // B2: `choiceMenuRows` is the component's own accounting twin, so model and render agree.
     pickerRows: pickerOpen ? choiceMenuRows(choice!.options.length) : 0,
   }, rows);
@@ -738,6 +785,8 @@ export function App({
   // The child-view header (childHeaderLine) is pinned ABOVE the viewport, outside both the line
   // log and the bottom bar — subtract its one row here so the frame stays exactly rows-1 tall.
   const viewH = Math.max(1, (rows - 1) - barRows - (childOpen ? 1 : 0));
+  const composerOwnsPages = state.pending === null && !pickerOpen && selIdx === null && composerState.text.length > 0
+    && composerNaturalRows - 2 > layout.composerContentRows;
 
   // Growth compensation (scroll-model.ts, TUI renderer T2): the scroll offset is BOTTOM-anchored,
   // so a log that grew while the user is scrolled back would slide the view toward newer rows
@@ -763,6 +812,82 @@ export function App({
   const sameBasis = basis.columns === columns && basis.verbose === verbose && basis.highlight === highlight && basis.childViewId === childViewId;
   const grownBy = sameBasis ? lineLog.length - basis.len : 0;
   const scrollForRender = grownBy > 0 ? onContentGrown(scroll, grownBy) : scroll;
+  const bottomBarTopRow = rows - barRows;
+  const transcriptTopRow = childOpen ? 2 : 1;
+  const transcriptBottomRow = transcriptTopRow + viewH - 1;
+  const composerTopRow = bottomBarTopRow
+    + (layout.showTasks ? taskListRows(state.tasks) : 0)
+    + (state.turnRunning ? 1 : 0) + (resuming ? 1 : 0)
+    + (pickerOpen ? choiceMenuRows(choice!.options.length) : 0) + menuRows;
+  const pointerHandlerRef = useRef<(event: PointerEvent) => void>(() => {});
+  const repeatDragRef = useRef<() => void>(() => {});
+  repeatDragRef.current = () => {
+    const event = dragEventRef.current;
+    if (!event) return;
+    const outside = mouseOwnerRef.current === "composer"
+      ? event.row <= composerTopRow || event.row >= composerTopRow + layout.composerContentRows + 1
+      : mouseOwnerRef.current === "transcript" && (event.row <= transcriptTopRow || event.row >= transcriptBottomRow);
+    if (outside) pointerHandlerRef.current(event);
+  };
+  useEffect(() => {
+    const timer = setInterval(() => repeatDragRef.current(), 50);
+    return () => clearInterval(timer);
+  }, []);
+  pointerHandlerRef.current = (event) => {
+    if (event.button !== 0) return;
+    dragEventRef.current = event.kind === "drag" ? event : null;
+    if (event.kind === "press") pointerMovedRef.current = false;
+    if (event.kind === "drag") pointerMovedRef.current = true;
+    if (event.kind === "press") {
+      const inComposer = state.pending === null && event.row >= composerTopRow
+        && event.row <= composerTopRow + layout.composerContentRows + 1;
+      mouseOwnerRef.current = inComposer ? "composer" : event.row >= transcriptTopRow && event.row <= transcriptBottomRow ? "transcript" : null;
+      if (mouseOwnerRef.current === "composer") {
+        setTranscriptSelection(null);
+        transcriptAnchorRef.current = null;
+      }
+    }
+    if (mouseOwnerRef.current === "composer") {
+      composerPointerRef.current?.(event);
+      if (event.kind === "release") mouseOwnerRef.current = null;
+      return;
+    }
+    if (mouseOwnerRef.current !== "transcript") return;
+    // Terminal drag reports stop at the viewport edge. Advance the window one line at a time while
+    // the pointer is held there, so selecting upward/downward through a long transcript continues
+    // to reveal rows instead of pinning the endpoint to the first/last visible line.
+    let selectionScroll = scrollForRender;
+    if (event.kind === "drag" && event.row <= transcriptTopRow) {
+      selectionScroll = applyWheel(selectionScroll, { kind: "wheelUp", lines: 1 }, viewH, lineLog.length);
+      if (selectionScroll !== scrollForRender) setScroll(selectionScroll);
+    } else if (event.kind === "drag" && event.row >= transcriptBottomRow) {
+      selectionScroll = applyWheel(selectionScroll, { kind: "wheelDown", lines: 1 }, viewH, lineLog.length);
+      if (selectionScroll !== scrollForRender) setScroll(selectionScroll);
+    }
+    let index = transcriptLineAt(lineLog, selectionScroll, viewH, event.row, transcriptTopRow);
+    // Disclosure rows are not text. At an edge during a drag, use the nearest actual content row
+    // so the selection endpoint keeps moving while the viewport scrolls beneath the pointer.
+    if (index === null && event.kind === "drag") {
+      const adjacentRow = event.row <= transcriptTopRow ? transcriptTopRow + 1 : transcriptBottomRow - 1;
+      index = transcriptLineAt(lineLog, selectionScroll, viewH, adjacentRow, transcriptTopRow);
+    }
+    if (index === null) {
+      if (event.kind === "release") mouseOwnerRef.current = null;
+      return;
+    }
+    const point = { line: index, column: Math.max(0, event.column - 1) };
+    if (event.kind === "press") {
+      transcriptAnchorRef.current = point;
+      setTranscriptSelection(null);
+    } else if (transcriptAnchorRef.current) {
+      const anchor = transcriptAnchorRef.current;
+      if (event.kind === "release" && !pointerMovedRef.current && anchor.line === point.line && anchor.column === point.column) {
+        void transcriptFileAtCell(lineLog, index, point.column, columns, cwdRef.current).then((path) => { if (path) openFile(path); });
+      }
+      setTranscriptSelection(anchor.line === point.line && anchor.column === point.column ? null : { anchor, focus: point });
+      if (event.kind === "release") mouseOwnerRef.current = null;
+    }
+  };
   useEffect(() => {
     const prev = growthBasisRef.current;
     const same = prev.columns === columns && prev.verbose === verbose && prev.highlight === highlight && prev.childViewId === childViewId;
@@ -797,33 +922,40 @@ export function App({
   // byte, including inside the 3-byte "\x1b[<" prefix. A single stateful `createMouseFilter()`
   // (input-model.ts, TUI renderer T1) owns all of it at this input layer: complete/batched/split
   // reports (SGR and legacy X10) are consumed here, wheel notches arrive as first-class
-  // `WheelEvent`s (scrolled below — the same channel ctrl+a rides), every other mouse report is
-  // dropped, and dead partial mouse CSI is swallowed rather than flushed — so no mouse bytes ever
+  // `WheelEvent`s, pointer reports go to transcript/composer handlers, and dead partial mouse CSI
+  // is swallowed rather than flushed — so no mouse bytes ever
   // reach the composer buffer. One instance per mount, held in a ref so its carried tail survives
   // across effect re-runs. ctrl+a (\x01) toggles roster select mode while agents exist
   // (child-transcript-view T3 — see the branch's own comment inside). Restored on unmount. ---
   const { internal_eventEmitter: inputEmitter } = useStdin();
-  const mouseFilterRef = useRef(createMouseFilter());
+  const wheelRouteRef = useRef<(event: { kind: "wheelUp" | "wheelDown"; lines: number }, row: number) => void>(() => {});
+  wheelRouteRef.current = (event, row) => {
+    if (state.pending === null && row >= composerTopRow && row <= composerTopRow + layout.composerContentRows + 1) {
+      composerWheelRef.current?.((event.kind === "wheelUp" ? -1 : 1) * event.lines);
+    } else if (row >= transcriptTopRow && row <= transcriptBottomRow) {
+      setScroll((cur) => applyWheel(cur, event, viewHRef.current, lineCountRef.current));
+    }
+  };
   useEffect(() => {
     const em = inputEmitter;
     if (!em) return;
     const orig = em.emit.bind(em) as (event: string, ...args: unknown[]) => boolean;
-    const consumeMouseReports = mouseFilterRef.current;
+    const pasteBatch = makePasteBatch((text) => orig("input", text));
+    const consumeMouseReports = createMouseFilter((event, row) => { pasteBatch.flush(); wheelRouteRef.current(event, row); });
+    const pointerFrames = makePointerCoalescer((pointer) => pointerHandlerRef.current(pointer));
     const patched = (event: string, ...args: unknown[]): boolean => {
       if (event === "input") {
         const chunk = String(args[0]);
-        const { text, wheel } = consumeMouseReports(chunk);
-        for (const w of wheel) {
-          // T1's first-class WheelEvent feeds the scroll model whole — no sign/step re-derivation
-          // here; geometry refs are read when the updater RUNS, so batched notches see live values.
-          setScroll((cur) => applyWheel(cur, w, viewHRef.current, lineCountRef.current));
-        }
+        const { text, wheel, pointer } = consumeMouseReports(chunk);
+        if (wheel.length || pointer?.length) pasteBatch.flush();
+        for (const p of pointer ?? []) pointerFrames.push(p);
         if (text !== chunk) {
           // The chunk contained mouse-report bytes (fully, or a now-resolved/still-pending
           // partial) — never forward the ORIGINAL raw chunk (that's the tui-mouse leak). Forward
           // only whatever genuine text is left over, if any; nothing left means fully swallowed.
           if (text === "") return true;
-          return orig(event, text);
+          pasteBatch.push(text);
+          return true;
         }
         // Untouched fast path — chunk had no mouse-report bytes at all (the overwhelmingly common
         // case): preserve the exact original ctrl+a-then-passthrough behavior byte-for-byte.
@@ -835,14 +967,17 @@ export function App({
         // pending card owns input — otherwise \x01 falls through untouched (empty roster keeps the
         // composer's cursor-Home byte-identical; a pending card keeps today's input ownership).
         if (chunk === "\x01" && pendingRef.current === null && !pickerOpenRef.current && visibleAgentCountRef.current > 0) {
+          pasteBatch.flush();
           setAgentSel((cur) => (cur === null ? 0 : null));
           return true;
         }
+        pasteBatch.push(text);
+        return true;
       }
       return orig(event, ...args);
     };
     em.emit = patched as typeof em.emit;
-    return () => { em.emit = orig as typeof em.emit; };
+    return () => { pasteBatch.dispose(); pointerFrames.dispose(); em.emit = orig as typeof em.emit; };
   }, [inputEmitter]);
 
   // child-transcript-view T3: message the OPEN child view's agent (thread.send). Addressed by
@@ -948,6 +1083,12 @@ export function App({
       // handler, but if any mouse-shaped input slips through (Ink strips the leading ESC), swallow it
       // here too so it never triggers a key branch below. Scrolling is handled by the patch, not here.
       if (isMouseArtifact(input)) return;
+      if (key.ctrl && ((key.shift && input.toLowerCase() === "c") || input === "y")) {
+        if (transcriptSelection) {
+          copyText(selectedTranscriptText(lineLog, transcriptSelection));
+        }
+        return;
+      }
 
       // Bugfix-pass B2 — the bottom picker owns ↑/↓/Enter/Esc while open. The composer is DISABLED
       // for the duration (see its `disabled` prop below) and this branch runs BEFORE roster select
@@ -1006,8 +1147,8 @@ export function App({
       // key, the T1/T2 shape) — one model, one clamp/follow rule set, no parallel scroll math.
       const len = lineCountRef.current;
       const vh = viewHRef.current;
-      if (key.pageUp) { setScroll((cur) => applyWheel(cur, { kind: "wheelUp", lines: vh - 1 }, vh, len)); return; }
-      if (key.pageDown) { setScroll((cur) => applyWheel(cur, { kind: "wheelDown", lines: vh - 1 }, vh, len)); return; }
+      if (key.pageUp) { if (!composerOwnsPages) setScroll((cur) => applyWheel(cur, { kind: "wheelUp", lines: vh - 1 }, vh, len)); return; }
+      if (key.pageDown) { if (!composerOwnsPages) setScroll((cur) => applyWheel(cur, { kind: "wheelDown", lines: vh - 1 }, vh, len)); return; }
       if (key.ctrl && input === "u") { setScroll((cur) => applyWheel(cur, { kind: "wheelUp", lines: Math.ceil(vh / 2) }, vh, len)); return; }
       if (key.ctrl && input === "o") { setVerbose((v) => !v); return; }
       if (key.ctrl && input === "t") { setTasksVisible((v) => !v); return; }
@@ -1041,11 +1182,17 @@ export function App({
   // hook ceded ctrl+d entirely; see its comment) — every other key falls through untouched.
   useInput(
     (input, key) => {
-      if (key.ctrl && input === "c") { armOrExit("ctrl-c"); return; }
+      if (key.ctrl && !key.shift && input === "c") {
+        if (transcriptSelection) { copyText(selectedTranscriptText(lineLog, transcriptSelection)); return; }
+        const composerText = selectedText(composerStateRef.current);
+        if (composerText) { copyText(composerText); return; }
+        armOrExit("ctrl-c");
+        return;
+      }
       if (key.ctrl && input === "d") {
         // Only when the composer is empty or unmounted (a pending card owns input) — a non-empty
         // buffer leaves ctrl+D fully inert (no other hook binds it anymore).
-        const composerEligible = state.pending !== null || composerState.text.length === 0;
+        const composerEligible = state.pending !== null || composerStateRef.current.text.length === 0;
         if (composerEligible) armOrExit("ctrl-d");
       }
     },
@@ -1058,7 +1205,7 @@ export function App({
           rendered OUTSIDE the scrolling viewport (always visible, unlike the welcome banner which
           scrolls off) and pre-counted in viewH's math above. */}
       {childOpen ? <Text>{childHeaderLine(childRow!, columns)}</Text> : null}
-      <TranscriptViewport lines={lineLog} scroll={scrollForRender} viewportRows={viewH} />
+      <TranscriptViewport lines={lineLog} scroll={scrollForRender} viewportRows={viewH} selection={transcriptSelection} />
       <Box flexDirection="column" flexShrink={0}>
         {state.tasks.length > 0 && tasksVisible && layout.showTasks ? <TaskList tasks={state.tasks} nowMs={nowMs} /> : null}
         <Spinner
@@ -1089,6 +1236,10 @@ export function App({
             onSteer={onSteer}
             onInterrupt={onInterrupt}
             onCyclePolicy={onCyclePolicy}
+            screenTopRow={composerTopRow}
+            registerPointerHandler={registerComposerPointer}
+            registerWheelHandler={registerComposerWheel}
+            onCopy={(text) => { if (!transcriptSelection) copyText(text); }}
             nowMs={nowMs}
             sessionId={sessionId}
             project={cwdRef.current}

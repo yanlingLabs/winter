@@ -25,14 +25,85 @@
 
 import React from "react";
 import { Box, Text } from "ink";
+import { Chalk } from "chalk";
+import stringWidth from "string-width";
 import type { Block } from "./state";
 import { theme } from "./theme";
 import { renderMarkdown, type Highlighter } from "./markdown";
 import { pickVerb, TURN_VERBS } from "./spinner-verbs";
 import { formatElapsed, formatTokens } from "../task-display";
 import { groupBlocks, type DisplayItem } from "./group-blocks";
-import { formatArgsHead, MAX_RESULT_LINES } from "./format";
+import { displayLineBreaks, formatArgsHead, MAX_RESULT_LINES } from "./format";
 import { visibleSlice, type ScrollState } from "./scroll-model";
+
+const selectionAnsi = new Chalk({ level: 3 });
+const stripAnsi = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, "");
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+export interface TranscriptPoint { line: number; column: number }
+export interface TranscriptSelection { anchor: TranscriptPoint; focus: TranscriptPoint }
+
+function selectedCells(text: string, from: number, to: number): [number, number] {
+  let cells = 0;
+  let start = text.length;
+  let end = text.length;
+  for (const { index, segment } of graphemeSegmenter.segment(text)) {
+    if (cells >= from && start === text.length) start = index;
+    if (cells >= to && end === text.length) end = index;
+    cells += stringWidth(segment);
+  }
+  if (from <= 0) start = 0;
+  if (to >= cells) end = text.length;
+  return [start, end];
+}
+
+function orderSelection(selection: TranscriptSelection): [TranscriptPoint, TranscriptPoint] {
+  const { anchor, focus } = selection;
+  return anchor.line < focus.line || (anchor.line === focus.line && anchor.column <= focus.column)
+    ? [anchor, focus] : [focus, anchor];
+}
+
+export function selectedTranscriptText(lines: string[], selection: TranscriptSelection): string {
+  const [start, end] = orderSelection(selection);
+  const parts: string[] = [];
+  for (let i = start.line; i <= end.line && i < lines.length; i++) {
+    const plain = stripAnsi(lines[i] ?? "");
+    const [from, to] = selectedCells(plain, i === start.line ? start.column : 0, i === end.line ? end.column : stringWidth(plain));
+    parts.push(plain.slice(from, to).trimEnd());
+  }
+  return parts.join("\n");
+}
+
+function selectedTranscriptLine(line: string, index: number, selection?: TranscriptSelection | null): string {
+  if (!selection) return line;
+  const [start, end] = orderSelection(selection);
+  if (index < start.line || index > end.line) return line;
+  const plain = stripAnsi(line);
+  // User-message rows are deliberately padded to the terminal width for their normal full-width
+  // surface. That padding is layout, not text: never turn it into part of a selection, or a drag
+  // across multiple lines paints a dark/selected strip all the way to the right edge.
+  const content = plain.replace(/[ \t]+$/u, "");
+  const contentCells = stringWidth(content);
+  const [from, to] = selectedCells(content, index === start.line ? start.column : 0, index === end.line ? Math.min(end.column, contentCells) : contentCells);
+  if (from === to) return line;
+  return content.slice(0, from)
+    + selectionAnsi.bgHex(theme.promptBorder)(selectionAnsi.hex(theme.userMessageBackground)(content.slice(from, to)))
+    + content.slice(to)
+    + plain.slice(content.length);
+}
+
+/** Translate a 1-based terminal row to a line-log index; disclosure rows and empty flex space
+ * deliberately have no selectable text. Mirrors TranscriptViewport's exact window geometry. */
+export function transcriptLineAt(lines: string[], scroll: ScrollState, viewportRows: number, screenRow: number, viewportTopRow = 1): number | null {
+  const { start, end } = visibleSlice(lines, scroll, viewportRows, 0);
+  const showIndicator = viewportRows > 0 && !scroll.follow && end < lines.length;
+  const showEarlier = start > 0 && viewportRows > (showIndicator ? 2 : 1);
+  const contentStart = showEarlier ? start + 1 : start;
+  const contentEnd = showIndicator ? Math.max(start, end - 1) : end;
+  const relative = screenRow - viewportTopRow - (showEarlier ? 1 : 0);
+  const index = contentStart + relative;
+  return relative >= 0 && index < contentEnd ? index : null;
+}
 
 // Re-export for existing importers of the transcript module (the args-head cap now lives in the
 // React-free format.ts, its single definition; see this file's header).
@@ -67,7 +138,7 @@ function TranscriptEntry({ block, highlight }: { block: Block; highlight?: Highl
         <Box>
           <Text backgroundColor={theme.userMessageBackground}>
             {"❯ "}
-            {block.text}
+            {displayLineBreaks(block.text)}
           </Text>
         </Box>
       );
@@ -176,11 +247,10 @@ function DisplayEntry({ item, highlight }: { item: DisplayItem; highlight?: High
  *  beyond the budget would corrupt the frame math — `OVERSCAN_ROWS` (scroll-model.ts) is for
  *  consumers that PREPARE row neighborhoods rather than paint them.
  *
- *  THE HONESTY LINE: while scrolled back with content hidden below (`!follow` and the window's end
- *  short of the log's), the viewport's BOTTOM row becomes a dim `↓ N newer lines` indicator — the
- *  top edge (where the user is reading) stays put, the newest visible row yields the slot, and `N`
- *  counts every hidden row INCLUDING the one the indicator displaced. No indicator while followed
- *  (nothing is hidden) or when an unfollowed view still shows the bottom (N would be a lie at 0).
+ *  Hidden content is disclosed at either edge: `↑ N earlier lines` replaces the top row when the
+ *  window starts below the log's beginning, and `↓ N newer lines` replaces the bottom row while
+ *  scrolled back. Each count includes the row its indicator displaced. The indicators leave at
+ *  least one content row visible, even in a tiny viewport.
  *
  *  WRAP MODEL (why slicing by array index is exact): rows here are not logical lines — they are the
  *  post-wrap physical lines `flatten-blocks.ts`/`welcomeLines` emit (wrap-ansi, hard:true, at the
@@ -188,24 +258,33 @@ function DisplayEntry({ item, highlight }: { item: DisplayItem; highlight?: High
  *  drifts from rendered height. The residual error bound is a width-measurement disagreement
  *  between `string-width` (wrap-ansi's ruler) and the terminal's own cell count for exotic
  *  graphemes — shared by every other height model in this app (composerRows, makeStreamRenderer). */
-export function TranscriptViewport({ lines, scroll, viewportRows }: {
+function TranscriptViewportView({ lines, scroll, viewportRows, selection }: {
   lines: string[];
   scroll: ScrollState;
   viewportRows: number;
+  selection?: TranscriptSelection | null;
 }) {
   const { start, end } = visibleSlice(lines, scroll, viewportRows, 0);
   const showIndicator = viewportRows > 0 && !scroll.follow && end < lines.length;
+  const showEarlier = start > 0 && viewportRows > (showIndicator ? 2 : 1);
+  const contentStart = showEarlier ? start + 1 : start;
   const contentEnd = showIndicator ? Math.max(start, end - 1) : end;
   const newerCount = lines.length - contentEnd;
   return (
     <Box flexGrow={1} flexDirection="column" overflow="hidden">
-      {lines.slice(start, contentEnd).map((line, i) => (
-        <Text key={start + i}>{line.length > 0 ? line : " "}</Text>
+      {showEarlier ? <Text dimColor wrap="truncate">{`↑ ${contentStart} earlier lines (PgUp)`}</Text> : null}
+      {lines.slice(contentStart, contentEnd).map((line, i) => (
+        <Text key={contentStart + i}>{line.length > 0 ? selectedTranscriptLine(line, contentStart + i, selection) : " "}</Text>
       ))}
-      {showIndicator ? <Text dimColor>{`↓ ${newerCount} newer line${newerCount === 1 ? "" : "s"}`}</Text> : null}
+      {showIndicator ? <Text dimColor wrap="truncate">{`↓ ${newerCount} newer line${newerCount === 1 ? "" : "s"}`}</Text> : null}
     </Box>
   );
 }
+
+// The parent App also renders for composer edits and its 100ms activity clock. The transcript's
+// line array, scroll state, and selection are independent of those updates; skip rebuilding the
+// visible row tree unless one of those actual inputs changes.
+export const TranscriptViewport = React.memo(TranscriptViewportView);
 
 /** Renders `TuiState.committed` with the CC grammar, `groupBlocks`-collapsed. Recomputed fresh every
  *  render (no `<Static>` write-once index to keep sound anymore) — a still-open trailing collapsible

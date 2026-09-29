@@ -90,6 +90,8 @@ export function loadHistory(path: string, sessionId: string, max = 100): string[
 }
 
 export interface HistoryNav {
+  /** Leaves history browsing so the next recall starts with the newest loaded entry. */
+  reset(): void;
   /** Called on ↑. `draft` is the live (not-yet-submitted) input text — saved on the FIRST call (the
    *  move from live input into history), ignored on subsequent calls (already navigating). Returns
    *  the recalled entry, or `null` if there's nowhere older to go (including "no entries at all"). */
@@ -109,6 +111,10 @@ export function makeHistoryNav(entries: string[]): HistoryNav {
   let index = -1; // -1 == at the live draft, not navigating history
   let draft = "";
   return {
+    reset(): void {
+      index = -1;
+      draft = "";
+    },
     up(currentDraft: string): string | null {
       if (entries.length === 0) return null;
       if (index === -1) {

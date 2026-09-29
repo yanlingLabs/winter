@@ -30,6 +30,28 @@ describe("flattenBlock — every line is ≤ columns visible columns", () => {
     assertNoOverflow(lines, 80);
   });
 
+  test("a user block renders carriage returns as line breaks without altering its source text", () => {
+    const text = "first line\rsecond line\r\nthird line";
+    const lines = flattenBlock({ kind: "user", text }, opts());
+    expect(lines.map(stripAnsi)).toEqual(["❯ first line".padEnd(80), "second line".padEnd(80), "third line".padEnd(80)]);
+    expect(text).toBe("first line\rsecond line\r\nthird line");
+  });
+
+  test("a multiline user message paints one full-width block, including empty and wrapped rows", () => {
+    const lines = flattenBlock({ kind: "user", text: "one\n\nABCDEFGHIJKLM\ntwo" }, opts({ columns: 10 }));
+    expect(lines.map(stripAnsi)).toEqual([
+      "❯ one     ",
+      "          ",
+      "ABCDEFGHIJ",
+      "KLM       ",
+      "two       ",
+    ]);
+    for (const line of lines) {
+      expect(line).toContain("\x1b[48;2;93;111;126m");
+      expect(stripAnsi(line).length).toBe(10);
+    }
+  });
+
   test("assistant block: gutter + markdown-rendered body (bold applied, raw ** gone)", () => {
     const lines = flattenBlock({ kind: "assistant", text: "hi **there**, friend" }, opts());
     const joined = stripAnsi(lines.join("\n"));
@@ -153,6 +175,19 @@ describe("flattenBlock — collapsed-group rendering happens at the cache level 
 });
 
 describe("makeFlattenCache — non-verbose applies groupBlocks (collapsed runs); verbose does not", () => {
+  test("a completed turn separates the assistant text from its summary by one empty row in both modes", () => {
+    const blocks: Block[] = [
+      { kind: "assistant", text: "Answer." },
+      { kind: "turn-summary", durationMs: 1_000, inTokens: 10, outTokens: 5 },
+    ];
+    for (const verbose of [false, true]) {
+      const lines = makeFlattenCache().lines(blocks, opts({ verbose })).map(stripAnsi);
+      expect(lines[0]).toBe("⏺ Answer.");
+      expect(lines[1]).toBe("");
+      expect(lines[2]).toContain("for 1s");
+    }
+  });
+
   test("non-verbose: a lone read collapses to one dim summary + ctrl+o hint, no per-call args/output", () => {
     const blocks: Block[] = [{ kind: "tool", name: "read", argsJson: '{"path":"a.ts"}', output: "ok" }];
     const cache = makeFlattenCache();

@@ -714,6 +714,8 @@ export interface StatusChromeInput {
   exitArmed?: "ctrl-c" | "ctrl-d";
   /** Injected clock — read ONLY by the work line's spinner glyph; the status line never sees it. */
   nowMs: number;
+  /** An app-owned text selection is active; show its reachable copy key in the status row. */
+  selectionActive?: boolean;
 }
 
 /** Label budget for one work item on the running-work line. */
@@ -735,7 +737,7 @@ export function runningWorkLabels(agents: AgentRow[], bgTasks: BgTaskRow[]): str
 }
 
 export function statusChromeModel(input: StatusChromeInput): { lines: StatusLine[] } {
-  const { policy, running, agents, bgTasks, model, effort, activity, exitArmed, nowMs } = input;
+  const { policy, running, agents, bgTasks, model, effort, activity, exitArmed, nowMs, selectionActive } = input;
 
   // Exit-armed replaces the WHOLE chrome with the one key-specific hint (the pre-T5 footer's
   // contract, kept: nothing else renders alongside, so the line reads unambiguously).
@@ -766,6 +768,7 @@ export function statusChromeModel(input: StatusChromeInput): { lines: StatusLine
 
   // --- the status line (always; wording byte-compatible with the pre-T5 footer) ----------------
   const segments: StatusSegment[] = [];
+  if (selectionActive) segments.push({ text: "selection · ctrl+c to copy", tone: "accent" });
   if (policy === "plan") segments.push({ text: "⏸ plan mode on (shift+tab to cycle)", tone: "planMode" });
   else if (policy === "dont-ask") segments.push({ text: "✕ dont-ask — auto-declines prompts (shift+tab to cycle)", tone: "warning" });
   else if (policy === "accept-edits") segments.push({ text: "✎ accept edits (shift+tab to cycle)", tone: "autoAccept" });

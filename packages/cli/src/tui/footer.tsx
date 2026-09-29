@@ -6,7 +6,7 @@
  *  the running-work line, the two-line cap, and exit-armed's whole-chrome replacement. This
  *  component only lays that model out: one `<Text wrap="truncate">` per StatusLine (each line is
  *  EXACTLY one terminal row — never a wrap — so app.tsx's `bottomBarLayout` can count
- *  `lines.length` and the height model never lies), dim base with per-segment theme colors, and
+ *  `lines.length` and the height model never lies), white base with per-segment theme colors, and
  *  the line's own `sep` between segments (the established `" · "` on the status line; a plain
  *  space between the work line's spinner glyph and its summary).
  *
@@ -28,7 +28,7 @@ export interface FooterProps {
   lines: StatusLine[];
 }
 
-/** Tone → Ink color. `"dim"` returns undefined so the segment inherits the line's dim base. */
+/** Tone → Ink color. `"dim"` returns undefined so the segment inherits the line's white base. */
 function toneColor(tone: StatusTone): string | undefined {
   switch (tone) {
     case "planMode": return theme.planMode;
@@ -44,7 +44,7 @@ export function Footer({ lines }: FooterProps) {
   return (
     <Box flexDirection="column">
       {lines.map((line) => (
-        <Text key={line.key} dimColor wrap="truncate">
+        <Text key={line.key} color={theme.text} wrap="truncate">
           {line.segments.map((segment, i) => {
             const color = toneColor(segment.tone);
             return (
