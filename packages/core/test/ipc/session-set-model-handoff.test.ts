@@ -95,7 +95,7 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
           // WS-20 (review round 2, M4 fix — R1): `resolveModelSelection` now CANONICALIZES a
           // `<providerId>/<facingName>` request to its real catalog row key — the stored value is
           // never the facing form as sent.
-          expect(store.meta(sessionId).model).toBe("anthropic/claude-sonnet-5");
+          expect(store.meta(sessionId).model).toBe("anthropic/claude-sonnet-5-5");
         } else {
           expect(res.error).toBeDefined();
           expect(res.error.data?.code).toBe(c.expectedCode);
@@ -151,7 +151,7 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
       const sessionId = store.createSession("global");
       // The record still names the SOURCE leg — precisely the state a "not in the runtime
       // directory" silent apply used to leave behind.
-      const { server, c } = await boot(store, home, arm.outcome(SEL("winter-agent", "anthropic", "claude-sonnet-5")), {
+      const { server, c } = await boot(store, home, arm.outcome(SEL("winter-agent", "anthropic", "claude-sonnet-5-5")), {
         get: () => recordNaming("winter-agent", "openai", "openai/gpt-5.6-sol"),
       });
       try {
@@ -173,15 +173,15 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
       const home = mkdtempSync(join(tmpdir(), `winter-setmodel-invariant-ok-${arm.name}-`));
       const store = new SessionStore(home);
       const sessionId = store.createSession("global");
-      const want = SEL("winter-agent", "anthropic", "claude-sonnet-5");
-      const { server, c } = await boot(store, home, arm.outcome(want), { get: () => recordNaming("winter-agent", "anthropic", "claude-sonnet-5") });
+      const want = SEL("winter-agent", "anthropic", "claude-sonnet-5-5");
+      const { server, c } = await boot(store, home, arm.outcome(want), { get: () => recordNaming("winter-agent", "anthropic", "claude-sonnet-5-5") });
       try {
         const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/sonnet", confirmLossy: true });
         expect(res.error).toBeUndefined();
         // WS-20 (review round 2, M4 fix — R1): `resolveModelSelection` now CANONICALIZES a
           // `<providerId>/<facingName>` request to its real catalog row key — the stored value is
           // never the facing form as sent.
-          expect(store.meta(sessionId).model).toBe("anthropic/claude-sonnet-5");
+          expect(store.meta(sessionId).model).toBe("anthropic/claude-sonnet-5-5");
       } finally {
         c.close();
         server.stop();
@@ -206,7 +206,7 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
       // WS-20 (review round 2, M4 fix — R1): `resolveModelSelection` now CANONICALIZES a
           // `<providerId>/<facingName>` request to its real catalog row key — the stored value is
           // never the facing form as sent.
-          expect(store.meta(sessionId).model).toBe("anthropic/claude-sonnet-5");
+          expect(store.meta(sessionId).model).toBe("anthropic/claude-sonnet-5-5");
     } finally {
       c.close();
       server.stop();

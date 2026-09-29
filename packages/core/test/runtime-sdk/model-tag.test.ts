@@ -65,12 +65,12 @@ describe("modelTagIsKnown", () => {
 // the REAL catalog row key; `modelTagIsKnown` is a thin boolean wrapper over it.
 describe("canonicalizeModelTag", () => {
   test("a facing-name request resolves to its provider's real catalog row key", () => {
-    expect(canonicalizeModelTag("anthropic/sonnet")).toBe(tag("anthropic/claude-sonnet-5"));
+    expect(canonicalizeModelTag("anthropic/sonnet")).toBe(tag("anthropic/claude-sonnet-5-5"));
     expect(canonicalizeModelTag("codex-oauth/terra")).toBe(tag("codex-oauth/gpt-5.6-terra"));
   });
   test("case-insensitive slot-name matching", () => {
-    expect(canonicalizeModelTag("anthropic/Sonnet")).toBe(tag("anthropic/claude-sonnet-5"));
-    expect(canonicalizeModelTag("anthropic/SONNET")).toBe(tag("anthropic/claude-sonnet-5"));
+    expect(canonicalizeModelTag("anthropic/Sonnet")).toBe(tag("anthropic/claude-sonnet-5-5"));
+    expect(canonicalizeModelTag("anthropic/SONNET")).toBe(tag("anthropic/claude-sonnet-5-5"));
   });
   test("an already-canonical row key resolves to itself, unchanged", () => {
     expect(canonicalizeModelTag("codex-oauth/gpt-5.6-terra")).toBe(tag("codex-oauth/gpt-5.6-terra"));
@@ -105,6 +105,6 @@ describe("slots", () => {
     expect(facingNameOf("openai/gpt-5.6" as never)).toBeUndefined();
   });
   test("console serves the claude slots", () => {
-    expect(facingNameToTag("console", "sonnet")).toBe(tag("console/claude-sonnet-5"));
+    expect(facingNameToTag("console", "sonnet")).toBe(tag("console/claude-sonnet-5-5"));
   });
 });
