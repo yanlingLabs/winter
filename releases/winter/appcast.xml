@@ -429,5 +429,29 @@
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
       <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.122.0/Winter-0.122.0.zip" sparkle:edSignature="qjrbAqp5sslmQ2CZwgyFRzvrkXL15kngyk09P+10wNnN0JNUSDBnXXiZP5nNDDqK1yLGKGL5Npq8g/dslbZfDA==" length="426733001" type="application/octet-stream"/>
     </item>
+      <item>
+      <title>0.122.1</title>
+      <description><![CDATA[<p>Winter agent SDK 0.0.35</p>
+<h2>Fixes</h2>
+<ul>
+  <li><code>winter mcp permissions</code> works again. In 0.121.0 and 0.122.0 it stopped with an error before showing or changing anything.</li>
+</ul>
+<h2>Terminal</h2>
+<ul>
+  <li>Drag to select text in the conversation or the input box, then press ctrl+c to copy it.</li>
+  <li>Click a file path in the conversation to open the file.</li>
+  <li>Large pastes no longer make typing lag.</li>
+  <li>Brighter look: white input borders and status line, and a blue-grey background behind your own messages.</li>
+</ul>
+<h2>Models</h2>
+<ul>
+  <li>Claude Sonnet 5.5 is available with an Anthropic API key or a Console sign-in. Like Opus 5.5, it can change effort and pick up new tools partway through a conversation without losing the prompt cache.</li>
+</ul>
+<p>This release runs on Winter agent SDK 0.0.35 and runtime SDK 0.0.15.</p>]]></description>
+      <sparkle:version>0.122.1</sparkle:version>
+      <sparkle:shortVersionString>0.122.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.122.1/Winter-0.122.1.zip" sparkle:edSignature="hVmqgLLqGXwXEVJlpo+atdm/Y67R6xI/1j3vnVTPgL1Qfh5vVoWLD1BkL2sQVHM5uCUujAzUBOGdJk0oHlFcAA==" length="426757305" type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>
