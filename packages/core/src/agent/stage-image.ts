@@ -15,8 +15,8 @@
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, realpathSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { join, sep } from "node:path";
 import {
-  IMAGE_DATA_INVALID, IMAGE_STAGE_FAILED, IMAGE_TOO_LARGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED,
-  STAGE_IMAGE_MAX_BYTES, type STAGE_IMAGE_MEDIA_TYPES,
+  IMAGE_DATA_INVALID, IMAGE_STAGE_FAILED, IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED,
+  STAGE_IMAGE_B64_MAX_LENGTH, STAGE_IMAGE_MAX_BYTES, type STAGE_IMAGE_MEDIA_TYPES,
 } from "@yanlinglabs/winter-protocol";
 import { sessionTmpDirPath } from "./session-tmp";
 
@@ -66,12 +66,15 @@ export function decodeStrictBase64(s: string): Uint8Array | undefined {
 
 /** Decode, check and sniff — every input refusal, before anything touches the disk. */
 export function validateStagedImage(mediaType: StageImageMediaType, dataBase64: string): { bytes: Uint8Array; ext: string } {
+  // Too long to be within the cap whatever it decodes to — refused from the length alone, so an
+  // oversize image is never decoded at all.
+  if (dataBase64.length > STAGE_IMAGE_B64_MAX_LENGTH) throw new StageImageRefusal(IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE);
   const bytes = decodeStrictBase64(dataBase64);
   if (bytes === undefined || bytes.length === 0) {
     throw new StageImageRefusal(IMAGE_DATA_INVALID, "the image data is not valid base64");
   }
   if (bytes.length > STAGE_IMAGE_MAX_BYTES) {
-    throw new StageImageRefusal(IMAGE_TOO_LARGE, `The image is too large (the limit is ${STAGE_IMAGE_MAX_BYTES / (1024 * 1024)} MB)`);
+    throw new StageImageRefusal(IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE);
   }
   const sniffed = sniffImageMediaType(bytes);
   if (sniffed === undefined) {

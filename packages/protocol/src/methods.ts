@@ -417,19 +417,26 @@ export const ELICITATION_NOT_ACTIVE = "elicitation_not_active";
  *    - `image_input_unsupported` — the session's CURRENT model row does not accept images, with the
  *      exact message `IMAGE_INPUT_UNSUPPORTED_MESSAGE` (`INVALID_PARAMS`);
  *    - `image_data_invalid` — `dataBase64` is not strict base64, or decodes to nothing;
- *    - `image_too_large` — more than `STAGE_IMAGE_MAX_BYTES` decoded (the runtime Read tool's own
- *      image limit, so a staged file is always readable);
+ *    - `image_too_large` — more than `STAGE_IMAGE_MAX_BYTES` (3.75 MiB) decoded, message
+ *      `IMAGE_TOO_LARGE_MESSAGE` (the runtime Read tool's own image limit, so a staged file is always
+ *      readable);
  *    - `image_type_unsupported` — the bytes are not png/jpeg/gif/webp (the MAGIC BYTES decide,
  *      never the declared type);
  *    - `image_type_mismatch` — the bytes are an allowed type other than the declared `mediaType`;
  *    - `image_stage_failed` — the file could not be created safely (`INTERNAL`).
  *  An unknown session is `NOT_FOUND`. The bytes are never logged. */
 export const STAGE_IMAGE_MEDIA_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
-/** The runtime Read tool's `IMAGE_MAX_BYTES` (5 MiB). A max-size request's base64 (6,990,508 chars)
+/** The runtime Read tool's image limit — `READ_IMAGE_MAX_BYTES` in the agent runtime's
+ *  `tools/impl/read.ts` (3.75 MiB: the raw size whose base64 is exactly 5 MiB, Claude's per-image
+ *  limit on Bedrock/Vertex). Hard-coded here until that constant is published; keep the two equal,
+ *  so a staged image is always one Read will deliver. A max-size request's base64 (5,242,880 chars)
  *  plus its JSON-RPC envelope fits the daemon's 8 MiB inbound NDJSON line cap (`LineDecoder`). */
-export const STAGE_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
-/** `4 * ceil(STAGE_IMAGE_MAX_BYTES / 3)` — the longest base64 a max-size image encodes to. */
+export const STAGE_IMAGE_MAX_BYTES = 3_932_160;
+/** `4 * ceil(STAGE_IMAGE_MAX_BYTES / 3)` — the longest base64 a max-size image encodes to. Longer
+ *  data is refused `image_too_large` before it is decoded. */
 export const STAGE_IMAGE_B64_MAX_LENGTH = 4 * Math.ceil(STAGE_IMAGE_MAX_BYTES / 3);
+/** The `image_too_large` refusal's wording, shared by every client's attach-time check. */
+export const IMAGE_TOO_LARGE_MESSAGE = "Images must be 3.75 MB or smaller";
 export const IMAGE_INPUT_UNSUPPORTED = "image_input_unsupported";
 export const IMAGE_INPUT_UNSUPPORTED_MESSAGE = "The selected model doesn't support images";
 export const IMAGE_SESSION_NOT_CODE = "image_session_not_code";
@@ -441,7 +448,9 @@ export const IMAGE_STAGE_FAILED = "image_stage_failed";
 export const SessionStageImageParams = z.object({
   sessionId: z.string().min(1),
   mediaType: z.enum(STAGE_IMAGE_MEDIA_TYPES),
-  dataBase64: z.string().min(1).max(STAGE_IMAGE_B64_MAX_LENGTH),
+  // No `.max()` here: an oversize image deserves its TYPED refusal (`image_too_large`), which the
+  // handler gives from the length alone, before decoding. The 8 MiB line cap bounds the string.
+  dataBase64: z.string().min(1),
 });
 export const SessionStageImageResult = z.object({ path: z.string().min(1) });
 export type SessionStageImageParams = z.infer<typeof SessionStageImageParams>;
